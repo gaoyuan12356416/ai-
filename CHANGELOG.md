@@ -1,3 +1,7 @@
+## 2026-05-07 screenshot duration mojibake fix
+
+- Changed screenshot duration unit rendering to use escaped Unicode sequences so the static page does not show garbled text.
+
 ## 2026-05-07 screenshot retry preserves finished outputs
 
 - Changed screenshot job retry to preserve already generated ratios and only regenerate failed or missing ratios.

@@ -1462,9 +1462,9 @@ const els = {
       const hours = Math.floor(totalSeconds / 3600);
       const minutes = Math.floor((totalSeconds % 3600) / 60);
       const seconds = totalSeconds % 60;
-      if (hours > 0) return `${hours}小时${minutes}分`;
-      if (minutes > 0) return `${minutes}分${seconds}秒`;
-      return `${seconds}秒`;
+      if (hours > 0) return `${hours}\u5c0f\u65f6${minutes}\u5206`;
+      if (minutes > 0) return `${minutes}\u5206${seconds}\u79d2`;
+      return `${seconds}\u79d2`;
     }
 
     function jobDurationText(job) {
