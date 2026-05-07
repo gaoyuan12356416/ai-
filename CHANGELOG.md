@@ -1,3 +1,8 @@
+## 2026-05-07 screenshot Beijing time display
+
+- Changed screenshot job created and updated timestamps to render in Beijing time.
+- Kept total duration calculation on the same parsed timestamp basis and prevented duration/time columns from wrapping vertically.
+
 ## 2026-05-07 screenshot duration mojibake fix
 
 - Changed screenshot duration unit rendering to use escaped Unicode sequences so the static page does not show garbled text.
