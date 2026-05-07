@@ -1,6 +1,6 @@
 # AI Drama Material Service
 
-???? / GPU video worker service snapshot.
+Drama material composition and GPU video worker service snapshot.
 
 ## Current GPU video behavior
 
