@@ -31911,19 +31911,26 @@ def retry_screenshot_job(job_id):
     if job.get("status") not in ("done", "failed"):
         raise ValueError("\u4efb\u52a1\u6b63\u5728\u5904\u7406\u4e2d\uff0c\u6682\u4e0d\u80fd\u91cd\u65b0\u5236\u4f5c")
     clear_screenshot_job_deleted_marker(job_id)
-    job["square_1x1_url"] = ""
-    job["landscape_1_91x1_url"] = ""
-    job["portrait_4x5_url"] = ""
-    job["assets"] = {}
+    preserved_count = sum(
+        1 for spec in SCREENSHOT_SPECS
+        if str(job.get(spec["field"], "") or "").strip()
+    )
+    retry_count = max(0, len(SCREENSHOT_SPECS) - preserved_count)
     job["status"] = "queued"
     job["progress"] = 2
-    job["progress_detail"] = "\u622a\u56fe\u7d20\u6750\u4efb\u52a1\u5df2\u91cd\u65b0\u8fdb\u5165\u961f\u5217"
+    job["progress_detail"] = (
+        "\u5df2\u4fdd\u7559 %d \u4e2a\u5df2\u751f\u6210\u5c3a\u5bf8\uff0c\u4ec5\u91cd\u65b0\u5236\u4f5c %d \u4e2a\u5931\u8d25\u6216\u7f3a\u5931\u5c3a\u5bf8"
+        % (preserved_count, retry_count)
+    )
     job["error_message"] = ""
     upsert_screenshot_job_record(job)
-    shutil.rmtree(os.path.join(SCREENSHOT_WORK_ROOT, job_id), ignore_errors=True)
-    shutil.rmtree(os.path.join(SCREENSHOT_PUBLIC_ROOT, job_id), ignore_errors=True)
     run_screenshot_job_async(job)
-    return {"job_id": job_id, "resumed": True}
+    return {
+        "job_id": job_id,
+        "resumed": True,
+        "preserved_count": preserved_count,
+        "retry_count": retry_count,
+    }
 
 
 def parse_screenshot_job_route(path):

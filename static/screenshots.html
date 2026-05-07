@@ -1169,6 +1169,8 @@
 
                   <th>创建人</th>
 
+                  <th>总计用时</th>
+
                   <th>创建时间</th>
 
                   <th>操作</th>
@@ -1446,6 +1448,34 @@ const els = {
       return String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
+    function parseServerTime(value) {
+      const text = String(value || "").trim();
+      if (!text) return null;
+      const normalized = text.includes("T") ? text : text.replace(" ", "T") + "Z";
+      const date = new Date(normalized);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    function formatDuration(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return "--";
+      const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) return `${hours}小时${minutes}分`;
+      if (minutes > 0) return `${minutes}分${seconds}秒`;
+      return `${seconds}秒`;
+    }
+
+    function jobDurationText(job) {
+      const start = parseServerTime(job.created_at);
+      if (!start) return "--";
+      const finished = job.status === "done" || job.status === "failed";
+      const end = finished ? parseServerTime(job.updated_at) : new Date();
+      if (!end) return "--";
+      return formatDuration(end.getTime() - start.getTime());
+    }
+
     function syncSelectionUi() {
       const selectedCount = state.selectedJobIds.size;
       if (els.bulkDeleteBtn) els.bulkDeleteBtn.disabled = selectedCount === 0;
@@ -1501,6 +1531,8 @@ const els = {
           </td>
 
           <td>${job.creator_name || "--"}<div class="muted">${job.creator_user_id || ""}</div></td>
+
+          <td>${jobDurationText(job)}</td>
 
           <td>${job.created_at}</td>
 
@@ -1683,6 +1715,7 @@ const els = {
           <div>\u72b6\u6001\uff1a${job.status_label}</div>
           <div>\u8fdb\u5ea6\uff1a${job.progress}% / ${job.progress_detail || "--"}</div>
           <div>\u521b\u5efa\u4eba\uff1a${job.creator_name || "--"}</div>
+          <div>\u603b\u8ba1\u7528\u65f6\uff1a${jobDurationText(job)}</div>
           <div>\u521b\u5efa\u65f6\u95f4\uff1a${job.created_at || "--"}</div>
           <div>\u66f4\u65b0\u65f6\u95f4\uff1a${job.updated_at || "--"}</div>
         </div>

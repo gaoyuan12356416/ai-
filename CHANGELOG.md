@@ -1,3 +1,8 @@
+## 2026-05-07 screenshot retry preserves finished outputs
+
+- Changed screenshot job retry to preserve already generated ratios and only regenerate failed or missing ratios.
+- Added total duration display to the screenshot job list and detail drawer.
+
 ## 2026-05-07 screenshot job actions
 
 - Added screenshot job detail drawer with source/result previews and error log.
