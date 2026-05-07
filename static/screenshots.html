@@ -1,0 +1,1977 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+
+<head>
+
+  <meta charset="UTF-8" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>截图素材后台</title>
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
+
+  <style>
+
+    :root {
+
+      --bg: #f4f7fb;
+
+      --panel: #ffffff;
+
+      --sidebar: #111c30;
+
+      --sidebar-muted: #90a0bb;
+
+      --line: #dbe3f0;
+
+      --text: #14213d;
+
+      --muted: #6f7d94;
+
+      --primary: #2f6bff;
+
+      --primary-weak: rgba(47, 107, 255, 0.12);
+
+      --success: #1f9d62;
+
+      --success-weak: rgba(31, 157, 98, 0.14);
+
+      --danger: #d64545;
+
+      --danger-weak: rgba(214, 69, 69, 0.14);
+
+      --shadow: 0 20px 40px rgba(16, 32, 66, 0.08);
+
+      --radius: 20px;
+
+    }
+
+
+
+    * { box-sizing: border-box; }
+
+    body {
+
+      margin: 0;
+
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+
+      background: linear-gradient(135deg, #eef3ff 0%, #f7f9fc 48%, #edf3ff 100%);
+
+      color: var(--text);
+
+    }
+
+
+
+    a { color: inherit; text-decoration: none; }
+
+
+
+    .app {
+
+      min-height: 100vh;
+
+      display: grid;
+
+      grid-template-columns: 260px 1fr;
+
+    }
+
+
+
+    .sidebar {
+
+      background: linear-gradient(180deg, #16233d 0%, #101a2d 100%);
+
+      color: #fff;
+
+      padding: 24px 18px;
+
+      display: flex;
+
+      flex-direction: column;
+
+      gap: 24px;
+
+      border-right: 1px solid rgba(255,255,255,0.06);
+
+    }
+
+
+
+    .brand small {
+
+      display: block;
+
+      color: #b8c4d8;
+
+      font-size: 12px;
+
+      margin-bottom: 8px;
+
+    }
+
+
+
+    .brand strong {
+
+      display: block;
+
+      font-size: 24px;
+
+      letter-spacing: 0.5px;
+
+    }
+
+
+
+    .nav-group {
+
+      display: flex;
+
+      flex-direction: column;
+
+      gap: 10px;
+
+    }
+
+
+
+    .nav-item {
+
+      display: block;
+
+      padding: 14px 16px;
+
+      border-radius: 16px;
+
+      background: transparent;
+
+      color: #fff;
+
+      border: 1px solid transparent;
+
+      transition: .18s ease;
+
+    }
+
+
+
+    .nav-item:hover,
+
+    .nav-item.active {
+
+      background: rgba(255,255,255,0.08);
+
+      border-color: rgba(255,255,255,0.08);
+
+    }
+
+
+
+    .nav-item strong {
+
+      display: block;
+
+      font-size: 15px;
+
+    }
+
+
+
+    .nav-item span {
+
+      display: block;
+
+      font-size: 12px;
+
+      color: var(--sidebar-muted);
+
+      margin-top: 4px;
+
+    }
+
+
+
+    .main {
+
+      padding: 28px;
+
+    }
+
+
+
+    .topbar {
+
+      display: flex;
+
+      align-items: center;
+
+      justify-content: space-between;
+
+      gap: 18px;
+
+      margin-bottom: 22px;
+
+    }
+
+
+
+    .hero h1 {
+
+      margin: 0 0 8px;
+
+      font-size: 32px;
+
+    }
+
+
+
+    .hero p {
+
+      margin: 0;
+
+      color: var(--muted);
+
+      font-size: 15px;
+
+    }
+
+
+
+    .toolbar {
+
+      display: flex;
+
+      align-items: center;
+
+      gap: 12px;
+
+      flex-wrap: wrap;
+
+    }
+
+
+
+    .user-card {
+
+      display: flex;
+
+      align-items: center;
+
+      gap: 12px;
+
+      padding: 10px 14px;
+
+      border-radius: 18px;
+
+      background: rgba(255,255,255,0.72);
+
+      box-shadow: var(--shadow);
+
+    }
+
+
+
+    .avatar {
+
+      width: 42px;
+
+      height: 42px;
+
+      border-radius: 50%;
+
+      background: linear-gradient(135deg, #d8e5ff, #f2f6ff);
+
+      display: flex;
+
+      align-items: center;
+
+      justify-content: center;
+
+      overflow: hidden;
+
+      font-weight: 700;
+
+    }
+
+
+
+    .avatar img {
+
+      width: 100%;
+
+      height: 100%;
+
+      object-fit: cover;
+
+    }
+
+
+
+    .user-meta strong {
+
+      display: block;
+
+      font-size: 14px;
+
+    }
+
+
+
+    .user-meta span {
+
+      display: block;
+
+      margin-top: 2px;
+
+      color: var(--muted);
+
+      font-size: 12px;
+
+    }
+
+
+
+    .btn {
+
+      appearance: none;
+
+      border: 1px solid var(--line);
+
+      background: var(--panel);
+
+      color: var(--text);
+
+      height: 42px;
+
+      padding: 0 16px;
+
+      border-radius: 14px;
+
+      font-size: 14px;
+
+      cursor: pointer;
+
+      transition: .18s ease;
+
+    }
+
+
+
+    .btn:hover { border-color: #bed0f7; transform: translateY(-1px); }
+
+    .btn:disabled { cursor: not-allowed; opacity: .65; transform: none; }
+
+
+
+    .btn-primary {
+
+      background: linear-gradient(135deg, #2f6bff 0%, #1b56f0 100%);
+
+      color: #fff;
+
+      border-color: transparent;
+
+      box-shadow: 0 12px 24px rgba(47,107,255,0.22);
+
+    }
+
+
+    .btn-danger {
+
+      color: var(--danger);
+
+      border-color: rgba(214, 69, 69, 0.28);
+
+      background: rgba(214, 69, 69, 0.06);
+
+    }
+
+    .btn-danger:hover { border-color: rgba(214, 69, 69, 0.48); }
+
+    .btn-small { height: 34px; padding: 0 10px; border-radius: 10px; font-size: 12px; }
+
+    .bulk-actions { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+
+    .select-cell { width: 44px; text-align: center; }
+
+    .select-cell input { width: 16px; height: 16px; cursor: pointer; }
+
+    .actions-cell { min-width: 220px; }
+    .row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+    .detail-drawer {
+      position: fixed;
+      inset: 0;
+      z-index: 900;
+      display: none;
+      justify-content: flex-end;
+      background: rgba(15, 25, 45, .32);
+    }
+
+    .detail-drawer.open { display: flex; }
+
+    .detail-panel {
+      width: min(720px, 100%);
+      height: 100%;
+      overflow: auto;
+      background: #f7f9fc;
+      box-shadow: -24px 0 48px rgba(15, 25, 45, .18);
+      padding: 20px;
+    }
+
+    .detail-section {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      margin-top: 14px;
+    }
+
+    .detail-media-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .detail-media img {
+      width: 100%;
+      border-radius: 12px;
+      background: #e7edf7;
+      border: 1px solid var(--line);
+    }
+
+    .detail-log {
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--muted);
+      margin: 0;
+    }
+
+
+
+    .panel {
+
+      background: rgba(255,255,255,0.86);
+
+      border: 1px solid rgba(219,227,240,0.8);
+
+      border-radius: var(--radius);
+
+      box-shadow: var(--shadow);
+
+      margin-bottom: 20px;
+
+      overflow: hidden;
+
+      backdrop-filter: blur(10px);
+
+    }
+
+
+
+    .panel-head {
+
+      padding: 20px 22px 0;
+
+      display: flex;
+
+      align-items: center;
+
+      justify-content: space-between;
+
+      gap: 16px;
+
+      flex-wrap: wrap;
+
+    }
+
+
+
+    .panel-title {
+
+      margin: 0;
+
+      font-size: 20px;
+
+    }
+
+
+
+    .panel-body {
+
+      padding: 20px 22px 22px;
+
+    }
+
+
+
+    .grid {
+
+      display: grid;
+
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+
+      gap: 16px;
+
+    }
+
+
+
+    .field {
+
+      grid-column: span 4;
+
+      display: flex;
+
+      flex-direction: column;
+
+      gap: 8px;
+
+    }
+
+
+
+    .field.wide { grid-column: span 12; }
+
+    .field label {
+
+      font-size: 13px;
+
+      color: var(--muted);
+
+    }
+
+
+
+    input, select, textarea {
+
+      width: 100%;
+
+      border: 1px solid var(--line);
+
+      background: #fff;
+
+      border-radius: 14px;
+
+      padding: 12px 14px;
+
+      font: inherit;
+
+      color: var(--text);
+
+      outline: none;
+
+      transition: border-color .18s ease, box-shadow .18s ease;
+
+    }
+
+
+
+    input:focus, select:focus, textarea:focus {
+
+      border-color: #9cbcff;
+
+      box-shadow: 0 0 0 4px rgba(47,107,255,0.12);
+
+    }
+
+
+
+    textarea {
+
+      min-height: 140px;
+
+      resize: vertical;
+
+    }
+
+
+
+    .hint {
+
+      color: var(--muted);
+
+      font-size: 12px;
+
+      line-height: 1.5;
+
+    }
+
+
+
+    .segmented {
+
+      display: inline-flex;
+
+      gap: 8px;
+
+      flex-wrap: wrap;
+
+    }
+
+
+
+    .segmented button.active {
+
+      background: var(--primary-weak);
+
+      color: var(--primary);
+
+      border-color: rgba(47,107,255,0.16);
+
+    }
+
+
+
+    .filter-row {
+
+      display: grid;
+
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+
+      gap: 16px;
+
+      align-items: end;
+
+      margin-bottom: 16px;
+
+    }
+
+
+
+    .table-wrap {
+
+      overflow: auto;
+
+      border: 1px solid var(--line);
+
+      border-radius: 18px;
+
+      background: #fff;
+
+    }
+
+
+
+    table {
+
+      width: 100%;
+
+      border-collapse: collapse;
+
+      min-width: 980px;
+
+    }
+
+
+
+    th, td {
+
+      text-align: left;
+
+      padding: 16px;
+
+      border-bottom: 1px solid #edf1f7;
+
+      vertical-align: top;
+
+      font-size: 14px;
+
+    }
+
+
+
+    th {
+
+      background: #f8faff;
+
+      color: var(--muted);
+
+      font-weight: 600;
+
+      position: sticky;
+
+      top: 0;
+
+      z-index: 1;
+
+    }
+
+
+
+    tr:last-child td { border-bottom: none; }
+
+
+
+    .muted {
+
+      color: var(--muted);
+
+      font-size: 12px;
+
+      line-height: 1.5;
+
+    }
+
+
+
+    .status-pill {
+
+      display: inline-flex;
+
+      align-items: center;
+
+      padding: 6px 10px;
+
+      border-radius: 999px;
+
+      font-size: 12px;
+
+      font-weight: 600;
+
+    }
+
+
+
+    .status-active {
+
+      background: var(--primary-weak);
+
+      color: var(--primary);
+
+    }
+
+
+
+    .status-done {
+
+      background: var(--success-weak);
+
+      color: var(--success);
+
+    }
+
+
+
+    .status-failed {
+
+      background: var(--danger-weak);
+
+      color: var(--danger);
+
+    }
+
+
+
+    .progress {
+
+      width: 180px;
+
+      max-width: 100%;
+
+      height: 8px;
+
+      margin-top: 8px;
+
+      background: #e8eef9;
+
+      border-radius: 999px;
+
+      overflow: hidden;
+
+    }
+
+
+
+    .progress span {
+
+      display: block;
+
+      height: 100%;
+
+      border-radius: inherit;
+
+      background: linear-gradient(90deg, #2f6bff, #65a0ff);
+
+    }
+
+
+
+    .preview-grid {
+
+      display: grid;
+
+      grid-template-columns: repeat(3, minmax(88px, 1fr));
+
+      gap: 10px;
+
+      min-width: 300px;
+
+    }
+
+
+
+    .preview-card {
+
+      display: flex;
+
+      flex-direction: column;
+
+      gap: 8px;
+
+      color: inherit;
+
+    }
+
+
+
+    .preview-card img,
+
+    .empty-card {
+
+      width: 100%;
+
+      aspect-ratio: 1 / 1;
+
+      border-radius: 14px;
+
+      border: 1px solid var(--line);
+
+      background: #f5f8fd;
+
+      object-fit: cover;
+
+    }
+
+
+
+    .empty-card {
+
+      display: flex;
+
+      align-items: center;
+
+      justify-content: center;
+
+      color: var(--muted);
+
+      font-size: 12px;
+
+      font-weight: 600;
+
+    }
+
+
+
+    .preview-card span {
+
+      text-align: center;
+
+      font-size: 12px;
+
+      color: var(--muted);
+
+    }
+
+
+
+    .summary-row {
+
+      display: flex;
+
+      align-items: center;
+
+      justify-content: space-between;
+
+      gap: 12px;
+
+      margin-top: 16px;
+
+      flex-wrap: wrap;
+
+    }
+
+
+
+    .toast {
+
+      position: fixed;
+
+      right: 20px;
+
+      bottom: 20px;
+
+      z-index: 1000;
+
+      min-width: 240px;
+
+      max-width: 440px;
+
+      padding: 14px 16px;
+
+      border-radius: 16px;
+
+      color: #fff;
+
+      background: rgba(20, 33, 61, 0.92);
+
+      box-shadow: 0 18px 30px rgba(20,33,61,0.24);
+
+      opacity: 0;
+
+      transform: translateY(12px);
+
+      pointer-events: none;
+
+      transition: opacity .2s ease, transform .2s ease;
+
+      white-space: pre-wrap;
+
+    }
+
+
+
+    .toast.show {
+
+      opacity: 1;
+
+      transform: translateY(0);
+
+    }
+
+
+
+    .toast.error {
+
+      background: rgba(214, 69, 69, 0.96);
+
+    }
+
+
+
+    @media (max-width: 1120px) {
+
+      .app { grid-template-columns: 1fr; }
+
+      .sidebar { padding-bottom: 12px; }
+
+      .main { padding: 18px; }
+
+    }
+
+
+
+    @media (max-width: 900px) {
+
+      .topbar { flex-direction: column; align-items: flex-start; }
+
+      .field { grid-column: span 12; }
+
+      .filter-row > .field { grid-column: span 12 !important; }
+
+      .preview-grid { min-width: 260px; }
+
+    }
+
+  </style>
+
+</head>
+
+<body>
+
+  <div class="app">
+
+    <aside class="sidebar">
+
+      <div class="brand">
+
+        <small>ai.yingliangads.com</small>
+
+        <strong>AI自动后台</strong>
+
+      </div>
+
+
+
+      <div id="quickNav" class="nav"></div>
+
+    </aside>
+
+
+
+    <main class="main">
+
+      <div class="topbar">
+
+        <div class="hero">
+
+          <h1>截图素材</h1>
+
+          <p>按产品批量提交剧 ID，查看三种图片尺寸的生成进度。</p>
+
+        </div>
+
+        <div class="toolbar">
+
+          <div class="user-card">
+
+            <div id="userAvatar" class="avatar">管</div>
+
+            <div class="user-meta">
+
+              <strong id="userName">--</strong>
+
+              <span id="userRole">--</span>
+
+            </div>
+
+          </div>
+
+          <button id="refreshBtn" class="btn" type="button">刷新</button>
+
+          <button id="logoutBtn" class="btn" type="button">退出登录</button>
+
+        </div>
+
+      </div>
+
+
+
+      <section class="panel">
+
+        <div class="panel-head">
+
+          <h2 class="panel-title">批量创建截图素材任务</h2>
+
+        </div>
+
+        <div class="panel-body">
+
+          <form id="batchForm">
+
+            <div class="grid">
+
+              <div class="field">
+
+                <label for="appIdSelect">产品</label>
+
+                <select id="appIdSelect"></select>
+
+              </div>
+
+              <div class="field wide">
+
+                <label for="contentIdsInput">批量剧 ID</label>
+
+                <textarea id="contentIdsInput" placeholder="每行一个剧 ID，支持一次性批量提交"></textarea>
+
+                <div class="hint">按行粘贴剧 ID。系统会自动去空行和重复值。</div>
+
+              </div>
+
+              <div class="field wide">
+
+                <button id="submitBtn" class="btn btn-primary" type="submit">批量提交截图任务</button>
+
+                <div class="hint">同一产品下，同一剧 ID 已存在截图任务时会自动排重，不重复创建。</div>
+
+              </div>
+
+            </div>
+
+          </form>
+
+        </div>
+
+      </section>
+
+
+
+      <section class="panel">
+
+        <div class="panel-head">
+
+          <h2 class="panel-title">截图任务列表</h2>
+
+          <div class="segmented" id="statusTabs">
+
+            <button class="btn active" data-status="all" type="button">全部</button>
+
+            <button class="btn" data-status="processing" type="button">处理中</button>
+
+            <button class="btn" data-status="done" type="button">已完成</button>
+
+            <button class="btn" data-status="failed" type="button">失败</button>
+
+          </div>
+
+        </div>
+
+        <div class="panel-body">
+
+          <div class="filter-row">
+
+            <div class="field" style="grid-column: span 8;">
+
+              <label for="searchInput">搜索</label>
+
+              <input id="searchInput" placeholder="剧 ID / 产品 / 剧名 / 任务 ID" />
+
+            </div>
+
+            <div class="field" style="grid-column: span 2;">
+
+              <button id="searchBtn" class="btn" type="button">应用筛选</button>
+
+            </div>
+
+            <div class="field" style="grid-column: span 2;">
+
+              <button id="clearBtn" class="btn" type="button">清空</button>
+
+            </div>
+
+          </div>
+
+
+
+          <div class="bulk-actions">
+            <button id="bulkDeleteBtn" class="btn btn-danger" type="button" disabled>批量删除</button>
+            <span id="selectedSummary" class="muted">未选择任务</span>
+          </div>
+
+          <div class="table-wrap">
+
+            <table>
+
+              <thead>
+
+                <tr>
+
+                  <th class="select-cell"><input id="selectAllJobs" type="checkbox" aria-label="全选当前页" /></th>
+
+                  <th>任务 ID</th>
+
+                  <th>剧 ID</th>
+
+                  <th>产品</th>
+
+                  <th>状态</th>
+
+                  <th>进度</th>
+
+                  <th>结果预览</th>
+
+                  <th>创建人</th>
+
+                  <th>创建时间</th>
+
+                  <th>操作</th>
+
+                </tr>
+
+              </thead>
+
+              <tbody id="tableBody"></tbody>
+
+            </table>
+
+          </div>
+
+
+
+          <div class="summary-row">
+
+            <div id="summary" class="muted">--</div>
+
+            <div class="toolbar">
+
+              <button id="prevBtn" class="btn" type="button">上一页</button>
+
+              <button id="nextBtn" class="btn" type="button">下一页</button>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </section>
+
+    </main>
+
+  </div>
+
+
+
+  <div id="detailDrawer" class="detail-drawer">
+    <div class="detail-panel">
+      <div class="panel" style="margin-bottom:0;">
+        <div class="panel-head">
+          <h2 class="panel-title">&#20219;&#21153;&#35814;&#24773;</h2>
+          <button id="closeDetailBtn" class="btn" type="button">&#20851;&#38381;</button>
+        </div>
+        <div class="panel-body">
+          <div id="detailMeta" class="detail-section"></div>
+          <div id="detailResults" class="detail-section"></div>
+          <div class="detail-section">
+            <strong>&#38169;&#35823;&#26085;&#24535;</strong>
+            <pre id="detailLog" class="detail-log">&#26242;&#26080;&#26085;&#24535;</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+
+
+  <script src="/quick-nav.js"></script>
+  <script>
+    const state = {
+
+      auth: null,
+
+      products: [],
+
+      jobs: [],
+
+      page: 1,
+
+      pageSize: 20,
+
+      total: 0,
+
+      status: "all",
+
+      query: "",
+
+      pollTimer: null,
+
+      selectedJobIds: new Set(),
+      selectedJob: null
+
+    };
+
+
+
+const els = {
+      quickNav: document.getElementById("quickNav"),
+      userAvatar: document.getElementById("userAvatar"),
+      userName: document.getElementById("userName"),
+
+      userRole: document.getElementById("userRole"),
+
+      refreshBtn: document.getElementById("refreshBtn"),
+
+      logoutBtn: document.getElementById("logoutBtn"),
+
+      appIdSelect: document.getElementById("appIdSelect"),
+
+      contentIdsInput: document.getElementById("contentIdsInput"),
+
+      batchForm: document.getElementById("batchForm"),
+
+      submitBtn: document.getElementById("submitBtn"),
+
+      searchInput: document.getElementById("searchInput"),
+
+      searchBtn: document.getElementById("searchBtn"),
+
+      clearBtn: document.getElementById("clearBtn"),
+
+      tableBody: document.getElementById("tableBody"),
+
+      selectAllJobs: document.getElementById("selectAllJobs"),
+
+      bulkDeleteBtn: document.getElementById("bulkDeleteBtn"),
+
+      selectedSummary: document.getElementById("selectedSummary"),
+
+      summary: document.getElementById("summary"),
+
+      prevBtn: document.getElementById("prevBtn"),
+
+      nextBtn: document.getElementById("nextBtn"),
+
+      statusTabs: document.querySelectorAll("#statusTabs button"),
+      detailDrawer: document.getElementById("detailDrawer"),
+      closeDetailBtn: document.getElementById("closeDetailBtn"),
+      detailMeta: document.getElementById("detailMeta"),
+      detailResults: document.getElementById("detailResults"),
+      detailLog: document.getElementById("detailLog"),
+
+      toast: document.getElementById("toast")
+
+    };
+
+    async function renderQuickNav() {
+      if (!window.QuickNav || !els.quickNav) return;
+      await window.QuickNav.render({
+        container: els.quickNav,
+        auth: state.auth,
+        activeKey: "screenshots",
+        onNavigate: (item) => {
+          if (item.href) location.href = item.href;
+        }
+      });
+    }
+
+    function toast(message, variant) {
+
+      els.toast.textContent = message;
+
+      els.toast.classList.toggle("error", variant === "error");
+
+      els.toast.classList.add("show");
+
+      clearTimeout(toast._timer);
+
+      toast._timer = setTimeout(() => els.toast.classList.remove("show"), variant === "error" ? 5200 : 2600);
+
+    }
+
+
+
+    function showError(prefix, error) {
+
+      const message = error && error.message ? error.message : String(error || "请求失败");
+
+      toast(`${prefix}：${message}`, "error");
+
+    }
+
+
+
+    async function api(url, options) {
+
+      const resp = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
+
+      const data = await resp.json().catch(() => ({}));
+
+      if (resp.status === 401) {
+
+        location.href = "/tasks.html";
+
+        throw new Error("请先登录飞书后台");
+
+      }
+
+      if (!resp.ok) {
+
+        throw new Error(data.error || "请求失败");
+
+      }
+
+      return data;
+
+    }
+
+
+
+    async function loadAuth() {
+
+      const auth = await api("/api/auth/status");
+
+      if (!auth.authenticated) {
+
+        location.href = "/tasks.html";
+
+        return;
+
+      }
+
+      state.auth = auth;
+
+      const user = auth.user || {};
+
+      els.userName.textContent = user.name || "--";
+
+      els.userRole.textContent = `${user.is_admin ? "管理员" : "普通用户"} / tenant ${user.tenant_key || "--"}`;
+
+      if (user.avatar_url) {
+        els.userAvatar.innerHTML = `<img src="${user.avatar_url}" alt="${user.name || "avatar"}" />`;
+      } else {
+        els.userAvatar.textContent = (user.name || "管").slice(0, 1);
+      }
+      await renderQuickNav();
+    }
+
+
+    async function loadProducts() {
+
+      const data = await api("/api/drama-material/products");
+
+      state.products = data.items || [];
+
+      els.appIdSelect.innerHTML = state.products.map(item => `<option value="${item.app_id}">${item.label}</option>`).join("");
+
+    }
+
+
+
+    function statusClass(status) {
+
+      if (status === "done") return "status-done";
+
+      if (status === "failed") return "status-failed";
+
+      return "status-active";
+
+    }
+
+
+
+    function previewCard(url, label) {
+
+      if (!url) {
+
+        return `<div class="preview-card"><div class="empty-card">待生成</div><span>${label}</span></div>`;
+
+      }
+
+      return `<a class="preview-card" href="${url}" target="_blank"><img src="${url}" alt="${label}" /><span>${label}</span></a>`;
+
+    }
+
+
+
+    function escapeAttr(value) {
+      return String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function syncSelectionUi() {
+      const selectedCount = state.selectedJobIds.size;
+      if (els.bulkDeleteBtn) els.bulkDeleteBtn.disabled = selectedCount === 0;
+      if (els.selectedSummary) els.selectedSummary.textContent = selectedCount ? `已选择 ${selectedCount} 条任务` : "未选择任务";
+      if (els.selectAllJobs) {
+        const visibleIds = state.jobs.map(item => item.job_id);
+        const checkedCount = visibleIds.filter(id => state.selectedJobIds.has(id)).length;
+        els.selectAllJobs.checked = visibleIds.length > 0 && checkedCount === visibleIds.length;
+        els.selectAllJobs.indeterminate = checkedCount > 0 && checkedCount < visibleIds.length;
+      }
+    }
+
+    function buildRow(job) {
+
+      const canRetry = job.status === "done" || job.status === "failed";
+      const retryDisabled = canRetry ? "" : "disabled title=\"\u4efb\u52a1\u6b63\u5728\u5904\u7406\u4e2d\"";
+      return `
+
+        <tr>
+
+          <td class="select-cell"><input class="job-check" type="checkbox" data-job-id="${escapeAttr(job.job_id)}" ${state.selectedJobIds.has(job.job_id) ? "checked" : ""} aria-label="\u9009\u62e9\u4efb\u52a1 ${escapeAttr(job.job_id)}" /></td>
+
+          <td><strong>${job.job_id.slice(0, 12)}...</strong><div class="muted">${job.job_id}</div></td>
+
+          <td>${job.content_id}<div class="muted">${job.drama_name || "--"}</div></td>
+
+          <td>${job.app}<div class="muted">${job.app_id} / ${job.country || "--"} / ${job.language || "--"}</div></td>
+
+          <td><span class="status-pill ${statusClass(job.status)}">${job.status_label}</span></td>
+
+          <td>
+
+            <div>${job.progress}%</div>
+
+            <div class="progress"><span style="width:${job.progress}%"></span></div>
+
+            <div class="muted" style="margin-top:6px;max-width:220px;">${job.progress_detail || "--"}</div>
+
+          </td>
+
+          <td>
+
+            <div class="preview-grid">
+
+              ${previewCard(job.square_1x1_url, "1:1")}
+
+              ${previewCard(job.landscape_1_91x1_url, "1.91:1")}
+
+              ${previewCard(job.portrait_4x5_url, "4:5")}
+
+            </div>
+
+          </td>
+
+          <td>${job.creator_name || "--"}<div class="muted">${job.creator_user_id || ""}</div></td>
+
+          <td>${job.created_at}</td>
+
+          <td class="actions-cell">
+            <div class="row-actions">
+              <button class="btn btn-small view-job" type="button" data-job-id="${escapeAttr(job.job_id)}">\u67e5\u770b\u8be6\u60c5</button>
+              <button class="btn btn-small retry-job" type="button" data-job-id="${escapeAttr(job.job_id)}" ${retryDisabled}>\u91cd\u65b0\u5236\u4f5c</button>
+              <button class="btn btn-small btn-danger delete-job" type="button" data-job-id="${escapeAttr(job.job_id)}">\u5220\u9664</button>
+            </div>
+          </td>
+
+        </tr>
+
+      `;
+
+    }
+
+
+
+    function syncPolling() {
+
+      if (state.pollTimer) {
+
+        clearInterval(state.pollTimer);
+
+        state.pollTimer = null;
+
+      }
+
+      const hasProcessing = state.jobs.some(item => item.status !== "done" && item.status !== "failed");
+
+      if (!hasProcessing) return;
+
+      state.pollTimer = setInterval(() => {
+
+        loadJobs(true).catch(error => console.warn("poll failed", error));
+
+      }, 5000);
+
+    }
+
+
+
+    async function loadJobs(silent) {
+
+      const params = new URLSearchParams({
+
+        status: state.status,
+
+        page: String(state.page),
+
+        page_size: String(state.pageSize)
+
+      });
+
+      if (state.query) params.set("q", state.query);
+
+      const data = await api(`/api/drama-screenshot-material/jobs?${params.toString()}`);
+
+      state.jobs = data.items || [];
+
+      const visible = new Set(state.jobs.map(item => item.job_id));
+      state.selectedJobIds.forEach(id => { if (!visible.has(id)) state.selectedJobIds.delete(id); });
+
+      state.total = data.total || 0;
+
+      els.tableBody.innerHTML = state.jobs.length
+
+        ? state.jobs.map(buildRow).join("")
+
+        : `<tr><td colspan="8" class="muted">暂无截图任务</td></tr>`;
+
+      const processingCount = state.jobs.filter(item => item.status !== "done" && item.status !== "failed").length;
+
+      els.summary.textContent = `共 ${state.total} 条，当前第 ${state.page} 页${processingCount ? `，当前页处理中 ${processingCount} 条` : ""}`;
+
+      syncSelectionUi();
+      syncPolling();
+
+      if (!silent && processingCount) {
+
+        console.info("processing screenshot jobs", processingCount);
+
+      }
+
+    }
+
+
+
+    function collectBatchPayload() {
+
+      const ids = Array.from(new Set(
+
+        (els.contentIdsInput.value || "")
+
+          .split(/\r?\n/)
+
+          .map(item => item.trim())
+
+          .filter(Boolean)
+
+      ));
+
+      return { app_id: els.appIdSelect.value, content_ids: ids };
+
+    }
+
+
+
+    async function submitBatch(event) {
+
+      event.preventDefault();
+
+      const previousText = els.submitBtn.textContent;
+
+      try {
+
+        const payload = collectBatchPayload();
+
+        if (!payload.app_id) throw new Error("请选择产品");
+
+        if (!payload.content_ids.length) throw new Error("请至少输入一个剧 ID");
+
+        els.submitBtn.disabled = true;
+
+        els.submitBtn.textContent = "提交中...";
+
+        const result = await api("/api/drama-screenshot-material/jobs/batch", {
+
+          method: "POST",
+
+          headers: { "Content-Type": "application/json" },
+
+          body: JSON.stringify(payload)
+
+        });
+
+        toast(`已处理 ${result.count} 条，创建 ${result.accepted_count} 条，重复 ${result.duplicate_count} 条，失败 ${result.failed_count} 条`, result.failed_count ? "error" : undefined);
+
+        els.contentIdsInput.value = "";
+
+        await loadJobs(true);
+
+      } catch (error) {
+
+        showError("批量创建截图任务失败", error);
+
+      } finally {
+
+        els.submitBtn.disabled = false;
+
+        els.submitBtn.textContent = previousText;
+
+      }
+
+    }
+
+
+
+    function detailImageCard(title, url) {
+      if (!url) return `<div class="detail-media"><strong>${title}</strong><div class="muted" style="margin-top:8px;">\u5c1a\u672a\u751f\u6210</div></div>`;
+      return `<div class="detail-media"><strong>${title}</strong><div style="margin:8px 0;"><a href="${url}" target="_blank">\u6253\u5f00\u539f\u56fe</a></div><img src="${url}" alt="${title}" loading="lazy" decoding="async" /></div>`;
+    }
+
+    function renderDetail(job) {
+      if (!job) {
+        els.detailMeta.innerHTML = `<div class="muted">\u70b9\u51fb\u5217\u8868\u91cc\u7684\u201c\u67e5\u770b\u8be6\u60c5\u201d\u67e5\u770b\u4efb\u52a1\u8be6\u60c5\u3002</div>`;
+        els.detailResults.innerHTML = "";
+        els.detailLog.textContent = "\u6682\u65e0\u65e5\u5fd7";
+        return;
+      }
+      els.detailMeta.innerHTML = `
+        <strong>\u57fa\u7840\u4fe1\u606f</strong>
+        <div style="margin-top:10px;line-height:1.9;">
+          <div>\u4efb\u52a1 ID\uff1a${job.job_id}</div>
+          <div>\u5267 ID\uff1a${job.content_id}</div>
+          <div>\u5267\u540d\uff1a${job.drama_name || "--"}</div>
+          <div>\u4ea7\u54c1\uff1a${job.app} (${job.app_id})</div>
+          <div>\u5730\u533a/\u8bed\u8a00\uff1a${job.country || "--"} / ${job.language || "--"}</div>
+          <div>\u72b6\u6001\uff1a${job.status_label}</div>
+          <div>\u8fdb\u5ea6\uff1a${job.progress}% / ${job.progress_detail || "--"}</div>
+          <div>\u521b\u5efa\u4eba\uff1a${job.creator_name || "--"}</div>
+          <div>\u521b\u5efa\u65f6\u95f4\uff1a${job.created_at || "--"}</div>
+          <div>\u66f4\u65b0\u65f6\u95f4\uff1a${job.updated_at || "--"}</div>
+        </div>
+      `;
+      els.detailResults.innerHTML = `
+        <strong>\u7ed3\u679c\u9884\u89c8</strong>
+        <div class="detail-media-grid" style="margin-top:12px;">
+          ${detailImageCard("\u539f\u59cb\u5c01\u9762", job.cover_source_url)}
+          ${detailImageCard("1:1 \u65b9\u56fe", job.square_1x1_url)}
+          ${detailImageCard("1.91:1 \u6a2a\u56fe", job.landscape_1_91x1_url)}
+          ${detailImageCard("4:5 \u7ad6\u56fe", job.portrait_4x5_url)}
+        </div>
+      `;
+      els.detailLog.textContent = job.error_message || "\u6682\u65e0\u9519\u8bef\u65e5\u5fd7";
+    }
+
+    function closeDetail() {
+      els.detailDrawer.classList.remove("open");
+      if (location.hash.startsWith("#screenshot-job/")) history.replaceState({}, "", location.pathname);
+    }
+
+    async function viewJobDetail(jobId) {
+      try {
+        const job = await api(`/api/drama-screenshot-material/jobs/${encodeURIComponent(jobId)}`);
+        state.selectedJob = job;
+        renderDetail(job);
+        els.detailDrawer.classList.add("open");
+        location.hash = "#screenshot-job/" + jobId;
+      } catch (error) {
+        showError("\u67e5\u770b\u622a\u56fe\u4efb\u52a1\u8be6\u60c5\u5931\u8d25", error);
+      }
+    }
+
+    async function retryOneJob(jobId) {
+      if (!jobId) return;
+      if (!confirm(`\u786e\u8ba4\u91cd\u65b0\u5236\u4f5c\u622a\u56fe\u4efb\u52a1 ${jobId.slice(0, 12)}...\uff1f\u5df2\u6709\u751f\u6210\u56fe\u4f1a\u88ab\u66ff\u6362\u3002`)) return;
+      try {
+        closeDetail();
+        await api(`/api/drama-screenshot-material/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+        toast("\u622a\u56fe\u4efb\u52a1\u5df2\u91cd\u65b0\u8fdb\u5165\u961f\u5217");
+        await loadJobs(true);
+      } catch (error) {
+        showError("\u91cd\u65b0\u5236\u4f5c\u622a\u56fe\u4efb\u52a1\u5931\u8d25", error);
+      }
+    }
+
+    async function deleteOneJob(jobId) {
+      if (!jobId) return;
+      if (!confirm(`确认删除截图任务 ${jobId.slice(0, 12)}...？删除后列表和已生成文件都会清理。`)) return;
+      try {
+        await api(`/api/drama-screenshot-material/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+        state.selectedJobIds.delete(jobId);
+        toast("截图任务已删除");
+        await loadJobs(true);
+      } catch (error) {
+        showError("删除截图任务失败", error);
+      }
+    }
+
+    async function deleteSelectedJobs() {
+      const ids = Array.from(state.selectedJobIds);
+      if (!ids.length) return;
+      if (!confirm(`确认删除已选择的 ${ids.length} 条截图任务？删除后列表和已生成文件都会清理。`)) return;
+      try {
+        const result = await api("/api/drama-screenshot-material/jobs/delete-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_ids: ids })
+        });
+        state.selectedJobIds.clear();
+        toast(`已删除 ${result.deleted_count || 0} 条任务${result.missing_count ? `，${result.missing_count} 条不存在` : ""}`);
+        await loadJobs(true);
+      } catch (error) {
+        showError("批量删除截图任务失败", error);
+      }
+    }
+
+    function bindEvents() {
+
+      els.batchForm.addEventListener("submit", submitBatch);
+
+      els.tableBody.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!target.classList.contains("job-check")) return;
+        const jobId = target.dataset.jobId;
+        if (target.checked) state.selectedJobIds.add(jobId);
+        else state.selectedJobIds.delete(jobId);
+        syncSelectionUi();
+      });
+
+      els.tableBody.addEventListener("click", (event) => {
+        const viewButton = event.target.closest(".view-job");
+        if (viewButton) {
+          viewJobDetail(viewButton.dataset.jobId);
+          return;
+        }
+        const retryButton = event.target.closest(".retry-job");
+        if (retryButton && !retryButton.disabled) {
+          retryOneJob(retryButton.dataset.jobId);
+          return;
+        }
+        const button = event.target.closest(".delete-job");
+        if (!button) return;
+        deleteOneJob(button.dataset.jobId);
+      });
+
+      els.closeDetailBtn.onclick = closeDetail;
+      els.detailDrawer.addEventListener("click", (event) => {
+        if (event.target === els.detailDrawer) closeDetail();
+      });
+
+      if (els.selectAllJobs) {
+        els.selectAllJobs.addEventListener("change", () => {
+          const ids = state.jobs.map(item => item.job_id);
+          if (els.selectAllJobs.checked) ids.forEach(id => state.selectedJobIds.add(id));
+          else ids.forEach(id => state.selectedJobIds.delete(id));
+          syncSelectionUi();
+          els.tableBody.querySelectorAll(".job-check").forEach(input => { input.checked = state.selectedJobIds.has(input.dataset.jobId); });
+        });
+      }
+
+      els.bulkDeleteBtn.onclick = deleteSelectedJobs;
+
+      els.refreshBtn.onclick = async () => {
+
+        try {
+
+          await Promise.all([loadAuth(), loadProducts(), loadJobs(true)]);
+
+          toast("页面已刷新");
+
+        } catch (error) {
+
+          showError("刷新失败", error);
+
+        }
+
+      };
+
+      els.logoutBtn.onclick = async () => {
+
+        try {
+
+          await api("/api/auth/logout", { method: "POST" });
+
+          location.href = "/tasks.html";
+
+        } catch (error) {
+
+          showError("退出登录失败", error);
+
+        }
+
+      };
+
+      els.searchBtn.onclick = async () => {
+
+        try {
+
+          state.page = 1;
+
+          state.query = els.searchInput.value.trim();
+
+          await loadJobs(true);
+
+        } catch (error) {
+
+          showError("筛选截图任务失败", error);
+
+        }
+
+      };
+
+      els.clearBtn.onclick = async () => {
+
+        try {
+
+          els.searchInput.value = "";
+
+          state.query = "";
+
+          state.status = "all";
+
+          state.page = 1;
+
+          els.statusTabs.forEach(button => button.classList.toggle("active", button.dataset.status === "all"));
+
+          await loadJobs(true);
+
+        } catch (error) {
+
+          showError("重置截图筛选失败", error);
+
+        }
+
+      };
+
+      els.prevBtn.onclick = async () => {
+
+        if (state.page <= 1) return;
+
+        try {
+
+          state.page -= 1;
+
+          await loadJobs(true);
+
+        } catch (error) {
+
+          state.page += 1;
+
+          showError("截图任务翻页失败", error);
+
+        }
+
+      };
+
+      els.nextBtn.onclick = async () => {
+
+        if (state.page * state.pageSize >= state.total) return;
+
+        try {
+
+          state.page += 1;
+
+          await loadJobs(true);
+
+        } catch (error) {
+
+          state.page -= 1;
+
+          showError("截图任务翻页失败", error);
+
+        }
+
+      };
+
+      els.statusTabs.forEach(button => {
+
+        button.onclick = async () => {
+
+          const previous = state.status;
+
+          try {
+
+            els.statusTabs.forEach(item => item.classList.remove("active"));
+
+            button.classList.add("active");
+
+            state.status = button.dataset.status;
+
+            state.page = 1;
+
+            await loadJobs(true);
+
+          } catch (error) {
+
+            state.status = previous;
+
+            showError("切换截图状态失败", error);
+
+          }
+
+        };
+
+      });
+
+    }
+
+
+
+    async function init() {
+
+      bindEvents();
+
+      await loadAuth();
+
+      await loadProducts();
+
+      await loadJobs(true);
+
+    }
+
+
+
+    init().catch(error => showError("初始化失败", error));
+
+  </script>
+
+</body>
+
+</html>

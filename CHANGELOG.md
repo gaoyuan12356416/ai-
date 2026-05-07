@@ -1,3 +1,9 @@
+## 2026-05-07 screenshot job actions
+
+- Added screenshot job detail drawer with source/result previews and error log.
+- Added screenshot job retry action for completed or failed cover-generation tasks.
+- Kept delete action in the same operation cell and disabled retry while a job is still processing.
+
 ## 2026-05-07 task list pagination controls
 
 - Added total page display for the task list footer.
@@ -15,4 +21,3 @@
 - Removed per-episode background/blur/overlay normalization from the GPU render path.
 - Kept rolling prefetch downloads and post-COS local cleanup.
 - Backup before final intro restore: app.py.bak.restore-cover-intro.20260507143621
-

@@ -10394,6 +10394,8 @@
 
                     <th>&#21019;&#24314;&#26102;&#38388;</th>
 
+                    <th>&#25805;&#20316;</th>
+
 
 
                   </tr>
@@ -17054,6 +17056,10 @@ function buildJobRow(job) {
 
 
     function buildScreenshotJobRow(job) {
+      const canRetry = job.status === "done" || job.status === "failed";
+      const retryButton = canRetry
+        ? `<button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); retryScreenshotJob('${job.job_id}')">\u91cd\u65b0\u5236\u4f5c</button>`
+        : `<button class="btn btn-secondary mini" type="button" disabled title="\u4efb\u52a1\u6b63\u5728\u5904\u7406\u4e2d">\u91cd\u65b0\u5236\u4f5c</button>`;
       return `
         <tr>
           <td><strong>${job.job_id.slice(0, 12)}...</strong><div class="muted">${job.job_id}</div></td>
@@ -17075,8 +17081,87 @@ function buildJobRow(job) {
           </td>
           <td>${job.creator_name || "--"}<div class="muted">${job.creator_user_id || ""}</div></td>
           <td class="time-cell">${formatBeijingTime(job.created_at)}</td>
+          <td>
+            <div class="actions-inline">
+              <button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); viewScreenshotJob('${job.job_id}')">\u67e5\u770b\u8be6\u60c5</button>
+              ${retryButton}
+              <button class="btn btn-danger mini" type="button" onclick="event.stopPropagation(); deleteScreenshotJob('${job.job_id}')">\u5220\u9664</button>
+            </div>
+          </td>
         </tr>
       `;
+    }
+
+    function renderScreenshotJobDetail(job) {
+      if (!job) {
+        els.jobDetailMeta.innerHTML = `<div class="muted">\u70b9\u51fb\u5217\u8868\u91cc\u7684\u201c\u67e5\u770b\u8be6\u60c5\u201d\u67e5\u770b\u4efb\u52a1\u8be6\u60c5\u3002</div>`;
+        els.jobDetailResults.innerHTML = "";
+        els.jobDetailLog.textContent = "\u6682\u65e0\u65e5\u5fd7";
+        return;
+      }
+      els.jobDetailMeta.innerHTML = `
+        <div class="card">
+          <strong>\u57fa\u7840\u4fe1\u606f</strong>
+          <div style="margin-top:10px;line-height:1.8;">
+            <div>\u4efb\u52a1 ID\uff1a${job.job_id}</div>
+            <div>\u5267 ID\uff1a${job.content_id}</div>
+            <div>\u5267\u540d\uff1a${job.drama_name || "--"}</div>
+            <div>\u4ea7\u54c1\uff1a${job.app} (${job.app_id})</div>
+            <div>\u72b6\u6001\uff1a${job.status_label}</div>
+            <div>\u8fdb\u5ea6\uff1a${job.progress}% / ${job.progress_detail || "--"}</div>
+            <div>\u521b\u5efa\u4eba\uff1a${job.creator_name || "--"}</div>
+            <div>\u521b\u5efa\u65f6\u95f4\uff1a${formatBeijingTime(job.created_at)}</div>
+            <div>\u66f4\u65b0\u65f6\u95f4\uff1a${formatBeijingTime(job.updated_at)}</div>
+          </div>
+        </div>
+      `;
+      els.jobDetailResults.innerHTML = [
+        resultCard("\u539f\u59cb\u5c01\u9762", job.cover_source_url, "image"),
+        resultCard("1:1 \u65b9\u56fe", job.square_1x1_url, "image"),
+        resultCard("1.91:1 \u6a2a\u56fe", job.landscape_1_91x1_url, "image"),
+        resultCard("4:5 \u7ad6\u56fe", job.portrait_4x5_url, "image")
+      ].join("");
+      els.jobDetailLog.textContent = job.error_message || "\u6682\u65e0\u9519\u8bef\u65e5\u5fd7";
+    }
+
+    async function viewScreenshotJob(jobId) {
+      try {
+        const job = await api(`/api/drama-screenshot-material/jobs/${jobId}`);
+        state.selectedScreenshotJob = job;
+        renderScreenshotJobDetail(job);
+        els.detailDrawer.classList.add("open");
+        location.hash = "#screenshot-job/" + jobId;
+      } catch (error) {
+        showError("\u67e5\u770b\u8be6\u60c5\u5931\u8d25", error);
+      }
+    }
+
+    async function retryScreenshotJob(jobId) {
+      if (!confirm(`\u786e\u8ba4\u91cd\u65b0\u5236\u4f5c\u5c01\u9762\u56fe\u5408\u6210\u4efb\u52a1 ${jobId} \u5417\uff1f`)) return;
+      try {
+        closeDetailDrawer();
+        const result = await api(`/api/drama-screenshot-material/jobs/${jobId}/retry`, { method: "POST" });
+        toast(result.resumed ? "\u5df2\u91cd\u65b0\u5236\u4f5c\uff0c\u5e76\u5df2\u91cd\u65b0\u5165\u961f" : "\u4efb\u52a1\u5df2\u91cd\u65b0\u63d0\u4ea4");
+        await loadScreenshotJobs(true);
+      } catch (error) {
+        showError("\u91cd\u65b0\u5236\u4f5c\u5931\u8d25", error);
+      }
+    }
+
+    async function deleteScreenshotJob(jobId) {
+      if (!confirm(`\u786e\u8ba4\u5220\u9664\u5c01\u9762\u56fe\u5408\u6210\u4efb\u52a1 ${jobId} \u5417\uff1f`)) return;
+      try {
+        await api(`/api/drama-screenshot-material/jobs/${jobId}`, { method: "DELETE" });
+        if (state.selectedScreenshotJob && state.selectedScreenshotJob.job_id === jobId) {
+          state.selectedScreenshotJob = null;
+          renderScreenshotJobDetail(null);
+          closeDetailDrawer();
+        }
+        toast("\u4efb\u52a1\u5df2\u5220\u9664");
+        await loadScreenshotJobs(true);
+      } catch (error) {
+        showError("\u5220\u9664\u4efb\u52a1\u5931\u8d25", error);
+      }
     }
 
         async function loadScreenshotJobs(silent) {
@@ -22128,6 +22213,9 @@ function buildJobRow(job) {
 
 
     window.deleteJob = deleteJob;
+    window.viewScreenshotJob = viewScreenshotJob;
+    window.retryScreenshotJob = retryScreenshotJob;
+    window.deleteScreenshotJob = deleteScreenshotJob;
     window.toggleJobSelection = toggleJobSelection;
     window.deleteSelectedJobs = deleteSelectedJobs;
 

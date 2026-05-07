@@ -31904,15 +31904,37 @@ def run_screenshot_job_async(job):
 
 
 
+def retry_screenshot_job(job_id):
+    job = fetch_screenshot_job_row(job_id)
+    if not job:
+        raise ValueError("\u4efb\u52a1\u4e0d\u5b58\u5728")
+    if job.get("status") not in ("done", "failed"):
+        raise ValueError("\u4efb\u52a1\u6b63\u5728\u5904\u7406\u4e2d\uff0c\u6682\u4e0d\u80fd\u91cd\u65b0\u5236\u4f5c")
+    clear_screenshot_job_deleted_marker(job_id)
+    job["square_1x1_url"] = ""
+    job["landscape_1_91x1_url"] = ""
+    job["portrait_4x5_url"] = ""
+    job["assets"] = {}
+    job["status"] = "queued"
+    job["progress"] = 2
+    job["progress_detail"] = "\u622a\u56fe\u7d20\u6750\u4efb\u52a1\u5df2\u91cd\u65b0\u8fdb\u5165\u961f\u5217"
+    job["error_message"] = ""
+    upsert_screenshot_job_record(job)
+    shutil.rmtree(os.path.join(SCREENSHOT_WORK_ROOT, job_id), ignore_errors=True)
+    shutil.rmtree(os.path.join(SCREENSHOT_PUBLIC_ROOT, job_id), ignore_errors=True)
+    run_screenshot_job_async(job)
+    return {"job_id": job_id, "resumed": True}
+
+
 def parse_screenshot_job_route(path):
 
-    match = re.match(r"^/api/drama-screenshot-material/jobs/([0-9a-f]{32})$", path)
+    match = re.match(r"^/api/drama-screenshot-material/jobs/([0-9a-f]{32})(?:/(retry))?$", path)
 
     if not match:
 
-        return None
+        return None, None
 
-    return match.group(1)
+    return match.group(1), match.group(2)
 
 
 
@@ -83146,9 +83168,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
-        screenshot_job_id = parse_screenshot_job_route(parsed.path)
+        screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
 
-        if screenshot_job_id:
+        if screenshot_job_id and not screenshot_action:
 
             if not self._require_module("cover_synthesis"):
 
@@ -84523,6 +84545,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
+        if screenshot_job_id and screenshot_action == "retry":
+            if not self._require_module("cover_synthesis"):
+                return
+            try:
+                payload = retry_screenshot_job(screenshot_job_id)
+                append_audit_log(self._session(), "retry_screenshot_job", "screenshot_job", screenshot_job_id, payload)
+                json_response(self, 202, payload)
+            except Exception as exc:
+                json_response(self, 400, {"error": str(exc)})
+            return
+
         if parsed.path == "/api/drama-screenshot-material/jobs/delete-batch":
             if not self._require_module("cover_synthesis"):
                 return
@@ -84701,8 +84735,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
-        screenshot_job_id = parse_screenshot_job_route(parsed.path)
-        if screenshot_job_id:
+        screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
+        if screenshot_job_id and not screenshot_action:
             if not self._require_module("cover_synthesis"):
                 return
             result = delete_screenshot_job(screenshot_job_id)
