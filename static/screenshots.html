@@ -1780,7 +1780,7 @@ const els = {
 
     async function retryOneJob(jobId) {
       if (!jobId) return;
-      if (!confirm(`\u786e\u8ba4\u91cd\u65b0\u5236\u4f5c\u622a\u56fe\u4efb\u52a1 ${jobId.slice(0, 12)}...\uff1f\u5df2\u6709\u751f\u6210\u56fe\u4f1a\u88ab\u66ff\u6362\u3002`)) return;
+      if (!confirm(`\u786e\u8ba4\u91cd\u65b0\u5236\u4f5c\u622a\u56fe\u4efb\u52a1 ${jobId.slice(0, 12)}...\uff1f\u5c06\u4ec5\u91cd\u65b0\u5236\u4f5c\u5931\u8d25\u6216\u7f3a\u5931\u7684\u5c3a\u5bf8\uff0c\u5df2\u751f\u6210\u7684\u56fe\u4f1a\u4fdd\u7559\u3002`)) return;
       try {
         closeDetail();
         await api(`/api/drama-screenshot-material/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });

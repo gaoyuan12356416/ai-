@@ -31705,7 +31705,18 @@ def process_screenshot_job(job):
 
     set_screenshot_job_progress(job, status="validating", progress=6, detail="校验封面素材可用性")
 
-    validation = validate_screenshot_request(job["app_id"], job["content_id"])
+    existing_cover_source_url = str(job.get("cover_source_url", "") or "").strip()
+    if existing_cover_source_url:
+        validation = {
+            "app_id": job["app_id"],
+            "app": job.get("app", ""),
+            "country": job.get("country", ""),
+            "language": job.get("language", ""),
+            "drama_name": job.get("drama_name", ""),
+            "cover_source_url": existing_cover_source_url,
+        }
+    else:
+        validation = validate_screenshot_request(job["app_id"], job["content_id"])
 
     job["app_id"] = validation["app_id"]
 

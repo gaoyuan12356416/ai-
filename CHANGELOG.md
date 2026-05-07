@@ -1,3 +1,8 @@
+## 2026-05-07 screenshot retry missing sizes only
+
+- Changed screenshot retry confirmation copy to say only failed or missing sizes will be regenerated.
+- Changed screenshot retry processing to reuse the existing cover source URL so partial retries do not fail during external material revalidation.
+
 ## 2026-05-07 screenshot item retry
 
 - Added per-ratio screenshot generation retries so a failed image size is retried up to three times before the task fails.
