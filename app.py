@@ -1561,6 +1561,7 @@ COS_REGION = os.environ.get("COS_REGION", "").strip()
 COS_DOMAIN = os.environ.get("COS_DOMAIN", "").strip()
 
 COS_PREFIX = os.environ.get("COS_PREFIX", "drama-materials").strip().strip("/")
+COS_UPLOAD_TIMEOUT = int(os.environ.get("COS_UPLOAD_TIMEOUT", "120"))
 
 
 
@@ -22158,7 +22159,13 @@ def get_cos_client():
 
         return None
 
-    config = CosConfig(Region=COS_REGION, SecretId=COS_SECRET_ID, SecretKey=COS_SECRET_KEY)
+    config = CosConfig(
+        Region=COS_REGION,
+        SecretId=COS_SECRET_ID,
+        SecretKey=COS_SECRET_KEY,
+        Timeout=COS_UPLOAD_TIMEOUT,
+        KeepAlive=False,
+    )
 
     return CosS3Client(config)
 
@@ -22176,9 +22183,20 @@ def upload_file_to_cos(path):
 
         raise ValueError("cos upload source missing: %s" % path)
 
-    client = get_cos_client()
-
     object_key = build_cos_object_key(path)
+    object_url = build_cos_url(object_key)
+    expected_size = os.path.getsize(path)
+    try:
+        response = requests.head(object_url, timeout=(5, 15))
+        if response.status_code == 200:
+            remote_size = int(response.headers.get("Content-Length") or "-1")
+            if remote_size == expected_size:
+                logging.info("reuse existing COS object: %s", object_url)
+                return object_url
+    except Exception as exc:
+        logging.warning("COS existing-object check failed, will upload: %s %s", object_url, exc)
+
+    client = get_cos_client()
 
     with open(path, "rb") as fp:
 
@@ -22198,7 +22216,7 @@ def upload_file_to_cos(path):
 
         )
 
-    return build_cos_url(object_key)
+    return object_url
 
 
 

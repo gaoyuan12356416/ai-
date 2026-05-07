@@ -1,3 +1,8 @@
+## 2026-05-07 COS upload hang guard
+
+- Added COS existing-object reuse for same-size outputs to avoid repeated uploads.
+- Added COS SDK upload timeout and disabled keepalive so worker request threads cannot hang indefinitely on stale upload connections.
+
 ## 2026-05-07 actual production duration display
 
 - Changed total duration rendering to ignore failed, queued, validation, download, and other waiting states.
