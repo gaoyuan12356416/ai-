@@ -1,3 +1,8 @@
+## 2026-05-07 screenshot item retry
+
+- Added per-ratio screenshot generation retries so a failed image size is retried up to three times before the task fails.
+- Kept successful screenshot sizes reusable during retry instead of regenerating every output.
+
 ## 2026-05-07 COS upload hang guard
 
 - Added COS existing-object reuse for same-size outputs to avoid repeated uploads.

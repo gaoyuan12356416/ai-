@@ -2446,6 +2446,7 @@ DEMUCS_FALLBACK_CHUNK_SECONDS = int(os.environ.get("DEMUCS_FALLBACK_CHUNK_SECOND
 
 
 JOB_AUTO_RETRY_ATTEMPTS = int(os.environ.get("JOB_AUTO_RETRY_ATTEMPTS", "1"))
+SCREENSHOT_ITEM_RETRY_ATTEMPTS = int(os.environ.get("SCREENSHOT_ITEM_RETRY_ATTEMPTS", "3"))
 
 
 
@@ -31807,6 +31808,46 @@ def process_screenshot_job(job):
                 raise RuntimeError("缺少生成结果: %s" % spec["filename"])
             asset_url = publish_asset(public_output_path)
             return index, spec, workspace_output_path, public_output_path, asset_url
+
+        generate_one_once = generate_one
+
+        def generate_one(item):
+            index, spec, workspace_output_path, public_output_path = item
+            attempts = max(1, SCREENSHOT_ITEM_RETRY_ATTEMPTS + 1)
+            last_error = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    if attempt > 1:
+                        set_screenshot_job_progress(
+                            job,
+                            status="processing_cover",
+                            progress=max(38, clamp_progress(job.get("progress", 38))),
+                            detail="\u91cd\u8bd5\u751f\u6210 %s\uff08\u7b2c %d/%d \u6b21\uff09"
+                            % (spec["label"], attempt - 1, SCREENSHOT_ITEM_RETRY_ATTEMPTS),
+                        )
+                    return generate_one_once(item)
+                except Exception as exc:
+                    last_error = exc
+                    if file_ready(public_output_path):
+                        asset_url = publish_asset(public_output_path)
+                        return index, spec, workspace_output_path, public_output_path, asset_url
+                    if attempt >= attempts:
+                        break
+                    logging.warning(
+                        "screenshot size retrying: job=%s key=%s attempt=%s/%s error=%s",
+                        job["job_id"],
+                        spec["key"],
+                        attempt,
+                        attempts,
+                        str(exc).strip() or exc.__class__.__name__,
+                    )
+                    for partial_path in (workspace_output_path, public_output_path):
+                        try:
+                            if partial_path and os.path.exists(partial_path) and not file_ready(partial_path):
+                                os.remove(partial_path)
+                        except OSError:
+                            logging.warning("failed to remove partial screenshot output: %s", partial_path)
+            raise last_error or RuntimeError("\u751f\u6210\u5931\u8d25: %s" % spec["filename"])
 
         completed = 0
         errors = []
