@@ -1,3 +1,9 @@
+## 2026-05-07 task list pagination controls
+
+- Added total page display for the task list footer.
+- Disabled previous/next pagination buttons when no target page exists.
+- Added click guards so disabled pagination controls do not issue no-op requests.
+
 ## 2026-05-07 1s cover intro
 
 - Changed the default GPU cover intro duration from 3 seconds to 1 second.
@@ -9,5 +15,4 @@
 - Removed per-episode background/blur/overlay normalization from the GPU render path.
 - Kept rolling prefetch downloads and post-COS local cleanup.
 - Backup before final intro restore: app.py.bak.restore-cover-intro.20260507143621
-
 
