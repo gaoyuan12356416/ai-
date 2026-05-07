@@ -1,0 +1,15 @@
+[Unit]
+Description=Drama Material GPU Worker API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=/root/drama_material_service/.env
+ExecStart=/root/miniconda3/envs/drama-voice/bin/python /root/drama_material_service/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

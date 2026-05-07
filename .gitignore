@@ -1,0 +1,8 @@
+.env
+*.pyc
+__pycache__/
+data/
+*.sqlite3
+*.db
+*.log
+.drama_material_jobs/
