@@ -15160,11 +15160,27 @@
       return `${seconds}秒`;
     }
 
+    function numericSeconds(value) {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : null;
+    }
+
+    function actualDurationStart(job) {
+      return parseJobTime(job.active_started_at || job.processing_started_at || job.started_at || job.created_at);
+    }
+
+    function actualDurationEnd(job) {
+      return parseJobTime(job.active_finished_at || job.processing_finished_at || job.finished_at || job.updated_at);
+    }
+
     function formatJobElapsed(job) {
-      const start = parseJobTime(job.created_at);
+      const status = String(job.status || "");
+      if (["queued", "validating", "downloading", "failed"].includes(status)) return "--";
+      const persistedSeconds = numericSeconds(job.active_elapsed_seconds || job.processing_elapsed_seconds || job.elapsed_seconds);
+      if (persistedSeconds !== null) return formatSeconds(persistedSeconds);
+      const start = actualDurationStart(job);
       if (!start) return "--";
-      const finished = ["done", "failed"].includes(job.status);
-      const end = finished ? (parseJobTime(job.updated_at) || new Date()) : new Date();
+      const end = status === "done" ? (actualDurationEnd(job) || new Date()) : new Date();
       return formatSeconds((end.getTime() - start.getTime()) / 1000);
     }
 
@@ -22394,7 +22410,6 @@ function buildJobRow(job) {
 
 
 </html>
-
 
 
 

@@ -403,7 +403,7 @@
 
     .actions-cell { min-width: 220px; }
     .row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .duration-cell { min-width: 88px; white-space: nowrap; }
+    .duration-cell { min-width: 120px; white-space: nowrap; }
     .time-cell { min-width: 150px; white-space: nowrap; }
 
     .detail-drawer {
@@ -1480,11 +1480,27 @@ const els = {
       return `${seconds}\u79d2`;
     }
 
+    function numericSeconds(value) {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : null;
+    }
+
+    function actualDurationStart(job) {
+      return parseServerTime(job.active_started_at || job.processing_started_at || job.started_at || job.created_at);
+    }
+
+    function actualDurationEnd(job) {
+      return parseServerTime(job.active_finished_at || job.processing_finished_at || job.finished_at || job.updated_at);
+    }
+
     function jobDurationText(job) {
-      const start = parseServerTime(job.created_at);
+      const status = String(job.status || "");
+      if (["queued", "downloading", "failed"].includes(status)) return "--";
+      const persistedSeconds = numericSeconds(job.active_elapsed_seconds || job.processing_elapsed_seconds || job.elapsed_seconds);
+      if (persistedSeconds !== null) return formatDuration(persistedSeconds * 1000);
+      const start = actualDurationStart(job);
       if (!start) return "--";
-      const finished = job.status === "done" || job.status === "failed";
-      const end = finished ? parseServerTime(job.updated_at) : new Date();
+      const end = status === "done" ? actualDurationEnd(job) : new Date();
       if (!end) return "--";
       return formatDuration(end.getTime() - start.getTime());
     }

@@ -1,3 +1,8 @@
+## 2026-05-07 actual production duration display
+
+- Changed total duration rendering to ignore failed, queued, validation, download, and other waiting states.
+- Added support for future precise active duration fields while preserving current static-page deployment.
+
 ## 2026-05-07 screenshot Beijing time display
 
 - Changed screenshot job created and updated timestamps to render in Beijing time.
