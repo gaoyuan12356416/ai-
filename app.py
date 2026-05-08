@@ -2124,6 +2124,11 @@ DEMUCS_FALLBACK_CHUNK_SECONDS = int(os.environ.get("DEMUCS_FALLBACK_CHUNK_SECOND
 
 JOB_AUTO_RETRY_ATTEMPTS = int(os.environ.get("JOB_AUTO_RETRY_ATTEMPTS", "1"))
 SCREENSHOT_ITEM_RETRY_ATTEMPTS = int(os.environ.get("SCREENSHOT_ITEM_RETRY_ATTEMPTS", "3"))
+CODEX_SCREENSHOT_BATCH_ENABLED = os.environ.get("CODEX_SCREENSHOT_BATCH_ENABLED", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 
@@ -31504,7 +31509,7 @@ def process_screenshot_job(job):
 
         generate_one_once = generate_one
 
-        if len(pending) > 1:
+        if CODEX_SCREENSHOT_BATCH_ENABLED and len(pending) > 1:
             batch_items = []
             for _, spec, workspace_output_path, public_output_path in pending:
                 batch_items.append(

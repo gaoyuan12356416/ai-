@@ -35,7 +35,7 @@ GENERATION_SEMAPHORE = threading.Semaphore(MAX_CONCURRENCY)
 
 # Cache: avoids repeated generations for same source + spec + prompt version.
 CACHE_ROOT = os.environ.get("CODEX_SCREENSHOT_CACHE_ROOT", "/root/codex_screenshot_cache")
-PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v1")
+PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v2")
 KEEP_JOB_WORKSPACE = os.environ.get("CODEX_SCREENSHOT_KEEP_JOB_WORKSPACE", "0").strip().lower() in (
     "1",
     "true",
@@ -188,6 +188,7 @@ def build_codex_instruction(drama_name, item):
     return (
         "Use the attached original drama cover as the source image. "
         "Create a new finished paid-social key art image for {title} at exactly {width}x{height} pixels, aspect ratio {ratio}. "
+        "This must be an AI image generation or image-editing result for this exact canvas, not a deterministic crop, resize, pad, or copy-paste layout. "
         "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the original source, while adapting the composition naturally to the target canvas. "
         "Extend or recreate the surrounding background as needed so the result looks complete, polished, and not like a cropped or stretched image. "
         "Do not add watermarks, unrelated props, extra people, duplicate limbs, deformed hands, or collage seams. "
@@ -218,6 +219,7 @@ def build_codex_batch_instruction(drama_name, items):
     return (
         "Use the attached original drama cover as the source image. "
         "Create finished paid-social key art images for {title} for every requested canvas below. "
+        "Each requested canvas must be an independently composed AI image generation or image-editing result, not crops, resizes, pads, or copy-paste derivatives from one generated image. "
         "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the original source across all outputs. "
         "Adapt each composition naturally to its target canvas, extending or recreating the surrounding background as needed so each image looks complete, polished, and not cropped or stretched. "
         "Do not add watermarks, unrelated props, extra people, duplicate limbs, deformed hands, or collage seams. "
