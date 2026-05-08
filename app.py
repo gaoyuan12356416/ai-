@@ -9570,6 +9570,50 @@ def status_rank(status):
 
 
 
+def parse_job_timestamp(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("T", " ")[:19]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def enrich_screenshot_job_timing(job):
+    job_id = str(job.get("job_id", "") or "")
+    start_text = str(job.get("created_at", "") or "")
+    if job_id:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT created_at
+                    FROM drama_admin_audit_log
+                    WHERE target_type = 'screenshot_job'
+                      AND target_id = ?
+                      AND action IN ('retry_screenshot_job', 'create_screenshot_job')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (job_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if row and row[0]:
+            start_text = row[0]
+    end_text = str(job.get("updated_at", "") or "")
+    job["active_started_at"] = start_text
+    job["active_finished_at"] = end_text if job.get("status") == "done" else ""
+    start_dt = parse_job_timestamp(start_text)
+    end_dt = parse_job_timestamp(end_text)
+    if start_dt and end_dt and end_dt >= start_dt and job.get("status") == "done":
+        job["active_elapsed_seconds"] = int((end_dt - start_dt).total_seconds())
+    return job
+
+
 def row_to_screenshot_job(row):
     assets = parse_json_text(row[11], {})
     status = row[12]
@@ -9580,7 +9624,7 @@ def row_to_screenshot_job(row):
     if progress_detail and re.fullmatch(r"[?\uFF1F\s]+", progress_detail):
         progress_detail = "\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210" if status == "done" else default_progress_detail(status)
     status_text = "\u751f\u6210\u622a\u56fe" if status == "processing_cover" else status_label(status)
-    return {
+    job = {
 
         "job_id": row[0],
 
@@ -9637,6 +9681,7 @@ def row_to_screenshot_job(row):
         },
 
     }
+    return enrich_screenshot_job_timing(job)
 
 
 
@@ -31717,23 +31762,47 @@ def retry_screenshot_job(job_id):
     if job.get("status") not in ("done", "failed"):
         raise ValueError("\u4efb\u52a1\u6b63\u5728\u5904\u7406\u4e2d\uff0c\u6682\u4e0d\u80fd\u91cd\u65b0\u5236\u4f5c")
     clear_screenshot_job_deleted_marker(job_id)
-    preserved_count = sum(
-        1 for spec in SCREENSHOT_SPECS
-        if str(job.get(spec["field"], "") or "").strip()
-    )
-    retry_count = max(0, len(SCREENSHOT_SPECS) - preserved_count)
+    force_remake = job.get("status") == "done"
+    assets = job.get("assets", {})
+    if not isinstance(assets, dict):
+        assets = {}
+    if force_remake:
+        for spec in SCREENSHOT_SPECS:
+            job[spec["field"]] = ""
+            assets.pop(spec["key"], None)
+            for path in (
+                os.path.join(SCREENSHOT_WORK_ROOT, job_id, "generated", spec["filename"]),
+                os.path.join(SCREENSHOT_PUBLIC_ROOT, job_id, spec["filename"]),
+            ):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    logging.warning("failed to remove screenshot output before remake: %s", path)
+        preserved_count = 0
+        retry_count = len(SCREENSHOT_SPECS)
+        progress_detail = "\u5df2\u6e05\u7a7a\u5b8c\u6210\u4efb\u52a1\u7684\u65e7\u622a\u56fe\uff0c\u5c06\u91cd\u65b0\u5236\u4f5c %d \u4e2a\u5c3a\u5bf8" % retry_count
+    else:
+        preserved_count = sum(
+            1 for spec in SCREENSHOT_SPECS
+            if str(job.get(spec["field"], "") or "").strip()
+        )
+        retry_count = max(0, len(SCREENSHOT_SPECS) - preserved_count)
+        progress_detail = (
+            "\u5df2\u4fdd\u7559 %d \u4e2a\u5df2\u751f\u6210\u5c3a\u5bf8\uff0c\u4ec5\u91cd\u65b0\u5236\u4f5c %d \u4e2a\u5931\u8d25\u6216\u7f3a\u5931\u5c3a\u5bf8"
+            % (preserved_count, retry_count)
+        )
+    job["assets"] = assets
     job["status"] = "queued"
     job["progress"] = 2
-    job["progress_detail"] = (
-        "\u5df2\u4fdd\u7559 %d \u4e2a\u5df2\u751f\u6210\u5c3a\u5bf8\uff0c\u4ec5\u91cd\u65b0\u5236\u4f5c %d \u4e2a\u5931\u8d25\u6216\u7f3a\u5931\u5c3a\u5bf8"
-        % (preserved_count, retry_count)
-    )
+    job["progress_detail"] = progress_detail
     job["error_message"] = ""
     upsert_screenshot_job_record(job)
     run_screenshot_job_async(job)
     return {
         "job_id": job_id,
         "resumed": True,
+        "force_remake": force_remake,
         "preserved_count": preserved_count,
         "retry_count": retry_count,
     }

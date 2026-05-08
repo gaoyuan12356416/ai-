@@ -1432,15 +1432,22 @@ const els = {
 
 
 
-    function previewCard(url, label) {
+    function versionedAssetUrl(url, job) {
+      if (!url) return "";
+      const version = encodeURIComponent([job?.updated_at || "", job?.progress || "", job?.status || ""].join("|"));
+      if (!version) return url;
+      return `${url}${url.includes("?") ? "&" : "?"}v=${version}`;
+    }
+
+    function previewCard(url, label, job) {
 
       if (!url) {
-
-        return `<div class="preview-card"><div class="empty-card">待生成</div><span>${label}</span></div>`;
+        return `<div class="preview-card"><div class="empty-card">\u5f85\u751f\u6210</div><span>${label}</span></div>`;
 
       }
 
-      return `<a class="preview-card" href="${url}" target="_blank"><img src="${url}" alt="${label}" /><span>${label}</span></a>`;
+      const displayUrl = versionedAssetUrl(url, job);
+      return `<a class="preview-card" href="${escapeAttr(displayUrl)}" target="_blank"><img src="${escapeAttr(displayUrl)}" alt="${escapeAttr(label)}" /><span>${label}</span></a>`;
 
     }
 
@@ -1549,11 +1556,11 @@ const els = {
 
             <div class="preview-grid">
 
-              ${previewCard(job.square_1x1_url, "1:1")}
+              ${previewCard(job.square_1x1_url, "1:1", job)}
 
-              ${previewCard(job.landscape_1_91x1_url, "1.91:1")}
+              ${previewCard(job.landscape_1_91x1_url, "1.91:1", job)}
 
-              ${previewCard(job.portrait_4x5_url, "4:5")}
+              ${previewCard(job.portrait_4x5_url, "4:5", job)}
 
             </div>
 
@@ -1721,9 +1728,10 @@ const els = {
 
 
 
-    function detailImageCard(title, url) {
+    function detailImageCard(title, url, job) {
       if (!url) return `<div class="detail-media"><strong>${title}</strong><div class="muted" style="margin-top:8px;">\u5c1a\u672a\u751f\u6210</div></div>`;
-      return `<div class="detail-media"><strong>${title}</strong><div style="margin:8px 0;"><a href="${url}" target="_blank">\u6253\u5f00\u539f\u56fe</a></div><img src="${url}" alt="${title}" loading="lazy" decoding="async" /></div>`;
+      const displayUrl = versionedAssetUrl(url, job);
+      return `<div class="detail-media"><strong>${title}</strong><div style="margin:8px 0;"><a href="${escapeAttr(displayUrl)}" target="_blank">\u6253\u5f00\u539f\u56fe</a></div><img src="${escapeAttr(displayUrl)}" alt="${escapeAttr(title)}" loading="lazy" decoding="async" /></div>`;
     }
 
     function renderDetail(job) {
@@ -1752,10 +1760,10 @@ const els = {
       els.detailResults.innerHTML = `
         <strong>\u7ed3\u679c\u9884\u89c8</strong>
         <div class="detail-media-grid" style="margin-top:12px;">
-          ${detailImageCard("\u539f\u59cb\u5c01\u9762", job.cover_source_url)}
-          ${detailImageCard("1:1 \u65b9\u56fe", job.square_1x1_url)}
-          ${detailImageCard("1.91:1 \u6a2a\u56fe", job.landscape_1_91x1_url)}
-          ${detailImageCard("4:5 \u7ad6\u56fe", job.portrait_4x5_url)}
+          ${detailImageCard("\u539f\u59cb\u5c01\u9762", job.cover_source_url, job)}
+          ${detailImageCard("1:1 \u65b9\u56fe", job.square_1x1_url, job)}
+          ${detailImageCard("1.91:1 \u6a2a\u56fe", job.landscape_1_91x1_url, job)}
+          ${detailImageCard("4:5 \u7ad6\u56fe", job.portrait_4x5_url, job)}
         </div>
       `;
       els.detailLog.textContent = job.error_message || "\u6682\u65e0\u9519\u8bef\u65e5\u5fd7";
