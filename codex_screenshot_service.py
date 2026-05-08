@@ -202,6 +202,31 @@ def build_codex_instruction(drama_name, item):
     )
 
 
+def build_codex_batch_instruction(drama_name, items):
+    title = (drama_name or "").strip() or "the provided drama"
+    specs = []
+    for item in items:
+        specs.append(
+            {
+                "key": str(item.get("key", "")).strip(),
+                "ratio": str(item.get("ratio", "")).strip(),
+                "width": int(item.get("width") or 0),
+                "height": int(item.get("height") or 0),
+                "output_path": str(item.get("workspace_output_path", "")).strip(),
+            }
+        )
+    return (
+        "Use the attached original drama cover as the source image. "
+        "Create finished paid-social key art images for {title} for every requested canvas below. "
+        "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the original source across all outputs. "
+        "Adapt each composition naturally to its target canvas, extending or recreating the surrounding background as needed so each image looks complete, polished, and not cropped or stretched. "
+        "Do not add watermarks, unrelated props, extra people, duplicate limbs, deformed hands, or collage seams. "
+        "Requested outputs: {specs}. "
+        "After generation, copy each selected final image into its exact output_path. "
+        "Reply with only compact JSON containing an items array with key, output_path, and summary."
+    ).format(title=title, specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")))
+
+
 def generate_screenshots(payload):
     job_id = str(payload.get("job_id", "")).strip()
     source_path = str(payload.get("source_path", "")).strip()
@@ -234,6 +259,74 @@ def generate_screenshots(payload):
             results.append(hit)
             continue
         remaining.append(item)
+
+    if len(remaining) > 1:
+        for item in remaining:
+            workspace_output_path = str(item.get("workspace_output_path", "")).strip()
+            public_output_path = str(item.get("public_output_path", "")).strip()
+            ensure_dir(os.path.dirname(workspace_output_path))
+            ensure_dir(os.path.dirname(public_output_path))
+            if workspace_output_path and os.path.exists(workspace_output_path):
+                os.remove(workspace_output_path)
+
+        result_json_path = os.path.join(workdir, "batch_result.json")
+        cmd = [
+            CODEX_BIN,
+            "exec",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-C",
+            ws,
+            "-i",
+            staged_source_path,
+            "-o",
+            result_json_path,
+            build_codex_batch_instruction(drama_name, remaining),
+        ]
+        try:
+            run_cmd(cmd, timeout=CODEX_TIMEOUT)
+        except Exception:
+            logging.exception("batch generation failed for %s", job_id)
+
+        batch_result_data = {"items": []}
+        if os.path.isfile(result_json_path):
+            try:
+                with open(result_json_path, "r", encoding="utf-8") as fh:
+                    batch_result_data = json.loads(extract_json_text(fh.read()))
+            except Exception:
+                logging.exception("batch result JSON parse failed for %s", job_id)
+
+        generated_keys = set()
+        batch_summaries = {
+            str(item.get("key", "")): item
+            for item in batch_result_data.get("items", []) or []
+            if isinstance(item, dict)
+        }
+        for item in remaining:
+            key = str(item.get("key", "")).strip()
+            workspace_output_path = str(item.get("workspace_output_path", "")).strip()
+            public_output_path = str(item.get("public_output_path", "")).strip()
+            if not key or not os.path.isfile(workspace_output_path):
+                continue
+            shutil.copy2(workspace_output_path, public_output_path)
+            cache_id = store_to_cache(source_url, drama_name, item)
+            result_data = dict(batch_summaries.get(key) or {})
+            result_data.update(
+                {
+                    "key": key,
+                    "status": "done",
+                    "workspace_output_path": workspace_output_path,
+                    "public_output_path": public_output_path,
+                    "public_url": build_public_url(public_output_path),
+                    "generator": "codex-imagegen",
+                    "cache": "miss",
+                    "cache_key": cache_id,
+                    "batch": True,
+                }
+            )
+            results.append(result_data)
+            generated_keys.add(key)
+        remaining = [item for item in remaining if str(item.get("key", "")).strip() not in generated_keys]
 
     for item in remaining:
         key = str(item.get("key", "")).strip()

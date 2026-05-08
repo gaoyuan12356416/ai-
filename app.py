@@ -31703,7 +31703,7 @@ def process_screenshot_job(job):
 
 
 
-    set_screenshot_job_progress(job, status="validating", progress=6, detail="校验封面素材可用性")
+    set_screenshot_job_progress(job, status="validating", progress=6, detail="\u6821\u9a8c\u5c01\u9762\u7d20\u6750\u53ef\u7528\u6027")
 
     existing_cover_source_url = str(job.get("cover_source_url", "") or "").strip()
     if existing_cover_source_url:
@@ -31738,15 +31738,15 @@ def process_screenshot_job(job):
 
     if file_ready(source_path):
 
-        set_screenshot_job_progress(job, status="downloading", progress=16, detail="复用已下载封面素材")
+        set_screenshot_job_progress(job, status="downloading", progress=16, detail="\u590d\u7528\u5df2\u4e0b\u8f7d\u5c01\u9762\u7d20\u6750")
 
     else:
 
-        set_screenshot_job_progress(job, status="downloading", progress=12, detail="开始下载封面素材")
+        set_screenshot_job_progress(job, status="downloading", progress=12, detail="\u5f00\u59cb\u4e0b\u8f7d\u5c01\u9762\u7d20\u6750")
 
         download_file(validation["cover_source_url"], source_path)
 
-        set_screenshot_job_progress(job, status="downloading", progress=24, detail="封面素材下载完成")
+        set_screenshot_job_progress(job, status="downloading", progress=24, detail="\u5c01\u9762\u7d20\u6750\u4e0b\u8f7d\u5b8c\u6210")
 
 
 
@@ -31783,7 +31783,7 @@ def process_screenshot_job(job):
                 job,
                 status="processing_cover",
                 progress=max(38, progress_after),
-                detail="复用已有 %s" % spec["label"],
+                detail="\u590d\u7528\u5df2\u6709 %s" % spec["label"],
             )
             continue
 
@@ -31794,7 +31794,7 @@ def process_screenshot_job(job):
             job,
             status="processing_cover",
             progress=38,
-            detail="并行生成 %d 个截图尺寸" % len(pending),
+            detail="\u5e76\u884c\u751f\u6210 %d \u4e2a\u622a\u56fe\u5c3a\u5bf8" % len(pending),
         )
 
         def generate_one(item):
@@ -31816,11 +31816,60 @@ def process_screenshot_job(job):
                 ],
             )
             if not file_ready(public_output_path):
-                raise RuntimeError("缺少生成结果: %s" % spec["filename"])
+                raise RuntimeError("\u7f3a\u5c11\u751f\u6210\u7ed3\u679c: %s" % spec["filename"])
             asset_url = publish_asset(public_output_path)
             return index, spec, workspace_output_path, public_output_path, asset_url
 
         generate_one_once = generate_one
+
+        if len(pending) > 1:
+            batch_items = []
+            for _, spec, workspace_output_path, public_output_path in pending:
+                batch_items.append(
+                    {
+                        "key": spec["key"],
+                        "label": spec["label"],
+                        "ratio": spec["ratio"],
+                        "width": spec["width"],
+                        "height": spec["height"],
+                        "workspace_output_path": workspace_output_path,
+                        "public_output_path": public_output_path,
+                        "public_base_url": SCREENSHOT_PUBLIC_BASE_URL,
+                    }
+                )
+            try:
+                generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
+            except Exception:
+                logging.exception("screenshot batch failed: %s", job["job_id"])
+
+            remaining = []
+            completed = 0
+            for item in pending:
+                _, spec, workspace_output_path, public_output_path = item
+                if not file_ready(public_output_path):
+                    remaining.append(item)
+                    continue
+                asset_url = publish_asset(public_output_path)
+                completed += 1
+                job[spec["field"]] = asset_url
+                assets[spec["key"]] = {
+                    "label": spec["label"],
+                    "ratio": spec["ratio"],
+                    "width": spec["width"],
+                    "height": spec["height"],
+                    "url": asset_url,
+                    "public_output_path": public_output_path,
+                    "workspace_output_path": workspace_output_path,
+                }
+                job["assets"] = assets
+                progress = 38 + int(46 * completed / max(1, len(pending)))
+                set_screenshot_job_progress(
+                    job,
+                    status="processing_cover",
+                    progress=progress,
+                    detail="\u5df2\u6279\u91cf\u751f\u6210\u5e76\u4e0a\u4f20 %s" % spec["label"],
+                )
+            pending = remaining
 
         def generate_one(item):
             index, spec, workspace_output_path, public_output_path = item
@@ -31862,7 +31911,7 @@ def process_screenshot_job(job):
 
         completed = 0
         errors = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(pending)) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(pending))) as executor:
             future_map = {executor.submit(generate_one, item): item for item in pending}
             for future in concurrent.futures.as_completed(future_map):
                 index, spec, workspace_output_path, public_output_path = future_map[future]
@@ -31890,7 +31939,7 @@ def process_screenshot_job(job):
                     job,
                     status="processing_cover",
                     progress=progress,
-                    detail="已生成并上传 %s" % spec["label"],
+                    detail="\u5df2\u751f\u6210\u5e76\u4e0a\u4f20 %s" % spec["label"],
                 )
 
         if errors:
@@ -31902,7 +31951,7 @@ def process_screenshot_job(job):
 
     job["error_message"] = ""
 
-    set_screenshot_job_progress(job, status="done", progress=100, detail="三种截图素材已全部生成")
+    set_screenshot_job_progress(job, status="done", progress=100, detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210")
 
     callback_job = fetch_screenshot_job_row(job["job_id"]) or job
 
@@ -54673,6 +54722,50 @@ def generate_screenshot_via_codex_service(job, source_path, items):
     service_url = screenshot_service_url_for_item(items[0]) if items else CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
     response = requests.post(
         service_url,
+        json=payload,
+        timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
+    )
+    try:
+        data = response.json()
+    except Exception:
+        data = {"error": response.text.strip()}
+    if response.status_code >= 400:
+        raise RuntimeError(
+            "codex screenshot service error (%s): %s"
+            % (response.status_code, data.get("error") or response.text.strip())
+        )
+    if data.get("status") != "done":
+        raise RuntimeError("codex screenshot service returned unexpected payload")
+    requested_by_key = {str(item.get("key", "")): item for item in items}
+    for result_item in data.get("items", []) or []:
+        key = str(result_item.get("key", ""))
+        requested_item = requested_by_key.get(key)
+        remote_url = str(result_item.get("public_url") or "").strip()
+        if not requested_item or not remote_url:
+            continue
+        workspace_output_path = requested_item.get("workspace_output_path")
+        public_output_path = requested_item.get("public_output_path")
+        if workspace_output_path and public_output_path and not file_ready(public_output_path):
+            download_file(remote_url, workspace_output_path)
+            ensure_dir(os.path.dirname(public_output_path))
+            shutil.copy2(workspace_output_path, public_output_path)
+            result_item["workspace_output_path"] = workspace_output_path
+            result_item["public_output_path"] = public_output_path
+    return data
+
+
+def generate_screenshot_via_codex_service_batch(job, source_path, items):
+    payload = {
+        "job_id": job["job_id"],
+        "app_id": job.get("app_id", ""),
+        "content_id": job["content_id"],
+        "drama_name": job.get("drama_name", ""),
+        "source_path": source_path,
+        "source_url": job.get("cover_source_url", ""),
+        "items": items,
+    }
+    response = requests.post(
+        CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL,
         json=payload,
         timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
     )

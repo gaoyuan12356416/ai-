@@ -1,3 +1,8 @@
+## 2026-05-08 screenshot batch token optimization
+
+- Standardized screenshot progress strings to escaped Unicode so local patches do not break on mojibake.
+- Added a multi-size screenshot batch path so one Codex call can generate all pending ratios before falling back to per-size retries.
+
 ## 2026-05-07 screenshot retry missing sizes only
 
 - Changed screenshot retry confirmation copy to say only failed or missing sizes will be regenerated.
