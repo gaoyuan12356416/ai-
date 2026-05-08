@@ -808,358 +808,35 @@ except Exception:
 
 
 
-MYSQL_BASE_CMD = [
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "mysql",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-h${ADMIN_MAPPING_MYSQL_HOST}",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-P${ADMIN_MAPPING_MYSQL_PORT}",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-u${ADMIN_MAPPING_MYSQL_USER}",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-p${ADMIN_MAPPING_MYSQL_PASSWORD}",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-N",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-B",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    "-e",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+MYSQL_HOST = (
+    os.environ.get("DRAMA_DB_HOST")
+    or os.environ.get("ADMIN_MAPPING_MYSQL_HOST")
+    or ""
+).strip()
+MYSQL_PORT = (
+    os.environ.get("DRAMA_DB_PORT")
+    or os.environ.get("ADMIN_MAPPING_MYSQL_PORT")
+    or ""
+).strip()
+MYSQL_USER = (
+    os.environ.get("DRAMA_DB_USER")
+    or os.environ.get("ADMIN_MAPPING_MYSQL_USER")
+    or ""
+).strip()
+MYSQL_PASSWORD = (
+    os.environ.get("DRAMA_DB_PASSWORD")
+    or os.environ.get("ADMIN_MAPPING_MYSQL_PASSWORD")
+    or ""
+)
+
+MYSQL_BASE_CMD = ["mysql"]
+if MYSQL_HOST:
+    MYSQL_BASE_CMD.extend(["-h", MYSQL_HOST])
+if MYSQL_PORT:
+    MYSQL_BASE_CMD.extend(["-P", MYSQL_PORT])
+if MYSQL_USER:
+    MYSQL_BASE_CMD.extend(["-u", MYSQL_USER])
+MYSQL_BASE_CMD.extend(["-N", "-B", "--default-character-set=utf8mb4", "-e"])
 DB_NAME = os.environ.get("DRAMA_DB_NAME", "kunlunads_dev")
 
 
@@ -13565,6 +13242,9 @@ def normalize_advanced_options(raw_options):
 
 
 def run_mysql(query):
+    mysql_env = os.environ.copy()
+    if MYSQL_PASSWORD:
+        mysql_env["MYSQL_PWD"] = MYSQL_PASSWORD
 
 
 
@@ -13757,6 +13437,8 @@ def run_mysql(query):
 
 
         universal_newlines=True,
+
+        env=mysql_env,
 
 
 
