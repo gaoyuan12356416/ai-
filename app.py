@@ -56502,7 +56502,95 @@ def normalize_episode(source_path, output_path):
     ])
 
 
-def render_intro(cover_path, output_path):
+def ffprobe_path():
+    configured = os.environ.get("DRAMA_FFPROBE", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    if FFMPEG:
+        candidates.append(os.path.join(os.path.dirname(FFMPEG), "ffprobe"))
+    candidates.append("ffprobe")
+    for candidate in candidates:
+        if os.path.isabs(candidate):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        elif shutil.which(candidate):
+            return candidate
+    return candidates[-1]
+
+
+def valid_media_rate(value, default_value):
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return default_value
+    if "/" in raw_value:
+        left, right = raw_value.split("/", 1)
+        try:
+            numerator = int(left)
+            denominator = int(right)
+        except ValueError:
+            return default_value
+        if numerator > 0 and denominator > 0:
+            return raw_value
+        return default_value
+    try:
+        if float(raw_value) > 0:
+            return raw_value
+    except ValueError:
+        return default_value
+    return default_value
+
+
+def probe_intro_reference_timing(reference_path):
+    timing = {"fps": "25", "audio_rate": "48000"}
+    if not reference_path or not file_ready(reference_path):
+        return timing
+    probe = ffprobe_path()
+    try:
+        proc = subprocess.run(
+            [
+                probe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+                "-of", "json", reference_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            stream = (json.loads(proc.stdout or "{}").get("streams") or [{}])[0]
+            timing["fps"] = valid_media_rate(stream.get("avg_frame_rate") or stream.get("r_frame_rate"), timing["fps"])
+    except Exception as exc:
+        logging.warning("failed to probe intro reference video timing: %s", exc)
+    try:
+        proc = subprocess.run(
+            [
+                probe, "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "json", reference_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            stream = (json.loads(proc.stdout or "{}").get("streams") or [{}])[0]
+            sample_rate = str(stream.get("sample_rate") or "").strip()
+            if sample_rate.isdigit() and int(sample_rate) > 0:
+                timing["audio_rate"] = sample_rate
+    except Exception as exc:
+        logging.warning("failed to probe intro reference audio timing: %s", exc)
+    return timing
+
+
+def render_intro(cover_path, output_path, reference_path=None):
+    timing = probe_intro_reference_timing(reference_path)
+    intro_fps = timing["fps"]
+    intro_audio_rate = timing["audio_rate"]
+    if reference_path:
+        logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
 
 
 
@@ -56598,7 +56686,7 @@ def render_intro(cover_path, output_path):
 
 
 
-        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-f", "lavfi", "-i", "anullsrc=r=%s:cl=stereo" % intro_audio_rate,
 
 
 
@@ -56694,7 +56782,7 @@ def render_intro(cover_path, output_path):
 
 
 
-        "-map", "0:v", "-map", "1:a", "-r", "25", *video_encode_args(),
+        "-map", "0:v", "-map", "1:a", "-r", intro_fps, *video_encode_args(),
 
 
 
@@ -56726,7 +56814,7 @@ def render_intro(cover_path, output_path):
 
 
 
-        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-shortest", output_path,
+        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", output_path,
 
 
 
@@ -66843,7 +66931,8 @@ def handle_gpu_video_render(payload):
         if not file_ready(cover_path):
             download_file(cover_16x9_url, cover_path)
         if not file_ready(intro_path):
-            render_intro(cover_path, intro_path)
+            reference_path = episode_work_items[0]["source_path"] if episode_work_items else None
+            render_intro(cover_path, intro_path, reference_path=reference_path)
         segment_paths.insert(0, intro_path)
         completed_steps += 1
         update_render_stage(job, completed_steps, total_steps, "GPU intro rendered")
