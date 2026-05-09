@@ -98,7 +98,7 @@ def run_codex(args, job_root, source_path, items, prompt):
             cmd,
             stdout=stdout_fh,
             stderr=stderr_fh,
-            text=True,
+            universal_newlines=True,
             timeout=args.timeout,
         )
     duration = time.time() - started
