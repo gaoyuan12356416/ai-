@@ -1068,11 +1068,11 @@
 
               <div class="field wide">
 
-                <label for="contentIdsInput">批量剧 ID</label>
+                <label for="contentIdsInput">批量 content_id</label>
 
-                <textarea id="contentIdsInput" placeholder="每行一个剧 ID，支持一次性批量提交"></textarea>
+                <textarea id="contentIdsInput" placeholder="每行一个 content_id，支持一次性批量提交"></textarea>
 
-                <div class="hint">按行粘贴剧 ID。系统会自动去空行和重复值。</div>
+                <div class="hint">按行粘贴短剧 content_id。系统会自动去空行和重复值。</div>
 
               </div>
 
@@ -1080,7 +1080,7 @@
 
                 <button id="submitBtn" class="btn btn-primary" type="submit">批量提交截图任务</button>
 
-                <div class="hint">同一产品下，同一剧 ID 已存在截图任务时会自动排重，不重复创建。</div>
+                <div class="hint">同一产品下，同一 content_id 已存在截图任务时会自动排重，不重复创建。</div>
 
               </div>
 
@@ -1690,7 +1690,7 @@ const els = {
 
         if (!payload.app_id) throw new Error("请选择产品");
 
-        if (!payload.content_ids.length) throw new Error("请至少输入一个剧 ID");
+        if (!payload.content_ids.length) throw new Error("请至少输入一个 content_id");
 
         els.submitBtn.disabled = true;
 
@@ -1706,9 +1706,15 @@ const els = {
 
         });
 
-        toast(`已处理 ${result.count} 条，创建 ${result.accepted_count} 条，重复 ${result.duplicate_count} 条，失败 ${result.failed_count} 条`, result.failed_count ? "error" : undefined);
+        const failedItems = (result.items || []).filter(item => !item.accepted && !item.duplicate);
+        const failedSuffix = failedItems.length
+          ? `；失败项已保留：${failedItems.map(item => item.content_id).filter(Boolean).join("、")}`
+          : "";
+        toast(`已处理 ${result.count} 条，创建 ${result.accepted_count} 条，重复 ${result.duplicate_count} 条，失败 ${result.failed_count} 条${failedSuffix}`, result.failed_count ? "error" : undefined);
 
-        els.contentIdsInput.value = "";
+        els.contentIdsInput.value = failedItems.length
+          ? failedItems.map(item => item.content_id).filter(Boolean).join("\n")
+          : "";
 
         await loadJobs(true);
 

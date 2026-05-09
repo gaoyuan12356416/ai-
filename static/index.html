@@ -10208,11 +10208,11 @@
 
 
 
-                  <textarea id="batchContentIdsInput" rows="8" placeholder="&#27599;&#34892;&#19968;&#20010;&#21095; ID&#65292;&#25903;&#25345;&#19968;&#27425;&#24615;&#25209;&#37327;&#25552;&#20132;" required></textarea>
+                  <textarea id="batchContentIdsInput" rows="8" placeholder="&#27599;&#34892;&#19968;&#20010; content_id&#65292;&#25903;&#25345;&#19968;&#27425;&#24615;&#25209;&#37327;&#25552;&#20132;" required></textarea>
 
 
 
-                  <div class="hint">&#25353;&#34892;&#31896;&#36148;&#21095; ID&#12290;&#31995;&#32479;&#20250;&#33258;&#21160;&#21435;&#31354;&#34892;&#21644;&#37325;&#22797;&#20540;&#12290;</div>
+                  <div class="hint">&#25353;&#34892;&#31896;&#36148;&#30701;&#21095; content_id&#12290;&#31995;&#32479;&#20250;&#33258;&#21160;&#21435;&#31354;&#34892;&#21644;&#37325;&#22797;&#20540;&#12290;</div>
 
 
 
@@ -10228,7 +10228,7 @@
 
 
 
-                  <div class="hint">&#21516;&#19968;&#20135;&#21697;&#19979;&#65292;&#21516;&#19968;&#21095; ID &#24050;&#23384;&#22312;&#25130;&#22270;&#20219;&#21153;&#26102;&#20250;&#33258;&#21160;&#25490;&#37325;&#65292;&#19981;&#37325;&#22797;&#21019;&#24314;&#12290;</div>
+                  <div class="hint">&#21516;&#19968;&#20135;&#21697;&#19979;&#65292;&#21516;&#19968; content_id &#24050;&#23384;&#22312;&#25130;&#22270;&#20219;&#21153;&#26102;&#20250;&#33258;&#21160;&#25490;&#37325;&#65292;&#19981;&#37325;&#22797;&#21019;&#24314;&#12290;</div>
 
 
 
@@ -17328,7 +17328,7 @@ function buildJobRow(job) {
 
 
 
-        if (!payload.content_ids.length) throw new Error("\u8bf7\u81f3\u5c11\u8f93\u5165\u4e00\u4e2a\u5267 ID");
+        if (!payload.content_ids.length) throw new Error("\u8bf7\u81f3\u5c11\u8f93\u5165\u4e00\u4e2a content_id");
 
 
 
@@ -17368,7 +17368,20 @@ function buildJobRow(job) {
 
 
 
-        toast(`\u5df2\u5904\u7406 ${result.count} \u6761\uff0c\u521b\u5efa ${result.accepted_count} \u6761\uff0c\u91cd\u590d ${result.duplicate_count} \u6761\uff0c\u5931\u8d25 ${result.failed_count} \u6761`, result.failed_count ? "error" : undefined);
+        const failedItems = (result.items || []).filter(item => !item.accepted && !item.duplicate);
+
+        const failedSuffix = failedItems.length
+          ? `\uff1b\u5931\u8d25\u9879\u5df2\u4fdd\u7559\uff1a${failedItems.map(item => item.content_id).filter(Boolean).join("\u3001")}`
+          : "";
+
+        toast(`\u5df2\u5904\u7406 ${result.count} \u6761\uff0c\u521b\u5efa ${result.accepted_count} \u6761\uff0c\u91cd\u590d ${result.duplicate_count} \u6761\uff0c\u5931\u8d25 ${result.failed_count} \u6761${failedSuffix}`, result.failed_count ? "error" : undefined);
+
+        const input = document.getElementById("batchContentIdsInput");
+        if (input) {
+          input.value = failedItems.length
+            ? failedItems.map(item => item.content_id).filter(Boolean).join("\n")
+            : "";
+        }
 
 
 
@@ -22410,8 +22423,6 @@ function buildJobRow(job) {
 
 
 </html>
-
-
 
 
 

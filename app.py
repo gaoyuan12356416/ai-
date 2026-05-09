@@ -31398,6 +31398,12 @@ def submit_screenshot_job_batch(payload, actor_session=None):
 
                 })
 
+    if accepted == 0 and failed > 0 and duplicates == 0:
+
+        first_error = next((str(item.get("error", "")).strip() for item in items if item.get("error")), "")
+
+        raise ValueError("全部截图任务创建失败：%s" % (first_error or "请检查 content_id 是否正确"))
+
 
 
     return {
