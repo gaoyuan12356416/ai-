@@ -12,9 +12,10 @@ from socketserver import ThreadingMixIn
 from urllib.parse import unquote, urlparse
 
 import requests
-from PIL import ImageFile
+from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+RESAMPLE_LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
 HOST = os.environ.get("CODEX_SCREENSHOT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CODEX_SCREENSHOT_PORT", "8791"))
@@ -40,10 +41,11 @@ ISOLATE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_ISOLATE_CODEX_HOME", "0").
 SOURCE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_SOURCE_CODEX_HOME", "/root/.codex")
 CODEX_MODEL = os.environ.get("CODEX_SCREENSHOT_CODEX_MODEL", "gpt-5.5").strip() or "gpt-5.5"
 CODEX_REASONING = os.environ.get("CODEX_SCREENSHOT_CODEX_REASONING", "medium").strip() or "medium"
+ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE", "0.03"))
 
 # Cache: avoids repeated generations for same source + spec + prompt version.
 CACHE_ROOT = os.environ.get("CODEX_SCREENSHOT_CACHE_ROOT", "/root/codex_screenshot_cache")
-PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v2")
+PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v3")
 KEEP_JOB_WORKSPACE = os.environ.get("CODEX_SCREENSHOT_KEEP_JOB_WORKSPACE", "0").strip().lower() in (
     "1",
     "true",
@@ -211,6 +213,13 @@ def try_restore_from_cache(source_url, drama_name, item):
     cached_img = os.path.join(cached_dir, "output.jpg")
     if not os.path.isfile(cached_img):
         return None
+    try:
+        if image_dimensions(cached_img) != target_dimensions(item):
+            logging.warning("skip screenshot cache with bad dimensions: %s", cached_img)
+            return None
+    except Exception:
+        logging.warning("skip unreadable screenshot cache: %s", cached_img)
+        return None
     workspace_output_path = str(item.get("workspace_output_path", "")).strip()
     public_output_path = str(item.get("public_output_path", "")).strip()
     ensure_dir(os.path.dirname(workspace_output_path))
@@ -240,6 +249,112 @@ def store_to_cache(source_url, drama_name, item):
     return key
 
 
+def target_dimensions(item):
+    return int(item.get("width") or 0), int(item.get("height") or 0)
+
+
+def target_aspect_ratio(item):
+    width, height = target_dimensions(item)
+    if width <= 0 or height <= 0:
+        raise ValueError("invalid target dimensions for %s" % str(item.get("key", "")).strip())
+    return width / float(height)
+
+
+def image_dimensions(path):
+    with Image.open(path) as image:
+        return image.size
+
+
+def image_aspect_ratio(path):
+    width, height = image_dimensions(path)
+    if height <= 0:
+        raise RuntimeError("invalid image height: %s" % path)
+    return width / float(height), width, height
+
+
+def aspect_ratio_error(actual, target):
+    if target <= 0:
+        return 1.0
+    return abs(actual - target) / target
+
+
+def validate_raw_generated_image(item, result_data):
+    key = str(item.get("key", "")).strip()
+    raw_path = str((result_data or {}).get("raw_generated_path") or "").strip()
+    if not raw_path:
+        raise RuntimeError("missing raw_generated_path for %s" % key)
+    if not os.path.isfile(raw_path):
+        raise RuntimeError("raw_generated_path not found for %s: %s" % (key, raw_path))
+
+    raw_ratio, raw_width, raw_height = image_aspect_ratio(raw_path)
+    target_ratio = target_aspect_ratio(item)
+    error = aspect_ratio_error(raw_ratio, target_ratio)
+    if error > ASPECT_RATIO_TOLERANCE:
+        raise RuntimeError(
+            "raw aspect ratio rejected for %s: %sx%s ratio %.6f, target %.6f, error %.2f%% > %.2f%%"
+            % (
+                key,
+                raw_width,
+                raw_height,
+                raw_ratio,
+                target_ratio,
+                error * 100.0,
+                ASPECT_RATIO_TOLERANCE * 100.0,
+            )
+        )
+    data = dict(result_data or {})
+    data.update(
+        {
+            "raw_generated_path": raw_path,
+            "raw_width": raw_width,
+            "raw_height": raw_height,
+            "raw_ratio": round(raw_ratio, 10),
+            "target_ratio": round(target_ratio, 10),
+            "aspect_ratio_error": round(error, 10),
+            "aspect_ratio_tolerance": ASPECT_RATIO_TOLERANCE,
+            "aspect_ratio_valid": True,
+        }
+    )
+    return data
+
+
+def normalize_without_crop(item, source_path, output_path):
+    width, height = target_dimensions(item)
+    ensure_dir(os.path.dirname(output_path))
+    with Image.open(source_path) as image:
+        image = image.convert("RGB")
+        if image.size != (width, height):
+            image = image.resize((width, height), RESAMPLE_LANCZOS)
+        image.save(output_path, "JPEG", quality=94, optimize=True, progressive=True)
+
+
+def validate_and_normalize_generated_output(item, result_data, workspace_output_path):
+    result_data = validate_raw_generated_image(item, result_data)
+    raw_path = result_data["raw_generated_path"]
+    normalize_without_crop(item, raw_path, workspace_output_path)
+    final_width, final_height = image_dimensions(workspace_output_path)
+    expected = target_dimensions(item)
+    if (final_width, final_height) != expected:
+        raise RuntimeError(
+            "bad normalized size for %s: %sx%s expected %sx%s"
+            % (
+                str(item.get("key", "")).strip(),
+                final_width,
+                final_height,
+                expected[0],
+                expected[1],
+            )
+        )
+    result_data.update(
+        {
+            "normalized_width": final_width,
+            "normalized_height": final_height,
+            "normalized_method": "resize_without_crop",
+        }
+    )
+    return result_data
+
+
 def job_workspace(job_id):
     # Each job runs in a clean workspace to avoid stale files inflating token usage.
     return os.path.join(PROMPT_WORKSPACE_ROOT, "_jobs", job_id)
@@ -253,19 +368,28 @@ def reset_dir(path):
 
 def build_codex_instruction(drama_name, item):
     title = (drama_name or "").strip() or "the provided drama"
+    target_ratio = target_aspect_ratio(item)
+    tolerance_percent = ASPECT_RATIO_TOLERANCE * 100.0
     return (
         "Use the attached original drama cover as the source image. "
         "Create a new finished paid-social key art image for {title} at exactly {width}x{height} pixels, aspect ratio {ratio}. "
+        "The raw AI-generated image itself must naturally match this canvas: width={width}, height={height}, width/height={target_ratio:.6f}. "
+        "After the AI generation call, inspect the raw generated image dimensions with Python/PIL. "
+        "If raw width/height differs from {target_ratio:.6f} by more than {tolerance_percent:.2f}% relative error, treat that generation as unusable and retry only this target. "
+        "Do at most three AI generation attempts for this target. "
+        "Do not use crop, pad, blur-background, or layout conversion to hide an invalid raw aspect ratio. "
         "This must be an AI image generation or image-editing result for this exact canvas, not a deterministic crop, resize, pad, or copy-paste layout. "
         "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the original source, while adapting the composition naturally to the target canvas. "
         "Extend or recreate the surrounding background as needed so the result looks complete, polished, and not like a cropped or stretched image. "
         "Do not add watermarks, unrelated props, extra people, duplicate limbs, deformed hands, or collage seams. "
-        "After generation, copy the selected final image into {output_path}. "
-        "Reply with only compact JSON containing output_path and summary."
+        "After a target-ratio raw AI image exists, copy or JPEG-convert the selected raw image into {output_path}; do not crop, pad, or stretch it. "
+        "Reply with only compact JSON containing output_path, raw_generated_path, raw_width, raw_height, raw_ratio, used_ai_generation=true, retry_count, and summary."
     ).format(
         ratio=item["ratio"],
         width=int(item["width"]),
         height=int(item["height"]),
+        target_ratio=target_ratio,
+        tolerance_percent=tolerance_percent,
         title=title,
         output_path=item["workspace_output_path"],
     )
@@ -302,12 +426,16 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
     specs = []
     plan_steps = []
     for item in items:
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
         spec = {
             "key": str(item.get("key", "")).strip(),
             "label": str(item.get("label") or item.get("key") or "").strip(),
             "ratio": str(item.get("ratio", "")).strip(),
-            "width": int(item.get("width") or 0),
-            "height": int(item.get("height") or 0),
+            "width": width,
+            "height": height,
+            "target_width_height_ratio": round(width / float(height), 10) if height else 0,
+            "max_relative_ratio_error": ASPECT_RATIO_TOLERANCE,
             "output_path": str(item.get("workspace_output_path", "")).strip(),
         }
         specs.append(spec)
@@ -336,22 +464,26 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         "Hard rules: use only direct built-in AI image generation or image-editing calls for the creative artwork; "
         "do not create a warmup image, sample image, exploratory variant, optional alternate candidate, or quality-only retry; "
         "do not generate a second image for a target key once that key has produced a usable image; "
-        "retry only if the target-specific AI call fails technically with no usable image file, and record any retry in the summary; "
+        "a usable image must have a raw AI-generated width/height ratio within {tolerance_percent:.2f}% relative error of that target's target_width_height_ratio; "
+        "retry only if the target-specific AI call fails technically with no usable image file or fails this raw aspect-ratio check, and record any retry in the summary; "
+        "do at most three AI generation attempts per target key; "
         "do not create the creative artwork with Python, PIL, OpenCV, ImageMagick, ffmpeg, HTML, CSS, or deterministic image processing; "
         "do not crop, resize, pad, blur-background, or copy-paste the source image as a substitute for AI generation; "
         "do not use a generated image for one ratio as the source for another ratio; "
-        "Python/PIL may be used only after each target-specific AI image exists, and only to normalize that selected generated image to the exact requested pixel size and JPEG format. "
+        "Python/PIL may be used only after each target-specific AI image exists, first to inspect raw dimensions, then only to JPEG-convert or resize a raw image that already passed the target-ratio check. "
+        "Do not use PIL crop, ImageOps.fit, pad, stretch, blurred background, or any geometry-changing layout trick to make a bad-ratio raw image pass. "
         "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the source, while adapting each composition naturally to its target canvas. "
         "Each output should look like polished OTT short-drama advertising key art, not a layout conversion. "
         "Requested outputs: {specs}. "
-        "For each requested output, save the final normalized image to its exact output_path. "
-        "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, used_ai_generation=true, retry_count, and summary. "
+        "For each requested output, save the final image to its exact output_path after the raw image passes aspect-ratio validation. "
+        "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, raw_width, raw_height, raw_ratio, used_ai_generation=true, retry_count, and summary. "
         "{manifest_rule}"
         "If you cannot produce all three target-specific AI-generated outputs inside this one subprocess, fail explicitly instead of fabricating outputs."
     ).format(
         title=title,
         plan=" | ".join(plan_steps),
         specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")),
+        tolerance_percent=ASPECT_RATIO_TOLERANCE * 100.0,
         manifest_rule=manifest_rule,
     )
 
@@ -440,9 +572,30 @@ def generate_screenshots(payload):
             public_output_path = str(item.get("public_output_path", "")).strip()
             if not key or not os.path.isfile(workspace_output_path):
                 continue
+            result_data = dict(batch_summaries.get(key) or {})
+            try:
+                result_data = validate_and_normalize_generated_output(
+                    item, result_data, workspace_output_path
+                )
+            except Exception as exc:
+                logging.warning(
+                    "batch generated output rejected: job=%s key=%s error=%s",
+                    job_id,
+                    key,
+                    str(exc).strip() or exc.__class__.__name__,
+                )
+                try:
+                    os.remove(workspace_output_path)
+                except OSError:
+                    pass
+                try:
+                    if public_output_path and os.path.exists(public_output_path):
+                        os.remove(public_output_path)
+                except OSError:
+                    pass
+                continue
             shutil.copy2(workspace_output_path, public_output_path)
             cache_id = store_to_cache(source_url, drama_name, item)
-            result_data = dict(batch_summaries.get(key) or {})
             result_data.update(
                 {
                     "key": key,
@@ -493,9 +646,12 @@ def generate_screenshots(payload):
         run_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
         if not os.path.isfile(workspace_output_path):
             raise RuntimeError("Codex did not create expected output for %s" % key)
-        shutil.copy2(workspace_output_path, public_output_path)
         with open(result_json_path, "r", encoding="utf-8") as fh:
             result_data = json.loads(extract_json_text(fh.read()))
+        result_data = validate_and_normalize_generated_output(
+            item, result_data, workspace_output_path
+        )
+        shutil.copy2(workspace_output_path, public_output_path)
         cache_id = store_to_cache(source_url, drama_name, item)
         result_data.update(
             {

@@ -14,7 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from codex_screenshot_service import build_codex_batch_imagegen_instruction, extract_json_text
+from codex_screenshot_service import (
+    ASPECT_RATIO_TOLERANCE,
+    build_codex_batch_imagegen_instruction,
+    extract_json_text,
+)
 
 
 SPECS = [
@@ -328,6 +332,23 @@ def validate_outputs(items, result_data):
             raise RuntimeError("missing raw_generated_path for %s" % item["key"])
         if not Path(raw_generated_path).is_file():
             raise RuntimeError("raw generated file does not exist for %s: %s" % (item["key"], raw_generated_path))
+        with Image.open(raw_generated_path) as raw_image:
+            raw_width, raw_height = raw_image.size
+        target_ratio = int(item["width"]) / float(int(item["height"]))
+        raw_ratio = raw_width / float(raw_height)
+        raw_ratio_error = abs(raw_ratio - target_ratio) / target_ratio
+        if raw_ratio_error > ASPECT_RATIO_TOLERANCE:
+            raise RuntimeError(
+                "bad raw ratio for %s: %sx%s ratio %.6f expected %.6f tolerance %.2f%%"
+                % (
+                    item["key"],
+                    raw_width,
+                    raw_height,
+                    raw_ratio,
+                    target_ratio,
+                    ASPECT_RATIO_TOLERANCE * 100.0,
+                )
+            )
         raw_paths.append(raw_generated_path)
         validations.append(
             {
@@ -335,6 +356,10 @@ def validate_outputs(items, result_data):
                 "path": str(path),
                 "size": "%sx%s" % size,
                 "raw_generated_path": raw_generated_path,
+                "raw_size": "%sx%s" % (raw_width, raw_height),
+                "raw_ratio": round(raw_ratio, 10),
+                "target_ratio": round(target_ratio, 10),
+                "raw_ratio_error": round(raw_ratio_error, 10),
                 "used_ai_generation": result_item.get("used_ai_generation"),
                 "retry_count": result_item.get("retry_count"),
             }

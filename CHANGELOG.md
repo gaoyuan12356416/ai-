@@ -1,3 +1,9 @@
+## 2026-05-09 screenshot raw aspect guard
+
+- Tightened screenshot AI prompts to require raw generated images to match the requested target ratio before any final size normalization.
+- Added server-side raw aspect-ratio validation and no-crop resize normalization so bad-ratio AI outputs are rejected instead of center-cropped into 1:1, 1.91:1, or 4:5 assets.
+- Bumped the screenshot prompt/cache version to avoid reusing older crop-like cached screenshot outputs.
+
 ## 2026-05-09 single-process screenshot batch test
 
 - Added an isolated test prompt builder for one Codex subprocess to perform three separate AI image-generation steps for 1:1, 1.91:1, and 4:5 screenshot materials.
