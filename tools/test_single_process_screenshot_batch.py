@@ -157,6 +157,27 @@ def parse_codex_thread_id(events_path):
     return ""
 
 
+def assert_no_forbidden_context(events_path):
+    if not events_path.is_file():
+        return
+    forbidden = [
+        "/.codex/skills/",
+        "\\.codex\\skills\\",
+        "/skills/.system/",
+        "\\skills\\.system\\",
+        "SKILL.md",
+        "MEMORY.md",
+    ]
+    with events_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line_number, line in enumerate(fh, 1):
+            for marker in forbidden:
+                if marker in line:
+                    raise RuntimeError(
+                        "forbidden context access found in Codex event log at line %s: %s"
+                        % (line_number, marker)
+                    )
+
+
 def validate_outputs(items, result_data):
     by_key = {
         str(item.get("key")): item
@@ -259,6 +280,7 @@ def main():
         args, job_root, staged_source, items, prompt
     )
     result_data = parse_result(result_path, manifest_path)
+    assert_no_forbidden_context(events_path)
     validations = validate_outputs(items, result_data)
     image_event_count, image_call_ids = count_image_generation_events(events_path)
     thread_id = parse_codex_thread_id(events_path)

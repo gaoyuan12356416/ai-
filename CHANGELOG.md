@@ -3,6 +3,7 @@
 - Added an isolated test prompt builder for one Codex subprocess to perform three separate AI image-generation steps for 1:1, 1.91:1, and 4:5 screenshot materials.
 - Added a local test runner under `tools/` that writes results to `.test_screenshot_batch/` and records Codex JSON events, generated outputs, dimensions, and a contact sheet without changing production service configuration.
 - Tightened the experimental prompt to avoid unrelated memory/repo inspection and to request exactly three planned image-generation calls before final size normalization.
+- Updated the server-side experiment to forbid reading or using local skill files and to fail validation if Codex event logs show `.codex/skills` or `MEMORY.md` access.
 
 ## 2026-05-08 screenshot AI quality guard
 
