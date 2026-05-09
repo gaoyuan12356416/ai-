@@ -232,16 +232,26 @@ def build_codex_batch_instruction(drama_name, items):
 def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None):
     title = (drama_name or "").strip() or "the provided drama"
     specs = []
+    plan_steps = []
     for item in items:
-        specs.append(
-            {
-                "key": str(item.get("key", "")).strip(),
-                "label": str(item.get("label") or item.get("key") or "").strip(),
-                "ratio": str(item.get("ratio", "")).strip(),
-                "width": int(item.get("width") or 0),
-                "height": int(item.get("height") or 0),
-                "output_path": str(item.get("workspace_output_path", "")).strip(),
-            }
+        spec = {
+            "key": str(item.get("key", "")).strip(),
+            "label": str(item.get("label") or item.get("key") or "").strip(),
+            "ratio": str(item.get("ratio", "")).strip(),
+            "width": int(item.get("width") or 0),
+            "height": int(item.get("height") or 0),
+            "output_path": str(item.get("workspace_output_path", "")).strip(),
+        }
+        specs.append(spec)
+        plan_steps.append(
+            "CALL_{index}: TARGET_KEY={key}; CANVAS={width}x{height}; RATIO={ratio}; OUTPUT={output_path}".format(
+                index=len(plan_steps) + 1,
+                key=spec["key"],
+                width=spec["width"],
+                height=spec["height"],
+                ratio=spec["ratio"],
+                output_path=spec["output_path"],
+            )
         )
     manifest = (manifest_path or "").strip()
     manifest_rule = (
@@ -252,11 +262,13 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
     return (
         "This is an isolated batch-image-generation test. "
         "Use the attached original drama cover only as the visual identity reference. "
-        "Produce three independently AI-generated paid-social key art images for {title} in this single Codex subprocess. "
+        "In this single Codex subprocess, produce exactly one selected AI-generated paid-social key art image for each target below, in this exact order: {plan}. "
         "Do not inspect memories, Git history, web pages, logs, databases, unrelated project files, or any skill files. "
-        "Do not read or use any local skill file, helper script, or CLI fallback for image generation. "
-        "Hard rules: run exactly three planned direct built-in AI image generation or image-editing calls total, one for each requested canvas; "
-        "do not create exploratory variants or optional alternate candidates; retry only if one target fails technically, and record any retry in the summary; "
+        "Do not read or use any local skill file, local helper script, plugin helper, external image-generation CLI, or web service for image generation. "
+        "Hard rules: use only direct built-in AI image generation or image-editing calls for the creative artwork; "
+        "do not create a warmup image, sample image, exploratory variant, optional alternate candidate, or quality-only retry; "
+        "do not generate a second image for a target key once that key has produced a usable image; "
+        "retry only if the target-specific AI call fails technically with no usable image file, and record any retry in the summary; "
         "do not create the creative artwork with Python, PIL, OpenCV, ImageMagick, ffmpeg, HTML, CSS, or deterministic image processing; "
         "do not crop, resize, pad, blur-background, or copy-paste the source image as a substitute for AI generation; "
         "do not use a generated image for one ratio as the source for another ratio; "
@@ -267,9 +279,10 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         "For each requested output, save the final normalized image to its exact output_path. "
         "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, used_ai_generation=true, retry_count, and summary. "
         "{manifest_rule}"
-        "If you cannot perform three separate AI image generations inside this one subprocess, fail explicitly instead of fabricating outputs."
+        "If you cannot produce all three target-specific AI-generated outputs inside this one subprocess, fail explicitly instead of fabricating outputs."
     ).format(
         title=title,
+        plan=" | ".join(plan_steps),
         specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")),
         manifest_rule=manifest_rule,
     )

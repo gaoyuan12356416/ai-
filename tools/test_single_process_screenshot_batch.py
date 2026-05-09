@@ -72,10 +72,56 @@ def build_items(job_root):
     return items
 
 
+def toml_string(value):
+    return json.dumps(str(value))
+
+
+def prepare_isolated_codex_home(job_root):
+    source_home = Path(
+        os.environ.get("CODEX_SCREENSHOT_SOURCE_CODEX_HOME", str(Path.home() / ".codex"))
+    ).expanduser()
+    codex_home = job_root / "codex_home"
+    if codex_home.exists():
+        shutil.rmtree(str(codex_home))
+    ensure_dir(codex_home)
+    for dirname in ("generated_images", "sessions", "log", "tmp", "shell_snapshots"):
+        ensure_dir(codex_home / dirname)
+    for filename in (
+        "auth.json",
+        "installation_id",
+        "version.json",
+        "models_cache.json",
+        ".personality_migration",
+    ):
+        source = source_home / filename
+        if source.is_file():
+            shutil.copy2(str(source), str(codex_home / filename))
+    model = os.environ.get("CODEX_SCREENSHOT_TEST_MODEL", "gpt-5.5")
+    reasoning = os.environ.get("CODEX_SCREENSHOT_TEST_REASONING", "medium")
+    config = "\n".join(
+        [
+            "model = %s" % toml_string(model),
+            "model_reasoning_effort = %s" % toml_string(reasoning),
+            'approval_policy = "never"',
+            "",
+            "[projects.%s]" % toml_string(str(job_root)),
+            'trust_level = "trusted"',
+            "",
+            "[notice]",
+            "hide_full_access_warning = true",
+            "fast_default_opt_out = true",
+            "",
+        ]
+    )
+    (codex_home / "config.toml").write_text(config, encoding="utf-8")
+    return codex_home
+
+
 def run_codex(args, job_root, source_path, items, prompt):
     result_path = job_root / "result.json"
     events_path = job_root / "codex_events.jsonl"
     stderr_path = job_root / "codex_stderr.log"
+    codex_home = prepare_isolated_codex_home(job_root)
     cmd = [
         args.codex_bin,
         "exec",
@@ -94,8 +140,11 @@ def run_codex(args, job_root, source_path, items, prompt):
     with events_path.open("w", encoding="utf-8") as stdout_fh, stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr_fh:
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(codex_home)
         proc = subprocess.run(
             cmd,
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=stdout_fh,
             stderr=stderr_fh,
@@ -107,7 +156,7 @@ def run_codex(args, job_root, source_path, items, prompt):
         raise RuntimeError(
             "codex exec failed with code %s; see %s" % (proc.returncode, stderr_path)
         )
-    return result_path, events_path, stderr_path, duration
+    return result_path, events_path, stderr_path, duration, codex_home
 
 
 def parse_result(result_path, manifest_path):
@@ -177,6 +226,79 @@ def assert_no_forbidden_context(events_path):
                         "forbidden context access found in Codex event log at line %s: %s"
                         % (line_number, marker)
                     )
+
+
+def find_codex_session_path(codex_home, thread_id):
+    if not thread_id:
+        return None
+    sessions_dir = Path(codex_home) / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+    matches = list(sessions_dir.rglob("*%s*.jsonl" % thread_id))
+    if matches:
+        return sorted(matches, key=lambda path: str(path))[-1]
+    return None
+
+
+def parse_session_evidence(session_path):
+    evidence = {
+        "session_path": str(session_path) if session_path else "",
+        "image_generation_event_count": 0,
+        "image_generation_call_ids": [],
+        "forbidden_context_hits": [],
+        "forbidden_tool_access_hits": [],
+    }
+    if not session_path or not Path(session_path).is_file():
+        return evidence
+    call_ids = set()
+    forbidden_context = [
+        "/.codex/skills/",
+        "\\.codex\\skills\\",
+        "/skills/.system/",
+        "\\skills\\.system\\",
+        "SKILL.md",
+        "MEMORY.md",
+    ]
+    forbidden_tool_access = [
+        "/skills/",
+        "\\skills\\",
+        "SKILL.md",
+        "/memories/",
+        "\\memories\\",
+        "MEMORY.md",
+    ]
+    with Path(session_path).open("r", encoding="utf-8", errors="replace") as fh:
+        for line_number, line in enumerate(fh, 1):
+            for marker in forbidden_context:
+                if marker in line:
+                    evidence["forbidden_context_hits"].append(
+                        {"line": line_number, "marker": marker}
+                    )
+                    break
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            payload = event.get("payload") or {}
+            if event.get("type") == "event_msg" and payload.get("type") == "image_generation_end":
+                evidence["image_generation_event_count"] += 1
+                call_id = payload.get("call_id")
+                if call_id:
+                    call_ids.add(str(call_id))
+            if event.get("type") != "response_item":
+                continue
+            item = payload.get("item") or payload
+            if item.get("type") != "function_call":
+                continue
+            needle = "%s %s" % (item.get("name") or "", item.get("arguments") or "")
+            for marker in forbidden_tool_access:
+                if marker in needle:
+                    evidence["forbidden_tool_access_hits"].append(
+                        {"line": line_number, "marker": marker}
+                    )
+                    break
+    evidence["image_generation_call_ids"] = sorted(call_ids)
+    return evidence
 
 
 def validate_outputs(items, result_data):
@@ -277,7 +399,7 @@ def main():
         print(json.dumps({"job_root": str(job_root), "prompt_path": str(prompt_path)}, indent=2))
         return
 
-    result_path, events_path, stderr_path, duration = run_codex(
+    result_path, events_path, stderr_path, duration, codex_home = run_codex(
         args, job_root, staged_source, items, prompt
     )
     result_data = parse_result(result_path, manifest_path)
@@ -285,6 +407,23 @@ def main():
     validations = validate_outputs(items, result_data)
     image_event_count, image_call_ids = count_image_generation_events(events_path)
     thread_id = parse_codex_thread_id(events_path)
+    session_path = find_codex_session_path(codex_home, thread_id)
+    session_evidence = parse_session_evidence(session_path)
+    if session_evidence["forbidden_context_hits"]:
+        raise RuntimeError(
+            "forbidden skill or memory context found in isolated Codex session: %s"
+            % session_evidence["forbidden_context_hits"][:5]
+        )
+    if session_evidence["forbidden_tool_access_hits"]:
+        raise RuntimeError(
+            "forbidden skill or memory access found in tool calls: %s"
+            % session_evidence["forbidden_tool_access_hits"][:5]
+        )
+    if session_evidence["image_generation_event_count"] < len(items):
+        raise RuntimeError(
+            "expected at least %s built-in AI image-generation events, found %s"
+            % (len(items), session_evidence["image_generation_event_count"])
+        )
     selected_raw_paths = [item["raw_generated_path"] for item in validations]
     thread_raw_count = count_thread_generated_files(selected_raw_paths, thread_id)
     contact_sheet = job_root / "contact_sheet.jpg"
@@ -298,8 +437,10 @@ def main():
         "manifest_path": str(manifest_path),
         "events_path": str(events_path),
         "stderr_path": str(stderr_path),
+        "isolated_codex_home": str(codex_home),
         "contact_sheet": str(contact_sheet),
         "codex_thread_id": thread_id,
+        "codex_session_evidence": session_evidence,
         "codex_json_image_generation_event_count": image_event_count,
         "codex_json_image_generation_call_ids": image_call_ids,
         "selected_raw_generated_count": len(set(selected_raw_paths)),
