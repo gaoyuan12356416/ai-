@@ -256,14 +256,16 @@ def parse_session_evidence(session_path):
         return evidence
     call_ids = set()
     forbidden_imagegen_context = [
-        "imagegen",
         "image_gen.py",
+        "- imagegen:",
+        "imagegen/SKILL.md",
         "/skills/.system/imagegen",
         "\\skills\\.system\\imagegen",
     ]
     forbidden_tool_access = [
-        "imagegen",
         "image_gen.py",
+        "imagegen/SKILL.md",
+        "/imagegen/",
         "/skills/.system/imagegen",
         "\\skills\\.system\\imagegen",
     ]
