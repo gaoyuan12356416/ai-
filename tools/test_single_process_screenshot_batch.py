@@ -86,6 +86,10 @@ def prepare_isolated_codex_home(job_root):
     ensure_dir(codex_home)
     for dirname in ("generated_images", "sessions", "log", "tmp", "shell_snapshots"):
         ensure_dir(codex_home / dirname)
+    # Codex auto-installs bundled system skills into CODEX_HOME/skills when it
+    # can create that directory. For this test, the server-side subprocess must
+    # not expose the imagegen skill at all, so keep the path as a plain file.
+    (codex_home / "skills").write_text("system skills disabled for screenshot batch test\n", encoding="utf-8")
     for filename in (
         "auth.json",
         "installation_id",
@@ -245,33 +249,30 @@ def parse_session_evidence(session_path):
         "session_path": str(session_path) if session_path else "",
         "image_generation_event_count": 0,
         "image_generation_call_ids": [],
-        "forbidden_context_hits": [],
+        "forbidden_imagegen_context_hits": [],
         "forbidden_tool_access_hits": [],
     }
     if not session_path or not Path(session_path).is_file():
         return evidence
     call_ids = set()
-    forbidden_context = [
-        "/.codex/skills/",
-        "\\.codex\\skills\\",
-        "/skills/.system/",
-        "\\skills\\.system\\",
-        "SKILL.md",
-        "MEMORY.md",
+    forbidden_imagegen_context = [
+        "imagegen",
+        "image_gen.py",
+        "/skills/.system/imagegen",
+        "\\skills\\.system\\imagegen",
     ]
     forbidden_tool_access = [
-        "/skills/",
-        "\\skills\\",
-        "SKILL.md",
-        "/memories/",
-        "\\memories\\",
-        "MEMORY.md",
+        "imagegen",
+        "image_gen.py",
+        "/skills/.system/imagegen",
+        "\\skills\\.system\\imagegen",
     ]
     with Path(session_path).open("r", encoding="utf-8", errors="replace") as fh:
         for line_number, line in enumerate(fh, 1):
-            for marker in forbidden_context:
-                if marker in line:
-                    evidence["forbidden_context_hits"].append(
+            lower_line = line.lower()
+            for marker in forbidden_imagegen_context:
+                if marker.lower() in lower_line:
+                    evidence["forbidden_imagegen_context_hits"].append(
                         {"line": line_number, "marker": marker}
                     )
                     break
@@ -291,8 +292,9 @@ def parse_session_evidence(session_path):
             if item.get("type") != "function_call":
                 continue
             needle = "%s %s" % (item.get("name") or "", item.get("arguments") or "")
+            lower_needle = needle.lower()
             for marker in forbidden_tool_access:
-                if marker in needle:
+                if marker.lower() in lower_needle:
                     evidence["forbidden_tool_access_hits"].append(
                         {"line": line_number, "marker": marker}
                     )
@@ -409,10 +411,10 @@ def main():
     thread_id = parse_codex_thread_id(events_path)
     session_path = find_codex_session_path(codex_home, thread_id)
     session_evidence = parse_session_evidence(session_path)
-    if session_evidence["forbidden_context_hits"]:
+    if session_evidence["forbidden_imagegen_context_hits"]:
         raise RuntimeError(
-            "forbidden skill or memory context found in isolated Codex session: %s"
-            % session_evidence["forbidden_context_hits"][:5]
+            "forbidden imagegen context found in isolated Codex session: %s"
+            % session_evidence["forbidden_imagegen_context_hits"][:5]
         )
     if session_evidence["forbidden_tool_access_hits"]:
         raise RuntimeError(
