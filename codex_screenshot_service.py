@@ -254,7 +254,7 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         "Use the attached original drama cover only as the visual identity reference. "
         "Produce three independently AI-generated paid-social key art images for {title} in this single Codex subprocess. "
         "Do not inspect memories, Git history, web pages, logs, databases, unrelated project files, or any skill files. "
-        "Do not read or use the image-generation skill, local image-generation scripts, or any CLI image-generation fallback. "
+        "Do not read or use any local skill file, helper script, or CLI fallback for image generation. "
         "Hard rules: run exactly three planned direct built-in AI image generation or image-editing calls total, one for each requested canvas; "
         "do not create exploratory variants or optional alternate candidates; retry only if one target fails technically, and record any retry in the summary; "
         "do not create the creative artwork with Python, PIL, OpenCV, ImageMagick, ffmpeg, HTML, CSS, or deterministic image processing; "
