@@ -96,6 +96,7 @@ def run_codex(args, job_root, source_path, items, prompt):
     ) as stderr_fh:
         proc = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=stdout_fh,
             stderr=stderr_fh,
             universal_newlines=True,

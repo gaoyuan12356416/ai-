@@ -4,6 +4,7 @@
 - Added a local test runner under `tools/` that writes results to `.test_screenshot_batch/` and records Codex JSON events, generated outputs, dimensions, and a contact sheet without changing production service configuration.
 - Tightened the experimental prompt to avoid unrelated memory/repo inspection and to request exactly three planned image-generation calls before final size normalization.
 - Updated the server-side experiment to forbid reading or using local skill files and to fail validation if Codex event logs show `.codex/skills` or `MEMORY.md` access.
+- Set the experimental Codex subprocess stdin to `/dev/null` so server-side background tests do not stall while reading inherited stdin.
 
 ## 2026-05-08 screenshot AI quality guard
 
