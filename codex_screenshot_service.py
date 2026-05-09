@@ -32,6 +32,14 @@ CODEX_BIN = os.environ.get("CODEX_SCREENSHOT_CODEX_BIN", "/usr/bin/codex")
 CODEX_TIMEOUT = int(os.environ.get("CODEX_SCREENSHOT_CODEX_TIMEOUT", "1800"))
 MAX_CONCURRENCY = max(1, int(os.environ.get("CODEX_SCREENSHOT_MAX_CONCURRENCY", "1")))
 GENERATION_SEMAPHORE = threading.Semaphore(MAX_CONCURRENCY)
+ISOLATE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_ISOLATE_CODEX_HOME", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+SOURCE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_SOURCE_CODEX_HOME", "/root/.codex")
+CODEX_MODEL = os.environ.get("CODEX_SCREENSHOT_CODEX_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+CODEX_REASONING = os.environ.get("CODEX_SCREENSHOT_CODEX_REASONING", "medium").strip() or "medium"
 
 # Cache: avoids repeated generations for same source + spec + prompt version.
 CACHE_ROOT = os.environ.get("CODEX_SCREENSHOT_CACHE_ROOT", "/root/codex_screenshot_cache")
@@ -62,14 +70,16 @@ def json_response(handler, status_code, payload):
     handler.wfile.write(body)
 
 
-def run_cmd(cmd, timeout=None):
+def run_cmd(cmd, timeout=None, env=None):
     logging.info("running: %s", " ".join(cmd))
     proc = subprocess.run(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
         timeout=timeout,
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -77,6 +87,64 @@ def run_cmd(cmd, timeout=None):
             % (proc.returncode, proc.stderr.strip() or proc.stdout.strip())
         )
     return proc
+
+
+def toml_string(value):
+    return json.dumps(str(value))
+
+
+def prepare_isolated_codex_home(workdir, project_dir):
+    codex_home = os.path.join(workdir, "codex_home")
+    if os.path.isdir(codex_home):
+        shutil.rmtree(codex_home, ignore_errors=True)
+    elif os.path.exists(codex_home):
+        os.remove(codex_home)
+    ensure_dir(codex_home)
+    for dirname in ("generated_images", "sessions", "log", "tmp", "shell_snapshots"):
+        ensure_dir(os.path.join(codex_home, dirname))
+
+    # Keep this path as a plain file so Codex cannot auto-install bundled
+    # system skills such as imagegen into the subprocess context.
+    with open(os.path.join(codex_home, "skills"), "w", encoding="utf-8") as fh:
+        fh.write("system skills disabled for screenshot generation\n")
+
+    for filename in (
+        "auth.json",
+        "installation_id",
+        "version.json",
+        "models_cache.json",
+        ".personality_migration",
+    ):
+        source = os.path.join(SOURCE_CODEX_HOME, filename)
+        if os.path.isfile(source):
+            shutil.copy2(source, os.path.join(codex_home, filename))
+
+    config = "\n".join(
+        [
+            "model = %s" % toml_string(CODEX_MODEL),
+            "model_reasoning_effort = %s" % toml_string(CODEX_REASONING),
+            'approval_policy = "never"',
+            "",
+            "[projects.%s]" % toml_string(project_dir),
+            'trust_level = "trusted"',
+            "",
+            "[notice]",
+            "hide_full_access_warning = true",
+            "fast_default_opt_out = true",
+            "",
+        ]
+    )
+    with open(os.path.join(codex_home, "config.toml"), "w", encoding="utf-8") as fh:
+        fh.write(config)
+    return codex_home
+
+
+def build_codex_env(workdir, project_dir):
+    if not ISOLATE_CODEX_HOME:
+        return None
+    env = os.environ.copy()
+    env["CODEX_HOME"] = prepare_isolated_codex_home(workdir, project_dir)
+    return env
 
 
 def build_public_url(path):
@@ -331,6 +399,8 @@ def generate_screenshots(payload):
                 os.remove(workspace_output_path)
 
         result_json_path = os.path.join(workdir, "batch_result.json")
+        manifest_json_path = os.path.join(workdir, "batch_manifest.json")
+        codex_env = build_codex_env(workdir, ws)
         cmd = [
             CODEX_BIN,
             "exec",
@@ -342,17 +412,18 @@ def generate_screenshots(payload):
             staged_source_path,
             "-o",
             result_json_path,
-            build_codex_batch_instruction(drama_name, remaining),
+            build_codex_batch_imagegen_instruction(drama_name, remaining, manifest_json_path),
         ]
         try:
-            run_cmd(cmd, timeout=CODEX_TIMEOUT)
+            run_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
         except Exception:
             logging.exception("batch generation failed for %s", job_id)
 
         batch_result_data = {"items": []}
-        if os.path.isfile(result_json_path):
+        batch_result_source = result_json_path if os.path.isfile(result_json_path) else manifest_json_path
+        if os.path.isfile(batch_result_source):
             try:
-                with open(result_json_path, "r", encoding="utf-8") as fh:
+                with open(batch_result_source, "r", encoding="utf-8") as fh:
                     batch_result_data = json.loads(extract_json_text(fh.read()))
             except Exception:
                 logging.exception("batch result JSON parse failed for %s", job_id)
@@ -405,6 +476,7 @@ def generate_screenshots(payload):
             os.remove(workspace_output_path)
 
         result_json_path = os.path.join(workdir, "%s_result.json" % key)
+        codex_env = build_codex_env(workdir, ws)
         cmd = [
             CODEX_BIN,
             "exec",
@@ -418,7 +490,7 @@ def generate_screenshots(payload):
             result_json_path,
             build_codex_instruction(drama_name, item),
         ]
-        run_cmd(cmd, timeout=CODEX_TIMEOUT)
+        run_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
         if not os.path.isfile(workspace_output_path):
             raise RuntimeError("Codex did not create expected output for %s" % key)
         shutil.copy2(workspace_output_path, public_output_path)

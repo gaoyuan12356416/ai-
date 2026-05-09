@@ -2129,6 +2129,11 @@ CODEX_SCREENSHOT_BATCH_ENABLED = os.environ.get("CODEX_SCREENSHOT_BATCH_ENABLED"
     "true",
     "yes",
 )
+CODEX_SCREENSHOT_BATCH_STRICT = os.environ.get("CODEX_SCREENSHOT_BATCH_STRICT", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 
@@ -31573,6 +31578,8 @@ def process_screenshot_job(job):
                 generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
             except Exception:
                 logging.exception("screenshot batch failed: %s", job["job_id"])
+                if CODEX_SCREENSHOT_BATCH_STRICT:
+                    raise
 
             remaining = []
             completed = 0
@@ -31602,6 +31609,11 @@ def process_screenshot_job(job):
                     detail="\u5df2\u6279\u91cf\u751f\u6210\u5e76\u4e0a\u4f20 %s" % spec["label"],
                 )
             pending = remaining
+            if CODEX_SCREENSHOT_BATCH_STRICT and pending:
+                raise RuntimeError(
+                    "screenshot batch incomplete: %s"
+                    % ",".join(str(item[1].get("key", "")) for item in pending)
+                )
 
         def generate_one(item):
             index, spec, workspace_output_path, public_output_path = item
