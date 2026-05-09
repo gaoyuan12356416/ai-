@@ -229,6 +229,51 @@ def build_codex_batch_instruction(drama_name, items):
     ).format(title=title, specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")))
 
 
+def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None):
+    title = (drama_name or "").strip() or "the provided drama"
+    specs = []
+    for item in items:
+        specs.append(
+            {
+                "key": str(item.get("key", "")).strip(),
+                "label": str(item.get("label") or item.get("key") or "").strip(),
+                "ratio": str(item.get("ratio", "")).strip(),
+                "width": int(item.get("width") or 0),
+                "height": int(item.get("height") or 0),
+                "output_path": str(item.get("workspace_output_path", "")).strip(),
+            }
+        )
+    manifest = (manifest_path or "").strip()
+    manifest_rule = (
+        "Also write the same JSON object to {manifest_path}. ".format(manifest_path=manifest)
+        if manifest
+        else ""
+    )
+    return (
+        "This is an isolated batch-image-generation test. "
+        "Use the attached original drama cover only as the visual identity reference. "
+        "Produce three independently AI-generated paid-social key art images for {title} in this single Codex subprocess. "
+        "Do not inspect memories, Git history, web pages, logs, databases, or unrelated project files; only read the image-generation skill instructions if needed. "
+        "Hard rules: run exactly three planned built-in AI image generation or image-editing calls total, one for each requested canvas; "
+        "do not create exploratory variants or optional alternate candidates; retry only if one target fails technically, and record any retry in the summary; "
+        "do not create the creative artwork with Python, PIL, OpenCV, ImageMagick, ffmpeg, HTML, CSS, or deterministic image processing; "
+        "do not crop, resize, pad, blur-background, or copy-paste the source image as a substitute for AI generation; "
+        "do not use a generated image for one ratio as the source for another ratio; "
+        "Python/PIL may be used only after each target-specific AI image exists, and only to normalize that selected generated image to the exact requested pixel size and JPEG format. "
+        "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the source, while adapting each composition naturally to its target canvas. "
+        "Each output should look like polished OTT short-drama advertising key art, not a layout conversion. "
+        "Requested outputs: {specs}. "
+        "For each requested output, save the final normalized image to its exact output_path. "
+        "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, used_ai_generation=true, retry_count, and summary. "
+        "{manifest_rule}"
+        "If you cannot perform three separate AI image generations inside this one subprocess, fail explicitly instead of fabricating outputs."
+    ).format(
+        title=title,
+        specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")),
+        manifest_rule=manifest_rule,
+    )
+
+
 def generate_screenshots(payload):
     job_id = str(payload.get("job_id", "")).strip()
     source_path = str(payload.get("source_path", "")).strip()
