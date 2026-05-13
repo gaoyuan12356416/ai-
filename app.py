@@ -11091,6 +11091,38 @@ def json_response(handler, status_code, payload):
     handler.wfile.write(body)
 
 
+class StructuredApiError(ValueError):
+    def __init__(self, code, message, **details):
+        super().__init__(message)
+        self.code = str(code or "bad_request")
+        self.message = str(message or self.code)
+        self.details = {
+            str(key): value
+            for key, value in (details or {}).items()
+            if value is not None and value != ""
+        }
+
+    def to_payload(self):
+        payload = {
+            "code": self.code,
+            "error": self.code,
+        }
+        payload.update(self.details)
+        payload["message"] = self.message
+        return payload
+
+
+def api_error_payload(exc, default_code="bad_request"):
+    if isinstance(exc, StructuredApiError):
+        return exc.to_payload()
+    message = str(exc).strip() or exc.__class__.__name__
+    return {
+        "code": default_code,
+        "error": message,
+        "message": message,
+    }
+
+
 
 
 
@@ -31167,12 +31199,13 @@ def ensure_no_duplicate_screenshot_job(app_id, content_id):
 
         return None
 
-    raise ValueError(
-
-        "相同产品下该剧已存在截图素材制作记录，禁止重复创建。job_id=%s status=%s"
-
-        % (existing["job_id"], existing["status"])
-
+    raise StructuredApiError(
+        "duplicate_screenshot_job",
+        "相同产品下该剧已存在截图素材制作记录，禁止重复创建。",
+        job_id=existing.get("job_id", ""),
+        status=existing.get("status", ""),
+        app_id=str(app_id or ""),
+        content_id=str(content_id or ""),
     )
 
 
@@ -83263,7 +83296,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -83307,7 +83340,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -83339,7 +83372,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -83371,7 +83404,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -83949,7 +83982,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
 
 
@@ -84519,7 +84552,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 append_audit_log(self._session(), "update_navigation", "navigation", "quick_nav", {"items": saved})
                 json_response(self, 200, {"items": saved})
             except Exception as exc:
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
             return
 
         if parsed.path == "/api/admin/users/role":
@@ -84546,7 +84579,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -84574,7 +84607,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -84587,7 +84620,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 append_audit_log(self._session(), "retry_screenshot_job", "screenshot_job", screenshot_job_id, payload)
                 json_response(self, 202, payload)
             except Exception as exc:
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
             return
 
         if parsed.path == "/api/drama-screenshot-material/jobs/delete-batch":
@@ -84609,7 +84642,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 )
                 json_response(self, 200, result)
             except Exception as exc:
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
             return
 
         if parsed.path == "/api/drama-screenshot-material/jobs/batch":
@@ -84652,7 +84685,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -84684,7 +84717,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -84704,7 +84737,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
@@ -84726,7 +84759,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             except Exception as exc:
 
-                json_response(self, 400, {"error": str(exc)})
+                json_response(self, 400, api_error_payload(exc))
 
             return
 
