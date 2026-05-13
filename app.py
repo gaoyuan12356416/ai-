@@ -11105,9 +11105,9 @@ class StructuredApiError(ValueError):
     def to_payload(self):
         payload = {
             "code": self.code,
-            "error": self.code,
         }
         payload.update(self.details)
+        payload["error"] = self.message
         payload["message"] = self.message
         return payload
 
