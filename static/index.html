@@ -4513,6 +4513,52 @@
 
     .required-mark { color: #e03131; font-weight: 800; margin-right: 4px; }
 
+    .md-preview {
+      margin-top: 12px;
+      line-height: 1.72;
+      color: var(--text);
+    }
+
+    .md-preview h1,
+    .md-preview h2,
+    .md-preview h3,
+    .md-preview h4 { margin: 14px 0 8px; line-height: 1.35; }
+
+    .md-preview h1 { font-size: 18px; }
+    .md-preview h2 { font-size: 16px; padding-top: 10px; border-top: 1px solid #edf2f8; }
+    .md-preview h3 { font-size: 15px; }
+    .md-preview p { margin: 8px 0; }
+    .md-preview ul,
+    .md-preview ol { margin: 8px 0 10px 20px; padding: 0; }
+    .md-preview li { margin: 4px 0; }
+    .md-preview blockquote {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border-left: 3px solid var(--brand);
+      border-radius: 8px;
+      background: #f3f7ff;
+      color: #50607a;
+    }
+    .md-preview code {
+      padding: 1px 5px;
+      border-radius: 6px;
+      background: #edf2f8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .md-preview table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 13px;
+    }
+    .md-preview td,
+    .md-preview th {
+      border: 1px solid #e6edf7;
+      padding: 8px;
+      vertical-align: top;
+    }
+
     .hint { color: var(--muted); font-size: 13px; }
 
 
@@ -15184,6 +15230,88 @@
       return navText(JSON.stringify(String(value == null ? "" : value)));
     }
 
+    function inlineMarkdown(value) {
+      return navText(value)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+
+    function renderMarkdownPreview(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const html = [];
+      let listType = "";
+      let tableOpen = false;
+      const closeList = () => {
+        if (listType) {
+          html.push(`</${listType}>`);
+          listType = "";
+        }
+      };
+      const closeTable = () => {
+        if (tableOpen) {
+          html.push("</tbody></table>");
+          tableOpen = false;
+        }
+      };
+      const openList = type => {
+        closeTable();
+        if (listType !== type) {
+          closeList();
+          html.push(`<${type}>`);
+          listType = type;
+        }
+      };
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          closeList();
+          closeTable();
+          continue;
+        }
+        if (/^\|.+\|$/.test(line)) {
+          closeList();
+          const cells = line.slice(1, -1).split("|").map(cell => cell.trim());
+          if (cells.every(cell => /^:?-{3,}:?$/.test(cell))) continue;
+          if (!tableOpen) {
+            html.push("<table><tbody>");
+            tableOpen = true;
+          }
+          html.push(`<tr>${cells.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join("")}</tr>`);
+          continue;
+        }
+        closeTable();
+        const heading = line.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+          closeList();
+          const level = heading[1].length;
+          html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+          continue;
+        }
+        if (line.startsWith(">")) {
+          closeList();
+          html.push(`<blockquote>${inlineMarkdown(line.replace(/^>\s?/, ""))}</blockquote>`);
+          continue;
+        }
+        const bullet = line.match(/^[-*]\s+(.+)$/);
+        if (bullet) {
+          openList("ul");
+          html.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+          continue;
+        }
+        const ordered = line.match(/^\d+\.\s+(.+)$/);
+        if (ordered) {
+          openList("ol");
+          html.push(`<li>${inlineMarkdown(ordered[1])}</li>`);
+          continue;
+        }
+        closeList();
+        html.push(`<p>${inlineMarkdown(line)}</p>`);
+      }
+      closeList();
+      closeTable();
+      return html.join("") || `<div class="muted">暂无需求内容</div>`;
+    }
+
     const AD_MATERIAL_COUNTRIES = [
       "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
       "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS", "BT", "BV", "BW", "BY", "BZ",
@@ -15603,8 +15731,11 @@
           ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架任务</button></div>` : ""}
         </div>
         <div class="card">
-          <strong>需求内容</strong>
-          <pre style="white-space:pre-wrap;margin-top:10px;">${navText(task.demand_text || "暂无需求内容")}</pre>
+          <div class="actions-inline" style="justify-content:space-between;align-items:center;">
+            <strong>需求内容</strong>
+            ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialDemand()">复制 MD</button>` : ""}
+          </div>
+          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
           ${canReviewDemand ? `<div class="actions-inline">
             <button class="btn btn-primary" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','approved')">需求通过</button>
             <button class="btn btn-danger" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','rejected')">需求驳回</button>
@@ -15619,6 +15750,17 @@
         </div>
         ${task.error_message ? `<div class="card"><strong>错误</strong><pre style="white-space:pre-wrap;">${navText(task.error_message)}</pre></div>` : ""}
       `;
+    }
+
+    async function copyAdMaterialDemand() {
+      const text = state.selectedAdMaterialTask?.demand_text || "";
+      if (!text) return toast("暂无需求内容", "error");
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("已复制需求 MD");
+      } catch (error) {
+        toast("复制失败，请手动选择文本", "error");
+      }
     }
 
     function hideAdMaterialDetail() {
@@ -15716,6 +15858,7 @@
     }
 
     window.openAdMaterialDetail = openAdMaterialDetail;
+    window.copyAdMaterialDemand = copyAdMaterialDemand;
     window.editAdMaterialTask = editAdMaterialTask;
     window.publishAdMaterialTask = publishAdMaterialTask;
     window.copyAdMaterialTask = copyAdMaterialTask;

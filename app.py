@@ -32509,6 +32509,134 @@ def fallback_ad_material_demand(task, reason=""):
     return "\n".join(lines)
 
 
+def _ad_material_size(task):
+    size = str(task.get("size") or "").strip()
+    return size or "按最终投放版位约束；默认优先 1080x1080 静态图"
+
+
+def _ad_material_reference_names(task):
+    refs = task.get("reference_files") or []
+    names = []
+    for item in refs:
+        name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _ad_material_source_note(task):
+    task_type = str(task.get("task_type") or "").strip()
+    source = str(task.get("competitor_source") or "").strip()
+    if task_type == "素材优化":
+        return "本任务以需求人上传的参考素材和产品自身信息为主，不强制拉取竞品素材。"
+    return "本任务需要通过 %s 拉取并筛选 image-only 竞品素材，最终需求应优先继承通过审核的竞品参考风格。" % (source or "已配置竞品源")
+
+
+def _ad_material_direction(task):
+    description = str(task.get("description") or "").strip()
+    if description:
+        return description
+    task_type = str(task.get("task_type") or "").strip()
+    if task_type == "素材优化":
+        return "基于上传参考素材做静态图优化，保留可复用的构图、主体、卖点层级和品牌识别，不直接照搬原图。"
+    if task_type == "竞品借鉴":
+        return "从竞品静态图中提炼可迁移的版式、信息层级、CTA 和色彩节奏，再替换为当前产品品牌与合规表达。"
+    return "综合产品信息、上传参考素材和竞品静态图，产出可审核、可投放、可继续交给图片生成服务执行的静态素材需求。"
+
+
+def fallback_ad_material_demand_v2(task, reason=""):
+    product = task.get("product_name") or task.get("app_id") or "未命名产品"
+    app_id = task.get("app_id") or ""
+    quantity = max(1, int(task.get("quantity") or 1))
+    size = _ad_material_size(task)
+    reference_names = _ad_material_reference_names(task)
+    source_note = _ad_material_source_note(task)
+    direction = _ad_material_direction(task)
+    has_refs = bool(reference_names)
+    ref_text = "、".join(reference_names) if has_refs else "暂无上传参考素材"
+    output_ratio = "1:1" if str(size).lower() in ("", "1080x1080") else size
+
+    lines = [
+        "# %s 静态图片素材需求审核版" % product,
+        "",
+        "> 当前为 Markdown 审核版需求。若后续接入 MetApi / 广大大 / AI 视觉识别脚本，外部脚本返回的 Markdown/PDF 可直接替换本内容。",
+        "",
+        "## 1. 需求范围与输出规格",
+        "",
+        "- 产品：%s" % product,
+        "- App ID：%s" % app_id,
+        "- 任务类型：%s" % (task.get("task_type") or ""),
+        "- 市场/语言：%s / %s" % (task.get("country") or "", task.get("language") or ""),
+        "- 输出数量：%s 张静态图片素材" % quantity,
+        "- 输出尺寸：%s" % size,
+        "- 输出比例：%s" % output_ratio,
+        "- 投放场景：Meta / Facebook 静态图片素材",
+        "- 竞品数据源：%s" % (task.get("competitor_source") or "不使用竞品源"),
+        "- 上传参考素材：%s" % ref_text,
+        "",
+        "## 2. 数据与参考来源",
+        "",
+        "- 参考策略：%s" % source_note,
+        "- 需求方向：%s" % direction,
+        "- 审核要求：需求通过后再进入素材生成；未通过时必须填写驳回原因，并按原因重新生成需求。",
+        "- 重要限制：不得复制竞品 logo、品牌色、界面细节或不可验证承诺；不得使用保证通过、秒到账、无审核、官方背书等高风险表达。",
+        "",
+        "## 3. 参考素材识别要求",
+        "",
+    ]
+    if has_refs:
+        lines.extend([
+            "生成服务必须先逐张识别上传参考素材，再基于识别结果写入最终制作要求：",
+            "",
+        ])
+        for index, name in enumerate(reference_names, 1):
+            lines.append("- REF_%02d：%s；需识别可见主体、构图、色彩、文字层级、CTA、可迁移元素与禁止照搬元素。" % (index, name))
+    else:
+        lines.extend([
+            "当前任务没有上传参考素材。正式生成前需要补齐至少一种参考来源：",
+            "",
+            "- 上传内部高质量静态图素材；或",
+            "- 通过已选竞品源拉取并筛选 image-only 竞品素材；或",
+            "- 在任务描述中补充明确的画面、文案和品牌规范。",
+        ])
+    lines.extend(["", "## 4. 逐张素材需求", ""])
+
+    for index in range(1, quantity + 1):
+        request_id = "REQ_%02d" % index
+        lines.extend([
+            "### %s" % request_id,
+            "",
+            "- 目标：产出 1 张可投放静态图片，必须服务于当前产品和当前市场语言。",
+            "- 参考继承：%s" % ("优先继承上传参考素材的版式、主体关系、色彩节奏和信息层级。" if has_refs else "先补齐参考素材或竞品素材，再基于真实识别结论确定视觉方向。"),
+            "- 画面结构：保留清晰主视觉区、核心卖点区、CTA 区、品牌/Logo 区；移动端信息层级必须一眼可读。",
+            "- 文案要求：主标题、辅助说明、CTA 必须使用 %s 语言；文案应具体、克制、可验证，避免夸张承诺。" % (task.get("language") or "目标市场"),
+            "- Logo 规则：必须使用当前产品 logo；如系统无法定位透明 logo，需在画面中预留 logo 位置，不得用竞品 logo 替代。",
+            "- 生成方式：AI 负责生成背景、主体、氛围和版式草图；关键文字、Logo、按钮文案应作为可控图层或后置叠加，保证清晰不乱码。",
+            "- 验收标准：尺寸符合 %s；文案无拼写错误；主体无遮挡；品牌露出清晰；不出现竞品品牌资产；不出现违规承诺。" % size,
+            "",
+        ])
+
+    lines.extend([
+        "## 5. 上报字段",
+        "",
+        "- category：%s" % (task.get("category") or ""),
+        "- tag_name：%s" % (task.get("tag_name") or ""),
+        "- title：%s" % (task.get("title") or ""),
+        "- body：%s" % (task.get("body") or ""),
+        "- remark：固定留空",
+        "",
+        "## 6. 审核关注点",
+        "",
+        "- 每一张素材必须能对应到明确的需求条目和参考来源。",
+        "- 如果使用竞品素材，只能学习版式/节奏/信息层级，不得复制品牌资产。",
+        "- 如果使用上传参考素材，只能迁移可复用风格，不得直接改色或简单换字。",
+        "- 若需求被驳回，下一轮必须围绕驳回原因调整，不保留历史版本。",
+    ])
+    if reason:
+        lines.extend(["", "## 7. 本次重新生成原因", "", reason])
+    return "\n".join(lines)
+
+
 def notify_ad_material_task_owner(task, text):
     try:
         if task.get("creator_open_id"):
@@ -32526,7 +32654,7 @@ def generate_ad_material_demand(task_id, reason=""):
         result = run_ad_material_external_command(AD_MATERIAL_REQUIREMENT_COMMAND, task, "demand", {"reason": reason}) if AD_MATERIAL_REQUIREMENT_COMMAND else {}
         demand_text = str(result.get("demand_text") or result.get("markdown") or "").strip()
         if not demand_text:
-            demand_text = fallback_ad_material_demand(task, reason)
+            demand_text = fallback_ad_material_demand_v2(task, reason)
         update_ad_material_task_status(task_id, "demand_review", demand_text=demand_text, error_message="")
         fresh = fetch_ad_material_task(task_id)
         notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
