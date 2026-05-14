@@ -17568,6 +17568,9 @@ function buildJobRow(job) {
 
 
         </label>
+        <label class="check" style="font-weight:500;gap:6px;">
+          <input type="checkbox" ${permissions.ad_material_tasks ? "checked" : ""} onchange="setUserPermission('${user.user_id}', 'ad_material_tasks', this.checked)" /> 投放素材任务
+        </label>
 
 
 
