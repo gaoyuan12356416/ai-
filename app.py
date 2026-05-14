@@ -32637,6 +32637,165 @@ def fallback_ad_material_demand_v2(task, reason=""):
     return "\n".join(lines)
 
 
+def _ad_material_language_code(task):
+    value = str(task.get("language") or "").strip().lower()
+    return re.split(r"[^a-zA-Z]+", value, 1)[0] if value else ""
+
+
+def _ad_material_is_finance_product(task):
+    text = " ".join([
+        str(task.get("product_name") or ""),
+        str(task.get("description") or ""),
+        str(task.get("title") or ""),
+        str(task.get("body") or ""),
+    ]).lower()
+    tokens = (
+        "cash", "loan", "credit", "credito", "crédito", "prestamo", "préstamo",
+        "fintech", "dinero", "lend", "wallet", "pago", "pay",
+    )
+    return any(token in text for token in tokens)
+
+
+def _ad_material_copy_variants(task, quantity):
+    product = str(task.get("product_name") or task.get("app_id") or "Product").strip()
+    title = str(task.get("title") or "").strip()
+    body = str(task.get("body") or "").strip()
+    lang = _ad_material_language_code(task)
+    finance = _ad_material_is_finance_product(task)
+
+    if title or body:
+        cta_map = {"es": "Solicitar ahora", "pt": "Começar agora", "en": "Get started", "id": "Mulai sekarang"}
+        cta = cta_map.get(lang, "立即体验" if lang in ("zh", "cn") else "Start now")
+        return [{
+            "headline": title or product,
+            "body": body or "突出产品核心卖点，文案保持简短清晰。",
+            "cta": cta,
+        } for _ in range(quantity)]
+
+    if lang == "es" and finance:
+        base = [
+            ("Préstamo rápido con %s" % product, "Solicita en línea desde tu celular.", "Solicitar ahora"),
+            ("%s para tus planes" % product, "Proceso simple, claro y desde la app.", "Ver mi opción"),
+            ("Crédito personal en pocos pasos", "Consulta tu monto disponible de forma sencilla.", "Empezar ahora"),
+        ]
+    elif lang == "es":
+        base = [
+            ("%s listo para usar" % product, "Empieza en pocos pasos desde tu celular.", "Probar ahora"),
+            ("Descubre %s" % product, "Una experiencia simple, clara y práctica.", "Empezar ahora"),
+            ("%s para tu día a día" % product, "Abre la app y continúa en segundos.", "Usar ahora"),
+        ]
+    elif lang == "pt" and finance:
+        base = [
+            ("Crédito rápido com %s" % product, "Solicite online pelo celular.", "Solicitar agora"),
+            ("%s para seus planos" % product, "Processo simples e direto no app.", "Ver opção"),
+            ("Crédito em poucos passos", "Confira sua opção disponível com clareza.", "Começar agora"),
+        ]
+    elif lang == "pt":
+        base = [
+            ("%s pronto para usar" % product, "Comece em poucos passos pelo celular.", "Começar agora"),
+            ("Descubra %s" % product, "Uma experiência simples e prática.", "Usar agora"),
+            ("%s no seu dia a dia" % product, "Abra o app e continue em segundos.", "Experimentar"),
+        ]
+    elif lang == "en" and finance:
+        base = [
+            ("Fast credit with %s" % product, "Apply online from your phone.", "Apply now"),
+            ("%s for your plans" % product, "A simple app-first request flow.", "Check options"),
+            ("Personal credit in a few steps", "Clear information before you continue.", "Get started"),
+        ]
+    elif lang == "en":
+        base = [
+            ("%s is ready to use" % product, "Start in a few simple steps from your phone.", "Try now"),
+            ("Discover %s" % product, "A simple and practical app experience.", "Get started"),
+            ("%s for everyday use" % product, "Open the app and continue in seconds.", "Use now"),
+        ]
+    else:
+        base = [
+            ("%s，立即体验" % product, "打开应用，按步骤完成操作。", "立即开始"),
+            ("用 %s 解决当前需求" % product, "信息清晰、操作简单、移动端优先。", "立即体验"),
+            ("%s，简单好用" % product, "突出核心利益点，减少干扰信息。", "马上使用"),
+        ]
+
+    return [
+        {"headline": base[index % len(base)][0], "body": base[index % len(base)][1], "cta": base[index % len(base)][2]}
+        for index in range(quantity)
+    ]
+
+
+def build_ad_material_image_generation_demand(task, reason=""):
+    product = str(task.get("product_name") or task.get("app_id") or "未命名产品").strip()
+    quantity = max(1, int(task.get("quantity") or 1))
+    size = _ad_material_size(task)
+    language = str(task.get("language") or "目标语言").strip()
+    country = str(task.get("country") or "目标市场").strip()
+    task_type = str(task.get("task_type") or "").strip()
+    source = str(task.get("competitor_source") or "").strip()
+    reference_names = _ad_material_reference_names(task)
+    has_refs = bool(reference_names)
+    description = str(task.get("description") or "").strip()
+    copy_variants = _ad_material_copy_variants(task, quantity)
+    layouts = [
+        "左文右图结构：左侧 45% 放主标题、副文案和 CTA，右侧 55% 放手机界面/产品核心视觉；logo 固定在左上角，底部留 8% 安全边距。",
+        "上卖点下行动结构：顶部 20% 放 logo 和主标题，中部放产品界面或核心主体，底部用高对比按钮承载 CTA；画面中心保持单一视觉焦点。",
+        "卡片式信息结构：背景干净，中央放一张大信息卡，卡内包含主标题、2 个利益点和 CTA；右下角可放手机 mockup 或产品使用场景。",
+        "对角线视觉结构：左上为品牌与文案，右下为产品界面/主体，使用柔和色块引导视线；CTA 放在视觉终点，不遮挡主体。",
+    ]
+
+    lines = [
+        "# %s AI生图素材需求" % product,
+        "",
+        "## 素材参考",
+        "",
+    ]
+    if has_refs:
+        lines.append("以下素材只作为 AI 生图的视觉参考，必须先识别画面主体、构图、色彩、文字层级、按钮样式和可迁移元素；不得直接复制原图。")
+        lines.append("")
+        for index, name in enumerate(reference_names, 1):
+            lines.append("- REF_%02d：%s；继承方向：版式节奏、信息层级、主体关系、色彩氛围；禁止直接照搬原图细节。" % (index, name))
+    else:
+        lines.append("- 暂无上传素材参考。AI 生图时不得假设已有参考图；若后续补充参考图，需优先按参考图识别结果调整构图、色彩和主体关系。")
+
+    lines.extend(["", "## 竞品素材参考", ""])
+    if task_type == "素材优化":
+        lines.append("- 本次任务不强制使用竞品素材参考；画面以「素材参考」和下方详细素材需求为准。")
+    else:
+        source_text = source or "已配置竞品源"
+        lines.append("- 竞品来源：%s。" % source_text)
+        lines.append("- 只使用筛选后的 image-only 竞品静态图作为参考；只学习构图、卖点表达、CTA 位置、信息层级和色彩节奏。")
+        lines.append("- 禁止复制竞品 logo、品牌色、人物/界面细节、不可验证承诺或任何容易造成品牌混淆的元素。")
+        lines.append("- 若当前任务尚未绑定具体竞品图片，生图前需要补齐竞品图 URL/文件及视觉识别结论，不能凭空套用固定模板。")
+
+    lines.extend(["", "## 详细素材需求", ""])
+    lines.append("- 输出类型：静态图片素材，仅生成 jpg/png/webp 等图片，不包含视频脚本或投放策略。")
+    lines.append("- 输出规格：%s；共 %s 张；文案语言使用 %s；面向市场 %s。" % (size, quantity, language, country))
+    lines.append("- 品牌规则：画面必须出现 %s 的 logo 或预留 logo 位；不得出现竞品品牌资产。" % product)
+    if description:
+        lines.append("- 用户补充方向：%s" % description)
+    if reason:
+        lines.append("- 本轮重做重点：%s" % reason)
+    lines.append("")
+
+    for index in range(1, quantity + 1):
+        copy_item = copy_variants[index - 1]
+        ref_hint = "优先参考 REF_%02d" % (((index - 1) % len(reference_names)) + 1) if has_refs else "无上传参考图，按本条需求直接生成"
+        layout = layouts[(index - 1) % len(layouts)]
+        lines.extend([
+            "### 素材 %02d" % index,
+            "",
+            "- 主文案：\"%s\"" % copy_item["headline"],
+            "- 副文案：\"%s\"" % copy_item["body"],
+            "- CTA：\"%s\"" % copy_item["cta"],
+            "- 布局：%s" % layout,
+            "- 画面主体：以 %s 产品体验为核心，建议使用手机界面、产品核心功能卡片或用户使用场景作为主体；主体占画面 45%%-60%%，背景保持简洁。" % product,
+            "- 文案排版：主文案最大、3 秒内可读；副文案不超过两行；CTA 做成清晰按钮，按钮文字必须完整可读，不能被图形遮挡。",
+            "- 参考继承：%s；只继承可迁移的构图、色彩和信息层级，不复制原图/竞品的品牌资产。" % ref_hint,
+            "- 禁止元素：夸大承诺、保证通过、官方背书、无审核、秒到账、竞品 logo、低清文字、乱码文字、过多小字、遮挡主体的装饰。",
+            "- 验收标准：尺寸符合 %s；主文案、副文案、CTA 清晰无拼写错误；logo/预留 logo 位清楚；画面第一眼能理解产品卖点。" % size,
+            "",
+        ])
+
+    return "\n".join(lines).strip()
+
+
 def notify_ad_material_task_owner(task, text):
     try:
         if task.get("creator_open_id"):
@@ -32654,7 +32813,7 @@ def generate_ad_material_demand(task_id, reason=""):
         result = run_ad_material_external_command(AD_MATERIAL_REQUIREMENT_COMMAND, task, "demand", {"reason": reason}) if AD_MATERIAL_REQUIREMENT_COMMAND else {}
         demand_text = str(result.get("demand_text") or result.get("markdown") or "").strip()
         if not demand_text:
-            demand_text = fallback_ad_material_demand_v2(task, reason)
+            demand_text = build_ad_material_image_generation_demand(task, reason)
         update_ad_material_task_status(task_id, "demand_review", demand_text=demand_text, error_message="")
         fresh = fetch_ad_material_task(task_id)
         notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
