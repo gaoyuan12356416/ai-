@@ -15,6 +15,8 @@ Environment=DRAMA_PUBLIC_BASE_URL=https://ai.yingliangads.com/drama-materials
 Environment=AD_MATERIAL_WORK_ROOT=/root/ad_material_tasks
 Environment=AD_MATERIAL_PUBLIC_ROOT=/usr/share/nginx/html/ad-materials
 Environment=AD_MATERIAL_PUBLIC_BASE_URL=https://ai.yingliangads.com/ad-materials
+Environment=AD_MATERIAL_VISION_PROVIDER=codex
+Environment=AD_MATERIAL_CODEX_VISION_URL=http://127.0.0.1:18796/api/ad-material-vision/analyze
 Environment=CODEX_COVER_SERVICE_URL=http://127.0.0.1:8790/api/codex-cover/generate
 Environment=CODEX_COVER_SERVICE_TIMEOUT=1200
 Environment=CODEX_SCREENSHOT_SERVICE_URL=http://127.0.0.1:8795/api/codex-screenshot/generate
