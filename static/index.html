@@ -15683,6 +15683,9 @@
       return {
         app_id: els.adMaterialAppId.value,
         product_name: product.name || product.product_name || "",
+        store_url: product.store_url || "",
+        package_name: product.package_name || product.package || "",
+        product_icon_url: product.product_icon_url || product.icon_url || "",
         task_type: els.adMaterialTaskType.value,
         competitor_source: els.adMaterialCompetitorSource.value,
         quantity: Number(els.adMaterialQuantity.value || 0),

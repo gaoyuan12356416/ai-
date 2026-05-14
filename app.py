@@ -31982,6 +31982,9 @@ CREATE TABLE IF NOT EXISTS ad_material_task (
   title TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
+  store_url TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  product_icon_url TEXT NOT NULL DEFAULT '',
   quantity INTEGER NOT NULL DEFAULT 1,
   reference_files_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'draft',
@@ -32030,6 +32033,12 @@ def ensure_ad_material_tables():
             columns = [row["name"] for row in conn.execute("PRAGMA table_info(ad_material_task)").fetchall()]
             if "demand_artifacts_json" not in columns:
                 conn.execute("ALTER TABLE ad_material_task ADD COLUMN demand_artifacts_json TEXT NOT NULL DEFAULT '{}'")
+            if "store_url" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN store_url TEXT NOT NULL DEFAULT ''")
+            if "package_name" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN package_name TEXT NOT NULL DEFAULT ''")
+            if "product_icon_url" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN product_icon_url TEXT NOT NULL DEFAULT ''")
             conn.commit()
         finally:
             conn.close()
@@ -32127,6 +32136,57 @@ def product_name_expr(columns):
     return "COALESCE(%s)" % ", ".join(parts)
 
 
+def product_optional_expr(columns, candidates):
+    parts = ["NULLIF(a.%s, '')" % sql_identifier(item) for item in candidates if item in columns]
+    return "COALESCE(%s, '')" % ", ".join(parts) if parts else "''"
+
+
+def ad_material_product_select_exprs(columns):
+    return {
+        "store_url": product_optional_expr(columns, ["store_url", "ios_store_url", "website_url", "origin_websit_url", "click_url"]),
+        "package_name": product_optional_expr(columns, ["package", "package_name", "ios_package_name", "package_ios", "google_app_android", "app_id"]),
+        "product_icon_url": product_optional_expr(columns, ["icon_url", "profile_image", "profile_image_ios"]),
+    }
+
+
+def lookup_ad_material_product_metadata(app_id):
+    app_id = str(app_id or "").strip()
+    if not app_id:
+        return {}
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not database:
+        return {}
+    try:
+        columns = mysql_table_columns("ads_apps_setting", database)
+        if "id" not in columns:
+            return {}
+        exprs = ad_material_product_select_exprs(columns)
+        rows = run_mysql(
+            "SELECT CAST(a.id AS CHAR), a.name, %s, %s, %s "
+            "FROM `%s`.ads_apps_setting a WHERE CAST(a.id AS CHAR) = '%s' LIMIT 1"
+            % (
+                exprs["store_url"],
+                exprs["package_name"],
+                exprs["product_icon_url"],
+                database.replace("`", "``"),
+                mysql_escape_literal(app_id),
+            )
+        )
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "app_id": str(row[0] if len(row) > 0 else "").strip(),
+            "product_name": str(row[1] if len(row) > 1 else "").strip(),
+            "store_url": str(row[2] if len(row) > 2 else "").strip(),
+            "package_name": str(row[3] if len(row) > 3 else "").strip(),
+            "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
+        }
+    except Exception:
+        logging.exception("failed to lookup ad material product metadata: %s", app_id)
+        return {}
+
+
 def list_ad_material_products(session=None):
     database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
     if database:
@@ -32151,10 +32211,18 @@ def list_ad_material_products(session=None):
                             "REPLACE(REPLACE(REPLACE(REPLACE(ara.values, '[', ''), ']', ''), '\"', ''), ' ', '')) > 0))"
                         ) % (database.replace("`", "``"), database.replace("`", "``"), mysql_escape_literal(sub_user_id))
                 limit_clause = "" if is_admin else " LIMIT 500"
+                exprs = ad_material_product_select_exprs(columns)
                 rows = run_mysql(
-                    "SELECT DISTINCT CAST(a.id AS CHAR), a.name "
+                    "SELECT DISTINCT CAST(a.id AS CHAR), a.name, %s, %s, %s "
                     "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC%s"
-                    % (database.replace("`", "``"), where, limit_clause)
+                    % (
+                        exprs["store_url"],
+                        exprs["package_name"],
+                        exprs["product_icon_url"],
+                        database.replace("`", "``"),
+                        where,
+                        limit_clause,
+                    )
                 )
                 items = []
                 for row in rows:
@@ -32168,6 +32236,9 @@ def list_ad_material_products(session=None):
                             "name": product_name,
                             "country": "",
                             "language": "",
+                            "store_url": str(row[2] if len(row) > 2 else "").strip(),
+                            "package_name": str(row[3] if len(row) > 3 else "").strip(),
+                            "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
                             "label": "%s | %s" % (app_id, product_name),
                         })
                 return items
@@ -32182,6 +32253,9 @@ def list_ad_material_products(session=None):
                 "name": item.get("app", "") or item.get("label", "") or item.get("app_id", ""),
                 "country": item.get("country", ""),
                 "language": item.get("language", ""),
+                "store_url": item.get("store_url", ""),
+                "package_name": item.get("package", "") or item.get("package_name", ""),
+                "product_icon_url": item.get("icon_url", "") or item.get("product_icon_url", ""),
                 "label": item.get("label", "") or item.get("app_id", ""),
             }
             for item in list_products()
@@ -32309,6 +32383,9 @@ def validate_ad_material_payload(payload, existing=None):
         "title": str(payload.get("title", existing.get("title") if existing else "") or "").strip(),
         "body": str(payload.get("body", existing.get("body") if existing else "") or "").strip(),
         "description": str(payload.get("description", existing.get("description") if existing else "") or "").strip(),
+        "store_url": str(payload.get("store_url", existing.get("store_url") if existing else "") or "").strip(),
+        "package_name": str(payload.get("package_name", existing.get("package_name") if existing else "") or "").strip(),
+        "product_icon_url": str(payload.get("product_icon_url", existing.get("product_icon_url") if existing else "") or "").strip(),
         "quantity": quantity,
     }
 
@@ -32319,8 +32396,12 @@ def create_ad_material_task(payload, session):
     data = validate_ad_material_payload(payload)
     products = [] if data["product_name"] else list_ad_material_products(session)
     product = next((item for item in products if str(item.get("app_id")) == data["app_id"]), {})
+    product_meta = lookup_ad_material_product_metadata(data["app_id"])
     if not data["product_name"]:
-        data["product_name"] = product.get("product_name") or product.get("label") or data["app_id"]
+        data["product_name"] = product.get("product_name") or product_meta.get("product_name") or product.get("label") or data["app_id"]
+    for key in ("store_url", "package_name", "product_icon_url"):
+        if not data.get(key):
+            data[key] = product.get(key) or product_meta.get(key) or ""
     admin_group = lookup_admin_group_by_email(actor.get("email"))
     references = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
     with JOB_DB_LOCK:
@@ -32330,15 +32411,17 @@ def create_ad_material_task(payload, session):
                 """
                 INSERT INTO ad_material_task (
                   task_id, task_type, competitor_source, app_id, product_name, country, language,
-                  size, tag_name, category, title, body, description, quantity, reference_files_json,
+                  size, tag_name, category, title, body, description, store_url, package_name, product_icon_url,
+                  quantity, reference_files_json,
                   status, creator_user_id, creator_open_id, creator_email, creator_name, initiator_sub_user_id,
                   created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (
                     task_id, data["task_type"], data["competitor_source"], data["app_id"], data["product_name"],
                     data["country"], data["language"], data["size"], data["tag_name"], data["category"],
-                    data["title"], data["body"], data["description"], data["quantity"], json.dumps(references, ensure_ascii=False),
+                    data["title"], data["body"], data["description"], data["store_url"], data["package_name"],
+                    data["product_icon_url"], data["quantity"], json.dumps(references, ensure_ascii=False),
                     actor["user_id"], actor["open_id"], actor["email"], actor["name"], admin_group.get("sub_user_id", ""),
                 ),
             )
@@ -32354,6 +32437,10 @@ def update_ad_material_task(task_id, payload, session):
     if task["status"] != "draft":
         raise StructuredApiError("task_locked", "任务发布后不允许编辑")
     data = validate_ad_material_payload(payload, task)
+    product_meta = lookup_ad_material_product_metadata(data["app_id"])
+    for key in ("store_url", "package_name", "product_icon_url"):
+        if not data.get(key):
+            data[key] = product_meta.get(key, "")
     references = task.get("reference_files", [])
     new_refs = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
     if new_refs:
@@ -32365,14 +32452,16 @@ def update_ad_material_task(task_id, payload, session):
                 """
                 UPDATE ad_material_task
                 SET task_type=?, competitor_source=?, app_id=?, product_name=?, country=?, language=?,
-                    size=?, tag_name=?, category=?, title=?, body=?, description=?, quantity=?,
+                    size=?, tag_name=?, category=?, title=?, body=?, description=?, store_url=?, package_name=?,
+                    product_icon_url=?, quantity=?,
                     reference_files_json=?, updated_at=CURRENT_TIMESTAMP
                 WHERE task_id=?
                 """,
                 (
                     data["task_type"], data["competitor_source"], data["app_id"], data["product_name"],
                     data["country"], data["language"], data["size"], data["tag_name"], data["category"],
-                    data["title"], data["body"], data["description"], data["quantity"],
+                    data["title"], data["body"], data["description"], data["store_url"], data["package_name"],
+                    data["product_icon_url"], data["quantity"],
                     json.dumps(references, ensure_ascii=False), task_id,
                 ),
             )
@@ -32466,6 +32555,11 @@ def upsert_ad_material_asset(asset):
 
 
 def run_ad_material_external_command(command, task, stage, extra=None):
+    task = dict(task or {})
+    product_meta = lookup_ad_material_product_metadata(task.get("app_id", ""))
+    for key in ("store_url", "package_name", "product_icon_url"):
+        if not task.get(key):
+            task[key] = product_meta.get(key, "")
     workdir = ad_material_task_work_dir(task["task_id"])
     ensure_dir(workdir)
     input_path = os.path.join(workdir, "%s_input.json" % stage)

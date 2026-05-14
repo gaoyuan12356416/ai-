@@ -79,6 +79,7 @@ def main():
     script = skill_root / ("image-material-requirements-%s" % provider) / "scripts" / "generate_image_material_brief.py"
     if not script.exists():
         raise SystemExit("Requirement skill script not found: %s" % script)
+    script_text = script.read_text(encoding="utf-8", errors="ignore")
 
     today = date.today()
     default_start = today - timedelta(days=33)
@@ -110,13 +111,27 @@ def main():
     vision_json = os.environ.get("AD_MATERIAL_VISION_ANALYSIS_JSON", "").strip()
     if vision_json:
         cmd.extend(["--vision-analysis-json", vision_json])
+    if "--store-url" in script_text and task.get("store_url"):
+        cmd.extend(["--store-url", str(task.get("store_url") or "")])
+    if "--package-name" in script_text and task.get("package_name"):
+        cmd.extend(["--package-name", str(task.get("package_name") or "")])
+    if "--product-icon-url" in script_text and task.get("product_icon_url"):
+        cmd.extend(["--product-icon-url", str(task.get("product_icon_url") or "")])
 
+    env = os.environ.copy()
+    if task.get("store_url"):
+        env["AD_MATERIAL_STORE_URL"] = str(task.get("store_url") or "")
+    if task.get("package_name"):
+        env["AD_MATERIAL_PACKAGE_NAME"] = str(task.get("package_name") or "")
+    if task.get("product_icon_url"):
+        env["AD_MATERIAL_PRODUCT_ICON_URL"] = str(task.get("product_icon_url") or "")
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
         timeout=int(os.environ.get("AD_MATERIAL_REQUIREMENT_RUNNER_TIMEOUT", "1800")),
+        env=env,
     )
     if proc.returncode != 0:
         raise SystemExit((proc.stderr or proc.stdout or "requirement generator failed").strip())
