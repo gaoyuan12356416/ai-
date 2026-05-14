@@ -10699,18 +10699,6 @@
             </div>
           </div>
         </div>
-
-        <div id="adMaterialDetailPanel" class="panel" style="display:none;margin-top:16px;">
-          <div class="panel-head">
-            <h3 class="panel-title">任务详情</h3>
-            <div class="actions-inline">
-              <button id="adMaterialCloseDetailBtn" class="btn btn-secondary" type="button">关闭</button>
-            </div>
-          </div>
-          <div class="panel-body">
-            <div id="adMaterialDetailContent" class="stack"></div>
-          </div>
-        </div>
       </section>
 
       <section id="noneSection" class="section">
@@ -12360,6 +12348,20 @@
 
 
 
+  </div>
+
+  <div id="adMaterialDetailPanel" class="detail-drawer">
+    <div class="detail-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h3 class="panel-title">投放素材任务详情</h3>
+          <button id="adMaterialCloseDetailBtn" class="btn btn-secondary" type="button">关闭</button>
+        </div>
+        <div class="panel-body">
+          <div id="adMaterialDetailContent" class="stack"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
 
@@ -15589,7 +15591,7 @@
     function renderAdMaterialDetail(task) {
       const canReviewDemand = task.status === "demand_review";
       const canUpload = (task.assets || []).length > 0 && (task.assets || []).every(asset => asset.status === "approved" || asset.status === "uploaded");
-      els.adMaterialDetailPanel.style.display = "";
+      els.adMaterialDetailPanel?.classList.add("open");
       els.adMaterialDetailContent.innerHTML = `
         <div class="card">
           <div class="grid">
@@ -15621,7 +15623,7 @@
 
     function hideAdMaterialDetail() {
       state.selectedAdMaterialTask = null;
-      if (els.adMaterialDetailPanel) els.adMaterialDetailPanel.style.display = "none";
+      if (els.adMaterialDetailPanel) els.adMaterialDetailPanel.classList.remove("open");
       if (els.adMaterialDetailContent) els.adMaterialDetailContent.innerHTML = "";
     }
 
@@ -21464,6 +21466,11 @@ function buildJobRow(job) {
       }
       if (els.adMaterialCloseDetailBtn) {
         els.adMaterialCloseDetailBtn.onclick = hideAdMaterialDetail;
+      }
+      if (els.adMaterialDetailPanel) {
+        els.adMaterialDetailPanel.addEventListener("click", event => {
+          if (event.target === els.adMaterialDetailPanel) hideAdMaterialDetail();
+        });
       }
       els.logoutBtn.onclick = async () => {
 
