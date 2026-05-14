@@ -32192,7 +32192,9 @@ def save_ad_material_reference_files(task_id, raw_files):
     if not isinstance(raw_files, list):
         return saved
     target_dir = os.path.join(ad_material_task_work_dir(task_id), "references")
+    public_dir = os.path.join(ad_material_public_dir(task_id), "references")
     ensure_dir(target_dir)
+    ensure_dir(public_dir)
     for index, item in enumerate(raw_files, 1):
         if not isinstance(item, dict):
             continue
@@ -32208,12 +32210,18 @@ def save_ad_material_reference_files(task_id, raw_files):
         if len(data) > 20 * 1024 * 1024:
             raise StructuredApiError("reference_file_too_large", "单个参考素材不能超过20MB")
         path = os.path.join(target_dir, "%02d_%s" % (index, name))
+        public_path = os.path.join(public_dir, "%02d_%s" % (index, name))
         with open(path, "wb") as handle:
             handle.write(data)
+        with open(public_path, "wb") as handle:
+            handle.write(data)
+        content_type = str(item.get("content_type", "") or guess_content_type(name))
         saved.append({
             "name": name,
-            "content_type": str(item.get("content_type", "") or guess_content_type(name)),
+            "content_type": content_type,
             "local_path": path,
+            "public_path": public_path,
+            "url": build_public_url(public_path),
             "size": len(data),
         })
     return saved
@@ -32524,6 +32532,19 @@ def _ad_material_reference_names(task):
     return names
 
 
+def _ad_material_reference_items(task):
+    refs = task.get("reference_files") or []
+    items = []
+    for index, item in enumerate(refs, 1):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip() or "reference_%02d" % index
+        url = str(item.get("url") or item.get("public_url") or "").strip()
+        content_type = str(item.get("content_type") or guess_content_type(name)).strip()
+        items.append({"name": name, "url": url, "content_type": content_type})
+    return items
+
+
 def _ad_material_source_note(task):
     task_type = str(task.get("task_type") or "").strip()
     source = str(task.get("competitor_source") or "").strip()
@@ -32549,7 +32570,8 @@ def fallback_ad_material_demand_v2(task, reason=""):
     app_id = task.get("app_id") or ""
     quantity = max(1, int(task.get("quantity") or 1))
     size = _ad_material_size(task)
-    reference_names = _ad_material_reference_names(task)
+    reference_items = _ad_material_reference_items(task)
+    reference_names = [item["name"] for item in reference_items]
     source_note = _ad_material_source_note(task)
     direction = _ad_material_direction(task)
     has_refs = bool(reference_names)
@@ -32729,7 +32751,8 @@ def build_ad_material_image_generation_demand(task, reason=""):
     country = str(task.get("country") or "目标市场").strip()
     task_type = str(task.get("task_type") or "").strip()
     source = str(task.get("competitor_source") or "").strip()
-    reference_names = _ad_material_reference_names(task)
+    reference_items = _ad_material_reference_items(task)
+    reference_names = [item["name"] for item in reference_items]
     has_refs = bool(reference_names)
     description = str(task.get("description") or "").strip()
     copy_variants = _ad_material_copy_variants(task, quantity)
@@ -32749,8 +32772,15 @@ def build_ad_material_image_generation_demand(task, reason=""):
     if has_refs:
         lines.append("以下素材只作为 AI 生图的视觉参考，必须先识别画面主体、构图、色彩、文字层级、按钮样式和可迁移元素；不得直接复制原图。")
         lines.append("")
-        for index, name in enumerate(reference_names, 1):
+        for index, item in enumerate(reference_items, 1):
+            name = item["name"]
             lines.append("- REF_%02d：%s；继承方向：版式节奏、信息层级、主体关系、色彩氛围；禁止直接照搬原图细节。" % (index, name))
+            if item.get("url") and str(item.get("content_type") or "").lower().startswith("image/"):
+                lines.append("")
+                lines.append("![REF_%02d %s](%s)" % (index, name, item["url"]))
+                lines.append("")
+            elif item.get("url"):
+                lines.append("  预览链接：%s" % item["url"])
     else:
         lines.append("- 暂无上传素材参考。AI 生图时不得假设已有参考图；若后续补充参考图，需优先按参考图识别结果调整构图、色彩和主体关系。")
 

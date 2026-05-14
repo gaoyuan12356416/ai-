@@ -4531,6 +4531,27 @@
     .md-preview ul,
     .md-preview ol { margin: 8px 0 10px 20px; padding: 0; }
     .md-preview li { margin: 4px 0; }
+    .md-preview a { color: var(--brand); font-weight: 700; }
+    .md-preview .md-image {
+      margin: 10px 0 14px;
+      padding: 10px;
+      border: 1px solid #e6edf7;
+      border-radius: 8px;
+      background: #f8fbff;
+    }
+    .md-preview .md-image img {
+      display: block;
+      max-width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .md-preview .md-image figcaption {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
     .md-preview blockquote {
       margin: 10px 0;
       padding: 10px 12px;
@@ -15263,6 +15284,7 @@
 
     function inlineMarkdown(value) {
       return navText(value)
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>`)
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     }
@@ -15297,6 +15319,13 @@
         if (!line) {
           closeList();
           closeTable();
+          continue;
+        }
+        const image = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)$/);
+        if (image) {
+          closeList();
+          closeTable();
+          html.push(`<figure class="md-image"><img src="${navText(image[2])}" alt="${navText(image[1])}" loading="lazy" /><figcaption>${navText(image[1] || "参考图")}</figcaption></figure>`);
           continue;
         }
         if (/^\|.+\|$/.test(line)) {
