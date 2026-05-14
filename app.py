@@ -31986,6 +31986,7 @@ CREATE TABLE IF NOT EXISTS ad_material_task (
   reference_files_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'draft',
   demand_text TEXT NOT NULL DEFAULT '',
+  demand_artifacts_json TEXT NOT NULL DEFAULT '{}',
   review_reason TEXT NOT NULL DEFAULT '',
   error_message TEXT NOT NULL DEFAULT '',
   creator_user_id TEXT NOT NULL DEFAULT '',
@@ -32026,6 +32027,9 @@ def ensure_ad_material_tables():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_task_status_updated ON ad_material_task(status, updated_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_task_creator ON ad_material_task(creator_user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_asset_task ON ad_material_asset(task_id, asset_index)")
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(ad_material_task)").fetchall()]
+            if "demand_artifacts_json" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN demand_artifacts_json TEXT NOT NULL DEFAULT '{}'")
             conn.commit()
         finally:
             conn.close()
@@ -32230,6 +32234,7 @@ def save_ad_material_reference_files(task_id, raw_files):
 def ad_material_task_from_row(row):
     item = dict(row)
     item["reference_files"] = parse_json_text(item.pop("reference_files_json", "[]"), [])
+    item["demand_artifacts"] = parse_json_text(item.pop("demand_artifacts_json", "{}"), {})
     item["status_label"] = AD_MATERIAL_STATUS_LABELS.get(item.get("status"), item.get("status", ""))
     item["quantity"] = int(item.get("quantity") or 0)
     item["assets"] = fetch_ad_material_assets(item["task_id"])
@@ -32842,9 +32847,16 @@ def generate_ad_material_demand(task_id, reason=""):
     try:
         result = run_ad_material_external_command(AD_MATERIAL_REQUIREMENT_COMMAND, task, "demand", {"reason": reason}) if AD_MATERIAL_REQUIREMENT_COMMAND else {}
         demand_text = str(result.get("demand_text") or result.get("markdown") or "").strip()
+        demand_artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
         if not demand_text:
             demand_text = build_ad_material_image_generation_demand(task, reason)
-        update_ad_material_task_status(task_id, "demand_review", demand_text=demand_text, error_message="")
+        update_ad_material_task_status(
+            task_id,
+            "demand_review",
+            demand_text=demand_text,
+            demand_artifacts_json=json.dumps(demand_artifacts, ensure_ascii=False),
+            error_message="",
+        )
         fresh = fetch_ad_material_task(task_id)
         notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
     except Exception as exc:
