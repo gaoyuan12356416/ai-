@@ -3810,6 +3810,25 @@
 
 
 
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(13, 24, 43, .48);
+    }
+
+    .modal-panel {
+      width: min(1080px, 100%);
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: 0 28px 70px rgba(13, 24, 43, .32);
+    }
+
     .panel-head {
 
 
@@ -10497,93 +10516,15 @@
       <section id="adMaterialsSection" class="section">
         <div class="panel">
           <div class="panel-head">
-            <div>
-              <h3 class="panel-title">投放素材任务管理</h3>
-              <div class="muted" style="margin-top:6px;">创建投放素材需求，审核需求和素材，并完成最终素材上报。</div>
-            </div>
+            <h3 class="panel-title">任务列表</h3>
             <div class="actions-inline">
+              <button id="adMaterialCreateBtn" class="btn btn-primary" type="button">创建任务</button>
               <button id="adMaterialReloadBtn" class="btn btn-secondary" type="button">刷新</button>
             </div>
           </div>
           <div class="panel-body">
-            <form id="adMaterialForm" class="stack">
-              <div class="grid">
-                <div class="field">
-                  <label>产品</label>
-                  <select id="adMaterialAppId" required></select>
-                </div>
-                <div class="field">
-                  <label>任务类型</label>
-                  <select id="adMaterialTaskType" required>
-                    <option value="素材优化">素材优化</option>
-                    <option value="竞品借鉴">竞品借鉴</option>
-                    <option value="综合策划">综合策划</option>
-                  </select>
-                </div>
-                <div class="field" id="adMaterialCompetitorField">
-                  <label>竞品查询接口</label>
-                  <select id="adMaterialCompetitorSource">
-                    <option value="有米云">有米云</option>
-                    <option value="metapi">metapi</option>
-                    <option value="广大大">广大大</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label>任务数量</label>
-                  <input id="adMaterialQuantity" type="number" min="1" max="20" value="1" required />
-                </div>
-                <div class="field">
-                  <label>国家</label>
-                  <input id="adMaterialCountry" list="adMaterialCountryList" placeholder="MX / US / BR" required />
-                  <datalist id="adMaterialCountryList"></datalist>
-                </div>
-                <div class="field">
-                  <label>语言</label>
-                  <input id="adMaterialLanguage" list="adMaterialLanguageList" placeholder="es / en / pt" required />
-                  <datalist id="adMaterialLanguageList"></datalist>
-                </div>
-                <div class="field">
-                  <label>尺寸</label>
-                  <input id="adMaterialSize" placeholder="1080x1080 / 1200x1500" />
-                </div>
-                <div class="field">
-                  <label>标签 tag_name</label>
-                  <input id="adMaterialTagName" />
-                </div>
-                <div class="field">
-                  <label>category</label>
-                  <input id="adMaterialCategory" />
-                </div>
-                <div class="field">
-                  <label>title</label>
-                  <input id="adMaterialTitle" />
-                </div>
-                <div class="field">
-                  <label>body</label>
-                  <input id="adMaterialBody" />
-                </div>
-                <div class="field">
-                  <label>素材参考</label>
-                  <input id="adMaterialReferenceFiles" type="file" accept="image/*,video/*" multiple />
-                </div>
-                <div class="field" style="grid-column: span 12;">
-                  <label>任务描述</label>
-                  <textarea id="adMaterialDescription" rows="3" placeholder="描述希望优化或借鉴的方向"></textarea>
-                </div>
-              </div>
-              <div class="actions-inline">
-                <button id="adMaterialSubmitBtn" class="btn btn-primary" type="submit">创建任务</button>
-                <button id="adMaterialResetBtn" class="btn btn-secondary" type="button">清空</button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        <div class="panel" style="margin-top:16px;">
-          <div class="panel-head">
-            <h3 class="panel-title">任务列表</h3>
-            <div class="filter-row" style="max-width:720px;">
-              <div class="field">
+            <div class="filter-row" style="margin-bottom:16px;">
+              <div class="field" style="grid-column:span 3;">
                 <label>状态</label>
                 <select id="adMaterialStatusFilter">
                   <option value="all">全部</option>
@@ -10596,16 +10537,14 @@
                   <option value="failed">失败</option>
                 </select>
               </div>
-              <div class="field">
+              <div class="field" style="grid-column:span 6;">
                 <label>搜索</label>
                 <input id="adMaterialSearch" placeholder="产品 / 任务 / 创建人" />
               </div>
-              <div class="field" style="align-self:end;">
+              <div class="field" style="grid-column:span 3;align-self:end;">
                 <button id="adMaterialSearchBtn" class="btn btn-secondary" type="button">筛选</button>
               </div>
             </div>
-          </div>
-          <div class="panel-body">
             <div class="table-wrap">
               <table>
                 <thead>
@@ -10627,6 +10566,89 @@
             </div>
             <div class="pagination">
               <div class="muted" id="adMaterialSummary">--</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="adMaterialTaskModal" class="modal-backdrop hidden">
+          <div class="modal-panel">
+            <div class="panel-head">
+              <h3 id="adMaterialModalTitle" class="panel-title">创建任务</h3>
+              <div class="actions-inline">
+                <button id="adMaterialModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <form id="adMaterialForm" class="stack">
+                <div class="grid">
+                  <div class="field">
+                    <label>产品</label>
+                    <select id="adMaterialAppId" required></select>
+                  </div>
+                  <div class="field">
+                    <label>任务类型</label>
+                    <select id="adMaterialTaskType" required>
+                      <option value="素材优化">素材优化</option>
+                      <option value="竞品借鉴">竞品借鉴</option>
+                      <option value="综合策划">综合策划</option>
+                    </select>
+                  </div>
+                  <div class="field" id="adMaterialCompetitorField">
+                    <label>竞品查询接口</label>
+                    <select id="adMaterialCompetitorSource">
+                      <option value="有米云">有米云</option>
+                      <option value="metapi">metapi</option>
+                      <option value="广大大">广大大</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>任务数量</label>
+                    <input id="adMaterialQuantity" type="number" min="1" max="20" value="1" required />
+                  </div>
+                  <div class="field">
+                    <label>国家</label>
+                    <input id="adMaterialCountry" list="adMaterialCountryList" placeholder="MX / US / BR" required />
+                    <datalist id="adMaterialCountryList"></datalist>
+                  </div>
+                  <div class="field">
+                    <label>语言</label>
+                    <input id="adMaterialLanguage" list="adMaterialLanguageList" placeholder="es / en / pt" required />
+                    <datalist id="adMaterialLanguageList"></datalist>
+                  </div>
+                  <div class="field">
+                    <label>尺寸</label>
+                    <input id="adMaterialSize" placeholder="1080x1080 / 1200x1500" />
+                  </div>
+                  <div class="field">
+                    <label>标签 tag_name</label>
+                    <input id="adMaterialTagName" />
+                  </div>
+                  <div class="field">
+                    <label>category</label>
+                    <input id="adMaterialCategory" />
+                  </div>
+                  <div class="field">
+                    <label>title</label>
+                    <input id="adMaterialTitle" />
+                  </div>
+                  <div class="field">
+                    <label>body</label>
+                    <input id="adMaterialBody" />
+                  </div>
+                  <div class="field">
+                    <label>素材参考</label>
+                    <input id="adMaterialReferenceFiles" type="file" accept="image/*,video/*" multiple />
+                  </div>
+                  <div class="field" style="grid-column: span 12;">
+                    <label>任务描述</label>
+                    <textarea id="adMaterialDescription" rows="3" placeholder="描述希望优化或借鉴的方向"></textarea>
+                  </div>
+                </div>
+                <div class="actions-inline">
+                  <button id="adMaterialSubmitBtn" class="btn btn-primary" type="submit">确认创建</button>
+                  <button id="adMaterialResetBtn" class="btn btn-secondary" type="button">清空</button>
+                </div>
+              </form>
             </div>
           </div>
         </div>
@@ -13369,7 +13391,11 @@
       adMaterialDescription: document.getElementById("adMaterialDescription"),
       adMaterialSubmitBtn: document.getElementById("adMaterialSubmitBtn"),
       adMaterialResetBtn: document.getElementById("adMaterialResetBtn"),
+      adMaterialCreateBtn: document.getElementById("adMaterialCreateBtn"),
       adMaterialReloadBtn: document.getElementById("adMaterialReloadBtn"),
+      adMaterialTaskModal: document.getElementById("adMaterialTaskModal"),
+      adMaterialModalTitle: document.getElementById("adMaterialModalTitle"),
+      adMaterialModalCloseBtn: document.getElementById("adMaterialModalCloseBtn"),
       adMaterialStatusFilter: document.getElementById("adMaterialStatusFilter"),
       adMaterialSearch: document.getElementById("adMaterialSearch"),
       adMaterialSearchBtn: document.getElementById("adMaterialSearchBtn"),
@@ -15140,14 +15166,26 @@
       return state.adMaterialProducts.find(item => String(item.app_id) === String(appId)) || {};
     }
 
+    function openAdMaterialTaskModal(mode) {
+      if (els.adMaterialModalTitle) els.adMaterialModalTitle.textContent = mode === "edit" ? "编辑任务" : "创建任务";
+      if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = mode === "edit" ? "保存编辑" : "确认创建";
+      els.adMaterialTaskModal?.classList.remove("hidden");
+    }
+
+    function closeAdMaterialTaskModal() {
+      els.adMaterialTaskModal?.classList.add("hidden");
+    }
+
     async function loadAdMaterialProducts() {
       if (!userCan("ad_material_tasks")) return;
       const data = await api("/api/ad-material/products");
       state.adMaterialProducts = data.items || [];
       if (els.adMaterialAppId) {
         els.adMaterialAppId.innerHTML = state.adMaterialProducts.map(item => {
-          const label = item.label || `${item.app_id} | ${item.product_name || ""}`;
-          return `<option value="${navText(item.app_id)}" data-name="${navText(item.product_name || "")}">${navText(label)}</option>`;
+          const productId = item.id || item.app_id || "";
+          const productName = item.name || item.product_name || "";
+          const label = item.label || `${productId} | ${productName}`;
+          return `<option value="${navText(productId)}" data-name="${navText(productName)}">${navText(label)}</option>`;
         }).join("");
       }
     }
@@ -15207,7 +15245,7 @@
       const product = selectedAdMaterialProduct();
       return {
         app_id: els.adMaterialAppId.value,
-        product_name: product.product_name || "",
+        product_name: product.name || product.product_name || "",
         task_type: els.adMaterialTaskType.value,
         competitor_source: els.adMaterialCompetitorSource.value,
         quantity: Number(els.adMaterialQuantity.value || 0),
@@ -15232,6 +15270,7 @@
         const result = await api(url, { method: "POST", body: JSON.stringify(payload) });
         toast(editingId ? "任务已更新" : "任务已创建");
         resetAdMaterialForm();
+        closeAdMaterialTaskModal();
         await loadAdMaterialTasks();
         await openAdMaterialDetail(result.task_id);
       } catch (error) {
@@ -15243,8 +15282,14 @@
       state.editingAdMaterialTaskId = "";
       els.adMaterialForm?.reset();
       if (els.adMaterialQuantity) els.adMaterialQuantity.value = "1";
-      if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = "创建任务";
+      if (els.adMaterialModalTitle) els.adMaterialModalTitle.textContent = "创建任务";
+      if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = "确认创建";
       updateAdMaterialCompetitorVisibility();
+    }
+
+    function createAdMaterialTask() {
+      resetAdMaterialForm();
+      openAdMaterialTaskModal("create");
     }
 
     async function editAdMaterialTask(taskId) {
@@ -15262,8 +15307,8 @@
       els.adMaterialTitle.value = task.title || "";
       els.adMaterialBody.value = task.body || "";
       els.adMaterialDescription.value = task.description || "";
-      if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = "保存编辑";
       updateAdMaterialCompetitorVisibility();
+      openAdMaterialTaskModal("edit");
     }
 
     function renderAdMaterialAssets(task) {
@@ -21173,6 +21218,23 @@ function buildJobRow(job) {
       }
       if (els.adMaterialResetBtn) {
         els.adMaterialResetBtn.onclick = resetAdMaterialForm;
+      }
+      if (els.adMaterialCreateBtn) {
+        els.adMaterialCreateBtn.onclick = createAdMaterialTask;
+      }
+      if (els.adMaterialModalCloseBtn) {
+        els.adMaterialModalCloseBtn.onclick = () => {
+          resetAdMaterialForm();
+          closeAdMaterialTaskModal();
+        };
+      }
+      if (els.adMaterialTaskModal) {
+        els.adMaterialTaskModal.addEventListener("click", event => {
+          if (event.target === els.adMaterialTaskModal) {
+            resetAdMaterialForm();
+            closeAdMaterialTaskModal();
+          }
+        });
       }
       if (els.adMaterialReloadBtn) {
         els.adMaterialReloadBtn.onclick = () => Promise.all([loadAdMaterialProducts(), loadAdMaterialTasks()]).catch(error => showError("刷新投放素材任务失败", error));

@@ -32128,10 +32128,7 @@ def list_ad_material_products(session=None):
     if database:
         try:
             columns = mysql_table_columns("ads_apps_setting", database)
-            if "app_id" in columns:
-                name_expr = product_name_expr(columns)
-                country_expr = sql_identifier("country") if "country" in columns else "''"
-                language_expr = sql_identifier("language") if "language" in columns else "''"
+            if "id" in columns and "name" in columns:
                 where = "1=1"
                 actor = ad_material_actor(session)
                 admin_group = lookup_admin_group_by_email(actor.get("email"))
@@ -32139,37 +32136,32 @@ def list_ad_material_products(session=None):
                 if not session_is_admin(session) and sub_user_id:
                     role_app_columns = mysql_table_columns("admin_role_apps", database)
                     role_user_columns = mysql_table_columns("admin_role_users", database)
-                    user_column = next((item for item in ("admin_user_id", "sub_user_id", "user_id") if item in role_user_columns), "")
-                    if "app_id" in role_app_columns and "role_id" in role_app_columns and "role_id" in role_user_columns and user_column:
+                    if {"role_id", "user_id"}.issubset(role_user_columns) and {"role_id", "is_all", "values"}.issubset(role_app_columns):
                         where = (
-                            "EXISTS (SELECT 1 FROM `%s`.admin_role_apps ara "
-                            "JOIN `%s`.admin_role_users aru ON aru.role_id = ara.role_id "
-                            "WHERE CAST(ara.app_id AS CHAR) = CAST(a.app_id AS CHAR) "
-                            "AND CAST(aru.%s AS CHAR) = '%s')"
-                        ) % (database.replace("`", "``"), database.replace("`", "``"), user_column, mysql_escape_literal(sub_user_id))
+                            "EXISTS (SELECT 1 FROM `%s`.admin_role_users aru "
+                            "JOIN `%s`.admin_role_apps ara ON ara.role_id = aru.role_id "
+                            "WHERE CAST(aru.user_id AS CHAR) = '%s' "
+                            "AND (ara.is_all = 1 OR FIND_IN_SET(CAST(a.id AS CHAR), "
+                            "REPLACE(REPLACE(REPLACE(REPLACE(ara.values, '[', ''), ']', ''), '\"', ''), ' ', '')) > 0))"
+                        ) % (database.replace("`", "``"), database.replace("`", "``"), mysql_escape_literal(sub_user_id))
                 rows = run_mysql(
-                    "SELECT DISTINCT CAST(a.app_id AS CHAR), %s, %s, %s "
+                    "SELECT DISTINCT CAST(a.id AS CHAR), a.name "
                     "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC LIMIT 500"
-                    % (name_expr, country_expr, language_expr, database.replace("`", "``"), where)
+                    % (database.replace("`", "``"), where)
                 )
                 items = []
                 for row in rows:
                     app_id = str(row[0] if len(row) > 0 else "").strip()
                     product_name = str(row[1] if len(row) > 1 else "").strip() or app_id
-                    country = str(row[2] if len(row) > 2 else "").strip()
-                    language = str(row[3] if len(row) > 3 else "").strip()
                     if app_id:
                         items.append({
                             "app_id": app_id,
+                            "id": app_id,
                             "product_name": product_name,
-                            "country": country,
-                            "language": language,
-                            "label": "%s | %s%s%s" % (
-                                app_id,
-                                product_name,
-                                (" | " + country) if country else "",
-                                (" | " + language) if language else "",
-                            ),
+                            "name": product_name,
+                            "country": "",
+                            "language": "",
+                            "label": "%s | %s" % (app_id, product_name),
                         })
                 if items:
                     return items
@@ -32179,7 +32171,9 @@ def list_ad_material_products(session=None):
         return [
             {
                 "app_id": item.get("app_id", ""),
+                "id": item.get("app_id", ""),
                 "product_name": item.get("app", "") or item.get("label", "") or item.get("app_id", ""),
+                "name": item.get("app", "") or item.get("label", "") or item.get("app_id", ""),
                 "country": item.get("country", ""),
                 "language": item.get("language", ""),
                 "label": item.get("label", "") or item.get("app_id", ""),
