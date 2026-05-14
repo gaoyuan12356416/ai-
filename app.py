@@ -3277,6 +3277,20 @@ DEFAULT_USER_PERMISSIONS = {"drama_synthesis": False, "cover_synthesis": False, 
 
 ADMIN_PERMISSIONS = {key: True for key in MODULE_PERMISSIONS}
 
+SCREENSHOT_API_TOKEN_NAME = os.environ.get("DRAMA_SCREENSHOT_API_TOKEN_NAME", "screenshot-api").strip() or "screenshot-api"
+
+SCREENSHOT_API_TOKENS = []
+
+for _token_value in (
+    os.environ.get("DRAMA_SCREENSHOT_API_TOKEN", ""),
+    os.environ.get("AI_COVER_API_TOKEN", ""),
+    os.environ.get("DRAMA_SCREENSHOT_API_TOKENS", ""),
+):
+    for _token_item in str(_token_value or "").split(","):
+        _token_item = _token_item.strip()
+        if _token_item and _token_item not in SCREENSHOT_API_TOKENS:
+            SCREENSHOT_API_TOKENS.append(_token_item)
+
 
 
 
@@ -79742,7 +79756,40 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        token_session = self._api_token_session()
+        if token_session:
+            return token_session
         return load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+
+    def _request_api_token(self):
+        auth = self.headers.get("Authorization", "").strip()
+        if auth.lower().startswith("bearer "):
+            return auth.split(" ", 1)[1].strip()
+        return self.headers.get("X-API-Token", "").strip()
+
+    def _api_token_session(self):
+        token = self._request_api_token()
+        if not token or not SCREENSHOT_API_TOKENS:
+            return None
+        for expected in SCREENSHOT_API_TOKENS:
+            if secrets.compare_digest(token, expected):
+                permissions = dict(DEFAULT_USER_PERMISSIONS)
+                permissions["cover_synthesis"] = True
+                return {
+                    "session_token": "",
+                    "user_id": "api:%s" % SCREENSHOT_API_TOKEN_NAME,
+                    "union_id": "",
+                    "open_id": "",
+                    "name": SCREENSHOT_API_TOKEN_NAME,
+                    "en_name": "",
+                    "avatar_url": "",
+                    "tenant_key": "api",
+                    "source": "api_token",
+                    "role": "user",
+                    "permissions": permissions,
+                    "auth_type": "api_token",
+                }
+        return None
 
 
 
@@ -80478,6 +80525,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+    def _auth_required_payload(self):
+        auth = self._auth_payload()
+        return {
+            "code": "auth_required",
+            "error": "auth_required",
+            "message": "未提供 Cookie 或有效 token。",
+            "authenticated": False,
+            "login_url": auth.get("login_url", ""),
+            "token_supported": bool(SCREENSHOT_API_TOKENS),
+            "auth": auth,
+        }
+
     def _require_auth(self):
 
 
@@ -80638,7 +80697,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
-        json_response(self, 401, {"error": "auth_required", "auth": self._auth_payload()})
+        json_response(self, 401, self._auth_required_payload())
 
 
 
@@ -81248,6 +81307,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         return False
 
+
+    def _require_cookie_module(self, module_key):
+        if not self._require_auth():
+            return False
+        session = self._session()
+        if session and session.get("auth_type") == "api_token":
+            json_response(self, 403, {"error": "cookie_auth_required", "module": module_key})
+            return False
+        if has_module_permission(session, module_key):
+            return True
+        json_response(self, 403, {"error": "permission_denied", "module": module_key})
+        return False
 
     def _require_any_module(self, module_keys):
         if not self._require_auth():
@@ -84624,7 +84695,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/drama-screenshot-material/jobs/delete-batch":
-            if not self._require_module("cover_synthesis"):
+            if not self._require_cookie_module("cover_synthesis"):
                 return
             try:
                 payload = self._read_json()
@@ -84803,7 +84874,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
         if screenshot_job_id and not screenshot_action:
-            if not self._require_module("cover_synthesis"):
+            if not self._require_cookie_module("cover_synthesis"):
                 return
             result = delete_screenshot_job(screenshot_job_id)
             if result:
