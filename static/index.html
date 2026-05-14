@@ -4471,6 +4471,48 @@
 
 
 
+    .product-combobox { position: relative; }
+
+    .product-options {
+      position: absolute;
+      z-index: 90;
+      top: calc(100% + 6px);
+      left: 0;
+      right: 0;
+      max-height: 320px;
+      overflow: auto;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 18px 48px rgba(13, 24, 43, .18);
+    }
+
+    .product-option {
+      width: 100%;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+      display: grid;
+      gap: 3px;
+    }
+
+    .product-option:hover,
+    .product-option.active { background: #eef4ff; }
+
+    .product-option strong { font-weight: 700; }
+
+    .product-option span,
+    .product-empty { color: var(--muted); font-size: 12px; }
+
+    .product-empty { padding: 12px; }
+
+    .required-mark { color: #e03131; font-weight: 800; margin-right: 4px; }
+
     .hint { color: var(--muted); font-size: 13px; }
 
 
@@ -10582,11 +10624,16 @@
               <form id="adMaterialForm" class="stack">
                 <div class="grid">
                   <div class="field">
-                    <label>产品</label>
-                    <select id="adMaterialAppId" required></select>
+                    <label><span class="required-mark">*</span>产品</label>
+                    <div class="product-combobox">
+                      <input id="adMaterialProductSearch" placeholder="输入产品 ID / 名称搜索" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="adMaterialProductOptions" required />
+                      <input id="adMaterialAppId" type="hidden" />
+                      <div id="adMaterialProductOptions" class="product-options hidden"></div>
+                    </div>
+                    <div id="adMaterialProductHint" class="hint">输入关键词后选择产品</div>
                   </div>
                   <div class="field">
-                    <label>任务类型</label>
+                    <label><span class="required-mark">*</span>任务类型</label>
                     <select id="adMaterialTaskType" required>
                       <option value="素材优化">素材优化</option>
                       <option value="竞品借鉴">竞品借鉴</option>
@@ -10602,16 +10649,16 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label>任务数量</label>
+                    <label><span class="required-mark">*</span>任务数量</label>
                     <input id="adMaterialQuantity" type="number" min="1" max="20" value="1" required />
                   </div>
                   <div class="field">
-                    <label>国家</label>
+                    <label><span class="required-mark">*</span>国家</label>
                     <input id="adMaterialCountry" list="adMaterialCountryList" placeholder="MX / US / BR" required />
                     <datalist id="adMaterialCountryList"></datalist>
                   </div>
                   <div class="field">
-                    <label>语言</label>
+                    <label><span class="required-mark">*</span>语言</label>
                     <input id="adMaterialLanguage" list="adMaterialLanguageList" placeholder="es / en / pt" required />
                     <datalist id="adMaterialLanguageList"></datalist>
                   </div>
@@ -12452,6 +12499,8 @@
       jobs: [],
       adMaterialProducts: [],
       adMaterialTasks: [],
+      adMaterialProductMatches: [],
+      adMaterialProductActiveIndex: -1,
       selectedAdMaterialTask: null,
       editingAdMaterialTaskId: "",
       selectedJobIds: new Set(),
@@ -13376,6 +13425,9 @@
 
       logTableBody: document.getElementById("logTableBody"),
       adMaterialForm: document.getElementById("adMaterialForm"),
+      adMaterialProductSearch: document.getElementById("adMaterialProductSearch"),
+      adMaterialProductOptions: document.getElementById("adMaterialProductOptions"),
+      adMaterialProductHint: document.getElementById("adMaterialProductHint"),
       adMaterialAppId: document.getElementById("adMaterialAppId"),
       adMaterialTaskType: document.getElementById("adMaterialTaskType"),
       adMaterialCompetitorField: document.getElementById("adMaterialCompetitorField"),
@@ -15130,8 +15182,41 @@
       return navText(JSON.stringify(String(value == null ? "" : value)));
     }
 
-    const AD_MATERIAL_COUNTRIES = ["US", "MX", "BR", "CO", "PE", "CL", "AR", "ES", "ID", "PH", "TH", "VN", "MY", "SG", "IN", "JP", "KR", "SA", "AE", "ZA"];
-    const AD_MATERIAL_LANGUAGES = ["en", "es", "pt", "id", "tl", "th", "vi", "ms", "hi", "ja", "ko", "ar", "fr", "de", "it"];
+    const AD_MATERIAL_COUNTRIES = [
+      "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
+      "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS", "BT", "BV", "BW", "BY", "BZ",
+      "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN", "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ",
+      "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG", "EH", "ER", "ES", "ET",
+      "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF", "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY",
+      "HK", "HM", "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT",
+      "JE", "JM", "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ",
+      "LA", "LB", "LC", "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY",
+      "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK", "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ",
+      "NA", "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ",
+      "OM", "PA", "PE", "PF", "PG", "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY",
+      "QA", "RE", "RO", "RS", "RU", "RW", "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS", "ST", "SV", "SX", "SY", "SZ",
+      "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ",
+      "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI", "VN", "VU",
+      "WF", "WS", "XK", "YE", "YT", "ZA", "ZM", "ZW"
+    ];
+    const AD_MATERIAL_LANGUAGES = [
+      "aa", "ab", "ae", "af", "ak", "am", "an", "ar", "as", "av", "ay", "az",
+      "ba", "be", "bg", "bh", "bi", "bm", "bn", "bo", "br", "bs",
+      "ca", "ce", "ch", "co", "cr", "cs", "cu", "cv", "cy",
+      "da", "de", "dv", "dz", "ee", "el", "en", "eo", "es", "et", "eu",
+      "fa", "ff", "fi", "fj", "fo", "fr", "fy", "ga", "gd", "gl", "gn", "gu", "gv",
+      "ha", "he", "hi", "ho", "hr", "ht", "hu", "hy", "hz",
+      "ia", "id", "ie", "ig", "ii", "ik", "io", "is", "it", "iu",
+      "ja", "jv", "ka", "kg", "ki", "kj", "kk", "kl", "km", "kn", "ko", "kr", "ks", "ku", "kv", "kw", "ky",
+      "la", "lb", "lg", "li", "ln", "lo", "lt", "lu", "lv",
+      "mg", "mh", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my",
+      "na", "nb", "nd", "ne", "ng", "nl", "nn", "no", "nr", "nv", "ny",
+      "oc", "oj", "om", "or", "os", "pa", "pi", "pl", "ps", "pt", "qu",
+      "rm", "rn", "ro", "ru", "rw", "sa", "sc", "sd", "se", "sg", "si", "sk", "sl", "sm", "sn", "so", "sq", "sr", "ss", "st", "su", "sv", "sw",
+      "ta", "te", "tg", "th", "ti", "tk", "tl", "tn", "to", "tr", "ts", "tt", "tw", "ty",
+      "ug", "uk", "ur", "uz", "ve", "vi", "vo", "wa", "wo", "xh", "yi", "yo", "za", "zh", "zu",
+      "zh-Hans", "zh-Hant", "pt-BR", "pt-PT", "es-419"
+    ];
 
     function fillAdMaterialDatalists() {
       if (els.adMaterialCountryList) {
@@ -15166,9 +15251,163 @@
       return Promise.all(files.map(fileToDataUrl));
     }
 
+    function adMaterialProductId(item) {
+      return String(item?.id || item?.app_id || "").trim();
+    }
+
+    function adMaterialProductName(item) {
+      return String(item?.name || item?.product_name || "").trim();
+    }
+
+    function adMaterialProductLabel(item) {
+      const productId = adMaterialProductId(item);
+      const productName = adMaterialProductName(item);
+      return String(item?.label || (productName ? `${productId} | ${productName}` : productId)).trim();
+    }
+
+    function adMaterialProductSearchText(item) {
+      return [adMaterialProductId(item), adMaterialProductName(item), item?.label || ""].join(" ").toLowerCase();
+    }
+
+    function adMaterialProductMatchesQuery(item, query) {
+      const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (!tokens.length) return true;
+      const text = adMaterialProductSearchText(item);
+      const compactText = text.replace(/\s+/g, "");
+      return tokens.every(token => text.includes(token) || compactText.includes(token.replace(/\s+/g, "")));
+    }
+
+    function findAdMaterialProduct(appId) {
+      return state.adMaterialProducts.find(item => adMaterialProductId(item) === String(appId || "").trim());
+    }
+
+    function matchedAdMaterialProducts(query) {
+      return state.adMaterialProducts.filter(item => adMaterialProductMatchesQuery(item, query));
+    }
+
+    function hideAdMaterialProductOptions() {
+      els.adMaterialProductOptions?.classList.add("hidden");
+      els.adMaterialProductSearch?.setAttribute("aria-expanded", "false");
+      state.adMaterialProductActiveIndex = -1;
+    }
+
+    function setAdMaterialProductValue(appId, fallbackName) {
+      const product = findAdMaterialProduct(appId);
+      const label = product ? adMaterialProductLabel(product) : String(fallbackName || appId || "").trim();
+      if (els.adMaterialAppId) els.adMaterialAppId.value = String(appId || "").trim();
+      if (els.adMaterialProductSearch) els.adMaterialProductSearch.value = label;
+      if (els.adMaterialProductHint) {
+        els.adMaterialProductHint.textContent = label ? `已选择：${label}` : "输入关键词后选择产品";
+      }
+    }
+
+    function clearAdMaterialProductValue() {
+      if (els.adMaterialAppId) els.adMaterialAppId.value = "";
+      if (els.adMaterialProductSearch) els.adMaterialProductSearch.value = "";
+      if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = "输入关键词后选择产品";
+      hideAdMaterialProductOptions();
+    }
+
+    function renderAdMaterialProductOptions(open = true) {
+      if (!els.adMaterialProductOptions) return;
+      const query = els.adMaterialProductSearch?.value || "";
+      const allMatches = matchedAdMaterialProducts(query);
+      const limit = query.trim() ? 80 : 40;
+      state.adMaterialProductMatches = allMatches.slice(0, limit);
+      if (state.adMaterialProductActiveIndex >= state.adMaterialProductMatches.length) {
+        state.adMaterialProductActiveIndex = state.adMaterialProductMatches.length ? 0 : -1;
+      }
+      if (state.adMaterialProductActiveIndex < 0 && state.adMaterialProductMatches.length) {
+        state.adMaterialProductActiveIndex = 0;
+      }
+      els.adMaterialProductOptions.innerHTML = state.adMaterialProductMatches.length
+        ? state.adMaterialProductMatches.map((item, index) => {
+            const productId = adMaterialProductId(item);
+            const productName = adMaterialProductName(item);
+            const active = index === state.adMaterialProductActiveIndex ? " active" : "";
+            return `<button type="button" class="product-option${active}" data-product-index="${index}"><strong>${navText(productName || productId)}</strong><span>${navText(productId)}</span></button>`;
+          }).join("") + (allMatches.length > limit ? `<div class="product-empty">仅显示前 ${limit} 条，请继续输入关键词缩小范围</div>` : "")
+        : `<div class="product-empty">未找到匹配产品</div>`;
+      els.adMaterialProductOptions.classList.toggle("hidden", !open);
+      els.adMaterialProductSearch?.setAttribute("aria-expanded", open ? "true" : "false");
+      if (els.adMaterialProductHint) {
+        els.adMaterialProductHint.textContent = query.trim()
+          ? `匹配 ${allMatches.length} 个产品`
+          : "输入关键词后选择产品";
+      }
+    }
+
+    function selectAdMaterialProductByIndex(index) {
+      const product = state.adMaterialProductMatches[index];
+      if (!product) return;
+      setAdMaterialProductValue(adMaterialProductId(product), adMaterialProductName(product));
+      hideAdMaterialProductOptions();
+    }
+
+    function handleAdMaterialProductInput() {
+      const selected = findAdMaterialProduct(els.adMaterialAppId?.value || "");
+      if (selected && els.adMaterialProductSearch?.value !== adMaterialProductLabel(selected)) {
+        if (els.adMaterialAppId) els.adMaterialAppId.value = "";
+      }
+      state.adMaterialProductActiveIndex = 0;
+      renderAdMaterialProductOptions(true);
+    }
+
+    function handleAdMaterialProductKeydown(event) {
+      if (!["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key)) return;
+      if (event.key === "Escape") {
+        hideAdMaterialProductOptions();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const count = state.adMaterialProductMatches.length || matchedAdMaterialProducts(els.adMaterialProductSearch?.value || "").length;
+        if (!count) return renderAdMaterialProductOptions(true);
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        state.adMaterialProductActiveIndex = (state.adMaterialProductActiveIndex + direction + count) % count;
+        renderAdMaterialProductOptions(true);
+        return;
+      }
+      if (event.key === "Enter" && !els.adMaterialProductOptions?.classList.contains("hidden")) {
+        event.preventDefault();
+        selectAdMaterialProductByIndex(Math.max(state.adMaterialProductActiveIndex, 0));
+      }
+    }
+
+    function handleAdMaterialProductOptionClick(event) {
+      const button = event.target.closest("[data-product-index]");
+      if (!button) return;
+      selectAdMaterialProductByIndex(Number(button.dataset.productIndex));
+    }
+
+    function ensureAdMaterialProductSelected() {
+      const currentId = els.adMaterialAppId?.value || "";
+      if (currentId && findAdMaterialProduct(currentId)) return findAdMaterialProduct(currentId);
+      const query = (els.adMaterialProductSearch?.value || "").trim();
+      if (!query) return null;
+      const exact = state.adMaterialProducts.find(item => {
+        const productId = adMaterialProductId(item);
+        const productName = adMaterialProductName(item);
+        const label = adMaterialProductLabel(item);
+        return [productId, productName, label].some(value => value.toLowerCase() === query.toLowerCase());
+      });
+      if (exact) {
+        setAdMaterialProductValue(adMaterialProductId(exact), adMaterialProductName(exact));
+        return exact;
+      }
+      const matches = matchedAdMaterialProducts(query);
+      if (matches.length === 1) {
+        setAdMaterialProductValue(adMaterialProductId(matches[0]), adMaterialProductName(matches[0]));
+        return matches[0];
+      }
+      return null;
+    }
+
     function selectedAdMaterialProduct() {
       const appId = els.adMaterialAppId?.value || "";
-      return state.adMaterialProducts.find(item => String(item.app_id) === String(appId)) || {};
+      const product = findAdMaterialProduct(appId);
+      if (product) return product;
+      return appId ? { app_id: appId, id: appId, product_name: els.adMaterialProductSearch?.value || "", name: els.adMaterialProductSearch?.value || "" } : {};
     }
 
     function openAdMaterialTaskModal(mode) {
@@ -15184,14 +15423,10 @@
     async function loadAdMaterialProducts() {
       if (!userCan("ad_material_tasks")) return;
       const data = await api("/api/ad-material/products");
+      const selectedAppId = els.adMaterialAppId?.value || "";
       state.adMaterialProducts = data.items || [];
-      if (els.adMaterialAppId) {
-        els.adMaterialAppId.innerHTML = state.adMaterialProducts.map(item => {
-          const productId = item.id || item.app_id || "";
-          const productName = item.name || item.product_name || "";
-          const label = item.label || `${productId} | ${productName}`;
-          return `<option value="${navText(productId)}" data-name="${navText(productName)}">${navText(label)}</option>`;
-        }).join("");
+      if (selectedAppId) {
+        setAdMaterialProductValue(selectedAppId, els.adMaterialProductSearch?.value || "");
       }
     }
 
@@ -15247,7 +15482,8 @@
     }
 
     function adMaterialPayloadBase() {
-      const product = selectedAdMaterialProduct();
+      const product = ensureAdMaterialProductSelected();
+      if (!product) throw new Error("请先搜索并选择产品");
       return {
         app_id: els.adMaterialAppId.value,
         product_name: product.name || product.product_name || "",
@@ -15286,21 +15522,26 @@
     function resetAdMaterialForm() {
       state.editingAdMaterialTaskId = "";
       els.adMaterialForm?.reset();
+      clearAdMaterialProductValue();
       if (els.adMaterialQuantity) els.adMaterialQuantity.value = "1";
       if (els.adMaterialModalTitle) els.adMaterialModalTitle.textContent = "创建任务";
       if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = "确认创建";
       updateAdMaterialCompetitorVisibility();
     }
 
-    function createAdMaterialTask() {
+    async function createAdMaterialTask() {
       resetAdMaterialForm();
       openAdMaterialTaskModal("create");
+      if (!state.adMaterialProducts.length) {
+        await loadAdMaterialProducts();
+      }
+      els.adMaterialProductSearch?.focus();
     }
 
     async function editAdMaterialTask(taskId) {
       const task = await api(`/api/ad-material/tasks/${taskId}`);
       state.editingAdMaterialTaskId = task.task_id;
-      els.adMaterialAppId.value = task.app_id || "";
+      setAdMaterialProductValue(task.app_id || "", task.product_name || "");
       els.adMaterialTaskType.value = task.task_type || "素材优化";
       els.adMaterialCompetitorSource.value = task.competitor_source || "有米云";
       els.adMaterialQuantity.value = task.quantity || 1;
@@ -21164,6 +21405,18 @@ function buildJobRow(job) {
       if (els.adMaterialForm) {
         els.adMaterialForm.addEventListener("submit", submitAdMaterialTask);
       }
+      if (els.adMaterialProductSearch) {
+        els.adMaterialProductSearch.addEventListener("focus", () => renderAdMaterialProductOptions(true));
+        els.adMaterialProductSearch.addEventListener("input", handleAdMaterialProductInput);
+        els.adMaterialProductSearch.addEventListener("keydown", handleAdMaterialProductKeydown);
+      }
+      if (els.adMaterialProductOptions) {
+        els.adMaterialProductOptions.addEventListener("mousedown", event => event.preventDefault());
+        els.adMaterialProductOptions.addEventListener("click", handleAdMaterialProductOptionClick);
+      }
+      document.addEventListener("click", event => {
+        if (!event.target.closest(".product-combobox")) hideAdMaterialProductOptions();
+      });
       if (els.adMaterialTaskType) {
         els.adMaterialTaskType.addEventListener("change", updateAdMaterialCompetitorVisibility);
       }
@@ -21171,7 +21424,7 @@ function buildJobRow(job) {
         els.adMaterialResetBtn.onclick = resetAdMaterialForm;
       }
       if (els.adMaterialCreateBtn) {
-        els.adMaterialCreateBtn.onclick = createAdMaterialTask;
+        els.adMaterialCreateBtn.onclick = () => createAdMaterialTask().catch(error => showError("加载产品失败", error));
       }
       if (els.adMaterialModalCloseBtn) {
         els.adMaterialModalCloseBtn.onclick = () => {
