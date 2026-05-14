@@ -32130,13 +32130,15 @@ def list_ad_material_products(session=None):
             columns = mysql_table_columns("ads_apps_setting", database)
             if "id" in columns and "name" in columns:
                 where = "1=1"
-                actor = ad_material_actor(session)
-                admin_group = lookup_admin_group_by_email(actor.get("email"))
-                sub_user_id = admin_group.get("sub_user_id")
-                if not session_is_admin(session) and sub_user_id:
+                is_admin = session_is_admin(session)
+                if not is_admin:
+                    actor = ad_material_actor(session)
+                    admin_group = lookup_admin_group_by_email(actor.get("email"))
+                    sub_user_id = admin_group.get("sub_user_id")
+                    where = "0=1"
                     role_app_columns = mysql_table_columns("admin_role_apps", database)
                     role_user_columns = mysql_table_columns("admin_role_users", database)
-                    if {"role_id", "user_id"}.issubset(role_user_columns) and {"role_id", "is_all", "values"}.issubset(role_app_columns):
+                    if sub_user_id and {"role_id", "user_id"}.issubset(role_user_columns) and {"role_id", "is_all", "values"}.issubset(role_app_columns):
                         where = (
                             "EXISTS (SELECT 1 FROM `%s`.admin_role_users aru "
                             "JOIN `%s`.admin_role_apps ara ON ara.role_id = aru.role_id "
@@ -32144,10 +32146,11 @@ def list_ad_material_products(session=None):
                             "AND (ara.is_all = 1 OR FIND_IN_SET(CAST(a.id AS CHAR), "
                             "REPLACE(REPLACE(REPLACE(REPLACE(ara.values, '[', ''), ']', ''), '\"', ''), ' ', '')) > 0))"
                         ) % (database.replace("`", "``"), database.replace("`", "``"), mysql_escape_literal(sub_user_id))
+                limit_clause = "" if is_admin else " LIMIT 500"
                 rows = run_mysql(
                     "SELECT DISTINCT CAST(a.id AS CHAR), a.name "
-                    "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC LIMIT 500"
-                    % (database.replace("`", "``"), where)
+                    "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC%s"
+                    % (database.replace("`", "``"), where, limit_clause)
                 )
                 items = []
                 for row in rows:
@@ -32163,8 +32166,7 @@ def list_ad_material_products(session=None):
                             "language": "",
                             "label": "%s | %s" % (app_id, product_name),
                         })
-                if items:
-                    return items
+                return items
         except Exception:
             logging.exception("failed to list ad material products from mysql")
     try:
