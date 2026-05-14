@@ -6909,6 +6909,37 @@
 
 
 
+    #adMaterialDetailPanel {
+      align-items: stretch;
+    }
+
+    #adMaterialDetailPanel .detail-panel {
+      box-sizing: border-box;
+      max-height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #adMaterialDetailPanel .detail-panel > .panel {
+      min-height: 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #adMaterialDetailPanel .panel-head {
+      flex: 0 0 auto;
+    }
+
+    #adMaterialDetailPanel .panel-body {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding-bottom: 48px;
+    }
+
     .stack { display: grid; gap: 12px; }
 
 
