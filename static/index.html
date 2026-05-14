@@ -12471,6 +12471,7 @@
 
 
       users: [],
+      permissionModules: [],
 
 
 
@@ -15125,6 +15126,10 @@
         .replace(/"/g, "&quot;");
     }
 
+    function inlineArg(value) {
+      return navText(JSON.stringify(String(value == null ? "" : value)));
+    }
+
     const AD_MATERIAL_COUNTRIES = ["US", "MX", "BR", "CO", "PE", "CL", "AR", "ES", "ID", "PH", "TH", "VN", "MY", "SG", "IN", "JP", "KR", "SA", "AE", "ZA"];
     const AD_MATERIAL_LANGUAGES = ["en", "es", "pt", "id", "tl", "th", "vi", "ms", "hi", "ja", "ko", "ar", "fr", "de", "it"];
 
@@ -17486,140 +17491,75 @@ function buildJobRow(job) {
 
 
 
-    function permissionCell(user) {
-
-
-
-
-
-
-
-      const permissions = user.permissions || {};
-
-
-
-
-
-
-
-      if (user.role === "admin") {
-
-
-
-
-
-
-
-        return `<span class="status-pill status-done">全部权限</span>`;
-
-
-
-
-
-
-
-      }
-
-
-
-
-
-
-
-      return `
-
-
-
-
-
-
-
-        <label class="check" style="font-weight:500;gap:6px;">
-
-
-
-
-
-
-
-          <input type="checkbox" ${permissions.drama_synthesis ? "checked" : ""} onchange="setUserPermission('${user.user_id}', 'drama_synthesis', this.checked)" /> 剧集合成
-
-
-
-
-
-
-
-        </label>
-        <label class="check" style="font-weight:500;gap:6px;">
-
-
-
-
-
-
-
-          <input type="checkbox" ${permissions.cover_synthesis ? "checked" : ""} onchange="setUserPermission('${user.user_id}', 'cover_synthesis', this.checked)" /> 封面图合成
-
-
-
-
-
-
-
-        </label>
-        <label class="check" style="font-weight:500;gap:6px;">
-          <input type="checkbox" ${permissions.ad_material_tasks ? "checked" : ""} onchange="setUserPermission('${user.user_id}', 'ad_material_tasks', this.checked)" /> 投放素材任务
-        </label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        <label class="check" style="font-weight:500;gap:6px;color:#8a94a8;">
-
-
-
-
-
-
-
-          <input type="checkbox" disabled /> 设置（仅 admin）
-
-
-
-
-
-
-
-        </label>
-
-
-
-
-
-
-
-      `;
-
-
-
-
-
-
-
+    function permissionModulesFromNavigation(config) {
+      const modules = [];
+      const seen = new Set();
+      const addModule = (moduleKey, label, editable) => {
+        moduleKey = String(moduleKey || "").trim();
+        if (!moduleKey || seen.has(moduleKey)) return;
+        seen.add(moduleKey);
+        modules.push({
+          key: moduleKey,
+          label: String(label || moduleKey).trim() || moduleKey,
+          editable: editable !== false && moduleKey !== "settings",
+        });
+      };
+      (Array.isArray(config) ? config : []).forEach(group => {
+        if (!group || group.enabled === false) return;
+        const groupAdminOnly = !!group.adminOnly;
+        const items = (group.items || []).filter(item => item && item.enabled !== false);
+        const sameModuleItems = items.filter(item => item.module && item.module === group.module);
+        const groupLabel = sameModuleItems.length === 1 && items.length === 1
+          ? sameModuleItems[0].label || group.label
+          : group.label;
+        addModule(group.module, groupLabel, !groupAdminOnly);
+        items.forEach(item => {
+          if (item.module === group.module) return;
+          addModule(item.module, item.label || group.label, !(groupAdminOnly || item.adminOnly));
+        });
+      });
+      return modules;
     }
 
+    async function loadPermissionModules() {
+      let modules = [];
+      try {
+        const config = window.QuickNav?.loadConfig ? await window.QuickNav.loadConfig() : navigationDraft();
+        modules = permissionModulesFromNavigation(config);
+      } catch (error) {
+        modules = [];
+      }
+      if (!modules.length) {
+        const backendModules = (state.auth && state.auth.modules) || {};
+        modules = Object.entries(backendModules).map(([key, label]) => ({
+          key,
+          label,
+          editable: key !== "settings",
+        }));
+      }
+      state.permissionModules = modules;
+      return modules;
+    }
 
+    function permissionCell(user) {
+      const permissions = user.permissions || {};
+      if (user.role === "admin") {
+        return `<span class="status-pill status-done">全部权限</span>`;
+      }
+      const modules = state.permissionModules || [];
+      if (!modules.length) {
+        return `<span class="muted">暂无可配置权限</span>`;
+      }
+      return modules.map(module => {
+        const label = navText(module.label || module.key);
+        const userIdArg = inlineArg(user.user_id);
+        const moduleKeyArg = inlineArg(module.key);
+        if (!module.editable) {
+          return `<label class="check" style="font-weight:500;gap:6px;color:#8a94a8;"><input type="checkbox" disabled /> ${label}（仅 admin）</label>`;
+        }
+        return `<label class="check" style="font-weight:500;gap:6px;"><input type="checkbox" ${permissions[module.key] ? "checked" : ""} onchange="setUserPermission(${userIdArg}, ${moduleKeyArg}, this.checked)" /> ${label}</label>`;
+      }).join("");
+    }
 
     function buildScreenshotJobRow(job) {
       const canRetry = job.status === "done" || job.status === "failed";
@@ -18096,6 +18036,14 @@ function buildJobRow(job) {
 
 
       els.userTableBody.innerHTML = `<tr><td colspan="8" class="muted">正在加载用户...</td></tr>`;
+
+
+
+
+
+
+
+      await loadPermissionModules();
 
 
 
