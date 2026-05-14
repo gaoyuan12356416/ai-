@@ -10570,7 +10570,7 @@
                 <label>状态</label>
                 <select id="adMaterialStatusFilter">
                   <option value="all">全部</option>
-                  <option value="draft">待发布</option>
+                  <option value="draft">待上架</option>
                   <option value="generating_demand">生成需求中</option>
                   <option value="demand_review">需求待审核</option>
                   <option value="generating_material">生成素材中</option>
@@ -15430,9 +15430,14 @@
       }
     }
 
+    function adMaterialStatusText(status, label) {
+      if (status === "draft") return "待上架";
+      return label || status || "--";
+    }
+
     function adMaterialStatusBadge(status, label) {
       const cls = status === "done" ? "ok" : status === "failed" ? "bad" : "warn";
-      return `<span class="badge ${cls}">${navText(label || status || "--")}</span>`;
+      return `<span class="badge ${cls}">${navText(adMaterialStatusText(status, label))}</span>`;
     }
 
     function buildAdMaterialRow(task) {
@@ -15440,7 +15445,7 @@
       const canEdit = task.status === "draft";
       const canDelete = task.status !== "done";
       return `
-        <tr onclick="openAdMaterialDetail('${task.task_id}')">
+        <tr>
           <td><code>${navText((task.task_id || "").slice(0, 8))}</code></td>
           <td>${navText(task.task_type || "")}</td>
           <td>${navText(task.product_name || task.app_id || "")}</td>
@@ -15450,10 +15455,11 @@
           <td>${navText(task.creator_name || "")}</td>
           <td>${assets.length}</td>
           <td>${navText(task.updated_at || "")}</td>
-          <td onclick="event.stopPropagation();">
+          <td>
             <div class="actions-inline">
+              <button class="btn btn-secondary mini" type="button" onclick="openAdMaterialDetail('${task.task_id}')">详情</button>
               ${canEdit ? `<button class="btn btn-secondary mini" type="button" onclick="editAdMaterialTask('${task.task_id}')">编辑</button>` : ""}
-              ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishAdMaterialTask('${task.task_id}')">发布</button>` : ""}
+              ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架</button>` : ""}
               <button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialTask('${task.task_id}')">复制</button>
               ${canDelete ? `<button class="btn btn-danger mini" type="button" onclick="deleteAdMaterialTask('${task.task_id}')">删除</button>` : ""}
             </div>
@@ -15513,7 +15519,7 @@
         resetAdMaterialForm();
         closeAdMaterialTaskModal();
         await loadAdMaterialTasks();
-        await openAdMaterialDetail(result.task_id);
+        hideAdMaterialDetail();
       } catch (error) {
         showError("保存投放素材任务失败", error);
       }
@@ -15592,6 +15598,7 @@
             <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
             <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
           </div>
+          ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架任务</button></div>` : ""}
         </div>
         <div class="card">
           <strong>需求内容</strong>
@@ -15612,6 +15619,12 @@
       `;
     }
 
+    function hideAdMaterialDetail() {
+      state.selectedAdMaterialTask = null;
+      if (els.adMaterialDetailPanel) els.adMaterialDetailPanel.style.display = "none";
+      if (els.adMaterialDetailContent) els.adMaterialDetailContent.innerHTML = "";
+    }
+
     async function openAdMaterialDetail(taskId) {
       try {
         const task = await api(`/api/ad-material/tasks/${taskId}`);
@@ -15625,11 +15638,11 @@
     async function publishAdMaterialTask(taskId) {
       try {
         await api(`/api/ad-material/tasks/${taskId}/publish`, { method: "POST", body: "{}" });
-        toast("任务已发布，开始生成需求");
+        toast("任务已上架，开始生成需求");
         await loadAdMaterialTasks();
         await openAdMaterialDetail(taskId);
       } catch (error) {
-        showError("发布任务失败", error);
+        showError("任务上架失败", error);
       }
     }
 
@@ -15638,7 +15651,7 @@
         const task = await api(`/api/ad-material/tasks/${taskId}/copy`, { method: "POST", body: "{}" });
         toast("任务已复制");
         await loadAdMaterialTasks();
-        await openAdMaterialDetail(task.task_id);
+        hideAdMaterialDetail();
       } catch (error) {
         showError("复制任务失败", error);
       }
@@ -15649,7 +15662,7 @@
       try {
         await api(`/api/ad-material/tasks/${taskId}`, { method: "DELETE" });
         toast("任务已删除");
-        els.adMaterialDetailPanel.style.display = "none";
+        hideAdMaterialDetail();
         await loadAdMaterialTasks();
       } catch (error) {
         showError("删除任务失败", error);
@@ -21450,7 +21463,7 @@ function buildJobRow(job) {
         els.adMaterialStatusFilter.addEventListener("change", () => loadAdMaterialTasks().catch(error => showError("筛选投放素材任务失败", error)));
       }
       if (els.adMaterialCloseDetailBtn) {
-        els.adMaterialCloseDetailBtn.onclick = () => { els.adMaterialDetailPanel.style.display = "none"; };
+        els.adMaterialCloseDetailBtn.onclick = hideAdMaterialDetail;
       }
       els.logoutBtn.onclick = async () => {
 
