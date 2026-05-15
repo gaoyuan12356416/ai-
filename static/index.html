@@ -15726,6 +15726,11 @@
       return task && (task.status === "demand_review" || task.status === "material_review");
     }
 
+    function adMaterialCanCompleteUpload(task) {
+      const assets = task?.assets || [];
+      return task && task.status !== "done" && assets.length > 0 && assets.every(asset => asset.status === "approved" || asset.status === "uploaded");
+    }
+
     function adMaterialStatusCell(task) {
       return `<div class="status-cell">
         ${adMaterialStatusBadge(task.status, task.status_label)}
@@ -15753,6 +15758,7 @@
               <button class="btn btn-secondary mini" type="button" onclick="openAdMaterialDetail('${task.task_id}')">详情</button>
               ${canEdit ? `<button class="btn btn-secondary mini" type="button" onclick="editAdMaterialTask('${task.task_id}')">编辑</button>` : ""}
               ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架</button>` : ""}
+              ${adMaterialCanCompleteUpload(task) ? `<button class="btn btn-primary mini" type="button" onclick="completeAdMaterialUpload('${task.task_id}')">完成上报</button>` : ""}
               <button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialTask('${task.task_id}')">复制</button>
               ${canDelete ? `<button class="btn btn-danger mini" type="button" onclick="deleteAdMaterialTask('${task.task_id}')">删除</button>` : ""}
             </div>
@@ -15859,58 +15865,63 @@
       openAdMaterialTaskModal("edit");
     }
 
-    function renderAdMaterialAssets(task) {
-      const assets = task.assets || [];
-      if (!assets.length) return `<div class="muted">暂无素材</div>`;
-      return `<div class="grid">${assets.map(asset => {
-        const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(asset.url || "");
-        const media = isVideo
-          ? `<video src="${navText(asset.url)}" controls style="width:100%;max-height:320px;background:#000;border-radius:8px;"></video>`
-          : `<img src="${navText(asset.url)}" alt="${navText(asset.name || "")}" style="width:100%;max-height:320px;object-fit:contain;background:#f6f8fb;border-radius:8px;" />`;
-        return `<div class="card" style="grid-column:span 4;">
-          ${media}
-          <div style="margin-top:10px;font-weight:700;">${navText(asset.name || asset.asset_id)}</div>
-          <div style="margin-top:6px;">${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
-          ${asset.source_api_id ? `<div class="muted" style="margin-top:6px;">上报ID：${navText(asset.source_api_id)}</div>` : ""}
-          ${asset.source_api_error ? `<div class="muted" style="margin-top:6px;color:#b42318;">${navText(asset.source_api_error)}</div>` : ""}
-        </div>`;
-      }).join("")}</div>`;
-    }
-
     function renderAdMaterialDetail(task) {
-      const canUpload = (task.assets || []).length > 0 && (task.assets || []).every(asset => asset.status === "approved" || asset.status === "uploaded");
-      const demandMdUrl = task.demand_artifacts?.markdown_url || "";
-      const demandPdfUrl = task.demand_artifacts?.pdf_url || "";
+      const referenceFiles = task.reference_files || [];
+      const artifacts = task.demand_artifacts || {};
+      const assets = task.assets || [];
       els.adMaterialDetailPanel?.classList.add("open");
       els.adMaterialDetailContent.innerHTML = `
         <div class="card">
           <div class="grid">
+            <div><strong>任务ID</strong><div><code>${navText(task.task_id || "")}</code></div></div>
             <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>产品ID</strong><div>${navText(task.app_id || "")}</div></div>
             <div><strong>类型</strong><div>${navText(task.task_type || "")}</div></div>
             <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
             <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
             <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
+            <div><strong>尺寸</strong><div>${navText(task.size || "未填写")}</div></div>
+            <div><strong>竞品源</strong><div>${navText(task.competitor_source || "不使用")}</div></div>
           </div>
           ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架任务</button></div>` : ""}
         </div>
         <div class="card">
-          <div class="actions-inline" style="justify-content:space-between;align-items:center;">
-            <strong>需求内容</strong>
-            <div class="actions-inline">
-              ${demandMdUrl ? `<a class="btn btn-secondary mini" href="${navText(demandMdUrl)}" target="_blank" rel="noopener noreferrer">打开完整 MD</a>` : ""}
-              ${demandPdfUrl ? `<a class="btn btn-secondary mini" href="${navText(demandPdfUrl)}" target="_blank" rel="noopener noreferrer">打开 PDF</a>` : ""}
-              ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="exportAdMaterialDemandPdf('${task.task_id}')">导出PDF</button>` : ""}
-              ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialDemand()">复制 MD</button>` : ""}
-            </div>
+          <strong>上报字段</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>category</strong><div>${navText(task.category || "空")}</div></div>
+            <div><strong>tag_name</strong><div>${navText(task.tag_name || "空")}</div></div>
+            <div><strong>title</strong><div>${navText(task.title || "空")}</div></div>
+            <div><strong>body</strong><div>${navText(task.body || "空")}</div></div>
           </div>
-          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
         </div>
         <div class="card">
-          <div class="panel-head" style="padding:0;margin-bottom:12px;">
-            <h3 class="panel-title">素材审核</h3>
-            ${canUpload && task.status !== "done" ? `<button class="btn btn-primary" type="button" onclick="completeAdMaterialUpload('${task.task_id}')">完成上报</button>` : ""}
+          <strong>产品与商店信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>包名</strong><div>${navText(task.package_name || "未记录")}</div></div>
+            <div><strong>产品图标</strong><div>${task.product_icon_url ? `<a href="${navText(task.product_icon_url)}" target="_blank" rel="noopener noreferrer">打开图标</a>` : "未记录"}</div></div>
+            <div style="grid-column:span 12;"><strong>商店链接</strong><div>${task.store_url ? `<a href="${navText(task.store_url)}" target="_blank" rel="noopener noreferrer">${navText(task.store_url)}</a>` : "未记录"}</div></div>
           </div>
-          ${renderAdMaterialAssets(task)}
+        </div>
+        <div class="card">
+          <strong>补充说明与参考文件</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div style="grid-column:span 12;"><strong>任务描述</strong><div>${navText(task.description || "未填写")}</div></div>
+            <div><strong>参考文件</strong><div>${referenceFiles.length}</div></div>
+            <div><strong>生成素材</strong><div>${assets.length}</div></div>
+            <div><strong>需求MD</strong><div>${artifacts.markdown_url ? `<a href="${navText(artifacts.markdown_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+            <div><strong>需求PDF</strong><div>${artifacts.pdf_url ? `<a href="${navText(artifacts.pdf_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+          </div>
+          ${referenceFiles.length ? `<div class="actions-inline" style="margin-top:12px;">${referenceFiles.map((file, index) => `<a class="btn btn-secondary mini" href="${navText(file.url || "")}" target="_blank" rel="noopener noreferrer">参考文件 ${index + 1}</a>`).join("")}</div>` : ""}
+        </div>
+        <div class="card">
+          <strong>创建信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>发起人</strong><div>${navText(task.creator_name || "")}</div></div>
+            <div><strong>邮箱</strong><div>${navText(task.creator_email || "")}</div></div>
+            <div><strong>initiator</strong><div>${navText(task.initiator_sub_user_id || "未定位")}</div></div>
+            <div><strong>创建时间</strong><div>${navText(task.created_at || "")}</div></div>
+            <div><strong>更新时间</strong><div>${navText(task.updated_at || "")}</div></div>
+          </div>
         </div>
         ${task.error_message ? `<div class="card"><strong>错误</strong><pre style="white-space:pre-wrap;">${navText(task.error_message)}</pre></div>` : ""}
       `;
