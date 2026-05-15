@@ -1,0 +1,26 @@
+[Unit]
+Description=Ad Material Codex Image Generation Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+Environment=PYTHONUNBUFFERED=1
+Environment=AD_MATERIAL_GENERATION_HOST=127.0.0.1
+Environment=AD_MATERIAL_GENERATION_PORT=8797
+Environment=AD_MATERIAL_GENERATION_WORK_ROOT=/root/ad_material_generation_jobs
+Environment=AD_MATERIAL_GENERATION_PUBLIC_ROOT=/usr/share/nginx/html/ad-material-generation
+Environment=AD_MATERIAL_GENERATION_PUBLIC_BASE_URL=http://127.0.0.1:18797/files
+Environment=AD_MATERIAL_GENERATION_PROMPT_WORKSPACE=/root/ad_material_generation_workspace
+Environment=AD_MATERIAL_GENERATION_CODEX_BIN=/usr/bin/codex
+Environment=AD_MATERIAL_GENERATION_CODEX_MODEL=gpt-5.5
+Environment=AD_MATERIAL_GENERATION_CODEX_REASONING=medium
+Environment=AD_MATERIAL_GENERATION_CODEX_TIMEOUT=2400
+Environment=AD_MATERIAL_GENERATION_MAX_CONCURRENCY=1
+ExecStart=/usr/bin/python3 /root/drama_material_service/ad_material_generation_service.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

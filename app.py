@@ -33886,13 +33886,34 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
         return
     update_ad_material_task_status(task_id, "generating_material", review_reason=reason, error_message="")
     try:
-        result = run_ad_material_external_command(AD_MATERIAL_GENERATION_COMMAND, task, "generation", {"indexes": indexes or [], "reason": reason}) if AD_MATERIAL_GENERATION_COMMAND else {}
-        assets = generation_outputs_to_assets(task, result, indexes=indexes)
-        if not assets:
-            target_indexes = indexes or list(range(1, int(task.get("quantity") or 1) + 1))
+        raw_indexes = indexes or list(range(1, int(task.get("quantity") or 1) + 1))
+        target_indexes = []
+        for raw_index in raw_indexes:
+            index = int(raw_index)
+            if index not in target_indexes:
+                target_indexes.append(index)
+        if not target_indexes:
+            raise RuntimeError("no ad material asset indexes requested")
+
+        assets = []
+        if AD_MATERIAL_GENERATION_COMMAND:
+            for index in target_indexes:
+                result = run_ad_material_external_command(
+                    AD_MATERIAL_GENERATION_COMMAND,
+                    task,
+                    "generation_%02d" % index,
+                    {"indexes": [index], "reason": reason},
+                )
+                generated_assets = generation_outputs_to_assets(task, result, indexes=[index])
+                if not generated_assets:
+                    raise RuntimeError("generation command returned no downloadable asset for index %02d" % index)
+                for asset in generated_assets:
+                    upsert_ad_material_asset(asset)
+                    assets.append(asset)
+        else:
             assets = [write_placeholder_ad_material_asset(task, index) for index in target_indexes]
-        for asset in assets:
-            upsert_ad_material_asset(asset)
+            for asset in assets:
+                upsert_ad_material_asset(asset)
         update_ad_material_task_status(task_id, "material_review", error_message="")
         fresh = fetch_ad_material_task(task_id)
         notify_ad_material_task_owner(fresh, "投放素材已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
