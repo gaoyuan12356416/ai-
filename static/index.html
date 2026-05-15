@@ -4517,6 +4517,8 @@
       margin-top: 12px;
       line-height: 1.72;
       color: var(--text);
+      max-width: 100%;
+      overflow-x: auto;
     }
 
     .md-preview h1,
@@ -4552,6 +4554,15 @@
       color: var(--muted);
       font-size: 12px;
     }
+    .md-preview .md-inline-image {
+      display: block;
+      width: auto;
+      max-width: 220px;
+      max-height: 180px;
+      object-fit: contain;
+      border-radius: 6px;
+      background: #fff;
+    }
     .md-preview blockquote {
       margin: 10px 0;
       padding: 10px 12px;
@@ -4569,6 +4580,7 @@
     }
     .md-preview table {
       width: 100%;
+      min-width: 760px;
       border-collapse: collapse;
       margin: 10px 0;
       font-size: 13px;
@@ -6936,6 +6948,7 @@
 
     #adMaterialDetailPanel .detail-panel {
       box-sizing: border-box;
+      width: min(1180px, calc(100vw - 220px));
       max-height: 100vh;
       overflow: hidden;
       display: flex;
@@ -6959,6 +6972,54 @@
       overflow-y: auto;
       overscroll-behavior: contain;
       padding-bottom: 48px;
+    }
+
+    .ad-material-review-modal {
+      width: min(1040px, calc(100vw - 48px));
+      max-height: calc(100vh - 48px);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .ad-material-review-modal .panel-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .status-cell {
+      display: grid;
+      gap: 6px;
+      justify-items: start;
+    }
+
+    .review-asset-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      display: grid;
+      gap: 10px;
+    }
+
+    .review-asset-card img,
+    .review-asset-card video {
+      width: 100%;
+      max-height: 420px;
+      object-fit: contain;
+      border-radius: 8px;
+      background: #f6f8fb;
+    }
+
+    @media (max-width: 900px) {
+      #adMaterialDetailPanel .detail-panel {
+        width: 100vw;
+      }
+      .ad-material-review-modal {
+        width: 100vw;
+        max-height: 100vh;
+        border-radius: 0;
+      }
     }
 
     .stack { display: grid; gap: 12px; }
@@ -12462,6 +12523,18 @@
     </div>
   </div>
 
+  <div id="adMaterialReviewModal" class="modal-backdrop hidden">
+    <div class="modal-panel ad-material-review-modal">
+      <div class="panel-head">
+        <h3 id="adMaterialReviewTitle" class="panel-title">任务审核</h3>
+        <button id="adMaterialReviewCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="adMaterialReviewContent" class="stack"></div>
+      </div>
+    </div>
+  </div>
+
 
 
 
@@ -12602,6 +12675,7 @@
       adMaterialProductMatches: [],
       adMaterialProductActiveIndex: -1,
       selectedAdMaterialTask: null,
+      reviewingAdMaterialTask: null,
       editingAdMaterialTaskId: "",
       selectedJobIds: new Set(),
 
@@ -13557,6 +13631,10 @@
       adMaterialDetailPanel: document.getElementById("adMaterialDetailPanel"),
       adMaterialDetailContent: document.getElementById("adMaterialDetailContent"),
       adMaterialCloseDetailBtn: document.getElementById("adMaterialCloseDetailBtn"),
+      adMaterialReviewModal: document.getElementById("adMaterialReviewModal"),
+      adMaterialReviewTitle: document.getElementById("adMaterialReviewTitle"),
+      adMaterialReviewContent: document.getElementById("adMaterialReviewContent"),
+      adMaterialReviewCloseBtn: document.getElementById("adMaterialReviewCloseBtn"),
       adMaterialCountryList: document.getElementById("adMaterialCountryList"),
       adMaterialLanguageList: document.getElementById("adMaterialLanguageList"),
 
@@ -15283,7 +15361,21 @@
     }
 
     function inlineMarkdown(value) {
-      return navText(value)
+      let text = String(value == null ? "" : value);
+      const inlineImages = [];
+      text = text.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (_, src) => {
+        const index = inlineImages.push({ src, alt: "参考图" }) - 1;
+        return `@@MD_INLINE_IMAGE_${index}@@`;
+      });
+      text = text.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, (_, alt, src) => {
+        const index = inlineImages.push({ src, alt: alt || "参考图" }) - 1;
+        return `@@MD_INLINE_IMAGE_${index}@@`;
+      });
+      return navText(text)
+        .replace(/@@MD_INLINE_IMAGE_(\d+)@@/g, (_, index) => {
+          const image = inlineImages[Number(index)] || {};
+          return `<a href="${navText(image.src || "")}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${navText(image.src || "")}" alt="${navText(image.alt || "参考图")}" loading="lazy" decoding="async" /></a>`;
+        })
         .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>`)
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -15630,6 +15722,17 @@
       return `<span class="badge ${cls}">${navText(adMaterialStatusText(status, label))}</span>`;
     }
 
+    function adMaterialCanReview(task) {
+      return task && (task.status === "demand_review" || task.status === "material_review");
+    }
+
+    function adMaterialStatusCell(task) {
+      return `<div class="status-cell">
+        ${adMaterialStatusBadge(task.status, task.status_label)}
+        ${adMaterialCanReview(task) ? `<button class="btn btn-primary mini" type="button" onclick="openAdMaterialReview('${task.task_id}')">审核</button>` : ""}
+      </div>`;
+    }
+
     function buildAdMaterialRow(task) {
       const assets = task.assets || [];
       const canEdit = task.status === "draft";
@@ -15641,7 +15744,7 @@
           <td>${navText(task.product_name || task.app_id || "")}</td>
           <td>${task.quantity || 0}</td>
           <td>${navText(task.country || "")}/${navText(task.language || "")}</td>
-          <td>${adMaterialStatusBadge(task.status, task.status_label)}</td>
+          <td>${adMaterialStatusCell(task)}</td>
           <td>${navText(task.creator_name || "")}</td>
           <td>${assets.length}</td>
           <td>${navText(task.updated_at || "")}</td>
@@ -15770,19 +15873,14 @@
           <div style="margin-top:6px;">${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
           ${asset.source_api_id ? `<div class="muted" style="margin-top:6px;">上报ID：${navText(asset.source_api_id)}</div>` : ""}
           ${asset.source_api_error ? `<div class="muted" style="margin-top:6px;color:#b42318;">${navText(asset.source_api_error)}</div>` : ""}
-          ${task.status === "material_review" && asset.status === "pending_review" ? `
-            <div class="actions-inline" style="margin-top:10px;">
-              <button class="btn btn-primary mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','approved')">通过</button>
-              <button class="btn btn-danger mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','rejected')">驳回</button>
-            </div>` : ""}
         </div>`;
       }).join("")}</div>`;
     }
 
     function renderAdMaterialDetail(task) {
-      const canReviewDemand = task.status === "demand_review";
       const canUpload = (task.assets || []).length > 0 && (task.assets || []).every(asset => asset.status === "approved" || asset.status === "uploaded");
       const demandMdUrl = task.demand_artifacts?.markdown_url || "";
+      const demandPdfUrl = task.demand_artifacts?.pdf_url || "";
       els.adMaterialDetailPanel?.classList.add("open");
       els.adMaterialDetailContent.innerHTML = `
         <div class="card">
@@ -15800,14 +15898,12 @@
             <strong>需求内容</strong>
             <div class="actions-inline">
               ${demandMdUrl ? `<a class="btn btn-secondary mini" href="${navText(demandMdUrl)}" target="_blank" rel="noopener noreferrer">打开完整 MD</a>` : ""}
+              ${demandPdfUrl ? `<a class="btn btn-secondary mini" href="${navText(demandPdfUrl)}" target="_blank" rel="noopener noreferrer">打开 PDF</a>` : ""}
+              ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="exportAdMaterialDemandPdf('${task.task_id}')">导出PDF</button>` : ""}
               ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialDemand()">复制 MD</button>` : ""}
             </div>
           </div>
           <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
-          ${canReviewDemand ? `<div class="actions-inline">
-            <button class="btn btn-primary" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','approved')">需求通过</button>
-            <button class="btn btn-danger" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','rejected')">需求驳回</button>
-          </div>` : ""}
         </div>
         <div class="card">
           <div class="panel-head" style="padding:0;margin-bottom:12px;">
@@ -15881,8 +15977,129 @@
       }
     }
 
-    async function reviewAdMaterialDemand(taskId, result) {
-      const reason = result === "rejected" ? prompt("请输入驳回原因") : "";
+    function closeAdMaterialReviewModal() {
+      els.adMaterialReviewModal?.classList.add("hidden");
+      if (els.adMaterialReviewContent) els.adMaterialReviewContent.innerHTML = "";
+      state.reviewingAdMaterialTask = null;
+    }
+
+    function reviewAssetMedia(asset) {
+      const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(asset.url || "");
+      if (!asset.url) return `<div class="empty-card">暂无素材预览</div>`;
+      return isVideo
+        ? `<video src="${navText(asset.url)}" controls></video>`
+        : `<a href="${navText(asset.url)}" target="_blank" rel="noopener noreferrer"><img src="${navText(asset.url)}" alt="${navText(asset.name || asset.asset_id || "")}" loading="lazy" decoding="async" /></a>`;
+    }
+
+    function renderAdMaterialDemandReview(task) {
+      const demandMdUrl = task.demand_artifacts?.markdown_url || "";
+      const demandPdfUrl = task.demand_artifacts?.pdf_url || "";
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
+            <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="actions-inline" style="justify-content:space-between;align-items:center;">
+            <strong>需求预览</strong>
+            <div class="actions-inline">
+              ${demandMdUrl ? `<a class="btn btn-secondary mini" href="${navText(demandMdUrl)}" target="_blank" rel="noopener noreferrer">打开 MD</a>` : ""}
+              ${demandPdfUrl ? `<a class="btn btn-secondary mini" href="${navText(demandPdfUrl)}" target="_blank" rel="noopener noreferrer">打开 PDF</a>` : ""}
+              ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="exportAdMaterialDemandPdf('${task.task_id}')">导出PDF</button>` : ""}
+            </div>
+          </div>
+          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
+        </div>
+        <div class="card">
+          <label><strong>驳回原因</strong></label>
+          <textarea id="adMaterialDemandReviewReason" rows="3" placeholder="仅驳回时必填，会作为重新生成需求的方向"></textarea>
+          <div class="actions-inline" style="margin-top:12px;">
+            <button class="btn btn-primary" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','approved')">需求通过</button>
+            <button class="btn btn-danger" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','rejected', document.getElementById('adMaterialDemandReviewReason')?.value || '')">需求驳回</button>
+          </div>
+        </div>`;
+    }
+
+    function renderAdMaterialAssetReview(task) {
+      const assets = task.assets || [];
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
+            <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
+            <div><strong>素材数</strong><div>${assets.length}</div></div>
+          </div>
+        </div>
+        ${assets.length ? `<div class="grid">${assets.map(asset => `
+          <div class="review-asset-card" style="grid-column:span 6;">
+            ${reviewAssetMedia(asset)}
+            <div><strong>${navText(asset.name || asset.asset_id || "")}</strong></div>
+            <div>${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
+            ${asset.review_reason ? `<div class="muted">驳回原因：${navText(asset.review_reason)}</div>` : ""}
+            ${asset.status === "pending_review" ? `
+              <textarea id="adMaterialAssetReason_${navText(asset.asset_id)}" rows="2" placeholder="驳回时填写原因"></textarea>
+              <div class="actions-inline">
+                <button class="btn btn-primary mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','approved')">通过</button>
+                <button class="btn btn-danger mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','rejected', document.getElementById('adMaterialAssetReason_${navText(asset.asset_id)}')?.value || '')">驳回</button>
+              </div>` : ""}
+          </div>`).join("")}</div>` : `<div class="card muted">暂无素材</div>`}
+      `;
+    }
+
+    async function openAdMaterialReview(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${taskId}`);
+        state.reviewingAdMaterialTask = task;
+        if (els.adMaterialReviewTitle) {
+          els.adMaterialReviewTitle.textContent = task.status === "material_review" ? "素材审核" : "需求审核";
+        }
+        if (els.adMaterialReviewContent) {
+          els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+            ? renderAdMaterialAssetReview(task)
+            : renderAdMaterialDemandReview(task);
+        }
+        els.adMaterialReviewModal?.classList.remove("hidden");
+      } catch (error) {
+        showError("加载审核任务失败", error);
+      }
+    }
+
+    async function refreshAdMaterialReview(taskId) {
+      if (!els.adMaterialReviewModal || els.adMaterialReviewModal.classList.contains("hidden")) return;
+      const task = await api(`/api/ad-material/tasks/${taskId}`);
+      if (!adMaterialCanReview(task)) {
+        closeAdMaterialReviewModal();
+        return;
+      }
+      state.reviewingAdMaterialTask = task;
+      if (els.adMaterialReviewContent) {
+        els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+          ? renderAdMaterialAssetReview(task)
+          : renderAdMaterialDemandReview(task);
+      }
+    }
+
+    async function exportAdMaterialDemandPdf(taskId) {
+      try {
+        const data = await api(`/api/ad-material/tasks/${taskId}/export-pdf`, { method: "POST", body: "{}" });
+        const pdfUrl = data.pdf_url || data.task?.demand_artifacts?.pdf_url || "";
+        toast("PDF 已生成");
+        if (pdfUrl) window.open(pdfUrl, "_blank", "noopener,noreferrer");
+        await loadAdMaterialTasks();
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
+        if (state.reviewingAdMaterialTask?.task_id === taskId) await refreshAdMaterialReview(taskId);
+      } catch (error) {
+        showError("导出 PDF 失败", error);
+      }
+    }
+
+    async function reviewAdMaterialDemand(taskId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
       if (result === "rejected" && !reason) return toast("驳回原因必填", "error");
       try {
         await api(`/api/ad-material/tasks/${taskId}/demand-review`, {
@@ -15891,14 +16108,15 @@
         });
         toast(result === "approved" ? "需求已通过，开始生成素材" : "已驳回并重新生成需求");
         await loadAdMaterialTasks();
-        await openAdMaterialDetail(taskId);
+        closeAdMaterialReviewModal();
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
       } catch (error) {
         showError("审核需求失败", error);
       }
     }
 
-    async function reviewAdMaterialAsset(taskId, assetId, result) {
-      const reason = result === "rejected" ? prompt("请输入素材驳回原因") : "";
+    async function reviewAdMaterialAsset(taskId, assetId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
       if (result === "rejected" && !reason) return toast("驳回原因必填", "error");
       try {
         await api(`/api/ad-material/tasks/${taskId}/assets/${assetId}/review`, {
@@ -15907,7 +16125,8 @@
         });
         toast(result === "approved" ? "素材已通过" : "素材已驳回并重新生成");
         await loadAdMaterialTasks();
-        await openAdMaterialDetail(taskId);
+        await refreshAdMaterialReview(taskId);
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
       } catch (error) {
         showError("审核素材失败", error);
       }
@@ -15926,6 +16145,8 @@
     }
 
     window.openAdMaterialDetail = openAdMaterialDetail;
+    window.openAdMaterialReview = openAdMaterialReview;
+    window.exportAdMaterialDemandPdf = exportAdMaterialDemandPdf;
     window.copyAdMaterialDemand = copyAdMaterialDemand;
     window.editAdMaterialTask = editAdMaterialTask;
     window.publishAdMaterialTask = publishAdMaterialTask;
@@ -21681,6 +21902,14 @@ function buildJobRow(job) {
       if (els.adMaterialDetailPanel) {
         els.adMaterialDetailPanel.addEventListener("click", event => {
           if (event.target === els.adMaterialDetailPanel) hideAdMaterialDetail();
+        });
+      }
+      if (els.adMaterialReviewCloseBtn) {
+        els.adMaterialReviewCloseBtn.onclick = closeAdMaterialReviewModal;
+      }
+      if (els.adMaterialReviewModal) {
+        els.adMaterialReviewModal.addEventListener("click", event => {
+          if (event.target === els.adMaterialReviewModal) closeAdMaterialReviewModal();
         });
       }
       els.logoutBtn.onclick = async () => {

@@ -32141,6 +32141,10 @@ def product_optional_expr(columns, candidates):
     return "COALESCE(%s, '')" % ", ".join(parts) if parts else "''"
 
 
+def mysql_csv_contains_expr(csv_expr, value_expr):
+    return "FIND_IN_SET(%s, REPLACE(REPLACE(REPLACE(REPLACE(%s, '[', ''), ']', ''), '\"', ''), ' ', '')) > 0" % (value_expr, csv_expr)
+
+
 def ad_material_product_select_exprs(columns):
     return {
         "store_url": product_optional_expr(columns, ["store_url", "ios_store_url", "website_url", "origin_websit_url", "click_url"]),
@@ -32203,14 +32207,22 @@ def list_ad_material_products(session=None):
                     role_app_columns = mysql_table_columns("admin_role_apps", database)
                     role_user_columns = mysql_table_columns("admin_role_users", database)
                     if sub_user_id and {"role_id", "user_id"}.issubset(role_user_columns) and {"role_id", "is_all", "values"}.issubset(role_app_columns):
+                        join_condition = "ara.role_id = aru.role_id"
+                        if "role_app_id" in role_user_columns and "id" in role_app_columns:
+                            join_condition = "ara.id = aru.role_app_id"
                         where = (
                             "EXISTS (SELECT 1 FROM `%s`.admin_role_users aru "
-                            "JOIN `%s`.admin_role_apps ara ON ara.role_id = aru.role_id "
+                            "JOIN `%s`.admin_role_apps ara ON %s "
                             "WHERE CAST(aru.user_id AS CHAR) = '%s' "
-                            "AND (ara.is_all = 1 OR FIND_IN_SET(CAST(a.id AS CHAR), "
-                            "REPLACE(REPLACE(REPLACE(REPLACE(ara.values, '[', ''), ']', ''), '\"', ''), ' ', '')) > 0))"
-                        ) % (database.replace("`", "``"), database.replace("`", "``"), mysql_escape_literal(sub_user_id))
-                limit_clause = "" if is_admin else " LIMIT 500"
+                            "AND (ara.is_all = 1 OR %s))"
+                        ) % (
+                            database.replace("`", "``"),
+                            database.replace("`", "``"),
+                            join_condition,
+                            mysql_escape_literal(sub_user_id),
+                            mysql_csv_contains_expr("ara.values", "CAST(a.id AS CHAR)"),
+                        )
+                limit_clause = ""
                 exprs = ad_material_product_select_exprs(columns)
                 rows = run_mysql(
                     "SELECT DISTINCT CAST(a.id AS CHAR), a.name, %s, %s, %s "
@@ -32925,6 +32937,469 @@ def build_ad_material_image_generation_demand(task, reason=""):
     return "\n".join(lines).strip()
 
 
+def ad_material_pdf_filename(task):
+    name = re.sub(r"[^0-9A-Za-z_-]+", "_", str(task.get("product_name") or task.get("app_id") or "ad_material")).strip("_")
+    return "%s_requirement_%s.pdf" % (name or "ad_material", task["task_id"][:8])
+
+
+def ad_material_markdown_plain(text):
+    import html as html_lib
+    text = re.sub(r"<img[^>]*>", " [image] ", str(text or ""), flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 \2", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    return html_lib.unescape(re.sub(r"\s+", " ", text).strip())
+
+
+def ad_material_markdown_images(text):
+    images = []
+    for match in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', str(text or ""), flags=re.I):
+        images.append(match.group(1))
+    for match in re.finditer(r"!\[[^\]]*\]\((https?://[^)\s]+|/[^)\s]+)\)", str(text or ""), flags=re.I):
+        images.append(match.group(1))
+    seen = set()
+    result = []
+    for url in images:
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
+def ad_material_download_pdf_image(url, temp_dir):
+    if not url or not str(url).startswith(("http://", "https://")):
+        return ""
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        suffix = ".jpg"
+        if "png" in content_type:
+            suffix = ".png"
+        elif "webp" in content_type:
+            suffix = ".webp"
+        path = os.path.join(temp_dir, hashlib.md5(url.encode("utf-8")).hexdigest() + suffix)
+        with open(path, "wb") as handle:
+            handle.write(resp.content)
+        return path
+    except Exception:
+        logging.exception("failed to download pdf image: %s", url)
+        return ""
+
+
+def ad_material_add_pdf_image(story, url, temp_dir, max_width=160, max_height=130):
+    try:
+        from PIL import Image as PilImage
+        from reportlab.platypus import Image as PdfImage
+
+        path = ad_material_download_pdf_image(url, temp_dir)
+        if not path:
+            return False
+        with PilImage.open(path) as image:
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            return False
+        scale = min(float(max_width) / width, float(max_height) / height, 1.0)
+        story.append(PdfImage(path, width=width * scale, height=height * scale))
+        return True
+    except Exception:
+        logging.exception("failed to append pdf image: %s", url)
+        return False
+
+
+def ad_material_parse_markdown_table(lines, start_index):
+    rows = []
+    index = start_index
+    while index < len(lines) and re.match(r"^\s*\|.+\|\s*$", lines[index]):
+        cells = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+        if not all(re.match(r"^:?-{3,}:?$", cell) for cell in cells):
+            rows.append(cells)
+        index += 1
+    return rows, index
+
+
+def render_ad_material_demand_pdf_pillow(task, demand_text, artifacts=None):
+    try:
+        from PIL import Image as PilImage, ImageDraw, ImageFont
+    except Exception as exc:
+        raise StructuredApiError("pdf_dependency_missing", "服务端缺少 PDF 生成依赖：%s" % exc)
+
+    public_dir = os.path.join(ad_material_public_dir(task["task_id"]), "exports")
+    ensure_dir(public_dir)
+    pdf_path = os.path.join(public_dir, ad_material_pdf_filename(task))
+    temp_dir = tempfile.mkdtemp(prefix="ad-material-pdf-")
+    width, height = 1240, 1754
+    margin_x, margin_y = 72, 64
+    max_text_width = width - margin_x * 2
+    font_candidates = [
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    ]
+
+    def font(size, bold=False):
+        paths = font_candidates[:]
+        if bold:
+            paths.insert(0, "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc")
+            paths.insert(1, "C:/Windows/Fonts/msyhbd.ttc")
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    return ImageFont.truetype(path, size=size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    fonts = {
+        "title": font(34, True),
+        "h2": font(25, True),
+        "h3": font(21, True),
+        "body": font(18),
+        "small": font(15),
+    }
+    pages = []
+    image = None
+    draw = None
+    y = margin_y
+
+    def text_width(text, fnt):
+        try:
+            bbox = draw.textbbox((0, 0), text, font=fnt)
+            return bbox[2] - bbox[0]
+        except Exception:
+            return draw.textsize(text, font=fnt)[0]
+
+    def line_height(fnt, extra=8):
+        try:
+            bbox = fnt.getbbox("国Ag")
+            return (bbox[3] - bbox[1]) + extra
+        except Exception:
+            return 24 + extra
+
+    def new_page():
+        nonlocal image, draw, y
+        image = PilImage.new("RGB", (width, height), "#FFFFFF")
+        draw = ImageDraw.Draw(image)
+        pages.append(image)
+        y = margin_y
+
+    def ensure_space(needed):
+        if y + needed > height - margin_y:
+            new_page()
+
+    def draw_wrapped(text, fnt, fill="#172033", indent=0, spacing=6):
+        nonlocal y
+        text = ad_material_markdown_plain(text)
+        if not text:
+            return
+        max_width = max_text_width - indent
+        line = ""
+        lines = []
+        for char in text:
+            candidate = line + char
+            if line and text_width(candidate, fnt) > max_width:
+                lines.append(line)
+                line = char
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        lh = line_height(fnt)
+        ensure_space(lh * max(1, len(lines)) + spacing)
+        for line in lines:
+            draw.text((margin_x + indent, y), line, font=fnt, fill=fill)
+            y += lh
+        y += spacing
+
+    def draw_rule():
+        nonlocal y
+        ensure_space(20)
+        draw.line((margin_x, y, width - margin_x, y), fill="#D8E2F0", width=2)
+        y += 18
+
+    def draw_image_from_url(url, max_w=300, max_h=210):
+        nonlocal y
+        path = ad_material_download_pdf_image(url, temp_dir)
+        if not path:
+            return False
+        try:
+            with PilImage.open(path) as raw:
+                raw = raw.convert("RGB")
+                raw.thumbnail((max_w, max_h))
+                ensure_space(raw.height + 14)
+                image.paste(raw, (margin_x, y))
+                y += raw.height + 14
+            return True
+        except Exception:
+            logging.exception("failed to draw pdf image: %s", url)
+            return False
+
+    def draw_table(rows):
+        nonlocal y
+        if not rows:
+            return
+        data_rows = rows[1:] if len(rows) > 1 else rows
+        if any("img" in cell.lower() for row in data_rows for cell in row):
+            draw_wrapped("素材参考", fonts["h2"], "#174EA6")
+            for row in data_rows[:24]:
+                ensure_space(260)
+                draw_rule()
+                ref = row[0] if row else ""
+                draw_wrapped(ref, fonts["h3"], "#172033")
+                image_url = ""
+                for cell in row:
+                    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cell, flags=re.I)
+                    if match:
+                        image_url = match.group(1)
+                        break
+                if image_url:
+                    draw_image_from_url(image_url)
+                for cell in row[2:4]:
+                    plain = ad_material_markdown_plain(cell)
+                    if plain:
+                        draw_wrapped(plain[:900], fonts["small"], "#44546A", indent=14)
+            draw_rule()
+            return
+        for row in rows[:18]:
+            draw_wrapped(" | ".join(ad_material_markdown_plain(cell) for cell in row[:4]), fonts["small"], "#44546A")
+
+    new_page()
+    draw_wrapped("%s 投放素材需求" % (task.get("product_name") or task.get("app_id") or ""), fonts["title"], "#102A56")
+    draw_wrapped("任务ID：%s    类型：%s    状态：%s    国家/语言：%s/%s    数量：%s" % (
+        task.get("task_id", ""),
+        task.get("task_type", ""),
+        task.get("status_label") or task.get("status", ""),
+        task.get("country", ""),
+        task.get("language", ""),
+        task.get("quantity", ""),
+    ), fonts["small"], "#5D6B82")
+    draw_rule()
+
+    lines = str(demand_text or "").splitlines()
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.strip()
+        if not line:
+            index += 1
+            continue
+        if re.match(r"^\s*\|.+\|\s*$", raw):
+            rows, index = ad_material_parse_markdown_table(lines, index)
+            draw_table(rows)
+            continue
+        heading = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            if level <= 2:
+                draw_rule()
+            draw_wrapped(heading.group(2), fonts["h2"] if level <= 2 else fonts["h3"], "#174EA6" if level <= 2 else "#172033")
+            index += 1
+            continue
+        images = ad_material_markdown_images(line)
+        if images and len(ad_material_markdown_plain(line)) < 20:
+            for url in images[:3]:
+                draw_image_from_url(url, max_w=440, max_h=320)
+            index += 1
+            continue
+        bullet_match = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet_match:
+            draw_wrapped("• " + bullet_match.group(1), fonts["body"], "#172033", indent=16)
+        else:
+            draw_wrapped(line, fonts["body"], "#172033")
+        index += 1
+
+    try:
+        pages[0].save(pdf_path, "PDF", resolution=150.0, save_all=True, append_images=pages[1:])
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return {"pdf_path": pdf_path, "pdf_url": build_public_url(pdf_path)}
+
+
+def render_ad_material_demand_pdf(task, demand_text, artifacts=None):
+    if not str(demand_text or "").strip():
+        raise StructuredApiError("empty_demand", "暂无需求内容，无法导出 PDF")
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except Exception as exc:
+        logging.info("reportlab unavailable, falling back to pillow pdf renderer: %s", exc)
+        return render_ad_material_demand_pdf_pillow(task, demand_text, artifacts)
+
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        font_name = "STSong-Light"
+    except Exception:
+        font_name = "Helvetica"
+
+    public_dir = os.path.join(ad_material_public_dir(task["task_id"]), "exports")
+    ensure_dir(public_dir)
+    pdf_path = os.path.join(public_dir, ad_material_pdf_filename(task))
+    temp_dir = tempfile.mkdtemp(prefix="ad-material-pdf-")
+    styles = getSampleStyleSheet()
+    base = ParagraphStyle(
+        "AdMaterialBase",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=9.5,
+        leading=14,
+        textColor=colors.HexColor("#172033"),
+        alignment=TA_LEFT,
+        spaceAfter=5,
+    )
+    title = ParagraphStyle("AdMaterialTitle", parent=base, fontSize=18, leading=24, textColor=colors.HexColor("#102A56"), spaceAfter=12)
+    h2 = ParagraphStyle("AdMaterialH2", parent=base, fontSize=13, leading=18, textColor=colors.HexColor("#174EA6"), spaceBefore=10, spaceAfter=7)
+    h3 = ParagraphStyle("AdMaterialH3", parent=base, fontSize=11.5, leading=16, textColor=colors.HexColor("#172033"), spaceBefore=7, spaceAfter=5)
+    bullet = ParagraphStyle("AdMaterialBullet", parent=base, leftIndent=12, firstLineIndent=-8)
+    small = ParagraphStyle("AdMaterialSmall", parent=base, fontSize=8, leading=11, textColor=colors.HexColor("#5D6B82"))
+
+    def pdf_text(value):
+        import html as html_lib
+        return html_lib.escape(ad_material_markdown_plain(value))
+
+    def para(value, style=base):
+        return Paragraph(pdf_text(value), style)
+
+    story = [
+        Paragraph(pdf_text("%s 投放素材需求" % (task.get("product_name") or task.get("app_id") or "")), title),
+        Paragraph(pdf_text("任务ID：%s    类型：%s    状态：%s    国家/语言：%s/%s    数量：%s" % (
+            task.get("task_id", ""),
+            task.get("task_type", ""),
+            task.get("status_label") or task.get("status", ""),
+            task.get("country", ""),
+            task.get("language", ""),
+            task.get("quantity", ""),
+        )), small),
+        Spacer(1, 6),
+    ]
+
+    lines = str(demand_text or "").splitlines()
+    index = 0
+    table_count = 0
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.strip()
+        if not line:
+            index += 1
+            continue
+        if re.match(r"^\s*\|.+\|\s*$", raw):
+            rows, index = ad_material_parse_markdown_table(lines, index)
+            if rows:
+                table_count += 1
+                header = rows[0]
+                data_rows = rows[1:] if len(rows) > 1 else []
+                if any("img" in cell.lower() for row in data_rows for cell in row):
+                    story.append(Paragraph("参考素材", h2 if table_count == 1 else h3))
+                    for row in data_rows[:24]:
+                        ref = row[0] if row else ""
+                        image_url = ""
+                        for cell in row:
+                            match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cell, flags=re.I)
+                            if match:
+                                image_url = match.group(1)
+                                break
+                        text_cells = [ad_material_markdown_plain(cell) for cell in row[2:] if ad_material_markdown_plain(cell)]
+                        card = [Paragraph("<b>%s</b>" % pdf_text(ref), h3)]
+                        if image_url:
+                            ad_material_add_pdf_image(card, image_url, temp_dir, max_width=150, max_height=120)
+                        if text_cells:
+                            card.append(Paragraph(pdf_text("; ".join(text_cells)[:1400]), small))
+                        story.append(KeepTogether(card))
+                        story.append(Spacer(1, 6))
+                else:
+                    table_data = [[Paragraph(pdf_text(cell)[:260], small) for cell in row[:4]] for row in rows[:18]]
+                    table = Table(table_data, hAlign="LEFT", repeatRows=1)
+                    table.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF4FF")),
+                        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D8E2F0")),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ]))
+                    story.append(table)
+                    story.append(Spacer(1, 8))
+            continue
+        heading = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            story.append(Paragraph(pdf_text(heading.group(2)), title if level == 1 else h2 if level == 2 else h3))
+            index += 1
+            continue
+        images = ad_material_markdown_images(line)
+        if images and len(ad_material_markdown_plain(line)) < 20:
+            for url in images[:3]:
+                ad_material_add_pdf_image(story, url, temp_dir, max_width=260, max_height=180)
+            index += 1
+            continue
+        bullet_match = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet_match:
+            story.append(Paragraph("• " + pdf_text(bullet_match.group(1)), bullet))
+        else:
+            story.append(para(line, base))
+        if len(story) % 85 == 0:
+            story.append(PageBreak())
+        index += 1
+
+    def page_footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(font_name, 8)
+        canvas.setFillColor(colors.HexColor("#7B8798"))
+        canvas.drawString(18 * mm, 11 * mm, "AI 自动后台 | 投放素材需求")
+        canvas.drawRightString(A4[0] - 18 * mm, 11 * mm, "Page %s" % doc.page)
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        pdf_path,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=16 * mm,
+        bottomMargin=18 * mm,
+        title="%s 投放素材需求" % (task.get("product_name") or task.get("app_id") or ""),
+    )
+    try:
+        doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return {"pdf_path": pdf_path, "pdf_url": build_public_url(pdf_path)}
+
+
+def ensure_ad_material_demand_pdf(task, demand_text=None, artifacts=None):
+    artifacts = dict(artifacts or task.get("demand_artifacts") or {})
+    if artifacts.get("pdf_url"):
+        return artifacts
+    pdf_artifacts = render_ad_material_demand_pdf(task, demand_text if demand_text is not None else task.get("demand_text", ""), artifacts)
+    artifacts.update(pdf_artifacts)
+    return artifacts
+
+
+def export_ad_material_demand_pdf(task_id, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    artifacts = ensure_ad_material_demand_pdf(task)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_material_task SET demand_artifacts_json=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
+                (json.dumps(artifacts, ensure_ascii=False), task_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    updated = fetch_ad_material_task(task_id)
+    return {"task_id": task_id, "pdf_url": artifacts.get("pdf_url", ""), "task": updated}
+
+
 def notify_ad_material_task_owner(task, text):
     try:
         if task.get("creator_open_id"):
@@ -32944,6 +33419,11 @@ def generate_ad_material_demand(task_id, reason=""):
         demand_artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
         if not demand_text:
             demand_text = build_ad_material_image_generation_demand(task, reason)
+        try:
+            demand_artifacts = ensure_ad_material_demand_pdf(task, demand_text, demand_artifacts)
+        except Exception as pdf_exc:
+            logging.exception("ad material demand pdf generation failed: %s", task_id)
+            demand_artifacts["pdf_error"] = str(pdf_exc)
         update_ad_material_task_status(
             task_id,
             "demand_review",
@@ -86130,6 +86610,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 elif ad_action == "demand-review":
                     payload = review_ad_material_demand(ad_task_id, body, self._session())
                     audit_action = "review_ad_material_demand"
+                elif ad_action == "export-pdf":
+                    payload = export_ad_material_demand_pdf(ad_task_id, self._session())
+                    audit_action = "export_ad_material_demand_pdf"
                 elif ad_action == "complete-upload":
                     payload = complete_ad_material_upload(ad_task_id, self._session())
                     audit_action = "complete_ad_material_upload"

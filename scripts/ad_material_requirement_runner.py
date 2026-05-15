@@ -51,6 +51,8 @@ def parse_command_output(stdout):
             "json_url",
             "markdown_path",
             "markdown_url",
+            "pdf_path",
+            "pdf_url",
             "evidence_path",
             "evidence_url",
             "internal_refs",
