@@ -16333,7 +16333,7 @@
       }
     }
 
-    function adMaterialPayloadBase() {
+    async function adMaterialPayloadBase() {
       const product = await ensureAdMaterialProductSelected();
       if (!product) throw new Error("请先搜索并选择产品");
       const taskType = normalizeAdMaterialTaskType(els.adMaterialTaskType.value);
@@ -16365,7 +16365,7 @@
     async function submitAdMaterialTask(event) {
       event.preventDefault();
       try {
-        const payload = adMaterialPayloadBase();
+        const payload = await adMaterialPayloadBase();
         payload.reference_files = await adMaterialReferencePayload();
         const editingId = state.editingAdMaterialTaskId;
         const url = editingId ? `/api/ad-material/tasks/${editingId}` : "/api/ad-material/tasks";
