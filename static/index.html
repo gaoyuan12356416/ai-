@@ -15768,7 +15768,9 @@
 
     function adMaterialCanCompleteUpload(task) {
       const assets = task?.assets || [];
-      return task && task.status !== "done" && assets.length > 0 && assets.every(asset => asset.status === "approved" || asset.status === "uploaded");
+      const readyStatuses = new Set(["approved", "uploaded", "abandoned"]);
+      const hasUploadable = assets.some(asset => asset.status === "approved" || asset.status === "uploaded");
+      return task && task.status !== "done" && assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
     }
 
     function adMaterialStatusCell(task) {
@@ -16107,10 +16109,11 @@
             <div>${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
             ${asset.review_reason ? `<div class="muted">驳回原因：${navText(asset.review_reason)}</div>` : ""}
             ${asset.status === "pending_review" ? `
-              <textarea id="adMaterialAssetReason_${navText(asset.asset_id)}" rows="2" placeholder="驳回时填写原因"></textarea>
+              <textarea id="adMaterialAssetReason_${navText(asset.asset_id)}" rows="2" placeholder="驳回时填写原因，废弃可不填"></textarea>
               <div class="actions-inline">
                 <button class="btn btn-primary mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','approved')">通过</button>
                 <button class="btn btn-danger mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','rejected', document.getElementById('adMaterialAssetReason_${navText(asset.asset_id)}')?.value || '')">驳回</button>
+                <button class="btn btn-secondary mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','abandoned', document.getElementById('adMaterialAssetReason_${navText(asset.asset_id)}')?.value || '')">废弃</button>
               </div>` : ""}
           </div>`).join("")}</div>` : `<div class="card muted">暂无素材</div>`}
       `;
@@ -16183,12 +16186,13 @@
     async function reviewAdMaterialAsset(taskId, assetId, result, reasonOverride) {
       const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
       if (result === "rejected" && !reason) return toast("驳回原因必填", "error");
+      if (result === "abandoned" && !confirm("确认废弃该素材？废弃后不会重新制作，也不会上传至素材库。")) return;
       try {
         await api(`/api/ad-material/tasks/${taskId}/assets/${assetId}/review`, {
           method: "POST",
           body: JSON.stringify({ result, reason })
         });
-        toast(result === "approved" ? "素材已通过" : "素材已驳回并重新生成");
+        toast(result === "approved" ? "素材已通过" : result === "abandoned" ? "素材已废弃" : "素材已驳回并重新生成");
         await loadAdMaterialTasks();
         await refreshAdMaterialReview(taskId);
         if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
@@ -16198,7 +16202,7 @@
     }
 
     async function completeAdMaterialUpload(taskId) {
-      if (!confirm("确认将全部通过的素材上报到素材库？")) return;
+      if (!confirm("确认将审核通过的素材上传至盈量素材库？已废弃素材会跳过。")) return;
       try {
         await api(`/api/ad-material/tasks/${taskId}/complete-upload`, { method: "POST", body: "{}" });
         toast("素材已上传至盈量素材库");

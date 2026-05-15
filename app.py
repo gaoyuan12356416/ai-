@@ -31969,6 +31969,7 @@ AD_MATERIAL_ASSET_STATUS_LABELS = {
     "pending_review": "待审核",
     "approved": "已通过",
     "rejected": "已驳回",
+    "abandoned": "已废弃",
     "regenerating": "重新生成中",
     "uploaded": "已上报",
     "upload_failed": "上报失败",
@@ -33991,6 +33992,8 @@ def review_ad_material_asset(task_id, asset_id, payload, session):
         if not reason:
             raise StructuredApiError("reason_required", "驳回原因必填")
         status = "regenerating"
+    elif result == "abandoned":
+        status = "abandoned"
     else:
         raise StructuredApiError("invalid_review_result", "审核结果无效")
     with JOB_DB_LOCK:
@@ -34097,11 +34100,14 @@ def complete_ad_material_upload(task_id, session):
     assets = fetch_ad_material_assets(task_id)
     if not assets:
         raise StructuredApiError("no_assets", "没有可上报素材")
-    not_ready = [item for item in assets if item.get("status") not in ("approved", "uploaded")]
+    not_ready = [item for item in assets if item.get("status") not in ("approved", "uploaded", "abandoned")]
     if not_ready:
-        raise StructuredApiError("asset_not_approved", "所有素材审核通过后才能上报")
+        raise StructuredApiError("asset_not_approved", "所有待上传素材审核通过后才能上报")
+    uploadable_assets = [item for item in assets if item.get("status") in ("approved", "uploaded")]
+    if not uploadable_assets:
+        raise StructuredApiError("no_uploadable_assets", "没有可上传至素材库的素材")
     errors = []
-    for asset in assets:
+    for asset in uploadable_assets:
         if asset.get("status") == "uploaded" and asset.get("source_api_id"):
             continue
         try:
