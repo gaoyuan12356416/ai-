@@ -32944,10 +32944,12 @@ def ad_material_pdf_filename(task):
 
 def ad_material_markdown_plain(text):
     import html as html_lib
-    text = re.sub(r"<img[^>]*>", " [image] ", str(text or ""), flags=re.I)
+    text = re.sub(r"<img[^>]*>", " ", str(text or ""), flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 \2", text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"https?://\S+\.(?:png|jpe?g|webp|gif)(?:\?\S*)?", " ", text, flags=re.I)
+    text = re.sub(r"https?://play-lh\.googleusercontent\.com/\S+", " ", text, flags=re.I)
     text = re.sub(r"`([^`]+)`", r"\1", text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     return html_lib.unescape(re.sub(r"\s+", " ", text).strip())
@@ -33138,31 +33140,113 @@ def render_ad_material_demand_pdf_pillow(task, demand_text, artifacts=None):
             logging.exception("failed to draw pdf image: %s", url)
             return False
 
+    def wrap_text_lines(text, fnt, max_width, max_lines=None):
+        text = ad_material_markdown_plain(text)
+        if not text:
+            return []
+        lines = []
+        current = ""
+        for char in text:
+            candidate = current + char
+            if current and text_width(candidate, fnt) > max_width:
+                lines.append(current)
+                current = char
+                if max_lines and len(lines) >= max_lines:
+                    break
+            else:
+                current = candidate
+        if current and (not max_lines or len(lines) < max_lines):
+            lines.append(current)
+        if max_lines and len(lines) >= max_lines and len(ad_material_markdown_plain(text)) > len("".join(lines)):
+            lines[-1] = lines[-1].rstrip("，。；,. ") + "..."
+        return lines
+
+    def draw_text_cell(text, x, top, cell_width, cell_height, fnt, fill="#172033", padding=12):
+        lines = wrap_text_lines(text, fnt, cell_width - padding * 2, max(1, int((cell_height - padding * 2) / line_height(fnt, 4))))
+        cursor = top + padding
+        for text_line in lines:
+            draw.text((x + padding, cursor), text_line, font=fnt, fill=fill)
+            cursor += line_height(fnt, 4)
+
+    def markdown_cell_image_url(cell):
+        match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cell or "", flags=re.I)
+        if match:
+            return match.group(1)
+        match = re.search(r"!\[[^\]]*\]\((https?://[^)\s]+|/[^)\s]+)\)", cell or "", flags=re.I)
+        if match:
+            return match.group(1)
+        return ""
+
+    def draw_image_cell(url, x, top, cell_width, cell_height):
+        path = ad_material_download_pdf_image(url, temp_dir)
+        if not path:
+            draw_text_cell("暂无预览", x, top, cell_width, cell_height, fonts["small"], "#8A96A8")
+            return
+        try:
+            with PilImage.open(path) as raw:
+                raw = raw.convert("RGB")
+                raw.thumbnail((cell_width - 24, cell_height - 24))
+                paste_x = int(x + (cell_width - raw.width) / 2)
+                paste_y = int(top + (cell_height - raw.height) / 2)
+                image.paste(raw, (paste_x, paste_y))
+        except Exception:
+            logging.exception("failed to draw pdf table image: %s", url)
+            draw_text_cell("预览失败", x, top, cell_width, cell_height, fonts["small"], "#8A96A8")
+
     def draw_table(rows):
         nonlocal y
         if not rows:
             return
         data_rows = rows[1:] if len(rows) > 1 else rows
-        if any("img" in cell.lower() for row in data_rows for cell in row):
-            draw_wrapped("素材参考", fonts["h2"], "#174EA6")
+        if any(markdown_cell_image_url(cell) for row in data_rows for cell in row):
+            col_widths = [120, 185, 530, max_text_width - 120 - 185 - 530]
+            headers = rows[0] if rows and len(rows[0]) >= 4 else ["编号", "预览", "生图可参考点", "禁止照搬"]
+            header_h = 46
+            row_gap = 0
+
+            def draw_header():
+                nonlocal y
+                x = margin_x
+                draw.rectangle((margin_x, y, margin_x + max_text_width, y + header_h), fill="#F8FBFF", outline="#D8E2F0", width=1)
+                for idx, col_width in enumerate(col_widths):
+                    if idx:
+                        draw.line((x, y, x, y + header_h), fill="#D8E2F0", width=1)
+                    draw.text((x + 12, y + 13), ad_material_markdown_plain(headers[idx] if idx < len(headers) else ""), font=fonts["small"], fill="#102A56")
+                    x += col_width
+                y += header_h
+
+            ensure_space(header_h + 220)
+            draw_header()
             for row in data_rows[:24]:
-                ensure_space(260)
-                draw_rule()
-                ref = row[0] if row else ""
-                draw_wrapped(ref, fonts["h3"], "#172033")
-                image_url = ""
-                for cell in row:
-                    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cell, flags=re.I)
-                    if match:
-                        image_url = match.group(1)
-                        break
-                if image_url:
-                    draw_image_from_url(image_url)
-                for cell in row[2:4]:
-                    plain = ad_material_markdown_plain(cell)
-                    if plain:
-                        draw_wrapped(plain[:900], fonts["small"], "#44546A", indent=14)
-            draw_rule()
+                ref = row[0] if len(row) > 0 else ""
+                image_url = next((markdown_cell_image_url(cell) for cell in row if markdown_cell_image_url(cell)), "")
+                learn = row[2] if len(row) > 2 else ""
+                forbidden = row[3] if len(row) > 3 else ""
+                text_lines = max(
+                    len(wrap_text_lines(learn, fonts["small"], col_widths[2] - 24, 18)),
+                    len(wrap_text_lines(forbidden, fonts["small"], col_widths[3] - 24, 18)),
+                    6,
+                )
+                row_h = min(520, max(220, text_lines * line_height(fonts["small"], 4) + 28))
+                if y + row_h > height - margin_y:
+                    new_page()
+                    draw_header()
+                x = margin_x
+                draw.rectangle((margin_x, y, margin_x + max_text_width, y + row_h), fill="#FFFFFF", outline="#D8E2F0", width=1)
+                for idx, col_width in enumerate(col_widths):
+                    if idx:
+                        draw.line((x, y, x, y + row_h), fill="#D8E2F0", width=1)
+                    if idx == 0:
+                        draw_text_cell(ref, x, y, col_width, row_h, fonts["small"], "#172033")
+                    elif idx == 1:
+                        draw_image_cell(image_url, x, y, col_width, row_h)
+                    elif idx == 2:
+                        draw_text_cell(learn, x, y, col_width, row_h, fonts["small"], "#172033")
+                    else:
+                        draw_text_cell(forbidden, x, y, col_width, row_h, fonts["small"], "#172033")
+                    x += col_width
+                y += row_h + row_gap
+            y += 18
             return
         for row in rows[:18]:
             draw_wrapped(" | ".join(ad_material_markdown_plain(cell) for cell in row[:4]), fonts["small"], "#44546A")

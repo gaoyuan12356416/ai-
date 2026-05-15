@@ -16003,8 +16003,6 @@
     }
 
     function renderAdMaterialDemandReview(task) {
-      const demandMdUrl = task.demand_artifacts?.markdown_url || "";
-      const demandPdfUrl = task.demand_artifacts?.pdf_url || "";
       return `
         <div class="card">
           <div class="grid">
@@ -16018,8 +16016,6 @@
           <div class="actions-inline" style="justify-content:space-between;align-items:center;">
             <strong>需求预览</strong>
             <div class="actions-inline">
-              ${demandMdUrl ? `<a class="btn btn-secondary mini" href="${navText(demandMdUrl)}" target="_blank" rel="noopener noreferrer">打开 MD</a>` : ""}
-              ${demandPdfUrl ? `<a class="btn btn-secondary mini" href="${navText(demandPdfUrl)}" target="_blank" rel="noopener noreferrer">打开 PDF</a>` : ""}
               ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="exportAdMaterialDemandPdf('${task.task_id}')">导出PDF</button>` : ""}
             </div>
           </div>
