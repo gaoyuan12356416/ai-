@@ -4513,6 +4513,34 @@
 
     .required-mark { color: #e03131; font-weight: 800; margin-right: 4px; }
 
+    .size-plan {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(118px, 1fr));
+      gap: 10px;
+    }
+
+    .size-plan-item {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    .size-plan-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .size-plan-item input[type="number"] {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+    }
+
     .md-preview {
       margin-top: 12px;
       line-height: 1.72;
@@ -7567,6 +7595,8 @@
 
 
       .field, .field.wide, .field.half { grid-column: span 12; }
+
+      .size-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 
 
@@ -10794,9 +10824,9 @@
                   <div class="field">
                     <label><span class="required-mark">*</span>任务类型</label>
                     <select id="adMaterialTaskType" required>
-                      <option value="素材优化">素材优化</option>
-                      <option value="竞品借鉴">竞品借鉴</option>
-                      <option value="综合策划">综合策划</option>
+                      <option value="素材迭代——根据老素材效果优化">素材迭代——根据老素材效果优化</option>
+                      <option value="竞品借鉴——参考竞品优质素材">竞品借鉴——参考竞品优质素材</option>
+                      <option value="综合策划——综合内外素材出方案">综合策划——综合内外素材出方案</option>
                     </select>
                   </div>
                   <div class="field" id="adMaterialCompetitorField">
@@ -10808,10 +10838,6 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label><span class="required-mark">*</span>任务数量</label>
-                    <input id="adMaterialQuantity" type="number" min="1" max="20" value="1" required />
-                  </div>
-                  <div class="field">
                     <label><span class="required-mark">*</span>国家</label>
                     <input id="adMaterialCountry" list="adMaterialCountryList" placeholder="MX / US / BR" required />
                     <datalist id="adMaterialCountryList"></datalist>
@@ -10821,9 +10847,12 @@
                     <input id="adMaterialLanguage" list="adMaterialLanguageList" placeholder="es / en / pt" required />
                     <datalist id="adMaterialLanguageList"></datalist>
                   </div>
-                  <div class="field">
-                    <label>尺寸</label>
-                    <input id="adMaterialSize" placeholder="1080x1080 / 1200x1500" />
+                  <div class="field wide">
+                    <label><span class="required-mark">*</span>尺寸与数量</label>
+                    <input id="adMaterialQuantity" type="hidden" value="1" />
+                    <input id="adMaterialSize" type="hidden" value="1:1 x 1" />
+                    <div id="adMaterialSizePlan" class="size-plan"></div>
+                    <div id="adMaterialSizePlanSummary" class="hint">默认 1:1 x 1，总计 1 张</div>
                   </div>
                   <div class="field">
                     <label>标签 tag_name</label>
@@ -13611,6 +13640,8 @@
       adMaterialCountry: document.getElementById("adMaterialCountry"),
       adMaterialLanguage: document.getElementById("adMaterialLanguage"),
       adMaterialSize: document.getElementById("adMaterialSize"),
+      adMaterialSizePlan: document.getElementById("adMaterialSizePlan"),
+      adMaterialSizePlanSummary: document.getElementById("adMaterialSizePlanSummary"),
       adMaterialTagName: document.getElementById("adMaterialTagName"),
       adMaterialCategory: document.getElementById("adMaterialCategory"),
       adMaterialTitle: document.getElementById("adMaterialTitle"),
@@ -15502,6 +15533,41 @@
       "ug", "uk", "ur", "uz", "ve", "vi", "vo", "wa", "wo", "xh", "yi", "yo", "za", "zh", "zu",
       "zh-Hans", "zh-Hant", "pt-BR", "pt-PT", "es-419"
     ];
+    const AD_MATERIAL_TASK_TYPE_ITERATION = "素材迭代——根据老素材效果优化";
+    const AD_MATERIAL_TASK_TYPE_COMPETITOR = "竞品借鉴——参考竞品优质素材";
+    const AD_MATERIAL_TASK_TYPE_PLANNING = "综合策划——综合内外素材出方案";
+    const AD_MATERIAL_TASK_TYPE_ALIASES = {
+      "素材优化": AD_MATERIAL_TASK_TYPE_ITERATION,
+      "素材迭代": AD_MATERIAL_TASK_TYPE_ITERATION,
+      "竞品借鉴": AD_MATERIAL_TASK_TYPE_COMPETITOR,
+      "综合策划": AD_MATERIAL_TASK_TYPE_PLANNING,
+    };
+    const AD_MATERIAL_SIZE_OPTIONS = [
+      { value: "1:1", label: "1:1", dimensions: "1080x1080" },
+      { value: "4:5", label: "4:5", dimensions: "1080x1350" },
+      { value: "9:16", label: "9:16", dimensions: "1080x1920" },
+      { value: "1.91:1", label: "1.91:1", dimensions: "1200x628" },
+      { value: "16:9", label: "16:9", dimensions: "1920x1080" },
+    ];
+
+    function normalizeAdMaterialTaskType(value) {
+      const text = String(value || "").trim();
+      if ([AD_MATERIAL_TASK_TYPE_ITERATION, AD_MATERIAL_TASK_TYPE_COMPETITOR, AD_MATERIAL_TASK_TYPE_PLANNING].includes(text)) return text;
+      const prefix = text.split(/[—-]/)[0]?.trim();
+      return AD_MATERIAL_TASK_TYPE_ALIASES[text] || AD_MATERIAL_TASK_TYPE_ALIASES[prefix] || text;
+    }
+
+    function adMaterialTaskTypeKind(value) {
+      const type = normalizeAdMaterialTaskType(value);
+      if (type === AD_MATERIAL_TASK_TYPE_ITERATION) return "iteration";
+      if (type === AD_MATERIAL_TASK_TYPE_COMPETITOR) return "competitor";
+      if (type === AD_MATERIAL_TASK_TYPE_PLANNING) return "planning";
+      return "";
+    }
+
+    function adMaterialTaskTypeText(value) {
+      return normalizeAdMaterialTaskType(value) || "";
+    }
 
     function fillAdMaterialDatalists() {
       if (els.adMaterialCountryList) {
@@ -15547,13 +15613,108 @@
     }
 
     function updateAdMaterialCompetitorVisibility() {
-      const type = els.adMaterialTaskType?.value || "素材优化";
-      if (els.adMaterialCompetitorField) {
-        els.adMaterialCompetitorField.style.display = type === "素材优化" ? "none" : "";
+      const type = normalizeAdMaterialTaskType(els.adMaterialTaskType?.value || AD_MATERIAL_TASK_TYPE_ITERATION);
+      if (els.adMaterialTaskType && els.adMaterialTaskType.value !== type) {
+        els.adMaterialTaskType.value = type;
       }
-      if (type !== "素材优化") {
+      if (els.adMaterialCompetitorField) {
+        els.adMaterialCompetitorField.style.display = adMaterialTaskTypeKind(type) === "iteration" ? "none" : "";
+      }
+      if (adMaterialTaskTypeKind(type) !== "iteration") {
         renderAdMaterialCompetitorSources();
       }
+    }
+
+    function normalizeAdMaterialSizePlan(plan, fallbackQuantity = 1, fallbackSize = "1:1") {
+      const counts = Object.fromEntries(AD_MATERIAL_SIZE_OPTIONS.map(item => [item.value, 0]));
+      const applyItem = item => {
+        if (!item) return;
+        const size = String(item.size || item.value || "").trim();
+        const option = AD_MATERIAL_SIZE_OPTIONS.find(entry => entry.value === size || entry.dimensions === size);
+        if (!option) return;
+        const count = Number(item.count || item.quantity || 0);
+        if (Number.isFinite(count) && count > 0) counts[option.value] += Math.floor(count);
+      };
+      if (Array.isArray(plan)) {
+        plan.forEach(applyItem);
+      }
+      const result = AD_MATERIAL_SIZE_OPTIONS
+        .map(item => ({ size: item.value, count: counts[item.value] }))
+        .filter(item => item.count > 0);
+      if (result.length) return result;
+      const option = AD_MATERIAL_SIZE_OPTIONS.find(item => item.value === fallbackSize || item.dimensions === fallbackSize) || AD_MATERIAL_SIZE_OPTIONS[0];
+      return [{ size: option.value, count: Math.max(1, Math.min(20, Number(fallbackQuantity) || 1)) }];
+    }
+
+    function parseAdMaterialSizePlanText(text, fallbackQuantity = 1) {
+      const value = String(text || "").trim();
+      if (!value) return normalizeAdMaterialSizePlan([], fallbackQuantity, "1:1");
+      const plan = [];
+      value.split(/[,，;；\n]+/).forEach(part => {
+        const itemText = part.trim();
+        if (!itemText) return;
+        const option = AD_MATERIAL_SIZE_OPTIONS.find(entry => itemText.includes(entry.value) || itemText.toLowerCase().includes(entry.dimensions.toLowerCase()));
+        if (!option) return;
+        const countMatch = itemText.match(/(?:x|×|\*)\s*(\d+)|(\d+)\s*(?:张|条|个)/i);
+        const count = countMatch ? Number(countMatch[1] || countMatch[2]) : (value.split(/[,，;；\n]+/).length === 1 ? Number(fallbackQuantity || 1) : 1);
+        plan.push({ size: option.value, count });
+      });
+      return normalizeAdMaterialSizePlan(plan, fallbackQuantity, "1:1");
+    }
+
+    function formatAdMaterialSizePlan(plan) {
+      return normalizeAdMaterialSizePlan(plan).map(item => `${item.size} x ${item.count}`).join(", ");
+    }
+
+    function updateAdMaterialSizePlanHidden(plan) {
+      const normalized = normalizeAdMaterialSizePlan(plan);
+      const total = normalized.reduce((sum, item) => sum + item.count, 0);
+      if (els.adMaterialSize) els.adMaterialSize.value = formatAdMaterialSizePlan(normalized);
+      if (els.adMaterialQuantity) els.adMaterialQuantity.value = String(total);
+      if (els.adMaterialSizePlanSummary) {
+        els.adMaterialSizePlanSummary.textContent = `${formatAdMaterialSizePlan(normalized)}，总计 ${total} 张`;
+      }
+      return normalized;
+    }
+
+    function renderAdMaterialSizePlan(plan = [{ size: "1:1", count: 1 }]) {
+      if (!els.adMaterialSizePlan) return updateAdMaterialSizePlanHidden(plan);
+      const normalized = normalizeAdMaterialSizePlan(plan);
+      const countBySize = Object.fromEntries(normalized.map(item => [item.size, item.count]));
+      els.adMaterialSizePlan.innerHTML = AD_MATERIAL_SIZE_OPTIONS.map(item => {
+        const checked = countBySize[item.value] > 0;
+        const count = checked ? countBySize[item.value] : 1;
+        return `<div class="size-plan-item" data-size="${navText(item.value)}">
+          <label class="size-plan-head">
+            <input type="checkbox" data-size-check="${navText(item.value)}" ${checked ? "checked" : ""} />
+            <span>${navText(item.label)}</span>
+          </label>
+          <input type="number" min="1" max="20" value="${count}" data-size-count="${navText(item.value)}" ${checked ? "" : "disabled"} />
+          <div class="hint">${navText(item.dimensions)}</div>
+        </div>`;
+      }).join("");
+      return updateAdMaterialSizePlanHidden(normalized);
+    }
+
+    function collectAdMaterialSizePlan(throwIfInvalid = false) {
+      const plan = [];
+      if (els.adMaterialSizePlan) {
+        AD_MATERIAL_SIZE_OPTIONS.forEach(item => {
+          const checked = els.adMaterialSizePlan.querySelector(`[data-size-check="${item.value}"]`);
+          const countInput = els.adMaterialSizePlan.querySelector(`[data-size-count="${item.value}"]`);
+          if (countInput) countInput.disabled = !checked?.checked;
+          if (checked?.checked) {
+            plan.push({ size: item.value, count: Number(countInput?.value || 0) });
+          }
+        });
+      }
+      const normalized = normalizeAdMaterialSizePlan(plan);
+      const total = normalized.reduce((sum, item) => sum + item.count, 0);
+      if ((total < 1 || total > 20) && throwIfInvalid) {
+        throw new Error("尺寸与数量总计必须为 1 到 20 张");
+      }
+      updateAdMaterialSizePlanHidden(normalized);
+      return normalized;
     }
 
     function fileToDataUrl(file) {
@@ -15603,6 +15764,52 @@
       return state.adMaterialProducts.find(item => adMaterialProductId(item) === String(appId || "").trim());
     }
 
+    function normalizeProductCountry(value) {
+      const text = String(value || "").trim();
+      const match = text.match(/[A-Za-z]{2}/);
+      return match ? match[0].toUpperCase() : "";
+    }
+
+    function normalizeProductLanguage(value) {
+      const text = String(value || "").trim();
+      if (!text) return "";
+      const match = text.match(/[A-Za-z]{2,3}(?:[-_][A-Za-z]{2})?/);
+      return match ? match[0].split(/[-_]/)[0].toLowerCase() : "";
+    }
+
+    function inferAdMaterialProductLocale(product) {
+      product = product || {};
+      let country = product.country || product.market || product.geo || "";
+      let language = product.language || product.lang || "";
+      const rawUrl = product.store_url || product.url || product.website_url || "";
+      if (rawUrl) {
+        try {
+          const url = new URL(rawUrl, window.location.origin);
+          country = country || url.searchParams.get("gl") || url.searchParams.get("country") || "";
+          language = language || url.searchParams.get("hl") || url.searchParams.get("lang") || "";
+        } catch (error) {
+          const countryMatch = String(rawUrl).match(/[?&](?:gl|country)=([A-Za-z]{2})/i);
+          const langMatch = String(rawUrl).match(/[?&](?:hl|lang)=([A-Za-z]{2,3}(?:[-_][A-Za-z]{2})?)/i);
+          country = country || countryMatch?.[1] || "";
+          language = language || langMatch?.[1] || "";
+        }
+      }
+      return {
+        country: normalizeProductCountry(country),
+        language: normalizeProductLanguage(language),
+      };
+    }
+
+    function applyAdMaterialProductLocale(product, force = true) {
+      const locale = inferAdMaterialProductLocale(product);
+      if (locale.country && (force || !String(els.adMaterialCountry?.value || "").trim())) {
+        els.adMaterialCountry.value = locale.country;
+      }
+      if (locale.language && (force || !String(els.adMaterialLanguage?.value || "").trim())) {
+        els.adMaterialLanguage.value = locale.language;
+      }
+    }
+
     function matchedAdMaterialProducts(query) {
       return state.adMaterialProducts.filter(item => adMaterialProductMatchesQuery(item, query));
     }
@@ -15613,13 +15820,16 @@
       state.adMaterialProductActiveIndex = -1;
     }
 
-    function setAdMaterialProductValue(appId, fallbackName) {
+    function setAdMaterialProductValue(appId, fallbackName, applyLocale = false) {
       const product = findAdMaterialProduct(appId);
       const label = product ? adMaterialProductLabel(product) : String(fallbackName || appId || "").trim();
       if (els.adMaterialAppId) els.adMaterialAppId.value = String(appId || "").trim();
       if (els.adMaterialProductSearch) els.adMaterialProductSearch.value = label;
       if (els.adMaterialProductHint) {
         els.adMaterialProductHint.textContent = label ? `已选择：${label}` : "输入关键词后选择产品";
+      }
+      if (product && applyLocale) {
+        applyAdMaterialProductLocale(product, true);
       }
     }
 
@@ -15662,7 +15872,7 @@
     function selectAdMaterialProductByIndex(index) {
       const product = state.adMaterialProductMatches[index];
       if (!product) return;
-      setAdMaterialProductValue(adMaterialProductId(product), adMaterialProductName(product));
+      setAdMaterialProductValue(adMaterialProductId(product), adMaterialProductName(product), true);
       hideAdMaterialProductOptions();
     }
 
@@ -15714,12 +15924,12 @@
         return [productId, productName, label].some(value => value.toLowerCase() === query.toLowerCase());
       });
       if (exact) {
-        setAdMaterialProductValue(adMaterialProductId(exact), adMaterialProductName(exact));
+        setAdMaterialProductValue(adMaterialProductId(exact), adMaterialProductName(exact), true);
         return exact;
       }
       const matches = matchedAdMaterialProducts(query);
       if (matches.length === 1) {
-        setAdMaterialProductValue(adMaterialProductId(matches[0]), adMaterialProductName(matches[0]));
+        setAdMaterialProductValue(adMaterialProductId(matches[0]), adMaterialProductName(matches[0]), true);
         return matches[0];
       }
       return null;
@@ -15787,7 +15997,7 @@
       return `
         <tr>
           <td><code>${navText((task.task_id || "").slice(0, 8))}</code></td>
-          <td>${navText(task.task_type || "")}</td>
+          <td>${navText(adMaterialTaskTypeText(task.task_type))}</td>
           <td>${navText(task.product_name || task.app_id || "")}</td>
           <td>${task.quantity || 0}</td>
           <td>${navText(task.country || "")}/${navText(task.language || "")}</td>
@@ -15831,21 +16041,24 @@
     function adMaterialPayloadBase() {
       const product = ensureAdMaterialProductSelected();
       if (!product) throw new Error("请先搜索并选择产品");
-      if (els.adMaterialTaskType.value !== "素材优化" && !els.adMaterialCompetitorSource.value) {
-        throw new Error("当前没有可用竞品源，请先恢复竞品接口或改用素材优化");
+      const taskType = normalizeAdMaterialTaskType(els.adMaterialTaskType.value);
+      if (adMaterialTaskTypeKind(taskType) !== "iteration" && !els.adMaterialCompetitorSource.value) {
+        throw new Error("当前没有可用竞品源，请先恢复竞品接口或改用素材迭代");
       }
+      const sizePlan = collectAdMaterialSizePlan(true);
       return {
         app_id: els.adMaterialAppId.value,
         product_name: product.name || product.product_name || "",
         store_url: product.store_url || "",
         package_name: product.package_name || product.package || "",
         product_icon_url: "",
-        task_type: els.adMaterialTaskType.value,
+        task_type: taskType,
         competitor_source: els.adMaterialCompetitorSource.value,
-        quantity: Number(els.adMaterialQuantity.value || 0),
+        quantity: sizePlan.reduce((sum, item) => sum + item.count, 0),
+        size_plan: sizePlan,
         country: (els.adMaterialCountry.value || "").trim(),
         language: (els.adMaterialLanguage.value || "").trim(),
-        size: (els.adMaterialSize.value || "").trim(),
+        size: formatAdMaterialSizePlan(sizePlan),
         tag_name: (els.adMaterialTagName.value || "").trim(),
         category: (els.adMaterialCategory.value || "").trim(),
         title: (els.adMaterialTitle.value || "").trim(),
@@ -15876,7 +16089,8 @@
       state.editingAdMaterialTaskId = "";
       els.adMaterialForm?.reset();
       clearAdMaterialProductValue();
-      if (els.adMaterialQuantity) els.adMaterialQuantity.value = "1";
+      if (els.adMaterialTaskType) els.adMaterialTaskType.value = AD_MATERIAL_TASK_TYPE_ITERATION;
+      renderAdMaterialSizePlan([{ size: "1:1", count: 1 }]);
       if (els.adMaterialModalTitle) els.adMaterialModalTitle.textContent = "创建任务";
       if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = "确认创建";
       updateAdMaterialCompetitorVisibility();
@@ -15900,13 +16114,12 @@
       }
       const task = await api(`/api/ad-material/tasks/${taskId}`);
       state.editingAdMaterialTaskId = task.task_id;
-      setAdMaterialProductValue(task.app_id || "", task.product_name || "");
-      els.adMaterialTaskType.value = task.task_type || "素材优化";
+      setAdMaterialProductValue(task.app_id || "", task.product_name || "", false);
+      els.adMaterialTaskType.value = normalizeAdMaterialTaskType(task.task_type || AD_MATERIAL_TASK_TYPE_ITERATION);
       renderAdMaterialCompetitorSources(task.competitor_source || "有米云");
-      els.adMaterialQuantity.value = task.quantity || 1;
+      renderAdMaterialSizePlan(task.size_plan || parseAdMaterialSizePlanText(task.size || "", task.quantity || 1));
       els.adMaterialCountry.value = task.country || "";
       els.adMaterialLanguage.value = task.language || "";
-      els.adMaterialSize.value = task.size || "";
       els.adMaterialTagName.value = task.tag_name || "";
       els.adMaterialCategory.value = task.category || "";
       els.adMaterialTitle.value = task.title || "";
@@ -15927,11 +16140,11 @@
             <div><strong>任务ID</strong><div><code>${navText(task.task_id || "")}</code></div></div>
             <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
             <div><strong>产品ID</strong><div>${navText(task.app_id || "")}</div></div>
-            <div><strong>类型</strong><div>${navText(task.task_type || "")}</div></div>
+            <div><strong>类型</strong><div>${navText(adMaterialTaskTypeText(task.task_type))}</div></div>
             <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
             <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
             <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
-            <div><strong>尺寸</strong><div>${navText(task.size || "未填写")}</div></div>
+            <div><strong>尺寸</strong><div>${navText(task.size_plan_summary || task.size || "未填写")}</div></div>
             <div><strong>竞品源</strong><div>${navText(task.competitor_source || "不使用")}</div></div>
           </div>
           ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架任务</button></div>` : ""}
@@ -21942,6 +22155,10 @@ function buildJobRow(job) {
       if (els.adMaterialTaskType) {
         els.adMaterialTaskType.addEventListener("change", updateAdMaterialCompetitorVisibility);
       }
+      if (els.adMaterialSizePlan) {
+        els.adMaterialSizePlan.addEventListener("change", () => collectAdMaterialSizePlan(false));
+        els.adMaterialSizePlan.addEventListener("input", () => collectAdMaterialSizePlan(false));
+      }
       if (els.adMaterialResetBtn) {
         els.adMaterialResetBtn.onclick = resetAdMaterialForm;
       }
@@ -23468,6 +23685,7 @@ function buildJobRow(job) {
 
       bindEvents();
       fillAdMaterialDatalists();
+      renderAdMaterialSizePlan([{ size: "1:1", count: 1 }]);
       updateAdMaterialCompetitorVisibility();
 
 

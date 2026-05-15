@@ -31951,7 +31951,28 @@ def parse_screenshot_job_route(path):
 
 
 
-AD_MATERIAL_TASK_TYPES = ("素材优化", "竞品借鉴", "综合策划")
+AD_MATERIAL_TASK_TYPE_ITERATION = "素材迭代——根据老素材效果优化"
+AD_MATERIAL_TASK_TYPE_COMPETITOR = "竞品借鉴——参考竞品优质素材"
+AD_MATERIAL_TASK_TYPE_PLANNING = "综合策划——综合内外素材出方案"
+AD_MATERIAL_TASK_TYPES = (
+    AD_MATERIAL_TASK_TYPE_ITERATION,
+    AD_MATERIAL_TASK_TYPE_COMPETITOR,
+    AD_MATERIAL_TASK_TYPE_PLANNING,
+)
+AD_MATERIAL_TASK_TYPE_ALIASES = {
+    "素材优化": AD_MATERIAL_TASK_TYPE_ITERATION,
+    "素材迭代": AD_MATERIAL_TASK_TYPE_ITERATION,
+    "竞品借鉴": AD_MATERIAL_TASK_TYPE_COMPETITOR,
+    "综合策划": AD_MATERIAL_TASK_TYPE_PLANNING,
+}
+AD_MATERIAL_SIZE_OPTIONS = ("1:1", "4:5", "9:16", "1.91:1", "16:9")
+AD_MATERIAL_SIZE_DIMENSIONS = {
+    "1:1": "1080x1080",
+    "4:5": "1080x1350",
+    "9:16": "1080x1920",
+    "1.91:1": "1200x628",
+    "16:9": "1920x1080",
+}
 AD_MATERIAL_COMPETITOR_SOURCES = ("有米云", "metapi", "广大大")
 AD_MATERIAL_STATUS_LABELS = {
     "draft": "待发布",
@@ -32090,9 +32111,141 @@ def normalize_ad_material_status(status):
 
 def normalize_ad_material_task_type(value):
     value = str(value or "").strip()
+    if value in AD_MATERIAL_TASK_TYPES:
+        return value
+    if value in AD_MATERIAL_TASK_TYPE_ALIASES:
+        return AD_MATERIAL_TASK_TYPE_ALIASES[value]
+    prefix = re.split(r"[—-]", value, 1)[0].strip()
+    if prefix in AD_MATERIAL_TASK_TYPE_ALIASES:
+        return AD_MATERIAL_TASK_TYPE_ALIASES[prefix]
     if value not in AD_MATERIAL_TASK_TYPES:
         raise StructuredApiError("invalid_task_type", "任务类型无效")
     return value
+
+
+def ad_material_task_kind(value):
+    try:
+        task_type = normalize_ad_material_task_type(value)
+    except Exception:
+        task_type = str(value or "").strip()
+    if task_type == AD_MATERIAL_TASK_TYPE_ITERATION:
+        return "iteration"
+    if task_type == AD_MATERIAL_TASK_TYPE_COMPETITOR:
+        return "competitor"
+    if task_type == AD_MATERIAL_TASK_TYPE_PLANNING:
+        return "planning"
+    return ""
+
+
+def normalize_ad_material_size_label(value):
+    text = str(value or "").strip().lower().replace(" ", "")
+    text = text.replace("：", ":").replace("×", "x").replace("*", "x")
+    dimension_map = {
+        "1080x1080": "1:1",
+        "1200x1200": "1:1",
+        "1080x1350": "4:5",
+        "1200x1500": "4:5",
+        "1080x1920": "9:16",
+        "1200x628": "1.91:1",
+        "1200x630": "1.91:1",
+        "1920x1080": "16:9",
+        "1280x720": "16:9",
+    }
+    if text in dimension_map:
+        return dimension_map[text]
+    for option in AD_MATERIAL_SIZE_OPTIONS:
+        if text == option.lower():
+            return option
+    raise StructuredApiError("invalid_size", "尺寸仅支持：%s" % " / ".join(AD_MATERIAL_SIZE_OPTIONS))
+
+
+def parse_ad_material_size_plan_text(value, fallback_quantity=1):
+    text = str(value or "").strip()
+    fallback_quantity = max(1, int(fallback_quantity or 1))
+    if not text:
+        return [{"size": "1:1", "count": fallback_quantity}]
+    parts = [part.strip() for part in re.split(r"[,，;；\n]+", text) if part.strip()]
+    plan = []
+    for part in parts:
+        size = ""
+        for option in sorted(AD_MATERIAL_SIZE_OPTIONS, key=len, reverse=True):
+            if option.lower() in part.lower().replace("：", ":"):
+                size = option
+                break
+        if not size:
+            try:
+                size = normalize_ad_material_size_label(part)
+            except Exception:
+                continue
+        count = 1
+        count_match = re.search(r"(?:x|×|\*)\s*(\d+)|(\d+)\s*(?:张|条|个)", part, flags=re.I)
+        if count_match:
+            count = int(next(group for group in count_match.groups() if group))
+        elif len(parts) == 1:
+            count = fallback_quantity
+        if count > 0:
+            plan.append({"size": size, "count": count})
+    if not plan:
+        return [{"size": "1:1", "count": fallback_quantity}]
+    return merge_ad_material_size_plan(plan)
+
+
+def merge_ad_material_size_plan(plan):
+    counts = {size: 0 for size in AD_MATERIAL_SIZE_OPTIONS}
+    for item in plan or []:
+        size = normalize_ad_material_size_label(item.get("size") if isinstance(item, dict) else item)
+        count = int((item.get("count") if isinstance(item, dict) else 1) or 0)
+        if count > 0:
+            counts[size] += count
+    return [{"size": size, "count": counts[size]} for size in AD_MATERIAL_SIZE_OPTIONS if counts[size] > 0]
+
+
+def normalize_ad_material_size_plan(payload, existing=None):
+    payload = payload or {}
+    fallback_quantity = int(payload.get("quantity", existing.get("quantity") if existing else 1) or 1)
+    raw_plan = payload.get("size_plan")
+    if isinstance(raw_plan, list):
+        plan = merge_ad_material_size_plan(raw_plan)
+    elif raw_plan:
+        plan = parse_ad_material_size_plan_text(raw_plan, fallback_quantity)
+    else:
+        plan = parse_ad_material_size_plan_text(
+            payload.get("size", existing.get("size") if existing else ""),
+            fallback_quantity,
+        )
+    total = sum(int(item["count"]) for item in plan)
+    if total < 1 or total > 20:
+        raise StructuredApiError("invalid_quantity", "任务数量必须为1到20")
+    return plan
+
+
+def format_ad_material_size_plan(plan):
+    normalized = merge_ad_material_size_plan(plan)
+    return ", ".join("%s x %s" % (item["size"], item["count"]) for item in normalized)
+
+
+def ad_material_size_plan_from_task(task):
+    raw_plan = task.get("size_plan") if isinstance(task, dict) else None
+    if isinstance(raw_plan, list) and raw_plan:
+        try:
+            return merge_ad_material_size_plan(raw_plan)
+        except Exception:
+            pass
+    return parse_ad_material_size_plan_text(task.get("size"), task.get("quantity") or 1)
+
+
+def ad_material_asset_size(task, index):
+    current = 0
+    for item in ad_material_size_plan_from_task(task):
+        current += int(item["count"])
+        if int(index or 1) <= current:
+            return item["size"]
+    plan = ad_material_size_plan_from_task(task)
+    return plan[-1]["size"] if plan else "1:1"
+
+
+def ad_material_asset_output_size(task, index):
+    return AD_MATERIAL_SIZE_DIMENSIONS.get(ad_material_asset_size(task, index), "1080x1080")
 
 
 def list_ad_material_competitor_sources(include_disabled=False):
@@ -32142,7 +32295,7 @@ def active_ad_material_competitor_sources():
 
 def normalize_competitor_source(task_type, value):
     value = str(value or "").strip()
-    if task_type == "素材优化":
+    if ad_material_task_kind(task_type) == "iteration":
         return ""
     active_sources = active_ad_material_competitor_sources()
     if not active_sources:
@@ -32261,6 +32414,8 @@ def ad_material_product_select_exprs(columns):
         "store_url": product_optional_expr(columns, ["store_url", "ios_store_url", "website_url", "origin_websit_url", "click_url"]),
         "package_name": product_optional_expr(columns, ["package", "package_name", "ios_package_name", "package_ios", "google_app_android", "app_id"]),
         "product_icon_url": product_optional_expr(columns, ["icon_url", "profile_image", "profile_image_ios"]),
+        "country": product_optional_expr(columns, ["country", "countries", "market", "region", "geo"]),
+        "language": product_optional_expr(columns, ["language", "lang", "language_code", "locale"]),
     }
 
 
@@ -32347,12 +32502,14 @@ def lookup_ad_material_product_metadata(app_id):
             return {}
         exprs = ad_material_product_select_exprs(columns)
         rows = run_mysql(
-            "SELECT CAST(a.id AS CHAR), a.name, %s, %s, %s "
+            "SELECT CAST(a.id AS CHAR), a.name, %s, %s, %s, %s, %s "
             "FROM `%s`.ads_apps_setting a WHERE CAST(a.id AS CHAR) = '%s' LIMIT 1"
             % (
                 exprs["store_url"],
                 exprs["package_name"],
                 exprs["product_icon_url"],
+                exprs["country"],
+                exprs["language"],
                 database.replace("`", "``"),
                 mysql_escape_literal(app_id),
             )
@@ -32366,6 +32523,8 @@ def lookup_ad_material_product_metadata(app_id):
             "store_url": str(row[2] if len(row) > 2 else "").strip(),
             "package_name": str(row[3] if len(row) > 3 else "").strip(),
             "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
+            "country": str(row[5] if len(row) > 5 else "").strip(),
+            "language": str(row[6] if len(row) > 6 else "").strip(),
         }
     except Exception:
         logging.exception("failed to lookup ad material product metadata: %s", app_id)
@@ -32406,12 +32565,14 @@ def list_ad_material_products(session=None):
                 limit_clause = ""
                 exprs = ad_material_product_select_exprs(columns)
                 rows = run_mysql(
-                    "SELECT DISTINCT CAST(a.id AS CHAR), a.name, %s, %s, %s "
+                    "SELECT DISTINCT CAST(a.id AS CHAR), a.name, %s, %s, %s, %s, %s "
                     "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC%s"
                     % (
                         exprs["store_url"],
                         exprs["package_name"],
                         exprs["product_icon_url"],
+                        exprs["country"],
+                        exprs["language"],
                         database.replace("`", "``"),
                         where,
                         limit_clause,
@@ -32427,8 +32588,8 @@ def list_ad_material_products(session=None):
                             "id": app_id,
                             "product_name": product_name,
                             "name": product_name,
-                            "country": "",
-                            "language": "",
+                            "country": str(row[5] if len(row) > 5 else "").strip(),
+                            "language": str(row[6] if len(row) > 6 else "").strip(),
                             "store_url": str(row[2] if len(row) > 2 else "").strip(),
                             "package_name": str(row[3] if len(row) > 3 else "").strip(),
                             "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
@@ -32504,6 +32665,9 @@ def ad_material_task_from_row(row):
     item["demand_artifacts"] = parse_json_text(item.pop("demand_artifacts_json", "{}"), {})
     item["status_label"] = AD_MATERIAL_STATUS_LABELS.get(item.get("status"), item.get("status", ""))
     item["quantity"] = int(item.get("quantity") or 0)
+    item["task_type"] = normalize_ad_material_task_type(item.get("task_type"))
+    item["size_plan"] = ad_material_size_plan_from_task(item)
+    item["size_plan_summary"] = format_ad_material_size_plan(item["size_plan"])
     item["assets"] = fetch_ad_material_assets(item["task_id"])
     return item
 
@@ -32551,9 +32715,8 @@ def ensure_ad_material_access(session, task):
 def validate_ad_material_payload(payload, existing=None):
     payload = payload or {}
     task_type = normalize_ad_material_task_type(payload.get("task_type", existing.get("task_type") if existing else ""))
-    quantity = int(payload.get("quantity", existing.get("quantity") if existing else 0) or 0)
-    if quantity < 1 or quantity > 20:
-        raise StructuredApiError("invalid_quantity", "任务数量必须为1到20")
+    size_plan = normalize_ad_material_size_plan(payload, existing)
+    quantity = sum(int(item["count"]) for item in size_plan)
     app_id = str(payload.get("app_id", existing.get("app_id") if existing else "") or "").strip()
     country = str(payload.get("country", existing.get("country") if existing else "") or "").strip().upper()
     language = str(payload.get("language", existing.get("language") if existing else "") or "").strip().lower()
@@ -32570,7 +32733,8 @@ def validate_ad_material_payload(payload, existing=None):
         "product_name": str(payload.get("product_name", existing.get("product_name") if existing else "") or "").strip(),
         "country": country,
         "language": language,
-        "size": str(payload.get("size", existing.get("size") if existing else "") or "").strip(),
+        "size": format_ad_material_size_plan(size_plan),
+        "size_plan": size_plan,
         "tag_name": str(payload.get("tag_name", existing.get("tag_name") if existing else "") or "").strip(),
         "category": str(payload.get("category", existing.get("category") if existing else "") or "").strip(),
         "title": str(payload.get("title", existing.get("title") if existing else "") or "").strip(),
@@ -32814,8 +32978,10 @@ def fallback_ad_material_demand(task, reason=""):
 
 
 def _ad_material_size(task):
-    size = str(task.get("size") or "").strip()
-    return size or "按最终投放版位约束；默认优先 1080x1080 静态图"
+    size = str(task.get("size_plan_summary") or "").strip()
+    if not size:
+        size = format_ad_material_size_plan(ad_material_size_plan_from_task(task))
+    return size or "按最终投放版位约束；默认优先 1:1 静态图"
 
 
 def _ad_material_reference_names(task):
@@ -32842,9 +33008,8 @@ def _ad_material_reference_items(task):
 
 
 def _ad_material_source_note(task):
-    task_type = str(task.get("task_type") or "").strip()
     source = str(task.get("competitor_source") or "").strip()
-    if task_type == "素材优化":
+    if ad_material_task_kind(task.get("task_type")) == "iteration":
         return "本任务以需求人上传的参考素材和产品自身信息为主，不强制拉取竞品素材。"
     return "本任务需要通过 %s 拉取并筛选 image-only 竞品素材，最终需求应优先继承通过审核的竞品参考风格。" % (source or "已配置竞品源")
 
@@ -32853,10 +33018,10 @@ def _ad_material_direction(task):
     description = str(task.get("description") or "").strip()
     if description:
         return description
-    task_type = str(task.get("task_type") or "").strip()
-    if task_type == "素材优化":
+    task_kind = ad_material_task_kind(task.get("task_type"))
+    if task_kind == "iteration":
         return "基于上传参考素材做静态图优化，保留可复用的构图、主体、卖点层级和品牌识别，不直接照搬原图。"
-    if task_type == "竞品借鉴":
+    if task_kind == "competitor":
         return "从竞品静态图中提炼可迁移的版式、信息层级、CTA 和色彩节奏，再替换为当前产品品牌与合规表达。"
     return "综合产品信息、上传参考素材和竞品静态图，产出可审核、可投放、可继续交给图片生成服务执行的静态素材需求。"
 
@@ -33081,7 +33246,7 @@ def build_ad_material_image_generation_demand(task, reason=""):
         lines.append("- 暂无上传素材参考。AI 生图时不得假设已有参考图；若后续补充参考图，需优先按参考图识别结果调整构图、色彩和主体关系。")
 
     lines.extend(["", "## 竞品素材参考", ""])
-    if task_type == "素材优化":
+    if ad_material_task_kind(task_type) == "iteration":
         lines.append("- 本次任务不强制使用竞品素材参考；画面以「素材参考」和下方详细素材需求为准。")
     else:
         source_text = source or "已配置竞品源"
@@ -33092,7 +33257,7 @@ def build_ad_material_image_generation_demand(task, reason=""):
 
     lines.extend(["", "## 详细素材需求", ""])
     lines.append("- 输出类型：静态图片素材，仅生成 jpg/png/webp 等图片，不包含视频脚本或投放策略。")
-    lines.append("- 输出规格：%s；共 %s 张；文案语言使用 %s；面向市场 %s。" % (size, quantity, language, country))
+    lines.append("- 尺寸与数量计划：%s；共 %s 张；文案语言使用 %s；面向市场 %s。" % (size, quantity, language, country))
     lines.append("- 品牌规则：画面必须出现 %s 的 logo 或预留 logo 位；不得出现竞品品牌资产。" % product)
     if description:
         lines.append("- 用户补充方向：%s" % description)
@@ -33101,12 +33266,14 @@ def build_ad_material_image_generation_demand(task, reason=""):
     lines.append("")
 
     for index in range(1, quantity + 1):
+        asset_size = ad_material_asset_size(task, index)
         copy_item = copy_variants[index - 1]
         ref_hint = "优先参考 REF_%02d" % (((index - 1) % len(reference_names)) + 1) if has_refs else "无上传参考图，按本条需求直接生成"
         layout = layouts[(index - 1) % len(layouts)]
         lines.extend([
             "### 素材 %02d" % index,
             "",
+            "- 输出尺寸：%s" % asset_size,
             "- 主文案：\"%s\"" % copy_item["headline"],
             "- 副文案：\"%s\"" % copy_item["body"],
             "- CTA：\"%s\"" % copy_item["cta"],
@@ -33115,7 +33282,7 @@ def build_ad_material_image_generation_demand(task, reason=""):
             "- 文案排版：主文案最大、3 秒内可读；副文案不超过两行；CTA 做成清晰按钮，按钮文字必须完整可读，不能被图形遮挡。",
             "- 参考继承：%s；只继承可迁移的构图、色彩和信息层级，不复制原图/竞品的品牌资产。" % ref_hint,
             "- 禁止元素：夸大承诺、保证通过、官方背书、无审核、秒到账、竞品 logo、低清文字、乱码文字、过多小字、遮挡主体的装饰。",
-            "- 验收标准：尺寸符合 %s；主文案、副文案、CTA 清晰无拼写错误；logo/预留 logo 位清楚；画面第一眼能理解产品卖点。" % size,
+            "- 验收标准：尺寸符合 %s；主文案、副文案、CTA 清晰无拼写错误；logo/预留 logo 位清楚；画面第一眼能理解产品卖点。" % asset_size,
             "",
         ])
 
@@ -33808,7 +33975,7 @@ def generate_ad_material_demand(task_id, reason=""):
         notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
     except Exception as exc:
         logging.exception("ad material demand generation failed: %s", task_id)
-        if task.get("competitor_source") and task.get("task_type") != "素材优化":
+        if task.get("competitor_source") and ad_material_task_kind(task.get("task_type")) != "iteration":
             disable_ad_material_competitor_source(task.get("competitor_source"), exc, task)
         update_ad_material_task_status(task_id, "failed", error_message=str(exc))
 
@@ -33826,17 +33993,37 @@ def write_placeholder_ad_material_asset(task, index):
     filename = "%s.svg" % asset_id
     path = os.path.join(public_dir, filename)
     title = "%s #%02d" % (task.get("product_name") or task.get("app_id"), index)
-    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
-<rect width="1080" height="1080" fill="#eef4ff"/>
-<rect x="88" y="120" width="904" height="840" rx="36" fill="#ffffff" stroke="#2f6bff" stroke-width="8"/>
-<text x="540" y="390" font-family="Arial,sans-serif" font-size="54" font-weight="700" text-anchor="middle" fill="#172033">%s</text>
-<text x="540" y="500" font-family="Arial,sans-serif" font-size="34" text-anchor="middle" fill="#44546a">%s / %s / %s</text>
-<text x="540" y="610" font-family="Arial,sans-serif" font-size="30" text-anchor="middle" fill="#667085">待接入真实AI/GPU生成服务</text>
+    width_text, height_text = ad_material_asset_output_size(task, index).split("x", 1)
+    width = int(width_text)
+    height = int(height_text)
+    center_x = width // 2
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="%s" height="%s" viewBox="0 0 %s %s">
+<rect width="%s" height="%s" fill="#eef4ff"/>
+<rect x="%s" y="%s" width="%s" height="%s" rx="36" fill="#ffffff" stroke="#2f6bff" stroke-width="8"/>
+<text x="%s" y="%s" font-family="Arial,sans-serif" font-size="54" font-weight="700" text-anchor="middle" fill="#172033">%s</text>
+<text x="%s" y="%s" font-family="Arial,sans-serif" font-size="34" text-anchor="middle" fill="#44546a">%s / %s / %s</text>
+<text x="%s" y="%s" font-family="Arial,sans-serif" font-size="30" text-anchor="middle" fill="#667085">待接入真实AI/GPU生成服务</text>
 </svg>""" % (
+        width,
+        height,
+        width,
+        height,
+        width,
+        height,
+        max(40, width // 12),
+        max(60, height // 9),
+        max(120, width - width // 6),
+        max(200, height - height // 5),
+        center_x,
+        height * 36 // 100,
         title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
+        center_x,
+        height * 48 // 100,
         task.get("task_type", ""),
         task.get("country", ""),
         task.get("language", ""),
+        center_x,
+        height * 58 // 100,
     )
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(svg)
@@ -33915,11 +34102,14 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
         assets = []
         if AD_MATERIAL_GENERATION_COMMAND:
             for index in target_indexes:
+                task_for_index = dict(task)
+                task_for_index["size_ratio"] = ad_material_asset_size(task, index)
+                task_for_index["size"] = ad_material_asset_output_size(task, index)
                 result = run_ad_material_external_command(
                     AD_MATERIAL_GENERATION_COMMAND,
-                    task,
+                    task_for_index,
                     "generation_%02d" % index,
-                    {"indexes": [index], "reason": reason},
+                    {"indexes": [index], "reason": reason, "size": task_for_index["size_ratio"]},
                 )
                 generated_assets = generation_outputs_to_assets(task, result, indexes=[index])
                 if not generated_assets:

@@ -26,6 +26,54 @@ def normalize_size(value):
     return "1080x1080"
 
 
+def parse_size_plan(task):
+    raw_plan = task.get("size_plan")
+    if isinstance(raw_plan, list):
+        result = []
+        for item in raw_plan:
+            if not isinstance(item, dict):
+                continue
+            size = str(item.get("size") or "").strip()
+            count = int(item.get("count") or 0)
+            if size and count > 0:
+                result.append({"size": size, "count": count})
+        if result:
+            return result
+    text = str(task.get("size") or "").strip()
+    quantity = max(1, min(20, int(task.get("quantity") or 1)))
+    if not text:
+        return [{"size": "1:1", "count": quantity}]
+    plan = []
+    for part in re.split(r"[,，;；\n]+", text):
+        part = part.strip()
+        if not part:
+            continue
+        size_match = re.search(r"(1\.91:1|1:1|4:5|9:16|16:9|\d{3,5}x\d{3,5})", part, flags=re.I)
+        if not size_match:
+            continue
+        count_match = re.search(r"(?:x|×|\*)\s*(\d+)|(\d+)\s*(?:张|条|个)", part, flags=re.I)
+        count = int(next((group for group in (count_match.groups() if count_match else []) if group), "1"))
+        if count > 0:
+            plan.append({"size": size_match.group(1), "count": count})
+    return plan or [{"size": "1:1", "count": quantity}]
+
+
+def append_size_plan(demand_text, size_plan):
+    if not size_plan:
+        return demand_text
+    lines = ["", "## 尺寸与数量计划", ""]
+    cursor = 1
+    for item in size_plan:
+        size = str(item.get("size") or "").strip()
+        count = int(item.get("count") or 0)
+        for _ in range(max(0, count)):
+            lines.append("- 素材 %02d：%s" % (cursor, size))
+            cursor += 1
+    if cursor == 1:
+        return demand_text
+    return demand_text.rstrip() + "\n" + "\n".join(lines) + "\n"
+
+
 def pick_provider(task):
     configured = os.environ.get("AD_MATERIAL_REQUIREMENT_PROVIDER", "").strip().lower()
     if configured:
@@ -87,6 +135,8 @@ def main():
     default_start = today - timedelta(days=33)
     default_end = today - timedelta(days=3)
     quantity = max(1, min(20, int(task.get("quantity") or 1)))
+    size_plan = parse_size_plan(task)
+    primary_size = size_plan[0]["size"] if size_plan else task.get("size")
     revision_instruction = str((payload.get("extra") or {}).get("reason") or task.get("review_reason") or "").strip()
     out_dir = Path(os.environ.get("AD_MATERIAL_REQUIREMENT_OUTPUT_DIR", "/root/codex_test/output"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -107,7 +157,7 @@ def main():
         "--count",
         str(quantity),
         "--size",
-        normalize_size(task.get("size")),
+        normalize_size(primary_size),
         "--output-dir",
         str(out_dir),
     ]
@@ -148,7 +198,7 @@ def main():
     if not markdown_path or not Path(markdown_path).exists():
         raise SystemExit("Requirement generator did not return a readable markdown_path")
 
-    demand_text = Path(markdown_path).read_text(encoding="utf-8")
+    demand_text = append_size_plan(Path(markdown_path).read_text(encoding="utf-8"), size_plan)
     write_output(output_path, {
         "demand_text": demand_text,
         "markdown": demand_text,
