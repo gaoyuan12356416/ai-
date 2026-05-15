@@ -31952,16 +31952,21 @@ def parse_screenshot_job_route(path):
 
 
 AD_MATERIAL_TASK_TYPE_ITERATION = "素材迭代——根据老素材效果优化"
+AD_MATERIAL_TASK_TYPE_REFERENCE = "参考衍生——解析参考素材风格出新素材"
 AD_MATERIAL_TASK_TYPE_COMPETITOR = "竞品借鉴——参考竞品优质素材"
 AD_MATERIAL_TASK_TYPE_PLANNING = "综合策划——综合内外素材出方案"
 AD_MATERIAL_TASK_TYPES = (
     AD_MATERIAL_TASK_TYPE_ITERATION,
+    AD_MATERIAL_TASK_TYPE_REFERENCE,
     AD_MATERIAL_TASK_TYPE_COMPETITOR,
     AD_MATERIAL_TASK_TYPE_PLANNING,
 )
 AD_MATERIAL_TASK_TYPE_ALIASES = {
     "素材优化": AD_MATERIAL_TASK_TYPE_ITERATION,
     "素材迭代": AD_MATERIAL_TASK_TYPE_ITERATION,
+    "参考衍生": AD_MATERIAL_TASK_TYPE_REFERENCE,
+    "参考复刻": AD_MATERIAL_TASK_TYPE_REFERENCE,
+    "参考素材": AD_MATERIAL_TASK_TYPE_REFERENCE,
     "竞品借鉴": AD_MATERIAL_TASK_TYPE_COMPETITOR,
     "综合策划": AD_MATERIAL_TASK_TYPE_PLANNING,
 }
@@ -32130,6 +32135,8 @@ def ad_material_task_kind(value):
         task_type = str(value or "").strip()
     if task_type == AD_MATERIAL_TASK_TYPE_ITERATION:
         return "iteration"
+    if task_type == AD_MATERIAL_TASK_TYPE_REFERENCE:
+        return "reference"
     if task_type == AD_MATERIAL_TASK_TYPE_COMPETITOR:
         return "competitor"
     if task_type == AD_MATERIAL_TASK_TYPE_PLANNING:
@@ -32295,7 +32302,7 @@ def active_ad_material_competitor_sources():
 
 def normalize_competitor_source(task_type, value):
     value = str(value or "").strip()
-    if ad_material_task_kind(task_type) == "iteration":
+    if ad_material_task_kind(task_type) in ("iteration", "reference"):
         return ""
     active_sources = active_ad_material_competitor_sources()
     if not active_sources:
@@ -33009,8 +33016,11 @@ def _ad_material_reference_items(task):
 
 def _ad_material_source_note(task):
     source = str(task.get("competitor_source") or "").strip()
-    if ad_material_task_kind(task.get("task_type")) == "iteration":
+    task_kind = ad_material_task_kind(task.get("task_type"))
+    if task_kind == "iteration":
         return "本任务以需求人上传的参考素材和产品自身信息为主，不强制拉取竞品素材。"
+    if task_kind == "reference":
+        return "本任务以需求人上传的参考素材为核心输入，先解析参考素材的构图、色彩、主体关系和信息层级，再迁移为当前产品的新素材。"
     return "本任务需要通过 %s 拉取并筛选 image-only 竞品素材，最终需求应优先继承通过审核的竞品参考风格。" % (source or "已配置竞品源")
 
 
@@ -33021,6 +33031,8 @@ def _ad_material_direction(task):
     task_kind = ad_material_task_kind(task.get("task_type"))
     if task_kind == "iteration":
         return "基于上传参考素材做静态图优化，保留可复用的构图、主体、卖点层级和品牌识别，不直接照搬原图。"
+    if task_kind == "reference":
+        return "先解析上传参考素材的原素材风格，包括版式、色彩、主体、镜头、文案层级和 CTA 位置，再结合当前产品信息生成新的静态图方案。"
     if task_kind == "competitor":
         return "从竞品静态图中提炼可迁移的版式、信息层级、CTA 和色彩节奏，再替换为当前产品品牌与合规表达。"
     return "综合产品信息、上传参考素材和竞品静态图，产出可审核、可投放、可继续交给图片生成服务执行的静态素材需求。"
@@ -33246,8 +33258,11 @@ def build_ad_material_image_generation_demand(task, reason=""):
         lines.append("- 暂无上传素材参考。AI 生图时不得假设已有参考图；若后续补充参考图，需优先按参考图识别结果调整构图、色彩和主体关系。")
 
     lines.extend(["", "## 竞品素材参考", ""])
-    if ad_material_task_kind(task_type) == "iteration":
+    task_kind = ad_material_task_kind(task_type)
+    if task_kind == "iteration":
         lines.append("- 本次任务不强制使用竞品素材参考；画面以「素材参考」和下方详细素材需求为准。")
+    elif task_kind == "reference":
+        lines.append("- 本次任务不强制使用竞品素材参考；画面以需求人上传的参考素材解析结果为主要风格依据。")
     else:
         source_text = source or "已配置竞品源"
         lines.append("- 竞品来源：%s。" % source_text)
@@ -33975,7 +33990,7 @@ def generate_ad_material_demand(task_id, reason=""):
         notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
     except Exception as exc:
         logging.exception("ad material demand generation failed: %s", task_id)
-        if task.get("competitor_source") and ad_material_task_kind(task.get("task_type")) != "iteration":
+        if task.get("competitor_source") and ad_material_task_kind(task.get("task_type")) not in ("iteration", "reference"):
             disable_ad_material_competitor_source(task.get("competitor_source"), exc, task)
         update_ad_material_task_status(task_id, "failed", error_message=str(exc))
 

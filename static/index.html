@@ -10985,6 +10985,7 @@
                     <label><span class="required-mark">*</span>任务类型</label>
                     <select id="adMaterialTaskType" required>
                       <option value="素材迭代——根据老素材效果优化">素材迭代——根据老素材效果优化</option>
+                      <option value="参考衍生——解析参考素材风格出新素材">参考衍生——解析参考素材风格出新素材</option>
                       <option value="竞品借鉴——参考竞品优质素材">竞品借鉴——参考竞品优质素材</option>
                       <option value="综合策划——综合内外素材出方案">综合策划——综合内外素材出方案</option>
                     </select>
@@ -12867,6 +12868,8 @@
       adMaterialTasks: [],
       adMaterialProductMatches: [],
       adMaterialProductActiveIndex: -1,
+      adMaterialProductsLoaded: false,
+      adMaterialProductsLoading: null,
       selectedAdMaterialTask: null,
       reviewingAdMaterialTask: null,
       editingAdMaterialTaskId: "",
@@ -15697,11 +15700,15 @@
       "zh-Hans", "zh-Hant", "pt-BR", "pt-PT", "es-419"
     ];
     const AD_MATERIAL_TASK_TYPE_ITERATION = "素材迭代——根据老素材效果优化";
+    const AD_MATERIAL_TASK_TYPE_REFERENCE = "参考衍生——解析参考素材风格出新素材";
     const AD_MATERIAL_TASK_TYPE_COMPETITOR = "竞品借鉴——参考竞品优质素材";
     const AD_MATERIAL_TASK_TYPE_PLANNING = "综合策划——综合内外素材出方案";
     const AD_MATERIAL_TASK_TYPE_ALIASES = {
       "素材优化": AD_MATERIAL_TASK_TYPE_ITERATION,
       "素材迭代": AD_MATERIAL_TASK_TYPE_ITERATION,
+      "参考衍生": AD_MATERIAL_TASK_TYPE_REFERENCE,
+      "参考复刻": AD_MATERIAL_TASK_TYPE_REFERENCE,
+      "参考素材": AD_MATERIAL_TASK_TYPE_REFERENCE,
       "竞品借鉴": AD_MATERIAL_TASK_TYPE_COMPETITOR,
       "综合策划": AD_MATERIAL_TASK_TYPE_PLANNING,
     };
@@ -15715,7 +15722,7 @@
 
     function normalizeAdMaterialTaskType(value) {
       const text = String(value || "").trim();
-      if ([AD_MATERIAL_TASK_TYPE_ITERATION, AD_MATERIAL_TASK_TYPE_COMPETITOR, AD_MATERIAL_TASK_TYPE_PLANNING].includes(text)) return text;
+      if ([AD_MATERIAL_TASK_TYPE_ITERATION, AD_MATERIAL_TASK_TYPE_REFERENCE, AD_MATERIAL_TASK_TYPE_COMPETITOR, AD_MATERIAL_TASK_TYPE_PLANNING].includes(text)) return text;
       const prefix = text.split(/[—-]/)[0]?.trim();
       return AD_MATERIAL_TASK_TYPE_ALIASES[text] || AD_MATERIAL_TASK_TYPE_ALIASES[prefix] || text;
     }
@@ -15723,6 +15730,7 @@
     function adMaterialTaskTypeKind(value) {
       const type = normalizeAdMaterialTaskType(value);
       if (type === AD_MATERIAL_TASK_TYPE_ITERATION) return "iteration";
+      if (type === AD_MATERIAL_TASK_TYPE_REFERENCE) return "reference";
       if (type === AD_MATERIAL_TASK_TYPE_COMPETITOR) return "competitor";
       if (type === AD_MATERIAL_TASK_TYPE_PLANNING) return "planning";
       return "";
@@ -15781,9 +15789,9 @@
         els.adMaterialTaskType.value = type;
       }
       if (els.adMaterialCompetitorField) {
-        els.adMaterialCompetitorField.style.display = adMaterialTaskTypeKind(type) === "iteration" ? "none" : "";
+        els.adMaterialCompetitorField.style.display = ["iteration", "reference"].includes(adMaterialTaskTypeKind(type)) ? "none" : "";
       }
-      if (adMaterialTaskTypeKind(type) !== "iteration") {
+      if (!["iteration", "reference"].includes(adMaterialTaskTypeKind(type))) {
         renderAdMaterialCompetitorSources();
       }
     }
@@ -16086,9 +16094,20 @@
 
     function renderAdMaterialProductOptions(open = true) {
       if (!els.adMaterialProductOptions) return;
-      const query = els.adMaterialProductSearch?.value || "";
+      const query = (els.adMaterialProductSearch?.value || "").trim();
+      if (!query) {
+        state.adMaterialProductMatches = [];
+        state.adMaterialProductActiveIndex = -1;
+        els.adMaterialProductOptions.innerHTML = "";
+        els.adMaterialProductOptions.classList.add("hidden");
+        els.adMaterialProductSearch?.setAttribute("aria-expanded", "false");
+        if (els.adMaterialProductHint) {
+          els.adMaterialProductHint.textContent = "输入关键词后选择产品";
+        }
+        return;
+      }
       const allMatches = matchedAdMaterialProducts(query);
-      const limit = query.trim() ? 80 : 40;
+      const limit = 80;
       state.adMaterialProductMatches = allMatches.slice(0, limit);
       if (state.adMaterialProductActiveIndex >= state.adMaterialProductMatches.length) {
         state.adMaterialProductActiveIndex = state.adMaterialProductMatches.length ? 0 : -1;
@@ -16107,9 +16126,7 @@
       els.adMaterialProductOptions.classList.toggle("hidden", !open);
       els.adMaterialProductSearch?.setAttribute("aria-expanded", open ? "true" : "false");
       if (els.adMaterialProductHint) {
-        els.adMaterialProductHint.textContent = query.trim()
-          ? `匹配 ${allMatches.length} 个产品`
-          : "输入关键词后选择产品";
+        els.adMaterialProductHint.textContent = `匹配 ${allMatches.length} 个产品`;
       }
     }
 
@@ -16120,10 +16137,26 @@
       hideAdMaterialProductOptions();
     }
 
-    function handleAdMaterialProductInput() {
+    async function handleAdMaterialProductInput() {
       const selected = findAdMaterialProduct(els.adMaterialAppId?.value || "");
       if (selected && els.adMaterialProductSearch?.value !== adMaterialProductLabel(selected)) {
         if (els.adMaterialAppId) els.adMaterialAppId.value = "";
+      }
+      const query = String(els.adMaterialProductSearch?.value || "").trim();
+      if (!query) {
+        hideAdMaterialProductOptions();
+        if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = "输入关键词后选择产品";
+        return;
+      }
+      if (!state.adMaterialProductsLoaded) {
+        if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = "正在搜索产品...";
+        try {
+          await ensureAdMaterialProductsLoaded();
+        } catch (error) {
+          if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = error.message || "产品搜索失败";
+          return;
+        }
+        if (!String(els.adMaterialProductSearch?.value || "").trim()) return;
       }
       state.adMaterialProductActiveIndex = 0;
       renderAdMaterialProductOptions(true);
@@ -16137,6 +16170,7 @@
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
+        if (!String(els.adMaterialProductSearch?.value || "").trim()) return;
         const count = state.adMaterialProductMatches.length || matchedAdMaterialProducts(els.adMaterialProductSearch?.value || "").length;
         if (!count) return renderAdMaterialProductOptions(true);
         const direction = event.key === "ArrowDown" ? 1 : -1;
@@ -16156,11 +16190,14 @@
       selectAdMaterialProductByIndex(Number(button.dataset.productIndex));
     }
 
-    function ensureAdMaterialProductSelected() {
+    async function ensureAdMaterialProductSelected() {
       const currentId = els.adMaterialAppId?.value || "";
       if (currentId && findAdMaterialProduct(currentId)) return findAdMaterialProduct(currentId);
       const query = (els.adMaterialProductSearch?.value || "").trim();
       if (!query) return null;
+      if (!state.adMaterialProductsLoaded) {
+        await ensureAdMaterialProductsLoaded();
+      }
       const exact = state.adMaterialProducts.find(item => {
         const productId = adMaterialProductId(item);
         const productName = adMaterialProductName(item);
@@ -16197,13 +16234,27 @@
     }
 
     async function loadAdMaterialProducts() {
-      if (!userCan("ad_material_tasks")) return;
+      if (!userCan("ad_material_tasks")) {
+        state.adMaterialProductsLoaded = true;
+        return;
+      }
       const data = await api("/api/ad-material/products");
       const selectedAppId = els.adMaterialAppId?.value || "";
       state.adMaterialProducts = data.items || [];
+      state.adMaterialProductsLoaded = true;
       if (selectedAppId) {
         setAdMaterialProductValue(selectedAppId, els.adMaterialProductSearch?.value || "");
       }
+    }
+
+    async function ensureAdMaterialProductsLoaded() {
+      if (state.adMaterialProductsLoaded) return;
+      if (!state.adMaterialProductsLoading) {
+        state.adMaterialProductsLoading = loadAdMaterialProducts().finally(() => {
+          state.adMaterialProductsLoading = null;
+        });
+      }
+      return state.adMaterialProductsLoading;
     }
 
     function adMaterialStatusText(status, label) {
@@ -16283,10 +16334,10 @@
     }
 
     function adMaterialPayloadBase() {
-      const product = ensureAdMaterialProductSelected();
+      const product = await ensureAdMaterialProductSelected();
       if (!product) throw new Error("请先搜索并选择产品");
       const taskType = normalizeAdMaterialTaskType(els.adMaterialTaskType.value);
-      if (adMaterialTaskTypeKind(taskType) !== "iteration" && !els.adMaterialCompetitorSource.value) {
+      if (!["iteration", "reference"].includes(adMaterialTaskTypeKind(taskType)) && !els.adMaterialCompetitorSource.value) {
         throw new Error("当前没有可用竞品源，请先恢复竞品接口或改用素材迭代");
       }
       const sizePlan = collectAdMaterialSizePlan(true);
@@ -16343,13 +16394,9 @@
     async function createAdMaterialTask() {
       resetAdMaterialForm();
       openAdMaterialTaskModal("create");
-      if (!state.adMaterialProducts.length) {
-        await loadAdMaterialProducts();
-      }
       if (!state.adMaterialCompetitorSources.length) {
         await loadAdMaterialCompetitorSources();
       }
-      els.adMaterialProductSearch?.focus();
     }
 
     async function editAdMaterialTask(taskId) {
@@ -22024,7 +22071,7 @@ function buildJobRow(job) {
 
 
       if (view === "adMaterials") {
-        Promise.all([loadAdMaterialProducts(), loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => {
+        Promise.all([loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => {
           if (els.adMaterialTableBody) {
             els.adMaterialTableBody.innerHTML = `<tr><td colspan="10" class="muted">加载失败：${errorText(error)}</td></tr>`;
           }
@@ -22385,7 +22432,6 @@ function buildJobRow(job) {
         els.adMaterialForm.addEventListener("submit", submitAdMaterialTask);
       }
       if (els.adMaterialProductSearch) {
-        els.adMaterialProductSearch.addEventListener("focus", () => renderAdMaterialProductOptions(true));
         els.adMaterialProductSearch.addEventListener("input", handleAdMaterialProductInput);
         els.adMaterialProductSearch.addEventListener("keydown", handleAdMaterialProductKeydown);
       }
@@ -22418,14 +22464,15 @@ function buildJobRow(job) {
       }
       if (els.adMaterialTaskModal) {
         els.adMaterialTaskModal.addEventListener("click", event => {
-          if (event.target === els.adMaterialTaskModal) {
-            resetAdMaterialForm();
-            closeAdMaterialTaskModal();
-          }
+          if (event.target === els.adMaterialTaskModal) event.stopPropagation();
         });
       }
       if (els.adMaterialReloadBtn) {
-        els.adMaterialReloadBtn.onclick = () => Promise.all([loadAdMaterialProducts(), loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => showError("刷新投放素材任务失败", error));
+        els.adMaterialReloadBtn.onclick = () => {
+          state.adMaterialProducts = [];
+          state.adMaterialProductsLoaded = false;
+          return Promise.all([loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => showError("刷新投放素材任务失败", error));
+        };
       }
       if (els.adMaterialSearchBtn) {
         els.adMaterialSearchBtn.onclick = () => loadAdMaterialTasks().catch(error => showError("筛选投放素材任务失败", error));
