@@ -4249,6 +4249,8 @@
 
     .field.half { grid-column: span 6; }
 
+    .field.small { grid-column: span 2; }
+
 
 
 
@@ -4513,32 +4515,144 @@
 
     .required-mark { color: #e03131; font-weight: 800; margin-right: 4px; }
 
-    .size-plan {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(118px, 1fr));
-      gap: 10px;
-    }
-
-    .size-plan-item {
-      display: grid;
-      gap: 8px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #fff;
-    }
-
-    .size-plan-head {
+    .size-plan-titlebar {
       display: flex;
       align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .size-plan-total {
+      min-height: 28px;
+      padding: 6px 10px;
+      border: 1px solid #dce7fb;
+      border-radius: 999px;
+      background: #f6f9ff;
+      color: #35506f;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .size-plan {
+      display: flex;
+      flex-wrap: wrap;
       gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f8fbff;
+    }
+
+    .size-plan-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex: 1 1 190px;
+      min-height: 50px;
+      padding: 7px 8px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+    }
+
+    .size-plan-row.active {
+      border-color: #c7dcff;
+      background: #fff;
+      box-shadow: 0 6px 16px rgba(47, 107, 255, .08);
+    }
+
+    .size-choice {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 38px;
+      padding: 0 8px;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .size-choice strong {
+      font-size: 15px;
       font-weight: 700;
     }
 
-    .size-plan-item input[type="number"] {
-      width: 100%;
-      min-height: 36px;
-      padding: 7px 9px;
+    .size-choice span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .size-check {
+      width: 18px;
+      height: 18px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid #cbd8eb;
+      border-radius: 50%;
+      color: transparent;
+      font-size: 12px;
+      flex: 0 0 auto;
+    }
+
+    .size-plan-row.active .size-check {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .size-stepper {
+      display: grid;
+      grid-template-columns: 32px 52px 32px;
+      align-items: center;
+      overflow: hidden;
+      border: 1px solid #d9e3f3;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .size-stepper button,
+    .size-stepper input {
+      height: 34px;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      text-align: center;
+    }
+
+    .size-stepper button {
+      cursor: pointer;
+      color: #35506f;
+      font-weight: 800;
+    }
+
+    .size-stepper button:hover { background: #eef4ff; }
+
+    .size-stepper button:disabled,
+    .size-stepper input:disabled {
+      cursor: not-allowed;
+      color: #a5b2c5;
+      background: #f5f7fb;
+    }
+
+    .size-stepper input {
+      width: 52px;
+      padding: 0;
+      border-left: 1px solid #e6edf7;
+      border-right: 1px solid #e6edf7;
+      font-weight: 700;
+    }
+
+    .size-plan-footnote {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .md-preview {
@@ -7594,9 +7708,13 @@
 
 
 
-      .field, .field.wide, .field.half { grid-column: span 12; }
+      .field, .field.wide, .field.half, .field.small { grid-column: span 12; }
 
-      .size-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .size-plan-titlebar { align-items: flex-start; flex-direction: column; }
+
+      .size-plan-row { flex-basis: 100%; gap: 6px; }
+
+      .size-stepper { width: 116px; }
 
 
 
@@ -10837,22 +10955,25 @@
                       <option value="广大大">广大大</option>
                     </select>
                   </div>
-                  <div class="field">
+                  <div class="field small">
                     <label><span class="required-mark">*</span>国家</label>
                     <input id="adMaterialCountry" list="adMaterialCountryList" placeholder="MX / US / BR" required />
                     <datalist id="adMaterialCountryList"></datalist>
                   </div>
-                  <div class="field">
+                  <div class="field small">
                     <label><span class="required-mark">*</span>语言</label>
                     <input id="adMaterialLanguage" list="adMaterialLanguageList" placeholder="es / en / pt" required />
                     <datalist id="adMaterialLanguageList"></datalist>
                   </div>
                   <div class="field wide">
-                    <label><span class="required-mark">*</span>尺寸与数量</label>
+                    <div class="size-plan-titlebar">
+                      <label><span class="required-mark">*</span>尺寸与数量</label>
+                      <div id="adMaterialSizePlanSummary" class="size-plan-total">默认 1:1 x 1，总计 1 张</div>
+                    </div>
                     <input id="adMaterialQuantity" type="hidden" value="1" />
                     <input id="adMaterialSize" type="hidden" value="1:1 x 1" />
                     <div id="adMaterialSizePlan" class="size-plan"></div>
-                    <div id="adMaterialSizePlanSummary" class="hint">默认 1:1 x 1，总计 1 张</div>
+                    <div class="size-plan-footnote">点击尺寸启用或取消；已启用尺寸可用 +/- 调整数量，全部尺寸合计最多 20 张。</div>
                   </div>
                   <div class="field">
                     <label>标签 tag_name</label>
@@ -15672,9 +15793,23 @@
       if (els.adMaterialSize) els.adMaterialSize.value = formatAdMaterialSizePlan(normalized);
       if (els.adMaterialQuantity) els.adMaterialQuantity.value = String(total);
       if (els.adMaterialSizePlanSummary) {
-        els.adMaterialSizePlanSummary.textContent = `${formatAdMaterialSizePlan(normalized)}，总计 ${total} 张`;
+        els.adMaterialSizePlanSummary.textContent = `总计 ${total} 张 · ${formatAdMaterialSizePlan(normalized)}`;
       }
       return normalized;
+    }
+
+    function refreshAdMaterialSizeRows() {
+      if (!els.adMaterialSizePlan) return;
+      els.adMaterialSizePlan.querySelectorAll("[data-size-row]").forEach(row => {
+        const enabled = row.dataset.sizeEnabled === "1";
+        row.classList.toggle("active", enabled);
+        const countInput = row.querySelector("[data-size-count]");
+        const stepButtons = row.querySelectorAll("[data-size-step]");
+        const toggle = row.querySelector("[data-size-toggle]");
+        if (toggle) toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+        if (countInput) countInput.disabled = !enabled;
+        stepButtons.forEach(button => { button.disabled = !enabled; });
+      });
     }
 
     function renderAdMaterialSizePlan(plan = [{ size: "1:1", count: 1 }]) {
@@ -15684,37 +15819,104 @@
       els.adMaterialSizePlan.innerHTML = AD_MATERIAL_SIZE_OPTIONS.map(item => {
         const checked = countBySize[item.value] > 0;
         const count = checked ? countBySize[item.value] : 1;
-        return `<div class="size-plan-item" data-size="${navText(item.value)}">
-          <label class="size-plan-head">
-            <input type="checkbox" data-size-check="${navText(item.value)}" ${checked ? "checked" : ""} />
-            <span>${navText(item.label)}</span>
-          </label>
-          <input type="number" min="1" max="20" value="${count}" data-size-count="${navText(item.value)}" ${checked ? "" : "disabled"} />
-          <div class="hint">${navText(item.dimensions)}</div>
+        return `<div class="size-plan-row${checked ? " active" : ""}" data-size-row="${navText(item.value)}" data-size-enabled="${checked ? "1" : "0"}">
+          <button class="size-choice" type="button" data-size-toggle="${navText(item.value)}" aria-pressed="${checked ? "true" : "false"}">
+            <span class="size-check">✓</span>
+            <strong>${navText(item.label)}</strong>
+            <span>${navText(item.dimensions)}</span>
+          </button>
+          <div class="size-stepper">
+            <button type="button" data-size-step="-1" data-size-target="${navText(item.value)}" ${checked ? "" : "disabled"}>-</button>
+            <input type="number" min="1" max="20" value="${count}" data-size-count="${navText(item.value)}" ${checked ? "" : "disabled"} />
+            <button type="button" data-size-step="1" data-size-target="${navText(item.value)}" ${checked ? "" : "disabled"}>+</button>
+          </div>
         </div>`;
       }).join("");
+      refreshAdMaterialSizeRows();
       return updateAdMaterialSizePlanHidden(normalized);
     }
 
     function collectAdMaterialSizePlan(throwIfInvalid = false) {
       const plan = [];
       if (els.adMaterialSizePlan) {
-        AD_MATERIAL_SIZE_OPTIONS.forEach(item => {
-          const checked = els.adMaterialSizePlan.querySelector(`[data-size-check="${item.value}"]`);
-          const countInput = els.adMaterialSizePlan.querySelector(`[data-size-count="${item.value}"]`);
-          if (countInput) countInput.disabled = !checked?.checked;
-          if (checked?.checked) {
-            plan.push({ size: item.value, count: Number(countInput?.value || 0) });
+        els.adMaterialSizePlan.querySelectorAll("[data-size-row]").forEach(row => {
+          const enabled = row.dataset.sizeEnabled === "1";
+          const size = row.dataset.sizeRow || "";
+          const countInput = row.querySelector("[data-size-count]");
+          if (enabled) {
+            const count = Math.max(1, Math.min(20, Math.floor(Number(countInput?.value || 1))));
+            if (countInput) countInput.value = String(count);
+            plan.push({ size, count });
           }
         });
+        if (!plan.length) {
+          const firstRow = els.adMaterialSizePlan.querySelector("[data-size-row]");
+          if (firstRow) {
+            firstRow.dataset.sizeEnabled = "1";
+            const countInput = firstRow.querySelector("[data-size-count]");
+            if (countInput && Number(countInput.value || 0) < 1) countInput.value = "1";
+            plan.push({ size: firstRow.dataset.sizeRow || "1:1", count: Number(countInput?.value || 1) });
+          }
+        }
       }
       const normalized = normalizeAdMaterialSizePlan(plan);
       const total = normalized.reduce((sum, item) => sum + item.count, 0);
       if ((total < 1 || total > 20) && throwIfInvalid) {
         throw new Error("尺寸与数量总计必须为 1 到 20 张");
       }
+      refreshAdMaterialSizeRows();
       updateAdMaterialSizePlanHidden(normalized);
       return normalized;
+    }
+
+    function handleAdMaterialSizePlanClick(event) {
+      const toggle = event.target.closest("[data-size-toggle]");
+      const step = event.target.closest("[data-size-step]");
+      if (!toggle && !step) return;
+      if (toggle) {
+        const row = toggle.closest("[data-size-row]");
+        if (!row) return;
+        const activeRows = Array.from(els.adMaterialSizePlan.querySelectorAll("[data-size-row]"))
+          .filter(item => item.dataset.sizeEnabled === "1");
+        const enabled = row.dataset.sizeEnabled === "1";
+        const currentTotal = activeRows.reduce((sum, item) => {
+          const input = item.querySelector("[data-size-count]");
+          return sum + Math.max(1, Math.floor(Number(input?.value || 1)));
+        }, 0);
+        if (enabled && activeRows.length <= 1) {
+          const countInput = row.querySelector("[data-size-count]");
+          if (countInput && Number(countInput.value || 0) < 1) countInput.value = "1";
+        } else {
+          if (!enabled && currentTotal >= 20) {
+            toast("尺寸数量总计最多 20 张", "error");
+            return;
+          }
+          row.dataset.sizeEnabled = enabled ? "0" : "1";
+        }
+        collectAdMaterialSizePlan(false);
+        return;
+      }
+      const row = step.closest("[data-size-row]");
+      const countInput = row?.querySelector("[data-size-count]");
+      if (!row || !countInput) return;
+      const delta = Number(step.dataset.sizeStep || 0);
+      const activeRows = Array.from(els.adMaterialSizePlan.querySelectorAll("[data-size-row]"))
+        .filter(item => item.dataset.sizeEnabled === "1");
+      const wasEnabled = row.dataset.sizeEnabled === "1";
+      const currentTotal = activeRows.reduce((sum, item) => {
+        const input = item.querySelector("[data-size-count]");
+        return sum + Math.max(1, Math.floor(Number(input?.value || 1)));
+      }, 0);
+      if (!wasEnabled && currentTotal >= 20) {
+        toast("尺寸数量总计最多 20 张", "error");
+        return;
+      }
+      row.dataset.sizeEnabled = "1";
+      const currentValue = Math.max(1, Math.floor(Number(countInput.value || 1)));
+      const maxForCurrent = Math.max(1, 20 - ((wasEnabled ? currentTotal : currentTotal + currentValue) - currentValue));
+      const nextValue = Math.max(1, Math.min(maxForCurrent, currentValue + delta));
+      countInput.value = String(nextValue);
+      collectAdMaterialSizePlan(false);
     }
 
     function fileToDataUrl(file) {
@@ -22156,6 +22358,7 @@ function buildJobRow(job) {
         els.adMaterialTaskType.addEventListener("change", updateAdMaterialCompetitorVisibility);
       }
       if (els.adMaterialSizePlan) {
+        els.adMaterialSizePlan.addEventListener("click", handleAdMaterialSizePlanClick);
         els.adMaterialSizePlan.addEventListener("change", () => collectAdMaterialSizePlan(false));
         els.adMaterialSizePlan.addEventListener("input", () => collectAdMaterialSizePlan(false));
       }
