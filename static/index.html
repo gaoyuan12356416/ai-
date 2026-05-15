@@ -15798,7 +15798,7 @@
               <button class="btn btn-secondary mini" type="button" onclick="openAdMaterialDetail('${task.task_id}')">详情</button>
               ${canEdit ? `<button class="btn btn-secondary mini" type="button" onclick="editAdMaterialTask('${task.task_id}')">编辑</button>` : ""}
               ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架</button>` : ""}
-              ${adMaterialCanCompleteUpload(task) ? `<button class="btn btn-primary mini" type="button" onclick="completeAdMaterialUpload('${task.task_id}')">完成上报</button>` : ""}
+              ${adMaterialCanCompleteUpload(task) ? `<button class="btn btn-primary mini" type="button" onclick="completeAdMaterialUpload('${task.task_id}')">上传至盈量素材库</button>` : ""}
               <button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialTask('${task.task_id}')">复制</button>
               ${canDelete ? `<button class="btn btn-danger mini" type="button" onclick="deleteAdMaterialTask('${task.task_id}')">删除</button>` : ""}
             </div>
@@ -16201,11 +16201,11 @@
       if (!confirm("确认将全部通过的素材上报到素材库？")) return;
       try {
         await api(`/api/ad-material/tasks/${taskId}/complete-upload`, { method: "POST", body: "{}" });
-        toast("素材已完成上报");
+        toast("素材已上传至盈量素材库");
         await loadAdMaterialTasks();
         await openAdMaterialDetail(taskId);
       } catch (error) {
-        showError("完成上报失败", error);
+        showError("上传至盈量素材库失败", error);
       }
     }
 
