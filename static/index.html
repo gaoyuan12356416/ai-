@@ -4251,6 +4251,34 @@
 
     .field.small { grid-column: span 2; }
 
+    .ad-material-create-panel { width: min(1080px, calc(100vw - 64px)); }
+
+    .ad-material-create-grid {
+      align-items: start;
+      column-gap: 16px;
+      row-gap: 16px;
+    }
+
+    .ad-material-create-grid .field { gap: 7px; }
+
+    .ad-material-create-grid label {
+      min-height: 20px;
+      display: flex;
+      align-items: center;
+      line-height: 20px;
+    }
+
+    .ad-material-create-grid input:not([type="hidden"]),
+    .ad-material-create-grid select {
+      height: 50px;
+      box-sizing: border-box;
+    }
+
+    .ad-material-create-grid .hint {
+      min-height: 18px;
+      line-height: 18px;
+    }
+
 
 
 
@@ -4535,25 +4563,23 @@
     }
 
     .size-plan {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
       gap: 8px;
-      padding: 8px;
+      padding: 10px;
       border: 1px solid var(--line);
       border-radius: 14px;
       background: #f8fbff;
     }
 
     .size-plan-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 118px;
       align-items: center;
-      justify-content: space-between;
       gap: 12px;
-      flex: 1 1 190px;
-      min-height: 50px;
-      padding: 7px 8px;
+      min-height: 48px;
+      padding: 7px 10px;
       border: 1px solid transparent;
-      border-radius: 10px;
+      border-radius: 12px;
       transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
     }
 
@@ -4564,14 +4590,14 @@
     }
 
     .size-choice {
-      display: flex;
+      display: grid;
+      grid-template-columns: 28px 88px minmax(120px, 1fr);
       align-items: center;
-      justify-content: space-between;
       gap: 10px;
-      flex: 1 1 auto;
+      width: 100%;
       min-width: 0;
-      min-height: 38px;
-      padding: 0 8px;
+      min-height: 34px;
+      padding: 0;
       border: 0;
       background: transparent;
       color: var(--text);
@@ -4579,14 +4605,22 @@
       cursor: pointer;
     }
 
-    .size-choice strong {
+    .size-choice:focus { outline: none; }
+
+    .size-plan-row:focus-within {
+      border-color: rgba(36, 87, 255, .35);
+      box-shadow: 0 0 0 3px rgba(36, 87, 255, .08);
+    }
+
+    .size-ratio {
       font-size: 15px;
       font-weight: 700;
     }
 
-    .size-choice span {
+    .size-pixels {
       color: var(--muted);
       font-size: 12px;
+      text-align: left;
     }
 
     .size-check {
@@ -4611,6 +4645,7 @@
       display: grid;
       grid-template-columns: 32px 52px 32px;
       align-items: center;
+      justify-self: end;
       overflow: hidden;
       border: 1px solid #d9e3f3;
       border-radius: 10px;
@@ -7710,9 +7745,16 @@
 
       .field, .field.wide, .field.half, .field.small { grid-column: span 12; }
 
+      .ad-material-create-panel { width: min(100%, calc(100vw - 28px)); }
+
       .size-plan-titlebar { align-items: flex-start; flex-direction: column; }
 
-      .size-plan-row { flex-basis: 100%; gap: 6px; }
+      .size-plan-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+
+      .size-choice { grid-template-columns: 28px 76px minmax(0, 1fr); }
 
       .size-stepper { width: 116px; }
 
@@ -10920,7 +10962,7 @@
         </div>
 
         <div id="adMaterialTaskModal" class="modal-backdrop hidden">
-          <div class="modal-panel">
+          <div class="modal-panel ad-material-create-panel">
             <div class="panel-head">
               <h3 id="adMaterialModalTitle" class="panel-title">创建任务</h3>
               <div class="actions-inline">
@@ -10929,7 +10971,7 @@
             </div>
             <div class="panel-body">
               <form id="adMaterialForm" class="stack">
-                <div class="grid">
+                <div class="grid ad-material-create-grid">
                   <div class="field">
                     <label><span class="required-mark">*</span>产品</label>
                     <div class="product-combobox">
@@ -15822,8 +15864,8 @@
         return `<div class="size-plan-row${checked ? " active" : ""}" data-size-row="${navText(item.value)}" data-size-enabled="${checked ? "1" : "0"}">
           <button class="size-choice" type="button" data-size-toggle="${navText(item.value)}" aria-pressed="${checked ? "true" : "false"}">
             <span class="size-check">✓</span>
-            <strong>${navText(item.label)}</strong>
-            <span>${navText(item.dimensions)}</span>
+            <span class="size-ratio">${navText(item.label)}</span>
+            <span class="size-pixels">${navText(item.dimensions)}</span>
           </button>
           <div class="size-stepper">
             <button type="button" data-size-step="-1" data-size-target="${navText(item.value)}" ${checked ? "" : "disabled"}>-</button>
