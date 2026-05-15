@@ -110,8 +110,29 @@ def download_url(url, path):
     path.write_bytes(data)
 
 
+def extract_brand_logo_url(task, demand_text):
+    for key in ("product_icon_url", "brand_logo_url", "logo_url"):
+        value = str(task.get(key) or "").strip()
+        if value.startswith("http"):
+            return value
+
+    text = demand_text or ""
+    patterns = [
+        r"官方\s*logo\s*URL\s*[:：]\s*(https?://[^\s\"'<>]+)",
+        r"Brand\s+logo\s+URL\s*[:：]\s*(https?://[^\s\"'<>]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return match.group(1).strip().rstrip(").,;")
+    return ""
+
+
 def stage_reference_images(task, demand_text, workdir):
     urls = []
+    brand_logo_url = extract_brand_logo_url(task, demand_text)
+    if brand_logo_url:
+        urls.append(brand_logo_url)
     for ref in task.get("reference_files") or []:
         if isinstance(ref, dict):
             value = str(ref.get("archive_url") or ref.get("url") or "").strip()
@@ -143,16 +164,19 @@ def stage_reference_images(task, demand_text, workdir):
 
 def extract_asset_section(demand_text, index):
     text = demand_text or ""
+    asset_label = r"(?:素材|Material|Asset)"
+    heading_suffix = r"(?:\b|[：:])"
     markers = [
-        r"(?im)^#{1,4}\s*(?:素材|Material|Asset)\s*0*%d\b.*$" % index,
-        r"(?im)^\s*(?:素材|Material|Asset)\s*0*%d\b.*$" % index,
+        r"(?im)^#{1,6}\s*%s\s*0*%d%s.*$" % (asset_label, index, heading_suffix),
+        r"(?im)^\s*%s\s*0*%d%s.*$" % (asset_label, index, heading_suffix),
     ]
     for pattern in markers:
         match = re.search(pattern, text)
         if not match:
             continue
         start = match.start()
-        next_match = re.search(r"(?im)^#{1,4}\s*(?:素材|Material|Asset)\s*0*\d+\b.*$", text[match.end() :])
+        next_pattern = r"(?im)^#{1,6}\s*%s\s*0*\d+%s.*$" % (asset_label, heading_suffix)
+        next_match = re.search(next_pattern, text[match.end() :])
         end = match.end() + next_match.start() if next_match else len(text)
         return text[start:end].strip()
     return ""
@@ -160,6 +184,16 @@ def extract_asset_section(demand_text, index):
 
 def build_prompt(task, demand_text, index, output_path, width, height, reason):
     product = task.get("product_name") or task.get("app_id") or "the product"
+    brand_logo_url = extract_brand_logo_url(task, demand_text)
+    brand_logo = (
+        "Use this exact official store app icon/logo as the only product logo on every material: %s. "
+        "Keep the logo color, lettering, proportions, rounded shape, and inner graphic consistent. "
+        "Do not redraw, recolor, distort, retype, approximate, or replace it with a competitor logo or text-only mark. "
+        "If the model cannot reproduce the logo faithfully, reserve a clean logo slot so the exact logo can be composited after generation."
+        % brand_logo_url
+        if brand_logo_url
+        else "Use one consistent product logo style across all materials. Do not invent variant logos, malformed text logos, or competitor marks."
+    )
     section = extract_asset_section(demand_text, index)
     if not section:
         section = "Use the overall requirement document and create variant #%02d." % index
@@ -172,6 +206,7 @@ Hard requirements:
 - Product: {product}
 - Market/language: {country}/{language}
 - Output size: {width}x{height}px.
+- Brand logo: {brand_logo}
 - Static image only. Do not create video, gif, storyboards, mock UI code, SVG placeholders, or explanations.
 - Follow the specific asset requirement for material #{index:02d}.
 - Preserve only transferable layout, color, hierarchy, product cues, and ad copy from references. Do not copy competitor logos, competitor brand names, watermarks, app-store badges, policy-unsafe promises, or unreadable tiny text.
@@ -194,6 +229,7 @@ Full requirement document:
         language=task.get("language") or "",
         width=width,
         height=height,
+        brand_logo=brand_logo,
         index=index,
         reason=reason or "None",
         section=section[:5000],
