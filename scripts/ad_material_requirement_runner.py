@@ -87,6 +87,7 @@ def main():
     default_start = today - timedelta(days=33)
     default_end = today - timedelta(days=3)
     quantity = max(1, min(20, int(task.get("quantity") or 1)))
+    revision_instruction = str((payload.get("extra") or {}).get("reason") or task.get("review_reason") or "").strip()
     out_dir = Path(os.environ.get("AD_MATERIAL_REQUIREMENT_OUTPUT_DIR", "/root/codex_test/output"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,6 +111,8 @@ def main():
         "--output-dir",
         str(out_dir),
     ]
+    if revision_instruction and "--revision-instruction" in script_text:
+        cmd.extend(["--revision-instruction", revision_instruction])
     vision_json = os.environ.get("AD_MATERIAL_VISION_ANALYSIS_JSON", "").strip()
     if vision_json:
         cmd.extend(["--vision-analysis-json", vision_json])
@@ -127,6 +130,8 @@ def main():
         env["AD_MATERIAL_PACKAGE_NAME"] = str(task.get("package_name") or "")
     if task.get("product_icon_url"):
         env["AD_MATERIAL_PRODUCT_ICON_URL"] = str(task.get("product_icon_url") or "")
+    if revision_instruction:
+        env["AD_MATERIAL_REVISION_INSTRUCTION"] = revision_instruction
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,

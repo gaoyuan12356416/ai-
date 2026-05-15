@@ -14018,10 +14018,10 @@
       const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
-        if (data.auth) {
-          state.auth = data.auth;
-          renderAuth();
-        }
+        clearCachedAuth();
+        document.documentElement.classList.remove("warm-auth");
+        state.auth = data.auth || { enabled: true, authenticated: false, user: null, login_url: "/api/auth/feishu/login", feishu_app_id: "" };
+        renderAuth();
         throw new Error("请先登录");
       }
       if (!response.ok) {
@@ -14119,6 +14119,7 @@
 
 
         clearCachedAuth();
+        document.documentElement.classList.remove("warm-auth");
 
 
 
@@ -14356,6 +14357,7 @@
 
       const canDrama = userCan("drama_synthesis");
       const canCover = userCan("cover_synthesis");
+      const canAdMaterial = userCan("ad_material_tasks");
 
 
 
@@ -14386,7 +14388,7 @@
 
 
 
-      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover)) {
+      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover) || (activeView === "adMaterials" && !canAdMaterial)) {
 
 
 
@@ -21716,7 +21718,13 @@ function buildJobRow(job) {
 
 
 
-          const tasks = [loadAuthStatus()];
+          await loadAuthStatus();
+          if (!state.auth.authenticated) {
+            clearCachedAuth();
+            location.reload();
+            return;
+          }
+          const tasks = [];
           if (userCan("drama_synthesis")) tasks.push(loadJobs());
           if (userCan("cover_synthesis")) tasks.push(loadScreenshotJobs(true));
           if (userCan("ad_material_tasks")) tasks.push(loadAdMaterialTasks());
@@ -22007,6 +22015,7 @@ function buildJobRow(job) {
 
 
           renderAuth();
+          window.location.href = "/";
 
 
 

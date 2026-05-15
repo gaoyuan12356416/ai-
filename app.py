@@ -32208,6 +32208,36 @@ def lookup_admin_group_by_email(email):
     return {}
 
 
+def lookup_admin_group_by_name(name):
+    name = str(name or "").strip()
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not name or not database:
+        return {}
+    try:
+        columns = mysql_table_columns("admin_user_group", database)
+        if "name" not in columns or "sub_user_id" not in columns:
+            return {}
+        status_filter = " AND status = 0" if "status" in columns else ""
+        rows = run_mysql(
+            "SELECT CAST(sub_user_id AS CHAR), email, name FROM `%s`.admin_user_group WHERE name='%s'%s LIMIT 2"
+            % (database.replace("`", "``"), mysql_escape_literal(name), status_filter)
+        )
+        if len(rows) == 1:
+            return {
+                "sub_user_id": str(rows[0][0] or "").strip(),
+                "email": str(rows[0][1] or "").strip(),
+                "name": str(rows[0][2] or "").strip(),
+            }
+    except Exception:
+        logging.exception("failed to lookup admin_user_group by name")
+    return {}
+
+
+def lookup_admin_group_for_actor(actor):
+    actor = actor or {}
+    return lookup_admin_group_by_email(actor.get("email")) or lookup_admin_group_by_name(actor.get("name"))
+
+
 def product_name_expr(columns):
     candidates = ["app_name", "product_name", "name", "app", "title"]
     parts = ["NULLIF(%s, '')" % sql_identifier(item) for item in candidates if item in columns]
@@ -32350,7 +32380,7 @@ def list_ad_material_products(session=None):
                 is_admin = session_is_admin(session)
                 if not is_admin:
                     actor = ad_material_actor(session)
-                    admin_group = lookup_admin_group_by_email(actor.get("email"))
+                    admin_group = lookup_admin_group_for_actor(actor)
                     sub_user_id = admin_group.get("sub_user_id")
                     where = "0=1"
                     role_app_columns = mysql_table_columns("admin_role_apps", database)
@@ -32564,7 +32594,8 @@ def create_ad_material_task(payload, session):
         if not data.get(key):
             data[key] = product.get(key) or product_meta.get(key) or ""
     enrich_ad_material_store_icon(data)
-    admin_group = lookup_admin_group_by_email(actor.get("email"))
+    admin_group = lookup_admin_group_for_actor(actor)
+    creator_email = actor["email"] or admin_group.get("email", "")
     references = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
@@ -32584,7 +32615,7 @@ def create_ad_material_task(payload, session):
                     data["country"], data["language"], data["size"], data["tag_name"], data["category"],
                     data["title"], data["body"], data["description"], data["store_url"], data["package_name"],
                     data["product_icon_url"], data["quantity"], json.dumps(references, ensure_ascii=False),
-                    actor["user_id"], actor["open_id"], actor["email"], actor["name"], admin_group.get("sub_user_id", ""),
+                    actor["user_id"], actor["open_id"], creator_email, actor["name"], admin_group.get("sub_user_id", ""),
                 ),
             )
             conn.commit()
@@ -33968,7 +33999,7 @@ def post_ad_material_source(task, asset):
     if not AD_MATERIAL_SOURCE_API_TOKEN:
         raise StructuredApiError("source_api_token_missing", "最终素材上报 token 未配置")
     if not task.get("initiator_sub_user_id"):
-        admin_group = lookup_admin_group_by_email(task.get("creator_email"))
+        admin_group = lookup_admin_group_by_email(task.get("creator_email")) or lookup_admin_group_by_name(task.get("creator_name"))
         if admin_group.get("sub_user_id"):
             with JOB_DB_LOCK:
                 conn = get_job_db_connection()
