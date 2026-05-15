@@ -1231,6 +1231,11 @@ AD_MATERIAL_REQUIREMENT_COMMAND = os.environ.get("AD_MATERIAL_REQUIREMENT_COMMAN
 AD_MATERIAL_GENERATION_COMMAND = os.environ.get("AD_MATERIAL_GENERATION_COMMAND", "").strip()
 AD_MATERIAL_COMMAND_TIMEOUT = int(os.environ.get("AD_MATERIAL_COMMAND_TIMEOUT", "1800"))
 AD_MATERIAL_FINAL_USER_ID = int(os.environ.get("AD_MATERIAL_FINAL_USER_ID", "248"))
+AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE = os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE", "").strip()
+AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID = os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID", "").strip()
+AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS = [
+    item.strip() for item in os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS", "").split(",") if item.strip()
+]
 
 
 AI_SOURCE_CALLBACK_URL = os.environ.get(
@@ -2798,7 +2803,9 @@ FEISHU_REDIRECT_URI = os.environ.get(
 
 
 
-FEISHU_SCOPE = os.environ.get("FEISHU_SCOPE", "contact:user.id:readonly").strip()
+FEISHU_SCOPE = os.environ.get(
+    "FEISHU_SCOPE", "contact:user.id:readonly contact:user.email:readonly"
+).strip()
 
 
 
@@ -32020,6 +32027,18 @@ CREATE TABLE IF NOT EXISTS ad_material_asset (
 )
 """
 
+AD_MATERIAL_COMPETITOR_SOURCE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_material_competitor_source (
+  source TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'active',
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  disabled_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 
 def ensure_ad_material_tables():
     with JOB_DB_LOCK:
@@ -32027,9 +32046,19 @@ def ensure_ad_material_tables():
         try:
             conn.execute(AD_MATERIAL_TASK_TABLE_SQL)
             conn.execute(AD_MATERIAL_ASSET_TABLE_SQL)
+            conn.execute(AD_MATERIAL_COMPETITOR_SOURCE_TABLE_SQL)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_task_status_updated ON ad_material_task(status, updated_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_task_creator ON ad_material_task(creator_user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_asset_task ON ad_material_asset(task_id, asset_index)")
+            for source in AD_MATERIAL_COMPETITOR_SOURCES:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ad_material_competitor_source (
+                      source, status, fail_count, last_error, disabled_at, created_at, updated_at
+                    ) VALUES (?, 'active', 0, '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (source,),
+                )
             columns = [row["name"] for row in conn.execute("PRAGMA table_info(ad_material_task)").fetchall()]
             if "demand_artifacts_json" not in columns:
                 conn.execute("ALTER TABLE ad_material_task ADD COLUMN demand_artifacts_json TEXT NOT NULL DEFAULT '{}'")
@@ -32064,14 +32093,64 @@ def normalize_ad_material_task_type(value):
     return value
 
 
+def list_ad_material_competitor_sources(include_disabled=False):
+    default_items = [
+        {"source": source, "name": source, "status": "active", "fail_count": 0, "last_error": "", "disabled_at": ""}
+        for source in AD_MATERIAL_COMPETITOR_SOURCES
+    ]
+    try:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT source, status, fail_count, last_error, disabled_at
+                    FROM ad_material_competitor_source
+                    ORDER BY CASE source WHEN '有米云' THEN 1 WHEN 'metapi' THEN 2 WHEN '广大大' THEN 3 ELSE 99 END, source
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+        items = []
+        known = set(AD_MATERIAL_COMPETITOR_SOURCES)
+        for row in rows:
+            source = str(row["source"] or "").strip()
+            if source not in known:
+                continue
+            status = str(row["status"] or "active").strip() or "active"
+            if not include_disabled and status != "active":
+                continue
+            items.append({
+                "source": source,
+                "name": source,
+                "status": status,
+                "fail_count": int(row["fail_count"] or 0),
+                "last_error": str(row["last_error"] or ""),
+                "disabled_at": str(row["disabled_at"] or ""),
+            })
+        return items if rows else default_items
+    except Exception:
+        logging.exception("failed to list ad material competitor sources")
+        return default_items
+
+
+def active_ad_material_competitor_sources():
+    return [item["source"] for item in list_ad_material_competitor_sources(include_disabled=False) if item.get("status") == "active"]
+
+
 def normalize_competitor_source(task_type, value):
     value = str(value or "").strip()
     if task_type == "素材优化":
         return ""
+    active_sources = active_ad_material_competitor_sources()
+    if not active_sources:
+        raise StructuredApiError("competitor_source_unavailable", "暂无可用竞品查询接口，请先恢复竞品源")
     if not value:
-        return "有米云"
+        return "有米云" if "有米云" in active_sources else active_sources[0]
     if value not in AD_MATERIAL_COMPETITOR_SOURCES:
         raise StructuredApiError("invalid_competitor_source", "竞品查询接口无效")
+    if value not in active_sources:
+        raise StructuredApiError("competitor_source_disabled", "该竞品查询接口已临时下架，请选择其他竞品源")
     return value
 
 
@@ -32151,6 +32230,76 @@ def ad_material_product_select_exprs(columns):
         "package_name": product_optional_expr(columns, ["package", "package_name", "ios_package_name", "package_ios", "google_app_android", "app_id"]),
         "product_icon_url": product_optional_expr(columns, ["icon_url", "profile_image", "profile_image_ios"]),
     }
+
+
+def ad_material_google_store_url(package_name, country="", language=""):
+    package_name = str(package_name or "").strip()
+    if not package_name:
+        return ""
+    params = {"id": package_name}
+    if language:
+        params["hl"] = str(language).strip()
+    if country:
+        params["gl"] = str(country).strip().upper()
+    return "https://play.google.com/store/apps/details?%s" % urlencode(params)
+
+
+def ad_material_store_icon_from_url(store_url, package_name="", country="", language=""):
+    import html as html_lib
+
+    store_url = str(store_url or "").strip()
+    package_name = str(package_name or "").strip()
+    if not store_url and package_name:
+        store_url = ad_material_google_store_url(package_name, country, language)
+    if not store_url:
+        return ""
+    cache_key = "|".join([store_url, package_name, str(country or ""), str(language or "")])
+    cache = getattr(ad_material_store_icon_from_url, "_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+    icon_url = ""
+    try:
+        response = requests.get(
+            store_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept-Language": "%s,%s;q=0.9,en;q=0.8" % (language or "en", country or "US"),
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        html_text = response.text or ""
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<img[^>]+itemprop=["\']image["\'][^>]+src=["\']([^"\']+)["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html_text, flags=re.I)
+            if match:
+                icon_url = html_lib.unescape(match.group(1)).strip()
+                break
+        if icon_url.startswith("//"):
+            icon_url = "https:" + icon_url
+    except Exception:
+        logging.exception("failed to fetch store icon: %s", store_url)
+        icon_url = ""
+    cache[cache_key] = icon_url
+    setattr(ad_material_store_icon_from_url, "_cache", cache)
+    return icon_url
+
+
+def enrich_ad_material_store_icon(data):
+    icon_url = ad_material_store_icon_from_url(
+        data.get("store_url", ""),
+        data.get("package_name", ""),
+        data.get("country", ""),
+        data.get("language", ""),
+    )
+    data["product_icon_url"] = icon_url or ""
+    return data
 
 
 def lookup_ad_material_product_metadata(app_id):
@@ -32414,6 +32563,7 @@ def create_ad_material_task(payload, session):
     for key in ("store_url", "package_name", "product_icon_url"):
         if not data.get(key):
             data[key] = product.get(key) or product_meta.get(key) or ""
+    enrich_ad_material_store_icon(data)
     admin_group = lookup_admin_group_by_email(actor.get("email"))
     references = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
     with JOB_DB_LOCK:
@@ -32453,6 +32603,7 @@ def update_ad_material_task(task_id, payload, session):
     for key in ("store_url", "package_name", "product_icon_url"):
         if not data.get(key):
             data[key] = product_meta.get(key, "")
+    enrich_ad_material_store_icon(data)
     references = task.get("reference_files", [])
     new_refs = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
     if new_refs:
@@ -32572,6 +32723,7 @@ def run_ad_material_external_command(command, task, stage, extra=None):
     for key in ("store_url", "package_name", "product_icon_url"):
         if not task.get(key):
             task[key] = product_meta.get(key, "")
+    enrich_ad_material_store_icon(task)
     workdir = ad_material_task_work_dir(task["task_id"])
     ensure_dir(workdir)
     input_path = os.path.join(workdir, "%s_input.json" % stage)
@@ -33492,6 +33644,106 @@ def notify_ad_material_task_owner(task, text):
         logging.exception("failed to notify ad material owner: %s", task.get("task_id"))
 
 
+def ad_material_competitor_alert_recipients(task=None):
+    recipients = []
+    if AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE and AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID:
+        recipients.append((AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE, AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID))
+    for open_id in AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS:
+        recipients.append(("open_id", open_id))
+    try:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT open_id FROM drama_admin_user WHERE role = 'admin' AND TRIM(open_id) <> ''"
+                ).fetchall()
+            finally:
+                conn.close()
+        for row in rows:
+            recipients.append(("open_id", str(row["open_id"] or "").strip()))
+    except Exception:
+        logging.exception("failed to load ad material competitor alert admin recipients")
+    if task and task.get("creator_open_id"):
+        recipients.append(("open_id", str(task.get("creator_open_id") or "").strip()))
+    result = []
+    seen = set()
+    for receive_id_type, receive_id in recipients:
+        key = (str(receive_id_type or "").strip(), str(receive_id or "").strip())
+        if key[0] and key[1] and key not in seen:
+            seen.add(key)
+            result.append(key)
+    return result
+
+
+def notify_ad_material_competitor_source_disabled(source, error, task=None):
+    task = task or {}
+    text = (
+        "投放素材竞品源已自动临时下架\n"
+        "竞品源：%s\n"
+        "触发任务：%s / %s\n"
+        "错误：%s\n"
+        "处理：后台创建任务时将不再展示该竞品源，恢复前请改用其他来源。"
+    ) % (
+        source,
+        task.get("task_id", ""),
+        task.get("product_name") or task.get("app_id") or "",
+        str(error or "")[:800],
+    )
+    recipients = ad_material_competitor_alert_recipients(task)
+    if not recipients:
+        logging.warning("ad material competitor source disabled without alert recipient: %s %s", source, error)
+        return
+    for receive_id_type, receive_id in recipients:
+        try:
+            send_feishu_text(receive_id_type, receive_id, text)
+        except Exception:
+            logging.exception("failed to send competitor source disabled alert: %s %s", receive_id_type, receive_id)
+
+
+def disable_ad_material_competitor_source(source, error, task=None):
+    source = str(source or "").strip()
+    if source not in AD_MATERIAL_COMPETITOR_SOURCES:
+        return
+    error_text = str(error or "").strip()[:1000]
+    previous_status = ""
+    try:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ad_material_competitor_source (
+                      source, status, fail_count, last_error, disabled_at, created_at, updated_at
+                    ) VALUES (?, 'active', 0, '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (source,),
+                )
+                row = conn.execute(
+                    "SELECT status FROM ad_material_competitor_source WHERE source = ?",
+                    (source,),
+                ).fetchone()
+                previous_status = str(row["status"] or "") if row else ""
+                conn.execute(
+                    """
+                    UPDATE ad_material_competitor_source
+                    SET status = 'disabled',
+                        fail_count = fail_count + 1,
+                        last_error = ?,
+                        disabled_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE source = ?
+                    """,
+                    (error_text, source),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        if previous_status != "disabled":
+            notify_ad_material_competitor_source_disabled(source, error_text, task)
+    except Exception:
+        logging.exception("failed to disable ad material competitor source: %s", source)
+
+
 def generate_ad_material_demand(task_id, reason=""):
     task = fetch_ad_material_task(task_id)
     if not task:
@@ -33519,6 +33771,8 @@ def generate_ad_material_demand(task_id, reason=""):
         notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
     except Exception as exc:
         logging.exception("ad material demand generation failed: %s", task_id)
+        if task.get("competitor_source") and task.get("task_type") != "素材优化":
+            disable_ad_material_competitor_source(task.get("competitor_source"), exc, task)
         update_ad_material_task_status(task_id, "failed", error_message=str(exc))
 
 
@@ -84121,6 +84375,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 200, {"items": load_navigation_config()})
             except Exception as exc:
                 json_response(self, 500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/ad-material/competitor-sources":
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                include_disabled = (parse_qs(parsed.query).get("include_disabled") or [""])[0] in ("1", "true", "yes")
+                json_response(self, 200, {"items": list_ad_material_competitor_sources(include_disabled=include_disabled)})
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
             return
 
         if parsed.path == "/api/ad-material/products":

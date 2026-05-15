@@ -12671,6 +12671,7 @@
 
       jobs: [],
       adMaterialProducts: [],
+      adMaterialCompetitorSources: [],
       adMaterialTasks: [],
       adMaterialProductMatches: [],
       adMaterialProductActiveIndex: -1,
@@ -15509,10 +15510,47 @@
       }
     }
 
+    function renderAdMaterialCompetitorSources(selectedValue = "") {
+      if (!els.adMaterialCompetitorSource) return;
+      const activeSources = (state.adMaterialCompetitorSources || []).filter(item => (item.status || "active") === "active");
+      const current = selectedValue || els.adMaterialCompetitorSource.value || activeSources[0]?.source || "";
+      if (!activeSources.length) {
+        els.adMaterialCompetitorSource.innerHTML = `<option value="">暂无可用竞品源</option>`;
+        els.adMaterialCompetitorSource.disabled = true;
+        return;
+      }
+      els.adMaterialCompetitorSource.disabled = false;
+      els.adMaterialCompetitorSource.innerHTML = activeSources
+        .map(item => `<option value="${navText(item.source)}">${navText(item.name || item.source)}</option>`)
+        .join("");
+      els.adMaterialCompetitorSource.value = activeSources.some(item => item.source === current)
+        ? current
+        : activeSources[0].source;
+    }
+
+    async function loadAdMaterialCompetitorSources() {
+      if (!userCan("ad_material_tasks")) return;
+      try {
+        const data = await api("/api/ad-material/competitor-sources");
+        state.adMaterialCompetitorSources = data.items || [];
+      } catch (error) {
+        state.adMaterialCompetitorSources = [
+          { source: "有米云", name: "有米云", status: "active" },
+          { source: "metapi", name: "metapi", status: "active" },
+          { source: "广大大", name: "广大大", status: "active" },
+        ];
+        console.warn("加载竞品源失败，使用本地兜底", error);
+      }
+      renderAdMaterialCompetitorSources();
+    }
+
     function updateAdMaterialCompetitorVisibility() {
       const type = els.adMaterialTaskType?.value || "素材优化";
       if (els.adMaterialCompetitorField) {
         els.adMaterialCompetitorField.style.display = type === "素材优化" ? "none" : "";
+      }
+      if (type !== "素材优化") {
+        renderAdMaterialCompetitorSources();
       }
     }
 
@@ -15789,12 +15827,15 @@
     function adMaterialPayloadBase() {
       const product = ensureAdMaterialProductSelected();
       if (!product) throw new Error("请先搜索并选择产品");
+      if (els.adMaterialTaskType.value !== "素材优化" && !els.adMaterialCompetitorSource.value) {
+        throw new Error("当前没有可用竞品源，请先恢复竞品接口或改用素材优化");
+      }
       return {
         app_id: els.adMaterialAppId.value,
         product_name: product.name || product.product_name || "",
         store_url: product.store_url || "",
         package_name: product.package_name || product.package || "",
-        product_icon_url: product.product_icon_url || product.icon_url || "",
+        product_icon_url: "",
         task_type: els.adMaterialTaskType.value,
         competitor_source: els.adMaterialCompetitorSource.value,
         quantity: Number(els.adMaterialQuantity.value || 0),
@@ -15843,15 +15884,21 @@
       if (!state.adMaterialProducts.length) {
         await loadAdMaterialProducts();
       }
+      if (!state.adMaterialCompetitorSources.length) {
+        await loadAdMaterialCompetitorSources();
+      }
       els.adMaterialProductSearch?.focus();
     }
 
     async function editAdMaterialTask(taskId) {
+      if (!state.adMaterialCompetitorSources.length) {
+        await loadAdMaterialCompetitorSources();
+      }
       const task = await api(`/api/ad-material/tasks/${taskId}`);
       state.editingAdMaterialTaskId = task.task_id;
       setAdMaterialProductValue(task.app_id || "", task.product_name || "");
       els.adMaterialTaskType.value = task.task_type || "素材优化";
-      els.adMaterialCompetitorSource.value = task.competitor_source || "有米云";
+      renderAdMaterialCompetitorSources(task.competitor_source || "有米云");
       els.adMaterialQuantity.value = task.quantity || 1;
       els.adMaterialCountry.value = task.country || "";
       els.adMaterialLanguage.value = task.language || "";
@@ -21505,7 +21552,7 @@ function buildJobRow(job) {
 
 
       if (view === "adMaterials") {
-        Promise.all([loadAdMaterialProducts(), loadAdMaterialTasks()]).catch(error => {
+        Promise.all([loadAdMaterialProducts(), loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => {
           if (els.adMaterialTableBody) {
             els.adMaterialTableBody.innerHTML = `<tr><td colspan="10" class="muted">加载失败：${errorText(error)}</td></tr>`;
           }
@@ -21895,7 +21942,7 @@ function buildJobRow(job) {
         });
       }
       if (els.adMaterialReloadBtn) {
-        els.adMaterialReloadBtn.onclick = () => Promise.all([loadAdMaterialProducts(), loadAdMaterialTasks()]).catch(error => showError("刷新投放素材任务失败", error));
+        els.adMaterialReloadBtn.onclick = () => Promise.all([loadAdMaterialProducts(), loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => showError("刷新投放素材任务失败", error));
       }
       if (els.adMaterialSearchBtn) {
         els.adMaterialSearchBtn.onclick = () => loadAdMaterialTasks().catch(error => showError("筛选投放素材任务失败", error));
