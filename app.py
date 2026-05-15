@@ -33889,17 +33889,28 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
     task = fetch_ad_material_task(task_id)
     if not task:
         return
-    update_ad_material_task_status(task_id, "generating_material", review_reason=reason, error_message="")
+    partial_generation = indexes is not None
+    quantity = int(task.get("quantity") or 1)
+    raw_indexes = indexes if indexes is not None else list(range(1, quantity + 1))
+    target_indexes = []
+    for raw_index in raw_indexes:
+        index = int(raw_index)
+        if index not in target_indexes:
+            target_indexes.append(index)
+    if not target_indexes:
+        update_ad_material_task_status(
+            task_id,
+            "material_review" if partial_generation else "failed",
+            error_message="no ad material asset indexes requested",
+        )
+        return
+    update_ad_material_task_status(
+        task_id,
+        "material_review" if partial_generation else "generating_material",
+        review_reason=reason,
+        error_message="",
+    )
     try:
-        raw_indexes = indexes or list(range(1, int(task.get("quantity") or 1) + 1))
-        target_indexes = []
-        for raw_index in raw_indexes:
-            index = int(raw_index)
-            if index not in target_indexes:
-                target_indexes.append(index)
-        if not target_indexes:
-            raise RuntimeError("no ad material asset indexes requested")
-
         assets = []
         if AD_MATERIAL_GENERATION_COMMAND:
             for index in target_indexes:
@@ -33924,7 +33935,11 @@ def generate_ad_material_assets(task_id, indexes=None, reason=""):
         notify_ad_material_task_owner(fresh, "投放素材已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
     except Exception as exc:
         logging.exception("ad material generation failed: %s", task_id)
-        update_ad_material_task_status(task_id, "failed", error_message=str(exc))
+        update_ad_material_task_status(
+            task_id,
+            "material_review" if partial_generation else "failed",
+            error_message=str(exc),
+        )
 
 
 def run_ad_material_generation_async(task_id, indexes=None, reason=""):
@@ -33989,7 +34004,7 @@ def review_ad_material_asset(task_id, asset_id, payload, session):
         finally:
             conn.close()
     if status == "regenerating":
-        update_ad_material_task_status(task_id, "material_returned", review_reason=reason)
+        update_ad_material_task_status(task_id, "material_review", review_reason=reason)
         run_ad_material_generation_async(task_id, indexes=[int(asset.get("asset_index") or 1)], reason=reason)
     return fetch_ad_material_task(task_id)
 
