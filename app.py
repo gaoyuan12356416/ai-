@@ -1222,6 +1222,7 @@ AD_MATERIAL_PUBLIC_ROOT = os.environ.get(
 AD_MATERIAL_PUBLIC_BASE_URL = os.environ.get(
     "AD_MATERIAL_PUBLIC_BASE_URL", "https://ai.yingliangads.com/ad-materials"
 )
+AD_MATERIAL_ADMIN_URL = os.environ.get("AD_MATERIAL_ADMIN_URL", "https://ai.yingliangads.com/#adMaterials").strip()
 AD_MATERIAL_SOURCE_API_URL = os.environ.get(
     "AD_MATERIAL_SOURCE_API_URL", "https://aa.yingliangads.com/api/material/source"
 ).strip()
@@ -33670,7 +33671,11 @@ def export_ad_material_demand_pdf(task_id, session):
 def notify_ad_material_task_owner(task, text):
     try:
         if task.get("creator_open_id"):
-            send_feishu_text("open_id", task["creator_open_id"], text)
+            message = str(text or "").strip()
+            admin_url = AD_MATERIAL_ADMIN_URL.rstrip("/")
+            if admin_url and admin_url not in message:
+                message = "%s\nAI后台：%s" % (message, admin_url)
+            send_feishu_text("open_id", task["creator_open_id"], message)
     except Exception:
         logging.exception("failed to notify ad material owner: %s", task.get("task_id"))
 
