@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -70,7 +71,8 @@ def main():
         remote_url = str(item.get("public_url") or item.get("url") or "").strip()
         if not remote_url:
             continue
-        local_path = local_dir / ("%s.png" % asset_id)
+        suffix = int(time.time())
+        local_path = local_dir / ("%s_%s.png" % (asset_id, suffix))
         download(remote_url, local_path)
         outputs.append(
             {

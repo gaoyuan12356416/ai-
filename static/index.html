@@ -16045,10 +16045,19 @@
 
     function reviewAssetMedia(asset) {
       const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(asset.url || "");
-      if (!asset.url) return `<div class="empty-card">暂无素材预览</div>`;
+      const previewUrl = adMaterialAssetPreviewUrl(asset);
+      if (!previewUrl) return `<div class="empty-card">暂无素材预览</div>`;
       return isVideo
-        ? `<video src="${navText(asset.url)}" controls></video>`
-        : `<a href="${navText(asset.url)}" target="_blank" rel="noopener noreferrer"><img src="${navText(asset.url)}" alt="${navText(asset.name || asset.asset_id || "")}" loading="lazy" decoding="async" /></a>`;
+        ? `<video src="${navText(previewUrl)}" controls></video>`
+        : `<a href="${navText(previewUrl)}" target="_blank" rel="noopener noreferrer"><img src="${navText(previewUrl)}" alt="${navText(asset.name || asset.asset_id || "")}" loading="lazy" decoding="async" /></a>`;
+    }
+
+    function adMaterialAssetPreviewUrl(asset) {
+      const url = String(asset?.url || "");
+      if (!url) return "";
+      const version = String(asset?.updated_at || asset?.source_api_id || "").replace(/[^0-9A-Za-z_-]+/g, "");
+      if (!version) return url;
+      return `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(version)}`;
     }
 
     function renderAdMaterialDemandReview(task) {
