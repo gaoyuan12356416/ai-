@@ -69546,6 +69546,7 @@ def _handle_gpu_video_render_unlocked(payload):
     cover_wait_timeout = int(payload.get("cover_wait_timeout") or GPU_VIDEO_WORKER_TIMEOUT or 1800)
     render_concat = bool(outputs.get("concat_video", True) or outputs.get("no_bgm_video", True))
     render_no_bgm = bool(outputs.get("no_bgm_video", True))
+    publish_concat = bool(outputs.get("concat_video", True))
     if not render_concat:
         return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
 
@@ -69570,7 +69571,13 @@ def _handle_gpu_video_render_unlocked(payload):
         "output_video_no_bgm_url": "",
     }
     segment_paths = []
-    total_steps = (1 if (cover_16x9_url or await_cover_16x9) else 0) + max(1, len(episodes)) + 1 + (1 if render_no_bgm else 0)
+    total_steps = (
+        (1 if (cover_16x9_url or await_cover_16x9) else 0)
+        + max(1, len(episodes))
+        + 1
+        + (1 if render_no_bgm else 0)
+        + (1 if publish_concat else 0)
+    )
     completed_steps = 0
 
     if cover_16x9_url:
@@ -69640,11 +69647,13 @@ def _handle_gpu_video_render_unlocked(payload):
     public_video_path = os.path.join(public_dir, "material.mp4")
     remove_invalid_video_file(output_path, "GPU concat workspace")
     remove_invalid_video_file(public_video_path, "GPU concat public")
-    if not file_ready(public_video_path):
-        if not file_ready(output_path):
-            concat_segments(segment_paths, output_path)
+    if not file_ready(output_path):
+        concat_segments(segment_paths, output_path)
+    if not valid_video_file(output_path):
+        raise RuntimeError("GPU concat video is invalid: %s" % output_path)
+    if publish_concat and not file_ready(public_video_path):
         shutil.copy2(output_path, public_video_path)
-    if not valid_video_file(public_video_path):
+    if publish_concat and not valid_video_file(public_video_path):
         raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
     update_render_stage(job, completed_steps, total_steps, "GPU concat video ready")
 
@@ -69656,20 +69665,21 @@ def _handle_gpu_video_render_unlocked(payload):
         if file_ready(public_no_bgm_path):
             job["output_video_no_bgm_url"] = publish_asset(public_no_bgm_path)
         else:
-            run_no_bgm_pipeline(job, public_video_path, no_bgm_output_path, public_no_bgm_path)
+            run_no_bgm_pipeline(job, output_path, no_bgm_output_path, public_no_bgm_path)
         completed_steps += 1
         update_render_stage(job, completed_steps, total_steps, "GPU no-BGM video uploaded")
 
-    job["output_video_url"] = publish_asset(public_video_path)
-    completed_steps += 1
-    update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
+    if publish_concat:
+        job["output_video_url"] = publish_asset(public_video_path)
+        completed_steps += 1
+        update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
 
     result = {
         "job_id": job_id,
         "output_video_url": job.get("output_video_url", ""),
         "output_video_no_bgm_url": job.get("output_video_no_bgm_url", ""),
     }
-    if not result["output_video_url"]:
+    if publish_concat and not result["output_video_url"]:
         raise RuntimeError("GPU concat video upload did not return a URL")
     if render_no_bgm and not result["output_video_no_bgm_url"]:
         raise RuntimeError("GPU no-BGM video upload did not return a URL")
@@ -72394,7 +72404,7 @@ def process_job(job):
 
 
 
-    need_cover = outputs["cover_16x9"] or need_video_pipeline
+    need_cover = outputs["cover_16x9"] or (need_video_pipeline and not gpu_video_worker_enabled())
 
 
 
@@ -74758,7 +74768,7 @@ def process_job(job):
 
 
 
-        total_render_steps = len(downloaded_episode_paths) + 2
+        total_render_steps = len(downloaded_episode_paths) + 1 + (1 if need_cover else 0)
 
 
 

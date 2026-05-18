@@ -7121,6 +7121,29 @@
 
 
 
+    .detail-drawer.open {
+      overflow: hidden;
+    }
+
+    .detail-panel {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    body.drawer-open {
+      overflow: hidden;
+    }
+
+    #detailDrawer .detail-panel {
+      display: block;
+    }
+
+    #detailDrawer .detail-panel > .panel {
+      overflow: visible;
+      margin-bottom: 18px;
+    }
+
     #adMaterialDetailPanel {
       align-items: stretch;
     }
@@ -18073,6 +18096,18 @@ function buildJobRow(job) {
 
 
 
+    function openDetailDrawer(hash) {
+      const panel = els.detailDrawer.querySelector(".detail-panel");
+      els.detailDrawer.classList.add("open");
+      document.body.classList.add("drawer-open");
+      if (panel) {
+        panel.tabIndex = -1;
+        panel.scrollTop = 0;
+        requestAnimationFrame(() => panel.focus({ preventScroll: true }));
+      }
+      if (hash) location.hash = hash;
+    }
+
     function closeDetailDrawer() {
 
 
@@ -18090,6 +18125,7 @@ function buildJobRow(job) {
 
 
       els.detailDrawer.classList.remove("open");
+      document.body.classList.remove("drawer-open");
 
 
 
@@ -18898,8 +18934,7 @@ function buildJobRow(job) {
         const job = await api(`/api/drama-screenshot-material/jobs/${jobId}`);
         state.selectedScreenshotJob = job;
         renderScreenshotJobDetail(job);
-        els.detailDrawer.classList.add("open");
-        location.hash = "#screenshot-job/" + jobId;
+        openDetailDrawer("#screenshot-job/" + jobId);
       } catch (error) {
         showError("\u67e5\u770b\u8be6\u60c5\u5931\u8d25", error);
       }
@@ -20690,23 +20725,7 @@ function buildJobRow(job) {
 
 
 
-        els.detailDrawer.classList.add("open");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        location.hash = "#job/" + jobId;
+        openDetailDrawer("#job/" + jobId);
 
 
 
@@ -23894,6 +23913,12 @@ function buildJobRow(job) {
 
 
       };
+      els.detailDrawer.addEventListener("wheel", (event) => {
+        const panel = els.detailDrawer.querySelector(".detail-panel");
+        if (panel && panel.contains(event.target)) {
+          event.stopPropagation();
+        }
+      }, { passive: true });
 
 
 
