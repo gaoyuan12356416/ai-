@@ -1266,6 +1266,10 @@ COS_DOMAIN = os.environ.get("COS_DOMAIN", "").strip()
 
 COS_PREFIX = os.environ.get("COS_PREFIX", "drama-materials").strip().strip("/")
 COS_UPLOAD_TIMEOUT = int(os.environ.get("COS_UPLOAD_TIMEOUT", "120"))
+COS_MULTIPART_THRESHOLD = int(os.environ.get("COS_MULTIPART_THRESHOLD", str(64 * 1024 * 1024)))
+COS_MULTIPART_PART_SIZE_MB = int(os.environ.get("COS_MULTIPART_PART_SIZE_MB", "16"))
+COS_MULTIPART_THREADS = int(os.environ.get("COS_MULTIPART_THREADS", "8"))
+COS_MULTIPART_TIMEOUT = int(os.environ.get("COS_MULTIPART_TIMEOUT", "900"))
 
 
 
@@ -9254,10 +9258,65 @@ def valid_video_file(path, min_duration=0.5):
         return False
 
 
+def probe_media_stream_info(path):
+    if not file_ready(path):
+        return {}
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_path(), "-v", "error",
+                "-show_entries",
+                "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,sample_rate,channels,duration:format=duration",
+                "-of", "json",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            logging.warning("failed to probe media streams for %s: %s", path, proc.stderr.strip())
+            return {}
+        return json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        logging.warning("failed to probe media streams for %s: %s", path, exc)
+        return {}
+
+
+def media_duration_delta_seconds(path):
+    data = probe_media_stream_info(path)
+    streams = data.get("streams") or []
+    video_duration = None
+    audio_duration = None
+    for stream in streams:
+        codec_type = stream.get("codec_type")
+        try:
+            duration = float(stream.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration <= 0:
+            continue
+        if codec_type == "video" and video_duration is None:
+            video_duration = duration
+        elif codec_type == "audio" and audio_duration is None:
+            audio_duration = duration
+    if video_duration is None or audio_duration is None:
+        return None
+    return abs(video_duration - audio_duration)
+
+
+def valid_av_duration_alignment(path, max_delta=1.0):
+    delta = media_duration_delta_seconds(path)
+    if delta is None:
+        return True
+    return delta <= float(max_delta)
+
+
 def remove_invalid_video_file(path, label="video"):
     if not path or not os.path.exists(path):
         return False
-    if valid_video_file(path):
+    if valid_video_file(path) and valid_av_duration_alignment(path):
         return False
     try:
         os.remove(path)
@@ -13025,6 +13084,17 @@ def normalize_outputs(raw_outputs):
 
 
     return normalized
+
+
+def selected_job_outputs_ready(job):
+    outputs = normalize_outputs(job.get("outputs", {}))
+    if outputs["concat_video"] and not str(job.get("output_video_url") or "").strip():
+        return False
+    if outputs["no_bgm_video"] and not str(job.get("output_video_no_bgm_url") or "").strip():
+        return False
+    if outputs["cover_16x9"] and not str(job.get("cover_16x9_url") or "").strip():
+        return False
+    return True
 
 
 
@@ -22063,17 +22133,18 @@ def guess_content_type(path):
 
 
 
-def get_cos_client():
+def get_cos_client(timeout=None):
 
     if not cos_enabled():
 
         return None
 
+    timeout = int(timeout or COS_UPLOAD_TIMEOUT)
     config = CosConfig(
         Region=COS_REGION,
         SecretId=COS_SECRET_ID,
         SecretKey=COS_SECRET_KEY,
-        Timeout=COS_UPLOAD_TIMEOUT,
+        Timeout=timeout,
         KeepAlive=False,
     )
 
@@ -22106,25 +22177,39 @@ def upload_file_to_cos(path):
     except Exception as exc:
         logging.warning("COS existing-object check failed, will upload: %s %s", object_url, exc)
 
-    client = get_cos_client()
-
-    with open(path, "rb") as fp:
-
-        client.put_object(
-
+    if expected_size >= COS_MULTIPART_THRESHOLD:
+        logging.info("uploading large COS object with multipart: %s size=%s", object_url, expected_size)
+        client = get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT))
+        client.upload_file(
             Bucket=COS_BUCKET,
-
-            Body=fp,
-
             Key=object_key,
-
-            EnableMD5=True,
-
+            LocalFilePath=path,
+            PartSize=max(1, COS_MULTIPART_PART_SIZE_MB),
+            MAXThread=max(1, COS_MULTIPART_THREADS),
+            EnableMD5=False,
             ACL="public-read",
-
             ContentType=guess_content_type(path),
-
         )
+    else:
+        client = get_cos_client()
+
+        with open(path, "rb") as fp:
+
+            client.put_object(
+
+                Bucket=COS_BUCKET,
+
+                Body=fp,
+
+                Key=object_key,
+
+                EnableMD5=True,
+
+                ACL="public-read",
+
+                ContentType=guess_content_type(path),
+
+            )
 
     return object_url
 
@@ -59176,6 +59261,70 @@ def normalize_episode(source_path, output_path):
     ])
 
 
+def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="48000"):
+    ensure_dir(os.path.dirname(output_path))
+    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+    if os.path.exists(tmp_output_path):
+        os.remove(tmp_output_path)
+    try:
+        run_cmd([
+            FFMPEG, "-y", "-i", source_path,
+            "-map", "0:v:0", "-map", "0:a?",
+            "-vf", "fps=%s,format=yuv420p,setsar=1" % fps,
+            "-r", str(fps),
+            *video_encode_args(),
+            "-c:a", "aac", "-b:a", "128k", "-ar", str(audio_rate), "-ac", "2",
+            "-af", "aresample=async=1:first_pts=0",
+            "-movflags", "+faststart",
+            "-shortest",
+            tmp_output_path,
+        ])
+        if not valid_video_file(tmp_output_path):
+            raise RuntimeError("normalized concat segment is not a valid video: %s" % tmp_output_path)
+        if not valid_av_duration_alignment(tmp_output_path):
+            raise RuntimeError("normalized concat segment has audio/video duration mismatch: %s" % tmp_output_path)
+        os.replace(tmp_output_path, output_path)
+    finally:
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+
+
+def concat_segments_need_normalization(segment_paths):
+    signatures = []
+    for path in segment_paths:
+        data = probe_media_stream_info(path)
+        streams = data.get("streams") or []
+        video = next((item for item in streams if item.get("codec_type") == "video"), None)
+        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+        if not video or not audio:
+            return True
+        signatures.append((
+            video.get("codec_name") or "",
+            int(video.get("width") or 0),
+            int(video.get("height") or 0),
+            video.get("avg_frame_rate") or video.get("r_frame_rate") or "",
+            video.get("time_base") or "",
+            audio.get("codec_name") or "",
+            audio.get("sample_rate") or "",
+            int(audio.get("channels") or 0),
+            audio.get("time_base") or "",
+        ))
+    return len(set(signatures)) > 1
+
+
+def prepare_concat_segments(segment_paths, output_dir):
+    if len(segment_paths) <= 1 or not concat_segments_need_normalization(segment_paths):
+        return segment_paths
+    ensure_dir(output_dir)
+    normalized_paths = []
+    for index, source_path in enumerate(segment_paths):
+        normalized_path = os.path.join(output_dir, "%03d.mp4" % index)
+        if not file_ready(normalized_path) or not valid_av_duration_alignment(normalized_path):
+            normalize_concat_segment(source_path, normalized_path)
+        normalized_paths.append(normalized_path)
+    return normalized_paths
+
+
 def ffprobe_path():
     configured = os.environ.get("DRAMA_FFPROBE", "").strip()
     candidates = []
@@ -59682,7 +59831,7 @@ def concat_segments(segment_paths, output_path):
 
     os.close(fd)
     ensure_dir(os.path.dirname(output_path))
-    tmp_output_path = output_path + ".tmp.%s" % os.getpid()
+    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
 
 
 
@@ -59847,6 +59996,8 @@ def concat_segments(segment_paths, output_path):
         run_cmd([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c", "copy", "-movflags", "+faststart", tmp_output_path])
         if not valid_video_file(tmp_output_path):
             raise RuntimeError("concat output is not a valid video: %s" % tmp_output_path)
+        if not valid_av_duration_alignment(tmp_output_path):
+            raise RuntimeError("concat output has audio/video duration mismatch: %s" % tmp_output_path)
         os.replace(tmp_output_path, output_path)
 
 
@@ -61130,6 +61281,10 @@ def remux_vocals_video(input_video_path, vocals_audio_path, output_video_path):
 
 
     ], timeout=DEMUCS_TIMEOUT)
+    if not valid_video_file(output_video_path):
+        raise RuntimeError("no-BGM output is not a valid video: %s" % output_video_path)
+    if not valid_av_duration_alignment(output_video_path):
+        raise RuntimeError("no-BGM output has audio/video duration mismatch: %s" % output_video_path)
 
 
 
@@ -69553,9 +69708,11 @@ def _handle_gpu_video_render_unlocked(payload):
     workdir = os.path.join(WORK_ROOT, job_id)
     download_dir = os.path.join(workdir, "downloads")
     segment_dir = os.path.join(workdir, "segments")
+    concat_segment_dir = os.path.join(workdir, "concat_segments")
     public_dir = os.path.join(PUBLIC_ROOT, job_id)
     ensure_dir(download_dir)
     ensure_dir(segment_dir)
+    ensure_dir(concat_segment_dir)
     ensure_dir(public_dir)
 
     job = {
@@ -69636,6 +69793,8 @@ def _handle_gpu_video_render_unlocked(payload):
         segment_paths.insert(0, intro_path)
         completed_steps += 1
         update_render_stage(job, completed_steps, total_steps, "GPU intro rendered")
+
+    segment_paths = prepare_concat_segments(segment_paths, concat_segment_dir)
 
     output_name = "%s_%s_eps_%s_%s.mp4" % (
         job["content_id"] or "material",
@@ -74712,7 +74871,7 @@ def process_job(job):
 
 
 
-    if need_video_pipeline and gpu_video_worker_enabled() and os.path.isfile(public_cover_path):
+    if need_video_pipeline and gpu_video_worker_enabled() and outputs["cover_16x9"] and os.path.isfile(public_cover_path):
         job["_gpu_cover_16x9_url"] = job.get("cover_16x9_url") or publish_asset(public_cover_path)
         if outputs["cover_16x9"] and not job.get("cover_16x9_url"):
             job["cover_16x9_url"] = job["_gpu_cover_16x9_url"]
@@ -80663,6 +80822,13 @@ def resume_job_from_checkpoint(job):
 
 
     job["progress_detail"] = "从断点继续执行任务"
+    if selected_job_outputs_ready(job):
+        job["status"] = "done"
+        job["progress"] = 100
+        job["progress_detail"] = "全部产物已生成"
+        upsert_job_record(job)
+        notify_job_creator_on_completion(job)
+        return
 
 
 
