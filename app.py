@@ -2422,6 +2422,14 @@ JOB_DB_LOCK = threading.Lock()
 
 DEMUCS_LOCK = threading.Lock()
 
+JOB_RETRY_LOCKS_LOCK = threading.Lock()
+
+JOB_RETRY_LOCKS = {}
+
+GPU_VIDEO_RENDER_LOCKS_LOCK = threading.Lock()
+
+GPU_VIDEO_RENDER_LOCKS = {}
+
 
 
 
@@ -9204,6 +9212,60 @@ def file_ready(path):
 
 
     return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def get_named_runtime_lock(lock_map, lock_guard, key):
+    key = str(key or "").strip()
+    with lock_guard:
+        lock = lock_map.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            lock_map[key] = lock
+        return lock
+
+
+def valid_video_file(path, min_duration=0.5):
+    if not file_ready(path):
+        return False
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_path(), "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type:format=duration",
+                "-of", "json",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            return False
+        data = json.loads(proc.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return False
+        duration = float((data.get("format") or {}).get("duration") or 0)
+        return duration >= float(min_duration or 0)
+    except Exception as exc:
+        logging.warning("failed to validate video file %s: %s", path, exc)
+        return False
+
+
+def remove_invalid_video_file(path, label="video"):
+    if not path or not os.path.exists(path):
+        return False
+    if valid_video_file(path):
+        return False
+    try:
+        os.remove(path)
+        logging.warning("removed invalid %s file: %s", label, path)
+        return True
+    except OSError as exc:
+        logging.warning("failed to remove invalid %s file %s: %s", label, path, exc)
+        return False
 
 
 
@@ -59619,6 +59681,8 @@ def concat_segments(segment_paths, output_path):
 
 
     os.close(fd)
+    ensure_dir(os.path.dirname(output_path))
+    tmp_output_path = output_path + ".tmp.%s" % os.getpid()
 
 
 
@@ -59778,7 +59842,12 @@ def concat_segments(segment_paths, output_path):
 
 
 
-        run_cmd([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c", "copy", "-movflags", "+faststart", output_path])
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+        run_cmd([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c", "copy", "-movflags", "+faststart", tmp_output_path])
+        if not valid_video_file(tmp_output_path):
+            raise RuntimeError("concat output is not a valid video: %s" % tmp_output_path)
+        os.replace(tmp_output_path, output_path)
 
 
 
@@ -59875,6 +59944,8 @@ def concat_segments(segment_paths, output_path):
 
 
             os.remove(concat_path)
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
 
 
 
@@ -69355,7 +69426,8 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         headers=headers,
         timeout=GPU_VIDEO_WORKER_TIMEOUT,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        raise RuntimeError("GPU video worker failed (%s): %s" % (response.status_code, response.text[:2000]))
     result = response.json()
     if result.get("error"):
         raise RuntimeError(result.get("error"))
@@ -69451,6 +69523,15 @@ def cleanup_gpu_video_job_files(job_id, workdir, public_dir):
 
 
 def handle_gpu_video_render(payload):
+    job_id = str((payload or {}).get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("missing job_id")
+    lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
+    with lock:
+        return _handle_gpu_video_render_unlocked(payload)
+
+
+def _handle_gpu_video_render_unlocked(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
     job_id = str(payload.get("job_id", "") or "").strip()
@@ -69557,15 +69638,21 @@ def handle_gpu_video_render(payload):
     )
     output_path = os.path.join(workdir, output_name)
     public_video_path = os.path.join(public_dir, "material.mp4")
+    remove_invalid_video_file(output_path, "GPU concat workspace")
+    remove_invalid_video_file(public_video_path, "GPU concat public")
     if not file_ready(public_video_path):
         if not file_ready(output_path):
             concat_segments(segment_paths, output_path)
         shutil.copy2(output_path, public_video_path)
+    if not valid_video_file(public_video_path):
+        raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
     update_render_stage(job, completed_steps, total_steps, "GPU concat video ready")
 
     if render_no_bgm:
         no_bgm_output_path = os.path.join(workdir, "material_no_bgm.mp4")
         public_no_bgm_path = os.path.join(public_dir, "material_no_bgm.mp4")
+        remove_invalid_video_file(no_bgm_output_path, "GPU no-BGM workspace")
+        remove_invalid_video_file(public_no_bgm_path, "GPU no-BGM public")
         if file_ready(public_no_bgm_path):
             job["output_video_no_bgm_url"] = publish_asset(public_no_bgm_path)
         else:
@@ -81014,6 +81101,10 @@ def resume_job_from_checkpoint(job):
 
 
 def retry_job(job_id):
+    lock = get_named_runtime_lock(JOB_RETRY_LOCKS, JOB_RETRY_LOCKS_LOCK, job_id)
+    if not lock.acquire(blocking=False):
+        raise ValueError("任务正在重新制作，请勿重复提交")
+    try:
 
 
 
@@ -81045,7 +81136,7 @@ def retry_job(job_id):
 
 
 
-    job = fetch_job_row(job_id)
+        job = fetch_job_row(job_id)
 
 
 
@@ -81077,7 +81168,7 @@ def retry_job(job_id):
 
 
 
-    if not job:
+        if not job:
 
 
 
@@ -81109,7 +81200,7 @@ def retry_job(job_id):
 
 
 
-        raise ValueError("任务不存在")
+            raise ValueError("任务不存在")
 
 
 
@@ -81141,7 +81232,7 @@ def retry_job(job_id):
 
 
 
-    if job.get("status") == "done":
+        if job.get("status") == "done":
 
 
 
@@ -81173,7 +81264,7 @@ def retry_job(job_id):
 
 
 
-        raise ValueError("任务已完成，无需重新制作")
+            raise ValueError("任务已完成，无需重新制作")
 
 
 
@@ -81205,7 +81296,11 @@ def retry_job(job_id):
 
 
 
-    resume_job_from_checkpoint(job)
+        if job.get("status") != "failed":
+            raise ValueError("任务正在处理中，无需重复提交")
+        resume_job_from_checkpoint(job)
+    finally:
+        lock.release()
 
 
 
