@@ -75,16 +75,15 @@ def append_size_plan(demand_text, size_plan):
 
 
 def pick_provider(task):
-    configured = os.environ.get("AD_MATERIAL_REQUIREMENT_PROVIDER", "").strip().lower()
-    if configured:
-        return configured
     source = str(task.get("competitor_source") or "").strip().lower()
     if source in {"\u5e7f\u5927\u5927", "guangdada", "dataidea", "dataidea/guangdada"}:
         return "guangdada"
     if source in {"metapi", "meta api"}:
         return "metapi"
+    configured = os.environ.get("AD_MATERIAL_REQUIREMENT_PROVIDER", "").strip().lower()
+    if configured:
+        return configured
     return "guangdada"
-
 
 def parse_command_output(stdout):
     result = {}
@@ -134,8 +133,9 @@ def main():
     today = date.today()
     default_start = today - timedelta(days=33)
     default_end = today - timedelta(days=3)
-    quantity = max(1, min(20, int(task.get("quantity") or 1)))
     size_plan = parse_size_plan(task)
+    plan_quantity = sum(max(0, int(item.get("count") or 0)) for item in size_plan)
+    quantity = max(1, min(20, plan_quantity or int(task.get("quantity") or 1)))
     primary_size = size_plan[0]["size"] if size_plan else task.get("size")
     revision_instruction = str((payload.get("extra") or {}).get("reason") or task.get("review_reason") or "").strip()
     out_dir = Path(os.environ.get("AD_MATERIAL_REQUIREMENT_OUTPUT_DIR", "/root/codex_test/output"))
@@ -161,6 +161,8 @@ def main():
         "--output-dir",
         str(out_dir),
     ]
+    if "--size-plan-json" in script_text:
+        cmd.extend(["--size-plan-json", json.dumps(size_plan, ensure_ascii=False)])
     if revision_instruction and "--revision-instruction" in script_text:
         cmd.extend(["--revision-instruction", revision_instruction])
     vision_json = os.environ.get("AD_MATERIAL_VISION_ANALYSIS_JSON", "").strip()
