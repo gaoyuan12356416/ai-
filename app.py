@@ -33200,6 +33200,22 @@ def _ad_material_reference_items(task):
     return items
 
 
+def normalize_cover_source_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    replacements = (
+        ("https://static-v1.mydramawave.com/", "https://static.mydramawave.com/"),
+        ("http://static-v1.mydramawave.com/", "https://static.mydramawave.com/"),
+        ("https://static-v2.mydramawave.com/", "https://static.mydramawave.com/"),
+        ("http://static-v2.mydramawave.com/", "https://static.mydramawave.com/"),
+    )
+    for old, new in replacements:
+        if text.startswith(old):
+            return new + text[len(old) :]
+    return text
+
+
 def _ad_material_source_note(task):
     source = str(task.get("competitor_source") or "").strip()
     task_kind = ad_material_task_kind(task.get("task_type"))
@@ -56950,7 +56966,7 @@ def validate_content_request(app_id, content_id, episode_start, episode_end):
 
 
 
-        "cover_source_url": sample["cover_url"] or episodes[0]["cover_url"],
+        "cover_source_url": normalize_cover_source_url(sample["cover_url"] or episodes[0]["cover_url"]),
 
 
 
@@ -57152,7 +57168,7 @@ def validate_screenshot_request(app_id, content_id):
 
     for episode in episodes:
 
-        cover_source_url = str(episode.get("cover_url", "") or "").strip()
+        cover_source_url = normalize_cover_source_url(episode.get("cover_url", ""))
 
         if cover_source_url:
 
