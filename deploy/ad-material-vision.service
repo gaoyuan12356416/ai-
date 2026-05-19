@@ -1,0 +1,25 @@
+[Unit]
+Description=Ad Material Codex Vision Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+Environment=PYTHONUNBUFFERED=1
+Environment=AD_MATERIAL_VISION_HOST=127.0.0.1
+Environment=AD_MATERIAL_VISION_PORT=8796
+Environment=AD_MATERIAL_VISION_WORK_ROOT=/root/ad_material_vision_jobs
+Environment=AD_MATERIAL_VISION_CODEX_BIN=/usr/bin/codex
+Environment=AD_MATERIAL_VISION_CODEX_MODEL=gpt-5.5
+Environment=AD_MATERIAL_VISION_CODEX_REASONING=medium
+Environment=AD_MATERIAL_VISION_CODEX_TIMEOUT=2400
+Environment=AD_MATERIAL_VISION_ISOLATE_CODEX_HOME=1
+Environment=AD_MATERIAL_VISION_SOURCE_CODEX_HOME=/root/.codex
+Environment=AD_MATERIAL_VISION_MAX_CONCURRENCY=1
+ExecStart=/usr/bin/python3 /root/drama_material_service/ad_material_vision_service.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
