@@ -2154,6 +2154,12 @@ DEMUCS_FALLBACK_CHUNK_SECONDS = int(os.environ.get("DEMUCS_FALLBACK_CHUNK_SECOND
 
 
 JOB_AUTO_RETRY_ATTEMPTS = int(os.environ.get("JOB_AUTO_RETRY_ATTEMPTS", "1"))
+DRAMA_JOB_USE_WORKER = os.environ.get("DRAMA_JOB_USE_WORKER", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 SCREENSHOT_ITEM_RETRY_ATTEMPTS = int(os.environ.get("SCREENSHOT_ITEM_RETRY_ATTEMPTS", "3"))
 CODEX_SCREENSHOT_BATCH_ENABLED = os.environ.get("CODEX_SCREENSHOT_BATCH_ENABLED", "0").strip().lower() in (
     "1",
@@ -59319,7 +59325,11 @@ def prepare_concat_segments(segment_paths, output_dir):
     normalized_paths = []
     for index, source_path in enumerate(segment_paths):
         normalized_path = os.path.join(output_dir, "%03d.mp4" % index)
-        if not file_ready(normalized_path) or not valid_av_duration_alignment(normalized_path):
+        if (
+            not file_ready(normalized_path)
+            or not valid_video_file(normalized_path)
+            or not valid_av_duration_alignment(normalized_path)
+        ):
             normalize_concat_segment(source_path, normalized_path)
         normalized_paths.append(normalized_path)
     return normalized_paths
@@ -59414,6 +59424,10 @@ def render_intro(cover_path, output_path, reference_path=None):
     intro_audio_rate = timing["audio_rate"]
     if reference_path:
         logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
+    ensure_dir(os.path.dirname(output_path))
+    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+    if os.path.exists(tmp_output_path):
+        os.remove(tmp_output_path)
 
 
 
@@ -59637,7 +59651,7 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", output_path,
+        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", tmp_output_path,
 
 
 
@@ -59670,6 +59684,15 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
     ])
+    try:
+        if not valid_video_file(tmp_output_path):
+            raise RuntimeError("intro output is not a valid video: %s" % tmp_output_path)
+        if not valid_av_duration_alignment(tmp_output_path):
+            raise RuntimeError("intro output has audio/video duration mismatch: %s" % tmp_output_path)
+        os.replace(tmp_output_path, output_path)
+    finally:
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
 
 
 
@@ -69785,6 +69808,7 @@ def _handle_gpu_video_render_unlocked(payload):
             cover_16x9_url = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
         cover_path = os.path.join(download_dir, "cover_16x9.jpg")
         intro_path = os.path.join(segment_dir, "000_intro.mp4")
+        remove_invalid_video_file(intro_path, "GPU intro")
         if not file_ready(cover_path):
             download_file(cover_16x9_url, cover_path)
         if not file_ready(intro_path):
@@ -75024,6 +75048,7 @@ def process_job(job):
 
 
         intro_path = os.path.join(normalized_dir, "000_intro.mp4")
+        remove_invalid_video_file(intro_path, "CPU intro")
 
 
 
@@ -79046,6 +79071,12 @@ def resume_failed_no_bgm_job(job):
 
 
 def run_job_async(job):
+
+    if DRAMA_JOB_USE_WORKER:
+
+        logging.info("drama job queued for external worker: %s", job.get("job_id"))
+
+        return
 
 
 

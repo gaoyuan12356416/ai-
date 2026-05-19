@@ -1,0 +1,17 @@
+[Unit]
+Description=Drama Material Job Worker
+After=network.target drama-material-api.service
+Wants=drama-material-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=-/root/drama_material_service/.env
+Environment=DRAMA_JOB_USE_WORKER=1
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/drama_job_worker.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
