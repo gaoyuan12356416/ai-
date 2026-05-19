@@ -77,6 +77,21 @@
     return (items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
+  const INTERNAL_VIEW_HREFS = {
+    tasks: "#tasks",
+    screenshots: "#screenshots",
+    adMaterials: "#adMaterials",
+    settings: "#settings",
+    navigation: "#navigation",
+    users: "#users",
+    logs: "#logs"
+  };
+
+  function navItemHref(item) {
+    const key = item.view || item.key;
+    return INTERNAL_VIEW_HREFS[key] || item.href || "#";
+  }
+
   function mergeDefaultNav(config) {
     const groups = Array.isArray(config) ? config.slice() : [];
     for (const defaultGroup of DEFAULT_NAV) {
@@ -111,7 +126,16 @@
   function renderItem(item, activeKey) {
     const active = item.key === activeKey || item.view === activeKey;
     const description = item.description ? `<span>${escapeHtml(item.description)}</span>` : "";
-    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" href="${escapeHtml(item.href || "#")}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
+    return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
+  }
+
+  function buildNavHtml(config, options) {
+    return sortItems(config).map(group => {
+      if (!visibleFor(options.auth || {}, group)) return "";
+      const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
+      if (!items.length) return "";
+      return `<div class="nav-group"><div class="nav-parent">${escapeHtml(group.label || "")}</div><div class="nav-children">${items.map(item => renderItem(item, options.activeKey)).join("")}</div></div>`;
+    }).join("");
   }
 
   async function render(options) {
@@ -119,14 +143,9 @@
     if (!container) return;
     injectStyle();
     container.classList.add("quick-nav-root");
+    container.innerHTML = buildNavHtml(navCache || DEFAULT_NAV, options);
     const config = await loadConfig();
-    const html = sortItems(config).map(group => {
-      if (!visibleFor(options.auth || {}, group)) return "";
-      const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
-      if (!items.length) return "";
-      return `<div class="nav-group"><div class="nav-parent">${escapeHtml(group.label || "")}</div><div class="nav-children">${items.map(item => renderItem(item, options.activeKey)).join("")}</div></div>`;
-    }).join("");
-    container.innerHTML = html;
+    container.innerHTML = buildNavHtml(config, options);
   }
 
   function clearCache() {

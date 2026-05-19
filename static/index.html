@@ -86,7 +86,7 @@
 
 
 
-  <script src="/quick-nav.js?v=20260518-perf-nav-product"></script>
+  <script src="/quick-nav.js?v=20260519-qa-perf-nav"></script>
   <script>
 
 
@@ -12900,6 +12900,7 @@
       adMaterialProductQueryCache: {},
       adMaterialProductSearchTimer: null,
       adMaterialProductSearchRequestId: 0,
+      adMaterialTasksRequestId: 0,
       selectedAdMaterialTask: null,
       reviewingAdMaterialTask: null,
       editingAdMaterialTaskId: "",
@@ -15895,15 +15896,25 @@
 
     function refreshAdMaterialSizeRows() {
       if (!els.adMaterialSizePlan) return;
-      els.adMaterialSizePlan.querySelectorAll("[data-size-row]").forEach(row => {
+      const rows = Array.from(els.adMaterialSizePlan.querySelectorAll("[data-size-row]"));
+      const activeRows = rows.filter(row => row.dataset.sizeEnabled === "1");
+      const total = activeRows.reduce((sum, row) => {
+        const input = row.querySelector("[data-size-count]");
+        return sum + Math.max(1, Math.floor(Number(input?.value || 1)));
+      }, 0);
+      rows.forEach(row => {
         const enabled = row.dataset.sizeEnabled === "1";
         row.classList.toggle("active", enabled);
         const countInput = row.querySelector("[data-size-count]");
         const stepButtons = row.querySelectorAll("[data-size-step]");
         const toggle = row.querySelector("[data-size-toggle]");
+        const count = Math.max(1, Math.floor(Number(countInput?.value || 1)));
         if (toggle) toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
         if (countInput) countInput.disabled = !enabled;
-        stepButtons.forEach(button => { button.disabled = !enabled; });
+        stepButtons.forEach(button => {
+          const delta = Number(button.dataset.sizeStep || 0);
+          button.disabled = !enabled || (delta < 0 && count <= 1) || (delta > 0 && total >= 20);
+        });
       });
     }
 
@@ -16350,7 +16361,8 @@
       params.set("limit", "80");
       const data = await api(`/api/ad-material/products?${params.toString()}`);
       const selectedAppId = els.adMaterialAppId?.value || "";
-      const items = data.items || [];
+      const responseItems = data.items || [];
+      const items = searchQuery ? responseItems.filter(item => adMaterialProductMatchesQuery(item, searchQuery)) : responseItems;
       mergeAdMaterialProducts(items);
       if (!searchQuery) state.adMaterialProductsLoaded = true;
       if (searchQuery) {
@@ -16393,6 +16405,17 @@
       return `<span class="badge ${cls}">${navText(adMaterialStatusText(status, label))}</span>`;
     }
 
+    function adMaterialDisplayStatusText(task) {
+      if (adMaterialCanCompleteUpload(task)) return "待上报";
+      return adMaterialStatusText(task?.status, task?.status_label);
+    }
+
+    function adMaterialTaskStatusBadge(task) {
+      const status = task?.status || "";
+      const cls = status === "done" ? "ok" : status === "failed" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${navText(adMaterialDisplayStatusText(task))}</span>`;
+    }
+
     function adMaterialCanReview(task) {
       return task && (task.status === "demand_review" || task.status === "material_review");
     }
@@ -16406,7 +16429,7 @@
 
     function adMaterialStatusCell(task) {
       return `<div class="status-cell">
-        ${adMaterialStatusBadge(task.status, task.status_label)}
+        ${adMaterialTaskStatusBadge(task)}
         ${adMaterialCanReview(task) ? `<button class="btn btn-primary mini" type="button" onclick="openAdMaterialReview('${task.task_id}')">审核</button>` : ""}
       </div>`;
     }
@@ -16440,19 +16463,41 @@
       `;
     }
 
-    async function loadAdMaterialTasks() {
+    function adMaterialTaskMatchesCurrentFilters(task) {
+      if (!task) return false;
+      const status = els.adMaterialStatusFilter?.value || "all";
+      if (status && status !== "all" && task.status !== status) return false;
+      const q = (els.adMaterialSearch?.value || "").trim().toLowerCase();
+      if (!q) return true;
+      const text = [
+        task.task_id,
+        task.product_name,
+        task.description,
+        task.creator_name,
+        task.app_id,
+      ].map(value => String(value || "").toLowerCase()).join(" ");
+      return text.includes(q);
+    }
+
+    async function loadAdMaterialTasks(options = {}) {
       if (!userCan("ad_material_tasks")) return;
+      const requestId = ++state.adMaterialTasksRequestId;
       const params = new URLSearchParams();
       const status = els.adMaterialStatusFilter?.value || "all";
       if (status && status !== "all") params.set("status", status);
       const q = (els.adMaterialSearch?.value || "").trim();
       if (q) params.set("q", q);
+      if (options.showLoading !== false && els.adMaterialTableBody) {
+        els.adMaterialTableBody.innerHTML = `<tr><td colspan="10" class="muted">加载中...</td></tr>`;
+      }
       const data = await api(`/api/ad-material/tasks?${params.toString()}`);
+      if (requestId !== state.adMaterialTasksRequestId) return data;
       state.adMaterialTasks = data.items || [];
       renderAdMaterialTaskRows();
       if (els.adMaterialSummary) {
         els.adMaterialSummary.textContent = `共 ${data.total || 0} 条`;
       }
+      return data;
     }
 
     async function adMaterialPayloadBase() {
@@ -16554,7 +16599,7 @@
             <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
             <div><strong>产品ID</strong><div>${navText(task.app_id || "")}</div></div>
             <div><strong>类型</strong><div>${navText(adMaterialTaskTypeText(task.task_type))}</div></div>
-            <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
             <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
             <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
             <div><strong>尺寸</strong><div>${navText(task.size_plan_summary || task.size || "未填写")}</div></div>
@@ -16645,9 +16690,10 @@
     async function copyAdMaterialTask(taskId) {
       try {
         const task = await api(`/api/ad-material/tasks/${taskId}/copy`, { method: "POST", body: "{}" });
+        applyAdMaterialTaskSnapshot(task);
         toast("任务已复制");
-        await loadAdMaterialTasks();
         hideAdMaterialDetail();
+        loadAdMaterialTasks({ showLoading: false }).catch(error => showError("刷新投放素材任务失败", error));
       } catch (error) {
         showError("复制任务失败", error);
       }
@@ -16693,7 +16739,7 @@
         <div class="card">
           <div class="grid">
             <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
-            <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
             <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
             <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
           </div>
@@ -16723,7 +16769,7 @@
         <div class="card">
           <div class="grid">
             <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
-            <div><strong>状态</strong><div>${adMaterialStatusBadge(task.status, task.status_label)}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
             <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
             <div><strong>素材数</strong><div>${assets.length}</div></div>
           </div>
@@ -16819,8 +16865,16 @@
     function applyAdMaterialTaskSnapshot(task) {
       if (!task || !task.task_id) return;
       const existingIndex = state.adMaterialTasks.findIndex(item => item.task_id === task.task_id);
+      const matchesFilters = adMaterialTaskMatchesCurrentFilters(task);
       if (existingIndex >= 0) {
-        state.adMaterialTasks[existingIndex] = Object.assign({}, state.adMaterialTasks[existingIndex], task);
+        if (matchesFilters) {
+          state.adMaterialTasks[existingIndex] = Object.assign({}, state.adMaterialTasks[existingIndex], task);
+        } else {
+          state.adMaterialTasks.splice(existingIndex, 1);
+        }
+        renderAdMaterialTaskRows();
+      } else if (matchesFilters) {
+        state.adMaterialTasks.unshift(task);
         renderAdMaterialTaskRows();
       }
       if (state.reviewingAdMaterialTask?.task_id === task.task_id && els.adMaterialReviewContent) {
@@ -16846,9 +16900,15 @@
         });
         applyAdMaterialTaskSnapshot(task);
         toast(result === "approved" ? "素材已通过" : result === "abandoned" ? "素材已废弃" : "素材已驳回并重新生成");
-        loadAdMaterialTasks()
+        if (state.reviewingAdMaterialTask?.task_id === taskId) {
+          const hasPendingReview = (task.assets || []).some(asset => asset.status === "pending_review");
+          if (!hasPendingReview) {
+            closeAdMaterialReviewModal();
+          }
+        }
+        loadAdMaterialTasks({ showLoading: false })
           .then(() => {
-            if (state.reviewingAdMaterialTask?.task_id === taskId && result !== "approved") {
+            if (state.reviewingAdMaterialTask?.task_id === taskId) {
               return refreshAdMaterialReview(taskId);
             }
           })
@@ -16861,10 +16921,14 @@
     async function completeAdMaterialUpload(taskId) {
       if (!confirm("确认将审核通过的素材上传至盈量素材库？已废弃素材会跳过。")) return;
       try {
-        await api(`/api/ad-material/tasks/${taskId}/complete-upload`, { method: "POST", body: "{}" });
+        const task = await api(`/api/ad-material/tasks/${taskId}/complete-upload`, { method: "POST", body: "{}" });
+        applyAdMaterialTaskSnapshot(task);
         toast("素材已上传至盈量素材库");
-        await loadAdMaterialTasks();
-        await openAdMaterialDetail(taskId);
+        if (state.selectedAdMaterialTask?.task_id === taskId) {
+          state.selectedAdMaterialTask = task;
+          renderAdMaterialDetail(task);
+        }
+        loadAdMaterialTasks({ showLoading: false }).catch(error => showError("刷新投放素材任务失败", error));
       } catch (error) {
         showError("上传至盈量素材库失败", error);
       }
@@ -22042,6 +22106,7 @@ function buildJobRow(job) {
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
       if (path === "/ad-materials.html") return "adMaterials";
+      if (path === "/tasks.html") return "tasks";
       return "tasks";
     }
 
@@ -22058,6 +22123,7 @@ function buildJobRow(job) {
       if (INTERNAL_VIEWS.has(hashView)) return hashView;
       const path = url.pathname.replace(/\/+$/, "") || "/";
       if (path === "/") return "tasks";
+      if (path === "/tasks.html") return "tasks";
       if (path === "/settings.html") return "settings";
       if (path === "/navigation.html") return "navigation";
       if (path === "/users.html") return "users";

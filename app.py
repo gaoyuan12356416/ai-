@@ -483,6 +483,8 @@ import traceback
 
 import uuid
 
+import unicodedata
+
 
 
 
@@ -21250,6 +21252,35 @@ def cleanup_expired_sessions():
 
 
 def recover_inflight_jobs():
+    resumable_jobs = []
+
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute("""
+                SELECT
+                  job_id, app_id, content_id, app, country, language, drama_name,
+                  episode_start, episode_end, total_episodes,
+                  cover_source_url, cover_16x9_url, output_video_url,
+                  output_video_no_bgm_url, outputs_json, advanced_options_json,
+                  status, progress, progress_detail, error_message, created_at, updated_at,
+                  creator_user_id, creator_open_id, creator_name,
+                  completion_notified_at, completion_notification_error
+                FROM drama_material_job
+                WHERE status NOT IN ('done', 'failed')
+            """).fetchall()
+            resumable_jobs = [row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
+    for job in resumable_jobs:
+        logging.info(
+            "resuming in-flight drama material job after service restart: %s",
+            job.get("job_id"),
+        )
+        resume_job_from_checkpoint(job)
+
+    return
 
 
 
@@ -32724,7 +32755,48 @@ def lookup_ad_material_product_metadata(app_id):
         return {}
 
 
-def list_ad_material_products(session=None):
+def normalize_ad_material_product_search_text(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"\s+", "", text).lower()
+
+
+def ad_material_product_matches_query(item, query):
+    tokens = [
+        normalize_ad_material_product_search_text(part)
+        for part in re.split(r"\s+", str(query or "").strip())
+        if str(part or "").strip()
+    ]
+    if not tokens:
+        return True
+    text = normalize_ad_material_product_search_text(" ".join([
+        str(item.get("app_id", "") or ""),
+        str(item.get("id", "") or ""),
+        str(item.get("product_name", "") or ""),
+        str(item.get("name", "") or ""),
+        str(item.get("label", "") or ""),
+        str(item.get("package_name", "") or ""),
+        str(item.get("store_url", "") or ""),
+    ]))
+    return all(token in text for token in tokens)
+
+
+def list_ad_material_products(session=None, query="", limit=None, with_total=False):
+    search_query = str(query or "").strip()
+    try:
+        limit_value = int(limit) if limit not in (None, "") else 0
+    except Exception:
+        limit_value = 0
+    limit_value = max(0, min(500, limit_value))
+
+    def finish(items, total=None):
+        total = len(items) if total is None else int(total or 0)
+        if limit_value:
+            items = items[:limit_value]
+        if with_total:
+            return {"items": items, "total": total}
+        return items
+
     database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
     if database:
         try:
@@ -32755,8 +32827,26 @@ def list_ad_material_products(session=None):
                             mysql_escape_literal(sub_user_id),
                             mysql_csv_contains_expr("ara.values", "CAST(a.id AS CHAR)"),
                         )
-                limit_clause = ""
                 exprs = ad_material_product_select_exprs(columns)
+                search_fields = ["CAST(a.id AS CHAR)"]
+                for column in ("name", "app_name", "product_name", "app", "title", "package", "package_name", "ios_package_name", "google_app_android"):
+                    if column in columns:
+                        search_fields.append("CAST(a.%s AS CHAR)" % sql_identifier(column))
+                query_where = where
+                if search_query:
+                    like = "%%%s%%" % mysql_escape_literal(search_query)
+                    search_sql = " OR ".join("LOWER(%s) LIKE LOWER('%s')" % (field, like) for field in search_fields)
+                    query_where = "(%s) AND (%s)" % (where, search_sql)
+                total = 0
+                try:
+                    total_rows = run_mysql(
+                        "SELECT COUNT(DISTINCT a.id) FROM `%s`.ads_apps_setting a WHERE %s"
+                        % (database.replace("`", "``"), query_where)
+                    )
+                    total = int(total_rows[0][0]) if total_rows and total_rows[0] else 0
+                except Exception:
+                    logging.exception("failed to count ad material products")
+                limit_clause = " LIMIT %d" % limit_value if limit_value else ""
                 rows = run_mysql(
                     "SELECT DISTINCT CAST(a.id AS CHAR), a.name, %s, %s, %s, %s, %s "
                     "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC%s"
@@ -32767,7 +32857,7 @@ def list_ad_material_products(session=None):
                         exprs["country"],
                         exprs["language"],
                         database.replace("`", "``"),
-                        where,
+                        query_where,
                         limit_clause,
                     )
                 )
@@ -32788,11 +32878,11 @@ def list_ad_material_products(session=None):
                             "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
                             "label": "%s | %s" % (app_id, product_name),
                         })
-                return items
+                return finish(items, total if total else len(items))
         except Exception:
             logging.exception("failed to list ad material products from mysql")
     try:
-        return [
+        items = [
             {
                 "app_id": item.get("app_id", ""),
                 "id": item.get("app_id", ""),
@@ -32807,9 +32897,12 @@ def list_ad_material_products(session=None):
             }
             for item in list_products()
         ]
+        if search_query:
+            items = [item for item in items if ad_material_product_matches_query(item, search_query)]
+        return finish(items, len(items))
     except Exception:
         logging.exception("failed to list fallback products")
-        return []
+        return finish([], 0)
 
 
 def save_ad_material_reference_files(task_id, raw_files):
@@ -85025,7 +85118,19 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_material_tasks"):
                 return
             try:
-                json_response(self, 200, {"items": list_ad_material_products(self._session())})
+                product_params = parse_qs(parsed.query)
+                product_query = (product_params.get("q") or [""])[0]
+                product_limit = (product_params.get("limit") or ["80"])[0]
+                json_response(
+                    self,
+                    200,
+                    list_ad_material_products(
+                        self._session(),
+                        query=product_query,
+                        limit=product_limit,
+                        with_total=True,
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
