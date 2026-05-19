@@ -9796,6 +9796,39 @@ def enrich_screenshot_job_timing(job):
     return job
 
 
+def enrich_material_job_timing(job):
+    job_id = str(job.get("job_id", "") or "")
+    start_text = str(job.get("created_at", "") or "")
+    if job_id:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT created_at
+                    FROM drama_admin_audit_log
+                    WHERE target_type = 'job'
+                      AND target_id = ?
+                      AND action IN ('retry_job', 'create_job')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (job_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if row and row[0]:
+            start_text = row[0]
+    end_text = str(job.get("updated_at", "") or "")
+    job["active_started_at"] = start_text
+    job["active_finished_at"] = end_text if job.get("status") == "done" else ""
+    start_dt = parse_job_timestamp(start_text)
+    end_dt = parse_job_timestamp(end_text)
+    if start_dt and end_dt and end_dt >= start_dt and job.get("status") == "done":
+        job["active_elapsed_seconds"] = int((end_dt - start_dt).total_seconds())
+    return job
+
+
 def row_to_screenshot_job(row):
     assets = parse_json_text(row[11], {})
     status = row[12]
@@ -21575,7 +21608,7 @@ def recover_inflight_jobs():
 
 
 
-            failed_jobs = [row_to_job(row) for row in rows]
+            failed_jobs = [enrich_material_job_timing(row_to_job(row)) for row in rows]
 
 
 
@@ -27753,7 +27786,7 @@ def fetch_job_row(job_id):
 
 
 
-    return row_to_job(row) if row else None
+    return enrich_material_job_timing(row_to_job(row)) if row else None
 
 
 
@@ -30521,7 +30554,7 @@ def fetch_job_rows(job_id=None, app_id=None, content_id=None, status=None, query
 
 
 
-        "items": [row_to_job(row) for row in rows],
+        "items": [enrich_material_job_timing(row_to_job(row)) for row in rows],
 
 
 
