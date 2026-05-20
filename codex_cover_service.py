@@ -23,7 +23,7 @@ PROMPT_WORKSPACE = os.environ.get(
 )
 CODEX_BIN = os.environ.get("CODEX_COVER_CODEX_BIN", "/usr/bin/codex")
 CODEX_TIMEOUT = int(os.environ.get("CODEX_COVER_CODEX_TIMEOUT", "1200"))
-CODEX_COVER_STRATEGY = os.environ.get("CODEX_COVER_STRATEGY", "safe_composite").strip().lower()
+CODEX_COVER_STRATEGY = os.environ.get("CODEX_COVER_STRATEGY", "codex_imagegen").strip().lower()
 MAX_CONCURRENCY = max(1, int(os.environ.get("CODEX_COVER_MAX_CONCURRENCY", "1")))
 GENERATION_SEMAPHORE = __import__("threading").Semaphore(MAX_CONCURRENCY)
 
@@ -112,76 +112,17 @@ def prepare_source_file(source_path, source_url, workdir):
 def build_codex_instruction(drama_name, workspace_output_path):
     title = drama_name.strip() or "the provided drama"
     return (
-        "Use the built-in image generation or image editing capability to turn the attached vertical drama poster into a premium cinematic horizontal 16:9 cover. "
-        "Preserve the same identities, facial features, costumes, color mood, and original visible title text in its original language. "
+        "Use the built-in image generation or image editing capability to create a brand-new premium cinematic horizontal 16:9 drama cover from the attached vertical poster reference. "
+        "This must be pure AI-generated horizontal key art, not a deterministic composite, not a blurred-background poster layout, and not a simple side-extension/outpainting of the original edges. "
+        "Recompose the scene natively for 16:9: keep the two main characters as the focus, preserve their identities, facial features, costumes, relationship tension, color mood, and original visible title text in its original language. "
         "Do not translate, localize, or replace the title text. "
-        "Do not add extra people, duplicate limbs, watermarks, logos, collage seams, or any new text. "
+        "Do not add extra people, duplicate faces, duplicate bodies, malformed hands, duplicate limbs, watermarks, logos, collage seams, blurred side panels, enlarged background copies of the poster, or any new text. "
+        "Avoid vague smeared areas at the left or right edge; the whole 16:9 frame should look like a single coherent cinematic still. "
         "Make the final image feel like a polished short-drama key art cover for %s. "
         "After generation, copy the selected final image into %s. "
         "Reply with only compact JSON containing output_path and summary."
         % (title, workspace_output_path)
     )
-
-
-def parse_size(value, default=(1920, 1080)):
-    text = str(value or "").lower().replace("*", "x")
-    if "x" not in text:
-        return default
-    left, right = text.split("x", 1)
-    try:
-        width = int(left.strip())
-        height = int(right.strip())
-        if width > 0 and height > 0:
-            return width, height
-    except ValueError:
-        pass
-    return default
-
-
-def compose_safe_cover(source_path, output_path):
-    try:
-        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-    except Exception as exc:
-        raise RuntimeError("Pillow is required for safe cover composition: %s" % exc)
-
-    target_size = parse_size(os.environ.get("CODEX_COVER_OUTPUT_SIZE"), (1920, 1080))
-    with Image.open(source_path) as raw:
-        source = raw.convert("RGB")
-    resample_lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-
-    background = ImageOps.fit(
-        source,
-        target_size,
-        method=resample_lanczos,
-        centering=(0.5, 0.45),
-    )
-    background = background.filter(ImageFilter.GaussianBlur(radius=34))
-    background = ImageEnhance.Brightness(background).enhance(0.68)
-    background = ImageEnhance.Color(background).enhance(0.88)
-
-    foreground = ImageOps.contain(
-        source,
-        (int(target_size[0] * 0.72), target_size[1]),
-        method=resample_lanczos,
-    )
-    x = (target_size[0] - foreground.width) // 2
-    y = (target_size[1] - foreground.height) // 2
-
-    shadow = Image.new("RGBA", target_size, (0, 0, 0, 0))
-    shadow_box = Image.new("RGBA", foreground.size, (0, 0, 0, 150))
-    shadow.paste(shadow_box, (x + 18, y + 18), shadow_box)
-    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=28))
-
-    canvas = background.convert("RGBA")
-    canvas.alpha_composite(shadow)
-    mask = Image.new("L", foreground.size, 255)
-    fade = min(56, max(1, foreground.width // 12))
-    for i in range(fade):
-        alpha = int(255 * (i + 1) / fade)
-        mask.paste(alpha, (i, 0, i + 1, foreground.height))
-        mask.paste(alpha, (foreground.width - i - 1, 0, foreground.width - i, foreground.height))
-    canvas.paste(foreground, (x, y), mask)
-    canvas.convert("RGB").save(output_path, "JPEG", quality=92, optimize=True)
 
 
 def generate_cover(payload):
@@ -208,21 +149,8 @@ def generate_cover(payload):
     result_json_path = os.path.join(workdir, "codex_result.json")
     if os.path.exists(workspace_output_path):
         os.remove(workspace_output_path)
-    if CODEX_COVER_STRATEGY in ("safe_composite", "composite", "deterministic"):
-        compose_safe_cover(staged_source_path, workspace_output_path)
-        shutil.copy2(workspace_output_path, public_output_path)
-        result_data = {
-            "status": "done",
-            "job_id": job_id,
-            "workspace_output_path": workspace_output_path,
-            "public_output_path": public_output_path,
-            "public_url": build_public_url(public_output_path),
-            "generator": "safe-composite",
-            "summary": "Built a deterministic 16:9 cover from the source poster without AI outpainting.",
-        }
-        with open(result_json_path, "w", encoding="utf-8") as fh:
-            json.dump(result_data, fh, ensure_ascii=False, indent=2)
-        return result_data
+    if CODEX_COVER_STRATEGY not in ("codex_imagegen", "ai", "imagegen"):
+        raise ValueError("unsupported CODEX_COVER_STRATEGY: %s" % CODEX_COVER_STRATEGY)
     cmd = [
         CODEX_BIN,
         "exec",
