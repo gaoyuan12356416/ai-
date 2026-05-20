@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import importlib.util
 import os
 import re
 import subprocess
@@ -89,7 +90,10 @@ def task_kind(task):
 
 def pick_provider(task):
     source = str(task.get("competitor_source") or "").strip().lower()
-    if task_kind(task) in {"reference", "iteration"} and not source:
+    kind = task_kind(task)
+    if kind == "iteration" and not source:
+        return "local_iteration"
+    if kind == "reference" and not source:
         return "local_reference"
     if source in {"\u5e7f\u5927\u5927", "guangdada", "dataidea", "dataidea/guangdada"}:
         return "guangdada"
@@ -144,6 +148,86 @@ def local_reference_artifacts(task_id):
     markdown_url = "%s/%s/exports/%s" % (public_base, task_id, markdown_path.name)
     evidence_path = work_root / task_id / "reference_requirement_evidence.json"
     return markdown_path, markdown_url, evidence_path
+
+
+def local_task_artifacts(task_id, suffix):
+    work_root = Path(os.environ.get("AD_MATERIAL_WORK_ROOT", "/root/ad_material_tasks"))
+    public_root = Path(os.environ.get("AD_MATERIAL_PUBLIC_ROOT", "/usr/share/nginx/html/ad-materials"))
+    public_base = os.environ.get("AD_MATERIAL_PUBLIC_BASE_URL", "https://ai.yingliangads.com/ad-materials").rstrip("/")
+    export_dir = public_root / task_id / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = export_dir / ("%s_%s_requirement.md" % (task_id[:8], suffix))
+    markdown_url = "%s/%s/exports/%s" % (public_base, task_id, markdown_path.name)
+    evidence_path = work_root / task_id / ("%s_requirement_evidence.json" % suffix)
+    return markdown_path, markdown_url, evidence_path
+
+
+def load_skill_module(provider):
+    skill_root = Path(os.environ.get("CODEX_SKILLS_ROOT", "/root/.codex/skills"))
+    script = skill_root / ("image-material-requirements-%s" % provider) / "scripts" / "generate_image_material_brief.py"
+    if not script.exists():
+        raise RuntimeError("Requirement skill script not found: %s" % script)
+    spec = importlib.util.spec_from_file_location("image_material_%s" % provider, str(script))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def make_slug(value):
+    text = re.sub(r"[^0-9A-Za-z_-]+", "_", str(value or "").strip()).strip("_").lower()
+    return text or "product"
+
+
+def collect_internal_winners(task, limit=6):
+    product = str(task.get("product_name") or task.get("app_id") or "").strip()
+    if not product:
+        return [], {"error": "missing product"}
+    today = date.today()
+    default_start = today - timedelta(days=33)
+    default_end = today - timedelta(days=3)
+    dt_start = os.environ.get("AD_MATERIAL_REQUIREMENT_DT_START", default_start.isoformat())
+    dt_end = os.environ.get("AD_MATERIAL_REQUIREMENT_DT_END", default_end.isoformat())
+    out_dir = Path(os.environ.get("AD_MATERIAL_REQUIREMENT_OUTPUT_DIR", "/root/codex_test/output"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        module = load_skill_module("guangdada")
+        base_mod = module.ensure_base_loaded()
+        base_mod.SINCE = dt_start
+        base_mod.UNTIL = dt_end
+        base_mod.PRODUCT = product
+        db = base_mod.db_data()
+        stamp = module.now_stamp() if hasattr(module, "now_stamp") else date.today().strftime("%Y%m%d")
+        work_dir = out_dir / ("%s_internal_iteration_refs_%s" % (make_slug(product), stamp))
+        work_dir.mkdir(parents=True, exist_ok=True)
+        refs = module.archive_internal_refs(db, stamp, work_dir, limit=limit)
+        summary = module.summarize_internal(db) if hasattr(module, "summarize_internal") else {}
+        return refs, {
+            "product": product,
+            "dt_start": dt_start,
+            "dt_end": dt_end,
+            "summary": summary,
+            "work_dir": str(work_dir),
+        }
+    except Exception as exc:
+        return [], {"product": product, "dt_start": dt_start, "dt_end": dt_end, "error": str(exc)[:500]}
+
+
+def internal_ref_to_visual_ref(ref):
+    asset_id = str(ref.get("asset_id") or "").strip() or "INT_REF"
+    return {
+        "index": asset_id,
+        "code": asset_id,
+        "name": str(ref.get("label") or ref.get("created_data_id") or asset_id).strip(),
+        "url": str(ref.get("archive_url") or "").strip(),
+        "content_type": "image/jpeg",
+    }
+
+
+def compact_text(value, limit=180):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if limit and len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
 
 
 NOISE_SECTION_TITLES = (
@@ -462,6 +546,180 @@ def build_and_write_local_reference_output(task, payload, size_plan, output_path
         },
     })
 
+
+def build_local_iteration_demand(task, size_plan, internal_refs, reference_analysis=None, revision_instruction=""):
+    product = str(task.get("product_name") or task.get("app_id") or "未命名产品").strip()
+    country = str(task.get("country") or "").strip()
+    language = str(task.get("language") or "").strip()
+    description = str(task.get("description") or "").strip()
+    slots = output_slots(size_plan)
+    quantity = len(slots) or max(1, int(task.get("quantity") or 1))
+    size_summary = ", ".join("%s x %s" % (item.get("size"), item.get("count")) for item in size_plan) or str(task.get("size") or "")
+    product_icon_url = str(task.get("product_icon_url") or "").strip()
+    analysis_items = reference_analysis or []
+    analysis_by_code = {}
+    for index, item in enumerate(analysis_items, 1):
+        key = str(item.get("id") or "").strip()
+        if not key or key.lower().startswith("image #"):
+            key = "INT_REF_%02d" % index
+        analysis_by_code[key] = item
+
+    lines = [
+        "# %s 投放素材需求" % product,
+        "",
+        "## 制作信息",
+        "",
+        "- 产品：%s" % product,
+        "- 国家/语言：%s / %s" % (country or "未填写", language or "未填写"),
+        "- 尺寸与数量：%s" % (size_summary or "未填写"),
+        "- 输出数量：%s 张静态图片" % quantity,
+        "- 用户需求描述：%s" % (description or "基于历史优质静态素材做同类迭代。"),
+    ]
+    if product_icon_url:
+        lines.extend([
+            "",
+            "## 产品基础信息",
+            "",
+            "- 产品图标：%s" % product_icon_url,
+            "",
+            '<img src="%s" width="96">' % product_icon_url,
+        ])
+
+    lines.extend(["", "## 历史优质素材参考", ""])
+    if internal_refs:
+        lines.extend([
+            "以下老素材来自当前产品历史静态素材表现较好的样本。新图应学习它们的构图、信息层级、色彩节奏、CTA 位置和卖点呈现方式，再做新的组合与表达。",
+            "",
+            "| 编号 | 预览 | 可学习点 | 必须规避 |",
+            "| --- | --- | --- | --- |",
+        ])
+        for index, ref in enumerate(internal_refs, 1):
+            code = str(ref.get("asset_id") or "INT_REF_%02d" % index)
+            url = str(ref.get("archive_url") or "").strip()
+            preview = '<img src="%s" width="180">' % url if url else ""
+            analysis = analysis_by_code.get(code, {})
+            learning = compact_text(
+                analysis.get("transferable_points")
+                or ref.get("learning_point")
+                or "学习该素材的主视觉结构、卖点层级、色彩节奏和 CTA 位置。",
+                220,
+            )
+            avoid = compact_text(
+                analysis.get("avoid_copying")
+                or "不要原样复制旧素材的具体金额、人物、背景、Logo 位置和排版细节；需要做新的视觉组合。",
+                220,
+            )
+            lines.append("| %s | %s | %s | %s |" % (code, preview, learning, avoid))
+    else:
+        lines.append("- 未检索到可用的历史优质静态素材。制作时请按用户描述和产品信息补足清晰画面方向。")
+
+    if analysis_items:
+        lines.extend(["", "## 历史素材视觉拆解", ""])
+        for index, ref in enumerate(internal_refs, 1):
+            code = str(ref.get("asset_id") or "INT_REF_%02d" % index)
+            analysis = analysis_by_code.get(code, {})
+            if not analysis:
+                continue
+            lines.extend([
+                "### %s" % code,
+                "",
+                "- 构图：%s" % (analysis.get("layout") or "未返回"),
+                "- 色彩：%s" % (analysis.get("colors") or "未返回"),
+                "- 可见主文案：%s" % (analysis.get("main_text") or "未返回"),
+                "- 视觉元素：%s" % (analysis.get("visual_elements") or "未返回"),
+                "- 可迁移点：%s" % (analysis.get("transferable_points") or "未返回"),
+                "- 禁止照搬：%s" % (analysis.get("avoid_copying") or "未返回"),
+                "- 制作提醒：%s" % (analysis.get("production_notes") or "未返回"),
+                "",
+            ])
+
+    ref_codes = ", ".join(str(ref.get("asset_id") or "INT_REF_%02d" % (idx + 1)) for idx, ref in enumerate(internal_refs)) or "历史优质素材"
+    lines.extend([
+        "",
+        "## 迭代制作要求",
+        "",
+        "- 先分析历史优质素材的共同点，再进行新构图；不要只做换色、换字或简单替换 Logo。",
+        "- 保留高转化结构：强主标题、清晰金额/利益点、卡片式信息区、明确 CTA、底部免责声明安全区。",
+        "- 语言、货币、产品名、额度、周期和合规表述必须替换为当前产品与当前市场可用信息。",
+        "- Logo 必须使用当前产品 Logo 或预留后置叠加位置；不得重新绘制近似 Logo。",
+        "",
+        "## 逐张素材需求",
+        "",
+    ])
+
+    for slot in slots or [{"index": i, "size": str(task.get("size") or "1:1"), "dimensions": normalize_size(task.get("size"))} for i in range(1, quantity + 1)]:
+        index = int(slot["index"])
+        size = slot["size"]
+        dimensions = slot["dimensions"]
+        primary = str(internal_refs[(index - 1) % len(internal_refs)].get("asset_id")) if internal_refs else ref_codes
+        if index % 2 == 1:
+            angle = "继承老素材的大标题 + 核心利益点 + CTA 结构，重做为当前产品的新视觉。"
+            focus = "首屏冲击和点击引导。"
+        else:
+            angle = "继承老素材的信息卡片/额度展示方式，重做更清晰的产品解释型素材。"
+            focus = "透明信息和可信表达。"
+        lines.extend([
+            "### 素材 %02d" % index,
+            "",
+            "- 输出规格：%s（%s）" % (size, dimensions),
+            "- 主参考老素材：%s" % primary,
+            "- 需求目标：%s" % (description or "基于历史优质素材做同类迭代，产出当前产品可用的新静态图。"),
+            "- 构图方向：%s" % angle,
+            "- 表达重点：%s" % focus,
+            "- 画面要求：延续历史优质素材的清晰层级和金融视觉识别，但必须更换画面组合、文案、图标和品牌元素。",
+            "- 文案要求：使用 %s 语言；主标题和 CTA 必须完整可读；不要照搬旧素材中的具体金额、周期或承诺。" % (language or "目标市场"),
+            "- 验收标准：尺寸正确；能看出来自历史优质素材的结构继承；没有乱码文字、没有未验证金融承诺、没有旧素材品牌残留。",
+            "",
+        ])
+
+    lines.extend([
+        "## 禁止项",
+        "",
+        "- 禁止直接复刻旧素材；必须做新构图或新组合。",
+        "- 禁止出现旧素材中的其他产品名、旧 Logo、水印、二维码、商店按钮、真实证件、银行卡、OTP、联系人或催收压力表达。",
+        "- 禁止承诺秒批、必过、免审、立即到账、固定月供、固定总还款额，除非用户或产品资料明确提供。",
+    ])
+    revision_note = creative_revision_note(revision_instruction)
+    if revision_note:
+        lines.extend(["", "## 制作调整方向", "", revision_note])
+    return clean_material_demand_text("\n".join(lines))
+
+
+def build_and_write_local_iteration_output(task, payload, size_plan, output_path):
+    revision_instruction = str((payload.get("extra") or {}).get("reason") or task.get("review_reason") or "").strip()
+    task_id = str(task.get("task_id") or os.environ.get("AD_MATERIAL_TASK_ID") or "ad_material").strip()
+    internal_refs, internal_evidence = collect_internal_winners(task, limit=int(os.environ.get("AD_MATERIAL_ITERATION_INTERNAL_REF_LIMIT", "6")))
+    visual_refs = [internal_ref_to_visual_ref(item) for item in internal_refs]
+    reference_analysis = analyze_reference_images(visual_refs)
+    demand_text = build_local_iteration_demand(task, size_plan, internal_refs, reference_analysis, revision_instruction)
+    markdown_path, markdown_url, evidence_path = local_task_artifacts(task_id, "iteration")
+    markdown_path.write_text(demand_text, encoding="utf-8")
+    evidence = {
+        "provider": "local_iteration",
+        "task_kind": "iteration",
+        "internal_evidence": internal_evidence,
+        "internal_refs": internal_refs,
+        "reference_analysis": reference_analysis,
+        "size_plan": size_plan,
+    }
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_output(output_path, {
+        "demand_text": demand_text,
+        "markdown": demand_text,
+        "provider": "local_iteration",
+        "artifacts": {
+            "provider": "local_iteration",
+            "markdown_path": str(markdown_path),
+            "markdown_url": markdown_url,
+            "evidence_path": str(evidence_path),
+            "internal_refs": str(len(internal_refs)),
+            "competitor_refs": "0",
+            "selected_competitors": "",
+        },
+    })
+
+
 def parse_command_output(stdout):
     result = {}
     for raw in stdout.splitlines():
@@ -502,6 +760,9 @@ def main():
     task = payload.get("task") or {}
     provider = pick_provider(task)
     size_plan = parse_size_plan(task)
+    if provider == "local_iteration":
+        build_and_write_local_iteration_output(task, payload, size_plan, output_path)
+        return
     if provider == "local_reference":
         build_and_write_local_reference_output(task, payload, size_plan, output_path)
         return
