@@ -146,6 +146,91 @@ def local_reference_artifacts(task_id):
     return markdown_path, markdown_url, evidence_path
 
 
+NOISE_SECTION_TITLES = (
+    "data basis",
+    "competitor ranking",
+    "数据依据",
+    "竞品排名",
+    "上报字段",
+    "审核关注点",
+    "本次重新生成说明",
+    "本次重生成原因",
+    "本轮重做重点",
+)
+
+NOISE_LINE_TERMS = (
+    "竞品接口",
+    "竞品数据源",
+    "竞品查询源",
+    "竞品来源：",
+    "禁止调用",
+    "外部接口素材",
+    "接口补充素材",
+    "metapi",
+    "guangdada",
+    "广大大",
+    "有米云",
+    "provider",
+    "competitor_refs",
+    "selected_competitors",
+    "internal_refs",
+    "需求通过",
+    "需求待审核",
+    "审核要求",
+    "驳回",
+    "后台",
+    "触发任务",
+    "任务ID",
+    "remark：",
+)
+
+
+def is_noise_line(line):
+    normalized = str(line or "").strip().lower()
+    if not normalized:
+        return False
+    return any(term.lower() in normalized for term in NOISE_LINE_TERMS)
+
+
+def clean_material_demand_text(text):
+    lines = str(text or "").splitlines()
+    cleaned = []
+    skip_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            title = stripped.lstrip("#").strip().lower()
+            skip_section = any(term in title for term in NOISE_SECTION_TITLES)
+            if skip_section:
+                continue
+        elif stripped.startswith("# "):
+            skip_section = False
+        if skip_section:
+            continue
+        if is_noise_line(line):
+            continue
+        cleaned.append(line)
+
+    compact = []
+    blank_count = 0
+    for line in cleaned:
+        if line.strip():
+            blank_count = 0
+            compact.append(line.rstrip())
+        else:
+            blank_count += 1
+            if blank_count <= 1:
+                compact.append("")
+    return "\n".join(compact).strip() + "\n"
+
+
+def creative_revision_note(value):
+    text = str(value or "").strip()
+    if not text or is_noise_line(text):
+        return ""
+    return text
+
+
 def analyze_reference_images(refs):
     if not refs:
         return []
@@ -224,27 +309,21 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
     lines = [
         "# %s 投放素材需求" % product,
         "",
-        "## 任务参数",
+        "## 制作信息",
         "",
-        "- 任务类型：%s" % (task.get("task_type") or mode_text),
         "- 产品：%s" % product,
         "- 国家/语言：%s / %s" % (country or "未填写", language or "未填写"),
         "- 尺寸与数量：%s" % (size_summary or "未填写"),
         "- 输出数量：%s 张静态图片" % quantity,
-        "- 竞品接口：不使用。该任务为%s任务，需求文档只允许使用用户上传参考素材、用户描述和产品基础信息。" % mode_text,
         "- 用户需求描述：%s" % (description or "未填写；默认按上传参考素材做风格迁移与同类新图。"),
     ]
     if title or body or category or tag_name:
         lines.extend([
-            "- 上报标签 tag_name：%s" % tag_name,
-            "- category：%s" % category,
             "- title：%s" % title,
             "- body：%s" % body,
         ])
     if store_url or product_icon_url:
         lines.extend(["", "## 产品基础信息", ""])
-        if store_url:
-            lines.append("- 商店链接：%s" % store_url)
         if product_icon_url:
             lines.append("- 产品图标：%s" % product_icon_url)
             lines.append("")
@@ -257,7 +336,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
     ])
     if refs:
         lines.extend([
-            "以下参考素材是本需求的核心输入。生成需求和后续生图必须先解析这些图的版式、色彩、主体、金额/利益点层级、CTA 位置和免责声明位置，再迁移到当前产品与目标语言；不得拉取或混入任何竞品接口素材。",
+            "以下参考素材是本需求的核心输入。生成需求和后续生图必须先解析这些图的版式、色彩、主体、金额/利益点层级、CTA 位置和免责声明位置，再迁移到当前产品与目标语言。",
             "",
             "| 编号 | 上传文件 | 预览 | 需要继承 | 必须规避 |",
             "| --- | --- | --- | --- | --- |",
@@ -274,7 +353,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
             lines.append("| %s | %s | %s | %s | %s |" % (ref["code"], ref["name"], preview, inherit, avoid))
     else:
         lines.extend([
-            "- 未检测到上传参考素材。该任务不能自动改走竞品接口；请补充参考素材或在任务描述中明确画面结构。",
+            "- 未检测到上传参考素材；请在任务描述中明确画面结构、主视觉、文案和品牌规范。",
         ])
 
     if analysis_items:
@@ -333,21 +412,21 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
             "- 画面要求：蓝白为主、信息层级清楚、金额/利益点字号最大、CTA 高对比、底部保留免责声明安全区；允许保留参考图的卡片/滑杆/图标节奏，但必须更换为当前产品内容。",
             "- 文案要求：使用 %s 语言；不得直接复制参考图的西语文案、MXN 币种、审批分钟数、具体还款金额或月供。" % (language or "目标市场"),
             "- 生成提示：先复刻参考图的版式骨架和视觉节奏，再替换品牌、语言、产品事实和图标；图片中不出现竞品名、竞品 Logo 或竞品 UI。",
-            "- 验收标准：尺寸正确；能看出来自上传参考素材的风格衍生；没有竞品素材、没有外部接口素材、没有乱码文字、没有未验证金融承诺。",
+            "- 验收标准：尺寸正确；能看出来自上传参考素材的风格衍生；没有乱码文字、没有未验证金融承诺。",
             "",
         ])
 
     lines.extend([
         "## 禁止项",
         "",
-        "- 禁止调用广大大、MetApi、有米云等竞品接口补充素材。",
         "- 禁止出现参考图原品牌、竞品 Logo、二维码、商店按钮、真实证件、银行卡、OTP、联系人或催收压力表达。",
-        "- 禁止承诺秒批、必过、无审核、立即到账、固定月供、固定总还款额，除非用户或产品资料明确提供。",
+        "- 禁止承诺秒批、必过、免审、立即到账、固定月供、固定总还款额，除非用户或产品资料明确提供。",
         "- 禁止把参考图简单换色、换字后直接交付；必须做当前产品的新构图或新组合。",
     ])
-    if revision_instruction:
-        lines.extend(["", "## 本次重新生成说明", "", revision_instruction])
-    return "\n".join(lines).rstrip() + "\n"
+    revision_note = creative_revision_note(revision_instruction)
+    if revision_note:
+        lines.extend(["", "## 制作调整方向", "", revision_note])
+    return clean_material_demand_text("\n".join(lines))
 
 
 def build_and_write_local_reference_output(task, payload, size_plan, output_path):
@@ -503,7 +582,7 @@ def main():
     if not markdown_path or not Path(markdown_path).exists():
         raise SystemExit("Requirement generator did not return a readable markdown_path")
 
-    demand_text = append_size_plan(Path(markdown_path).read_text(encoding="utf-8"), size_plan)
+    demand_text = clean_material_demand_text(append_size_plan(Path(markdown_path).read_text(encoding="utf-8"), size_plan))
     write_output(output_path, {
         "demand_text": demand_text,
         "markdown": demand_text,
