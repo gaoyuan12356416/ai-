@@ -2162,6 +2162,8 @@ DRAMA_JOB_USE_WORKER = os.environ.get("DRAMA_JOB_USE_WORKER", "0").strip().lower
     "yes",
     "on",
 )
+DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT = int(os.environ.get("DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT", "20"))
+GPU_VIDEO_RESULT_ROOT = os.environ.get("GPU_VIDEO_RESULT_ROOT", "/root/drama_material_job_results")
 SCREENSHOT_ITEM_RETRY_ATTEMPTS = int(os.environ.get("SCREENSHOT_ITEM_RETRY_ATTEMPTS", "3"))
 CODEX_SCREENSHOT_BATCH_ENABLED = os.environ.get("CODEX_SCREENSHOT_BATCH_ENABLED", "0").strip().lower() in (
     "1",
@@ -21273,6 +21275,19 @@ def recover_inflight_jobs():
         finally:
             conn.close()
 
+    if DRAMA_JOB_USE_WORKER:
+        reconciled_count = 0
+        for job in resumable_jobs:
+            if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
+                reconciled_count += 1
+        if resumable_jobs:
+            logging.info(
+                "DRAMA_JOB_USE_WORKER=1; skipped API in-process recovery for %d jobs, reconciled %d from public artifacts",
+                len(resumable_jobs),
+                reconciled_count,
+            )
+        return
+
     for job in resumable_jobs:
         logging.info(
             "resuming in-flight drama material job after service restart: %s",
@@ -21377,6 +21392,76 @@ def build_public_url(path):
     rel_path = os.path.relpath(normalized_path, default_root).replace(os.sep, "/")
 
     return PUBLIC_BASE_URL.rstrip("/") + "/" + rel_path.lstrip("/")
+
+
+def build_drama_public_url(job_id, filename):
+    public_path = os.path.join(PUBLIC_ROOT, str(job_id).strip("/"), filename.lstrip("/"))
+    if cos_enabled():
+        return build_cos_url(build_cos_object_key(public_path))
+    return build_public_url(public_path)
+
+
+def public_artifact_ready(url, min_bytes=1):
+    url = str(url or "").strip()
+    if not url:
+        return False
+    try:
+        response = requests.head(
+            url,
+            allow_redirects=True,
+            timeout=(5, max(5, DRAMA_PUBLIC_ARTIFACT_CHECK_TIMEOUT)),
+        )
+        if response.status_code not in (200, 206):
+            return False
+        content_length = response.headers.get("Content-Length")
+        if content_length is None:
+            return True
+        return int(content_length) >= int(min_bytes or 1)
+    except Exception as exc:
+        logging.warning("public artifact check failed: %s %s", url, exc)
+        return False
+
+
+def reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=False):
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return False
+    outputs = normalize_outputs(job.get("outputs", {}))
+    candidates = {}
+    if outputs["cover_16x9"]:
+        candidates["cover_16x9_url"] = str(job.get("cover_16x9_url") or "").strip() or build_drama_public_url(
+            job_id, "cover_16x9.jpg"
+        )
+    if outputs["concat_video"]:
+        candidates["output_video_url"] = str(job.get("output_video_url") or "").strip() or build_drama_public_url(
+            job_id, "material.mp4"
+        )
+    if outputs["no_bgm_video"]:
+        candidates["output_video_no_bgm_url"] = str(
+            job.get("output_video_no_bgm_url") or ""
+        ).strip() or build_drama_public_url(job_id, "material_no_bgm.mp4")
+
+    min_bytes = {
+        "cover_16x9_url": 1024,
+        "output_video_url": 1024 * 1024,
+        "output_video_no_bgm_url": 1024 * 1024,
+    }
+    for key, url in candidates.items():
+        if not public_artifact_ready(url, min_bytes.get(key, 1)):
+            return False
+
+    for key, url in candidates.items():
+        job[key] = url
+    job["status"] = "done"
+    job["progress"] = 100
+    job["progress_detail"] = "\u5168\u90e8\u4ea7\u7269\u5df2\u751f\u6210"
+    job["error_message"] = ""
+    if persist:
+        upsert_job_record(job)
+    if notify:
+        notify_job_creator_on_completion(job)
+    logging.info("reconciled drama job from public artifacts: %s", job_id)
+    return True
 
 
 
@@ -69337,6 +69422,59 @@ def wait_for_gpu_cover_url(workdir, timeout_seconds):
     raise TimeoutError("timed out waiting for GPU cover url")
 
 
+def gpu_video_result_path(job_id):
+    safe_job_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(job_id or "").strip())
+    return os.path.join(GPU_VIDEO_RESULT_ROOT, safe_job_id + ".json")
+
+
+def gpu_video_result_satisfies_outputs(result, outputs):
+    if not result:
+        return False
+    if bool(outputs.get("concat_video", True)):
+        url = str(result.get("output_video_url") or "").strip()
+        if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+    if bool(outputs.get("no_bgm_video", True)):
+        url = str(result.get("output_video_no_bgm_url") or "").strip()
+        if not url or not public_artifact_ready(url, 1024 * 1024):
+            return False
+    return True
+
+
+def read_gpu_video_result(job_id, outputs):
+    result_path = gpu_video_result_path(job_id)
+    if os.path.isfile(result_path):
+        try:
+            with open(result_path, "r", encoding="utf-8") as fp:
+                result = json.load(fp)
+            if gpu_video_result_satisfies_outputs(result, outputs):
+                return result
+        except Exception as exc:
+            logging.warning("failed to read GPU result manifest: %s %s", result_path, exc)
+
+    result = {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
+    if bool(outputs.get("concat_video", True)):
+        result["output_video_url"] = build_drama_public_url(job_id, "material.mp4")
+    if bool(outputs.get("no_bgm_video", True)):
+        result["output_video_no_bgm_url"] = build_drama_public_url(job_id, "material_no_bgm.mp4")
+    if gpu_video_result_satisfies_outputs(result, outputs):
+        write_gpu_video_result(job_id, result)
+        return result
+    return None
+
+
+def write_gpu_video_result(job_id, result):
+    ensure_dir(GPU_VIDEO_RESULT_ROOT)
+    result_path = gpu_video_result_path(job_id)
+    tmp_path = result_path + ".tmp"
+    payload = dict(result or {})
+    payload["job_id"] = str(job_id or payload.get("job_id") or "")
+    payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(tmp_path, "w", encoding="utf-8") as fp:
+        json.dump(payload, fp, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp_path, result_path)
+
+
 def handle_gpu_video_cover(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
@@ -69400,6 +69538,11 @@ def _handle_gpu_video_render_unlocked(payload):
     publish_concat = bool(outputs.get("concat_video", True))
     if not render_concat:
         return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
+
+    existing_result = read_gpu_video_result(job_id, outputs)
+    if existing_result:
+        logging.info("reuse GPU video result for job=%s", job_id)
+        return existing_result
 
     workdir = os.path.join(WORK_ROOT, job_id)
     download_dir = os.path.join(workdir, "downloads")
@@ -69539,6 +69682,7 @@ def _handle_gpu_video_render_unlocked(payload):
         raise RuntimeError("GPU concat video upload did not return a URL")
     if render_no_bgm and not result["output_video_no_bgm_url"]:
         raise RuntimeError("GPU no-BGM video upload did not return a URL")
+    write_gpu_video_result(job_id, result)
     cleanup_gpu_video_job_files(job_id, workdir, public_dir)
     return result
 
@@ -71525,6 +71669,8 @@ def process_job(job):
 
 
     clear_job_deleted_marker(job["job_id"])
+    if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
+        return
 
 
 
@@ -80526,6 +80672,8 @@ def resume_job_from_checkpoint(job):
 
 
     job["progress_detail"] = "从断点继续执行任务"
+    if reconcile_job_outputs_from_public_artifacts(job, persist=True, notify=True):
+        return
     if selected_job_outputs_ready(job):
         job["status"] = "done"
         job["progress"] = 100
