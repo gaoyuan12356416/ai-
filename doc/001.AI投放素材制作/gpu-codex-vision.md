@@ -14,9 +14,12 @@ Codex subprocess workloads for ad-material requirement vision analysis should ru
 ```bash
 AD_MATERIAL_VISION_PROVIDER=codex
 AD_MATERIAL_CODEX_VISION_URL=http://127.0.0.1:18796/api/ad-material-vision/analyze
+AD_MATERIAL_VISION_TIMEOUT=360
+AD_MATERIAL_VISION_BATCH_SIZE=2
 ```
 
 The CPU task runner still performs product data lookup, Guangdada/DataIdea pulls, reference-image archiving, and final task persistence. The image-understanding Codex subprocess is delegated to the GPU worker.
+The requirement runner batches historical/reference images before calling the vision worker so that a multi-image task can still get per-image visual analysis instead of falling back to generic iteration notes.
 
 ## GPU Tunnel
 
