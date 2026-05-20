@@ -4,6 +4,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -144,7 +146,56 @@ def local_reference_artifacts(task_id):
     return markdown_path, markdown_url, evidence_path
 
 
-def build_local_reference_demand(task, size_plan, revision_instruction=""):
+def analyze_reference_images(refs):
+    if not refs:
+        return []
+    endpoint = os.environ.get(
+        "AD_MATERIAL_CODEX_VISION_URL",
+        "http://127.0.0.1:18796/api/ad-material-vision/analyze",
+    ).strip()
+    if not endpoint:
+        return []
+    prompt = (
+        "Return strict JSON only. Analyze each ad image reference. For each item "
+        "provide id, layout, colors, main_text, visual_elements, transferable_points, "
+        "avoid_copying, and production_notes in Chinese."
+    )
+    payload = {
+        "prompt": prompt,
+        "refs": [
+            {
+                "id": ref["code"],
+                "name": ref["name"],
+                "archive_url": ref["url"],
+                "url": ref["url"],
+            }
+            for ref in refs
+            if ref.get("url")
+        ],
+    }
+    if not payload["refs"]:
+        return []
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("AD_MATERIAL_VISION_TIMEOUT", "180"))) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return []
+    try:
+        data = json.loads(body)
+    except Exception:
+        return []
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    return []
+
+
+def build_local_reference_demand(task, size_plan, revision_instruction="", reference_analysis=None):
     product = str(task.get("product_name") or task.get("app_id") or "未命名产品").strip()
     task_id = str(task.get("task_id") or "").strip()
     country = str(task.get("country") or "").strip()
@@ -152,6 +203,13 @@ def build_local_reference_demand(task, size_plan, revision_instruction=""):
     description = str(task.get("description") or "").strip()
     kind = task_kind(task)
     refs = reference_items(task)
+    analysis_items = reference_analysis or []
+    analysis_by_code = {}
+    for index, item in enumerate(analysis_items, 1):
+        key = str(item.get("id") or "").strip()
+        if not key or key.lower().startswith("image #"):
+            key = "REF_%02d" % index
+        analysis_by_code[key] = item
     slots = output_slots(size_plan)
     quantity = len(slots) or max(1, int(task.get("quantity") or 1))
     size_summary = ", ".join("%s x %s" % (item.get("size"), item.get("count")) for item in size_plan) or str(task.get("size") or "")
@@ -206,13 +264,37 @@ def build_local_reference_demand(task, size_plan, revision_instruction=""):
         ])
         for ref in refs:
             preview = '<img src="%s" width="180">' % ref["url"] if ref["url"] else ""
-            inherit = "构图比例、主标题层级、金额/利益点大字、卡片式信息区、CTA 按钮位置、蓝白金融视觉节奏。"
-            avoid = "不得照搬原图品牌、金额、币种、承诺、Logo、合规标识或原图中的不可验证还款数据。"
+            analysis = analysis_by_code.get(ref["code"], {})
+            inherit = str(analysis.get("transferable_points") or "").strip()
+            avoid = str(analysis.get("avoid_copying") or "").strip()
+            if not inherit:
+                inherit = "构图比例、主标题层级、金额/利益点大字、卡片式信息区、CTA 按钮位置、蓝白金融视觉节奏。"
+            if not avoid:
+                avoid = "不得照搬原图品牌、金额、币种、承诺、Logo、合规标识或原图中的不可验证还款数据。"
             lines.append("| %s | %s | %s | %s | %s |" % (ref["code"], ref["name"], preview, inherit, avoid))
     else:
         lines.extend([
             "- 未检测到上传参考素材。该任务不能自动改走竞品接口；请补充参考素材或在任务描述中明确画面结构。",
         ])
+
+    if analysis_items:
+        lines.extend(["", "## 参考素材视觉拆解", ""])
+        for index, ref in enumerate(refs, 1):
+            analysis = analysis_by_code.get(ref["code"], {})
+            if not analysis:
+                continue
+            lines.extend([
+                "### %s：%s" % (ref["code"], ref["name"]),
+                "",
+                "- 构图：%s" % (analysis.get("layout") or "未返回"),
+                "- 色彩：%s" % (analysis.get("colors") or "未返回"),
+                "- 可见主文案：%s" % (analysis.get("main_text") or "未返回"),
+                "- 视觉元素：%s" % (analysis.get("visual_elements") or "未返回"),
+                "- 可迁移点：%s" % (analysis.get("transferable_points") or "未返回"),
+                "- 禁止照搬：%s" % (analysis.get("avoid_copying") or "未返回"),
+                "- 制作提醒：%s" % (analysis.get("production_notes") or "未返回"),
+                "",
+            ])
 
     lines.extend([
         "",
@@ -270,7 +352,9 @@ def build_local_reference_demand(task, size_plan, revision_instruction=""):
 
 def build_and_write_local_reference_output(task, payload, size_plan, output_path):
     revision_instruction = str((payload.get("extra") or {}).get("reason") or task.get("review_reason") or "").strip()
-    demand_text = build_local_reference_demand(task, size_plan, revision_instruction)
+    refs = reference_items(task)
+    reference_analysis = analyze_reference_images(refs)
+    demand_text = build_local_reference_demand(task, size_plan, revision_instruction, reference_analysis)
     task_id = str(task.get("task_id") or os.environ.get("AD_MATERIAL_TASK_ID") or "ad_material").strip()
     markdown_path, markdown_url, evidence_path = local_reference_artifacts(task_id)
     markdown_path.write_text(demand_text, encoding="utf-8")
@@ -278,7 +362,8 @@ def build_and_write_local_reference_output(task, payload, size_plan, output_path
         "provider": "local_reference",
         "task_kind": task_kind(task),
         "competitor_source": task.get("competitor_source") or "",
-        "reference_files": reference_items(task),
+        "reference_files": refs,
+        "reference_analysis": reference_analysis,
         "size_plan": size_plan,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
