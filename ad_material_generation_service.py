@@ -32,6 +32,15 @@ MAX_REFERENCE_IMAGES = max(0, int(os.environ.get("AD_MATERIAL_GENERATION_MAX_REF
 
 SEMAPHORE = threading.Semaphore(MAX_CONCURRENCY)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+FORMAT_ALIGNMENT_REQUIREMENTS = """
+Text/container alignment requirements:
+- Treat every white card, colored panel, table cell, pill label, button, badge, and disclaimer strip as a hard clipping container.
+- All visible text, numbers, labels, CTA copy, icons, arrows, and separators must stay fully inside their intended container with clear inner padding.
+- No text may cross a border, sit on a divider line, float outside its background card, touch the canvas edge, or overlap decorative circles, glow effects, icons, or phone mockups.
+- If a phrase does not fit, shorten the copy, split it into fewer readable lines, reduce font size moderately, or enlarge the container before generation. Never allow overflow.
+- For table/card layouts, align labels and values to consistent rows, columns, and baselines; keep equal spacing between cards and avoid random vertical offsets.
+- Keep bottom disclaimers fully inside a light background strip or safe area, with enough margin from the canvas edge.
+""".strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(threadName)s %(message)s")
 
@@ -211,6 +220,7 @@ Hard requirements:
 - Follow the specific asset requirement for material #{index:02d}.
 - Preserve only transferable layout, color, hierarchy, product cues, and ad copy from references. Do not copy competitor logos, competitor brand names, watermarks, app-store badges, policy-unsafe promises, or unreadable tiny text.
 - Keep all visible text intentional, legible, and in the requested language.
+- Enforce text/container alignment: {format_alignment_requirements}
 - After image generation, copy or save the final image file to the exact output path above.
 - Reply only with compact JSON: {{"output_path":"{output_path}","summary":"..."}}
 
@@ -230,6 +240,7 @@ Full requirement document:
         width=width,
         height=height,
         brand_logo=brand_logo,
+        format_alignment_requirements=FORMAT_ALIGNMENT_REQUIREMENTS,
         index=index,
         reason=reason or "None",
         section=section[:5000],

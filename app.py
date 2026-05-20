@@ -33185,6 +33185,7 @@ def build_ad_material_image_generation_demand(task, reason=""):
     lines.append("- 输出类型：静态图片素材，仅生成 jpg/png/webp 等图片，不包含视频脚本或投放策略。")
     lines.append("- 尺寸与数量计划：%s；共 %s 张；文案语言使用 %s；面向市场 %s。" % (size, quantity, language, country))
     lines.append("- 品牌规则：画面必须出现 %s 的 logo 或预留 logo 位；不得出现竞品品牌资产。" % product)
+    lines.append("- 版式对齐硬约束：文案和背景容器必须严格对齐；主标题、副文案、信息卡、表格字段、按钮文字和免责声明必须完整落在对应白底/色块/卡片/表格/按钮内部，不得跨出边框、压线、悬浮在背景外或与装饰元素重叠；文字过长时必须缩短、换行、缩小字号或放大容器，禁止溢出。")
     if description:
         lines.append("- 用户补充方向：%s" % description)
     if reason:
@@ -33205,7 +33206,7 @@ def build_ad_material_image_generation_demand(task, reason=""):
             "- CTA：\"%s\"" % copy_item["cta"],
             "- 布局：%s" % layout,
             "- 画面主体：以 %s 产品体验为核心，建议使用手机界面、产品核心功能卡片或用户使用场景作为主体；主体占画面 45%%-60%%，背景保持简洁。" % product,
-            "- 文案排版：主文案最大、3 秒内可读；副文案不超过两行；CTA 做成清晰按钮，按钮文字必须完整可读，不能被图形遮挡。",
+            "- 文案排版：主文案最大、3 秒内可读；副文案不超过两行；CTA 做成清晰按钮；所有文案必须在对应卡片/表格/按钮/免责声明底色内部，不能越界、压线、贴边、漂浮或被图形遮挡。",
             "- 参考继承：%s；只继承可迁移的构图、色彩和信息层级，不复制原图/竞品的品牌资产。" % ref_hint,
             "- 禁止元素：夸大承诺、保证通过、官方背书、无审核、秒到账、竞品 logo、低清文字、乱码文字、过多小字、遮挡主体的装饰。",
             "- 验收标准：尺寸符合 %s；主文案、副文案、CTA 清晰无拼写错误；logo/预留 logo 位清楚；画面第一眼能理解产品卖点。" % asset_size,
@@ -34136,7 +34137,9 @@ def recover_inflight_ad_material_tasks():
         if not task:
             continue
         if status == "generating_demand":
-            reason = task.get("review_reason") or "service restart recovery"
+            reason = str(task.get("review_reason") or "").strip()
+            if reason.lower().startswith("service restart recovery"):
+                reason = ""
             logging.info("resuming ad material demand after service restart: %s", task_id)
             run_ad_material_demand_async(task_id, reason=reason)
             continue

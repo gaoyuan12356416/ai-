@@ -664,15 +664,29 @@ WATERMARK_HARD_CONSTRAINT_TEXT = (
     "半透明品牌字样、版权标记或平台水印只用于识别来源，生成的素材中不含任何水印元素，"
     "不得出现原水印文字、形状、角度、透明叠层或残影，也不得把水印当作背景纹理或装饰。"
 )
+FORMAT_ALIGNMENT_HARD_CONSTRAINT_MARKER = "文案和背景容器必须严格对齐"
+FORMAT_ALIGNMENT_HARD_CONSTRAINT_TEXT = (
+    "- 版式对齐：文案和背景容器必须严格对齐；所有主标题、副文案、信息卡、表格字段、"
+    "按钮文字、标签和免责声明必须完整落在对应白底/色块/卡片/表格/按钮内部，"
+    "不得跨出边框、压线、悬浮在背景外、贴住容器边缘或与装饰元素重叠。"
+    "若文字过长，必须缩短文案、换行、缩小字号或放大容器；禁止让文字溢出表格、卡片或按钮。"
+)
 
 
 def ensure_global_hard_constraints(text):
     normalized = str(text or "").strip()
     if not normalized:
         return ""
-    if WATERMARK_HARD_CONSTRAINT_MARKER in normalized:
+    missing = []
+    if WATERMARK_HARD_CONSTRAINT_MARKER not in normalized:
+        missing.append(WATERMARK_HARD_CONSTRAINT_TEXT)
+    if FORMAT_ALIGNMENT_HARD_CONSTRAINT_MARKER not in normalized:
+        missing.append(FORMAT_ALIGNMENT_HARD_CONSTRAINT_TEXT)
+    if not missing:
         return normalized + "\n"
-    return normalized + "\n\n## 全局硬性约束\n\n" + WATERMARK_HARD_CONSTRAINT_TEXT + "\n"
+    if "## 全局硬性约束" in normalized:
+        return normalized + "\n" + "\n".join(missing) + "\n"
+    return normalized + "\n\n## 全局硬性约束\n\n" + "\n".join(missing) + "\n"
 
 
 def clean_material_demand_text(text):
