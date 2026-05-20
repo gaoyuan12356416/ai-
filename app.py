@@ -34065,6 +34065,111 @@ def run_ad_material_generation_async(task_id, indexes=None, reason=""):
     thread.start()
 
 
+def ad_material_ready_asset_indexes(task):
+    ready = set()
+    for asset in fetch_ad_material_assets(task["task_id"]):
+        try:
+            index = int(asset.get("asset_index") or 0)
+        except Exception:
+            index = 0
+        if index <= 0:
+            continue
+        status = str(asset.get("status") or "").strip()
+        if status not in ("pending_review", "approved", "uploaded"):
+            continue
+        url = str(asset.get("url") or "").strip()
+        local_path = str(asset.get("local_path") or "").strip()
+        if url or (local_path and file_ready(local_path)):
+            ready.add(index)
+    return ready
+
+
+def recover_ad_material_generation_output(task, index):
+    output_path = os.path.join(ad_material_task_work_dir(task["task_id"]), "generation_%02d_output.json" % index)
+    if not os.path.isfile(output_path):
+        return False
+    try:
+        with open(output_path, "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+        assets = generation_outputs_to_assets(task, result, indexes=[index])
+        if not assets:
+            return False
+        for asset in assets:
+            upsert_ad_material_asset(asset)
+        logging.info(
+            "recovered ad material asset from existing generation output: task=%s index=%s",
+            task.get("task_id"),
+            index,
+        )
+        return True
+    except Exception:
+        logging.exception(
+            "failed to recover ad material asset from generation output: task=%s index=%s",
+            task.get("task_id"),
+            index,
+        )
+        return False
+
+
+def recover_inflight_ad_material_tasks():
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT task_id, status
+                FROM ad_material_task
+                WHERE status IN ('generating_demand', 'generating_material')
+                ORDER BY updated_at ASC
+                """
+            ).fetchall()
+            task_states = [(row["task_id"], row["status"]) for row in rows]
+        finally:
+            conn.close()
+
+    for task_id, status in task_states:
+        try:
+            task = fetch_ad_material_task(task_id)
+        except Exception:
+            logging.exception("skipping ad material restart recovery for unreadable task: %s", task_id)
+            continue
+        if not task:
+            continue
+        if status == "generating_demand":
+            reason = task.get("review_reason") or "service restart recovery"
+            logging.info("resuming ad material demand after service restart: %s", task_id)
+            run_ad_material_demand_async(task_id, reason=reason)
+            continue
+
+        quantity = max(1, int(task.get("quantity") or 1))
+        expected_indexes = list(range(1, quantity + 1))
+        ready_indexes = ad_material_ready_asset_indexes(task)
+        for index in expected_indexes:
+            if index not in ready_indexes and recover_ad_material_generation_output(task, index):
+                ready_indexes.add(index)
+
+        missing_indexes = [index for index in expected_indexes if index not in ready_indexes]
+        if not missing_indexes:
+            logging.info("recovered ad material task from existing assets after service restart: %s", task_id)
+            update_ad_material_task_status(task_id, "material_review", error_message="")
+            continue
+
+        reason = "service restart recovery: regenerate missing ad material assets %s" % ",".join(
+            str(index) for index in missing_indexes
+        )
+        logging.info(
+            "resuming ad material generation after service restart: task=%s missing=%s ready=%s",
+            task_id,
+            missing_indexes,
+            sorted(ready_indexes),
+        )
+        if len(missing_indexes) == quantity:
+            run_ad_material_generation_async(task_id, reason=reason)
+        else:
+            update_ad_material_task_status(task_id, "material_review", review_reason=reason, error_message="")
+            run_ad_material_generation_async(task_id, indexes=missing_indexes, reason=reason)
+
+
 def publish_ad_material_task(task_id, session):
     task = fetch_ad_material_task(task_id)
     ensure_ad_material_access(session, task)
@@ -88320,6 +88425,7 @@ def main():
 
     recover_inflight_jobs()
     recover_inflight_screenshot_jobs()
+    recover_inflight_ad_material_tasks()
 
 
 
