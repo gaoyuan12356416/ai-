@@ -86,7 +86,7 @@
 
 
 
-  <script src="/quick-nav.js?v=20260429-cover-permission"></script>
+  <script src="/quick-nav.js?v=20260519-qa-perf-nav"></script>
   <script>
 
 
@@ -3810,6 +3810,25 @@
 
 
 
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(13, 24, 43, .48);
+    }
+
+    .modal-panel {
+      width: min(1080px, 100%);
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: 0 28px 70px rgba(13, 24, 43, .32);
+    }
+
     .panel-head {
 
 
@@ -4230,6 +4249,36 @@
 
     .field.half { grid-column: span 6; }
 
+    .field.small { grid-column: span 2; }
+
+    .ad-material-create-panel { width: min(1080px, calc(100vw - 64px)); }
+
+    .ad-material-create-grid {
+      align-items: start;
+      column-gap: 16px;
+      row-gap: 16px;
+    }
+
+    .ad-material-create-grid .field { gap: 7px; }
+
+    .ad-material-create-grid label {
+      min-height: 20px;
+      display: flex;
+      align-items: center;
+      line-height: 20px;
+    }
+
+    .ad-material-create-grid input:not([type="hidden"]),
+    .ad-material-create-grid select {
+      height: 50px;
+      box-sizing: border-box;
+    }
+
+    .ad-material-create-grid .hint {
+      min-height: 18px;
+      line-height: 18px;
+    }
+
 
 
 
@@ -4451,6 +4500,274 @@
 
 
 
+
+    .product-combobox { position: relative; }
+
+    .product-options {
+      position: absolute;
+      z-index: 90;
+      top: calc(100% + 6px);
+      left: 0;
+      right: 0;
+      max-height: 320px;
+      overflow: auto;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 18px 48px rgba(13, 24, 43, .18);
+    }
+
+    .product-option {
+      width: 100%;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+      display: grid;
+      gap: 3px;
+    }
+
+    .product-option:hover,
+    .product-option.active { background: #eef4ff; }
+
+    .product-option strong { font-weight: 700; }
+
+    .product-option span,
+    .product-empty { color: var(--muted); font-size: 12px; }
+
+    .product-empty { padding: 12px; }
+
+    .required-mark { color: #e03131; font-weight: 800; margin-right: 4px; }
+
+    .size-plan-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .size-plan-total {
+      min-height: 28px;
+      padding: 6px 10px;
+      border: 1px solid #dce7fb;
+      border-radius: 999px;
+      background: #f6f9ff;
+      color: #35506f;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .size-plan {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f8fbff;
+    }
+
+    .size-plan-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 118px;
+      align-items: center;
+      gap: 12px;
+      min-height: 48px;
+      padding: 7px 10px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+    }
+
+    .size-plan-row.active {
+      border-color: #c7dcff;
+      background: #fff;
+      box-shadow: 0 6px 16px rgba(47, 107, 255, .08);
+    }
+
+    .size-choice {
+      display: grid;
+      grid-template-columns: 28px 88px minmax(120px, 1fr);
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      min-width: 0;
+      min-height: 34px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .size-choice:focus { outline: none; }
+
+    .size-plan-row:focus-within {
+      border-color: rgba(36, 87, 255, .35);
+      box-shadow: 0 0 0 3px rgba(36, 87, 255, .08);
+    }
+
+    .size-ratio {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .size-pixels {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: left;
+    }
+
+    .size-check {
+      width: 18px;
+      height: 18px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid #cbd8eb;
+      border-radius: 50%;
+      color: transparent;
+      font-size: 12px;
+      flex: 0 0 auto;
+    }
+
+    .size-plan-row.active .size-check {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .size-stepper {
+      display: grid;
+      grid-template-columns: 32px 52px 32px;
+      align-items: center;
+      justify-self: end;
+      overflow: hidden;
+      border: 1px solid #d9e3f3;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .size-stepper button,
+    .size-stepper input {
+      height: 34px;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      text-align: center;
+    }
+
+    .size-stepper button {
+      cursor: pointer;
+      color: #35506f;
+      font-weight: 800;
+    }
+
+    .size-stepper button:hover { background: #eef4ff; }
+
+    .size-stepper button:disabled,
+    .size-stepper input:disabled {
+      cursor: not-allowed;
+      color: #a5b2c5;
+      background: #f5f7fb;
+    }
+
+    .size-stepper input {
+      width: 52px;
+      padding: 0;
+      border-left: 1px solid #e6edf7;
+      border-right: 1px solid #e6edf7;
+      font-weight: 700;
+    }
+
+    .size-plan-footnote {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .md-preview {
+      margin-top: 12px;
+      line-height: 1.72;
+      color: var(--text);
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    .md-preview h1,
+    .md-preview h2,
+    .md-preview h3,
+    .md-preview h4 { margin: 14px 0 8px; line-height: 1.35; }
+
+    .md-preview h1 { font-size: 18px; }
+    .md-preview h2 { font-size: 16px; padding-top: 10px; border-top: 1px solid #edf2f8; }
+    .md-preview h3 { font-size: 15px; }
+    .md-preview p { margin: 8px 0; }
+    .md-preview ul,
+    .md-preview ol { margin: 8px 0 10px 20px; padding: 0; }
+    .md-preview li { margin: 4px 0; }
+    .md-preview a { color: var(--brand); font-weight: 700; }
+    .md-preview .md-image {
+      margin: 10px 0 14px;
+      padding: 10px;
+      border: 1px solid #e6edf7;
+      border-radius: 8px;
+      background: #f8fbff;
+    }
+    .md-preview .md-image img {
+      display: block;
+      max-width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .md-preview .md-image figcaption {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .md-preview .md-inline-image {
+      display: block;
+      width: auto;
+      max-width: 220px;
+      max-height: 180px;
+      object-fit: contain;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .md-preview blockquote {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border-left: 3px solid var(--brand);
+      border-radius: 8px;
+      background: #f3f7ff;
+      color: #50607a;
+    }
+    .md-preview code {
+      padding: 1px 5px;
+      border-radius: 6px;
+      background: #edf2f8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .md-preview table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 13px;
+    }
+    .md-preview td,
+    .md-preview th {
+      border: 1px solid #e6edf7;
+      padding: 8px;
+      vertical-align: top;
+    }
 
     .hint { color: var(--muted); font-size: 13px; }
 
@@ -6515,6 +6832,7 @@
 
 
       z-index: 60;
+      pointer-events: none;
 
 
 
@@ -6659,6 +6977,7 @@
 
 
       background: #f7faff;
+      pointer-events: auto;
 
 
 
@@ -6801,6 +7120,109 @@
 
 
 
+
+    .detail-drawer.open {
+      overflow: hidden;
+    }
+
+    .detail-panel {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    body.drawer-open {
+      overflow: hidden;
+    }
+
+    #detailDrawer .detail-panel {
+      display: block;
+    }
+
+    #detailDrawer .detail-panel > .panel {
+      overflow: visible;
+      margin-bottom: 18px;
+    }
+
+    #adMaterialDetailPanel {
+      align-items: stretch;
+    }
+
+    #adMaterialDetailPanel .detail-panel {
+      box-sizing: border-box;
+      width: min(1180px, calc(100vw - 220px));
+      max-height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #adMaterialDetailPanel .detail-panel > .panel {
+      min-height: 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #adMaterialDetailPanel .panel-head {
+      flex: 0 0 auto;
+    }
+
+    #adMaterialDetailPanel .panel-body {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding-bottom: 48px;
+    }
+
+    .ad-material-review-modal {
+      width: min(1040px, calc(100vw - 48px));
+      max-height: calc(100vh - 48px);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .ad-material-review-modal .panel-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .status-cell {
+      display: grid;
+      gap: 6px;
+      justify-items: start;
+    }
+
+    .review-asset-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      display: grid;
+      gap: 10px;
+    }
+
+    .review-asset-card img,
+    .review-asset-card video {
+      width: 100%;
+      max-height: 420px;
+      object-fit: contain;
+      border-radius: 8px;
+      background: #f6f8fb;
+    }
+
+    @media (max-width: 900px) {
+      #adMaterialDetailPanel .detail-panel {
+        width: 100vw;
+      }
+      .ad-material-review-modal {
+        width: 100vw;
+        max-height: 100vh;
+        border-radius: 0;
+      }
+    }
 
     .stack { display: grid; gap: 12px; }
 
@@ -7346,7 +7768,20 @@
 
 
 
-      .field, .field.wide, .field.half { grid-column: span 12; }
+      .field, .field.wide, .field.half, .field.small { grid-column: span 12; }
+
+      .ad-material-create-panel { width: min(100%, calc(100vw - 28px)); }
+
+      .size-plan-titlebar { align-items: flex-start; flex-direction: column; }
+
+      .size-plan-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+
+      .size-choice { grid-template-columns: 28px 76px minmax(0, 1fr); }
+
+      .size-stepper { width: 116px; }
 
 
 
@@ -10494,6 +10929,155 @@
 
 
 
+      <section id="adMaterialsSection" class="section">
+        <div class="panel">
+          <div class="panel-head">
+            <h3 class="panel-title">任务列表</h3>
+            <div class="actions-inline">
+              <button id="adMaterialCreateBtn" class="btn btn-primary" type="button">创建任务</button>
+              <button id="adMaterialReloadBtn" class="btn btn-secondary" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="filter-row" style="margin-bottom:16px;">
+              <div class="field" style="grid-column:span 3;">
+                <label>状态</label>
+                <select id="adMaterialStatusFilter">
+                  <option value="all">全部</option>
+                  <option value="draft">待上架</option>
+                  <option value="generating_demand">生成需求中</option>
+                  <option value="demand_review">需求待审核</option>
+                  <option value="generating_material">生成素材中</option>
+                  <option value="material_review">素材待审核</option>
+                  <option value="done">已完成</option>
+                  <option value="failed">失败</option>
+                </select>
+              </div>
+              <div class="field" style="grid-column:span 6;">
+                <label>搜索</label>
+                <input id="adMaterialSearch" placeholder="产品 / 任务 / 创建人" />
+              </div>
+              <div class="field" style="grid-column:span 3;align-self:end;">
+                <button id="adMaterialSearchBtn" class="btn btn-secondary" type="button">筛选</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>任务ID</th>
+                    <th>类型</th>
+                    <th>产品</th>
+                    <th>数量</th>
+                    <th>国家/语言</th>
+                    <th>状态</th>
+                    <th>发起人</th>
+                    <th>素材</th>
+                    <th>更新时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="adMaterialTableBody"></tbody>
+              </table>
+            </div>
+            <div class="pagination">
+              <div class="muted" id="adMaterialSummary">--</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="adMaterialTaskModal" class="modal-backdrop hidden">
+          <div class="modal-panel ad-material-create-panel">
+            <div class="panel-head">
+              <h3 id="adMaterialModalTitle" class="panel-title">创建任务</h3>
+              <div class="actions-inline">
+                <button id="adMaterialModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <form id="adMaterialForm" class="stack">
+                <div class="grid ad-material-create-grid">
+                  <div class="field">
+                    <label><span class="required-mark">*</span>产品</label>
+                    <div class="product-combobox">
+                      <input id="adMaterialProductSearch" placeholder="输入产品 ID / 名称搜索" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="adMaterialProductOptions" required />
+                      <input id="adMaterialAppId" type="hidden" />
+                      <div id="adMaterialProductOptions" class="product-options hidden"></div>
+                    </div>
+                    <div id="adMaterialProductHint" class="hint">输入关键词后选择产品</div>
+                  </div>
+                  <div class="field">
+                    <label><span class="required-mark">*</span>任务类型</label>
+                    <select id="adMaterialTaskType" required>
+                      <option value="素材迭代——根据老素材效果优化">素材迭代——根据老素材效果优化</option>
+                      <option value="参考衍生——解析参考素材风格出新素材">参考衍生——解析参考素材风格出新素材</option>
+                      <option value="竞品借鉴——参考竞品优质素材">竞品借鉴——参考竞品优质素材</option>
+                      <option value="综合策划——综合内外素材出方案">综合策划——综合内外素材出方案</option>
+                    </select>
+                  </div>
+                  <div class="field" id="adMaterialCompetitorField">
+                    <label>竞品查询接口</label>
+                    <select id="adMaterialCompetitorSource">
+                      <option value="有米云">有米云</option>
+                      <option value="metapi">metapi</option>
+                      <option value="广大大">广大大</option>
+                    </select>
+                  </div>
+                  <div class="field small">
+                    <label><span class="required-mark">*</span>国家</label>
+                    <input id="adMaterialCountry" list="adMaterialCountryList" placeholder="MX / US / BR" required />
+                    <datalist id="adMaterialCountryList"></datalist>
+                  </div>
+                  <div class="field small">
+                    <label><span class="required-mark">*</span>语言</label>
+                    <input id="adMaterialLanguage" list="adMaterialLanguageList" placeholder="es / en / pt" required />
+                    <datalist id="adMaterialLanguageList"></datalist>
+                  </div>
+                  <div class="field wide">
+                    <div class="size-plan-titlebar">
+                      <label><span class="required-mark">*</span>尺寸与数量</label>
+                      <div id="adMaterialSizePlanSummary" class="size-plan-total">默认 1:1 x 1，总计 1 张</div>
+                    </div>
+                    <input id="adMaterialQuantity" type="hidden" value="1" />
+                    <input id="adMaterialSize" type="hidden" value="1:1 x 1" />
+                    <div id="adMaterialSizePlan" class="size-plan"></div>
+                    <div class="size-plan-footnote">点击尺寸启用或取消；已启用尺寸可用 +/- 调整数量，全部尺寸合计最多 20 张。</div>
+                  </div>
+                  <div class="field">
+                    <label>标签 tag_name</label>
+                    <input id="adMaterialTagName" />
+                  </div>
+                  <div class="field">
+                    <label>category</label>
+                    <input id="adMaterialCategory" />
+                  </div>
+                  <div class="field">
+                    <label>title</label>
+                    <input id="adMaterialTitle" />
+                  </div>
+                  <div class="field">
+                    <label>body</label>
+                    <input id="adMaterialBody" />
+                  </div>
+                  <div class="field">
+                    <label>素材参考</label>
+                    <input id="adMaterialReferenceFiles" type="file" accept="image/*,video/*" multiple />
+                  </div>
+                  <div class="field" style="grid-column: span 12;">
+                    <label>任务描述</label>
+                    <textarea id="adMaterialDescription" rows="3" placeholder="描述希望优化或借鉴的方向"></textarea>
+                  </div>
+                </div>
+                <div class="actions-inline">
+                  <button id="adMaterialSubmitBtn" class="btn btn-primary" type="submit">确认创建</button>
+                  <button id="adMaterialResetBtn" class="btn btn-secondary" type="button">清空</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="noneSection" class="section">
 
 
@@ -12143,6 +12727,32 @@
 
   </div>
 
+  <div id="adMaterialDetailPanel" class="detail-drawer">
+    <div class="detail-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h3 class="panel-title">投放素材任务详情</h3>
+          <button id="adMaterialCloseDetailBtn" class="btn btn-secondary" type="button">关闭</button>
+        </div>
+        <div class="panel-body">
+          <div id="adMaterialDetailContent" class="stack"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="adMaterialReviewModal" class="modal-backdrop hidden">
+    <div class="modal-panel ad-material-review-modal">
+      <div class="panel-head">
+        <h3 id="adMaterialReviewTitle" class="panel-title">任务审核</h3>
+        <button id="adMaterialReviewCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="adMaterialReviewContent" class="stack"></div>
+      </div>
+    </div>
+  </div>
+
 
 
 
@@ -12278,6 +12888,22 @@
 
 
       jobs: [],
+      adMaterialProducts: [],
+      adMaterialCompetitorSources: [],
+      adMaterialTasks: [],
+      adMaterialProductMatches: [],
+      adMaterialProductMatchesQuery: "",
+      adMaterialProductMatchesTotal: 0,
+      adMaterialProductActiveIndex: -1,
+      adMaterialProductsLoaded: false,
+      adMaterialProductsLoading: null,
+      adMaterialProductQueryCache: {},
+      adMaterialProductSearchTimer: null,
+      adMaterialProductSearchRequestId: 0,
+      adMaterialTasksRequestId: 0,
+      selectedAdMaterialTask: null,
+      reviewingAdMaterialTask: null,
+      editingAdMaterialTaskId: "",
       selectedJobIds: new Set(),
 
 
@@ -12295,6 +12921,7 @@
 
 
       users: [],
+      permissionModules: [],
 
 
 
@@ -13198,6 +13825,47 @@
 
 
       logTableBody: document.getElementById("logTableBody"),
+      adMaterialForm: document.getElementById("adMaterialForm"),
+      adMaterialProductSearch: document.getElementById("adMaterialProductSearch"),
+      adMaterialProductOptions: document.getElementById("adMaterialProductOptions"),
+      adMaterialProductHint: document.getElementById("adMaterialProductHint"),
+      adMaterialAppId: document.getElementById("adMaterialAppId"),
+      adMaterialTaskType: document.getElementById("adMaterialTaskType"),
+      adMaterialCompetitorField: document.getElementById("adMaterialCompetitorField"),
+      adMaterialCompetitorSource: document.getElementById("adMaterialCompetitorSource"),
+      adMaterialQuantity: document.getElementById("adMaterialQuantity"),
+      adMaterialCountry: document.getElementById("adMaterialCountry"),
+      adMaterialLanguage: document.getElementById("adMaterialLanguage"),
+      adMaterialSize: document.getElementById("adMaterialSize"),
+      adMaterialSizePlan: document.getElementById("adMaterialSizePlan"),
+      adMaterialSizePlanSummary: document.getElementById("adMaterialSizePlanSummary"),
+      adMaterialTagName: document.getElementById("adMaterialTagName"),
+      adMaterialCategory: document.getElementById("adMaterialCategory"),
+      adMaterialTitle: document.getElementById("adMaterialTitle"),
+      adMaterialBody: document.getElementById("adMaterialBody"),
+      adMaterialReferenceFiles: document.getElementById("adMaterialReferenceFiles"),
+      adMaterialDescription: document.getElementById("adMaterialDescription"),
+      adMaterialSubmitBtn: document.getElementById("adMaterialSubmitBtn"),
+      adMaterialResetBtn: document.getElementById("adMaterialResetBtn"),
+      adMaterialCreateBtn: document.getElementById("adMaterialCreateBtn"),
+      adMaterialReloadBtn: document.getElementById("adMaterialReloadBtn"),
+      adMaterialTaskModal: document.getElementById("adMaterialTaskModal"),
+      adMaterialModalTitle: document.getElementById("adMaterialModalTitle"),
+      adMaterialModalCloseBtn: document.getElementById("adMaterialModalCloseBtn"),
+      adMaterialStatusFilter: document.getElementById("adMaterialStatusFilter"),
+      adMaterialSearch: document.getElementById("adMaterialSearch"),
+      adMaterialSearchBtn: document.getElementById("adMaterialSearchBtn"),
+      adMaterialTableBody: document.getElementById("adMaterialTableBody"),
+      adMaterialSummary: document.getElementById("adMaterialSummary"),
+      adMaterialDetailPanel: document.getElementById("adMaterialDetailPanel"),
+      adMaterialDetailContent: document.getElementById("adMaterialDetailContent"),
+      adMaterialCloseDetailBtn: document.getElementById("adMaterialCloseDetailBtn"),
+      adMaterialReviewModal: document.getElementById("adMaterialReviewModal"),
+      adMaterialReviewTitle: document.getElementById("adMaterialReviewTitle"),
+      adMaterialReviewContent: document.getElementById("adMaterialReviewContent"),
+      adMaterialReviewCloseBtn: document.getElementById("adMaterialReviewCloseBtn"),
+      adMaterialCountryList: document.getElementById("adMaterialCountryList"),
+      adMaterialLanguageList: document.getElementById("adMaterialLanguageList"),
 
 
 
@@ -13521,13 +14189,28 @@
 
 
 
-    async function renderQuickNav(activeKey) {
+    function markQuickNavActive(activeKey) {
+      if (!els.quickNav) return;
+      window.QuickNav?.setActive?.(els.quickNav, activeKey);
+      els.quickNav.querySelectorAll(".nav-item").forEach(item => {
+        item.classList.toggle("active", item.dataset.quickNavKey === activeKey);
+      });
+    }
+
+    async function renderQuickNav(activeKey, force = false) {
       if (!window.QuickNav || !els.quickNav) return;
+      if (els.quickNav.dataset.rendered === "1" && !force) {
+        markQuickNavActive(activeKey);
+        return;
+      }
       await window.QuickNav.render({
         container: els.quickNav,
         auth: state.auth,
-        activeKey
+        activeKey,
+        force
       });
+      els.quickNav.dataset.rendered = "1";
+      markQuickNavActive(activeKey);
     }
 
     function readCachedAuth() {
@@ -13578,14 +14261,17 @@
       const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
-        if (data.auth) {
-          state.auth = data.auth;
-          renderAuth();
-        }
-        throw new Error("请先登录");
+        clearCachedAuth();
+        document.documentElement.classList.remove("warm-auth");
+        state.auth = data.auth || { enabled: true, authenticated: false, user: null, login_url: "/api/auth/feishu/login", feishu_app_id: "" };
+        renderAuth();
+        throw new Error("\u8bf7\u5148\u767b\u5f55");
       }
       if (!response.ok) {
-        throw new Error(data.error || "请求失败");
+        if (response.status === 413) {
+          throw new Error("\u4e0a\u4f20\u5185\u5bb9\u8fc7\u5927\uff0c\u8bf7\u538b\u7f29\u53c2\u8003\u7d20\u6750\u6216\u51cf\u5c11\u6587\u4ef6\u6570\u91cf\u540e\u91cd\u8bd5");
+        }
+        throw new Error(data.error || data.message || `\u8bf7\u6c42\u5931\u8d25\uff08HTTP ${response.status}\uff09`);
       }
       return data;
     }
@@ -13600,6 +14286,7 @@
     function firstAllowedView() {
       if (userCan("drama_synthesis")) return "tasks";
       if (userCan("cover_synthesis")) return "screenshots";
+      if (userCan("ad_material_tasks")) return "adMaterials";
       if (state.auth.user && state.auth.user.is_admin) return "settings";
       return "none";
     }
@@ -13678,6 +14365,7 @@
 
 
         clearCachedAuth();
+        document.documentElement.classList.remove("warm-auth");
 
 
 
@@ -13915,6 +14603,7 @@
 
       const canDrama = userCan("drama_synthesis");
       const canCover = userCan("cover_synthesis");
+      const canAdMaterial = userCan("ad_material_tasks");
 
 
 
@@ -13945,7 +14634,7 @@
 
 
 
-      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover)) {
+      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover) || (activeView === "adMaterials" && !canAdMaterial)) {
 
 
 
@@ -14916,6 +15605,1350 @@
         .replace(/"/g, "&quot;");
     }
 
+    function inlineArg(value) {
+      return navText(JSON.stringify(String(value == null ? "" : value)));
+    }
+
+    function inlineMarkdown(value) {
+      let text = String(value == null ? "" : value);
+      const inlineImages = [];
+      text = text.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (_, src) => {
+        const index = inlineImages.push({ src, alt: "参考图" }) - 1;
+        return `@@MD_INLINE_IMAGE_${index}@@`;
+      });
+      text = text.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, (_, alt, src) => {
+        const index = inlineImages.push({ src, alt: alt || "参考图" }) - 1;
+        return `@@MD_INLINE_IMAGE_${index}@@`;
+      });
+      return navText(text)
+        .replace(/@@MD_INLINE_IMAGE_(\d+)@@/g, (_, index) => {
+          const image = inlineImages[Number(index)] || {};
+          return `<a href="${navText(image.src || "")}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${navText(image.src || "")}" alt="${navText(image.alt || "参考图")}" loading="lazy" decoding="async" /></a>`;
+        })
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>`)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+
+    function renderMarkdownPreview(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const html = [];
+      let listType = "";
+      let tableOpen = false;
+      const closeList = () => {
+        if (listType) {
+          html.push(`</${listType}>`);
+          listType = "";
+        }
+      };
+      const closeTable = () => {
+        if (tableOpen) {
+          html.push("</tbody></table>");
+          tableOpen = false;
+        }
+      };
+      const openList = type => {
+        closeTable();
+        if (listType !== type) {
+          closeList();
+          html.push(`<${type}>`);
+          listType = type;
+        }
+      };
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          closeList();
+          closeTable();
+          continue;
+        }
+        const image = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)$/);
+        if (image) {
+          closeList();
+          closeTable();
+          html.push(`<figure class="md-image"><img src="${navText(image[2])}" alt="${navText(image[1])}" loading="lazy" /><figcaption>${navText(image[1] || "参考图")}</figcaption></figure>`);
+          continue;
+        }
+        if (/^\|.+\|$/.test(line)) {
+          closeList();
+          const cells = line.slice(1, -1).split("|").map(cell => cell.trim());
+          if (cells.every(cell => /^:?-{3,}:?$/.test(cell))) continue;
+          if (!tableOpen) {
+            html.push("<table><tbody>");
+            tableOpen = true;
+          }
+          html.push(`<tr>${cells.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join("")}</tr>`);
+          continue;
+        }
+        closeTable();
+        const heading = line.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+          closeList();
+          const level = heading[1].length;
+          html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+          continue;
+        }
+        if (line.startsWith(">")) {
+          closeList();
+          html.push(`<blockquote>${inlineMarkdown(line.replace(/^>\s?/, ""))}</blockquote>`);
+          continue;
+        }
+        const bullet = line.match(/^[-*]\s+(.+)$/);
+        if (bullet) {
+          openList("ul");
+          html.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+          continue;
+        }
+        const ordered = line.match(/^\d+\.\s+(.+)$/);
+        if (ordered) {
+          openList("ol");
+          html.push(`<li>${inlineMarkdown(ordered[1])}</li>`);
+          continue;
+        }
+        closeList();
+        html.push(`<p>${inlineMarkdown(line)}</p>`);
+      }
+      closeList();
+      closeTable();
+      return html.join("") || `<div class="muted">暂无需求内容</div>`;
+    }
+
+    const AD_MATERIAL_COUNTRIES = [
+      "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
+      "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS", "BT", "BV", "BW", "BY", "BZ",
+      "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN", "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ",
+      "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG", "EH", "ER", "ES", "ET",
+      "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF", "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY",
+      "HK", "HM", "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT",
+      "JE", "JM", "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ",
+      "LA", "LB", "LC", "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY",
+      "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK", "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ",
+      "NA", "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ",
+      "OM", "PA", "PE", "PF", "PG", "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY",
+      "QA", "RE", "RO", "RS", "RU", "RW", "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS", "ST", "SV", "SX", "SY", "SZ",
+      "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ",
+      "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI", "VN", "VU",
+      "WF", "WS", "XK", "YE", "YT", "ZA", "ZM", "ZW"
+    ];
+    const AD_MATERIAL_LANGUAGES = [
+      "aa", "ab", "ae", "af", "ak", "am", "an", "ar", "as", "av", "ay", "az",
+      "ba", "be", "bg", "bh", "bi", "bm", "bn", "bo", "br", "bs",
+      "ca", "ce", "ch", "co", "cr", "cs", "cu", "cv", "cy",
+      "da", "de", "dv", "dz", "ee", "el", "en", "eo", "es", "et", "eu",
+      "fa", "ff", "fi", "fj", "fo", "fr", "fy", "ga", "gd", "gl", "gn", "gu", "gv",
+      "ha", "he", "hi", "ho", "hr", "ht", "hu", "hy", "hz",
+      "ia", "id", "ie", "ig", "ii", "ik", "io", "is", "it", "iu",
+      "ja", "jv", "ka", "kg", "ki", "kj", "kk", "kl", "km", "kn", "ko", "kr", "ks", "ku", "kv", "kw", "ky",
+      "la", "lb", "lg", "li", "ln", "lo", "lt", "lu", "lv",
+      "mg", "mh", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my",
+      "na", "nb", "nd", "ne", "ng", "nl", "nn", "no", "nr", "nv", "ny",
+      "oc", "oj", "om", "or", "os", "pa", "pi", "pl", "ps", "pt", "qu",
+      "rm", "rn", "ro", "ru", "rw", "sa", "sc", "sd", "se", "sg", "si", "sk", "sl", "sm", "sn", "so", "sq", "sr", "ss", "st", "su", "sv", "sw",
+      "ta", "te", "tg", "th", "ti", "tk", "tl", "tn", "to", "tr", "ts", "tt", "tw", "ty",
+      "ug", "uk", "ur", "uz", "ve", "vi", "vo", "wa", "wo", "xh", "yi", "yo", "za", "zh", "zu",
+      "zh-Hans", "zh-Hant", "pt-BR", "pt-PT", "es-419"
+    ];
+    const AD_MATERIAL_TASK_TYPE_ITERATION = "素材迭代——根据老素材效果优化";
+    const AD_MATERIAL_TASK_TYPE_REFERENCE = "参考衍生——解析参考素材风格出新素材";
+    const AD_MATERIAL_TASK_TYPE_COMPETITOR = "竞品借鉴——参考竞品优质素材";
+    const AD_MATERIAL_TASK_TYPE_PLANNING = "综合策划——综合内外素材出方案";
+    const AD_MATERIAL_TASK_TYPE_ALIASES = {
+      "素材优化": AD_MATERIAL_TASK_TYPE_ITERATION,
+      "素材迭代": AD_MATERIAL_TASK_TYPE_ITERATION,
+      "参考衍生": AD_MATERIAL_TASK_TYPE_REFERENCE,
+      "参考复刻": AD_MATERIAL_TASK_TYPE_REFERENCE,
+      "参考素材": AD_MATERIAL_TASK_TYPE_REFERENCE,
+      "竞品借鉴": AD_MATERIAL_TASK_TYPE_COMPETITOR,
+      "综合策划": AD_MATERIAL_TASK_TYPE_PLANNING,
+    };
+    const AD_MATERIAL_SIZE_OPTIONS = [
+      { value: "1:1", label: "1:1", dimensions: "1080x1080" },
+      { value: "4:5", label: "4:5", dimensions: "1080x1350" },
+      { value: "9:16", label: "9:16", dimensions: "1080x1920" },
+      { value: "1.91:1", label: "1.91:1", dimensions: "1200x628" },
+      { value: "16:9", label: "16:9", dimensions: "1920x1080" },
+    ];
+
+    function normalizeAdMaterialTaskType(value) {
+      const text = String(value || "").trim();
+      if ([AD_MATERIAL_TASK_TYPE_ITERATION, AD_MATERIAL_TASK_TYPE_REFERENCE, AD_MATERIAL_TASK_TYPE_COMPETITOR, AD_MATERIAL_TASK_TYPE_PLANNING].includes(text)) return text;
+      const prefix = text.split(/[—-]/)[0]?.trim();
+      return AD_MATERIAL_TASK_TYPE_ALIASES[text] || AD_MATERIAL_TASK_TYPE_ALIASES[prefix] || text;
+    }
+
+    function adMaterialTaskTypeKind(value) {
+      const type = normalizeAdMaterialTaskType(value);
+      if (type === AD_MATERIAL_TASK_TYPE_ITERATION) return "iteration";
+      if (type === AD_MATERIAL_TASK_TYPE_REFERENCE) return "reference";
+      if (type === AD_MATERIAL_TASK_TYPE_COMPETITOR) return "competitor";
+      if (type === AD_MATERIAL_TASK_TYPE_PLANNING) return "planning";
+      return "";
+    }
+
+    function adMaterialTaskTypeText(value) {
+      return normalizeAdMaterialTaskType(value) || "";
+    }
+
+    function fillAdMaterialDatalists() {
+      if (els.adMaterialCountryList) {
+        els.adMaterialCountryList.innerHTML = AD_MATERIAL_COUNTRIES.map(item => `<option value="${item}"></option>`).join("");
+      }
+      if (els.adMaterialLanguageList) {
+        els.adMaterialLanguageList.innerHTML = AD_MATERIAL_LANGUAGES.map(item => `<option value="${item}"></option>`).join("");
+      }
+    }
+
+    function renderAdMaterialCompetitorSources(selectedValue = "") {
+      if (!els.adMaterialCompetitorSource) return;
+      const activeSources = (state.adMaterialCompetitorSources || []).filter(item => (item.status || "active") === "active");
+      const current = selectedValue || els.adMaterialCompetitorSource.value || activeSources[0]?.source || "";
+      if (!activeSources.length) {
+        els.adMaterialCompetitorSource.innerHTML = `<option value="">暂无可用竞品源</option>`;
+        els.adMaterialCompetitorSource.disabled = true;
+        return;
+      }
+      els.adMaterialCompetitorSource.disabled = false;
+      els.adMaterialCompetitorSource.innerHTML = activeSources
+        .map(item => `<option value="${navText(item.source)}">${navText(item.name || item.source)}</option>`)
+        .join("");
+      els.adMaterialCompetitorSource.value = activeSources.some(item => item.source === current)
+        ? current
+        : activeSources[0].source;
+    }
+
+    async function loadAdMaterialCompetitorSources() {
+      if (!userCan("ad_material_tasks")) return;
+      try {
+        const data = await api("/api/ad-material/competitor-sources");
+        state.adMaterialCompetitorSources = data.items || [];
+      } catch (error) {
+        state.adMaterialCompetitorSources = [
+          { source: "有米云", name: "有米云", status: "active" },
+          { source: "metapi", name: "metapi", status: "active" },
+          { source: "广大大", name: "广大大", status: "active" },
+        ];
+        console.warn("加载竞品源失败，使用本地兜底", error);
+      }
+      renderAdMaterialCompetitorSources();
+    }
+
+    function updateAdMaterialCompetitorVisibility() {
+      const type = normalizeAdMaterialTaskType(els.adMaterialTaskType?.value || AD_MATERIAL_TASK_TYPE_ITERATION);
+      if (els.adMaterialTaskType && els.adMaterialTaskType.value !== type) {
+        els.adMaterialTaskType.value = type;
+      }
+      if (els.adMaterialCompetitorField) {
+        els.adMaterialCompetitorField.style.display = ["iteration", "reference"].includes(adMaterialTaskTypeKind(type)) ? "none" : "";
+      }
+      if (!["iteration", "reference"].includes(adMaterialTaskTypeKind(type))) {
+        renderAdMaterialCompetitorSources();
+      }
+    }
+
+    function normalizeAdMaterialSizePlan(plan, fallbackQuantity = 1, fallbackSize = "1:1") {
+      const counts = Object.fromEntries(AD_MATERIAL_SIZE_OPTIONS.map(item => [item.value, 0]));
+      const applyItem = item => {
+        if (!item) return;
+        const size = String(item.size || item.value || "").trim();
+        const option = AD_MATERIAL_SIZE_OPTIONS.find(entry => entry.value === size || entry.dimensions === size);
+        if (!option) return;
+        const count = Number(item.count || item.quantity || 0);
+        if (Number.isFinite(count) && count > 0) counts[option.value] += Math.floor(count);
+      };
+      if (Array.isArray(plan)) {
+        plan.forEach(applyItem);
+      }
+      const result = AD_MATERIAL_SIZE_OPTIONS
+        .map(item => ({ size: item.value, count: counts[item.value] }))
+        .filter(item => item.count > 0);
+      if (result.length) return result;
+      const option = AD_MATERIAL_SIZE_OPTIONS.find(item => item.value === fallbackSize || item.dimensions === fallbackSize) || AD_MATERIAL_SIZE_OPTIONS[0];
+      return [{ size: option.value, count: Math.max(1, Math.min(20, Number(fallbackQuantity) || 1)) }];
+    }
+
+    function parseAdMaterialSizePlanText(text, fallbackQuantity = 1) {
+      const value = String(text || "").trim();
+      if (!value) return normalizeAdMaterialSizePlan([], fallbackQuantity, "1:1");
+      const plan = [];
+      value.split(/[,，;；\n]+/).forEach(part => {
+        const itemText = part.trim();
+        if (!itemText) return;
+        const option = AD_MATERIAL_SIZE_OPTIONS.find(entry => itemText.includes(entry.value) || itemText.toLowerCase().includes(entry.dimensions.toLowerCase()));
+        if (!option) return;
+        const countMatch = itemText.match(/(?:x|×|\*)\s*(\d+)|(\d+)\s*(?:张|条|个)/i);
+        const count = countMatch ? Number(countMatch[1] || countMatch[2]) : (value.split(/[,，;；\n]+/).length === 1 ? Number(fallbackQuantity || 1) : 1);
+        plan.push({ size: option.value, count });
+      });
+      return normalizeAdMaterialSizePlan(plan, fallbackQuantity, "1:1");
+    }
+
+    function formatAdMaterialSizePlan(plan) {
+      return normalizeAdMaterialSizePlan(plan).map(item => `${item.size} x ${item.count}`).join(", ");
+    }
+
+    function updateAdMaterialSizePlanHidden(plan) {
+      const normalized = normalizeAdMaterialSizePlan(plan);
+      const total = normalized.reduce((sum, item) => sum + item.count, 0);
+      if (els.adMaterialSize) els.adMaterialSize.value = formatAdMaterialSizePlan(normalized);
+      if (els.adMaterialQuantity) els.adMaterialQuantity.value = String(total);
+      if (els.adMaterialSizePlanSummary) {
+        els.adMaterialSizePlanSummary.textContent = `总计 ${total} 张 · ${formatAdMaterialSizePlan(normalized)}`;
+      }
+      return normalized;
+    }
+
+    function refreshAdMaterialSizeRows() {
+      if (!els.adMaterialSizePlan) return;
+      const rows = Array.from(els.adMaterialSizePlan.querySelectorAll("[data-size-row]"));
+      const activeRows = rows.filter(row => row.dataset.sizeEnabled === "1");
+      const total = activeRows.reduce((sum, row) => {
+        const input = row.querySelector("[data-size-count]");
+        return sum + Math.max(1, Math.floor(Number(input?.value || 1)));
+      }, 0);
+      rows.forEach(row => {
+        const enabled = row.dataset.sizeEnabled === "1";
+        row.classList.toggle("active", enabled);
+        const countInput = row.querySelector("[data-size-count]");
+        const stepButtons = row.querySelectorAll("[data-size-step]");
+        const toggle = row.querySelector("[data-size-toggle]");
+        const count = Math.max(1, Math.floor(Number(countInput?.value || 1)));
+        if (toggle) toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+        if (countInput) countInput.disabled = !enabled;
+        stepButtons.forEach(button => {
+          const delta = Number(button.dataset.sizeStep || 0);
+          button.disabled = !enabled || (delta < 0 && count <= 1) || (delta > 0 && total >= 20);
+        });
+      });
+    }
+
+    function renderAdMaterialSizePlan(plan = [{ size: "1:1", count: 1 }]) {
+      if (!els.adMaterialSizePlan) return updateAdMaterialSizePlanHidden(plan);
+      const normalized = normalizeAdMaterialSizePlan(plan);
+      const countBySize = Object.fromEntries(normalized.map(item => [item.size, item.count]));
+      els.adMaterialSizePlan.innerHTML = AD_MATERIAL_SIZE_OPTIONS.map(item => {
+        const checked = countBySize[item.value] > 0;
+        const count = checked ? countBySize[item.value] : 1;
+        return `<div class="size-plan-row${checked ? " active" : ""}" data-size-row="${navText(item.value)}" data-size-enabled="${checked ? "1" : "0"}">
+          <button class="size-choice" type="button" data-size-toggle="${navText(item.value)}" aria-pressed="${checked ? "true" : "false"}">
+            <span class="size-check">✓</span>
+            <span class="size-ratio">${navText(item.label)}</span>
+            <span class="size-pixels">${navText(item.dimensions)}</span>
+          </button>
+          <div class="size-stepper">
+            <button type="button" data-size-step="-1" data-size-target="${navText(item.value)}" ${checked ? "" : "disabled"}>-</button>
+            <input type="number" min="1" max="20" value="${count}" data-size-count="${navText(item.value)}" ${checked ? "" : "disabled"} />
+            <button type="button" data-size-step="1" data-size-target="${navText(item.value)}" ${checked ? "" : "disabled"}>+</button>
+          </div>
+        </div>`;
+      }).join("");
+      refreshAdMaterialSizeRows();
+      return updateAdMaterialSizePlanHidden(normalized);
+    }
+
+    function collectAdMaterialSizePlan(throwIfInvalid = false) {
+      const plan = [];
+      if (els.adMaterialSizePlan) {
+        els.adMaterialSizePlan.querySelectorAll("[data-size-row]").forEach(row => {
+          const enabled = row.dataset.sizeEnabled === "1";
+          const size = row.dataset.sizeRow || "";
+          const countInput = row.querySelector("[data-size-count]");
+          if (enabled) {
+            const count = Math.max(1, Math.min(20, Math.floor(Number(countInput?.value || 1))));
+            if (countInput) countInput.value = String(count);
+            plan.push({ size, count });
+          }
+        });
+        if (!plan.length) {
+          const firstRow = els.adMaterialSizePlan.querySelector("[data-size-row]");
+          if (firstRow) {
+            firstRow.dataset.sizeEnabled = "1";
+            const countInput = firstRow.querySelector("[data-size-count]");
+            if (countInput && Number(countInput.value || 0) < 1) countInput.value = "1";
+            plan.push({ size: firstRow.dataset.sizeRow || "1:1", count: Number(countInput?.value || 1) });
+          }
+        }
+      }
+      const normalized = normalizeAdMaterialSizePlan(plan);
+      const total = normalized.reduce((sum, item) => sum + item.count, 0);
+      if ((total < 1 || total > 20) && throwIfInvalid) {
+        throw new Error("尺寸与数量总计必须为 1 到 20 张");
+      }
+      refreshAdMaterialSizeRows();
+      updateAdMaterialSizePlanHidden(normalized);
+      return normalized;
+    }
+
+    function handleAdMaterialSizePlanClick(event) {
+      const toggle = event.target.closest("[data-size-toggle]");
+      const step = event.target.closest("[data-size-step]");
+      if (!toggle && !step) return;
+      if (toggle) {
+        const row = toggle.closest("[data-size-row]");
+        if (!row) return;
+        const activeRows = Array.from(els.adMaterialSizePlan.querySelectorAll("[data-size-row]"))
+          .filter(item => item.dataset.sizeEnabled === "1");
+        const enabled = row.dataset.sizeEnabled === "1";
+        const currentTotal = activeRows.reduce((sum, item) => {
+          const input = item.querySelector("[data-size-count]");
+          return sum + Math.max(1, Math.floor(Number(input?.value || 1)));
+        }, 0);
+        if (enabled && activeRows.length <= 1) {
+          const countInput = row.querySelector("[data-size-count]");
+          if (countInput && Number(countInput.value || 0) < 1) countInput.value = "1";
+        } else {
+          if (!enabled && currentTotal >= 20) {
+            toast("尺寸数量总计最多 20 张", "error");
+            return;
+          }
+          row.dataset.sizeEnabled = enabled ? "0" : "1";
+        }
+        collectAdMaterialSizePlan(false);
+        return;
+      }
+      const row = step.closest("[data-size-row]");
+      const countInput = row?.querySelector("[data-size-count]");
+      if (!row || !countInput) return;
+      const delta = Number(step.dataset.sizeStep || 0);
+      const activeRows = Array.from(els.adMaterialSizePlan.querySelectorAll("[data-size-row]"))
+        .filter(item => item.dataset.sizeEnabled === "1");
+      const wasEnabled = row.dataset.sizeEnabled === "1";
+      const currentTotal = activeRows.reduce((sum, item) => {
+        const input = item.querySelector("[data-size-count]");
+        return sum + Math.max(1, Math.floor(Number(input?.value || 1)));
+      }, 0);
+      if (!wasEnabled && currentTotal >= 20) {
+        toast("尺寸数量总计最多 20 张", "error");
+        return;
+      }
+      row.dataset.sizeEnabled = "1";
+      const currentValue = Math.max(1, Math.floor(Number(countInput.value || 1)));
+      const maxForCurrent = Math.max(1, 20 - ((wasEnabled ? currentTotal : currentTotal + currentValue) - currentValue));
+      const nextValue = Math.max(1, Math.min(maxForCurrent, currentValue + delta));
+      countInput.value = String(nextValue);
+      collectAdMaterialSizePlan(false);
+    }
+
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, content_type: file.type || "", data_url: reader.result });
+        reader.onerror = () => reject(reader.error || new Error("文件读取失败"));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function adMaterialReferencePayload() {
+      const files = Array.from(els.adMaterialReferenceFiles?.files || []);
+      if (files.some(file => file.size > 20 * 1024 * 1024)) {
+        throw new Error("单个参考素材不能超过20MB");
+      }
+      return Promise.all(files.map(fileToDataUrl));
+    }
+
+    function adMaterialProductId(item) {
+      return String(item?.id || item?.app_id || "").trim();
+    }
+
+    function adMaterialProductName(item) {
+      return String(item?.name || item?.product_name || "").trim();
+    }
+
+    function adMaterialProductLabel(item) {
+      const productId = adMaterialProductId(item);
+      const productName = adMaterialProductName(item);
+      return String(item?.label || (productName ? `${productId} | ${productName}` : productId)).trim();
+    }
+
+    function adMaterialProductSearchText(item) {
+      return [adMaterialProductId(item), adMaterialProductName(item), item?.label || ""].join(" ").toLowerCase();
+    }
+
+    function adMaterialProductMatchesQuery(item, query) {
+      const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (!tokens.length) return true;
+      const text = adMaterialProductSearchText(item);
+      const compactText = text.replace(/\s+/g, "");
+      return tokens.every(token => text.includes(token) || compactText.includes(token.replace(/\s+/g, "")));
+    }
+
+    function findAdMaterialProduct(appId) {
+      return state.adMaterialProducts.find(item => adMaterialProductId(item) === String(appId || "").trim());
+    }
+
+    function normalizeProductCountry(value) {
+      const text = String(value || "").trim();
+      const match = text.match(/[A-Za-z]{2}/);
+      return match ? match[0].toUpperCase() : "";
+    }
+
+    function normalizeProductLanguage(value) {
+      const text = String(value || "").trim();
+      if (!text) return "";
+      const match = text.match(/[A-Za-z]{2,3}(?:[-_][A-Za-z]{2})?/);
+      return match ? match[0].split(/[-_]/)[0].toLowerCase() : "";
+    }
+
+    function inferAdMaterialProductLocale(product) {
+      product = product || {};
+      let country = product.country || product.market || product.geo || "";
+      let language = product.language || product.lang || "";
+      const rawUrl = product.store_url || product.url || product.website_url || "";
+      if (rawUrl) {
+        try {
+          const url = new URL(rawUrl, window.location.origin);
+          country = country || url.searchParams.get("gl") || url.searchParams.get("country") || "";
+          language = language || url.searchParams.get("hl") || url.searchParams.get("lang") || "";
+        } catch (error) {
+          const countryMatch = String(rawUrl).match(/[?&](?:gl|country)=([A-Za-z]{2})/i);
+          const langMatch = String(rawUrl).match(/[?&](?:hl|lang)=([A-Za-z]{2,3}(?:[-_][A-Za-z]{2})?)/i);
+          country = country || countryMatch?.[1] || "";
+          language = language || langMatch?.[1] || "";
+        }
+      }
+      return {
+        country: normalizeProductCountry(country),
+        language: normalizeProductLanguage(language),
+      };
+    }
+
+    function applyAdMaterialProductLocale(product, force = true) {
+      const locale = inferAdMaterialProductLocale(product);
+      if (locale.country && (force || !String(els.adMaterialCountry?.value || "").trim())) {
+        els.adMaterialCountry.value = locale.country;
+      }
+      if (locale.language && (force || !String(els.adMaterialLanguage?.value || "").trim())) {
+        els.adMaterialLanguage.value = locale.language;
+      }
+    }
+
+    function mergeAdMaterialProducts(items) {
+      const byId = new Map(state.adMaterialProducts.map(item => [adMaterialProductId(item), item]));
+      (items || []).forEach(item => {
+        const productId = adMaterialProductId(item);
+        if (productId) byId.set(productId, Object.assign({}, byId.get(productId) || {}, item));
+      });
+      state.adMaterialProducts = Array.from(byId.values());
+    }
+
+    function adMaterialProductCacheKey(query) {
+      return String(query || "").trim().toLowerCase();
+    }
+
+    function matchedAdMaterialProducts(query) {
+      return state.adMaterialProducts.filter(item => adMaterialProductMatchesQuery(item, query));
+    }
+
+    function setAdMaterialProductMatches(query, items, total) {
+      state.adMaterialProductMatchesQuery = String(query || "").trim();
+      state.adMaterialProductMatches = items || [];
+      state.adMaterialProductMatchesTotal = Number.isFinite(Number(total)) ? Number(total) : state.adMaterialProductMatches.length;
+      state.adMaterialProductActiveIndex = state.adMaterialProductMatches.length ? 0 : -1;
+    }
+
+    function hideAdMaterialProductOptions() {
+      els.adMaterialProductOptions?.classList.add("hidden");
+      els.adMaterialProductSearch?.setAttribute("aria-expanded", "false");
+      state.adMaterialProductActiveIndex = -1;
+    }
+
+    function setAdMaterialProductValue(appId, fallbackName, applyLocale = false) {
+      const product = findAdMaterialProduct(appId);
+      const label = product ? adMaterialProductLabel(product) : String(fallbackName || appId || "").trim();
+      if (els.adMaterialAppId) els.adMaterialAppId.value = String(appId || "").trim();
+      if (els.adMaterialProductSearch) els.adMaterialProductSearch.value = label;
+      if (els.adMaterialProductHint) {
+        els.adMaterialProductHint.textContent = label ? `已选择：${label}` : "输入关键词后选择产品";
+      }
+      if (product && applyLocale) {
+        applyAdMaterialProductLocale(product, true);
+      }
+    }
+
+    function clearAdMaterialProductValue() {
+      if (els.adMaterialAppId) els.adMaterialAppId.value = "";
+      if (els.adMaterialProductSearch) els.adMaterialProductSearch.value = "";
+      if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = "输入关键词后选择产品";
+      hideAdMaterialProductOptions();
+    }
+
+    function renderAdMaterialProductOptions(open = true) {
+      if (!els.adMaterialProductOptions) return;
+      const query = (els.adMaterialProductSearch?.value || "").trim();
+      if (!query) {
+        state.adMaterialProductMatches = [];
+        state.adMaterialProductMatchesQuery = "";
+        state.adMaterialProductMatchesTotal = 0;
+        state.adMaterialProductActiveIndex = -1;
+        els.adMaterialProductOptions.innerHTML = "";
+        els.adMaterialProductOptions.classList.add("hidden");
+        els.adMaterialProductSearch?.setAttribute("aria-expanded", "false");
+        if (els.adMaterialProductHint) {
+          els.adMaterialProductHint.textContent = "\u8f93\u5165\u5173\u952e\u8bcd\u540e\u9009\u62e9\u4ea7\u54c1";
+        }
+        return;
+      }
+      const limit = 80;
+      const usesServerMatches = state.adMaterialProductMatchesQuery === query;
+      const allMatches = usesServerMatches ? state.adMaterialProductMatches : matchedAdMaterialProducts(query);
+      const totalMatches = usesServerMatches ? state.adMaterialProductMatchesTotal : allMatches.length;
+      state.adMaterialProductMatches = allMatches.slice(0, limit);
+      state.adMaterialProductMatchesQuery = query;
+      state.adMaterialProductMatchesTotal = totalMatches;
+      if (state.adMaterialProductActiveIndex >= state.adMaterialProductMatches.length) {
+        state.adMaterialProductActiveIndex = state.adMaterialProductMatches.length ? 0 : -1;
+      }
+      if (state.adMaterialProductActiveIndex < 0 && state.adMaterialProductMatches.length) {
+        state.adMaterialProductActiveIndex = 0;
+      }
+      els.adMaterialProductOptions.innerHTML = state.adMaterialProductMatches.length
+        ? state.adMaterialProductMatches.map((item, index) => {
+            const productId = adMaterialProductId(item);
+            const productName = adMaterialProductName(item);
+            const active = index === state.adMaterialProductActiveIndex ? " active" : "";
+            return `<button type="button" class="product-option${active}" data-product-index="${index}"><strong>${navText(productName || productId)}</strong><span>${navText(productId)}</span></button>`;
+          }).join("") + (totalMatches > limit ? `<div class="product-empty">\u4ec5\u663e\u793a\u524d ${limit} \u6761\uff0c\u8bf7\u7ee7\u7eed\u8f93\u5165\u5173\u952e\u8bcd\u7f29\u5c0f\u8303\u56f4</div>` : "")
+        : `<div class="product-empty">\u672a\u627e\u5230\u5339\u914d\u4ea7\u54c1</div>`;
+      els.adMaterialProductOptions.classList.toggle("hidden", !open);
+      els.adMaterialProductSearch?.setAttribute("aria-expanded", open ? "true" : "false");
+      if (els.adMaterialProductHint) {
+        els.adMaterialProductHint.textContent = `\u5339\u914d ${totalMatches} \u4e2a\u4ea7\u54c1`;
+      }
+    }
+
+    function selectAdMaterialProductByIndex(index) {
+      const product = state.adMaterialProductMatches[index];
+      if (!product) return;
+      setAdMaterialProductValue(adMaterialProductId(product), adMaterialProductName(product), true);
+      hideAdMaterialProductOptions();
+    }
+
+    function renderAdMaterialProductLoading(query) {
+      if (!els.adMaterialProductOptions) return;
+      els.adMaterialProductOptions.innerHTML = `<div class="product-empty">\u6b63\u5728\u641c\u7d22\u300c${navText(query)}\u300d...</div>`;
+      els.adMaterialProductOptions.classList.remove("hidden");
+      els.adMaterialProductSearch?.setAttribute("aria-expanded", "true");
+      if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = "\u6b63\u5728\u641c\u7d22\u4ea7\u54c1...";
+    }
+
+    function scheduleAdMaterialProductSearch(query) {
+      if (state.adMaterialProductSearchTimer) clearTimeout(state.adMaterialProductSearchTimer);
+      state.adMaterialProductSearchTimer = setTimeout(async () => {
+        const requestId = ++state.adMaterialProductSearchRequestId;
+        const activeQuery = String(els.adMaterialProductSearch?.value || "").trim();
+        if (!activeQuery || activeQuery !== query) return;
+        try {
+          const items = await searchAdMaterialProducts(query);
+          if (requestId !== state.adMaterialProductSearchRequestId) return;
+          if (String(els.adMaterialProductSearch?.value || "").trim() !== query) return;
+          const cache = state.adMaterialProductQueryCache[adMaterialProductCacheKey(query)] || {};
+          setAdMaterialProductMatches(query, items, cache.total);
+          renderAdMaterialProductOptions(true);
+        } catch (error) {
+          if (requestId !== state.adMaterialProductSearchRequestId) return;
+          if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = error.message || "\u4ea7\u54c1\u641c\u7d22\u5931\u8d25";
+          if (els.adMaterialProductOptions) {
+            els.adMaterialProductOptions.innerHTML = `<div class="product-empty">\u4ea7\u54c1\u641c\u7d22\u5931\u8d25\uff1a${navText(errorText(error))}</div>`;
+            els.adMaterialProductOptions.classList.remove("hidden");
+          }
+        }
+      }, 180);
+    }
+
+    async function handleAdMaterialProductInput() {
+      const selected = findAdMaterialProduct(els.adMaterialAppId?.value || "");
+      if (selected && els.adMaterialProductSearch?.value !== adMaterialProductLabel(selected)) {
+        if (els.adMaterialAppId) els.adMaterialAppId.value = "";
+      }
+      const query = String(els.adMaterialProductSearch?.value || "").trim();
+      if (!query) {
+        if (state.adMaterialProductSearchTimer) clearTimeout(state.adMaterialProductSearchTimer);
+        hideAdMaterialProductOptions();
+        if (els.adMaterialProductHint) els.adMaterialProductHint.textContent = "\u8f93\u5165\u5173\u952e\u8bcd\u540e\u9009\u62e9\u4ea7\u54c1";
+        return;
+      }
+      const cache = state.adMaterialProductQueryCache[adMaterialProductCacheKey(query)];
+      if (cache) {
+        setAdMaterialProductMatches(query, cache.items, cache.total);
+        renderAdMaterialProductOptions(true);
+        return;
+      }
+      const localMatches = matchedAdMaterialProducts(query).slice(0, 80);
+      if (localMatches.length) {
+        setAdMaterialProductMatches(query, localMatches, localMatches.length);
+        renderAdMaterialProductOptions(true);
+      } else {
+        renderAdMaterialProductLoading(query);
+      }
+      scheduleAdMaterialProductSearch(query);
+    }
+
+    function handleAdMaterialProductKeydown(event) {
+      if (!["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key)) return;
+      if (event.key === "Escape") {
+        hideAdMaterialProductOptions();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (!String(els.adMaterialProductSearch?.value || "").trim()) return;
+        const count = state.adMaterialProductMatches.length || matchedAdMaterialProducts(els.adMaterialProductSearch?.value || "").length;
+        if (!count) return renderAdMaterialProductOptions(true);
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        state.adMaterialProductActiveIndex = (state.adMaterialProductActiveIndex + direction + count) % count;
+        renderAdMaterialProductOptions(true);
+        return;
+      }
+      if (event.key === "Enter" && !els.adMaterialProductOptions?.classList.contains("hidden")) {
+        event.preventDefault();
+        selectAdMaterialProductByIndex(Math.max(state.adMaterialProductActiveIndex, 0));
+      }
+    }
+
+    function handleAdMaterialProductOptionClick(event) {
+      const button = event.target.closest("[data-product-index]");
+      if (!button) return;
+      selectAdMaterialProductByIndex(Number(button.dataset.productIndex));
+    }
+
+    async function ensureAdMaterialProductSelected() {
+      const currentId = els.adMaterialAppId?.value || "";
+      if (currentId && findAdMaterialProduct(currentId)) return findAdMaterialProduct(currentId);
+      const query = (els.adMaterialProductSearch?.value || "").trim();
+      if (!query) return null;
+      if (!state.adMaterialProductsLoaded && query) {
+        await searchAdMaterialProducts(query);
+      }
+      const exact = state.adMaterialProducts.find(item => {
+        const productId = adMaterialProductId(item);
+        const productName = adMaterialProductName(item);
+        const label = adMaterialProductLabel(item);
+        return [productId, productName, label].some(value => value.toLowerCase() === query.toLowerCase());
+      });
+      if (exact) {
+        setAdMaterialProductValue(adMaterialProductId(exact), adMaterialProductName(exact), true);
+        return exact;
+      }
+      const matches = matchedAdMaterialProducts(query);
+      if (matches.length === 1) {
+        setAdMaterialProductValue(adMaterialProductId(matches[0]), adMaterialProductName(matches[0]), true);
+        return matches[0];
+      }
+      return null;
+    }
+
+    function selectedAdMaterialProduct() {
+      const appId = els.adMaterialAppId?.value || "";
+      const product = findAdMaterialProduct(appId);
+      if (product) return product;
+      return appId ? { app_id: appId, id: appId, product_name: els.adMaterialProductSearch?.value || "", name: els.adMaterialProductSearch?.value || "" } : {};
+    }
+
+    function openAdMaterialTaskModal(mode) {
+      if (els.adMaterialModalTitle) els.adMaterialModalTitle.textContent = mode === "edit" ? "编辑任务" : "创建任务";
+      if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = mode === "edit" ? "保存编辑" : "确认创建";
+      els.adMaterialTaskModal?.classList.remove("hidden");
+    }
+
+    function closeAdMaterialTaskModal() {
+      els.adMaterialTaskModal?.classList.add("hidden");
+    }
+
+    async function loadAdMaterialProducts(query = "") {
+      if (!userCan("ad_material_tasks")) {
+        state.adMaterialProductsLoaded = true;
+        return [];
+      }
+      const params = new URLSearchParams();
+      const searchQuery = String(query || "").trim();
+      if (searchQuery) params.set("q", searchQuery);
+      params.set("limit", "80");
+      const data = await api(`/api/ad-material/products?${params.toString()}`);
+      const selectedAppId = els.adMaterialAppId?.value || "";
+      const responseItems = data.items || [];
+      const items = searchQuery ? responseItems.filter(item => adMaterialProductMatchesQuery(item, searchQuery)) : responseItems;
+      mergeAdMaterialProducts(items);
+      if (!searchQuery) state.adMaterialProductsLoaded = true;
+      if (searchQuery) {
+        state.adMaterialProductQueryCache[adMaterialProductCacheKey(searchQuery)] = {
+          items,
+          total: Number.isFinite(Number(data.total)) ? Number(data.total) : items.length,
+          cachedAt: Date.now()
+        };
+      }
+      if (selectedAppId) {
+        setAdMaterialProductValue(selectedAppId, els.adMaterialProductSearch?.value || "");
+      }
+      return items;
+    }
+
+    async function searchAdMaterialProducts(query) {
+      const key = adMaterialProductCacheKey(query);
+      const cached = state.adMaterialProductQueryCache[key];
+      if (cached && Date.now() - cached.cachedAt < 5 * 60 * 1000) return cached.items;
+      return loadAdMaterialProducts(query);
+    }
+
+    async function ensureAdMaterialProductsLoaded() {
+      if (state.adMaterialProductsLoaded) return;
+      if (!state.adMaterialProductsLoading) {
+        state.adMaterialProductsLoading = loadAdMaterialProducts("").finally(() => {
+          state.adMaterialProductsLoading = null;
+        });
+      }
+      return state.adMaterialProductsLoading;
+    }
+
+    function adMaterialStatusText(status, label) {
+      if (status === "draft") return "待上架";
+      return label || status || "--";
+    }
+
+    function adMaterialStatusBadge(status, label) {
+      const cls = status === "done" ? "ok" : status === "failed" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${navText(adMaterialStatusText(status, label))}</span>`;
+    }
+
+    function adMaterialDisplayStatusText(task) {
+      if (adMaterialCanCompleteUpload(task)) return "待上报";
+      return adMaterialStatusText(task?.status, task?.status_label);
+    }
+
+    function adMaterialTaskStatusBadge(task) {
+      const status = task?.status || "";
+      const cls = status === "done" ? "ok" : status === "failed" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${navText(adMaterialDisplayStatusText(task))}</span>`;
+    }
+
+    function adMaterialCanReview(task) {
+      return task && (task.status === "demand_review" || task.status === "material_review");
+    }
+
+    function adMaterialCanCompleteUpload(task) {
+      const assets = task?.assets || [];
+      const readyStatuses = new Set(["approved", "uploaded", "abandoned"]);
+      const hasUploadable = assets.some(asset => asset.status === "approved" || asset.status === "uploaded");
+      return task && task.status !== "done" && assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
+    }
+
+    function adMaterialStatusCell(task) {
+      return `<div class="status-cell">
+        ${adMaterialTaskStatusBadge(task)}
+        ${adMaterialCanReview(task) ? `<button class="btn btn-primary mini" type="button" onclick="openAdMaterialReview('${task.task_id}')">审核</button>` : ""}
+      </div>`;
+    }
+
+    function buildAdMaterialRow(task) {
+      const assets = task.assets || [];
+      const canEdit = task.status === "draft";
+      const canDelete = task.status !== "done";
+      return `
+        <tr>
+          <td><code>${navText((task.task_id || "").slice(0, 8))}</code></td>
+          <td>${navText(adMaterialTaskTypeText(task.task_type))}</td>
+          <td>${navText(task.product_name || task.app_id || "")}</td>
+          <td>${task.quantity || 0}</td>
+          <td>${navText(task.country || "")}/${navText(task.language || "")}</td>
+          <td>${adMaterialStatusCell(task)}</td>
+          <td>${navText(task.creator_name || "")}</td>
+          <td>${assets.length}</td>
+          <td>${navText(task.updated_at || "")}</td>
+          <td>
+            <div class="actions-inline">
+              <button class="btn btn-secondary mini" type="button" onclick="openAdMaterialDetail('${task.task_id}')">详情</button>
+              ${canEdit ? `<button class="btn btn-secondary mini" type="button" onclick="editAdMaterialTask('${task.task_id}')">编辑</button>` : ""}
+              ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架</button>` : ""}
+              ${adMaterialCanCompleteUpload(task) ? `<button class="btn btn-primary mini" type="button" onclick="completeAdMaterialUpload('${task.task_id}')">上传至盈量素材库</button>` : ""}
+              <button class="btn btn-secondary mini" type="button" onclick="copyAdMaterialTask('${task.task_id}')">复制</button>
+              ${canDelete ? `<button class="btn btn-danger mini" type="button" onclick="deleteAdMaterialTask('${task.task_id}')">删除</button>` : ""}
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+
+    function adMaterialTaskMatchesCurrentFilters(task) {
+      if (!task) return false;
+      const status = els.adMaterialStatusFilter?.value || "all";
+      if (status && status !== "all" && task.status !== status) return false;
+      const q = (els.adMaterialSearch?.value || "").trim().toLowerCase();
+      if (!q) return true;
+      const text = [
+        task.task_id,
+        task.product_name,
+        task.description,
+        task.creator_name,
+        task.app_id,
+      ].map(value => String(value || "").toLowerCase()).join(" ");
+      return text.includes(q);
+    }
+
+    async function loadAdMaterialTasks(options = {}) {
+      if (!userCan("ad_material_tasks")) return;
+      const requestId = ++state.adMaterialTasksRequestId;
+      const params = new URLSearchParams();
+      const status = els.adMaterialStatusFilter?.value || "all";
+      if (status && status !== "all") params.set("status", status);
+      const q = (els.adMaterialSearch?.value || "").trim();
+      if (q) params.set("q", q);
+      if (options.showLoading !== false && els.adMaterialTableBody) {
+        els.adMaterialTableBody.innerHTML = `<tr><td colspan="10" class="muted">加载中...</td></tr>`;
+      }
+      const data = await api(`/api/ad-material/tasks?${params.toString()}`);
+      if (requestId !== state.adMaterialTasksRequestId) return data;
+      state.adMaterialTasks = data.items || [];
+      renderAdMaterialTaskRows();
+      if (els.adMaterialSummary) {
+        els.adMaterialSummary.textContent = `共 ${data.total || 0} 条`;
+      }
+      return data;
+    }
+
+    async function adMaterialPayloadBase() {
+      const product = await ensureAdMaterialProductSelected();
+      if (!product) throw new Error("请先搜索并选择产品");
+      const taskType = normalizeAdMaterialTaskType(els.adMaterialTaskType.value);
+      if (!["iteration", "reference"].includes(adMaterialTaskTypeKind(taskType)) && !els.adMaterialCompetitorSource.value) {
+        throw new Error("当前没有可用竞品源，请先恢复竞品接口或改用素材迭代");
+      }
+      const sizePlan = collectAdMaterialSizePlan(true);
+      return {
+        app_id: els.adMaterialAppId.value,
+        product_name: product.name || product.product_name || "",
+        store_url: product.store_url || "",
+        package_name: product.package_name || product.package || "",
+        product_icon_url: "",
+        task_type: taskType,
+        competitor_source: els.adMaterialCompetitorSource.value,
+        quantity: sizePlan.reduce((sum, item) => sum + item.count, 0),
+        size_plan: sizePlan,
+        country: (els.adMaterialCountry.value || "").trim(),
+        language: (els.adMaterialLanguage.value || "").trim(),
+        size: formatAdMaterialSizePlan(sizePlan),
+        tag_name: (els.adMaterialTagName.value || "").trim(),
+        category: (els.adMaterialCategory.value || "").trim(),
+        title: (els.adMaterialTitle.value || "").trim(),
+        body: (els.adMaterialBody.value || "").trim(),
+        description: (els.adMaterialDescription.value || "").trim(),
+      };
+    }
+
+    async function submitAdMaterialTask(event) {
+      event.preventDefault();
+      try {
+        const payload = await adMaterialPayloadBase();
+        payload.reference_files = await adMaterialReferencePayload();
+        const editingId = state.editingAdMaterialTaskId;
+        const url = editingId ? `/api/ad-material/tasks/${editingId}` : "/api/ad-material/tasks";
+        const result = await api(url, { method: "POST", body: JSON.stringify(payload) });
+        toast(editingId ? "任务已更新" : "任务已创建");
+        resetAdMaterialForm();
+        closeAdMaterialTaskModal();
+        await loadAdMaterialTasks();
+        hideAdMaterialDetail();
+      } catch (error) {
+        showError("保存投放素材任务失败", error);
+      }
+    }
+
+    function resetAdMaterialForm() {
+      state.editingAdMaterialTaskId = "";
+      els.adMaterialForm?.reset();
+      clearAdMaterialProductValue();
+      if (els.adMaterialTaskType) els.adMaterialTaskType.value = AD_MATERIAL_TASK_TYPE_ITERATION;
+      renderAdMaterialSizePlan([{ size: "1:1", count: 1 }]);
+      if (els.adMaterialModalTitle) els.adMaterialModalTitle.textContent = "创建任务";
+      if (els.adMaterialSubmitBtn) els.adMaterialSubmitBtn.textContent = "确认创建";
+      updateAdMaterialCompetitorVisibility();
+    }
+
+    async function createAdMaterialTask() {
+      resetAdMaterialForm();
+      openAdMaterialTaskModal("create");
+      if (!state.adMaterialCompetitorSources.length) {
+        await loadAdMaterialCompetitorSources();
+      }
+    }
+
+    async function editAdMaterialTask(taskId) {
+      if (!state.adMaterialCompetitorSources.length) {
+        await loadAdMaterialCompetitorSources();
+      }
+      const task = await api(`/api/ad-material/tasks/${taskId}`);
+      state.editingAdMaterialTaskId = task.task_id;
+      setAdMaterialProductValue(task.app_id || "", task.product_name || "", false);
+      els.adMaterialTaskType.value = normalizeAdMaterialTaskType(task.task_type || AD_MATERIAL_TASK_TYPE_ITERATION);
+      renderAdMaterialCompetitorSources(task.competitor_source || "有米云");
+      renderAdMaterialSizePlan(task.size_plan || parseAdMaterialSizePlanText(task.size || "", task.quantity || 1));
+      els.adMaterialCountry.value = task.country || "";
+      els.adMaterialLanguage.value = task.language || "";
+      els.adMaterialTagName.value = task.tag_name || "";
+      els.adMaterialCategory.value = task.category || "";
+      els.adMaterialTitle.value = task.title || "";
+      els.adMaterialBody.value = task.body || "";
+      els.adMaterialDescription.value = task.description || "";
+      updateAdMaterialCompetitorVisibility();
+      openAdMaterialTaskModal("edit");
+    }
+
+    function renderAdMaterialDetail(task) {
+      const referenceFiles = task.reference_files || [];
+      const artifacts = task.demand_artifacts || {};
+      const assets = task.assets || [];
+      els.adMaterialDetailPanel?.classList.add("open");
+      els.adMaterialDetailContent.innerHTML = `
+        <div class="card">
+          <div class="grid">
+            <div><strong>任务ID</strong><div><code>${navText(task.task_id || "")}</code></div></div>
+            <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>产品ID</strong><div>${navText(task.app_id || "")}</div></div>
+            <div><strong>类型</strong><div>${navText(adMaterialTaskTypeText(task.task_type))}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
+            <div><strong>尺寸</strong><div>${navText(task.size_plan_summary || task.size || "未填写")}</div></div>
+            <div><strong>竞品源</strong><div>${navText(task.competitor_source || "不使用")}</div></div>
+          </div>
+          ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishAdMaterialTask('${task.task_id}')">上架任务</button></div>` : ""}
+        </div>
+        <div class="card">
+          <strong>上报字段</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>category</strong><div>${navText(task.category || "空")}</div></div>
+            <div><strong>tag_name</strong><div>${navText(task.tag_name || "空")}</div></div>
+            <div><strong>title</strong><div>${navText(task.title || "空")}</div></div>
+            <div><strong>body</strong><div>${navText(task.body || "空")}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>产品与商店信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>包名</strong><div>${navText(task.package_name || "未记录")}</div></div>
+            <div><strong>产品图标</strong><div>${task.product_icon_url ? `<a href="${navText(task.product_icon_url)}" target="_blank" rel="noopener noreferrer">打开图标</a>` : "未记录"}</div></div>
+            <div style="grid-column:span 12;"><strong>商店链接</strong><div>${task.store_url ? `<a href="${navText(task.store_url)}" target="_blank" rel="noopener noreferrer">${navText(task.store_url)}</a>` : "未记录"}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>补充说明与参考文件</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div style="grid-column:span 12;"><strong>任务描述</strong><div>${navText(task.description || "未填写")}</div></div>
+            <div><strong>参考文件</strong><div>${referenceFiles.length}</div></div>
+            <div><strong>生成素材</strong><div>${assets.length}</div></div>
+            <div><strong>需求MD</strong><div>${artifacts.markdown_url ? `<a href="${navText(artifacts.markdown_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+            <div><strong>需求PDF</strong><div>${artifacts.pdf_url ? `<a href="${navText(artifacts.pdf_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+          </div>
+          ${referenceFiles.length ? `<div class="actions-inline" style="margin-top:12px;">${referenceFiles.map((file, index) => `<a class="btn btn-secondary mini" href="${navText(file.url || "")}" target="_blank" rel="noopener noreferrer">参考文件 ${index + 1}</a>`).join("")}</div>` : ""}
+        </div>
+        <div class="card">
+          <strong>创建信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>发起人</strong><div>${navText(task.creator_name || "")}</div></div>
+            <div><strong>邮箱</strong><div>${navText(task.creator_email || "")}</div></div>
+            <div><strong>initiator</strong><div>${navText(task.initiator_sub_user_id || "未定位")}</div></div>
+            <div><strong>创建时间</strong><div>${navText(task.created_at || "")}</div></div>
+            <div><strong>更新时间</strong><div>${navText(task.updated_at || "")}</div></div>
+          </div>
+        </div>
+        ${task.error_message ? `<div class="card"><strong>错误</strong><pre style="white-space:pre-wrap;">${navText(task.error_message)}</pre></div>` : ""}
+      `;
+    }
+
+    async function copyAdMaterialDemand() {
+      const text = state.selectedAdMaterialTask?.demand_text || "";
+      if (!text) return toast("暂无需求内容", "error");
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("已复制需求 MD");
+      } catch (error) {
+        toast("复制失败，请手动选择文本", "error");
+      }
+    }
+
+    function hideAdMaterialDetail() {
+      state.selectedAdMaterialTask = null;
+      if (els.adMaterialDetailPanel) els.adMaterialDetailPanel.classList.remove("open");
+      if (els.adMaterialDetailContent) els.adMaterialDetailContent.innerHTML = "";
+    }
+
+    async function openAdMaterialDetail(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${taskId}`);
+        state.selectedAdMaterialTask = task;
+        renderAdMaterialDetail(task);
+      } catch (error) {
+        showError("加载投放素材任务失败", error);
+      }
+    }
+
+    async function publishAdMaterialTask(taskId) {
+      try {
+        await api(`/api/ad-material/tasks/${taskId}/publish`, { method: "POST", body: "{}" });
+        toast("任务已上架，开始生成需求");
+        await loadAdMaterialTasks();
+        await openAdMaterialDetail(taskId);
+      } catch (error) {
+        showError("任务上架失败", error);
+      }
+    }
+
+    async function copyAdMaterialTask(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${taskId}/copy`, { method: "POST", body: "{}" });
+        applyAdMaterialTaskSnapshot(task);
+        toast("任务已复制");
+        hideAdMaterialDetail();
+        loadAdMaterialTasks({ showLoading: false }).catch(error => showError("刷新投放素材任务失败", error));
+      } catch (error) {
+        showError("复制任务失败", error);
+      }
+    }
+
+    async function deleteAdMaterialTask(taskId) {
+      if (!confirm("确认删除该投放素材任务？")) return;
+      try {
+        await api(`/api/ad-material/tasks/${taskId}`, { method: "DELETE" });
+        toast("任务已删除");
+        hideAdMaterialDetail();
+        await loadAdMaterialTasks();
+      } catch (error) {
+        showError("删除任务失败", error);
+      }
+    }
+
+    function closeAdMaterialReviewModal() {
+      els.adMaterialReviewModal?.classList.add("hidden");
+      if (els.adMaterialReviewContent) els.adMaterialReviewContent.innerHTML = "";
+      state.reviewingAdMaterialTask = null;
+    }
+
+    function reviewAssetMedia(asset) {
+      const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(asset.url || "");
+      const previewUrl = adMaterialAssetPreviewUrl(asset);
+      if (!previewUrl) return `<div class="empty-card">暂无素材预览</div>`;
+      return isVideo
+        ? `<video src="${navText(previewUrl)}" controls></video>`
+        : `<a href="${navText(previewUrl)}" target="_blank" rel="noopener noreferrer"><img src="${navText(previewUrl)}" alt="${navText(asset.name || asset.asset_id || "")}" loading="lazy" decoding="async" /></a>`;
+    }
+
+    function adMaterialAssetPreviewUrl(asset) {
+      const url = String(asset?.url || "");
+      if (!url) return "";
+      const version = String(asset?.updated_at || asset?.source_api_id || "").replace(/[^0-9A-Za-z_-]+/g, "");
+      if (!version) return url;
+      return `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(version)}`;
+    }
+
+    function renderAdMaterialDemandReview(task) {
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${navText(task.quantity || 0)}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="actions-inline" style="justify-content:space-between;align-items:center;">
+            <strong>需求预览</strong>
+            <div class="actions-inline">
+              ${task.demand_text ? `<button class="btn btn-secondary mini" type="button" onclick="exportAdMaterialDemandPdf('${task.task_id}')">导出PDF</button>` : ""}
+            </div>
+          </div>
+          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
+        </div>
+        <div class="card">
+          <label><strong>驳回原因</strong></label>
+          <textarea id="adMaterialDemandReviewReason" rows="3" placeholder="仅驳回时必填，会作为重新生成需求的方向"></textarea>
+          <div class="actions-inline" style="margin-top:12px;">
+            <button class="btn btn-primary" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','approved')">需求通过</button>
+            <button class="btn btn-danger" type="button" onclick="reviewAdMaterialDemand('${task.task_id}','rejected', document.getElementById('adMaterialDemandReviewReason')?.value || '')">需求驳回</button>
+          </div>
+        </div>`;
+    }
+
+    function renderAdMaterialAssetReview(task) {
+      const assets = task.assets || [];
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${navText(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${navText(task.country || "")}/${navText(task.language || "")}</div></div>
+            <div><strong>素材数</strong><div>${assets.length}</div></div>
+          </div>
+        </div>
+        ${assets.length ? `<div class="grid">${assets.map(asset => `
+          <div class="review-asset-card" style="grid-column:span 6;">
+            ${reviewAssetMedia(asset)}
+            <div><strong>${navText(asset.name || asset.asset_id || "")}</strong></div>
+            <div>${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
+            ${asset.review_reason ? `<div class="muted">驳回原因：${navText(asset.review_reason)}</div>` : ""}
+            ${asset.status === "pending_review" ? `
+              <textarea id="adMaterialAssetReason_${navText(asset.asset_id)}" rows="2" placeholder="驳回时填写原因，废弃可不填"></textarea>
+              <div class="actions-inline">
+                <button class="btn btn-primary mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','approved')">通过</button>
+                <button class="btn btn-danger mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','rejected', document.getElementById('adMaterialAssetReason_${navText(asset.asset_id)}')?.value || '')">驳回</button>
+                <button class="btn btn-secondary mini" type="button" onclick="reviewAdMaterialAsset('${task.task_id}','${asset.asset_id}','abandoned', document.getElementById('adMaterialAssetReason_${navText(asset.asset_id)}')?.value || '')">废弃</button>
+              </div>` : ""}
+          </div>`).join("")}</div>` : `<div class="card muted">暂无素材</div>`}
+      `;
+    }
+
+    async function openAdMaterialReview(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${taskId}`);
+        state.reviewingAdMaterialTask = task;
+        if (els.adMaterialReviewTitle) {
+          els.adMaterialReviewTitle.textContent = task.status === "material_review" ? "素材审核" : "需求审核";
+        }
+        if (els.adMaterialReviewContent) {
+          els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+            ? renderAdMaterialAssetReview(task)
+            : renderAdMaterialDemandReview(task);
+        }
+        els.adMaterialReviewModal?.classList.remove("hidden");
+      } catch (error) {
+        showError("加载审核任务失败", error);
+      }
+    }
+
+    async function refreshAdMaterialReview(taskId) {
+      if (!els.adMaterialReviewModal || els.adMaterialReviewModal.classList.contains("hidden")) return;
+      const task = await api(`/api/ad-material/tasks/${taskId}`);
+      if (!adMaterialCanReview(task)) {
+        closeAdMaterialReviewModal();
+        return;
+      }
+      state.reviewingAdMaterialTask = task;
+      if (els.adMaterialReviewContent) {
+        els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+          ? renderAdMaterialAssetReview(task)
+          : renderAdMaterialDemandReview(task);
+      }
+    }
+
+    async function exportAdMaterialDemandPdf(taskId) {
+      try {
+        const data = await api(`/api/ad-material/tasks/${taskId}/export-pdf`, { method: "POST", body: "{}" });
+        const pdfUrl = data.pdf_url || data.task?.demand_artifacts?.pdf_url || "";
+        toast("PDF 已生成");
+        if (pdfUrl) window.open(pdfUrl, "_blank", "noopener,noreferrer");
+        await loadAdMaterialTasks();
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
+        if (state.reviewingAdMaterialTask?.task_id === taskId) await refreshAdMaterialReview(taskId);
+      } catch (error) {
+        showError("导出 PDF 失败", error);
+      }
+    }
+
+    async function reviewAdMaterialDemand(taskId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
+      if (result === "rejected" && !reason) return toast("驳回原因必填", "error");
+      try {
+        await api(`/api/ad-material/tasks/${taskId}/demand-review`, {
+          method: "POST",
+          body: JSON.stringify({ result, reason })
+        });
+        toast(result === "approved" ? "需求已通过，开始生成素材" : "已驳回并重新生成需求");
+        await loadAdMaterialTasks();
+        closeAdMaterialReviewModal();
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
+      } catch (error) {
+        showError("审核需求失败", error);
+      }
+    }
+
+    function renderAdMaterialTaskRows() {
+      if (!els.adMaterialTableBody) return;
+      els.adMaterialTableBody.innerHTML = state.adMaterialTasks.length
+        ? state.adMaterialTasks.map(buildAdMaterialRow).join("")
+        : `<tr><td colspan="10" class="muted">暂无任务</td></tr>`;
+    }
+
+    function applyAdMaterialTaskSnapshot(task) {
+      if (!task || !task.task_id) return;
+      const existingIndex = state.adMaterialTasks.findIndex(item => item.task_id === task.task_id);
+      const matchesFilters = adMaterialTaskMatchesCurrentFilters(task);
+      if (existingIndex >= 0) {
+        if (matchesFilters) {
+          state.adMaterialTasks[existingIndex] = Object.assign({}, state.adMaterialTasks[existingIndex], task);
+        } else {
+          state.adMaterialTasks.splice(existingIndex, 1);
+        }
+        renderAdMaterialTaskRows();
+      } else if (matchesFilters) {
+        state.adMaterialTasks.unshift(task);
+        renderAdMaterialTaskRows();
+      }
+      if (state.reviewingAdMaterialTask?.task_id === task.task_id && els.adMaterialReviewContent) {
+        state.reviewingAdMaterialTask = task;
+        els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+          ? renderAdMaterialAssetReview(task)
+          : renderAdMaterialDemandReview(task);
+      }
+      if (state.selectedAdMaterialTask?.task_id === task.task_id) {
+        state.selectedAdMaterialTask = task;
+        renderAdMaterialDetail(task);
+      }
+    }
+
+    async function reviewAdMaterialAsset(taskId, assetId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
+      if (result === "rejected" && !reason) return toast("驳回原因必填", "error");
+      if (result === "abandoned" && !confirm("确认废弃该素材？废弃后不会重新制作，也不会上传至素材库。")) return;
+      try {
+        const task = await api(`/api/ad-material/tasks/${taskId}/assets/${assetId}/review`, {
+          method: "POST",
+          body: JSON.stringify({ result, reason })
+        });
+        applyAdMaterialTaskSnapshot(task);
+        toast(result === "approved" ? "素材已通过" : result === "abandoned" ? "素材已废弃" : "素材已驳回并重新生成");
+        if (state.reviewingAdMaterialTask?.task_id === taskId) {
+          const hasPendingReview = (task.assets || []).some(asset => asset.status === "pending_review");
+          if (!hasPendingReview) {
+            closeAdMaterialReviewModal();
+          }
+        }
+        loadAdMaterialTasks({ showLoading: false })
+          .then(() => {
+            if (state.reviewingAdMaterialTask?.task_id === taskId) {
+              return refreshAdMaterialReview(taskId);
+            }
+          })
+          .catch(error => showError("刷新投放素材任务失败", error));
+      } catch (error) {
+        showError("审核素材失败", error);
+      }
+    }
+
+    async function completeAdMaterialUpload(taskId) {
+      if (!confirm("确认将审核通过的素材上传至盈量素材库？已废弃素材会跳过。")) return;
+      try {
+        const task = await api(`/api/ad-material/tasks/${taskId}/complete-upload`, { method: "POST", body: "{}" });
+        applyAdMaterialTaskSnapshot(task);
+        toast("素材已上传至盈量素材库");
+        if (state.selectedAdMaterialTask?.task_id === taskId) {
+          state.selectedAdMaterialTask = task;
+          renderAdMaterialDetail(task);
+        }
+        loadAdMaterialTasks({ showLoading: false }).catch(error => showError("刷新投放素材任务失败", error));
+      } catch (error) {
+        showError("上传至盈量素材库失败", error);
+      }
+    }
+
+    window.openAdMaterialDetail = openAdMaterialDetail;
+    window.openAdMaterialReview = openAdMaterialReview;
+    window.exportAdMaterialDemandPdf = exportAdMaterialDemandPdf;
+    window.copyAdMaterialDemand = copyAdMaterialDemand;
+    window.editAdMaterialTask = editAdMaterialTask;
+    window.publishAdMaterialTask = publishAdMaterialTask;
+    window.copyAdMaterialTask = copyAdMaterialTask;
+    window.deleteAdMaterialTask = deleteAdMaterialTask;
+    window.reviewAdMaterialDemand = reviewAdMaterialDemand;
+    window.reviewAdMaterialAsset = reviewAdMaterialAsset;
+    window.completeAdMaterialUpload = completeAdMaterialUpload;
+
     function navigationDraft() {
       return Array.isArray(state.navigationConfig) ? state.navigationConfig : [];
     }
@@ -15023,7 +17056,8 @@
       state.navigationConfig = data.items || [];
       renderNavigationEditor();
       window.QuickNav?.clearCache?.();
-      await renderQuickNav("navigation");
+      if (els.quickNav) delete els.quickNav.dataset.rendered;
+      await renderQuickNav("navigation", true);
       toast("\u5bfc\u822a\u914d\u7f6e\u5df2\u4fdd\u5b58");
     }
 
@@ -15166,11 +17200,11 @@
     }
 
     function actualDurationStart(job) {
-      return parseJobTime(job.active_started_at || job.processing_started_at || job.started_at || job.created_at);
+      return parseJobTime(job.active_started_at || job.processing_started_at || job.started_at);
     }
 
     function actualDurationEnd(job) {
-      return parseJobTime(job.active_finished_at || job.processing_finished_at || job.finished_at || job.updated_at);
+      return parseJobTime(job.active_finished_at || job.processing_finished_at || job.finished_at);
     }
 
     function formatJobElapsed(job) {
@@ -16258,6 +18292,18 @@ function buildJobRow(job) {
 
 
 
+    function openDetailDrawer(hash) {
+      const panel = els.detailDrawer.querySelector(".detail-panel");
+      els.detailDrawer.classList.add("open");
+      document.body.classList.add("drawer-open");
+      if (panel) {
+        panel.tabIndex = -1;
+        panel.scrollTop = 0;
+        requestAnimationFrame(() => panel.focus({ preventScroll: true }));
+      }
+      if (hash) location.hash = hash;
+    }
+
     function closeDetailDrawer() {
 
 
@@ -16275,6 +18321,7 @@ function buildJobRow(job) {
 
 
       els.detailDrawer.classList.remove("open");
+      document.body.classList.remove("drawer-open");
 
 
 
@@ -16939,137 +18986,75 @@ function buildJobRow(job) {
 
 
 
-    function permissionCell(user) {
-
-
-
-
-
-
-
-      const permissions = user.permissions || {};
-
-
-
-
-
-
-
-      if (user.role === "admin") {
-
-
-
-
-
-
-
-        return `<span class="status-pill status-done">全部权限</span>`;
-
-
-
-
-
-
-
-      }
-
-
-
-
-
-
-
-      return `
-
-
-
-
-
-
-
-        <label class="check" style="font-weight:500;gap:6px;">
-
-
-
-
-
-
-
-          <input type="checkbox" ${permissions.drama_synthesis ? "checked" : ""} onchange="setUserPermission('${user.user_id}', 'drama_synthesis', this.checked)" /> 剧集合成
-
-
-
-
-
-
-
-        </label>
-        <label class="check" style="font-weight:500;gap:6px;">
-
-
-
-
-
-
-
-          <input type="checkbox" ${permissions.cover_synthesis ? "checked" : ""} onchange="setUserPermission('${user.user_id}', 'cover_synthesis', this.checked)" /> 封面图合成
-
-
-
-
-
-
-
-        </label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        <label class="check" style="font-weight:500;gap:6px;color:#8a94a8;">
-
-
-
-
-
-
-
-          <input type="checkbox" disabled /> 设置（仅 admin）
-
-
-
-
-
-
-
-        </label>
-
-
-
-
-
-
-
-      `;
-
-
-
-
-
-
-
+    function permissionModulesFromNavigation(config) {
+      const modules = [];
+      const seen = new Set();
+      const addModule = (moduleKey, label, editable) => {
+        moduleKey = String(moduleKey || "").trim();
+        if (!moduleKey || seen.has(moduleKey)) return;
+        seen.add(moduleKey);
+        modules.push({
+          key: moduleKey,
+          label: String(label || moduleKey).trim() || moduleKey,
+          editable: editable !== false && moduleKey !== "settings",
+        });
+      };
+      (Array.isArray(config) ? config : []).forEach(group => {
+        if (!group || group.enabled === false) return;
+        const groupAdminOnly = !!group.adminOnly;
+        const items = (group.items || []).filter(item => item && item.enabled !== false);
+        const sameModuleItems = items.filter(item => item.module && item.module === group.module);
+        const groupLabel = sameModuleItems.length === 1 && items.length === 1
+          ? sameModuleItems[0].label || group.label
+          : group.label;
+        addModule(group.module, groupLabel, !groupAdminOnly);
+        items.forEach(item => {
+          if (item.module === group.module) return;
+          addModule(item.module, item.label || group.label, !(groupAdminOnly || item.adminOnly));
+        });
+      });
+      return modules;
     }
 
+    async function loadPermissionModules() {
+      let modules = [];
+      try {
+        const config = window.QuickNav?.loadConfig ? await window.QuickNav.loadConfig() : navigationDraft();
+        modules = permissionModulesFromNavigation(config);
+      } catch (error) {
+        modules = [];
+      }
+      if (!modules.length) {
+        const backendModules = (state.auth && state.auth.modules) || {};
+        modules = Object.entries(backendModules).map(([key, label]) => ({
+          key,
+          label,
+          editable: key !== "settings",
+        }));
+      }
+      state.permissionModules = modules;
+      return modules;
+    }
 
+    function permissionCell(user) {
+      const permissions = user.permissions || {};
+      if (user.role === "admin") {
+        return `<span class="status-pill status-done">全部权限</span>`;
+      }
+      const modules = state.permissionModules || [];
+      if (!modules.length) {
+        return `<span class="muted">暂无可配置权限</span>`;
+      }
+      return modules.map(module => {
+        const label = navText(module.label || module.key);
+        const userIdArg = inlineArg(user.user_id);
+        const moduleKeyArg = inlineArg(module.key);
+        if (!module.editable) {
+          return `<label class="check" style="font-weight:500;gap:6px;color:#8a94a8;"><input type="checkbox" disabled /> ${label}（仅 admin）</label>`;
+        }
+        return `<label class="check" style="font-weight:500;gap:6px;"><input type="checkbox" ${permissions[module.key] ? "checked" : ""} onchange="setUserPermission(${userIdArg}, ${moduleKeyArg}, this.checked)" /> ${label}</label>`;
+      }).join("");
+    }
 
     function buildScreenshotJobRow(job) {
       const canRetry = job.status === "done" || job.status === "failed";
@@ -17145,8 +19130,7 @@ function buildJobRow(job) {
         const job = await api(`/api/drama-screenshot-material/jobs/${jobId}`);
         state.selectedScreenshotJob = job;
         renderScreenshotJobDetail(job);
-        els.detailDrawer.classList.add("open");
-        location.hash = "#screenshot-job/" + jobId;
+        openDetailDrawer("#screenshot-job/" + jobId);
       } catch (error) {
         showError("\u67e5\u770b\u8be6\u60c5\u5931\u8d25", error);
       }
@@ -17546,6 +19530,14 @@ function buildJobRow(job) {
 
 
       els.userTableBody.innerHTML = `<tr><td colspan="8" class="muted">正在加载用户...</td></tr>`;
+
+
+
+
+
+
+
+      await loadPermissionModules();
 
 
 
@@ -18929,23 +20921,7 @@ function buildJobRow(job) {
 
 
 
-        els.detailDrawer.classList.add("open");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        location.hash = "#job/" + jobId;
+        openDetailDrawer("#job/" + jobId);
 
 
 
@@ -20121,14 +22097,57 @@ function buildJobRow(job) {
 
 
 
+    const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "adMaterials", "settings", "navigation", "users", "logs"]);
+
     function viewFromPath() {
+      const hashView = (location.hash || "").replace(/^#/, "");
+      if (INTERNAL_VIEWS.has(hashView)) return hashView;
       const path = location.pathname.replace(/\/+$/, "") || "/";
       if (path === "/settings.html") return "settings";
       if (path === "/navigation.html") return "navigation";
       if (path === "/users.html") return "users";
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
+      if (path === "/ad-materials.html") return "adMaterials";
+      if (path === "/tasks.html") return "tasks";
       return "tasks";
+    }
+
+    function viewFromInternalUrl(href) {
+      if (!href) return "";
+      let url;
+      try {
+        url = new URL(href, window.location.origin);
+      } catch (error) {
+        return "";
+      }
+      if (url.origin !== window.location.origin) return "";
+      const hashView = (url.hash || "").replace(/^#/, "");
+      if (INTERNAL_VIEWS.has(hashView)) return hashView;
+      const path = url.pathname.replace(/\/+$/, "") || "/";
+      if (path === "/") return "tasks";
+      if (path === "/tasks.html") return "tasks";
+      if (path === "/settings.html") return "settings";
+      if (path === "/navigation.html") return "navigation";
+      if (path === "/users.html") return "users";
+      if (path === "/logs.html") return "logs";
+      if (path === "/screenshots.html") return "screenshots";
+      if (path === "/ad-materials.html") return "adMaterials";
+      return "";
+    }
+
+    function handleQuickNavClick(event) {
+      const link = event.target.closest("a.nav-item");
+      if (!link || !els.quickNav?.contains(link)) return;
+      const view = viewFromInternalUrl(link.getAttribute("href") || "");
+      if (!view) return;
+      event.preventDefault();
+      const target = new URL(link.getAttribute("href") || "/", window.location.origin);
+      const nextPath = target.pathname + target.search + target.hash;
+      if (nextPath !== location.pathname + location.search + location.hash) {
+        history.pushState({}, "", nextPath);
+      }
+      switchView(view);
     }
 
     function switchView(view) {
@@ -20156,6 +22175,7 @@ function buildJobRow(job) {
 
 
         screenshots: ["\u622a\u56fe\u7d20\u6750", "\u6309\u4ea7\u54c1\u6279\u91cf\u63d0\u4ea4\u5267 ID\uff0c\u67e5\u770b\u4e09\u79cd\u56fe\u7247\u5c3a\u5bf8\u7684\u751f\u6210\u8fdb\u5ea6\u3002"],
+        adMaterials: ["投放素材任务管理", "创建投放素材需求，审核需求和素材，并完成最终素材上报。"],
 
 
 
@@ -20206,6 +22226,7 @@ function buildJobRow(job) {
 
       if (view === "tasks" && !userCan("drama_synthesis")) view = firstAllowedView();
       if (view === "screenshots" && !userCan("cover_synthesis")) view = firstAllowedView();
+      if (view === "adMaterials" && !userCan("ad_material_tasks")) view = firstAllowedView();
 
 
 
@@ -20249,6 +22270,7 @@ function buildJobRow(job) {
 
 
       const navButton = document.querySelector(`.nav button[data-view="${view}"], .nav [data-quick-nav-key="${view}"]`);
+      markQuickNavActive(view);
 
 
 
@@ -20306,6 +22328,14 @@ function buildJobRow(job) {
 
 
 
+      if (view === "adMaterials") {
+        Promise.all([loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => {
+          if (els.adMaterialTableBody) {
+            els.adMaterialTableBody.innerHTML = `<tr><td colspan="10" class="muted">加载失败：${errorText(error)}</td></tr>`;
+          }
+          showError("加载投放素材任务失败", error);
+        });
+      }
       if (view === "navigation") loadNavigationConfig().catch(error => showError("加载导航配置失败", error));
       syncScreenshotPolling();
 
@@ -20463,9 +22493,16 @@ function buildJobRow(job) {
 
 
 
-          const tasks = [loadAuthStatus()];
+          await loadAuthStatus();
+          if (!state.auth.authenticated) {
+            clearCachedAuth();
+            location.reload();
+            return;
+          }
+          const tasks = [];
           if (userCan("drama_synthesis")) tasks.push(loadJobs());
           if (userCan("cover_synthesis")) tasks.push(loadScreenshotJobs(true));
+          if (userCan("ad_material_tasks")) tasks.push(loadAdMaterialTasks());
           await Promise.all(tasks);
 
 
@@ -20649,6 +22686,78 @@ function buildJobRow(job) {
           if (button.dataset.navAction === "remove-item") removeNavigationItem(groupIndex, itemIndex);
         });
       }
+      if (els.quickNav) {
+        els.quickNav.addEventListener("click", handleQuickNavClick);
+      }
+      if (els.adMaterialForm) {
+        els.adMaterialForm.addEventListener("submit", submitAdMaterialTask);
+      }
+      if (els.adMaterialProductSearch) {
+        els.adMaterialProductSearch.addEventListener("input", handleAdMaterialProductInput);
+        els.adMaterialProductSearch.addEventListener("keydown", handleAdMaterialProductKeydown);
+      }
+      if (els.adMaterialProductOptions) {
+        els.adMaterialProductOptions.addEventListener("mousedown", event => event.preventDefault());
+        els.adMaterialProductOptions.addEventListener("click", handleAdMaterialProductOptionClick);
+      }
+      document.addEventListener("click", event => {
+        if (!event.target.closest(".product-combobox")) hideAdMaterialProductOptions();
+      });
+      if (els.adMaterialTaskType) {
+        els.adMaterialTaskType.addEventListener("change", updateAdMaterialCompetitorVisibility);
+      }
+      if (els.adMaterialSizePlan) {
+        els.adMaterialSizePlan.addEventListener("click", handleAdMaterialSizePlanClick);
+        els.adMaterialSizePlan.addEventListener("change", () => collectAdMaterialSizePlan(false));
+        els.adMaterialSizePlan.addEventListener("input", () => collectAdMaterialSizePlan(false));
+      }
+      if (els.adMaterialResetBtn) {
+        els.adMaterialResetBtn.onclick = resetAdMaterialForm;
+      }
+      if (els.adMaterialCreateBtn) {
+        els.adMaterialCreateBtn.onclick = () => createAdMaterialTask().catch(error => showError("加载产品失败", error));
+      }
+      if (els.adMaterialModalCloseBtn) {
+        els.adMaterialModalCloseBtn.onclick = () => {
+          resetAdMaterialForm();
+          closeAdMaterialTaskModal();
+        };
+      }
+      if (els.adMaterialTaskModal) {
+        els.adMaterialTaskModal.addEventListener("click", event => {
+          if (event.target === els.adMaterialTaskModal) event.stopPropagation();
+        });
+      }
+      if (els.adMaterialReloadBtn) {
+        els.adMaterialReloadBtn.onclick = () => {
+          state.adMaterialProducts = [];
+          state.adMaterialProductQueryCache = {};
+          state.adMaterialProductsLoaded = false;
+          return Promise.all([loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => showError("刷新投放素材任务失败", error));
+        };
+      }
+      if (els.adMaterialSearchBtn) {
+        els.adMaterialSearchBtn.onclick = () => loadAdMaterialTasks().catch(error => showError("筛选投放素材任务失败", error));
+      }
+      if (els.adMaterialStatusFilter) {
+        els.adMaterialStatusFilter.addEventListener("change", () => loadAdMaterialTasks().catch(error => showError("筛选投放素材任务失败", error)));
+      }
+      if (els.adMaterialCloseDetailBtn) {
+        els.adMaterialCloseDetailBtn.onclick = hideAdMaterialDetail;
+      }
+      if (els.adMaterialDetailPanel) {
+        els.adMaterialDetailPanel.addEventListener("click", event => {
+          if (event.target === els.adMaterialDetailPanel) hideAdMaterialDetail();
+        });
+      }
+      if (els.adMaterialReviewCloseBtn) {
+        els.adMaterialReviewCloseBtn.onclick = closeAdMaterialReviewModal;
+      }
+      if (els.adMaterialReviewModal) {
+        els.adMaterialReviewModal.addEventListener("click", event => {
+          if (event.target === els.adMaterialReviewModal) closeAdMaterialReviewModal();
+        });
+      }
       els.logoutBtn.onclick = async () => {
 
 
@@ -20690,6 +22799,7 @@ function buildJobRow(job) {
 
 
           renderAuth();
+          window.location.href = "/";
 
 
 
@@ -22044,6 +24154,12 @@ function buildJobRow(job) {
 
 
       };
+      els.detailDrawer.addEventListener("wheel", (event) => {
+        const panel = els.detailDrawer.querySelector(".detail-panel");
+        if (panel && panel.contains(event.target)) {
+          event.stopPropagation();
+        }
+      }, { passive: true });
 
 
 
@@ -22092,33 +24208,12 @@ function buildJobRow(job) {
 
 
     window.addEventListener("hashchange", () => {
-
-
-
       const view = (location.hash || "").replace(/^#/, "");
-
-
-
-      if (["tasks", "screenshots", "users", "logs"].includes(view)) {
-
-
-
+      if (INTERNAL_VIEWS.has(view)) {
         switchView(view);
-
-
-
       }
-
-
-
     });
-
-
-
-
-
-
-
+    window.addEventListener("popstate", () => switchView(viewFromPath()));
     async function init() {
 
 
@@ -22128,6 +24223,9 @@ function buildJobRow(job) {
 
 
       bindEvents();
+      fillAdMaterialDatalists();
+      renderAdMaterialSizePlan([{ size: "1:1", count: 1 }]);
+      updateAdMaterialCompetitorVisibility();
 
 
 
@@ -22423,6 +24521,3 @@ function buildJobRow(job) {
 
 
 </html>
-
-
-

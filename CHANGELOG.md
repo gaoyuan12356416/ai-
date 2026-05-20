@@ -3,7 +3,6 @@
 - Tightened screenshot AI prompts to require raw generated images to match the requested target ratio before any final size normalization.
 - Added server-side raw aspect-ratio validation and no-crop resize normalization so bad-ratio AI outputs are rejected instead of center-cropped into 1:1, 1.91:1, or 4:5 assets.
 - Bumped the screenshot prompt/cache version to avoid reusing older crop-like cached screenshot outputs.
-- Routed all screenshot size requests through the batch screenshot service so the old three single-size services can be stopped.
 
 ## 2026-05-09 single-process screenshot batch test
 

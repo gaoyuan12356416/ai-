@@ -1,7 +1,6 @@
 [Unit]
 Description=Drama Material API
-After=network.target codex-cover-generator.service codex-screenshot-batch.service
-Wants=codex-cover-generator.service codex-screenshot-batch.service
+After=network.target
 
 [Service]
 Type=simple
@@ -12,16 +11,6 @@ Environment=DRAMA_API_HOST=127.0.0.1
 Environment=DRAMA_API_PORT=8787
 Environment=DRAMA_PUBLIC_ROOT=/usr/share/nginx/html/drama-materials
 Environment=DRAMA_PUBLIC_BASE_URL=https://ai.yingliangads.com/drama-materials
-Environment=CODEX_COVER_SERVICE_URL=http://127.0.0.1:8790/api/codex-cover/generate
-Environment=CODEX_COVER_SERVICE_TIMEOUT=1200
-Environment=CODEX_SCREENSHOT_SERVICE_URL=http://127.0.0.1:8795/api/codex-screenshot/generate
-Environment=CODEX_SCREENSHOT_SERVICE_URL_SQUARE_1X1=http://127.0.0.1:8795/api/codex-screenshot/generate
-Environment=CODEX_SCREENSHOT_SERVICE_URL_LANDSCAPE_1_91X1=http://127.0.0.1:8795/api/codex-screenshot/generate
-Environment=CODEX_SCREENSHOT_SERVICE_URL_PORTRAIT_4X5=http://127.0.0.1:8795/api/codex-screenshot/generate
-Environment=SCREENSHOT_JOB_MAX_CONCURRENCY=1
-Environment=CODEX_SCREENSHOT_BATCH_ENABLED=1
-Environment=CODEX_SCREENSHOT_BATCH_STRICT=1
-Environment=CODEX_SCREENSHOT_SERVICE_TIMEOUT=2400
 ExecStart=/usr/bin/python3 /root/drama_material_service/app.py
 Restart=always
 RestartSec=3

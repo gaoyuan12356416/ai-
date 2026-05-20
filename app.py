@@ -30,6 +30,7 @@
 
 
 
+import base64
 import json
 
 import concurrent.futures
@@ -481,6 +482,8 @@ import traceback
 
 
 import uuid
+
+import unicodedata
 
 
 
@@ -1212,6 +1215,32 @@ SCREENSHOT_PUBLIC_BASE_URL = os.environ.get(
 )
 
 
+AD_MATERIAL_WORK_ROOT = os.environ.get(
+    "AD_MATERIAL_WORK_ROOT", "/root/ad_material_tasks"
+)
+AD_MATERIAL_PUBLIC_ROOT = os.environ.get(
+    "AD_MATERIAL_PUBLIC_ROOT", "/usr/share/nginx/html/ad-materials"
+)
+AD_MATERIAL_PUBLIC_BASE_URL = os.environ.get(
+    "AD_MATERIAL_PUBLIC_BASE_URL", "https://ai.yingliangads.com/ad-materials"
+)
+AD_MATERIAL_ADMIN_URL = os.environ.get("AD_MATERIAL_ADMIN_URL", "https://ai.yingliangads.com/#adMaterials").strip()
+AD_MATERIAL_SOURCE_API_URL = os.environ.get(
+    "AD_MATERIAL_SOURCE_API_URL", "https://aa.yingliangads.com/api/material/source"
+).strip()
+AD_MATERIAL_SOURCE_API_TOKEN = os.environ.get("AD_MATERIAL_SOURCE_API_TOKEN", "").strip()
+AD_MATERIAL_SOURCE_API_TIMEOUT = int(os.environ.get("AD_MATERIAL_SOURCE_API_TIMEOUT", "30"))
+AD_MATERIAL_REQUIREMENT_COMMAND = os.environ.get("AD_MATERIAL_REQUIREMENT_COMMAND", "").strip()
+AD_MATERIAL_GENERATION_COMMAND = os.environ.get("AD_MATERIAL_GENERATION_COMMAND", "").strip()
+AD_MATERIAL_COMMAND_TIMEOUT = int(os.environ.get("AD_MATERIAL_COMMAND_TIMEOUT", "1800"))
+AD_MATERIAL_FINAL_USER_ID = int(os.environ.get("AD_MATERIAL_FINAL_USER_ID", "248"))
+AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE = os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE", "").strip()
+AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID = os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID", "").strip()
+AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS = [
+    item.strip() for item in os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS", "").split(",") if item.strip()
+]
+
+
 AI_SOURCE_CALLBACK_URL = os.environ.get(
     "AI_SOURCE_CALLBACK_URL", "https://aa.yingliangads.com/api/material/ai-source"
 ).strip()
@@ -1239,6 +1268,10 @@ COS_DOMAIN = os.environ.get("COS_DOMAIN", "").strip()
 
 COS_PREFIX = os.environ.get("COS_PREFIX", "drama-materials").strip().strip("/")
 COS_UPLOAD_TIMEOUT = int(os.environ.get("COS_UPLOAD_TIMEOUT", "120"))
+COS_MULTIPART_THRESHOLD = int(os.environ.get("COS_MULTIPART_THRESHOLD", str(64 * 1024 * 1024)))
+COS_MULTIPART_PART_SIZE_MB = int(os.environ.get("COS_MULTIPART_PART_SIZE_MB", "16"))
+COS_MULTIPART_THREADS = int(os.environ.get("COS_MULTIPART_THREADS", "8"))
+COS_MULTIPART_TIMEOUT = int(os.environ.get("COS_MULTIPART_TIMEOUT", "900"))
 
 
 
@@ -2123,6 +2156,12 @@ DEMUCS_FALLBACK_CHUNK_SECONDS = int(os.environ.get("DEMUCS_FALLBACK_CHUNK_SECOND
 
 
 JOB_AUTO_RETRY_ATTEMPTS = int(os.environ.get("JOB_AUTO_RETRY_ATTEMPTS", "1"))
+DRAMA_JOB_USE_WORKER = os.environ.get("DRAMA_JOB_USE_WORKER", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 SCREENSHOT_ITEM_RETRY_ATTEMPTS = int(os.environ.get("SCREENSHOT_ITEM_RETRY_ATTEMPTS", "3"))
 CODEX_SCREENSHOT_BATCH_ENABLED = os.environ.get("CODEX_SCREENSHOT_BATCH_ENABLED", "0").strip().lower() in (
     "1",
@@ -2394,6 +2433,14 @@ JOB_DB_LOCK = threading.Lock()
 
 
 DEMUCS_LOCK = threading.Lock()
+
+JOB_RETRY_LOCKS_LOCK = threading.Lock()
+
+JOB_RETRY_LOCKS = {}
+
+GPU_VIDEO_RENDER_LOCKS_LOCK = threading.Lock()
+
+GPU_VIDEO_RENDER_LOCKS = {}
 
 
 
@@ -2777,7 +2824,9 @@ FEISHU_REDIRECT_URI = os.environ.get(
 
 
 
-FEISHU_SCOPE = os.environ.get("FEISHU_SCOPE", "contact:user.id:readonly").strip()
+FEISHU_SCOPE = os.environ.get(
+    "FEISHU_SCOPE", "contact:user.id:readonly contact:user.email:readonly"
+).strip()
 
 
 
@@ -3213,6 +3262,8 @@ MODULE_PERMISSIONS = {
 
     "cover_synthesis": "封面图合成",
 
+    "ad_material_tasks": "投放素材任务",
+
 
 
 
@@ -3259,7 +3310,12 @@ MODULE_PERMISSIONS = {
 
 
 
-DEFAULT_USER_PERMISSIONS = {"drama_synthesis": False, "cover_synthesis": False, "settings": False}
+DEFAULT_USER_PERMISSIONS = {
+    "drama_synthesis": False,
+    "cover_synthesis": False,
+    "ad_material_tasks": False,
+    "settings": False,
+}
 
 
 
@@ -9170,6 +9226,115 @@ def file_ready(path):
     return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0
 
 
+def get_named_runtime_lock(lock_map, lock_guard, key):
+    key = str(key or "").strip()
+    with lock_guard:
+        lock = lock_map.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            lock_map[key] = lock
+        return lock
+
+
+def valid_video_file(path, min_duration=0.5):
+    if not file_ready(path):
+        return False
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_path(), "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type:format=duration",
+                "-of", "json",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            return False
+        data = json.loads(proc.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return False
+        duration = float((data.get("format") or {}).get("duration") or 0)
+        return duration >= float(min_duration or 0)
+    except Exception as exc:
+        logging.warning("failed to validate video file %s: %s", path, exc)
+        return False
+
+
+def probe_media_stream_info(path):
+    if not file_ready(path):
+        return {}
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe_path(), "-v", "error",
+                "-show_entries",
+                "stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,sample_rate,channels,duration:format=duration",
+                "-of", "json",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            logging.warning("failed to probe media streams for %s: %s", path, proc.stderr.strip())
+            return {}
+        return json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        logging.warning("failed to probe media streams for %s: %s", path, exc)
+        return {}
+
+
+def media_duration_delta_seconds(path):
+    data = probe_media_stream_info(path)
+    streams = data.get("streams") or []
+    video_duration = None
+    audio_duration = None
+    for stream in streams:
+        codec_type = stream.get("codec_type")
+        try:
+            duration = float(stream.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration <= 0:
+            continue
+        if codec_type == "video" and video_duration is None:
+            video_duration = duration
+        elif codec_type == "audio" and audio_duration is None:
+            audio_duration = duration
+    if video_duration is None or audio_duration is None:
+        return None
+    return abs(video_duration - audio_duration)
+
+
+def valid_av_duration_alignment(path, max_delta=1.0):
+    delta = media_duration_delta_seconds(path)
+    if delta is None:
+        return True
+    return delta <= float(max_delta)
+
+
+def remove_invalid_video_file(path, label="video"):
+    if not path or not os.path.exists(path):
+        return False
+    if valid_video_file(path) and valid_av_duration_alignment(path):
+        return False
+    try:
+        os.remove(path)
+        logging.warning("removed invalid %s file: %s", label, path)
+        return True
+    except OSError as exc:
+        logging.warning("failed to remove invalid %s file %s: %s", label, path, exc)
+        return False
+
+
 
 
 
@@ -9614,6 +9779,39 @@ def enrich_screenshot_job_timing(job):
                     WHERE target_type = 'screenshot_job'
                       AND target_id = ?
                       AND action IN ('retry_screenshot_job', 'create_screenshot_job')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (job_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if row and row[0]:
+            start_text = row[0]
+    end_text = str(job.get("updated_at", "") or "")
+    job["active_started_at"] = start_text
+    job["active_finished_at"] = end_text if job.get("status") == "done" else ""
+    start_dt = parse_job_timestamp(start_text)
+    end_dt = parse_job_timestamp(end_text)
+    if start_dt and end_dt and end_dt >= start_dt and job.get("status") == "done":
+        job["active_elapsed_seconds"] = int((end_dt - start_dt).total_seconds())
+    return job
+
+
+def enrich_material_job_timing(job):
+    job_id = str(job.get("job_id", "") or "")
+    start_text = str(job.get("created_at", "") or "")
+    if job_id:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT created_at
+                    FROM drama_admin_audit_log
+                    WHERE target_type = 'job'
+                      AND target_id = ?
+                      AND action IN ('retry_job', 'create_job')
                     ORDER BY id DESC
                     LIMIT 1
                     """,
@@ -12927,6 +13125,17 @@ def normalize_outputs(raw_outputs):
 
 
     return normalized
+
+
+def selected_job_outputs_ready(job):
+    outputs = normalize_outputs(job.get("outputs", {}))
+    if outputs["concat_video"] and not str(job.get("output_video_url") or "").strip():
+        return False
+    if outputs["no_bgm_video"] and not str(job.get("output_video_no_bgm_url") or "").strip():
+        return False
+    if outputs["cover_16x9"] and not str(job.get("cover_16x9_url") or "").strip():
+        return False
+    return True
 
 
 
@@ -21043,475 +21252,35 @@ def cleanup_expired_sessions():
 
 
 def recover_inflight_jobs():
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    failed_jobs = []
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    resumable_jobs = []
 
     with JOB_DB_LOCK:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         conn = get_job_db_connection()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         try:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             rows = conn.execute("""
-
-
-
-
-
-
-
                 SELECT
-
-
-
-
-
-
-
                   job_id, app_id, content_id, app, country, language, drama_name,
-
-
-
-
-
-
-
                   episode_start, episode_end, total_episodes,
-
-
-
-
-
-
-
                   cover_source_url, cover_16x9_url, output_video_url,
-
-
-
-
-
-
-
                   output_video_no_bgm_url, outputs_json, advanced_options_json,
-
-
-
-
-
-
-
                   status, progress, progress_detail, error_message, created_at, updated_at,
-
-
-
-
-
-
-
                   creator_user_id, creator_open_id, creator_name,
-
-
-
-
-
-
-
                   completion_notified_at, completion_notification_error
-
-
-
-
-
-
-
                 FROM drama_material_job
-
-
-
-
-
-
-
                 WHERE status NOT IN ('done', 'failed')
-
-
-
-
-
-
-
             """).fetchall()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            conn.execute(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                """
-
-
-
-
-
-
-
-                UPDATE drama_material_job
-
-
-
-
-
-
-
-                SET status = 'failed',
-
-
-
-
-
-
-
-                    progress_detail = CASE
-
-
-
-
-
-
-
-                        WHEN TRIM(progress_detail) = '' THEN '任务恢复后继续处理'
-
-
-
-
-
-
-
-                        ELSE progress_detail || '，任务恢复后继续处理'
-
-
-
-
-
-
-
-                    END,
-
-
-
-
-
-
-
-                    error_message = CASE
-
-
-
-
-
-
-
-                        WHEN TRIM(error_message) = '' THEN '服务重启，任务已按断点恢复'
-
-
-
-
-
-
-
-                        ELSE error_message || '
-
-
-
-
-
-
-
-服务重启，任务已按断点恢复'
-
-
-
-
-
-
-
-                    END,
-
-
-
-
-
-
-
-                    updated_at = CURRENT_TIMESTAMP
-
-
-
-
-
-
-
-                WHERE status NOT IN ('done', 'failed')
-
-
-
-
-
-
-
-                """
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            conn.commit()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            failed_jobs = [row_to_job(row) for row in rows]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            resumable_jobs = [row_to_job(row) for row in rows]
         finally:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             conn.close()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    for job in failed_jobs:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job["status"] = "failed"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if not str(job.get("error_message", "") or "").strip():
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            job["error_message"] = "服务重启，任务已按断点恢复"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        notify_job_creator_on_completion(job)
-
+    for job in resumable_jobs:
+        logging.info(
+            "resuming in-flight drama material job after service restart: %s",
+            job.get("job_id"),
+        )
+        resume_job_from_checkpoint(job)
+
+    return
 
 def recover_inflight_screenshot_jobs():
     resumable_jobs = []
@@ -21587,9 +21356,17 @@ def build_public_url(path):
 
     normalized_path = os.path.abspath(path)
 
+    ad_material_root = os.path.abspath(AD_MATERIAL_PUBLIC_ROOT)
+
     screenshot_root = os.path.abspath(SCREENSHOT_PUBLIC_ROOT)
 
     default_root = os.path.abspath(PUBLIC_ROOT)
+
+    if normalized_path.startswith(ad_material_root + os.sep) or normalized_path == ad_material_root:
+
+        rel_path = os.path.relpath(normalized_path, ad_material_root).replace(os.sep, "/")
+
+        return AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/" + rel_path.lstrip("/")
 
     if normalized_path.startswith(screenshot_root + os.sep) or normalized_path == screenshot_root:
 
@@ -21696,6 +21473,14 @@ def build_public_url(path):
 
 
 def public_url_to_path(url):
+
+    ad_material_base = AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/"
+
+    if url and str(url).startswith(ad_material_base):
+
+        rel_path = str(url)[len(ad_material_base):].lstrip("/").replace("/", os.sep)
+
+        return os.path.join(AD_MATERIAL_PUBLIC_ROOT, rel_path)
 
 
 
@@ -21885,9 +21670,17 @@ def build_cos_object_key(path):
 
     normalized_path = os.path.abspath(path)
 
+    ad_material_root = os.path.abspath(AD_MATERIAL_PUBLIC_ROOT)
+
     screenshot_root = os.path.abspath(SCREENSHOT_PUBLIC_ROOT)
 
     default_root = os.path.abspath(PUBLIC_ROOT)
+
+    if normalized_path.startswith(ad_material_root + os.sep) or normalized_path == ad_material_root:
+
+        rel_path = os.path.relpath(normalized_path, ad_material_root).replace(os.sep, "/").lstrip("/")
+
+        return "ad-materials/" + rel_path
 
     if normalized_path.startswith(screenshot_root + os.sep) or normalized_path == screenshot_root:
 
@@ -21931,23 +21724,28 @@ def guess_content_type(path):
 
         return "video/mp4"
 
+    if lower.endswith(".svg"):
+
+        return "image/svg+xml"
+
     return "application/octet-stream"
 
 
 
 
 
-def get_cos_client():
+def get_cos_client(timeout=None):
 
     if not cos_enabled():
 
         return None
 
+    timeout = int(timeout or COS_UPLOAD_TIMEOUT)
     config = CosConfig(
         Region=COS_REGION,
         SecretId=COS_SECRET_ID,
         SecretKey=COS_SECRET_KEY,
-        Timeout=COS_UPLOAD_TIMEOUT,
+        Timeout=timeout,
         KeepAlive=False,
     )
 
@@ -21980,25 +21778,39 @@ def upload_file_to_cos(path):
     except Exception as exc:
         logging.warning("COS existing-object check failed, will upload: %s %s", object_url, exc)
 
-    client = get_cos_client()
-
-    with open(path, "rb") as fp:
-
-        client.put_object(
-
+    if expected_size >= COS_MULTIPART_THRESHOLD:
+        logging.info("uploading large COS object with multipart: %s size=%s", object_url, expected_size)
+        client = get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT))
+        client.upload_file(
             Bucket=COS_BUCKET,
-
-            Body=fp,
-
             Key=object_key,
-
-            EnableMD5=True,
-
+            LocalFilePath=path,
+            PartSize=max(1, COS_MULTIPART_PART_SIZE_MB),
+            MAXThread=max(1, COS_MULTIPART_THREADS),
+            EnableMD5=False,
             ACL="public-read",
-
             ContentType=guess_content_type(path),
-
         )
+    else:
+        client = get_cos_client()
+
+        with open(path, "rb") as fp:
+
+            client.put_object(
+
+                Bucket=COS_BUCKET,
+
+                Body=fp,
+
+                Key=object_key,
+
+                EnableMD5=True,
+
+                ACL="public-read",
+
+                ContentType=guess_content_type(path),
+
+            )
 
     return object_url
 
@@ -27536,7 +27348,7 @@ def fetch_job_row(job_id):
 
 
 
-    return row_to_job(row) if row else None
+    return enrich_material_job_timing(row_to_job(row)) if row else None
 
 
 
@@ -30304,7 +30116,7 @@ def fetch_job_rows(job_id=None, app_id=None, content_id=None, status=None, query
 
 
 
-        "items": [row_to_job(row) for row in rows],
+        "items": [enrich_material_job_timing(row_to_job(row)) for row in rows],
 
 
 
@@ -31885,6 +31697,2489 @@ def parse_screenshot_job_route(path):
 
 
 
+
+
+AD_MATERIAL_TASK_TYPE_ITERATION = "素材迭代——根据老素材效果优化"
+AD_MATERIAL_TASK_TYPE_REFERENCE = "参考衍生——解析参考素材风格出新素材"
+AD_MATERIAL_TASK_TYPE_COMPETITOR = "竞品借鉴——参考竞品优质素材"
+AD_MATERIAL_TASK_TYPE_PLANNING = "综合策划——综合内外素材出方案"
+AD_MATERIAL_TASK_TYPES = (
+    AD_MATERIAL_TASK_TYPE_ITERATION,
+    AD_MATERIAL_TASK_TYPE_REFERENCE,
+    AD_MATERIAL_TASK_TYPE_COMPETITOR,
+    AD_MATERIAL_TASK_TYPE_PLANNING,
+)
+AD_MATERIAL_TASK_TYPE_ALIASES = {
+    "素材优化": AD_MATERIAL_TASK_TYPE_ITERATION,
+    "素材迭代": AD_MATERIAL_TASK_TYPE_ITERATION,
+    "参考衍生": AD_MATERIAL_TASK_TYPE_REFERENCE,
+    "参考复刻": AD_MATERIAL_TASK_TYPE_REFERENCE,
+    "参考素材": AD_MATERIAL_TASK_TYPE_REFERENCE,
+    "竞品借鉴": AD_MATERIAL_TASK_TYPE_COMPETITOR,
+    "综合策划": AD_MATERIAL_TASK_TYPE_PLANNING,
+}
+AD_MATERIAL_SIZE_OPTIONS = ("1:1", "4:5", "9:16", "1.91:1", "16:9")
+AD_MATERIAL_SIZE_DIMENSIONS = {
+    "1:1": "1080x1080",
+    "4:5": "1080x1350",
+    "9:16": "1080x1920",
+    "1.91:1": "1200x628",
+    "16:9": "1920x1080",
+}
+AD_MATERIAL_COMPETITOR_SOURCES = ("有米云", "metapi", "广大大")
+AD_MATERIAL_STATUS_LABELS = {
+    "draft": "待发布",
+    "generating_demand": "生成需求中",
+    "demand_review": "需求待审核",
+    "demand_returned": "需求打回",
+    "generating_material": "生成素材中",
+    "material_review": "素材待审核",
+    "material_returned": "素材打回",
+    "done": "已完成",
+    "failed": "失败",
+}
+AD_MATERIAL_ASSET_STATUS_LABELS = {
+    "generating": "生成中",
+    "pending_review": "待审核",
+    "approved": "已通过",
+    "rejected": "已驳回",
+    "abandoned": "已废弃",
+    "regenerating": "重新生成中",
+    "uploaded": "已上报",
+    "upload_failed": "上报失败",
+}
+
+AD_MATERIAL_TASK_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_material_task (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL UNIQUE,
+  task_type TEXT NOT NULL,
+  competitor_source TEXT NOT NULL DEFAULT '',
+  app_id TEXT NOT NULL,
+  product_name TEXT NOT NULL DEFAULT '',
+  country TEXT NOT NULL,
+  language TEXT NOT NULL,
+  size TEXT NOT NULL DEFAULT '',
+  tag_name TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  store_url TEXT NOT NULL DEFAULT '',
+  package_name TEXT NOT NULL DEFAULT '',
+  product_icon_url TEXT NOT NULL DEFAULT '',
+  quantity INTEGER NOT NULL DEFAULT 1,
+  reference_files_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'draft',
+  demand_text TEXT NOT NULL DEFAULT '',
+  demand_artifacts_json TEXT NOT NULL DEFAULT '{}',
+  review_reason TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  creator_user_id TEXT NOT NULL DEFAULT '',
+  creator_open_id TEXT NOT NULL DEFAULT '',
+  creator_email TEXT NOT NULL DEFAULT '',
+  creator_name TEXT NOT NULL DEFAULT '',
+  initiator_sub_user_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+AD_MATERIAL_ASSET_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_material_asset (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL,
+  asset_index INTEGER NOT NULL DEFAULT 1,
+  name TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  local_path TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'generating',
+  review_reason TEXT NOT NULL DEFAULT '',
+  source_api_id TEXT NOT NULL DEFAULT '',
+  source_api_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+AD_MATERIAL_COMPETITOR_SOURCE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_material_competitor_source (
+  source TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'active',
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  disabled_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+
+def ensure_ad_material_tables():
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(AD_MATERIAL_TASK_TABLE_SQL)
+            conn.execute(AD_MATERIAL_ASSET_TABLE_SQL)
+            conn.execute(AD_MATERIAL_COMPETITOR_SOURCE_TABLE_SQL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_task_status_updated ON ad_material_task(status, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_task_creator ON ad_material_task(creator_user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_material_asset_task ON ad_material_asset(task_id, asset_index)")
+            for source in AD_MATERIAL_COMPETITOR_SOURCES:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ad_material_competitor_source (
+                      source, status, fail_count, last_error, disabled_at, created_at, updated_at
+                    ) VALUES (?, 'active', 0, '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (source,),
+                )
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(ad_material_task)").fetchall()]
+            if "demand_artifacts_json" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN demand_artifacts_json TEXT NOT NULL DEFAULT '{}'")
+            if "store_url" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN store_url TEXT NOT NULL DEFAULT ''")
+            if "package_name" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN package_name TEXT NOT NULL DEFAULT ''")
+            if "product_icon_url" not in columns:
+                conn.execute("ALTER TABLE ad_material_task ADD COLUMN product_icon_url TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def ad_material_task_work_dir(task_id):
+    return os.path.join(AD_MATERIAL_WORK_ROOT, task_id)
+
+
+def ad_material_public_dir(task_id):
+    return os.path.join(AD_MATERIAL_PUBLIC_ROOT, task_id)
+
+
+def normalize_ad_material_status(status):
+    status = str(status or "").strip()
+    return status if status in AD_MATERIAL_STATUS_LABELS else "draft"
+
+
+def normalize_ad_material_task_type(value):
+    value = str(value or "").strip()
+    if value in AD_MATERIAL_TASK_TYPES:
+        return value
+    if value in AD_MATERIAL_TASK_TYPE_ALIASES:
+        return AD_MATERIAL_TASK_TYPE_ALIASES[value]
+    prefix = re.split(r"[—-]", value, 1)[0].strip()
+    if prefix in AD_MATERIAL_TASK_TYPE_ALIASES:
+        return AD_MATERIAL_TASK_TYPE_ALIASES[prefix]
+    if value not in AD_MATERIAL_TASK_TYPES:
+        raise StructuredApiError("invalid_task_type", "任务类型无效")
+    return value
+
+
+def ad_material_task_kind(value):
+    try:
+        task_type = normalize_ad_material_task_type(value)
+    except Exception:
+        task_type = str(value or "").strip()
+    if task_type == AD_MATERIAL_TASK_TYPE_ITERATION:
+        return "iteration"
+    if task_type == AD_MATERIAL_TASK_TYPE_REFERENCE:
+        return "reference"
+    if task_type == AD_MATERIAL_TASK_TYPE_COMPETITOR:
+        return "competitor"
+    if task_type == AD_MATERIAL_TASK_TYPE_PLANNING:
+        return "planning"
+    return ""
+
+
+def normalize_ad_material_size_label(value):
+    text = str(value or "").strip().lower().replace(" ", "")
+    text = text.replace("：", ":").replace("×", "x").replace("*", "x")
+    dimension_map = {
+        "1080x1080": "1:1",
+        "1200x1200": "1:1",
+        "1080x1350": "4:5",
+        "1200x1500": "4:5",
+        "1080x1920": "9:16",
+        "1200x628": "1.91:1",
+        "1200x630": "1.91:1",
+        "1920x1080": "16:9",
+        "1280x720": "16:9",
+    }
+    if text in dimension_map:
+        return dimension_map[text]
+    for option in AD_MATERIAL_SIZE_OPTIONS:
+        if text == option.lower():
+            return option
+    raise StructuredApiError("invalid_size", "尺寸仅支持：%s" % " / ".join(AD_MATERIAL_SIZE_OPTIONS))
+
+
+def parse_ad_material_size_plan_text(value, fallback_quantity=1):
+    text = str(value or "").strip()
+    fallback_quantity = max(1, int(fallback_quantity or 1))
+    if not text:
+        return [{"size": "1:1", "count": fallback_quantity}]
+    parts = [part.strip() for part in re.split(r"[,，;；\n]+", text) if part.strip()]
+    plan = []
+    for part in parts:
+        size = ""
+        for option in sorted(AD_MATERIAL_SIZE_OPTIONS, key=len, reverse=True):
+            if option.lower() in part.lower().replace("：", ":"):
+                size = option
+                break
+        if not size:
+            try:
+                size = normalize_ad_material_size_label(part)
+            except Exception:
+                continue
+        count = 1
+        count_match = re.search(r"(?:x|×|\*)\s*(\d+)|(\d+)\s*(?:张|条|个)", part, flags=re.I)
+        if count_match:
+            count = int(next(group for group in count_match.groups() if group))
+        elif len(parts) == 1:
+            count = fallback_quantity
+        if count > 0:
+            plan.append({"size": size, "count": count})
+    if not plan:
+        return [{"size": "1:1", "count": fallback_quantity}]
+    return merge_ad_material_size_plan(plan)
+
+
+def merge_ad_material_size_plan(plan):
+    counts = {size: 0 for size in AD_MATERIAL_SIZE_OPTIONS}
+    for item in plan or []:
+        size = normalize_ad_material_size_label(item.get("size") if isinstance(item, dict) else item)
+        count = int((item.get("count") if isinstance(item, dict) else 1) or 0)
+        if count > 0:
+            counts[size] += count
+    return [{"size": size, "count": counts[size]} for size in AD_MATERIAL_SIZE_OPTIONS if counts[size] > 0]
+
+
+def normalize_ad_material_size_plan(payload, existing=None):
+    payload = payload or {}
+    fallback_quantity = int(payload.get("quantity", existing.get("quantity") if existing else 1) or 1)
+    raw_plan = payload.get("size_plan")
+    if isinstance(raw_plan, list):
+        plan = merge_ad_material_size_plan(raw_plan)
+    elif raw_plan:
+        plan = parse_ad_material_size_plan_text(raw_plan, fallback_quantity)
+    else:
+        plan = parse_ad_material_size_plan_text(
+            payload.get("size", existing.get("size") if existing else ""),
+            fallback_quantity,
+        )
+    total = sum(int(item["count"]) for item in plan)
+    if total < 1 or total > 20:
+        raise StructuredApiError("invalid_quantity", "任务数量必须为1到20")
+    return plan
+
+
+def format_ad_material_size_plan(plan):
+    normalized = merge_ad_material_size_plan(plan)
+    return ", ".join("%s x %s" % (item["size"], item["count"]) for item in normalized)
+
+
+def ad_material_size_plan_from_task(task):
+    raw_plan = task.get("size_plan") if isinstance(task, dict) else None
+    if isinstance(raw_plan, list) and raw_plan:
+        try:
+            return merge_ad_material_size_plan(raw_plan)
+        except Exception:
+            pass
+    return parse_ad_material_size_plan_text(task.get("size"), task.get("quantity") or 1)
+
+
+def ad_material_asset_size(task, index):
+    current = 0
+    for item in ad_material_size_plan_from_task(task):
+        current += int(item["count"])
+        if int(index or 1) <= current:
+            return item["size"]
+    plan = ad_material_size_plan_from_task(task)
+    return plan[-1]["size"] if plan else "1:1"
+
+
+def ad_material_asset_output_size(task, index):
+    return AD_MATERIAL_SIZE_DIMENSIONS.get(ad_material_asset_size(task, index), "1080x1080")
+
+
+def list_ad_material_competitor_sources(include_disabled=False):
+    default_items = [
+        {"source": source, "name": source, "status": "active", "fail_count": 0, "last_error": "", "disabled_at": ""}
+        for source in AD_MATERIAL_COMPETITOR_SOURCES
+    ]
+    try:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT source, status, fail_count, last_error, disabled_at
+                    FROM ad_material_competitor_source
+                    ORDER BY CASE source WHEN '有米云' THEN 1 WHEN 'metapi' THEN 2 WHEN '广大大' THEN 3 ELSE 99 END, source
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+        items = []
+        known = set(AD_MATERIAL_COMPETITOR_SOURCES)
+        for row in rows:
+            source = str(row["source"] or "").strip()
+            if source not in known:
+                continue
+            status = str(row["status"] or "active").strip() or "active"
+            if not include_disabled and status != "active":
+                continue
+            items.append({
+                "source": source,
+                "name": source,
+                "status": status,
+                "fail_count": int(row["fail_count"] or 0),
+                "last_error": str(row["last_error"] or ""),
+                "disabled_at": str(row["disabled_at"] or ""),
+            })
+        return items if rows else default_items
+    except Exception:
+        logging.exception("failed to list ad material competitor sources")
+        return default_items
+
+
+def active_ad_material_competitor_sources():
+    return [item["source"] for item in list_ad_material_competitor_sources(include_disabled=False) if item.get("status") == "active"]
+
+
+def normalize_competitor_source(task_type, value):
+    value = str(value or "").strip()
+    if ad_material_task_kind(task_type) in ("iteration", "reference"):
+        return ""
+    active_sources = active_ad_material_competitor_sources()
+    if not active_sources:
+        raise StructuredApiError("competitor_source_unavailable", "暂无可用竞品查询接口，请先恢复竞品源")
+    if not value:
+        return "有米云" if "有米云" in active_sources else active_sources[0]
+    if value not in AD_MATERIAL_COMPETITOR_SOURCES:
+        raise StructuredApiError("invalid_competitor_source", "竞品查询接口无效")
+    if value not in active_sources:
+        raise StructuredApiError("competitor_source_disabled", "该竞品查询接口已临时下架，请选择其他竞品源")
+    return value
+
+
+def session_is_admin(session):
+    return bool(session and session.get("role") == "admin")
+
+
+def ad_material_actor(session):
+    session = session or {}
+    return {
+        "user_id": str(session.get("user_id", "") or ""),
+        "open_id": str(session.get("open_id", "") or ""),
+        "email": str(session.get("email", "") or ""),
+        "name": str(session.get("name", "") or session.get("user_id", "") or "unknown"),
+    }
+
+
+def mysql_table_columns(table_name, database=None):
+    database = database or ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not database:
+        return set()
+    try:
+        rows = run_mysql("SHOW COLUMNS FROM `%s`.`%s`" % (database.replace("`", "``"), table_name.replace("`", "``")))
+        return {row[0] for row in rows if row}
+    except FileNotFoundError:
+        logging.warning("mysql client unavailable while reading columns: %s", table_name)
+        return set()
+    except Exception:
+        logging.exception("failed to read mysql columns: %s", table_name)
+        return set()
+
+
+def sql_identifier(name):
+    return "`%s`" % str(name or "").replace("`", "``")
+
+
+def lookup_admin_group_by_email(email):
+    email = str(email or "").strip()
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not email or not database:
+        return {}
+    try:
+        columns = mysql_table_columns("admin_user_group", database)
+        if "email" not in columns or "sub_user_id" not in columns:
+            return {}
+        status_filter = " AND status = 0" if "status" in columns else ""
+        rows = run_mysql(
+            "SELECT CAST(sub_user_id AS CHAR), email FROM `%s`.admin_user_group WHERE email='%s'%s LIMIT 1"
+            % (database.replace("`", "``"), mysql_escape_literal(email), status_filter)
+        )
+        if rows:
+            return {"sub_user_id": str(rows[0][0] or "").strip(), "email": str(rows[0][1] or "").strip()}
+    except Exception:
+        logging.exception("failed to lookup admin_user_group by email")
+    return {}
+
+
+def lookup_admin_group_by_name(name):
+    name = str(name or "").strip()
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not name or not database:
+        return {}
+    try:
+        columns = mysql_table_columns("admin_user_group", database)
+        if "name" not in columns or "sub_user_id" not in columns:
+            return {}
+        status_filter = " AND status = 0" if "status" in columns else ""
+        rows = run_mysql(
+            "SELECT CAST(sub_user_id AS CHAR), email, name FROM `%s`.admin_user_group WHERE name='%s'%s LIMIT 2"
+            % (database.replace("`", "``"), mysql_escape_literal(name), status_filter)
+        )
+        if len(rows) == 1:
+            return {
+                "sub_user_id": str(rows[0][0] or "").strip(),
+                "email": str(rows[0][1] or "").strip(),
+                "name": str(rows[0][2] or "").strip(),
+            }
+    except Exception:
+        logging.exception("failed to lookup admin_user_group by name")
+    return {}
+
+
+def lookup_admin_group_for_actor(actor):
+    actor = actor or {}
+    return lookup_admin_group_by_email(actor.get("email")) or lookup_admin_group_by_name(actor.get("name"))
+
+
+def product_name_expr(columns):
+    candidates = ["app_name", "product_name", "name", "app", "title"]
+    parts = ["NULLIF(%s, '')" % sql_identifier(item) for item in candidates if item in columns]
+    parts.append("CAST(app_id AS CHAR)")
+    return "COALESCE(%s)" % ", ".join(parts)
+
+
+def product_optional_expr(columns, candidates):
+    parts = ["NULLIF(a.%s, '')" % sql_identifier(item) for item in candidates if item in columns]
+    return "COALESCE(%s, '')" % ", ".join(parts) if parts else "''"
+
+
+def mysql_csv_contains_expr(csv_expr, value_expr):
+    return "FIND_IN_SET(%s, REPLACE(REPLACE(REPLACE(REPLACE(%s, '[', ''), ']', ''), '\"', ''), ' ', '')) > 0" % (value_expr, csv_expr)
+
+
+def ad_material_product_select_exprs(columns):
+    return {
+        "store_url": product_optional_expr(columns, ["store_url", "ios_store_url", "website_url", "origin_websit_url", "click_url"]),
+        "package_name": product_optional_expr(columns, ["package", "package_name", "ios_package_name", "package_ios", "google_app_android", "app_id"]),
+        "product_icon_url": product_optional_expr(columns, ["icon_url", "profile_image", "profile_image_ios"]),
+        "country": product_optional_expr(columns, ["country", "countries", "market", "region", "geo"]),
+        "language": product_optional_expr(columns, ["language", "lang", "language_code", "locale"]),
+    }
+
+
+def ad_material_google_store_url(package_name, country="", language=""):
+    package_name = str(package_name or "").strip()
+    if not package_name:
+        return ""
+    params = {"id": package_name}
+    if language:
+        params["hl"] = str(language).strip()
+    if country:
+        params["gl"] = str(country).strip().upper()
+    return "https://play.google.com/store/apps/details?%s" % urlencode(params)
+
+
+def ad_material_store_icon_from_url(store_url, package_name="", country="", language=""):
+    import html as html_lib
+
+    store_url = str(store_url or "").strip()
+    package_name = str(package_name or "").strip()
+    if not store_url and package_name:
+        store_url = ad_material_google_store_url(package_name, country, language)
+    if not store_url:
+        return ""
+    cache_key = "|".join([store_url, package_name, str(country or ""), str(language or "")])
+    cache = getattr(ad_material_store_icon_from_url, "_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+    icon_url = ""
+    try:
+        response = requests.get(
+            store_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept-Language": "%s,%s;q=0.9,en;q=0.8" % (language or "en", country or "US"),
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        html_text = response.text or ""
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<img[^>]+itemprop=["\']image["\'][^>]+src=["\']([^"\']+)["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html_text, flags=re.I)
+            if match:
+                icon_url = html_lib.unescape(match.group(1)).strip()
+                break
+        if icon_url.startswith("//"):
+            icon_url = "https:" + icon_url
+    except Exception:
+        logging.exception("failed to fetch store icon: %s", store_url)
+        icon_url = ""
+    cache[cache_key] = icon_url
+    setattr(ad_material_store_icon_from_url, "_cache", cache)
+    return icon_url
+
+
+def enrich_ad_material_store_icon(data):
+    icon_url = ad_material_store_icon_from_url(
+        data.get("store_url", ""),
+        data.get("package_name", ""),
+        data.get("country", ""),
+        data.get("language", ""),
+    )
+    data["product_icon_url"] = icon_url or ""
+    return data
+
+
+def lookup_ad_material_product_metadata(app_id):
+    app_id = str(app_id or "").strip()
+    if not app_id:
+        return {}
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not database:
+        return {}
+    try:
+        columns = mysql_table_columns("ads_apps_setting", database)
+        if "id" not in columns:
+            return {}
+        exprs = ad_material_product_select_exprs(columns)
+        rows = run_mysql(
+            "SELECT CAST(a.id AS CHAR), a.name, %s, %s, %s, %s, %s "
+            "FROM `%s`.ads_apps_setting a WHERE CAST(a.id AS CHAR) = '%s' LIMIT 1"
+            % (
+                exprs["store_url"],
+                exprs["package_name"],
+                exprs["product_icon_url"],
+                exprs["country"],
+                exprs["language"],
+                database.replace("`", "``"),
+                mysql_escape_literal(app_id),
+            )
+        )
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "app_id": str(row[0] if len(row) > 0 else "").strip(),
+            "product_name": str(row[1] if len(row) > 1 else "").strip(),
+            "store_url": str(row[2] if len(row) > 2 else "").strip(),
+            "package_name": str(row[3] if len(row) > 3 else "").strip(),
+            "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
+            "country": str(row[5] if len(row) > 5 else "").strip(),
+            "language": str(row[6] if len(row) > 6 else "").strip(),
+        }
+    except Exception:
+        logging.exception("failed to lookup ad material product metadata: %s", app_id)
+        return {}
+
+
+def normalize_ad_material_product_search_text(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"\s+", "", text).lower()
+
+
+def ad_material_product_matches_query(item, query):
+    tokens = [
+        normalize_ad_material_product_search_text(part)
+        for part in re.split(r"\s+", str(query or "").strip())
+        if str(part or "").strip()
+    ]
+    if not tokens:
+        return True
+    text = normalize_ad_material_product_search_text(" ".join([
+        str(item.get("app_id", "") or ""),
+        str(item.get("id", "") or ""),
+        str(item.get("product_name", "") or ""),
+        str(item.get("name", "") or ""),
+        str(item.get("label", "") or ""),
+        str(item.get("package_name", "") or ""),
+        str(item.get("store_url", "") or ""),
+    ]))
+    return all(token in text for token in tokens)
+
+
+def list_ad_material_products(session=None, query="", limit=None, with_total=False):
+    search_query = str(query or "").strip()
+    try:
+        limit_value = int(limit) if limit not in (None, "") else 0
+    except Exception:
+        limit_value = 0
+    limit_value = max(0, min(500, limit_value))
+
+    def finish(items, total=None):
+        total = len(items) if total is None else int(total or 0)
+        if limit_value:
+            items = items[:limit_value]
+        if with_total:
+            return {"items": items, "total": total}
+        return items
+
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if database:
+        try:
+            columns = mysql_table_columns("ads_apps_setting", database)
+            if "id" in columns and "name" in columns:
+                where = "1=1"
+                is_admin = session_is_admin(session)
+                if not is_admin:
+                    actor = ad_material_actor(session)
+                    admin_group = lookup_admin_group_for_actor(actor)
+                    sub_user_id = admin_group.get("sub_user_id")
+                    where = "0=1"
+                    role_app_columns = mysql_table_columns("admin_role_apps", database)
+                    role_user_columns = mysql_table_columns("admin_role_users", database)
+                    if sub_user_id and {"role_id", "user_id"}.issubset(role_user_columns) and {"role_id", "is_all", "values"}.issubset(role_app_columns):
+                        join_condition = "ara.role_id = aru.role_id"
+                        if "role_app_id" in role_user_columns and "id" in role_app_columns:
+                            join_condition = "ara.id = aru.role_app_id"
+                        where = (
+                            "EXISTS (SELECT 1 FROM `%s`.admin_role_users aru "
+                            "JOIN `%s`.admin_role_apps ara ON %s "
+                            "WHERE CAST(aru.user_id AS CHAR) = '%s' "
+                            "AND (ara.is_all = 1 OR %s))"
+                        ) % (
+                            database.replace("`", "``"),
+                            database.replace("`", "``"),
+                            join_condition,
+                            mysql_escape_literal(sub_user_id),
+                            mysql_csv_contains_expr("ara.values", "CAST(a.id AS CHAR)"),
+                        )
+                exprs = ad_material_product_select_exprs(columns)
+                search_fields = ["CAST(a.id AS CHAR)"]
+                for column in ("name", "app_name", "product_name", "app", "title", "package", "package_name", "ios_package_name", "google_app_android"):
+                    if column in columns:
+                        search_fields.append("CAST(a.%s AS CHAR)" % sql_identifier(column))
+                query_where = where
+                if search_query:
+                    like = "%%%s%%" % mysql_escape_literal(search_query)
+                    search_sql = " OR ".join("LOWER(%s) LIKE LOWER('%s')" % (field, like) for field in search_fields)
+                    query_where = "(%s) AND (%s)" % (where, search_sql)
+                total = 0
+                try:
+                    total_rows = run_mysql(
+                        "SELECT COUNT(DISTINCT a.id) FROM `%s`.ads_apps_setting a WHERE %s"
+                        % (database.replace("`", "``"), query_where)
+                    )
+                    total = int(total_rows[0][0]) if total_rows and total_rows[0] else 0
+                except Exception:
+                    logging.exception("failed to count ad material products")
+                limit_clause = " LIMIT %d" % limit_value if limit_value else ""
+                rows = run_mysql(
+                    "SELECT DISTINCT CAST(a.id AS CHAR), a.name, %s, %s, %s, %s, %s "
+                    "FROM `%s`.ads_apps_setting a WHERE %s ORDER BY 2 ASC%s"
+                    % (
+                        exprs["store_url"],
+                        exprs["package_name"],
+                        exprs["product_icon_url"],
+                        exprs["country"],
+                        exprs["language"],
+                        database.replace("`", "``"),
+                        query_where,
+                        limit_clause,
+                    )
+                )
+                items = []
+                for row in rows:
+                    app_id = str(row[0] if len(row) > 0 else "").strip()
+                    product_name = str(row[1] if len(row) > 1 else "").strip() or app_id
+                    if app_id:
+                        items.append({
+                            "app_id": app_id,
+                            "id": app_id,
+                            "product_name": product_name,
+                            "name": product_name,
+                            "country": str(row[5] if len(row) > 5 else "").strip(),
+                            "language": str(row[6] if len(row) > 6 else "").strip(),
+                            "store_url": str(row[2] if len(row) > 2 else "").strip(),
+                            "package_name": str(row[3] if len(row) > 3 else "").strip(),
+                            "product_icon_url": str(row[4] if len(row) > 4 else "").strip(),
+                            "label": "%s | %s" % (app_id, product_name),
+                        })
+                return finish(items, total if total else len(items))
+        except Exception:
+            logging.exception("failed to list ad material products from mysql")
+    try:
+        items = [
+            {
+                "app_id": item.get("app_id", ""),
+                "id": item.get("app_id", ""),
+                "product_name": item.get("app", "") or item.get("label", "") or item.get("app_id", ""),
+                "name": item.get("app", "") or item.get("label", "") or item.get("app_id", ""),
+                "country": item.get("country", ""),
+                "language": item.get("language", ""),
+                "store_url": item.get("store_url", ""),
+                "package_name": item.get("package", "") or item.get("package_name", ""),
+                "product_icon_url": item.get("icon_url", "") or item.get("product_icon_url", ""),
+                "label": item.get("label", "") or item.get("app_id", ""),
+            }
+            for item in list_products()
+        ]
+        if search_query:
+            items = [item for item in items if ad_material_product_matches_query(item, search_query)]
+        return finish(items, len(items))
+    except Exception:
+        logging.exception("failed to list fallback products")
+        return finish([], 0)
+
+
+def save_ad_material_reference_files(task_id, raw_files):
+    saved = []
+    if not isinstance(raw_files, list):
+        return saved
+    target_dir = os.path.join(ad_material_task_work_dir(task_id), "references")
+    public_dir = os.path.join(ad_material_public_dir(task_id), "references")
+    ensure_dir(target_dir)
+    ensure_dir(public_dir)
+    for index, item in enumerate(raw_files, 1):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "") or "reference_%02d" % index).strip()
+        name = re.sub(r"[\\/:*?\"<>|]+", "-", name).strip(". ") or "reference_%02d" % index
+        data_url = str(item.get("data_url", "") or "")
+        raw_base64 = str(item.get("base64", "") or "")
+        if data_url and "," in data_url:
+            raw_base64 = data_url.split(",", 1)[1]
+        if not raw_base64:
+            continue
+        data = base64.b64decode(raw_base64)
+        if len(data) > 20 * 1024 * 1024:
+            raise StructuredApiError("reference_file_too_large", "单个参考素材不能超过20MB")
+        path = os.path.join(target_dir, "%02d_%s" % (index, name))
+        public_path = os.path.join(public_dir, "%02d_%s" % (index, name))
+        with open(path, "wb") as handle:
+            handle.write(data)
+        with open(public_path, "wb") as handle:
+            handle.write(data)
+        content_type = str(item.get("content_type", "") or guess_content_type(name))
+        saved.append({
+            "name": name,
+            "content_type": content_type,
+            "local_path": path,
+            "public_path": public_path,
+            "url": build_public_url(public_path),
+            "size": len(data),
+        })
+    return saved
+
+
+def ad_material_task_from_row(row):
+    item = dict(row)
+    item["reference_files"] = parse_json_text(item.pop("reference_files_json", "[]"), [])
+    item["demand_artifacts"] = parse_json_text(item.pop("demand_artifacts_json", "{}"), {})
+    item["status_label"] = AD_MATERIAL_STATUS_LABELS.get(item.get("status"), item.get("status", ""))
+    item["quantity"] = int(item.get("quantity") or 0)
+    item["task_type"] = normalize_ad_material_task_type(item.get("task_type"))
+    item["size_plan"] = ad_material_size_plan_from_task(item)
+    item["size_plan_summary"] = format_ad_material_size_plan(item["size_plan"])
+    item["assets"] = fetch_ad_material_assets(item["task_id"])
+    return item
+
+
+def ad_material_asset_from_row(row):
+    item = dict(row)
+    item["status_label"] = AD_MATERIAL_ASSET_STATUS_LABELS.get(item.get("status"), item.get("status", ""))
+    return item
+
+
+def fetch_ad_material_assets(task_id):
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_material_asset WHERE task_id = ? ORDER BY asset_index ASC, created_at ASC",
+                (task_id,),
+            ).fetchall()
+            return [ad_material_asset_from_row(row) for row in rows]
+        finally:
+            conn.close()
+
+
+def fetch_ad_material_task(task_id):
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM ad_material_task WHERE task_id = ?", (task_id,)).fetchone()
+        finally:
+            conn.close()
+    return ad_material_task_from_row(row) if row else None
+
+
+def ensure_ad_material_access(session, task):
+    if not task:
+        raise StructuredApiError("not_found", "任务不存在")
+    if session_is_admin(session):
+        return
+    actor = ad_material_actor(session)
+    if task.get("creator_user_id") == actor.get("user_id"):
+        return
+    raise PermissionError("permission_denied")
+
+
+def validate_ad_material_payload(payload, existing=None):
+    payload = payload or {}
+    task_type = normalize_ad_material_task_type(payload.get("task_type", existing.get("task_type") if existing else ""))
+    size_plan = normalize_ad_material_size_plan(payload, existing)
+    quantity = sum(int(item["count"]) for item in size_plan)
+    app_id = str(payload.get("app_id", existing.get("app_id") if existing else "") or "").strip()
+    country = str(payload.get("country", existing.get("country") if existing else "") or "").strip().upper()
+    language = str(payload.get("language", existing.get("language") if existing else "") or "").strip().lower()
+    if not app_id:
+        raise StructuredApiError("invalid_app_id", "产品不能为空")
+    if not country:
+        raise StructuredApiError("invalid_country", "国家不能为空")
+    if not language:
+        raise StructuredApiError("invalid_language", "语言不能为空")
+    return {
+        "task_type": task_type,
+        "competitor_source": normalize_competitor_source(task_type, payload.get("competitor_source", existing.get("competitor_source") if existing else "")),
+        "app_id": app_id,
+        "product_name": str(payload.get("product_name", existing.get("product_name") if existing else "") or "").strip(),
+        "country": country,
+        "language": language,
+        "size": format_ad_material_size_plan(size_plan),
+        "size_plan": size_plan,
+        "tag_name": str(payload.get("tag_name", existing.get("tag_name") if existing else "") or "").strip(),
+        "category": str(payload.get("category", existing.get("category") if existing else "") or "").strip(),
+        "title": str(payload.get("title", existing.get("title") if existing else "") or "").strip(),
+        "body": str(payload.get("body", existing.get("body") if existing else "") or "").strip(),
+        "description": str(payload.get("description", existing.get("description") if existing else "") or "").strip(),
+        "store_url": str(payload.get("store_url", existing.get("store_url") if existing else "") or "").strip(),
+        "package_name": str(payload.get("package_name", existing.get("package_name") if existing else "") or "").strip(),
+        "product_icon_url": str(payload.get("product_icon_url", existing.get("product_icon_url") if existing else "") or "").strip(),
+        "quantity": quantity,
+    }
+
+
+def create_ad_material_task(payload, session):
+    actor = ad_material_actor(session)
+    task_id = uuid.uuid4().hex
+    data = validate_ad_material_payload(payload)
+    products = [] if data["product_name"] else list_ad_material_products(session)
+    product = next((item for item in products if str(item.get("app_id")) == data["app_id"]), {})
+    product_meta = lookup_ad_material_product_metadata(data["app_id"])
+    if not data["product_name"]:
+        data["product_name"] = product.get("product_name") or product_meta.get("product_name") or product.get("label") or data["app_id"]
+    for key in ("store_url", "package_name", "product_icon_url"):
+        if not data.get(key):
+            data[key] = product.get(key) or product_meta.get(key) or ""
+    enrich_ad_material_store_icon(data)
+    admin_group = lookup_admin_group_for_actor(actor)
+    creator_email = actor["email"] or admin_group.get("email", "")
+    references = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_material_task (
+                  task_id, task_type, competitor_source, app_id, product_name, country, language,
+                  size, tag_name, category, title, body, description, store_url, package_name, product_icon_url,
+                  quantity, reference_files_json,
+                  status, creator_user_id, creator_open_id, creator_email, creator_name, initiator_sub_user_id,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    task_id, data["task_type"], data["competitor_source"], data["app_id"], data["product_name"],
+                    data["country"], data["language"], data["size"], data["tag_name"], data["category"],
+                    data["title"], data["body"], data["description"], data["store_url"], data["package_name"],
+                    data["product_icon_url"], data["quantity"], json.dumps(references, ensure_ascii=False),
+                    actor["user_id"], actor["open_id"], creator_email, actor["name"], admin_group.get("sub_user_id", ""),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return fetch_ad_material_task(task_id)
+
+
+def update_ad_material_task(task_id, payload, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    if task["status"] != "draft":
+        raise StructuredApiError("task_locked", "任务发布后不允许编辑")
+    data = validate_ad_material_payload(payload, task)
+    product_meta = lookup_ad_material_product_metadata(data["app_id"])
+    for key in ("store_url", "package_name", "product_icon_url"):
+        if not data.get(key):
+            data[key] = product_meta.get(key, "")
+    enrich_ad_material_store_icon(data)
+    references = task.get("reference_files", [])
+    new_refs = save_ad_material_reference_files(task_id, payload.get("reference_files", []))
+    if new_refs:
+        references = references + new_refs
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                UPDATE ad_material_task
+                SET task_type=?, competitor_source=?, app_id=?, product_name=?, country=?, language=?,
+                    size=?, tag_name=?, category=?, title=?, body=?, description=?, store_url=?, package_name=?,
+                    product_icon_url=?, quantity=?,
+                    reference_files_json=?, updated_at=CURRENT_TIMESTAMP
+                WHERE task_id=?
+                """,
+                (
+                    data["task_type"], data["competitor_source"], data["app_id"], data["product_name"],
+                    data["country"], data["language"], data["size"], data["tag_name"], data["category"],
+                    data["title"], data["body"], data["description"], data["store_url"], data["package_name"],
+                    data["product_icon_url"], data["quantity"],
+                    json.dumps(references, ensure_ascii=False), task_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return fetch_ad_material_task(task_id)
+
+
+def list_ad_material_tasks(session, params):
+    page = max(1, int((params.get("page") or ["1"])[0] or "1"))
+    page_size = max(1, min(100, int((params.get("page_size") or ["20"])[0] or "20")))
+    where = []
+    args = []
+    for field in ("status", "task_type", "app_id", "country", "language"):
+        value = str((params.get(field) or [""])[0] or "").strip()
+        if value and value != "all":
+            where.append("%s = ?" % field)
+            args.append(value)
+    query = str((params.get("q") or [""])[0] or "").strip()
+    if query:
+        like = "%%%s%%" % query
+        where.append("(task_id LIKE ? OR product_name LIKE ? OR description LIKE ? OR creator_name LIKE ?)")
+        args.extend([like, like, like, like])
+    if not session_is_admin(session):
+        where.append("creator_user_id = ?")
+        args.append(ad_material_actor(session).get("user_id"))
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM ad_material_task%s" % where_sql, args).fetchone()[0]
+            rows = conn.execute(
+                "SELECT * FROM ad_material_task%s ORDER BY updated_at DESC LIMIT ? OFFSET ?" % where_sql,
+                args + [page_size, (page - 1) * page_size],
+            ).fetchall()
+        finally:
+            conn.close()
+    return {
+        "items": [ad_material_task_from_row(row) for row in rows],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+
+def update_ad_material_task_status(task_id, status, **fields):
+    assignments = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+    args = [normalize_ad_material_status(status)]
+    for key, value in fields.items():
+        assignments.append("%s = ?" % key)
+        args.append("" if value is None else value)
+    args.append(task_id)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("UPDATE ad_material_task SET %s WHERE task_id = ?" % ", ".join(assignments), args)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def upsert_ad_material_asset(asset):
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_material_asset (
+                  asset_id, task_id, asset_index, name, url, local_path, status,
+                  review_reason, source_api_id, source_api_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                  name=excluded.name,
+                  url=excluded.url,
+                  local_path=excluded.local_path,
+                  status=excluded.status,
+                  review_reason=excluded.review_reason,
+                  source_api_error=excluded.source_api_error,
+                  updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    asset["asset_id"], asset["task_id"], int(asset.get("asset_index") or 1), asset.get("name", ""),
+                    asset.get("url", ""), asset.get("local_path", ""), asset.get("status", "pending_review"),
+                    asset.get("review_reason", ""), asset.get("source_api_id", ""), asset.get("source_api_error", ""),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def run_ad_material_external_command(command, task, stage, extra=None):
+    task = dict(task or {})
+    product_meta = lookup_ad_material_product_metadata(task.get("app_id", ""))
+    for key in ("store_url", "package_name", "product_icon_url"):
+        if not task.get(key):
+            task[key] = product_meta.get(key, "")
+    enrich_ad_material_store_icon(task)
+    workdir = ad_material_task_work_dir(task["task_id"])
+    ensure_dir(workdir)
+    input_path = os.path.join(workdir, "%s_input.json" % stage)
+    output_path = os.path.join(workdir, "%s_output.json" % stage)
+    payload = {"task": task, "extra": extra or {}, "output_path": output_path}
+    with open(input_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    env = os.environ.copy()
+    env["AD_MATERIAL_TASK_ID"] = task["task_id"]
+    env["AD_MATERIAL_TASK_PAYLOAD"] = input_path
+    env["AD_MATERIAL_TASK_OUTPUT"] = output_path
+    proc = subprocess.run(
+        command,
+        shell=True,
+        cwd=workdir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        timeout=AD_MATERIAL_COMMAND_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "ad material command failed").strip())
+    if os.path.isfile(output_path):
+        with open(output_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    text = (proc.stdout or "").strip()
+    if text.startswith("{"):
+        return json.loads(text)
+    return {"stdout": text}
+
+
+def fallback_ad_material_demand(task, reason=""):
+    lines = [
+        "# %s 投放素材需求" % (task.get("product_name") or task.get("app_id")),
+        "",
+        "- 任务类型：%s" % task.get("task_type"),
+        "- 国家/语言：%s/%s" % (task.get("country"), task.get("language")),
+        "- 数量：%s" % task.get("quantity"),
+        "- 尺寸：%s" % (task.get("size") or "按投放平台默认比例"),
+        "- 竞品查询源：%s" % (task.get("competitor_source") or "不使用"),
+        "",
+        "## 生成方向",
+        task.get("description") or "围绕产品核心卖点生成可投放静态素材，优先复用上传参考素材的构图、色彩和信息层级。",
+        "",
+        "## 上报字段",
+        "- category：%s" % (task.get("category") or ""),
+        "- tag_name：%s" % (task.get("tag_name") or ""),
+        "- title：%s" % (task.get("title") or ""),
+        "- body：%s" % (task.get("body") or ""),
+    ]
+    if reason:
+        lines.extend(["", "## 本次重生成原因", reason])
+    return "\n".join(lines)
+
+
+def _ad_material_size(task):
+    size = str(task.get("size_plan_summary") or "").strip()
+    if not size:
+        size = format_ad_material_size_plan(ad_material_size_plan_from_task(task))
+    return size or "按最终投放版位约束；默认优先 1:1 静态图"
+
+
+def _ad_material_reference_names(task):
+    refs = task.get("reference_files") or []
+    names = []
+    for item in refs:
+        name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _ad_material_reference_items(task):
+    refs = task.get("reference_files") or []
+    items = []
+    for index, item in enumerate(refs, 1):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip() or "reference_%02d" % index
+        url = str(item.get("url") or item.get("public_url") or "").strip()
+        content_type = str(item.get("content_type") or guess_content_type(name)).strip()
+        items.append({"name": name, "url": url, "content_type": content_type})
+    return items
+
+
+def normalize_cover_source_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    replacements = (
+        ("https://static-v1.mydramawave.com/", "https://static.mydramawave.com/"),
+        ("http://static-v1.mydramawave.com/", "https://static.mydramawave.com/"),
+        ("https://static-v2.mydramawave.com/", "https://static.mydramawave.com/"),
+        ("http://static-v2.mydramawave.com/", "https://static.mydramawave.com/"),
+    )
+    for old, new in replacements:
+        if text.startswith(old):
+            return new + text[len(old) :]
+    return text
+
+
+def _ad_material_source_note(task):
+    source = str(task.get("competitor_source") or "").strip()
+    task_kind = ad_material_task_kind(task.get("task_type"))
+    if task_kind == "iteration":
+        return "本任务以需求人上传的参考素材和产品自身信息为主，不强制拉取竞品素材。"
+    if task_kind == "reference":
+        return "本任务以需求人上传的参考素材为核心输入，先解析参考素材的构图、色彩、主体关系和信息层级，再迁移为当前产品的新素材。"
+    return "本任务需要通过 %s 拉取并筛选 image-only 竞品素材，最终需求应优先继承通过审核的竞品参考风格。" % (source or "已配置竞品源")
+
+
+def _ad_material_direction(task):
+    description = str(task.get("description") or "").strip()
+    if description:
+        return description
+    task_kind = ad_material_task_kind(task.get("task_type"))
+    if task_kind == "iteration":
+        return "基于上传参考素材做静态图优化，保留可复用的构图、主体、卖点层级和品牌识别，不直接照搬原图。"
+    if task_kind == "reference":
+        return "先解析上传参考素材的原素材风格，包括版式、色彩、主体、镜头、文案层级和 CTA 位置，再结合当前产品信息生成新的静态图方案。"
+    if task_kind == "competitor":
+        return "从竞品静态图中提炼可迁移的版式、信息层级、CTA 和色彩节奏，再替换为当前产品品牌与合规表达。"
+    return "综合产品信息、上传参考素材和竞品静态图，产出可审核、可投放、可继续交给图片生成服务执行的静态素材需求。"
+
+
+def fallback_ad_material_demand_v2(task, reason=""):
+    product = task.get("product_name") or task.get("app_id") or "未命名产品"
+    app_id = task.get("app_id") or ""
+    quantity = max(1, int(task.get("quantity") or 1))
+    size = _ad_material_size(task)
+    reference_items = _ad_material_reference_items(task)
+    reference_names = [item["name"] for item in reference_items]
+    source_note = _ad_material_source_note(task)
+    direction = _ad_material_direction(task)
+    has_refs = bool(reference_names)
+    ref_text = "、".join(reference_names) if has_refs else "暂无上传参考素材"
+    output_ratio = "1:1" if str(size).lower() in ("", "1080x1080") else size
+
+    lines = [
+        "# %s 静态图片素材需求审核版" % product,
+        "",
+        "> 当前为 Markdown 审核版需求。若后续接入 MetApi / 广大大 / AI 视觉识别脚本，外部脚本返回的 Markdown/PDF 可直接替换本内容。",
+        "",
+        "## 1. 需求范围与输出规格",
+        "",
+        "- 产品：%s" % product,
+        "- App ID：%s" % app_id,
+        "- 任务类型：%s" % (task.get("task_type") or ""),
+        "- 市场/语言：%s / %s" % (task.get("country") or "", task.get("language") or ""),
+        "- 输出数量：%s 张静态图片素材" % quantity,
+        "- 输出尺寸：%s" % size,
+        "- 输出比例：%s" % output_ratio,
+        "- 投放场景：Meta / Facebook 静态图片素材",
+        "- 竞品数据源：%s" % (task.get("competitor_source") or "不使用竞品源"),
+        "- 上传参考素材：%s" % ref_text,
+        "",
+        "## 2. 数据与参考来源",
+        "",
+        "- 参考策略：%s" % source_note,
+        "- 需求方向：%s" % direction,
+        "- 审核要求：需求通过后再进入素材生成；未通过时必须填写驳回原因，并按原因重新生成需求。",
+        "- 重要限制：不得复制竞品 logo、品牌色、界面细节或不可验证承诺；不得使用保证通过、秒到账、无审核、官方背书等高风险表达。",
+        "",
+        "## 3. 参考素材识别要求",
+        "",
+    ]
+    if has_refs:
+        lines.extend([
+            "生成服务必须先逐张识别上传参考素材，再基于识别结果写入最终制作要求：",
+            "",
+        ])
+        for index, name in enumerate(reference_names, 1):
+            lines.append("- REF_%02d：%s；需识别可见主体、构图、色彩、文字层级、CTA、可迁移元素与禁止照搬元素。" % (index, name))
+    else:
+        lines.extend([
+            "当前任务没有上传参考素材。正式生成前需要补齐至少一种参考来源：",
+            "",
+            "- 上传内部高质量静态图素材；或",
+            "- 通过已选竞品源拉取并筛选 image-only 竞品素材；或",
+            "- 在任务描述中补充明确的画面、文案和品牌规范。",
+        ])
+    lines.extend(["", "## 4. 逐张素材需求", ""])
+
+    for index in range(1, quantity + 1):
+        request_id = "REQ_%02d" % index
+        lines.extend([
+            "### %s" % request_id,
+            "",
+            "- 目标：产出 1 张可投放静态图片，必须服务于当前产品和当前市场语言。",
+            "- 参考继承：%s" % ("优先继承上传参考素材的版式、主体关系、色彩节奏和信息层级。" if has_refs else "先补齐参考素材或竞品素材，再基于真实识别结论确定视觉方向。"),
+            "- 画面结构：保留清晰主视觉区、核心卖点区、CTA 区、品牌/Logo 区；移动端信息层级必须一眼可读。",
+            "- 文案要求：主标题、辅助说明、CTA 必须使用 %s 语言；文案应具体、克制、可验证，避免夸张承诺。" % (task.get("language") or "目标市场"),
+            "- Logo 规则：必须使用当前产品 logo；如系统无法定位透明 logo，需在画面中预留 logo 位置，不得用竞品 logo 替代。",
+            "- 生成方式：AI 负责生成背景、主体、氛围和版式草图；关键文字、Logo、按钮文案应作为可控图层或后置叠加，保证清晰不乱码。",
+            "- 验收标准：尺寸符合 %s；文案无拼写错误；主体无遮挡；品牌露出清晰；不出现竞品品牌资产；不出现违规承诺。" % size,
+            "",
+        ])
+
+    lines.extend([
+        "## 5. 上报字段",
+        "",
+        "- category：%s" % (task.get("category") or ""),
+        "- tag_name：%s" % (task.get("tag_name") or ""),
+        "- title：%s" % (task.get("title") or ""),
+        "- body：%s" % (task.get("body") or ""),
+        "- remark：固定留空",
+        "",
+        "## 6. 审核关注点",
+        "",
+        "- 每一张素材必须能对应到明确的需求条目和参考来源。",
+        "- 如果使用竞品素材，只能学习版式/节奏/信息层级，不得复制品牌资产。",
+        "- 如果使用上传参考素材，只能迁移可复用风格，不得直接改色或简单换字。",
+        "- 若需求被驳回，下一轮必须围绕驳回原因调整，不保留历史版本。",
+    ])
+    if reason:
+        lines.extend(["", "## 7. 本次重新生成原因", "", reason])
+    return "\n".join(lines)
+
+
+def _ad_material_language_code(task):
+    value = str(task.get("language") or "").strip().lower()
+    return re.split(r"[^a-zA-Z]+", value, 1)[0] if value else ""
+
+
+def _ad_material_is_finance_product(task):
+    text = " ".join([
+        str(task.get("product_name") or ""),
+        str(task.get("description") or ""),
+        str(task.get("title") or ""),
+        str(task.get("body") or ""),
+    ]).lower()
+    tokens = (
+        "cash", "loan", "credit", "credito", "crédito", "prestamo", "préstamo",
+        "fintech", "dinero", "lend", "wallet", "pago", "pay",
+    )
+    return any(token in text for token in tokens)
+
+
+def _ad_material_copy_variants(task, quantity):
+    product = str(task.get("product_name") or task.get("app_id") or "Product").strip()
+    title = str(task.get("title") or "").strip()
+    body = str(task.get("body") or "").strip()
+    lang = _ad_material_language_code(task)
+    finance = _ad_material_is_finance_product(task)
+
+    if title or body:
+        cta_map = {"es": "Solicitar ahora", "pt": "Começar agora", "en": "Get started", "id": "Mulai sekarang"}
+        cta = cta_map.get(lang, "立即体验" if lang in ("zh", "cn") else "Start now")
+        return [{
+            "headline": title or product,
+            "body": body or "突出产品核心卖点，文案保持简短清晰。",
+            "cta": cta,
+        } for _ in range(quantity)]
+
+    if lang == "es" and finance:
+        base = [
+            ("Préstamo rápido con %s" % product, "Solicita en línea desde tu celular.", "Solicitar ahora"),
+            ("%s para tus planes" % product, "Proceso simple, claro y desde la app.", "Ver mi opción"),
+            ("Crédito personal en pocos pasos", "Consulta tu monto disponible de forma sencilla.", "Empezar ahora"),
+        ]
+    elif lang == "es":
+        base = [
+            ("%s listo para usar" % product, "Empieza en pocos pasos desde tu celular.", "Probar ahora"),
+            ("Descubre %s" % product, "Una experiencia simple, clara y práctica.", "Empezar ahora"),
+            ("%s para tu día a día" % product, "Abre la app y continúa en segundos.", "Usar ahora"),
+        ]
+    elif lang == "pt" and finance:
+        base = [
+            ("Crédito rápido com %s" % product, "Solicite online pelo celular.", "Solicitar agora"),
+            ("%s para seus planos" % product, "Processo simples e direto no app.", "Ver opção"),
+            ("Crédito em poucos passos", "Confira sua opção disponível com clareza.", "Começar agora"),
+        ]
+    elif lang == "pt":
+        base = [
+            ("%s pronto para usar" % product, "Comece em poucos passos pelo celular.", "Começar agora"),
+            ("Descubra %s" % product, "Uma experiência simples e prática.", "Usar agora"),
+            ("%s no seu dia a dia" % product, "Abra o app e continue em segundos.", "Experimentar"),
+        ]
+    elif lang == "en" and finance:
+        base = [
+            ("Fast credit with %s" % product, "Apply online from your phone.", "Apply now"),
+            ("%s for your plans" % product, "A simple app-first request flow.", "Check options"),
+            ("Personal credit in a few steps", "Clear information before you continue.", "Get started"),
+        ]
+    elif lang == "en":
+        base = [
+            ("%s is ready to use" % product, "Start in a few simple steps from your phone.", "Try now"),
+            ("Discover %s" % product, "A simple and practical app experience.", "Get started"),
+            ("%s for everyday use" % product, "Open the app and continue in seconds.", "Use now"),
+        ]
+    else:
+        base = [
+            ("%s，立即体验" % product, "打开应用，按步骤完成操作。", "立即开始"),
+            ("用 %s 解决当前需求" % product, "信息清晰、操作简单、移动端优先。", "立即体验"),
+            ("%s，简单好用" % product, "突出核心利益点，减少干扰信息。", "马上使用"),
+        ]
+
+    return [
+        {"headline": base[index % len(base)][0], "body": base[index % len(base)][1], "cta": base[index % len(base)][2]}
+        for index in range(quantity)
+    ]
+
+
+def build_ad_material_image_generation_demand(task, reason=""):
+    product = str(task.get("product_name") or task.get("app_id") or "未命名产品").strip()
+    quantity = max(1, int(task.get("quantity") or 1))
+    size = _ad_material_size(task)
+    language = str(task.get("language") or "目标语言").strip()
+    country = str(task.get("country") or "目标市场").strip()
+    task_type = str(task.get("task_type") or "").strip()
+    source = str(task.get("competitor_source") or "").strip()
+    reference_items = _ad_material_reference_items(task)
+    reference_names = [item["name"] for item in reference_items]
+    has_refs = bool(reference_names)
+    description = str(task.get("description") or "").strip()
+    copy_variants = _ad_material_copy_variants(task, quantity)
+    layouts = [
+        "左文右图结构：左侧 45% 放主标题、副文案和 CTA，右侧 55% 放手机界面/产品核心视觉；logo 固定在左上角，底部留 8% 安全边距。",
+        "上卖点下行动结构：顶部 20% 放 logo 和主标题，中部放产品界面或核心主体，底部用高对比按钮承载 CTA；画面中心保持单一视觉焦点。",
+        "卡片式信息结构：背景干净，中央放一张大信息卡，卡内包含主标题、2 个利益点和 CTA；右下角可放手机 mockup 或产品使用场景。",
+        "对角线视觉结构：左上为品牌与文案，右下为产品界面/主体，使用柔和色块引导视线；CTA 放在视觉终点，不遮挡主体。",
+    ]
+
+    lines = [
+        "# %s AI生图素材需求" % product,
+        "",
+        "## 素材参考",
+        "",
+    ]
+    if has_refs:
+        lines.append("以下素材只作为 AI 生图的视觉参考，必须先识别画面主体、构图、色彩、文字层级、按钮样式和可迁移元素；不得直接复制原图。")
+        lines.append("")
+        for index, item in enumerate(reference_items, 1):
+            name = item["name"]
+            lines.append("- REF_%02d：%s；继承方向：版式节奏、信息层级、主体关系、色彩氛围；禁止直接照搬原图细节。" % (index, name))
+            if item.get("url") and str(item.get("content_type") or "").lower().startswith("image/"):
+                lines.append("")
+                lines.append("![REF_%02d %s](%s)" % (index, name, item["url"]))
+                lines.append("")
+            elif item.get("url"):
+                lines.append("  预览链接：%s" % item["url"])
+    else:
+        lines.append("- 暂无上传素材参考。AI 生图时不得假设已有参考图；若后续补充参考图，需优先按参考图识别结果调整构图、色彩和主体关系。")
+
+    lines.extend(["", "## 竞品素材参考", ""])
+    task_kind = ad_material_task_kind(task_type)
+    if task_kind == "iteration":
+        lines.append("- 本次任务不强制使用竞品素材参考；画面以「素材参考」和下方详细素材需求为准。")
+    elif task_kind == "reference":
+        lines.append("- 本次任务不强制使用竞品素材参考；画面以需求人上传的参考素材解析结果为主要风格依据。")
+    else:
+        source_text = source or "已配置竞品源"
+        lines.append("- 竞品来源：%s。" % source_text)
+        lines.append("- 只使用筛选后的 image-only 竞品静态图作为参考；只学习构图、卖点表达、CTA 位置、信息层级和色彩节奏。")
+        lines.append("- 禁止复制竞品 logo、品牌色、人物/界面细节、不可验证承诺或任何容易造成品牌混淆的元素。")
+        lines.append("- 若当前任务尚未绑定具体竞品图片，生图前需要补齐竞品图 URL/文件及视觉识别结论，不能凭空套用固定模板。")
+
+    lines.extend(["", "## 详细素材需求", ""])
+    lines.append("- 输出类型：静态图片素材，仅生成 jpg/png/webp 等图片，不包含视频脚本或投放策略。")
+    lines.append("- 尺寸与数量计划：%s；共 %s 张；文案语言使用 %s；面向市场 %s。" % (size, quantity, language, country))
+    lines.append("- 品牌规则：画面必须出现 %s 的 logo 或预留 logo 位；不得出现竞品品牌资产。" % product)
+    if description:
+        lines.append("- 用户补充方向：%s" % description)
+    if reason:
+        lines.append("- 本轮重做重点：%s" % reason)
+    lines.append("")
+
+    for index in range(1, quantity + 1):
+        asset_size = ad_material_asset_size(task, index)
+        copy_item = copy_variants[index - 1]
+        ref_hint = "优先参考 REF_%02d" % (((index - 1) % len(reference_names)) + 1) if has_refs else "无上传参考图，按本条需求直接生成"
+        layout = layouts[(index - 1) % len(layouts)]
+        lines.extend([
+            "### 素材 %02d" % index,
+            "",
+            "- 输出尺寸：%s" % asset_size,
+            "- 主文案：\"%s\"" % copy_item["headline"],
+            "- 副文案：\"%s\"" % copy_item["body"],
+            "- CTA：\"%s\"" % copy_item["cta"],
+            "- 布局：%s" % layout,
+            "- 画面主体：以 %s 产品体验为核心，建议使用手机界面、产品核心功能卡片或用户使用场景作为主体；主体占画面 45%%-60%%，背景保持简洁。" % product,
+            "- 文案排版：主文案最大、3 秒内可读；副文案不超过两行；CTA 做成清晰按钮，按钮文字必须完整可读，不能被图形遮挡。",
+            "- 参考继承：%s；只继承可迁移的构图、色彩和信息层级，不复制原图/竞品的品牌资产。" % ref_hint,
+            "- 禁止元素：夸大承诺、保证通过、官方背书、无审核、秒到账、竞品 logo、低清文字、乱码文字、过多小字、遮挡主体的装饰。",
+            "- 验收标准：尺寸符合 %s；主文案、副文案、CTA 清晰无拼写错误；logo/预留 logo 位清楚；画面第一眼能理解产品卖点。" % asset_size,
+            "",
+        ])
+
+    return "\n".join(lines).strip()
+
+
+def ad_material_pdf_filename(task):
+    name = re.sub(r"[^0-9A-Za-z_-]+", "_", str(task.get("product_name") or task.get("app_id") or "ad_material")).strip("_")
+    return "%s_requirement_%s.pdf" % (name or "ad_material", task["task_id"][:8])
+
+
+def ad_material_markdown_plain(text):
+    import html as html_lib
+    text = re.sub(r"<img[^>]*>", " ", str(text or ""), flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"https?://\S+\.(?:png|jpe?g|webp|gif)(?:\?\S*)?", " ", text, flags=re.I)
+    text = re.sub(r"https?://play-lh\.googleusercontent\.com/\S+", " ", text, flags=re.I)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    return html_lib.unescape(re.sub(r"\s+", " ", text).strip())
+
+
+def ad_material_markdown_images(text):
+    images = []
+    for match in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', str(text or ""), flags=re.I):
+        images.append(match.group(1))
+    for match in re.finditer(r"!\[[^\]]*\]\((https?://[^)\s]+|/[^)\s]+)\)", str(text or ""), flags=re.I):
+        images.append(match.group(1))
+    seen = set()
+    result = []
+    for url in images:
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
+def ad_material_download_pdf_image(url, temp_dir):
+    if not url or not str(url).startswith(("http://", "https://")):
+        return ""
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        suffix = ".jpg"
+        if "png" in content_type:
+            suffix = ".png"
+        elif "webp" in content_type:
+            suffix = ".webp"
+        path = os.path.join(temp_dir, hashlib.md5(url.encode("utf-8")).hexdigest() + suffix)
+        with open(path, "wb") as handle:
+            handle.write(resp.content)
+        return path
+    except Exception:
+        logging.exception("failed to download pdf image: %s", url)
+        return ""
+
+
+def ad_material_add_pdf_image(story, url, temp_dir, max_width=160, max_height=130):
+    try:
+        from PIL import Image as PilImage
+        from reportlab.platypus import Image as PdfImage
+
+        path = ad_material_download_pdf_image(url, temp_dir)
+        if not path:
+            return False
+        with PilImage.open(path) as image:
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            return False
+        scale = min(float(max_width) / width, float(max_height) / height, 1.0)
+        story.append(PdfImage(path, width=width * scale, height=height * scale))
+        return True
+    except Exception:
+        logging.exception("failed to append pdf image: %s", url)
+        return False
+
+
+def ad_material_parse_markdown_table(lines, start_index):
+    rows = []
+    index = start_index
+    while index < len(lines) and re.match(r"^\s*\|.+\|\s*$", lines[index]):
+        cells = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+        if not all(re.match(r"^:?-{3,}:?$", cell) for cell in cells):
+            rows.append(cells)
+        index += 1
+    return rows, index
+
+
+def render_ad_material_demand_pdf_pillow(task, demand_text, artifacts=None):
+    try:
+        from PIL import Image as PilImage, ImageDraw, ImageFont
+    except Exception as exc:
+        raise StructuredApiError("pdf_dependency_missing", "服务端缺少 PDF 生成依赖：%s" % exc)
+
+    public_dir = os.path.join(ad_material_public_dir(task["task_id"]), "exports")
+    ensure_dir(public_dir)
+    pdf_path = os.path.join(public_dir, ad_material_pdf_filename(task))
+    temp_dir = tempfile.mkdtemp(prefix="ad-material-pdf-")
+    width, height = 1240, 1754
+    margin_x, margin_y = 72, 64
+    max_text_width = width - margin_x * 2
+    font_candidates = [
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    ]
+
+    def font(size, bold=False):
+        paths = font_candidates[:]
+        if bold:
+            paths.insert(0, "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Bold.ttc")
+            paths.insert(1, "C:/Windows/Fonts/msyhbd.ttc")
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    return ImageFont.truetype(path, size=size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    fonts = {
+        "title": font(34, True),
+        "h2": font(25, True),
+        "h3": font(21, True),
+        "body": font(18),
+        "small": font(15),
+    }
+    pages = []
+    image = None
+    draw = None
+    y = margin_y
+
+    def text_width(text, fnt):
+        try:
+            bbox = draw.textbbox((0, 0), text, font=fnt)
+            return bbox[2] - bbox[0]
+        except Exception:
+            return draw.textsize(text, font=fnt)[0]
+
+    def line_height(fnt, extra=8):
+        try:
+            bbox = fnt.getbbox("国Ag")
+            return (bbox[3] - bbox[1]) + extra
+        except Exception:
+            return 24 + extra
+
+    def new_page():
+        nonlocal image, draw, y
+        image = PilImage.new("RGB", (width, height), "#FFFFFF")
+        draw = ImageDraw.Draw(image)
+        pages.append(image)
+        y = margin_y
+
+    def ensure_space(needed):
+        if y + needed > height - margin_y:
+            new_page()
+
+    def draw_wrapped(text, fnt, fill="#172033", indent=0, spacing=6):
+        nonlocal y
+        text = ad_material_markdown_plain(text)
+        if not text:
+            return
+        max_width = max_text_width - indent
+        line = ""
+        lines = []
+        for char in text:
+            candidate = line + char
+            if line and text_width(candidate, fnt) > max_width:
+                lines.append(line)
+                line = char
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        lh = line_height(fnt)
+        ensure_space(lh * max(1, len(lines)) + spacing)
+        for line in lines:
+            draw.text((margin_x + indent, y), line, font=fnt, fill=fill)
+            y += lh
+        y += spacing
+
+    def draw_rule():
+        nonlocal y
+        ensure_space(20)
+        draw.line((margin_x, y, width - margin_x, y), fill="#D8E2F0", width=2)
+        y += 18
+
+    def draw_image_from_url(url, max_w=300, max_h=210):
+        nonlocal y
+        path = ad_material_download_pdf_image(url, temp_dir)
+        if not path:
+            return False
+        try:
+            with PilImage.open(path) as raw:
+                raw = raw.convert("RGB")
+                raw.thumbnail((max_w, max_h))
+                ensure_space(raw.height + 14)
+                image.paste(raw, (margin_x, y))
+                y += raw.height + 14
+            return True
+        except Exception:
+            logging.exception("failed to draw pdf image: %s", url)
+            return False
+
+    def wrap_text_lines(text, fnt, max_width, max_lines=None):
+        text = ad_material_markdown_plain(text)
+        if not text:
+            return []
+        lines = []
+        current = ""
+        for char in text:
+            candidate = current + char
+            if current and text_width(candidate, fnt) > max_width:
+                lines.append(current)
+                current = char
+                if max_lines and len(lines) >= max_lines:
+                    break
+            else:
+                current = candidate
+        if current and (not max_lines or len(lines) < max_lines):
+            lines.append(current)
+        if max_lines and len(lines) >= max_lines and len(ad_material_markdown_plain(text)) > len("".join(lines)):
+            lines[-1] = lines[-1].rstrip("，。；,. ") + "..."
+        return lines
+
+    def draw_text_cell(text, x, top, cell_width, cell_height, fnt, fill="#172033", padding=12):
+        lines = wrap_text_lines(text, fnt, cell_width - padding * 2, max(1, int((cell_height - padding * 2) / line_height(fnt, 4))))
+        cursor = top + padding
+        for text_line in lines:
+            draw.text((x + padding, cursor), text_line, font=fnt, fill=fill)
+            cursor += line_height(fnt, 4)
+
+    def markdown_cell_image_url(cell):
+        match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cell or "", flags=re.I)
+        if match:
+            return match.group(1)
+        match = re.search(r"!\[[^\]]*\]\((https?://[^)\s]+|/[^)\s]+)\)", cell or "", flags=re.I)
+        if match:
+            return match.group(1)
+        return ""
+
+    def draw_image_cell(url, x, top, cell_width, cell_height):
+        path = ad_material_download_pdf_image(url, temp_dir)
+        if not path:
+            draw_text_cell("暂无预览", x, top, cell_width, cell_height, fonts["small"], "#8A96A8")
+            return
+        try:
+            with PilImage.open(path) as raw:
+                raw = raw.convert("RGB")
+                raw.thumbnail((cell_width - 24, cell_height - 24))
+                paste_x = int(x + (cell_width - raw.width) / 2)
+                paste_y = int(top + (cell_height - raw.height) / 2)
+                image.paste(raw, (paste_x, paste_y))
+        except Exception:
+            logging.exception("failed to draw pdf table image: %s", url)
+            draw_text_cell("预览失败", x, top, cell_width, cell_height, fonts["small"], "#8A96A8")
+
+    def draw_table(rows):
+        nonlocal y
+        if not rows:
+            return
+        data_rows = rows[1:] if len(rows) > 1 else rows
+        if any(markdown_cell_image_url(cell) for row in data_rows for cell in row):
+            col_widths = [120, 185, 530, max_text_width - 120 - 185 - 530]
+            headers = rows[0] if rows and len(rows[0]) >= 4 else ["编号", "预览", "生图可参考点", "禁止照搬"]
+            header_h = 46
+            row_gap = 0
+
+            def draw_header():
+                nonlocal y
+                x = margin_x
+                draw.rectangle((margin_x, y, margin_x + max_text_width, y + header_h), fill="#F8FBFF", outline="#D8E2F0", width=1)
+                for idx, col_width in enumerate(col_widths):
+                    if idx:
+                        draw.line((x, y, x, y + header_h), fill="#D8E2F0", width=1)
+                    draw.text((x + 12, y + 13), ad_material_markdown_plain(headers[idx] if idx < len(headers) else ""), font=fonts["small"], fill="#102A56")
+                    x += col_width
+                y += header_h
+
+            ensure_space(header_h + 220)
+            draw_header()
+            for row in data_rows[:24]:
+                ref = row[0] if len(row) > 0 else ""
+                image_url = next((markdown_cell_image_url(cell) for cell in row if markdown_cell_image_url(cell)), "")
+                learn = row[2] if len(row) > 2 else ""
+                forbidden = row[3] if len(row) > 3 else ""
+                text_lines = max(
+                    len(wrap_text_lines(learn, fonts["small"], col_widths[2] - 24, 18)),
+                    len(wrap_text_lines(forbidden, fonts["small"], col_widths[3] - 24, 18)),
+                    6,
+                )
+                row_h = min(520, max(220, text_lines * line_height(fonts["small"], 4) + 28))
+                if y + row_h > height - margin_y:
+                    new_page()
+                    draw_header()
+                x = margin_x
+                draw.rectangle((margin_x, y, margin_x + max_text_width, y + row_h), fill="#FFFFFF", outline="#D8E2F0", width=1)
+                for idx, col_width in enumerate(col_widths):
+                    if idx:
+                        draw.line((x, y, x, y + row_h), fill="#D8E2F0", width=1)
+                    if idx == 0:
+                        draw_text_cell(ref, x, y, col_width, row_h, fonts["small"], "#172033")
+                    elif idx == 1:
+                        draw_image_cell(image_url, x, y, col_width, row_h)
+                    elif idx == 2:
+                        draw_text_cell(learn, x, y, col_width, row_h, fonts["small"], "#172033")
+                    else:
+                        draw_text_cell(forbidden, x, y, col_width, row_h, fonts["small"], "#172033")
+                    x += col_width
+                y += row_h + row_gap
+            y += 18
+            return
+        for row in rows[:18]:
+            draw_wrapped(" | ".join(ad_material_markdown_plain(cell) for cell in row[:4]), fonts["small"], "#44546A")
+
+    new_page()
+    draw_wrapped("%s 投放素材需求" % (task.get("product_name") or task.get("app_id") or ""), fonts["title"], "#102A56")
+    draw_wrapped("任务ID：%s    类型：%s    状态：%s    国家/语言：%s/%s    数量：%s" % (
+        task.get("task_id", ""),
+        task.get("task_type", ""),
+        task.get("status_label") or task.get("status", ""),
+        task.get("country", ""),
+        task.get("language", ""),
+        task.get("quantity", ""),
+    ), fonts["small"], "#5D6B82")
+    draw_rule()
+
+    lines = str(demand_text or "").splitlines()
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.strip()
+        if not line:
+            index += 1
+            continue
+        if re.match(r"^\s*\|.+\|\s*$", raw):
+            rows, index = ad_material_parse_markdown_table(lines, index)
+            draw_table(rows)
+            continue
+        heading = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            if level <= 2:
+                draw_rule()
+            draw_wrapped(heading.group(2), fonts["h2"] if level <= 2 else fonts["h3"], "#174EA6" if level <= 2 else "#172033")
+            index += 1
+            continue
+        images = ad_material_markdown_images(line)
+        if images and len(ad_material_markdown_plain(line)) < 20:
+            for url in images[:3]:
+                draw_image_from_url(url, max_w=440, max_h=320)
+            index += 1
+            continue
+        bullet_match = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet_match:
+            draw_wrapped("• " + bullet_match.group(1), fonts["body"], "#172033", indent=16)
+        else:
+            draw_wrapped(line, fonts["body"], "#172033")
+        index += 1
+
+    try:
+        pages[0].save(pdf_path, "PDF", resolution=150.0, save_all=True, append_images=pages[1:])
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return {"pdf_path": pdf_path, "pdf_url": build_public_url(pdf_path)}
+
+
+def render_ad_material_demand_pdf(task, demand_text, artifacts=None):
+    if not str(demand_text or "").strip():
+        raise StructuredApiError("empty_demand", "暂无需求内容，无法导出 PDF")
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except Exception as exc:
+        logging.info("reportlab unavailable, falling back to pillow pdf renderer: %s", exc)
+        return render_ad_material_demand_pdf_pillow(task, demand_text, artifacts)
+
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        font_name = "STSong-Light"
+    except Exception:
+        font_name = "Helvetica"
+
+    public_dir = os.path.join(ad_material_public_dir(task["task_id"]), "exports")
+    ensure_dir(public_dir)
+    pdf_path = os.path.join(public_dir, ad_material_pdf_filename(task))
+    temp_dir = tempfile.mkdtemp(prefix="ad-material-pdf-")
+    styles = getSampleStyleSheet()
+    base = ParagraphStyle(
+        "AdMaterialBase",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=9.5,
+        leading=14,
+        textColor=colors.HexColor("#172033"),
+        alignment=TA_LEFT,
+        spaceAfter=5,
+    )
+    title = ParagraphStyle("AdMaterialTitle", parent=base, fontSize=18, leading=24, textColor=colors.HexColor("#102A56"), spaceAfter=12)
+    h2 = ParagraphStyle("AdMaterialH2", parent=base, fontSize=13, leading=18, textColor=colors.HexColor("#174EA6"), spaceBefore=10, spaceAfter=7)
+    h3 = ParagraphStyle("AdMaterialH3", parent=base, fontSize=11.5, leading=16, textColor=colors.HexColor("#172033"), spaceBefore=7, spaceAfter=5)
+    bullet = ParagraphStyle("AdMaterialBullet", parent=base, leftIndent=12, firstLineIndent=-8)
+    small = ParagraphStyle("AdMaterialSmall", parent=base, fontSize=8, leading=11, textColor=colors.HexColor("#5D6B82"))
+
+    def pdf_text(value):
+        import html as html_lib
+        return html_lib.escape(ad_material_markdown_plain(value))
+
+    def para(value, style=base):
+        return Paragraph(pdf_text(value), style)
+
+    story = [
+        Paragraph(pdf_text("%s 投放素材需求" % (task.get("product_name") or task.get("app_id") or "")), title),
+        Paragraph(pdf_text("任务ID：%s    类型：%s    状态：%s    国家/语言：%s/%s    数量：%s" % (
+            task.get("task_id", ""),
+            task.get("task_type", ""),
+            task.get("status_label") or task.get("status", ""),
+            task.get("country", ""),
+            task.get("language", ""),
+            task.get("quantity", ""),
+        )), small),
+        Spacer(1, 6),
+    ]
+
+    lines = str(demand_text or "").splitlines()
+    index = 0
+    table_count = 0
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.strip()
+        if not line:
+            index += 1
+            continue
+        if re.match(r"^\s*\|.+\|\s*$", raw):
+            rows, index = ad_material_parse_markdown_table(lines, index)
+            if rows:
+                table_count += 1
+                header = rows[0]
+                data_rows = rows[1:] if len(rows) > 1 else []
+                if any("img" in cell.lower() for row in data_rows for cell in row):
+                    story.append(Paragraph("参考素材", h2 if table_count == 1 else h3))
+                    for row in data_rows[:24]:
+                        ref = row[0] if row else ""
+                        image_url = ""
+                        for cell in row:
+                            match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cell, flags=re.I)
+                            if match:
+                                image_url = match.group(1)
+                                break
+                        text_cells = [ad_material_markdown_plain(cell) for cell in row[2:] if ad_material_markdown_plain(cell)]
+                        card = [Paragraph("<b>%s</b>" % pdf_text(ref), h3)]
+                        if image_url:
+                            ad_material_add_pdf_image(card, image_url, temp_dir, max_width=150, max_height=120)
+                        if text_cells:
+                            card.append(Paragraph(pdf_text("; ".join(text_cells)[:1400]), small))
+                        story.append(KeepTogether(card))
+                        story.append(Spacer(1, 6))
+                else:
+                    table_data = [[Paragraph(pdf_text(cell)[:260], small) for cell in row[:4]] for row in rows[:18]]
+                    table = Table(table_data, hAlign="LEFT", repeatRows=1)
+                    table.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF4FF")),
+                        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D8E2F0")),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ]))
+                    story.append(table)
+                    story.append(Spacer(1, 8))
+            continue
+        heading = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            story.append(Paragraph(pdf_text(heading.group(2)), title if level == 1 else h2 if level == 2 else h3))
+            index += 1
+            continue
+        images = ad_material_markdown_images(line)
+        if images and len(ad_material_markdown_plain(line)) < 20:
+            for url in images[:3]:
+                ad_material_add_pdf_image(story, url, temp_dir, max_width=260, max_height=180)
+            index += 1
+            continue
+        bullet_match = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet_match:
+            story.append(Paragraph("• " + pdf_text(bullet_match.group(1)), bullet))
+        else:
+            story.append(para(line, base))
+        if len(story) % 85 == 0:
+            story.append(PageBreak())
+        index += 1
+
+    def page_footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(font_name, 8)
+        canvas.setFillColor(colors.HexColor("#7B8798"))
+        canvas.drawString(18 * mm, 11 * mm, "AI 自动后台 | 投放素材需求")
+        canvas.drawRightString(A4[0] - 18 * mm, 11 * mm, "Page %s" % doc.page)
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        pdf_path,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=16 * mm,
+        bottomMargin=18 * mm,
+        title="%s 投放素材需求" % (task.get("product_name") or task.get("app_id") or ""),
+    )
+    try:
+        doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    return {"pdf_path": pdf_path, "pdf_url": build_public_url(pdf_path)}
+
+
+def ensure_ad_material_demand_pdf(task, demand_text=None, artifacts=None):
+    artifacts = dict(artifacts or task.get("demand_artifacts") or {})
+    if artifacts.get("pdf_url"):
+        return artifacts
+    pdf_artifacts = render_ad_material_demand_pdf(task, demand_text if demand_text is not None else task.get("demand_text", ""), artifacts)
+    artifacts.update(pdf_artifacts)
+    return artifacts
+
+
+def export_ad_material_demand_pdf(task_id, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    artifacts = ensure_ad_material_demand_pdf(task)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_material_task SET demand_artifacts_json=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
+                (json.dumps(artifacts, ensure_ascii=False), task_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    updated = fetch_ad_material_task(task_id)
+    return {"task_id": task_id, "pdf_url": artifacts.get("pdf_url", ""), "task": updated}
+
+
+def notify_ad_material_task_owner(task, text):
+    try:
+        if task.get("creator_open_id"):
+            message = str(text or "").strip()
+            admin_url = AD_MATERIAL_ADMIN_URL.rstrip("/")
+            if admin_url and admin_url not in message:
+                message = "%s\nAI后台：%s" % (message, admin_url)
+            send_feishu_text("open_id", task["creator_open_id"], message)
+    except Exception:
+        logging.exception("failed to notify ad material owner: %s", task.get("task_id"))
+
+
+def ad_material_competitor_alert_recipients(task=None):
+    recipients = []
+    if AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE and AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID:
+        recipients.append((AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID_TYPE, AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID))
+    for open_id in AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS:
+        recipients.append(("open_id", open_id))
+    try:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT open_id FROM drama_admin_user WHERE role = 'admin' AND TRIM(open_id) <> ''"
+                ).fetchall()
+            finally:
+                conn.close()
+        for row in rows:
+            recipients.append(("open_id", str(row["open_id"] or "").strip()))
+    except Exception:
+        logging.exception("failed to load ad material competitor alert admin recipients")
+    if task and task.get("creator_open_id"):
+        recipients.append(("open_id", str(task.get("creator_open_id") or "").strip()))
+    result = []
+    seen = set()
+    for receive_id_type, receive_id in recipients:
+        key = (str(receive_id_type or "").strip(), str(receive_id or "").strip())
+        if key[0] and key[1] and key not in seen:
+            seen.add(key)
+            result.append(key)
+    return result
+
+
+def notify_ad_material_competitor_source_disabled(source, error, task=None):
+    task = task or {}
+    text = (
+        "投放素材竞品源已自动临时下架\n"
+        "竞品源：%s\n"
+        "触发任务：%s / %s\n"
+        "错误：%s\n"
+        "处理：后台创建任务时将不再展示该竞品源，恢复前请改用其他来源。"
+    ) % (
+        source,
+        task.get("task_id", ""),
+        task.get("product_name") or task.get("app_id") or "",
+        str(error or "")[:800],
+    )
+    recipients = ad_material_competitor_alert_recipients(task)
+    if not recipients:
+        logging.warning("ad material competitor source disabled without alert recipient: %s %s", source, error)
+        return
+    for receive_id_type, receive_id in recipients:
+        try:
+            send_feishu_text(receive_id_type, receive_id, text)
+        except Exception:
+            logging.exception("failed to send competitor source disabled alert: %s %s", receive_id_type, receive_id)
+
+
+def disable_ad_material_competitor_source(source, error, task=None):
+    source = str(source or "").strip()
+    if source not in AD_MATERIAL_COMPETITOR_SOURCES:
+        return
+    error_text = str(error or "").strip()[:1000]
+    previous_status = ""
+    try:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ad_material_competitor_source (
+                      source, status, fail_count, last_error, disabled_at, created_at, updated_at
+                    ) VALUES (?, 'active', 0, '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (source,),
+                )
+                row = conn.execute(
+                    "SELECT status FROM ad_material_competitor_source WHERE source = ?",
+                    (source,),
+                ).fetchone()
+                previous_status = str(row["status"] or "") if row else ""
+                conn.execute(
+                    """
+                    UPDATE ad_material_competitor_source
+                    SET status = 'disabled',
+                        fail_count = fail_count + 1,
+                        last_error = ?,
+                        disabled_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE source = ?
+                    """,
+                    (error_text, source),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        if previous_status != "disabled":
+            notify_ad_material_competitor_source_disabled(source, error_text, task)
+    except Exception:
+        logging.exception("failed to disable ad material competitor source: %s", source)
+
+
+def generate_ad_material_demand(task_id, reason=""):
+    task = fetch_ad_material_task(task_id)
+    if not task:
+        return
+    update_ad_material_task_status(task_id, "generating_demand", review_reason=reason, error_message="")
+    try:
+        result = run_ad_material_external_command(AD_MATERIAL_REQUIREMENT_COMMAND, task, "demand", {"reason": reason}) if AD_MATERIAL_REQUIREMENT_COMMAND else {}
+        demand_text = str(result.get("demand_text") or result.get("markdown") or "").strip()
+        demand_artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+        if not demand_text:
+            demand_text = build_ad_material_image_generation_demand(task, reason)
+        try:
+            demand_artifacts = ensure_ad_material_demand_pdf(task, demand_text, demand_artifacts)
+        except Exception as pdf_exc:
+            logging.exception("ad material demand pdf generation failed: %s", task_id)
+            demand_artifacts["pdf_error"] = str(pdf_exc)
+        update_ad_material_task_status(
+            task_id,
+            "demand_review",
+            demand_text=demand_text,
+            demand_artifacts_json=json.dumps(demand_artifacts, ensure_ascii=False),
+            error_message="",
+        )
+        fresh = fetch_ad_material_task(task_id)
+        notify_ad_material_task_owner(fresh, "投放素材任务需求已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
+    except Exception as exc:
+        logging.exception("ad material demand generation failed: %s", task_id)
+        if task.get("competitor_source") and ad_material_task_kind(task.get("task_type")) not in ("iteration", "reference"):
+            disable_ad_material_competitor_source(task.get("competitor_source"), exc, task)
+        update_ad_material_task_status(task_id, "failed", error_message=str(exc))
+
+
+def run_ad_material_demand_async(task_id, reason=""):
+    thread = threading.Thread(target=generate_ad_material_demand, args=(task_id, reason), name="ad-demand-%s" % task_id[:8])
+    thread.daemon = True
+    thread.start()
+
+
+def write_placeholder_ad_material_asset(task, index):
+    public_dir = ad_material_public_dir(task["task_id"])
+    ensure_dir(public_dir)
+    asset_id = "%s_%02d" % (task["task_id"], index)
+    filename = "%s.svg" % asset_id
+    path = os.path.join(public_dir, filename)
+    title = "%s #%02d" % (task.get("product_name") or task.get("app_id"), index)
+    width_text, height_text = ad_material_asset_output_size(task, index).split("x", 1)
+    width = int(width_text)
+    height = int(height_text)
+    center_x = width // 2
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="%s" height="%s" viewBox="0 0 %s %s">
+<rect width="%s" height="%s" fill="#eef4ff"/>
+<rect x="%s" y="%s" width="%s" height="%s" rx="36" fill="#ffffff" stroke="#2f6bff" stroke-width="8"/>
+<text x="%s" y="%s" font-family="Arial,sans-serif" font-size="54" font-weight="700" text-anchor="middle" fill="#172033">%s</text>
+<text x="%s" y="%s" font-family="Arial,sans-serif" font-size="34" text-anchor="middle" fill="#44546a">%s / %s / %s</text>
+<text x="%s" y="%s" font-family="Arial,sans-serif" font-size="30" text-anchor="middle" fill="#667085">待接入真实AI/GPU生成服务</text>
+</svg>""" % (
+        width,
+        height,
+        width,
+        height,
+        width,
+        height,
+        max(40, width // 12),
+        max(60, height // 9),
+        max(120, width - width // 6),
+        max(200, height - height // 5),
+        center_x,
+        height * 36 // 100,
+        title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
+        center_x,
+        height * 48 // 100,
+        task.get("task_type", ""),
+        task.get("country", ""),
+        task.get("language", ""),
+        center_x,
+        height * 58 // 100,
+    )
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(svg)
+    return {
+        "asset_id": asset_id,
+        "task_id": task["task_id"],
+        "asset_index": index,
+        "name": "%s_%02d" % (task.get("product_name") or "ad_material", index),
+        "url": publish_asset(path),
+        "local_path": path,
+        "status": "pending_review",
+        "review_reason": "",
+        "source_api_id": "",
+        "source_api_error": "",
+    }
+
+
+def generation_outputs_to_assets(task, result, indexes=None):
+    outputs = result.get("outputs") or result.get("assets") or []
+    assets = []
+    wanted = set(indexes or [])
+    for offset, item in enumerate(outputs, 1):
+        if not isinstance(item, dict):
+            continue
+        index = int(item.get("asset_index") or item.get("index") or offset)
+        if wanted and index not in wanted:
+            continue
+        url = str(item.get("cos_url") or item.get("url") or "").strip()
+        local_path = str(item.get("local_path") or item.get("path") or "").strip()
+        if not url and local_path and file_ready(local_path):
+            url = publish_asset(local_path)
+        if not url:
+            continue
+        asset_id = str(item.get("asset_id") or "%s_%02d" % (task["task_id"], index))
+        assets.append({
+            "asset_id": asset_id,
+            "task_id": task["task_id"],
+            "asset_index": index,
+            "name": str(item.get("name") or item.get("headline") or "%s_%02d" % (task.get("product_name") or "ad_material", index)),
+            "url": url,
+            "local_path": local_path,
+            "status": "pending_review",
+            "review_reason": "",
+            "source_api_id": "",
+            "source_api_error": "",
+        })
+    return assets
+
+
+def generate_ad_material_assets(task_id, indexes=None, reason=""):
+    task = fetch_ad_material_task(task_id)
+    if not task:
+        return
+    partial_generation = indexes is not None
+    quantity = int(task.get("quantity") or 1)
+    raw_indexes = indexes if indexes is not None else list(range(1, quantity + 1))
+    target_indexes = []
+    for raw_index in raw_indexes:
+        index = int(raw_index)
+        if index not in target_indexes:
+            target_indexes.append(index)
+    if not target_indexes:
+        update_ad_material_task_status(
+            task_id,
+            "material_review" if partial_generation else "failed",
+            error_message="no ad material asset indexes requested",
+        )
+        return
+    update_ad_material_task_status(
+        task_id,
+        "material_review" if partial_generation else "generating_material",
+        review_reason=reason,
+        error_message="",
+    )
+    try:
+        assets = []
+        if AD_MATERIAL_GENERATION_COMMAND:
+            for index in target_indexes:
+                task_for_index = dict(task)
+                task_for_index["size_ratio"] = ad_material_asset_size(task, index)
+                task_for_index["size"] = ad_material_asset_output_size(task, index)
+                result = run_ad_material_external_command(
+                    AD_MATERIAL_GENERATION_COMMAND,
+                    task_for_index,
+                    "generation_%02d" % index,
+                    {"indexes": [index], "reason": reason, "size": task_for_index["size_ratio"]},
+                )
+                generated_assets = generation_outputs_to_assets(task, result, indexes=[index])
+                if not generated_assets:
+                    raise RuntimeError("generation command returned no downloadable asset for index %02d" % index)
+                for asset in generated_assets:
+                    upsert_ad_material_asset(asset)
+                    assets.append(asset)
+        else:
+            assets = [write_placeholder_ad_material_asset(task, index) for index in target_indexes]
+            for asset in assets:
+                upsert_ad_material_asset(asset)
+        update_ad_material_task_status(task_id, "material_review", error_message="")
+        fresh = fetch_ad_material_task(task_id)
+        notify_ad_material_task_owner(fresh, "投放素材已生成，请审核：%s" % (fresh.get("product_name") or fresh.get("task_id")))
+    except Exception as exc:
+        logging.exception("ad material generation failed: %s", task_id)
+        update_ad_material_task_status(
+            task_id,
+            "material_review" if partial_generation else "failed",
+            error_message=str(exc),
+        )
+
+
+def run_ad_material_generation_async(task_id, indexes=None, reason=""):
+    thread = threading.Thread(target=generate_ad_material_assets, args=(task_id, indexes, reason), name="ad-assets-%s" % task_id[:8])
+    thread.daemon = True
+    thread.start()
+
+
+def publish_ad_material_task(task_id, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    if task["status"] != "draft":
+        raise StructuredApiError("invalid_status", "只有待发布任务可以发布")
+    run_ad_material_demand_async(task_id)
+    return fetch_ad_material_task(task_id)
+
+
+def review_ad_material_demand(task_id, payload, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    if task["status"] != "demand_review":
+        raise StructuredApiError("invalid_status", "当前状态不能审核需求")
+    result = str(payload.get("result", "") or "").strip()
+    reason = str(payload.get("reason", "") or "").strip()
+    if result == "approved":
+        run_ad_material_generation_async(task_id)
+    elif result == "rejected":
+        if not reason:
+            raise StructuredApiError("reason_required", "驳回原因必填")
+        update_ad_material_task_status(task_id, "demand_returned", review_reason=reason)
+        run_ad_material_demand_async(task_id, reason=reason)
+    else:
+        raise StructuredApiError("invalid_review_result", "审核结果无效")
+    return fetch_ad_material_task(task_id)
+
+
+def review_ad_material_asset(task_id, asset_id, payload, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    result = str(payload.get("result", "") or "").strip()
+    reason = str(payload.get("reason", "") or "").strip()
+    assets = fetch_ad_material_assets(task_id)
+    asset = next((item for item in assets if item["asset_id"] == asset_id), None)
+    if not asset:
+        raise StructuredApiError("not_found", "素材不存在")
+    if result == "approved":
+        status = "approved"
+    elif result == "rejected":
+        if not reason:
+            raise StructuredApiError("reason_required", "驳回原因必填")
+        status = "regenerating"
+    elif result == "abandoned":
+        status = "abandoned"
+    else:
+        raise StructuredApiError("invalid_review_result", "审核结果无效")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_material_asset SET status=?, review_reason=?, updated_at=CURRENT_TIMESTAMP WHERE asset_id=?",
+                (status, reason, asset_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    if status == "regenerating":
+        update_ad_material_task_status(task_id, "material_review", review_reason=reason)
+        run_ad_material_generation_async(task_id, indexes=[int(asset.get("asset_index") or 1)], reason=reason)
+    return fetch_ad_material_task(task_id)
+
+
+def copy_ad_material_task(task_id, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    payload = dict(task)
+    payload["reference_files"] = []
+    copied = create_ad_material_task(payload, session)
+    return copied
+
+
+def delete_ad_material_task(task_id, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    if task["status"] == "done":
+        raise StructuredApiError("task_done", "已完成任务不允许删除")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("DELETE FROM ad_material_asset WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM ad_material_task WHERE task_id = ?", (task_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    shutil.rmtree(ad_material_task_work_dir(task_id), ignore_errors=True)
+    shutil.rmtree(ad_material_public_dir(task_id), ignore_errors=True)
+    return {"message": "deleted", "task_id": task_id}
+
+
+def post_ad_material_source(task, asset):
+    if not AD_MATERIAL_SOURCE_API_TOKEN:
+        raise StructuredApiError("source_api_token_missing", "最终素材上报 token 未配置")
+    if not task.get("initiator_sub_user_id"):
+        admin_group = lookup_admin_group_by_email(task.get("creator_email")) or lookup_admin_group_by_name(task.get("creator_name"))
+        if admin_group.get("sub_user_id"):
+            with JOB_DB_LOCK:
+                conn = get_job_db_connection()
+                try:
+                    conn.execute(
+                        "UPDATE ad_material_task SET initiator_sub_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
+                        (admin_group["sub_user_id"], task["task_id"]),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            task["initiator_sub_user_id"] = admin_group["sub_user_id"]
+    if not task.get("initiator_sub_user_id"):
+        raise StructuredApiError("initiator_missing", "无法通过邮箱定位发起人 sub_user_id")
+    body = {
+        "app_id": int(task["app_id"]),
+        "country": task["country"],
+        "language": task["language"],
+        "content_sign": asset["asset_id"],
+        "url": asset["url"],
+        "name": asset["name"] or asset["asset_id"],
+        "user_id": AD_MATERIAL_FINAL_USER_ID,
+        "initiator": int(task["initiator_sub_user_id"]),
+        "category": task.get("category", ""),
+        "tag_name": task.get("tag_name", ""),
+        "title": task.get("title", ""),
+        "body": task.get("body", ""),
+        "remark": "",
+    }
+    response = requests.post(
+        AD_MATERIAL_SOURCE_API_URL,
+        headers={
+            "Authorization": "Bearer %s" % AD_MATERIAL_SOURCE_API_TOKEN,
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=AD_MATERIAL_SOURCE_API_TIMEOUT,
+    )
+    if response.status_code == 403:
+        raise StructuredApiError("source_api_forbidden", "最终素材上报认证失败")
+    data = response.json()
+    code = data.get("code")
+    if code not in (None, 0, "0", "success") and not data.get("success"):
+        raise StructuredApiError("source_api_failed", str(data.get("message") or data.get("error") or data))
+    source_id = ""
+    if isinstance(data.get("data"), dict):
+        source_id = str(data["data"].get("id") or "")
+    return source_id or str(data.get("id") or "")
+
+
+def complete_ad_material_upload(task_id, session):
+    task = fetch_ad_material_task(task_id)
+    ensure_ad_material_access(session, task)
+    assets = fetch_ad_material_assets(task_id)
+    if not assets:
+        raise StructuredApiError("no_assets", "没有可上报素材")
+    not_ready = [item for item in assets if item.get("status") not in ("approved", "uploaded", "abandoned")]
+    if not_ready:
+        raise StructuredApiError("asset_not_approved", "所有待上传素材审核通过后才能上报")
+    uploadable_assets = [item for item in assets if item.get("status") in ("approved", "uploaded")]
+    if not uploadable_assets:
+        raise StructuredApiError("no_uploadable_assets", "没有可上传至素材库的素材")
+    errors = []
+    for asset in uploadable_assets:
+        if asset.get("status") == "uploaded" and asset.get("source_api_id"):
+            continue
+        try:
+            source_id = post_ad_material_source(task, asset)
+            with JOB_DB_LOCK:
+                conn = get_job_db_connection()
+                try:
+                    conn.execute(
+                        "UPDATE ad_material_asset SET status='uploaded', source_api_id=?, source_api_error='', updated_at=CURRENT_TIMESTAMP WHERE asset_id=?",
+                        (source_id, asset["asset_id"]),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception as exc:
+            errors.append({"asset_id": asset["asset_id"], "error": str(exc)})
+            with JOB_DB_LOCK:
+                conn = get_job_db_connection()
+                try:
+                    conn.execute(
+                        "UPDATE ad_material_asset SET status='upload_failed', source_api_error=?, updated_at=CURRENT_TIMESTAMP WHERE asset_id=?",
+                        (str(exc), asset["asset_id"]),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+    if errors:
+        update_ad_material_task_status(task_id, "material_review", error_message=json.dumps(errors, ensure_ascii=False))
+        raise StructuredApiError("source_upload_failed", "部分素材上报失败", errors=errors)
+    update_ad_material_task_status(task_id, "done", error_message="")
+    return fetch_ad_material_task(task_id)
+
+
+def parse_ad_material_task_route(path):
+    match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})(?:/([a-z-]+))?$", path)
+    if match:
+        return match.group(1), match.group(2) or ""
+    match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})/assets/([^/]+)/review$", path)
+    if match:
+        return match.group(1), "asset-review:%s" % match.group(2)
+    return "", ""
 
 
 def list_products(force=False):
@@ -43065,7 +45360,9 @@ def load_session(session_token):
 
 
 
-                       COALESCE(u.permissions_json, '{}') AS permissions_json
+                       COALESCE(u.permissions_json, '{}') AS permissions_json,
+
+                       COALESCE(u.email, '') AS email
 
 
 
@@ -43802,6 +46099,8 @@ def load_session(session_token):
 
 
         "permissions": normalize_user_permissions(row[11] if len(row) > 11 else {}, row[10] or "user"),
+
+        "email": row[12] if len(row) > 12 else "",
 
 
 
@@ -54291,7 +56590,7 @@ def validate_content_request(app_id, content_id, episode_start, episode_end):
 
 
 
-        "cover_source_url": sample["cover_url"] or episodes[0]["cover_url"],
+        "cover_source_url": normalize_cover_source_url(sample["cover_url"] or episodes[0]["cover_url"]),
 
 
 
@@ -54493,7 +56792,7 @@ def validate_screenshot_request(app_id, content_id):
 
     for episode in episodes:
 
-        cover_source_url = str(episode.get("cover_url", "") or "").strip()
+        cover_source_url = normalize_cover_source_url(episode.get("cover_url", ""))
 
         if cover_source_url:
 
@@ -56641,6 +58940,74 @@ def normalize_episode(source_path, output_path):
     ])
 
 
+def normalize_concat_segment(source_path, output_path, fps="25", audio_rate="48000"):
+    ensure_dir(os.path.dirname(output_path))
+    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+    if os.path.exists(tmp_output_path):
+        os.remove(tmp_output_path)
+    try:
+        run_cmd([
+            FFMPEG, "-y", "-i", source_path,
+            "-map", "0:v:0", "-map", "0:a?",
+            "-vf", "fps=%s,format=yuv420p,setsar=1" % fps,
+            "-r", str(fps),
+            *video_encode_args(),
+            "-c:a", "aac", "-b:a", "128k", "-ar", str(audio_rate), "-ac", "2",
+            "-af", "aresample=async=1:first_pts=0",
+            "-movflags", "+faststart",
+            "-shortest",
+            tmp_output_path,
+        ])
+        if not valid_video_file(tmp_output_path):
+            raise RuntimeError("normalized concat segment is not a valid video: %s" % tmp_output_path)
+        if not valid_av_duration_alignment(tmp_output_path):
+            raise RuntimeError("normalized concat segment has audio/video duration mismatch: %s" % tmp_output_path)
+        os.replace(tmp_output_path, output_path)
+    finally:
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+
+
+def concat_segments_need_normalization(segment_paths):
+    signatures = []
+    for path in segment_paths:
+        data = probe_media_stream_info(path)
+        streams = data.get("streams") or []
+        video = next((item for item in streams if item.get("codec_type") == "video"), None)
+        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+        if not video or not audio:
+            return True
+        signatures.append((
+            video.get("codec_name") or "",
+            int(video.get("width") or 0),
+            int(video.get("height") or 0),
+            video.get("avg_frame_rate") or video.get("r_frame_rate") or "",
+            video.get("time_base") or "",
+            audio.get("codec_name") or "",
+            audio.get("sample_rate") or "",
+            int(audio.get("channels") or 0),
+            audio.get("time_base") or "",
+        ))
+    return len(set(signatures)) > 1
+
+
+def prepare_concat_segments(segment_paths, output_dir):
+    if len(segment_paths) <= 1 or not concat_segments_need_normalization(segment_paths):
+        return segment_paths
+    ensure_dir(output_dir)
+    normalized_paths = []
+    for index, source_path in enumerate(segment_paths):
+        normalized_path = os.path.join(output_dir, "%03d.mp4" % index)
+        if (
+            not file_ready(normalized_path)
+            or not valid_video_file(normalized_path)
+            or not valid_av_duration_alignment(normalized_path)
+        ):
+            normalize_concat_segment(source_path, normalized_path)
+        normalized_paths.append(normalized_path)
+    return normalized_paths
+
+
 def ffprobe_path():
     configured = os.environ.get("DRAMA_FFPROBE", "").strip()
     candidates = []
@@ -56730,6 +59097,10 @@ def render_intro(cover_path, output_path, reference_path=None):
     intro_audio_rate = timing["audio_rate"]
     if reference_path:
         logging.info("rendering intro with reference timing: fps=%s audio_rate=%s source=%s", intro_fps, intro_audio_rate, reference_path)
+    ensure_dir(os.path.dirname(output_path))
+    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
+    if os.path.exists(tmp_output_path):
+        os.remove(tmp_output_path)
 
 
 
@@ -56953,7 +59324,7 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
 
-        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", output_path,
+        "-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k", "-ar", intro_audio_rate, "-ac", "2", "-shortest", tmp_output_path,
 
 
 
@@ -56986,6 +59357,15 @@ def render_intro(cover_path, output_path, reference_path=None):
 
 
     ])
+    try:
+        if not valid_video_file(tmp_output_path):
+            raise RuntimeError("intro output is not a valid video: %s" % tmp_output_path)
+        if not valid_av_duration_alignment(tmp_output_path):
+            raise RuntimeError("intro output has audio/video duration mismatch: %s" % tmp_output_path)
+        os.replace(tmp_output_path, output_path)
+    finally:
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
 
 
 
@@ -57146,6 +59526,8 @@ def concat_segments(segment_paths, output_path):
 
 
     os.close(fd)
+    ensure_dir(os.path.dirname(output_path))
+    tmp_output_path = output_path + ".tmp.%s.mp4" % os.getpid()
 
 
 
@@ -57305,7 +59687,14 @@ def concat_segments(segment_paths, output_path):
 
 
 
-        run_cmd([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c", "copy", "-movflags", "+faststart", output_path])
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+        run_cmd([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c", "copy", "-movflags", "+faststart", tmp_output_path])
+        if not valid_video_file(tmp_output_path):
+            raise RuntimeError("concat output is not a valid video: %s" % tmp_output_path)
+        if not valid_av_duration_alignment(tmp_output_path):
+            raise RuntimeError("concat output has audio/video duration mismatch: %s" % tmp_output_path)
+        os.replace(tmp_output_path, output_path)
 
 
 
@@ -57402,6 +59791,8 @@ def concat_segments(segment_paths, output_path):
 
 
             os.remove(concat_path)
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
 
 
 
@@ -58586,6 +60977,10 @@ def remux_vocals_video(input_video_path, vocals_audio_path, output_video_path):
 
 
     ], timeout=DEMUCS_TIMEOUT)
+    if not valid_video_file(output_video_path):
+        raise RuntimeError("no-BGM output is not a valid video: %s" % output_video_path)
+    if not valid_av_duration_alignment(output_video_path):
+        raise RuntimeError("no-BGM output has audio/video duration mismatch: %s" % output_video_path)
 
 
 
@@ -66882,7 +69277,8 @@ def call_gpu_video_worker(job, requested, outputs, await_cover_16x9=False):
         headers=headers,
         timeout=GPU_VIDEO_WORKER_TIMEOUT,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        raise RuntimeError("GPU video worker failed (%s): %s" % (response.status_code, response.text[:2000]))
     result = response.json()
     if result.get("error"):
         raise RuntimeError(result.get("error"))
@@ -66978,6 +69374,15 @@ def cleanup_gpu_video_job_files(job_id, workdir, public_dir):
 
 
 def handle_gpu_video_render(payload):
+    job_id = str((payload or {}).get("job_id", "") or "").strip()
+    if not job_id:
+        raise ValueError("missing job_id")
+    lock = get_named_runtime_lock(GPU_VIDEO_RENDER_LOCKS, GPU_VIDEO_RENDER_LOCKS_LOCK, job_id)
+    with lock:
+        return _handle_gpu_video_render_unlocked(payload)
+
+
+def _handle_gpu_video_render_unlocked(payload):
     if not GPU_VIDEO_WORKER_TOKEN:
         raise PermissionError("GPU_VIDEO_WORKER_TOKEN is not configured")
     job_id = str(payload.get("job_id", "") or "").strip()
@@ -66992,15 +69397,18 @@ def handle_gpu_video_render(payload):
     cover_wait_timeout = int(payload.get("cover_wait_timeout") or GPU_VIDEO_WORKER_TIMEOUT or 1800)
     render_concat = bool(outputs.get("concat_video", True) or outputs.get("no_bgm_video", True))
     render_no_bgm = bool(outputs.get("no_bgm_video", True))
+    publish_concat = bool(outputs.get("concat_video", True))
     if not render_concat:
         return {"job_id": job_id, "output_video_url": "", "output_video_no_bgm_url": ""}
 
     workdir = os.path.join(WORK_ROOT, job_id)
     download_dir = os.path.join(workdir, "downloads")
     segment_dir = os.path.join(workdir, "segments")
+    concat_segment_dir = os.path.join(workdir, "concat_segments")
     public_dir = os.path.join(PUBLIC_ROOT, job_id)
     ensure_dir(download_dir)
     ensure_dir(segment_dir)
+    ensure_dir(concat_segment_dir)
     ensure_dir(public_dir)
 
     job = {
@@ -67016,7 +69424,13 @@ def handle_gpu_video_render(payload):
         "output_video_no_bgm_url": "",
     }
     segment_paths = []
-    total_steps = (1 if (cover_16x9_url or await_cover_16x9) else 0) + max(1, len(episodes)) + 1 + (1 if render_no_bgm else 0)
+    total_steps = (
+        (1 if (cover_16x9_url or await_cover_16x9) else 0)
+        + max(1, len(episodes))
+        + 1
+        + (1 if render_no_bgm else 0)
+        + (1 if publish_concat else 0)
+    )
     completed_steps = 0
 
     if cover_16x9_url:
@@ -67067,6 +69481,7 @@ def handle_gpu_video_render(payload):
             cover_16x9_url = wait_for_gpu_cover_url(workdir, cover_wait_timeout)
         cover_path = os.path.join(download_dir, "cover_16x9.jpg")
         intro_path = os.path.join(segment_dir, "000_intro.mp4")
+        remove_invalid_video_file(intro_path, "GPU intro")
         if not file_ready(cover_path):
             download_file(cover_16x9_url, cover_path)
         if not file_ready(intro_path):
@@ -67076,6 +69491,8 @@ def handle_gpu_video_render(payload):
         completed_steps += 1
         update_render_stage(job, completed_steps, total_steps, "GPU intro rendered")
 
+    segment_paths = prepare_concat_segments(segment_paths, concat_segment_dir)
+
     output_name = "%s_%s_eps_%s_%s.mp4" % (
         job["content_id"] or "material",
         job_id[:8],
@@ -67084,32 +69501,41 @@ def handle_gpu_video_render(payload):
     )
     output_path = os.path.join(workdir, output_name)
     public_video_path = os.path.join(public_dir, "material.mp4")
-    if not file_ready(public_video_path):
-        if not file_ready(output_path):
-            concat_segments(segment_paths, output_path)
+    remove_invalid_video_file(output_path, "GPU concat workspace")
+    remove_invalid_video_file(public_video_path, "GPU concat public")
+    if not file_ready(output_path):
+        concat_segments(segment_paths, output_path)
+    if not valid_video_file(output_path):
+        raise RuntimeError("GPU concat video is invalid: %s" % output_path)
+    if publish_concat and not file_ready(public_video_path):
         shutil.copy2(output_path, public_video_path)
+    if publish_concat and not valid_video_file(public_video_path):
+        raise RuntimeError("GPU concat video is invalid: %s" % public_video_path)
     update_render_stage(job, completed_steps, total_steps, "GPU concat video ready")
 
     if render_no_bgm:
         no_bgm_output_path = os.path.join(workdir, "material_no_bgm.mp4")
         public_no_bgm_path = os.path.join(public_dir, "material_no_bgm.mp4")
+        remove_invalid_video_file(no_bgm_output_path, "GPU no-BGM workspace")
+        remove_invalid_video_file(public_no_bgm_path, "GPU no-BGM public")
         if file_ready(public_no_bgm_path):
             job["output_video_no_bgm_url"] = publish_asset(public_no_bgm_path)
         else:
-            run_no_bgm_pipeline(job, public_video_path, no_bgm_output_path, public_no_bgm_path)
+            run_no_bgm_pipeline(job, output_path, no_bgm_output_path, public_no_bgm_path)
         completed_steps += 1
         update_render_stage(job, completed_steps, total_steps, "GPU no-BGM video uploaded")
 
-    job["output_video_url"] = publish_asset(public_video_path)
-    completed_steps += 1
-    update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
+    if publish_concat:
+        job["output_video_url"] = publish_asset(public_video_path)
+        completed_steps += 1
+        update_render_stage(job, completed_steps, total_steps, "GPU concat video uploaded")
 
     result = {
         "job_id": job_id,
         "output_video_url": job.get("output_video_url", ""),
         "output_video_no_bgm_url": job.get("output_video_no_bgm_url", ""),
     }
-    if not result["output_video_url"]:
+    if publish_concat and not result["output_video_url"]:
         raise RuntimeError("GPU concat video upload did not return a URL")
     if render_no_bgm and not result["output_video_no_bgm_url"]:
         raise RuntimeError("GPU no-BGM video upload did not return a URL")
@@ -69834,7 +72260,7 @@ def process_job(job):
 
 
 
-    need_cover = outputs["cover_16x9"] or need_video_pipeline
+    need_cover = outputs["cover_16x9"] or (need_video_pipeline and not gpu_video_worker_enabled())
 
 
 
@@ -72142,7 +74568,7 @@ def process_job(job):
 
 
 
-    if need_video_pipeline and gpu_video_worker_enabled() and os.path.isfile(public_cover_path):
+    if need_video_pipeline and gpu_video_worker_enabled() and outputs["cover_16x9"] and os.path.isfile(public_cover_path):
         job["_gpu_cover_16x9_url"] = job.get("cover_16x9_url") or publish_asset(public_cover_path)
         if outputs["cover_16x9"] and not job.get("cover_16x9_url"):
             job["cover_16x9_url"] = job["_gpu_cover_16x9_url"]
@@ -72198,7 +74624,7 @@ def process_job(job):
 
 
 
-        total_render_steps = len(downloaded_episode_paths) + 2
+        total_render_steps = len(downloaded_episode_paths) + 1 + (1 if need_cover else 0)
 
 
 
@@ -72295,6 +74721,7 @@ def process_job(job):
 
 
         intro_path = os.path.join(normalized_dir, "000_intro.mp4")
+        remove_invalid_video_file(intro_path, "CPU intro")
 
 
 
@@ -76318,6 +78745,12 @@ def resume_failed_no_bgm_job(job):
 
 def run_job_async(job):
 
+    if DRAMA_JOB_USE_WORKER:
+
+        logging.info("drama job queued for external worker: %s", job.get("job_id"))
+
+        return
+
 
 
 
@@ -78093,6 +80526,13 @@ def resume_job_from_checkpoint(job):
 
 
     job["progress_detail"] = "从断点继续执行任务"
+    if selected_job_outputs_ready(job):
+        job["status"] = "done"
+        job["progress"] = 100
+        job["progress_detail"] = "全部产物已生成"
+        upsert_job_record(job)
+        notify_job_creator_on_completion(job)
+        return
 
 
 
@@ -78541,6 +80981,10 @@ def resume_job_from_checkpoint(job):
 
 
 def retry_job(job_id):
+    lock = get_named_runtime_lock(JOB_RETRY_LOCKS, JOB_RETRY_LOCKS_LOCK, job_id)
+    if not lock.acquire(blocking=False):
+        raise ValueError("任务正在重新制作，请勿重复提交")
+    try:
 
 
 
@@ -78572,7 +81016,7 @@ def retry_job(job_id):
 
 
 
-    job = fetch_job_row(job_id)
+        job = fetch_job_row(job_id)
 
 
 
@@ -78604,7 +81048,7 @@ def retry_job(job_id):
 
 
 
-    if not job:
+        if not job:
 
 
 
@@ -78636,7 +81080,7 @@ def retry_job(job_id):
 
 
 
-        raise ValueError("任务不存在")
+            raise ValueError("任务不存在")
 
 
 
@@ -78668,7 +81112,7 @@ def retry_job(job_id):
 
 
 
-    if job.get("status") == "done":
+        if job.get("status") == "done":
 
 
 
@@ -78700,7 +81144,7 @@ def retry_job(job_id):
 
 
 
-        raise ValueError("任务已完成，无需重新制作")
+            raise ValueError("任务已完成，无需重新制作")
 
 
 
@@ -78732,7 +81176,11 @@ def retry_job(job_id):
 
 
 
-    resume_job_from_checkpoint(job)
+        if job.get("status") != "failed":
+            raise ValueError("任务正在处理中，无需重复提交")
+        resume_job_from_checkpoint(job)
+    finally:
+        lock.release()
 
 
 
@@ -80364,6 +82812,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+
+                "email": session.get("email", ""),
 
                 "is_admin": session.get("role", "user") == "admin",
 
@@ -82183,6 +84633,60 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 200, {"items": load_navigation_config()})
             except Exception as exc:
                 json_response(self, 500, {"error": str(exc)})
+            return
+
+        if parsed.path == "/api/ad-material/competitor-sources":
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                include_disabled = (parse_qs(parsed.query).get("include_disabled") or [""])[0] in ("1", "true", "yes")
+                json_response(self, 200, {"items": list_ad_material_competitor_sources(include_disabled=include_disabled)})
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-material/products":
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                product_params = parse_qs(parsed.query)
+                product_query = (product_params.get("q") or [""])[0]
+                product_limit = (product_params.get("limit") or ["80"])[0]
+                json_response(
+                    self,
+                    200,
+                    list_ad_material_products(
+                        self._session(),
+                        query=product_query,
+                        limit=product_limit,
+                        with_total=True,
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-material/tasks":
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                json_response(self, 200, list_ad_material_tasks(self._session(), parse_qs(parsed.query)))
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
+        if ad_task_id and not ad_action:
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                task = fetch_ad_material_task(ad_task_id)
+                ensure_ad_material_access(self._session(), task)
+                json_response(self, 200, task)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
             return
 
         if parsed.path == "/api/auth/feishu/login":
@@ -84694,6 +87198,55 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/ad-material/tasks":
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                payload = create_ad_material_task(self._read_json(), self._session())
+                append_audit_log(self._session(), "create_ad_material_task", "ad_material_task", payload.get("task_id", ""), payload)
+                json_response(self, 201, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
+        if ad_task_id:
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                body = self._read_json()
+                if ad_action == "":
+                    payload = update_ad_material_task(ad_task_id, body, self._session())
+                    audit_action = "update_ad_material_task"
+                elif ad_action == "copy":
+                    payload = copy_ad_material_task(ad_task_id, self._session())
+                    audit_action = "copy_ad_material_task"
+                elif ad_action == "publish":
+                    payload = publish_ad_material_task(ad_task_id, self._session())
+                    audit_action = "publish_ad_material_task"
+                elif ad_action == "demand-review":
+                    payload = review_ad_material_demand(ad_task_id, body, self._session())
+                    audit_action = "review_ad_material_demand"
+                elif ad_action == "export-pdf":
+                    payload = export_ad_material_demand_pdf(ad_task_id, self._session())
+                    audit_action = "export_ad_material_demand_pdf"
+                elif ad_action == "complete-upload":
+                    payload = complete_ad_material_upload(ad_task_id, self._session())
+                    audit_action = "complete_ad_material_upload"
+                elif ad_action.startswith("asset-review:"):
+                    payload = review_ad_material_asset(ad_task_id, ad_action.split(":", 1)[1], body, self._session())
+                    audit_action = "review_ad_material_asset"
+                else:
+                    json_response(self, 404, {"error": "not_found"})
+                    return
+                append_audit_log(self._session(), audit_action, "ad_material_task", ad_task_id, {"status": payload.get("status", "")})
+                json_response(self, 202 if audit_action.startswith(("publish", "review")) else 200, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/drama-screenshot-material/jobs/delete-batch":
             if not self._require_cookie_module("cover_synthesis"):
                 return
@@ -84871,6 +87424,19 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
+        if ad_task_id and not ad_action:
+            if not self._require_module("ad_material_tasks"):
+                return
+            try:
+                result = delete_ad_material_task(ad_task_id, self._session())
+                append_audit_log(self._session(), "delete_ad_material_task", "ad_material_task", ad_task_id, {})
+                json_response(self, 200, result)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
 
         screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
         if screenshot_job_id and not screenshot_action:
@@ -85396,6 +87962,10 @@ def main():
 
     ensure_dir(SCREENSHOT_PUBLIC_ROOT)
 
+    ensure_dir(AD_MATERIAL_WORK_ROOT)
+
+    ensure_dir(AD_MATERIAL_PUBLIC_ROOT)
+
 
 
 
@@ -85427,6 +87997,8 @@ def main():
     ensure_job_table()
 
     ensure_screenshot_job_table()
+
+    ensure_ad_material_tables()
 
 
 

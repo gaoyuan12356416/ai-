@@ -1493,11 +1493,11 @@ const els = {
     }
 
     function actualDurationStart(job) {
-      return parseServerTime(job.active_started_at || job.processing_started_at || job.started_at || job.created_at);
+      return parseServerTime(job.active_started_at || job.processing_started_at || job.started_at);
     }
 
     function actualDurationEnd(job) {
-      return parseServerTime(job.active_finished_at || job.processing_finished_at || job.finished_at || job.updated_at);
+      return parseServerTime(job.active_finished_at || job.processing_finished_at || job.finished_at);
     }
 
     function jobDurationText(job) {
