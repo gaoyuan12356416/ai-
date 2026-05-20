@@ -1230,7 +1230,10 @@ AD_MATERIAL_SOURCE_API_URL = os.environ.get(
 ).strip()
 AD_MATERIAL_SOURCE_API_TOKEN = os.environ.get("AD_MATERIAL_SOURCE_API_TOKEN", "").strip()
 AD_MATERIAL_SOURCE_API_TIMEOUT = int(os.environ.get("AD_MATERIAL_SOURCE_API_TIMEOUT", "30"))
-AD_MATERIAL_REQUIREMENT_COMMAND = os.environ.get("AD_MATERIAL_REQUIREMENT_COMMAND", "").strip()
+AD_MATERIAL_REQUIREMENT_COMMAND = os.environ.get(
+    "AD_MATERIAL_REQUIREMENT_COMMAND",
+    "/usr/bin/python3 /root/drama_material_service/scripts/ad_material_requirement_runner.py",
+).strip()
 AD_MATERIAL_GENERATION_COMMAND = os.environ.get("AD_MATERIAL_GENERATION_COMMAND", "").strip()
 AD_MATERIAL_COMMAND_TIMEOUT = int(os.environ.get("AD_MATERIAL_COMMAND_TIMEOUT", "1800"))
 AD_MATERIAL_FINAL_USER_ID = int(os.environ.get("AD_MATERIAL_FINAL_USER_ID", "248"))
@@ -33651,7 +33654,10 @@ def render_ad_material_demand_pdf(task, demand_text, artifacts=None):
 
 
 def ensure_ad_material_demand_pdf(task, demand_text=None, artifacts=None):
-    artifacts = dict(artifacts or task.get("demand_artifacts") or {})
+    if artifacts is None:
+        artifacts = dict(task.get("demand_artifacts") or {})
+    else:
+        artifacts = dict(artifacts or {})
     if artifacts.get("pdf_url"):
         return artifacts
     pdf_artifacts = render_ad_material_demand_pdf(task, demand_text if demand_text is not None else task.get("demand_text", ""), artifacts)
