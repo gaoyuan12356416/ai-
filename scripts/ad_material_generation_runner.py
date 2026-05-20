@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -89,6 +90,63 @@ def clean_generation_reason(value):
     return "" if is_noise_line(text) else text
 
 
+def compact_text(value, limit=220):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if limit and len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def extract_product_fact_lines(demand_text, limit=10):
+    wanted_terms = (
+        "额度", "金额", "期限", "周期", "利息", "费率", "费用", "还款", "申请条件", "资质", "合规",
+        "OJK", "AFPI", "KTP", "WNI", "IDR", "Rp", "MXN", "USD", "%", "tenor", "limit", "pinjaman",
+        "bunga", "biaya",
+    )
+    lines = []
+    seen = set()
+    for raw in str(demand_text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith("- "):
+            continue
+        if "<img" in line.lower() or "http://" in line.lower() or "https://" in line.lower():
+            continue
+        if any(term.lower() in line.lower() for term in wanted_terms):
+            clean = compact_text(line.lstrip("- ").strip(), 260)
+            key = clean.lower()
+            if clean and key not in seen:
+                lines.append(clean)
+                seen.add(key)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def build_generation_copy_guard(task, demand_text):
+    product = str(task.get("product_name") or task.get("app_id") or "当前产品").strip()
+    language = str(task.get("language") or "目标语言").strip()
+    country = str(task.get("country") or "目标市场").strip()
+    fact_lines = extract_product_fact_lines(demand_text)
+    lines = [
+        "",
+        "## 生图文案硬约束",
+        "",
+        "- 图片可见文案必须与 %s 产品直接相关，面向 %s / %s；禁止生成含义不明、和产品参数无关的泛口号。" % (product, country, language),
+        "- 主标题、副文案、CTA、小字必须使用 %s 语言；不得混用其他语言、乱码或参考图里的竞品原文。" % (language or "目标语言"),
+        "- 每张图必须出现当前产品名或当前产品 Logo，并至少承接 1 个需求中的产品事实、申请流程或费用透明场景。" ,
+        "- 不得编造未在需求中出现的额度、期限、费率、到账速度、通过率、免审、免息、固定月供或合规背书。",
+    ]
+    if fact_lines:
+        lines.append("- 可用产品事实/参数如下，图片文字优先从这里取：")
+        for item in fact_lines[:8]:
+            lines.append("  - %s" % item)
+    else:
+        lines.append("- 当前需求未提供可验证产品参数时，只能用“在应用内查看额度、期限和费用”等保守表达，不得写具体数字。")
+    if language.lower().startswith("id"):
+        lines.append("- 印尼语广告文案优先使用 `Pinjaman online`、`Limit`、`Tenor`、`Biaya/Bunga transparan`、`Ajukan Sekarang` 这类与贷款产品直接相关的表达；避免只写 `Pembayaran lebih jelas` 等弱相关文案。")
+    return "\n".join(lines)
+
+
 def read_payload():
     payload_path = os.environ.get("AD_MATERIAL_TASK_PAYLOAD")
     if not payload_path:
@@ -136,13 +194,15 @@ def main():
         raise RuntimeError("task_id is required")
 
     demand_text = clean_material_demand_text(task.get("demand_text") or "")
+    guarded_demand_text = clean_material_demand_text(demand_text.rstrip() + "\n" + build_generation_copy_guard(task, demand_text))
     safe_task = dict(task)
-    safe_task["demand_text"] = demand_text
+    safe_task["demand_text"] = guarded_demand_text
     request_payload = {
         "task": safe_task,
         "indexes": extra.get("indexes") or [],
         "reason": clean_generation_reason(extra.get("reason") or task.get("review_reason") or ""),
-        "demand_text": demand_text,
+        "demand_text": guarded_demand_text,
+        "copy_guard": build_generation_copy_guard(task, demand_text),
     }
     result = post_json(service_url, request_payload, timeout)
     if not result.get("ok", True):

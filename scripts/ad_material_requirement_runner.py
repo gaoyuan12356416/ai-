@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import html
 import importlib.util
 import os
 import re
@@ -230,6 +231,376 @@ def compact_text(value, limit=180):
     return text
 
 
+def compact_store_value(value, limit=600):
+    text = "" if value is None else str(value)
+    text = text.replace("\\u003d", "=").replace("\\u0026", "&").replace("\\n", " ").replace("\\/", "/")
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if limit and len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def unique_values(values, limit=8):
+    out = []
+    seen = set()
+    for value in values or []:
+        text = compact_store_value(value, limit=420)
+        key = text.lower()
+        if text and key not in seen:
+            out.append(text)
+            seen.add(key)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def sentence_hits(text, patterns, limit=6):
+    chunks = re.split(r"[。.!?；;]\s*|\n+", str(text or ""))
+    hits = []
+    for chunk in chunks:
+        clean = compact_store_value(chunk, limit=420)
+        if not clean:
+            continue
+        if any(re.search(pattern, clean, flags=re.I) for pattern in patterns):
+            hits.append(clean)
+        if len(hits) >= limit:
+            break
+    return unique_values(hits, limit=limit)
+
+
+def extract_store_financial_facts(text):
+    clean = compact_store_value(text, limit=7000)
+    direct_amounts = []
+    for pattern in [
+        r"(?:Variasi\s+jumlah\s+pinjaman\s+uang|jumlah\s+pinjaman|limit|plafon|monto|amount)[^:：]{0,30}[:：]\s*((?:IDR|Rp\.?|MXN|USD|\$|₱|₹)\s?[\d.,]+(?:\s*[-–]\s*(?:IDR|Rp\.?|MXN|USD|\$|₱|₹)?\s?[\d.,]+)?)",
+        r"((?:IDR|Rp\.?|MXN|USD|\$|₱|₹)\s?[\d.,]+\s*[-–]\s*(?:IDR|Rp\.?|MXN|USD|\$|₱|₹)?\s?[\d.,]+)",
+    ]:
+        for match in re.finditer(pattern, clean, flags=re.I):
+            direct_amounts.append(match.group(1))
+    money = unique_values(
+        direct_amounts + re.findall(
+            r"(?:hingga|sampai|mulai|limit|plafon|jumlah|pinjaman|amount|monto|cr[eé]dito|pr[eé]stamo|loan)?[^。.!?;\n]{0,50}(?:Rp\.?|IDR|RM|MXN|USD|COP|BRL|PHP|INR|\$|₱|₹)\s?[\d.,]+(?:\s*[-–]\s*(?:Rp\.?|IDR|RM|MXN|USD|COP|BRL|PHP|INR|\$|₱|₹)?\s?[\d.,]+)?[^。.!?;\n]{0,30}",
+            clean,
+            flags=re.I,
+        ),
+        limit=8,
+    )
+    direct_terms = []
+    for pattern in [
+        r"(?:Variasi\s+tenor\s+pinjaman\s+uang|tenor|jangka\s+waktu|plazo|term|period)[^:：]{0,30}[:：]?\s*(\d+\s*[-–]\s*\d+\s*(?:hari|bulan|minggu|tahun|d[ií]as|days|months|weeks))",
+    ]:
+        for match in re.finditer(pattern, clean, flags=re.I):
+            direct_terms.append(match.group(1))
+    terms = unique_values(
+        direct_terms + sentence_hits(
+            clean,
+            [
+                r"\b\d+\s*(?:a|-|to|sampai|hingga)\s*\d+\s*(?:hari|bulan|minggu|tahun|d[ií]as|days|meses|months|weeks)\b",
+                r"\b\d+\s*(?:hari|bulan|minggu|tahun|d[ií]as|days|meses|months|weeks)\b",
+                r"\b(?:tenor|jangka waktu|periode|plazo|term|period|cuotas?)\b",
+            ],
+            limit=8,
+        ),
+        limit=8,
+    )
+    direct_rates = []
+    for pattern in [
+        r"(?:Bunga\s+rendah\s*\(maksimum\)|bunga[^:：]{0,40}maksimum|suku\s+bunga|interest|rate|fee)[^:：]{0,40}[:：]\s*(\d+(?:[.,]\d+)?\s?%\s*(?:per\s*tahun|pertahun|per\s*bulan|bulanan|monthly|annual|APR|CAT)?)",
+        r"(\d+(?:[.,]\d+)?\s?%\s*(?:per\s*tahun|pertahun|per\s*bulan|bulanan|monthly|annual|APR|CAT))",
+    ]:
+        for match in re.finditer(pattern, clean, flags=re.I):
+            direct_rates.append(match.group(1))
+    rates = unique_values(
+        direct_rates + sentence_hits(
+            clean,
+            [
+                r"\b(?:bunga|suku bunga|biaya|admin|layanan|interest|rate|fee|CAT|APR|TEA|TCEA|tasa|inter[eé]s|comisi[oó]n|commission)\b[^。.!?;]{0,120}\d+(?:[.,]\d+)?\s?%",
+                r"\d+(?:[.,]\d+)?\s?%[^。.!?;]{0,120}\b(?:bunga|suku bunga|biaya|admin|layanan|interest|rate|fee|CAT|APR|TEA|TCEA|tasa|inter[eé]s|comisi[oó]n|commission)\b",
+            ],
+            limit=8,
+        ),
+        limit=8,
+    )
+    repayment = sentence_hits(
+        clean,
+        [
+            r"\b(?:angsuran|cicilan|pembayaran|bayar|pelunasan|tagihan|repayment|payment|pago|cuota|installment)\b",
+        ],
+        limit=6,
+    )
+    requirements = sentence_hits(
+        clean,
+        [
+            r"\b(?:syarat|persyaratan|KTP|WNI|usia|umur|rekening bank|rekening|bank account|income|pendapatan|requisito|requirements?|INE|CURP|RFC|edad|age|identificaci[oó]n)\b",
+        ],
+        limit=6,
+    )
+    compliance = sentence_hits(
+        clean,
+        [
+            r"\b(?:OJK|AFPI|berizin|terdaftar|diawasi|otoritas jasa keuangan|privacy|keamanan|regulated|supervised|authorized|license|licence)\b",
+        ],
+        limit=6,
+    )
+    finance_keywords = [
+        "pinjaman", "kredit", "dana", "uang", "tunai", "tenor", "cicilan", "angsuran",
+        "prestamo", "préstamo", "credito", "crédito", "loan", "cash", "finanzas",
+        "plazo", "tasa", "interés", "interest", "repayment", "pago", "cat", "apr",
+    ]
+    return {
+        "is_financial_product": any(keyword in clean.lower() for keyword in finance_keywords) or bool(money or rates or terms),
+        "amount_or_limit_claims": money,
+        "term_or_period_claims": terms,
+        "interest_fee_or_rate_claims": rates,
+        "repayment_claims": repayment,
+        "eligibility_or_requirement_claims": requirements,
+        "trust_or_compliance_claims": compliance,
+        "usage_rule": "Only use facts explicitly present in the store text. Do not invent limits, periods, interest, fees, approval speed, or eligibility.",
+    }
+
+
+def merge_store_facts(primary, secondary):
+    primary = primary if isinstance(primary, dict) else {}
+    secondary = secondary if isinstance(secondary, dict) else {}
+    keys = [
+        "amount_or_limit_claims",
+        "term_or_period_claims",
+        "interest_fee_or_rate_claims",
+        "repayment_claims",
+        "eligibility_or_requirement_claims",
+        "trust_or_compliance_claims",
+    ]
+    merged = dict(primary)
+    for key in keys:
+        merged[key] = unique_values(list(primary.get(key) or []) + list(secondary.get(key) or []), limit=8)
+    merged["is_financial_product"] = bool(primary.get("is_financial_product") or secondary.get("is_financial_product"))
+    merged["usage_rule"] = primary.get("usage_rule") or secondary.get("usage_rule") or "Only use explicitly provided product facts."
+    return merged
+
+
+def empty_store_profile(task, status="missing_store_url", note=""):
+    notes = [note] if note else []
+    return {
+        "source": "app_store",
+        "store_url": str(task.get("store_url") or "").strip(),
+        "package": str(task.get("package_name") or task.get("package") or "").strip(),
+        "status": status,
+        "title": "",
+        "developer": "",
+        "description_excerpt": "",
+        "icon_url": str(task.get("product_icon_url") or "").strip(),
+        "image_urls": [],
+        "financial_facts": extract_store_financial_facts(""),
+        "notes": notes,
+    }
+
+
+def normalize_store_profile(profile, task):
+    profile = dict(profile or empty_store_profile(task))
+    profile["store_url"] = str(profile.get("store_url") or task.get("store_url") or "").strip()
+    profile["package"] = str(profile.get("package") or task.get("package_name") or task.get("package") or "").strip()
+    profile["title"] = compact_store_value(profile.get("title"), limit=240)
+    profile["developer"] = compact_store_value(profile.get("developer"), limit=180)
+    profile["description_excerpt"] = compact_store_value(profile.get("description_excerpt"), limit=3000)
+    profile["icon_url"] = str(profile.get("icon_url") or task.get("product_icon_url") or "").strip()
+    helper_facts = profile.get("financial_facts") if isinstance(profile.get("financial_facts"), dict) else {}
+    local_facts = extract_store_financial_facts(profile.get("description_excerpt") or "")
+    profile["financial_facts"] = merge_store_facts(local_facts, helper_facts)
+    if not isinstance(profile.get("notes"), list):
+        profile["notes"] = [str(profile.get("notes"))] if profile.get("notes") else []
+    return profile
+
+
+def fetch_store_profile(task):
+    store_url = str(task.get("store_url") or "").strip()
+    if not store_url:
+        return empty_store_profile(task)
+    app_info = {
+        "store_url": store_url,
+        "package": str(task.get("package_name") or task.get("package") or "").strip(),
+        "package_name": str(task.get("package_name") or task.get("package") or "").strip(),
+    }
+    try:
+        module = load_skill_module("guangdada")
+        fetcher = getattr(module, "fetch_store_product_profile", None)
+        if callable(fetcher):
+            return normalize_store_profile(fetcher(app_info), task)
+    except Exception as exc:
+        fallback = empty_store_profile(task, status="fetch_failed", note=str(exc)[:180])
+        return fallback
+    return empty_store_profile(task, status="fetcher_missing")
+
+
+def store_fact_values(store_profile, key, limit=4):
+    facts = (store_profile or {}).get("financial_facts") or {}
+    values = []
+    for item in facts.get(key) or []:
+        text = compact_text(item, 180)
+        if not text:
+            continue
+        lower = text.lower()
+        if any(token in text for token in ("◉", "👉")) and key in {"amount_or_limit_claims", "term_or_period_claims", "interest_fee_or_rate_claims"}:
+            continue
+        if key in {"amount_or_limit_claims", "term_or_period_claims", "interest_fee_or_rate_claims"} and len(text) > 140:
+            continue
+        if key in {"amount_or_limit_claims", "interest_fee_or_rate_claims", "repayment_claims"} and re.match(r"^\d{2,}\b", text):
+            continue
+        if key == "amount_or_limit_claims" and not re.search(r"(?:IDR|Rp\.?|MXN|USD|\$|₱|₹)\s?[\d.,]+", text, flags=re.I):
+            continue
+        if key == "amount_or_limit_claims" and any(token in lower for token in ("contoh", "bunga", "suku bunga", "%")):
+            continue
+        if key == "term_or_period_claims" and not re.search(r"\d+[\s\-–]*(?:a|to|sampai|hingga)?\s*\d*\s*(?:hari|bulan|minggu|tahun|d[ií]as|days|months|weeks)|tenor|jangka waktu|plazo|term", text, flags=re.I):
+            continue
+        if key == "term_or_period_claims" and any(token in lower for token in ("rp", "idr", "%", "wni", "ktp", "bunga")):
+            continue
+        if key == "interest_fee_or_rate_claims" and "%" not in text:
+            continue
+        if key == "interest_fee_or_rate_claims" and any(token in lower for token in ("rp", "idr", "contoh", "tenor")):
+            continue
+        if key == "repayment_claims" and (len(text) > 140 or "online loan" in lower or "pinjaman uang tunai" in lower):
+            continue
+        if key == "eligibility_or_requirement_claims" and text.startswith("200 Syarat"):
+            continue
+        if text not in values:
+            values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def store_fact_summary(store_profile):
+    parts = []
+    for label, key in [
+        ("额度/金额", "amount_or_limit_claims"),
+        ("期限/周期", "term_or_period_claims"),
+        ("利息/费用", "interest_fee_or_rate_claims"),
+        ("申请条件", "eligibility_or_requirement_claims"),
+        ("合规/可信", "trust_or_compliance_claims"),
+    ]:
+        values = store_fact_values(store_profile, key, limit=3)
+        if values:
+            parts.append("%s：%s" % (label, "；".join(values)))
+    return "；".join(parts)
+
+
+def product_basic_info_lines(task, store_profile=None):
+    store_profile = normalize_store_profile(store_profile, task) if store_profile else empty_store_profile(task)
+    lines = []
+    store_url = str(task.get("store_url") or store_profile.get("store_url") or "").strip()
+    package_name = str(task.get("package_name") or store_profile.get("package") or "").strip()
+    product_icon_url = str(task.get("product_icon_url") or store_profile.get("icon_url") or "").strip()
+    if store_url:
+        lines.append("- 商店链接：%s" % store_url)
+    if package_name:
+        lines.append("- 包名：%s" % package_name)
+    if store_profile.get("title"):
+        lines.append("- 商店标题：%s" % store_profile.get("title"))
+    if store_profile.get("developer"):
+        lines.append("- 开发者：%s" % store_profile.get("developer"))
+    if product_icon_url:
+        lines.append("- 产品图标：%s" % product_icon_url)
+        lines.append("")
+        lines.append('<img src="%s" width="96">' % product_icon_url)
+    facts = store_profile.get("financial_facts") or {}
+    for label, key in [
+        ("额度/金额", "amount_or_limit_claims"),
+        ("期限/周期", "term_or_period_claims"),
+        ("利息/费用", "interest_fee_or_rate_claims"),
+        ("还款/费用透明", "repayment_claims"),
+        ("申请条件/资质", "eligibility_or_requirement_claims"),
+        ("合规/可信", "trust_or_compliance_claims"),
+    ]:
+        values = store_fact_values(store_profile, key, limit=4)
+        if values:
+            lines.append("- %s：%s" % (label, "；".join(values)))
+    if facts.get("is_financial_product"):
+        lines.append("- 产品事实使用规则：图片文案只能使用上面商店描述明示的额度、期限、费率、还款、申请条件和合规事实；不得编造秒批、必过、固定到账、固定月供或未验证金额。")
+    elif store_url:
+        lines.append("- 产品事实使用规则：商店描述未提取到明确金融参数时，不得在图片中编造额度、利率、期限、审批速度或资质。")
+    return [line for line in lines if line is not None]
+
+
+def product_copy_constraint_lines(task, store_profile=None):
+    product = str(task.get("product_name") or task.get("app_id") or "当前产品").strip()
+    language = str(task.get("language") or "目标语言").strip()
+    summary = store_fact_summary(store_profile or {})
+    lines = [
+        "",
+        "## 产品文案事实约束",
+        "",
+        "- 图片中的主标题、副文案、按钮和小字必须服务于 %s 的产品卖点；不得只写含义泛泛或与贷款弱相关的口号。" % product,
+        "- 文案语言使用 %s；若画面包含具体金额、期限、费率、资质或申请条件，必须来自“产品基础信息”中的商店明示事实。" % (language or "目标语言"),
+    ]
+    if summary:
+        lines.append("- 可用产品参数：%s" % summary)
+        lines.append("- 每张图至少绑定 1 个可用产品参数或明确的申请/费用透明场景，例如额度、期限、费率、申请条件、费用明细或合规资质。")
+    else:
+        lines.append("- 当前没有可验证产品参数时，禁止写具体额度、期限、费率和到账承诺；只能用“在应用内查看额度/期限/费用”等保守表达。")
+    if language.lower().startswith("id"):
+        lines.append("- 印尼语文案方向优先围绕 `pinjaman online`、`limit`、`tenor`、`biaya/bunga`、`Ajukan Sekarang`；避免只写 `Pembayaran lebih jelas` 这类不说明贷款产品参数的泛文案。")
+    lines.append("- 生成图片时禁止出现乱码、混合语言、无意义短语、与产品无关的生活口号，禁止把参考图中的竞品文案直接搬到当前产品。")
+    return lines
+
+
+def build_analysis_map(refs, analysis_items, fallback_prefix):
+    mapping = {}
+    refs = refs or []
+    for index, item in enumerate(analysis_items or [], 1):
+        if not isinstance(item, dict):
+            continue
+        keys = []
+        raw_id = str(item.get("id") or "").strip()
+        if raw_id:
+            keys.append(raw_id)
+            lower = raw_id.lower()
+            match = re.search(r"(\d+)$", lower)
+            if match:
+                number = int(match.group(1))
+                keys.append("%s_%02d" % (fallback_prefix, number))
+                keys.append("%s_%d" % (fallback_prefix, number))
+                if number <= len(refs):
+                    code = str(refs[number - 1].get("code") or "").strip()
+                    if code:
+                        keys.append(code)
+        if index <= len(refs):
+            code = str(refs[index - 1].get("code") or "").strip()
+            if code:
+                keys.append(code)
+        keys.append("%s_%02d" % (fallback_prefix, index))
+        for key in keys:
+            if key and key not in mapping:
+                mapping[key] = item
+    return mapping
+
+
+def reference_style_fields(analysis):
+    if not isinstance(analysis, dict) or not analysis:
+        return "", "", ""
+    layout = compact_text(analysis.get("layout"), 260)
+    colors = compact_text(analysis.get("colors"), 220)
+    elements = compact_text(analysis.get("visual_elements"), 260)
+    transfer = compact_text(analysis.get("transferable_points"), 260)
+    main_text = compact_text(analysis.get("main_text"), 220)
+    angle_parts = []
+    if layout:
+        angle_parts.append("构图骨架：" + layout)
+    if elements:
+        angle_parts.append("视觉元素：" + elements)
+    focus_parts = []
+    if transfer:
+        focus_parts.append("可迁移点：" + transfer)
+    if main_text:
+        focus_parts.append("原图信息层级：" + main_text)
+    visual_parts = []
+    if colors:
+        visual_parts.append("色彩节奏：" + colors)
+    if elements:
+        visual_parts.append("主体/装饰：" + elements)
+    return "；".join(angle_parts), "；".join(focus_parts), "；".join(visual_parts)
+
+
 NOISE_SECTION_TITLES = (
     "data basis",
     "competitor ranking",
@@ -364,7 +735,7 @@ def analyze_reference_images(refs):
     return []
 
 
-def build_local_reference_demand(task, size_plan, revision_instruction="", reference_analysis=None):
+def build_local_reference_demand(task, size_plan, revision_instruction="", reference_analysis=None, store_profile=None):
     product = str(task.get("product_name") or task.get("app_id") or "未命名产品").strip()
     task_id = str(task.get("task_id") or "").strip()
     country = str(task.get("country") or "").strip()
@@ -373,12 +744,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
     kind = task_kind(task)
     refs = reference_items(task)
     analysis_items = reference_analysis or []
-    analysis_by_code = {}
-    for index, item in enumerate(analysis_items, 1):
-        key = str(item.get("id") or "").strip()
-        if not key or key.lower().startswith("image #"):
-            key = "REF_%02d" % index
-        analysis_by_code[key] = item
+    analysis_by_code = build_analysis_map(refs, analysis_items, "REF")
     slots = output_slots(size_plan)
     quantity = len(slots) or max(1, int(task.get("quantity") or 1))
     size_summary = ", ".join("%s x %s" % (item.get("size"), item.get("count")) for item in size_plan) or str(task.get("size") or "")
@@ -386,8 +752,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
     body = str(task.get("body") or "").strip()
     tag_name = str(task.get("tag_name") or "").strip()
     category = str(task.get("category") or "").strip()
-    store_url = str(task.get("store_url") or "").strip()
-    product_icon_url = str(task.get("product_icon_url") or "").strip()
+    store_profile = normalize_store_profile(store_profile, task) if store_profile else empty_store_profile(task)
 
     mode_text = "参考衍生" if kind == "reference" else "素材迭代"
     lines = [
@@ -406,12 +771,11 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
             "- title：%s" % title,
             "- body：%s" % body,
         ])
-    if store_url or product_icon_url:
+    basic_lines = product_basic_info_lines(task, store_profile)
+    if basic_lines:
         lines.extend(["", "## 产品基础信息", ""])
-        if product_icon_url:
-            lines.append("- 产品图标：%s" % product_icon_url)
-            lines.append("")
-            lines.append('<img src="%s" width="96">' % product_icon_url)
+        lines.extend(basic_lines)
+    lines.extend(product_copy_constraint_lines(task, store_profile))
 
     lines.extend([
         "",
@@ -420,7 +784,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
     ])
     if refs:
         lines.extend([
-            "以下参考素材是本需求的核心输入。生成需求和后续生图必须先解析这些图的版式、色彩、主体、金额/利益点层级、CTA 位置和免责声明位置，再迁移到当前产品与目标语言。",
+            "以下参考素材是本需求的核心输入。生成需求和后续生图必须先解析这些图实际出现的版式、色彩、主体、金额/利益点层级、品牌区和免责声明位置，再迁移到当前产品与目标语言；不得用固定金融模板替代参考图。",
             "",
             "| 编号 | 上传文件 | 预览 | 需要继承 | 必须规避 |",
             "| --- | --- | --- | --- | --- |",
@@ -431,7 +795,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
             inherit = str(analysis.get("transferable_points") or "").strip()
             avoid = str(analysis.get("avoid_copying") or "").strip()
             if not inherit:
-                inherit = "构图比例、主标题层级、金额/利益点大字、卡片式信息区、CTA 按钮位置、蓝白金融视觉节奏。"
+                inherit = "参考图实际构图比例、主体位置、主标题层级、核心数字/利益点层级、品牌区和底部免责声明安全区。"
             if not avoid:
                 avoid = "不得照搬原图品牌、金额、币种、承诺、Logo、合规标识或原图中的不可验证还款数据。"
             lines.append("| %s | %s | %s | %s | %s |" % (ref["code"], ref["name"], preview, inherit, avoid))
@@ -464,7 +828,7 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
         "## 参考素材解析要求",
         "",
         "- 先看上传参考图，再写每张图的制作要求；不得用固定竞品模板替代参考图。",
-        "- 视觉上优先保留参考图的高转化结构：大标题、大金额/核心利益点、信息卡片、强 CTA、底部免责声明。",
+        "- 视觉上优先保留参考图实际出现的高转化结构；参考图没有出现的手机、金币、功能卡、滑杆、箭头、强 CTA 不要默认添加。",
         "- 内容上必须替换为当前产品、当前国家和当前语言；原参考图里的产品名、币种、金额、审批速度、还款数据不能原样继承。",
         "- 若用户描述与参考图冲突，以用户描述优先；若用户描述较短，则以参考图的可迁移版式和信息层级补足。",
         "- Logo 必须使用当前产品 Logo 或预留后置叠加位置；不得让模型重新绘制相似 Logo。",
@@ -479,23 +843,24 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
         index = int(slot["index"])
         size = slot["size"]
         dimensions = slot["dimensions"]
-        if index % 2 == 1:
-            angle = "以大标题和核心金额/利益点为第一视觉，右侧或中部放金融视觉元素，底部放信息卡与 CTA。"
-            focus = "强冲击首屏：让用户先看到需求/利益点，再看到可行动按钮。"
-        else:
-            angle = "以 App 计算器/额度卡片结构为主，中央用白色圆角卡片承载金额、周期、说明和 CTA。"
-            focus = "清晰解释型：让用户理解产品能力、申请入口和注意事项。"
+        primary_ref = refs[(index - 1) % len(refs)] if refs else None
+        primary_ref_code = primary_ref["code"] if primary_ref else ref_codes
+        primary_analysis = analysis_by_code.get(primary_ref_code, {}) if primary_ref else {}
+        style_angle, style_focus, style_visual = reference_style_fields(primary_analysis)
+        angle = style_angle or "严格以主参考素材的真实版式骨架为第一约束：先保留布局关系、主体位置和信息层级，再替换为当前产品内容。"
+        focus = style_focus or "让用户一眼看出与上传参考素材同源的风格衍生，而不是通用贷款模板。"
+        visual_rule = style_visual or "保留参考图实际存在的构图、色彩、主体位置、文字层级和免责声明安全区。"
         lines.extend([
             "### 素材 %02d" % index,
             "",
             "- 输出规格：%s（%s）" % (size, dimensions),
-            "- 主参考素材：%s" % ref_codes,
+            "- 主参考素材：%s" % primary_ref_code,
             "- 需求目标：%s" % (description or "参考上传素材做同风格迭代，生成当前产品可用的新静态图。"),
             "- 构图方向：%s" % angle,
             "- 表达重点：%s" % focus,
-            "- 画面要求：蓝白为主、信息层级清楚、金额/利益点字号最大、CTA 高对比、底部保留免责声明安全区；允许保留参考图的卡片/滑杆/图标节奏，但必须更换为当前产品内容。",
+            "- 画面要求：%s；必须替换为当前产品、当前国家和当前语言；不得额外套用参考图没有的手机、金币、功能卡、滑杆或箭头模板元素。" % visual_rule,
             "- 文案要求：使用 %s 语言；不得直接复制参考图的西语文案、MXN 币种、审批分钟数、具体还款金额或月供。" % (language or "目标市场"),
-            "- 生成提示：先复刻参考图的版式骨架和视觉节奏，再替换品牌、语言、产品事实和图标；图片中不出现竞品名、竞品 Logo 或竞品 UI。",
+            "- 生成提示：把上传参考图和上方视觉拆解作为主约束，先复刻其版式骨架、信息层级和情绪/主体关系，再替换品牌、语言、产品事实和图标；图片中不出现竞品名、竞品 Logo 或竞品 UI。",
             "- 验收标准：尺寸正确；能看出来自上传参考素材的风格衍生；没有乱码文字、没有未验证金融承诺。",
             "",
         ])
@@ -517,7 +882,8 @@ def build_and_write_local_reference_output(task, payload, size_plan, output_path
     revision_instruction = str((payload.get("extra") or {}).get("reason") or task.get("review_reason") or "").strip()
     refs = reference_items(task)
     reference_analysis = analyze_reference_images(refs)
-    demand_text = build_local_reference_demand(task, size_plan, revision_instruction, reference_analysis)
+    store_profile = fetch_store_profile(task)
+    demand_text = build_local_reference_demand(task, size_plan, revision_instruction, reference_analysis, store_profile)
     task_id = str(task.get("task_id") or os.environ.get("AD_MATERIAL_TASK_ID") or "ad_material").strip()
     markdown_path, markdown_url, evidence_path = local_reference_artifacts(task_id)
     markdown_path.write_text(demand_text, encoding="utf-8")
@@ -527,6 +893,7 @@ def build_and_write_local_reference_output(task, payload, size_plan, output_path
         "competitor_source": task.get("competitor_source") or "",
         "reference_files": refs,
         "reference_analysis": reference_analysis,
+        "store_profile": store_profile,
         "size_plan": size_plan,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -547,7 +914,7 @@ def build_and_write_local_reference_output(task, payload, size_plan, output_path
     })
 
 
-def build_local_iteration_demand(task, size_plan, internal_refs, reference_analysis=None, revision_instruction=""):
+def build_local_iteration_demand(task, size_plan, internal_refs, reference_analysis=None, revision_instruction="", store_profile=None):
     product = str(task.get("product_name") or task.get("app_id") or "未命名产品").strip()
     country = str(task.get("country") or "").strip()
     language = str(task.get("language") or "").strip()
@@ -555,14 +922,13 @@ def build_local_iteration_demand(task, size_plan, internal_refs, reference_analy
     slots = output_slots(size_plan)
     quantity = len(slots) or max(1, int(task.get("quantity") or 1))
     size_summary = ", ".join("%s x %s" % (item.get("size"), item.get("count")) for item in size_plan) or str(task.get("size") or "")
-    product_icon_url = str(task.get("product_icon_url") or "").strip()
+    store_profile = normalize_store_profile(store_profile, task) if store_profile else empty_store_profile(task)
     analysis_items = reference_analysis or []
-    analysis_by_code = {}
-    for index, item in enumerate(analysis_items, 1):
-        key = str(item.get("id") or "").strip()
-        if not key or key.lower().startswith("image #"):
-            key = "INT_REF_%02d" % index
-        analysis_by_code[key] = item
+    analysis_refs = [
+        {"code": str(ref.get("asset_id") or "INT_REF_%02d" % index)}
+        for index, ref in enumerate(internal_refs or [], 1)
+    ]
+    analysis_by_code = build_analysis_map(analysis_refs, analysis_items, "INT_REF")
 
     lines = [
         "# %s 投放素材需求" % product,
@@ -575,15 +941,11 @@ def build_local_iteration_demand(task, size_plan, internal_refs, reference_analy
         "- 输出数量：%s 张静态图片" % quantity,
         "- 用户需求描述：%s" % (description or "基于历史优质静态素材做同类迭代。"),
     ]
-    if product_icon_url:
-        lines.extend([
-            "",
-            "## 产品基础信息",
-            "",
-            "- 产品图标：%s" % product_icon_url,
-            "",
-            '<img src="%s" width="96">' % product_icon_url,
-        ])
+    basic_lines = product_basic_info_lines(task, store_profile)
+    if basic_lines:
+        lines.extend(["", "## 产品基础信息", ""])
+        lines.extend(basic_lines)
+    lines.extend(product_copy_constraint_lines(task, store_profile))
 
     lines.extend(["", "## 历史优质素材参考", ""])
     if internal_refs:
@@ -691,7 +1053,8 @@ def build_and_write_local_iteration_output(task, payload, size_plan, output_path
     internal_refs, internal_evidence = collect_internal_winners(task, limit=int(os.environ.get("AD_MATERIAL_ITERATION_INTERNAL_REF_LIMIT", "6")))
     visual_refs = [internal_ref_to_visual_ref(item) for item in internal_refs]
     reference_analysis = analyze_reference_images(visual_refs)
-    demand_text = build_local_iteration_demand(task, size_plan, internal_refs, reference_analysis, revision_instruction)
+    store_profile = fetch_store_profile(task)
+    demand_text = build_local_iteration_demand(task, size_plan, internal_refs, reference_analysis, revision_instruction, store_profile)
     markdown_path, markdown_url, evidence_path = local_task_artifacts(task_id, "iteration")
     markdown_path.write_text(demand_text, encoding="utf-8")
     evidence = {
@@ -700,6 +1063,7 @@ def build_and_write_local_iteration_output(task, payload, size_plan, output_path
         "internal_evidence": internal_evidence,
         "internal_refs": internal_refs,
         "reference_analysis": reference_analysis,
+        "store_profile": store_profile,
         "size_plan": size_plan,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
