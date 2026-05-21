@@ -34270,9 +34270,78 @@ def ad_material_ready_asset_indexes(task):
     return ready
 
 
-def recover_ad_material_generation_output(task, index):
+def ad_material_generation_file_mtime(path):
+    try:
+        return datetime.utcfromtimestamp(os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def ad_material_output_is_current(task_id, index, min_output_at=""):
+    workdir = ad_material_task_work_dir(task_id)
+    input_path = os.path.join(workdir, "generation_%02d_input.json" % index)
+    output_path = os.path.join(workdir, "generation_%02d_output.json" % index)
+    output_mtime = ad_material_generation_file_mtime(output_path)
+    if not output_mtime:
+        return False
+    checkpoints = []
+    input_mtime = ad_material_generation_file_mtime(input_path)
+    if input_mtime:
+        checkpoints.append(("input", input_mtime))
+    min_dt = parse_job_timestamp(min_output_at)
+    if min_dt:
+        checkpoints.append(("asset", min_dt))
+    stale_after = [(name, dt) for name, dt in checkpoints if output_mtime < dt]
+    if stale_after:
+        logging.info(
+            "ignoring stale ad material generation output: task=%s index=%s output_mtime=%s checkpoints=%s",
+            task_id,
+            index,
+            output_mtime.strftime("%Y-%m-%d %H:%M:%S"),
+            ",".join("%s:%s" % (name, dt.strftime("%Y-%m-%d %H:%M:%S")) for name, dt in stale_after),
+        )
+        return False
+    return True
+
+
+def ad_material_regenerating_asset_targets(task_id):
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT asset_index, review_reason, updated_at
+                FROM ad_material_asset
+                WHERE task_id=? AND status='regenerating'
+                ORDER BY asset_index, id
+                """,
+                (task_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    targets = []
+    seen = set()
+    for row in rows:
+        try:
+            index = int(row["asset_index"] or 0)
+        except Exception:
+            index = 0
+        if index <= 0 or index in seen:
+            continue
+        seen.add(index)
+        targets.append({
+            "index": index,
+            "reason": str(row["review_reason"] or "").strip(),
+            "updated_at": str(row["updated_at"] or "").strip(),
+        })
+    return targets
+
+
+def recover_ad_material_generation_output(task, index, min_output_at=""):
     output_path = os.path.join(ad_material_task_work_dir(task["task_id"]), "generation_%02d_output.json" % index)
     if not os.path.isfile(output_path):
+        return False
+    if not ad_material_output_is_current(task["task_id"], index, min_output_at=min_output_at):
         return False
     try:
         with open(output_path, "r", encoding="utf-8") as handle:
@@ -34310,6 +34379,20 @@ def recover_inflight_ad_material_tasks():
                 """
             ).fetchall()
             task_states = [(row["task_id"], row["status"]) for row in rows]
+            regenerating_rows = conn.execute(
+                """
+                SELECT DISTINCT t.task_id, t.status
+                FROM ad_material_task t
+                JOIN ad_material_asset a ON a.task_id = t.task_id
+                WHERE t.status='material_review' AND a.status='regenerating'
+                ORDER BY t.updated_at ASC
+                """
+            ).fetchall()
+            known_task_ids = {task_id for task_id, _ in task_states}
+            for row in regenerating_rows:
+                if row["task_id"] not in known_task_ids:
+                    task_states.append((row["task_id"], "regenerating_assets"))
+                    known_task_ids.add(row["task_id"])
         finally:
             conn.close()
 
@@ -34327,6 +34410,43 @@ def recover_inflight_ad_material_tasks():
                 reason = ""
             logging.info("resuming ad material demand after service restart: %s", task_id)
             run_ad_material_demand_async(task_id, reason=reason)
+            continue
+
+        if status == "regenerating_assets":
+            targets = ad_material_regenerating_asset_targets(task_id)
+            missing_indexes = []
+            recovered_indexes = []
+            reasons = []
+            for target in targets:
+                index = target["index"]
+                reason = target["reason"]
+                if reason:
+                    reasons.append(reason)
+                if recover_ad_material_generation_output(task, index, min_output_at=target["updated_at"]):
+                    recovered_indexes.append(index)
+                else:
+                    missing_indexes.append(index)
+            if missing_indexes:
+                reason = "service restart recovery: regenerate interrupted ad material assets %s" % ",".join(
+                    str(index) for index in missing_indexes
+                )
+                if reasons:
+                    reason = "%s; original review reason: %s" % (reason, "; ".join(dict.fromkeys(reasons)))
+                logging.info(
+                    "resuming interrupted ad material asset regeneration after service restart: task=%s missing=%s recovered=%s",
+                    task_id,
+                    missing_indexes,
+                    sorted(recovered_indexes),
+                )
+                update_ad_material_task_status(task_id, "material_review", review_reason=reason, error_message="")
+                run_ad_material_generation_async(task_id, indexes=missing_indexes, reason=reason)
+            elif recovered_indexes:
+                logging.info(
+                    "recovered interrupted ad material asset regeneration after service restart: task=%s recovered=%s",
+                    task_id,
+                    sorted(recovered_indexes),
+                )
+                update_ad_material_task_status(task_id, "material_review", error_message="")
             continue
 
         quantity = max(1, int(task.get("quantity") or 1))

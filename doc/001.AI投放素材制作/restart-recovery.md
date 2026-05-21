@@ -21,3 +21,4 @@ The API startup path recovers in-flight work so production tasks do not stay stu
 - `generating_material` tasks first reuse any existing generation output JSON and ready asset rows.
 - Only missing asset indexes are regenerated.
 - Existing ready assets are preserved and are not remade unless their output is missing or unreadable.
+- `material_review` tasks with `regenerating` assets are also recovered. Output JSON is reused only when it is newer than the latest generation input and the asset regeneration marker; otherwise the interrupted asset indexes are regenerated so stale pre-rejection images are not restored.
