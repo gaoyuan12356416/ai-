@@ -4213,6 +4213,8 @@ CREATE TABLE IF NOT EXISTS drama_material_job (
 
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
+  finished_at TEXT NOT NULL DEFAULT '',
+
 
 
 
@@ -5044,6 +5046,8 @@ JOB_TABLE_COLUMNS = [
 
 
     "updated_at",
+
+    "finished_at",
 
 
 
@@ -9100,6 +9104,10 @@ def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def utc_now_text():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
 
 
 
@@ -9823,7 +9831,7 @@ def enrich_material_job_timing(job):
                 conn.close()
         if row and row[0]:
             start_text = row[0]
-    end_text = str(job.get("updated_at", "") or "")
+    end_text = str(job.get("finished_at") or job.get("updated_at", "") or "")
     job["active_started_at"] = start_text
     job["active_finished_at"] = end_text if job.get("status") == "done" else ""
     start_dt = parse_job_timestamp(start_text)
@@ -21265,7 +21273,7 @@ def recover_inflight_jobs():
                   episode_start, episode_end, total_episodes,
                   cover_source_url, cover_16x9_url, output_video_url,
                   output_video_no_bgm_url, outputs_json, advanced_options_json,
-                  status, progress, progress_detail, error_message, created_at, updated_at,
+                  status, progress, progress_detail, error_message, created_at, updated_at, finished_at,
                   creator_user_id, creator_open_id, creator_name,
                   completion_notified_at, completion_notification_error
                 FROM drama_material_job
@@ -23897,6 +23905,7 @@ def row_to_job(row):
 
         "updated_at": row[21],
 
+        "finished_at": row[22] if len(row) > 22 else "",
 
 
 
@@ -23911,8 +23920,8 @@ def row_to_job(row):
 
 
 
-        "creator_user_id": row[22] if len(row) > 22 else "",
 
+        "creator_user_id": row[23] if len(row) > 23 else "",
 
 
 
@@ -23927,8 +23936,8 @@ def row_to_job(row):
 
 
 
-        "creator_open_id": row[23] if len(row) > 23 else "",
 
+        "creator_open_id": row[24] if len(row) > 24 else "",
 
 
 
@@ -23943,8 +23952,8 @@ def row_to_job(row):
 
 
 
-        "creator_name": row[24] if len(row) > 24 else "",
 
+        "creator_name": row[25] if len(row) > 25 else "",
 
 
 
@@ -23959,8 +23968,8 @@ def row_to_job(row):
 
 
 
-        "completion_notified_at": row[25] if len(row) > 25 else "",
 
+        "completion_notified_at": row[26] if len(row) > 26 else "",
 
 
 
@@ -23975,7 +23984,8 @@ def row_to_job(row):
 
 
 
-        "completion_notification_error": row[26] if len(row) > 26 else "",
+
+        "completion_notification_error": row[27] if len(row) > 27 else "",
 
 
 
@@ -24873,7 +24883,9 @@ def upsert_job_record(job):
 
 
 
-    progress = clamp_progress(job.get("progress", progress_for_status(job.get("status", "queued"))))
+    status_text = str(job.get("status", "queued") or "queued")
+
+    progress = clamp_progress(job.get("progress", progress_for_status(status_text)))
 
 
 
@@ -24906,6 +24918,15 @@ def upsert_job_record(job):
 
 
     progress_detail = str(job.get("progress_detail", "") or "").strip()
+
+    finished_at = str(job.get("finished_at", "") or "").strip()
+    if status_text == "done":
+        if not finished_at:
+            finished_at = utc_now_text()
+        job["finished_at"] = finished_at
+    else:
+        finished_at = ""
+        job["finished_at"] = ""
 
 
 
@@ -25177,7 +25198,7 @@ def upsert_job_record(job):
 
 
 
-                  status, progress, progress_detail, error_message, created_at, updated_at,
+                  status, progress, progress_detail, error_message, created_at, updated_at, finished_at,
 
 
 
@@ -25225,7 +25246,7 @@ def upsert_job_record(job):
 
 
 
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
 
 
 
@@ -25945,6 +25966,12 @@ def upsert_job_record(job):
 
 
 
+                  finished_at=CASE
+                    WHEN excluded.status = 'done' AND TRIM(drama_material_job.finished_at) != '' THEN drama_material_job.finished_at
+                    WHEN excluded.status = 'done' THEN excluded.finished_at
+                    ELSE ''
+                  END,
+
                   completion_notified_at=excluded.completion_notified_at,
 
 
@@ -26537,7 +26564,7 @@ def upsert_job_record(job):
 
 
 
-                    job.get("status", "queued"),
+                    status_text,
 
 
 
@@ -26616,6 +26643,8 @@ def upsert_job_record(job):
 
 
 
+
+                    finished_at,
 
                     str(job.get("creator_user_id", "") or ""),
 
@@ -27209,7 +27238,7 @@ def fetch_job_row(job_id):
 
 
 
-                  status, progress, progress_detail, error_message, created_at, updated_at,
+                  status, progress, progress_detail, error_message, created_at, updated_at, finished_at,
 
 
 
@@ -28713,7 +28742,7 @@ def fetch_job_rows(job_id=None, app_id=None, content_id=None, status=None, query
 
 
 
-      status, progress, progress_detail, error_message, created_at, updated_at,
+      status, progress, progress_detail, error_message, created_at, updated_at, finished_at,
 
 
 
@@ -70977,6 +71006,8 @@ def submit_job(payload, actor_session=None):
 
 
         "completion_notification_error": "",
+
+        "finished_at": "",
 
 
 

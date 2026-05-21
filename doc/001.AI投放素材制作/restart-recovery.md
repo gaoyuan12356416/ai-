@@ -8,6 +8,13 @@ The API startup path recovers in-flight work so production tasks do not stay stu
 - Screenshot jobs: returned to queued state and resumed.
 - Ad material tasks: recovered on API startup.
 
+## Drama Job Timing Rules
+
+- Drama material jobs persist `finished_at` separately from `updated_at`.
+- `finished_at` is set the first time a job enters `done`; later notification writes, cover repair, URL repair, or other maintenance updates may refresh `updated_at` but must not overwrite `finished_at`.
+- If a retry or resume moves a job out of `done`, `finished_at` is cleared and will be set again only when the regenerated job completes.
+- The UI elapsed time uses `active_finished_at` derived from `finished_at`, so post-completion repairs do not inflate "total elapsed" time.
+
 ## Ad Material Recovery Rules
 
 - `generating_demand` tasks are re-enqueued for demand generation.
