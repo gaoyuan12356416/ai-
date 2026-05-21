@@ -32005,6 +32005,7 @@ AD_MATERIAL_STATUS_LABELS = {
     "generating_material": "生成素材中",
     "material_review": "素材待审核",
     "material_returned": "素材打回",
+    "material_abandoned": "已废弃",
     "done": "已完成",
     "failed": "失败",
 }
@@ -34251,6 +34252,23 @@ def run_ad_material_generation_async(task_id, indexes=None, reason=""):
     thread.start()
 
 
+def reconcile_ad_material_task_after_asset_review(task_id):
+    assets = fetch_ad_material_assets(task_id)
+    if not assets:
+        return
+    terminal_statuses = {"approved", "uploaded", "abandoned"}
+    if not all(str(asset.get("status") or "").strip() in terminal_statuses for asset in assets):
+        return
+    if any(str(asset.get("status") or "").strip() in ("approved", "uploaded") for asset in assets):
+        return
+    update_ad_material_task_status(
+        task_id,
+        "material_abandoned",
+        review_reason="all generated ad material assets were abandoned",
+        error_message="",
+    )
+
+
 def ad_material_ready_asset_indexes(task):
     ready = set()
     for asset in fetch_ad_material_assets(task["task_id"]):
@@ -34538,6 +34556,8 @@ def review_ad_material_asset(task_id, asset_id, payload, session):
     if status == "regenerating":
         update_ad_material_task_status(task_id, "material_review", review_reason=reason)
         run_ad_material_generation_async(task_id, indexes=[int(asset.get("asset_index") or 1)], reason=reason)
+    elif status in ("approved", "abandoned"):
+        reconcile_ad_material_task_after_asset_review(task_id)
     return fetch_ad_material_task(task_id)
 
 

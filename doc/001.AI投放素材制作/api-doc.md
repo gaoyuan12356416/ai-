@@ -112,6 +112,8 @@
 }
 ```
 
+`result` 支持 `approved`、`rejected`、`abandoned`。当一个任务下全部素材都为 `abandoned` 且没有可上报素材时，任务状态变为 `material_abandoned`，不再停留在 `material_review` 审核队列。
+
 ### 完成上传
 
 `POST /api/ad-material/tasks/{task_id}/complete-upload`
