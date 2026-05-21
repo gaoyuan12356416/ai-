@@ -5233,6 +5233,16 @@ CREATE TABLE IF NOT EXISTS drama_screenshot_job (
 
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
+  started_at TEXT NOT NULL DEFAULT '',
+
+  finished_at TEXT NOT NULL DEFAULT '',
+
+  elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+
+  token_total INTEGER NOT NULL DEFAULT 0,
+
+  token_usage_json TEXT NOT NULL DEFAULT '{}',
+
   creator_user_id TEXT NOT NULL DEFAULT '',
 
   creator_open_id TEXT NOT NULL DEFAULT '',
@@ -5284,6 +5294,16 @@ SCREENSHOT_JOB_TABLE_COLUMNS = [
     "created_at",
 
     "updated_at",
+
+    "started_at",
+
+    "finished_at",
+
+    "elapsed_seconds",
+
+    "token_total",
+
+    "token_usage_json",
 
     "creator_user_id",
 
@@ -9775,10 +9795,18 @@ def parse_job_timestamp(value):
         return None
 
 
+def nonnegative_int(value, default=0):
+    try:
+        number = int(float(value or 0))
+    except (TypeError, ValueError):
+        return int(default or 0)
+    return max(0, number)
+
+
 def enrich_screenshot_job_timing(job):
     job_id = str(job.get("job_id", "") or "")
-    start_text = str(job.get("created_at", "") or "")
-    if job_id:
+    start_text = str(job.get("started_at") or job.get("created_at") or "")
+    if job_id and not str(job.get("started_at") or "").strip():
         with JOB_DB_LOCK:
             conn = get_job_db_connection()
             try:
@@ -9798,12 +9826,16 @@ def enrich_screenshot_job_timing(job):
                 conn.close()
         if row and row[0]:
             start_text = row[0]
-    end_text = str(job.get("updated_at", "") or "")
+    end_text = str(job.get("finished_at") or job.get("updated_at") or "")
     job["active_started_at"] = start_text
-    job["active_finished_at"] = end_text if job.get("status") == "done" else ""
+    job["active_finished_at"] = end_text if job.get("status") in ("done", "failed") else ""
+    persisted_seconds = nonnegative_int(job.get("elapsed_seconds"), 0)
+    if persisted_seconds and job.get("status") in ("done", "failed"):
+        job["active_elapsed_seconds"] = persisted_seconds
+        return job
     start_dt = parse_job_timestamp(start_text)
     end_dt = parse_job_timestamp(end_text)
-    if start_dt and end_dt and end_dt >= start_dt and job.get("status") == "done":
+    if start_dt and end_dt and end_dt >= start_dt and job.get("status") in ("done", "failed"):
         job["active_elapsed_seconds"] = int((end_dt - start_dt).total_seconds())
     return job
 
@@ -9844,6 +9876,7 @@ def enrich_material_job_timing(job):
 def row_to_screenshot_job(row):
     assets = parse_json_text(row[11], {})
     status = row[12]
+    token_usage = parse_json_text(row[22], {}) if len(row) > 22 else {}
     stored_progress = clamp_progress(row[13])
     if stored_progress <= 0 and status != "failed":
         stored_progress = progress_for_status(status)
@@ -9891,11 +9924,21 @@ def row_to_screenshot_job(row):
 
         "updated_at": row[17],
 
-        "creator_user_id": row[18] if len(row) > 18 else "",
+        "started_at": row[18] if len(row) > 18 else "",
 
-        "creator_open_id": row[19] if len(row) > 19 else "",
+        "finished_at": row[19] if len(row) > 19 else "",
 
-        "creator_name": row[20] if len(row) > 20 else "",
+        "elapsed_seconds": nonnegative_int(row[20] if len(row) > 20 else 0, 0),
+
+        "token_total": nonnegative_int(row[21] if len(row) > 21 else 0, 0),
+
+        "token_usage": token_usage if isinstance(token_usage, dict) else {},
+
+        "creator_user_id": row[23] if len(row) > 23 else "",
+
+        "creator_open_id": row[24] if len(row) > 24 else "",
+
+        "creator_name": row[25] if len(row) > 25 else "",
 
         "result_preview": {
 
@@ -15918,9 +15961,13 @@ def rebuild_screenshot_job_table(conn, columns):
 
             select_exprs.append(column)
 
-        elif column == "assets_json":
+        elif column in ("assets_json", "token_usage_json"):
 
             select_exprs.append("'{}' AS %s" % column)
+
+        elif column in ("elapsed_seconds", "token_total"):
+
+            select_exprs.append("0 AS %s" % column)
 
         else:
 
@@ -21316,6 +21363,7 @@ def recover_inflight_screenshot_jobs():
                   job_id, app_id, content_id, app, country, language, drama_name,
                   cover_source_url, square_1x1_url, landscape_1_91x1_url, portrait_4x5_url,
                   assets_json, status, progress, progress_detail, error_message, created_at, updated_at,
+                  started_at, finished_at, elapsed_seconds, token_total, token_usage_json,
                   creator_user_id, creator_open_id, creator_name
                 FROM drama_screenshot_job
                 WHERE status NOT IN ('done', 'failed')
@@ -30524,6 +30572,12 @@ def upsert_screenshot_job_record(job):
 
     assets_json = json.dumps(job.get("assets", {}), ensure_ascii=False)
 
+    token_usage_json = json.dumps(job.get("token_usage", {}), ensure_ascii=False)
+
+    elapsed_seconds = nonnegative_int(job.get("elapsed_seconds"), 0)
+
+    token_total = nonnegative_int(job.get("token_total"), 0)
+
     progress = clamp_progress(job.get("progress", progress_for_status(job.get("status", "queued"))))
 
     progress_detail = str(job.get("progress_detail", "") or "").strip()
@@ -30546,9 +30600,11 @@ def upsert_screenshot_job_record(job):
 
                   assets_json, status, progress, progress_detail, error_message, created_at, updated_at,
 
+                  started_at, finished_at, elapsed_seconds, token_total, token_usage_json,
+
                   creator_user_id, creator_open_id, creator_name
 
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?)
 
                 ON CONFLICT(job_id) DO UPDATE SET
 
@@ -30581,6 +30637,16 @@ def upsert_screenshot_job_record(job):
                   progress_detail=excluded.progress_detail,
 
                   error_message=excluded.error_message,
+
+                  started_at=excluded.started_at,
+
+                  finished_at=excluded.finished_at,
+
+                  elapsed_seconds=excluded.elapsed_seconds,
+
+                  token_total=excluded.token_total,
+
+                  token_usage_json=excluded.token_usage_json,
 
                   creator_user_id=CASE
 
@@ -30644,6 +30710,16 @@ def upsert_screenshot_job_record(job):
 
                     job.get("error_message", ""),
 
+                    job.get("started_at", ""),
+
+                    job.get("finished_at", ""),
+
+                    elapsed_seconds,
+
+                    token_total,
+
+                    token_usage_json,
+
                     job.get("creator_user_id", ""),
 
                     job.get("creator_open_id", ""),
@@ -30662,6 +30738,73 @@ def upsert_screenshot_job_record(job):
 
 
 
+
+
+TOKEN_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def normalize_token_usage_payload(value):
+    if not isinstance(value, dict):
+        return {}
+    usage = {}
+    for field in TOKEN_USAGE_FIELDS:
+        usage[field] = nonnegative_int(value.get(field), 0)
+    if not usage.get("total_tokens"):
+        usage["total_tokens"] = nonnegative_int(value.get("token_total") or value.get("total"), 0)
+    if not any(usage.values()):
+        return {}
+    if value.get("session_count") is not None:
+        usage["session_count"] = nonnegative_int(value.get("session_count"), 0)
+    return usage
+
+
+def record_screenshot_token_usage(job, usage, source="codex_screenshot"):
+    usage = normalize_token_usage_payload(usage)
+    if not usage:
+        return
+    current = job.get("token_usage", {})
+    if not isinstance(current, dict):
+        current = {}
+    runs = current.get("runs")
+    if not isinstance(runs, list):
+        runs = []
+    entry = dict(usage)
+    entry["source"] = source
+    entry["recorded_at"] = utc_now_text()
+    runs.append(entry)
+    merged = {"runs": runs}
+    for field in TOKEN_USAGE_FIELDS:
+        merged[field] = sum(nonnegative_int(item.get(field), 0) for item in runs if isinstance(item, dict))
+    job["token_total"] = merged["total_tokens"]
+    job["token_usage"] = merged
+    upsert_screenshot_job_record(job)
+
+
+def begin_screenshot_job_run(job):
+    if not str(job.get("started_at", "") or "").strip():
+        job["started_at"] = utc_now_text()
+    job["finished_at"] = ""
+    job["elapsed_seconds"] = 0
+    upsert_screenshot_job_record(job)
+
+
+def finish_screenshot_job_run(job):
+    finished_at = utc_now_text()
+    started_at = str(job.get("started_at", "") or "").strip() or finished_at
+    job["started_at"] = started_at
+    job["finished_at"] = finished_at
+    start_dt = parse_job_timestamp(started_at)
+    end_dt = parse_job_timestamp(finished_at)
+    if start_dt and end_dt and end_dt >= start_dt:
+        job["elapsed_seconds"] = int((end_dt - start_dt).total_seconds())
+    else:
+        job["elapsed_seconds"] = 0
 
 
 def app_package_for_app_id(app_id):
@@ -30869,6 +31012,8 @@ def fetch_screenshot_job_row(job_id):
 
                   assets_json, status, progress, progress_detail, error_message, created_at, updated_at,
 
+                  started_at, finished_at, elapsed_seconds, token_total, token_usage_json,
+
                   creator_user_id, creator_open_id, creator_name
 
                 FROM drama_screenshot_job
@@ -30902,6 +31047,8 @@ def fetch_screenshot_job_rows(job_id=None, app_id=None, content_id=None, status=
       cover_source_url, square_1x1_url, landscape_1_91x1_url, portrait_4x5_url,
 
       assets_json, status, progress, progress_detail, error_message, created_at, updated_at,
+
+      started_at, finished_at, elapsed_seconds, token_total, token_usage_json,
 
       creator_user_id, creator_open_id, creator_name
 
@@ -31674,6 +31821,8 @@ def process_screenshot_job(job):
 
     job["error_message"] = ""
 
+    finish_screenshot_job_run(job)
+
     set_screenshot_job_progress(job, status="done", progress=100, detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210")
 
     callback_job = fetch_screenshot_job_row(job["job_id"]) or job
@@ -31688,6 +31837,7 @@ def run_screenshot_job_async(job):
 
     def target():
         with SCREENSHOT_JOB_SEMAPHORE:
+            begin_screenshot_job_run(job)
             attempts = max(1, JOB_AUTO_RETRY_ATTEMPTS + 1)
 
             for attempt in range(1, attempts + 1):
@@ -31723,6 +31873,7 @@ def run_screenshot_job_async(job):
                     job["status"] = "failed"
 
                     job["progress"] = clamp_progress(job.get("progress", 0))
+                    finish_screenshot_job_run(job)
 
                     message = str(exc).strip() or exc.__class__.__name__
 
@@ -31788,6 +31939,11 @@ def retry_screenshot_job(job_id):
     job["progress"] = 2
     job["progress_detail"] = progress_detail
     job["error_message"] = ""
+    job["started_at"] = ""
+    job["finished_at"] = ""
+    job["elapsed_seconds"] = 0
+    job["token_total"] = 0
+    job["token_usage"] = {}
     upsert_screenshot_job_record(job)
     run_screenshot_job_async(job)
     return {
@@ -57078,6 +57234,7 @@ def generate_screenshot_via_codex_service(job, source_path, items):
         )
     if data.get("status") != "done":
         raise RuntimeError("codex screenshot service returned unexpected payload")
+    record_screenshot_token_usage(job, data.get("token_usage") or data.get("usage"), "codex_screenshot_single")
     requested_by_key = {str(item.get("key", "")): item for item in items}
     for result_item in data.get("items", []) or []:
         key = str(result_item.get("key", ""))
@@ -57122,6 +57279,7 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
         )
     if data.get("status") != "done":
         raise RuntimeError("codex screenshot service returned unexpected payload")
+    record_screenshot_token_usage(job, data.get("token_usage") or data.get("usage"), "codex_screenshot_batch")
     requested_by_key = {str(item.get("key", "")): item for item in items}
     for result_item in data.get("items", []) or []:
         key = str(result_item.get("key", ""))

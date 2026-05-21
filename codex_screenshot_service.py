@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import unquote, urlparse
@@ -84,11 +85,126 @@ def run_cmd(cmd, timeout=None, env=None):
         env=env,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
+        error = RuntimeError(
             "command failed (%s): %s"
             % (proc.returncode, proc.stderr.strip() or proc.stdout.strip())
         )
+        error.proc = proc
+        raise error
     return proc
+
+
+TOKEN_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def nonnegative_int(value):
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def merge_token_usage(target, usage):
+    if not isinstance(usage, dict):
+        return target
+    if target is None:
+        target = {}
+    for field in TOKEN_USAGE_FIELDS:
+        target[field] = nonnegative_int(target.get(field)) + nonnegative_int(usage.get(field))
+    target["session_count"] = nonnegative_int(target.get("session_count")) + nonnegative_int(usage.get("session_count"))
+    return target
+
+
+def normalize_token_usage(value):
+    if not isinstance(value, dict):
+        return {}
+    usage = {field: nonnegative_int(value.get(field)) for field in TOKEN_USAGE_FIELDS}
+    if not usage.get("total_tokens"):
+        usage["total_tokens"] = nonnegative_int(value.get("token_total") or value.get("total"))
+    return usage if any(usage.values()) else {}
+
+
+def token_usage_from_text(text):
+    import re
+
+    text = str(text or "")
+    match = re.search(r"tokens?\s+used\s*[:=]?\s*([0-9][0-9,]*)", text, re.IGNORECASE)
+    if not match:
+        match = re.search(r"total[_\s-]*tokens?\s*[:=]\s*([0-9][0-9,]*)", text, re.IGNORECASE)
+    if not match:
+        return {}
+    return {"total_tokens": nonnegative_int(match.group(1).replace(",", ""))}
+
+
+def token_usage_from_session_file(path):
+    final_usage = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if event.get("type") != "event_msg":
+                    continue
+                payload = event.get("payload") or {}
+                if payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info") or {}
+                usage = normalize_token_usage(info.get("total_token_usage") or {})
+                if usage:
+                    final_usage = usage
+                    continue
+                usage = normalize_token_usage(info.get("last_token_usage") or {})
+                if usage:
+                    merge_token_usage(final_usage, usage)
+    except Exception:
+        logging.exception("failed to parse Codex token usage session: %s", path)
+    if final_usage:
+        final_usage["session_count"] = 1
+    return final_usage
+
+
+def collect_codex_token_usage(codex_home, since_epoch, proc=None):
+    usage = {}
+    sessions_root = os.path.join(codex_home, "sessions") if codex_home else ""
+    if sessions_root and os.path.isdir(sessions_root):
+        for root, _, files in os.walk(sessions_root):
+            for filename in files:
+                if not filename.endswith(".jsonl"):
+                    continue
+                path = os.path.join(root, filename)
+                try:
+                    if os.path.getmtime(path) < since_epoch - 5:
+                        continue
+                except OSError:
+                    continue
+                merge_token_usage(usage, token_usage_from_session_file(path))
+    if not usage.get("total_tokens") and proc is not None:
+        merge_token_usage(usage, token_usage_from_text((proc.stdout or "") + "\n" + (proc.stderr or "")))
+    return usage if usage.get("total_tokens") else {}
+
+
+def run_codex_cmd(cmd, timeout=None, env=None):
+    started_at = time.time()
+    proc = None
+    try:
+        proc = run_cmd(cmd, timeout=timeout, env=env)
+        return proc
+    except Exception as exc:
+        proc = getattr(exc, "proc", None)
+        raise
+    finally:
+        codex_home = (env or os.environ).get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        token_usage = collect_codex_token_usage(codex_home, started_at, proc)
+        if proc is not None:
+            proc.codex_token_usage = token_usage
 
 
 def toml_string(value):
@@ -512,6 +628,7 @@ def generate_screenshots(payload):
 
     results = []
     remaining = []
+    token_usage = {}
 
     # Cache (3): restore any items we already have.
     for item in items:
@@ -547,8 +664,12 @@ def generate_screenshots(payload):
             build_codex_batch_imagegen_instruction(drama_name, remaining, manifest_json_path),
         ]
         try:
-            run_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
-        except Exception:
+            proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
+            merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
+        except Exception as exc:
+            proc = getattr(exc, "proc", None)
+            if proc is not None:
+                merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
             logging.exception("batch generation failed for %s", job_id)
 
         batch_result_data = {"items": []}
@@ -643,7 +764,8 @@ def generate_screenshots(payload):
             result_json_path,
             build_codex_instruction(drama_name, item),
         ]
-        run_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
+        proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
+        merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
         if not os.path.isfile(workspace_output_path):
             raise RuntimeError("Codex did not create expected output for %s" % key)
         with open(result_json_path, "r", encoding="utf-8") as fh:
@@ -672,7 +794,7 @@ def generate_screenshots(payload):
     if not KEEP_JOB_WORKSPACE:
         shutil.rmtree(ws, ignore_errors=True)
 
-    return {"status": "done", "job_id": job_id, "items": results}
+    return {"status": "done", "job_id": job_id, "items": results, "token_usage": token_usage}
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):

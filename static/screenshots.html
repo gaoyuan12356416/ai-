@@ -404,6 +404,7 @@
     .actions-cell { min-width: 220px; }
     .row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .duration-cell { min-width: 120px; white-space: nowrap; }
+    .token-cell { min-width: 120px; white-space: nowrap; }
     .time-cell { min-width: 150px; white-space: nowrap; }
 
     .detail-drawer {
@@ -1173,6 +1174,8 @@
 
                   <th class="duration-cell">总计用时</th>
 
+                  <th class="token-cell">Token 消耗</th>
+
                   <th class="time-cell">创建时间</th>
 
                   <th>操作</th>
@@ -1492,6 +1495,20 @@ const els = {
       return Number.isFinite(number) && number >= 0 ? number : null;
     }
 
+    function numericTokens(value) {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+    }
+
+    function formatTokenUsage(job) {
+      const total = numericTokens(job.token_total || job.token_usage?.total_tokens);
+      if (total === null) return "--";
+      const exact = new Intl.NumberFormat("en-US").format(total);
+      if (total >= 1000000) return `${(total / 1000000).toFixed(1)}M`;
+      if (total >= 1000) return `${(total / 1000).toFixed(1)}k`;
+      return exact;
+    }
+
     function actualDurationStart(job) {
       return parseServerTime(job.active_started_at || job.processing_started_at || job.started_at);
     }
@@ -1502,7 +1519,7 @@ const els = {
 
     function jobDurationText(job) {
       const status = String(job.status || "");
-      if (["queued", "downloading", "failed"].includes(status)) return "--";
+      if (status === "queued") return "--";
       const persistedSeconds = numericSeconds(job.active_elapsed_seconds || job.processing_elapsed_seconds || job.elapsed_seconds);
       if (persistedSeconds !== null) return formatDuration(persistedSeconds * 1000);
       const start = actualDurationStart(job);
@@ -1569,6 +1586,8 @@ const els = {
           <td>${job.creator_name || "--"}<div class="muted">${job.creator_user_id || ""}</div></td>
 
           <td class="duration-cell">${jobDurationText(job)}</td>
+
+          <td class="token-cell">${formatTokenUsage(job)}</td>
 
           <td class="time-cell">${formatBeijingTime(job.created_at)}</td>
 
@@ -1639,7 +1658,7 @@ const els = {
 
         ? state.jobs.map(buildRow).join("")
 
-        : `<tr><td colspan="10" class="muted">暂无截图任务</td></tr>`;
+        : `<tr><td colspan="12" class="muted">暂无截图任务</td></tr>`;
 
       const processingCount = state.jobs.filter(item => item.status !== "done" && item.status !== "failed").length;
 
@@ -1759,6 +1778,7 @@ const els = {
           <div>\u8fdb\u5ea6\uff1a${job.progress}% / ${job.progress_detail || "--"}</div>
           <div>\u521b\u5efa\u4eba\uff1a${job.creator_name || "--"}</div>
           <div>\u603b\u8ba1\u7528\u65f6\uff1a${jobDurationText(job)}</div>
+          <div>Token \u6d88\u8017\uff1a${formatTokenUsage(job)}</div>
           <div>\u521b\u5efa\u65f6\u95f4\uff1a${formatBeijingTime(job.created_at)}</div>
           <div>\u66f4\u65b0\u65f6\u95f4\uff1a${formatBeijingTime(job.updated_at)}</div>
         </div>

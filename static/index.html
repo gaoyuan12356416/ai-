@@ -10827,6 +10827,10 @@
 
 
 
+                    <th class="time-cell">&#24635;&#35745;&#29992;&#26102;</th>
+
+                    <th class="time-cell">Token &#28040;&#32791;</th>
+
                     <th>&#21019;&#24314;&#26102;&#38388;</th>
 
                     <th>&#25805;&#20316;</th>
@@ -17196,6 +17200,19 @@
       return Number.isFinite(number) && number >= 0 ? number : null;
     }
 
+    function numericTokens(value) {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+    }
+
+    function formatTokenUsage(job) {
+      const total = numericTokens(job.token_total || job.token_usage?.total_tokens);
+      if (total === null) return "--";
+      if (total >= 1000000) return `${(total / 1000000).toFixed(1)}M`;
+      if (total >= 1000) return `${(total / 1000).toFixed(1)}k`;
+      return new Intl.NumberFormat("en-US").format(total);
+    }
+
     function actualDurationStart(job) {
       return parseJobTime(job.active_started_at || job.processing_started_at || job.started_at);
     }
@@ -17212,6 +17229,17 @@
       const start = actualDurationStart(job);
       if (!start) return "--";
       const end = status === "done" ? (actualDurationEnd(job) || new Date()) : new Date();
+      return formatSeconds((end.getTime() - start.getTime()) / 1000);
+    }
+
+    function formatScreenshotElapsed(job) {
+      const status = String(job.status || "");
+      if (status === "queued") return "--";
+      const persistedSeconds = numericSeconds(job.active_elapsed_seconds || job.processing_elapsed_seconds || job.elapsed_seconds);
+      if (persistedSeconds !== null) return formatSeconds(persistedSeconds);
+      const start = actualDurationStart(job);
+      if (!start) return "--";
+      const end = status === "done" || status === "failed" ? (actualDurationEnd(job) || new Date()) : new Date();
       return formatSeconds((end.getTime() - start.getTime()) / 1000);
     }
 
@@ -19055,6 +19083,7 @@ function buildJobRow(job) {
 
     function buildScreenshotJobRow(job) {
       const canRetry = job.status === "done" || job.status === "failed";
+      const elapsed = formatScreenshotElapsed(job);
       const retryButton = canRetry
         ? `<button class="btn btn-secondary mini" type="button" onclick="event.stopPropagation(); retryScreenshotJob('${job.job_id}')">\u91cd\u65b0\u5236\u4f5c</button>`
         : `<button class="btn btn-secondary mini" type="button" disabled title="\u4efb\u52a1\u6b63\u5728\u5904\u7406\u4e2d">\u91cd\u65b0\u5236\u4f5c</button>`;
@@ -19078,6 +19107,8 @@ function buildJobRow(job) {
             </div>
           </td>
           <td>${job.creator_name || "--"}<div class="muted">${job.creator_user_id || ""}</div></td>
+          <td class="time-cell">${elapsed}</td>
+          <td class="time-cell">${formatTokenUsage(job)}</td>
           <td class="time-cell">${formatBeijingTime(job.created_at)}</td>
           <td>
             <div class="actions-inline">
@@ -19108,6 +19139,8 @@ function buildJobRow(job) {
             <div>\u72b6\u6001\uff1a${job.status_label}</div>
             <div>\u8fdb\u5ea6\uff1a${job.progress}% / ${job.progress_detail || "--"}</div>
             <div>\u521b\u5efa\u4eba\uff1a${job.creator_name || "--"}</div>
+            <div>\u603b\u8ba1\u7528\u65f6\uff1a${formatScreenshotElapsed(job)}</div>
+            <div>Token \u6d88\u8017\uff1a${formatTokenUsage(job)}</div>
             <div>\u521b\u5efa\u65f6\u95f4\uff1a${formatBeijingTime(job.created_at)}</div>
             <div>\u66f4\u65b0\u65f6\u95f4\uff1a${formatBeijingTime(job.updated_at)}</div>
           </div>
@@ -19209,7 +19242,7 @@ function buildJobRow(job) {
 
 
 
-        : `<tr><td colspan="8" class="muted">\u6682\u65e0\u622a\u56fe\u4efb\u52a1</td></tr>`;
+        : `<tr><td colspan="11" class="muted">\u6682\u65e0\u622a\u56fe\u4efb\u52a1</td></tr>`;
 
 
 
@@ -22313,7 +22346,7 @@ function buildJobRow(job) {
 
 
 
-        els.screenshotJobTableBody.innerHTML = `<tr><td colspan="8" class="muted">\u52a0\u8f7d\u5931\u8d25\uff1a${errorText(error)}</td></tr>`;
+        els.screenshotJobTableBody.innerHTML = `<tr><td colspan="11" class="muted">\u52a0\u8f7d\u5931\u8d25\uff1a${errorText(error)}</td></tr>`;
 
 
 
