@@ -86,7 +86,7 @@
 
 
 
-  <script src="/quick-nav.js?v=20260519-qa-perf-nav"></script>
+  <script src="/quick-nav.js?v=20260522-voiceover-tasks"></script>
   <script>
 
 
@@ -7225,6 +7225,121 @@
     }
 
     .stack { display: grid; gap: 12px; }
+    .voiceover-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .voiceover-grid .span-4 { grid-column: span 4; }
+    .voiceover-grid .span-6 { grid-column: span 6; }
+    .voiceover-grid .span-8 { grid-column: span 8; }
+    .voiceover-grid .span-12 { grid-column: span 12; }
+    .voiceover-stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .voiceover-stat {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #f8fbff;
+    }
+    .voiceover-stat strong {
+      display: block;
+      font-size: 22px;
+      color: var(--brand);
+      line-height: 1.1;
+    }
+    .voiceover-risk {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #fff3cd;
+      color: #9a6100;
+    }
+    .voiceover-modal-panel {
+      width: min(1180px, calc(100vw - 48px));
+      max-height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .voiceover-modal-panel .panel-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .voiceover-material-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfdff;
+      display: grid;
+      gap: 12px;
+    }
+    .voiceover-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .voiceover-stepper {
+      display: grid;
+      grid-template-columns: 40px 64px 40px;
+      align-items: stretch;
+    }
+    .voiceover-stepper button,
+    .voiceover-stepper input {
+      height: 40px;
+      border: 1px solid var(--line);
+      background: #fff;
+      text-align: center;
+      font-weight: 700;
+    }
+    .voiceover-stepper button:last-child {
+      background: #03a66a;
+      color: #fff;
+      border-color: #03a66a;
+    }
+    .voiceover-stepper button:first-child {
+      border-radius: 8px 0 0 8px;
+    }
+    .voiceover-stepper button:last-child {
+      border-radius: 0 8px 8px 0;
+    }
+    .voiceover-stepper input {
+      border-left: 0;
+      border-right: 0;
+    }
+    .voiceover-modal-footer {
+      border-top: 1px solid var(--line);
+      padding: 14px 18px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      background: #fff;
+    }
+    @media (max-width: 900px) {
+      .voiceover-grid .span-4,
+      .voiceover-grid .span-6,
+      .voiceover-grid .span-8,
+      .voiceover-grid .span-12 {
+        grid-column: span 12;
+      }
+      .voiceover-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .voiceover-modal-panel {
+        width: 100vw;
+        max-height: 100vh;
+        border-radius: 0;
+      }
+    }
 
 
 
@@ -10933,6 +11048,126 @@
 
 
 
+      <section id="voiceoverTasksSection" class="section">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3 class="panel-title">批量素材数查询</h3>
+              <div class="muted">输入剧 ID 后按剧库 series_code 统计该系列已有素材数量。</div>
+            </div>
+            <div class="actions-inline">
+              <button id="voiceoverCountBtn" class="btn btn-primary" type="button">查询素材数</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="voiceover-grid">
+              <div class="field span-8">
+                <label>剧 ID 列表</label>
+                <textarea id="voiceoverCountContentIds" rows="7" placeholder="每行一个剧 ID，支持逗号或空格分隔"></textarea>
+              </div>
+              <div class="field span-4">
+                <label>查询结果</label>
+                <div class="table-wrap" style="max-height:220px;">
+                  <table>
+                    <thead><tr><th>剧 ID</th><th>series_code</th><th>素材数</th><th>状态</th></tr></thead>
+                    <tbody id="voiceoverCountTableBody"><tr><td colspan="4" class="muted">暂无查询结果</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3 class="panel-title">筛选任务与配置</h3>
+              <div class="muted">批量填写剧 ID 和筛选条件；结果按素材维度展示。</div>
+            </div>
+            <div class="actions-inline">
+              <button id="voiceoverFilterBtn" class="btn btn-primary" type="button">筛选素材</button>
+              <button id="voiceoverClearBtn" class="btn btn-secondary" type="button">清空</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="voiceover-grid">
+              <div class="field span-8">
+                <label>批量剧 ID</label>
+                <textarea id="voiceoverFilterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
+              </div>
+              <div class="field span-2">
+                <label>ROAS 阈值</label>
+                <input id="voiceoverRoasThreshold" type="number" min="0" step="0.1" value="45" />
+              </div>
+              <div class="field span-2">
+                <label>保底候选数</label>
+                <input id="voiceoverMinCandidates" type="number" min="0" max="50" value="15" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3 class="panel-title">候选素材筛选结果</h3>
+              <div class="muted" id="voiceoverResultSummary">尚未筛选</div>
+            </div>
+            <div class="actions-inline">
+              <button id="voiceoverExportBtn" class="btn btn-secondary" type="button" disabled>导出筛选明细</button>
+              <button id="voiceoverOpenCreateBtn" class="btn btn-primary" type="button" disabled>创建任务</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="voiceover-stats" id="voiceoverStats">
+              <div class="voiceover-stat"><strong>0</strong><span>素材总数</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>默认候选</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>替补素材</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>已选择</span></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th><input id="voiceoverSelectAll" type="checkbox" aria-label="选择全部素材" /></th>
+                    <th>目标剧 ID</th>
+                    <th>素材 ID</th>
+                    <th>素材名称</th>
+                    <th>Category</th>
+                    <th>语种/时长</th>
+                    <th>ROAS/消耗</th>
+                    <th>风险</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="voiceoverResultTableBody"><tr><td colspan="9" class="muted">暂无筛选结果</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div id="voiceoverTaskModal" class="modal-backdrop hidden">
+          <div class="modal-panel voiceover-modal-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">批量创建设计师任务</h3>
+                <div class="muted" id="voiceoverModalSummary">请逐条素材设置任务参数，确认后统一提交。</div>
+              </div>
+              <button id="voiceoverModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+            </div>
+            <div class="panel-body">
+              <div id="voiceoverTaskCards" class="stack"></div>
+            </div>
+            <div class="voiceover-modal-footer">
+              <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+              <div class="actions-inline">
+                <button id="voiceoverModalResetBtn" class="btn btn-secondary" type="button">Reset</button>
+                <button id="voiceoverSubmitTasksBtn" class="btn btn-primary" type="button">确认创建全部任务</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
       <section id="adMaterialsSection" class="section">
         <div class="panel">
           <div class="panel-head">
@@ -12893,6 +13128,11 @@
 
 
       jobs: [],
+      voiceoverCountRows: [],
+      voiceoverMaterials: [],
+      voiceoverSelectedKeys: new Set(),
+      voiceoverDesigners: [],
+      voiceoverModalItems: [],
       adMaterialProducts: [],
       adMaterialCompetitorSources: [],
       adMaterialTasks: [],
@@ -13831,6 +14071,26 @@
 
       logTableBody: document.getElementById("logTableBody"),
       adMaterialForm: document.getElementById("adMaterialForm"),
+      voiceoverCountContentIds: document.getElementById("voiceoverCountContentIds"),
+      voiceoverCountBtn: document.getElementById("voiceoverCountBtn"),
+      voiceoverCountTableBody: document.getElementById("voiceoverCountTableBody"),
+      voiceoverFilterContentIds: document.getElementById("voiceoverFilterContentIds"),
+      voiceoverRoasThreshold: document.getElementById("voiceoverRoasThreshold"),
+      voiceoverMinCandidates: document.getElementById("voiceoverMinCandidates"),
+      voiceoverFilterBtn: document.getElementById("voiceoverFilterBtn"),
+      voiceoverClearBtn: document.getElementById("voiceoverClearBtn"),
+      voiceoverResultSummary: document.getElementById("voiceoverResultSummary"),
+      voiceoverStats: document.getElementById("voiceoverStats"),
+      voiceoverResultTableBody: document.getElementById("voiceoverResultTableBody"),
+      voiceoverSelectAll: document.getElementById("voiceoverSelectAll"),
+      voiceoverExportBtn: document.getElementById("voiceoverExportBtn"),
+      voiceoverOpenCreateBtn: document.getElementById("voiceoverOpenCreateBtn"),
+      voiceoverTaskModal: document.getElementById("voiceoverTaskModal"),
+      voiceoverTaskCards: document.getElementById("voiceoverTaskCards"),
+      voiceoverModalSummary: document.getElementById("voiceoverModalSummary"),
+      voiceoverModalCloseBtn: document.getElementById("voiceoverModalCloseBtn"),
+      voiceoverModalResetBtn: document.getElementById("voiceoverModalResetBtn"),
+      voiceoverSubmitTasksBtn: document.getElementById("voiceoverSubmitTasksBtn"),
       adMaterialProductSearch: document.getElementById("adMaterialProductSearch"),
       adMaterialProductOptions: document.getElementById("adMaterialProductOptions"),
       adMaterialProductHint: document.getElementById("adMaterialProductHint"),
@@ -14288,6 +14548,7 @@
     function firstAllowedView() {
       if (userCan("drama_synthesis")) return "tasks";
       if (userCan("cover_synthesis")) return "screenshots";
+      if (userCan("voiceover_drama_tasks")) return "voiceoverTasks";
       if (userCan("ad_material_tasks")) return "adMaterials";
       if (state.auth.user && state.auth.user.is_admin) return "settings";
       return "none";
@@ -14606,6 +14867,7 @@
       const canDrama = userCan("drama_synthesis");
       const canCover = userCan("cover_synthesis");
       const canAdMaterial = userCan("ad_material_tasks");
+      const canVoiceover = userCan("voiceover_drama_tasks");
 
 
 
@@ -14636,7 +14898,7 @@
 
 
 
-      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover) || (activeView === "adMaterials" && !canAdMaterial)) {
+      } else if ((activeView === "tasks" && !canDrama) || (activeView === "screenshots" && !canCover) || (activeView === "voiceoverTasks" && !canVoiceover) || (activeView === "adMaterials" && !canAdMaterial)) {
 
 
 
@@ -15611,6 +15873,268 @@
       return navText(JSON.stringify(String(value == null ? "" : value)));
     }
 
+    function parseVoiceoverIds(text) {
+      const ids = String(text || "").split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
+      return Array.from(new Set(ids));
+    }
+    function voiceoverKey(item) {
+      return `${item.target_content_id || ""}::${item.material_id || ""}`;
+    }
+    function voiceoverSelectedItems() {
+      return state.voiceoverMaterials.filter(item => state.voiceoverSelectedKeys.has(voiceoverKey(item)));
+    }
+    function refreshVoiceoverButtons() {
+      const selectedCount = state.voiceoverSelectedKeys.size;
+      if (els.voiceoverExportBtn) els.voiceoverExportBtn.disabled = !state.voiceoverMaterials.length;
+      if (els.voiceoverOpenCreateBtn) els.voiceoverOpenCreateBtn.disabled = selectedCount < 1;
+      if (els.voiceoverSelectAll) {
+        const selectable = state.voiceoverMaterials.length;
+        els.voiceoverSelectAll.checked = selectable > 0 && selectedCount === selectable;
+        els.voiceoverSelectAll.indeterminate = selectedCount > 0 && selectedCount < selectable;
+      }
+      renderVoiceoverStats();
+    }
+    function renderVoiceoverStats() {
+      if (!els.voiceoverStats) return;
+      const total = state.voiceoverMaterials.length;
+      const defaults = state.voiceoverMaterials.filter(item => item.selected_by_default).length;
+      const substitutes = state.voiceoverMaterials.filter(item => item.risk_label === "替补素材").length;
+      const selected = state.voiceoverSelectedKeys.size;
+      els.voiceoverStats.innerHTML = [
+        ["素材总数", total],
+        ["默认候选", defaults],
+        ["替补素材", substitutes],
+        ["已选择", selected],
+      ].map(([label, value]) => `<div class="voiceover-stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
+    }
+    function renderVoiceoverCountRows() {
+      if (!els.voiceoverCountTableBody) return;
+      els.voiceoverCountTableBody.innerHTML = state.voiceoverCountRows.length
+        ? state.voiceoverCountRows.map(item => `
+          <tr>
+            <td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td>
+            <td>${navText(item.series_code || "-")}</td>
+            <td>${navText(item.material_count ?? 0)}</td>
+            <td>${item.status === "ok" ? '<span class="status-pill status-done">成功</span>' : `<span class="status-pill status-failed">${navText(item.error || "失败")}</span>`}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="4" class="muted">暂无查询结果</td></tr>`;
+    }
+    async function queryVoiceoverCounts() {
+      const contentIds = parseVoiceoverIds(els.voiceoverCountContentIds?.value || "");
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      if (els.voiceoverCountBtn) els.voiceoverCountBtn.disabled = true;
+      try {
+        const data = await api("/api/voiceover-drama/material-counts", {
+          method: "POST",
+          body: JSON.stringify({ content_ids: contentIds })
+        });
+        state.voiceoverCountRows = data.items || [];
+        renderVoiceoverCountRows();
+        toast("素材数查询完成");
+      } finally {
+        if (els.voiceoverCountBtn) els.voiceoverCountBtn.disabled = false;
+      }
+    }
+    function voiceoverRiskCell(item) {
+      if (item.risk_label === "替补素材") return `<span class="voiceover-risk">替补素材</span>`;
+      return "";
+    }
+    function renderVoiceoverResults() {
+      if (!els.voiceoverResultTableBody) return;
+      els.voiceoverResultTableBody.innerHTML = state.voiceoverMaterials.length
+        ? state.voiceoverMaterials.map(item => {
+            const key = voiceoverKey(item);
+            const checked = state.voiceoverSelectedKeys.has(key) ? "checked" : "";
+            const statusText = item.candidate_reason || item.candidate_status || "";
+            return `<tr>
+              <td><input type="checkbox" ${checked} onchange="toggleVoiceoverSelection(${inlineArg(key)}, this.checked)" /></td>
+              <td><strong>${navText(item.target_content_id || "")}</strong><div class="muted">${navText(item.target_drama_name || "")}</div></td>
+              <td><strong>${navText(item.material_id || "")}</strong><div class="muted">${navText(item.product || "")}</div></td>
+              <td>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(statusText)}</div></td>
+              <td>${navText(item.category || "-")}</td>
+              <td>${navText(item.language || "-")}<div class="muted">${navText(item.duration || 0)}s</div></td>
+              <td><strong>${navText(item.roas ?? 0)}</strong><div class="muted">消耗 ${navText(item.spend ?? 0)}</div></td>
+              <td>${voiceoverRiskCell(item)}</td>
+              <td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td>
+            </tr>`;
+          }).join("")
+        : `<tr><td colspan="9" class="muted">暂无筛选结果</td></tr>`;
+      if (els.voiceoverResultSummary) {
+        els.voiceoverResultSummary.textContent = state.voiceoverMaterials.length
+          ? `共 ${state.voiceoverMaterials.length} 条素材，已选择 ${state.voiceoverSelectedKeys.size} 条`
+          : "尚未筛选";
+      }
+      refreshVoiceoverButtons();
+    }
+    async function filterVoiceoverMaterials() {
+      const contentIds = parseVoiceoverIds(els.voiceoverFilterContentIds?.value || "");
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      if (els.voiceoverFilterBtn) els.voiceoverFilterBtn.disabled = true;
+      try {
+        const data = await api("/api/voiceover-drama/filter", {
+          method: "POST",
+          body: JSON.stringify({
+            content_ids: contentIds,
+            roas_threshold: Number(els.voiceoverRoasThreshold?.value || 45),
+            min_candidates: Number(els.voiceoverMinCandidates?.value || 15)
+          })
+        });
+        state.voiceoverMaterials = data.items || [];
+        state.voiceoverSelectedKeys = new Set(state.voiceoverMaterials.filter(item => item.selected_by_default).map(voiceoverKey));
+        renderVoiceoverResults();
+        toast("素材筛选完成");
+      } finally {
+        if (els.voiceoverFilterBtn) els.voiceoverFilterBtn.disabled = false;
+      }
+    }
+    function clearVoiceoverFilters() {
+      if (els.voiceoverFilterContentIds) els.voiceoverFilterContentIds.value = "";
+      state.voiceoverMaterials = [];
+      state.voiceoverSelectedKeys = new Set();
+      renderVoiceoverResults();
+    }
+    function toggleVoiceoverSelection(key, checked) {
+      if (checked) state.voiceoverSelectedKeys.add(String(key || ""));
+      else state.voiceoverSelectedKeys.delete(String(key || ""));
+      refreshVoiceoverButtons();
+      if (els.voiceoverResultSummary) {
+        els.voiceoverResultSummary.textContent = `共 ${state.voiceoverMaterials.length} 条素材，已选择 ${state.voiceoverSelectedKeys.size} 条`;
+      }
+    }
+    function toggleAllVoiceoverSelection(checked) {
+      state.voiceoverSelectedKeys = checked ? new Set(state.voiceoverMaterials.map(voiceoverKey)) : new Set();
+      renderVoiceoverResults();
+    }
+    async function loadVoiceoverDesigners() {
+      if (state.voiceoverDesigners.length || !userCan("voiceover_drama_tasks")) return state.voiceoverDesigners;
+      const data = await api("/api/voiceover-drama/designers");
+      state.voiceoverDesigners = data.items || [];
+      return state.voiceoverDesigners;
+    }
+    function voiceoverDesignerOptions(selectedValue = "") {
+      const designers = state.voiceoverDesigners || [];
+      if (!designers.length) return `<option value="">暂无可选设计师</option>`;
+      return [`<option value="">请选择设计师</option>`].concat(designers.map(item => {
+        const value = String(item.user_id || "");
+        const selected = value === String(selectedValue || "") ? "selected" : "";
+        return `<option value="${navText(value)}" ${selected}>${navText(item.label || item.name || value)} / ${navText(value)}</option>`;
+      })).join("");
+    }
+    function renderVoiceoverTaskCards() {
+      if (!els.voiceoverTaskCards) return;
+      const defaultDesigner = state.voiceoverDesigners[0]?.user_id || "";
+      if (els.voiceoverModalSummary) {
+        els.voiceoverModalSummary.textContent = `已选择 ${state.voiceoverModalItems.length} 条素材；请逐条设置数量、设计师、截止时间和描述。`;
+      }
+      els.voiceoverTaskCards.innerHTML = state.voiceoverModalItems.map((item, index) => {
+        const key = voiceoverKey(item);
+        const description = item.roas_pass
+          ? `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`
+          : `该素材 ROAS 未达标，作为替补素材参考，请优先保留有效信息并优化创意表达。`;
+        return `<div class="voiceover-material-card" data-voiceover-task-card="${navText(key)}">
+          <div class="voiceover-card-head">
+            <div>
+              <strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong>
+              <div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${item.risk_label ? ` / ${navText(item.risk_label)}` : ""}</div>
+            </div>
+            ${voiceoverRiskCell(item)}
+          </div>
+          <div class="voiceover-grid">
+            <div class="field span-2">
+              <label>任务数量</label>
+              <div class="voiceover-stepper">
+                <button type="button" onclick="stepVoiceoverTaskNumber(${index}, -1)">-</button>
+                <input id="voiceoverTaskNumber_${index}" type="number" min="1" max="100" value="1" />
+                <button type="button" onclick="stepVoiceoverTaskNumber(${index}, 1)">+</button>
+              </div>
+            </div>
+            <div class="field span-4">
+              <label>指定设计师</label>
+              <select id="voiceoverTaskDesigner_${index}">${voiceoverDesignerOptions(defaultDesigner)}</select>
+            </div>
+            <div class="field span-3">
+              <label>截止时间</label>
+              <input id="voiceoverTaskEndDate_${index}" type="date" />
+            </div>
+            <div class="field span-3">
+              <label>是否使用原始素材名</label>
+              <div class="checks">
+                <label class="check"><input name="voiceoverOrigin_${index}" type="radio" value="1" checked /> 是</label>
+                <label class="check"><input name="voiceoverOrigin_${index}" type="radio" value="0" /> 否</label>
+              </div>
+            </div>
+            <div class="field span-12">
+              <label>任务描述</label>
+              <textarea id="voiceoverTaskDescription_${index}" rows="2">${navText(description)}</textarea>
+            </div>
+          </div>
+        </div>`;
+      }).join("");
+    }
+    async function openVoiceoverTaskModal() {
+      const items = voiceoverSelectedItems();
+      if (!items.length) return toast("请先选择素材", "error");
+      await loadVoiceoverDesigners();
+      state.voiceoverModalItems = items;
+      renderVoiceoverTaskCards();
+      els.voiceoverTaskModal?.classList.remove("hidden");
+    }
+    function closeVoiceoverTaskModal() {
+      state.voiceoverModalItems = [];
+      els.voiceoverTaskModal?.classList.add("hidden");
+      if (els.voiceoverTaskCards) els.voiceoverTaskCards.innerHTML = "";
+    }
+    function stepVoiceoverTaskNumber(index, delta) {
+      const input = document.getElementById(`voiceoverTaskNumber_${index}`);
+      if (!input) return;
+      const next = Math.max(1, Math.min(100, Number(input.value || 1) + delta));
+      input.value = String(next);
+    }
+    async function submitVoiceoverTasks() {
+      const items = state.voiceoverModalItems.map((item, index) => {
+        const origin = document.querySelector(`input[name="voiceoverOrigin_${index}"]:checked`)?.value || "1";
+        return {
+          target_content_id: item.target_content_id,
+          material_id: item.material_id,
+          number: Number(document.getElementById(`voiceoverTaskNumber_${index}`)?.value || 1),
+          designer: document.getElementById(`voiceoverTaskDesigner_${index}`)?.value || "",
+          end_date: document.getElementById(`voiceoverTaskEndDate_${index}`)?.value || "",
+          origin_name: Number(origin),
+          description: document.getElementById(`voiceoverTaskDescription_${index}`)?.value || ""
+        };
+      });
+      if (items.some(item => !item.designer)) return toast("每条素材都需要选择设计师", "error");
+      if (els.voiceoverSubmitTasksBtn) els.voiceoverSubmitTasksBtn.disabled = true;
+      try {
+        const data = await api("/api/voiceover-drama/design-tasks", {
+          method: "POST",
+          body: JSON.stringify({ items })
+        });
+        toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
+        if (!data.failed_count) closeVoiceoverTaskModal();
+      } finally {
+        if (els.voiceoverSubmitTasksBtn) els.voiceoverSubmitTasksBtn.disabled = false;
+      }
+    }
+    function exportVoiceoverCsv() {
+      if (!state.voiceoverMaterials.length) return;
+      const headers = ["target_content_id", "target_drama_name", "material_id", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const csv = [headers.join(",")].concat(state.voiceoverMaterials.map(item => headers.map(key => {
+        const value = String(item[key] ?? "").replace(/"/g, '""');
+        return `"${value}"`;
+      }).join(","))).join("\n");
+      const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `voiceover_materials_${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+    window.toggleVoiceoverSelection = toggleVoiceoverSelection;
+    window.stepVoiceoverTaskNumber = stepVoiceoverTaskNumber;
     function inlineMarkdown(value) {
       let text = String(value == null ? "" : value);
       const inlineImages = [];
@@ -22131,7 +22655,7 @@ function buildJobRow(job) {
 
 
 
-    const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "adMaterials", "settings", "navigation", "users", "logs"]);
+    const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "voiceoverTasks", "adMaterials", "settings", "navigation", "users", "logs"]);
 
     function viewFromDetailHash(hash) {
       const value = (hash || "").replace(/^#/, "");
@@ -22151,6 +22675,7 @@ function buildJobRow(job) {
       if (path === "/users.html") return "users";
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
+      if (path === "/voiceover-drama.html") return "voiceoverTasks";
       if (path === "/ad-materials.html") return "adMaterials";
       if (path === "/tasks.html") return "tasks";
       return "tasks";
@@ -22175,6 +22700,7 @@ function buildJobRow(job) {
       if (path === "/users.html") return "users";
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
+      if (path === "/voiceover-drama.html") return "voiceoverTasks";
       if (path === "/ad-materials.html") return "adMaterials";
       return "";
     }
@@ -22218,6 +22744,7 @@ function buildJobRow(job) {
 
 
         screenshots: ["\u622a\u56fe\u7d20\u6750", "\u6309\u4ea7\u54c1\u6279\u91cf\u63d0\u4ea4\u5267 ID\uff0c\u67e5\u770b\u4e09\u79cd\u56fe\u7247\u5c3a\u5bf8\u7684\u751f\u6210\u8fdb\u5ea6\u3002"],
+        voiceoverTasks: ["配音剧语种任务", "按剧 ID 查询系列素材，筛选候选素材并批量创建设计师需求。"],
         adMaterials: ["投放素材任务管理", "创建投放素材需求，审核需求和素材，并完成最终素材上报。"],
 
 
@@ -22269,6 +22796,7 @@ function buildJobRow(job) {
 
       if (view === "tasks" && !userCan("drama_synthesis")) view = firstAllowedView();
       if (view === "screenshots" && !userCan("cover_synthesis")) view = firstAllowedView();
+      if (view === "voiceoverTasks" && !userCan("voiceover_drama_tasks")) view = firstAllowedView();
       if (view === "adMaterials" && !userCan("ad_material_tasks")) view = firstAllowedView();
 
 
@@ -22371,6 +22899,10 @@ function buildJobRow(job) {
 
 
 
+      if (view === "voiceoverTasks") {
+        refreshVoiceoverButtons();
+        loadVoiceoverDesigners().catch(error => console.warn("加载设计师列表失败", error));
+      }
       if (view === "adMaterials") {
         Promise.all([loadAdMaterialCompetitorSources(), loadAdMaterialTasks()]).catch(error => {
           if (els.adMaterialTableBody) {
@@ -22731,6 +23263,38 @@ function buildJobRow(job) {
       }
       if (els.quickNav) {
         els.quickNav.addEventListener("click", handleQuickNavClick);
+      }
+      if (els.voiceoverCountBtn) {
+        els.voiceoverCountBtn.onclick = () => queryVoiceoverCounts().catch(error => showError("查询素材数失败", error));
+      }
+      if (els.voiceoverFilterBtn) {
+        els.voiceoverFilterBtn.onclick = () => filterVoiceoverMaterials().catch(error => showError("筛选素材失败", error));
+      }
+      if (els.voiceoverClearBtn) {
+        els.voiceoverClearBtn.onclick = clearVoiceoverFilters;
+      }
+      if (els.voiceoverSelectAll) {
+        els.voiceoverSelectAll.addEventListener("change", event => toggleAllVoiceoverSelection(event.target.checked));
+      }
+      if (els.voiceoverExportBtn) {
+        els.voiceoverExportBtn.onclick = exportVoiceoverCsv;
+      }
+      if (els.voiceoverOpenCreateBtn) {
+        els.voiceoverOpenCreateBtn.onclick = () => openVoiceoverTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
+      }
+      if (els.voiceoverModalCloseBtn) {
+        els.voiceoverModalCloseBtn.onclick = closeVoiceoverTaskModal;
+      }
+      if (els.voiceoverModalResetBtn) {
+        els.voiceoverModalResetBtn.onclick = renderVoiceoverTaskCards;
+      }
+      if (els.voiceoverSubmitTasksBtn) {
+        els.voiceoverSubmitTasksBtn.onclick = () => submitVoiceoverTasks().catch(error => showError("创建设计师任务失败", error));
+      }
+      if (els.voiceoverTaskModal) {
+        els.voiceoverTaskModal.addEventListener("click", event => {
+          if (event.target === els.voiceoverTaskModal) closeVoiceoverTaskModal();
+        });
       }
       if (els.adMaterialForm) {
         els.adMaterialForm.addEventListener("submit", submitAdMaterialTask);

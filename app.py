@@ -1240,6 +1240,16 @@ AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS = [
     item.strip() for item in os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS", "").split(",") if item.strip()
 ]
 
+VOICEOVER_KOL_TASK_API_URL = os.environ.get(
+    "VOICEOVER_KOL_TASK_API_URL", "https://ads-admin.static.kunlun.com/api/ai/kol-task"
+).strip()
+VOICEOVER_KOL_TASK_API_TOKEN = os.environ.get("VOICEOVER_KOL_TASK_API_TOKEN", "").strip()
+VOICEOVER_KOL_TASK_API_TIMEOUT = int(os.environ.get("VOICEOVER_KOL_TASK_API_TIMEOUT", "30"))
+VOICEOVER_DESIGNER_ROLE_APP_ID = os.environ.get("VOICEOVER_DESIGNER_ROLE_APP_ID", "78").strip() or "78"
+VOICEOVER_DEFAULT_ROAS_THRESHOLD = float(os.environ.get("VOICEOVER_DEFAULT_ROAS_THRESHOLD", "45"))
+VOICEOVER_DEFAULT_MIN_CANDIDATES = int(os.environ.get("VOICEOVER_DEFAULT_MIN_CANDIDATES", "15"))
+VOICEOVER_DEFAULT_APP_ID = os.environ.get("VOICEOVER_DEFAULT_APP_ID", "").strip()
+
 
 AI_SOURCE_CALLBACK_URL = os.environ.get(
     "AI_SOURCE_CALLBACK_URL", "https://aa.yingliangads.com/api/material/ai-source"
@@ -3285,6 +3295,7 @@ MODULE_PERMISSIONS = {
     "cover_synthesis": "封面图合成",
 
     "ad_material_tasks": "投放素材任务",
+    "voiceover_drama_tasks": "配音剧语种任务",
 
 
 
@@ -3336,6 +3347,7 @@ DEFAULT_USER_PERMISSIONS = {
     "drama_synthesis": False,
     "cover_synthesis": False,
     "ad_material_tasks": False,
+    "voiceover_drama_tasks": False,
     "settings": False,
 }
 
@@ -34869,6 +34881,532 @@ def complete_ad_material_upload(task_id, session):
         raise StructuredApiError("source_upload_failed", "部分素材上报失败", errors=errors)
     update_ad_material_task_status(task_id, "done", error_message="")
     return fetch_ad_material_task(task_id)
+
+
+def voiceover_int(value, default=0):
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def voiceover_float(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def voiceover_parse_content_ids(payload):
+    payload = payload or {}
+    raw = payload.get("content_ids")
+    if raw is None:
+        raw = payload.get("content_ids_text", payload.get("content_id", ""))
+    if isinstance(raw, list):
+        values = [str(item or "").strip() for item in raw]
+    else:
+        values = [item.strip() for item in re.split(r"[\s,，;；]+", str(raw or "")) if item.strip()]
+    result = []
+    seen = set()
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    if not result:
+        raise StructuredApiError("content_ids_required", "请填写至少一个剧 ID")
+    if len(result) > 100:
+        raise StructuredApiError("content_ids_too_many", "一次最多处理 100 个剧 ID")
+    return result
+
+
+def voiceover_sql_db():
+    return (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
+
+
+def lookup_voiceover_drama_info(content_id, app_id=""):
+    content_id = str(content_id or "").strip()
+    app_id = str(app_id or "").strip()
+    if not content_id:
+        raise StructuredApiError("invalid_content_id", "剧 ID 不能为空")
+    database = voiceover_sql_db()
+    where = "d.content_id='%s'" % mysql_escape_literal(content_id)
+    if app_id:
+        where += " AND CAST(d.app_id AS CHAR)='%s'" % mysql_escape_literal(app_id)
+    prefer_app_id = app_id or VOICEOVER_DEFAULT_APP_ID
+    prefer_sql = ""
+    if prefer_app_id:
+        prefer_sql = "CASE WHEN CAST(d.app_id AS CHAR)='%s' THEN 0 ELSE 1 END, " % mysql_escape_literal(prefer_app_id)
+    rows = run_mysql(
+        (
+            "SELECT CAST(d.id AS CHAR), CAST(d.app_id AS CHAR), d.content_id, d.name, d.country, "
+            "d.language, d.series_code, d.app, CAST(d.updated_at AS CHAR), "
+            "COALESCE(a.name, ''), COALESCE(a.package, ''), COALESCE(a.google_app_android, ''), "
+            "COALESCE(a.app_id, '') "
+            "FROM `%s`.ads_drama_info d "
+            "LEFT JOIN `%s`.ads_apps_setting a ON a.id=d.app_id "
+            "WHERE %s "
+            "ORDER BY %sd.updated_at DESC, d.id ASC LIMIT 1"
+        )
+        % (database, database, where, prefer_sql)
+    )
+    if not rows:
+        raise StructuredApiError("drama_not_found", "未在剧库中找到剧 ID：%s" % content_id)
+    row = rows[0]
+    app_id_value = str(row[1] if len(row) > 1 else "").strip()
+    app_package = (
+        str(row[11] if len(row) > 11 else "").strip()
+        or str(row[10] if len(row) > 10 else "").strip()
+        or app_package_for_app_id(app_id_value)
+    )
+    drama_app = str(row[7] if len(row) > 7 else "").strip() or app_package
+    full_content_id = "%s#-#%s#-#%s" % (app_package, drama_app, content_id)
+    product_name = str(row[9] if len(row) > 9 else "").strip() or app_package or app_id_value
+    return {
+        "id": str(row[0] if len(row) > 0 else "").strip(),
+        "app_id": app_id_value,
+        "content_id": content_id,
+        "full_content_id": full_content_id,
+        "name": str(row[3] if len(row) > 3 else "").strip(),
+        "country": str(row[4] if len(row) > 4 else "").strip(),
+        "language": str(row[5] if len(row) > 5 else "").strip(),
+        "series_code": str(row[6] if len(row) > 6 else "").strip(),
+        "app": drama_app,
+        "app_package": app_package,
+        "product_name": product_name,
+        "updated_at": str(row[8] if len(row) > 8 else "").strip(),
+    }
+
+
+def voiceover_material_count_for_series(series_code):
+    series_code = str(series_code or "").strip()
+    if not series_code:
+        return 0
+    database = voiceover_sql_db()
+    rows = run_mysql(
+        (
+            "SELECT COUNT(DISTINCT s.id) "
+            "FROM `%s`.ads_custom_resource_drama_insight i "
+            "JOIN `%s`.ads_custom_source s ON CAST(s.id AS CHAR)=CAST(i.resource_id AS CHAR) "
+            "WHERE i.series_code='%s' AND s.is_delete=0 AND s.url<>''"
+        )
+        % (database, database, mysql_escape_literal(series_code))
+    )
+    return voiceover_int(rows[0][0] if rows and rows[0] else 0, 0)
+
+
+def voiceover_material_counts(payload):
+    items = []
+    for content_id in voiceover_parse_content_ids(payload):
+        try:
+            drama = lookup_voiceover_drama_info(content_id)
+            count = voiceover_material_count_for_series(drama.get("series_code", ""))
+            items.append({
+                "content_id": content_id,
+                "drama_name": drama.get("name", ""),
+                "series_code": drama.get("series_code", ""),
+                "app_id": drama.get("app_id", ""),
+                "app": drama.get("app", ""),
+                "country": drama.get("country", ""),
+                "language": drama.get("language", ""),
+                "material_count": count,
+                "status": "ok",
+            })
+        except Exception as exc:
+            items.append({
+                "content_id": content_id,
+                "material_count": 0,
+                "status": "failed",
+                "error": api_error_payload(exc).get("message") or str(exc),
+            })
+    return {"items": items, "total": len(items)}
+
+
+def voiceover_material_dedupe_key(item):
+    name = str(item.get("name") or item.get("resource_name") or "").lower()
+    name = re.sub(r"\.(mp4|mov|webm|m4v)$", "", name)
+    name = re.sub(r"\b(en|es|tr|ru|pt|br|hi|id|de|fr|it|ar|th|vi|ms|tl|ja|ko)\b", "", name)
+    name = re.sub(r"\d{4}[-_.]?\d{1,2}[-_.]?\d{1,2}", "", name)
+    name = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", name)
+    duration = voiceover_int(item.get("duration"), 0)
+    return "%s:%s" % (duration, name[:80])
+
+
+def voiceover_material_rows_for_series(series_code, limit=300):
+    series_code = str(series_code or "").strip()
+    if not series_code:
+        return []
+    limit = max(1, min(1000, voiceover_int(limit, 300)))
+    database = voiceover_sql_db()
+    sql = (
+        "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
+        "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
+        "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.content_sign, ''), "
+        "COALESCE(s.video_duration, 0), COALESCE(MAX(i.resource_name), ''), "
+        "COALESCE(MAX(i.resource_tag), ''), COALESCE(SUM(i.spend), 0), "
+        "COALESCE(SUM(i.revenue), 0), COALESCE(SUM(i.revenue0), 0), "
+        "COALESCE(MIN(i.stats_date), ''), COALESCE(MAX(i.stats_date), ''), COUNT(*) "
+        "FROM `%s`.ads_custom_resource_drama_insight i "
+        "JOIN `%s`.ads_custom_source s ON CAST(s.id AS CHAR)=CAST(i.resource_id AS CHAR) "
+        "WHERE i.series_code='%s' AND s.is_delete=0 AND s.url<>'' "
+        "GROUP BY s.id, s.name, s.url, s.category, s.product, s.country, s.language, "
+        "s.data_source_id, s.content_sign, s.video_duration "
+        "ORDER BY SUM(i.spend) DESC LIMIT %d"
+    ) % (database, database, mysql_escape_literal(series_code), limit)
+    rows = run_mysql(sql)
+    items = []
+    for row in rows:
+        spend = voiceover_float(row[12] if len(row) > 12 else 0)
+        revenue = voiceover_float(row[13] if len(row) > 13 else 0)
+        revenue0 = voiceover_float(row[14] if len(row) > 14 else 0)
+        roas = round(revenue / spend * 100, 2) if spend > 0 else 0.0
+        roas0 = round(revenue0 / spend * 100, 2) if spend > 0 else 0.0
+        items.append({
+            "material_id": str(row[0] if len(row) > 0 else "").strip(),
+            "name": str(row[1] if len(row) > 1 else "").strip(),
+            "url": str(row[2] if len(row) > 2 else "").strip(),
+            "category": str(row[3] if len(row) > 3 else "").strip(),
+            "product": str(row[4] if len(row) > 4 else "").strip(),
+            "country": str(row[5] if len(row) > 5 else "").strip(),
+            "language": str(row[6] if len(row) > 6 else "").strip(),
+            "source_content_id": str(row[7] if len(row) > 7 else "").strip(),
+            "content_sign": str(row[8] if len(row) > 8 else "").strip(),
+            "duration": voiceover_int(row[9] if len(row) > 9 else 0),
+            "resource_name": str(row[10] if len(row) > 10 else "").strip(),
+            "resource_tag": str(row[11] if len(row) > 11 else "").strip(),
+            "spend": round(spend, 2),
+            "revenue": round(revenue, 2),
+            "revenue0": round(revenue0, 2),
+            "roas": roas,
+            "roas0": roas0,
+            "stats_date_from": str(row[15] if len(row) > 15 else "").strip(),
+            "stats_date_to": str(row[16] if len(row) > 16 else "").strip(),
+            "insight_rows": voiceover_int(row[17] if len(row) > 17 else 0),
+        })
+    return items
+
+
+def voiceover_apply_candidate_rules(items, roas_threshold, min_candidates):
+    roas_threshold = voiceover_float(roas_threshold, VOICEOVER_DEFAULT_ROAS_THRESHOLD)
+    min_candidates = max(0, voiceover_int(min_candidates, VOICEOVER_DEFAULT_MIN_CANDIDATES))
+    for item in items:
+        item["roas_threshold"] = roas_threshold
+        item["roas_pass"] = item.get("roas", 0) >= roas_threshold
+        item["risk_label"] = ""
+        item["candidate_status"] = "not_selected"
+        item["candidate_reason"] = "未进入默认候选"
+        item["selected_by_default"] = False
+        item["duplicate_of"] = ""
+
+    selected = []
+    seen_keys = {}
+    pass_items = sorted([item for item in items if item["roas_pass"]], key=lambda item: (-item["roas"], -item["spend"]))
+    for item in pass_items:
+        key = voiceover_material_dedupe_key(item)
+        if key and key in seen_keys:
+            item["candidate_status"] = "duplicate"
+            item["candidate_reason"] = "疑似同素材不同语种/版本，默认去重"
+            item["duplicate_of"] = seen_keys[key]
+            continue
+        seen_keys[key] = item["material_id"]
+        item["candidate_status"] = "roas_pass"
+        item["candidate_reason"] = "ROAS 达标"
+        item["selected_by_default"] = True
+        selected.append(item)
+
+    if len(selected) < min_candidates:
+        fallback_items = sorted(
+            [item for item in items if item["candidate_status"] == "not_selected"],
+            key=lambda item: (-item["spend"], -item["roas"]),
+        )
+        for item in fallback_items:
+            if len(selected) >= min_candidates:
+                break
+            key = voiceover_material_dedupe_key(item)
+            if key and key in seen_keys:
+                item["candidate_status"] = "duplicate"
+                item["candidate_reason"] = "疑似同素材不同语种/版本，默认去重"
+                item["duplicate_of"] = seen_keys[key]
+                continue
+            seen_keys[key] = item["material_id"]
+            item["candidate_status"] = "substitute"
+            item["candidate_reason"] = "ROAS 未达标，按消耗补足候选"
+            item["risk_label"] = "替补素材"
+            item["selected_by_default"] = True
+            selected.append(item)
+    return items
+
+
+def voiceover_filter_materials(payload):
+    payload = payload or {}
+    roas_threshold = voiceover_float(payload.get("roas_threshold"), VOICEOVER_DEFAULT_ROAS_THRESHOLD)
+    min_candidates = voiceover_int(payload.get("min_candidates"), VOICEOVER_DEFAULT_MIN_CANDIDATES)
+    limit = voiceover_int(payload.get("limit"), 300)
+    groups = []
+    all_items = []
+    for content_id in voiceover_parse_content_ids(payload):
+        drama = lookup_voiceover_drama_info(content_id)
+        materials = voiceover_material_rows_for_series(drama.get("series_code", ""), limit=limit)
+        voiceover_apply_candidate_rules(materials, roas_threshold, min_candidates)
+        for item in materials:
+            item["target_content_id"] = content_id
+            item["target_drama_name"] = drama.get("name", "")
+            item["target_series_code"] = drama.get("series_code", "")
+            item["target_app_id"] = drama.get("app_id", "")
+            item["target_app"] = drama.get("app", "")
+            item["target_country"] = drama.get("country", "")
+            item["target_language"] = drama.get("language", "")
+        default_count = len([item for item in materials if item.get("selected_by_default")])
+        substitute_count = len([item for item in materials if item.get("candidate_status") == "substitute"])
+        groups.append({
+            "content_id": content_id,
+            "drama": drama,
+            "material_count": len(materials),
+            "default_candidate_count": default_count,
+            "substitute_count": substitute_count,
+        })
+        all_items.extend(materials)
+    return {
+        "items": all_items,
+        "groups": groups,
+        "total": len(all_items),
+        "roas_threshold": roas_threshold,
+        "min_candidates": min_candidates,
+    }
+
+
+def voiceover_lookup_material(material_id, target_content_id=""):
+    material_id = str(material_id or "").strip()
+    if not material_id:
+        raise StructuredApiError("invalid_material_id", "素材 ID 不能为空")
+    database = voiceover_sql_db()
+    join_type = "LEFT JOIN"
+    series_filter = ""
+    if target_content_id:
+        drama = lookup_voiceover_drama_info(target_content_id)
+        join_type = "JOIN"
+        series_filter = " AND i.series_code='%s'" % mysql_escape_literal(drama.get("series_code", ""))
+    sql = (
+        "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
+        "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
+        "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.video_duration, 0), "
+        "COALESCE(SUM(i.spend), 0), COALESCE(SUM(i.revenue), 0), COALESCE(SUM(i.revenue0), 0) "
+        "FROM `%s`.ads_custom_source s "
+        "%s `%s`.ads_custom_resource_drama_insight i ON CAST(i.resource_id AS CHAR)=CAST(s.id AS CHAR)%s "
+        "WHERE CAST(s.id AS CHAR)='%s' AND s.is_delete=0 AND s.url<>'' "
+        "GROUP BY s.id, s.name, s.url, s.category, s.product, s.country, s.language, s.data_source_id, s.video_duration "
+        "LIMIT 1"
+    ) % (database, join_type, database, series_filter, mysql_escape_literal(material_id))
+    rows = run_mysql(sql)
+    if not rows:
+        raise StructuredApiError("material_not_found", "未找到素材：%s" % material_id)
+    row = rows[0]
+    spend = voiceover_float(row[9] if len(row) > 9 else 0)
+    revenue = voiceover_float(row[10] if len(row) > 10 else 0)
+    return {
+        "material_id": str(row[0] if len(row) > 0 else "").strip(),
+        "name": str(row[1] if len(row) > 1 else "").strip(),
+        "url": str(row[2] if len(row) > 2 else "").strip(),
+        "category": str(row[3] if len(row) > 3 else "").strip(),
+        "product": str(row[4] if len(row) > 4 else "").strip(),
+        "country": str(row[5] if len(row) > 5 else "").strip(),
+        "language": str(row[6] if len(row) > 6 else "").strip(),
+        "source_content_id": str(row[7] if len(row) > 7 else "").strip(),
+        "duration": voiceover_int(row[8] if len(row) > 8 else 0),
+        "spend": round(spend, 2),
+        "revenue": round(revenue, 2),
+        "roas": round(revenue / spend * 100, 2) if spend > 0 else 0,
+    }
+
+
+def list_voiceover_designers():
+    database = voiceover_sql_db()
+    rows = run_mysql(
+        (
+            "SELECT DISTINCT CAST(aug.user_id AS CHAR), CAST(aug.sub_user_id AS CHAR), "
+            "COALESCE(NULLIF(aug.name, ''), NULLIF(au.name, ''), NULLIF(au.username, ''), CAST(aug.user_id AS CHAR)), "
+            "COALESCE(aug.email, ''), COALESCE(au.username, '') "
+            "FROM `%s`.admin_role_users aru "
+            "JOIN `%s`.admin_role_apps ara ON ara.id=aru.role_app_id "
+            "LEFT JOIN `%s`.admin_user_group aug ON aug.sub_user_id=aru.user_id AND aug.status=0 "
+            "LEFT JOIN `%s`.admin_users au ON au.id=aru.user_id "
+            "WHERE CAST(ara.id AS CHAR)='%s' AND aug.user_id IS NOT NULL "
+            "ORDER BY 3 ASC"
+        )
+        % (database, database, database, database, mysql_escape_literal(VOICEOVER_DESIGNER_ROLE_APP_ID))
+    )
+    items = []
+    seen = set()
+    for row in rows:
+        user_id = str(row[0] if len(row) > 0 else "").strip()
+        if not user_id or user_id in seen:
+            continue
+        seen.add(user_id)
+        name = str(row[2] if len(row) > 2 else "").strip() or user_id
+        username = str(row[4] if len(row) > 4 else "").strip()
+        items.append({
+            "user_id": user_id,
+            "sub_user_id": str(row[1] if len(row) > 1 else "").strip(),
+            "name": name,
+            "email": str(row[3] if len(row) > 3 else "").strip(),
+            "username": username,
+            "label": "%s / %s" % (name, username or user_id),
+        })
+    return {"items": items, "group_role_app_id": VOICEOVER_DESIGNER_ROLE_APP_ID}
+
+
+def lookup_voiceover_admin_group_for_actor(actor):
+    actor = actor or {}
+    email = str(actor.get("email") or "").strip()
+    name = str(actor.get("name") or "").strip()
+    database = voiceover_sql_db()
+    filters = []
+    if email:
+        filters.append("LOWER(TRIM(aug.email))=LOWER(TRIM('%s'))" % mysql_escape_literal(email))
+    if name:
+        filters.append("aug.name='%s'" % mysql_escape_literal(name))
+    if not filters:
+        return {}
+    rows = run_mysql(
+        (
+            "SELECT CAST(aug.user_id AS CHAR), CAST(aug.sub_user_id AS CHAR), aug.name, aug.email "
+            "FROM `%s`.admin_user_group aug WHERE aug.status=0 AND (%s) "
+            "ORDER BY CASE WHEN LOWER(TRIM(aug.email))=LOWER(TRIM('%s')) THEN 0 ELSE 1 END LIMIT 1"
+        )
+        % (database, " OR ".join(filters), mysql_escape_literal(email))
+    )
+    if not rows:
+        return {}
+    row = rows[0]
+    return {
+        "user_id": str(row[0] if len(row) > 0 else "").strip(),
+        "sub_user_id": str(row[1] if len(row) > 1 else "").strip(),
+        "name": str(row[2] if len(row) > 2 else "").strip(),
+        "email": str(row[3] if len(row) > 3 else "").strip(),
+    }
+
+
+def voiceover_safe_name_part(value, fallback="NA"):
+    text = str(value or "").strip() or fallback
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[\\/:*?\"<>|#]+", "-", text)
+    return text[:64] or fallback
+
+
+def build_voiceover_task_name(drama, requester):
+    date_text = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y%m%d")
+    random_text = secrets.token_hex(3)
+    requester_text = requester.get("name") or requester.get("email") or requester.get("user_id") or "unknown"
+    return "AI_%s_%s_%s_%s_%s_%s" % (
+        voiceover_safe_name_part(drama.get("product_name")),
+        voiceover_safe_name_part(drama.get("language")),
+        voiceover_safe_name_part(drama.get("content_id")),
+        date_text,
+        voiceover_safe_name_part(requester_text),
+        random_text,
+    )
+
+
+def post_voiceover_kol_task(body):
+    if not VOICEOVER_KOL_TASK_API_TOKEN:
+        raise StructuredApiError("kol_task_token_missing", "生成需求接口 token 未配置")
+    response = requests.post(
+        VOICEOVER_KOL_TASK_API_URL,
+        headers={
+            "Authorization": "Bearer %s" % VOICEOVER_KOL_TASK_API_TOKEN,
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=VOICEOVER_KOL_TASK_API_TIMEOUT,
+    )
+    try:
+        data = response.json()
+    except Exception:
+        data = {"message": response.text[:500]}
+    if response.status_code >= 400:
+        raise StructuredApiError("kol_task_http_failed", "生成需求接口请求失败", status=response.status_code, response=data)
+    code = data.get("code") if isinstance(data, dict) else None
+    if code not in (0, "0", None) and not data.get("success"):
+        raise StructuredApiError("kol_task_failed", str(data.get("message") or data.get("error") or data), response=data)
+    return data
+
+
+def create_voiceover_design_tasks(payload, session):
+    payload = payload or {}
+    raw_items = payload.get("items") or payload.get("materials") or []
+    if not isinstance(raw_items, list) or not raw_items:
+        raise StructuredApiError("materials_required", "请至少选择一个素材")
+    actor = ad_material_actor(session)
+    requester_group = lookup_voiceover_admin_group_for_actor(actor)
+    requester_user_id = requester_group.get("user_id") or requester_group.get("sub_user_id")
+    if not requester_user_id:
+        raise StructuredApiError("requester_missing", "无法通过当前登录人定位 admin_user_group.user_id")
+    valid_designer_ids = {str(item.get("user_id") or "").strip() for item in list_voiceover_designers().get("items", [])}
+    results = []
+    errors = []
+    for index, raw_item in enumerate(raw_items, 1):
+        raw_item = raw_item or {}
+        target_content_id = str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip()
+        material_id = str(raw_item.get("material_id") or raw_item.get("id") or "").strip()
+        try:
+            drama = lookup_voiceover_drama_info(target_content_id)
+            material = voiceover_lookup_material(material_id, target_content_id=target_content_id)
+            number = max(1, min(100, voiceover_int(raw_item.get("number", raw_item.get("quantity", 1)), 1)))
+            designer = str(raw_item.get("designer") or raw_item.get("designer_id") or "").strip()
+            if not designer:
+                raise StructuredApiError("designer_required", "请选择设计师")
+            if designer not in valid_designer_ids:
+                raise StructuredApiError("designer_not_allowed", "设计师不在授权接单权限用户组中")
+            description = str(raw_item.get("description", raw_item.get("introducation", "")) or "").strip()
+            origin_name = voiceover_int(raw_item.get("origin_name", 1), 1)
+            end_date = str(raw_item.get("end_date") or "").strip()
+            body = {
+                "name": build_voiceover_task_name(drama, actor),
+                "app": drama.get("app", ""),
+                "type": 11,
+                "content_id": drama.get("full_content_id", ""),
+                "number": number,
+                "country": drama.get("country", ""),
+                "language": drama.get("language", ""),
+                "tag": [drama.get("name", "")],
+                "category": material.get("category", ""),
+                "origin_name": origin_name,
+                "designer": voiceover_int(designer),
+                "is_ad_activity": 0,
+                "examples": [material.get("url", "")],
+                "introducation": description,
+                "user_id": voiceover_int(requester_user_id),
+            }
+            if end_date:
+                body["end_date"] = end_date
+            response = post_voiceover_kol_task(body)
+            results.append({
+                "index": index,
+                "material_id": material_id,
+                "target_content_id": target_content_id,
+                "name": body["name"],
+                "request": body,
+                "response": response,
+                "status": "created",
+            })
+        except Exception as exc:
+            errors.append({
+                "index": index,
+                "material_id": material_id,
+                "target_content_id": target_content_id,
+                "error": api_error_payload(exc).get("message") or str(exc),
+            })
+    if errors and not results:
+        raise StructuredApiError("voiceover_task_create_failed", "全部设计师任务创建失败", errors=errors)
+    return {
+        "created_count": len(results),
+        "failed_count": len(errors),
+        "items": results,
+        "errors": errors,
+    }
 
 
 def parse_ad_material_task_route(path):
@@ -85438,6 +85976,15 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/voiceover-drama/designers":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                json_response(self, 200, list_voiceover_designers())
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/ad-material/products":
             if not self._require_module("ad_material_tasks"):
                 return
@@ -87977,6 +88524,60 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
                 json_response(self, 400, api_error_payload(exc))
 
+            return
+
+        if parsed.path == "/api/voiceover-drama/material-counts":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                payload = voiceover_material_counts(self._read_json())
+                append_audit_log(self._session(), "voiceover_material_counts", "voiceover_drama", "", {"total": payload.get("total", 0)})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/voiceover-drama/filter":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                payload = voiceover_filter_materials(self._read_json())
+                append_audit_log(
+                    self._session(),
+                    "voiceover_filter_materials",
+                    "voiceover_drama",
+                    "",
+                    {
+                        "total": payload.get("total", 0),
+                        "groups": len(payload.get("groups") or []),
+                    },
+                )
+                json_response(self, 200, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/voiceover-drama/design-tasks":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                payload = create_voiceover_design_tasks(self._read_json(), self._session())
+                append_audit_log(
+                    self._session(),
+                    "create_voiceover_design_tasks",
+                    "voiceover_drama",
+                    "",
+                    {
+                        "created_count": payload.get("created_count", 0),
+                        "failed_count": payload.get("failed_count", 0),
+                    },
+                )
+                json_response(self, 200 if not payload.get("failed_count") else 207, payload)
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
             return
 
         screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
