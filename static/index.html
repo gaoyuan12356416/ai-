@@ -18396,6 +18396,9 @@ function buildJobRow(job) {
 
 
       }
+      if (location.hash.startsWith("#screenshot-job/")) {
+        history.replaceState({}, "", location.pathname + "#screenshots");
+      }
 
 
 
@@ -19158,7 +19161,7 @@ function buildJobRow(job) {
 
     async function viewScreenshotJob(jobId) {
       try {
-        const job = await api(`/api/drama-screenshot-material/jobs/${jobId}`);
+        const job = await api(`/api/drama-screenshot-material/jobs/${encodeURIComponent(jobId)}`);
         state.selectedScreenshotJob = job;
         renderScreenshotJobDetail(job);
         openDetailDrawer("#screenshot-job/" + jobId);
@@ -22130,9 +22133,18 @@ function buildJobRow(job) {
 
     const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "adMaterials", "settings", "navigation", "users", "logs"]);
 
+    function viewFromDetailHash(hash) {
+      const value = (hash || "").replace(/^#/, "");
+      if (value.startsWith("job/")) return "tasks";
+      if (value.startsWith("screenshot-job/")) return "screenshots";
+      return "";
+    }
+
     function viewFromPath() {
       const hashView = (location.hash || "").replace(/^#/, "");
       if (INTERNAL_VIEWS.has(hashView)) return hashView;
+      const detailView = viewFromDetailHash(location.hash || "");
+      if (detailView) return detailView;
       const path = location.pathname.replace(/\/+$/, "") || "/";
       if (path === "/settings.html") return "settings";
       if (path === "/navigation.html") return "navigation";
@@ -24324,6 +24336,10 @@ function buildJobRow(job) {
         await loadProducts();
         await loadJobs();
         await viewJob(location.hash.slice(5));
+      } else if (location.hash.startsWith("#screenshot-job/")) {
+        switchView("screenshots");
+        await loadScreenshotJobs(true);
+        await viewScreenshotJob(location.hash.slice("#screenshot-job/".length));
       } else {
         const initialView = viewFromPath();
         if (initialView === "tasks") {
