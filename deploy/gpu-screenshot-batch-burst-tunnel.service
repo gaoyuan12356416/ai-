@@ -1,0 +1,14 @@
+[Unit]
+Description=Reverse tunnel for GPU screenshot burst batch service
+After=network.target codex-screenshot-batch-burst.service
+Wants=codex-screenshot-batch-burst.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/ssh -i /root/.ssh/id_ed25519_gpu_worker -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -R 127.0.0.1:18798:127.0.0.1:8798 root@43.166.187.96
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+import concurrent.futures
 import hashlib
 import json
 import logging
 import mimetypes
 import os
 import shutil
+import shlex
 import subprocess
 import threading
 import time
@@ -18,8 +20,16 @@ from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 RESAMPLE_LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
+
+def positive_int_env(name, default):
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return max(1, int(default))
+
+
 HOST = os.environ.get("CODEX_SCREENSHOT_HOST", "127.0.0.1")
-PORT = int(os.environ.get("CODEX_SCREENSHOT_PORT", "8791"))
+PORT = positive_int_env("CODEX_SCREENSHOT_PORT", 8791)
 WORK_ROOT = os.environ.get("CODEX_SCREENSHOT_WORK_ROOT", "/root/codex_screenshot_jobs")
 PUBLIC_ROOT = os.environ.get(
     "CODEX_SCREENSHOT_PUBLIC_ROOT", "/usr/share/nginx/html/drama-screenshot-materials"
@@ -31,9 +41,12 @@ PROMPT_WORKSPACE_ROOT = os.environ.get(
     "CODEX_SCREENSHOT_PROMPT_WORKSPACE", "/root/codex_screenshot_worker_workspace"
 )
 CODEX_BIN = os.environ.get("CODEX_SCREENSHOT_CODEX_BIN", "/usr/bin/codex")
-CODEX_TIMEOUT = int(os.environ.get("CODEX_SCREENSHOT_CODEX_TIMEOUT", "1800"))
-MAX_CONCURRENCY = max(1, int(os.environ.get("CODEX_SCREENSHOT_MAX_CONCURRENCY", "1")))
+CODEX_TIMEOUT = positive_int_env("CODEX_SCREENSHOT_CODEX_TIMEOUT", 1800)
+MAX_CONCURRENCY = positive_int_env("CODEX_SCREENSHOT_MAX_CONCURRENCY", 1)
 GENERATION_SEMAPHORE = threading.Semaphore(MAX_CONCURRENCY)
+ITEM_PARALLELISM = positive_int_env("CODEX_SCREENSHOT_ITEM_PARALLELISM", 1)
+AI_ATTEMPTS = positive_int_env("CODEX_SCREENSHOT_AI_ATTEMPTS", 2)
+CODEX_EXTRA_ARGS = shlex.split(os.environ.get("CODEX_SCREENSHOT_CODEX_EXTRA_ARGS", ""))
 ISOLATE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_ISOLATE_CODEX_HOME", "0").strip().lower() in (
     "1",
     "true",
@@ -46,7 +59,7 @@ ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOL
 
 # Cache: avoids repeated generations for same source + spec + prompt version.
 CACHE_ROOT = os.environ.get("CODEX_SCREENSHOT_CACHE_ROOT", "/root/codex_screenshot_cache")
-PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v3")
+PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v5")
 KEEP_JOB_WORKSPACE = os.environ.get("CODEX_SCREENSHOT_KEEP_JOB_WORKSPACE", "0").strip().lower() in (
     "1",
     "true",
@@ -211,8 +224,16 @@ def toml_string(value):
     return json.dumps(str(value))
 
 
-def prepare_isolated_codex_home(workdir, project_dir):
+def safe_path_id(value):
+    text = str(value or "").strip()
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)[:80]
+
+
+def prepare_isolated_codex_home(workdir, project_dir, home_id=""):
     codex_home = os.path.join(workdir, "codex_home")
+    home_id = safe_path_id(home_id)
+    if home_id:
+        codex_home = os.path.join(codex_home, home_id)
     if os.path.isdir(codex_home):
         shutil.rmtree(codex_home, ignore_errors=True)
     elif os.path.exists(codex_home):
@@ -257,12 +278,38 @@ def prepare_isolated_codex_home(workdir, project_dir):
     return codex_home
 
 
-def build_codex_env(workdir, project_dir):
+def build_codex_env(workdir, project_dir, home_id=""):
     if not ISOLATE_CODEX_HOME:
         return None
     env = os.environ.copy()
-    env["CODEX_HOME"] = prepare_isolated_codex_home(workdir, project_dir)
+    env["CODEX_HOME"] = prepare_isolated_codex_home(workdir, project_dir, home_id)
     return env
+
+
+def build_codex_exec_cmd(workdir, staged_source_path, result_json_path, instruction):
+    cmd = [
+        CODEX_BIN,
+        "exec",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        CODEX_MODEL,
+        "-c",
+        "model_reasoning_effort=%s" % toml_string(CODEX_REASONING),
+    ]
+    cmd.extend(CODEX_EXTRA_ARGS)
+    cmd.extend(
+        [
+            "-C",
+            workdir,
+            "-i",
+            staged_source_path,
+            "-o",
+            result_json_path,
+            instruction,
+        ]
+    )
+    return cmd
 
 
 def build_public_url(path):
@@ -348,7 +395,7 @@ def try_restore_from_cache(source_url, drama_name, item):
         "workspace_output_path": workspace_output_path,
         "public_output_path": public_output_path,
         "public_url": build_public_url(public_output_path),
-        "generator": "codex-imagegen",
+        "generator": "codex-ai-image",
         "cache": "hit",
         "cache_key": key,
     }
@@ -394,9 +441,37 @@ def aspect_ratio_error(actual, target):
     return abs(actual - target) / target
 
 
-def validate_raw_generated_image(item, result_data):
-    key = str(item.get("key", "")).strip()
+def latest_generated_image(codex_home):
+    root = os.path.join(codex_home or "", "generated_images")
+    if not os.path.isdir(root):
+        return ""
+    candidates = []
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                candidates.append((os.path.getmtime(path), path))
+            except OSError:
+                continue
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def resolve_raw_generated_path(result_data, codex_home):
     raw_path = str((result_data or {}).get("raw_generated_path") or "").strip()
+    if raw_path and os.path.isfile(raw_path):
+        return raw_path
+    fallback = latest_generated_image(codex_home)
+    return fallback or raw_path
+
+
+def validate_raw_generated_image(item, result_data, codex_home=None):
+    key = str(item.get("key", "")).strip()
+    raw_path = resolve_raw_generated_path(result_data, codex_home)
     if not raw_path:
         raise RuntimeError("missing raw_generated_path for %s" % key)
     if not os.path.isfile(raw_path):
@@ -444,8 +519,8 @@ def normalize_without_crop(item, source_path, output_path):
         image.save(output_path, "JPEG", quality=94, optimize=True, progressive=True)
 
 
-def validate_and_normalize_generated_output(item, result_data, workspace_output_path):
-    result_data = validate_raw_generated_image(item, result_data)
+def validate_and_normalize_generated_output(item, result_data, workspace_output_path, codex_home=None):
+    result_data = validate_raw_generated_image(item, result_data, codex_home)
     raw_path = result_data["raw_generated_path"]
     normalize_without_crop(item, raw_path, workspace_output_path)
     final_width, final_height = image_dimensions(workspace_output_path)
@@ -471,9 +546,11 @@ def validate_and_normalize_generated_output(item, result_data, workspace_output_
     return result_data
 
 
-def job_workspace(job_id):
+def job_workspace(job_id, item_key=""):
     # Each job runs in a clean workspace to avoid stale files inflating token usage.
-    return os.path.join(PROMPT_WORKSPACE_ROOT, "_jobs", job_id)
+    root = os.path.join(PROMPT_WORKSPACE_ROOT, "_jobs", job_id)
+    item_key = safe_path_id(item_key)
+    return os.path.join(root, item_key) if item_key else root
 
 
 def reset_dir(path):
@@ -482,32 +559,36 @@ def reset_dir(path):
     ensure_dir(path)
 
 
+def ratio_prompt_guidance(item):
+    key = str(item.get("key", "")).strip()
+    ratio = str(item.get("ratio", "")).strip()
+    if key == "portrait_4x5" or ratio == "4:5":
+        return (
+            "Format guidance: this is a 4:5 feed portrait, only slightly taller than wide; "
+            "do not make a tall phone wallpaper, 9:16, 2:3, or 3:5 poster. "
+        )
+    if key == "landscape_1_91x1" or ratio == "1.91:1":
+        return "Format guidance: this is a wide horizontal feed ad, about 1.91 times wider than tall. "
+    if key == "square_1x1" or ratio == "1:1":
+        return "Format guidance: this is a true square feed ad, equal width and height. "
+    return ""
+
+
 def build_codex_instruction(drama_name, item):
-    title = (drama_name or "").strip() or "the provided drama"
     target_ratio = target_aspect_ratio(item)
-    tolerance_percent = ASPECT_RATIO_TOLERANCE * 100.0
     return (
-        "Use the attached original drama cover as the source image. "
-        "Create a new finished paid-social key art image for {title} at exactly {width}x{height} pixels, aspect ratio {ratio}. "
-        "The raw AI-generated image itself must naturally match this canvas: width={width}, height={height}, width/height={target_ratio:.6f}. "
-        "After the AI generation call, inspect the raw generated image dimensions with Python/PIL. "
-        "If raw width/height differs from {target_ratio:.6f} by more than {tolerance_percent:.2f}% relative error, treat that generation as unusable and retry only this target. "
-        "Do at most three AI generation attempts for this target. "
-        "Do not use crop, pad, blur-background, or layout conversion to hide an invalid raw aspect ratio. "
-        "This must be an AI image generation or image-editing result for this exact canvas, not a deterministic crop, resize, pad, or copy-paste layout. "
-        "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the original source, while adapting the composition naturally to the target canvas. "
-        "Extend or recreate the surrounding background as needed so the result looks complete, polished, and not like a cropped or stretched image. "
-        "Do not add watermarks, unrelated props, extra people, duplicate limbs, deformed hands, or collage seams. "
-        "After a target-ratio raw AI image exists, copy or JPEG-convert the selected raw image into {output_path}; do not crop, pad, or stretch it. "
-        "Reply with only compact JSON containing output_path, raw_generated_path, raw_width, raw_height, raw_ratio, used_ai_generation=true, retry_count, and summary."
+        "Use the attached cover as reference. Generate exactly one new paid-social drama key-art image for the referenced drama. "
+        "Required raw canvas: {width}x{height}px, {ratio}, width/height={target_ratio:.6f}. "
+        "{ratio_guidance}"
+        "Keep recognizable characters/title/visual identity; no watermark, extra people, malformed faces, crop, pad, blur background, resize-only, or layout conversion. "
+        "Use only the built-in AI image generation/editing capability; do not use skills, plugins, external CLI, web services, Python, PIL, shell, or deterministic image processing. "
+        "After the AI image is generated, stop. Return compact JSON only: {{\"raw_generated_path\":\"<generated image path>\",\"used_ai_generation\":true,\"retry_count\":0,\"summary\":\"...\"}}."
     ).format(
         ratio=item["ratio"],
         width=int(item["width"]),
         height=int(item["height"]),
         target_ratio=target_ratio,
-        tolerance_percent=tolerance_percent,
-        title=title,
-        output_path=item["workspace_output_path"],
+        ratio_guidance=ratio_prompt_guidance(item),
     )
 
 
@@ -582,7 +663,7 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         "do not generate a second image for a target key once that key has produced a usable image; "
         "a usable image must have a raw AI-generated width/height ratio within {tolerance_percent:.2f}% relative error of that target's target_width_height_ratio; "
         "retry only if the target-specific AI call fails technically with no usable image file or fails this raw aspect-ratio check, and record any retry in the summary; "
-        "do at most three AI generation attempts per target key; "
+        "do at most {ai_attempts} AI generation attempts per target key; "
         "do not create the creative artwork with Python, PIL, OpenCV, ImageMagick, ffmpeg, HTML, CSS, or deterministic image processing; "
         "do not crop, resize, pad, blur-background, or copy-paste the source image as a substitute for AI generation; "
         "do not use a generated image for one ratio as the source for another ratio; "
@@ -601,7 +682,61 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")),
         tolerance_percent=ASPECT_RATIO_TOLERANCE * 100.0,
         manifest_rule=manifest_rule,
+        ai_attempts=AI_ATTEMPTS,
     )
+
+
+def generate_one_item(job_id, drama_name, staged_source_path, source_url, workdir, item):
+    key = str(item.get("key", "")).strip()
+    workspace_output_path = str(item.get("workspace_output_path", "")).strip()
+    public_output_path = str(item.get("public_output_path", "")).strip()
+    if not key:
+        raise ValueError("item.key is required")
+    if not workspace_output_path:
+        raise ValueError("workspace_output_path is required")
+    if not public_output_path:
+        raise ValueError("public_output_path is required")
+
+    ensure_dir(os.path.dirname(workspace_output_path))
+    ensure_dir(os.path.dirname(public_output_path))
+    if os.path.exists(workspace_output_path):
+        os.remove(workspace_output_path)
+
+    result_json_path = os.path.join(workdir, "%s_result.json" % key)
+    ws = job_workspace(job_id, key)
+    reset_dir(ws)
+    codex_env = build_codex_env(workdir, ws, key)
+    codex_home = (codex_env or {}).get("CODEX_HOME")
+    cmd = build_codex_exec_cmd(
+        ws,
+        staged_source_path,
+        result_json_path,
+        build_codex_instruction(drama_name, item),
+    )
+    proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
+    token_usage = getattr(proc, "codex_token_usage", {})
+    with open(result_json_path, "r", encoding="utf-8") as fh:
+        result_data = json.loads(extract_json_text(fh.read()))
+    result_data = validate_and_normalize_generated_output(
+        item, result_data, workspace_output_path, codex_home
+    )
+    shutil.copy2(workspace_output_path, public_output_path)
+    cache_id = store_to_cache(source_url, drama_name, item)
+    result_data.update(
+        {
+            "key": key,
+            "status": "done",
+            "workspace_output_path": workspace_output_path,
+            "public_output_path": public_output_path,
+            "public_url": build_public_url(public_output_path),
+            "generator": "codex-ai-image",
+            "cache": "miss",
+            "cache_key": cache_id,
+        }
+    )
+    with open(result_json_path, "w", encoding="utf-8") as fh:
+        json.dump(result_data, fh, ensure_ascii=False, indent=2)
+    return result_data, token_usage
 
 
 def generate_screenshots(payload):
@@ -638,7 +773,56 @@ def generate_screenshots(payload):
             continue
         remaining.append(item)
 
-    if len(remaining) > 1:
+    parallel_attempted = False
+    if len(remaining) > 1 and ITEM_PARALLELISM > 1:
+        parallel_attempted = True
+        for item in remaining:
+            workspace_output_path = str(item.get("workspace_output_path", "")).strip()
+            public_output_path = str(item.get("public_output_path", "")).strip()
+            ensure_dir(os.path.dirname(workspace_output_path))
+            ensure_dir(os.path.dirname(public_output_path))
+            if workspace_output_path and os.path.exists(workspace_output_path):
+                os.remove(workspace_output_path)
+
+        generated_keys = set()
+        errors = {}
+        max_workers = min(ITEM_PARALLELISM, len(remaining))
+        logging.info("parallel item generation: job=%s items=%s workers=%s", job_id, len(remaining), max_workers)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    generate_one_item,
+                    job_id,
+                    drama_name,
+                    staged_source_path,
+                    source_url,
+                    workdir,
+                    item,
+                ): item
+                for item in remaining
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                item = future_map[future]
+                key = str(item.get("key", "")).strip()
+                try:
+                    result_data, item_token_usage = future.result()
+                except Exception as exc:
+                    proc = getattr(exc, "proc", None)
+                    if proc is not None:
+                        merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
+                    errors[key or "unknown"] = str(exc).strip() or exc.__class__.__name__
+                    logging.exception("parallel item generation failed: job=%s key=%s", job_id, key)
+                    continue
+                merge_token_usage(token_usage, item_token_usage)
+                result_data["parallel"] = True
+                results.append(result_data)
+                generated_keys.add(key)
+
+        if errors:
+            logging.warning("parallel item generation incomplete: job=%s errors=%s", job_id, errors)
+        remaining = [item for item in remaining if str(item.get("key", "")).strip() not in generated_keys]
+
+    if len(remaining) > 1 and not parallel_attempted:
         for item in remaining:
             workspace_output_path = str(item.get("workspace_output_path", "")).strip()
             public_output_path = str(item.get("public_output_path", "")).strip()
@@ -650,19 +834,12 @@ def generate_screenshots(payload):
         result_json_path = os.path.join(workdir, "batch_result.json")
         manifest_json_path = os.path.join(workdir, "batch_manifest.json")
         codex_env = build_codex_env(workdir, ws)
-        cmd = [
-            CODEX_BIN,
-            "exec",
-            "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-C",
+        cmd = build_codex_exec_cmd(
             ws,
-            "-i",
             staged_source_path,
-            "-o",
             result_json_path,
             build_codex_batch_imagegen_instruction(drama_name, remaining, manifest_json_path),
-        ]
+        )
         try:
             proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
             merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
@@ -724,7 +901,7 @@ def generate_screenshots(payload):
                     "workspace_output_path": workspace_output_path,
                     "public_output_path": public_output_path,
                     "public_url": build_public_url(public_output_path),
-                    "generator": "codex-imagegen",
+                    "generator": "codex-ai-image",
                     "cache": "miss",
                     "cache_key": cache_id,
                     "batch": True,
@@ -735,60 +912,15 @@ def generate_screenshots(payload):
         remaining = [item for item in remaining if str(item.get("key", "")).strip() not in generated_keys]
 
     for item in remaining:
-        key = str(item.get("key", "")).strip()
-        workspace_output_path = str(item.get("workspace_output_path", "")).strip()
-        public_output_path = str(item.get("public_output_path", "")).strip()
-        if not key:
-            raise ValueError("item.key is required")
-        if not workspace_output_path:
-            raise ValueError("workspace_output_path is required")
-        if not public_output_path:
-            raise ValueError("public_output_path is required")
-        ensure_dir(os.path.dirname(workspace_output_path))
-        ensure_dir(os.path.dirname(public_output_path))
-        if os.path.exists(workspace_output_path):
-            os.remove(workspace_output_path)
-
-        result_json_path = os.path.join(workdir, "%s_result.json" % key)
-        codex_env = build_codex_env(workdir, ws)
-        cmd = [
-            CODEX_BIN,
-            "exec",
-            "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-C",
-            ws,
-            "-i",
+        result_data, item_token_usage = generate_one_item(
+            job_id,
+            drama_name,
             staged_source_path,
-            "-o",
-            result_json_path,
-            build_codex_instruction(drama_name, item),
-        ]
-        proc = run_codex_cmd(cmd, timeout=CODEX_TIMEOUT, env=codex_env)
-        merge_token_usage(token_usage, getattr(proc, "codex_token_usage", {}))
-        if not os.path.isfile(workspace_output_path):
-            raise RuntimeError("Codex did not create expected output for %s" % key)
-        with open(result_json_path, "r", encoding="utf-8") as fh:
-            result_data = json.loads(extract_json_text(fh.read()))
-        result_data = validate_and_normalize_generated_output(
-            item, result_data, workspace_output_path
+            source_url,
+            workdir,
+            item,
         )
-        shutil.copy2(workspace_output_path, public_output_path)
-        cache_id = store_to_cache(source_url, drama_name, item)
-        result_data.update(
-            {
-                "key": key,
-                "status": "done",
-                "workspace_output_path": workspace_output_path,
-                "public_output_path": public_output_path,
-                "public_url": build_public_url(public_output_path),
-                "generator": "codex-imagegen",
-                "cache": "miss",
-                "cache_key": cache_id,
-            }
-        )
-        with open(result_json_path, "w", encoding="utf-8") as fh:
-            json.dump(result_data, fh, ensure_ascii=False, indent=2)
+        merge_token_usage(token_usage, item_token_usage)
         results.append(result_data)
 
     if not KEEP_JOB_WORKSPACE:
@@ -844,6 +976,9 @@ class CodexScreenshotHandler(BaseHTTPRequestHandler):
             {
                 "status": "ok",
                 "max_concurrency": MAX_CONCURRENCY,
+                "item_parallelism": ITEM_PARALLELISM,
+                "ai_attempts": AI_ATTEMPTS,
+                "codex_extra_args": CODEX_EXTRA_ARGS,
                 "public_base_url": PUBLIC_BASE_URL,
                 "cache_root": CACHE_ROOT,
                 "prompt_version": PROMPT_VERSION,

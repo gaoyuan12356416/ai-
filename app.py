@@ -1516,8 +1516,28 @@ CODEX_SCREENSHOT_SERVICE_URLS = {
     "portrait_4x5": os.environ.get("CODEX_SCREENSHOT_SERVICE_URL_PORTRAIT_4X5", "http://127.0.0.1:8794/api/codex-screenshot/generate"),
 }
 
-SCREENSHOT_JOB_MAX_CONCURRENCY = max(1, int(os.environ.get("SCREENSHOT_JOB_MAX_CONCURRENCY", "1")))
-SCREENSHOT_JOB_SEMAPHORE = threading.Semaphore(SCREENSHOT_JOB_MAX_CONCURRENCY)
+def parse_env_csv(name):
+    return [
+        item.strip()
+        for item in str(os.environ.get(name, "") or "").replace("\n", ",").split(",")
+        if item.strip()
+    ]
+
+
+SCREENSHOT_JOB_BASE_CONCURRENCY = max(1, int(os.environ.get("SCREENSHOT_JOB_MAX_CONCURRENCY", "1")))
+SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD = max(1, int(os.environ.get("SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD", "5")))
+SCREENSHOT_JOB_BURST_CONCURRENCY = max(
+    SCREENSHOT_JOB_BASE_CONCURRENCY,
+    int(os.environ.get("SCREENSHOT_JOB_BURST_CONCURRENCY", str(SCREENSHOT_JOB_BASE_CONCURRENCY))),
+)
+CODEX_SCREENSHOT_SERVICE_POOL = parse_env_csv("CODEX_SCREENSHOT_SERVICE_POOL")
+CODEX_SCREENSHOT_SERVICE_POOL_BURST_ONLY = os.environ.get(
+    "CODEX_SCREENSHOT_SERVICE_POOL_BURST_ONLY", "1"
+).strip().lower() in ("1", "true", "yes", "on")
+SCREENSHOT_JOB_ACTIVE_COUNT = 0
+SCREENSHOT_JOB_CONDITION = threading.Condition()
+SCREENSHOT_SERVICE_POOL_INDEX = 0
+SCREENSHOT_SERVICE_POOL_LOCK = threading.Lock()
 
 
 
@@ -21383,10 +21403,43 @@ def recover_inflight_screenshot_jobs():
                 """
             )
             conn.commit()
-            resumable_jobs = [row_to_screenshot_job(row) for row in rows]
+            for row in rows:
+                progress_detail = (row[14] or "").strip() or "服务重启，正在从断点恢复截图任务"
+                resumable_jobs.append(
+                    {
+                        "job_id": row[0],
+                        "app_id": row[1],
+                        "content_id": row[2],
+                        "app": row[3],
+                        "country": row[4],
+                        "language": row[5],
+                        "drama_name": row[6],
+                        "cover_source_url": row[7],
+                        "square_1x1_url": row[8],
+                        "landscape_1_91x1_url": row[9],
+                        "portrait_4x5_url": row[10],
+                        "assets": parse_json_text(row[11], {}),
+                        "status": "queued",
+                        "progress": clamp_progress(row[13]),
+                        "progress_detail": progress_detail,
+                        "error_message": "",
+                        "created_at": row[16],
+                        "updated_at": row[17],
+                        "started_at": row[18] if len(row) > 18 else "",
+                        "finished_at": row[19] if len(row) > 19 else "",
+                        "elapsed_seconds": nonnegative_int(row[20] if len(row) > 20 else 0, 0),
+                        "token_total": nonnegative_int(row[21] if len(row) > 21 else 0, 0),
+                        "token_usage": parse_json_text(row[22], {}) if len(row) > 22 else {},
+                        "creator_user_id": row[23] if len(row) > 23 else "",
+                        "creator_open_id": row[24] if len(row) > 24 else "",
+                        "creator_name": row[25] if len(row) > 25 else "",
+                    }
+                )
         finally:
             conn.close()
 
+    if resumable_jobs:
+        logging.info("resuming %d screenshot jobs after service restart", len(resumable_jobs))
     for job in resumable_jobs:
         job["status"] = "queued"
         job["error_message"] = ""
@@ -31833,10 +31886,54 @@ def process_screenshot_job(job):
 
 
 
+def screenshot_job_backlog_count():
+    try:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM drama_screenshot_job WHERE status = 'queued'"
+            ).fetchone()
+            return int(row["count"] if row else 0)
+        finally:
+            conn.close()
+    except Exception:
+        logging.exception("failed to count screenshot backlog")
+        return 0
+
+
+def screenshot_job_capacity():
+    backlog = screenshot_job_backlog_count()
+    if backlog > SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD:
+        return SCREENSHOT_JOB_BURST_CONCURRENCY
+    return SCREENSHOT_JOB_BASE_CONCURRENCY
+
+
+def acquire_screenshot_job_slot():
+    global SCREENSHOT_JOB_ACTIVE_COUNT
+    with SCREENSHOT_JOB_CONDITION:
+        while SCREENSHOT_JOB_ACTIVE_COUNT >= screenshot_job_capacity():
+            SCREENSHOT_JOB_CONDITION.wait(timeout=5)
+        SCREENSHOT_JOB_ACTIVE_COUNT += 1
+        logging.info(
+            "screenshot job slot acquired: active=%s capacity=%s queued=%s",
+            SCREENSHOT_JOB_ACTIVE_COUNT,
+            screenshot_job_capacity(),
+            screenshot_job_backlog_count(),
+        )
+
+
+def release_screenshot_job_slot():
+    global SCREENSHOT_JOB_ACTIVE_COUNT
+    with SCREENSHOT_JOB_CONDITION:
+        SCREENSHOT_JOB_ACTIVE_COUNT = max(0, SCREENSHOT_JOB_ACTIVE_COUNT - 1)
+        SCREENSHOT_JOB_CONDITION.notify_all()
+
+
 def run_screenshot_job_async(job):
 
     def target():
-        with SCREENSHOT_JOB_SEMAPHORE:
+        acquire_screenshot_job_slot()
+        try:
             begin_screenshot_job_run(job)
             attempts = max(1, JOB_AUTO_RETRY_ATTEMPTS + 1)
 
@@ -31884,6 +31981,8 @@ def run_screenshot_job_async(job):
                     upsert_screenshot_job_record(job)
 
                     return
+        finally:
+            release_screenshot_job_slot()
 
 
 
@@ -57344,7 +57443,30 @@ def validate_screenshot_request(app_id, content_id):
 
 def screenshot_service_url_for_item(item):
     key = str(item.get("key", "") or "").strip()
-    return CODEX_SCREENSHOT_SERVICE_URLS.get(key) or CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
+    default_url = CODEX_SCREENSHOT_SERVICE_URLS.get(key) or CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
+    return choose_screenshot_service_url(default_url)
+
+
+def screenshot_service_pool_enabled():
+    if not CODEX_SCREENSHOT_SERVICE_POOL:
+        return False
+    if not CODEX_SCREENSHOT_SERVICE_POOL_BURST_ONLY:
+        return True
+    if SCREENSHOT_JOB_ACTIVE_COUNT > SCREENSHOT_JOB_BASE_CONCURRENCY:
+        return True
+    return screenshot_job_backlog_count() > SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD
+
+
+def choose_screenshot_service_url(default_url):
+    global SCREENSHOT_SERVICE_POOL_INDEX
+    if not screenshot_service_pool_enabled():
+        return default_url
+    with SCREENSHOT_SERVICE_POOL_LOCK:
+        url = CODEX_SCREENSHOT_SERVICE_POOL[
+            SCREENSHOT_SERVICE_POOL_INDEX % len(CODEX_SCREENSHOT_SERVICE_POOL)
+        ]
+        SCREENSHOT_SERVICE_POOL_INDEX += 1
+    return url
 
 
 def generate_screenshot_via_codex_service(job, source_path, items):
@@ -57404,7 +57526,7 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
         "items": items,
     }
     response = requests.post(
-        CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL,
+        choose_screenshot_service_url(CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL),
         json=payload,
         timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
     )
