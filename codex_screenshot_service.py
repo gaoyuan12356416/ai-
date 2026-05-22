@@ -15,7 +15,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import unquote, urlparse
 
 import requests
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageOps
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 RESAMPLE_LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
@@ -388,23 +388,88 @@ def extract_json_text(raw_text):
     raise RuntimeError("Codex output does not contain valid JSON")
 
 
+def normalize_source_to_jpeg(input_path, output_path):
+    ensure_dir(os.path.dirname(output_path))
+    with Image.open(input_path) as image:
+        image = ImageOps.exif_transpose(image)
+        if image.mode in ("RGBA", "LA") or (image.mode == "P" and image.info.get("transparency") is not None):
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            image = background
+        else:
+            image = image.convert("RGB")
+        image.save(output_path, "JPEG", quality=95, optimize=True, progressive=True)
+    return output_path
+
+
+def source_url_candidates(source_url):
+    text = str(source_url or "").strip()
+    if not text:
+        return []
+    candidates = [text]
+    prefixes = (
+        "https://static.mydramawave.com/",
+        "http://static.mydramawave.com/",
+        "https://static-v1.mydramawave.com/",
+        "http://static-v1.mydramawave.com/",
+        "https://static-v2.mydramawave.com/",
+        "http://static-v2.mydramawave.com/",
+    )
+    suffix = None
+    for prefix in prefixes:
+        if text.startswith(prefix):
+            suffix = text[len(prefix) :]
+            break
+    if suffix:
+        for host in (
+            "https://static-v1.mydramawave.com/",
+            "https://static-v2.mydramawave.com/",
+            "https://static.mydramawave.com/",
+        ):
+            candidates.append(host + suffix)
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            deduped.append(candidate)
+            seen.add(candidate)
+    return deduped
+
+
+def download_and_normalize_source_url(source_url, staged_path, workdir):
+    errors = []
+    for index, candidate in enumerate(source_url_candidates(source_url)):
+        downloaded_path = os.path.join(workdir, "source_download" if index == 0 else "source_download_%d" % index)
+        try:
+            response = requests.get(candidate, stream=True, timeout=180)
+            response.raise_for_status()
+            with open(downloaded_path, "wb") as fh:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+            return normalize_source_to_jpeg(downloaded_path, staged_path)
+        except Exception as exc:
+            message = "%s: %s" % (candidate, str(exc).strip() or exc.__class__.__name__)
+            errors.append(message)
+            logging.warning("failed to prepare source image candidate: %s", message)
+    raise RuntimeError("source image unavailable; " + "; ".join(errors[-3:]))
+
+
 def prepare_source_file(source_path, source_url, workdir):
-    source_ext = ".jpg"
+    staged_path = os.path.join(workdir, "source.jpg")
     if source_path and os.path.isfile(source_path):
-        source_ext = os.path.splitext(source_path)[1] or ".jpg"
-        staged_path = os.path.join(workdir, "source%s" % source_ext)
-        shutil.copy2(source_path, staged_path)
-        return staged_path
+        try:
+            return normalize_source_to_jpeg(source_path, staged_path)
+        except Exception as exc:
+            logging.warning(
+                "local source image is not usable, falling back to source_url: path=%s error=%s",
+                source_path,
+                str(exc).strip() or exc.__class__.__name__,
+            )
     if not source_url:
         raise ValueError("source_path or source_url is required")
-    staged_path = os.path.join(workdir, "source.jpg")
-    response = requests.get(source_url, stream=True, timeout=180)
-    response.raise_for_status()
-    with open(staged_path, "wb") as fh:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                fh.write(chunk)
-    return staged_path
+    return download_and_normalize_source_url(source_url, staged_path, workdir)
 
 
 def cache_key(source_url, drama_name, item):
@@ -689,12 +754,14 @@ def ratio_prompt_guidance(item):
 def source_lock_prompt_rules():
     return (
         "Source lock: treat the attached original cover as the source of truth, not just a loose style reference. "
-        "Use source-locked image editing/outpainting/recomposition so the target canvas changes but the original information elements remain the same. "
-        "Preserve main character count, identities, faces, body type, posture, pose, pregnancy/belly state, embrace/hand placement, visible body proportions, costumes, clothing colors, accessories, and relationships between characters. "
-        "Preserve key props, creatures, animals, weapons, wings, crown, jewelry, background symbols, and foreground objects; do not add, remove, replace, or redesign story-significant elements. "
-        "Preserve all title/logo/badge/icon elements: exact title wording, typography style, color hierarchy, decorative treatment, app/platform/play/exclusive badges, logo marks, and icon style. "
-        "Do not redesign icons, badges, logos, play marks, exclusive marks, title fonts, or decorative text styling. "
-        "Only extend or lightly reframe background/empty areas needed for the target ratio; if a source element cannot fit, fail rather than inventing or changing it. "
+        "Keep the original visual style unchanged: same lighting, color grade, genre mood, poster treatment, rendering style, texture, and contrast. "
+        "Use source-locked image editing/outpainting/recomposition so the target canvas changes but the original information elements stay fixed and recognizable. "
+        "Preserve main character count, identities, faces, body type, posture, pose, pregnancy/belly state, embrace/hand placement, visible body proportions, costumes, clothing colors, accessories, and relationships between characters; do not slim, enlarge, expose, cover, or reposition body parts in a way that changes the source. "
+        "Preserve key props, creatures, animals, vehicles, weapons, wings, crown, jewelry, background symbols, foreground objects, and story-significant set pieces exactly as they appear; do not add, remove, replace, or redesign any object. "
+        "Preserve every sticker, pasted graphic, overlay, title/logo/badge/icon element exactly: title wording, font style, color hierarchy, decorative treatment, app/platform/play/exclusive badges, logo marks, icon shape, icon color, icon artwork, and relative placement. "
+        "Do not redesign icons, stickers, badges, logos, play marks, exclusive marks, title fonts, decorative text styling, or pasted overlay graphics. "
+        "For new canvas space, only extend simple background texture, darkness, sky, wall, forest, bokeh, or other non-story background already present in the source; do not invent cars, people, animals, buildings, weapons, lights, signs, props, or new foreground/background story elements. "
+        "Prefer a conservative source-preserving composition over a more dramatic redesign. If an element cannot fit without changing it, fail rather than inventing or changing it. "
     )
 
 

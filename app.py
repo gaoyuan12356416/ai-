@@ -1525,7 +1525,7 @@ def parse_env_csv(name):
 
 
 SCREENSHOT_JOB_BASE_CONCURRENCY = max(1, int(os.environ.get("SCREENSHOT_JOB_MAX_CONCURRENCY", "1")))
-SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD = max(1, int(os.environ.get("SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD", "5")))
+SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD = max(1, int(os.environ.get("SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD", "2")))
 SCREENSHOT_JOB_BURST_CONCURRENCY = max(
     SCREENSHOT_JOB_BASE_CONCURRENCY,
     int(os.environ.get("SCREENSHOT_JOB_BURST_CONCURRENCY", str(SCREENSHOT_JOB_BASE_CONCURRENCY))),
@@ -31613,6 +31613,30 @@ def is_screenshot_source_consistency_rejection(exc):
     )
 
 
+def is_screenshot_batch_recoverable_error(exc):
+    if is_screenshot_source_consistency_rejection(exc):
+        return True
+    text = str(exc or "").lower()
+    recoverable_keywords = (
+        "missing raw_generated_path",
+        "raw aspect ratio rejected",
+        "ai image generation failed before producing an output",
+        "screenshot batch incomplete",
+    )
+    return any(keyword in text for keyword in recoverable_keywords)
+
+
+def set_screenshot_batch_remake_progress(job, exc=None):
+    if is_screenshot_source_consistency_rejection(exc):
+        return set_screenshot_consistency_remake_progress(job)
+    return set_screenshot_job_progress(
+        job,
+        status="processing_cover",
+        progress=max(38, clamp_progress(job.get("progress", 38))),
+        detail="??????????????????",
+    )
+
+
 def set_screenshot_consistency_remake_progress(job, spec=None, attempt=None, max_retries=None, persist=True):
     label = str((spec or {}).get("label", "") or "").strip()
     detail = "校验不通过重新制作中"
@@ -31778,7 +31802,7 @@ def process_screenshot_job(job):
         generate_one_once = generate_one
 
         if CODEX_SCREENSHOT_BATCH_ENABLED and len(pending) > 1:
-            batch_consistency_rejected = False
+            batch_fallback_to_single = False
             batch_items = []
             for _, spec, workspace_output_path, public_output_path in pending:
                 batch_items.append(
@@ -31796,14 +31820,14 @@ def process_screenshot_job(job):
             try:
                 generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
             except Exception as exc:
-                if is_screenshot_source_consistency_rejection(exc):
+                if is_screenshot_batch_recoverable_error(exc):
                     logging.warning(
-                        "screenshot batch consistency rejected; remaking failed sizes: job=%s error=%s",
+                        "screenshot batch recoverable failure; remaking failed sizes: job=%s error=%s",
                         job["job_id"],
                         str(exc).strip() or exc.__class__.__name__,
                     )
-                    batch_consistency_rejected = True
-                    set_screenshot_consistency_remake_progress(job)
+                    batch_fallback_to_single = True
+                    set_screenshot_batch_remake_progress(job, exc)
                 elif CODEX_SCREENSHOT_BATCH_STRICT:
                     logging.exception("screenshot batch failed: %s", job["job_id"])
                     raise
@@ -31836,11 +31860,16 @@ def process_screenshot_job(job):
                     detail="\u5df2\u6279\u91cf\u751f\u6210\u5e76\u4e0a\u4f20 %s" % spec["label"],
                 )
             pending = remaining
-            if CODEX_SCREENSHOT_BATCH_STRICT and pending and not batch_consistency_rejected:
-                raise RuntimeError(
-                    "screenshot batch incomplete: %s"
-                    % ",".join(str(item[1].get("key", "")) for item in pending)
+            if CODEX_SCREENSHOT_BATCH_STRICT and pending:
+                message = "screenshot batch incomplete: %s" % ",".join(
+                    str(item[1].get("key", "")) for item in pending
                 )
+                if batch_fallback_to_single:
+                    logging.warning("%s; continuing with per-size remake", message)
+                else:
+                    logging.warning("%s; continuing with per-size remake", message)
+                    batch_fallback_to_single = True
+                    set_screenshot_batch_remake_progress(job, RuntimeError(message))
 
         def generate_one(item):
             index, spec, workspace_output_path, public_output_path = item
@@ -33260,17 +33289,6 @@ def _ad_material_reference_items(task):
 
 def normalize_cover_source_url(url):
     text = str(url or "").strip()
-    if not text:
-        return ""
-    replacements = (
-        ("https://static-v1.mydramawave.com/", "https://static.mydramawave.com/"),
-        ("http://static-v1.mydramawave.com/", "https://static.mydramawave.com/"),
-        ("https://static-v2.mydramawave.com/", "https://static.mydramawave.com/"),
-        ("http://static-v2.mydramawave.com/", "https://static.mydramawave.com/"),
-    )
-    for old, new in replacements:
-        if text.startswith(old):
-            return new + text[len(old) :]
     return text
 
 
@@ -68661,6 +68679,10 @@ def should_auto_retry_job(exc):
 
 
 
+
+    if is_screenshot_batch_recoverable_error(exc):
+
+        return True
 
     retry_keywords = [
 
