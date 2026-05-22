@@ -7223,6 +7223,8 @@ STATUS_PROGRESS = {
 
     "processing_cover": 45,
 
+    "validation_remaking": 45,
+
 
 
 
@@ -7574,6 +7576,8 @@ STATUS_LABELS = {
 
 
     "processing_cover": "生成封面",
+
+    "validation_remaking": "校验不通过重新制作中",
 
 
 
@@ -31601,6 +31605,41 @@ def submit_screenshot_job_batch(payload, actor_session=None):
 
 
 
+def is_screenshot_source_consistency_rejection(exc):
+    text = str(exc or "").lower()
+    return (
+        "source consistency rejected" in text
+        or ("source_consistency" in text and "passed" in text and "false" in text)
+    )
+
+
+def set_screenshot_consistency_remake_progress(job, spec=None, attempt=None, max_retries=None, persist=True):
+    label = str((spec or {}).get("label", "") or "").strip()
+    detail = "校验不通过重新制作中"
+    if label:
+        detail = "校验不通过重新制作中：正在重新制作 %s" % label
+    if attempt is not None and max_retries is not None:
+        detail = "%s（第 %d/%d 次）" % (detail, max(1, int(attempt)), max(1, int(max_retries)))
+    return set_screenshot_job_progress(
+        job,
+        status="validation_remaking",
+        progress=max(38, clamp_progress(job.get("progress", 38))),
+        detail=detail,
+        persist=persist,
+    )
+
+
+def cleanup_screenshot_output_paths(*paths, remove_ready=False):
+    for partial_path in paths:
+        try:
+            if not partial_path or not os.path.exists(partial_path):
+                continue
+            if remove_ready or not file_ready(partial_path):
+                os.remove(partial_path)
+        except OSError:
+            logging.warning("failed to remove partial screenshot output: %s", partial_path)
+
+
 def process_screenshot_job(job):
 
     workdir = os.path.join(SCREENSHOT_WORK_ROOT, job["job_id"])
@@ -31739,6 +31778,7 @@ def process_screenshot_job(job):
         generate_one_once = generate_one
 
         if CODEX_SCREENSHOT_BATCH_ENABLED and len(pending) > 1:
+            batch_consistency_rejected = False
             batch_items = []
             for _, spec, workspace_output_path, public_output_path in pending:
                 batch_items.append(
@@ -31755,9 +31795,17 @@ def process_screenshot_job(job):
                 )
             try:
                 generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
-            except Exception:
-                logging.exception("screenshot batch failed: %s", job["job_id"])
-                if CODEX_SCREENSHOT_BATCH_STRICT:
+            except Exception as exc:
+                if is_screenshot_source_consistency_rejection(exc):
+                    logging.warning(
+                        "screenshot batch consistency rejected; remaking failed sizes: job=%s error=%s",
+                        job["job_id"],
+                        str(exc).strip() or exc.__class__.__name__,
+                    )
+                    batch_consistency_rejected = True
+                    set_screenshot_consistency_remake_progress(job)
+                elif CODEX_SCREENSHOT_BATCH_STRICT:
+                    logging.exception("screenshot batch failed: %s", job["job_id"])
                     raise
 
             remaining = []
@@ -31788,7 +31836,7 @@ def process_screenshot_job(job):
                     detail="\u5df2\u6279\u91cf\u751f\u6210\u5e76\u4e0a\u4f20 %s" % spec["label"],
                 )
             pending = remaining
-            if CODEX_SCREENSHOT_BATCH_STRICT and pending:
+            if CODEX_SCREENSHOT_BATCH_STRICT and pending and not batch_consistency_rejected:
                 raise RuntimeError(
                     "screenshot batch incomplete: %s"
                     % ",".join(str(item[1].get("key", "")) for item in pending)
@@ -31798,24 +31846,41 @@ def process_screenshot_job(job):
             index, spec, workspace_output_path, public_output_path = item
             attempts = max(1, SCREENSHOT_ITEM_RETRY_ATTEMPTS + 1)
             last_error = None
+            retrying_after_consistency_rejection = False
             for attempt in range(1, attempts + 1):
                 try:
                     if attempt > 1:
-                        set_screenshot_job_progress(
-                            job,
-                            status="processing_cover",
-                            progress=max(38, clamp_progress(job.get("progress", 38))),
-                            detail="\u91cd\u8bd5\u751f\u6210 %s\uff08\u7b2c %d/%d \u6b21\uff09"
-                            % (spec["label"], attempt - 1, SCREENSHOT_ITEM_RETRY_ATTEMPTS),
-                        )
+                        if retrying_after_consistency_rejection:
+                            set_screenshot_consistency_remake_progress(
+                                job,
+                                spec,
+                                attempt - 1,
+                                SCREENSHOT_ITEM_RETRY_ATTEMPTS,
+                            )
+                        else:
+                            set_screenshot_job_progress(
+                                job,
+                                status="processing_cover",
+                                progress=max(38, clamp_progress(job.get("progress", 38))),
+                                detail="\u91cd\u8bd5\u751f\u6210 %s\uff08\u7b2c %d/%d \u6b21\uff09"
+                                % (spec["label"], attempt - 1, SCREENSHOT_ITEM_RETRY_ATTEMPTS),
+                            )
                     return generate_one_once(item)
                 except Exception as exc:
                     last_error = exc
-                    if file_ready(public_output_path):
+                    retrying_after_consistency_rejection = is_screenshot_source_consistency_rejection(exc)
+                    if file_ready(public_output_path) and not retrying_after_consistency_rejection:
                         asset_url = publish_asset(public_output_path)
                         return index, spec, workspace_output_path, public_output_path, asset_url
                     if attempt >= attempts:
                         break
+                    if retrying_after_consistency_rejection:
+                        set_screenshot_consistency_remake_progress(
+                            job,
+                            spec,
+                            attempt,
+                            SCREENSHOT_ITEM_RETRY_ATTEMPTS,
+                        )
                     logging.warning(
                         "screenshot size retrying: job=%s key=%s attempt=%s/%s error=%s",
                         job["job_id"],
@@ -31824,12 +31889,11 @@ def process_screenshot_job(job):
                         attempts,
                         str(exc).strip() or exc.__class__.__name__,
                     )
-                    for partial_path in (workspace_output_path, public_output_path):
-                        try:
-                            if partial_path and os.path.exists(partial_path) and not file_ready(partial_path):
-                                os.remove(partial_path)
-                        except OSError:
-                            logging.warning("failed to remove partial screenshot output: %s", partial_path)
+                    cleanup_screenshot_output_paths(
+                        workspace_output_path,
+                        public_output_path,
+                        remove_ready=retrying_after_consistency_rejection,
+                    )
             raise last_error or RuntimeError("\u751f\u6210\u5931\u8d25: %s" % spec["filename"])
 
         completed = 0
