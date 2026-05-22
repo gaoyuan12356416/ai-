@@ -22193,7 +22193,7 @@ function buildJobRow(job) {
       switchView(view);
     }
 
-    function switchView(view) {
+    function switchView(view, options = {}) {
 
 
 
@@ -22355,7 +22355,7 @@ function buildJobRow(job) {
 
 
 
-      if (view === "screenshots") loadScreenshotJobs(true).catch(error => {
+      if (view === "screenshots" && !options.skipAutoLoad) Promise.all([loadProducts(), loadScreenshotJobs(true)]).catch(error => {
 
 
 
@@ -22363,7 +22363,7 @@ function buildJobRow(job) {
 
 
 
-        showError("\u52a0\u8f7d\u622a\u56fe\u4efb\u52a1\u5931\u8d25", error);
+        showError("\u52a0\u8f7d\u622a\u56fe\u9875\u9762\u5931\u8d25", error);
 
 
 
@@ -24337,7 +24337,8 @@ function buildJobRow(job) {
         await loadJobs();
         await viewJob(location.hash.slice(5));
       } else if (location.hash.startsWith("#screenshot-job/")) {
-        switchView("screenshots");
+        switchView("screenshots", { skipAutoLoad: true });
+        await loadProducts();
         await loadScreenshotJobs(true);
         await viewScreenshotJob(location.hash.slice("#screenshot-job/".length));
       } else {
