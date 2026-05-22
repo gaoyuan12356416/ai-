@@ -42,6 +42,7 @@ PROMPT_WORKSPACE_ROOT = os.environ.get(
 )
 CODEX_BIN = os.environ.get("CODEX_SCREENSHOT_CODEX_BIN", "/usr/bin/codex")
 CODEX_TIMEOUT = positive_int_env("CODEX_SCREENSHOT_CODEX_TIMEOUT", 1800)
+CONSISTENCY_TIMEOUT = positive_int_env("CODEX_SCREENSHOT_CONSISTENCY_TIMEOUT", 300)
 MAX_CONCURRENCY = positive_int_env("CODEX_SCREENSHOT_MAX_CONCURRENCY", 1)
 GENERATION_SEMAPHORE = threading.Semaphore(MAX_CONCURRENCY)
 ITEM_PARALLELISM = positive_int_env("CODEX_SCREENSHOT_ITEM_PARALLELISM", 1)
@@ -59,7 +60,13 @@ ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOL
 
 # Cache: avoids repeated generations for same source + spec + prompt version.
 CACHE_ROOT = os.environ.get("CODEX_SCREENSHOT_CACHE_ROOT", "/root/codex_screenshot_cache")
-PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v5")
+PROMPT_VERSION = os.environ.get("CODEX_SCREENSHOT_PROMPT_VERSION", "v6")
+SOURCE_CONSISTENCY_CHECK = os.environ.get("CODEX_SCREENSHOT_SOURCE_CONSISTENCY_CHECK", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 KEEP_JOB_WORKSPACE = os.environ.get("CODEX_SCREENSHOT_KEEP_JOB_WORKSPACE", "0").strip().lower() in (
     "1",
     "true",
@@ -286,7 +293,7 @@ def build_codex_env(workdir, project_dir, home_id=""):
     return env
 
 
-def build_codex_exec_cmd(workdir, staged_source_path, result_json_path, instruction):
+def build_codex_exec_cmd(workdir, image_paths, result_json_path, instruction):
     cmd = [
         CODEX_BIN,
         "exec",
@@ -298,18 +305,61 @@ def build_codex_exec_cmd(workdir, staged_source_path, result_json_path, instruct
         "model_reasoning_effort=%s" % toml_string(CODEX_REASONING),
     ]
     cmd.extend(CODEX_EXTRA_ARGS)
+    if isinstance(image_paths, (list, tuple)):
+        images = [str(path) for path in image_paths if str(path or "").strip()]
+    else:
+        images = [str(image_paths)] if str(image_paths or "").strip() else []
+    image_args = []
+    for image_path in images:
+        image_args.extend(["-i", image_path])
     cmd.extend(
         [
             "-C",
             workdir,
-            "-i",
-            staged_source_path,
+            *image_args,
             "-o",
             result_json_path,
             instruction,
         ]
     )
     return cmd
+
+
+def build_source_consistency_instruction(item):
+    key = str(item.get("key", "")).strip()
+    ratio = str(item.get("ratio", "")).strip()
+    width, height = target_dimensions(item)
+    return (
+        "Validation only. Do not generate or edit images. "
+        "There are two attached images: IMAGE_1 is the original source cover, IMAGE_2 is the generated candidate for key={key}, canvas={width}x{height}, ratio={ratio}. "
+        "Compare IMAGE_2 against IMAGE_1 for source-element consistency. Pass only if the candidate preserves the original's core information elements. "
+        "Required checks: same main character count; same character identities/faces; same body type, posture, pose, pregnancy/belly state, embrace/hand placement, and visible body proportions; "
+        "same costumes/clothing colors and major accessories; same key props, creatures, animals, weapons, wings, crown, jewelry, background symbols, and foreground objects; "
+        "same title text content; same title typography style, color, hierarchy, and decorative treatment; "
+        "same logo, badge, app icon, play icon, exclusive/paid badge, platform mark, and other icon styles. "
+        "Reject if any icon, badge, logo, title style, protagonist body/pose, foreground prop, creature/object, or story-significant background element is redesigned, removed, added, or materially repositioned. "
+        "Allow only canvas-ratio adaptation, background extension, and minor spacing changes that do not alter the original story elements or branding/icon style. "
+        "Return compact JSON only: {{\"passed\":true|false,\"reason\":\"...\",\"checks\":{{\"main_character_count\":true|false,\"character_identity_faces\":true|false,\"body_pose_body_type\":true|false,\"costumes_accessories\":true|false,\"key_props_creatures_objects\":true|false,\"title_text_content\":true|false,\"title_font_color_style\":true|false,\"logos_badges_icons_style\":true|false,\"composition_story_elements\":true|false,\"no_new_or_missing_elements\":true|false}},\"differences\":[\"...\"]}}."
+    ).format(key=key, width=width, height=height, ratio=ratio)
+
+
+def run_source_consistency_validation(item, source_path, generated_path, workdir, result_json_path, env=None):
+    if not SOURCE_CONSISTENCY_CHECK:
+        return {}, {}
+    if not source_path or not os.path.isfile(source_path):
+        raise RuntimeError("source consistency validation missing source image")
+    if not generated_path or not os.path.isfile(generated_path):
+        raise RuntimeError("source consistency validation missing generated image")
+    cmd = build_codex_exec_cmd(
+        workdir,
+        [source_path, generated_path],
+        result_json_path,
+        build_source_consistency_instruction(item),
+    )
+    proc = run_codex_cmd(cmd, timeout=CONSISTENCY_TIMEOUT, env=env)
+    with open(result_json_path, "r", encoding="utf-8") as fh:
+        validation = json.loads(extract_json_text(fh.read()))
+    return validation, getattr(proc, "codex_token_usage", {})
 
 
 def build_public_url(path):
@@ -509,6 +559,41 @@ def validate_raw_generated_image(item, result_data, codex_home=None):
     return data
 
 
+def bool_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "pass", "passed")
+    return False
+
+
+def validate_source_consistency_report(item, result_data):
+    if not SOURCE_CONSISTENCY_CHECK:
+        return result_data
+    key = str(item.get("key", "")).strip() or "item"
+    check = (
+        result_data.get("source_consistency")
+        or result_data.get("identity_check")
+        or result_data.get("reference_consistency")
+    )
+    if not isinstance(check, dict):
+        raise RuntimeError("missing source_consistency check for %s" % key)
+    if not bool_value(check.get("passed")):
+        reason = str(check.get("reason") or check.get("summary") or "source consistency check failed").strip()
+        raise RuntimeError("source consistency rejected for %s: %s" % (key, reason))
+    checks = check.get("checks")
+    failed = []
+    if isinstance(checks, dict):
+        for name, passed in checks.items():
+            if not bool_value(passed):
+                failed.append(str(name))
+    if failed:
+        raise RuntimeError("source consistency rejected for %s: failed checks: %s" % (key, ", ".join(failed)))
+    return result_data
+
+
 def normalize_without_crop(item, source_path, output_path):
     width, height = target_dimensions(item)
     ensure_dir(os.path.dirname(output_path))
@@ -519,8 +604,35 @@ def normalize_without_crop(item, source_path, output_path):
         image.save(output_path, "JPEG", quality=94, optimize=True, progressive=True)
 
 
-def validate_and_normalize_generated_output(item, result_data, workspace_output_path, codex_home=None):
+def validate_and_normalize_generated_output(
+    item,
+    result_data,
+    workspace_output_path,
+    codex_home=None,
+    source_path="",
+    validation_workdir="",
+    validation_env=None,
+    validation_result_path="",
+):
     result_data = validate_raw_generated_image(item, result_data, codex_home)
+    if SOURCE_CONSISTENCY_CHECK and source_path:
+        key = str(item.get("key", "")).strip() or "item"
+        validation_path = validation_result_path or os.path.join(
+            validation_workdir or os.path.dirname(workspace_output_path) or ".",
+            "%s_source_consistency.json" % safe_path_id(key),
+        )
+        validation, validation_token_usage = run_source_consistency_validation(
+            item,
+            source_path,
+            result_data["raw_generated_path"],
+            validation_workdir or os.path.dirname(validation_path) or ".",
+            validation_path,
+            validation_env,
+        )
+        result_data["source_consistency"] = validation
+        if validation_token_usage:
+            result_data["_validation_token_usage"] = validation_token_usage
+    result_data = validate_source_consistency_report(item, result_data)
     raw_path = result_data["raw_generated_path"]
     normalize_without_crop(item, raw_path, workspace_output_path)
     final_width, final_height = image_dimensions(workspace_output_path)
@@ -574,21 +686,36 @@ def ratio_prompt_guidance(item):
     return ""
 
 
+def source_lock_prompt_rules():
+    return (
+        "Source lock: treat the attached original cover as the source of truth, not just a loose style reference. "
+        "Use source-locked image editing/outpainting/recomposition so the target canvas changes but the original information elements remain the same. "
+        "Preserve main character count, identities, faces, body type, posture, pose, pregnancy/belly state, embrace/hand placement, visible body proportions, costumes, clothing colors, accessories, and relationships between characters. "
+        "Preserve key props, creatures, animals, weapons, wings, crown, jewelry, background symbols, and foreground objects; do not add, remove, replace, or redesign story-significant elements. "
+        "Preserve all title/logo/badge/icon elements: exact title wording, typography style, color hierarchy, decorative treatment, app/platform/play/exclusive badges, logo marks, and icon style. "
+        "Do not redesign icons, badges, logos, play marks, exclusive marks, title fonts, or decorative text styling. "
+        "Only extend or lightly reframe background/empty areas needed for the target ratio; if a source element cannot fit, fail rather than inventing or changing it. "
+    )
+
+
 def build_codex_instruction(drama_name, item):
     target_ratio = target_aspect_ratio(item)
     return (
-        "Use the attached cover as reference. Generate exactly one new paid-social drama key-art image for the referenced drama. "
+        "Use the attached original cover as the locked source image. Generate exactly one paid-social drama key-art image for the referenced drama. "
         "Required raw canvas: {width}x{height}px, {ratio}, width/height={target_ratio:.6f}. "
         "{ratio_guidance}"
-        "Keep recognizable characters/title/visual identity; no watermark, extra people, malformed faces, crop, pad, blur background, resize-only, or layout conversion. "
+        "{source_lock_rules}"
+        "No watermark, extra people, malformed faces, changed body shape, changed icon style, crop, pad, blur background, resize-only, or layout conversion. "
         "Use only the built-in AI image generation/editing capability; do not use skills, plugins, external CLI, web services, Python, PIL, shell, or deterministic image processing. "
-        "After the AI image is generated, stop. Return compact JSON only: {{\"raw_generated_path\":\"<generated image path>\",\"used_ai_generation\":true,\"retry_count\":0,\"summary\":\"...\"}}."
+        "Before returning, compare the generated image against the source image for source_consistency. "
+        "Return compact JSON only: {{\"raw_generated_path\":\"<generated image path>\",\"used_ai_generation\":true,\"retry_count\":0,\"source_consistency\":{{\"passed\":true,\"reason\":\"self-check passed\",\"checks\":{{\"main_character_count\":true,\"character_identity_faces\":true,\"body_pose_body_type\":true,\"costumes_accessories\":true,\"key_props_creatures_objects\":true,\"title_text_content\":true,\"title_font_color_style\":true,\"logos_badges_icons_style\":true,\"composition_story_elements\":true,\"no_new_or_missing_elements\":true}},\"differences\":[]}},\"summary\":\"...\"}}."
     ).format(
         ratio=item["ratio"],
         width=int(item["width"]),
         height=int(item["height"]),
         target_ratio=target_ratio,
         ratio_guidance=ratio_prompt_guidance(item),
+        source_lock_rules=source_lock_prompt_rules(),
     )
 
 
@@ -609,13 +736,17 @@ def build_codex_batch_instruction(drama_name, items):
         "Use the attached original drama cover as the source image. "
         "Create finished paid-social key art images for {title} for every requested canvas below. "
         "Each requested canvas must be an independently composed AI image generation or image-editing result, not crops, resizes, pads, or copy-paste derivatives from one generated image. "
-        "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the original source across all outputs. "
+        "{source_lock_rules}"
         "Adapt each composition naturally to its target canvas, extending or recreating the surrounding background as needed so each image looks complete, polished, and not cropped or stretched. "
         "Do not add watermarks, unrelated props, extra people, duplicate limbs, deformed hands, or collage seams. "
         "Requested outputs: {specs}. "
         "After generation, copy each selected final image into its exact output_path. "
-        "Reply with only compact JSON containing an items array with key, output_path, and summary."
-    ).format(title=title, specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")))
+        "Reply with only compact JSON containing an items array with key, output_path, source_consistency, and summary."
+    ).format(
+        title=title,
+        specs=json.dumps(specs, ensure_ascii=False, separators=(",", ":")),
+        source_lock_rules=source_lock_prompt_rules(),
+    )
 
 
 def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None):
@@ -654,7 +785,7 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
     )
     return (
         "This is an isolated batch-image-generation test. "
-        "Use the attached original drama cover only as the visual identity reference. "
+        "Use the attached original drama cover as the locked source image, not as a loose style reference. "
         "In this single Codex subprocess, produce exactly one selected AI-generated paid-social key art image for each target below, in this exact order: {plan}. "
         "Do not inspect memories, Git history, web pages, logs, databases, unrelated project files, or any skill files. "
         "Do not read or use any local skill file, local helper script, plugin helper, external image-generation CLI, or web service for image generation. "
@@ -669,11 +800,12 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         "do not use a generated image for one ratio as the source for another ratio; "
         "Python/PIL may be used only after each target-specific AI image exists, first to inspect raw dimensions, then only to JPEG-convert or resize a raw image that already passed the target-ratio check. "
         "Do not use PIL crop, ImageOps.fit, pad, stretch, blurred background, or any geometry-changing layout trick to make a bad-ratio raw image pass. "
-        "Keep the main characters, faces, costumes, title text, logos, and visual identity recognizable from the source, while adapting each composition naturally to its target canvas. "
+        "{source_lock_rules}"
         "Each output should look like polished OTT short-drama advertising key art, not a layout conversion. "
         "Requested outputs: {specs}. "
         "For each requested output, save the final image to its exact output_path after the raw image passes aspect-ratio validation. "
-        "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, raw_width, raw_height, raw_ratio, used_ai_generation=true, retry_count, and summary. "
+        "Before returning, self-check each output against the source image. If any main character, body/pose, costume, title style, logo, badge, play icon, exclusive/app icon, icon style, prop, creature, or story-significant element changed, mark source_consistency.passed=false and do not claim the item is usable. "
+        "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, raw_width, raw_height, raw_ratio, used_ai_generation=true, retry_count, source_consistency, and summary. "
         "{manifest_rule}"
         "If you cannot produce all three target-specific AI-generated outputs inside this one subprocess, fail explicitly instead of fabricating outputs."
     ).format(
@@ -683,6 +815,7 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         tolerance_percent=ASPECT_RATIO_TOLERANCE * 100.0,
         manifest_rule=manifest_rule,
         ai_attempts=AI_ATTEMPTS,
+        source_lock_rules=source_lock_prompt_rules(),
     )
 
 
@@ -718,8 +851,16 @@ def generate_one_item(job_id, drama_name, staged_source_path, source_url, workdi
     with open(result_json_path, "r", encoding="utf-8") as fh:
         result_data = json.loads(extract_json_text(fh.read()))
     result_data = validate_and_normalize_generated_output(
-        item, result_data, workspace_output_path, codex_home
+        item,
+        result_data,
+        workspace_output_path,
+        codex_home,
+        staged_source_path,
+        ws,
+        codex_env,
+        os.path.join(workdir, "%s_source_consistency.json" % key),
     )
+    merge_token_usage(token_usage, result_data.pop("_validation_token_usage", {}))
     shutil.copy2(workspace_output_path, public_output_path)
     cache_id = store_to_cache(source_url, drama_name, item)
     result_data.update(
@@ -873,8 +1014,16 @@ def generate_screenshots(payload):
             result_data = dict(batch_summaries.get(key) or {})
             try:
                 result_data = validate_and_normalize_generated_output(
-                    item, result_data, workspace_output_path
+                    item,
+                    result_data,
+                    workspace_output_path,
+                    None,
+                    staged_source_path,
+                    ws,
+                    codex_env,
+                    os.path.join(workdir, "%s_source_consistency.json" % key),
                 )
+                merge_token_usage(token_usage, result_data.pop("_validation_token_usage", {}))
             except Exception as exc:
                 logging.warning(
                     "batch generated output rejected: job=%s key=%s error=%s",
