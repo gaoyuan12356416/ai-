@@ -26,10 +26,27 @@ VOICEOVER_DEFAULT_APP_ID=
 1. 将变更同步到 `/root/drama_material_service`。
 2. 同步静态文件到 nginx web root `/usr/share/nginx/html`。
 3. 配置 `VOICEOVER_KOL_TASK_API_TOKEN`。
-4. 重启 `drama-material-api.service`。
-5. 验证：
+4. nginx 需要转发新接口前缀：
+
+```nginx
+location /api/voiceover-drama/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 300s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+}
+```
+
+5. 重启 `drama-material-api.service`；nginx 配置变更后执行 `nginx -t` 并对 master pid 发 `HUP`。
+6. 验证：
    - `python -m py_compile app.py`
    - `node --check static/quick-nav.js`
    - 内联脚本语法解析
    - `GET /api/auth/status`
+   - `GET /api/voiceover-drama/designers` 公网应返回后端 401 或登录态数据，不能是 nginx 404
    - 登录后打开 `/#voiceoverTasks`
