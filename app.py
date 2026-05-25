@@ -32821,9 +32821,62 @@ def screenshot_failure_notify_recipients():
     return recipients
 
 
+def screenshot_failed_size_labels(error_text):
+    text = str(error_text or "")
+    labels = []
+    for label in ("1.91:1 横图", "1:1 方图", "4:5 竖图"):
+        if ("%s:" % label) in text or ("%s：" % label) in text:
+            labels.append(label)
+    return labels
+
+
+def humanize_screenshot_failure_reason(job, error_text):
+    raw_reason = (
+        str(error_text or "").strip()
+        or str(job.get("error_message", "") or "").strip()
+    )
+    lower_reason = raw_reason.lower()
+    failed_labels = screenshot_failed_size_labels(raw_reason)
+    failed_suffix = "，失败尺寸：%s" % "、".join(failed_labels) if failed_labels else ""
+
+    if is_screenshot_generation_no_output_error(raw_reason):
+        return (
+            "图片生成工具在“出图前”返回 UserError，未生成原始图片文件%s。\n"
+            "为什么没有图片：失败发生在 AI 图片生成/编辑工具内部，工具没有写出 raw_generated_path，"
+            "所以系统没有任何可校验、可裁切或可上传的图片。\n"
+            "为什么重试仍失败：系统已先做批量生成；批量失败后又降级为按尺寸单独生成，"
+            "但这些失败尺寸使用同一张源封面和同一组源图锁定生成要求再次调用时，仍在出图前返回同类 UserError。"
+            "这类错误不是认证、排队、下载、上传或比例校验问题，继续按相同输入自动重试只会重复失败。\n"
+            "底层工具没有返回更细的拒绝码，无法再区分是源图内容、人物/标题锁定要求，还是其他模型侧限制；"
+            "建议更换源封面，或放宽源图锁定要求后重新制作。"
+            % failed_suffix
+        )
+    if "downloaded screenshot source image is invalid" in lower_reason or "source image is invalid" in lower_reason:
+        return "源封面图片下载后不是有效图片，系统无法读取原图；建议更换可正常打开的封面链接。"
+    if is_screenshot_source_consistency_rejection(raw_reason):
+        return (
+            "生成图和源封面差异过大，人物、标题或主体一致性校验未通过%s；"
+            "系统已停止继续使用这版结果。"
+            % failed_suffix
+        )
+    if "raw aspect ratio rejected" in lower_reason or "aspect ratio" in lower_reason:
+        return "生成图尺寸比例不符合投放要求%s，系统已拦截该结果。" % failed_suffix
+    if "token_invalidated" in lower_reason or "refresh_token" in lower_reason or "401" in lower_reason:
+        return "Codex 登录凭证失效或刷新令牌不可用，图片生成服务无法继续调用，需要重新认证后重试。"
+    if "timed out" in lower_reason or "timeout" in lower_reason:
+        return "图片生成进程超时%s，系统没有在限定时间内拿到结果。" % failed_suffix
+    if (
+        "remotedisconnected" in lower_reason
+        or "connection refused" in lower_reason
+        or "connection aborted" in lower_reason
+    ):
+        return "截图生成 sidecar 连接中断%s，通常发生在服务重启或 sidecar 短暂不可用时。" % failed_suffix
+    first_line = raw_reason.splitlines()[0][:240] if raw_reason else "未知错误"
+    return "截图生成失败%s。技术错误：%s" % (failed_suffix, first_line)
+
+
 def build_screenshot_failure_message(job, error_text):
-    reason = (str(error_text or "").strip() or str(job.get("error_message", "") or "").strip())
-    reason = reason.splitlines()[0][:800] if reason else "unknown error"
+    reason = humanize_screenshot_failure_reason(job, error_text)
     return (
         "封面图合成任务失败，系统已停止继续重试。\n"
         "剧名：%s\n"
