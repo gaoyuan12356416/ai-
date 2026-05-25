@@ -87,7 +87,7 @@
 
   const INTERNAL_VIEW_HREFS = {
     tasks: "/drama-synthesis.html",
-    screenshots: "#screenshots",
+    screenshots: "/screenshots.html",
     voiceoverTasks: "/voiceover-drama.html",
     adMaterials: "/ad-material-tasks.html",
     settings: "#settings",
