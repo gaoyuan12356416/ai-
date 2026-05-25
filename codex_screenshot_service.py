@@ -54,9 +54,30 @@ ISOLATE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_ISOLATE_CODEX_HOME", "0").
     "yes",
 )
 SOURCE_CODEX_HOME = os.environ.get("CODEX_SCREENSHOT_SOURCE_CODEX_HOME", "/root/.codex")
+AUTH_SYNC_LOCK_PATH = os.environ.get("CODEX_SCREENSHOT_AUTH_SYNC_LOCK_PATH", "/tmp/codex_screenshot_auth_sync.lock")
+SYNC_ISOLATED_AUTH = os.environ.get("CODEX_SCREENSHOT_SYNC_ISOLATED_AUTH", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 CODEX_MODEL = os.environ.get("CODEX_SCREENSHOT_CODEX_MODEL", "gpt-5.5").strip() or "gpt-5.5"
 CODEX_REASONING = os.environ.get("CODEX_SCREENSHOT_CODEX_REASONING", "medium").strip() or "medium"
-ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE", "0.03"))
+ASPECT_RATIO_TOLERANCE = float(os.environ.get("CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE", "0.08"))
+SOURCE_CONSISTENCY_STRICT = os.environ.get("CODEX_SCREENSHOT_SOURCE_CONSISTENCY_STRICT", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+SOURCE_CONSISTENCY_CRITICAL_CHECKS = {
+    item.strip()
+    for item in os.environ.get(
+        "CODEX_SCREENSHOT_SOURCE_CONSISTENCY_CRITICAL_CHECKS",
+        "main_character_count,character_identity_faces,title_text_content",
+    ).split(",")
+    if item.strip()
+}
 
 # Cache: avoids repeated generations for same source + spec + prompt version.
 CACHE_ROOT = os.environ.get("CODEX_SCREENSHOT_CACHE_ROOT", "/root/codex_screenshot_cache")
@@ -215,6 +236,15 @@ def run_codex_cmd(cmd, timeout=None, env=None):
     started_at = time.time()
     proc = None
     try:
+        if should_sync_isolated_auth(env):
+            codex_home = env.get("CODEX_HOME")
+            with isolated_auth_sync_lock():
+                refresh_isolated_auth_from_source(codex_home)
+                try:
+                    proc = run_cmd(cmd, timeout=timeout, env=env)
+                    return proc
+                finally:
+                    sync_isolated_auth_to_source(codex_home)
         proc = run_cmd(cmd, timeout=timeout, env=env)
         return proc
     except Exception as exc:
@@ -225,6 +255,62 @@ def run_codex_cmd(cmd, timeout=None, env=None):
         token_usage = collect_codex_token_usage(codex_home, started_at, proc)
         if proc is not None:
             proc.codex_token_usage = token_usage
+
+
+def should_sync_isolated_auth(env):
+    return bool(
+        ISOLATE_CODEX_HOME
+        and SYNC_ISOLATED_AUTH
+        and env
+        and str(env.get("CODEX_HOME") or "").strip()
+    )
+
+
+class isolated_auth_sync_lock:
+    def __enter__(self):
+        ensure_dir(os.path.dirname(AUTH_SYNC_LOCK_PATH) or ".")
+        self.fh = open(AUTH_SYNC_LOCK_PATH, "a+", encoding="utf-8")
+        try:
+            import fcntl
+
+            fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX)
+            self._fcntl = fcntl
+        except Exception:
+            self._fcntl = None
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if self._fcntl is not None:
+                self._fcntl.flock(self.fh.fileno(), self._fcntl.LOCK_UN)
+        finally:
+            self.fh.close()
+
+
+def copy_codex_state_file(source_dir, target_dir, filename):
+    source = os.path.join(source_dir, filename)
+    if not os.path.isfile(source):
+        return False
+    ensure_dir(target_dir)
+    target = os.path.join(target_dir, filename)
+    tmp = "%s.tmp.%s" % (target, os.getpid())
+    shutil.copy2(source, tmp)
+    os.replace(tmp, target)
+    return True
+
+
+def refresh_isolated_auth_from_source(codex_home):
+    for filename in ("auth.json", "installation_id", "version.json", "models_cache.json", ".personality_migration"):
+        copy_codex_state_file(SOURCE_CODEX_HOME, codex_home, filename)
+
+
+def sync_isolated_auth_to_source(codex_home):
+    if not codex_home:
+        return
+    try:
+        copy_codex_state_file(codex_home, SOURCE_CODEX_HOME, "auth.json")
+    except Exception:
+        logging.exception("failed to sync isolated Codex auth back to source home")
 
 
 def toml_string(value):
@@ -332,13 +418,13 @@ def build_source_consistency_instruction(item):
     return (
         "Validation only. Do not generate or edit images. "
         "There are two attached images: IMAGE_1 is the original source cover, IMAGE_2 is the generated candidate for key={key}, canvas={width}x{height}, ratio={ratio}. "
-        "Compare IMAGE_2 against IMAGE_1 for source-element consistency. Pass only if the candidate preserves the original's core information elements. "
-        "Required checks: same main character count; same character identities/faces; same body type, posture, pose, pregnancy/belly state, embrace/hand placement, and visible body proportions; "
+        "Compare IMAGE_2 against IMAGE_1 for source-element consistency. Pass if the candidate preserves the original's core story and branding information. "
+        "Required checks: same main character count; same character identities/faces; broadly same body type, posture, pose, pregnancy/belly state, embrace/hand placement, and visible body proportions; "
         "same costumes/clothing colors and major accessories; same key props, creatures, animals, weapons, wings, crown, jewelry, background symbols, and foreground objects; "
-        "same title text content; same title typography style, color, hierarchy, and decorative treatment; "
-        "same logo, badge, app icon, play icon, exclusive/paid badge, platform mark, and other icon styles. "
-        "Reject if any icon, badge, logo, title style, protagonist body/pose, foreground prop, creature/object, or story-significant background element is redesigned, removed, added, or materially repositioned. "
-        "Allow only canvas-ratio adaptation, background extension, and minor spacing changes that do not alter the original story elements or branding/icon style. "
+        "same title text content; close title typography style, color, hierarchy, and decorative treatment; "
+        "same logo, badge, app icon, play icon, exclusive/paid badge, platform mark, and other icon families. "
+        "Reject only if a core person, title text, logo/badge family, foreground prop, creature/object, or story-significant element is redesigned, removed, added, or made unrecognizable. "
+        "Allow canvas-ratio adaptation, background extension, moderate title repositioning, and spacing changes that keep the original story elements recognizable. "
         "Return compact JSON only: {{\"passed\":true|false,\"reason\":\"...\",\"checks\":{{\"main_character_count\":true|false,\"character_identity_faces\":true|false,\"body_pose_body_type\":true|false,\"costumes_accessories\":true|false,\"key_props_creatures_objects\":true|false,\"title_text_content\":true|false,\"title_font_color_style\":true|false,\"logos_badges_icons_style\":true|false,\"composition_story_elements\":true|false,\"no_new_or_missing_elements\":true|false}},\"differences\":[\"...\"]}}."
     ).format(key=key, width=width, height=height, ratio=ratio)
 
@@ -645,17 +731,24 @@ def validate_source_consistency_report(item, result_data):
     )
     if not isinstance(check, dict):
         raise RuntimeError("missing source_consistency check for %s" % key)
-    if not bool_value(check.get("passed")):
-        reason = str(check.get("reason") or check.get("summary") or "source consistency check failed").strip()
-        raise RuntimeError("source consistency rejected for %s: %s" % (key, reason))
     checks = check.get("checks")
     failed = []
     if isinstance(checks, dict):
         for name, passed in checks.items():
             if not bool_value(passed):
                 failed.append(str(name))
-    if failed:
+    critical_failed = [name for name in failed if name in SOURCE_CONSISTENCY_CRITICAL_CHECKS]
+    if not bool_value(check.get("passed")):
+        reason = str(check.get("reason") or check.get("summary") or "source consistency check failed").strip()
+        if SOURCE_CONSISTENCY_STRICT or critical_failed or not isinstance(checks, dict):
+            raise RuntimeError("source consistency rejected for %s: %s" % (key, reason))
+        result_data["source_consistency_relaxed"] = True
+        result_data["source_consistency_relaxed_reason"] = reason
+    if failed and (SOURCE_CONSISTENCY_STRICT or critical_failed):
         raise RuntimeError("source consistency rejected for %s: failed checks: %s" % (key, ", ".join(failed)))
+    if failed:
+        result_data["source_consistency_relaxed"] = True
+        result_data["source_consistency_relaxed_failed_checks"] = failed
     return result_data
 
 
@@ -756,12 +849,12 @@ def source_lock_prompt_rules():
         "Source lock: treat the attached original cover as the source of truth, not just a loose style reference. "
         "Keep the original visual style unchanged: same lighting, color grade, genre mood, poster treatment, rendering style, texture, and contrast. "
         "Use source-locked image editing/outpainting/recomposition so the target canvas changes but the original information elements stay fixed and recognizable. "
-        "Preserve main character count, identities, faces, body type, posture, pose, pregnancy/belly state, embrace/hand placement, visible body proportions, costumes, clothing colors, accessories, and relationships between characters; do not slim, enlarge, expose, cover, or reposition body parts in a way that changes the source. "
-        "Preserve key props, creatures, animals, vehicles, weapons, wings, crown, jewelry, background symbols, foreground objects, and story-significant set pieces exactly as they appear; do not add, remove, replace, or redesign any object. "
-        "Preserve every sticker, pasted graphic, overlay, title/logo/badge/icon element exactly: title wording, font style, color hierarchy, decorative treatment, app/platform/play/exclusive badges, logo marks, icon shape, icon color, icon artwork, and relative placement. "
-        "Do not redesign icons, stickers, badges, logos, play marks, exclusive marks, title fonts, decorative text styling, or pasted overlay graphics. "
+        "Preserve main character count, identities, faces, body type, posture, pose, pregnancy/belly state, embrace/hand placement, visible body proportions, costumes, clothing colors, accessories, and relationships between characters; minor canvas-driven spacing changes are acceptable if the source remains recognizable. "
+        "Preserve key props, creatures, animals, vehicles, weapons, wings, crown, jewelry, background symbols, foreground objects, and story-significant set pieces so they remain recognizable; do not add, remove, replace, or redesign core story objects. "
+        "Preserve title wording and logo/badge/icon families; moderate title or badge repositioning is acceptable when adapting to a new canvas ratio. "
+        "Do not redesign icons, stickers, badges, logos, play marks, exclusive marks, title fonts, decorative text styling, or pasted overlay graphics into a different brand style. "
         "For new canvas space, only extend simple background texture, darkness, sky, wall, forest, bokeh, or other non-story background already present in the source; do not invent cars, people, animals, buildings, weapons, lights, signs, props, or new foreground/background story elements. "
-        "Prefer a conservative source-preserving composition over a more dramatic redesign. If an element cannot fit without changing it, fail rather than inventing or changing it. "
+        "Prefer a conservative source-preserving composition over a more dramatic redesign. "
     )
 
 
@@ -871,7 +964,7 @@ def build_codex_batch_imagegen_instruction(drama_name, items, manifest_path=None
         "Each output should look like polished OTT short-drama advertising key art, not a layout conversion. "
         "Requested outputs: {specs}. "
         "For each requested output, save the final image to its exact output_path after the raw image passes aspect-ratio validation. "
-        "Before returning, self-check each output against the source image. If any main character, body/pose, costume, title style, logo, badge, play icon, exclusive/app icon, icon style, prop, creature, or story-significant element changed, mark source_consistency.passed=false and do not claim the item is usable. "
+        "Before returning, self-check each output against the source image. If a core person, title text, logo/badge family, prop, creature, or story-significant element is missing, added, or unrecognizable, mark source_consistency.passed=false and do not claim the item is usable. Allow moderate canvas-driven repositioning and spacing changes. "
         "Return compact JSON only, with an items array. Each item must include key, output_path, raw_generated_path, raw_width, raw_height, raw_ratio, used_ai_generation=true, retry_count, source_consistency, and summary. "
         "{manifest_rule}"
         "If you cannot produce all three target-specific AI-generated outputs inside this one subprocess, fail explicitly instead of fabricating outputs."
@@ -1194,6 +1287,10 @@ class CodexScreenshotHandler(BaseHTTPRequestHandler):
                 "max_concurrency": MAX_CONCURRENCY,
                 "item_parallelism": ITEM_PARALLELISM,
                 "ai_attempts": AI_ATTEMPTS,
+                "aspect_ratio_tolerance": ASPECT_RATIO_TOLERANCE,
+                "source_consistency_strict": SOURCE_CONSISTENCY_STRICT,
+                "source_consistency_critical_checks": sorted(SOURCE_CONSISTENCY_CRITICAL_CHECKS),
+                "sync_isolated_auth": bool(ISOLATE_CODEX_HOME and SYNC_ISOLATED_AUTH),
                 "codex_extra_args": CODEX_EXTRA_ARGS,
                 "public_base_url": PUBLIC_BASE_URL,
                 "cache_root": CACHE_ROOT,

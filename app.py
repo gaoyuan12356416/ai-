@@ -9280,6 +9280,29 @@ def file_ready(path):
     return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0
 
 
+def image_file_ready(path):
+    if not file_ready(path):
+        return False
+    try:
+        from PIL import Image as PilImage
+
+        with PilImage.open(path) as image:
+            image.verify()
+        with PilImage.open(path) as image:
+            image.load()
+        return True
+    except Exception:
+        return False
+
+
+def remove_file_quietly(path):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        logging.warning("failed to remove file: %s", path)
+
+
 def get_named_runtime_lock(lock_map, lock_guard, key):
     key = str(key or "").strip()
     with lock_guard:
@@ -31715,6 +31738,10 @@ def process_screenshot_job(job):
 
     source_path = os.path.join(source_dir, "cover_source.jpg")
 
+    if file_ready(source_path) and not image_file_ready(source_path):
+        logging.warning("cached screenshot source image is invalid; redownloading: %s", source_path)
+        remove_file_quietly(source_path)
+
     if file_ready(source_path):
 
         set_screenshot_job_progress(job, status="downloading", progress=16, detail="\u590d\u7528\u5df2\u4e0b\u8f7d\u5c01\u9762\u7d20\u6750")
@@ -31725,7 +31752,16 @@ def process_screenshot_job(job):
 
         download_file(validation["cover_source_url"], source_path)
 
-        set_screenshot_job_progress(job, status="downloading", progress=24, detail="\u5c01\u9762\u7d20\u6750\u4e0b\u8f7d\u5b8c\u6210")
+        if image_file_ready(source_path):
+            set_screenshot_job_progress(job, status="downloading", progress=24, detail="\u5c01\u9762\u7d20\u6750\u4e0b\u8f7d\u5b8c\u6210")
+        else:
+            logging.warning(
+                "downloaded screenshot source image is invalid; sidecar will retry source_url candidates: job=%s url=%s",
+                job.get("job_id"),
+                validation["cover_source_url"],
+            )
+            remove_file_quietly(source_path)
+            set_screenshot_job_progress(job, status="downloading", progress=24, detail="封面素材下载异常，将由生成服务重新拉取")
 
 
 
@@ -32072,6 +32108,9 @@ def run_screenshot_job_async(job):
                     job["error_message"] = "%s\n%s" % (message, trace)
 
                     upsert_screenshot_job_record(job)
+
+                    failure_job = fetch_screenshot_job_row(job["job_id"]) or job
+                    notify_screenshot_failure(failure_job, message)
 
                     return
         finally:
@@ -32705,6 +32744,112 @@ def enrich_ad_material_store_icon(data):
     )
     data["product_icon_url"] = icon_url or ""
     return data
+
+
+def screenshot_failure_notify_names():
+    text = os.environ.get("SCREENSHOT_FAILURE_NOTIFY_NAMES", "\u90dc\u8fdc")
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def screenshot_failure_notify_recipients():
+    names = screenshot_failure_notify_names()
+    if not names:
+        return []
+    placeholders = ",".join("?" for _ in names)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT user_id, open_id, name
+                FROM drama_admin_user
+                WHERE name IN (%s)
+                  AND (TRIM(user_id) != '' OR TRIM(open_id) != '')
+                """
+                % placeholders,
+                names,
+            ).fetchall()
+        finally:
+            conn.close()
+    recipients = []
+    seen = set()
+    for row in rows:
+        user_id = str(row["user_id"] or "").strip()
+        open_id = str(row["open_id"] or "").strip()
+        name = str(row["name"] or "").strip()
+        if user_id:
+            key = ("user_id", user_id)
+            if key not in seen:
+                seen.add(key)
+                recipients.append({"receive_id_type": "user_id", "receive_id": user_id, "name": name})
+        elif open_id:
+            key = ("open_id", open_id)
+            if key not in seen:
+                seen.add(key)
+                recipients.append({"receive_id_type": "open_id", "receive_id": open_id, "name": name})
+    return recipients
+
+
+def build_screenshot_failure_message(job, error_text):
+    reason = (str(error_text or "").strip() or str(job.get("error_message", "") or "").strip())
+    reason = reason.splitlines()[0][:800] if reason else "unknown error"
+    return (
+        "封面图合成任务失败，系统已停止继续重试。\n"
+        "剧名：%s\n"
+        "content_id：%s\n"
+        "job_id：%s\n"
+        "失败原因：%s\n"
+        "已生成尺寸：1.91:1=%s，1:1=%s，4:5=%s"
+        % (
+            str(job.get("drama_name", "") or ""),
+            str(job.get("content_id", "") or ""),
+            str(job.get("job_id", "") or ""),
+            reason,
+            "有" if str(job.get("landscape_1_91x1_url", "") or "").strip() else "无",
+            "有" if str(job.get("square_1x1_url", "") or "").strip() else "无",
+            "有" if str(job.get("portrait_4x5_url", "") or "").strip() else "无",
+        )
+    )
+
+
+def notify_screenshot_failure(job, error_text):
+    try:
+        recipients = screenshot_failure_notify_recipients()
+        if not recipients:
+            logging.warning("no screenshot failure Feishu recipients configured")
+            try:
+                append_audit_log(
+                    None,
+                    "notify_screenshot_failure_skipped",
+                    "screenshot_job",
+                    job.get("job_id", ""),
+                    {"reason": "missing_recipient", "names": screenshot_failure_notify_names()},
+                )
+            except Exception:
+                logging.exception("failed to write screenshot failure notify skipped audit log")
+            return
+        message = build_screenshot_failure_message(job, error_text)
+        sent = []
+        errors = []
+        for recipient in recipients:
+            try:
+                send_feishu_text(recipient["receive_id_type"], recipient["receive_id"], message)
+                sent.append(recipient)
+            except Exception as exc:
+                logging.exception("failed to notify screenshot failure recipient: %s", recipient)
+                errors.append({"recipient": recipient, "error": str(exc).strip() or exc.__class__.__name__})
+        try:
+            append_audit_log(
+                None,
+                "notify_screenshot_failure",
+                "screenshot_job",
+                job.get("job_id", ""),
+                {"sent": sent, "errors": errors},
+            )
+        except Exception:
+            logging.exception("failed to write screenshot failure notify audit log")
+    except Exception:
+        logging.exception("failed to notify screenshot failure: %s", job.get("job_id", ""))
 
 
 def lookup_ad_material_product_metadata(app_id):
