@@ -7366,7 +7366,7 @@
     }
     .voiceover-stats {
       display: grid;
-      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
       gap: 12px;
       margin-bottom: 18px;
     }
@@ -7510,6 +7510,9 @@
       gap: 12px;
       align-items: center;
       background: #fff;
+    }
+    .voiceover-submit-status {
+      margin-top: 8px;
     }
     @media (max-width: 900px) {
       .voiceover-count-grid,
@@ -11334,9 +11337,8 @@
           </div>
           <div class="panel-body">
             <div class="voiceover-stats" id="voiceoverStats">
-              <div class="voiceover-stat"><strong>0</strong><span>素材总数</span></div>
-              <div class="voiceover-stat"><strong>0</strong><span>默认候选</span></div>
-              <div class="voiceover-stat"><strong>0</strong><span>替补素材</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>候选素材</span></div>
+              <div class="voiceover-stat"><strong>0</strong><span>ROAS达标</span></div>
               <div class="voiceover-stat"><strong>0</strong><span>已选择</span></div>
             </div>
             <div class="table-wrap">
@@ -11379,7 +11381,10 @@
               <div id="voiceoverTaskCards" class="stack"></div>
             </div>
             <div class="voiceover-modal-footer">
-              <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+              <div>
+                <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+                <div id="voiceoverSubmitStatus" class="voiceover-form-status voiceover-submit-status">待提交</div>
+              </div>
               <div class="actions-inline">
                 <button id="voiceoverModalResetBtn" class="btn btn-secondary" type="button">Reset</button>
                 <button id="voiceoverSubmitTasksBtn" class="btn btn-primary" type="button">确认创建全部任务</button>
@@ -14315,6 +14320,7 @@
       voiceoverModalCloseBtn: document.getElementById("voiceoverModalCloseBtn"),
       voiceoverModalResetBtn: document.getElementById("voiceoverModalResetBtn"),
       voiceoverSubmitTasksBtn: document.getElementById("voiceoverSubmitTasksBtn"),
+      voiceoverSubmitStatus: document.getElementById("voiceoverSubmitStatus"),
       adMaterialProductSearch: document.getElementById("adMaterialProductSearch"),
       adMaterialProductOptions: document.getElementById("adMaterialProductOptions"),
       adMaterialProductHint: document.getElementById("adMaterialProductHint"),
@@ -16112,6 +16118,10 @@
       if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || "";
       button.disabled = !!loading;
       button.textContent = loading ? loadingText : button.dataset.defaultText;
+      button.setAttribute("aria-busy", loading ? "true" : "false");
+    }
+    function voiceoverNextPaint() {
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     }
     async function voiceoverRunLimited(items, limit, worker) {
       const results = new Array(items.length);
@@ -16174,10 +16184,11 @@
       const contentIds = parseVoiceoverIds(els.voiceoverCountContentIds?.value || "");
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
       setVoiceoverButtonLoading(els.voiceoverCountBtn, true, "查询中...");
-      setVoiceoverStatus(els.voiceoverCountStatus, `正在查询 ${contentIds.length} 个剧 ID`, "loading");
+      setVoiceoverStatus(els.voiceoverCountStatus, `正在查询 ${contentIds.length} 个剧 ID，请稍候`, "loading");
       if (els.voiceoverCountTableBody) {
         els.voiceoverCountTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按资源ID汇总素材数...</td></tr>`;
       }
+      await voiceoverNextPaint();
       try {
         const data = await api("/api/voiceover-drama/material-counts", {
           method: "POST",
@@ -16239,48 +16250,32 @@
       const contentIds = parseVoiceoverIds(els.voiceoverFilterContentIds?.value || "");
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
       setVoiceoverButtonLoading(els.voiceoverFilterBtn, true, "筛选中...");
-      setVoiceoverStatus(els.voiceoverFilterStatus, `正在并发筛选 ${contentIds.length} 个剧 ID`, "loading");
+      setVoiceoverStatus(els.voiceoverFilterStatus, `正在筛选 ${contentIds.length} 个剧 ID，请稍候`, "loading");
       if (els.voiceoverResultSummary) els.voiceoverResultSummary.textContent = "筛选中...";
       if (els.voiceoverResultTableBody) {
         els.voiceoverResultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并筛选达标候选...</td></tr>`;
       }
+      await voiceoverNextPaint();
       try {
         const roasThreshold = Number(els.voiceoverRoasThreshold?.value || 45);
         const minCandidates = Number(els.voiceoverMinCandidates?.value || 15);
-        let finished = 0;
-        const results = await voiceoverRunLimited(contentIds, 4, async (contentId) => {
-          const data = await api("/api/voiceover-drama/filter", {
-            method: "POST",
-            body: JSON.stringify({
-              content_ids: [contentId],
-              roas_threshold: roasThreshold,
-              min_candidates: minCandidates
-            })
-          });
-          finished += 1;
-          setVoiceoverStatus(els.voiceoverFilterStatus, `已完成 ${finished}/${contentIds.length}`, "loading");
-          return data;
+        const data = await api("/api/voiceover-drama/filter", {
+          method: "POST",
+          body: JSON.stringify({
+            content_ids: contentIds,
+            roas_threshold: roasThreshold,
+            min_candidates: minCandidates
+          })
         });
-        const failures = [];
-        state.voiceoverMaterials = [];
-        results.forEach((result, index) => {
-          if (result?.status === "fulfilled") {
-            state.voiceoverMaterials.push(...(result.value?.items || []));
-          } else {
-            failures.push(`${contentIds[index]}：${result?.reason?.message || result?.reason || "失败"}`);
-          }
-        });
-        if (!state.voiceoverMaterials.length && failures.length) {
-          throw new Error(failures.join("；"));
-        }
+        state.voiceoverMaterials = data.items || [];
         state.voiceoverSelectedKeys = new Set(state.voiceoverMaterials.filter(item => item.selected_by_default).map(voiceoverKey));
         renderVoiceoverResults();
         setVoiceoverStatus(
           els.voiceoverFilterStatus,
-          failures.length ? `完成 ${state.voiceoverMaterials.length} 条，失败 ${failures.length} 个剧 ID` : `完成 ${state.voiceoverMaterials.length} 条候选素材`,
-          failures.length ? "error" : "success"
+          `完成 ${state.voiceoverMaterials.length} 条候选素材`,
+          "success"
         );
-        toast(failures.length ? `素材筛选完成，失败 ${failures.length} 个剧 ID` : "素材筛选完成");
+        toast("素材筛选完成");
       } catch (error) {
         setVoiceoverStatus(els.voiceoverFilterStatus, "筛选失败", "error");
         throw error;
@@ -16349,24 +16344,26 @@
       if (!els.voiceoverModalOverview) return;
       const items = state.voiceoverModalItems || [];
       const selected = items.length;
-      const substitutes = items.filter(item => item.risk_label === "替补素材").length;
-      let totalTasks = 0;
+      let totalQuantity = 0;
+      let incomplete = 0;
       items.forEach((item, index) => {
         const input = document.getElementById(`voiceoverTaskNumber_${index}`);
-        totalTasks += Math.max(1, Number(input?.value || 1));
+        totalQuantity += Math.max(1, Number(input?.value || 1));
+        const designer = document.getElementById(`voiceoverTaskDesigner_${index}`)?.value || "";
+        if (!designer) incomplete += 1;
       });
       els.voiceoverModalOverview.innerHTML = [
         ["已选素材", selected],
-        ["预计创建任务", totalTasks || selected],
-        ["已选替补", substitutes],
-        ["未完成配置", 0],
+        ["预计创建任务", selected],
+        ["需求素材数", totalQuantity || selected],
+        ["未完成配置", incomplete],
       ].map(([label, value]) => `<div class="voiceover-overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      if (els.voiceoverModalSummary) {
+        els.voiceoverModalSummary.textContent = `已选择 ${selected} 条素材；预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+      }
     }
     function renderVoiceoverTaskCards() {
       if (!els.voiceoverTaskCards) return;
-      if (els.voiceoverModalSummary) {
-        els.voiceoverModalSummary.textContent = `已选择 ${state.voiceoverModalItems.length} 条素材；请逐条设置数量、设计师、截止时间和描述。`;
-      }
       els.voiceoverTaskCards.innerHTML = state.voiceoverModalItems.map((item, index) => {
         const key = voiceoverKey(item);
         const defaultDesigner = resolveVoiceoverDefaultDesigner(item);
@@ -16393,7 +16390,7 @@
             </div>
             <div class="field">
               <label>指定设计师</label>
-              <select id="voiceoverTaskDesigner_${index}">${voiceoverDesignerOptions(defaultDesigner)}</select>
+              <select id="voiceoverTaskDesigner_${index}" onchange="renderVoiceoverModalOverview()">${voiceoverDesignerOptions(defaultDesigner)}</select>
             </div>
             <div class="field">
               <label>截止时间</label>
@@ -16426,6 +16423,7 @@
         }
         state.voiceoverModalItems = items;
         renderVoiceoverTaskCards();
+        setVoiceoverStatus(els.voiceoverSubmitStatus, "待提交");
         els.voiceoverTaskModal?.classList.remove("hidden");
       } finally {
         setVoiceoverButtonLoading(els.voiceoverOpenCreateBtn, false);
@@ -16435,6 +16433,7 @@
       state.voiceoverModalItems = [];
       els.voiceoverTaskModal?.classList.add("hidden");
       if (els.voiceoverTaskCards) els.voiceoverTaskCards.innerHTML = "";
+      setVoiceoverStatus(els.voiceoverSubmitStatus, "待提交");
     }
     function stepVoiceoverTaskNumber(index, delta) {
       const input = document.getElementById(`voiceoverTaskNumber_${index}`);
@@ -16456,17 +16455,35 @@
           description: document.getElementById(`voiceoverTaskDescription_${index}`)?.value || ""
         };
       });
-      if (items.some(item => !item.designer)) return toast("每条素材都需要选择设计师", "error");
-      if (els.voiceoverSubmitTasksBtn) els.voiceoverSubmitTasksBtn.disabled = true;
+      if (!items.length) {
+        setVoiceoverStatus(els.voiceoverSubmitStatus, "请先选择素材", "error");
+        return toast("请先选择素材", "error");
+      }
+      if (items.some(item => !item.designer)) {
+        setVoiceoverStatus(els.voiceoverSubmitStatus, "每条素材都需要选择设计师", "error");
+        renderVoiceoverModalOverview();
+        return toast("每条素材都需要选择设计师", "error");
+      }
+      setVoiceoverButtonLoading(els.voiceoverSubmitTasksBtn, true, "创建中...");
+      setVoiceoverStatus(els.voiceoverSubmitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
+      await voiceoverNextPaint();
       try {
         const data = await api("/api/voiceover-drama/design-tasks", {
           method: "POST",
           body: JSON.stringify({ items })
         });
+        setVoiceoverStatus(
+          els.voiceoverSubmitStatus,
+          `创建完成：成功 ${data.created_count || 0} 个${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`,
+          data.failed_count ? "error" : "success"
+        );
         toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
         if (!data.failed_count) closeVoiceoverTaskModal();
+      } catch (error) {
+        setVoiceoverStatus(els.voiceoverSubmitStatus, errorText(error), "error");
+        throw error;
       } finally {
-        if (els.voiceoverSubmitTasksBtn) els.voiceoverSubmitTasksBtn.disabled = false;
+        setVoiceoverButtonLoading(els.voiceoverSubmitTasksBtn, false);
       }
     }
     function exportVoiceoverCsv() {

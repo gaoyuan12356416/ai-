@@ -34952,6 +34952,41 @@ def voiceover_series_content_ids(series_code):
     return [str(row[0] if row else "").strip() for row in rows if row and str(row[0]).strip()]
 
 
+def voiceover_series_content_ids_map(series_codes):
+    cleaned = []
+    seen = set()
+    for series_code in series_codes:
+        value = str(series_code or "").strip()
+        if value and value not in seen:
+            cleaned.append(value)
+            seen.add(value)
+    if not cleaned:
+        return {}
+    database = voiceover_sql_db()
+    rows = run_mysql(
+        (
+            "SELECT d.series_code, d.content_id "
+            "FROM `%s`.ads_drama_info d FORCE INDEX (scoo) "
+            "WHERE d.series_code IN (%s) AND d.content_id<>'' "
+            "ORDER BY d.series_code, d.content_id"
+        )
+        % (database, voiceover_sql_in(cleaned))
+    )
+    result = {series_code: [] for series_code in cleaned}
+    seen_pairs = set()
+    for row in rows:
+        series_code = str(row[0] if len(row) > 0 else "").strip()
+        content_id = str(row[1] if len(row) > 1 else "").strip()
+        if not series_code or not content_id:
+            continue
+        key = (series_code, content_id)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        result.setdefault(series_code, []).append(content_id)
+    return result
+
+
 def voiceover_drama_info_from_row(row, content_id=""):
     app_id_value = str(row[1] if len(row) > 1 else "").strip()
     source_content_id = content_id or str(row[2] if len(row) > 2 else "").strip()
@@ -35165,7 +35200,7 @@ def voiceover_material_dedupe_key(item):
     return "%s:%s" % (duration, name[:80])
 
 
-def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=15):
+def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=15, content_ids=None):
     series_code = str(series_code or "").strip()
     if not series_code:
         return []
@@ -35174,7 +35209,7 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
         return []
     roas_threshold = voiceover_float(roas_threshold, VOICEOVER_DEFAULT_ROAS_THRESHOLD)
     database = voiceover_sql_db()
-    content_ids = voiceover_series_content_ids(series_code)
+    content_ids = content_ids if content_ids is not None else voiceover_series_content_ids(series_code)
     if not content_ids:
         return []
     content_id_sql = voiceover_sql_in(content_ids)
@@ -35321,16 +35356,28 @@ def voiceover_filter_materials(payload):
     all_items = []
     content_ids = voiceover_parse_content_ids(payload)
     drama_map = lookup_voiceover_drama_info_map(content_ids)
+    series_codes = []
+    for drama in drama_map.values():
+        series_code = (drama or {}).get("series_code", "")
+        if series_code and series_code not in series_codes:
+            series_codes.append(series_code)
+    series_content_map = voiceover_series_content_ids_map(series_codes)
+    materials_by_series = {}
     for content_id in content_ids:
         drama = drama_map.get(content_id)
         if not drama:
             raise StructuredApiError("drama_not_found", "未在剧库中找到剧 ID：%s" % content_id)
-        materials = voiceover_material_rows_for_series(
-            drama.get("series_code", ""),
-            roas_threshold=roas_threshold,
-            limit=candidate_limit,
-        )
-        voiceover_apply_candidate_rules(materials, roas_threshold, min_candidates)
+        series_code = drama.get("series_code", "")
+        if series_code not in materials_by_series:
+            series_materials = voiceover_material_rows_for_series(
+                series_code,
+                roas_threshold=roas_threshold,
+                limit=candidate_limit,
+                content_ids=series_content_map.get(series_code) or [],
+            )
+            voiceover_apply_candidate_rules(series_materials, roas_threshold, min_candidates)
+            materials_by_series[series_code] = series_materials
+        materials = [dict(item) for item in materials_by_series.get(series_code, [])]
         for item in materials:
             item["target_content_id"] = content_id
             item["target_drama_name"] = drama.get("name", "")
