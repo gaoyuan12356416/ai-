@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "description": "Guard tokens for features that are active on the shared ai.yingliangads.com monolith. Deployment candidates must keep these tokens unless the feature is intentionally retired.",
+  "features": [
+    {
+      "id": "drama_synthesis",
+      "description": "Drama video synthesis module",
+      "required": [
+        {
+          "path": "app.py",
+          "contains": [
+            "drama_synthesis",
+            "/api/drama-material/jobs",
+            "parse_job_route"
+          ]
+        },
+        {
+          "path": "static/index.html",
+          "public_path": "index.html",
+          "contains": [
+            "tasksSection",
+            "createForm",
+            "/api/drama-material/jobs"
+          ]
+        },
+        {
+          "path": "static/quick-nav.js",
+          "public_path": "quick-nav.js",
+          "contains": [
+            "drama_synthesis",
+            "tasks"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cover_synthesis",
+      "description": "Screenshot material module",
+      "required": [
+        {
+          "path": "app.py",
+          "contains": [
+            "cover_synthesis",
+            "/api/drama-screenshot-material/jobs",
+            "submit_screenshot_job_batch",
+            "is_screenshot_generation_no_output_error"
+          ]
+        },
+        {
+          "path": "static/index.html",
+          "public_path": "index.html",
+          "contains": [
+            "screenshotsSection",
+            "screenshotBatchForm",
+            "screenshotJobTableBody"
+          ]
+        },
+        {
+          "path": "static/quick-nav.js",
+          "public_path": "quick-nav.js",
+          "contains": [
+            "cover_synthesis",
+            "screenshots"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ad_material_tasks",
+      "description": "Ad material task module",
+      "required": [
+        {
+          "path": "app.py",
+          "contains": [
+            "ad_material_tasks",
+            "/api/ad-material/tasks",
+            "create_ad_material_task",
+            "recover_inflight_ad_material_tasks"
+          ]
+        },
+        {
+          "path": "static/index.html",
+          "public_path": "index.html",
+          "contains": [
+            "adMaterialsSection",
+            "adMaterialCreateBtn",
+            "/api/ad-material/tasks"
+          ]
+        },
+        {
+          "path": "static/quick-nav.js",
+          "public_path": "quick-nav.js",
+          "contains": [
+            "ad_material_tasks",
+            "adMaterials"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "voiceover_drama_tasks",
+      "description": "Voiceover drama designer task module",
+      "required": [
+        {
+          "path": "features/voiceover_drama_tasks/service.py",
+          "contains": [
+            "def voiceover_material_counts",
+            "def voiceover_filter_materials",
+            "def create_voiceover_design_tasks"
+          ]
+        },
+        {
+          "path": "app.py",
+          "contains": [
+            "voiceover_drama_tasks",
+            "/api/voiceover-drama/material-counts",
+            "/api/voiceover-drama/filter",
+            "/api/voiceover-drama/design-tasks"
+          ]
+        },
+        {
+          "path": "static/voiceover-drama.html",
+          "public_path": "voiceover-drama.html",
+          "contains": [
+            "配音剧语种任务",
+            "countBtn",
+            "submitStatus",
+            "/api/voiceover-drama/material-counts"
+          ]
+        },
+        {
+          "path": "static/quick-nav.js",
+          "public_path": "quick-nav.js",
+          "contains": [
+            "voiceover_drama_tasks",
+            "voiceoverTasks"
+          ]
+        }
+      ]
+    }
+  ]
+}

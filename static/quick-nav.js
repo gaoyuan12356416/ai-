@@ -14,7 +14,7 @@
       label: "配音剧素材",
       module: "voiceover_drama_tasks",
       items: [
-        { key: "voiceoverTasks", label: "配音剧语种任务", description: "查询系列素材并批量创建设计师需求", kind: "page", href: "/#voiceoverTasks", module: "voiceover_drama_tasks", enabled: true, order: 10 }
+        { key: "voiceoverTasks", label: "配音剧语种任务", description: "查询系列素材并批量创建设计师需求", kind: "page", href: "/voiceover-drama.html", module: "voiceover_drama_tasks", enabled: true, order: 10 }
       ]
     },
     {
@@ -88,7 +88,7 @@
   const INTERNAL_VIEW_HREFS = {
     tasks: "#tasks",
     screenshots: "#screenshots",
-    voiceoverTasks: "#voiceoverTasks",
+    voiceoverTasks: "/voiceover-drama.html",
     adMaterials: "#adMaterials",
     settings: "#settings",
     navigation: "#navigation",
