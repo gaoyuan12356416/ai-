@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>投放素材任务 - AI自动后台</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --panel: #ffffff;
+      --panel-soft: #f7fafc;
+      --line: #d9e3ef;
+      --text: #10233f;
+      --muted: #687894;
+      --blue: #2f66ff;
+      --green: #0f9f6e;
+      --amber: #d98500;
+      --red: #d93f3f;
+      --nav: #0e1d36;
+      --shadow: 0 18px 42px rgba(35, 55, 95, .11);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, select, textarea { font: inherit; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 256px minmax(0, 1fr); }
+    .sidebar { background: linear-gradient(180deg, #132a4f, #09162b); color: #eef5ff; padding: 24px 18px; }
+    .brand { display: flex; gap: 12px; align-items: center; padding-bottom: 22px; border-bottom: 1px solid rgba(255,255,255,.1); }
+    .brand-mark { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--blue); font-weight: 800; }
+    .brand strong { display: block; font-size: 18px; }
+    .brand span, .nav span { color: rgba(238,245,255,.62); font-size: 12px; }
+    .nav { display: grid; gap: 10px; margin-top: 22px; }
+    .nav a { color: inherit; text-decoration: none; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 13px 14px; display: block; }
+    .nav a.active { background: linear-gradient(135deg, var(--blue), #1f48c9); border-color: transparent; box-shadow: 0 14px 28px rgba(25, 55, 150, .35); }
+    .main { padding: 28px; }
+    .topbar { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; margin-bottom: 20px; }
+    h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 18px; }
+    p { margin: 0; color: var(--muted); }
+    .user-card { background: rgba(255,255,255,.8); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; min-width: 220px; text-align: right; }
+    .grid { display: grid; gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    .panel-body { padding: 18px 20px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .field { display: grid; gap: 7px; }
+    label { color: #31476a; font-size: 13px; font-weight: 700; }
+    input, select, textarea { width: 100%; border: 1px solid #cbd8ea; border-radius: 12px; padding: 11px 12px; background: #fff; color: var(--text); outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(47,102,255,.12); }
+    textarea { resize: vertical; min-height: 88px; }
+    .btn { border: 1px solid #cbd8ea; background: #fff; color: var(--text); border-radius: 12px; padding: 10px 16px; cursor: pointer; font-weight: 700; }
+    .btn:hover { border-color: var(--blue); }
+    .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; box-shadow: 0 12px 24px rgba(47,102,255,.25); }
+    .btn.danger { background: #fff5f5; border-color: #ffc7c7; color: var(--red); }
+    .btn.small { padding: 7px 10px; font-size: 12px; border-radius: 10px; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stat { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 14px; padding: 13px; }
+    .stat b { display: block; color: var(--blue); font-size: 24px; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
+    table { border-collapse: collapse; width: 100%; min-width: 1080px; background: #fff; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid #ecf1f6; text-align: left; vertical-align: top; font-size: 13px; }
+    th { background: #f8fbff; color: #627493; font-weight: 800; }
+    tr:last-child td { border-bottom: 0; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 800; background: #eef4ff; color: var(--blue); }
+    .badge.green { background: #eaf8f2; color: var(--green); }
+    .badge.amber { background: #fff6dd; color: var(--amber); }
+    .badge.red { background: #fff0f0; color: var(--red); }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(10, 22, 42, .62); display: grid; place-items: center; padding: 28px; z-index: 10; }
+    .modal { width: min(1080px, 100%); max-height: calc(100vh - 56px); overflow: auto; background: var(--panel); border-radius: 20px; box-shadow: 0 28px 80px rgba(0,0,0,.25); }
+    .modal-head, .modal-foot { padding: 18px 22px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+    .modal-foot { border-top: 1px solid var(--line); border-bottom: 0; justify-content: flex-end; }
+    .modal-body { padding: 22px; }
+    .form-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+    .col-3 { grid-column: span 3; }
+    .col-4 { grid-column: span 4; }
+    .col-6 { grid-column: span 6; }
+    .col-8 { grid-column: span 8; }
+    .col-12 { grid-column: span 12; }
+    .hidden { display: none !important; }
+    .muted { color: var(--muted); }
+    .product-options { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 6px; max-height: 260px; overflow-y: auto; background: #fff; }
+    .product-options button { width: 100%; border: 0; background: #fff; text-align: left; padding: 10px 12px; border-bottom: 1px solid #edf2f7; cursor: pointer; }
+    .product-options button:hover { background: #f5f8ff; }
+    .size-plan { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 10px; }
+    .toast { position: fixed; right: 24px; bottom: 24px; background: #0e1d36; color: #fff; padding: 12px 16px; border-radius: 12px; box-shadow: var(--shadow); z-index: 20; }
+    .auth-panel { min-height: 70vh; display: grid; place-items: center; }
+    .auth-box { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px; width: min(420px, 100%); box-shadow: var(--shadow); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .main { padding: 18px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .form-grid { grid-template-columns: 1fr; }
+      .col-3, .col-4, .col-6, .col-8, .col-12 { grid-column: span 1; }
+      .size-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav class="nav">
+        <a href="/drama-synthesis.html"><strong>剧集合成</strong><span>创建、重试、删除、查看结果</span></a>
+        <a href="/screenshots.html"><strong>封面图合成</strong><span>批量提交剧 ID，查看图片进度</span></a>
+        <a href="/ad-material-tasks.html" class="active"><strong>投放素材任务</strong><span>创建需求、审核素材并上报</span></a>
+        <a href="/voiceover-drama.html"><strong>配音剧语种任务</strong><span>查询系列素材并批量提需求</span></a>
+      </nav>
+    </aside>
+    <main class="main">
+      <div id="authPanel" class="auth-panel hidden">
+        <div class="auth-box">
+          <h2>需要登录</h2>
+          <p style="margin:10px 0 18px">请先通过飞书登录 AI 后台，再进入投放素材任务。</p>
+          <button id="loginBtn" class="btn primary" type="button">飞书登录</button>
+        </div>
+      </div>
+      <section id="pageContent" class="hidden">
+        <div class="topbar">
+          <div>
+            <h1>投放素材任务</h1>
+            <p>创建素材需求，跟进需求审核、素材审核和最终素材上报。</p>
+          </div>
+          <div class="user-card">
+            <strong id="userName">--</strong>
+            <div class="muted" id="userMeta">--</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>任务列表</h2>
+              <p id="summary">正在加载...</p>
+            </div>
+            <div class="toolbar">
+              <button id="createBtn" class="btn primary" type="button">创建任务</button>
+              <button id="reloadBtn" class="btn" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="toolbar" style="margin-bottom:16px">
+              <div class="field" style="min-width:180px">
+                <label>状态</label>
+                <select id="statusFilter">
+                  <option value="all">全部状态</option>
+                  <option value="draft">待发布</option>
+                  <option value="generating_demand">生成需求中</option>
+                  <option value="demand_review">需求待审核</option>
+                  <option value="generating_material">生成素材中</option>
+                  <option value="material_review">素材待审核</option>
+                  <option value="material_abandoned">已废弃</option>
+                  <option value="done">已完成</option>
+                  <option value="failed">失败</option>
+                </select>
+              </div>
+              <div class="field" style="min-width:320px; flex:1">
+                <label>搜索</label>
+                <input id="searchInput" placeholder="任务 ID / 产品 / 创建人 / 描述" />
+              </div>
+              <button id="searchBtn" class="btn primary" type="button">筛选</button>
+            </div>
+            <div class="stats">
+              <div class="stat"><b id="statTotal">0</b><span>任务总数</span></div>
+              <div class="stat"><b id="statDraft">0</b><span>待发布</span></div>
+              <div class="stat"><b id="statReview">0</b><span>待审核</span></div>
+              <div class="stat"><b id="statDone">0</b><span>已完成</span></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>任务</th>
+                    <th>产品</th>
+                    <th>类型</th>
+                    <th>国家/语言</th>
+                    <th>尺寸/数量</th>
+                    <th>状态</th>
+                    <th>创建人</th>
+                    <th>更新时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="taskBody"><tr><td colspan="9" class="muted">正在加载...</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="taskModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2 id="modalTitle">创建任务</h2><p id="modalSub">填写投放素材需求参数。</p></div>
+        <button class="btn" type="button" data-close>关闭</button>
+      </div>
+      <form id="taskForm">
+        <div class="modal-body form-grid">
+          <div class="field col-8">
+            <label>产品</label>
+            <input id="productSearch" placeholder="输入产品 ID / 名称后搜索" autocomplete="off" required />
+            <div id="productOptions" class="product-options hidden"></div>
+            <p id="productHint" class="muted">未选择产品</p>
+          </div>
+          <div class="field col-4">
+            <label>任务类型</label>
+            <select id="taskType" required>
+              <option value="素材迭代——根据老素材效果优化">素材迭代</option>
+              <option value="参考衍生——解析参考素材风格出新素材">参考衍生</option>
+              <option value="竞品借鉴——参考竞品优质素材">竞品借鉴</option>
+              <option value="综合策划——综合内外素材出方案">综合策划</option>
+            </select>
+          </div>
+          <div class="field col-3">
+            <label>竞品源</label>
+            <select id="competitorSource"><option value="">无</option></select>
+          </div>
+          <div class="field col-3">
+            <label>国家</label>
+            <input id="countryInput" placeholder="MX / US / BR" required />
+          </div>
+          <div class="field col-3">
+            <label>语言</label>
+            <input id="languageInput" placeholder="es / en / pt" required />
+          </div>
+          <div class="field col-3">
+            <label>Category</label>
+            <input id="categoryInput" placeholder="可选" />
+          </div>
+          <div class="field col-12">
+            <label>尺寸与数量</label>
+            <div class="size-plan" id="sizePlan"></div>
+          </div>
+          <div class="field col-4">
+            <label>标签</label>
+            <input id="tagInput" placeholder="可选" />
+          </div>
+          <div class="field col-4">
+            <label>标题</label>
+            <input id="titleInput" placeholder="可选" />
+          </div>
+          <div class="field col-4">
+            <label>正文</label>
+            <input id="bodyInput" placeholder="可选" />
+          </div>
+          <div class="field col-12">
+            <label>参考素材</label>
+            <input id="referenceFiles" type="file" accept="image/*,video/*" multiple />
+          </div>
+          <div class="field col-12">
+            <label>任务描述</label>
+            <textarea id="descriptionInput" placeholder="描述希望优化、借鉴或生成的方向"></textarea>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button id="resetBtn" class="btn" type="button">清空</button>
+          <button id="submitBtn" class="btn primary" type="submit">确认创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="detailModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2>任务详情</h2><p id="detailSub">--</p></div>
+        <button class="btn" type="button" data-detail-close>关闭</button>
+      </div>
+      <div id="detailBody" class="modal-body grid"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    const els = {
+      authPanel: document.getElementById("authPanel"),
+      pageContent: document.getElementById("pageContent"),
+      loginBtn: document.getElementById("loginBtn"),
+      userName: document.getElementById("userName"),
+      userMeta: document.getElementById("userMeta"),
+      summary: document.getElementById("summary"),
+      createBtn: document.getElementById("createBtn"),
+      reloadBtn: document.getElementById("reloadBtn"),
+      statusFilter: document.getElementById("statusFilter"),
+      searchInput: document.getElementById("searchInput"),
+      searchBtn: document.getElementById("searchBtn"),
+      taskBody: document.getElementById("taskBody"),
+      taskModal: document.getElementById("taskModal"),
+      taskForm: document.getElementById("taskForm"),
+      modalTitle: document.getElementById("modalTitle"),
+      modalSub: document.getElementById("modalSub"),
+      productSearch: document.getElementById("productSearch"),
+      productOptions: document.getElementById("productOptions"),
+      productHint: document.getElementById("productHint"),
+      taskType: document.getElementById("taskType"),
+      competitorSource: document.getElementById("competitorSource"),
+      countryInput: document.getElementById("countryInput"),
+      languageInput: document.getElementById("languageInput"),
+      categoryInput: document.getElementById("categoryInput"),
+      sizePlan: document.getElementById("sizePlan"),
+      tagInput: document.getElementById("tagInput"),
+      titleInput: document.getElementById("titleInput"),
+      bodyInput: document.getElementById("bodyInput"),
+      referenceFiles: document.getElementById("referenceFiles"),
+      descriptionInput: document.getElementById("descriptionInput"),
+      resetBtn: document.getElementById("resetBtn"),
+      submitBtn: document.getElementById("submitBtn"),
+      detailModal: document.getElementById("detailModal"),
+      detailSub: document.getElementById("detailSub"),
+      detailBody: document.getElementById("detailBody"),
+      toast: document.getElementById("toast"),
+      statTotal: document.getElementById("statTotal"),
+      statDraft: document.getElementById("statDraft"),
+      statReview: document.getElementById("statReview"),
+      statDone: document.getElementById("statDone"),
+    };
+    const SIZE_OPTIONS = ["1:1", "4:5", "9:16", "1.91:1", "16:9"];
+    const state = { auth: null, tasks: [], sources: [], selectedProduct: null, editingTaskId: "", productTimer: null };
+
+    function text(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+    function statusTone(status) {
+      if (["done"].includes(status)) return "green";
+      if (["failed", "material_abandoned"].includes(status)) return "red";
+      if (["demand_review", "material_review", "generating_demand", "generating_material"].includes(status)) return "amber";
+      return "";
+    }
+    function taskKind(type) {
+      if (String(type || "").includes("素材迭代")) return "iteration";
+      if (String(type || "").includes("参考衍生")) return "reference";
+      if (String(type || "").includes("竞品借鉴")) return "competitor";
+      return "planning";
+    }
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options,
+      });
+      const raw = await response.text();
+      let data = {};
+      try { data = raw ? JSON.parse(raw) : {}; } catch (_) { data = { message: raw }; }
+      if (!response.ok) {
+        const message = data.message || data.error || response.statusText || "请求失败";
+        throw Object.assign(new Error(message), { status: response.status, data });
+      }
+      return data;
+    }
+    function toast(message, isError = false) {
+      els.toast.textContent = message;
+      els.toast.style.background = isError ? "#c92525" : "#0e1d36";
+      els.toast.classList.remove("hidden");
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => els.toast.classList.add("hidden"), 2600);
+    }
+    function userCan(moduleKey) {
+      const user = state.auth && state.auth.user;
+      return !!(user && (user.is_admin || (user.permissions && user.permissions[moduleKey])));
+    }
+    async function loadAuth() {
+      state.auth = await api("/api/auth/status");
+      if (!state.auth.authenticated) {
+        els.authPanel.classList.remove("hidden");
+        els.pageContent.classList.add("hidden");
+        els.loginBtn.onclick = () => { location.href = state.auth.login_url || "/api/auth/feishu/login"; };
+        return false;
+      }
+      if (!userCan("ad_material_tasks")) {
+        els.authPanel.classList.remove("hidden");
+        els.pageContent.classList.add("hidden");
+        els.authPanel.querySelector("h2").textContent = "无投放素材任务权限";
+        els.authPanel.querySelector("p").textContent = "请联系管理员在用户管理中开通投放素材任务权限。";
+        els.loginBtn.classList.add("hidden");
+        return false;
+      }
+      const user = state.auth.user || {};
+      els.userName.textContent = user.name || user.email || "已登录";
+      els.userMeta.textContent = `${user.role || "user"} / ${user.tenant_key || ""}`;
+      els.authPanel.classList.add("hidden");
+      els.pageContent.classList.remove("hidden");
+      return true;
+    }
+    async function loadSources() {
+      const data = await api("/api/ad-material/competitor-sources");
+      state.sources = data.items || [];
+      const options = ['<option value="">无</option>'].concat(
+        state.sources.filter(item => (item.status || "active") === "active").map(item => `<option value="${text(item.source)}">${text(item.source)}</option>`)
+      );
+      els.competitorSource.innerHTML = options.join("");
+    }
+    async function loadTasks() {
+      els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">加载中...</td></tr>`;
+      const params = new URLSearchParams();
+      if (els.statusFilter.value && els.statusFilter.value !== "all") params.set("status", els.statusFilter.value);
+      if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
+      const data = await api(`/api/ad-material/tasks?${params.toString()}`);
+      state.tasks = data.items || [];
+      els.summary.textContent = `共 ${data.total || 0} 条任务`;
+      updateStats();
+      renderRows();
+    }
+    function updateStats() {
+      els.statTotal.textContent = String(state.tasks.length);
+      els.statDraft.textContent = String(state.tasks.filter(item => item.status === "draft").length);
+      els.statReview.textContent = String(state.tasks.filter(item => ["demand_review", "material_review"].includes(item.status)).length);
+      els.statDone.textContent = String(state.tasks.filter(item => item.status === "done").length);
+    }
+    function renderRows() {
+      if (!state.tasks.length) {
+        els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">暂无投放素材任务</td></tr>`;
+        return;
+      }
+      els.taskBody.innerHTML = state.tasks.map(task => `
+        <tr>
+          <td><strong>${text(task.task_id)}</strong><div class="muted">${text(task.description || "-")}</div></td>
+          <td>${text(task.product_name || task.app_id)}<div class="muted">${text(task.app_id)}</div></td>
+          <td>${text(task.task_type || "-")}</td>
+          <td>${text(task.country || "-")} / ${text(task.language || "-")}</td>
+          <td>${text(task.size_plan_summary || task.size || "-")}<div class="muted">${text(task.quantity || 0)} 张</div></td>
+          <td><span class="badge ${statusTone(task.status)}">${text(task.status_label || task.status)}</span></td>
+          <td>${text(task.creator_name || task.creator_email || "-")}</td>
+          <td>${text(task.updated_at || "-")}</td>
+          <td><div class="actions">${actionButtons(task)}</div></td>
+        </tr>
+      `).join("");
+    }
+    function actionButtons(task) {
+      const id = text(task.task_id);
+      const buttons = [`<button class="btn small" onclick="viewTask('${id}')">详情</button>`];
+      if (task.status === "draft") {
+        buttons.push(`<button class="btn small" onclick="editTask('${id}')">编辑</button>`);
+        buttons.push(`<button class="btn small primary" onclick="publishTask('${id}')">发布</button>`);
+        buttons.push(`<button class="btn small danger" onclick="deleteTask('${id}')">删除</button>`);
+      }
+      if (task.status === "demand_review") buttons.push(`<button class="btn small primary" onclick="reviewDemand('${id}','approved')">需求通过</button>`);
+      if (task.status === "material_review") buttons.push(`<button class="btn small primary" onclick="completeUpload('${id}')">上报素材库</button>`);
+      buttons.push(`<button class="btn small" onclick="copyTask('${id}')">复制</button>`);
+      return buttons.join("");
+    }
+    function renderSizePlan(plan = [{ size: "1:1", count: 1 }]) {
+      const map = Object.fromEntries(SIZE_OPTIONS.map(size => [size, 0]));
+      plan.forEach(item => { if (map[item.size] != null) map[item.size] = Number(item.count || 0); });
+      els.sizePlan.innerHTML = SIZE_OPTIONS.map(size => `
+        <div class="field"><label>${size}</label><input data-size="${size}" type="number" min="0" max="20" value="${map[size]}" /></div>
+      `).join("");
+    }
+    function collectSizePlan() {
+      const items = Array.from(els.sizePlan.querySelectorAll("[data-size]"))
+        .map(input => ({ size: input.dataset.size, count: Math.max(0, Number(input.value || 0)) }))
+        .filter(item => item.count > 0);
+      if (!items.length) throw new Error("至少选择一个尺寸数量");
+      if (items.reduce((sum, item) => sum + item.count, 0) > 20) throw new Error("单个任务最多 20 张");
+      return items;
+    }
+    async function filePayload() {
+      const files = Array.from(els.referenceFiles.files || []);
+      return Promise.all(files.map(file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, type: file.type, data_url: reader.result });
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      })));
+    }
+    function openModal(mode = "create") {
+      els.modalTitle.textContent = mode === "edit" ? "编辑任务" : "创建任务";
+      els.submitBtn.textContent = mode === "edit" ? "保存编辑" : "确认创建";
+      els.taskModal.classList.remove("hidden");
+    }
+    function closeModal() { els.taskModal.classList.add("hidden"); }
+    function resetForm() {
+      state.editingTaskId = "";
+      state.selectedProduct = null;
+      els.taskForm.reset();
+      els.productHint.textContent = "未选择产品";
+      els.productOptions.classList.add("hidden");
+      els.taskType.value = "素材迭代——根据老素材效果优化";
+      renderSizePlan();
+    }
+    function setProduct(product) {
+      state.selectedProduct = product;
+      const label = `${product.product_name || product.name || product.label || product.app_id} / ${product.app_id || product.id || ""}`;
+      els.productSearch.value = label;
+      els.productHint.textContent = `已选择：${label}`;
+      els.productOptions.classList.add("hidden");
+      if (product.country && !els.countryInput.value) els.countryInput.value = product.country;
+      if (product.language && !els.languageInput.value) els.languageInput.value = product.language;
+    }
+    async function searchProducts() {
+      const q = els.productSearch.value.trim();
+      if (!q) return;
+      els.productOptions.innerHTML = `<button type="button">搜索中...</button>`;
+      els.productOptions.classList.remove("hidden");
+      const data = await api(`/api/ad-material/products?q=${encodeURIComponent(q)}&limit=20`);
+      const items = data.items || [];
+      els.productOptions.innerHTML = items.length ? items.map((item, index) => `
+        <button type="button" data-product-index="${index}"><strong>${text(item.product_name || item.name || item.label || item.app_id)}</strong><div class="muted">${text(item.app_id || item.id || "")}</div></button>
+      `).join("") : `<button type="button">暂无匹配产品</button>`;
+      els.productOptions.querySelectorAll("[data-product-index]").forEach(button => {
+        button.onclick = () => setProduct(items[Number(button.dataset.productIndex)]);
+      });
+    }
+    async function submitTask(event) {
+      event.preventDefault();
+      try {
+        if (!state.selectedProduct && state.editingTaskId) {
+          state.selectedProduct = { app_id: els.productSearch.dataset.appId || "", product_name: els.productSearch.value };
+        }
+        if (!state.selectedProduct) throw new Error("请先搜索并选择产品");
+        const sizePlan = collectSizePlan();
+        const product = state.selectedProduct;
+        const payload = {
+          app_id: product.app_id || product.id || els.productSearch.dataset.appId || "",
+          product_name: product.product_name || product.name || product.label || els.productSearch.value,
+          store_url: product.store_url || "",
+          package_name: product.package_name || product.package || "",
+          product_icon_url: product.product_icon_url || "",
+          task_type: els.taskType.value,
+          competitor_source: els.competitorSource.value,
+          country: els.countryInput.value.trim(),
+          language: els.languageInput.value.trim(),
+          category: els.categoryInput.value.trim(),
+          tag_name: els.tagInput.value.trim(),
+          title: els.titleInput.value.trim(),
+          body: els.bodyInput.value.trim(),
+          description: els.descriptionInput.value.trim(),
+          quantity: sizePlan.reduce((sum, item) => sum + item.count, 0),
+          size_plan: sizePlan,
+          reference_files: await filePayload(),
+        };
+        const path = state.editingTaskId ? `/api/ad-material/tasks/${state.editingTaskId}` : "/api/ad-material/tasks";
+        await api(path, { method: "POST", body: JSON.stringify(payload) });
+        toast(state.editingTaskId ? "任务已更新" : "任务已创建");
+        closeModal();
+        resetForm();
+        await loadTasks();
+      } catch (error) {
+        toast(error.message || "保存失败", true);
+      }
+    }
+    async function viewTask(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+        els.detailSub.textContent = `${task.product_name || task.app_id} / ${task.status_label || task.status}`;
+        els.detailBody.innerHTML = `
+          <div class="panel" style="box-shadow:none"><div class="panel-body">
+            <div class="form-grid">
+              <div class="col-3"><strong>任务 ID</strong><p>${text(task.task_id)}</p></div>
+              <div class="col-3"><strong>产品</strong><p>${text(task.product_name || task.app_id)}</p></div>
+              <div class="col-3"><strong>尺寸</strong><p>${text(task.size_plan_summary || task.size)}</p></div>
+              <div class="col-3"><strong>状态</strong><p>${text(task.status_label || task.status)}</p></div>
+              <div class="col-12"><strong>需求内容</strong><pre style="white-space:pre-wrap;background:#f7fafc;border:1px solid #d9e3ef;border-radius:12px;padding:12px;max-height:320px;overflow:auto">${text(task.demand_text || task.description || "-")}</pre></div>
+            </div>
+          </div></div>
+          <div class="table-wrap"><table><thead><tr><th>素材</th><th>尺寸</th><th>状态</th><th>预览</th><th>操作</th></tr></thead><tbody>
+            ${(task.assets || []).length ? (task.assets || []).map(asset => `<tr>
+              <td>${text(asset.asset_id)}</td><td>${text(asset.size || "")}</td><td>${text(asset.status_label || asset.status)}</td>
+              <td>${asset.url ? `<a href="${text(asset.url)}" target="_blank">打开</a>` : "-"}</td>
+              <td><div class="actions">${asset.status === "pending_review" ? `<button class="btn small primary" onclick="reviewAsset('${text(task.task_id)}','${text(asset.asset_id)}','approved')">通过</button><button class="btn small danger" onclick="reviewAsset('${text(task.task_id)}','${text(asset.asset_id)}','rejected')">驳回</button><button class="btn small" onclick="reviewAsset('${text(task.task_id)}','${text(asset.asset_id)}','abandoned')">废弃</button>` : ""}</div></td>
+            </tr>`).join("") : `<tr><td colspan="5" class="muted">暂无素材</td></tr>`}
+          </tbody></table></div>`;
+        els.detailModal.classList.remove("hidden");
+      } catch (error) {
+        toast(error.message || "加载详情失败", true);
+      }
+    }
+    async function editTask(taskId) {
+      const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+      resetForm();
+      state.editingTaskId = taskId;
+      state.selectedProduct = { app_id: task.app_id, product_name: task.product_name };
+      els.productSearch.value = `${task.product_name || task.app_id} / ${task.app_id}`;
+      els.productSearch.dataset.appId = task.app_id;
+      els.productHint.textContent = `已选择：${els.productSearch.value}`;
+      els.taskType.value = task.task_type || els.taskType.value;
+      els.competitorSource.value = task.competitor_source || "";
+      els.countryInput.value = task.country || "";
+      els.languageInput.value = task.language || "";
+      els.categoryInput.value = task.category || "";
+      els.tagInput.value = task.tag_name || "";
+      els.titleInput.value = task.title || "";
+      els.bodyInput.value = task.body || "";
+      els.descriptionInput.value = task.description || "";
+      renderSizePlan(task.size_plan || []);
+      openModal("edit");
+    }
+    async function publishTask(taskId) {
+      if (!confirm("确认发布并开始生成需求？")) return;
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/publish`, { method: "POST", body: "{}" });
+      toast("已发布");
+      await loadTasks();
+    }
+    async function copyTask(taskId) {
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/copy`, { method: "POST", body: "{}" });
+      toast("已复制");
+      await loadTasks();
+    }
+    async function deleteTask(taskId) {
+      if (!confirm("确认删除该任务？")) return;
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+      toast("已删除");
+      await loadTasks();
+    }
+    async function reviewDemand(taskId, result) {
+      const reason = result === "rejected" ? prompt("请输入驳回原因") || "" : "";
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/demand-review`, { method: "POST", body: JSON.stringify({ result, reason }) });
+      toast("需求审核已提交");
+      await loadTasks();
+    }
+    async function reviewAsset(taskId, assetId, result) {
+      const reason = result === "rejected" ? prompt("请输入驳回原因") || "" : "";
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(assetId)}/review`, { method: "POST", body: JSON.stringify({ result, reason }) });
+      toast("素材审核已提交");
+      await viewTask(taskId);
+      await loadTasks();
+    }
+    async function completeUpload(taskId) {
+      if (!confirm("确认将审核通过的素材上报至盈量素材库？")) return;
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/complete-upload`, { method: "POST", body: "{}" });
+      toast("上报完成");
+      await loadTasks();
+    }
+    window.viewTask = viewTask;
+    window.editTask = editTask;
+    window.publishTask = publishTask;
+    window.copyTask = copyTask;
+    window.deleteTask = deleteTask;
+    window.reviewDemand = reviewDemand;
+    window.reviewAsset = reviewAsset;
+    window.completeUpload = completeUpload;
+
+    document.querySelectorAll("[data-close]").forEach(button => button.onclick = closeModal);
+    document.querySelectorAll("[data-detail-close]").forEach(button => button.onclick = () => els.detailModal.classList.add("hidden"));
+    els.createBtn.onclick = () => { resetForm(); openModal("create"); };
+    els.reloadBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
+    els.searchBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
+    els.statusFilter.onchange = () => loadTasks().catch(error => toast(error.message, true));
+    els.resetBtn.onclick = resetForm;
+    els.taskForm.onsubmit = submitTask;
+    els.productSearch.addEventListener("input", () => {
+      clearTimeout(state.productTimer);
+      state.selectedProduct = null;
+      state.productTimer = setTimeout(() => searchProducts().catch(error => toast(error.message, true)), 300);
+    });
+    (async function init() {
+      try {
+        renderSizePlan();
+        if (!(await loadAuth())) return;
+        await loadSources();
+        await loadTasks();
+      } catch (error) {
+        toast(error.message || "页面初始化失败", true);
+      }
+    })();
+  </script>
+</body>
+</html>

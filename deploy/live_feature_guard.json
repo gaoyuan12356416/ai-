@@ -10,13 +10,23 @@
           "path": "app.py",
           "contains": [
             "drama_synthesis",
-            "/api/drama-material/jobs",
-            "parse_job_route"
+            "try_handle_drama_synthesis_get",
+            "try_handle_drama_synthesis_post",
+            "try_handle_drama_synthesis_delete"
           ]
         },
         {
-          "path": "static/index.html",
-          "public_path": "index.html",
+          "path": "features/drama_synthesis/routes.py",
+          "contains": [
+            "/api/drama-material/jobs",
+            "def try_handle_drama_synthesis_get",
+            "def try_handle_drama_synthesis_post",
+            "def try_handle_drama_synthesis_delete"
+          ]
+        },
+        {
+          "path": "static/drama-synthesis.html",
+          "public_path": "drama-synthesis.html",
           "contains": [
             "tasksSection",
             "createForm",
@@ -41,9 +51,19 @@
           "path": "app.py",
           "contains": [
             "cover_synthesis",
-            "/api/drama-screenshot-material/jobs",
-            "submit_screenshot_job_batch",
+            "try_handle_cover_synthesis_get",
+            "try_handle_cover_synthesis_post",
+            "try_handle_cover_synthesis_delete",
             "is_screenshot_generation_no_output_error"
+          ]
+        },
+        {
+          "path": "features/cover_synthesis/routes.py",
+          "contains": [
+            "/api/drama-screenshot-material/jobs",
+            "def try_handle_cover_synthesis_get",
+            "def try_handle_cover_synthesis_post",
+            "def try_handle_cover_synthesis_delete"
           ]
         },
         {
@@ -73,17 +93,27 @@
           "path": "app.py",
           "contains": [
             "ad_material_tasks",
-            "/api/ad-material/tasks",
-            "create_ad_material_task",
+            "try_handle_ad_material_get",
+            "try_handle_ad_material_post",
+            "try_handle_ad_material_delete",
             "recover_inflight_ad_material_tasks"
           ]
         },
         {
-          "path": "static/index.html",
-          "public_path": "index.html",
+          "path": "features/ad_material_tasks/routes.py",
           "contains": [
-            "adMaterialsSection",
-            "adMaterialCreateBtn",
+            "/api/ad-material/tasks",
+            "def try_handle_ad_material_get",
+            "def try_handle_ad_material_post",
+            "def try_handle_ad_material_delete"
+          ]
+        },
+        {
+          "path": "static/ad-material-tasks.html",
+          "public_path": "ad-material-tasks.html",
+          "contains": [
+            "投放素材任务",
+            "createBtn",
             "/api/ad-material/tasks"
           ]
         },

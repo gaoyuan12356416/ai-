@@ -836,13 +836,3 @@ def create_voiceover_design_tasks(payload, session):
         "errors": errors,
     }
 
-
-def parse_ad_material_task_route(path):
-    match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})(?:/([a-z-]+))?$", path)
-    if match:
-        return match.group(1), match.group(2) or ""
-    match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})/assets/([^/]+)/review$", path)
-    if match:
-        return match.group(1), "asset-review:%s" % match.group(2)
-    return "", ""
-

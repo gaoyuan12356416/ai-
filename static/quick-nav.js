@@ -5,7 +5,7 @@
       label: "剧集合成",
       module: "drama_synthesis",
       items: [
-        { key: "tasks", label: "任务列表", description: "创建、重试、删除、查看结果", kind: "page", href: "/", module: "drama_synthesis", enabled: true, order: 10 },
+        { key: "tasks", label: "任务列表", description: "创建、重试、删除、查看结果", kind: "page", href: "/drama-synthesis.html", module: "drama_synthesis", enabled: true, order: 10 },
         { key: "screenshots", label: "截图素材", description: "批量提交剧 ID，查看图片进度", kind: "page", href: "/screenshots.html", module: "cover_synthesis", enabled: true, order: 20 }
       ]
     },
@@ -22,7 +22,7 @@
       label: "投放素材",
       module: "ad_material_tasks",
       items: [
-        { key: "adMaterials", label: "投放素材任务", description: "创建需求、审核素材并完成上报", kind: "page", href: "/#adMaterials", module: "ad_material_tasks", enabled: true, order: 10 }
+        { key: "adMaterials", label: "投放素材任务", description: "创建需求、审核素材并完成上报", kind: "page", href: "/ad-material-tasks.html", module: "ad_material_tasks", enabled: true, order: 10 }
       ]
     },
     {
@@ -86,10 +86,10 @@
   }
 
   const INTERNAL_VIEW_HREFS = {
-    tasks: "#tasks",
+    tasks: "/drama-synthesis.html",
     screenshots: "#screenshots",
     voiceoverTasks: "/voiceover-drama.html",
-    adMaterials: "#adMaterials",
+    adMaterials: "/ad-material-tasks.html",
     settings: "#settings",
     navigation: "#navigation",
     users: "#users",
