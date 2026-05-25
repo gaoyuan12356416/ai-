@@ -674,11 +674,37 @@ def resolve_raw_generated_path(result_data, codex_home):
     return fallback or raw_path
 
 
+def summarize_missing_raw_path_reason(result_data):
+    parts = []
+    data = result_data or {}
+    consistency = data.get("source_consistency")
+    if isinstance(consistency, dict):
+        reason = str(consistency.get("reason") or "").strip()
+        if reason:
+            parts.append(reason)
+        differences = consistency.get("differences")
+        if isinstance(differences, list):
+            parts.extend(str(item).strip() for item in differences if str(item).strip())
+    summary = str(data.get("summary") or "").strip()
+    if summary:
+        parts.append(summary)
+    unique = []
+    for part in parts:
+        if part and part not in unique:
+            unique.append(part)
+    return "; ".join(unique)[:500]
+
+
 def validate_raw_generated_image(item, result_data, codex_home=None):
     key = str(item.get("key", "")).strip()
     raw_path = resolve_raw_generated_path(result_data, codex_home)
     if not raw_path:
-        raise RuntimeError("missing raw_generated_path for %s" % key)
+        reason = summarize_missing_raw_path_reason(result_data)
+        if reason:
+            raise RuntimeError(
+                "ai image generation produced no output for %s: %s" % (key, reason)
+            )
+        raise RuntimeError("ai image generation produced no output for %s" % key)
     if not os.path.isfile(raw_path):
         raise RuntimeError("raw_generated_path not found for %s: %s" % (key, raw_path))
 

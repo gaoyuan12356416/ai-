@@ -21401,6 +21401,7 @@ def recover_inflight_jobs():
 
 def recover_inflight_screenshot_jobs():
     resumable_jobs = []
+    recovery_progress_detail = "\u670d\u52a1\u91cd\u542f\u540e\u5df2\u91cd\u65b0\u6392\u961f\uff0c\u5c06\u4ece\u5df2\u6709\u4ea7\u7269\u65ad\u70b9\u7ee7\u7eed\u5904\u7406"
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -21420,18 +21421,17 @@ def recover_inflight_screenshot_jobs():
                 """
                 UPDATE drama_screenshot_job
                 SET status = 'queued',
-                    progress_detail = CASE
-                        WHEN TRIM(progress_detail) = '' THEN '服务重启，正在从断点恢复截图任务'
-                        ELSE progress_detail || '，服务重启后继续处理'
-                    END,
+                    progress = 2,
+                    progress_detail = ?,
                     error_message = '',
+                    started_at = '',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status NOT IN ('done', 'failed')
-                """
+                """,
+                (recovery_progress_detail,),
             )
             conn.commit()
             for row in rows:
-                progress_detail = (row[14] or "").strip() or "服务重启，正在从断点恢复截图任务"
                 resumable_jobs.append(
                     {
                         "job_id": row[0],
@@ -21447,12 +21447,12 @@ def recover_inflight_screenshot_jobs():
                         "portrait_4x5_url": row[10],
                         "assets": parse_json_text(row[11], {}),
                         "status": "queued",
-                        "progress": clamp_progress(row[13]),
-                        "progress_detail": progress_detail,
+                        "progress": 2,
+                        "progress_detail": recovery_progress_detail,
                         "error_message": "",
                         "created_at": row[16],
                         "updated_at": row[17],
-                        "started_at": row[18] if len(row) > 18 else "",
+                        "started_at": "",
                         "finished_at": row[19] if len(row) > 19 else "",
                         "elapsed_seconds": nonnegative_int(row[20] if len(row) > 20 else 0, 0),
                         "token_total": nonnegative_int(row[21] if len(row) > 21 else 0, 0),
@@ -21471,7 +21471,7 @@ def recover_inflight_screenshot_jobs():
         job["status"] = "queued"
         job["error_message"] = ""
         if not str(job.get("progress_detail", "") or "").strip():
-            job["progress_detail"] = "服务重启，正在从断点恢复截图任务"
+            job["progress_detail"] = recovery_progress_detail
         run_screenshot_job_async(job)
 
 
@@ -31636,17 +31636,40 @@ def is_screenshot_source_consistency_rejection(exc):
     )
 
 
+def is_screenshot_generation_no_output_error(exc):
+    text = str(exc or "").lower()
+    keywords = (
+        "ai image generation produced no output",
+        "image generation produced no output",
+        "image generation tool returned usererror",
+        "built-in ai image generation failed",
+        "built-in image generation failed",
+        "built-in ai image generation/editing failed",
+        "no usable ai-generated image",
+        "no raw ai-generated image",
+        "no generated image was returned",
+        "no image path was returned",
+        "no output path is available",
+        "missing raw_generated_path",
+    )
+    return any(keyword in text for keyword in keywords)
+
+
 def is_screenshot_batch_recoverable_error(exc):
     if is_screenshot_source_consistency_rejection(exc):
         return True
+    if is_screenshot_generation_no_output_error(exc):
+        return False
     text = str(exc or "").lower()
     recoverable_keywords = (
-        "missing raw_generated_path",
         "raw aspect ratio rejected",
-        "ai image generation failed before producing an output",
         "screenshot batch incomplete",
     )
     return any(keyword in text for keyword in recoverable_keywords)
+
+
+def is_screenshot_batch_fallback_error(exc):
+    return is_screenshot_batch_recoverable_error(exc) or is_screenshot_generation_no_output_error(exc)
 
 
 def set_screenshot_batch_remake_progress(job, exc=None):
@@ -31856,9 +31879,9 @@ def process_screenshot_job(job):
             try:
                 generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
             except Exception as exc:
-                if is_screenshot_batch_recoverable_error(exc):
+                if is_screenshot_batch_fallback_error(exc):
                     logging.warning(
-                        "screenshot batch recoverable failure; remaking failed sizes: job=%s error=%s",
+                        "screenshot batch failed; falling back to per-size generation: job=%s error=%s",
                         job["job_id"],
                         str(exc).strip() or exc.__class__.__name__,
                     )
@@ -31937,6 +31960,14 @@ def process_screenshot_job(job):
                     if file_ready(public_output_path) and not retrying_after_consistency_rejection:
                         asset_url = publish_asset(public_output_path)
                         return index, spec, workspace_output_path, public_output_path, asset_url
+                    if is_screenshot_generation_no_output_error(exc):
+                        logging.warning(
+                            "screenshot size hit hard image-generation no-output failure: job=%s key=%s error=%s",
+                            job["job_id"],
+                            spec["key"],
+                            str(exc).strip() or exc.__class__.__name__,
+                        )
+                        break
                     if attempt >= attempts:
                         break
                     if retrying_after_consistency_rejection:
@@ -68824,6 +68855,10 @@ def should_auto_retry_job(exc):
 
 
 
+
+    if is_screenshot_generation_no_output_error(exc):
+
+        return False
 
     if is_screenshot_batch_recoverable_error(exc):
 

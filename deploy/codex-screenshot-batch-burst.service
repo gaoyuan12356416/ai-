@@ -26,7 +26,7 @@ Environment=CODEX_SCREENSHOT_SYNC_ISOLATED_AUTH=1
 Environment=CODEX_SCREENSHOT_CODEX_MODEL=gpt-5.5
 Environment=CODEX_SCREENSHOT_CODEX_REASONING=low
 Environment="CODEX_SCREENSHOT_CODEX_EXTRA_ARGS=--ignore-user-config --ignore-rules --ephemeral --disable plugins --disable apps --disable browser_use"
-Environment=CODEX_SCREENSHOT_CODEX_TIMEOUT=2400
+Environment=CODEX_SCREENSHOT_CODEX_TIMEOUT=900
 ExecStart=/usr/bin/python3 /root/drama_material_service/codex_screenshot_service.py
 Restart=always
 RestartSec=3
