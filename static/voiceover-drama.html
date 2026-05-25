@@ -49,6 +49,7 @@
       display: grid;
       gap: 10px;
     }
+    .nav { display: grid; gap: 10px; }
     .nav-title { color: #8fa2bf; font-size: 12px; padding: 0 8px; }
     .nav-item {
       display: block;
@@ -179,16 +180,18 @@
         <div class="brand-mark">剧</div>
         <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
       </div>
-      <div class="nav-group">
-        <div class="nav-title">配音剧素材</div>
-        <a class="nav-item active" href="/voiceover-drama.html">配音剧语种任务</a>
-      </div>
-      <div class="nav-group">
-        <div class="nav-title">其他模块</div>
-        <a class="nav-item" href="/drama-synthesis.html">剧集合成</a>
-        <a class="nav-item" href="/screenshots.html">封面图合成</a>
-        <a class="nav-item" href="/ad-material-tasks.html">投放素材任务</a>
-      </div>
+      <nav id="quickNav" class="nav">
+        <div class="nav-group">
+          <div class="nav-title">配音剧素材</div>
+          <a class="nav-item active" href="/voiceover-drama.html">配音剧语种任务</a>
+        </div>
+        <div class="nav-group">
+          <div class="nav-title">其他模块</div>
+          <a class="nav-item" href="/drama-synthesis.html">剧集合成</a>
+          <a class="nav-item" href="/screenshots.html">封面图合成</a>
+          <a class="nav-item" href="/ad-material-tasks.html">投放素材任务</a>
+        </div>
+      </nav>
     </aside>
     <main class="main">
       <div class="topbar">
@@ -313,6 +316,7 @@
 
   <div id="toast" class="toast"></div>
 
+  <script src="/quick-nav.js?v=202605251900"></script>
   <script>
     const state = {
       auth: { authenticated: false, user: null, login_url: "/api/auth/feishu/login" },
@@ -323,6 +327,7 @@
       modalItems: []
     };
     const els = {
+      quickNav: document.getElementById("quickNav"),
       userCard: document.getElementById("userCard"),
       refreshBtn: document.getElementById("refreshBtn"),
       loginBtn: document.getElementById("loginBtn"),
@@ -411,12 +416,22 @@
       if (user.is_admin) return true;
       return !!(user.permissions && user.permissions[moduleKey]);
     }
+    async function renderQuickNavigation() {
+      if (!window.QuickNav || !els.quickNav) return;
+      await window.QuickNav.render({
+        container: els.quickNav,
+        activeKey: "voiceoverTasks",
+        auth: state.auth || {},
+        groupOrder: ["voiceover", "ad_material", "drama", "system"],
+      });
+    }
     async function loadAuthStatus() {
       try {
         state.auth = await api("/api/auth/status");
       } catch (error) {
         state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
       }
+      await renderQuickNavigation();
       renderAuth();
     }
     function renderAuth() {

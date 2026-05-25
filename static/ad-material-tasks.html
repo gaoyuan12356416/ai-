@@ -67,10 +67,40 @@
     .badge.green { background: #eaf8f2; color: var(--green); }
     .badge.amber { background: #fff6dd; color: var(--amber); }
     .badge.red { background: #fff0f0; color: var(--red); }
+    .badge.ok { background: #eaf8f2; color: var(--green); }
+    .badge.warn { background: #fff6dd; color: var(--amber); }
+    .badge.bad { background: #fff0f0; color: var(--red); }
     .actions { display: grid; gap: 6px; justify-items: start; }
+    .actions-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .status-cell { display: grid; gap: 6px; justify-items: start; }
     td:last-child .btn { min-width: 68px; }
+    .btn.btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; box-shadow: 0 12px 24px rgba(47,102,255,.25); }
+    .btn.btn-secondary { background: #fff; border-color: #cbd8ea; color: var(--text); box-shadow: none; }
+    .btn.btn-danger { background: #fff5f5; border-color: #ffc7c7; color: var(--red); box-shadow: none; }
+    .mini { padding: 7px 10px; font-size: 12px; border-radius: 10px; }
+    .stack { display: grid; gap: 12px; }
+    .card { border: 1px solid var(--line); border-radius: 14px; background: #fff; padding: 14px; }
+    .card .grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+    .card .grid > div { grid-column: span 3; min-width: 0; }
+    .card strong { color: #14284a; }
+    .card div div { overflow-wrap: anywhere; }
+    .detail-drawer { position: fixed; inset: 0; background: rgba(10, 18, 35, .42); display: none; justify-content: flex-end; z-index: 18; pointer-events: none; }
+    .detail-drawer.open { display: flex; overflow: hidden; }
+    .detail-panel { box-sizing: border-box; width: min(1180px, calc(100vw - 220px)); height: 100vh; background: #f7faff; pointer-events: auto; box-shadow: -24px 0 60px rgba(11,20,38,.22); padding: 22px; display: flex; flex-direction: column; }
+    .detail-panel > .panel { min-height: 0; flex: 1; display: flex; flex-direction: column; box-shadow: none; }
+    .detail-panel .panel-head { flex: 0 0 auto; }
+    .detail-panel .panel-body { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 48px; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(10, 22, 42, .62); display: grid; place-items: center; padding: 28px; z-index: 10; }
     .modal { width: min(1080px, 100%); max-height: calc(100vh - 56px); overflow: auto; background: var(--panel); border-radius: 20px; box-shadow: 0 28px 80px rgba(0,0,0,.25); }
+    .ad-material-review-modal { width: min(1040px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: hidden; display: flex; flex-direction: column; }
+    .ad-material-review-modal .panel-body { min-height: 0; overflow-y: auto; }
+    .ad-material-review-modal .grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+    .review-asset-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fff; display: grid; gap: 10px; }
+    .review-asset-card img, .review-asset-card video { width: 100%; max-height: 420px; object-fit: contain; border-radius: 8px; background: #f6f8fb; }
+    .empty-card { display: grid; place-items: center; color: var(--muted); height: 72px; font-size: 12px; background: #f6f8fb; border-radius: 8px; }
+    .md-preview { border: 1px solid var(--line); border-radius: 12px; background: #fbfdff; padding: 14px; max-height: 520px; overflow: auto; line-height: 1.65; }
+    .md-preview table { min-width: 0; table-layout: auto; }
+    .md-preview img, .md-inline-image { max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
     .modal-head, .modal-foot { padding: 18px 22px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 14px; align-items: center; }
     .modal-foot { border-top: 1px solid var(--line); border-bottom: 0; justify-content: flex-end; }
     .modal-body { padding: 22px; }
@@ -170,30 +200,32 @@
             <div class="table-wrap">
               <table>
                 <colgroup>
-                  <col style="width:33%">
-                  <col style="width:8%">
+                  <col style="width:12%">
+                  <col style="width:13%">
                   <col style="width:12%">
                   <col style="width:7%">
+                  <col style="width:9%">
+                  <col style="width:10%">
                   <col style="width:8%">
-                  <col style="width:7%">
                   <col style="width:6%">
                   <col style="width:10%">
-                  <col style="width:9%">
+                  <col style="width:13%">
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>任务</th>
-                    <th>产品</th>
+                    <th>任务ID</th>
                     <th>类型</th>
+                    <th>产品</th>
+                    <th>数量</th>
                     <th>国家/语言</th>
-                    <th>尺寸/数量</th>
                     <th>状态</th>
-                    <th>创建人</th>
+                    <th>发起人</th>
+                    <th>素材</th>
                     <th>更新时间</th>
                     <th>操作</th>
                   </tr>
                 </thead>
-                <tbody id="taskBody"><tr><td colspan="9" class="muted">正在加载...</td></tr></tbody>
+                <tbody id="taskBody"><tr><td colspan="10" class="muted">正在加载...</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -274,13 +306,29 @@
     </div>
   </div>
 
-  <div id="detailModal" class="modal-backdrop hidden">
-    <div class="modal">
-      <div class="modal-head">
-        <div><h2>任务详情</h2><p id="detailSub">--</p></div>
-        <button class="btn" type="button" data-detail-close>关闭</button>
+  <div id="adMaterialDetailPanel" class="detail-drawer">
+    <div class="detail-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h3 class="panel-title">投放素材任务详情</h3>
+          <button id="adMaterialCloseDetailBtn" class="btn btn-secondary" type="button">关闭</button>
+        </div>
+        <div class="panel-body">
+          <div id="adMaterialDetailContent" class="stack"></div>
+        </div>
       </div>
-      <div id="detailBody" class="modal-body grid"></div>
+    </div>
+  </div>
+
+  <div id="adMaterialReviewModal" class="modal-backdrop hidden">
+    <div class="modal ad-material-review-modal">
+      <div class="modal-head">
+        <div><h2 id="adMaterialReviewTitle">任务审核</h2></div>
+        <button id="adMaterialReviewCloseBtn" class="btn" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="adMaterialReviewContent" class="stack"></div>
+      </div>
     </div>
   </div>
 
@@ -321,9 +369,13 @@
       descriptionInput: document.getElementById("descriptionInput"),
       resetBtn: document.getElementById("resetBtn"),
       submitBtn: document.getElementById("submitBtn"),
-      detailModal: document.getElementById("detailModal"),
-      detailSub: document.getElementById("detailSub"),
-      detailBody: document.getElementById("detailBody"),
+      adMaterialDetailPanel: document.getElementById("adMaterialDetailPanel"),
+      adMaterialDetailContent: document.getElementById("adMaterialDetailContent"),
+      adMaterialCloseDetailBtn: document.getElementById("adMaterialCloseDetailBtn"),
+      adMaterialReviewModal: document.getElementById("adMaterialReviewModal"),
+      adMaterialReviewTitle: document.getElementById("adMaterialReviewTitle"),
+      adMaterialReviewContent: document.getElementById("adMaterialReviewContent"),
+      adMaterialReviewCloseBtn: document.getElementById("adMaterialReviewCloseBtn"),
       toast: document.getElementById("toast"),
       statTotal: document.getElementById("statTotal"),
       statDraft: document.getElementById("statDraft"),
@@ -331,7 +383,16 @@
       statDone: document.getElementById("statDone"),
     };
     const SIZE_OPTIONS = ["1:1", "4:5", "9:16", "1.91:1", "16:9"];
-    const state = { auth: null, tasks: [], sources: [], selectedProduct: null, editingTaskId: "", productTimer: null };
+    const state = {
+      auth: null,
+      tasks: [],
+      sources: [],
+      selectedProduct: null,
+      editingTaskId: "",
+      productTimer: null,
+      selectedAdMaterialTask: null,
+      reviewingAdMaterialTask: null,
+    };
 
     function text(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
@@ -341,6 +402,155 @@
       if (["failed", "material_abandoned"].includes(status)) return "red";
       if (["demand_review", "material_review", "generating_demand", "generating_material"].includes(status)) return "amber";
       return "";
+    }
+    function adMaterialStatusText(status, label) {
+      if (status === "draft") return "待发布";
+      return label || status || "--";
+    }
+    function adMaterialStatusBadge(status, label) {
+      const cls = status === "done" ? "ok" : status === "failed" || status === "material_abandoned" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${text(adMaterialStatusText(status, label))}</span>`;
+    }
+    function adMaterialCanCompleteUpload(task) {
+      const assets = task?.assets || [];
+      const readyStatuses = new Set(["approved", "uploaded", "abandoned"]);
+      const hasUploadable = assets.some(asset => asset.status === "approved" || asset.status === "uploaded");
+      return task && task.status !== "done" && assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
+    }
+    function adMaterialDisplayStatusText(task) {
+      if (adMaterialCanCompleteUpload(task)) return "待上报";
+      return adMaterialStatusText(task?.status, task?.status_label);
+    }
+    function adMaterialTaskStatusBadge(task) {
+      const status = task?.status || "";
+      const cls = status === "done" ? "ok" : status === "failed" || status === "material_abandoned" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${text(adMaterialDisplayStatusText(task))}</span>`;
+    }
+    function adMaterialCanReview(task) {
+      return task && (task.status === "demand_review" || task.status === "material_review");
+    }
+    function adMaterialStatusCell(task) {
+      return `<div class="status-cell">
+        ${adMaterialTaskStatusBadge(task)}
+        ${adMaterialCanReview(task) ? `<button class="btn btn-primary mini" type="button" onclick="openAdMaterialReview('${text(task.task_id)}')">审核</button>` : ""}
+      </div>`;
+    }
+    function adMaterialTaskTypeText(value) {
+      return value || "";
+    }
+    function applyTaskSnapshot(task) {
+      if (!task || !task.task_id) return;
+      const index = state.tasks.findIndex(item => item.task_id === task.task_id);
+      if (index >= 0) state.tasks[index] = { ...state.tasks[index], ...task };
+      else state.tasks.unshift(task);
+      updateStats();
+      renderRows();
+    }
+    function adMaterialAssetPreviewUrl(asset) {
+      const url = String(asset?.url || "");
+      if (!url) return "";
+      const version = String(asset?.updated_at || asset?.source_api_id || "").replace(/[^0-9A-Za-z_-]+/g, "");
+      if (!version) return url;
+      return `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(version)}`;
+    }
+    function reviewAssetMedia(asset) {
+      const previewUrl = adMaterialAssetPreviewUrl(asset);
+      if (!previewUrl) return `<div class="empty-card">暂无素材预览</div>`;
+      const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(previewUrl);
+      return isVideo
+        ? `<video src="${text(previewUrl)}" controls></video>`
+        : `<a href="${text(previewUrl)}" target="_blank" rel="noopener noreferrer"><img src="${text(previewUrl)}" alt="${text(asset.name || asset.asset_id || "")}" loading="lazy" decoding="async" /></a>`;
+    }
+    function inlineMarkdown(value) {
+      let markdownText = String(value == null ? "" : value);
+      const inlineImages = [];
+      markdownText = markdownText.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, (_, alt, src) => {
+        const index = inlineImages.push({ src, alt: alt || "参考图" }) - 1;
+        return `@@MD_INLINE_IMAGE_${index}@@`;
+      });
+      return text(markdownText)
+        .replace(/@@MD_INLINE_IMAGE_(\d+)@@/g, (_, index) => {
+          const image = inlineImages[Number(index)] || {};
+          return `<a href="${text(image.src || "")}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${text(image.src || "")}" alt="${text(image.alt || "参考图")}" loading="lazy" decoding="async" /></a>`;
+        })
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+    function renderMarkdownPreview(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const html = [];
+      let listType = "";
+      let tableOpen = false;
+      const closeList = () => {
+        if (listType) {
+          html.push(`</${listType}>`);
+          listType = "";
+        }
+      };
+      const closeTable = () => {
+        if (tableOpen) {
+          html.push("</tbody></table>");
+          tableOpen = false;
+        }
+      };
+      const openList = type => {
+        closeTable();
+        if (listType !== type) {
+          closeList();
+          html.push(`<${type}>`);
+          listType = type;
+        }
+      };
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          closeList();
+          closeTable();
+          continue;
+        }
+        const image = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)$/);
+        if (image) {
+          closeList();
+          closeTable();
+          html.push(`<figure class="md-image"><img src="${text(image[2])}" alt="${text(image[1])}" loading="lazy" /><figcaption>${text(image[1] || "参考图")}</figcaption></figure>`);
+          continue;
+        }
+        if (/^\|.+\|$/.test(line)) {
+          closeList();
+          const cells = line.slice(1, -1).split("|").map(cell => cell.trim());
+          if (cells.every(cell => /^:?-{3,}:?$/.test(cell))) continue;
+          if (!tableOpen) {
+            html.push("<table><tbody>");
+            tableOpen = true;
+          }
+          html.push(`<tr>${cells.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join("")}</tr>`);
+          continue;
+        }
+        closeTable();
+        const heading = line.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+          closeList();
+          const level = heading[1].length;
+          html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+          continue;
+        }
+        const bullet = line.match(/^[-*]\s+(.+)$/);
+        if (bullet) {
+          openList("ul");
+          html.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+          continue;
+        }
+        const ordered = line.match(/^\d+\.\s+(.+)$/);
+        if (ordered) {
+          openList("ol");
+          html.push(`<li>${inlineMarkdown(ordered[1])}</li>`);
+          continue;
+        }
+        closeList();
+        html.push(`<p>${inlineMarkdown(line)}</p>`);
+      }
+      closeList();
+      closeTable();
+      return html.join("") || `<div class="muted">暂无需求内容</div>`;
     }
     function taskKind(type) {
       if (String(type || "").includes("素材迭代")) return "iteration";
@@ -416,7 +626,7 @@
       els.competitorSource.innerHTML = options.join("");
     }
     async function loadTasks() {
-      els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">加载中...</td></tr>`;
+      els.taskBody.innerHTML = `<tr><td colspan="10" class="muted">加载中...</td></tr>`;
       const params = new URLSearchParams();
       if (els.statusFilter.value && els.statusFilter.value !== "all") params.set("status", els.statusFilter.value);
       if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
@@ -434,33 +644,49 @@
     }
     function renderRows() {
       if (!state.tasks.length) {
-        els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">暂无投放素材任务</td></tr>`;
+        els.taskBody.innerHTML = `<tr><td colspan="10" class="muted">暂无投放素材任务</td></tr>`;
         return;
       }
-      els.taskBody.innerHTML = state.tasks.map(task => `
+      els.taskBody.innerHTML = state.tasks.map(buildAdMaterialRow).join("");
+    }
+    function buildAdMaterialRow(task) {
+      const assets = task.assets || [];
+      const canEdit = task.status === "draft";
+      const canDelete = task.status !== "done";
+      const id = text(task.task_id);
+      return `
         <tr>
-          <td><span class="task-id">${text(task.task_id)}</span><div class="task-desc cell-muted" title="${text(task.description || "-")}">${text(task.description || "-")}</div></td>
-          <td><div class="nowrap" title="${text(task.product_name || task.app_id)}">${text(task.product_name || task.app_id)}</div><div class="cell-muted nowrap">${text(task.app_id)}</div></td>
-          <td>${text(task.task_type || "-")}</td>
-          <td>${text(task.country || "-")} / ${text(task.language || "-")}</td>
-          <td>${text(task.size_plan_summary || task.size || "-")}<div class="cell-muted">${text(task.quantity || 0)} 张</div></td>
-          <td><span class="badge ${statusTone(task.status)}">${text(task.status_label || task.status)}</span></td>
-          <td><div class="nowrap" title="${text(task.creator_name || task.creator_email || "-")}">${text(task.creator_name || task.creator_email || "-")}</div></td>
+          <td><code>${text((task.task_id || "").slice(0, 8))}</code></td>
+          <td>${text(adMaterialTaskTypeText(task.task_type))}</td>
+          <td><div class="nowrap" title="${text(task.product_name || task.app_id || "")}">${text(task.product_name || task.app_id || "")}</div><div class="cell-muted nowrap">${text(task.app_id || "")}</div></td>
+          <td>${text(task.quantity || 0)}</td>
+          <td>${text(task.country || "")}/${text(task.language || "")}</td>
+          <td>${adMaterialStatusCell(task)}</td>
+          <td><div class="nowrap" title="${text(task.creator_name || task.creator_email || "")}">${text(task.creator_name || task.creator_email || "")}</div></td>
+          <td>${assets.length}</td>
           <td>${text(task.updated_at || "-")}</td>
-          <td><div class="actions">${actionButtons(task)}</div></td>
+          <td>
+            <div class="actions-inline">
+              <button class="btn btn-secondary mini" type="button" onclick="openAdMaterialDetail('${id}')">详情</button>
+              ${canEdit ? `<button class="btn btn-secondary mini" type="button" onclick="editTask('${id}')">编辑</button>` : ""}
+              ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishTask('${id}')">上架</button>` : ""}
+              ${adMaterialCanCompleteUpload(task) ? `<button class="btn btn-primary mini" type="button" onclick="completeUpload('${id}')">上传至盈量素材库</button>` : ""}
+              <button class="btn btn-secondary mini" type="button" onclick="copyTask('${id}')">复制</button>
+              ${canDelete ? `<button class="btn btn-danger mini" type="button" onclick="deleteTask('${id}')">删除</button>` : ""}
+            </div>
+          </td>
         </tr>
-      `).join("");
+      `;
     }
     function actionButtons(task) {
       const id = text(task.task_id);
-      const buttons = [`<button class="btn small" onclick="viewTask('${id}')">详情</button>`];
+      const buttons = [`<button class="btn small" onclick="openAdMaterialDetail('${id}')">详情</button>`];
       if (task.status === "draft") {
         buttons.push(`<button class="btn small" onclick="editTask('${id}')">编辑</button>`);
         buttons.push(`<button class="btn small primary" onclick="publishTask('${id}')">发布</button>`);
         buttons.push(`<button class="btn small danger" onclick="deleteTask('${id}')">删除</button>`);
       }
-      if (task.status === "demand_review") buttons.push(`<button class="btn small primary" onclick="reviewDemand('${id}','approved')">需求通过</button>`);
-      if (task.status === "material_review") buttons.push(`<button class="btn small primary" onclick="completeUpload('${id}')">上报素材库</button>`);
+      if (adMaterialCanCompleteUpload(task)) buttons.push(`<button class="btn small primary" onclick="completeUpload('${id}')">上传至盈量素材库</button>`);
       buttons.push(`<button class="btn small" onclick="copyTask('${id}')">复制</button>`);
       return buttons.join("");
     }
@@ -564,30 +790,170 @@
         toast(error.message || "保存失败", true);
       }
     }
-    async function viewTask(taskId) {
+    function renderAdMaterialDetail(task) {
+      const referenceFiles = task.reference_files || [];
+      const artifacts = task.demand_artifacts || {};
+      const assets = task.assets || [];
+      els.adMaterialDetailPanel?.classList.add("open");
+      els.adMaterialDetailContent.innerHTML = `
+        <div class="card">
+          <div class="grid">
+            <div><strong>任务ID</strong><div><code>${text(task.task_id || "")}</code></div></div>
+            <div><strong>产品</strong><div>${text(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>产品ID</strong><div>${text(task.app_id || "")}</div></div>
+            <div><strong>类型</strong><div>${text(adMaterialTaskTypeText(task.task_type))}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${text(task.country || "")}/${text(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${text(task.quantity || 0)}</div></div>
+            <div><strong>尺寸</strong><div>${text(task.size_plan_summary || task.size || "未填写")}</div></div>
+            <div><strong>竞品源</strong><div>${text(task.competitor_source || "不使用")}</div></div>
+          </div>
+          ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishTask('${text(task.task_id)}')">上架任务</button></div>` : ""}
+        </div>
+        <div class="card">
+          <strong>上报字段</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>category</strong><div>${text(task.category || "空")}</div></div>
+            <div><strong>tag_name</strong><div>${text(task.tag_name || "空")}</div></div>
+            <div><strong>title</strong><div>${text(task.title || "空")}</div></div>
+            <div><strong>body</strong><div>${text(task.body || "空")}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>产品与商店信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>包名</strong><div>${text(task.package_name || "未记录")}</div></div>
+            <div><strong>产品图标</strong><div>${task.product_icon_url ? `<a href="${text(task.product_icon_url)}" target="_blank" rel="noopener noreferrer">打开图标</a>` : "未记录"}</div></div>
+            <div style="grid-column:span 12;"><strong>商店链接</strong><div>${task.store_url ? `<a href="${text(task.store_url)}" target="_blank" rel="noopener noreferrer">${text(task.store_url)}</a>` : "未记录"}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>补充说明与参考文件</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div style="grid-column:span 12;"><strong>任务描述</strong><div>${text(task.description || "未填写")}</div></div>
+            <div><strong>参考文件</strong><div>${referenceFiles.length}</div></div>
+            <div><strong>生成素材</strong><div>${assets.length}</div></div>
+            <div><strong>需求MD</strong><div>${artifacts.markdown_url ? `<a href="${text(artifacts.markdown_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+            <div><strong>需求PDF</strong><div>${artifacts.pdf_url ? `<a href="${text(artifacts.pdf_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+          </div>
+          ${referenceFiles.length ? `<div class="actions-inline" style="margin-top:12px;">${referenceFiles.map((file, index) => `<a class="btn btn-secondary mini" href="${text(file.url || "")}" target="_blank" rel="noopener noreferrer">参考文件 ${index + 1}</a>`).join("")}</div>` : ""}
+        </div>
+        <div class="card">
+          <strong>创建信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>发起人</strong><div>${text(task.creator_name || "")}</div></div>
+            <div><strong>邮箱</strong><div>${text(task.creator_email || "")}</div></div>
+            <div><strong>initiator</strong><div>${text(task.initiator_sub_user_id || "未定位")}</div></div>
+            <div><strong>创建时间</strong><div>${text(task.created_at || "")}</div></div>
+            <div><strong>更新时间</strong><div>${text(task.updated_at || "")}</div></div>
+          </div>
+        </div>
+        ${task.error_message ? `<div class="card"><strong>错误</strong><pre style="white-space:pre-wrap;">${text(task.error_message)}</pre></div>` : ""}
+      `;
+    }
+    async function openAdMaterialDetail(taskId) {
       try {
         const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
-        els.detailSub.textContent = `${task.product_name || task.app_id} / ${task.status_label || task.status}`;
-        els.detailBody.innerHTML = `
-          <div class="panel" style="box-shadow:none"><div class="panel-body">
-            <div class="form-grid">
-              <div class="col-3"><strong>任务 ID</strong><p>${text(task.task_id)}</p></div>
-              <div class="col-3"><strong>产品</strong><p>${text(task.product_name || task.app_id)}</p></div>
-              <div class="col-3"><strong>尺寸</strong><p>${text(task.size_plan_summary || task.size)}</p></div>
-              <div class="col-3"><strong>状态</strong><p>${text(task.status_label || task.status)}</p></div>
-              <div class="col-12"><strong>需求内容</strong><pre style="white-space:pre-wrap;background:#f7fafc;border:1px solid #d9e3ef;border-radius:12px;padding:12px;max-height:320px;overflow:auto">${text(task.demand_text || task.description || "-")}</pre></div>
-            </div>
-          </div></div>
-          <div class="table-wrap"><table><thead><tr><th>素材</th><th>尺寸</th><th>状态</th><th>预览</th><th>操作</th></tr></thead><tbody>
-            ${(task.assets || []).length ? (task.assets || []).map(asset => `<tr>
-              <td>${text(asset.asset_id)}</td><td>${text(asset.size || "")}</td><td>${text(asset.status_label || asset.status)}</td>
-              <td>${asset.url ? `<a href="${text(asset.url)}" target="_blank">打开</a>` : "-"}</td>
-              <td><div class="actions">${asset.status === "pending_review" ? `<button class="btn small primary" onclick="reviewAsset('${text(task.task_id)}','${text(asset.asset_id)}','approved')">通过</button><button class="btn small danger" onclick="reviewAsset('${text(task.task_id)}','${text(asset.asset_id)}','rejected')">驳回</button><button class="btn small" onclick="reviewAsset('${text(task.task_id)}','${text(asset.asset_id)}','abandoned')">废弃</button>` : ""}</div></td>
-            </tr>`).join("") : `<tr><td colspan="5" class="muted">暂无素材</td></tr>`}
-          </tbody></table></div>`;
-        els.detailModal.classList.remove("hidden");
+        state.selectedAdMaterialTask = task;
+        renderAdMaterialDetail(task);
       } catch (error) {
         toast(error.message || "加载详情失败", true);
+      }
+    }
+    function hideAdMaterialDetail() {
+      state.selectedAdMaterialTask = null;
+      els.adMaterialDetailPanel?.classList.remove("open");
+      if (els.adMaterialDetailContent) els.adMaterialDetailContent.innerHTML = "";
+    }
+    function renderAdMaterialDemandReview(task) {
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${text(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${text(task.country || "")}/${text(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${text(task.quantity || 0)}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="actions-inline" style="justify-content:space-between;align-items:center;">
+            <strong>需求预览</strong>
+          </div>
+          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
+        </div>
+        <div class="card">
+          <label><strong>驳回原因</strong></label>
+          <textarea id="adMaterialDemandReviewReason" rows="3" placeholder="仅驳回时必填，会作为重新生成需求的方向"></textarea>
+          <div class="actions-inline" style="margin-top:12px;">
+            <button class="btn btn-primary" type="button" onclick="reviewAdMaterialDemand('${text(task.task_id)}','approved')">需求通过</button>
+            <button class="btn btn-danger" type="button" onclick="reviewAdMaterialDemand('${text(task.task_id)}','rejected', document.getElementById('adMaterialDemandReviewReason')?.value || '')">需求驳回</button>
+          </div>
+        </div>`;
+    }
+    function renderAdMaterialAssetReview(task) {
+      const assets = task.assets || [];
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${text(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${text(task.country || "")}/${text(task.language || "")}</div></div>
+            <div><strong>素材数</strong><div>${assets.length}</div></div>
+          </div>
+        </div>
+        ${assets.length ? `<div class="grid">${assets.map(asset => `
+          <div class="review-asset-card" style="grid-column:span 6;">
+            ${reviewAssetMedia(asset)}
+            <div><strong>${text(asset.name || asset.asset_id || "")}</strong></div>
+            <div>${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
+            ${asset.review_reason ? `<div class="muted">驳回原因：${text(asset.review_reason)}</div>` : ""}
+            ${asset.status === "pending_review" ? `
+              <textarea id="adMaterialAssetReason_${text(asset.asset_id)}" rows="2" placeholder="驳回时填写原因，废弃可不填"></textarea>
+              <div class="actions-inline">
+                <button class="btn btn-primary mini" type="button" onclick="reviewAdMaterialAsset('${text(task.task_id)}','${text(asset.asset_id)}','approved')">通过</button>
+                <button class="btn btn-danger mini" type="button" onclick="reviewAdMaterialAsset('${text(task.task_id)}','${text(asset.asset_id)}','rejected', document.getElementById('adMaterialAssetReason_${text(asset.asset_id)}')?.value || '')">驳回</button>
+                <button class="btn btn-secondary mini" type="button" onclick="reviewAdMaterialAsset('${text(task.task_id)}','${text(asset.asset_id)}','abandoned', document.getElementById('adMaterialAssetReason_${text(asset.asset_id)}')?.value || '')">废弃</button>
+              </div>` : ""}
+          </div>`).join("")}</div>` : `<div class="card muted">暂无素材</div>`}
+      `;
+    }
+    async function openAdMaterialReview(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+        state.reviewingAdMaterialTask = task;
+        if (els.adMaterialReviewTitle) {
+          els.adMaterialReviewTitle.textContent = task.status === "material_review" ? "素材审核" : "需求审核";
+        }
+        if (els.adMaterialReviewContent) {
+          els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+            ? renderAdMaterialAssetReview(task)
+            : renderAdMaterialDemandReview(task);
+        }
+        els.adMaterialReviewModal?.classList.remove("hidden");
+      } catch (error) {
+        toast(error.message || "加载审核任务失败", true);
+      }
+    }
+    function closeAdMaterialReviewModal() {
+      els.adMaterialReviewModal?.classList.add("hidden");
+      if (els.adMaterialReviewContent) els.adMaterialReviewContent.innerHTML = "";
+      state.reviewingAdMaterialTask = null;
+    }
+    async function refreshAdMaterialReview(taskId) {
+      if (!els.adMaterialReviewModal || els.adMaterialReviewModal.classList.contains("hidden")) return;
+      const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+      if (!adMaterialCanReview(task)) {
+        closeAdMaterialReviewModal();
+        return;
+      }
+      state.reviewingAdMaterialTask = task;
+      if (els.adMaterialReviewTitle) {
+        els.adMaterialReviewTitle.textContent = task.status === "material_review" ? "素材审核" : "需求审核";
+      }
+      if (els.adMaterialReviewContent) {
+        els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+          ? renderAdMaterialAssetReview(task)
+          : renderAdMaterialDemandReview(task);
       }
     }
     async function editTask(taskId) {
@@ -627,36 +993,92 @@
       toast("已删除");
       await loadTasks();
     }
+    async function reviewAdMaterialDemand(taskId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
+      if (result === "rejected" && !reason) return toast("驳回原因必填", true);
+      try {
+        await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/demand-review`, {
+          method: "POST",
+          body: JSON.stringify({ result, reason })
+        });
+        toast(result === "approved" ? "需求已通过，开始生成素材" : "已驳回并重新生成需求");
+        await loadTasks();
+        closeAdMaterialReviewModal();
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
+      } catch (error) {
+        toast(error.message || "审核需求失败", true);
+      }
+    }
+    async function reviewAdMaterialAsset(taskId, assetId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
+      if (result === "rejected" && !reason) return toast("驳回原因必填", true);
+      if (result === "abandoned" && !confirm("确认废弃该素材？废弃后不会重新制作，也不会上传至素材库。")) return;
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(assetId)}/review`, {
+          method: "POST",
+          body: JSON.stringify({ result, reason })
+        });
+        applyTaskSnapshot(task);
+        toast(result === "approved" ? "素材已通过" : result === "abandoned" ? "素材已废弃" : "素材已驳回并重新生成");
+        if (state.selectedAdMaterialTask?.task_id === taskId) {
+          state.selectedAdMaterialTask = task;
+          renderAdMaterialDetail(task);
+        }
+        if (state.reviewingAdMaterialTask?.task_id === taskId) {
+          const hasPendingReview = (task.assets || []).some(asset => asset.status === "pending_review");
+          if (!hasPendingReview) closeAdMaterialReviewModal();
+          else await refreshAdMaterialReview(taskId);
+        }
+        loadTasks().catch(error => toast(error.message || "刷新投放素材任务失败", true));
+      } catch (error) {
+        toast(error.message || "审核素材失败", true);
+      }
+    }
     async function reviewDemand(taskId, result) {
       const reason = result === "rejected" ? prompt("请输入驳回原因") || "" : "";
-      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/demand-review`, { method: "POST", body: JSON.stringify({ result, reason }) });
-      toast("需求审核已提交");
-      await loadTasks();
+      return reviewAdMaterialDemand(taskId, result, reason);
     }
     async function reviewAsset(taskId, assetId, result) {
       const reason = result === "rejected" ? prompt("请输入驳回原因") || "" : "";
-      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(assetId)}/review`, { method: "POST", body: JSON.stringify({ result, reason }) });
-      toast("素材审核已提交");
-      await viewTask(taskId);
-      await loadTasks();
+      return reviewAdMaterialAsset(taskId, assetId, result, reason);
     }
     async function completeUpload(taskId) {
-      if (!confirm("确认将审核通过的素材上报至盈量素材库？")) return;
-      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/complete-upload`, { method: "POST", body: "{}" });
-      toast("上报完成");
-      await loadTasks();
+      if (!confirm("确认将审核通过的素材上传至盈量素材库？已废弃素材会跳过。")) return;
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/complete-upload`, { method: "POST", body: "{}" });
+        applyTaskSnapshot(task);
+        toast("素材已上传至盈量素材库");
+        if (state.selectedAdMaterialTask?.task_id === taskId) {
+          state.selectedAdMaterialTask = task;
+          renderAdMaterialDetail(task);
+        }
+        await loadTasks();
+      } catch (error) {
+        toast(error.message || "上传至盈量素材库失败", true);
+      }
     }
-    window.viewTask = viewTask;
+    window.viewTask = openAdMaterialDetail;
+    window.openAdMaterialDetail = openAdMaterialDetail;
+    window.openAdMaterialReview = openAdMaterialReview;
     window.editTask = editTask;
     window.publishTask = publishTask;
     window.copyTask = copyTask;
     window.deleteTask = deleteTask;
     window.reviewDemand = reviewDemand;
     window.reviewAsset = reviewAsset;
+    window.reviewAdMaterialDemand = reviewAdMaterialDemand;
+    window.reviewAdMaterialAsset = reviewAdMaterialAsset;
     window.completeUpload = completeUpload;
 
     document.querySelectorAll("[data-close]").forEach(button => button.onclick = closeModal);
-    document.querySelectorAll("[data-detail-close]").forEach(button => button.onclick = () => els.detailModal.classList.add("hidden"));
+    els.adMaterialCloseDetailBtn.onclick = hideAdMaterialDetail;
+    els.adMaterialDetailPanel.addEventListener("click", event => {
+      if (event.target === els.adMaterialDetailPanel) hideAdMaterialDetail();
+    });
+    els.adMaterialReviewCloseBtn.onclick = closeAdMaterialReviewModal;
+    els.adMaterialReviewModal.addEventListener("click", event => {
+      if (event.target === els.adMaterialReviewModal) closeAdMaterialReviewModal();
+    });
     els.createBtn.onclick = () => { resetForm(); openModal("create"); };
     els.reloadBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
     els.searchBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
