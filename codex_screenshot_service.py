@@ -240,15 +240,19 @@ def run_codex_cmd(cmd, timeout=None, env=None):
             codex_home = env.get("CODEX_HOME")
             with isolated_auth_sync_lock():
                 refresh_isolated_auth_from_source(codex_home)
-                try:
-                    proc = run_cmd(cmd, timeout=timeout, env=env)
-                    return proc
-                finally:
-                    sync_isolated_auth_to_source(codex_home)
         proc = run_cmd(cmd, timeout=timeout, env=env)
+        if should_sync_isolated_auth(env):
+            with isolated_auth_sync_lock():
+                sync_isolated_auth_to_source(env.get("CODEX_HOME"))
         return proc
     except Exception as exc:
         proc = getattr(exc, "proc", None)
+        if should_sync_isolated_auth(env):
+            try:
+                with isolated_auth_sync_lock():
+                    sync_isolated_auth_to_source(env.get("CODEX_HOME"))
+            except Exception:
+                logging.exception("failed to sync isolated Codex auth after command failure")
         raise
     finally:
         codex_home = (env or os.environ).get("CODEX_HOME") or os.path.expanduser("~/.codex")
