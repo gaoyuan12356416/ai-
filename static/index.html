@@ -11305,7 +11305,7 @@
                   <input id="voiceoverRoasThreshold" type="number" min="0" step="0.1" value="45" />
                 </div>
                 <div class="field">
-                  <label>保底候选数</label>
+                  <label>候选素材数</label>
                   <input id="voiceoverMinCandidates" type="number" min="0" max="50" value="15" />
                 </div>
                 <div id="voiceoverFilterStatus" class="voiceover-form-status">待筛选</div>
@@ -16113,6 +16113,22 @@
       button.disabled = !!loading;
       button.textContent = loading ? loadingText : button.dataset.defaultText;
     }
+    async function voiceoverRunLimited(items, limit, worker) {
+      const results = new Array(items.length);
+      let nextIndex = 0;
+      const workerCount = Math.min(Math.max(1, limit), items.length);
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+          const currentIndex = nextIndex++;
+          try {
+            results[currentIndex] = { status: "fulfilled", value: await worker(items[currentIndex], currentIndex) };
+          } catch (error) {
+            results[currentIndex] = { status: "rejected", reason: error };
+          }
+        }
+      }));
+      return results;
+    }
     function voiceoverKey(item) {
       return `${item.target_content_id || ""}::${item.material_id || ""}`;
     }
@@ -16134,12 +16150,10 @@
       if (!els.voiceoverStats) return;
       const total = state.voiceoverMaterials.length;
       const defaults = state.voiceoverMaterials.filter(item => item.selected_by_default).length;
-      const substitutes = state.voiceoverMaterials.filter(item => item.risk_label === "替补素材").length;
       const selected = state.voiceoverSelectedKeys.size;
       els.voiceoverStats.innerHTML = [
-        ["素材总数", total],
-        ["默认候选", defaults],
-        ["替补素材", substitutes],
+        ["候选素材", total],
+        ["ROAS达标", defaults],
         ["已选择", selected],
       ].map(([label, value]) => `<div class="voiceover-stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
     }
@@ -16225,25 +16239,48 @@
       const contentIds = parseVoiceoverIds(els.voiceoverFilterContentIds?.value || "");
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
       setVoiceoverButtonLoading(els.voiceoverFilterBtn, true, "筛选中...");
-      setVoiceoverStatus(els.voiceoverFilterStatus, `正在筛选 ${contentIds.length} 个剧 ID`, "loading");
+      setVoiceoverStatus(els.voiceoverFilterStatus, `正在并发筛选 ${contentIds.length} 个剧 ID`, "loading");
       if (els.voiceoverResultSummary) els.voiceoverResultSummary.textContent = "筛选中...";
       if (els.voiceoverResultTableBody) {
-        els.voiceoverResultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并计算候选结果...</td></tr>`;
+        els.voiceoverResultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并筛选达标候选...</td></tr>`;
       }
       try {
-        const data = await api("/api/voiceover-drama/filter", {
-          method: "POST",
-          body: JSON.stringify({
-            content_ids: contentIds,
-            roas_threshold: Number(els.voiceoverRoasThreshold?.value || 45),
-            min_candidates: Number(els.voiceoverMinCandidates?.value || 15)
-          })
+        const roasThreshold = Number(els.voiceoverRoasThreshold?.value || 45);
+        const minCandidates = Number(els.voiceoverMinCandidates?.value || 15);
+        let finished = 0;
+        const results = await voiceoverRunLimited(contentIds, 4, async (contentId) => {
+          const data = await api("/api/voiceover-drama/filter", {
+            method: "POST",
+            body: JSON.stringify({
+              content_ids: [contentId],
+              roas_threshold: roasThreshold,
+              min_candidates: minCandidates
+            })
+          });
+          finished += 1;
+          setVoiceoverStatus(els.voiceoverFilterStatus, `已完成 ${finished}/${contentIds.length}`, "loading");
+          return data;
         });
-        state.voiceoverMaterials = data.items || [];
+        const failures = [];
+        state.voiceoverMaterials = [];
+        results.forEach((result, index) => {
+          if (result?.status === "fulfilled") {
+            state.voiceoverMaterials.push(...(result.value?.items || []));
+          } else {
+            failures.push(`${contentIds[index]}：${result?.reason?.message || result?.reason || "失败"}`);
+          }
+        });
+        if (!state.voiceoverMaterials.length && failures.length) {
+          throw new Error(failures.join("；"));
+        }
         state.voiceoverSelectedKeys = new Set(state.voiceoverMaterials.filter(item => item.selected_by_default).map(voiceoverKey));
         renderVoiceoverResults();
-        setVoiceoverStatus(els.voiceoverFilterStatus, `完成 ${state.voiceoverMaterials.length} 条素材`, "success");
-        toast("素材筛选完成");
+        setVoiceoverStatus(
+          els.voiceoverFilterStatus,
+          failures.length ? `完成 ${state.voiceoverMaterials.length} 条，失败 ${failures.length} 个剧 ID` : `完成 ${state.voiceoverMaterials.length} 条候选素材`,
+          failures.length ? "error" : "success"
+        );
+        toast(failures.length ? `素材筛选完成，失败 ${failures.length} 个剧 ID` : "素材筛选完成");
       } catch (error) {
         setVoiceoverStatus(els.voiceoverFilterStatus, "筛选失败", "error");
         throw error;
@@ -16285,6 +16322,29 @@
         return `<option value="${navText(value)}" ${selected}>${navText(item.label || item.name || value)} / ${navText(value)}</option>`;
       })).join("");
     }
+    function resolveVoiceoverDefaultDesigner(item) {
+      const designers = state.voiceoverDesigners || [];
+      const candidates = [
+        item?.designer_id,
+        item?.designer,
+        item?.source_user_id,
+        item?.source_initiator,
+      ].map(value => String(value || "").trim()).filter(value => value && value !== "0" && value.toLowerCase() !== "null");
+      for (const candidate of candidates) {
+        const exact = designers.find(designer =>
+          String(designer.user_id || "") === candidate || String(designer.sub_user_id || "") === candidate
+        );
+        if (exact) return String(exact.user_id || "");
+      }
+      const textCandidates = candidates.map(value => value.toLowerCase());
+      const fuzzy = designers.find(designer => {
+        const fields = [designer.name, designer.username, designer.email, designer.label]
+          .map(value => String(value || "").toLowerCase())
+          .filter(Boolean);
+        return textCandidates.some(candidate => fields.includes(candidate));
+      });
+      return fuzzy ? String(fuzzy.user_id || "") : "";
+    }
     function renderVoiceoverModalOverview() {
       if (!els.voiceoverModalOverview) return;
       const items = state.voiceoverModalItems || [];
@@ -16304,12 +16364,13 @@
     }
     function renderVoiceoverTaskCards() {
       if (!els.voiceoverTaskCards) return;
-      const defaultDesigner = state.voiceoverDesigners[0]?.user_id || "";
       if (els.voiceoverModalSummary) {
         els.voiceoverModalSummary.textContent = `已选择 ${state.voiceoverModalItems.length} 条素材；请逐条设置数量、设计师、截止时间和描述。`;
       }
       els.voiceoverTaskCards.innerHTML = state.voiceoverModalItems.map((item, index) => {
         const key = voiceoverKey(item);
+        const defaultDesigner = resolveVoiceoverDefaultDesigner(item);
+        const designerHint = [item.designer, item.source_user_id].map(value => String(value || "").trim()).find(value => value && value !== "0" && value.toLowerCase() !== "null");
         const description = item.roas_pass
           ? `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`
           : `该素材 ROAS 未达标，作为替补素材参考，请优先保留有效信息并优化创意表达。`;
@@ -16317,7 +16378,7 @@
           <div class="voiceover-card-head">
             <div>
               <strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong>
-              <div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${item.risk_label ? ` / ${navText(item.risk_label)}` : ""}</div>
+              <div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div>
             </div>
             ${voiceoverRiskCell(item)}
           </div>
@@ -16357,10 +16418,18 @@
     async function openVoiceoverTaskModal() {
       const items = voiceoverSelectedItems();
       if (!items.length) return toast("请先选择素材", "error");
-      await loadVoiceoverDesigners();
-      state.voiceoverModalItems = items;
-      renderVoiceoverTaskCards();
-      els.voiceoverTaskModal?.classList.remove("hidden");
+      setVoiceoverButtonLoading(els.voiceoverOpenCreateBtn, true, "打开中...");
+      try {
+        await loadVoiceoverDesigners();
+        if (!state.voiceoverDesigners.length) {
+          toast("未查询到授权设计师，请先确认用户组权限", "error");
+        }
+        state.voiceoverModalItems = items;
+        renderVoiceoverTaskCards();
+        els.voiceoverTaskModal?.classList.remove("hidden");
+      } finally {
+        setVoiceoverButtonLoading(els.voiceoverOpenCreateBtn, false);
+      }
     }
     function closeVoiceoverTaskModal() {
       state.voiceoverModalItems = [];
