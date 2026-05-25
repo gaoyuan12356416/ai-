@@ -1538,6 +1538,7 @@ SCREENSHOT_JOB_ACTIVE_COUNT = 0
 SCREENSHOT_JOB_CONDITION = threading.Condition()
 SCREENSHOT_SERVICE_POOL_INDEX = 0
 SCREENSHOT_SERVICE_POOL_LOCK = threading.Lock()
+SCREENSHOT_SERVICE_POOL_INFLIGHT = {}
 
 
 
@@ -57752,10 +57753,9 @@ def validate_screenshot_request(app_id, content_id):
 
 
 
-def screenshot_service_url_for_item(item):
+def default_screenshot_service_url_for_item(item):
     key = str(item.get("key", "") or "").strip()
-    default_url = CODEX_SCREENSHOT_SERVICE_URLS.get(key) or CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
-    return choose_screenshot_service_url(default_url)
+    return CODEX_SCREENSHOT_SERVICE_URLS.get(key) or CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
 
 
 def screenshot_service_pool_enabled():
@@ -57773,11 +57773,39 @@ def choose_screenshot_service_url(default_url):
     if not screenshot_service_pool_enabled():
         return default_url
     with SCREENSHOT_SERVICE_POOL_LOCK:
-        url = CODEX_SCREENSHOT_SERVICE_POOL[
-            SCREENSHOT_SERVICE_POOL_INDEX % len(CODEX_SCREENSHOT_SERVICE_POOL)
-        ]
-        SCREENSHOT_SERVICE_POOL_INDEX += 1
+        pool = list(CODEX_SCREENSHOT_SERVICE_POOL)
+        if not pool:
+            return default_url
+        min_load = min(SCREENSHOT_SERVICE_POOL_INFLIGHT.get(item, 0) for item in pool)
+        start = SCREENSHOT_SERVICE_POOL_INDEX % len(pool)
+        selected_index = start
+        for offset in range(len(pool)):
+            index = (start + offset) % len(pool)
+            candidate = pool[index]
+            if SCREENSHOT_SERVICE_POOL_INFLIGHT.get(candidate, 0) == min_load:
+                selected_index = index
+                break
+        url = pool[selected_index]
+        SCREENSHOT_SERVICE_POOL_INDEX = selected_index + 1
     return url
+
+
+def acquire_screenshot_service_url(default_url):
+    url = choose_screenshot_service_url(default_url)
+    with SCREENSHOT_SERVICE_POOL_LOCK:
+        SCREENSHOT_SERVICE_POOL_INFLIGHT[url] = SCREENSHOT_SERVICE_POOL_INFLIGHT.get(url, 0) + 1
+    return url
+
+
+def release_screenshot_service_url(url):
+    if not url:
+        return
+    with SCREENSHOT_SERVICE_POOL_LOCK:
+        count = SCREENSHOT_SERVICE_POOL_INFLIGHT.get(url, 0)
+        if count <= 1:
+            SCREENSHOT_SERVICE_POOL_INFLIGHT.pop(url, None)
+        else:
+            SCREENSHOT_SERVICE_POOL_INFLIGHT[url] = count - 1
 
 
 def generate_screenshot_via_codex_service(job, source_path, items):
@@ -57790,12 +57818,16 @@ def generate_screenshot_via_codex_service(job, source_path, items):
         "source_url": job.get("cover_source_url", ""),
         "items": items,
     }
-    service_url = screenshot_service_url_for_item(items[0]) if items else CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
-    response = requests.post(
-        service_url,
-        json=payload,
-        timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
-    )
+    default_service_url = default_screenshot_service_url_for_item(items[0]) if items else CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
+    service_url = acquire_screenshot_service_url(default_service_url)
+    try:
+        response = requests.post(
+            service_url,
+            json=payload,
+            timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
+        )
+    finally:
+        release_screenshot_service_url(service_url)
     try:
         data = response.json()
     except Exception:
@@ -57836,11 +57868,15 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
         "source_url": job.get("cover_source_url", ""),
         "items": items,
     }
-    response = requests.post(
-        choose_screenshot_service_url(CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL),
-        json=payload,
-        timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
-    )
+    service_url = acquire_screenshot_service_url(CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL)
+    try:
+        response = requests.post(
+            service_url,
+            json=payload,
+            timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
+        )
+    finally:
+        release_screenshot_service_url(service_url)
     try:
         data = response.json()
     except Exception:
