@@ -7236,6 +7236,12 @@
     .voiceover-grid .span-12 { grid-column: span 12; }
     .voiceover-panel {
       overflow: hidden;
+      border: 1px solid rgba(213, 224, 238, 0.95);
+      box-shadow: 0 18px 44px rgba(15, 35, 70, 0.08);
+    }
+    .voiceover-panel .panel-head {
+      align-items: flex-start;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,251,255,0.98));
     }
     .voiceover-title-row {
       display: flex;
@@ -7263,8 +7269,8 @@
     .voiceover-count-grid,
     .voiceover-filter-grid {
       display: grid;
-      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
-      gap: 24px;
+      grid-template-columns: minmax(340px, 430px) minmax(0, 1fr);
+      gap: 18px;
       align-items: stretch;
     }
     .voiceover-count-grid > .field,
@@ -7274,14 +7280,14 @@
       grid-column: auto;
     }
     .voiceover-input-card {
-      background: #f8fafd;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 14px 16px;
-      min-height: 184px;
+      background: linear-gradient(180deg, #ffffff, #f7faff);
+      border: 1px solid #dce6f3;
+      border-radius: 14px;
+      padding: 16px;
+      min-height: 176px;
     }
     .voiceover-input-card textarea {
-      min-height: 140px;
+      min-height: 132px;
       border: 0;
       padding: 0;
       resize: vertical;
@@ -7290,40 +7296,87 @@
     }
     .voiceover-result-card {
       min-width: 0;
+      border: 1px solid #dce6f3;
+      border-radius: 14px;
+      background: #fff;
+      padding: 16px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+    }
+    .voiceover-result-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
     }
     .voiceover-result-card .table-wrap {
       max-height: 220px;
-      border-radius: 12px;
+      border-radius: 10px;
     }
     .voiceover-field-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 18px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
       align-items: end;
     }
-    .voiceover-field-grid .actions-inline {
-      align-self: end;
+    .voiceover-config-card {
+      align-content: start;
+      border: 1px solid #dce6f3;
+      border-radius: 14px;
+      background: #fff;
+      padding: 16px;
     }
-    .voiceover-removed-note {
-      grid-column: span 2;
-      color: #c2410c;
-      font-size: 13px;
-      font-weight: 700;
-      align-self: center;
+    .voiceover-field-grid .actions-inline {
+      grid-column: 1 / -1;
+      align-self: end;
+      justify-content: flex-end;
+      border-top: 1px solid #edf2f8;
+      padding-top: 12px;
+    }
+    .voiceover-query-state,
+    .voiceover-form-status {
+      display: inline-flex;
+      align-items: center;
+      width: max-content;
+      min-height: 28px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #f3f6fb;
+      color: #52627a;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .voiceover-form-status {
+      grid-column: 1 / -1;
+    }
+    .voiceover-query-state.is-loading,
+    .voiceover-form-status.is-loading {
+      background: #e8efff;
+      color: #2457ff;
+    }
+    .voiceover-query-state.is-success,
+    .voiceover-form-status.is-success {
+      background: #e9f8ef;
+      color: #127245;
+    }
+    .voiceover-query-state.is-error,
+    .voiceover-form-status.is-error {
+      background: #ffecec;
+      color: #b42318;
     }
     .voiceover-stats {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
       gap: 12px;
       margin-bottom: 18px;
     }
     .voiceover-stat {
-      border: 1px solid var(--line);
+      border: 1px solid #dce6f3;
       border-left: 4px solid var(--brand);
-      border-radius: 12px;
-      padding: 13px 14px 12px;
-      background: #fff;
-      flex: 0 0 140px;
+      border-radius: 10px;
+      padding: 12px 14px;
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      min-width: 0;
     }
     .voiceover-stat:nth-child(2) { border-left-color: #198754; }
     .voiceover-stat:nth-child(3) { border-left-color: #d18a12; }
@@ -7347,7 +7400,7 @@
       font-size: 12px;
     }
     .voiceover-count-table {
-      min-width: 520px;
+      min-width: 660px;
       font-size: 12px;
     }
     .voiceover-risk {
@@ -7465,11 +7518,12 @@
       }
       .voiceover-field-grid,
       .voiceover-task-form,
-      .voiceover-modal-overview {
+      .voiceover-modal-overview,
+      .voiceover-stats {
         grid-template-columns: 1fr;
       }
       .voiceover-task-form .voiceover-description-field,
-      .voiceover-removed-note {
+      .voiceover-form-status {
         grid-column: auto;
       }
       .voiceover-grid .span-4,
@@ -11214,11 +11268,14 @@
                 <textarea id="voiceoverCountContentIds" rows="7" placeholder="每行一个剧 ID，支持逗号或空格分隔"></textarea>
               </div>
               <div class="field voiceover-result-card">
-                <label>查询结果</label>
+                <div class="voiceover-result-title">
+                  <label>查询结果</label>
+                  <span id="voiceoverCountStatus" class="voiceover-query-state">待查询</span>
+                </div>
                 <div class="table-wrap">
                   <table class="voiceover-count-table">
-                    <thead><tr><th>剧 ID</th><th>series_code</th><th>素材数</th><th>状态</th></tr></thead>
-                    <tbody id="voiceoverCountTableBody"><tr><td colspan="4" class="muted">暂无查询结果</td></tr></tbody>
+                    <thead><tr><th>剧 ID</th><th>series_code</th><th>资源下剧数</th><th>素材数</th><th>状态</th></tr></thead>
+                    <tbody id="voiceoverCountTableBody"><tr><td colspan="5" class="muted">暂无查询结果</td></tr></tbody>
                   </table>
                 </div>
               </div>
@@ -11232,7 +11289,7 @@
               <div class="voiceover-icon filter">筛</div>
               <div>
                 <h3 class="panel-title">筛选任务与配置</h3>
-                <div class="muted">批量填写剧 ID；本区不填写目标语种、完成时间、任务名称。</div>
+                <div class="muted">批量填写剧 ID，系统按资源ID汇总该资源下全部素材。</div>
               </div>
             </div>
           </div>
@@ -11242,7 +11299,7 @@
                 <label>批量剧 ID</label>
                 <textarea id="voiceoverFilterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
               </div>
-              <div class="voiceover-field-grid">
+              <div class="voiceover-field-grid voiceover-config-card">
                 <div class="field">
                   <label>ROAS 阈值</label>
                   <input id="voiceoverRoasThreshold" type="number" min="0" step="0.1" value="45" />
@@ -11251,7 +11308,7 @@
                   <label>保底候选数</label>
                   <input id="voiceoverMinCandidates" type="number" min="0" max="50" value="15" />
                 </div>
-                <div class="voiceover-removed-note">已移除：目标语种 / 完成时间 / 任务名称</div>
+                <div id="voiceoverFilterStatus" class="voiceover-form-status">待筛选</div>
                 <div class="actions-inline">
                   <button id="voiceoverFilterBtn" class="btn btn-primary" type="button">筛选候选素材</button>
                   <button id="voiceoverClearBtn" class="btn btn-secondary" type="button">清空</button>
@@ -14237,12 +14294,14 @@
       voiceoverCountContentIds: document.getElementById("voiceoverCountContentIds"),
       voiceoverCountBtn: document.getElementById("voiceoverCountBtn"),
       voiceoverCountClearBtn: document.getElementById("voiceoverCountClearBtn"),
+      voiceoverCountStatus: document.getElementById("voiceoverCountStatus"),
       voiceoverCountTableBody: document.getElementById("voiceoverCountTableBody"),
       voiceoverFilterContentIds: document.getElementById("voiceoverFilterContentIds"),
       voiceoverRoasThreshold: document.getElementById("voiceoverRoasThreshold"),
       voiceoverMinCandidates: document.getElementById("voiceoverMinCandidates"),
       voiceoverFilterBtn: document.getElementById("voiceoverFilterBtn"),
       voiceoverClearBtn: document.getElementById("voiceoverClearBtn"),
+      voiceoverFilterStatus: document.getElementById("voiceoverFilterStatus"),
       voiceoverResultSummary: document.getElementById("voiceoverResultSummary"),
       voiceoverStats: document.getElementById("voiceoverStats"),
       voiceoverResultTableBody: document.getElementById("voiceoverResultTableBody"),
@@ -16042,6 +16101,18 @@
       const ids = String(text || "").split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
       return Array.from(new Set(ids));
     }
+    function setVoiceoverStatus(element, text, type = "idle") {
+      if (!element) return;
+      element.textContent = text;
+      element.classList.remove("is-loading", "is-success", "is-error");
+      if (type && type !== "idle") element.classList.add(`is-${type}`);
+    }
+    function setVoiceoverButtonLoading(button, loading, loadingText) {
+      if (!button) return;
+      if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || "";
+      button.disabled = !!loading;
+      button.textContent = loading ? loadingText : button.dataset.defaultText;
+    }
     function voiceoverKey(item) {
       return `${item.target_content_id || ""}::${item.material_id || ""}`;
     }
@@ -16079,15 +16150,20 @@
           <tr>
             <td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td>
             <td>${navText(item.series_code || "-")}</td>
+            <td>${navText(item.series_content_count ?? "-")}</td>
             <td>${navText(item.material_count ?? 0)}</td>
             <td>${item.status === "ok" ? '<span class="status-pill status-done">成功</span>' : `<span class="status-pill status-failed">${navText(item.error || "失败")}</span>`}</td>
           </tr>`).join("")
-        : `<tr><td colspan="4" class="muted">暂无查询结果</td></tr>`;
+        : `<tr><td colspan="5" class="muted">暂无查询结果</td></tr>`;
     }
     async function queryVoiceoverCounts() {
       const contentIds = parseVoiceoverIds(els.voiceoverCountContentIds?.value || "");
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
-      if (els.voiceoverCountBtn) els.voiceoverCountBtn.disabled = true;
+      setVoiceoverButtonLoading(els.voiceoverCountBtn, true, "查询中...");
+      setVoiceoverStatus(els.voiceoverCountStatus, `正在查询 ${contentIds.length} 个剧 ID`, "loading");
+      if (els.voiceoverCountTableBody) {
+        els.voiceoverCountTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按资源ID汇总素材数...</td></tr>`;
+      }
       try {
         const data = await api("/api/voiceover-drama/material-counts", {
           method: "POST",
@@ -16095,14 +16171,19 @@
         });
         state.voiceoverCountRows = data.items || [];
         renderVoiceoverCountRows();
+        setVoiceoverStatus(els.voiceoverCountStatus, `完成 ${state.voiceoverCountRows.length} 条`, "success");
         toast("素材数查询完成");
+      } catch (error) {
+        setVoiceoverStatus(els.voiceoverCountStatus, "查询失败", "error");
+        throw error;
       } finally {
-        if (els.voiceoverCountBtn) els.voiceoverCountBtn.disabled = false;
+        setVoiceoverButtonLoading(els.voiceoverCountBtn, false);
       }
     }
     function clearVoiceoverCounts() {
       if (els.voiceoverCountContentIds) els.voiceoverCountContentIds.value = "";
       state.voiceoverCountRows = [];
+      setVoiceoverStatus(els.voiceoverCountStatus, "待查询");
       renderVoiceoverCountRows();
     }
     function voiceoverRiskCell(item) {
@@ -16143,7 +16224,12 @@
     async function filterVoiceoverMaterials() {
       const contentIds = parseVoiceoverIds(els.voiceoverFilterContentIds?.value || "");
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
-      if (els.voiceoverFilterBtn) els.voiceoverFilterBtn.disabled = true;
+      setVoiceoverButtonLoading(els.voiceoverFilterBtn, true, "筛选中...");
+      setVoiceoverStatus(els.voiceoverFilterStatus, `正在筛选 ${contentIds.length} 个剧 ID`, "loading");
+      if (els.voiceoverResultSummary) els.voiceoverResultSummary.textContent = "筛选中...";
+      if (els.voiceoverResultTableBody) {
+        els.voiceoverResultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并计算候选结果...</td></tr>`;
+      }
       try {
         const data = await api("/api/voiceover-drama/filter", {
           method: "POST",
@@ -16156,15 +16242,20 @@
         state.voiceoverMaterials = data.items || [];
         state.voiceoverSelectedKeys = new Set(state.voiceoverMaterials.filter(item => item.selected_by_default).map(voiceoverKey));
         renderVoiceoverResults();
+        setVoiceoverStatus(els.voiceoverFilterStatus, `完成 ${state.voiceoverMaterials.length} 条素材`, "success");
         toast("素材筛选完成");
+      } catch (error) {
+        setVoiceoverStatus(els.voiceoverFilterStatus, "筛选失败", "error");
+        throw error;
       } finally {
-        if (els.voiceoverFilterBtn) els.voiceoverFilterBtn.disabled = false;
+        setVoiceoverButtonLoading(els.voiceoverFilterBtn, false);
       }
     }
     function clearVoiceoverFilters() {
       if (els.voiceoverFilterContentIds) els.voiceoverFilterContentIds.value = "";
       state.voiceoverMaterials = [];
       state.voiceoverSelectedKeys = new Set();
+      setVoiceoverStatus(els.voiceoverFilterStatus, "待筛选");
       renderVoiceoverResults();
     }
     function toggleVoiceoverSelection(key, checked) {

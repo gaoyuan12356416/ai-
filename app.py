@@ -1249,6 +1249,7 @@ VOICEOVER_DESIGNER_ROLE_APP_ID = os.environ.get("VOICEOVER_DESIGNER_ROLE_APP_ID"
 VOICEOVER_DEFAULT_ROAS_THRESHOLD = float(os.environ.get("VOICEOVER_DEFAULT_ROAS_THRESHOLD", "45"))
 VOICEOVER_DEFAULT_MIN_CANDIDATES = int(os.environ.get("VOICEOVER_DEFAULT_MIN_CANDIDATES", "15"))
 VOICEOVER_DEFAULT_APP_ID = os.environ.get("VOICEOVER_DEFAULT_APP_ID", "").strip()
+VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE = int(os.environ.get("VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE", "6") or "6")
 
 
 AI_SOURCE_CALLBACK_URL = os.environ.get(
@@ -34927,6 +34928,30 @@ def voiceover_sql_db():
     return (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
 
 
+def voiceover_sql_in(values):
+    cleaned = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not cleaned:
+        return "''"
+    return ",".join("'%s'" % mysql_escape_literal(value) for value in cleaned)
+
+
+def voiceover_series_content_ids(series_code):
+    series_code = str(series_code or "").strip()
+    if not series_code:
+        return []
+    database = voiceover_sql_db()
+    rows = run_mysql(
+        (
+            "SELECT DISTINCT d.content_id "
+            "FROM `%s`.ads_drama_info d "
+            "WHERE CAST(d.series_code AS CHAR)='%s' AND d.content_id<>'' "
+            "ORDER BY d.content_id"
+        )
+        % (database, mysql_escape_literal(series_code))
+    )
+    return [str(row[0] if row else "").strip() for row in rows if row and str(row[0]).strip()]
+
+
 def lookup_voiceover_drama_info(content_id, app_id=""):
     content_id = str(content_id or "").strip()
     app_id = str(app_id or "").strip()
@@ -34981,47 +35006,104 @@ def lookup_voiceover_drama_info(content_id, app_id=""):
     }
 
 
-def voiceover_material_count_for_series(series_code):
+def voiceover_material_count_for_series(series_code, content_ids=None):
     series_code = str(series_code or "").strip()
     if not series_code:
         return 0
     database = voiceover_sql_db()
+    content_ids = content_ids if content_ids is not None else voiceover_series_content_ids(series_code)
+    if not content_ids:
+        return 0
+    content_id_sql = voiceover_sql_in(content_ids)
     rows = run_mysql(
         (
             "SELECT COUNT(DISTINCT s.id) "
-            "FROM `%s`.ads_custom_resource_drama_insight i "
-            "JOIN `%s`.ads_custom_source s ON CAST(s.id AS CHAR)=CAST(i.resource_id AS CHAR) "
-            "WHERE i.series_code='%s' AND s.is_delete=0 AND s.url<>''"
+            "FROM `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
+            "WHERE s.data_source=%d AND s.data_source_id IN (%s) "
+            "AND s.is_delete=0 AND COALESCE(s.url, '')<>''"
         )
-        % (database, database, mysql_escape_literal(series_code))
+        % (database, VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE, content_id_sql)
     )
     return voiceover_int(rows[0][0] if rows and rows[0] else 0, 0)
 
 
+def voiceover_material_count_map_for_series(series_codes):
+    cleaned = []
+    seen = set()
+    for series_code in series_codes:
+        value = str(series_code or "").strip()
+        if value and value not in seen:
+            cleaned.append(value)
+            seen.add(value)
+    if not cleaned:
+        return {}
+    database = voiceover_sql_db()
+    series_sql = voiceover_sql_in(cleaned)
+    rows = run_mysql(
+        (
+            "SELECT d.series_code, COUNT(DISTINCT s.id), COUNT(DISTINCT d.content_id) "
+            "FROM `%s`.ads_drama_info d FORCE INDEX (scoo) "
+            "LEFT JOIN `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
+            "ON s.data_source=%d AND s.data_source_id=d.content_id "
+            "AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
+            "WHERE d.series_code IN (%s) AND d.content_id<>'' "
+            "GROUP BY d.series_code"
+        )
+        % (database, database, VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE, series_sql)
+    )
+    result = {}
+    for row in rows:
+        series_code = str(row[0] if row else "").strip()
+        if not series_code:
+            continue
+        result[series_code] = {
+            "material_count": voiceover_int(row[1] if len(row) > 1 else 0, 0),
+            "series_content_count": voiceover_int(row[2] if len(row) > 2 else 0, 0),
+        }
+    return result
+
+
 def voiceover_material_counts(payload):
-    items = []
+    records = []
+    series_codes = []
     for content_id in voiceover_parse_content_ids(payload):
         try:
             drama = lookup_voiceover_drama_info(content_id)
-            count = voiceover_material_count_for_series(drama.get("series_code", ""))
-            items.append({
+            series_codes.append(drama.get("series_code", ""))
+            records.append({
                 "content_id": content_id,
-                "drama_name": drama.get("name", ""),
-                "series_code": drama.get("series_code", ""),
-                "app_id": drama.get("app_id", ""),
-                "app": drama.get("app", ""),
-                "country": drama.get("country", ""),
-                "language": drama.get("language", ""),
-                "material_count": count,
+                "drama": drama,
                 "status": "ok",
             })
         except Exception as exc:
-            items.append({
+            records.append({
                 "content_id": content_id,
                 "material_count": 0,
+                "series_content_count": 0,
                 "status": "failed",
                 "error": api_error_payload(exc).get("message") or str(exc),
             })
+
+    count_map = voiceover_material_count_map_for_series(series_codes)
+    items = []
+    for record in records:
+        if record.get("status") != "ok":
+            items.append(record)
+            continue
+        drama = record.get("drama") or {}
+        count_info = count_map.get(drama.get("series_code", ""), {})
+        items.append({
+            "content_id": record.get("content_id", ""),
+            "drama_name": drama.get("name", ""),
+            "series_code": drama.get("series_code", ""),
+            "series_content_count": count_info.get("series_content_count", 0),
+            "app_id": drama.get("app_id", ""),
+            "app": drama.get("app", ""),
+            "country": drama.get("country", ""),
+            "language": drama.get("language", ""),
+            "material_count": count_info.get("material_count", 0),
+            "status": "ok",
+        })
     return {"items": items, "total": len(items)}
 
 
@@ -35041,21 +35123,41 @@ def voiceover_material_rows_for_series(series_code, limit=300):
         return []
     limit = max(1, min(1000, voiceover_int(limit, 300)))
     database = voiceover_sql_db()
+    content_ids = voiceover_series_content_ids(series_code)
+    if not content_ids:
+        return []
+    content_id_sql = voiceover_sql_in(content_ids)
     sql = (
         "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
         "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
         "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.content_sign, ''), "
         "COALESCE(s.video_duration, 0), COALESCE(MAX(i.resource_name), ''), "
-        "COALESCE(MAX(i.resource_tag), ''), COALESCE(SUM(i.spend), 0), "
-        "COALESCE(SUM(i.revenue), 0), COALESCE(SUM(i.revenue0), 0), "
-        "COALESCE(MIN(i.stats_date), ''), COALESCE(MAX(i.stats_date), ''), COUNT(*) "
-        "FROM `%s`.ads_custom_resource_drama_insight i "
-        "JOIN `%s`.ads_custom_source s ON CAST(s.id AS CHAR)=CAST(i.resource_id AS CHAR) "
-        "WHERE i.series_code='%s' AND s.is_delete=0 AND s.url<>'' "
+        "COALESCE(MAX(i.resource_tag), ''), COALESCE(MAX(i.spend), 0), "
+        "COALESCE(MAX(i.revenue), 0), COALESCE(MAX(i.revenue0), 0), "
+        "COALESCE(MIN(i.stats_date_from), ''), COALESCE(MAX(i.stats_date_to), ''), "
+        "COALESCE(MAX(i.insight_rows), 0) "
+        "FROM `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
+        "LEFT JOIN ("
+        "SELECT resource_id, MAX(resource_name) AS resource_name, MAX(resource_tag) AS resource_tag, "
+        "SUM(spend) AS spend, SUM(revenue) AS revenue, SUM(af_revenue0) AS revenue0, "
+        "MIN(dt) AS stats_date_from, MAX(dt) AS stats_date_to, COUNT(*) AS insight_rows "
+        "FROM `%s`.ads_custom_source_insight FORCE INDEX (ddds) "
+        "WHERE data_source=%d AND data_source_id IN (%s) "
+        "GROUP BY resource_id"
+        ") i ON CAST(i.resource_id AS CHAR)=CAST(s.id AS CHAR) "
+        "WHERE s.data_source=%d AND s.data_source_id IN (%s) AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
         "GROUP BY s.id, s.name, s.url, s.category, s.product, s.country, s.language, "
         "s.data_source_id, s.content_sign, s.video_duration "
-        "ORDER BY SUM(i.spend) DESC LIMIT %d"
-    ) % (database, database, mysql_escape_literal(series_code), limit)
+        "ORDER BY COALESCE(MAX(i.spend), 0) DESC, s.id DESC LIMIT %d"
+    ) % (
+        database,
+        database,
+        VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+        content_id_sql,
+        VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+        content_id_sql,
+        limit,
+    )
     rows = run_mysql(sql)
     items = []
     for row in rows:
@@ -35183,23 +35285,32 @@ def voiceover_lookup_material(material_id, target_content_id=""):
     if not material_id:
         raise StructuredApiError("invalid_material_id", "素材 ID 不能为空")
     database = voiceover_sql_db()
-    join_type = "LEFT JOIN"
-    series_filter = ""
+    source_filter = ""
+    insight_filter = ""
     if target_content_id:
         drama = lookup_voiceover_drama_info(target_content_id)
-        join_type = "JOIN"
-        series_filter = " AND i.series_code='%s'" % mysql_escape_literal(drama.get("series_code", ""))
+        content_ids = voiceover_series_content_ids(drama.get("series_code", ""))
+        content_id_sql = voiceover_sql_in(content_ids or [target_content_id])
+        source_filter = " AND s.data_source=%d AND s.data_source_id IN (%s)" % (
+            VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+            content_id_sql,
+        )
+        insight_filter = " AND i.data_source=%d AND i.data_source_id IN (%s)" % (
+            VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+            content_id_sql,
+        )
     sql = (
         "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
         "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
         "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.video_duration, 0), "
-        "COALESCE(SUM(i.spend), 0), COALESCE(SUM(i.revenue), 0), COALESCE(SUM(i.revenue0), 0) "
+        "COALESCE(SUM(i.spend), 0), COALESCE(SUM(i.revenue), 0), COALESCE(SUM(i.af_revenue0), 0) "
         "FROM `%s`.ads_custom_source s "
-        "%s `%s`.ads_custom_resource_drama_insight i ON CAST(i.resource_id AS CHAR)=CAST(s.id AS CHAR)%s "
-        "WHERE CAST(s.id AS CHAR)='%s' AND s.is_delete=0 AND s.url<>'' "
+        "LEFT JOIN `%s`.ads_custom_source_insight i FORCE INDEX (idx_ridstype) "
+        "ON CAST(i.resource_id AS CHAR)=CAST(s.id AS CHAR)%s "
+        "WHERE CAST(s.id AS CHAR)='%s' AND s.is_delete=0 AND COALESCE(s.url, '')<>''%s "
         "GROUP BY s.id, s.name, s.url, s.category, s.product, s.country, s.language, s.data_source_id, s.video_duration "
         "LIMIT 1"
-    ) % (database, join_type, database, series_filter, mysql_escape_literal(material_id))
+    ) % (database, database, insight_filter, mysql_escape_literal(material_id), source_filter)
     rows = run_mysql(sql)
     if not rows:
         raise StructuredApiError("material_not_found", "未找到素材：%s" % material_id)
