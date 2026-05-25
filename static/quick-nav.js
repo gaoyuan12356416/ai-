@@ -2,11 +2,11 @@
   const DEFAULT_NAV = [
     {
       key: "drama",
-      label: "剧集合成",
+      label: "短剧任务列表",
       module: "drama_synthesis",
       items: [
-        { key: "tasks", label: "任务列表", description: "创建、重试、删除、查看结果", kind: "page", href: "/drama-synthesis.html", module: "drama_synthesis", enabled: true, order: 10 },
-        { key: "screenshots", label: "截图素材", description: "批量提交剧 ID，查看图片进度", kind: "page", href: "/screenshots.html", module: "cover_synthesis", enabled: true, order: 20 }
+        { key: "tasks", label: "剧集合成", description: "创建、重试、删除、查看结果", kind: "page", href: "/drama-synthesis.html", module: "drama_synthesis", enabled: true, order: 10 },
+        { key: "screenshots", label: "封面图合成", description: "批量提交剧 ID，查看图片进度", kind: "page", href: "/screenshots.html", module: "cover_synthesis", enabled: true, order: 20 }
       ]
     },
     {
@@ -85,6 +85,17 @@
     return (items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
+  function sortGroups(groups, options) {
+    const preferred = Array.isArray(options && options.groupOrder) ? options.groupOrder : [];
+    const preferredIndex = new Map(preferred.map((key, index) => [key, index]));
+    return (groups || []).slice().sort((a, b) => {
+      const ai = preferredIndex.has(a.key) ? preferredIndex.get(a.key) : Number.POSITIVE_INFINITY;
+      const bi = preferredIndex.has(b.key) ? preferredIndex.get(b.key) : Number.POSITIVE_INFINITY;
+      if (ai !== bi) return ai - bi;
+      return (a.order || 0) - (b.order || 0);
+    });
+  }
+
   const INTERNAL_VIEW_HREFS = {
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
@@ -139,7 +150,7 @@
   }
 
   function buildNavHtml(config, options) {
-    return sortItems(config).map(group => {
+    return sortGroups(config, options).map(group => {
       if (!visibleFor(options.auth || {}, group)) return "";
       const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
       if (!items.length) return "";

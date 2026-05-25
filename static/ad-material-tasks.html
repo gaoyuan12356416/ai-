@@ -55,12 +55,12 @@
     .stat { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 14px; padding: 13px; }
     .stat b { display: block; color: var(--blue); font-size: 24px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
-    table { border-collapse: collapse; width: 100%; min-width: 1280px; table-layout: fixed; background: #fff; }
-    th, td { padding: 13px 14px; border-bottom: 1px solid #ecf1f6; text-align: left; vertical-align: top; font-size: 13px; overflow-wrap: anywhere; }
+    table { border-collapse: collapse; width: 100%; min-width: 1180px; table-layout: fixed; background: #fff; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid #ecf1f6; text-align: left; vertical-align: top; font-size: 13px; overflow-wrap: break-word; }
     th { background: #f8fbff; color: #627493; font-weight: 800; }
     tr:last-child td { border-bottom: 0; }
     .task-id { display: block; color: #0d2c57; font-weight: 900; line-height: 1.35; }
-    .task-desc { margin-top: 5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .task-desc { margin-top: 5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
     .cell-muted { color: var(--muted); font-size: 12px; line-height: 1.45; }
     .nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 800; background: #eef4ff; color: var(--blue); }
@@ -170,15 +170,15 @@
             <div class="table-wrap">
               <table>
                 <colgroup>
-                  <col style="width:31%">
+                  <col style="width:33%">
                   <col style="width:8%">
-                  <col style="width:11%">
+                  <col style="width:12%">
                   <col style="width:7%">
                   <col style="width:8%">
                   <col style="width:7%">
                   <col style="width:6%">
                   <col style="width:10%">
-                  <col style="width:7%">
+                  <col style="width:9%">
                 </colgroup>
                 <thead>
                   <tr>
@@ -286,7 +286,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/quick-nav.js?v=202605251755"></script>
+  <script src="/quick-nav.js?v=202605251815"></script>
   <script>
     const els = {
       authPanel: document.getElementById("authPanel"),
@@ -380,6 +380,7 @@
         container: "#quickNav",
         activeKey: "adMaterials",
         auth: state.auth || {},
+        groupOrder: ["voiceover", "ad_material", "drama", "system"],
       });
     }
     async function loadAuth() {
