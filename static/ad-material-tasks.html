@@ -200,32 +200,30 @@
             <div class="table-wrap">
               <table>
                 <colgroup>
-                  <col style="width:12%">
-                  <col style="width:13%">
-                  <col style="width:12%">
-                  <col style="width:7%">
-                  <col style="width:9%">
-                  <col style="width:10%">
+                  <col style="width:31%">
                   <col style="width:8%">
+                  <col style="width:11%">
+                  <col style="width:7%">
+                  <col style="width:8%">
+                  <col style="width:7%">
                   <col style="width:6%">
                   <col style="width:10%">
-                  <col style="width:13%">
+                  <col style="width:12%">
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>任务ID</th>
-                    <th>类型</th>
+                    <th>任务</th>
                     <th>产品</th>
-                    <th>数量</th>
+                    <th>类型</th>
                     <th>国家/语言</th>
+                    <th>尺寸/数量</th>
                     <th>状态</th>
-                    <th>发起人</th>
-                    <th>素材</th>
+                    <th>创建人</th>
                     <th>更新时间</th>
                     <th>操作</th>
                   </tr>
                 </thead>
-                <tbody id="taskBody"><tr><td colspan="10" class="muted">正在加载...</td></tr></tbody>
+                <tbody id="taskBody"><tr><td colspan="9" class="muted">正在加载...</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -626,7 +624,7 @@
       els.competitorSource.innerHTML = options.join("");
     }
     async function loadTasks() {
-      els.taskBody.innerHTML = `<tr><td colspan="10" class="muted">加载中...</td></tr>`;
+      els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">加载中...</td></tr>`;
       const params = new URLSearchParams();
       if (els.statusFilter.value && els.statusFilter.value !== "all") params.set("status", els.statusFilter.value);
       if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
@@ -644,26 +642,24 @@
     }
     function renderRows() {
       if (!state.tasks.length) {
-        els.taskBody.innerHTML = `<tr><td colspan="10" class="muted">暂无投放素材任务</td></tr>`;
+        els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">暂无投放素材任务</td></tr>`;
         return;
       }
       els.taskBody.innerHTML = state.tasks.map(buildAdMaterialRow).join("");
     }
     function buildAdMaterialRow(task) {
-      const assets = task.assets || [];
       const canEdit = task.status === "draft";
       const canDelete = task.status !== "done";
       const id = text(task.task_id);
       return `
         <tr>
-          <td><code>${text((task.task_id || "").slice(0, 8))}</code></td>
-          <td>${text(adMaterialTaskTypeText(task.task_type))}</td>
+          <td><span class="task-id">${text(task.task_id)}</span><div class="task-desc cell-muted" title="${text(task.description || "-")}">${text(task.description || "-")}</div></td>
           <td><div class="nowrap" title="${text(task.product_name || task.app_id || "")}">${text(task.product_name || task.app_id || "")}</div><div class="cell-muted nowrap">${text(task.app_id || "")}</div></td>
-          <td>${text(task.quantity || 0)}</td>
+          <td>${text(adMaterialTaskTypeText(task.task_type))}</td>
           <td>${text(task.country || "")}/${text(task.language || "")}</td>
+          <td>${text(task.size_plan_summary || task.size || "-")}<div class="cell-muted">${text(task.quantity || 0)} 张</div></td>
           <td>${adMaterialStatusCell(task)}</td>
           <td><div class="nowrap" title="${text(task.creator_name || task.creator_email || "")}">${text(task.creator_name || task.creator_email || "")}</div></td>
-          <td>${assets.length}</td>
           <td>${text(task.updated_at || "-")}</td>
           <td>
             <div class="actions-inline">
