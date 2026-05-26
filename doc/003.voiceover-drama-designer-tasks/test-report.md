@@ -9,6 +9,7 @@
 ## 待线上验证
 
 - 使用真实登录态打开 `https://ai.yingliangads.com/#voiceoverTasks`：页面可访问。
+- 公网 `GET /api/ui/topbar`：应进入后端并返回 200 JSON，不能是 nginx 404。
 - 公网 `GET /api/voiceover-drama/designers`：应进入后端并返回 401 或登录态数据，不能是 nginx 404。
 - 查询素材数：验证 `ads_drama_info.series_code` 到素材数的链路；无登录态可用时可在服务器内直接调用 `voiceover_material_counts` 做数据库口径验证。
 - 筛选素材：验证列表按素材维度展示，只有 ROAS 不达标但被补足的素材显示 `替补素材`。

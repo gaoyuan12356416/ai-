@@ -40,6 +40,18 @@ location /api/voiceover-drama/ {
     proxy_send_timeout 300s;
     proxy_read_timeout 300s;
 }
+
+location /api/ui/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 300s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+}
 ```
 
 5. 重启 `drama-material-api.service`；nginx 配置变更后执行 `nginx -t` 并对 master pid 发 `HUP`。
@@ -48,5 +60,6 @@ location /api/voiceover-drama/ {
    - `node --check static/quick-nav.js`
    - 内联脚本语法解析
    - `GET /api/auth/status`
+   - `GET /api/ui/topbar` 公网应返回后端 200 JSON，不能是 nginx 404
    - `GET /api/voiceover-drama/designers` 公网应返回后端 401 或登录态数据，不能是 nginx 404
    - 登录后打开 `/#voiceoverTasks`
