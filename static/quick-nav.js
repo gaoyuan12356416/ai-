@@ -3,6 +3,7 @@
     {
       key: "drama",
       label: "短剧任务列表",
+      order: 10,
       module: "drama_synthesis",
       items: [
         { key: "tasks", label: "剧集合成", description: "创建、重试、删除、查看结果", kind: "page", href: "/drama-synthesis.html", module: "drama_synthesis", enabled: true, order: 10 },
@@ -10,24 +11,27 @@
       ]
     },
     {
-      key: "voiceover",
-      label: "配音剧素材",
-      module: "voiceover_drama_tasks",
-      items: [
-        { key: "voiceoverTasks", label: "配音剧语种任务", description: "查询系列素材并批量创建设计师需求", kind: "page", href: "/voiceover-drama.html", module: "voiceover_drama_tasks", enabled: true, order: 10 }
-      ]
-    },
-    {
       key: "ad_material",
       label: "投放素材",
+      order: 20,
       module: "ad_material_tasks",
       items: [
         { key: "adMaterials", label: "投放素材任务", description: "创建需求、审核素材并完成上报", kind: "page", href: "/ad-material-tasks.html", module: "ad_material_tasks", enabled: true, order: 10 }
       ]
     },
     {
+      key: "voiceover",
+      label: "配音剧素材",
+      order: 30,
+      module: "voiceover_drama_tasks",
+      items: [
+        { key: "voiceoverTasks", label: "配音剧语种任务", description: "查询系列素材并批量创建设计师需求", kind: "page", href: "/voiceover-drama.html", module: "voiceover_drama_tasks", enabled: true, order: 10 }
+      ]
+    },
+    {
       key: "system",
       label: "设置",
+      order: 90,
       adminOnly: true,
       items: [
         { key: "settings", label: "基础设置", description: "产品映射和系统说明", kind: "page", href: "/settings.html", adminOnly: true, enabled: true, order: 10 },
@@ -46,7 +50,8 @@
     styleInjected = true;
     const style = document.createElement("style");
     style.textContent = `
-      .quick-nav-root .nav-group, .nav .nav-group { display: grid; gap: 8px; margin-bottom: 14px; }
+      .quick-nav-root { display: grid; gap: 10px; }
+      .quick-nav-root .nav-group, .nav .nav-group { display: grid; gap: 8px; margin: 0 0 14px; padding: 0; border: 0; }
       .quick-nav-root .nav-parent, .nav .nav-parent { color: rgba(237,243,255,.66); font-size: 12px; font-weight: 700; padding: 6px 10px; }
       .quick-nav-root .nav-children, .nav .nav-children { display: grid; gap: 6px; }
       .quick-nav-root .nav-item, .nav .nav-item { width: 100%; border: 0; background: transparent; color: inherit; text-align: left; border-radius: 14px; padding: 12px 14px; cursor: pointer; display: block; text-decoration: none; }
@@ -85,15 +90,8 @@
     return (items || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
-  function sortGroups(groups, options) {
-    const preferred = Array.isArray(options && options.groupOrder) ? options.groupOrder : [];
-    const preferredIndex = new Map(preferred.map((key, index) => [key, index]));
-    return (groups || []).slice().sort((a, b) => {
-      const ai = preferredIndex.has(a.key) ? preferredIndex.get(a.key) : Number.POSITIVE_INFINITY;
-      const bi = preferredIndex.has(b.key) ? preferredIndex.get(b.key) : Number.POSITIVE_INFINITY;
-      if (ai !== bi) return ai - bi;
-      return (a.order || 0) - (b.order || 0);
-    });
+  function sortGroups(groups) {
+    return (groups || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
   const INTERNAL_VIEW_HREFS = {
@@ -150,7 +148,7 @@
   }
 
   function buildNavHtml(config, options) {
-    return sortGroups(config, options).map(group => {
+    return sortGroups(config).map(group => {
       if (!visibleFor(options.auth || {}, group)) return "";
       const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
       if (!items.length) return "";
@@ -163,7 +161,6 @@
     if (!container) return;
     injectStyle();
     container.classList.add("quick-nav-root");
-    container.innerHTML = buildNavHtml(navCache || DEFAULT_NAV, options);
     const config = await loadConfig();
     container.innerHTML = buildNavHtml(config, options);
   }

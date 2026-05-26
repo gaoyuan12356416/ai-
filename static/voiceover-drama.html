@@ -43,21 +43,7 @@
     }
     .brand strong { display: block; font-size: 19px; }
     .brand span { color: #9eb0ca; font-size: 12px; }
-    .nav-group {
-      border-top: 1px solid rgba(255,255,255,.08);
-      padding-top: 16px;
-      display: grid;
-      gap: 10px;
-    }
-    .nav-title { color: #8fa2bf; font-size: 12px; padding: 0 8px; }
-    .nav-item {
-      display: block;
-      padding: 13px 14px;
-      border: 1px solid rgba(255,255,255,.1);
-      border-radius: 14px;
-      color: #dce7f7;
-    }
-    .nav-item.active { background: #2f63ff; border-color: #4f7cff; color: #fff; box-shadow: 0 14px 24px rgba(47,99,255,.3); }
+    .nav { display: grid; gap: 10px; }
     .main { min-width: 0; padding: 28px; }
     .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
     .title h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
@@ -180,16 +166,7 @@
         <div class="brand-mark">剧</div>
         <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
       </div>
-      <div class="nav-group">
-        <div class="nav-title">配音剧素材</div>
-        <a class="nav-item active" href="/voiceover-drama.html">配音剧语种任务</a>
-      </div>
-      <div class="nav-group">
-        <div class="nav-title">其他模块</div>
-        <a class="nav-item" href="/drama-synthesis.html">剧集合成</a>
-        <a class="nav-item" href="/screenshots.html">封面图合成</a>
-        <a class="nav-item" href="/ad-material-tasks.html">投放素材任务</a>
-      </div>
+      <nav id="quickNav" class="nav"></nav>
     </aside>
     <main class="main">
       <div class="topbar">
@@ -314,6 +291,7 @@
 
   <div id="toast" class="toast"></div>
 
+  <script src="/quick-nav.js?v=202605261520"></script>
   <script>
     const state = {
       auth: { authenticated: false, user: null, login_url: "/api/auth/feishu/login" },
@@ -324,6 +302,7 @@
       modalItems: []
     };
     const els = {
+      quickNav: document.getElementById("quickNav"),
       userCard: document.getElementById("userCard"),
       refreshBtn: document.getElementById("refreshBtn"),
       loginBtn: document.getElementById("loginBtn"),
@@ -423,7 +402,16 @@
       } catch (error) {
         state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
       }
+      await renderQuickNavigation();
       renderAuth();
+    }
+    async function renderQuickNavigation() {
+      if (!window.QuickNav || !els.quickNav) return;
+      await window.QuickNav.render({
+        container: els.quickNav,
+        activeKey: "voiceoverTasks",
+        auth: state.auth || {},
+      });
     }
     function renderAuth() {
       const user = state.auth && state.auth.user;
