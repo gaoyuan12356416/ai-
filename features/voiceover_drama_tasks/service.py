@@ -22,6 +22,9 @@ VOICEOVER_DEFAULT_ROAS_THRESHOLD = float(os.environ.get("VOICEOVER_DEFAULT_ROAS_
 VOICEOVER_DEFAULT_MIN_CANDIDATES = int(os.environ.get("VOICEOVER_DEFAULT_MIN_CANDIDATES", "15"))
 VOICEOVER_DEFAULT_APP_ID = os.environ.get("VOICEOVER_DEFAULT_APP_ID", "").strip()
 VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE = int(os.environ.get("VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE", "6") or "6")
+VOICEOVER_FILTER_SOURCE_SCAN_LIMIT = int(os.environ.get("VOICEOVER_FILTER_SOURCE_SCAN_LIMIT", "1500") or "1500")
+VOICEOVER_FILTER_SOURCE_SCAN_MAX = int(os.environ.get("VOICEOVER_FILTER_SOURCE_SCAN_MAX", "3000") or "3000")
+VOICEOVER_FILTER_LEGACY_FALLBACK = os.environ.get("VOICEOVER_FILTER_LEGACY_FALLBACK", "0").strip() == "1"
 
 ADMIN_MAPPING_MYSQL_DATABASE = ""
 DB_NAME = ""
@@ -393,6 +396,83 @@ def voiceover_material_dedupe_key(item):
     return "%s:%s" % (duration, name[:80])
 
 
+def voiceover_material_source_rows_for_series(content_ids, scan_limit):
+    content_ids = [str(content_id or "").strip() for content_id in (content_ids or []) if str(content_id or "").strip()]
+    if not content_ids:
+        return []
+    scan_limit = max(1, min(10000, voiceover_int(scan_limit, VOICEOVER_FILTER_SOURCE_SCAN_LIMIT)))
+    database = voiceover_sql_db()
+    content_id_sql = voiceover_sql_in(content_ids)
+    sql = (
+        "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
+        "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
+        "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.content_sign, ''), "
+        "COALESCE(s.video_duration, 0), COALESCE(s.designer, ''), "
+        "CAST(s.user_id AS CHAR), CAST(s.initiator AS CHAR) "
+        "FROM `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
+        "WHERE s.data_source=%d AND s.data_source_id IN (%s) "
+        "AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
+        "ORDER BY s.updated_at DESC, s.id DESC LIMIT %d"
+    ) % (database, VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE, content_id_sql, scan_limit)
+    return run_mysql(sql)
+
+
+def voiceover_insight_summary_for_resources(resource_ids, roas_threshold, limit):
+    resource_ids = [str(resource_id or "").strip() for resource_id in (resource_ids or []) if str(resource_id or "").strip()]
+    if not resource_ids:
+        return []
+    database = voiceover_sql_db()
+    resource_id_sql = voiceover_sql_in(resource_ids)
+    summary_limit = max(20, min(300, voiceover_int(limit, VOICEOVER_DEFAULT_MIN_CANDIDATES) * 5))
+    sql = (
+        "SELECT CAST(resource_id AS CHAR), MAX(resource_name), MAX(resource_tag), "
+        "SUM(spend), SUM(revenue), SUM(af_revenue0), MIN(dt), MAX(dt), COUNT(*) "
+        "FROM `%s`.ads_custom_source_insight FORCE INDEX (idx_ridstype) "
+        "WHERE resource_id IN (%s) "
+        "GROUP BY resource_id "
+        "HAVING SUM(spend)>0 AND SUM(revenue)/SUM(spend)*100 >= %.6f "
+        "ORDER BY SUM(revenue)/SUM(spend) DESC, SUM(spend) DESC LIMIT %d"
+    ) % (database, resource_id_sql, voiceover_float(roas_threshold, VOICEOVER_DEFAULT_ROAS_THRESHOLD), summary_limit)
+    return run_mysql(sql)
+
+
+def voiceover_material_item_from_source_and_summary(source_row, summary_row):
+    spend = voiceover_float(summary_row[3] if len(summary_row) > 3 else 0)
+    revenue = voiceover_float(summary_row[4] if len(summary_row) > 4 else 0)
+    revenue0 = voiceover_float(summary_row[5] if len(summary_row) > 5 else 0)
+    roas = round(revenue / spend * 100, 2) if spend > 0 else 0.0
+    roas0 = round(revenue0 / spend * 100, 2) if spend > 0 else 0.0
+    designer_id = str(source_row[10] if len(source_row) > 10 else "").strip()
+    source_user_id = str(source_row[11] if len(source_row) > 11 else "").strip()
+    source_initiator = str(source_row[12] if len(source_row) > 12 else "").strip()
+    return {
+        "material_id": str(source_row[0] if len(source_row) > 0 else "").strip(),
+        "name": str(source_row[1] if len(source_row) > 1 else "").strip(),
+        "url": str(source_row[2] if len(source_row) > 2 else "").strip(),
+        "category": str(source_row[3] if len(source_row) > 3 else "").strip(),
+        "product": str(source_row[4] if len(source_row) > 4 else "").strip(),
+        "country": str(source_row[5] if len(source_row) > 5 else "").strip(),
+        "language": str(source_row[6] if len(source_row) > 6 else "").strip(),
+        "source_content_id": str(source_row[7] if len(source_row) > 7 else "").strip(),
+        "content_sign": str(source_row[8] if len(source_row) > 8 else "").strip(),
+        "duration": voiceover_int(source_row[9] if len(source_row) > 9 else 0),
+        "designer": designer_id,
+        "designer_id": designer_id,
+        "source_user_id": source_user_id,
+        "source_initiator": source_initiator,
+        "resource_name": str(summary_row[1] if len(summary_row) > 1 else "").strip(),
+        "resource_tag": str(summary_row[2] if len(summary_row) > 2 else "").strip(),
+        "spend": round(spend, 2),
+        "revenue": round(revenue, 2),
+        "revenue0": round(revenue0, 2),
+        "roas": roas,
+        "roas0": roas0,
+        "stats_date_from": str(summary_row[6] if len(summary_row) > 6 else "").strip(),
+        "stats_date_to": str(summary_row[7] if len(summary_row) > 7 else "").strip(),
+        "insight_rows": voiceover_int(summary_row[8] if len(summary_row) > 8 else 0),
+    }
+
+
 def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=15, content_ids=None):
     series_code = str(series_code or "").strip()
     if not series_code:
@@ -405,6 +485,34 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
     content_ids = content_ids if content_ids is not None else voiceover_series_content_ids(series_code)
     if not content_ids:
         return []
+    scan_limit = max(VOICEOVER_FILTER_SOURCE_SCAN_LIMIT, limit * 80)
+    scan_limit = min(max(1, VOICEOVER_FILTER_SOURCE_SCAN_MAX), scan_limit)
+    scan_limits = [scan_limit]
+    max_scan = max(scan_limit, VOICEOVER_FILTER_SOURCE_SCAN_MAX)
+    if max_scan > scan_limit:
+        scan_limits.append(max_scan)
+    best_items = []
+    seen_scan_limits = set()
+    for current_scan_limit in scan_limits:
+        if current_scan_limit in seen_scan_limits:
+            continue
+        seen_scan_limits.add(current_scan_limit)
+        source_rows = voiceover_material_source_rows_for_series(content_ids, current_scan_limit)
+        source_by_id = {str(row[0] if row else "").strip(): row for row in source_rows if row and str(row[0]).strip()}
+        summary_rows = voiceover_insight_summary_for_resources(source_by_id.keys(), roas_threshold, limit)
+        items = []
+        for summary_row in summary_rows:
+            material_id = str(summary_row[0] if summary_row else "").strip()
+            source_row = source_by_id.get(material_id)
+            if not source_row:
+                continue
+            items.append(voiceover_material_item_from_source_and_summary(source_row, summary_row))
+        items = sorted(items, key=lambda item: (-voiceover_float(item.get("roas")), -voiceover_float(item.get("spend")), -voiceover_int(item.get("material_id"))))
+        best_items = items[:limit]
+        if len(best_items) >= limit or len(source_rows) < current_scan_limit:
+            return best_items
+    if best_items or not VOICEOVER_FILTER_LEGACY_FALLBACK:
+        return best_items
     content_id_sql = voiceover_sql_in(content_ids)
     sql = (
         "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
@@ -835,4 +943,3 @@ def create_voiceover_design_tasks(payload, session):
         "items": results,
         "errors": errors,
     }
-

@@ -118,6 +118,18 @@
     th, td { padding: 12px 14px; border-bottom: 1px solid #eef2f8; text-align: left; font-size: 13px; vertical-align: middle; }
     th { color: #667894; background: #fbfdff; font-weight: 900; }
     tr:last-child td { border-bottom: 0; }
+    .table-wrap th:first-child, .table-wrap td:first-child { width: 52px; text-align: center; }
+    .table-wrap input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      min-height: 0;
+      padding: 0;
+      margin: 0;
+      border-radius: 4px;
+      accent-color: var(--brand);
+      cursor: pointer;
+      box-shadow: none;
+    }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
     .stat { border: 1px solid #dce6f3; border-left: 4px solid var(--brand); border-radius: 12px; padding: 12px 14px; background: #fbfdff; }
     .stat strong { display: block; color: var(--brand); font-size: 22px; }
@@ -299,7 +311,8 @@
       materials: [],
       selectedKeys: new Set(),
       designers: [],
-      modalItems: []
+      modalItems: [],
+      filterRequestSeq: 0
     };
     const els = {
       quickNav: document.getElementById("quickNav"),
@@ -434,10 +447,29 @@
     function materialKey(item) {
       return `${item.target_content_id || ""}::${item.material_id || ""}`;
     }
+    function materialKeySet() {
+      return new Set(state.materials.map(materialKey));
+    }
+    function pruneSelection() {
+      const validKeys = materialKeySet();
+      state.selectedKeys = new Set(Array.from(state.selectedKeys).filter(key => validKeys.has(key)));
+    }
+    function syncSelectionFromDom() {
+      if (!els.resultTableBody || !state.materials.length) return;
+      const validKeys = materialKeySet();
+      const next = new Set();
+      els.resultTableBody.querySelectorAll("input.row-checkbox").forEach(input => {
+        const key = String(input.dataset.selectionKey || "");
+        if (input.checked && validKeys.has(key)) next.add(key);
+      });
+      state.selectedKeys = next;
+    }
     function selectedItems() {
+      syncSelectionFromDom();
       return state.materials.filter(item => state.selectedKeys.has(materialKey(item)));
     }
     function refreshButtons() {
+      pruneSelection();
       const selectedCount = state.selectedKeys.size;
       els.exportBtn.disabled = !state.materials.length;
       els.openCreateBtn.disabled = selectedCount < 1;
@@ -487,12 +519,13 @@
       return item.risk_label === "替补素材" ? `<span class="risk">替补素材</span>` : "";
     }
     function renderResults() {
+      pruneSelection();
       els.resultTableBody.innerHTML = state.materials.length
         ? state.materials.map(item => {
             const key = materialKey(item);
             const checked = state.selectedKeys.has(key) ? "checked" : "";
             const statusText = item.candidate_reason || item.candidate_status || "";
-            return `<tr><td><input type="checkbox" ${checked} onchange="toggleSelection(${inlineArg(key)}, this.checked)" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">${navText(item.product || "")}</div></td><td>${navText(item.target_content_id || "")}</td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
+            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">${navText(item.product || "")}</div></td><td>${navText(item.target_content_id || "")}</td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
           }).join("")
         : `<tr><td colspan="13" class="muted">暂无筛选结果</td></tr>`;
       els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
@@ -501,24 +534,54 @@
     async function filterMaterials() {
       const contentIds = parseIds(els.filterContentIds.value);
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      const requestSeq = ++state.filterRequestSeq;
+      const roasThreshold = Number(els.roasThreshold.value || 45);
+      const minCandidates = Number(els.minCandidates.value || 15);
+      let completed = 0;
+      const failed = [];
+      state.materials = [];
+      state.selectedKeys = new Set();
       setButtonLoading(els.filterBtn, true, "筛选中...");
       setStatus(els.filterStatus, `正在筛选 ${contentIds.length} 个剧 ID，请稍候`, "loading");
       els.resultSummary.textContent = "筛选中...";
       els.resultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并筛选达标候选...</td></tr>`;
+      renderStats();
+      refreshButtons();
       await nextPaint();
       try {
-        const data = await api("/api/voiceover-drama/filter", {
-          method: "POST",
-          body: JSON.stringify({
-            content_ids: contentIds,
-            roas_threshold: Number(els.roasThreshold.value || 45),
-            min_candidates: Number(els.minCandidates.value || 15)
-          })
+        await runLimited(contentIds, 2, async contentId => {
+          try {
+            const data = await api("/api/voiceover-drama/filter", {
+              method: "POST",
+              body: JSON.stringify({
+                content_ids: [contentId],
+                roas_threshold: roasThreshold,
+                min_candidates: minCandidates
+              })
+            });
+            if (requestSeq !== state.filterRequestSeq) return;
+            const items = data.items || [];
+            state.materials = state.materials.concat(items);
+            items.filter(item => item.selected_by_default).map(materialKey).forEach(key => state.selectedKeys.add(key));
+            completed += 1;
+            renderResults();
+            setStatus(els.filterStatus, `已完成 ${completed}/${contentIds.length} 个剧 ID，累计 ${state.materials.length} 条候选素材`, completed === contentIds.length ? "success" : "loading");
+          } catch (error) {
+            if (requestSeq !== state.filterRequestSeq) return;
+            completed += 1;
+            failed.push({ contentId, error });
+            renderResults();
+            setStatus(els.filterStatus, `已完成 ${completed}/${contentIds.length} 个剧 ID，${failed.length} 个失败`, "error");
+          }
         });
-        state.materials = data.items || [];
-        state.selectedKeys = new Set(state.materials.filter(item => item.selected_by_default).map(materialKey));
+        if (requestSeq !== state.filterRequestSeq) return;
         renderResults();
-        setStatus(els.filterStatus, `完成 ${state.materials.length} 条候选素材`, "success");
+        if (failed.length === contentIds.length) {
+          throw new Error(failed.map(item => `${item.contentId}: ${errorText(item.error)}`).join("；"));
+        }
+        const failedText = failed.length ? `，失败 ${failed.length} 个` : "";
+        setStatus(els.filterStatus, `完成 ${state.materials.length} 条候选素材${failedText}`, failed.length ? "error" : "success");
+        if (failed.length) toast(`部分剧 ID 筛选失败：${failed.map(item => item.contentId).join("、")}`, "error");
       } catch (error) {
         setStatus(els.filterStatus, errorText(error), "error");
         throw error;
@@ -526,7 +589,19 @@
         setButtonLoading(els.filterBtn, false);
       }
     }
+    async function runLimited(items, limit, worker) {
+      let nextIndex = 0;
+      const workerCount = Math.max(1, Math.min(limit, items.length));
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          await worker(items[index], index);
+        }
+      }));
+    }
     function clearFilters() {
+      state.filterRequestSeq += 1;
       els.filterContentIds.value = "";
       state.materials = [];
       state.selectedKeys = new Set();
@@ -588,6 +663,7 @@
       renderModalOverview();
     }
     async function openTaskModal() {
+      syncSelectionFromDom();
       const items = selectedItems();
       if (!items.length) return toast("请先选择素材", "error");
       setButtonLoading(els.openCreateBtn, true, "打开中...");
@@ -669,6 +745,11 @@
     els.filterBtn.onclick = () => filterMaterials().catch(error => showError("筛选素材失败", error));
     els.clearBtn.onclick = clearFilters;
     els.selectAll.onchange = event => toggleAllSelection(event.target.checked);
+    els.resultTableBody.addEventListener("change", event => {
+      const checkbox = event.target.closest("input.row-checkbox");
+      if (!checkbox) return;
+      toggleSelection(checkbox.dataset.selectionKey || "", checkbox.checked);
+    });
     els.exportBtn.onclick = exportCsv;
     els.openCreateBtn.onclick = () => openTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
     els.modalCloseBtn.onclick = closeTaskModal;
