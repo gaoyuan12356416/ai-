@@ -20,7 +20,7 @@
       --shadow: 0 18px 42px rgba(35, 55, 95, .11);
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     button, input, select, textarea { font: inherit; }
     .app { min-height: 100vh; display: grid; grid-template-columns: 256px minmax(0, 1fr); }
     .sidebar { background: linear-gradient(180deg, #132a4f, #09162b); color: #eef5ff; padding: 24px 18px; min-height: 100vh; }
@@ -29,18 +29,17 @@
     .brand strong { display: block; font-size: 18px; }
     .brand span, .nav span { color: rgba(238,245,255,.62); font-size: 12px; }
     .nav { display: grid; gap: 10px; margin-top: 22px; }
-    .main { min-width: 0; padding: 34px; }
-    .topbar { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; margin-bottom: clamp(120px, 17vh, 240px); }
-    h1 { margin: 0 0 8px; font-size: 32px; letter-spacing: 0; }
+    .main { min-width: 0; padding: 28px; }
+    .topbar { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; margin-bottom: 20px; }
+    h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
     h2 { margin: 0; font-size: 18px; }
     p { margin: 0; color: var(--muted); }
     .user-card { background: rgba(255,255,255,.8); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; min-width: 220px; text-align: right; }
     .grid { display: grid; gap: 16px; }
-    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
     .panel-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 16px; }
     .panel-body { padding: 18px 20px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-    .filter-row { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; align-items: end; margin-bottom: 16px; }
     .field { display: grid; gap: 7px; }
     label { color: #31476a; font-size: 13px; font-weight: 700; }
     input, select, textarea { width: 100%; border: 1px solid #cbd8ea; border-radius: 12px; padding: 11px 12px; background: #fff; color: var(--text); outline: none; }
@@ -56,8 +55,8 @@
     .stat { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 14px; padding: 13px; }
     .stat b { display: block; color: var(--blue); font-size: 24px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
-    table { border-collapse: collapse; width: 100%; min-width: 1320px; table-layout: fixed; background: #fff; }
-    th, td { padding: 15px 14px; border-bottom: 1px solid #ecf1f6; text-align: left; vertical-align: top; font-size: 13px; overflow-wrap: break-word; }
+    table { border-collapse: collapse; width: 100%; min-width: 1180px; table-layout: fixed; background: #fff; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid #ecf1f6; text-align: left; vertical-align: top; font-size: 13px; overflow-wrap: break-word; }
     th { background: #f8fbff; color: #627493; font-weight: 800; }
     tr:last-child td { border-bottom: 0; }
     .task-id { display: block; color: #0d2c57; font-weight: 900; line-height: 1.35; }
@@ -124,9 +123,6 @@
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
       .main { padding: 18px; }
-      .topbar { margin-bottom: 32px; }
-      .filter-row { grid-template-columns: 1fr; }
-      .filter-row .field { grid-column: auto !important; }
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .form-grid { grid-template-columns: 1fr; }
       .col-3, .col-4, .col-6, .col-8, .col-12 { grid-column: span 1; }
@@ -154,8 +150,8 @@
       <section id="pageContent" class="hidden">
         <div class="topbar">
           <div>
-            <h1>投放素材任务管理</h1>
-            <p>创建投放素材需求，审核需求和素材，并完成最终素材上报。</p>
+            <h1>投放素材任务</h1>
+            <p>创建素材需求，跟进需求审核、素材审核和最终素材上报。</p>
           </div>
           <div class="user-card">
             <strong id="userName">--</strong>
@@ -164,18 +160,21 @@
         </div>
         <div class="panel">
           <div class="panel-head">
-            <h2>任务列表</h2>
+            <div>
+              <h2>任务列表</h2>
+              <p id="summary">正在加载...</p>
+            </div>
             <div class="toolbar">
               <button id="createBtn" class="btn primary" type="button">创建任务</button>
               <button id="reloadBtn" class="btn" type="button">刷新</button>
             </div>
           </div>
           <div class="panel-body">
-            <div class="filter-row">
-              <div class="field" style="grid-column:span 3;">
+            <div class="toolbar" style="margin-bottom:16px">
+              <div class="field" style="min-width:180px">
                 <label>状态</label>
                 <select id="statusFilter">
-                  <option value="all">全部</option>
+                  <option value="all">全部状态</option>
                   <option value="draft">待发布</option>
                   <option value="generating_demand">生成需求中</option>
                   <option value="demand_review">需求待审核</option>
@@ -186,48 +185,46 @@
                   <option value="failed">失败</option>
                 </select>
               </div>
-              <div class="field" style="grid-column:span 6;">
+              <div class="field" style="min-width:320px; flex:1">
                 <label>搜索</label>
-                <input id="searchInput" placeholder="产品 / 任务 / 创建人" />
+                <input id="searchInput" placeholder="任务 ID / 产品 / 创建人 / 描述" />
               </div>
-              <div class="field" style="grid-column:span 3;">
-                <label>&nbsp;</label>
-                <button id="searchBtn" class="btn" type="button">筛选</button>
-              </div>
+              <button id="searchBtn" class="btn primary" type="button">筛选</button>
+            </div>
+            <div class="stats">
+              <div class="stat"><b id="statTotal">0</b><span>任务总数</span></div>
+              <div class="stat"><b id="statDraft">0</b><span>待发布</span></div>
+              <div class="stat"><b id="statReview">0</b><span>待审核</span></div>
+              <div class="stat"><b id="statDone">0</b><span>已完成</span></div>
             </div>
             <div class="table-wrap">
               <table>
                 <colgroup>
-                  <col style="width:13%">
-                  <col style="width:16%">
-                  <col style="width:12%">
+                  <col style="width:31%">
+                  <col style="width:8%">
+                  <col style="width:11%">
                   <col style="width:7%">
                   <col style="width:8%">
-                  <col style="width:9%">
-                  <col style="width:6%">
+                  <col style="width:7%">
                   <col style="width:6%">
                   <col style="width:10%">
-                  <col style="width:13%">
+                  <col style="width:12%">
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>任务ID</th>
-                    <th>类型</th>
+                    <th>任务</th>
                     <th>产品</th>
-                    <th>数量</th>
+                    <th>类型</th>
                     <th>国家/语言</th>
+                    <th>尺寸/数量</th>
                     <th>状态</th>
                     <th>创建人</th>
-                    <th>素材</th>
                     <th>更新时间</th>
                     <th>操作</th>
                   </tr>
                 </thead>
-                <tbody id="taskBody"><tr><td colspan="10" class="muted">正在加载...</td></tr></tbody>
+                <tbody id="taskBody"><tr><td colspan="9" class="muted">正在加载...</td></tr></tbody>
               </table>
-            </div>
-            <div class="pagination">
-              <div class="muted" id="summary">--</div>
             </div>
           </div>
         </div>
@@ -378,6 +375,10 @@
       adMaterialReviewContent: document.getElementById("adMaterialReviewContent"),
       adMaterialReviewCloseBtn: document.getElementById("adMaterialReviewCloseBtn"),
       toast: document.getElementById("toast"),
+      statTotal: document.getElementById("statTotal"),
+      statDraft: document.getElementById("statDraft"),
+      statReview: document.getElementById("statReview"),
+      statDone: document.getElementById("statDone"),
     };
     const SIZE_OPTIONS = ["1:1", "4:5", "9:16", "1.91:1", "16:9"];
     const state = {
@@ -410,10 +411,9 @@
     }
     function adMaterialCanCompleteUpload(task) {
       const assets = task?.assets || [];
-      if (!task || adMaterialCanReview(task) || ["draft", "generating_demand", "generating_material", "done"].includes(task.status)) return false;
       const readyStatuses = new Set(["approved", "uploaded", "abandoned"]);
       const hasUploadable = assets.some(asset => asset.status === "approved" || asset.status === "uploaded");
-      return assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
+      return task && task.status !== "done" && assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
     }
     function adMaterialDisplayStatusText(task) {
       if (adMaterialCanCompleteUpload(task)) return "待上报";
@@ -441,6 +441,7 @@
       const index = state.tasks.findIndex(item => item.task_id === task.task_id);
       if (index >= 0) state.tasks[index] = { ...state.tasks[index], ...task };
       else state.tasks.unshift(task);
+      updateStats();
       renderRows();
     }
     function adMaterialAssetPreviewUrl(asset) {
@@ -587,7 +588,7 @@
         container: "#quickNav",
         activeKey: "adMaterials",
         auth: state.auth || {},
-        groupOrder: ["ad_material", "drama", "system", "voiceover"],
+        groupOrder: ["voiceover", "ad_material", "drama", "system"],
       });
     }
     async function loadAuth() {
@@ -623,37 +624,42 @@
       els.competitorSource.innerHTML = options.join("");
     }
     async function loadTasks() {
-      els.taskBody.innerHTML = `<tr><td colspan="10" class="muted">加载中...</td></tr>`;
+      els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">加载中...</td></tr>`;
       const params = new URLSearchParams();
       if (els.statusFilter.value && els.statusFilter.value !== "all") params.set("status", els.statusFilter.value);
       if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
       const data = await api(`/api/ad-material/tasks?${params.toString()}`);
       state.tasks = data.items || [];
-      els.summary.textContent = `共 ${data.total || 0} 条`;
+      els.summary.textContent = `共 ${data.total || 0} 条任务`;
+      updateStats();
       renderRows();
+    }
+    function updateStats() {
+      els.statTotal.textContent = String(state.tasks.length);
+      els.statDraft.textContent = String(state.tasks.filter(item => item.status === "draft").length);
+      els.statReview.textContent = String(state.tasks.filter(item => ["demand_review", "material_review"].includes(item.status)).length);
+      els.statDone.textContent = String(state.tasks.filter(item => item.status === "done").length);
     }
     function renderRows() {
       if (!state.tasks.length) {
-        els.taskBody.innerHTML = `<tr><td colspan="10" class="muted">暂无投放素材任务</td></tr>`;
+        els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">暂无投放素材任务</td></tr>`;
         return;
       }
       els.taskBody.innerHTML = state.tasks.map(buildAdMaterialRow).join("");
     }
     function buildAdMaterialRow(task) {
-      const assets = task.assets || [];
       const canEdit = task.status === "draft";
       const canDelete = task.status !== "done";
       const id = text(task.task_id);
       return `
         <tr>
-          <td><code>${text((task.task_id || "").slice(0, 8))}</code></td>
-          <td>${text(adMaterialTaskTypeText(task.task_type))}</td>
+          <td><span class="task-id">${text(task.task_id)}</span><div class="task-desc cell-muted" title="${text(task.description || "-")}">${text(task.description || "-")}</div></td>
           <td><div class="nowrap" title="${text(task.product_name || task.app_id || "")}">${text(task.product_name || task.app_id || "")}</div><div class="cell-muted nowrap">${text(task.app_id || "")}</div></td>
-          <td>${text(task.quantity || 0)}</td>
+          <td>${text(adMaterialTaskTypeText(task.task_type))}</td>
           <td>${text(task.country || "")}/${text(task.language || "")}</td>
+          <td>${text(task.size_plan_summary || task.size || "-")}<div class="cell-muted">${text(task.quantity || 0)} 张</div></td>
           <td>${adMaterialStatusCell(task)}</td>
           <td><div class="nowrap" title="${text(task.creator_name || task.creator_email || "")}">${text(task.creator_name || task.creator_email || "")}</div></td>
-          <td>${text(assets.length)}</td>
           <td>${text(task.updated_at || "-")}</td>
           <td>
             <div class="actions-inline">

@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>配音剧语种任务 - AI自动后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #edf3fb;
+      --panel: #fff;
+      --line: #dbe5f2;
+      --text: #0f2342;
+      --muted: #697891;
+      --brand: #2f63ff;
+      --success: #118557;
+      --warn: #d48706;
+      --danger: #c83226;
+      --sidebar: #0e1a2f;
+      --shadow: 0 18px 40px rgba(18, 38, 74, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      background: linear-gradient(135deg, #eef4ff 0%, #f7f9fc 42%, #e8f0fb 100%);
+      color: var(--text);
+    }
+    a { color: inherit; text-decoration: none; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 260px 1fr; }
+    .sidebar {
+      background: linear-gradient(180deg, #14213a 0%, #0b1528 100%);
+      color: #fff;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; padding: 8px; }
+    .brand-mark {
+      width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center;
+      background: linear-gradient(135deg, #3a73ff, #2352d9); font-weight: 900;
+    }
+    .brand strong { display: block; font-size: 19px; }
+    .brand span { color: #9eb0ca; font-size: 12px; }
+    .nav-group {
+      border-top: 1px solid rgba(255,255,255,.08);
+      padding-top: 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .nav-title { color: #8fa2bf; font-size: 12px; padding: 0 8px; }
+    .nav-item {
+      display: block;
+      padding: 13px 14px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 14px;
+      color: #dce7f7;
+    }
+    .nav-item.active { background: #2f63ff; border-color: #4f7cff; color: #fff; box-shadow: 0 14px 24px rgba(47,99,255,.3); }
+    .main { min-width: 0; padding: 28px; }
+    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
+    .title h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
+    .title p { margin: 0; color: var(--muted); }
+    .user-card, .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      min-height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 16px;
+      font-weight: 800;
+    }
+    .top-actions { display: flex; gap: 10px; align-items: center; }
+    .user-card { justify-content: flex-start; min-width: 220px; font-weight: 700; }
+    .user-card small { display: block; color: var(--muted); font-weight: 600; margin-top: 2px; }
+    .btn { cursor: pointer; }
+    .btn:disabled { cursor: not-allowed; opacity: .55; }
+    .btn-primary { background: var(--brand); color: #fff; border-color: var(--brand); box-shadow: 0 14px 24px rgba(47,99,255,.22); }
+    .btn-secondary { color: #223855; }
+    .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .btn.mini { min-height: 30px; padding: 0 10px; font-size: 12px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 18px 22px; border-bottom: 1px solid #e8eef7; }
+    .panel-title-row { display: flex; gap: 12px; align-items: center; }
+    .panel-icon {
+      width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center;
+      color: #1f55e6; background: #e9efff; font-weight: 900; font-size: 13px;
+    }
+    .panel h2 { margin: 0 0 4px; font-size: 20px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .panel-body { padding: 20px 22px; }
+    .actions-inline { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    .count-grid, .filter-grid { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 18px; }
+    .field { display: grid; gap: 8px; }
+    label { color: #223855; font-weight: 900; font-size: 14px; }
+    textarea, input, select {
+      width: 100%;
+      border: 1px solid #cfdbea;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--text);
+      min-height: 42px;
+      padding: 10px 12px;
+      font: inherit;
+      outline: none;
+    }
+    textarea { resize: vertical; min-height: 132px; line-height: 1.5; }
+    textarea:focus, input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(47,99,255,.12); }
+    .input-card, .result-card, .config-card {
+      border: 1px solid #d9e4f2;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fff, #fbfdff);
+      padding: 16px;
+    }
+    .result-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .status-pill {
+      display: inline-flex; align-items: center; width: max-content; min-height: 28px;
+      border-radius: 999px; padding: 5px 10px; background: #f2f5fa; color: #50627d;
+      font-size: 12px; font-weight: 900;
+    }
+    .status-pill.is-loading { background: #e8efff; color: #2457ff; }
+    .status-pill.is-success { background: #e8f7ef; color: var(--success); }
+    .status-pill.is-error { background: #ffecec; color: var(--danger); }
+    .config-card { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 14px; align-content: start; }
+    .config-card .status-pill, .config-card .actions-inline { grid-column: 1 / -1; }
+    .table-wrap { overflow: auto; border: 1px solid #e2eaf5; border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; min-width: 820px; }
+    th, td { padding: 12px 14px; border-bottom: 1px solid #eef2f8; text-align: left; font-size: 13px; vertical-align: middle; }
+    th { color: #667894; background: #fbfdff; font-weight: 900; }
+    tr:last-child td { border-bottom: 0; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stat { border: 1px solid #dce6f3; border-left: 4px solid var(--brand); border-radius: 12px; padding: 12px 14px; background: #fbfdff; }
+    .stat strong { display: block; color: var(--brand); font-size: 22px; }
+    .stat span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .risk { display: inline-flex; border-radius: 999px; padding: 4px 8px; background: #fff3da; color: #b46c00; font-size: 12px; font-weight: 900; }
+    .detail { margin-top: 12px; font-size: 13px; color: #42536d; }
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(13, 24, 43, .48); display: grid; place-items: center; z-index: 40; padding: 28px;
+    }
+    .modal-backdrop.hidden { display: none; }
+    .modal-panel { width: min(1120px, 96vw); max-height: 92vh; display: flex; flex-direction: column; background: #fff; border-radius: 18px; overflow: hidden; box-shadow: 0 32px 70px rgba(0,0,0,.28); }
+    .modal-panel .panel-body { overflow: auto; }
+    .modal-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .overview-item { border: 1px solid #dce6f3; border-radius: 12px; padding: 12px 14px; background: #fbfdff; }
+    .overview-item strong { display: block; color: var(--brand); font-size: 20px; }
+    .overview-item span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .material-card { border: 1px solid #d6e2f1; border-radius: 14px; padding: 16px; background: #fbfdff; margin-bottom: 12px; }
+    .card-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .task-form { display: grid; grid-template-columns: 150px minmax(240px, 1fr) 180px 240px; gap: 14px; align-items: end; }
+    .description-field { grid-column: 2 / -1; }
+    .stepper { display: grid; grid-template-columns: 42px 64px 42px; }
+    .stepper button, .stepper input { border-radius: 0; text-align: center; min-height: 42px; }
+    .stepper button:first-child { border-radius: 10px 0 0 10px; }
+    .stepper button:last-child { border-radius: 0 10px 10px 0; background: #00a96b; border-color: #00a96b; color: #fff; }
+    .checks { display: flex; gap: 18px; min-height: 42px; align-items: center; }
+    .check { display: inline-flex; gap: 6px; align-items: center; font-weight: 800; }
+    .check input { width: auto; min-height: auto; }
+    .modal-footer { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-top: 1px solid var(--line); padding: 14px 18px; background: #fff; }
+    .toast { position: fixed; right: 22px; bottom: 22px; background: #0f2342; color: #fff; padding: 12px 14px; border-radius: 12px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .18s ease; z-index: 60; max-width: 520px; }
+    .toast.show { opacity: 1; }
+    .toast.error { background: var(--danger); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .count-grid, .filter-grid, .task-form { grid-template-columns: 1fr; }
+      .description-field { grid-column: 1; }
+      .topbar, .modal-footer { flex-direction: column; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">剧</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">配音剧素材</div>
+        <a class="nav-item active" href="/voiceover-drama.html">配音剧语种任务</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">其他模块</div>
+        <a class="nav-item" href="/drama-synthesis.html">剧集合成</a>
+        <a class="nav-item" href="/screenshots.html">封面图合成</a>
+        <a class="nav-item" href="/ad-material-tasks.html">投放素材任务</a>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div class="title">
+          <h1>配音剧语种任务</h1>
+          <p>按剧 ID 查询系列素材，筛选候选素材并批量创建设计师需求。</p>
+        </div>
+        <div class="top-actions">
+          <div class="user-card" id="userCard">未登录<small>请先登录</small></div>
+          <button id="refreshBtn" class="btn btn-secondary" type="button">刷新</button>
+          <button id="loginBtn" class="btn btn-primary" type="button">登录</button>
+        </div>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title-row">
+            <div class="panel-icon">查</div>
+            <div><h2>批量素材数查询</h2><div class="muted">输入 10-20 个剧 ID / content_id，自动去重后查询后台已有素材数量。</div></div>
+          </div>
+          <div class="actions-inline">
+            <button id="countBtn" class="btn btn-primary" type="button">确认查询</button>
+            <button id="countClearBtn" class="btn btn-secondary" type="button">清空</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="count-grid">
+            <div class="field input-card">
+              <label>剧 ID / content_id 列表</label>
+              <textarea id="countContentIds" rows="7" placeholder="每行一个剧 ID，支持逗号或空格分隔"></textarea>
+            </div>
+            <div class="field result-card">
+              <div class="result-title"><label>查询结果</label><span id="countStatus" class="status-pill">待查询</span></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>剧 ID</th><th>series_code</th><th>资源下剧数</th><th>素材数</th><th>状态</th></tr></thead>
+                  <tbody id="countTableBody"><tr><td colspan="5" class="muted">暂无查询结果</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title-row">
+            <div class="panel-icon">筛</div>
+            <div><h2>筛选任务与配置</h2><div class="muted">批量填写剧 ID，系统按资源ID汇总该资源下全部素材。</div></div>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="filter-grid">
+            <div class="field input-card">
+              <label>批量剧 ID</label>
+              <textarea id="filterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
+            </div>
+            <div class="config-card">
+              <div class="field"><label>ROAS 阈值</label><input id="roasThreshold" type="number" min="0" step="0.1" value="45" /></div>
+              <div class="field"><label>候选素材数</label><input id="minCandidates" type="number" min="0" max="50" value="15" /></div>
+              <div id="filterStatus" class="status-pill">待筛选</div>
+              <div class="actions-inline">
+                <button id="filterBtn" class="btn btn-primary" type="button">筛选候选素材</button>
+                <button id="clearBtn" class="btn btn-secondary" type="button">清空</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title-row">
+            <div class="panel-icon">结</div>
+            <div><h2>候选素材筛选结果</h2><div class="muted" id="resultSummary">尚未筛选</div></div>
+          </div>
+          <div class="actions-inline">
+            <button id="exportBtn" class="btn btn-secondary" type="button" disabled>导出筛选明细</button>
+            <button id="openCreateBtn" class="btn btn-primary" type="button" disabled>创建任务</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="stats" class="stats">
+            <div class="stat"><strong>0</strong><span>候选素材</span></div>
+            <div class="stat"><strong>0</strong><span>ROAS达标</span></div>
+            <div class="stat"><strong>0</strong><span>已选择</span></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>剧 ID</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
+              <tbody id="resultTableBody"><tr><td colspan="13" class="muted">暂无筛选结果</td></tr></tbody>
+            </table>
+          </div>
+          <div class="detail">素材级筛选说明：每一行就是一条可勾选素材；同一个剧可以出现多条素材。只对勾选素材提需求，未勾选素材不会进入创建弹窗。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="taskModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <div><h2>批量创建设计师任务</h2><div class="muted" id="modalSummary">请逐条素材设置任务参数，确认后统一提交。</div></div>
+        <button id="modalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="modalOverview" class="modal-overview"></div>
+        <div id="taskCards"></div>
+      </div>
+      <div class="modal-footer">
+        <div>
+          <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+          <div id="submitStatus" class="status-pill" style="margin-top:8px;">待提交</div>
+        </div>
+        <div class="actions-inline">
+          <button id="modalResetBtn" class="btn btn-secondary" type="button">Reset</button>
+          <button id="submitTasksBtn" class="btn btn-primary" type="button">确认创建全部任务</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const state = {
+      auth: { authenticated: false, user: null, login_url: "/api/auth/feishu/login" },
+      countRows: [],
+      materials: [],
+      selectedKeys: new Set(),
+      designers: [],
+      modalItems: []
+    };
+    const els = {
+      userCard: document.getElementById("userCard"),
+      refreshBtn: document.getElementById("refreshBtn"),
+      loginBtn: document.getElementById("loginBtn"),
+      countContentIds: document.getElementById("countContentIds"),
+      countBtn: document.getElementById("countBtn"),
+      countClearBtn: document.getElementById("countClearBtn"),
+      countStatus: document.getElementById("countStatus"),
+      countTableBody: document.getElementById("countTableBody"),
+      filterContentIds: document.getElementById("filterContentIds"),
+      roasThreshold: document.getElementById("roasThreshold"),
+      minCandidates: document.getElementById("minCandidates"),
+      filterBtn: document.getElementById("filterBtn"),
+      clearBtn: document.getElementById("clearBtn"),
+      filterStatus: document.getElementById("filterStatus"),
+      resultSummary: document.getElementById("resultSummary"),
+      stats: document.getElementById("stats"),
+      resultTableBody: document.getElementById("resultTableBody"),
+      selectAll: document.getElementById("selectAll"),
+      exportBtn: document.getElementById("exportBtn"),
+      openCreateBtn: document.getElementById("openCreateBtn"),
+      taskModal: document.getElementById("taskModal"),
+      modalSummary: document.getElementById("modalSummary"),
+      modalOverview: document.getElementById("modalOverview"),
+      taskCards: document.getElementById("taskCards"),
+      modalCloseBtn: document.getElementById("modalCloseBtn"),
+      modalResetBtn: document.getElementById("modalResetBtn"),
+      submitTasksBtn: document.getElementById("submitTasksBtn"),
+      submitStatus: document.getElementById("submitStatus"),
+      toast: document.getElementById("toast")
+    };
+    function navText(value) {
+      const div = document.createElement("div");
+      div.textContent = value == null ? "" : String(value);
+      return div.innerHTML;
+    }
+    function inlineArg(value) {
+      return navText(JSON.stringify(String(value == null ? "" : value)));
+    }
+    function parseIds(text) {
+      return Array.from(new Set(String(text || "").split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean)));
+    }
+    function toast(message, variant) {
+      els.toast.textContent = message;
+      els.toast.classList.toggle("error", variant === "error");
+      els.toast.classList.add("show");
+      clearTimeout(toast._timer);
+      toast._timer = setTimeout(() => els.toast.classList.remove("show"), variant === "error" ? 5200 : 2600);
+    }
+    function errorText(error) {
+      return error && error.message ? error.message : String(error || "请求失败");
+    }
+    function showError(prefix, error) {
+      console.warn(prefix, error);
+      toast(`${prefix}：${errorText(error)}`, "error");
+    }
+    function setStatus(element, text, type = "idle") {
+      if (!element) return;
+      element.textContent = text;
+      element.classList.remove("is-loading", "is-success", "is-error");
+      if (type && type !== "idle") element.classList.add(`is-${type}`);
+    }
+    function setButtonLoading(button, loading, loadingText) {
+      if (!button) return;
+      if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || "";
+      button.disabled = !!loading;
+      button.textContent = loading ? loadingText : button.dataset.defaultText;
+      button.setAttribute("aria-busy", loading ? "true" : "false");
+    }
+    function nextPaint() {
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    async function api(url, options) {
+      const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        state.auth = data.auth || { authenticated: false, login_url: "/api/auth/feishu/login" };
+        renderAuth();
+        throw new Error("请先登录");
+      }
+      if (!response.ok) throw new Error(data.message || data.error || `请求失败 (${response.status})`);
+      return data;
+    }
+    function userCan(moduleKey) {
+      const user = state.auth && state.auth.user;
+      if (!user) return false;
+      if (user.is_admin) return true;
+      return !!(user.permissions && user.permissions[moduleKey]);
+    }
+    async function loadAuthStatus() {
+      try {
+        state.auth = await api("/api/auth/status");
+      } catch (error) {
+        state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
+      }
+      renderAuth();
+    }
+    function renderAuth() {
+      const user = state.auth && state.auth.user;
+      if (state.auth && state.auth.authenticated && user) {
+        els.userCard.innerHTML = `<div><strong>${navText(user.name || user.email || "已登录")}</strong><small>${navText(user.role || "")} / tenant ${navText(user.tenant_key || "")}</small></div>`;
+        els.loginBtn.textContent = "退出登录";
+      } else {
+        els.userCard.innerHTML = `未登录<small>请先登录</small>`;
+        els.loginBtn.textContent = "登录";
+      }
+    }
+    async function loginOrLogout() {
+      if (state.auth && state.auth.authenticated) {
+        await api("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+        location.reload();
+      } else {
+        location.href = (state.auth && state.auth.login_url) || "/api/auth/feishu/login";
+      }
+    }
+    function materialKey(item) {
+      return `${item.target_content_id || ""}::${item.material_id || ""}`;
+    }
+    function selectedItems() {
+      return state.materials.filter(item => state.selectedKeys.has(materialKey(item)));
+    }
+    function refreshButtons() {
+      const selectedCount = state.selectedKeys.size;
+      els.exportBtn.disabled = !state.materials.length;
+      els.openCreateBtn.disabled = selectedCount < 1;
+      const selectable = state.materials.length;
+      els.selectAll.checked = selectable > 0 && selectedCount === selectable;
+      els.selectAll.indeterminate = selectedCount > 0 && selectedCount < selectable;
+      renderStats();
+    }
+    function renderStats() {
+      const total = state.materials.length;
+      const defaults = state.materials.filter(item => item.selected_by_default).length;
+      const selected = state.selectedKeys.size;
+      els.stats.innerHTML = [["候选素材", total], ["ROAS达标", defaults], ["已选择", selected]]
+        .map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
+    }
+    function renderCountRows() {
+      els.countTableBody.innerHTML = state.countRows.length
+        ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.series_content_count ?? "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="muted">暂无查询结果</td></tr>`;
+    }
+    async function queryCounts() {
+      const contentIds = parseIds(els.countContentIds.value);
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      setButtonLoading(els.countBtn, true, "查询中...");
+      setStatus(els.countStatus, `正在查询 ${contentIds.length} 个剧 ID，请稍候`, "loading");
+      els.countTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按资源ID汇总素材数...</td></tr>`;
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/material-counts", { method: "POST", body: JSON.stringify({ content_ids: contentIds }) });
+        state.countRows = data.items || [];
+        renderCountRows();
+        setStatus(els.countStatus, `完成 ${state.countRows.length} 条`, "success");
+      } catch (error) {
+        setStatus(els.countStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.countBtn, false);
+      }
+    }
+    function clearCounts() {
+      els.countContentIds.value = "";
+      state.countRows = [];
+      setStatus(els.countStatus, "待查询");
+      renderCountRows();
+    }
+    function riskCell(item) {
+      return item.risk_label === "替补素材" ? `<span class="risk">替补素材</span>` : "";
+    }
+    function renderResults() {
+      els.resultTableBody.innerHTML = state.materials.length
+        ? state.materials.map(item => {
+            const key = materialKey(item);
+            const checked = state.selectedKeys.has(key) ? "checked" : "";
+            const statusText = item.candidate_reason || item.candidate_status || "";
+            return `<tr><td><input type="checkbox" ${checked} onchange="toggleSelection(${inlineArg(key)}, this.checked)" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">${navText(item.product || "")}</div></td><td>${navText(item.target_content_id || "")}</td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
+          }).join("")
+        : `<tr><td colspan="13" class="muted">暂无筛选结果</td></tr>`;
+      els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
+      refreshButtons();
+    }
+    async function filterMaterials() {
+      const contentIds = parseIds(els.filterContentIds.value);
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      setButtonLoading(els.filterBtn, true, "筛选中...");
+      setStatus(els.filterStatus, `正在筛选 ${contentIds.length} 个剧 ID，请稍候`, "loading");
+      els.resultSummary.textContent = "筛选中...";
+      els.resultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并筛选达标候选...</td></tr>`;
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/filter", {
+          method: "POST",
+          body: JSON.stringify({
+            content_ids: contentIds,
+            roas_threshold: Number(els.roasThreshold.value || 45),
+            min_candidates: Number(els.minCandidates.value || 15)
+          })
+        });
+        state.materials = data.items || [];
+        state.selectedKeys = new Set(state.materials.filter(item => item.selected_by_default).map(materialKey));
+        renderResults();
+        setStatus(els.filterStatus, `完成 ${state.materials.length} 条候选素材`, "success");
+      } catch (error) {
+        setStatus(els.filterStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.filterBtn, false);
+      }
+    }
+    function clearFilters() {
+      els.filterContentIds.value = "";
+      state.materials = [];
+      state.selectedKeys = new Set();
+      setStatus(els.filterStatus, "待筛选");
+      renderResults();
+    }
+    function toggleSelection(key, checked) {
+      if (checked) state.selectedKeys.add(String(key || ""));
+      else state.selectedKeys.delete(String(key || ""));
+      els.resultSummary.textContent = `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条`;
+      refreshButtons();
+    }
+    function toggleAllSelection(checked) {
+      state.selectedKeys = checked ? new Set(state.materials.map(materialKey)) : new Set();
+      renderResults();
+    }
+    async function loadDesigners() {
+      if (state.designers.length || !userCan("voiceover_drama_tasks")) return state.designers;
+      const data = await api("/api/voiceover-drama/designers");
+      state.designers = data.items || [];
+      return state.designers;
+    }
+    function designerOptions(selectedValue = "") {
+      if (!state.designers.length) return `<option value="">暂无可选设计师</option>`;
+      return [`<option value="">请选择设计师</option>`].concat(state.designers.map(item => {
+        const value = String(item.user_id || "");
+        const selected = value === String(selectedValue || "") ? "selected" : "";
+        return `<option value="${navText(value)}" ${selected}>${navText(item.label || item.name || value)} / ${navText(value)}</option>`;
+      })).join("");
+    }
+    function resolveDefaultDesigner(item) {
+      const candidates = [item.designer_id, item.designer, item.source_user_id, item.source_initiator]
+        .map(value => String(value || "").trim()).filter(value => value && value !== "0" && value.toLowerCase() !== "null");
+      for (const candidate of candidates) {
+        const exact = state.designers.find(designer => String(designer.user_id || "") === candidate || String(designer.sub_user_id || "") === candidate);
+        if (exact) return String(exact.user_id || "");
+      }
+      return "";
+    }
+    function renderModalOverview() {
+      const selected = state.modalItems.length;
+      let totalQuantity = 0;
+      let incomplete = 0;
+      state.modalItems.forEach((item, index) => {
+        totalQuantity += Math.max(1, Number(document.getElementById(`taskNumber_${index}`)?.value || 1));
+        if (!document.getElementById(`taskDesigner_${index}`)?.value) incomplete += 1;
+      });
+      els.modalOverview.innerHTML = [["已选素材", selected], ["预计创建任务", selected], ["需求素材数", totalQuantity || selected], ["未完成配置", incomplete]]
+        .map(([label, value]) => `<div class="overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      els.modalSummary.textContent = `已选择 ${selected} 条素材；预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+    }
+    function renderTaskCards() {
+      els.taskCards.innerHTML = state.modalItems.map((item, index) => {
+        const defaultDesigner = resolveDefaultDesigner(item);
+        const designerHint = [item.designer, item.source_user_id].map(value => String(value || "").trim()).find(value => value && value !== "0" && value.toLowerCase() !== "null");
+        const description = `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`;
+        return `<div class="material-card"><div class="card-head"><div><strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong><div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div></div>${riskCell(item)}</div><div class="task-form"><div class="field"><label>任务数量</label><div class="stepper"><button type="button" onclick="stepTaskNumber(${index}, -1)">-</button><input id="taskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderModalOverview()" /><button type="button" onclick="stepTaskNumber(${index}, 1)">+</button></div></div><div class="field"><label>指定设计师</label><select id="taskDesigner_${index}" onchange="renderModalOverview()">${designerOptions(defaultDesigner)}</select></div><div class="field"><label>截止时间</label><input id="taskEndDate_${index}" type="date" /></div><div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="origin_${index}" type="radio" value="1" checked /> 是</label><label class="check"><input name="origin_${index}" type="radio" value="0" /> 否</label></div></div><div class="field description-field"><label>任务描述</label><textarea id="taskDescription_${index}" rows="2">${navText(description)}</textarea></div></div></div>`;
+      }).join("");
+      renderModalOverview();
+    }
+    async function openTaskModal() {
+      const items = selectedItems();
+      if (!items.length) return toast("请先选择素材", "error");
+      setButtonLoading(els.openCreateBtn, true, "打开中...");
+      try {
+        await loadDesigners();
+        state.modalItems = items;
+        renderTaskCards();
+        setStatus(els.submitStatus, "待提交");
+        els.taskModal.classList.remove("hidden");
+      } finally {
+        setButtonLoading(els.openCreateBtn, false);
+      }
+    }
+    function closeTaskModal() {
+      state.modalItems = [];
+      els.taskModal.classList.add("hidden");
+      els.taskCards.innerHTML = "";
+      setStatus(els.submitStatus, "待提交");
+    }
+    function stepTaskNumber(index, delta) {
+      const input = document.getElementById(`taskNumber_${index}`);
+      if (!input) return;
+      input.value = String(Math.max(1, Math.min(100, Number(input.value || 1) + delta)));
+      renderModalOverview();
+    }
+    async function submitTasks() {
+      const items = state.modalItems.map((item, index) => ({
+        target_content_id: item.target_content_id,
+        material_id: item.material_id,
+        number: Number(document.getElementById(`taskNumber_${index}`)?.value || 1),
+        designer: document.getElementById(`taskDesigner_${index}`)?.value || "",
+        end_date: document.getElementById(`taskEndDate_${index}`)?.value || "",
+        origin_name: Number(document.querySelector(`input[name="origin_${index}"]:checked`)?.value || "1"),
+        description: document.getElementById(`taskDescription_${index}`)?.value || ""
+      }));
+      if (!items.length) return toast("请先选择素材", "error");
+      if (items.some(item => !item.designer)) {
+        setStatus(els.submitStatus, "每条素材都需要选择设计师", "error");
+        renderModalOverview();
+        return toast("每条素材都需要选择设计师", "error");
+      }
+      setButtonLoading(els.submitTasksBtn, true, "创建中...");
+      setStatus(els.submitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/design-tasks", { method: "POST", body: JSON.stringify({ items }) });
+        setStatus(els.submitStatus, `创建完成：成功 ${data.created_count || 0} 个${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`, data.failed_count ? "error" : "success");
+        toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
+        if (!data.failed_count) closeTaskModal();
+      } catch (error) {
+        setStatus(els.submitStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.submitTasksBtn, false);
+      }
+    }
+    function exportCsv() {
+      if (!state.materials.length) return;
+      const headers = ["target_content_id", "target_drama_name", "material_id", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const csv = [headers.join(",")].concat(state.materials.map(item => headers.map(key => `"${String(item[key] ?? "").replace(/"/g, '""')}"`).join(","))).join("\n");
+      const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `voiceover_materials_${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+    window.toggleSelection = toggleSelection;
+    window.stepTaskNumber = stepTaskNumber;
+    window.renderModalOverview = renderModalOverview;
+
+    els.refreshBtn.onclick = () => location.reload();
+    els.loginBtn.onclick = () => loginOrLogout().catch(error => showError("登录状态切换失败", error));
+    els.countBtn.onclick = () => queryCounts().catch(error => showError("查询素材数失败", error));
+    els.countClearBtn.onclick = clearCounts;
+    els.filterBtn.onclick = () => filterMaterials().catch(error => showError("筛选素材失败", error));
+    els.clearBtn.onclick = clearFilters;
+    els.selectAll.onchange = event => toggleAllSelection(event.target.checked);
+    els.exportBtn.onclick = exportCsv;
+    els.openCreateBtn.onclick = () => openTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
+    els.modalCloseBtn.onclick = closeTaskModal;
+    els.modalResetBtn.onclick = renderTaskCards;
+    els.submitTasksBtn.onclick = () => submitTasks().catch(error => showError("创建设计师任务失败", error));
+    els.taskModal.addEventListener("click", event => { if (event.target === els.taskModal) closeTaskModal(); });
+    loadAuthStatus().catch(error => showError("加载登录状态失败", error));
+  </script>
+</body>
+</html>
