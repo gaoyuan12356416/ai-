@@ -562,7 +562,6 @@
             if (requestSeq !== state.filterRequestSeq) return;
             const items = data.items || [];
             state.materials = state.materials.concat(items);
-            items.filter(item => item.selected_by_default).map(materialKey).forEach(key => state.selectedKeys.add(key));
             completed += 1;
             renderResults();
             setStatus(els.filterStatus, `已完成 ${completed}/${contentIds.length} 个剧 ID，累计 ${state.materials.length} 条候选素材`, completed === contentIds.length ? "success" : "loading");
@@ -755,7 +754,6 @@
     els.modalCloseBtn.onclick = closeTaskModal;
     els.modalResetBtn.onclick = renderTaskCards;
     els.submitTasksBtn.onclick = () => submitTasks().catch(error => showError("创建设计师任务失败", error));
-    els.taskModal.addEventListener("click", event => { if (event.target === els.taskModal) closeTaskModal(); });
     loadAuthStatus().catch(error => showError("加载登录状态失败", error));
   </script>
 </body>
