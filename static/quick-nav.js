@@ -99,15 +99,15 @@
     screenshots: "/screenshots.html",
     voiceoverTasks: "/voiceover-drama.html",
     adMaterials: "/ad-material-tasks.html",
-    settings: "#settings",
-    navigation: "#navigation",
-    users: "#users",
-    logs: "#logs"
+    settings: "/settings.html",
+    navigation: "/navigation.html",
+    users: "/users.html",
+    logs: "/logs.html"
   };
 
   function navItemHref(item) {
     const key = item.view || item.key;
-    return INTERNAL_VIEW_HREFS[key] || item.href || "#";
+    return item.href || INTERNAL_VIEW_HREFS[key] || "#";
   }
 
   function mergeDefaultNav(config) {
