@@ -138,7 +138,7 @@
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">AI</div>
+        <div class="brand-mark">剧</div>
         <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
       </div>
       <nav id="quickNav" class="nav"></nav>
@@ -157,9 +157,13 @@
             <h1>投放素材任务管理</h1>
             <p>创建投放素材需求，审核需求和素材，并完成最终素材上报。</p>
           </div>
-          <div class="user-card">
-            <strong id="userName">--</strong>
-            <div class="muted" id="userMeta">--</div>
+          <div class="toolbar">
+            <div class="user-card">
+              <strong id="userName">--</strong>
+              <div class="muted" id="userMeta">--</div>
+            </div>
+            <button id="topRefreshBtn" class="btn" type="button">刷新</button>
+            <button id="logoutBtn" class="btn" type="button">退出登录</button>
           </div>
         </div>
         <div class="panel">
@@ -343,6 +347,8 @@
       loginBtn: document.getElementById("loginBtn"),
       userName: document.getElementById("userName"),
       userMeta: document.getElementById("userMeta"),
+      topRefreshBtn: document.getElementById("topRefreshBtn"),
+      logoutBtn: document.getElementById("logoutBtn"),
       summary: document.getElementById("summary"),
       createBtn: document.getElementById("createBtn"),
       reloadBtn: document.getElementById("reloadBtn"),
@@ -631,6 +637,9 @@
       state.tasks = data.items || [];
       els.summary.textContent = `共 ${data.total || 0} 条`;
       renderRows();
+    }
+    async function refreshPageData() {
+      await Promise.all([loadSources(), loadTasks()]);
     }
     function renderRows() {
       if (!state.tasks.length) {
@@ -1047,6 +1056,14 @@
         toast(error.message || "上传至盈量素材库失败", true);
       }
     }
+    async function logout() {
+      try {
+        await api("/api/auth/logout", { method: "POST", body: "{}" });
+      } catch (_) {
+        // Keep logout usable even if the session has already expired.
+      }
+      location.href = "/";
+    }
     window.viewTask = openAdMaterialDetail;
     window.openAdMaterialDetail = openAdMaterialDetail;
     window.openAdMaterialReview = openAdMaterialReview;
@@ -1070,6 +1087,8 @@
       if (event.target === els.adMaterialReviewModal) closeAdMaterialReviewModal();
     });
     els.createBtn.onclick = () => { resetForm(); openModal("create"); };
+    els.topRefreshBtn.onclick = () => refreshPageData().catch(error => toast(error.message, true));
+    els.logoutBtn.onclick = logout;
     els.reloadBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
     els.searchBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
     els.statusFilter.onchange = () => loadTasks().catch(error => toast(error.message, true));
@@ -1084,8 +1103,7 @@
       try {
         renderSizePlan();
         if (!(await loadAuth())) return;
-        await loadSources();
-        await loadTasks();
+        await refreshPageData();
       } catch (error) {
         toast(error.message || "页面初始化失败", true);
       }
