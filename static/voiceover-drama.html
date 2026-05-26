@@ -395,7 +395,13 @@
         renderAuth();
         throw new Error("请先登录");
       }
-      if (!response.ok) throw new Error(data.message || data.error || `请求失败 (${response.status})`);
+      if (!response.ok) {
+        const details = Array.isArray(data.errors)
+          ? data.errors.slice(0, 3).map(item => item && item.error ? item.error : "").filter(Boolean).join("；")
+          : "";
+        const message = data.message || data.error || `请求失败 (${response.status})`;
+        throw new Error(details ? `${message}：${details}` : message);
+      }
       return data;
     }
     function userCan(moduleKey) {

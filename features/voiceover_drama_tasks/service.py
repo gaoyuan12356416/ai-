@@ -10,6 +10,7 @@ import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from html import unescape
 
 import requests
 
@@ -870,9 +871,16 @@ def post_voiceover_kol_task(body):
     try:
         data = response.json()
     except Exception:
-        data = {"message": response.text[:500]}
+        preview = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", response.text or "", flags=re.IGNORECASE | re.DOTALL)
+        preview = unescape(re.sub(r"<[^>]+>", " ", preview))
+        preview = re.sub(r"\s+", " ", preview).strip()[:500]
+        data = {"message": preview or response.text[:500]}
     if response.status_code >= 400:
-        raise StructuredApiError("kol_task_http_failed", "生成需求接口请求失败", status=response.status_code, response=data)
+        response_message = data.get("message") if isinstance(data, dict) else str(data)
+        message = "生成需求接口请求失败 HTTP %s" % response.status_code
+        if response_message:
+            message = "%s：%s" % (message, str(response_message)[:220])
+        raise StructuredApiError("kol_task_http_failed", message, status=response.status_code, response=data)
     code = data.get("code") if isinstance(data, dict) else None
     if code not in (0, "0", None) and not data.get("success"):
         raise StructuredApiError("kol_task_failed", str(data.get("message") or data.get("error") or data), response=data)
@@ -928,7 +936,7 @@ def create_voiceover_design_tasks(payload, session):
             "name": build_voiceover_task_name(drama, actor),
             "app": drama.get("app", ""),
             "type": 11,
-            "content_id": drama.get("full_content_id", ""),
+            "contect_id": drama.get("full_content_id", ""),
             "number": number,
             "country": drama.get("country", ""),
             "language": drama.get("language", ""),
@@ -963,11 +971,14 @@ def create_voiceover_design_tasks(payload, session):
             try:
                 results.append(future.result())
             except Exception as exc:
+                error_payload = api_error_payload(exc)
                 errors.append({
                     "index": index,
                     "material_id": str(raw_item.get("material_id") or raw_item.get("id") or "").strip(),
                     "target_content_id": str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip(),
-                    "error": api_error_payload(exc).get("message") or str(exc),
+                    "error": error_payload.get("message") or str(exc),
+                    "code": error_payload.get("code", "bad_request"),
+                    "status": error_payload.get("status"),
                 })
     results = sorted(results, key=lambda item: item.get("index", 0))
     errors = sorted(errors, key=lambda item: item.get("index", 0))
