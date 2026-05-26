@@ -8,6 +8,7 @@ AI backend modules do not have to edit the shared app.py monolith.
 import os
 import re
 import secrets
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import requests
@@ -25,6 +26,7 @@ VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE = int(os.environ.get("VOICEOVER_CUSTOM_SOURC
 VOICEOVER_FILTER_SOURCE_SCAN_LIMIT = int(os.environ.get("VOICEOVER_FILTER_SOURCE_SCAN_LIMIT", "1500") or "1500")
 VOICEOVER_FILTER_SOURCE_SCAN_MAX = int(os.environ.get("VOICEOVER_FILTER_SOURCE_SCAN_MAX", "3000") or "3000")
 VOICEOVER_FILTER_LEGACY_FALLBACK = os.environ.get("VOICEOVER_FILTER_LEGACY_FALLBACK", "0").strip() == "1"
+VOICEOVER_CREATE_MAX_WORKERS = int(os.environ.get("VOICEOVER_CREATE_MAX_WORKERS", "5") or "5")
 
 ADMIN_MAPPING_MYSQL_DATABASE = ""
 DB_NAME = ""
@@ -709,53 +711,60 @@ def voiceover_lookup_material(material_id, target_content_id=""):
     material_id = str(material_id or "").strip()
     if not material_id:
         raise StructuredApiError("invalid_material_id", "素材 ID 不能为空")
+    material = voiceover_lookup_material_map([material_id]).get(material_id)
+    if not material:
+        raise StructuredApiError("material_not_found", "未找到素材：%s" % material_id)
+    return material
+
+
+def voiceover_lookup_material_map(material_ids):
+    cleaned = []
+    seen = set()
+    for material_id in material_ids or []:
+        value = str(material_id or "").strip()
+        if value and value not in seen:
+            cleaned.append(value)
+            seen.add(value)
+    if not cleaned:
+        return {}
     database = voiceover_sql_db()
-    source_filter = ""
-    insight_filter = ""
-    if target_content_id:
-        drama = lookup_voiceover_drama_info(target_content_id)
-        content_ids = voiceover_series_content_ids(drama.get("series_code", ""))
-        content_id_sql = voiceover_sql_in(content_ids or [target_content_id])
-        source_filter = " AND s.data_source=%d AND s.data_source_id IN (%s)" % (
-            VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
-            content_id_sql,
-        )
-        insight_filter = " AND i.data_source=%d AND i.data_source_id IN (%s)" % (
-            VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
-            content_id_sql,
-        )
+    numeric_ids = [value for value in cleaned if re.match(r"^\d+$", value)]
+    string_ids = [value for value in cleaned if not re.match(r"^\d+$", value)]
+    id_filters = []
+    if numeric_ids:
+        id_filters.append("s.id IN (%s)" % ",".join(str(voiceover_int(value)) for value in numeric_ids))
+    if string_ids:
+        id_filters.append("CAST(s.id AS CHAR) IN (%s)" % voiceover_sql_in(string_ids))
+    if not id_filters:
+        return {}
     sql = (
         "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
         "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
-        "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.video_duration, 0), "
-        "COALESCE(SUM(i.spend), 0), COALESCE(SUM(i.revenue), 0), COALESCE(SUM(i.af_revenue0), 0) "
+        "COALESCE(s.language, ''), COALESCE(s.data_source_id, ''), COALESCE(s.video_duration, 0) "
         "FROM `%s`.ads_custom_source s "
-        "LEFT JOIN `%s`.ads_custom_source_insight i FORCE INDEX (idx_ridstype) "
-        "ON CAST(i.resource_id AS CHAR)=CAST(s.id AS CHAR)%s "
-        "WHERE CAST(s.id AS CHAR)='%s' AND s.is_delete=0 AND COALESCE(s.url, '')<>''%s "
-        "GROUP BY s.id, s.name, s.url, s.category, s.product, s.country, s.language, s.data_source_id, s.video_duration "
-        "LIMIT 1"
-    ) % (database, database, insight_filter, mysql_escape_literal(material_id), source_filter)
+        "WHERE (%s) AND s.data_source=%d AND s.is_delete=0 AND COALESCE(s.url, '')<>''"
+    ) % (database, " OR ".join(id_filters), VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE)
     rows = run_mysql(sql)
-    if not rows:
-        raise StructuredApiError("material_not_found", "未找到素材：%s" % material_id)
-    row = rows[0]
-    spend = voiceover_float(row[9] if len(row) > 9 else 0)
-    revenue = voiceover_float(row[10] if len(row) > 10 else 0)
-    return {
-        "material_id": str(row[0] if len(row) > 0 else "").strip(),
-        "name": str(row[1] if len(row) > 1 else "").strip(),
-        "url": str(row[2] if len(row) > 2 else "").strip(),
-        "category": str(row[3] if len(row) > 3 else "").strip(),
-        "product": str(row[4] if len(row) > 4 else "").strip(),
-        "country": str(row[5] if len(row) > 5 else "").strip(),
-        "language": str(row[6] if len(row) > 6 else "").strip(),
-        "source_content_id": str(row[7] if len(row) > 7 else "").strip(),
-        "duration": voiceover_int(row[8] if len(row) > 8 else 0),
-        "spend": round(spend, 2),
-        "revenue": round(revenue, 2),
-        "roas": round(revenue / spend * 100, 2) if spend > 0 else 0,
-    }
+    result = {}
+    for row in rows:
+        material_id = str(row[0] if len(row) > 0 else "").strip()
+        if not material_id:
+            continue
+        result[material_id] = {
+            "material_id": material_id,
+            "name": str(row[1] if len(row) > 1 else "").strip(),
+            "url": str(row[2] if len(row) > 2 else "").strip(),
+            "category": str(row[3] if len(row) > 3 else "").strip(),
+            "product": str(row[4] if len(row) > 4 else "").strip(),
+            "country": str(row[5] if len(row) > 5 else "").strip(),
+            "language": str(row[6] if len(row) > 6 else "").strip(),
+            "source_content_id": str(row[7] if len(row) > 7 else "").strip(),
+            "duration": voiceover_int(row[8] if len(row) > 8 else 0),
+            "spend": 0,
+            "revenue": 0,
+            "roas": 0,
+        }
+    return result
 
 
 def list_voiceover_designers():
@@ -881,60 +890,87 @@ def create_voiceover_design_tasks(payload, session):
     if not requester_user_id:
         raise StructuredApiError("requester_missing", "无法通过当前登录人定位 admin_user_group.user_id")
     valid_designer_ids = {str(item.get("user_id") or "").strip() for item in list_voiceover_designers().get("items", [])}
-    results = []
-    errors = []
-    for index, raw_item in enumerate(raw_items, 1):
+    target_content_ids = []
+    material_ids = []
+    for raw_item in raw_items:
         raw_item = raw_item or {}
         target_content_id = str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip()
         material_id = str(raw_item.get("material_id") or raw_item.get("id") or "").strip()
-        try:
-            drama = lookup_voiceover_drama_info(target_content_id)
-            material = voiceover_lookup_material(material_id, target_content_id=target_content_id)
-            number = max(1, min(100, voiceover_int(raw_item.get("number", raw_item.get("quantity", 1)), 1)))
-            designer = str(raw_item.get("designer") or raw_item.get("designer_id") or "").strip()
-            if not designer:
-                raise StructuredApiError("designer_required", "请选择设计师")
-            if designer not in valid_designer_ids:
-                raise StructuredApiError("designer_not_allowed", "设计师不在授权接单权限用户组中")
-            description = str(raw_item.get("description", raw_item.get("introducation", "")) or "").strip()
-            origin_name = voiceover_int(raw_item.get("origin_name", 1), 1)
-            end_date = str(raw_item.get("end_date") or "").strip()
-            body = {
-                "name": build_voiceover_task_name(drama, actor),
-                "app": drama.get("app", ""),
-                "type": 11,
-                "content_id": drama.get("full_content_id", ""),
-                "number": number,
-                "country": drama.get("country", ""),
-                "language": drama.get("language", ""),
-                "tag": [drama.get("name", "")],
-                "category": material.get("category", ""),
-                "origin_name": origin_name,
-                "designer": voiceover_int(designer),
-                "is_ad_activity": 0,
-                "examples": [material.get("url", "")],
-                "introducation": description,
-                "user_id": voiceover_int(requester_user_id),
-            }
-            if end_date:
-                body["end_date"] = end_date
-            response = post_voiceover_kol_task(body)
-            results.append({
-                "index": index,
-                "material_id": material_id,
-                "target_content_id": target_content_id,
-                "name": body["name"],
-                "request": body,
-                "response": response,
-                "status": "created",
-            })
-        except Exception as exc:
-            errors.append({
-                "index": index,
-                "material_id": material_id,
-                "target_content_id": target_content_id,
-                "error": api_error_payload(exc).get("message") or str(exc),
-            })
+        if target_content_id and target_content_id not in target_content_ids:
+            target_content_ids.append(target_content_id)
+        if material_id and material_id not in material_ids:
+            material_ids.append(material_id)
+    drama_map = lookup_voiceover_drama_info_map(target_content_ids)
+    material_map = voiceover_lookup_material_map(material_ids)
+    results = []
+    errors = []
+
+    def create_one(index, raw_item):
+        raw_item = raw_item or {}
+        target_content_id = str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip()
+        material_id = str(raw_item.get("material_id") or raw_item.get("id") or "").strip()
+        drama = drama_map.get(target_content_id)
+        if not drama:
+            raise StructuredApiError("drama_not_found", "未在剧库中找到剧 ID：%s" % target_content_id)
+        material = material_map.get(material_id)
+        if not material:
+            raise StructuredApiError("material_not_found", "未找到素材：%s" % material_id)
+        number = max(1, min(100, voiceover_int(raw_item.get("number", raw_item.get("quantity", 1)), 1)))
+        designer = str(raw_item.get("designer") or raw_item.get("designer_id") or "").strip()
+        if not designer:
+            raise StructuredApiError("designer_required", "请选择设计师")
+        if designer not in valid_designer_ids:
+            raise StructuredApiError("designer_not_allowed", "设计师不在授权接单权限用户组中")
+        description = str(raw_item.get("description", raw_item.get("introducation", "")) or "").strip()
+        origin_name = voiceover_int(raw_item.get("origin_name", 1), 1)
+        end_date = str(raw_item.get("end_date") or "").strip()
+        body = {
+            "name": build_voiceover_task_name(drama, actor),
+            "app": drama.get("app", ""),
+            "type": 11,
+            "content_id": drama.get("full_content_id", ""),
+            "number": number,
+            "country": drama.get("country", ""),
+            "language": drama.get("language", ""),
+            "tag": [drama.get("name", "")],
+            "category": material.get("category", ""),
+            "origin_name": origin_name,
+            "designer": voiceover_int(designer),
+            "is_ad_activity": 0,
+            "examples": [material.get("url", "")],
+            "introducation": description,
+            "user_id": voiceover_int(requester_user_id),
+        }
+        if end_date:
+            body["end_date"] = end_date
+        response = post_voiceover_kol_task(body)
+        return {
+            "index": index,
+            "material_id": material_id,
+            "target_content_id": target_content_id,
+            "name": body["name"],
+            "request": body,
+            "response": response,
+            "status": "created",
+        }
+
+    max_workers = max(1, min(VOICEOVER_CREATE_MAX_WORKERS, len(raw_items)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(create_one, index, raw_item): (index, raw_item) for index, raw_item in enumerate(raw_items, 1)}
+        for future in as_completed(future_map):
+            index, raw_item = future_map[future]
+            raw_item = raw_item or {}
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                errors.append({
+                    "index": index,
+                    "material_id": str(raw_item.get("material_id") or raw_item.get("id") or "").strip(),
+                    "target_content_id": str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip(),
+                    "error": api_error_payload(exc).get("message") or str(exc),
+                })
+    results = sorted(results, key=lambda item: item.get("index", 0))
+    errors = sorted(errors, key=lambda item: item.get("index", 0))
     if errors and not results:
         raise StructuredApiError("voiceover_task_create_failed", "全部设计师任务创建失败", errors=errors)
     return {
