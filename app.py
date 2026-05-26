@@ -33171,6 +33171,20 @@ def ad_material_task_from_row(row):
     item["size_plan"] = ad_material_size_plan_from_task(item)
     item["size_plan_summary"] = format_ad_material_size_plan(item["size_plan"])
     item["assets"] = fetch_ad_material_assets(item["task_id"])
+    asset_statuses = {str(asset.get("status") or "").strip() for asset in item["assets"]}
+    ready_statuses = {"approved", "uploaded", "abandoned"}
+    item["review_pending"] = item.get("status") == "demand_review" or (
+        item.get("status") == "material_review"
+        and bool(asset_statuses & {"pending_review", "regenerating"})
+    )
+    item["material_upload_ready"] = (
+        item.get("status") not in {"draft", "generating_demand", "generating_material", "done"}
+        and bool(item["assets"])
+        and bool(asset_statuses & {"approved", "uploaded"})
+        and asset_statuses.issubset(ready_statuses)
+    )
+    if item["material_upload_ready"]:
+        item["status_label"] = "待上报"
     return item
 
 
@@ -85115,6 +85129,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if parsed.path == "/api/ui/topbar":
+            payload = self._auth_payload()
+            payload["ui"] = {
+                "brand": "AI自动后台",
+                "host": "ai.yingliangads.com",
+                "actions": ["refresh", "logout"],
+            }
+            json_response(self, 200, payload)
+            return
+
         if parsed.path == "/api/auth/status":
 
 
@@ -87524,8 +87548,6 @@ if __name__ == "__main__":
 
 
     main()
-
-
 
 
 

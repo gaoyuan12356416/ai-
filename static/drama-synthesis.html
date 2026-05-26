@@ -8226,6 +8226,7 @@
 
 
   </style>
+  <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 
 
 
@@ -14785,7 +14786,7 @@
     }
 
     async function loadAuthStatus() {
-      const data = await api("/api/auth/status");
+      const data = await api("/api/ui/topbar");
       state.auth = data;
       if (data.authenticated) writeCachedAuth(data);
       else clearCachedAuth();

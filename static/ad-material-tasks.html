@@ -93,6 +93,42 @@
     .detail-panel .panel-body { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 48px; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(10, 22, 42, .62); display: grid; place-items: center; padding: 28px; z-index: 10; }
     .modal { width: min(1080px, 100%); max-height: calc(100vh - 56px); overflow: auto; background: var(--panel); border-radius: 20px; box-shadow: 0 28px 80px rgba(0,0,0,.25); }
+    .modal-panel { width: min(1080px, 100%); max-height: calc(100vh - 48px); overflow: auto; background: #fff; border-radius: 20px; box-shadow: 0 28px 70px rgba(13, 24, 43, .32); }
+    .ad-material-create-panel { width: min(1080px, calc(100vw - 64px)); }
+    .ad-material-create-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: start; column-gap: 16px; row-gap: 16px; }
+    .ad-material-create-grid .field { grid-column: span 4; gap: 7px; }
+    .ad-material-create-grid .field.small { grid-column: span 2; }
+    .ad-material-create-grid .field.wide { grid-column: span 12; }
+    .ad-material-create-grid label { min-height: 20px; display: flex; align-items: center; line-height: 20px; }
+    .ad-material-create-grid input:not([type="hidden"]), .ad-material-create-grid select { height: 50px; box-sizing: border-box; }
+    .ad-material-create-grid .hint { min-height: 18px; line-height: 18px; }
+    .product-combobox { position: relative; }
+    .product-combobox .product-options { position: absolute; z-index: 90; top: calc(100% + 6px); left: 0; right: 0; max-height: 320px; overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: 0 18px 48px rgba(13, 24, 43, .18); }
+    .product-option { width: 100%; border: 0; border-radius: 10px; padding: 10px 12px; background: transparent; color: var(--text); text-align: left; cursor: pointer; display: grid; gap: 3px; }
+    .product-option:hover, .product-option.active { background: #eef4ff; }
+    .product-option strong { font-weight: 700; }
+    .product-option span, .product-empty { color: var(--muted); font-size: 12px; }
+    .product-empty { padding: 12px; }
+    .required-mark { color: #e03131; font-weight: 800; margin-right: 4px; }
+    .size-plan-titlebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .size-plan-total { min-height: 28px; padding: 6px 10px; border: 1px solid #dce7fb; border-radius: 999px; background: #f6f9ff; color: #35506f; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .size-plan { display: grid; grid-template-columns: 1fr; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: #f8fbff; }
+    .size-plan-row { display: grid; grid-template-columns: minmax(0, 1fr) 118px; align-items: center; gap: 12px; min-height: 48px; padding: 7px 10px; border: 1px solid transparent; border-radius: 12px; transition: background .15s ease, border-color .15s ease, box-shadow .15s ease; }
+    .size-plan-row.active { border-color: #c7dcff; background: #fff; box-shadow: 0 6px 16px rgba(47, 107, 255, .08); }
+    .size-choice { display: grid; grid-template-columns: 28px 88px minmax(120px, 1fr); align-items: center; gap: 10px; width: 100%; min-width: 0; min-height: 34px; padding: 0; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+    .size-choice:focus { outline: none; }
+    .size-plan-row:focus-within { border-color: rgba(36, 87, 255, .35); box-shadow: 0 0 0 3px rgba(36, 87, 255, .08); }
+    .size-ratio { font-size: 15px; font-weight: 700; }
+    .size-pixels { color: var(--muted); font-size: 12px; text-align: left; }
+    .size-check { width: 18px; height: 18px; display: inline-grid; place-items: center; border: 1px solid #cbd8eb; border-radius: 50%; color: transparent; font-size: 12px; flex: 0 0 auto; }
+    .size-plan-row.active .size-check { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .size-stepper { display: grid; grid-template-columns: 32px 52px 32px; align-items: center; justify-self: end; overflow: hidden; border: 1px solid #d9e3f3; border-radius: 10px; background: #fff; }
+    .size-stepper button, .size-stepper input { height: 34px; border: 0; background: transparent; color: var(--text); text-align: center; }
+    .size-stepper button { cursor: pointer; color: #35506f; font-weight: 800; }
+    .size-stepper button:hover { background: #eef4ff; }
+    .size-stepper button:disabled, .size-stepper input:disabled { cursor: not-allowed; color: #a5b2c5; background: #f5f7fb; }
+    .size-stepper input { width: 52px; padding: 0; border-left: 1px solid #e6edf7; border-right: 1px solid #e6edf7; font-weight: 700; }
+    .size-plan-footnote { margin-top: 6px; color: var(--muted); font-size: 12px; }
     .ad-material-review-modal { width: min(1040px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: hidden; display: flex; flex-direction: column; }
     .ad-material-review-modal .panel-body { min-height: 0; overflow-y: auto; }
     .ad-material-review-modal .grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
@@ -116,7 +152,6 @@
     .product-options { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 6px; max-height: 260px; overflow-y: auto; background: #fff; }
     .product-options button { width: 100%; border: 0; background: #fff; text-align: left; padding: 10px 12px; border-bottom: 1px solid #edf2f7; cursor: pointer; }
     .product-options button:hover { background: #f5f8ff; }
-    .size-plan { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 10px; }
     .toast { position: fixed; right: 24px; bottom: 24px; background: #0e1d36; color: #fff; padding: 12px 16px; border-radius: 12px; box-shadow: var(--shadow); z-index: 20; }
     .auth-panel { min-height: 70vh; display: grid; place-items: center; }
     .auth-box { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px; width: min(420px, 100%); box-shadow: var(--shadow); }
@@ -130,9 +165,16 @@
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .form-grid { grid-template-columns: 1fr; }
       .col-3, .col-4, .col-6, .col-8, .col-12 { grid-column: span 1; }
-      .size-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .ad-material-create-panel { width: min(100%, calc(100vw - 28px)); }
+      .ad-material-create-grid, .filter-row { grid-template-columns: 1fr; }
+      .ad-material-create-grid .field, .ad-material-create-grid .field.small, .ad-material-create-grid .field.wide { grid-column: span 1; }
+      .size-plan-titlebar { align-items: flex-start; flex-direction: column; }
+      .size-plan-row { grid-template-columns: 1fr; gap: 8px; }
+      .size-choice { grid-template-columns: 28px 76px minmax(0, 1fr); }
+      .size-stepper { width: 116px; }
     }
   </style>
+  <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 </head>
 <body>
   <div class="app">
@@ -159,8 +201,11 @@
           </div>
           <div class="toolbar">
             <div class="user-card">
-              <strong id="userName">--</strong>
-              <div class="muted" id="userMeta">--</div>
+              <div id="userAvatar" class="avatar">管</div>
+              <div class="user-meta">
+                <strong id="userName">--</strong>
+                <span id="userMeta">--</span>
+              </div>
             </div>
             <button id="topRefreshBtn" class="btn" type="button">刷新</button>
             <button id="logoutBtn" class="btn" type="button">退出登录</button>
@@ -240,74 +285,84 @@
   </div>
 
   <div id="taskModal" class="modal-backdrop hidden">
-    <div class="modal">
-      <div class="modal-head">
-        <div><h2 id="modalTitle">创建任务</h2><p id="modalSub">填写投放素材需求参数。</p></div>
-        <button class="btn" type="button" data-close>关闭</button>
+    <div class="modal-panel ad-material-create-panel">
+      <div class="panel-head">
+        <h3 id="modalTitle" class="panel-title">创建任务</h3>
+        <div class="actions-inline">
+          <button class="btn btn-secondary" type="button" data-close>关闭</button>
+        </div>
       </div>
-      <form id="taskForm">
-        <div class="modal-body form-grid">
-          <div class="field col-8">
-            <label>产品</label>
-            <input id="productSearch" placeholder="输入产品 ID / 名称后搜索" autocomplete="off" required />
-            <div id="productOptions" class="product-options hidden"></div>
-            <p id="productHint" class="muted">未选择产品</p>
+      <div class="panel-body">
+        <form id="taskForm" class="stack">
+          <div class="grid ad-material-create-grid">
+            <div class="field">
+              <label><span class="required-mark">*</span>产品</label>
+              <div class="product-combobox">
+                <input id="productSearch" placeholder="输入产品 ID / 名称搜索" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="productOptions" required />
+                <div id="productOptions" class="product-options hidden"></div>
+              </div>
+              <div id="productHint" class="hint">输入关键词后选择产品</div>
+            </div>
+            <div class="field">
+              <label><span class="required-mark">*</span>任务类型</label>
+              <select id="taskType" required>
+                <option value="素材迭代——根据老素材效果优化">素材迭代——根据老素材效果优化</option>
+                <option value="参考衍生——解析参考素材风格出新素材">参考衍生——解析参考素材风格出新素材</option>
+                <option value="竞品借鉴——参考竞品优质素材">竞品借鉴——参考竞品优质素材</option>
+                <option value="综合策划——综合内外素材出方案">综合策划——综合内外素材出方案</option>
+              </select>
+            </div>
+            <div class="field" id="competitorField">
+              <label>竞品查询接口</label>
+              <select id="competitorSource"><option value="">无</option></select>
+            </div>
+            <div class="field small">
+              <label><span class="required-mark">*</span>国家</label>
+              <input id="countryInput" placeholder="MX / US / BR" required />
+            </div>
+            <div class="field small">
+              <label><span class="required-mark">*</span>语言</label>
+              <input id="languageInput" placeholder="es / en / pt" required />
+            </div>
+            <div class="field wide">
+              <div class="size-plan-titlebar">
+                <label><span class="required-mark">*</span>尺寸与数量</label>
+                <div id="sizePlanSummary" class="size-plan-total">默认 1:1 x 1，总计 1 张</div>
+              </div>
+              <div id="sizePlan" class="size-plan"></div>
+              <div class="size-plan-footnote">点击尺寸启用或取消；已启用尺寸可用 +/- 调整数量，全部尺寸合计最多 20 张。</div>
+            </div>
+            <div class="field">
+              <label>标签 tag_name</label>
+              <input id="tagInput" />
+            </div>
+            <div class="field">
+              <label>category</label>
+              <input id="categoryInput" />
+            </div>
+            <div class="field">
+              <label>title</label>
+              <input id="titleInput" />
+            </div>
+            <div class="field">
+              <label>body</label>
+              <input id="bodyInput" />
+            </div>
+            <div class="field">
+              <label>素材参考</label>
+              <input id="referenceFiles" type="file" accept="image/*,video/*" multiple />
+            </div>
+            <div class="field wide">
+              <label>任务描述</label>
+              <textarea id="descriptionInput" rows="3" placeholder="描述希望优化或借鉴的方向"></textarea>
+            </div>
           </div>
-          <div class="field col-4">
-            <label>任务类型</label>
-            <select id="taskType" required>
-              <option value="素材迭代——根据老素材效果优化">素材迭代</option>
-              <option value="参考衍生——解析参考素材风格出新素材">参考衍生</option>
-              <option value="竞品借鉴——参考竞品优质素材">竞品借鉴</option>
-              <option value="综合策划——综合内外素材出方案">综合策划</option>
-            </select>
+          <div class="actions-inline">
+            <button id="submitBtn" class="btn btn-primary" type="submit">确认创建</button>
+            <button id="resetBtn" class="btn btn-secondary" type="button">清空</button>
           </div>
-          <div class="field col-3">
-            <label>竞品源</label>
-            <select id="competitorSource"><option value="">无</option></select>
-          </div>
-          <div class="field col-3">
-            <label>国家</label>
-            <input id="countryInput" placeholder="MX / US / BR" required />
-          </div>
-          <div class="field col-3">
-            <label>语言</label>
-            <input id="languageInput" placeholder="es / en / pt" required />
-          </div>
-          <div class="field col-3">
-            <label>Category</label>
-            <input id="categoryInput" placeholder="可选" />
-          </div>
-          <div class="field col-12">
-            <label>尺寸与数量</label>
-            <div class="size-plan" id="sizePlan"></div>
-          </div>
-          <div class="field col-4">
-            <label>标签</label>
-            <input id="tagInput" placeholder="可选" />
-          </div>
-          <div class="field col-4">
-            <label>标题</label>
-            <input id="titleInput" placeholder="可选" />
-          </div>
-          <div class="field col-4">
-            <label>正文</label>
-            <input id="bodyInput" placeholder="可选" />
-          </div>
-          <div class="field col-12">
-            <label>参考素材</label>
-            <input id="referenceFiles" type="file" accept="image/*,video/*" multiple />
-          </div>
-          <div class="field col-12">
-            <label>任务描述</label>
-            <textarea id="descriptionInput" placeholder="描述希望优化、借鉴或生成的方向"></textarea>
-          </div>
-        </div>
-        <div class="modal-foot">
-          <button id="resetBtn" class="btn" type="button">清空</button>
-          <button id="submitBtn" class="btn primary" type="submit">确认创建</button>
-        </div>
-      </form>
+        </form>
+      </div>
     </div>
   </div>
 
@@ -345,6 +400,7 @@
       authPanel: document.getElementById("authPanel"),
       pageContent: document.getElementById("pageContent"),
       loginBtn: document.getElementById("loginBtn"),
+      userAvatar: document.getElementById("userAvatar"),
       userName: document.getElementById("userName"),
       userMeta: document.getElementById("userMeta"),
       topRefreshBtn: document.getElementById("topRefreshBtn"),
@@ -369,6 +425,7 @@
       languageInput: document.getElementById("languageInput"),
       categoryInput: document.getElementById("categoryInput"),
       sizePlan: document.getElementById("sizePlan"),
+      sizePlanSummary: document.getElementById("sizePlanSummary"),
       tagInput: document.getElementById("tagInput"),
       titleInput: document.getElementById("titleInput"),
       bodyInput: document.getElementById("bodyInput"),
@@ -386,6 +443,13 @@
       toast: document.getElementById("toast"),
     };
     const SIZE_OPTIONS = ["1:1", "4:5", "9:16", "1.91:1", "16:9"];
+    const SIZE_PIXELS = {
+      "1:1": "1080x1080",
+      "4:5": "1080x1350",
+      "9:16": "1080x1920",
+      "1.91:1": "1200x628",
+      "16:9": "1920x1080",
+    };
     const state = {
       auth: null,
       tasks: [],
@@ -399,6 +463,10 @@
 
     function text(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+    function cssEscape(value) {
+      if (window.CSS && typeof window.CSS.escape === "function") return CSS.escape(String(value));
+      return String(value).replace(/["\\]/g, "\\$&");
     }
     function statusTone(status) {
       if (["done"].includes(status)) return "green";
@@ -414,12 +482,25 @@
       const cls = status === "done" ? "ok" : status === "failed" || status === "material_abandoned" ? "bad" : "warn";
       return `<span class="badge ${cls}">${text(adMaterialStatusText(status, label))}</span>`;
     }
-    function adMaterialCanCompleteUpload(task) {
-      const assets = task?.assets || [];
-      if (!task || adMaterialCanReview(task) || ["draft", "generating_demand", "generating_material", "done"].includes(task.status)) return false;
+    function adMaterialHasPendingReview(task) {
+      if (!task) return false;
+      if (task.review_pending != null) return !!task.review_pending;
+      if (task.status === "demand_review") return true;
+      if (task.status !== "material_review") return false;
+      const assets = task.assets || [];
+      return assets.some(asset => asset.status === "pending_review" || asset.status === "regenerating");
+    }
+    function adMaterialReadyForUpload(task) {
+      if (!task) return false;
+      if (task.material_upload_ready != null) return !!task.material_upload_ready;
+      const assets = task.assets || [];
       const readyStatuses = new Set(["approved", "uploaded", "abandoned"]);
       const hasUploadable = assets.some(asset => asset.status === "approved" || asset.status === "uploaded");
       return assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
+    }
+    function adMaterialCanCompleteUpload(task) {
+      if (!task || ["draft", "generating_demand", "generating_material", "done"].includes(task.status)) return false;
+      return adMaterialReadyForUpload(task);
     }
     function adMaterialDisplayStatusText(task) {
       if (adMaterialCanCompleteUpload(task)) return "待上报";
@@ -431,7 +512,7 @@
       return `<span class="badge ${cls}">${text(adMaterialDisplayStatusText(task))}</span>`;
     }
     function adMaterialCanReview(task) {
-      return task && (task.status === "demand_review" || task.status === "material_review");
+      return adMaterialHasPendingReview(task);
     }
     function adMaterialStatusCell(task) {
       return `<div class="status-cell">
@@ -597,7 +678,7 @@
       });
     }
     async function loadAuth() {
-      state.auth = await api("/api/auth/status");
+      state.auth = await api("/api/ui/topbar");
       await renderQuickNavigation();
       if (!state.auth.authenticated) {
         els.authPanel.classList.remove("hidden");
@@ -616,6 +697,11 @@
       const user = state.auth.user || {};
       els.userName.textContent = user.name || user.email || "已登录";
       els.userMeta.textContent = `${user.role || "user"} / ${user.tenant_key || ""}`;
+      if (els.userAvatar) {
+        els.userAvatar.innerHTML = user.avatar_url
+          ? `<img src="${text(user.avatar_url)}" alt="${text(user.name || "用户")}" loading="lazy" decoding="async" />`
+          : text((user.name || user.email || "管").slice(0, 1));
+      }
       els.authPanel.classList.add("hidden");
       els.pageContent.classList.remove("hidden");
       return true;
@@ -689,20 +775,81 @@
       buttons.push(`<button class="btn small" onclick="copyTask('${id}')">复制</button>`);
       return buttons.join("");
     }
-    function renderSizePlan(plan = [{ size: "1:1", count: 1 }]) {
+    function normalizedSizePlanMap(plan = [{ size: "1:1", count: 1 }]) {
       const map = Object.fromEntries(SIZE_OPTIONS.map(size => [size, 0]));
       plan.forEach(item => { if (map[item.size] != null) map[item.size] = Number(item.count || 0); });
+      return map;
+    }
+    function updateSizePlanSummary() {
+      const items = Array.from(els.sizePlan.querySelectorAll("[data-size-count]"))
+        .map(input => ({ size: input.dataset.sizeCount, count: input.dataset.active === "1" ? Math.max(0, Number(input.value || 0)) : 0 }))
+        .filter(item => item.count > 0);
+      const total = items.reduce((sum, item) => sum + item.count, 0);
+      if (!els.sizePlanSummary) return;
+      els.sizePlanSummary.textContent = total
+        ? `总计 ${total} 张 · ${items.map(item => `${item.size} x ${item.count}`).join("，")}`
+        : "未启用尺寸";
+    }
+    function syncSizeRow(size, count) {
+      const row = els.sizePlan.querySelector(`[data-size-row="${cssEscape(size)}"]`);
+      const input = els.sizePlan.querySelector(`[data-size-count="${cssEscape(size)}"]`);
+      if (!row || !input) return;
+      const active = Number(count || 0) > 0;
+      const normalizedCount = active ? Math.max(1, Math.min(20, Number(count) || 1)) : 0;
+      row.classList.toggle("active", active);
+      input.dataset.active = active ? "1" : "0";
+      input.disabled = !active;
+      input.value = active ? normalizedCount : 1;
+      const minus = row.querySelector("[data-size-step='-1']");
+      if (minus) minus.disabled = !active;
+      updateSizePlanSummary();
+    }
+    function renderSizePlan(plan = [{ size: "1:1", count: 1 }]) {
+      const map = normalizedSizePlanMap(plan);
       els.sizePlan.innerHTML = SIZE_OPTIONS.map(size => `
-        <div class="field"><label>${size}</label><input data-size="${size}" type="number" min="0" max="20" value="${map[size]}" /></div>
+        <div class="size-plan-row ${map[size] ? "active" : ""}" data-size-row="${text(size)}">
+          <button class="size-choice" type="button" data-size-toggle="${text(size)}">
+            <span class="size-check">✓</span>
+            <span class="size-ratio">${text(size)}</span>
+            <span class="size-pixels">${text(SIZE_PIXELS[size] || "")}</span>
+          </button>
+          <div class="size-stepper">
+            <button type="button" data-size-step="-1" data-size="${text(size)}" ${map[size] ? "" : "disabled"}>-</button>
+            <input data-size-count="${text(size)}" data-active="${map[size] ? "1" : "0"}" type="number" min="1" max="20" value="${map[size] || 1}" ${map[size] ? "" : "disabled"} />
+            <button type="button" data-size-step="1" data-size="${text(size)}">+</button>
+          </div>
+        </div>
       `).join("");
+      updateSizePlanSummary();
     }
     function collectSizePlan() {
-      const items = Array.from(els.sizePlan.querySelectorAll("[data-size]"))
-        .map(input => ({ size: input.dataset.size, count: Math.max(0, Number(input.value || 0)) }))
+      const items = Array.from(els.sizePlan.querySelectorAll("[data-size-count]"))
+        .map(input => ({ size: input.dataset.sizeCount, count: input.dataset.active === "1" ? Math.max(0, Number(input.value || 0)) : 0 }))
         .filter(item => item.count > 0);
       if (!items.length) throw new Error("至少选择一个尺寸数量");
       if (items.reduce((sum, item) => sum + item.count, 0) > 20) throw new Error("单个任务最多 20 张");
       return items;
+    }
+    function handleSizePlanClick(event) {
+      const toggle = event.target.closest("[data-size-toggle]");
+      if (toggle) {
+        const size = toggle.dataset.sizeToggle;
+        const input = els.sizePlan.querySelector(`[data-size-count="${cssEscape(size)}"]`);
+        syncSizeRow(size, input?.dataset.active === "1" ? 0 : 1);
+        return;
+      }
+      const step = event.target.closest("[data-size-step]");
+      if (step) {
+        const size = step.dataset.size;
+        const input = els.sizePlan.querySelector(`[data-size-count="${cssEscape(size)}"]`);
+        const current = input?.dataset.active === "1" ? Number(input.value || 1) : 0;
+        syncSizeRow(size, Math.max(0, Math.min(20, current + Number(step.dataset.sizeStep || 0))));
+      }
+    }
+    function handleSizePlanInput(event) {
+      const input = event.target.closest("[data-size-count]");
+      if (!input) return;
+      syncSizeRow(input.dataset.sizeCount, Math.max(1, Math.min(20, Number(input.value || 1))));
     }
     async function filePayload() {
       const files = Array.from(els.referenceFiles.files || []);
@@ -740,13 +887,13 @@
     async function searchProducts() {
       const q = els.productSearch.value.trim();
       if (!q) return;
-      els.productOptions.innerHTML = `<button type="button">搜索中...</button>`;
+      els.productOptions.innerHTML = `<div class="product-empty">搜索中...</div>`;
       els.productOptions.classList.remove("hidden");
       const data = await api(`/api/ad-material/products?q=${encodeURIComponent(q)}&limit=20`);
       const items = data.items || [];
       els.productOptions.innerHTML = items.length ? items.map((item, index) => `
-        <button type="button" data-product-index="${index}"><strong>${text(item.product_name || item.name || item.label || item.app_id)}</strong><div class="muted">${text(item.app_id || item.id || "")}</div></button>
-      `).join("") : `<button type="button">暂无匹配产品</button>`;
+        <button class="product-option" type="button" data-product-index="${index}"><strong>${text(item.product_name || item.name || item.label || item.app_id)}</strong><span>${text(item.app_id || item.id || "")}</span></button>
+      `).join("") : `<div class="product-empty">暂无匹配产品</div>`;
       els.productOptions.querySelectorAll("[data-product-index]").forEach(button => {
         button.onclick = () => setProduct(items[Number(button.dataset.productIndex)]);
       });
@@ -1078,6 +1225,8 @@
     window.completeUpload = completeUpload;
 
     document.querySelectorAll("[data-close]").forEach(button => button.onclick = closeModal);
+    els.sizePlan.addEventListener("click", handleSizePlanClick);
+    els.sizePlan.addEventListener("input", handleSizePlanInput);
     els.adMaterialCloseDetailBtn.onclick = hideAdMaterialDetail;
     els.adMaterialDetailPanel.addEventListener("click", event => {
       if (event.target === els.adMaterialDetailPanel) hideAdMaterialDetail();
