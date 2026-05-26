@@ -668,6 +668,11 @@
       const user = state.auth && state.auth.user;
       return !!(user && (user.is_admin || (user.permissions && user.permissions[moduleKey])));
     }
+    function loginUrlWithNext() {
+      const base = (state.auth && state.auth.login_url) || "/api/auth/feishu/login";
+      const next = `${location.pathname || "/"}${location.search || ""}`;
+      return `${base}${base.includes("?") ? "&" : "?"}next=${encodeURIComponent(next)}`;
+    }
     async function renderQuickNavigation() {
       if (!window.QuickNav) return;
       await window.QuickNav.render({
@@ -683,7 +688,7 @@
       if (!state.auth.authenticated) {
         els.authPanel.classList.remove("hidden");
         els.pageContent.classList.add("hidden");
-        els.loginBtn.onclick = () => { location.href = state.auth.login_url || "/api/auth/feishu/login"; };
+        els.loginBtn.onclick = () => { location.href = loginUrlWithNext(); };
         return false;
       }
       if (!userCan("ad_material_tasks")) {

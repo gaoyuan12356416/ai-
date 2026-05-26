@@ -85637,6 +85637,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if try_handle_cover_synthesis_get(self, parsed):
             return
 
+        if parsed.path == "/api/voiceover-drama/designers":
+            if not self._require_module("voiceover_drama_tasks"):
+                return
+            try:
+                json_response(self, 200, list_voiceover_designers())
+            except Exception as exc:
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/auth/feishu/login":
 
 
@@ -87548,7 +87558,6 @@ if __name__ == "__main__":
 
 
     main()
-
 
 
 
