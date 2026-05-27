@@ -19941,6 +19941,23 @@ function buildJobRow(job) {
       return modules;
     }
 
+    function mergeBackendPermissionModules(modules) {
+      const merged = Array.isArray(modules) ? modules.slice() : [];
+      const seen = new Set(merged.map(module => String(module?.key || "").trim()).filter(Boolean));
+      const backendModules = (state.auth && state.auth.modules) || {};
+      Object.entries(backendModules).forEach(([key, label]) => {
+        const moduleKey = String(key || "").trim();
+        if (!moduleKey || seen.has(moduleKey)) return;
+        seen.add(moduleKey);
+        merged.push({
+          key: moduleKey,
+          label: String(label || moduleKey).trim() || moduleKey,
+          editable: moduleKey !== "settings",
+        });
+      });
+      return merged;
+    }
+
     async function loadPermissionModules() {
       let modules = [];
       try {
@@ -19949,6 +19966,7 @@ function buildJobRow(job) {
       } catch (error) {
         modules = [];
       }
+      modules = mergeBackendPermissionModules(modules);
       if (!modules.length) {
         const backendModules = (state.auth && state.auth.modules) || {};
         modules = Object.entries(backendModules).map(([key, label]) => ({
