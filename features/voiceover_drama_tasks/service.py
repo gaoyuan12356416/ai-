@@ -35,7 +35,7 @@ VOICEOVER_PRODUCT_OPTIONS = (
 VOICEOVER_PRODUCT_BY_KEY = {item["key"]: item for item in VOICEOVER_PRODUCT_OPTIONS}
 VOICEOVER_PRODUCT_BY_APP_ID = {item["app_id"]: item for item in VOICEOVER_PRODUCT_OPTIONS}
 VOICEOVER_SOURCE_PRODUCTS_BY_APP_ID = {
-    "1479": ("Dramawave", "DramawaveSource"),
+    "1479": ("Dramawave",),
     "979": ("FreeReels", "freereels-AI素材"),
 }
 
