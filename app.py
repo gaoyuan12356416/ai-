@@ -31048,7 +31048,7 @@ def post_screenshot_ai_source_callback(job):
     return {"sent_count": len(items), "status_code": response.status_code, "response": response.text[:500]}
 
 
-def notify_screenshot_ai_source_callback(job):
+def notify_screenshot_ai_source_callback(job, raise_on_error=False):
     try:
         result = post_screenshot_ai_source_callback(job)
         logging.info("screenshot ai source callback result: %s %s", job.get("job_id", ""), result)
@@ -31059,6 +31059,7 @@ def notify_screenshot_ai_source_callback(job):
             job.get("job_id", ""),
             result,
         )
+        return result
     except Exception as exc:
         logging.exception("screenshot ai source callback failed: %s", job.get("job_id", ""))
         try:
@@ -31071,6 +31072,9 @@ def notify_screenshot_ai_source_callback(job):
             )
         except Exception:
             logging.exception("failed to write callback failure audit log")
+        if raise_on_error:
+            raise
+        return {"failed": True, "error": str(exc)}
 
 
 def fetch_screenshot_job_row(job_id):
@@ -32035,13 +32039,20 @@ def process_screenshot_job(job):
 
     job["error_message"] = ""
 
-    finish_screenshot_job_run(job)
-
-    set_screenshot_job_progress(job, status="done", progress=100, detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210")
+    set_screenshot_job_progress(
+        job,
+        status="processing_cover",
+        progress=96,
+        detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u751f\u6210\uff0c\u6b63\u5728\u56de\u4f20\u7d20\u6750\u63a5\u53e3",
+    )
 
     callback_job = fetch_screenshot_job_row(job["job_id"]) or job
 
-    notify_screenshot_ai_source_callback(callback_job)
+    notify_screenshot_ai_source_callback(callback_job, raise_on_error=True)
+
+    finish_screenshot_job_run(job)
+
+    set_screenshot_job_progress(job, status="done", progress=100, detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210\u5e76\u56de\u4f20")
 
 
 

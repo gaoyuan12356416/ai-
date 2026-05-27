@@ -23,6 +23,7 @@ Submission behavior:
 - Verifies the drama exists in `ads_drama_resource` for the target app before submission.
 - Skips rows that already exist in SQLite table `drama_screenshot_job` for the same `app_id + content_id`.
 - Submits to `POST /api/drama-screenshot-material/jobs` with the configured screenshot API token.
+- A submitted screenshot job is marked `done` only after all generated assets have been sent through the AI source callback. Its final `updated_at` and `finished_at` should therefore be later than, or equal to, the material-source ingestion request.
 
 Deployment:
 
