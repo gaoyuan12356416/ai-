@@ -150,6 +150,10 @@
     .card-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .task-form { display: grid; grid-template-columns: 150px minmax(240px, 1fr) 180px 240px; gap: 14px; align-items: end; }
     .description-field { grid-column: 2 / -1; }
+    .batch-task-form { grid-template-columns: 150px minmax(260px, 1fr) 180px 240px; }
+    .batch-task-form .description-field { grid-column: 1 / -1; }
+    .selected-material-list { display: grid; gap: 8px; max-height: 220px; overflow: auto; margin-top: 12px; }
+    .selected-material-item { display: grid; grid-template-columns: 120px minmax(180px, 1fr) minmax(180px, 1fr) 96px; gap: 12px; align-items: center; border: 1px solid #e0e8f3; border-radius: 10px; padding: 10px 12px; background: #fff; }
     .stepper { display: grid; grid-template-columns: 42px 64px 42px; }
     .stepper button, .stepper input { border-radius: 0; text-align: center; min-height: 42px; }
     .stepper button:first-child { border-radius: 10px 0 0 10px; }
@@ -172,7 +176,7 @@
     @media (max-width: 980px) {
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
-      .count-grid, .filter-grid, .task-form { grid-template-columns: 1fr; }
+      .count-grid, .filter-grid, .task-form, .selected-material-item { grid-template-columns: 1fr; }
       .description-field { grid-column: 1; }
       .topbar, .modal-footer { flex-direction: column; align-items: stretch; }
     }
@@ -280,6 +284,7 @@
           <div class="actions-inline">
             <button id="exportBtn" class="btn btn-secondary" type="button" disabled>导出筛选明细</button>
             <button id="openCreateBtn" class="btn btn-primary" type="button" disabled>创建任务</button>
+            <button id="openBatchCreateBtn" class="btn btn-primary" type="button" disabled>批量创建任务</button>
           </div>
         </div>
         <div class="panel-body">
@@ -323,6 +328,59 @@
     </div>
   </div>
 
+  <div id="batchTaskModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <div><h2>批量创建任务</h2><div class="muted" id="batchModalSummary">只设置一次，全局应用于所有已选素材目标。</div></div>
+        <button id="batchModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="batchModalOverview" class="modal-overview"></div>
+        <div class="material-card">
+          <div class="card-head">
+            <div>
+              <strong>全局任务参数</strong>
+              <div class="muted">以下配置会复制到每一条已选素材并分别创建需求。</div>
+            </div>
+          </div>
+          <div class="task-form batch-task-form">
+            <div class="field">
+              <label>任务数量</label>
+              <div class="stepper">
+                <button type="button" onclick="stepBatchTaskNumber(-1)">-</button>
+                <input id="batchTaskNumber" type="number" min="1" max="100" value="1" oninput="renderBatchModalOverview()" />
+                <button type="button" onclick="stepBatchTaskNumber(1)">+</button>
+              </div>
+            </div>
+            <div class="field"><label>指定设计师</label><select id="batchTaskDesigner" onchange="renderBatchModalOverview()"></select></div>
+            <div class="field"><label>截止时间</label><input id="batchTaskEndDate" type="date" /></div>
+            <div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="batchOrigin" type="radio" value="1" checked /> 是</label><label class="check"><input name="batchOrigin" type="radio" value="0" /> 否</label></div></div>
+            <div class="field description-field"><label>任务描述</label><textarea id="batchTaskDescription" rows="3"></textarea></div>
+          </div>
+        </div>
+        <div class="material-card">
+          <div class="card-head">
+            <div>
+              <strong>已选素材目标</strong>
+              <div class="muted">每条素材会按上方全局参数创建一个任务。</div>
+            </div>
+          </div>
+          <div id="batchSelectedList" class="selected-material-list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div>
+          <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+          <div id="batchSubmitStatus" class="status-pill" style="margin-top:8px;">待提交</div>
+        </div>
+        <div class="actions-inline">
+          <button id="batchModalResetBtn" class="btn btn-secondary" type="button">Reset</button>
+          <button id="submitBatchTasksBtn" class="btn btn-primary" type="button">确认批量创建</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <script src="/quick-nav.js?v=202605261520"></script>
@@ -358,6 +416,7 @@
       selectAll: document.getElementById("selectAll"),
       exportBtn: document.getElementById("exportBtn"),
       openCreateBtn: document.getElementById("openCreateBtn"),
+      openBatchCreateBtn: document.getElementById("openBatchCreateBtn"),
       taskModal: document.getElementById("taskModal"),
       modalSummary: document.getElementById("modalSummary"),
       modalOverview: document.getElementById("modalOverview"),
@@ -366,6 +425,18 @@
       modalResetBtn: document.getElementById("modalResetBtn"),
       submitTasksBtn: document.getElementById("submitTasksBtn"),
       submitStatus: document.getElementById("submitStatus"),
+      batchTaskModal: document.getElementById("batchTaskModal"),
+      batchModalSummary: document.getElementById("batchModalSummary"),
+      batchModalOverview: document.getElementById("batchModalOverview"),
+      batchTaskNumber: document.getElementById("batchTaskNumber"),
+      batchTaskDesigner: document.getElementById("batchTaskDesigner"),
+      batchTaskEndDate: document.getElementById("batchTaskEndDate"),
+      batchTaskDescription: document.getElementById("batchTaskDescription"),
+      batchSelectedList: document.getElementById("batchSelectedList"),
+      batchModalCloseBtn: document.getElementById("batchModalCloseBtn"),
+      batchModalResetBtn: document.getElementById("batchModalResetBtn"),
+      submitBatchTasksBtn: document.getElementById("submitBatchTasksBtn"),
+      batchSubmitStatus: document.getElementById("batchSubmitStatus"),
       toast: document.getElementById("toast")
     };
     function navText(value) {
@@ -507,6 +578,7 @@
       const selectedCount = state.selectedKeys.size;
       els.exportBtn.disabled = !state.materials.length;
       els.openCreateBtn.disabled = selectedCount < 1;
+      els.openBatchCreateBtn.disabled = selectedCount < 1;
       const selectable = state.materials.length;
       els.selectAll.checked = selectable > 0 && selectedCount === selectable;
       els.selectAll.indeterminate = selectedCount > 0 && selectedCount < selectable;
@@ -682,6 +754,25 @@
       }
       return "";
     }
+    function resolveCommonDefaultDesigner(items) {
+      const defaults = (items || []).map(resolveDefaultDesigner).filter(Boolean);
+      if (!defaults.length || defaults.length !== (items || []).length) return "";
+      return defaults.every(value => value === defaults[0]) ? defaults[0] : "";
+    }
+    function taskPayloadForItem(item, options) {
+      return {
+        target_content_id: item.target_content_id,
+        target_app_id: item.target_app_id,
+        target_product_key: item.target_product_key,
+        target_product_label: item.target_product_label,
+        material_id: item.material_id,
+        number: Number(options.number || 1),
+        designer: options.designer || "",
+        end_date: options.end_date || "",
+        origin_name: Number(options.origin_name ?? 1),
+        description: options.description || ""
+      };
+    }
     function renderModalOverview() {
       const selected = state.modalItems.length;
       let totalQuantity = 0;
@@ -726,23 +817,72 @@
       els.taskCards.innerHTML = "";
       setStatus(els.submitStatus, "待提交");
     }
+    function renderBatchSelectedList() {
+      els.batchSelectedList.innerHTML = state.modalItems.map(item => {
+        const targetProduct = item.target_product_label || item.target_app_id || "-";
+        const sourceProduct = item.source_product_label || item.product || "-";
+        return `<div class="selected-material-item"><div><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属 ${navText(sourceProduct)}</div></div><div>${navText(item.target_drama_name || "-")}<div class="muted">目标剧 ID ${navText(item.target_content_id || "")}</div></div><div>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}</div></div><div>${navText(targetProduct)}</div></div>`;
+      }).join("");
+    }
+    function renderBatchModalOverview() {
+      const selected = state.modalItems.length;
+      const number = Math.max(1, Number(els.batchTaskNumber.value || 1));
+      const totalQuantity = selected * number;
+      const incomplete = els.batchTaskDesigner.value ? 0 : 1;
+      els.batchModalOverview.innerHTML = [["已选素材", selected], ["预计创建任务", selected], ["需求素材数", totalQuantity || selected], ["未完成配置", incomplete]]
+        .map(([label, value]) => `<div class="overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      els.batchModalSummary.textContent = `已选择 ${selected} 条素材；全局配置将应用于全部已选素材，预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+    }
+    function renderBatchTaskForm() {
+      const commonDesigner = resolveCommonDefaultDesigner(state.modalItems);
+      els.batchTaskNumber.value = "1";
+      els.batchTaskDesigner.innerHTML = designerOptions(commonDesigner);
+      els.batchTaskEndDate.value = "";
+      const originYes = document.querySelector('input[name="batchOrigin"][value="1"]');
+      if (originYes) originYes.checked = true;
+      els.batchTaskDescription.value = state.modalItems.length === 1
+        ? `参考素材 ${state.modalItems[0].material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`
+        : `参考已选 ${state.modalItems.length} 条高 ROAS 素材的表现和画面风格，批量扩展设计师任务。`;
+      renderBatchSelectedList();
+      renderBatchModalOverview();
+    }
+    async function openBatchTaskModal() {
+      syncSelectionFromDom();
+      const items = selectedItems();
+      if (!items.length) return toast("请先选择素材", "error");
+      setButtonLoading(els.openBatchCreateBtn, true, "打开中...");
+      try {
+        await loadDesigners();
+        state.modalItems = items;
+        renderBatchTaskForm();
+        setStatus(els.batchSubmitStatus, "待提交");
+        els.batchTaskModal.classList.remove("hidden");
+      } finally {
+        setButtonLoading(els.openBatchCreateBtn, false);
+      }
+    }
+    function closeBatchTaskModal() {
+      state.modalItems = [];
+      els.batchTaskModal.classList.add("hidden");
+      els.batchSelectedList.innerHTML = "";
+      setStatus(els.batchSubmitStatus, "待提交");
+    }
     function stepTaskNumber(index, delta) {
       const input = document.getElementById(`taskNumber_${index}`);
       if (!input) return;
       input.value = String(Math.max(1, Math.min(100, Number(input.value || 1) + delta)));
       renderModalOverview();
     }
+    function stepBatchTaskNumber(delta) {
+      els.batchTaskNumber.value = String(Math.max(1, Math.min(100, Number(els.batchTaskNumber.value || 1) + delta)));
+      renderBatchModalOverview();
+    }
     async function submitTasks() {
-      const items = state.modalItems.map((item, index) => ({
-        target_content_id: item.target_content_id,
-        target_app_id: item.target_app_id,
-        target_product_key: item.target_product_key,
-        target_product_label: item.target_product_label,
-        material_id: item.material_id,
-        number: Number(document.getElementById(`taskNumber_${index}`)?.value || 1),
+      const items = state.modalItems.map((item, index) => taskPayloadForItem(item, {
+        number: document.getElementById(`taskNumber_${index}`)?.value || 1,
         designer: document.getElementById(`taskDesigner_${index}`)?.value || "",
         end_date: document.getElementById(`taskEndDate_${index}`)?.value || "",
-        origin_name: Number(document.querySelector(`input[name="origin_${index}"]:checked`)?.value || "1"),
+        origin_name: document.querySelector(`input[name="origin_${index}"]:checked`)?.value || "1",
         description: document.getElementById(`taskDescription_${index}`)?.value || ""
       }));
       if (!items.length) return toast("请先选择素材", "error");
@@ -766,6 +906,36 @@
         setButtonLoading(els.submitTasksBtn, false);
       }
     }
+    async function submitBatchTasks() {
+      const common = {
+        number: els.batchTaskNumber.value || 1,
+        designer: els.batchTaskDesigner.value || "",
+        end_date: els.batchTaskEndDate.value || "",
+        origin_name: document.querySelector('input[name="batchOrigin"]:checked')?.value || "1",
+        description: els.batchTaskDescription.value || ""
+      };
+      const items = state.modalItems.map(item => taskPayloadForItem(item, common));
+      if (!items.length) return toast("请先选择素材", "error");
+      if (!common.designer) {
+        setStatus(els.batchSubmitStatus, "请选择设计师", "error");
+        renderBatchModalOverview();
+        return toast("请选择设计师", "error");
+      }
+      setButtonLoading(els.submitBatchTasksBtn, true, "创建中...");
+      setStatus(els.batchSubmitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/design-tasks", { method: "POST", body: JSON.stringify({ items }) });
+        setStatus(els.batchSubmitStatus, `创建完成：成功 ${data.created_count || 0} 个${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`, data.failed_count ? "error" : "success");
+        toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
+        if (!data.failed_count) closeBatchTaskModal();
+      } catch (error) {
+        setStatus(els.batchSubmitStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.submitBatchTasksBtn, false);
+      }
+    }
     function exportCsv() {
       if (!state.materials.length) return;
       const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "source_content_id", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
@@ -782,7 +952,9 @@
     }
     window.toggleSelection = toggleSelection;
     window.stepTaskNumber = stepTaskNumber;
+    window.stepBatchTaskNumber = stepBatchTaskNumber;
     window.renderModalOverview = renderModalOverview;
+    window.renderBatchModalOverview = renderBatchModalOverview;
 
     els.refreshBtn.onclick = () => location.reload();
     els.loginBtn.onclick = () => loginOrLogout().catch(error => showError("登录状态切换失败", error));
@@ -798,9 +970,13 @@
     });
     els.exportBtn.onclick = exportCsv;
     els.openCreateBtn.onclick = () => openTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
+    els.openBatchCreateBtn.onclick = () => openBatchTaskModal().catch(error => showError("打开批量创建任务弹窗失败", error));
     els.modalCloseBtn.onclick = closeTaskModal;
     els.modalResetBtn.onclick = renderTaskCards;
     els.submitTasksBtn.onclick = () => submitTasks().catch(error => showError("创建设计师任务失败", error));
+    els.batchModalCloseBtn.onclick = closeBatchTaskModal;
+    els.batchModalResetBtn.onclick = renderBatchTaskForm;
+    els.submitBatchTasksBtn.onclick = () => submitBatchTasks().catch(error => showError("批量创建设计师任务失败", error));
     loadAuthStatus().catch(error => showError("加载登录状态失败", error));
   </script>
 </body>
