@@ -290,11 +290,11 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>剧 ID</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
+              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>素材剧 ID</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
               <tbody id="resultTableBody"><tr><td colspan="14" class="muted">暂无筛选结果</td></tr></tbody>
             </table>
           </div>
-          <div class="detail">素材级筛选说明：每一行就是一条可勾选素材；同一个剧可以出现多条素材。只对勾选素材提需求，未勾选素材不会进入创建弹窗。</div>
+          <div class="detail">素材级筛选说明：每一行就是一条可勾选素材；素材剧 ID 是参考素材所属剧，目标产品和目标剧 ID 仍按筛选条件保存并用于创建任务。</div>
         </div>
       </section>
     </main>
@@ -563,7 +563,8 @@
             const statusText = item.candidate_reason || item.candidate_status || "";
             const targetProduct = item.target_product_label || item.target_app_id || "-";
             const sourceProduct = item.source_product_label || item.product || "-";
-            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属：${navText(sourceProduct)}</div></td><td><strong>${navText(targetProduct)}</strong><div class="muted">${navText(item.target_app_id || "")}</div></td><td>${navText(item.target_content_id || "")}</td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
+            const sourceContentId = item.source_content_id || item.target_content_id || "";
+            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属：${navText(sourceProduct)}</div></td><td><strong>${navText(targetProduct)}</strong><div class="muted">${navText(item.target_app_id || "")}</div></td><td><strong>${navText(sourceContentId)}</strong><div class="muted">目标：${navText(item.target_content_id || "")}</div></td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
           }).join("")
         : `<tr><td colspan="14" class="muted">暂无筛选结果</td></tr>`;
       els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
@@ -767,7 +768,7 @@
     }
     function exportCsv() {
       if (!state.materials.length) return;
-      const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "source_content_id", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
       const csv = [headers.join(",")].concat(state.materials.map(item => headers.map(key => `"${String(item[key] ?? "").replace(/"/g, '""')}"`).join(","))).join("\n");
       const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);

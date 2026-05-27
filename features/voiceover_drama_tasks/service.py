@@ -34,6 +34,10 @@ VOICEOVER_PRODUCT_OPTIONS = (
 )
 VOICEOVER_PRODUCT_BY_KEY = {item["key"]: item for item in VOICEOVER_PRODUCT_OPTIONS}
 VOICEOVER_PRODUCT_BY_APP_ID = {item["app_id"]: item for item in VOICEOVER_PRODUCT_OPTIONS}
+VOICEOVER_SOURCE_PRODUCTS_BY_APP_ID = {
+    "1479": ("Dramawave", "DramawaveSource"),
+    "979": ("FreeReels", "freereels-AI素材"),
+}
 
 ADMIN_MAPPING_MYSQL_DATABASE = ""
 DB_NAME = ""
@@ -161,6 +165,18 @@ def voiceover_source_product_label(product):
     if "dramawave" in lowered:
         return "Dramawave"
     return text or "-"
+
+
+def voiceover_source_product_names(app_id):
+    return VOICEOVER_SOURCE_PRODUCTS_BY_APP_ID.get(str(app_id or "").strip(), ())
+
+
+def voiceover_source_product_sql_condition(app_id, alias="s"):
+    names = voiceover_source_product_names(app_id)
+    if not names:
+        return ""
+    field = "%s.product" % alias
+    return "COALESCE(%s, '') IN (%s)" % (field, voiceover_sql_in(names))
 
 
 def voiceover_parse_product_app_ids(payload):
@@ -487,13 +503,21 @@ def voiceover_material_count_map_for_series_targets(series_targets):
     if not cleaned_targets:
         return {}
     database = voiceover_sql_db()
+    source_product_filters = []
+    for app_id in app_ids:
+        source_condition = voiceover_source_product_sql_condition(app_id, "s")
+        if source_condition:
+            source_product_filters.append(
+                "(CAST(d.app_id AS CHAR)='%s' AND %s)" % (mysql_escape_literal(app_id), source_condition)
+            )
+    source_product_sql = " AND (%s)" % " OR ".join(source_product_filters) if source_product_filters else ""
     rows = run_mysql(
         (
             "SELECT d.series_code, CAST(d.app_id AS CHAR), COUNT(DISTINCT s.id), COUNT(DISTINCT d.content_id) "
             "FROM `%s`.ads_drama_info d FORCE INDEX (scoo) "
             "LEFT JOIN `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
             "ON s.data_source=%d AND s.data_source_id=d.content_id "
-            "AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
+            "AND s.is_delete=0 AND COALESCE(s.url, '')<>''%s "
             "WHERE d.series_code IN (%s) AND CAST(d.app_id AS CHAR) IN (%s) AND d.content_id<>'' "
             "GROUP BY d.series_code, d.app_id"
         )
@@ -501,6 +525,7 @@ def voiceover_material_count_map_for_series_targets(series_targets):
             database,
             database,
             VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+            source_product_sql,
             voiceover_sql_in(series_codes),
             voiceover_sql_in(app_ids),
         )
@@ -588,13 +613,15 @@ def voiceover_material_dedupe_key(item):
     return "%s:%s" % (duration, name[:80])
 
 
-def voiceover_material_source_rows_for_series(content_ids, scan_limit):
+def voiceover_material_source_rows_for_series(content_ids, scan_limit, product_app_id=""):
     content_ids = [str(content_id or "").strip() for content_id in (content_ids or []) if str(content_id or "").strip()]
     if not content_ids:
         return []
     scan_limit = max(1, min(10000, voiceover_int(scan_limit, VOICEOVER_FILTER_SOURCE_SCAN_LIMIT)))
     database = voiceover_sql_db()
     content_id_sql = voiceover_sql_in(content_ids)
+    source_product_condition = voiceover_source_product_sql_condition(product_app_id, "s")
+    source_product_sql = "AND %s " % source_product_condition if source_product_condition else ""
     sql = (
         "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
         "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
@@ -603,9 +630,9 @@ def voiceover_material_source_rows_for_series(content_ids, scan_limit):
         "CAST(s.user_id AS CHAR), CAST(s.initiator AS CHAR) "
         "FROM `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
         "WHERE s.data_source=%d AND s.data_source_id IN (%s) "
-        "AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
+        "AND s.is_delete=0 AND COALESCE(s.url, '')<>'' %s"
         "ORDER BY s.updated_at DESC, s.id DESC LIMIT %d"
-    ) % (database, VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE, content_id_sql, scan_limit)
+    ) % (database, VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE, content_id_sql, source_product_sql, scan_limit)
     return run_mysql(sql)
 
 
@@ -667,7 +694,7 @@ def voiceover_material_item_from_source_and_summary(source_row, summary_row):
     }
 
 
-def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=15, content_ids=None):
+def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=15, content_ids=None, product_app_id=""):
     series_code = str(series_code or "").strip()
     if not series_code:
         return []
@@ -691,7 +718,7 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
         if current_scan_limit in seen_scan_limits:
             continue
         seen_scan_limits.add(current_scan_limit)
-        source_rows = voiceover_material_source_rows_for_series(content_ids, current_scan_limit)
+        source_rows = voiceover_material_source_rows_for_series(content_ids, current_scan_limit, product_app_id=product_app_id)
         source_by_id = {str(row[0] if row else "").strip(): row for row in source_rows if row and str(row[0]).strip()}
         summary_rows = voiceover_insight_summary_for_resources(source_by_id.keys(), roas_threshold, limit)
         items = []
@@ -708,6 +735,8 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
     if best_items or not VOICEOVER_FILTER_LEGACY_FALLBACK:
         return best_items
     content_id_sql = voiceover_sql_in(content_ids)
+    source_product_condition = voiceover_source_product_sql_condition(product_app_id, "s")
+    source_product_sql = "AND %s " % source_product_condition if source_product_condition else ""
     sql = (
         "SELECT CAST(s.id AS CHAR), COALESCE(s.name, ''), COALESCE(s.url, ''), "
         "COALESCE(s.category, ''), COALESCE(s.product, ''), COALESCE(s.country, ''), "
@@ -726,7 +755,7 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
         "GROUP BY resource_id HAVING spend>0 AND revenue/spend*100 >= %.6f"
         ") i "
         "JOIN `%s`.ads_custom_source s ON CAST(s.id AS CHAR)=CAST(i.resource_id AS CHAR) "
-        "WHERE s.data_source=%d AND s.data_source_id IN (%s) AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
+        "WHERE s.data_source=%d AND s.data_source_id IN (%s) AND s.is_delete=0 AND COALESCE(s.url, '')<>'' %s"
         "ORDER BY i.revenue/i.spend DESC, i.spend DESC, s.id DESC LIMIT %d"
     ) % (
         database,
@@ -736,6 +765,7 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
         database,
         VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
         content_id_sql,
+        source_product_sql,
         limit,
     )
     rows = run_mysql(sql)
@@ -886,6 +916,7 @@ def voiceover_filter_materials(payload):
                     roas_threshold=roas_threshold,
                     limit=candidate_limit,
                     content_ids=series_content_map.get(series_key) or [],
+                    product_app_id=app_id,
                 )
                 voiceover_apply_candidate_rules(series_materials, roas_threshold, min_candidates)
                 materials_by_series[series_key] = series_materials
