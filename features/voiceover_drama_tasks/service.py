@@ -932,9 +932,10 @@ def create_voiceover_design_tasks(payload, session):
         description = str(raw_item.get("description", raw_item.get("introducation", "")) or "").strip()
         origin_name = voiceover_int(raw_item.get("origin_name", 1), 1)
         end_date = str(raw_item.get("end_date") or "").strip()
+        product_app_id = str(drama.get("app_id", "") or "").strip()
         body = {
             "name": build_voiceover_task_name(drama, actor),
-            "app": drama.get("app", ""),
+            "app": voiceover_int(product_app_id) if re.match(r"^\d+$", product_app_id) else product_app_id,
             "type": 11,
             "contect_id": drama.get("full_content_id", ""),
             "number": number,
