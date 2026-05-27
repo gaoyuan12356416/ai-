@@ -196,12 +196,14 @@ def voiceover_drama_info_from_row(row, content_id=""):
     )
     drama_app = str(row[7] if len(row) > 7 else "").strip() or app_package
     full_content_id = "%s#-#%s#-#%s" % (app_package, drama_app, source_content_id)
+    kol_content_id = "%s#-#%s" % (app_package, source_content_id)
     product_name = str(row[9] if len(row) > 9 else "").strip() or app_package or app_id_value
     return {
         "id": str(row[0] if len(row) > 0 else "").strip(),
         "app_id": app_id_value,
         "content_id": source_content_id,
         "full_content_id": full_content_id,
+        "kol_content_id": kol_content_id,
         "name": str(row[3] if len(row) > 3 else "").strip(),
         "country": str(row[4] if len(row) > 4 else "").strip(),
         "language": str(row[5] if len(row) > 5 else "").strip(),
@@ -937,7 +939,7 @@ def create_voiceover_design_tasks(payload, session):
             "name": build_voiceover_task_name(drama, actor),
             "app": voiceover_int(product_app_id) if re.match(r"^\d+$", product_app_id) else product_app_id,
             "type": 11,
-            "contect_id": drama.get("full_content_id", ""),
+            "content_id": drama.get("kol_content_id", ""),
             "number": number,
             "country": drama.get("country", ""),
             "language": drama.get("language", ""),
