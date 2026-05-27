@@ -28,6 +28,12 @@ VOICEOVER_FILTER_SOURCE_SCAN_LIMIT = int(os.environ.get("VOICEOVER_FILTER_SOURCE
 VOICEOVER_FILTER_SOURCE_SCAN_MAX = int(os.environ.get("VOICEOVER_FILTER_SOURCE_SCAN_MAX", "3000") or "3000")
 VOICEOVER_FILTER_LEGACY_FALLBACK = os.environ.get("VOICEOVER_FILTER_LEGACY_FALLBACK", "0").strip() == "1"
 VOICEOVER_CREATE_MAX_WORKERS = int(os.environ.get("VOICEOVER_CREATE_MAX_WORKERS", "5") or "5")
+VOICEOVER_PRODUCT_OPTIONS = (
+    {"key": "dramawave1479", "app_id": "1479", "label": "Dramawave"},
+    {"key": "freereels979", "app_id": "979", "label": "FreeReels"},
+)
+VOICEOVER_PRODUCT_BY_KEY = {item["key"]: item for item in VOICEOVER_PRODUCT_OPTIONS}
+VOICEOVER_PRODUCT_BY_APP_ID = {item["app_id"]: item for item in VOICEOVER_PRODUCT_OPTIONS}
 
 ADMIN_MAPPING_MYSQL_DATABASE = ""
 DB_NAME = ""
@@ -123,6 +129,71 @@ def voiceover_parse_content_ids(payload):
     return result
 
 
+def voiceover_normalize_product_app_id(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    lowered = value.lower()
+    if lowered in VOICEOVER_PRODUCT_BY_KEY:
+        return VOICEOVER_PRODUCT_BY_KEY[lowered]["app_id"]
+    if value in VOICEOVER_PRODUCT_BY_APP_ID:
+        return value
+    if "1479" in lowered or "dramawave" in lowered:
+        return "1479"
+    if "979" in lowered or "freereels" in lowered or "free_reels" in lowered:
+        return "979"
+    return value if re.match(r"^\d+$", value) else ""
+
+
+def voiceover_product_meta(app_id):
+    app_id = str(app_id or "").strip()
+    meta = VOICEOVER_PRODUCT_BY_APP_ID.get(app_id)
+    if meta:
+        return dict(meta)
+    return {"key": app_id or "", "app_id": app_id, "label": app_id or ""}
+
+
+def voiceover_source_product_label(product):
+    text = str(product or "").strip()
+    lowered = re.sub(r"[^a-z0-9]+", "", text.lower())
+    if "freereels" in lowered:
+        return "FreeReels"
+    if "dramawave" in lowered:
+        return "Dramawave"
+    return text or "-"
+
+
+def voiceover_parse_product_app_ids(payload):
+    payload = payload or {}
+    raw = payload.get("product_app_ids")
+    if raw is None:
+        raw = payload.get("app_ids")
+    if raw is None:
+        raw = payload.get("products")
+    if raw is None:
+        raw = payload.get("product")
+    if raw is None:
+        raw = payload.get("app_id")
+    if isinstance(raw, list):
+        values = [str(item or "").strip() for item in raw]
+    else:
+        values = [item.strip() for item in re.split(r"[\s,，;；]+", str(raw or "")) if item.strip()]
+    result = []
+    seen = set()
+    for value in values:
+        app_id = voiceover_normalize_product_app_id(value)
+        if app_id and app_id not in seen:
+            seen.add(app_id)
+            result.append(app_id)
+    if not result:
+        default_app_id = voiceover_normalize_product_app_id(VOICEOVER_DEFAULT_APP_ID)
+        if default_app_id:
+            result.append(default_app_id)
+        else:
+            result = [item["app_id"] for item in VOICEOVER_PRODUCT_OPTIONS]
+    return result
+
+
 def voiceover_sql_db():
     return (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
 
@@ -134,24 +205,28 @@ def voiceover_sql_in(values):
     return ",".join("'%s'" % mysql_escape_literal(value) for value in cleaned)
 
 
-def voiceover_series_content_ids(series_code):
+def voiceover_series_content_ids(series_code, app_id=""):
     series_code = str(series_code or "").strip()
     if not series_code:
         return []
     database = voiceover_sql_db()
+    where = "CAST(d.series_code AS CHAR)='%s' AND d.content_id<>''" % mysql_escape_literal(series_code)
+    app_id = str(app_id or "").strip()
+    if app_id:
+        where += " AND CAST(d.app_id AS CHAR)='%s'" % mysql_escape_literal(app_id)
     rows = run_mysql(
         (
             "SELECT DISTINCT d.content_id "
             "FROM `%s`.ads_drama_info d "
-            "WHERE CAST(d.series_code AS CHAR)='%s' AND d.content_id<>'' "
+            "WHERE %s "
             "ORDER BY d.content_id"
         )
-        % (database, mysql_escape_literal(series_code))
+        % (database, where)
     )
     return [str(row[0] if row else "").strip() for row in rows if row and str(row[0]).strip()]
 
 
-def voiceover_series_content_ids_map(series_codes):
+def voiceover_series_content_ids_map(series_codes, app_ids=None):
     cleaned = []
     seen = set()
     for series_code in series_codes:
@@ -161,28 +236,34 @@ def voiceover_series_content_ids_map(series_codes):
             seen.add(value)
     if not cleaned:
         return {}
+    app_ids = [str(app_id or "").strip() for app_id in (app_ids or []) if str(app_id or "").strip()]
     database = voiceover_sql_db()
+    where = "d.series_code IN (%s) AND d.content_id<>''" % voiceover_sql_in(cleaned)
+    if app_ids:
+        where += " AND CAST(d.app_id AS CHAR) IN (%s)" % voiceover_sql_in(app_ids)
     rows = run_mysql(
         (
-            "SELECT d.series_code, d.content_id "
+            "SELECT d.series_code, CAST(d.app_id AS CHAR), d.content_id "
             "FROM `%s`.ads_drama_info d FORCE INDEX (scoo) "
-            "WHERE d.series_code IN (%s) AND d.content_id<>'' "
-            "ORDER BY d.series_code, d.content_id"
+            "WHERE %s "
+            "ORDER BY d.series_code, d.app_id, d.content_id"
         )
-        % (database, voiceover_sql_in(cleaned))
+        % (database, where)
     )
-    result = {series_code: [] for series_code in cleaned}
+    result = {(series_code, app_id): [] for series_code in cleaned for app_id in app_ids} if app_ids else {series_code: [] for series_code in cleaned}
     seen_pairs = set()
     for row in rows:
         series_code = str(row[0] if len(row) > 0 else "").strip()
-        content_id = str(row[1] if len(row) > 1 else "").strip()
+        app_id = str(row[1] if len(row) > 1 else "").strip()
+        content_id = str(row[2] if len(row) > 2 else "").strip()
         if not series_code or not content_id:
             continue
-        key = (series_code, content_id)
-        if key in seen_pairs:
+        result_key = (series_code, app_id) if app_ids else series_code
+        pair_key = (result_key, content_id)
+        if pair_key in seen_pairs:
             continue
-        seen_pairs.add(key)
-        result.setdefault(series_code, []).append(content_id)
+        seen_pairs.add(pair_key)
+        result.setdefault(result_key, []).append(content_id)
     return result
 
 
@@ -252,6 +333,47 @@ def lookup_voiceover_drama_info_map(content_ids, app_id=""):
         content_id = str(row[2] if len(row) > 2 else "").strip()
         if content_id and content_id not in result:
             result[content_id] = voiceover_drama_info_from_row(row, content_id)
+    return result
+
+
+def lookup_voiceover_drama_info_map_by_app(content_ids, app_ids):
+    cleaned_content_ids = []
+    seen_content_ids = set()
+    for content_id in content_ids or []:
+        value = str(content_id or "").strip()
+        if value and value not in seen_content_ids:
+            cleaned_content_ids.append(value)
+            seen_content_ids.add(value)
+    cleaned_app_ids = []
+    seen_app_ids = set()
+    for app_id in app_ids or []:
+        value = str(app_id or "").strip()
+        if value and value not in seen_app_ids:
+            cleaned_app_ids.append(value)
+            seen_app_ids.add(value)
+    if not cleaned_content_ids or not cleaned_app_ids:
+        return {}
+    database = voiceover_sql_db()
+    rows = run_mysql(
+        (
+            "SELECT CAST(d.id AS CHAR), CAST(d.app_id AS CHAR), d.content_id, d.name, d.country, "
+            "d.language, d.series_code, d.app, CAST(d.updated_at AS CHAR), "
+            "COALESCE(a.name, ''), COALESCE(a.package, ''), COALESCE(a.google_app_android, ''), "
+            "COALESCE(a.app_id, '') "
+            "FROM `%s`.ads_drama_info d "
+            "LEFT JOIN `%s`.ads_apps_setting a ON a.id=d.app_id "
+            "WHERE d.content_id IN (%s) AND CAST(d.app_id AS CHAR) IN (%s) "
+            "ORDER BY d.content_id ASC, d.app_id ASC, d.updated_at DESC, d.id ASC"
+        )
+        % (database, database, voiceover_sql_in(cleaned_content_ids), voiceover_sql_in(cleaned_app_ids))
+    )
+    result = {}
+    for row in rows:
+        app_id = str(row[1] if len(row) > 1 else "").strip()
+        content_id = str(row[2] if len(row) > 2 else "").strip()
+        key = (app_id, content_id)
+        if app_id and content_id and key not in result:
+            result[key] = voiceover_drama_info_from_row(row, content_id)
     return result
 
 
@@ -343,39 +465,100 @@ def voiceover_material_count_map_for_series(series_codes):
     return result
 
 
+def voiceover_material_count_map_for_series_targets(series_targets):
+    cleaned_targets = []
+    seen_targets = set()
+    series_codes = []
+    app_ids = []
+    for series_code, app_id in series_targets or []:
+        series_code = str(series_code or "").strip()
+        app_id = str(app_id or "").strip()
+        if not series_code or not app_id:
+            continue
+        key = (series_code, app_id)
+        if key in seen_targets:
+            continue
+        seen_targets.add(key)
+        cleaned_targets.append(key)
+        if series_code not in series_codes:
+            series_codes.append(series_code)
+        if app_id not in app_ids:
+            app_ids.append(app_id)
+    if not cleaned_targets:
+        return {}
+    database = voiceover_sql_db()
+    rows = run_mysql(
+        (
+            "SELECT d.series_code, CAST(d.app_id AS CHAR), COUNT(DISTINCT s.id), COUNT(DISTINCT d.content_id) "
+            "FROM `%s`.ads_drama_info d FORCE INDEX (scoo) "
+            "LEFT JOIN `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
+            "ON s.data_source=%d AND s.data_source_id=d.content_id "
+            "AND s.is_delete=0 AND COALESCE(s.url, '')<>'' "
+            "WHERE d.series_code IN (%s) AND CAST(d.app_id AS CHAR) IN (%s) AND d.content_id<>'' "
+            "GROUP BY d.series_code, d.app_id"
+        )
+        % (
+            database,
+            database,
+            VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+            voiceover_sql_in(series_codes),
+            voiceover_sql_in(app_ids),
+        )
+    )
+    result = {}
+    for row in rows:
+        series_code = str(row[0] if len(row) > 0 else "").strip()
+        app_id = str(row[1] if len(row) > 1 else "").strip()
+        if not series_code or not app_id:
+            continue
+        result[(series_code, app_id)] = {
+            "material_count": voiceover_int(row[2] if len(row) > 2 else 0, 0),
+            "series_content_count": voiceover_int(row[3] if len(row) > 3 else 0, 0),
+        }
+    return result
+
+
 def voiceover_material_counts(payload):
     records = []
-    series_codes = []
+    series_targets = []
     content_ids = voiceover_parse_content_ids(payload)
-    drama_map = lookup_voiceover_drama_info_map(content_ids)
-    for content_id in content_ids:
-        try:
-            drama = drama_map.get(content_id)
-            if not drama:
-                raise StructuredApiError("drama_not_found", "未在剧库中找到剧 ID：%s" % content_id)
-            series_codes.append(drama.get("series_code", ""))
-            records.append({
-                "content_id": content_id,
-                "drama": drama,
-                "status": "ok",
-            })
-        except Exception as exc:
-            records.append({
-                "content_id": content_id,
-                "material_count": 0,
-                "series_content_count": 0,
-                "status": "failed",
-                "error": api_error_payload(exc).get("message") or str(exc),
-            })
+    product_app_ids = voiceover_parse_product_app_ids(payload)
+    drama_map = lookup_voiceover_drama_info_map_by_app(content_ids, product_app_ids)
+    for app_id in product_app_ids:
+        product = voiceover_product_meta(app_id)
+        for content_id in content_ids:
+            try:
+                drama = drama_map.get((app_id, content_id))
+                if not drama:
+                    raise StructuredApiError("drama_not_found", "未在%s中找到剧 ID：%s" % (product.get("label") or app_id, content_id))
+                series_targets.append((drama.get("series_code", ""), app_id))
+                records.append({
+                    "content_id": content_id,
+                    "product": product,
+                    "drama": drama,
+                    "status": "ok",
+                })
+            except Exception as exc:
+                records.append({
+                    "content_id": content_id,
+                    "product_app_id": app_id,
+                    "product_key": product.get("key", ""),
+                    "product_label": product.get("label", ""),
+                    "material_count": 0,
+                    "series_content_count": 0,
+                    "status": "failed",
+                    "error": api_error_payload(exc).get("message") or str(exc),
+                })
 
-    count_map = voiceover_material_count_map_for_series(series_codes)
+    count_map = voiceover_material_count_map_for_series_targets(series_targets)
     items = []
     for record in records:
         if record.get("status") != "ok":
             items.append(record)
             continue
         drama = record.get("drama") or {}
-        count_info = count_map.get(drama.get("series_code", ""), {})
+        product = record.get("product") or voiceover_product_meta(drama.get("app_id", ""))
+        count_info = count_map.get((drama.get("series_code", ""), product.get("app_id", "")), {})
         items.append({
             "content_id": record.get("content_id", ""),
             "drama_name": drama.get("name", ""),
@@ -383,6 +566,10 @@ def voiceover_material_counts(payload):
             "series_content_count": count_info.get("series_content_count", 0),
             "app_id": drama.get("app_id", ""),
             "app": drama.get("app", ""),
+            "product_app_id": product.get("app_id", ""),
+            "product_key": product.get("key", ""),
+            "product_label": product.get("label", ""),
+            "product_owner": product.get("label", ""),
             "country": drama.get("country", ""),
             "language": drama.get("language", ""),
             "material_count": count_info.get("material_count", 0),
@@ -450,12 +637,14 @@ def voiceover_material_item_from_source_and_summary(source_row, summary_row):
     designer_id = str(source_row[10] if len(source_row) > 10 else "").strip()
     source_user_id = str(source_row[11] if len(source_row) > 11 else "").strip()
     source_initiator = str(source_row[12] if len(source_row) > 12 else "").strip()
+    source_product = str(source_row[4] if len(source_row) > 4 else "").strip()
     return {
         "material_id": str(source_row[0] if len(source_row) > 0 else "").strip(),
         "name": str(source_row[1] if len(source_row) > 1 else "").strip(),
         "url": str(source_row[2] if len(source_row) > 2 else "").strip(),
         "category": str(source_row[3] if len(source_row) > 3 else "").strip(),
-        "product": str(source_row[4] if len(source_row) > 4 else "").strip(),
+        "product": source_product,
+        "source_product_label": voiceover_source_product_label(source_product),
         "country": str(source_row[5] if len(source_row) > 5 else "").strip(),
         "language": str(source_row[6] if len(source_row) > 6 else "").strip(),
         "source_content_id": str(source_row[7] if len(source_row) > 7 else "").strip(),
@@ -560,12 +749,14 @@ def voiceover_material_rows_for_series(series_code, roas_threshold=None, limit=1
         designer_id = str(row[10] if len(row) > 10 else "").strip()
         source_user_id = str(row[11] if len(row) > 11 else "").strip()
         source_initiator = str(row[12] if len(row) > 12 else "").strip()
+        source_product = str(row[4] if len(row) > 4 else "").strip()
         items.append({
             "material_id": str(row[0] if len(row) > 0 else "").strip(),
             "name": str(row[1] if len(row) > 1 else "").strip(),
             "url": str(row[2] if len(row) > 2 else "").strip(),
             "category": str(row[3] if len(row) > 3 else "").strip(),
-            "product": str(row[4] if len(row) > 4 else "").strip(),
+            "product": source_product,
+            "source_product_label": voiceover_source_product_label(source_product),
             "country": str(row[5] if len(row) > 5 else "").strip(),
             "language": str(row[6] if len(row) > 6 else "").strip(),
             "source_content_id": str(row[7] if len(row) > 7 else "").strip(),
@@ -661,46 +852,71 @@ def voiceover_filter_materials(payload):
     groups = []
     all_items = []
     content_ids = voiceover_parse_content_ids(payload)
-    drama_map = lookup_voiceover_drama_info_map(content_ids)
+    product_app_ids = voiceover_parse_product_app_ids(payload)
+    drama_map = lookup_voiceover_drama_info_map_by_app(content_ids, product_app_ids)
     series_codes = []
     for drama in drama_map.values():
         series_code = (drama or {}).get("series_code", "")
         if series_code and series_code not in series_codes:
             series_codes.append(series_code)
-    series_content_map = voiceover_series_content_ids_map(series_codes)
+    series_content_map = voiceover_series_content_ids_map(series_codes, product_app_ids)
     materials_by_series = {}
-    for content_id in content_ids:
-        drama = drama_map.get(content_id)
-        if not drama:
-            raise StructuredApiError("drama_not_found", "未在剧库中找到剧 ID：%s" % content_id)
-        series_code = drama.get("series_code", "")
-        if series_code not in materials_by_series:
-            series_materials = voiceover_material_rows_for_series(
-                series_code,
-                roas_threshold=roas_threshold,
-                limit=candidate_limit,
-                content_ids=series_content_map.get(series_code) or [],
-            )
-            voiceover_apply_candidate_rules(series_materials, roas_threshold, min_candidates)
-            materials_by_series[series_code] = series_materials
-        materials = [dict(item) for item in materials_by_series.get(series_code, [])]
-        for item in materials:
-            item["target_content_id"] = content_id
-            item["target_drama_name"] = drama.get("name", "")
-            item["target_series_code"] = drama.get("series_code", "")
-            item["target_app_id"] = drama.get("app_id", "")
-            item["target_app"] = drama.get("app", "")
-            item["target_country"] = drama.get("country", "")
-            item["target_language"] = drama.get("language", "")
-        default_count = len([item for item in materials if item.get("selected_by_default")])
-        groups.append({
-            "content_id": content_id,
-            "drama": drama,
-            "material_count": len(materials),
-            "default_candidate_count": default_count,
-            "substitute_count": 0,
-        })
-        all_items.extend(materials)
+    for app_id in product_app_ids:
+        product = voiceover_product_meta(app_id)
+        for content_id in content_ids:
+            drama = drama_map.get((app_id, content_id))
+            if not drama:
+                groups.append({
+                    "content_id": content_id,
+                    "product_app_id": product.get("app_id", ""),
+                    "product_key": product.get("key", ""),
+                    "product_label": product.get("label", ""),
+                    "material_count": 0,
+                    "default_candidate_count": 0,
+                    "substitute_count": 0,
+                    "status": "failed",
+                    "error": "未在%s中找到剧 ID：%s" % (product.get("label") or app_id, content_id),
+                })
+                continue
+            series_code = drama.get("series_code", "")
+            series_key = (series_code, app_id)
+            if series_key not in materials_by_series:
+                series_materials = voiceover_material_rows_for_series(
+                    series_code,
+                    roas_threshold=roas_threshold,
+                    limit=candidate_limit,
+                    content_ids=series_content_map.get(series_key) or [],
+                )
+                voiceover_apply_candidate_rules(series_materials, roas_threshold, min_candidates)
+                materials_by_series[series_key] = series_materials
+            materials = [dict(item) for item in materials_by_series.get(series_key, [])]
+            for item in materials:
+                item["target_content_id"] = content_id
+                item["target_drama_name"] = drama.get("name", "")
+                item["target_series_code"] = drama.get("series_code", "")
+                item["target_app_id"] = product.get("app_id", "") or drama.get("app_id", "")
+                item["target_product_key"] = product.get("key", "")
+                item["target_product_label"] = product.get("label", "")
+                item["target_app"] = drama.get("app", "")
+                item["target_country"] = drama.get("country", "")
+                item["target_language"] = drama.get("language", "")
+            default_count = len([item for item in materials if item.get("selected_by_default")])
+            groups.append({
+                "content_id": content_id,
+                "product_app_id": product.get("app_id", ""),
+                "product_key": product.get("key", ""),
+                "product_label": product.get("label", ""),
+                "drama": drama,
+                "material_count": len(materials),
+                "default_candidate_count": default_count,
+                "substitute_count": 0,
+            })
+            all_items.extend(materials)
+    if groups and all(group.get("status") == "failed" for group in groups):
+        raise StructuredApiError(
+            "drama_not_found",
+            "；".join(group.get("error", "") for group in groups[:3] if group.get("error")) or "未找到匹配产品下的剧 ID",
+        )
     return {
         "items": all_items,
         "groups": groups,
@@ -753,12 +969,14 @@ def voiceover_lookup_material_map(material_ids):
         material_id = str(row[0] if len(row) > 0 else "").strip()
         if not material_id:
             continue
+        source_product = str(row[4] if len(row) > 4 else "").strip()
         result[material_id] = {
             "material_id": material_id,
             "name": str(row[1] if len(row) > 1 else "").strip(),
             "url": str(row[2] if len(row) > 2 else "").strip(),
             "category": str(row[3] if len(row) > 3 else "").strip(),
-            "product": str(row[4] if len(row) > 4 else "").strip(),
+            "product": source_product,
+            "source_product_label": voiceover_source_product_label(source_product),
             "country": str(row[5] if len(row) > 5 else "").strip(),
             "language": str(row[6] if len(row) > 6 else "").strip(),
             "source_content_id": str(row[7] if len(row) > 7 else "").strip(),
@@ -901,15 +1119,26 @@ def create_voiceover_design_tasks(payload, session):
         raise StructuredApiError("requester_missing", "无法通过当前登录人定位 admin_user_group.user_id")
     valid_designer_ids = {str(item.get("user_id") or "").strip() for item in list_voiceover_designers().get("items", [])}
     target_content_ids = []
+    target_app_ids = []
     material_ids = []
     for raw_item in raw_items:
         raw_item = raw_item or {}
         target_content_id = str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip()
+        target_app_id = voiceover_normalize_product_app_id(
+            raw_item.get("target_app_id")
+            or raw_item.get("target_product_app_id")
+            or raw_item.get("product_app_id")
+            or raw_item.get("app_id")
+            or raw_item.get("target_product_key")
+        )
         material_id = str(raw_item.get("material_id") or raw_item.get("id") or "").strip()
         if target_content_id and target_content_id not in target_content_ids:
             target_content_ids.append(target_content_id)
+        if target_app_id and target_app_id not in target_app_ids:
+            target_app_ids.append(target_app_id)
         if material_id and material_id not in material_ids:
             material_ids.append(material_id)
+    drama_map_by_app = lookup_voiceover_drama_info_map_by_app(target_content_ids, target_app_ids) if target_app_ids else {}
     drama_map = lookup_voiceover_drama_info_map(target_content_ids)
     material_map = voiceover_lookup_material_map(material_ids)
     results = []
@@ -918,10 +1147,22 @@ def create_voiceover_design_tasks(payload, session):
     def create_one(index, raw_item):
         raw_item = raw_item or {}
         target_content_id = str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip()
+        target_app_id = voiceover_normalize_product_app_id(
+            raw_item.get("target_app_id")
+            or raw_item.get("target_product_app_id")
+            or raw_item.get("product_app_id")
+            or raw_item.get("app_id")
+            or raw_item.get("target_product_key")
+        )
         material_id = str(raw_item.get("material_id") or raw_item.get("id") or "").strip()
-        drama = drama_map.get(target_content_id)
+        if target_app_id:
+            drama = drama_map_by_app.get((target_app_id, target_content_id))
+        else:
+            drama = drama_map.get(target_content_id)
         if not drama:
-            raise StructuredApiError("drama_not_found", "未在剧库中找到剧 ID：%s" % target_content_id)
+            product = voiceover_product_meta(target_app_id) if target_app_id else {}
+            product_text = "%s " % (product.get("label") or target_app_id) if target_app_id else ""
+            raise StructuredApiError("drama_not_found", "未在%s剧库中找到剧 ID：%s" % (product_text, target_content_id))
         material = material_map.get(material_id)
         if not material:
             raise StructuredApiError("material_not_found", "未找到素材：%s" % material_id)
@@ -960,6 +1201,7 @@ def create_voiceover_design_tasks(payload, session):
             "index": index,
             "material_id": material_id,
             "target_content_id": target_content_id,
+            "target_app_id": drama.get("app_id", ""),
             "name": body["name"],
             "request": body,
             "response": response,
@@ -980,6 +1222,7 @@ def create_voiceover_design_tasks(payload, session):
                     "index": index,
                     "material_id": str(raw_item.get("material_id") or raw_item.get("id") or "").strip(),
                     "target_content_id": str(raw_item.get("target_content_id") or raw_item.get("content_id") or "").strip(),
+                    "target_app_id": str(raw_item.get("target_app_id") or raw_item.get("target_product_app_id") or raw_item.get("product_app_id") or raw_item.get("app_id") or "").strip(),
                     "error": error_payload.get("message") or str(exc),
                     "code": error_payload.get("code", "bad_request"),
                     "status": error_payload.get("status"),

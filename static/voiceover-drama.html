@@ -112,7 +112,7 @@
     .status-pill.is-success { background: #e8f7ef; color: var(--success); }
     .status-pill.is-error { background: #ffecec; color: var(--danger); }
     .config-card { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 14px; align-content: start; }
-    .config-card .status-pill, .config-card .actions-inline { grid-column: 1 / -1; }
+    .config-card .status-pill, .config-card .actions-inline, .config-card .product-field { grid-column: 1 / -1; }
     .table-wrap { overflow: auto; border: 1px solid #e2eaf5; border-radius: 12px; }
     table { width: 100%; border-collapse: collapse; min-width: 820px; }
     th, td { padding: 12px 14px; border-bottom: 1px solid #eef2f8; text-align: left; font-size: 13px; vertical-align: middle; }
@@ -157,6 +157,14 @@
     .checks { display: flex; gap: 18px; min-height: 42px; align-items: center; }
     .check { display: inline-flex; gap: 6px; align-items: center; font-weight: 800; }
     .check input { width: auto; min-height: auto; }
+    .product-checks { flex-wrap: wrap; gap: 10px; }
+    .product-checks .check {
+      min-height: 36px;
+      border: 1px solid #dbe5f2;
+      border-radius: 999px;
+      padding: 0 12px;
+      background: #f8fbff;
+    }
     .modal-footer { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-top: 1px solid var(--line); padding: 14px 18px; background: #fff; }
     .toast { position: fixed; right: 22px; bottom: 22px; background: #0f2342; color: #fff; padding: 12px 14px; border-radius: 12px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .18s ease; z-index: 60; max-width: 520px; }
     .toast.show { opacity: 1; }
@@ -207,6 +215,13 @@
         <div class="panel-body">
           <div class="count-grid">
             <div class="field input-card">
+              <div class="field product-field">
+                <label>产品维度</label>
+                <div class="checks product-checks">
+                  <label class="check"><input class="count-product" type="checkbox" value="dramawave1479" checked /> Dramawave / 1479</label>
+                  <label class="check"><input class="count-product" type="checkbox" value="freereels979" checked /> FreeReels / 979</label>
+                </div>
+              </div>
               <label>剧 ID / content_id 列表</label>
               <textarea id="countContentIds" rows="7" placeholder="每行一个剧 ID，支持逗号或空格分隔"></textarea>
             </div>
@@ -214,8 +229,8 @@
               <div class="result-title"><label>查询结果</label><span id="countStatus" class="status-pill">待查询</span></div>
               <div class="table-wrap">
                 <table>
-                  <thead><tr><th>剧 ID</th><th>series_code</th><th>资源下剧数</th><th>素材数</th><th>状态</th></tr></thead>
-                  <tbody id="countTableBody"><tr><td colspan="5" class="muted">暂无查询结果</td></tr></tbody>
+                  <thead><tr><th>剧 ID</th><th>产品归属</th><th>series_code</th><th>资源下剧数</th><th>素材数</th><th>状态</th></tr></thead>
+                  <tbody id="countTableBody"><tr><td colspan="6" class="muted">暂无查询结果</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -237,6 +252,13 @@
               <textarea id="filterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
             </div>
             <div class="config-card">
+              <div class="field product-field">
+                <label>产品维度</label>
+                <div class="checks product-checks">
+                  <label class="check"><input class="filter-product" type="checkbox" value="dramawave1479" checked /> Dramawave / 1479</label>
+                  <label class="check"><input class="filter-product" type="checkbox" value="freereels979" checked /> FreeReels / 979</label>
+                </div>
+              </div>
               <div class="field"><label>ROAS 阈值</label><input id="roasThreshold" type="number" min="0" step="0.1" value="45" /></div>
               <div class="field"><label>候选素材数</label><input id="minCandidates" type="number" min="0" max="50" value="15" /></div>
               <div id="filterStatus" class="status-pill">待筛选</div>
@@ -268,8 +290,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>剧 ID</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
-              <tbody id="resultTableBody"><tr><td colspan="13" class="muted">暂无筛选结果</td></tr></tbody>
+              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>剧 ID</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
+              <tbody id="resultTableBody"><tr><td colspan="14" class="muted">暂无筛选结果</td></tr></tbody>
             </table>
           </div>
           <div class="detail">素材级筛选说明：每一行就是一条可勾选素材；同一个剧可以出现多条素材。只对勾选素材提需求，未勾选素材不会进入创建弹窗。</div>
@@ -356,6 +378,12 @@
     }
     function parseIds(text) {
       return Array.from(new Set(String(text || "").split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean)));
+    }
+    function selectedProducts(selector) {
+      return Array.from(document.querySelectorAll(selector))
+        .filter(input => input.checked)
+        .map(input => input.value)
+        .filter(Boolean);
     }
     function toast(message, variant) {
       els.toast.textContent = message;
@@ -451,7 +479,7 @@
       }
     }
     function materialKey(item) {
-      return `${item.target_content_id || ""}::${item.material_id || ""}`;
+      return `${item.target_app_id || ""}::${item.target_content_id || ""}::${item.material_id || ""}`;
     }
     function materialKeySet() {
       return new Set(state.materials.map(materialKey));
@@ -493,18 +521,20 @@
     }
     function renderCountRows() {
       els.countTableBody.innerHTML = state.countRows.length
-        ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.series_content_count ?? "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
-        : `<tr><td colspan="5" class="muted">暂无查询结果</td></tr>`;
+        ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td><strong>${navText(item.product_label || item.product_owner || item.app || "-")}</strong><div class="muted">${navText(item.product_app_id || item.app_id || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.series_content_count ?? "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
+        : `<tr><td colspan="6" class="muted">暂无查询结果</td></tr>`;
     }
     async function queryCounts() {
       const contentIds = parseIds(els.countContentIds.value);
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      const products = selectedProducts(".count-product");
+      if (!products.length) return toast("请至少选择一个产品维度", "error");
       setButtonLoading(els.countBtn, true, "查询中...");
-      setStatus(els.countStatus, `正在查询 ${contentIds.length} 个剧 ID，请稍候`, "loading");
-      els.countTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按资源ID汇总素材数...</td></tr>`;
+      setStatus(els.countStatus, `正在查询 ${contentIds.length} 个剧 ID × ${products.length} 个产品，请稍候`, "loading");
+      els.countTableBody.innerHTML = `<tr><td colspan="6" class="muted">正在按产品和资源ID汇总素材数...</td></tr>`;
       await nextPaint();
       try {
-        const data = await api("/api/voiceover-drama/material-counts", { method: "POST", body: JSON.stringify({ content_ids: contentIds }) });
+        const data = await api("/api/voiceover-drama/material-counts", { method: "POST", body: JSON.stringify({ content_ids: contentIds, products }) });
         state.countRows = data.items || [];
         renderCountRows();
         setStatus(els.countStatus, `完成 ${state.countRows.length} 条`, "success");
@@ -531,15 +561,19 @@
             const key = materialKey(item);
             const checked = state.selectedKeys.has(key) ? "checked" : "";
             const statusText = item.candidate_reason || item.candidate_status || "";
-            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">${navText(item.product || "")}</div></td><td>${navText(item.target_content_id || "")}</td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
+            const targetProduct = item.target_product_label || item.target_app_id || "-";
+            const sourceProduct = item.source_product_label || item.product || "-";
+            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属：${navText(sourceProduct)}</div></td><td><strong>${navText(targetProduct)}</strong><div class="muted">${navText(item.target_app_id || "")}</div></td><td>${navText(item.target_content_id || "")}</td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
           }).join("")
-        : `<tr><td colspan="13" class="muted">暂无筛选结果</td></tr>`;
+        : `<tr><td colspan="14" class="muted">暂无筛选结果</td></tr>`;
       els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
       refreshButtons();
     }
     async function filterMaterials() {
       const contentIds = parseIds(els.filterContentIds.value);
       if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      const products = selectedProducts(".filter-product");
+      if (!products.length) return toast("请至少选择一个产品维度", "error");
       const requestSeq = ++state.filterRequestSeq;
       const roasThreshold = Number(els.roasThreshold.value || 45);
       const minCandidates = Number(els.minCandidates.value || 15);
@@ -548,9 +582,9 @@
       state.materials = [];
       state.selectedKeys = new Set();
       setButtonLoading(els.filterBtn, true, "筛选中...");
-      setStatus(els.filterStatus, `正在筛选 ${contentIds.length} 个剧 ID，请稍候`, "loading");
+      setStatus(els.filterStatus, `正在筛选 ${contentIds.length} 个剧 ID × ${products.length} 个产品，请稍候`, "loading");
       els.resultSummary.textContent = "筛选中...";
-      els.resultTableBody.innerHTML = `<tr><td colspan="13" class="muted">正在读取资源下素材并筛选达标候选...</td></tr>`;
+      els.resultTableBody.innerHTML = `<tr><td colspan="14" class="muted">正在按产品读取资源下素材并筛选达标候选...</td></tr>`;
       renderStats();
       refreshButtons();
       await nextPaint();
@@ -561,6 +595,7 @@
               method: "POST",
               body: JSON.stringify({
                 content_ids: [contentId],
+                products,
                 roas_threshold: roasThreshold,
                 min_candidates: minCandidates
               })
@@ -662,8 +697,10 @@
       els.taskCards.innerHTML = state.modalItems.map((item, index) => {
         const defaultDesigner = resolveDefaultDesigner(item);
         const designerHint = [item.designer, item.source_user_id].map(value => String(value || "").trim()).find(value => value && value !== "0" && value.toLowerCase() !== "null");
+        const targetProduct = item.target_product_label || item.target_app_id || "-";
+        const sourceProduct = item.source_product_label || item.product || "-";
         const description = `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`;
-        return `<div class="material-card"><div class="card-head"><div><strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong><div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div></div>${riskCell(item)}</div><div class="task-form"><div class="field"><label>任务数量</label><div class="stepper"><button type="button" onclick="stepTaskNumber(${index}, -1)">-</button><input id="taskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderModalOverview()" /><button type="button" onclick="stepTaskNumber(${index}, 1)">+</button></div></div><div class="field"><label>指定设计师</label><select id="taskDesigner_${index}" onchange="renderModalOverview()">${designerOptions(defaultDesigner)}</select></div><div class="field"><label>截止时间</label><input id="taskEndDate_${index}" type="date" /></div><div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="origin_${index}" type="radio" value="1" checked /> 是</label><label class="check"><input name="origin_${index}" type="radio" value="0" /> 否</label></div></div><div class="field description-field"><label>任务描述</label><textarea id="taskDescription_${index}" rows="2">${navText(description)}</textarea></div></div></div>`;
+        return `<div class="material-card"><div class="card-head"><div><strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong><div class="muted">目标产品 ${navText(targetProduct)} / 素材归属 ${navText(sourceProduct)} / ${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div></div>${riskCell(item)}</div><div class="task-form"><div class="field"><label>任务数量</label><div class="stepper"><button type="button" onclick="stepTaskNumber(${index}, -1)">-</button><input id="taskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderModalOverview()" /><button type="button" onclick="stepTaskNumber(${index}, 1)">+</button></div></div><div class="field"><label>指定设计师</label><select id="taskDesigner_${index}" onchange="renderModalOverview()">${designerOptions(defaultDesigner)}</select></div><div class="field"><label>截止时间</label><input id="taskEndDate_${index}" type="date" /></div><div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="origin_${index}" type="radio" value="1" checked /> 是</label><label class="check"><input name="origin_${index}" type="radio" value="0" /> 否</label></div></div><div class="field description-field"><label>任务描述</label><textarea id="taskDescription_${index}" rows="2">${navText(description)}</textarea></div></div></div>`;
       }).join("");
       renderModalOverview();
     }
@@ -697,6 +734,9 @@
     async function submitTasks() {
       const items = state.modalItems.map((item, index) => ({
         target_content_id: item.target_content_id,
+        target_app_id: item.target_app_id,
+        target_product_key: item.target_product_key,
+        target_product_label: item.target_product_label,
         material_id: item.material_id,
         number: Number(document.getElementById(`taskNumber_${index}`)?.value || 1),
         designer: document.getElementById(`taskDesigner_${index}`)?.value || "",
@@ -727,7 +767,7 @@
     }
     function exportCsv() {
       if (!state.materials.length) return;
-      const headers = ["target_content_id", "target_drama_name", "material_id", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
       const csv = [headers.join(",")].concat(state.materials.map(item => headers.map(key => `"${String(item[key] ?? "").replace(/"/g, '""')}"`).join(","))).join("\n");
       const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
