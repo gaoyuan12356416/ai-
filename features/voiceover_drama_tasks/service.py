@@ -940,6 +940,7 @@ def create_voiceover_design_tasks(payload, session):
             "app": voiceover_int(product_app_id) if re.match(r"^\d+$", product_app_id) else product_app_id,
             "type": 11,
             "content_id": drama.get("kol_content_id", ""),
+            "name_keyword": drama.get("name", ""),
             "number": number,
             "country": drama.get("country", ""),
             "language": drama.get("language", ""),

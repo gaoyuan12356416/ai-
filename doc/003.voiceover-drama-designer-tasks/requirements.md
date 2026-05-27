@@ -34,6 +34,7 @@
 | `name` | `AI_{产品名称}_{剧语言缩写}_{剧ID}_{日期}_{需求人}_随机数` |
 | `type` | 固定 `11` |
 | `content_id` | 目标剧 ID 拼接后的完整字符串，格式：`包名#-#剧ID`，例如 `com.dramawave.app#-#0QjVjIe9MG` |
+| `name_keyword` | 目标剧名称，例如 `Yeraltı Kralı'nın Dönüşü(Dublajlı)` |
 | `app` | 产品设置表产品 ID，例如 Dramawave 为 `1479` |
 | `country` | 目标剧 ID 对应 `ads_drama_info.country` |
 | `language` | 目标剧 ID 对应 `ads_drama_info.language` |
