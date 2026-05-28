@@ -9,7 +9,6 @@ import os
 import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
 from html import unescape
 
 import requests
@@ -1312,16 +1311,24 @@ def voiceover_safe_name_part(value, fallback="NA"):
     return text[:64] or fallback
 
 
-def build_voiceover_task_name(drama, requester):
-    date_text = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y%m%d")
-    random_text = secrets.token_hex(3)
-    requester_text = requester.get("name") or requester.get("email") or requester.get("user_id") or "unknown"
-    return "AI_%s_%s_%s_%s_%s_%s" % (
-        voiceover_safe_name_part(drama.get("product_name")),
+def voiceover_task_product_name(drama, raw_item=None):
+    app_id = str((drama or {}).get("app_id") or (raw_item or {}).get("target_app_id") or "").strip()
+    if app_id == "1479":
+        return "Dramawave"
+    if app_id == "979":
+        return "Freereels"
+    label = (raw_item or {}).get("target_product_label") or (drama or {}).get("product_name") or app_id
+    return voiceover_safe_name_part(label, "Product")
+
+
+def build_voiceover_task_name(drama, material=None, raw_item=None):
+    random_text = "%06d" % secrets.randbelow(1000000)
+    return "【首发扩展小语种】_%s_%s_%s_%s_%s_%s" % (
+        voiceover_task_product_name(drama, raw_item),
+        voiceover_safe_name_part((drama or {}).get("series_code") or (raw_item or {}).get("target_series_code")),
         voiceover_safe_name_part(drama.get("language")),
         voiceover_safe_name_part(drama.get("content_id")),
-        date_text,
-        voiceover_safe_name_part(requester_text),
+        voiceover_safe_name_part((material or {}).get("category") or (raw_item or {}).get("category"), "category"),
         random_text,
     )
 
@@ -1427,7 +1434,7 @@ def create_voiceover_design_tasks(payload, session):
         end_date = str(raw_item.get("end_date") or "").strip()
         product_app_id = str(drama.get("app_id", "") or "").strip()
         body = {
-            "name": build_voiceover_task_name(drama, actor),
+            "name": build_voiceover_task_name(drama, material, raw_item),
             "app": voiceover_int(product_app_id) if re.match(r"^\d+$", product_app_id) else product_app_id,
             "type": 11,
             "content_id": drama.get("kol_content_id", ""),

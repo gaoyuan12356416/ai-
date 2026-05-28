@@ -152,12 +152,46 @@
     .description-field { grid-column: 2 / -1; }
     .batch-task-form { grid-template-columns: 150px 180px 240px; }
     .batch-task-form .description-field { grid-column: 1 / -1; }
-    .selected-material-list { display: grid; gap: 8px; max-height: 300px; overflow: auto; margin-top: 12px; }
+    .selected-material-list { display: grid; gap: 8px; margin-top: 12px; }
     .selected-material-item { display: grid; grid-template-columns: 120px minmax(180px, 1fr) minmax(180px, 1fr) 96px; gap: 12px; align-items: center; border: 1px solid #e0e8f3; border-radius: 10px; padding: 10px 12px; background: #fff; }
     .batch-selected-item { grid-template-columns: 120px minmax(190px, 1fr) minmax(240px, 1.2fr) minmax(220px, 1fr) 110px; align-items: end; }
     .batch-designer-field { display: grid; gap: 6px; }
     .batch-designer-field label { font-size: 12px; color: #60728c; }
-    .batch-designer-field select { min-height: 38px; }
+    .designer-combo { position: relative; display: grid; gap: 6px; }
+    .designer-search { min-height: 38px; padding-right: 36px; }
+    .designer-selected { min-height: 16px; color: #60728c; font-size: 12px; line-height: 1.35; }
+    .designer-menu {
+      position: absolute;
+      z-index: 80;
+      left: 0;
+      right: 0;
+      top: calc(100% + 4px);
+      display: none;
+      max-height: 240px;
+      overflow: auto;
+      border: 1px solid #d5e1f0;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 18px 36px rgba(20, 38, 68, .18);
+      padding: 6px;
+    }
+    .designer-combo.is-open .designer-menu { display: grid; gap: 4px; }
+    .designer-option {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      border-radius: 8px;
+      padding: 8px 10px;
+      text-align: left;
+      color: #0f2342;
+      box-shadow: none;
+      min-height: auto;
+    }
+    .designer-option:hover,
+    .designer-option.is-selected { background: #edf4ff; color: #2457ff; }
+    .designer-option strong { display: block; font-size: 13px; }
+    .designer-option span { display: block; margin-top: 2px; color: #60728c; font-size: 12px; }
+    .designer-empty { padding: 12px 10px; color: #8a98ad; font-size: 12px; }
     .stepper { display: grid; grid-template-columns: 42px 64px 42px; }
     .stepper button, .stepper input { border-radius: 0; text-align: center; min-height: 42px; }
     .stepper button:first-child { border-radius: 10px 0 0 10px; }
@@ -866,13 +900,84 @@
       state.designers = data.items || [];
       return state.designers;
     }
-    function designerOptions(selectedValue = "") {
-      if (!state.designers.length) return `<option value="">暂无可选设计师</option>`;
-      return [`<option value="">请选择设计师</option>`].concat(state.designers.map(item => {
+    function designerDisplayLabel(item) {
+      if (!item) return "";
+      const value = String(item.user_id || "");
+      const label = item.label || item.name || item.username || value;
+      return value ? `${label} / ${value}` : label;
+    }
+    function designerSearchText(item) {
+      return [item.label, item.name, item.username, item.user_id, item.sub_user_id, item.email]
+        .map(normalizeDesignerKey)
+        .filter(Boolean)
+        .join(" ");
+    }
+    function designerById(value) {
+      const id = String(value || "").trim();
+      if (!id) return null;
+      return state.designers.find(item => String(item.user_id || "").trim() === id) || null;
+    }
+    function filterDesigners(keyword = "") {
+      const tokens = normalizeDesignerKey(keyword).split(/\s+/).filter(Boolean);
+      if (!tokens.length) return state.designers.slice(0, 40);
+      return state.designers
+        .filter(item => {
+          const text = designerSearchText(item);
+          return tokens.every(token => text.includes(token));
+        })
+        .slice(0, 40);
+    }
+    function invokeDesignerOverview(name) {
+      if (name === "renderBatchModalOverview") renderBatchModalOverview();
+      else renderModalOverview();
+    }
+    function searchableDesignerControl(fieldId, selectedValue = "", overviewFn = "renderModalOverview") {
+      const selected = designerById(selectedValue);
+      const selectedLabel = designerDisplayLabel(selected);
+      const placeholder = state.designers.length ? "输入姓名 / 用户名 / ID 搜索" : "暂无可选设计师";
+      return `<div class="designer-combo" data-designer-combo="${navText(fieldId)}"><input id="${navText(fieldId)}" type="hidden" value="${navText(selectedValue || "")}" /><input id="${navText(fieldId)}_search" class="designer-search" type="search" autocomplete="off" value="${navText(selectedLabel)}" placeholder="${placeholder}" data-designer-field="${navText(fieldId)}" data-overview-fn="${navText(overviewFn)}" /><div id="${navText(fieldId)}_menu" class="designer-menu"></div><div id="${navText(fieldId)}_selected" class="designer-selected">${selectedLabel ? `已选 ${navText(selectedLabel)}` : "未选择设计师"}</div></div>`;
+    }
+    function renderDesignerMenu(fieldId, keyword = "", overviewFn = "renderModalOverview") {
+      const menu = document.getElementById(`${fieldId}_menu`);
+      if (!menu) return;
+      const selectedValue = document.getElementById(fieldId)?.value || "";
+      const items = filterDesigners(keyword);
+      if (!items.length) {
+        menu.innerHTML = `<div class="designer-empty">无匹配设计师</div>`;
+        return;
+      }
+      menu.innerHTML = items.map(item => {
         const value = String(item.user_id || "");
-        const selected = value === String(selectedValue || "") ? "selected" : "";
-        return `<option value="${navText(value)}" ${selected}>${navText(item.label || item.name || value)} / ${navText(value)}</option>`;
-      })).join("");
+        const label = designerDisplayLabel(item);
+        const meta = [item.username, item.email, item.sub_user_id ? `sub ${item.sub_user_id}` : ""].filter(Boolean).join(" · ");
+        const selected = value === String(selectedValue || "") ? " is-selected" : "";
+        return `<button class="designer-option${selected}" type="button" data-designer-field="${navText(fieldId)}" data-designer-value="${navText(value)}" data-overview-fn="${navText(overviewFn)}"><strong>${navText(label)}</strong>${meta ? `<span>${navText(meta)}</span>` : ""}</button>`;
+      }).join("");
+    }
+    function openDesignerCombo(fieldId, overviewFn = "renderModalOverview") {
+      const input = document.getElementById(`${fieldId}_search`);
+      if (!input) return;
+      closeDesignerCombos(fieldId);
+      input.closest(".designer-combo")?.classList.add("is-open");
+      renderDesignerMenu(fieldId, input.value, overviewFn);
+    }
+    function closeDesignerCombos(exceptFieldId = "") {
+      document.querySelectorAll(".designer-combo.is-open").forEach(combo => {
+        if (exceptFieldId && combo.dataset.designerCombo === exceptFieldId) return;
+        combo.classList.remove("is-open");
+      });
+    }
+    function setDesignerComboValue(fieldId, value, overviewFn = "renderModalOverview") {
+      const hidden = document.getElementById(fieldId);
+      const input = document.getElementById(`${fieldId}_search`);
+      const selectedText = document.getElementById(`${fieldId}_selected`);
+      const designer = designerById(value);
+      const label = designerDisplayLabel(designer);
+      if (hidden) hidden.value = designer ? String(designer.user_id || "") : "";
+      if (input) input.value = label;
+      if (selectedText) selectedText.textContent = label ? `已选 ${label}` : "未选择设计师";
+      closeDesignerCombos();
+      invokeDesignerOverview(overviewFn);
     }
     function normalizeDesignerKey(value) {
       return String(value || "").trim().toLowerCase();
@@ -935,7 +1040,7 @@
         const targetProduct = item.target_product_label || item.target_app_id || "-";
         const sourceProduct = item.source_product_label || item.product || "-";
         const description = `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`;
-        return `<div class="material-card"><div class="card-head"><div><strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong><div class="muted">目标产品 ${navText(targetProduct)} / 素材归属 ${navText(sourceProduct)} / ${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div></div>${riskCell(item)}</div><div class="task-form"><div class="field"><label>任务数量</label><div class="stepper"><button type="button" onclick="stepTaskNumber(${index}, -1)">-</button><input id="taskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderModalOverview()" /><button type="button" onclick="stepTaskNumber(${index}, 1)">+</button></div></div><div class="field"><label>指定设计师</label><select id="taskDesigner_${index}" onchange="renderModalOverview()">${designerOptions(defaultDesigner)}</select></div><div class="field"><label>截止时间</label><input id="taskEndDate_${index}" type="date" /></div><div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="origin_${index}" type="radio" value="1" checked /> 是</label><label class="check"><input name="origin_${index}" type="radio" value="0" /> 否</label></div></div><div class="field description-field"><label>任务描述</label><textarea id="taskDescription_${index}" rows="2">${navText(description)}</textarea></div></div></div>`;
+        return `<div class="material-card"><div class="card-head"><div><strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong><div class="muted">目标产品 ${navText(targetProduct)} / 素材归属 ${navText(sourceProduct)} / ${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div></div>${riskCell(item)}</div><div class="task-form"><div class="field"><label>任务数量</label><div class="stepper"><button type="button" onclick="stepTaskNumber(${index}, -1)">-</button><input id="taskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderModalOverview()" /><button type="button" onclick="stepTaskNumber(${index}, 1)">+</button></div></div><div class="field"><label>指定设计师</label>${searchableDesignerControl(`taskDesigner_${index}`, defaultDesigner, "renderModalOverview")}</div><div class="field"><label>截止时间</label><input id="taskEndDate_${index}" type="date" /></div><div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="origin_${index}" type="radio" value="1" checked /> 是</label><label class="check"><input name="origin_${index}" type="radio" value="0" /> 否</label></div></div><div class="field description-field"><label>任务描述</label><textarea id="taskDescription_${index}" rows="2">${navText(description)}</textarea></div></div></div>`;
       }).join("");
       renderModalOverview();
     }
@@ -966,7 +1071,7 @@
         const designerHint = originalDesignerHint(item);
         const targetProduct = item.target_product_label || item.target_app_id || "-";
         const sourceProduct = item.source_product_label || item.product || "-";
-        return `<div class="selected-material-item batch-selected-item"><div><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属 ${navText(sourceProduct)}</div></div><div>${navText(item.target_drama_name || "-")}<div class="muted">目标剧 ID ${navText(item.target_content_id || "")}</div></div><div>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}</div></div><div class="batch-designer-field"><label>指定设计师${designerHint ? ` / 原 ${navText(designerHint)}` : ""}</label><select id="batchDesigner_${index}" onchange="renderBatchModalOverview()">${designerOptions(defaultDesigner)}</select></div><div>${navText(targetProduct)}</div></div>`;
+        return `<div class="selected-material-item batch-selected-item"><div><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属 ${navText(sourceProduct)}</div></div><div>${navText(item.target_drama_name || "-")}<div class="muted">目标剧 ID ${navText(item.target_content_id || "")}</div></div><div>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}</div></div><div class="batch-designer-field"><label>指定设计师${designerHint ? ` / 原 ${navText(designerHint)}` : ""}</label>${searchableDesignerControl(`batchDesigner_${index}`, defaultDesigner, "renderBatchModalOverview")}</div><div>${navText(targetProduct)}</div></div>`;
       }).join("");
     }
     function renderBatchModalOverview() {
@@ -1115,6 +1220,46 @@
       const checkbox = event.target.closest("input.row-checkbox");
       if (!checkbox) return;
       toggleSelection(checkbox.dataset.selectionKey || "", checkbox.checked);
+    });
+    document.addEventListener("input", event => {
+      const input = event.target.closest(".designer-search");
+      if (!input) return;
+      const fieldId = input.dataset.designerField || "";
+      const hidden = document.getElementById(fieldId);
+      if (hidden) hidden.value = "";
+      const selectedText = document.getElementById(`${fieldId}_selected`);
+      if (selectedText) selectedText.textContent = input.value.trim() ? "请选择下拉结果中的设计师" : "未选择设计师";
+      openDesignerCombo(fieldId, input.dataset.overviewFn || "renderModalOverview");
+      invokeDesignerOverview(input.dataset.overviewFn || "renderModalOverview");
+    });
+    document.addEventListener("focusin", event => {
+      const input = event.target.closest(".designer-search");
+      if (!input) return;
+      openDesignerCombo(input.dataset.designerField || "", input.dataset.overviewFn || "renderModalOverview");
+    });
+    document.addEventListener("keydown", event => {
+      const input = event.target.closest(".designer-search");
+      if (!input) return;
+      if (event.key === "Escape") {
+        closeDesignerCombos();
+        return;
+      }
+      if (event.key === "Enter") {
+        const fieldId = input.dataset.designerField || "";
+        const firstOption = document.querySelector(`#${fieldId}_menu .designer-option`);
+        if (firstOption) {
+          event.preventDefault();
+          setDesignerComboValue(fieldId, firstOption.dataset.designerValue || "", firstOption.dataset.overviewFn || input.dataset.overviewFn || "renderModalOverview");
+        }
+      }
+    });
+    document.addEventListener("click", event => {
+      const option = event.target.closest(".designer-option");
+      if (option) {
+        setDesignerComboValue(option.dataset.designerField || "", option.dataset.designerValue || "", option.dataset.overviewFn || "renderModalOverview");
+        return;
+      }
+      if (!event.target.closest(".designer-combo")) closeDesignerCombos();
     });
     els.exportBtn.onclick = exportCsv;
     els.openCreateBtn.onclick = () => openTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
