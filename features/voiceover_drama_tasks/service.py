@@ -157,6 +157,25 @@ def voiceover_parse_series_codes(payload, required=True):
     return result
 
 
+def voiceover_parse_target_language(payload):
+    payload = payload or {}
+    value = str(payload.get("target_language") or payload.get("target_lang") or "").strip()
+    return value.lower()
+
+
+def voiceover_parse_target_audio_type(payload):
+    payload = payload or {}
+    raw = payload.get("target_audio_type")
+    if raw is None:
+        raw = payload.get("audio_type")
+    value = str(raw if raw is not None else "").strip()
+    if value == "":
+        return ""
+    if value not in ("0", "1", "2"):
+        raise StructuredApiError("invalid_audio_type", "配音类型只能选择 0、1、2")
+    return value
+
+
 def voiceover_normalize_product_app_id(value):
     value = str(value or "").strip()
     if not value:
@@ -333,6 +352,7 @@ def voiceover_drama_info_from_row(row, content_id=""):
         "app_package": app_package,
         "product_name": product_name,
         "updated_at": str(row[8] if len(row) > 8 else "").strip(),
+        "audio_type": str(row[13] if len(row) > 13 else "").strip(),
     }
 
 
@@ -360,7 +380,7 @@ def lookup_voiceover_drama_info_map(content_ids, app_id=""):
             "SELECT CAST(d.id AS CHAR), CAST(d.app_id AS CHAR), d.content_id, d.name, d.country, "
             "d.language, d.series_code, d.app, CAST(d.updated_at AS CHAR), "
             "COALESCE(a.name, ''), COALESCE(a.package, ''), COALESCE(a.google_app_android, ''), "
-            "COALESCE(a.app_id, '') "
+            "COALESCE(a.app_id, ''), CAST(COALESCE(d.audio_type, '') AS CHAR) "
             "FROM `%s`.ads_drama_info d "
             "LEFT JOIN `%s`.ads_apps_setting a ON a.id=d.app_id "
             "WHERE %s "
@@ -399,7 +419,7 @@ def lookup_voiceover_drama_info_map_by_app(content_ids, app_ids):
             "SELECT CAST(d.id AS CHAR), CAST(d.app_id AS CHAR), d.content_id, d.name, d.country, "
             "d.language, d.series_code, d.app, CAST(d.updated_at AS CHAR), "
             "COALESCE(a.name, ''), COALESCE(a.package, ''), COALESCE(a.google_app_android, ''), "
-            "COALESCE(a.app_id, '') "
+            "COALESCE(a.app_id, ''), CAST(COALESCE(d.audio_type, '') AS CHAR) "
             "FROM `%s`.ads_drama_info d "
             "LEFT JOIN `%s`.ads_apps_setting a ON a.id=d.app_id "
             "WHERE d.content_id IN (%s) AND CAST(d.app_id AS CHAR) IN (%s) "
@@ -417,7 +437,7 @@ def lookup_voiceover_drama_info_map_by_app(content_ids, app_ids):
     return result
 
 
-def lookup_voiceover_drama_info_map_by_series(series_codes, app_ids):
+def lookup_voiceover_drama_info_map_by_series(series_codes, app_ids, target_language="", target_audio_type=""):
     cleaned_series_codes = []
     seen_series_codes = set()
     for series_code in series_codes or []:
@@ -435,18 +455,28 @@ def lookup_voiceover_drama_info_map_by_series(series_codes, app_ids):
     if not cleaned_series_codes or not cleaned_app_ids:
         return {}
     database = voiceover_sql_db()
+    where = (
+        "d.series_code IN (%s) AND CAST(d.app_id AS CHAR) IN (%s) AND d.content_id<>''"
+        % (voiceover_sql_in(cleaned_series_codes), voiceover_sql_in(cleaned_app_ids))
+    )
+    target_language = str(target_language or "").strip().lower()
+    if target_language:
+        where += " AND LOWER(TRIM(COALESCE(d.language, '')))='%s'" % mysql_escape_literal(target_language)
+    target_audio_type = str(target_audio_type or "").strip()
+    if target_audio_type:
+        where += " AND CAST(COALESCE(d.audio_type, '') AS CHAR)='%s'" % mysql_escape_literal(target_audio_type)
     rows = run_mysql(
         (
             "SELECT CAST(d.id AS CHAR), CAST(d.app_id AS CHAR), d.content_id, d.name, d.country, "
             "d.language, d.series_code, d.app, CAST(d.updated_at AS CHAR), "
             "COALESCE(a.name, ''), COALESCE(a.package, ''), COALESCE(a.google_app_android, ''), "
-            "COALESCE(a.app_id, '') "
+            "COALESCE(a.app_id, ''), CAST(COALESCE(d.audio_type, '') AS CHAR) "
             "FROM `%s`.ads_drama_info d FORCE INDEX (scoo) "
             "LEFT JOIN `%s`.ads_apps_setting a ON a.id=d.app_id "
-            "WHERE d.series_code IN (%s) AND CAST(d.app_id AS CHAR) IN (%s) AND d.content_id<>'' "
+            "WHERE %s "
             "ORDER BY d.series_code ASC, d.app_id ASC, d.updated_at DESC, d.id ASC"
         )
-        % (database, database, voiceover_sql_in(cleaned_series_codes), voiceover_sql_in(cleaned_app_ids))
+        % (database, database, where)
     )
     result = {}
     for row in rows:
@@ -493,7 +523,7 @@ def lookup_voiceover_drama_info(content_id, app_id=""):
             "SELECT CAST(d.id AS CHAR), CAST(d.app_id AS CHAR), d.content_id, d.name, d.country, "
             "d.language, d.series_code, d.app, CAST(d.updated_at AS CHAR), "
             "COALESCE(a.name, ''), COALESCE(a.package, ''), COALESCE(a.google_app_android, ''), "
-            "COALESCE(a.app_id, '') "
+            "COALESCE(a.app_id, ''), CAST(COALESCE(d.audio_type, '') AS CHAR) "
             "FROM `%s`.ads_drama_info d "
             "LEFT JOIN `%s`.ads_apps_setting a ON a.id=d.app_id "
             "WHERE %s "
@@ -1026,11 +1056,22 @@ def voiceover_filter_materials(payload):
     all_items = []
     product_app_ids = voiceover_parse_product_app_ids(payload)
     series_inputs = voiceover_parse_series_codes(payload, required=False)
+    target_language = voiceover_parse_target_language(payload)
+    target_audio_type = voiceover_parse_target_audio_type(payload)
     content_ids = [] if series_inputs else voiceover_parse_content_ids(payload)
     if series_inputs:
+        if not target_language:
+            raise StructuredApiError("target_language_required", "资源 ID 模式请选择目标语种")
+        if target_audio_type == "":
+            raise StructuredApiError("target_audio_type_required", "资源 ID 模式请选择配音类型")
         filter_mode = "series_code"
         target_ids = series_inputs
-        drama_map = lookup_voiceover_drama_info_map_by_series(series_inputs, product_app_ids)
+        drama_map = lookup_voiceover_drama_info_map_by_series(
+            series_inputs,
+            product_app_ids,
+            target_language=target_language,
+            target_audio_type=target_audio_type,
+        )
         series_codes = list(series_inputs)
         for drama in drama_map.values():
             series_code = (drama or {}).get("series_code", "")
@@ -1052,7 +1093,12 @@ def voiceover_filter_materials(payload):
         for target_id in target_ids:
             if filter_mode == "series_code":
                 drama = voiceover_pick_drama_by_series(drama_map, target_id, app_id)
-                missing_error = "未在%s中找到资源 ID：%s" % (product.get("label") or app_id, target_id)
+                missing_error = "未在%s中找到资源 ID %s 下目标语种 %s / 配音类型 %s 的剧" % (
+                    product.get("label") or app_id,
+                    target_id,
+                    target_language,
+                    target_audio_type,
+                )
             else:
                 drama = drama_map.get((app_id, target_id))
                 missing_error = "未在%s中找到剧 ID：%s" % (product.get("label") or app_id, target_id)
@@ -1060,6 +1106,8 @@ def voiceover_filter_materials(payload):
                 groups.append({
                     "filter_mode": filter_mode,
                     "target_id": target_id,
+                    "target_language": target_language,
+                    "target_audio_type": target_audio_type,
                     "content_id": target_id if filter_mode == "content_id" else "",
                     "series_code": target_id if filter_mode == "series_code" else "",
                     "product_app_id": product.get("app_id", ""),
@@ -1096,10 +1144,13 @@ def voiceover_filter_materials(payload):
                 item["target_app"] = drama.get("app", "")
                 item["target_country"] = drama.get("country", "")
                 item["target_language"] = drama.get("language", "")
+                item["target_audio_type"] = drama.get("audio_type", "")
             default_count = len([item for item in materials if item.get("selected_by_default")])
             groups.append({
                 "filter_mode": filter_mode,
                 "target_id": target_id,
+                "target_language": drama.get("language", ""),
+                "target_audio_type": drama.get("audio_type", ""),
                 "content_id": content_id,
                 "series_code": series_code,
                 "product_app_id": product.get("app_id", ""),

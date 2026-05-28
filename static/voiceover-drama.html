@@ -169,6 +169,17 @@
       padding: 0 12px;
       background: #f8fbff;
     }
+    .target-config {
+      grid-column: 1 / -1;
+      border: 1px solid #dce7f5;
+      border-radius: 14px;
+      padding: 14px;
+      background: linear-gradient(180deg, #f8fbff, #fff);
+    }
+    .target-config.is-hidden { display: none; }
+    .target-config-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    .target-config-head strong { display: block; font-size: 14px; color: #17325d; }
+    .target-fields { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 14px; }
     .input-mode { flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
     .input-mode .check {
       min-height: 36px;
@@ -184,7 +195,7 @@
     @media (max-width: 980px) {
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
-      .count-grid, .filter-grid, .task-form, .selected-material-item { grid-template-columns: 1fr; }
+      .count-grid, .filter-grid, .task-form, .selected-material-item, .target-fields { grid-template-columns: 1fr; }
       .description-field { grid-column: 1; }
       .topbar, .modal-footer { flex-direction: column; align-items: stretch; }
     }
@@ -277,6 +288,54 @@
                   <label class="check"><input class="filter-product" type="checkbox" value="freereels979" checked /> FreeReels / 979</label>
                 </div>
               </div>
+              <div id="resourceTargetConfig" class="target-config is-hidden">
+                <div class="target-config-head">
+                  <div>
+                    <strong>资源 ID 下单目标</strong>
+                    <div class="muted">只决定创建任务时下哪部剧的单，不影响候选素材筛选范围。</div>
+                  </div>
+                  <span class="status-pill">必选</span>
+                </div>
+                <div class="target-fields">
+                  <div class="field">
+                    <label>目标语种</label>
+                    <select id="targetLanguage">
+                      <option value="">请选择目标语种</option>
+                      <option value="en">en / English</option>
+                      <option value="tr">tr / Turkish</option>
+                      <option value="ja">ja / Japanese</option>
+                      <option value="ko">ko / Korean</option>
+                      <option value="zh">zh / Chinese</option>
+                      <option value="es">es / Spanish</option>
+                      <option value="pt">pt / Portuguese</option>
+                      <option value="fr">fr / French</option>
+                      <option value="de">de / German</option>
+                      <option value="it">it / Italian</option>
+                      <option value="ru">ru / Russian</option>
+                      <option value="pl">pl / Polish</option>
+                      <option value="th">th / Thai</option>
+                      <option value="vi">vi / Vietnamese</option>
+                      <option value="id">id / Indonesian</option>
+                      <option value="ms">ms / Malay</option>
+                      <option value="bn">bn / Bengali</option>
+                      <option value="hi">hi / Hindi</option>
+                      <option value="ar">ar / Arabic</option>
+                      <option value="el">el / Greek</option>
+                      <option value="nl">nl / Dutch</option>
+                      <option value="sv">sv / Swedish</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>配音类型</label>
+                    <select id="targetAudioType">
+                      <option value="">请选择配音类型</option>
+                      <option value="0">0 / 非配音剧</option>
+                      <option value="1">1 / 人工配音剧</option>
+                      <option value="2">2 / AI 配音剧</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
               <div class="field"><label>ROAS 阈值</label><input id="roasThreshold" type="number" min="0" step="0.1" value="45" /></div>
               <div class="field"><label>候选素材数</label><input id="minCandidates" type="number" min="0" max="50" value="15" /></div>
               <div id="filterStatus" class="status-pill">待筛选</div>
@@ -309,7 +368,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>素材剧 ID</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
+              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>素材剧 ID / 下单目标</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
               <tbody id="resultTableBody"><tr><td colspan="14" class="muted">暂无筛选结果</td></tr></tbody>
             </table>
           </div>
@@ -421,6 +480,9 @@
       filterInputLabel: document.getElementById("filterInputLabel"),
       filterInputHint: document.getElementById("filterInputHint"),
       filterContentIds: document.getElementById("filterContentIds"),
+      resourceTargetConfig: document.getElementById("resourceTargetConfig"),
+      targetLanguage: document.getElementById("targetLanguage"),
+      targetAudioType: document.getElementById("targetAudioType"),
       roasThreshold: document.getElementById("roasThreshold"),
       minCandidates: document.getElementById("minCandidates"),
       filterBtn: document.getElementById("filterBtn"),
@@ -476,6 +538,11 @@
       const checked = document.querySelector('input[name="filterInputMode"]:checked');
       return checked ? checked.value : "content_id";
     }
+    function audioTypeLabel(value) {
+      const map = { "0": "非配音剧", "1": "人工配音剧", "2": "AI 配音剧" };
+      const key = String(value ?? "").trim();
+      return key === "" ? "" : `${key} / ${map[key] || "未知类型"}`;
+    }
     function filterInputMeta(mode = filterInputMode()) {
       if (mode === "series_code") {
         return {
@@ -497,6 +564,7 @@
       if (els.filterInputLabel) els.filterInputLabel.textContent = meta.fieldLabel;
       if (els.filterContentIds) els.filterContentIds.placeholder = meta.placeholder;
       if (els.filterInputHint) els.filterInputHint.textContent = meta.hint;
+      if (els.resourceTargetConfig) els.resourceTargetConfig.classList.toggle("is-hidden", filterInputMode() !== "series_code");
     }
     function toast(message, variant) {
       els.toast.textContent = message;
@@ -678,7 +746,9 @@
             const targetProduct = item.target_product_label || item.target_app_id || "-";
             const sourceProduct = item.source_product_label || item.product || "-";
             const sourceContentId = item.source_content_id || item.target_content_id || "";
-            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属：${navText(sourceProduct)}</div></td><td><strong>${navText(targetProduct)}</strong><div class="muted">${navText(item.target_app_id || "")}</div></td><td><strong>${navText(sourceContentId)}</strong><div class="muted">目标：${navText(item.target_content_id || "")}</div></td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
+            const targetMeta = [item.target_language || "", audioTypeLabel(item.target_audio_type)].filter(Boolean).join(" / ");
+            const targetLine = `目标：${navText(item.target_content_id || "")}${targetMeta ? ` · ${navText(targetMeta)}` : ""}`;
+            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属：${navText(sourceProduct)}</div></td><td><strong>${navText(targetProduct)}</strong><div class="muted">${navText(item.target_app_id || "")}</div></td><td><strong>${navText(sourceContentId)}</strong><div class="muted">${targetLine}</div></td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
           }).join("")
         : `<tr><td colspan="14" class="muted">暂无筛选结果</td></tr>`;
       els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
@@ -691,6 +761,10 @@
       if (!targetIds.length) return toast(`请先填写${meta.label}`, "error");
       const products = selectedProducts(".filter-product");
       if (!products.length) return toast("请至少选择一个产品维度", "error");
+      const targetLanguage = (els.targetLanguage?.value || "").trim();
+      const targetAudioType = (els.targetAudioType?.value || "").trim();
+      if (mode === "series_code" && !targetLanguage) return toast("资源 ID 模式请选择目标语种", "error");
+      if (mode === "series_code" && targetAudioType === "") return toast("资源 ID 模式请选择配音类型", "error");
       const requestSeq = ++state.filterRequestSeq;
       const roasThreshold = Number(els.roasThreshold.value || 45);
       const minCandidates = Number(els.minCandidates.value || 15);
@@ -715,6 +789,8 @@
             };
             if (mode === "series_code") {
               requestBody.series_codes = [targetId];
+              requestBody.target_language = targetLanguage;
+              requestBody.target_audio_type = targetAudioType;
             } else {
               requestBody.content_ids = [targetId];
             }
@@ -765,6 +841,8 @@
     function clearFilters() {
       state.filterRequestSeq += 1;
       els.filterContentIds.value = "";
+      if (els.targetLanguage) els.targetLanguage.value = "";
+      if (els.targetAudioType) els.targetAudioType.value = "";
       state.materials = [];
       state.selectedKeys = new Set();
       setStatus(els.filterStatus, "待筛选");
@@ -987,7 +1065,7 @@
     }
     function exportCsv() {
       if (!state.materials.length) return;
-      const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "source_content_id", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "target_language", "target_audio_type", "source_content_id", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
       const csv = [headers.join(",")].concat(state.materials.map(item => headers.map(key => `"${String(item[key] ?? "").replace(/"/g, '""')}"`).join(","))).join("\n");
       const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
