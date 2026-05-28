@@ -150,10 +150,14 @@
     .card-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .task-form { display: grid; grid-template-columns: 150px minmax(240px, 1fr) 180px 240px; gap: 14px; align-items: end; }
     .description-field { grid-column: 2 / -1; }
-    .batch-task-form { grid-template-columns: 150px minmax(260px, 1fr) 180px 240px; }
+    .batch-task-form { grid-template-columns: 150px 180px 240px; }
     .batch-task-form .description-field { grid-column: 1 / -1; }
-    .selected-material-list { display: grid; gap: 8px; max-height: 220px; overflow: auto; margin-top: 12px; }
+    .selected-material-list { display: grid; gap: 8px; max-height: 300px; overflow: auto; margin-top: 12px; }
     .selected-material-item { display: grid; grid-template-columns: 120px minmax(180px, 1fr) minmax(180px, 1fr) 96px; gap: 12px; align-items: center; border: 1px solid #e0e8f3; border-radius: 10px; padding: 10px 12px; background: #fff; }
+    .batch-selected-item { grid-template-columns: 120px minmax(190px, 1fr) minmax(240px, 1.2fr) minmax(220px, 1fr) 110px; align-items: end; }
+    .batch-designer-field { display: grid; gap: 6px; }
+    .batch-designer-field label { font-size: 12px; color: #60728c; }
+    .batch-designer-field select { min-height: 38px; }
     .stepper { display: grid; grid-template-columns: 42px 64px 42px; }
     .stepper button, .stepper input { border-radius: 0; text-align: center; min-height: 42px; }
     .stepper button:first-child { border-radius: 10px 0 0 10px; }
@@ -195,7 +199,7 @@
     @media (max-width: 980px) {
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
-      .count-grid, .filter-grid, .task-form, .selected-material-item, .target-fields { grid-template-columns: 1fr; }
+      .count-grid, .filter-grid, .task-form, .selected-material-item, .batch-selected-item, .target-fields { grid-template-columns: 1fr; }
       .description-field { grid-column: 1; }
       .topbar, .modal-footer { flex-direction: column; align-items: stretch; }
     }
@@ -404,7 +408,7 @@
   <div id="batchTaskModal" class="modal-backdrop hidden">
     <div class="modal-panel">
       <div class="panel-head">
-        <div><h2>批量创建任务</h2><div class="muted" id="batchModalSummary">只设置一次，全局应用于所有已选素材目标。</div></div>
+        <div><h2>批量创建任务</h2><div class="muted" id="batchModalSummary">全局参数应用于全部已选素材，设计师按素材单独选择。</div></div>
         <button id="batchModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
       </div>
       <div class="panel-body">
@@ -413,7 +417,7 @@
           <div class="card-head">
             <div>
               <strong>全局任务参数</strong>
-              <div class="muted">以下配置会复制到每一条已选素材并分别创建需求。</div>
+              <div class="muted">任务数量、截止时间、素材名规则和任务描述会复制到每条已选素材。</div>
             </div>
           </div>
           <div class="task-form batch-task-form">
@@ -425,7 +429,6 @@
                 <button type="button" onclick="stepBatchTaskNumber(1)">+</button>
               </div>
             </div>
-            <div class="field"><label>指定设计师</label><select id="batchTaskDesigner" onchange="renderBatchModalOverview()"></select></div>
             <div class="field"><label>截止时间</label><input id="batchTaskEndDate" type="date" /></div>
             <div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="batchOrigin" type="radio" value="1" checked /> 是</label><label class="check"><input name="batchOrigin" type="radio" value="0" /> 否</label></div></div>
             <div class="field description-field"><label>任务描述</label><textarea id="batchTaskDescription" rows="3"></textarea></div>
@@ -435,7 +438,7 @@
           <div class="card-head">
             <div>
               <strong>已选素材目标</strong>
-              <div class="muted">每条素材会按上方全局参数创建一个任务。</div>
+              <div class="muted">每条素材单独选择设计师；有原设计师时默认带出，未匹配到则留空。</div>
             </div>
           </div>
           <div id="batchSelectedList" class="selected-material-list"></div>
@@ -507,7 +510,6 @@
       batchModalSummary: document.getElementById("batchModalSummary"),
       batchModalOverview: document.getElementById("batchModalOverview"),
       batchTaskNumber: document.getElementById("batchTaskNumber"),
-      batchTaskDesigner: document.getElementById("batchTaskDesigner"),
       batchTaskEndDate: document.getElementById("batchTaskEndDate"),
       batchTaskDescription: document.getElementById("batchTaskDescription"),
       batchSelectedList: document.getElementById("batchSelectedList"),
@@ -872,19 +874,33 @@
         return `<option value="${navText(value)}" ${selected}>${navText(item.label || item.name || value)} / ${navText(value)}</option>`;
       })).join("");
     }
+    function normalizeDesignerKey(value) {
+      return String(value || "").trim().toLowerCase();
+    }
+    function originalDesignerCandidates(item) {
+      return [item.designer_id, item.designer, item.source_user_id, item.source_initiator]
+        .map(value => String(value || "").trim())
+        .filter(value => value && value !== "0" && value.toLowerCase() !== "null");
+    }
     function resolveDefaultDesigner(item) {
-      const candidates = [item.designer_id, item.designer, item.source_user_id, item.source_initiator]
-        .map(value => String(value || "").trim()).filter(value => value && value !== "0" && value.toLowerCase() !== "null");
+      const candidates = originalDesignerCandidates(item);
       for (const candidate of candidates) {
-        const exact = state.designers.find(designer => String(designer.user_id || "") === candidate || String(designer.sub_user_id || "") === candidate);
+        const normalized = normalizeDesignerKey(candidate);
+        const exact = state.designers.find(designer => {
+          const keys = [designer.user_id, designer.sub_user_id, designer.username, designer.name]
+            .map(normalizeDesignerKey)
+            .filter(Boolean);
+          return keys.includes(normalized);
+        });
         if (exact) return String(exact.user_id || "");
       }
       return "";
     }
-    function resolveCommonDefaultDesigner(items) {
-      const defaults = (items || []).map(resolveDefaultDesigner).filter(Boolean);
-      if (!defaults.length || defaults.length !== (items || []).length) return "";
-      return defaults.every(value => value === defaults[0]) ? defaults[0] : "";
+    function originalDesignerHint(item) {
+      const candidate = originalDesignerCandidates(item)[0] || "";
+      if (!candidate) return "";
+      const matched = state.designers.find(designer => String(designer.user_id || "") === resolveDefaultDesigner(item));
+      return matched ? (matched.label || matched.name || candidate) : candidate;
     }
     function taskPayloadForItem(item, options) {
       return {
@@ -915,7 +931,7 @@
     function renderTaskCards() {
       els.taskCards.innerHTML = state.modalItems.map((item, index) => {
         const defaultDesigner = resolveDefaultDesigner(item);
-        const designerHint = [item.designer, item.source_user_id].map(value => String(value || "").trim()).find(value => value && value !== "0" && value.toLowerCase() !== "null");
+        const designerHint = originalDesignerHint(item);
         const targetProduct = item.target_product_label || item.target_app_id || "-";
         const sourceProduct = item.source_product_label || item.product || "-";
         const description = `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`;
@@ -945,25 +961,28 @@
       setStatus(els.submitStatus, "待提交");
     }
     function renderBatchSelectedList() {
-      els.batchSelectedList.innerHTML = state.modalItems.map(item => {
+      els.batchSelectedList.innerHTML = state.modalItems.map((item, index) => {
+        const defaultDesigner = resolveDefaultDesigner(item);
+        const designerHint = originalDesignerHint(item);
         const targetProduct = item.target_product_label || item.target_app_id || "-";
         const sourceProduct = item.source_product_label || item.product || "-";
-        return `<div class="selected-material-item"><div><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属 ${navText(sourceProduct)}</div></div><div>${navText(item.target_drama_name || "-")}<div class="muted">目标剧 ID ${navText(item.target_content_id || "")}</div></div><div>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}</div></div><div>${navText(targetProduct)}</div></div>`;
+        return `<div class="selected-material-item batch-selected-item"><div><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属 ${navText(sourceProduct)}</div></div><div>${navText(item.target_drama_name || "-")}<div class="muted">目标剧 ID ${navText(item.target_content_id || "")}</div></div><div>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}</div></div><div class="batch-designer-field"><label>指定设计师${designerHint ? ` / 原 ${navText(designerHint)}` : ""}</label><select id="batchDesigner_${index}" onchange="renderBatchModalOverview()">${designerOptions(defaultDesigner)}</select></div><div>${navText(targetProduct)}</div></div>`;
       }).join("");
     }
     function renderBatchModalOverview() {
       const selected = state.modalItems.length;
       const number = Math.max(1, Number(els.batchTaskNumber.value || 1));
       const totalQuantity = selected * number;
-      const incomplete = els.batchTaskDesigner.value ? 0 : 1;
+      let incomplete = 0;
+      state.modalItems.forEach((item, index) => {
+        if (!document.getElementById(`batchDesigner_${index}`)?.value) incomplete += 1;
+      });
       els.batchModalOverview.innerHTML = [["已选素材", selected], ["预计创建任务", selected], ["需求素材数", totalQuantity || selected], ["未完成配置", incomplete]]
         .map(([label, value]) => `<div class="overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
-      els.batchModalSummary.textContent = `已选择 ${selected} 条素材；全局配置将应用于全部已选素材，预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+      els.batchModalSummary.textContent = `已选择 ${selected} 条素材；全局参数应用于全部已选素材，设计师按素材单独选择，预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
     }
     function renderBatchTaskForm() {
-      const commonDesigner = resolveCommonDefaultDesigner(state.modalItems);
       els.batchTaskNumber.value = "1";
-      els.batchTaskDesigner.innerHTML = designerOptions(commonDesigner);
       els.batchTaskEndDate.value = "";
       const originYes = document.querySelector('input[name="batchOrigin"][value="1"]');
       if (originYes) originYes.checked = true;
@@ -1036,17 +1055,19 @@
     async function submitBatchTasks() {
       const common = {
         number: els.batchTaskNumber.value || 1,
-        designer: els.batchTaskDesigner.value || "",
         end_date: els.batchTaskEndDate.value || "",
         origin_name: document.querySelector('input[name="batchOrigin"]:checked')?.value || "1",
         description: els.batchTaskDescription.value || ""
       };
-      const items = state.modalItems.map(item => taskPayloadForItem(item, common));
+      const items = state.modalItems.map((item, index) => taskPayloadForItem(item, {
+        ...common,
+        designer: document.getElementById(`batchDesigner_${index}`)?.value || ""
+      }));
       if (!items.length) return toast("请先选择素材", "error");
-      if (!common.designer) {
-        setStatus(els.batchSubmitStatus, "请选择设计师", "error");
+      if (items.some(item => !item.designer)) {
+        setStatus(els.batchSubmitStatus, "每条素材都需要选择设计师", "error");
         renderBatchModalOverview();
-        return toast("请选择设计师", "error");
+        return toast("每条素材都需要选择设计师", "error");
       }
       setButtonLoading(els.submitBatchTasksBtn, true, "创建中...");
       setStatus(els.batchSubmitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
