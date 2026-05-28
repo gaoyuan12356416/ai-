@@ -169,6 +169,14 @@
       padding: 0 12px;
       background: #f8fbff;
     }
+    .input-mode { flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
+    .input-mode .check {
+      min-height: 36px;
+      border: 1px solid #dbe5f2;
+      border-radius: 999px;
+      padding: 0 12px;
+      background: #f8fbff;
+    }
     .modal-footer { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-top: 1px solid var(--line); padding: 14px 18px; background: #fff; }
     .toast { position: fixed; right: 22px; bottom: 22px; background: #0f2342; color: #fff; padding: 12px 14px; border-radius: 12px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .18s ease; z-index: 60; max-width: 520px; }
     .toast.show { opacity: 1; }
@@ -196,7 +204,7 @@
       <div class="topbar">
         <div class="title">
           <h1>配音剧语种任务</h1>
-          <p>按剧 ID 查询系列素材，筛选候选素材并批量创建设计师需求。</p>
+          <p>按剧 ID 或资源 ID 查询系列素材，筛选候选素材并批量创建设计师需求。</p>
         </div>
         <div class="top-actions">
           <div class="user-card" id="userCard">未登录<small>请先登录</small></div>
@@ -246,14 +254,20 @@
         <div class="panel-head">
           <div class="panel-title-row">
             <div class="panel-icon">筛</div>
-            <div><h2>筛选任务与配置</h2><div class="muted">批量填写剧 ID，系统按资源ID汇总该资源下全部素材。</div></div>
+            <div><h2>筛选任务与配置</h2><div class="muted">批量填写剧 ID 或资源 ID，系统按资源维度筛选候选素材。</div></div>
           </div>
         </div>
         <div class="panel-body">
           <div class="filter-grid">
             <div class="field input-card">
-              <label>批量剧 ID</label>
+              <label>筛选输入类型</label>
+              <div class="checks input-mode">
+                <label class="check"><input name="filterInputMode" type="radio" value="content_id" checked /> 剧 ID</label>
+                <label class="check"><input name="filterInputMode" type="radio" value="series_code" /> 资源 ID</label>
+              </div>
+              <label id="filterInputLabel">批量剧 ID</label>
               <textarea id="filterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
+              <div id="filterInputHint" class="muted">输入剧 ID 时，系统先定位 series_code，再查该资源下的候选素材。</div>
             </div>
             <div class="config-card">
               <div class="field product-field">
@@ -404,6 +418,8 @@
       countClearBtn: document.getElementById("countClearBtn"),
       countStatus: document.getElementById("countStatus"),
       countTableBody: document.getElementById("countTableBody"),
+      filterInputLabel: document.getElementById("filterInputLabel"),
+      filterInputHint: document.getElementById("filterInputHint"),
       filterContentIds: document.getElementById("filterContentIds"),
       roasThreshold: document.getElementById("roasThreshold"),
       minCandidates: document.getElementById("minCandidates"),
@@ -455,6 +471,32 @@
         .filter(input => input.checked)
         .map(input => input.value)
         .filter(Boolean);
+    }
+    function filterInputMode() {
+      const checked = document.querySelector('input[name="filterInputMode"]:checked');
+      return checked ? checked.value : "content_id";
+    }
+    function filterInputMeta(mode = filterInputMode()) {
+      if (mode === "series_code") {
+        return {
+          label: "资源 ID",
+          fieldLabel: "批量资源 ID",
+          placeholder: "每行一个资源 ID / series_code；系统直接查询该资源下的素材",
+          hint: "输入资源 ID 时，系统直接按 series_code 查询该资源下所有符合条件的候选素材。"
+        };
+      }
+      return {
+        label: "剧 ID",
+        fieldLabel: "批量剧 ID",
+        placeholder: "每行一个剧 ID；系统按 series_code 查询该系列下的素材",
+        hint: "输入剧 ID 时，系统先定位 series_code，再查该资源下的候选素材。"
+      };
+    }
+    function syncFilterInputMode() {
+      const meta = filterInputMeta();
+      if (els.filterInputLabel) els.filterInputLabel.textContent = meta.fieldLabel;
+      if (els.filterContentIds) els.filterContentIds.placeholder = meta.placeholder;
+      if (els.filterInputHint) els.filterInputHint.textContent = meta.hint;
     }
     function toast(message, variant) {
       els.toast.textContent = message;
@@ -643,8 +685,10 @@
       refreshButtons();
     }
     async function filterMaterials() {
-      const contentIds = parseIds(els.filterContentIds.value);
-      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      const mode = filterInputMode();
+      const meta = filterInputMeta(mode);
+      const targetIds = parseIds(els.filterContentIds.value);
+      if (!targetIds.length) return toast(`请先填写${meta.label}`, "error");
       const products = selectedProducts(".filter-product");
       if (!products.length) return toast("请至少选择一个产品维度", "error");
       const requestSeq = ++state.filterRequestSeq;
@@ -655,46 +699,51 @@
       state.materials = [];
       state.selectedKeys = new Set();
       setButtonLoading(els.filterBtn, true, "筛选中...");
-      setStatus(els.filterStatus, `正在筛选 ${contentIds.length} 个剧 ID × ${products.length} 个产品，请稍候`, "loading");
+      setStatus(els.filterStatus, `正在筛选 ${targetIds.length} 个${meta.label} × ${products.length} 个产品，请稍候`, "loading");
       els.resultSummary.textContent = "筛选中...";
       els.resultTableBody.innerHTML = `<tr><td colspan="14" class="muted">正在按产品读取资源下素材并筛选达标候选...</td></tr>`;
       renderStats();
       refreshButtons();
       await nextPaint();
       try {
-        await runLimited(contentIds, 2, async contentId => {
+        await runLimited(targetIds, 2, async targetId => {
           try {
+            const requestBody = {
+              products,
+              roas_threshold: roasThreshold,
+              min_candidates: minCandidates
+            };
+            if (mode === "series_code") {
+              requestBody.series_codes = [targetId];
+            } else {
+              requestBody.content_ids = [targetId];
+            }
             const data = await api("/api/voiceover-drama/filter", {
               method: "POST",
-              body: JSON.stringify({
-                content_ids: [contentId],
-                products,
-                roas_threshold: roasThreshold,
-                min_candidates: minCandidates
-              })
+              body: JSON.stringify(requestBody)
             });
             if (requestSeq !== state.filterRequestSeq) return;
             const items = data.items || [];
             state.materials = state.materials.concat(items);
             completed += 1;
             renderResults();
-            setStatus(els.filterStatus, `已完成 ${completed}/${contentIds.length} 个剧 ID，累计 ${state.materials.length} 条候选素材`, completed === contentIds.length ? "success" : "loading");
+            setStatus(els.filterStatus, `已完成 ${completed}/${targetIds.length} 个${meta.label}，累计 ${state.materials.length} 条候选素材`, completed === targetIds.length ? "success" : "loading");
           } catch (error) {
             if (requestSeq !== state.filterRequestSeq) return;
             completed += 1;
-            failed.push({ contentId, error });
+            failed.push({ targetId, error });
             renderResults();
-            setStatus(els.filterStatus, `已完成 ${completed}/${contentIds.length} 个剧 ID，${failed.length} 个失败`, "error");
+            setStatus(els.filterStatus, `已完成 ${completed}/${targetIds.length} 个${meta.label}，${failed.length} 个失败`, "error");
           }
         });
         if (requestSeq !== state.filterRequestSeq) return;
         renderResults();
-        if (failed.length === contentIds.length) {
-          throw new Error(failed.map(item => `${item.contentId}: ${errorText(item.error)}`).join("；"));
+        if (failed.length === targetIds.length) {
+          throw new Error(failed.map(item => `${item.targetId}: ${errorText(item.error)}`).join("；"));
         }
         const failedText = failed.length ? `，失败 ${failed.length} 个` : "";
         setStatus(els.filterStatus, `完成 ${state.materials.length} 条候选素材${failedText}`, failed.length ? "error" : "success");
-        if (failed.length) toast(`部分剧 ID 筛选失败：${failed.map(item => item.contentId).join("、")}`, "error");
+        if (failed.length) toast(`部分${meta.label}筛选失败：${failed.map(item => item.targetId).join("、")}`, "error");
       } catch (error) {
         setStatus(els.filterStatus, errorText(error), "error");
         throw error;
@@ -977,6 +1026,8 @@
     els.batchModalCloseBtn.onclick = closeBatchTaskModal;
     els.batchModalResetBtn.onclick = renderBatchTaskForm;
     els.submitBatchTasksBtn.onclick = () => submitBatchTasks().catch(error => showError("批量创建设计师任务失败", error));
+    document.querySelectorAll('input[name="filterInputMode"]').forEach(input => input.onchange = syncFilterInputMode);
+    syncFilterInputMode();
     loadAuthStatus().catch(error => showError("加载登录状态失败", error));
   </script>
 </body>
