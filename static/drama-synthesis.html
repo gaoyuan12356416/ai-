@@ -23046,6 +23046,13 @@ function buildJobRow(job) {
 
 
     const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "voiceoverTasks", "adMaterials", "settings", "navigation", "users", "logs"]);
+    const STANDALONE_VIEW_PATHS = {
+      voiceoverTasks: "/voiceover-drama.html",
+    };
+
+    function standalonePathForView(view) {
+      return STANDALONE_VIEW_PATHS[view] || "";
+    }
 
     function viewFromDetailHash(hash) {
       const value = (hash || "").replace(/^#/, "");
@@ -23100,6 +23107,7 @@ function buildJobRow(job) {
       if (!link || !els.quickNav?.contains(link)) return;
       const view = viewFromInternalUrl(link.getAttribute("href") || "");
       if (!view) return;
+      if (standalonePathForView(view)) return;
       event.preventDefault();
       const target = new URL(link.getAttribute("href") || "/", window.location.origin);
       const nextPath = target.pathname + target.search + target.hash;
@@ -23110,6 +23118,12 @@ function buildJobRow(job) {
     }
 
     function switchView(view, options = {}) {
+      const standalonePath = standalonePathForView(view);
+      const currentPath = location.pathname.replace(/\/+$/, "") || "/";
+      if (standalonePath && currentPath !== standalonePath) {
+        location.href = standalonePath;
+        return;
+      }
 
 
 

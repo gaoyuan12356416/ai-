@@ -209,7 +209,7 @@
         <div class="panel-head">
           <div class="panel-title-row">
             <div class="panel-icon">查</div>
-            <div><h2>批量素材数查询</h2><div class="muted">输入 10-20 个剧 ID / content_id，自动去重后查询后台已有素材数量。</div></div>
+            <div><h2>批量素材数查询</h2><div class="muted">输入 10-20 个剧 ID / content_id，只统计该剧 ID 本身已入库素材数量。</div></div>
           </div>
           <div class="actions-inline">
             <button id="countBtn" class="btn btn-primary" type="button">确认查询</button>
@@ -233,8 +233,8 @@
               <div class="result-title"><label>查询结果</label><span id="countStatus" class="status-pill">待查询</span></div>
               <div class="table-wrap">
                 <table>
-                  <thead><tr><th>剧 ID</th><th>产品归属</th><th>series_code</th><th>资源下剧数</th><th>素材数</th><th>状态</th></tr></thead>
-                  <tbody id="countTableBody"><tr><td colspan="6" class="muted">暂无查询结果</td></tr></tbody>
+                  <thead><tr><th>剧 ID</th><th>产品归属</th><th>series_code</th><th>素材数</th><th>状态</th></tr></thead>
+                  <tbody id="countTableBody"><tr><td colspan="5" class="muted">暂无查询结果</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -593,8 +593,8 @@
     }
     function renderCountRows() {
       els.countTableBody.innerHTML = state.countRows.length
-        ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td><strong>${navText(item.product_label || item.product_owner || item.app || "-")}</strong><div class="muted">${navText(item.product_app_id || item.app_id || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.series_content_count ?? "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
-        : `<tr><td colspan="6" class="muted">暂无查询结果</td></tr>`;
+        ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td><strong>${navText(item.product_label || item.product_owner || item.app || "-")}</strong><div class="muted">${navText(item.product_app_id || item.app_id || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="muted">暂无查询结果</td></tr>`;
     }
     async function queryCounts() {
       const contentIds = parseIds(els.countContentIds.value);
@@ -603,7 +603,7 @@
       if (!products.length) return toast("请至少选择一个产品维度", "error");
       setButtonLoading(els.countBtn, true, "查询中...");
       setStatus(els.countStatus, `正在查询 ${contentIds.length} 个剧 ID × ${products.length} 个产品，请稍候`, "loading");
-      els.countTableBody.innerHTML = `<tr><td colspan="6" class="muted">正在按产品和资源ID汇总素材数...</td></tr>`;
+      els.countTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按产品统计输入剧 ID 本身的素材数...</td></tr>`;
       await nextPaint();
       try {
         const data = await api("/api/voiceover-drama/material-counts", { method: "POST", body: JSON.stringify({ content_ids: contentIds, products }) });

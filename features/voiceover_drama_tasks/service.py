@@ -543,9 +543,69 @@ def voiceover_material_count_map_for_series_targets(series_targets):
     return result
 
 
+def voiceover_material_count_map_for_content_targets(content_targets):
+    cleaned_targets = []
+    seen_targets = set()
+    app_ids = []
+    for content_id, app_id in content_targets or []:
+        content_id = str(content_id or "").strip()
+        app_id = str(app_id or "").strip()
+        if not content_id or not app_id:
+            continue
+        key = (content_id, app_id)
+        if key in seen_targets:
+            continue
+        seen_targets.add(key)
+        cleaned_targets.append(key)
+        if app_id not in app_ids:
+            app_ids.append(app_id)
+    if not cleaned_targets:
+        return {}
+    database = voiceover_sql_db()
+    target_sql = " UNION ALL ".join(
+        "SELECT '%s' AS content_id, '%s' AS app_id"
+        % (mysql_escape_literal(content_id), mysql_escape_literal(app_id))
+        for content_id, app_id in cleaned_targets
+    )
+    source_product_filters = []
+    for app_id in app_ids:
+        source_condition = voiceover_source_product_sql_condition(app_id, "s")
+        if source_condition:
+            source_product_filters.append(
+                "(target.app_id='%s' AND %s)" % (mysql_escape_literal(app_id), source_condition)
+            )
+    source_product_sql = " AND (%s)" % " OR ".join(source_product_filters) if source_product_filters else ""
+    rows = run_mysql(
+        (
+            "SELECT target.content_id, target.app_id, COUNT(DISTINCT s.id) "
+            "FROM (%s) target "
+            "LEFT JOIN `%s`.ads_custom_source s FORCE INDEX (idx_source_type_source_id) "
+            "ON s.data_source=%d AND s.data_source_id=target.content_id "
+            "AND s.is_delete=0 AND COALESCE(s.url, '')<>''%s "
+            "GROUP BY target.content_id, target.app_id"
+        )
+        % (
+            target_sql,
+            database,
+            VOICEOVER_CUSTOM_SOURCE_DATA_SOURCE,
+            source_product_sql,
+        )
+    )
+    result = {}
+    for row in rows:
+        content_id = str(row[0] if len(row) > 0 else "").strip()
+        app_id = str(row[1] if len(row) > 1 else "").strip()
+        if not content_id or not app_id:
+            continue
+        result[(content_id, app_id)] = {
+            "material_count": voiceover_int(row[2] if len(row) > 2 else 0, 0),
+        }
+    return result
+
+
 def voiceover_material_counts(payload):
     records = []
-    series_targets = []
+    content_targets = []
     content_ids = voiceover_parse_content_ids(payload)
     product_app_ids = voiceover_parse_product_app_ids(payload)
     drama_map = lookup_voiceover_drama_info_map_by_app(content_ids, product_app_ids)
@@ -556,7 +616,7 @@ def voiceover_material_counts(payload):
                 drama = drama_map.get((app_id, content_id))
                 if not drama:
                     raise StructuredApiError("drama_not_found", "未在%s中找到剧 ID：%s" % (product.get("label") or app_id, content_id))
-                series_targets.append((drama.get("series_code", ""), app_id))
+                content_targets.append((content_id, app_id))
                 records.append({
                     "content_id": content_id,
                     "product": product,
@@ -575,7 +635,7 @@ def voiceover_material_counts(payload):
                     "error": api_error_payload(exc).get("message") or str(exc),
                 })
 
-    count_map = voiceover_material_count_map_for_series_targets(series_targets)
+    count_map = voiceover_material_count_map_for_content_targets(content_targets)
     items = []
     for record in records:
         if record.get("status") != "ok":
@@ -583,12 +643,13 @@ def voiceover_material_counts(payload):
             continue
         drama = record.get("drama") or {}
         product = record.get("product") or voiceover_product_meta(drama.get("app_id", ""))
-        count_info = count_map.get((drama.get("series_code", ""), product.get("app_id", "")), {})
+        count_info = count_map.get((record.get("content_id", ""), product.get("app_id", "")), {})
         items.append({
             "content_id": record.get("content_id", ""),
             "drama_name": drama.get("name", ""),
             "series_code": drama.get("series_code", ""),
-            "series_content_count": count_info.get("series_content_count", 0),
+            "series_content_count": 1,
+            "count_scope": "content_id",
             "app_id": drama.get("app_id", ""),
             "app": drama.get("app", ""),
             "product_app_id": product.get("app_id", ""),
