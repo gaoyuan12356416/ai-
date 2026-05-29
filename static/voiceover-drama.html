@@ -118,6 +118,25 @@
     th, td { padding: 12px 14px; border-bottom: 1px solid #eef2f8; text-align: left; font-size: 13px; vertical-align: middle; }
     th { color: #667894; background: #fbfdff; font-weight: 900; }
     tr:last-child td { border-bottom: 0; }
+    .sort-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: auto;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: 900;
+      box-shadow: none;
+      cursor: pointer;
+    }
+    .sort-button:hover,
+    .sort-button.is-active { color: var(--brand); }
+    .sort-arrow { font-size: 12px; opacity: .42; }
+    .sort-button.is-active .sort-arrow { opacity: 1; }
     .table-wrap th:first-child, .table-wrap td:first-child { width: 52px; text-align: center; }
     .table-wrap input[type="checkbox"] {
       width: 16px;
@@ -406,7 +425,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>素材剧 ID / 下单目标</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th>ROAS</th><th>消耗</th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
+              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>素材剧 ID / 下单目标</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th><button class="sort-button" type="button" data-sort-field="roas" aria-label="按 ROAS 倒序排序">ROAS <span class="sort-arrow">↓</span></button></th><th><button class="sort-button" type="button" data-sort-field="spend" aria-label="按消耗倒序排序">消耗 <span class="sort-arrow">↓</span></button></th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
               <tbody id="resultTableBody"><tr><td colspan="14" class="muted">暂无筛选结果</td></tr></tbody>
             </table>
           </div>
@@ -502,7 +521,8 @@
       selectedKeys: new Set(),
       designers: [],
       modalItems: [],
-      filterRequestSeq: 0
+      filterRequestSeq: 0,
+      resultSort: { field: "", direction: "desc" }
     };
     const els = {
       quickNav: document.getElementById("quickNav"),
@@ -737,6 +757,33 @@
       els.stats.innerHTML = [["候选素材", total], ["ROAS达标", defaults], ["已选择", selected]]
         .map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
     }
+    function numericSortValue(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : Number.NEGATIVE_INFINITY;
+    }
+    function sortedResultMaterials() {
+      const field = state.resultSort && state.resultSort.field;
+      if (!["roas", "spend"].includes(field)) return state.materials;
+      return state.materials
+        .map((item, index) => ({ item, index }))
+        .sort((left, right) => {
+          const diff = numericSortValue(right.item[field]) - numericSortValue(left.item[field]);
+          return diff || left.index - right.index;
+        })
+        .map(entry => entry.item);
+    }
+    function renderSortHeaders() {
+      document.querySelectorAll(".sort-button[data-sort-field]").forEach(button => {
+        const active = button.dataset.sortField === (state.resultSort && state.resultSort.field);
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-sort", active ? "descending" : "none");
+      });
+    }
+    function sortResultsBy(field) {
+      if (!["roas", "spend"].includes(field)) return;
+      state.resultSort = { field, direction: "desc" };
+      renderResults();
+    }
     function renderCountRows() {
       els.countTableBody.innerHTML = state.countRows.length
         ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td><strong>${navText(item.product_label || item.product_owner || item.app || "-")}</strong><div class="muted">${navText(item.product_app_id || item.app_id || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
@@ -774,8 +821,9 @@
     }
     function renderResults() {
       pruneSelection();
-      els.resultTableBody.innerHTML = state.materials.length
-        ? state.materials.map(item => {
+      const rows = sortedResultMaterials();
+      els.resultTableBody.innerHTML = rows.length
+        ? rows.map(item => {
             const key = materialKey(item);
             const checked = state.selectedKeys.has(key) ? "checked" : "";
             const statusText = item.candidate_reason || item.candidate_status || "";
@@ -788,6 +836,7 @@
           }).join("")
         : `<tr><td colspan="14" class="muted">暂无筛选结果</td></tr>`;
       els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
+      renderSortHeaders();
       refreshButtons();
     }
     async function filterMaterials() {
@@ -1220,6 +1269,9 @@
       const checkbox = event.target.closest("input.row-checkbox");
       if (!checkbox) return;
       toggleSelection(checkbox.dataset.selectionKey || "", checkbox.checked);
+    });
+    document.querySelectorAll(".sort-button[data-sort-field]").forEach(button => {
+      button.onclick = () => sortResultsBy(button.dataset.sortField || "");
     });
     document.addEventListener("input", event => {
       const input = event.target.closest(".designer-search");
