@@ -512,7 +512,8 @@
 
   <div id="toast" class="toast"></div>
 
-  <script src="/quick-nav.js?v=202605261520"></script>
+  <script src="/ui-topbar.js?v=202605291130"></script>
+  <script src="/quick-nav.js?v=202605291130"></script>
   <script>
     const state = {
       auth: { authenticated: false, user: null, login_url: "/api/auth/feishu/login" },
@@ -676,6 +677,7 @@
       return !!(user.permissions && user.permissions[moduleKey]);
     }
     function loginUrlWithNext() {
+      if (window.UiTopbar) return window.UiTopbar.loginUrl(state.auth);
       const base = (state.auth && state.auth.login_url) || "/api/auth/feishu/login";
       const next = `${location.pathname || "/"}${location.search || ""}`;
       return `${base}${base.includes("?") ? "&" : "?"}next=${encodeURIComponent(next)}`;
@@ -695,9 +697,23 @@
         container: els.quickNav,
         activeKey: "voiceoverTasks",
         auth: state.auth || {},
+        onNavigate: item => {
+          if (item && item.href) window.location.assign(item.href);
+        },
       });
     }
     function renderAuth() {
+      if (window.UiTopbar) {
+        window.UiTopbar.render({
+          auth: state.auth || {},
+          userCard: els.userCard,
+          authButton: els.loginBtn,
+          refreshButton: els.refreshBtn,
+          loginText: "登录",
+          logoutText: "退出登录",
+        });
+        return;
+      }
       const user = state.auth && state.auth.user;
       if (state.auth && state.auth.authenticated && user) {
         els.userCard.innerHTML = `<div><strong>${navText(user.name || user.email || "已登录")}</strong><small>${navText(user.role || "")} / tenant ${navText(user.tenant_key || "")}</small></div>`;
@@ -708,6 +724,14 @@
       }
     }
     async function loginOrLogout() {
+      if (window.UiTopbar) {
+        await window.UiTopbar.handleAuthAction({
+          auth: state.auth || {},
+          api,
+          afterLogout: () => location.reload(),
+        });
+        return;
+      }
       if (state.auth && state.auth.authenticated) {
         await api("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
         location.reload();

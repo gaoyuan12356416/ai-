@@ -147,6 +147,37 @@
     return `<a class="nav-item ${active ? "active" : ""}" data-quick-nav-key="${escapeHtml(item.key)}" href="${escapeHtml(navItemHref(item))}"><strong>${escapeHtml(item.label || "")}</strong>${description}</a>`;
   }
 
+  function findItemByKey(config, key) {
+    for (const group of config || []) {
+      for (const item of group.items || []) {
+        if (item.key === key || item.view === key) return item;
+      }
+    }
+    return null;
+  }
+
+  function bindNavigation(container, config, options) {
+    if (container.__quickNavClickHandler) {
+      container.removeEventListener("click", container.__quickNavClickHandler);
+    }
+    const handler = event => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const link = event.target.closest("a.nav-item[data-quick-nav-key]");
+      if (!link || !container.contains(link)) return;
+      const href = link.getAttribute("href") || "";
+      if (!href || href === "#") return;
+      const item = findItemByKey(config, link.dataset.quickNavKey || "") || { href };
+      event.preventDefault();
+      if (typeof options.onNavigate === "function") {
+        options.onNavigate(item, href, event);
+        return;
+      }
+      window.location.assign(href);
+    };
+    container.__quickNavClickHandler = handler;
+    container.addEventListener("click", handler);
+  }
+
   function buildNavHtml(config, options) {
     return sortGroups(config).map(group => {
       if (!visibleFor(options.auth || {}, group)) return "";
@@ -163,6 +194,7 @@
     container.classList.add("quick-nav-root");
     const config = await loadConfig();
     container.innerHTML = buildNavHtml(config, options);
+    bindNavigation(container, config, options || {});
   }
 
   function clearCache() {
