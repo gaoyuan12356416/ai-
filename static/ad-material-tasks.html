@@ -636,6 +636,42 @@
       closeTable();
       return html.join("") || `<div class="muted">暂无需求内容</div>`;
     }
+    function adMaterialDemandReviewMarkdown(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const sections = [];
+      let current = null;
+      const isReviewHeading = title => {
+        const normalized = String(title || "").replace(/^\s*\d+[\.\、]\s*/, "").trim();
+        if (!normalized) return false;
+        return normalized.includes("禁止项")
+          || normalized.includes("逐张素材需求")
+          || normalized.includes("详细素材需求")
+          || normalized === "素材需求";
+      };
+      for (const rawLine of lines) {
+        const heading = rawLine.match(/^(#{1,6})\s+(.+?)\s*$/);
+        if (heading) {
+          const level = heading[1].length;
+          if (isReviewHeading(heading[2])) {
+            current = { level, lines: [rawLine] };
+            sections.push(current);
+            continue;
+          }
+          if (current && level > current.level) {
+            current.lines.push(rawLine);
+            continue;
+          }
+          current = null;
+          continue;
+        }
+        if (current) current.lines.push(rawLine);
+      }
+      const preview = sections
+        .map(section => section.lines.join("\n").replace(/^\s+|\s+$/g, ""))
+        .filter(Boolean)
+        .join("\n\n");
+      return preview || "暂无可审核的素材需求或禁止项";
+    }
     function taskKind(type) {
       if (String(type || "").includes("素材迭代")) return "iteration";
       if (String(type || "").includes("参考衍生")) return "reference";
@@ -1029,7 +1065,7 @@
           <div class="actions-inline" style="justify-content:space-between;align-items:center;">
             <strong>需求预览</strong>
           </div>
-          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
+          <div class="md-preview">${renderMarkdownPreview(adMaterialDemandReviewMarkdown(task.demand_text || ""))}</div>
         </div>
         <div class="card">
           <label><strong>驳回原因</strong></label>

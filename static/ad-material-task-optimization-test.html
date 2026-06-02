@@ -88,6 +88,237 @@
 
   <script src="/quick-nav.js?v=20260522-voiceover-tasks"></script>
   <script>
+    (function initAdMaterialStaticTestApi() {
+      const KEY = "adMaterialTaskOptimizationStaticTest.early.v1";
+      const PRODUCTS = [
+        { id: "1521982041257719", app_id: "1521982041257719", name: "XJD tongyong", product_name: "XJD tongyong", label: "1521982041257719 | XJD tongyong", package_name: "team.opay.pay", store_url: "https://play.google.com/store/apps/details?id=team.opay.pay&gl=ng", country: "NG", language: "en" },
+        { id: "opay-ng-demo", app_id: "opay-ng-demo", name: "OPay NG", product_name: "OPay NG", label: "opay-ng-demo | OPay NG", package_name: "team.opay.pay", store_url: "https://play.google.com/store/apps/details?id=team.opay.pay&gl=ng", country: "NG", language: "en" },
+        { id: "mx-loan-demo", app_id: "mx-loan-demo", name: "MX Loan Demo", product_name: "MX Loan Demo", label: "mx-loan-demo | MX Loan Demo", package_name: "com.demo.mxloan", store_url: "https://play.google.com/store/apps/details?id=com.demo.mxloan&gl=mx", country: "MX", language: "es" }
+      ];
+      const SOURCES = [{ source: "有米云", name: "有米云", status: "active" }, { source: "metapi", name: "metapi", status: "active" }, { source: "广大大", name: "广大大", status: "active" }];
+      const STATUS = { draft: "待上架", demand_review: "需求待审核", material_review: "素材待审核", done: "已完成" };
+      const ASSET_STATUS = { pending_review: "待审核", approved: "已通过", abandoned: "已废弃", uploaded: "已上传" };
+      const clean = value => String(value || "").trim();
+      const now = () => new Date().toLocaleString("zh-CN", { hour12: false });
+      const isGeneric = value => /xjd\s*tongyong|xjdtongyong/i.test(String(value || ""));
+      const kindOf = value => String(value || "").includes("参考衍生") ? "reference" : String(value || "").includes("素材迭代") ? "iteration" : String(value || "").includes("竞品借鉴") ? "competitor" : "strategy";
+      const productById = id => PRODUCTS.find(item => String(item.app_id || item.id) === String(id || ""));
+      const sizeText = task => Array.isArray(task.size_plan) && task.size_plan.length ? task.size_plan.map(item => `${item.size} x ${item.count}`).join(", ") : (task.size || `${task.quantity || 1} 张`);
+      function demandText(task, reason) {
+        const kind = kindOf(task.task_type);
+        const refs = Array.isArray(task.reference_files) ? task.reference_files.length : 0;
+        const sourceRule = kind === "reference" ? "只分析用户上传参考图，不查询内部优质素材；参考图优先级最高，但构图相似度仍以任务描述为准。" : "先使用内部优质素材生成基准需求；如用户上传参考图，参考图权重高于内部优质素材。";
+        const competitorRule = kind === "competitor" || kind === "strategy" ? "可结合所选竞品源，但必须把竞品信息和用户要求拆开展示。" : "不使用竞品查询接口。";
+        const brandRule = task.brand_visible === false || isGeneric(`${task.product_name} ${task.app_id}`) ? "本任务不展示产品名或产品 Logo，避免把通用产品误写成单一品牌。" : "允许展示产品名/Logo，但必须与产品库和商店链接一致。";
+        const styleRule = task.style_mode === "diverse" ? "同批多张尽量在字体、文案、版式、视觉重心上差异化。" : task.style_mode === "consistent" ? "允许保持同一主风格/构图，但文案重点需有区分。" : "按用户任务描述自动判断像参考图还是明显改构图。";
+        return `# 投放素材需求预览（静态测试）\n\n## 1. 固定规则（系统约束，用户不可直接改）\n- 任务类型：${task.task_type}\n- 来源优先级：${sourceRule}\n- 竞品/内部素材：${competitorRule}\n- 产品名/Logo：${brandRule}\n- 商店链接：${task.store_url || "未填写，需要在创建弹窗中确认。"}\n\n## 逐张素材需求\n- 任务描述：${task.description || "未填写。"}\n- 尺寸与数量：${sizeText(task)}\n- 国家/语言：${task.country || "--"}/${task.language || "--"}\n- 风格策略：${styleRule}\n- 约束标签：${(task.constraint_tags || []).length ? task.constraint_tags.join("、") : "未选择，按任务描述自动判断。"}\n\n## 3. 参考材料处理\n- 上传参考文件：${refs} 个\n- 参考衍生：必须上传参考图，且只根据参考图和任务要求出需求。\n- 其他任务：参考图非必填；一旦上传，权重高于内部优质素材。\n\n## 禁止项\n- 同批素材不能只复用同一字体、同一文案结构、同一排版模板。\n- 如果用户描述要求“像参考图”，保留主构图、层级和情绪；如果要求“改构图/差异化”，允许明显变化。\n- 文案、字体和视觉组件需围绕用户描述重新拆解，不能把用户要求简单复制进需求文档。\n${reason ? `\n## 5. 本轮驳回反馈\n- ${reason}\n- 重新生成时优先按上述反馈调整需求结构和输出约束。\n` : ""}`;
+      }
+      function makeTask(payload, overrides = {}) {
+        const product = productById(payload.app_id) || PRODUCTS[0];
+        const quantity = Number(payload.quantity || 1) || 1;
+        const task = Object.assign({
+          task_id: `test_${String(Date.now()).slice(-6)}`,
+          app_id: payload.app_id || product.app_id,
+          product_name: payload.product_name || product.product_name,
+          package_name: payload.package_name || product.package_name,
+          store_url: clean(payload.store_url) || product.store_url,
+          product_icon_url: "",
+          task_type: payload.task_type || "素材迭代——根据老素材效果优化",
+          competitor_source: payload.competitor_source || "",
+          quantity,
+          size_plan: Array.isArray(payload.size_plan) ? payload.size_plan : [{ size: "1:1", count: quantity }],
+          size: payload.size || "1:1 x 1",
+          country: payload.country || product.country || "NG",
+          language: payload.language || product.language || "en",
+          tag_name: payload.tag_name || "",
+          category: payload.category || "",
+          title: payload.title || "",
+          body: payload.body || "",
+          description: payload.description || "",
+          reference_files: Array.isArray(payload.reference_files) ? payload.reference_files : [],
+          brand_visible: payload.brand_visible !== false,
+          style_mode: payload.style_mode || "auto",
+          constraint_tags: Array.isArray(payload.constraint_tags) ? payload.constraint_tags : [],
+          status: overrides.status || "draft",
+          creator_name: "测试管理员",
+          creator_email: "mock/static-test",
+          creator_user_id: "static-test-admin",
+          initiator_sub_user_id: "static-test",
+          created_at: now(),
+          updated_at: now(),
+          demand_text: "",
+          demand_artifacts: {},
+          review_reason: "",
+          error_message: "",
+          assets: []
+        }, overrides);
+        task.status_label = STATUS[task.status] || task.status;
+        task.size_plan_summary = sizeText(task);
+        if (task.status === "demand_review" && !task.demand_text) task.demand_text = demandText(task);
+        return task;
+      }
+      function initialState() {
+        const seed = makeTask({
+          app_id: "1521982041257719",
+          product_name: "XJD tongyong",
+          package_name: "team.opay.pay",
+          store_url: "https://play.google.com/store/apps/details?id=team.opay.pay&gl=ng",
+          task_type: "素材迭代——根据老素材效果优化",
+          quantity: 4,
+          size_plan: [{ size: "1:1", count: 4 }],
+          size: "1:1 x 4",
+          country: "NG",
+          language: "en",
+          description: "同批四张图要有明显差异，第一张偏费用透明，第二张偏填写资料流程，第三张偏谨慎借款说明，第四张允许同系列但换构图。不要在图里展示产品名/Logo。",
+          brand_visible: false,
+          style_mode: "diverse",
+          constraint_tags: ["文案差异化", "版式差异化"]
+        }, { task_id: "test_202", status: "demand_review" });
+        return { nextSeq: 203, tasks: [seed] };
+      }
+      function loadState() {
+        try {
+          const parsed = JSON.parse(sessionStorage.getItem(KEY) || "null");
+          if (parsed && Array.isArray(parsed.tasks)) return parsed;
+        } catch (error) {
+          console.warn(error);
+        }
+        return initialState();
+      }
+      let testState = loadState();
+      function saveState() {
+        try { sessionStorage.setItem(KEY, JSON.stringify(testState)); } catch (error) { console.warn(error); }
+      }
+      function json(data, status = 200) {
+        return Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json; charset=utf-8" } }));
+      }
+      function body(init) {
+        try { return JSON.parse(init?.body || "{}"); } catch (error) { return {}; }
+      }
+      function listTasks(url) {
+        const status = url.searchParams.get("status") || "all";
+        const q = (url.searchParams.get("q") || "").toLowerCase();
+        return testState.tasks.filter(task => (status === "all" || task.status === status) && (!q || [task.task_id, task.product_name, task.description, task.app_id, task.creator_name].join(" ").toLowerCase().includes(q)));
+      }
+      function findTask(id) {
+        return testState.tasks.find(item => item.task_id === id);
+      }
+      function mockAsset(task, index) {
+        return { asset_id: `${task.task_id}_asset_${index + 1}`, asset_index: index + 1, name: `${task.product_name || task.app_id}_NG_${String(index + 1).padStart(2, "0")}`, url: "", status: "pending_review", status_label: ASSET_STATUS.pending_review, review_reason: "" };
+      }
+      const realFetch = window.fetch.bind(window);
+      window.__AD_MATERIAL_STATIC_TEST__ = true;
+      window.__AD_MATERIAL_TEST_API__ = { products: PRODUCTS, productById, findTask, isGeneric };
+      function stampTestIdentity() {
+        const name = document.getElementById("userName");
+        const role = document.getElementById("userRole");
+        const avatar = document.getElementById("userAvatar");
+        if (name) name.textContent = "测试管理员";
+        if (role) role.textContent = "管理员 / mock/static-test";
+        if (avatar && !avatar.querySelector("img")) avatar.textContent = "测";
+      }
+      document.addEventListener("DOMContentLoaded", () => {
+        let count = 0;
+        const timer = window.setInterval(() => {
+          stampTestIdentity();
+          count += 1;
+          if (count >= 20) window.clearInterval(timer);
+        }, 250);
+      });
+      window.fetch = function(input, init) {
+        const raw = typeof input === "string" ? input : input?.url || "";
+        const url = new URL(raw, location.origin);
+        const path = url.pathname;
+        const method = String(init?.method || "GET").toUpperCase();
+        if (path === "/api/auth/status") return json({ enabled: true, authenticated: true, login_url: "", feishu_app_id: "static-test", user: { user_id: "static-test-admin", name: "测试管理员", email: "mock/static-test", tenant_key: "static-test", avatar_url: "", role: "admin", is_admin: true, permissions: { drama_synthesis: true, cover_synthesis: true, ad_material_tasks: true } } });
+        if (path === "/api/auth/logout") return json({ ok: true });
+        if (path === "/api/admin/navigation") return json({ items: [] });
+        if (path === "/api/ad-material/competitor-sources") return json({ items: SOURCES });
+        if (path === "/api/ad-material/products") {
+          const q = (url.searchParams.get("q") || "").toLowerCase();
+          const items = PRODUCTS.filter(item => !q || [item.app_id, item.product_name, item.name, item.label].join(" ").toLowerCase().includes(q));
+          return json({ items, total: items.length });
+        }
+        if (path === "/api/ad-material/tasks" && method === "GET") return json({ items: listTasks(url), total: listTasks(url).length, page: 1, page_size: 50 });
+        if (path === "/api/ad-material/tasks" && method === "POST") {
+          const payload = body(init);
+          if (kindOf(payload.task_type) === "reference" && !(payload.reference_files || []).length) return json({ error: "参考衍生必须上传参考图；测试页已拦截创建，未写入线上。" }, 400);
+          const task = makeTask(payload, { task_id: `test_${testState.nextSeq++}`, status: "draft" });
+          testState.tasks.unshift(task);
+          saveState();
+          return json(task);
+        }
+        const match = path.match(/^\/api\/ad-material\/tasks\/([^/]+)(?:\/(.+))?$/);
+        if (match) {
+          const task = findTask(decodeURIComponent(match[1]));
+          const action = match[2] || "";
+          if (!task) return json({ error: "测试任务不存在" }, 404);
+          if (!action && method === "GET") return json(task);
+          if (!action && method === "DELETE") {
+            testState.tasks = testState.tasks.filter(item => item.task_id !== task.task_id);
+            saveState();
+            return json({ ok: true });
+          }
+          if (action === "publish" && method === "POST") {
+            task.status = "demand_review";
+            task.status_label = STATUS.demand_review;
+            task.updated_at = now();
+            task.demand_text = demandText(task);
+            saveState();
+            return json(task);
+          }
+          if (action === "copy" && method === "POST") {
+            const copied = makeTask(task, { task_id: `test_${testState.nextSeq++}`, status: "draft", demand_text: "", assets: [], created_at: now(), updated_at: now() });
+            testState.tasks.unshift(copied);
+            saveState();
+            return json(copied);
+          }
+          if (action === "export-pdf" && method === "POST") return json({ pdf_url: "", task });
+          if (action === "demand-review" && method === "POST") {
+            const payload = body(init);
+            const reason = clean(payload.reason);
+            if (payload.result === "rejected" && !reason) return json({ error: "驳回原因必填" }, 400);
+            task.updated_at = now();
+            if (payload.result === "approved") {
+              task.status = "material_review";
+              task.status_label = STATUS.material_review;
+              task.assets = Array.from({ length: Math.max(1, Number(task.quantity) || 1) }, (_, index) => mockAsset(task, index));
+            } else {
+              task.status = "demand_review";
+              task.status_label = STATUS.demand_review;
+              task.review_reason = reason;
+              task.demand_text = demandText(task, reason);
+            }
+            saveState();
+            return json(task);
+          }
+          const assetMatch = action.match(/^assets\/([^/]+)\/review$/);
+          if (assetMatch && method === "POST") {
+            const payload = body(init);
+            const asset = (task.assets || []).find(item => item.asset_id === decodeURIComponent(assetMatch[1]));
+            if (!asset) return json({ error: "测试素材不存在" }, 404);
+            asset.status = payload.result === "approved" ? "approved" : payload.result === "abandoned" ? "abandoned" : "pending_review";
+            asset.status_label = ASSET_STATUS[asset.status] || asset.status;
+            asset.review_reason = clean(payload.reason);
+            task.updated_at = now();
+            saveState();
+            return json(task);
+          }
+          if (action === "complete-upload" && method === "POST") {
+            (task.assets || []).forEach(asset => { if (asset.status === "approved") { asset.status = "uploaded"; asset.status_label = ASSET_STATUS.uploaded; } });
+            task.status = "done";
+            task.status_label = STATUS.done;
+            task.updated_at = now();
+            saveState();
+            return json(task);
+          }
+        }
+        if (path.startsWith("/api/") && method !== "GET") return json({ error: "静态测试页已拦截写操作，不会影响线上环境。" }, 403);
+        return realFetch(input, init);
+      };
+    })();
+  </script>
+  <script>
 
 
 
@@ -8225,6 +8456,16 @@
 
 
 
+  
+
+    /* Test-only controls added to the real ad material task modal. */
+    .ad-material-create-grid input[type="checkbox"] { width: auto; height: auto; }
+    .ad-material-test-check { min-height: 50px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 10px; padding: 0 14px; display: flex; align-items: center; gap: 8px; background: #fff; color: var(--text); }
+    .ad-material-test-check input { margin: 0; }
+    .ad-material-test-tags { min-height: 50px; border: 1px solid var(--border); border-radius: 10px; padding: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: #fff; }
+    .ad-material-test-tags label { min-height: auto; border: 1px solid rgba(37,99,235,.18); border-radius: 999px; padding: 6px 10px; gap: 6px; color: var(--text); background: rgba(59,130,246,.06); font-size: 12px; }
+    .ad-material-review-tag.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+
   </style>
   <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 
@@ -11480,6 +11721,36 @@
                       <option value="竞品借鉴——参考竞品优质素材">竞品借鉴——参考竞品优质素材</option>
                       <option value="综合策划——综合内外素材出方案">综合策划——综合内外素材出方案</option>
                     </select>
+                  </div>
+
+                  <div class="field wide">
+                    <label>商店链接</label>
+                    <input id="adMaterialStoreUrlTest" placeholder="选择产品后自动填充，可自行修改" />
+                    <div class="hint">创建测试任务时使用这里的商店链接；不会写入线上任务。</div>
+                  </div>
+                  <div class="field">
+                    <label>产品名/Logo</label>
+                    <label class="ad-material-test-check"><input id="adMaterialBrandVisibleTest" type="checkbox" checked /> 在素材中展示产品名/Logo</label>
+                    <div class="hint">产品名包含 XJDtongyong / XJD tongyong 时默认关闭。</div>
+                  </div>
+                  <div class="field">
+                    <label>同批素材风格</label>
+                    <select id="adMaterialStyleModeTest">
+                      <option value="auto">按需求描述自动判断</option>
+                      <option value="diverse">同批多张尽量差异化</option>
+                      <option value="consistent">允许保持同一风格/构图</option>
+                    </select>
+                    <div class="hint">用于测试需求文档里的差异化/一致性约束。</div>
+                  </div>
+                  <div class="field">
+                    <label>约束标签</label>
+                    <div id="adMaterialConstraintTagsTest" class="ad-material-test-tags">
+                      <label><input type="checkbox" value="参考图优先" />参考图优先</label>
+                      <label><input type="checkbox" value="文案差异化" />文案差异化</label>
+                      <label><input type="checkbox" value="版式差异化" />版式差异化</label>
+                      <label><input type="checkbox" value="允许同风格" />允许同风格</label>
+                    </div>
+                    <div class="hint">标签会进入测试需求预览，辅助验证约束表达。</div>
                   </div>
                   <div class="field" id="adMaterialCompetitorField">
                     <label>竞品查询接口</label>
@@ -23083,13 +23354,6 @@ function buildJobRow(job) {
 
 
     const INTERNAL_VIEWS = new Set(["tasks", "screenshots", "voiceoverTasks", "adMaterials", "settings", "navigation", "users", "logs"]);
-    const STANDALONE_VIEW_PATHS = {
-      voiceoverTasks: "/voiceover-drama.html",
-    };
-
-    function standalonePathForView(view) {
-      return STANDALONE_VIEW_PATHS[view] || "";
-    }
 
     function viewFromDetailHash(hash) {
       const value = (hash || "").replace(/^#/, "");
@@ -23110,7 +23374,7 @@ function buildJobRow(job) {
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
       if (path === "/voiceover-drama.html") return "voiceoverTasks";
-      if (path === "/ad-materials.html") return "adMaterials";
+      if (path === "/ad-materials.html" || path === "/ad-material-task-optimization-test.html") return "adMaterials";
       if (path === "/tasks.html" || path === "/drama-synthesis.html") return "tasks";
       return "tasks";
     }
@@ -23135,7 +23399,7 @@ function buildJobRow(job) {
       if (path === "/logs.html") return "logs";
       if (path === "/screenshots.html") return "screenshots";
       if (path === "/voiceover-drama.html") return "voiceoverTasks";
-      if (path === "/ad-materials.html") return "adMaterials";
+      if (path === "/ad-materials.html" || path === "/ad-material-task-optimization-test.html") return "adMaterials";
       return "";
     }
 
@@ -23144,7 +23408,6 @@ function buildJobRow(job) {
       if (!link || !els.quickNav?.contains(link)) return;
       const view = viewFromInternalUrl(link.getAttribute("href") || "");
       if (!view) return;
-      if (standalonePathForView(view)) return;
       event.preventDefault();
       const target = new URL(link.getAttribute("href") || "/", window.location.origin);
       const nextPath = target.pathname + target.search + target.hash;
@@ -23155,12 +23418,6 @@ function buildJobRow(job) {
     }
 
     function switchView(view, options = {}) {
-      const standalonePath = standalonePathForView(view);
-      const currentPath = location.pathname.replace(/\/+$/, "") || "/";
-      if (standalonePath && currentPath !== standalonePath) {
-        location.href = standalonePath;
-        return;
-      }
 
 
 
@@ -25478,6 +25735,138 @@ function buildJobRow(job) {
 
 
 
+
+
+
+
+    (function configureAdMaterialStaticTestPage() {
+      window.__AD_MATERIAL_STATIC_TEST__ = true;
+      const STORAGE_KEY = "adMaterialTaskOptimizationStaticTest.v4";
+      const PRODUCTS = [
+        { id: "1521982041257719", app_id: "1521982041257719", name: "XJD tongyong", product_name: "XJD tongyong", label: "1521982041257719 | XJD tongyong", package_name: "team.opay.pay", store_url: "https://play.google.com/store/apps/details?id=team.opay.pay&gl=ng", country: "NG", language: "en" },
+        { id: "opay-ng-demo", app_id: "opay-ng-demo", name: "OPay NG", product_name: "OPay NG", label: "opay-ng-demo | OPay NG", package_name: "team.opay.pay", store_url: "https://play.google.com/store/apps/details?id=team.opay.pay&gl=ng", country: "NG", language: "en" },
+        { id: "mx-loan-demo", app_id: "mx-loan-demo", name: "MX Loan Demo", product_name: "MX Loan Demo", label: "mx-loan-demo | MX Loan Demo", package_name: "com.demo.mxloan", store_url: "https://play.google.com/store/apps/details?id=com.demo.mxloan&gl=mx", country: "MX", language: "es" }
+      ];
+      const SOURCES = [{ source: "有米云", name: "有米云", status: "active" }, { source: "metapi", name: "metapi", status: "active" }, { source: "广大大", name: "广大大", status: "active" }];
+      const STATUS = { draft: "待上架", demand_review: "需求待审核", material_review: "素材待审核", done: "已完成" };
+      const ASSET_STATUS = { pending_review: "待审核", approved: "已通过", abandoned: "已废弃", uploaded: "已上传" };
+      const text = value => String(value || "").trim();
+      const now = () => new Date().toLocaleString("zh-CN", { hour12: false });
+      const productId = item => String(item?.app_id || item?.id || "").trim();
+      const productById = id => PRODUCTS.find(item => productId(item) === String(id || "").trim());
+      const genericProduct = value => /xjd\s*tongyong|xjdtongyong/i.test(String(value || ""));
+      const taskKind = value => String(value || "").includes("参考衍生") ? "reference" : String(value || "").includes("素材迭代") ? "iteration" : String(value || "").includes("竞品借鉴") ? "competitor" : "strategy";
+      const selectedConstraintTags = () => Array.from(document.querySelectorAll("#adMaterialConstraintTagsTest input:checked")).map(item => item.value);
+      function styleRule(mode) {
+        if (mode === "diverse") return "同一批素材需要在字体、文案、版式、视觉重心上做明确差异化，避免多张图像看起来像同模板换字。";
+        if (mode === "consistent") return "允许同一批素材保持同一主风格，但需要在文案重点或局部信息层级上形成可识别差异。";
+        return "先读取用户任务描述；如果描述要求相似则保持风格，如果描述要求探索则输出明显不同构图。";
+      }
+      function sizeText(task) {
+        return Array.isArray(task.size_plan) && task.size_plan.length ? task.size_plan.map(item => `${item.size} x ${item.count}`).join(", ") : (task.size || `${task.quantity || 1} 张`);
+      }
+      function demandText(task, rejectionReason) {
+        const kind = taskKind(task.task_type);
+        const refs = Array.isArray(task.reference_files) ? task.reference_files.length : 0;
+        const sourceRule = kind === "reference"
+          ? "只分析用户上传参考图，不查询内部优质素材；参考图优先级最高，但构图相似度仍以任务描述为准。"
+          : "先使用内部优质素材生成基准需求；如用户上传参考图，参考图权重高于内部优质素材。";
+        const competitorRule = kind === "competitor" || kind === "strategy" ? "可结合所选竞品源，但必须把竞品信息和用户要求拆开展示。" : "不使用竞品查询接口。";
+        const brandRule = task.brand_visible === false || genericProduct(`${task.product_name} ${task.app_id}`) ? "本任务不展示产品名或产品 Logo，避免把通用产品误写成单一品牌。" : "允许展示产品名/Logo，但必须与产品库和商店链接一致。";
+        return `# 投放素材需求预览（静态测试）\n\n## 1. 固定规则（系统约束，用户不可直接改）\n- 任务类型：${task.task_type}\n- 来源优先级：${sourceRule}\n- 竞品/内部素材：${competitorRule}\n- 产品名/Logo：${brandRule}\n- 商店链接：${task.store_url || "未填写，需要在创建弹窗中确认。"}\n\n## 逐张素材需求\n- 任务描述：${task.description || "未填写。"}\n- 尺寸与数量：${sizeText(task)}\n- 国家/语言：${task.country || "--"}/${task.language || "--"}\n- 风格策略：${styleRule(task.style_mode)}\n- 约束标签：${(task.constraint_tags || []).length ? task.constraint_tags.join("、") : "未选择，按任务描述自动判断。"}\n\n## 3. 参考材料处理\n- 上传参考文件：${refs} 个\n- 参考衍生：必须上传参考图，且只根据参考图和任务要求出需求。\n- 其他任务：参考图非必填；一旦上传，权重高于内部优质素材。\n\n## 禁止项\n- 同批素材不能只复用同一字体、同一文案结构、同一排版模板。\n- 如果用户描述要求“像参考图”，保留主构图、层级和情绪；如果要求“改构图/差异化”，允许明显变化。\n- 文案、字体和视觉组件需围绕用户描述重新拆解，不能把用户要求简单复制进需求文档。\n${rejectionReason ? `\n## 5. 本轮驳回反馈\n- ${rejectionReason}\n- 重新生成时优先按上述反馈调整需求结构和输出约束。\n` : ""}`;
+      }
+      function asset(task, index) {
+        const colors = ["%232563eb", "%2316a34a", "%23f59e0b", "%237c3aed"];
+        const color = colors[index % colors.length];
+        const title = index % 2 ? "Fill%20in%20details" : "Clear%20loan%20costs";
+        return { asset_id: `${task.task_id}_asset_${index + 1}`, asset_index: index + 1, name: `${task.product_name || task.app_id}_NG_${String(index + 1).padStart(2, "0")}`, url: `data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' width='1080' height='1080'><rect width='1080' height='1080' fill='%23f8fbff'/><rect x='72' y='72' width='936' height='936' rx='42' fill='white' stroke='%23d8e2f0' stroke-width='4'/><rect x='72' y='72' width='936' height='210' rx='42' fill='${color}'/><text x='130' y='400' font-family='Arial' font-size='82' font-weight='700' fill='%23182739'>${title}</text><text x='130' y='500' font-family='Arial' font-size='36' fill='%23475569'>Static test creative ${index + 1}</text></svg>`, status: "pending_review", status_label: ASSET_STATUS.pending_review, review_reason: "" };
+      }
+      function makeTask(payload, overrides = {}) {
+        const product = productById(payload.app_id) || PRODUCTS[0];
+        const quantity = Number(payload.quantity || 1) || 1;
+        const task = Object.assign({ task_id: `test_${String(Date.now()).slice(-6)}`, app_id: payload.app_id || product.app_id, product_name: payload.product_name || product.product_name, package_name: payload.package_name || product.package_name, store_url: text(payload.store_url) || product.store_url, product_icon_url: "", task_type: payload.task_type || "素材迭代——根据老素材效果优化", competitor_source: payload.competitor_source || "", quantity, size_plan: Array.isArray(payload.size_plan) ? payload.size_plan : [{ size: "1:1", count: quantity }], size: payload.size || "1:1 x 1", country: payload.country || product.country || "NG", language: payload.language || product.language || "en", tag_name: payload.tag_name || "", category: payload.category || "", title: payload.title || "", body: payload.body || "", description: payload.description || "", reference_files: Array.isArray(payload.reference_files) ? payload.reference_files : [], brand_visible: payload.brand_visible !== false, style_mode: payload.style_mode || "auto", constraint_tags: Array.isArray(payload.constraint_tags) ? payload.constraint_tags : [], status: overrides.status || "draft", creator_name: "测试管理员", creator_email: "mock/static-test", creator_user_id: "static-test-admin", initiator_sub_user_id: "static-test", created_at: now(), updated_at: now(), demand_text: "", demand_artifacts: {}, review_reason: "", error_message: "", assets: [] }, overrides);
+        task.status_label = STATUS[task.status] || task.status;
+        task.size_plan_summary = sizeText(task);
+        if (task.status === "demand_review" && !task.demand_text) task.demand_text = demandText(task);
+        return task;
+      }
+      function initialState() {
+        const seed = makeTask({ app_id: "1521982041257719", product_name: "XJD tongyong", package_name: "team.opay.pay", store_url: "https://play.google.com/store/apps/details?id=team.opay.pay&gl=ng", task_type: "素材迭代——根据老素材效果优化", quantity: 4, size_plan: [{ size: "1:1", count: 4 }], size: "1:1 x 4", country: "NG", language: "en", description: "同批四张图要有明显差异，第一张偏费用透明，第二张偏填写资料流程，第三张偏谨慎借款说明，第四张允许同系列但换构图。不要在图里展示产品名/Logo。", brand_visible: false, style_mode: "diverse", constraint_tags: ["文案差异化", "版式差异化"] }, { task_id: "test_202", status: "demand_review" });
+        return { nextSeq: 203, tasks: [seed] };
+      }
+      function loadState() { try { const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null"); if (parsed && Array.isArray(parsed.tasks)) return parsed; } catch (error) { console.warn(error); } return initialState(); }
+      let testState = loadState();
+      function saveState() { try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(testState)); } catch (error) { console.warn(error); } }
+      function json(data, status = 200) { return Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json; charset=utf-8" } })); }
+      function body(init) { try { return JSON.parse(init?.body || "{}"); } catch (error) { return {}; } }
+      function findTask(id) { return testState.tasks.find(item => item.task_id === id); }
+      function listTasks(url) { const status = url.searchParams.get("status") || "all"; const q = (url.searchParams.get("q") || "").toLowerCase(); return testState.tasks.filter(task => (status === "all" || task.status === status) && (!q || [task.task_id, task.product_name, task.description, task.app_id, task.creator_name].join(" ").toLowerCase().includes(q))); }
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = function(input, init) {
+        const raw = typeof input === "string" ? input : input?.url || "";
+        const url = new URL(raw, location.origin);
+        const path = url.pathname;
+        const method = String(init?.method || "GET").toUpperCase();
+        if (path === "/api/auth/status") return json({ enabled: true, authenticated: true, login_url: "", feishu_app_id: "static-test", user: { user_id: "static-test-admin", name: "测试管理员", email: "mock/static-test", tenant_key: "static-test", avatar_url: "", role: "admin", is_admin: true, permissions: { drama_synthesis: true, cover_synthesis: true, ad_material_tasks: true } } });
+        if (path === "/api/auth/logout") return json({ ok: true });
+        if (path === "/api/admin/navigation") return json({ items: [] });
+        if (path === "/api/ad-material/competitor-sources") return json({ items: SOURCES });
+        if (path === "/api/ad-material/products") { const q = (url.searchParams.get("q") || "").toLowerCase(); const items = PRODUCTS.filter(item => !q || [item.app_id, item.product_name, item.name, item.label].join(" ").toLowerCase().includes(q)); return json({ items, total: items.length }); }
+        if (path === "/api/ad-material/tasks" && method === "GET") { const items = listTasks(url); return json({ items, total: items.length, page: 1, page_size: 50 }); }
+        if (path === "/api/ad-material/tasks" && method === "POST") { const payload = body(init); if (taskKind(payload.task_type) === "reference" && !(payload.reference_files || []).length) return json({ error: "参考衍生必须上传参考图；测试页已拦截创建，未写入线上。" }, 400); const task = makeTask(payload, { task_id: `test_${testState.nextSeq++}`, status: "draft" }); testState.tasks.unshift(task); saveState(); return json(task); }
+        const match = path.match(/^\/api\/ad-material\/tasks\/([^/]+)(?:\/(.+))?$/);
+        if (match) {
+          const task = findTask(decodeURIComponent(match[1]));
+          const action = match[2] || "";
+          if (!task) return json({ error: "测试任务不存在" }, 404);
+          if (!action && method === "GET") return json(task);
+          if (!action && method === "DELETE") { testState.tasks = testState.tasks.filter(item => item.task_id !== task.task_id); saveState(); return json({ ok: true }); }
+          if (action === "publish" && method === "POST") { task.status = "demand_review"; task.status_label = STATUS.demand_review; task.updated_at = now(); task.demand_text = demandText(task); saveState(); return json(task); }
+          if (action === "copy" && method === "POST") { const copied = makeTask(task, { task_id: `test_${testState.nextSeq++}`, status: "draft", demand_text: "", assets: [], created_at: now(), updated_at: now() }); testState.tasks.unshift(copied); saveState(); return json(copied); }
+          if (action === "export-pdf" && method === "POST") return json({ pdf_url: "", task });
+          if (action === "demand-review" && method === "POST") { const payload = body(init); const reason = text(payload.reason); if (payload.result === "rejected" && !reason) return json({ error: "驳回原因必填" }, 400); task.updated_at = now(); if (payload.result === "approved") { task.status = "material_review"; task.status_label = STATUS.material_review; task.assets = Array.from({ length: Math.max(1, Number(task.quantity) || 1) }, (_, index) => asset(task, index)); } else { task.status = "demand_review"; task.status_label = STATUS.demand_review; task.review_reason = reason; task.demand_text = demandText(task, reason); } saveState(); return json(task); }
+          const assetMatch = action.match(/^assets\/([^/]+)\/review$/);
+          if (assetMatch && method === "POST") { const payload = body(init); const item = (task.assets || []).find(asset => asset.asset_id === decodeURIComponent(assetMatch[1])); if (!item) return json({ error: "测试素材不存在" }, 404); item.status = payload.result === "approved" ? "approved" : payload.result === "abandoned" ? "abandoned" : "pending_review"; item.status_label = ASSET_STATUS[item.status] || item.status; item.review_reason = text(payload.reason); task.updated_at = now(); saveState(); return json(task); }
+          if (action === "complete-upload" && method === "POST") { (task.assets || []).forEach(item => { if (item.status === "approved") { item.status = "uploaded"; item.status_label = ASSET_STATUS.uploaded; } }); task.status = "done"; task.status_label = STATUS.done; task.updated_at = now(); saveState(); return json(task); }
+        }
+        if (path.startsWith("/api/") && method !== "GET") return json({ error: "静态测试页已拦截写操作，不会影响线上环境。" }, 403);
+        return originalFetch(input, init);
+      };
+      const originalPayloadBase = adMaterialPayloadBase;
+      adMaterialPayloadBase = async function() {
+        const payload = await originalPayloadBase();
+        payload.store_url = text(document.getElementById("adMaterialStoreUrlTest")?.value) || payload.store_url || "";
+        payload.brand_visible = !!document.getElementById("adMaterialBrandVisibleTest")?.checked;
+        payload.style_mode = document.getElementById("adMaterialStyleModeTest")?.value || "auto";
+        payload.constraint_tags = selectedConstraintTags();
+        if (genericProduct(`${payload.product_name} ${payload.app_id}`) && !payload.brand_visible) payload.product_icon_url = "";
+        return payload;
+      };
+      function syncProductFields(product, force) {
+        const store = document.getElementById("adMaterialStoreUrlTest");
+        const brand = document.getElementById("adMaterialBrandVisibleTest");
+        if (store && (force || !store.dataset.userEdited)) { store.value = product?.store_url || ""; delete store.dataset.userEdited; }
+        if (brand && (force || !brand.dataset.userEdited)) { brand.checked = !genericProduct(`${product?.product_name || product?.name || ""} ${product?.app_id || product?.id || ""}`); delete brand.dataset.userEdited; }
+      }
+      const originalSetProductValue = setAdMaterialProductValue;
+      setAdMaterialProductValue = function(appId) { const result = originalSetProductValue.apply(this, arguments); syncProductFields(productById(appId), true); return result; };
+      const originalClearProductValue = clearAdMaterialProductValue;
+      clearAdMaterialProductValue = function() { const result = originalClearProductValue.apply(this, arguments); syncProductFields(null, true); return result; };
+      const originalResetForm = resetAdMaterialForm;
+      resetAdMaterialForm = function() { const result = originalResetForm.apply(this, arguments); const style = document.getElementById("adMaterialStyleModeTest"); if (style) style.value = "auto"; document.querySelectorAll("#adMaterialConstraintTagsTest input").forEach(item => { item.checked = false; }); syncProductFields(null, true); return result; };
+      const originalEditTask = editAdMaterialTask;
+      editAdMaterialTask = async function(taskId) { await originalEditTask.apply(this, arguments); const task = findTask(taskId); if (!task) return; const store = document.getElementById("adMaterialStoreUrlTest"); const brand = document.getElementById("adMaterialBrandVisibleTest"); const style = document.getElementById("adMaterialStyleModeTest"); if (store) store.value = task.store_url || ""; if (brand) brand.checked = task.brand_visible !== false; if (style) style.value = task.style_mode || "auto"; document.querySelectorAll("#adMaterialConstraintTagsTest input").forEach(item => { item.checked = (task.constraint_tags || []).includes(item.value); }); };
+      const originalDemandReview = renderAdMaterialDemandReview;
+      renderAdMaterialDemandReview = function(task) {
+        const tags = `<div class="actions-inline" style="margin:10px 0 8px;gap:8px;"><button class="btn btn-secondary mini ad-material-review-tag" type="button" data-review-tag-test="参考图不像">参考图不像</button><button class="btn btn-secondary mini ad-material-review-tag" type="button" data-review-tag-test="文案太雷同">文案太雷同</button><button class="btn btn-secondary mini ad-material-review-tag" type="button" data-review-tag-test="构图不够差异化">构图不够差异化</button><button class="btn btn-secondary mini ad-material-review-tag" type="button" data-review-tag-test="不要产品名/Logo">不要产品名/Logo</button><button class="btn btn-secondary mini ad-material-review-tag" type="button" data-review-tag-test="商店链接不正确">商店链接不正确</button></div>`;
+        return originalDemandReview(task).replace('<textarea id="adMaterialDemandReviewReason" rows="3" placeholder="仅驳回时必填，会作为重新生成需求的方向"></textarea>', `${tags}<textarea id="adMaterialDemandReviewReason" rows="3" placeholder="可选标签后补充说明；驳回时必填，会作为重新生成需求的方向"></textarea>`);
+      };
+      document.addEventListener("click", event => { const button = event.target.closest("[data-review-tag-test]"); if (!button) return; button.classList.toggle("active"); const textarea = document.getElementById("adMaterialDemandReviewReason"); if (!textarea) return; const tags = Array.from(document.querySelectorAll("[data-review-tag-test].active")).map(item => item.dataset.reviewTagTest); textarea.value = tags.length ? `${tags.join("；")}；补充：` : ""; });
+      const originalReviewDemand = reviewAdMaterialDemand;
+      reviewAdMaterialDemand = function(taskId, result, reason) { if (result === "rejected" && !text(reason)) reason = Array.from(document.querySelectorAll("[data-review-tag-test].active")).map(item => item.dataset.reviewTagTest).join("；"); return originalReviewDemand.call(this, taskId, result, reason); };
+      document.addEventListener("input", event => { if (event.target?.id === "adMaterialStoreUrlTest") event.target.dataset.userEdited = "1"; });
+      document.addEventListener("change", event => { if (event.target?.id === "adMaterialBrandVisibleTest") event.target.dataset.userEdited = "1"; });
+    })();
 
 
     init().catch(error => {
