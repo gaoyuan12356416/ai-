@@ -32908,8 +32908,32 @@ def build_screenshot_failure_message(job, error_text):
     )
 
 
+def should_skip_screenshot_failure_notification(job, error_text):
+    raw_reason = (
+        str(error_text or "").strip()
+        or str((job or {}).get("error_message", "") or "").strip()
+    )
+    return is_screenshot_generation_no_output_error(raw_reason)
+
+
 def notify_screenshot_failure(job, error_text):
     try:
+        if should_skip_screenshot_failure_notification(job, error_text):
+            logging.info(
+                "skip screenshot failure notification for raw_generated_path no-output error: %s",
+                job.get("job_id", ""),
+            )
+            try:
+                append_audit_log(
+                    None,
+                    "notify_screenshot_failure_skipped",
+                    "screenshot_job",
+                    job.get("job_id", ""),
+                    {"reason": "generation_no_output_raw_generated_path"},
+                )
+            except Exception:
+                logging.exception("failed to write screenshot failure notify skipped audit log")
+            return
         recipients = screenshot_failure_notify_recipients()
         if not recipients:
             logging.warning("no screenshot failure Feishu recipients configured")
