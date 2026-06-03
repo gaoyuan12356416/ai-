@@ -1538,6 +1538,7 @@ SCREENSHOT_JOB_ACTIVE_COUNT = 0
 SCREENSHOT_JOB_CONDITION = threading.Condition()
 SCREENSHOT_SERVICE_POOL_INDEX = 0
 SCREENSHOT_SERVICE_POOL_LOCK = threading.Lock()
+SCREENSHOT_SERVICE_POOL_INFLIGHT = {}
 
 
 
@@ -9278,6 +9279,29 @@ def file_ready(path):
 
 
     return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def image_file_ready(path):
+    if not file_ready(path):
+        return False
+    try:
+        from PIL import Image as PilImage
+
+        with PilImage.open(path) as image:
+            image.verify()
+        with PilImage.open(path) as image:
+            image.load()
+        return True
+    except Exception:
+        return False
+
+
+def remove_file_quietly(path):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        logging.warning("failed to remove file: %s", path)
 
 
 def get_named_runtime_lock(lock_map, lock_guard, key):
@@ -21378,6 +21402,7 @@ def recover_inflight_jobs():
 
 def recover_inflight_screenshot_jobs():
     resumable_jobs = []
+    recovery_progress_detail = "\u670d\u52a1\u91cd\u542f\u540e\u5df2\u91cd\u65b0\u6392\u961f\uff0c\u5c06\u4ece\u5df2\u6709\u4ea7\u7269\u65ad\u70b9\u7ee7\u7eed\u5904\u7406"
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -21397,18 +21422,17 @@ def recover_inflight_screenshot_jobs():
                 """
                 UPDATE drama_screenshot_job
                 SET status = 'queued',
-                    progress_detail = CASE
-                        WHEN TRIM(progress_detail) = '' THEN '服务重启，正在从断点恢复截图任务'
-                        ELSE progress_detail || '，服务重启后继续处理'
-                    END,
+                    progress = 2,
+                    progress_detail = ?,
                     error_message = '',
+                    started_at = '',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status NOT IN ('done', 'failed')
-                """
+                """,
+                (recovery_progress_detail,),
             )
             conn.commit()
             for row in rows:
-                progress_detail = (row[14] or "").strip() or "服务重启，正在从断点恢复截图任务"
                 resumable_jobs.append(
                     {
                         "job_id": row[0],
@@ -21424,12 +21448,12 @@ def recover_inflight_screenshot_jobs():
                         "portrait_4x5_url": row[10],
                         "assets": parse_json_text(row[11], {}),
                         "status": "queued",
-                        "progress": clamp_progress(row[13]),
-                        "progress_detail": progress_detail,
+                        "progress": 2,
+                        "progress_detail": recovery_progress_detail,
                         "error_message": "",
                         "created_at": row[16],
                         "updated_at": row[17],
-                        "started_at": row[18] if len(row) > 18 else "",
+                        "started_at": "",
                         "finished_at": row[19] if len(row) > 19 else "",
                         "elapsed_seconds": nonnegative_int(row[20] if len(row) > 20 else 0, 0),
                         "token_total": nonnegative_int(row[21] if len(row) > 21 else 0, 0),
@@ -21448,7 +21472,7 @@ def recover_inflight_screenshot_jobs():
         job["status"] = "queued"
         job["error_message"] = ""
         if not str(job.get("progress_detail", "") or "").strip():
-            job["progress_detail"] = "服务重启，正在从断点恢复截图任务"
+            job["progress_detail"] = recovery_progress_detail
         run_screenshot_job_async(job)
 
 
@@ -31024,7 +31048,7 @@ def post_screenshot_ai_source_callback(job):
     return {"sent_count": len(items), "status_code": response.status_code, "response": response.text[:500]}
 
 
-def notify_screenshot_ai_source_callback(job):
+def notify_screenshot_ai_source_callback(job, raise_on_error=False):
     try:
         result = post_screenshot_ai_source_callback(job)
         logging.info("screenshot ai source callback result: %s %s", job.get("job_id", ""), result)
@@ -31035,6 +31059,7 @@ def notify_screenshot_ai_source_callback(job):
             job.get("job_id", ""),
             result,
         )
+        return result
     except Exception as exc:
         logging.exception("screenshot ai source callback failed: %s", job.get("job_id", ""))
         try:
@@ -31047,6 +31072,9 @@ def notify_screenshot_ai_source_callback(job):
             )
         except Exception:
             logging.exception("failed to write callback failure audit log")
+        if raise_on_error:
+            raise
+        return {"failed": True, "error": str(exc)}
 
 
 def fetch_screenshot_job_row(job_id):
@@ -31613,17 +31641,40 @@ def is_screenshot_source_consistency_rejection(exc):
     )
 
 
+def is_screenshot_generation_no_output_error(exc):
+    text = str(exc or "").lower()
+    keywords = (
+        "ai image generation produced no output",
+        "image generation produced no output",
+        "image generation tool returned usererror",
+        "built-in ai image generation failed",
+        "built-in image generation failed",
+        "built-in ai image generation/editing failed",
+        "no usable ai-generated image",
+        "no raw ai-generated image",
+        "no generated image was returned",
+        "no image path was returned",
+        "no output path is available",
+        "missing raw_generated_path",
+    )
+    return any(keyword in text for keyword in keywords)
+
+
 def is_screenshot_batch_recoverable_error(exc):
     if is_screenshot_source_consistency_rejection(exc):
         return True
+    if is_screenshot_generation_no_output_error(exc):
+        return False
     text = str(exc or "").lower()
     recoverable_keywords = (
-        "missing raw_generated_path",
         "raw aspect ratio rejected",
-        "ai image generation failed before producing an output",
         "screenshot batch incomplete",
     )
     return any(keyword in text for keyword in recoverable_keywords)
+
+
+def is_screenshot_batch_fallback_error(exc):
+    return is_screenshot_batch_recoverable_error(exc) or is_screenshot_generation_no_output_error(exc)
 
 
 def set_screenshot_batch_remake_progress(job, exc=None):
@@ -31715,6 +31766,10 @@ def process_screenshot_job(job):
 
     source_path = os.path.join(source_dir, "cover_source.jpg")
 
+    if file_ready(source_path) and not image_file_ready(source_path):
+        logging.warning("cached screenshot source image is invalid; redownloading: %s", source_path)
+        remove_file_quietly(source_path)
+
     if file_ready(source_path):
 
         set_screenshot_job_progress(job, status="downloading", progress=16, detail="\u590d\u7528\u5df2\u4e0b\u8f7d\u5c01\u9762\u7d20\u6750")
@@ -31725,7 +31780,16 @@ def process_screenshot_job(job):
 
         download_file(validation["cover_source_url"], source_path)
 
-        set_screenshot_job_progress(job, status="downloading", progress=24, detail="\u5c01\u9762\u7d20\u6750\u4e0b\u8f7d\u5b8c\u6210")
+        if image_file_ready(source_path):
+            set_screenshot_job_progress(job, status="downloading", progress=24, detail="\u5c01\u9762\u7d20\u6750\u4e0b\u8f7d\u5b8c\u6210")
+        else:
+            logging.warning(
+                "downloaded screenshot source image is invalid; sidecar will retry source_url candidates: job=%s url=%s",
+                job.get("job_id"),
+                validation["cover_source_url"],
+            )
+            remove_file_quietly(source_path)
+            set_screenshot_job_progress(job, status="downloading", progress=24, detail="封面素材下载异常，将由生成服务重新拉取")
 
 
 
@@ -31820,9 +31884,9 @@ def process_screenshot_job(job):
             try:
                 generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
             except Exception as exc:
-                if is_screenshot_batch_recoverable_error(exc):
+                if is_screenshot_batch_fallback_error(exc):
                     logging.warning(
-                        "screenshot batch recoverable failure; remaking failed sizes: job=%s error=%s",
+                        "screenshot batch failed; falling back to per-size generation: job=%s error=%s",
                         job["job_id"],
                         str(exc).strip() or exc.__class__.__name__,
                     )
@@ -31901,6 +31965,14 @@ def process_screenshot_job(job):
                     if file_ready(public_output_path) and not retrying_after_consistency_rejection:
                         asset_url = publish_asset(public_output_path)
                         return index, spec, workspace_output_path, public_output_path, asset_url
+                    if is_screenshot_generation_no_output_error(exc):
+                        logging.warning(
+                            "screenshot size hit hard image-generation no-output failure: job=%s key=%s error=%s",
+                            job["job_id"],
+                            spec["key"],
+                            str(exc).strip() or exc.__class__.__name__,
+                        )
+                        break
                     if attempt >= attempts:
                         break
                     if retrying_after_consistency_rejection:
@@ -31967,13 +32039,20 @@ def process_screenshot_job(job):
 
     job["error_message"] = ""
 
-    finish_screenshot_job_run(job)
-
-    set_screenshot_job_progress(job, status="done", progress=100, detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210")
+    set_screenshot_job_progress(
+        job,
+        status="processing_cover",
+        progress=96,
+        detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u751f\u6210\uff0c\u6b63\u5728\u56de\u4f20\u7d20\u6750\u63a5\u53e3",
+    )
 
     callback_job = fetch_screenshot_job_row(job["job_id"]) or job
 
-    notify_screenshot_ai_source_callback(callback_job)
+    notify_screenshot_ai_source_callback(callback_job, raise_on_error=True)
+
+    finish_screenshot_job_run(job)
+
+    set_screenshot_job_progress(job, status="done", progress=100, detail="\u4e09\u79cd\u622a\u56fe\u7d20\u6750\u5df2\u5168\u90e8\u751f\u6210\u5e76\u56de\u4f20")
 
 
 
@@ -32072,6 +32151,9 @@ def run_screenshot_job_async(job):
                     job["error_message"] = "%s\n%s" % (message, trace)
 
                     upsert_screenshot_job_record(job)
+
+                    failure_job = fetch_screenshot_job_row(job["job_id"]) or job
+                    notify_screenshot_failure(failure_job, message)
 
                     return
         finally:
@@ -32705,6 +32787,189 @@ def enrich_ad_material_store_icon(data):
     )
     data["product_icon_url"] = icon_url or ""
     return data
+
+
+def screenshot_failure_notify_names():
+    text = os.environ.get("SCREENSHOT_FAILURE_NOTIFY_NAMES", "\u90dc\u8fdc")
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def screenshot_failure_notify_recipients():
+    names = screenshot_failure_notify_names()
+    if not names:
+        return []
+    placeholders = ",".join("?" for _ in names)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT user_id, open_id, name
+                FROM drama_admin_user
+                WHERE name IN (%s)
+                  AND (TRIM(user_id) != '' OR TRIM(open_id) != '')
+                """
+                % placeholders,
+                names,
+            ).fetchall()
+        finally:
+            conn.close()
+    recipients = []
+    seen = set()
+    for row in rows:
+        user_id = str(row["user_id"] or "").strip()
+        open_id = str(row["open_id"] or "").strip()
+        name = str(row["name"] or "").strip()
+        if user_id:
+            key = ("user_id", user_id)
+            if key not in seen:
+                seen.add(key)
+                recipients.append({"receive_id_type": "user_id", "receive_id": user_id, "name": name})
+        elif open_id:
+            key = ("open_id", open_id)
+            if key not in seen:
+                seen.add(key)
+                recipients.append({"receive_id_type": "open_id", "receive_id": open_id, "name": name})
+    return recipients
+
+
+def screenshot_failed_size_labels(error_text):
+    text = str(error_text or "")
+    labels = []
+    for label in ("1.91:1 横图", "1:1 方图", "4:5 竖图"):
+        if ("%s:" % label) in text or ("%s：" % label) in text:
+            labels.append(label)
+    return labels
+
+
+def humanize_screenshot_failure_reason(job, error_text):
+    raw_reason = (
+        str(error_text or "").strip()
+        or str(job.get("error_message", "") or "").strip()
+    )
+    lower_reason = raw_reason.lower()
+    failed_labels = screenshot_failed_size_labels(raw_reason)
+    failed_suffix = "，失败尺寸：%s" % "、".join(failed_labels) if failed_labels else ""
+
+    if is_screenshot_generation_no_output_error(raw_reason):
+        return (
+            "图片生成工具在“出图前”返回 UserError，未生成原始图片文件%s。\n"
+            "为什么没有图片：失败发生在 AI 图片生成/编辑工具内部，工具没有写出 raw_generated_path，"
+            "所以系统没有任何可校验、可裁切或可上传的图片。\n"
+            "为什么重试仍失败：系统已先做批量生成；批量失败后又降级为按尺寸单独生成，"
+            "但这些失败尺寸使用同一张源封面和同一组源图锁定生成要求再次调用时，仍在出图前返回同类 UserError。"
+            "这类错误不是认证、排队、下载、上传或比例校验问题，继续按相同输入自动重试只会重复失败。\n"
+            "底层工具没有返回更细的拒绝码，无法再区分是源图内容、人物/标题锁定要求，还是其他模型侧限制；"
+            "建议更换源封面，或放宽源图锁定要求后重新制作。"
+            % failed_suffix
+        )
+    if "downloaded screenshot source image is invalid" in lower_reason or "source image is invalid" in lower_reason:
+        return "源封面图片下载后不是有效图片，系统无法读取原图；建议更换可正常打开的封面链接。"
+    if is_screenshot_source_consistency_rejection(raw_reason):
+        return (
+            "生成图和源封面差异过大，人物、标题或主体一致性校验未通过%s；"
+            "系统已停止继续使用这版结果。"
+            % failed_suffix
+        )
+    if "raw aspect ratio rejected" in lower_reason or "aspect ratio" in lower_reason:
+        return "生成图尺寸比例不符合投放要求%s，系统已拦截该结果。" % failed_suffix
+    if "token_invalidated" in lower_reason or "refresh_token" in lower_reason or "401" in lower_reason:
+        return "Codex 登录凭证失效或刷新令牌不可用，图片生成服务无法继续调用，需要重新认证后重试。"
+    if "timed out" in lower_reason or "timeout" in lower_reason:
+        return "图片生成进程超时%s，系统没有在限定时间内拿到结果。" % failed_suffix
+    if (
+        "remotedisconnected" in lower_reason
+        or "connection refused" in lower_reason
+        or "connection aborted" in lower_reason
+    ):
+        return "截图生成 sidecar 连接中断%s，通常发生在服务重启或 sidecar 短暂不可用时。" % failed_suffix
+    first_line = raw_reason.splitlines()[0][:240] if raw_reason else "未知错误"
+    return "截图生成失败%s。技术错误：%s" % (failed_suffix, first_line)
+
+
+def build_screenshot_failure_message(job, error_text):
+    reason = humanize_screenshot_failure_reason(job, error_text)
+    return (
+        "封面图合成任务失败，系统已停止继续重试。\n"
+        "剧名：%s\n"
+        "content_id：%s\n"
+        "job_id：%s\n"
+        "失败原因：%s\n"
+        "已生成尺寸：1.91:1=%s，1:1=%s，4:5=%s"
+        % (
+            str(job.get("drama_name", "") or ""),
+            str(job.get("content_id", "") or ""),
+            str(job.get("job_id", "") or ""),
+            reason,
+            "有" if str(job.get("landscape_1_91x1_url", "") or "").strip() else "无",
+            "有" if str(job.get("square_1x1_url", "") or "").strip() else "无",
+            "有" if str(job.get("portrait_4x5_url", "") or "").strip() else "无",
+        )
+    )
+
+
+def should_skip_screenshot_failure_notification(job, error_text):
+    raw_reason = (
+        str(error_text or "").strip()
+        or str((job or {}).get("error_message", "") or "").strip()
+    )
+    return is_screenshot_generation_no_output_error(raw_reason)
+
+
+def notify_screenshot_failure(job, error_text):
+    try:
+        if should_skip_screenshot_failure_notification(job, error_text):
+            logging.info(
+                "skip screenshot failure notification for raw_generated_path no-output error: %s",
+                job.get("job_id", ""),
+            )
+            try:
+                append_audit_log(
+                    None,
+                    "notify_screenshot_failure_skipped",
+                    "screenshot_job",
+                    job.get("job_id", ""),
+                    {"reason": "generation_no_output_raw_generated_path"},
+                )
+            except Exception:
+                logging.exception("failed to write screenshot failure notify skipped audit log")
+            return
+        recipients = screenshot_failure_notify_recipients()
+        if not recipients:
+            logging.warning("no screenshot failure Feishu recipients configured")
+            try:
+                append_audit_log(
+                    None,
+                    "notify_screenshot_failure_skipped",
+                    "screenshot_job",
+                    job.get("job_id", ""),
+                    {"reason": "missing_recipient", "names": screenshot_failure_notify_names()},
+                )
+            except Exception:
+                logging.exception("failed to write screenshot failure notify skipped audit log")
+            return
+        message = build_screenshot_failure_message(job, error_text)
+        sent = []
+        errors = []
+        for recipient in recipients:
+            try:
+                send_feishu_text(recipient["receive_id_type"], recipient["receive_id"], message)
+                sent.append(recipient)
+            except Exception as exc:
+                logging.exception("failed to notify screenshot failure recipient: %s", recipient)
+                errors.append({"recipient": recipient, "error": str(exc).strip() or exc.__class__.__name__})
+        try:
+            append_audit_log(
+                None,
+                "notify_screenshot_failure",
+                "screenshot_job",
+                job.get("job_id", ""),
+                {"sent": sent, "errors": errors},
+            )
+        except Exception:
+            logging.exception("failed to write screenshot failure notify audit log")
+    except Exception:
+        logging.exception("failed to notify screenshot failure: %s", job.get("job_id", ""))
 
 
 def lookup_ad_material_product_metadata(app_id):
@@ -57523,10 +57788,9 @@ def validate_screenshot_request(app_id, content_id):
 
 
 
-def screenshot_service_url_for_item(item):
+def default_screenshot_service_url_for_item(item):
     key = str(item.get("key", "") or "").strip()
-    default_url = CODEX_SCREENSHOT_SERVICE_URLS.get(key) or CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
-    return choose_screenshot_service_url(default_url)
+    return CODEX_SCREENSHOT_SERVICE_URLS.get(key) or CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
 
 
 def screenshot_service_pool_enabled():
@@ -57544,11 +57808,39 @@ def choose_screenshot_service_url(default_url):
     if not screenshot_service_pool_enabled():
         return default_url
     with SCREENSHOT_SERVICE_POOL_LOCK:
-        url = CODEX_SCREENSHOT_SERVICE_POOL[
-            SCREENSHOT_SERVICE_POOL_INDEX % len(CODEX_SCREENSHOT_SERVICE_POOL)
-        ]
-        SCREENSHOT_SERVICE_POOL_INDEX += 1
+        pool = list(CODEX_SCREENSHOT_SERVICE_POOL)
+        if not pool:
+            return default_url
+        min_load = min(SCREENSHOT_SERVICE_POOL_INFLIGHT.get(item, 0) for item in pool)
+        start = SCREENSHOT_SERVICE_POOL_INDEX % len(pool)
+        selected_index = start
+        for offset in range(len(pool)):
+            index = (start + offset) % len(pool)
+            candidate = pool[index]
+            if SCREENSHOT_SERVICE_POOL_INFLIGHT.get(candidate, 0) == min_load:
+                selected_index = index
+                break
+        url = pool[selected_index]
+        SCREENSHOT_SERVICE_POOL_INDEX = selected_index + 1
     return url
+
+
+def acquire_screenshot_service_url(default_url):
+    url = choose_screenshot_service_url(default_url)
+    with SCREENSHOT_SERVICE_POOL_LOCK:
+        SCREENSHOT_SERVICE_POOL_INFLIGHT[url] = SCREENSHOT_SERVICE_POOL_INFLIGHT.get(url, 0) + 1
+    return url
+
+
+def release_screenshot_service_url(url):
+    if not url:
+        return
+    with SCREENSHOT_SERVICE_POOL_LOCK:
+        count = SCREENSHOT_SERVICE_POOL_INFLIGHT.get(url, 0)
+        if count <= 1:
+            SCREENSHOT_SERVICE_POOL_INFLIGHT.pop(url, None)
+        else:
+            SCREENSHOT_SERVICE_POOL_INFLIGHT[url] = count - 1
 
 
 def generate_screenshot_via_codex_service(job, source_path, items):
@@ -57561,12 +57853,16 @@ def generate_screenshot_via_codex_service(job, source_path, items):
         "source_url": job.get("cover_source_url", ""),
         "items": items,
     }
-    service_url = screenshot_service_url_for_item(items[0]) if items else CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
-    response = requests.post(
-        service_url,
-        json=payload,
-        timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
-    )
+    default_service_url = default_screenshot_service_url_for_item(items[0]) if items else CODEX_SCREENSHOT_SERVICE_URLS["square_1x1"]
+    service_url = acquire_screenshot_service_url(default_service_url)
+    try:
+        response = requests.post(
+            service_url,
+            json=payload,
+            timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
+        )
+    finally:
+        release_screenshot_service_url(service_url)
     try:
         data = response.json()
     except Exception:
@@ -57607,11 +57903,15 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
         "source_url": job.get("cover_source_url", ""),
         "items": items,
     }
-    response = requests.post(
-        choose_screenshot_service_url(CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL),
-        json=payload,
-        timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
-    )
+    service_url = acquire_screenshot_service_url(CODEX_SCREENSHOT_SERVICE_URLS.get("square_1x1") or CODEX_SCREENSHOT_SERVICE_URL)
+    try:
+        response = requests.post(
+            service_url,
+            json=payload,
+            timeout=CODEX_SCREENSHOT_SERVICE_TIMEOUT,
+        )
+    finally:
+        release_screenshot_service_url(service_url)
     try:
         data = response.json()
     except Exception:
@@ -68679,6 +68979,10 @@ def should_auto_retry_job(exc):
 
 
 
+
+    if is_screenshot_generation_no_output_error(exc):
+
+        return False
 
     if is_screenshot_batch_recoverable_error(exc):
 

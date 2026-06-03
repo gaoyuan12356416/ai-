@@ -30,7 +30,7 @@ Environment=SCREENSHOT_JOB_MAX_CONCURRENCY=1
 Environment=SCREENSHOT_JOB_BURST_QUEUE_THRESHOLD=2
 Environment=CODEX_SCREENSHOT_BATCH_ENABLED=1
 Environment=CODEX_SCREENSHOT_BATCH_STRICT=1
-Environment=CODEX_SCREENSHOT_SERVICE_TIMEOUT=2400
+Environment=CODEX_SCREENSHOT_SERVICE_TIMEOUT=7200
 ExecStart=/usr/bin/python3 /root/drama_material_service/app.py
 Restart=always
 RestartSec=3

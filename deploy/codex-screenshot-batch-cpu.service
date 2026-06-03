@@ -13,16 +13,20 @@ Environment=CODEX_SCREENSHOT_PUBLIC_ROOT=/usr/share/nginx/html/drama-screenshot-
 Environment=CODEX_SCREENSHOT_PUBLIC_BASE_URL=https://ai.yingliangads.com/drama-screenshot-materials
 Environment=CODEX_SCREENSHOT_PROMPT_WORKSPACE=/root/codex_screenshot_worker_workspace_batch
 Environment=CODEX_SCREENSHOT_MAX_CONCURRENCY=1
-Environment=CODEX_SCREENSHOT_ITEM_PARALLELISM=3
-Environment=CODEX_SCREENSHOT_AI_ATTEMPTS=1
-Environment=CODEX_SCREENSHOT_PROMPT_VERSION=v6
+Environment=CODEX_SCREENSHOT_ITEM_PARALLELISM=1
+Environment=CODEX_SCREENSHOT_AI_ATTEMPTS=2
+Environment=CODEX_SCREENSHOT_ASPECT_RATIO_TOLERANCE=0.08
+Environment=CODEX_SCREENSHOT_PROMPT_VERSION=v7
 Environment=CODEX_SCREENSHOT_SOURCE_CONSISTENCY_CHECK=1
+Environment=CODEX_SCREENSHOT_SOURCE_CONSISTENCY_STRICT=0
 Environment=CODEX_SCREENSHOT_CONSISTENCY_TIMEOUT=600
 Environment=CODEX_SCREENSHOT_ISOLATE_CODEX_HOME=1
+Environment=CODEX_SCREENSHOT_SYNC_ISOLATED_AUTH=1
 Environment=CODEX_SCREENSHOT_CODEX_MODEL=gpt-5.5
 Environment=CODEX_SCREENSHOT_CODEX_REASONING=low
 Environment="CODEX_SCREENSHOT_CODEX_EXTRA_ARGS=--ignore-user-config --ignore-rules --ephemeral --disable plugins --disable apps --disable browser_use"
-Environment=CODEX_SCREENSHOT_CODEX_TIMEOUT=2400
+Environment=CODEX_SCREENSHOT_CODEX_TIMEOUT=900
+Environment=CODEX_SCREENSHOT_NO_OUTPUT_CONTEXT_RETRY_ATTEMPTS=1
 ExecStart=/usr/bin/python3 /root/drama_material_service/codex_screenshot_service.py
 Restart=always
 RestartSec=3

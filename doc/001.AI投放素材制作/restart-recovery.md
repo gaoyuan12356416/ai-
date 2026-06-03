@@ -15,6 +15,11 @@ The API startup path recovers in-flight work so production tasks do not stay stu
 - If a retry or resume moves a job out of `done`, `finished_at` is cleared and will be set again only when the regenerated job completes.
 - The UI elapsed time uses `active_finished_at` derived from `finished_at`, so post-completion repairs do not inflate "total elapsed" time.
 
+## Screenshot Job Completion Order
+
+- Screenshot jobs should not enter `done` immediately after image generation. The final AI source callback must complete first, then the API updates `finished_at`, `updated_at`, and the final `done` progress.
+- If the callback fails, keep the job non-terminal until the failure handler marks it failed. Retrying the job can then reuse already generated public assets and retry the callback instead of silently showing completion before material-source ingestion.
+
 ## Ad Material Recovery Rules
 
 - `generating_demand` tasks are re-enqueued for demand generation.
