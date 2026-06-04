@@ -733,6 +733,92 @@ def creative_revision_note(value):
     return text
 
 
+REVISION_DIRECTIVE_LABELS = {
+    "layout": ("构图方向", "构图要求", "版式方向", "布局要求"),
+    "focus": ("表达重点", "表达要求", "核心表达", "重点"),
+    "visual": ("画面要求", "视觉要求", "画面方向", "视觉方向"),
+    "copy": ("文案要求", "文字要求", "文案方向"),
+    "prompt": ("生成提示", "生成要求", "提示词要求"),
+    "acceptance": ("验收标准", "验收要求", "审核标准"),
+}
+
+
+def parse_revision_directives(value):
+    text = creative_revision_note(value)
+    directives = {key: "" for key in REVISION_DIRECTIVE_LABELS}
+    directives["copy_reference_text"] = False
+    if not text:
+        return directives
+
+    current_key = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip("-").strip()
+        if not line:
+            continue
+        matched_key = ""
+        matched_value = ""
+        for key, labels in REVISION_DIRECTIVE_LABELS.items():
+            for label in labels:
+                if line.startswith(label):
+                    matched_key = key
+                    matched_value = line[len(label):].lstrip("：:").strip()
+                    break
+            if matched_key:
+                break
+        if matched_key:
+            current_key = matched_key
+            if matched_value:
+                directives[matched_key] = _merge_directive_text(directives.get(matched_key), matched_value)
+            continue
+        if current_key:
+            directives[current_key] = _merge_directive_text(directives.get(current_key), line)
+
+    compact = re.sub(r"\s+", "", text)
+    positive_copy_terms = (
+        "文案不变",
+        "主文案不变",
+        "文字不变",
+        "直接复制参考图",
+        "复制参考图的西语文案",
+        "复制参考图西语文案",
+    )
+    negative_copy_terms = (
+        "不得直接复制",
+        "不要直接复制",
+        "不能直接复制",
+        "禁止直接复制",
+        "不直接复制",
+    )
+    directives["copy_reference_text"] = (
+        any(term in compact for term in positive_copy_terms)
+        and not any(term in compact for term in negative_copy_terms)
+    )
+    return directives
+
+
+def _merge_directive_text(current, value):
+    current = str(current or "").strip()
+    value = str(value or "").strip()
+    if not value:
+        return current
+    if not current:
+        return value
+    return current + "；" + value
+
+
+def revision_copy_rule(language, directives):
+    language_text = language or "目标市场"
+    copy_directive = str((directives or {}).get("copy") or "").strip()
+    if (directives or {}).get("copy_reference_text"):
+        if copy_directive:
+            base = copy_directive if re.search(r"使用\s*\S+\s*语言", copy_directive) else "使用 %s 语言；%s" % (language_text, copy_directive)
+            return base + "；涉及竞品品牌、Logo、产品名或当前产品不支持的金额/审批/还款承诺时，必须替换为当前产品事实或删除。"
+        return "使用 %s 语言；保留参考图主文案的语义、层级和版式位置；涉及竞品品牌、Logo、产品名或当前产品不支持的金额/审批/还款承诺时，必须替换为当前产品事实或删除。" % language_text
+    if copy_directive:
+        return copy_directive if re.search(r"使用\s*\S+\s*语言", copy_directive) else "使用 %s 语言；%s" % (language_text, copy_directive)
+    return "使用 %s 语言；不得直接复制参考图的西语文案、MXN 币种、审批分钟数、具体还款金额或月供。" % language_text
+
+
 def analyze_reference_images(refs):
     if not refs:
         return []
@@ -801,6 +887,8 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
     tag_name = str(task.get("tag_name") or "").strip()
     category = str(task.get("category") or "").strip()
     store_profile = normalize_store_profile(store_profile, task) if store_profile else empty_store_profile(task)
+    revision_directives = parse_revision_directives(revision_instruction)
+    revision_note = creative_revision_note(revision_instruction)
 
     mode_text = "参考衍生" if kind == "reference" else "素材迭代"
     lines = [
@@ -898,6 +986,18 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
         angle = style_angle or "严格以主参考素材的真实版式骨架为第一约束：先保留布局关系、主体位置和信息层级，再替换为当前产品内容。"
         focus = style_focus or "让用户一眼看出与上传参考素材同源的风格衍生，而不是通用贷款模板。"
         visual_rule = style_visual or "保留参考图实际存在的构图、色彩、主体位置、文字层级和免责声明安全区。"
+        if revision_directives.get("layout"):
+            angle = revision_directives["layout"]
+        if revision_directives.get("focus"):
+            focus = revision_directives["focus"]
+        if revision_directives.get("visual"):
+            visual_rule = revision_directives["visual"]
+        visual_text = visual_rule
+        if not revision_directives.get("visual"):
+            visual_text = "%s；必须替换为当前产品、当前国家和当前语言；不得额外套用参考图没有的手机、金币、功能卡、滑杆或箭头模板元素。" % visual_rule
+        copy_rule = revision_copy_rule(language, revision_directives)
+        generation_prompt = revision_directives.get("prompt") or "把上传参考图和上方视觉拆解作为主约束，先复刻其版式骨架、信息层级和情绪/主体关系，再替换品牌、语言、产品事实和图标；图片中不出现竞品名、竞品 Logo 或竞品 UI。"
+        acceptance = revision_directives.get("acceptance") or "尺寸正确；能看出来自上传参考素材的风格衍生；没有乱码文字、没有未验证金融承诺。"
         lines.extend([
             "### 素材 %02d" % index,
             "",
@@ -906,10 +1006,10 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
             "- 需求目标：%s" % (description or "参考上传素材做同风格迭代，生成当前产品可用的新静态图。"),
             "- 构图方向：%s" % angle,
             "- 表达重点：%s" % focus,
-            "- 画面要求：%s；必须替换为当前产品、当前国家和当前语言；不得额外套用参考图没有的手机、金币、功能卡、滑杆或箭头模板元素。" % visual_rule,
-            "- 文案要求：使用 %s 语言；不得直接复制参考图的西语文案、MXN 币种、审批分钟数、具体还款金额或月供。" % (language or "目标市场"),
-            "- 生成提示：把上传参考图和上方视觉拆解作为主约束，先复刻其版式骨架、信息层级和情绪/主体关系，再替换品牌、语言、产品事实和图标；图片中不出现竞品名、竞品 Logo 或竞品 UI。",
-            "- 验收标准：尺寸正确；能看出来自上传参考素材的风格衍生；没有乱码文字、没有未验证金融承诺。",
+            "- 画面要求：%s" % visual_text,
+            "- 文案要求：%s" % copy_rule,
+            "- 生成提示：%s" % generation_prompt,
+            "- 验收标准：%s" % acceptance,
             "",
         ])
 
@@ -920,7 +1020,6 @@ def build_local_reference_demand(task, size_plan, revision_instruction="", refer
         "- 禁止承诺秒批、必过、免审、立即到账、固定月供、固定总还款额，除非用户或产品资料明确提供。",
         "- 禁止把参考图简单换色、换字后直接交付；必须做当前产品的新构图或新组合。",
     ])
-    revision_note = creative_revision_note(revision_instruction)
     if revision_note:
         lines.extend(["", "## 制作调整方向", "", revision_note])
     return clean_material_demand_text("\n".join(lines))

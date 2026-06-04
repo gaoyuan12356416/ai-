@@ -145,12 +145,18 @@ def try_handle_ad_material_post(handler, parsed):
             else:
                 json_response(handler, 404, {"error": "not_found"})
                 return True
+            audit_detail = {"status": payload.get("status", "")}
+            if ad_action == "demand-review":
+                audit_detail["result"] = str(body.get("result") or "").strip()
+                reason = str(body.get("reason") or "").strip()
+                if reason:
+                    audit_detail["reason_excerpt"] = reason[:500]
             append_audit_log(
                 handler._session(),
                 audit_action,
                 "ad_material_task",
                 ad_task_id,
-                {"status": payload.get("status", "")},
+                audit_detail,
             )
             json_response(handler, 202 if audit_action.startswith(("publish", "review")) else 200, payload)
         except Exception as exc:
