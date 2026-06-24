@@ -3171,6 +3171,10 @@ DEFAULT_ADMIN_NAMES = "郜远"
 
 FEISHU_ALLOWED_TENANT_KEYS = [item.strip() for item in os.environ.get("FEISHU_ALLOWED_TENANT_KEYS", DEFAULT_ALLOWED_TENANT_KEYS).split(",") if item.strip()]
 
+TT_MINIS_REPORT_ALLOWED_TENANT_KEY = os.environ.get(
+    "TT_MINIS_REPORT_ALLOWED_TENANT_KEY", DEFAULT_ALLOWED_TENANT_KEYS
+).strip()
+
 
 
 
@@ -84877,6 +84881,50 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         json_response(self, 403, {"error": "permission_denied", "modules": list(module_keys)})
         return False
 
+    def _send_empty_response(self, status_code):
+        self.send_response(status_code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_tt_minis_report_auth(self):
+        original_uri = (self.headers.get("X-Original-URI", "") or "")[:512]
+        client_ip = (
+            self.headers.get("X-Real-IP", "")
+            or self.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+            or (self.client_address[0] if self.client_address else "")
+        )
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not feishu_auth_enabled() or not session:
+            logging.info(
+                "tt_minis_report_auth denied status=401 ip=%s uri=%s",
+                client_ip,
+                original_uri,
+            )
+            self._send_empty_response(401)
+            return
+        tenant_key = str(session.get("tenant_key", "") or "").strip()
+        if tenant_key != TT_MINIS_REPORT_ALLOWED_TENANT_KEY:
+            logging.info(
+                "tt_minis_report_auth denied status=403 ip=%s uri=%s user_id=%s name=%s tenant_key=%s",
+                client_ip,
+                original_uri,
+                session.get("user_id", ""),
+                session.get("name", ""),
+                tenant_key,
+            )
+            self._send_empty_response(403)
+            return
+        logging.info(
+            "tt_minis_report_auth allowed ip=%s uri=%s user_id=%s name=%s tenant_key=%s",
+            client_ip,
+            original_uri,
+            session.get("user_id", ""),
+            session.get("name", ""),
+            tenant_key,
+        )
+        self._send_empty_response(204)
+        return
+
 
 
 
@@ -85212,6 +85260,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/report-auth/tt-minis-native-growth":
+            self._handle_tt_minis_report_auth()
+            return
 
 
 
