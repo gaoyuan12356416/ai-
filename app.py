@@ -3287,6 +3287,8 @@ MODULE_PERMISSIONS = {
 
     "ad_material_tasks": "投放素材任务",
 
+    "ad_control_center": "产品广告调控中心",
+
 
 
 
@@ -3337,6 +3339,7 @@ DEFAULT_USER_PERMISSIONS = {
     "drama_synthesis": False,
     "cover_synthesis": False,
     "ad_material_tasks": False,
+    "ad_control_center": False,
     "settings": False,
 }
 
@@ -32640,6 +32643,916 @@ def mysql_table_columns(table_name, database=None):
 
 def sql_identifier(name):
     return "`%s`" % str(name or "").replace("`", "``")
+
+
+AD_CONTROL_DB_NAME = os.environ.get("AD_CONTROL_DB_NAME", DB_NAME).strip() or "kunlunads_dev"
+AD_CONTROL_GRAPH_VERSION = os.environ.get("AD_CONTROL_GRAPH_VERSION", "v19.0").strip() or "v19.0"
+AD_CONTROL_GRAPH_TIMEOUT = int(os.environ.get("AD_CONTROL_GRAPH_TIMEOUT", "30"))
+AD_CONTROL_PREVIEW_TTL_SECONDS = int(os.environ.get("AD_CONTROL_PREVIEW_TTL_SECONDS", "1800"))
+AD_CONTROL_MAX_PAGE_SIZE = int(os.environ.get("AD_CONTROL_MAX_PAGE_SIZE", "200"))
+AD_CONTROL_MAX_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_EXECUTE", "50"))
+AD_CONTROL_MAX_METRIC_IDS = int(os.environ.get("AD_CONTROL_MAX_METRIC_IDS", "200"))
+
+AD_CONTROL_LEVELS = {
+    "campaign": {
+        "id_column": "campaign_id",
+        "name_column": "campaign_name",
+        "action_at_column": "campaign_action_at",
+        "label": "Campaign",
+    },
+    "adset": {
+        "id_column": "adset_id",
+        "name_column": "adset_name",
+        "action_at_column": "adset_action_at",
+        "label": "Ad set",
+    },
+    "ad": {
+        "id_column": "ad_id",
+        "name_column": "ad_name",
+        "action_at_column": "ad_action_at",
+        "label": "Ad",
+    },
+}
+
+AD_CONTROL_PREVIEW_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_preview (
+  preview_id TEXT PRIMARY KEY,
+  actor_user_id TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  product TEXT NOT NULL DEFAULT '',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  sample_json TEXT NOT NULL DEFAULT '[]',
+  total_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
+AD_CONTROL_ACTION_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_action (
+  action_id TEXT PRIMARY KEY,
+  preview_id TEXT NOT NULL DEFAULT '',
+  rule_id TEXT NOT NULL DEFAULT '',
+  actor_user_id TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  product TEXT NOT NULL DEFAULT '',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  requested_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  results_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+AD_CONTROL_OBJECT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_object_state (
+  object_key TEXT PRIMARY KEY,
+  product TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  account_id TEXT NOT NULL DEFAULT '',
+  object_id TEXT NOT NULL DEFAULT '',
+  campaign_id TEXT NOT NULL DEFAULT '',
+  last_pause_action_id TEXT NOT NULL DEFAULT '',
+  last_reopen_action_id TEXT NOT NULL DEFAULT '',
+  object_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT '',
+  paused_at TEXT NOT NULL DEFAULT '',
+  reopened_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+AD_CONTROL_RULE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_rule (
+  rule_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  product TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL DEFAULT 'pause',
+  level TEXT NOT NULL DEFAULT 'campaign',
+  criteria_json TEXT NOT NULL DEFAULT '{}',
+  schedule_json TEXT NOT NULL DEFAULT '{}',
+  thresholds_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_run_at TEXT NOT NULL DEFAULT '',
+  last_result_json TEXT NOT NULL DEFAULT '{}'
+)
+"""
+
+
+def ensure_ad_control_tables():
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(AD_CONTROL_PREVIEW_TABLE_SQL)
+            conn.execute(AD_CONTROL_ACTION_TABLE_SQL)
+            conn.execute(AD_CONTROL_OBJECT_TABLE_SQL)
+            conn.execute(AD_CONTROL_RULE_TABLE_SQL)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_preview_expires ON ad_control_preview(expires_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_action_created ON ad_control_action(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_object_product ON ad_control_object_state(product, level, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_enabled ON ad_control_rule(enabled, updated_at)")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def ad_control_db_prefix():
+    return sql_identifier(AD_CONTROL_DB_NAME)
+
+
+def ad_control_table(table_name):
+    return "%s.%s" % (ad_control_db_prefix(), sql_identifier(table_name))
+
+
+def ad_control_quote(value):
+    return "'%s'" % mysql_escape_literal(value)
+
+
+def ad_control_sql_in(values):
+    clean = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not clean:
+        return "('')"
+    return "(" + ",".join(ad_control_quote(value) for value in clean) + ")"
+
+
+def ad_control_norm_account_sql(expr):
+    return "REPLACE(REPLACE(TRIM(%s),'act_',''),'ACT_','')" % expr
+
+
+def ad_control_normalize_account(value):
+    return str(value or "").strip().replace("act_", "").replace("ACT_", "")
+
+
+def ad_control_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw = value
+    else:
+        raw = re.split(r"[,，\s]+", str(value or ""))
+    out = []
+    seen = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            out.append(text)
+            seen.add(text)
+    return out
+
+
+def ad_control_level(value):
+    level = str(value or "campaign").strip().lower()
+    if level not in AD_CONTROL_LEVELS:
+        raise StructuredApiError("invalid_level", "对象层级无效")
+    return level
+
+
+def ad_control_action(value):
+    action = str(value or "preview").strip().lower()
+    if action in ("close", "pause", "paused"):
+        return "pause"
+    if action in ("open", "reopen", "active", "restart"):
+        return "reopen"
+    if action == "preview":
+        return "preview"
+    raise StructuredApiError("invalid_action", "调控动作无效")
+
+
+def ad_control_int(value, default=0, minimum=None, maximum=None):
+    try:
+        number = int(value)
+    except Exception:
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def ad_control_criteria(payload, require_action=False):
+    payload = payload or {}
+    product = str(payload.get("product", "") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "请选择产品")
+    action = ad_control_action(payload.get("action", "preview"))
+    if require_action and action == "preview":
+        raise StructuredApiError("missing_action", "请选择关停或重启动作")
+    level = ad_control_level(payload.get("level", "campaign"))
+    page_size = ad_control_int(payload.get("page_size", 50), 50, 1, AD_CONTROL_MAX_PAGE_SIZE)
+    page = ad_control_int(payload.get("page", 1), 1, 1, 100000)
+    criteria = {
+        "product": product,
+        "action": action,
+        "level": level,
+        "accounts": ad_control_list(payload.get("accounts") or payload.get("account_ids")),
+        "timezones": ad_control_list(payload.get("timezones")),
+        "countries": [item.upper() for item in ad_control_list(payload.get("countries"))],
+        "languages": [item.lower() for item in ad_control_list(payload.get("languages"))],
+        "statuses": [item.upper() for item in ad_control_list(payload.get("statuses"))],
+        "query": str(payload.get("query", "") or "").strip(),
+        "created_from": str(payload.get("created_from", "") or "").strip(),
+        "created_to": str(payload.get("created_to", "") or "").strip(),
+        "metric_days": ad_control_int(payload.get("metric_days", 3), 3, 1, 30),
+        "page": page,
+        "page_size": page_size,
+    }
+    return criteria
+
+
+def ad_control_candidate_where(criteria):
+    level_cfg = AD_CONTROL_LEVELS[criteria["level"]]
+    id_column = level_cfg["id_column"]
+    where = [
+        "d.product=%s" % ad_control_quote(criteria["product"]),
+        "d.%s IS NOT NULL" % sql_identifier(id_column),
+        "d.%s<>''" % sql_identifier(id_column),
+    ]
+    accounts = [ad_control_normalize_account(item) for item in criteria.get("accounts") or []]
+    if accounts:
+        where.append("%s IN %s" % (ad_control_norm_account_sql("d.ad_account_id"), ad_control_sql_in(accounts)))
+    if criteria.get("timezones"):
+        where.append("CAST(s.time_zone AS CHAR) IN %s" % ad_control_sql_in(criteria["timezones"]))
+    if criteria.get("countries"):
+        where.append("UPPER(COALESCE(d.country,'')) IN %s" % ad_control_sql_in(criteria["countries"]))
+    if criteria.get("languages"):
+        where.append("LOWER(COALESCE(d.language,'')) IN %s" % ad_control_sql_in(criteria["languages"]))
+    if criteria.get("statuses"):
+        where.append("UPPER(COALESCE(d.status,'')) IN %s" % ad_control_sql_in(criteria["statuses"]))
+    if criteria.get("created_from"):
+        where.append("d.created_at >= %s" % ad_control_quote(criteria["created_from"] + " 00:00:00"))
+    if criteria.get("created_to"):
+        where.append("d.created_at <= %s" % ad_control_quote(criteria["created_to"] + " 23:59:59"))
+    if criteria.get("query"):
+        like = "%%%s%%" % mysql_escape_literal(criteria["query"])
+        text_columns = [
+            "d.ad_account_id",
+            "d.campaign_id",
+            "d.campaign_name",
+            "d.adset_id",
+            "d.adset_name",
+            "d.ad_id",
+            "d.ad_name",
+        ]
+        where.append("(" + " OR ".join("%s LIKE '%s'" % (column, like) for column in text_columns) + ")")
+    return " AND ".join(where)
+
+
+def ad_control_candidate_join():
+    return (
+        "FROM {data} d "
+        "LEFT JOIN {accounts} s ON s.platform_id=1 AND {account_norm}= {setting_norm}"
+    ).format(
+        data=ad_control_table("ads_facebook_auto_created_data"),
+        accounts=ad_control_table("ads_accounts_setting"),
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+    )
+
+
+def ad_control_group_columns(level):
+    if level == "campaign":
+        return ["d.ad_account_id", "d.campaign_id"]
+    if level == "adset":
+        return ["d.ad_account_id", "d.campaign_id", "d.adset_id"]
+    return ["d.ad_account_id", "d.campaign_id", "d.adset_id", "d.ad_id"]
+
+
+def ad_control_fetch_candidates(criteria, page=None, page_size=None):
+    level = criteria["level"]
+    level_cfg = AD_CONTROL_LEVELS[level]
+    id_column = level_cfg["id_column"]
+    name_column = level_cfg["name_column"]
+    page = ad_control_int(page or criteria.get("page", 1), 1, 1, 100000)
+    page_size = ad_control_int(page_size or criteria.get("page_size", 50), 50, 1, AD_CONTROL_MAX_PAGE_SIZE)
+    where_sql = ad_control_candidate_where(criteria)
+    join_sql = ad_control_candidate_join()
+    group_sql = ", ".join(ad_control_group_columns(level))
+    count_sql = (
+        "SELECT COUNT(DISTINCT CONCAT_WS(':', d.ad_account_id, d.%s)) %s WHERE %s"
+        % (sql_identifier(id_column), join_sql, where_sql)
+    )
+    total_rows = run_mysql(count_sql)
+    total = int(total_rows[0][0] or 0) if total_rows else 0
+    offset = (page - 1) * page_size
+    select_sql = """
+        SELECT
+          MIN(d.id),
+          d.product,
+          d.ad_account_id,
+          COALESCE(MAX(NULLIF(s.name,'')), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.account_status AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.is_inactive AS CHAR)), ''),
+          d.campaign_id,
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          d.adset_id,
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.adset_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          d.ad_id,
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.ad_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          d.{id_column},
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.{name_column},'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.status,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(CAST(d.local_status AS CHAR) ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(CAST(d.budget AS CHAR) ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), '0'),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(CAST(d.latest_budget AS CHAR) ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), '0'),
+          GROUP_CONCAT(DISTINCT CAST(d.user_id AS CHAR) ORDER BY d.user_id SEPARATOR ','),
+          MIN(d.created_at),
+          MAX(d.updated_at),
+          COUNT(*)
+        {join_sql}
+        WHERE {where_sql}
+        GROUP BY {group_sql}
+        ORDER BY MAX(d.updated_at) DESC
+        LIMIT {limit_value} OFFSET {offset_value}
+    """.format(
+        id_column=sql_identifier(id_column),
+        name_column=sql_identifier(name_column),
+        join_sql=join_sql,
+        where_sql=where_sql,
+        group_sql=group_sql,
+        limit_value=page_size,
+        offset_value=offset,
+    )
+    rows = run_mysql(" ".join(select_sql.split()))
+    items = []
+    keys = [
+        "row_id", "product", "account_id", "account_name", "time_zone", "account_status", "is_inactive",
+        "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name", "object_id",
+        "object_name", "status", "local_status", "country", "language", "budget", "latest_budget",
+        "user_ids", "created_at", "updated_at", "row_count",
+    ]
+    for raw in rows:
+        item = {key: (raw[index] if index < len(raw) else "") for index, key in enumerate(keys)}
+        item["level"] = level
+        item["object_key"] = ad_control_object_key(item)
+        item["status"] = str(item.get("status") or "").upper()
+        item["account_normalized"] = ad_control_normalize_account(item.get("account_id"))
+        try:
+            item["row_count"] = int(item.get("row_count") or 0)
+        except Exception:
+            item["row_count"] = 0
+        items.append(item)
+    ad_control_attach_metrics(criteria, items)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+def ad_control_attach_metrics(criteria, items):
+    campaign_ids = []
+    for item in items:
+        campaign_id = str(item.get("campaign_id") or "").strip()
+        if campaign_id and campaign_id not in campaign_ids:
+            campaign_ids.append(campaign_id)
+    campaign_ids = campaign_ids[:AD_CONTROL_MAX_METRIC_IDS]
+    if not campaign_ids:
+        return
+    days = ad_control_int(criteria.get("metric_days", 3), 3, 1, 30)
+    sql = """
+        SELECT account_id, campaign_id, ROUND(SUM(spend_usd),2), COALESCE(SUM(install),0), COUNT(DISTINCT dt)
+          FROM {table}
+         WHERE product={product}
+           AND campaign_id IN {campaign_ids}
+           AND dt >= CURDATE() - INTERVAL {days} DAY
+         GROUP BY account_id, campaign_id
+    """.format(
+        table=ad_control_table("ads_platform_report_items"),
+        product=ad_control_quote(criteria["product"]),
+        campaign_ids=ad_control_sql_in(campaign_ids),
+        days=days,
+    )
+    try:
+        rows = run_mysql(" ".join(sql.split()))
+    except Exception:
+        logging.exception("failed to load ad control metrics")
+        return
+    metrics = {}
+    by_campaign = {}
+    for row in rows:
+        account_id = ad_control_normalize_account(row[0] if len(row) > 0 else "")
+        campaign_id = str(row[1] if len(row) > 1 else "")
+        payload = {
+            "spend_usd": float(row[2] or 0),
+            "install": int(float(row[3] or 0)),
+            "metric_days": int(float(row[4] or 0)),
+        }
+        metrics[(account_id, campaign_id)] = payload
+        by_campaign[campaign_id] = payload
+    for item in items:
+        account_id = ad_control_normalize_account(item.get("account_id"))
+        campaign_id = str(item.get("campaign_id") or "")
+        item["metrics"] = metrics.get((account_id, campaign_id)) or by_campaign.get(campaign_id) or {
+            "spend_usd": 0,
+            "install": 0,
+            "metric_days": 0,
+        }
+
+
+def ad_control_object_key(item):
+    return "%s:%s:%s:%s" % (
+        str(item.get("product") or ""),
+        str(item.get("level") or "campaign"),
+        ad_control_normalize_account(item.get("account_id")),
+        str(item.get("object_id") or ""),
+    )
+
+
+def list_ad_control_products(query="", limit=200):
+    limit = ad_control_int(limit, 200, 1, 500)
+    where = "(name<>'' OR product<>'')"
+    if query:
+        like = "%%%s%%" % mysql_escape_literal(query)
+        where += " AND (name LIKE '%s' OR product LIKE '%s' OR app_id LIKE '%s')" % (like, like, like)
+    sql = """
+        SELECT name, product, app_id, updated_at
+          FROM {table}
+         WHERE {where}
+         ORDER BY updated_at DESC
+         LIMIT {limit}
+    """.format(table=ad_control_table("setting_product"), where=where, limit=limit)
+    rows = run_mysql(" ".join(sql.split()))
+    items = []
+    seen = set()
+    for row in rows:
+        name = str(row[0] or "").strip()
+        product_value = str(row[1] or "").strip()
+        app_id = str(row[2] or "").strip()
+        updated_at = row[3] if len(row) > 3 else ""
+        for value in (name, product_value):
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            items.append({
+                "product": value,
+                "name": name,
+                "product_value": product_value,
+                "app_id": app_id,
+                "account_count": "",
+                "campaign_count": "",
+                "updated_at": updated_at,
+            })
+            if len(items) >= limit:
+                break
+        if len(items) >= limit:
+            break
+    return {"items": items}
+
+
+def list_ad_control_accounts(product):
+    product = str(product or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "请选择产品")
+    sql = """
+        SELECT
+          d.ad_account_id,
+          COALESCE(MAX(NULLIF(s.name,'')), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.account_status AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.is_inactive AS CHAR)), ''),
+          COUNT(DISTINCT d.campaign_id),
+          COUNT(DISTINCT d.adset_id),
+          COUNT(DISTINCT d.ad_id),
+          MAX(d.updated_at)
+        FROM {data} d
+        LEFT JOIN {accounts} s ON s.platform_id=1 AND {account_norm}= {setting_norm}
+        WHERE d.product={product}
+          AND d.ad_account_id IS NOT NULL
+          AND d.ad_account_id<>''
+        GROUP BY d.ad_account_id
+        ORDER BY MAX(d.updated_at) DESC
+        LIMIT 1000
+    """.format(
+        data=ad_control_table("ads_facebook_auto_created_data"),
+        accounts=ad_control_table("ads_accounts_setting"),
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        product=ad_control_quote(product),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    items = []
+    for row in rows:
+        items.append({
+            "account_id": row[0],
+            "account_name": row[1],
+            "time_zone": row[2],
+            "account_status": row[3],
+            "is_inactive": row[4],
+            "campaign_count": int(row[5] or 0),
+            "adset_count": int(row[6] or 0),
+            "ad_count": int(row[7] or 0),
+            "updated_at": row[8],
+        })
+    return {"items": items}
+
+
+def create_ad_control_preview(payload, session):
+    ensure_ad_control_tables()
+    criteria = ad_control_criteria(payload, require_action=False)
+    data = ad_control_fetch_candidates(criteria)
+    preview_id = uuid.uuid4().hex
+    expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    actor_user_id = str((session or {}).get("user_id") or "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_preview (
+                  preview_id, actor_user_id, action, level, product, criteria_json,
+                  sample_json, total_count, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    preview_id,
+                    actor_user_id,
+                    criteria["action"],
+                    criteria["level"],
+                    criteria["product"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    json.dumps(data["items"][: min(50, len(data["items"]))], ensure_ascii=False),
+                    data["total"],
+                    expires_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    data.update({
+        "preview_id": preview_id,
+        "expires_at": expires_at,
+        "action": criteria["action"],
+        "level": criteria["level"],
+        "product": criteria["product"],
+    })
+    return data
+
+
+def fetch_ad_control_preview(preview_id):
+    preview_id = str(preview_id or "").strip()
+    if not preview_id:
+        raise StructuredApiError("missing_preview", "请先试算")
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM ad_control_preview WHERE preview_id = ?", (preview_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise StructuredApiError("preview_not_found", "试算批次不存在或已失效")
+    expires_at = str(row["expires_at"] or "")
+    if expires_at:
+        try:
+            if datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S") < datetime.utcnow():
+                raise StructuredApiError("preview_expired", "试算批次已过期，请重新试算")
+        except StructuredApiError:
+            raise
+        except Exception:
+            pass
+    return dict(row)
+
+
+def ad_control_token_for_user_ids(user_ids):
+    ids = [item for item in ad_control_list(user_ids) if item and item != "0"]
+    if not ids:
+        return ""
+    sql = """
+        SELECT accessToken
+          FROM {table}
+         WHERE user_id IN {user_ids}
+           AND accessToken IS NOT NULL
+           AND accessToken<>''
+         ORDER BY FIELD(CAST(user_id AS CHAR), {field_ids})
+         LIMIT 1
+    """.format(
+        table=ad_control_table("ads_facebook_info"),
+        user_ids=ad_control_sql_in(ids),
+        field_ids=",".join(ad_control_quote(item) for item in ids),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    return str(rows[0][0] or "").strip() if rows else ""
+
+
+def ad_control_graph_get(token, object_id, fields):
+    response = requests.get(
+        "https://graph.facebook.com/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id),
+        params={"access_token": token, "fields": fields},
+        timeout=AD_CONTROL_GRAPH_TIMEOUT,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400 or payload.get("error"):
+        raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+    return payload
+
+
+def ad_control_graph_set_status(token, object_id, status):
+    response = requests.post(
+        "https://graph.facebook.com/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id),
+        data={"access_token": token, "status": status},
+        timeout=AD_CONTROL_GRAPH_TIMEOUT,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400 or payload.get("error"):
+        raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+    return payload
+
+
+def ad_control_meta_fields(level):
+    if level == "campaign":
+        return "account_id,status,effective_status,name"
+    if level == "adset":
+        return "account_id,campaign_id,status,effective_status,name"
+    return "account_id,campaign_id,adset_id,status,effective_status,name"
+
+
+def ad_control_update_business_status(row, target_status):
+    level = row.get("level") or "campaign"
+    level_cfg = AD_CONTROL_LEVELS[level]
+    id_column = level_cfg["id_column"]
+    action_column = level_cfg["action_at_column"]
+    sql = """
+        UPDATE {table}
+           SET status={status},
+               {action_column}=UNIX_TIMESTAMP(),
+               updated_at=NOW()
+         WHERE product={product}
+           AND {account_norm}= {account_id}
+           AND {id_column}={object_id}
+    """.format(
+        table=ad_control_table("ads_facebook_auto_created_data"),
+        status=ad_control_quote(target_status),
+        action_column=sql_identifier(action_column),
+        product=ad_control_quote(row.get("product")),
+        account_norm=ad_control_norm_account_sql("ad_account_id"),
+        account_id=ad_control_quote(ad_control_normalize_account(row.get("account_id"))),
+        id_column=sql_identifier(id_column),
+        object_id=ad_control_quote(row.get("object_id")),
+    )
+    run_mysql(" ".join(sql.split()))
+
+
+def ad_control_load_object_states(items):
+    keys = [item.get("object_key") for item in items if item.get("object_key")]
+    if not keys:
+        return {}
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            placeholders = ",".join(["?"] * len(keys))
+            rows = conn.execute(
+                "SELECT * FROM ad_control_object_state WHERE object_key IN (%s)" % placeholders,
+                keys,
+            ).fetchall()
+            return {row["object_key"]: dict(row) for row in rows}
+        finally:
+            conn.close()
+
+
+def ad_control_save_object_state(action_id, row, status):
+    now_text = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    existing = ad_control_load_object_states([row]).get(row["object_key"], {})
+    pause_action = action_id if status == "paused" else existing.get("last_pause_action_id", "")
+    reopen_action = action_id if status == "reopened" else existing.get("last_reopen_action_id", "")
+    paused_at = now_text if status == "paused" else existing.get("paused_at", "")
+    reopened_at = now_text if status == "reopened" else existing.get("reopened_at", "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO ad_control_object_state (
+                  object_key, product, level, account_id, object_id, campaign_id,
+                  last_pause_action_id, last_reopen_action_id, object_json,
+                  status, paused_at, reopened_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    row["object_key"],
+                    row.get("product", ""),
+                    row.get("level", ""),
+                    row.get("account_id", ""),
+                    row.get("object_id", ""),
+                    row.get("campaign_id", ""),
+                    pause_action,
+                    reopen_action,
+                    json.dumps(row, ensure_ascii=False),
+                    status,
+                    paused_at,
+                    reopened_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def execute_ad_control(payload, session):
+    ensure_ad_control_tables()
+    preview = fetch_ad_control_preview(payload.get("preview_id"))
+    criteria = json.loads(preview["criteria_json"] or "{}")
+    action = ad_control_action(payload.get("action") or criteria.get("action"))
+    if action not in ("pause", "reopen"):
+        raise StructuredApiError("invalid_action", "请选择关停或重启动作")
+    if action != criteria.get("action"):
+        raise StructuredApiError("preview_action_mismatch", "执行动作和试算动作不一致，请重新试算")
+    max_items = ad_control_int(payload.get("max_items", AD_CONTROL_MAX_EXECUTE), AD_CONTROL_MAX_EXECUTE, 1, AD_CONTROL_MAX_EXECUTE)
+    dry_run = bool(payload.get("dry_run"))
+    criteria = dict(criteria)
+    data = ad_control_fetch_candidates(criteria, page=1, page_size=max_items)
+    items = data["items"]
+    states = ad_control_load_object_states(items)
+    action_id = uuid.uuid4().hex
+    target_status = "PAUSED" if action == "pause" else "ACTIVE"
+    results = []
+    success_count = skipped_count = error_count = 0
+    for item in items:
+        item["level"] = criteria["level"]
+        item["object_key"] = ad_control_object_key(item)
+        if action == "reopen" and states.get(item["object_key"], {}).get("status") != "paused":
+            skipped_count += 1
+            results.append({"object_key": item["object_key"], "status": "skipped", "reason": "not_paused_by_control_center"})
+            continue
+        if action == "pause" and str(item.get("status") or "").upper() == "PAUSED":
+            skipped_count += 1
+            results.append({"object_key": item["object_key"], "status": "skipped", "reason": "already_paused"})
+            continue
+        try:
+            token = ad_control_token_for_user_ids(item.get("user_ids", ""))
+            if not token:
+                skipped_count += 1
+                results.append({"object_key": item["object_key"], "status": "skipped", "reason": "missing_meta_token"})
+                continue
+            meta = ad_control_graph_get(token, item["object_id"], ad_control_meta_fields(item["level"]))
+            meta_account = ad_control_normalize_account(meta.get("account_id"))
+            item_account = ad_control_normalize_account(item.get("account_id"))
+            if meta_account and item_account and meta_account != item_account:
+                skipped_count += 1
+                results.append({
+                    "object_key": item["object_key"],
+                    "status": "skipped",
+                    "reason": "account_owner_mismatch",
+                    "meta_account": meta.get("account_id"),
+                    "asset_account": item.get("account_id"),
+                })
+                continue
+            if dry_run:
+                success_count += 1
+                results.append({"object_key": item["object_key"], "status": "dry_run", "meta": meta})
+                continue
+            payload_result = ad_control_graph_set_status(token, item["object_id"], target_status)
+            ad_control_update_business_status(item, target_status)
+            ad_control_save_object_state(action_id, item, "paused" if action == "pause" else "reopened")
+            success_count += 1
+            results.append({"object_key": item["object_key"], "status": "success", "meta": payload_result})
+        except Exception as exc:
+            error_count += 1
+            logging.exception("ad control execute failed: %s", item.get("object_key"))
+            results.append({"object_key": item.get("object_key", ""), "status": "error", "reason": str(exc)})
+    actor_user_id = str((session or {}).get("user_id") or "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_action (
+                  action_id, preview_id, actor_user_id, action, level, product, criteria_json,
+                  requested_count, success_count, skipped_count, error_count, dry_run,
+                  results_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    action_id,
+                    preview["preview_id"],
+                    actor_user_id,
+                    action,
+                    criteria["level"],
+                    criteria["product"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    len(items),
+                    success_count,
+                    skipped_count,
+                    error_count,
+                    1 if dry_run else 0,
+                    json.dumps(results, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "action_id": action_id,
+        "preview_id": preview["preview_id"],
+        "action": action,
+        "dry_run": dry_run,
+        "requested_count": len(items),
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": error_count,
+        "remaining_count": max(0, int(data.get("total", 0)) - len(items)),
+        "results": results[:200],
+    }
+
+
+def ad_control_rule_payload(row):
+    item = dict(row)
+    for key in ("criteria_json", "schedule_json", "thresholds_json", "last_result_json"):
+        try:
+            item[key.replace("_json", "")] = json.loads(item.get(key) or "{}")
+        except Exception:
+            item[key.replace("_json", "")] = {}
+        item.pop(key, None)
+    item["enabled"] = bool(item.get("enabled"))
+    return item
+
+
+def list_ad_control_rules():
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute("SELECT * FROM ad_control_rule ORDER BY updated_at DESC").fetchall()
+            return {"items": [ad_control_rule_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def save_ad_control_rule(payload, session):
+    ensure_ad_control_tables()
+    criteria = ad_control_criteria(payload.get("criteria") or payload, require_action=True)
+    rule_id = str(payload.get("rule_id") or "").strip() or uuid.uuid4().hex
+    name = str(payload.get("name") or criteria["product"] + " " + criteria["action"]).strip()
+    schedule = payload.get("schedule") or {}
+    thresholds = payload.get("thresholds") or {}
+    enabled = 1 if payload.get("enabled") else 0
+    actor_user_id = str((session or {}).get("user_id") or "")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_rule (
+                  rule_id, name, enabled, product, action, level, criteria_json,
+                  schedule_json, thresholds_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(rule_id) DO UPDATE SET
+                  name=excluded.name,
+                  enabled=excluded.enabled,
+                  product=excluded.product,
+                  action=excluded.action,
+                  level=excluded.level,
+                  criteria_json=excluded.criteria_json,
+                  schedule_json=excluded.schedule_json,
+                  thresholds_json=excluded.thresholds_json,
+                  updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    rule_id,
+                    name,
+                    enabled,
+                    criteria["product"],
+                    criteria["action"],
+                    criteria["level"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    json.dumps(schedule, ensure_ascii=False),
+                    json.dumps(thresholds, ensure_ascii=False),
+                    actor_user_id,
+                ),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule WHERE rule_id = ?", (rule_id,)).fetchone()
+            return ad_control_rule_payload(row)
+        finally:
+            conn.close()
+
+
+def set_ad_control_rule_enabled(rule_id, enabled):
+    ensure_ad_control_tables()
+    rule_id = str(rule_id or "").strip()
+    if not rule_id:
+        raise StructuredApiError("missing_rule_id", "缺少规则 ID")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_control_rule SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE rule_id=?",
+                (1 if enabled else 0, rule_id),
+            )
+            if conn.total_changes < 1:
+                raise StructuredApiError("rule_not_found", "规则不存在")
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule WHERE rule_id = ?", (rule_id,)).fetchone()
+            return ad_control_rule_payload(row)
+        finally:
+            conn.close()
 
 
 def lookup_admin_group_by_email(email):
@@ -85732,6 +86645,42 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 500, {"error": str(exc)})
             return
 
+        if parsed.path == "/api/ad-control/products":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(
+                    self,
+                    200,
+                    list_ad_control_products(
+                        query=(params.get("q") or [""])[0],
+                        limit=(params.get("limit") or ["200"])[0],
+                    ),
+                )
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/accounts":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_accounts((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rules":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, list_ad_control_rules())
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/ad-material/competitor-sources":
             if not self._require_module("ad_material_tasks"):
                 return
@@ -88283,6 +89232,71 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        if parsed.path == "/api/ad-control/preview":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = create_ad_control_preview(self._read_json(), self._session())
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/execute":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = execute_ad_control(self._read_json(), self._session())
+                append_audit_log(
+                    self._session(),
+                    "execute_ad_control",
+                    "ad_control",
+                    payload.get("action_id", ""),
+                    {
+                        "preview_id": payload.get("preview_id", ""),
+                        "action": payload.get("action", ""),
+                        "requested_count": payload.get("requested_count", 0),
+                        "success_count": payload.get("success_count", 0),
+                        "skipped_count": payload.get("skipped_count", 0),
+                        "error_count": payload.get("error_count", 0),
+                        "dry_run": payload.get("dry_run", False),
+                    },
+                )
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rules":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_rule(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_rule", "ad_control_rule", payload.get("rule_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rules/") and parsed.path.endswith("/enabled"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                rule_id = parsed.path[len("/api/ad-control/rules/"):-len("/enabled")].strip("/")
+                body = self._read_json()
+                payload = set_ad_control_rule_enabled(rule_id, bool(body.get("enabled")))
+                append_audit_log(
+                    self._session(),
+                    "set_ad_control_rule_enabled",
+                    "ad_control_rule",
+                    payload.get("rule_id", ""),
+                    {"enabled": payload.get("enabled", False)},
+                )
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
         if screenshot_job_id and screenshot_action == "retry":
             if not self._require_module("cover_synthesis"):
@@ -89096,6 +90110,8 @@ def main():
     ensure_screenshot_job_table()
 
     ensure_ad_material_tables()
+
+    ensure_ad_control_tables()
 
 
 

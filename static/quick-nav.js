@@ -18,6 +18,14 @@
       ]
     },
     {
+      key: "ad_control",
+      label: "产品广告调控",
+      module: "ad_control_center",
+      items: [
+        { key: "adControl", label: "产品广告调控中心", description: "按产品、账户、时区和状态试算 Meta 广告调控", kind: "page", href: "/ad-control.html", module: "ad_control_center", enabled: true, order: 10 }
+      ]
+    },
+    {
       key: "system",
       label: "设置",
       adminOnly: true,
@@ -81,6 +89,7 @@
     tasks: "#tasks",
     screenshots: "#screenshots",
     adMaterials: "#adMaterials",
+    adControl: "/ad-control.html",
     settings: "#settings",
     navigation: "#navigation",
     users: "#users",
