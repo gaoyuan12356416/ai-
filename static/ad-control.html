@@ -4,9 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>产品广告调控中心</title>
-  <link rel="stylesheet" href="/ui-topbar.css" />
-  <script src="/quick-nav.js"></script>
-  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js?v=20260625-ad-control"></script>
   <style>
     :root {
       --bg: #f5f7fb;
@@ -71,6 +69,13 @@
       align-content: start;
     }
 
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
     h1 {
       margin: 0 0 6px;
       font-size: 26px;
@@ -82,6 +87,20 @@
       margin: 0;
       color: var(--muted);
       font-size: 14px;
+    }
+
+    .user {
+      min-width: 180px;
+      text-align: right;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .user strong {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
+      margin-bottom: 2px;
     }
 
     .toolbar, .panel {
@@ -413,7 +432,8 @@
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
       .main { padding: 20px 14px 34px; }
-      .topbar { flex-direction: column; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .user { text-align: left; }
       .filters, .summary { grid-template-columns: 1fr; }
       .actions { align-items: stretch; flex-direction: column; }
       .button-row { width: 100%; }
@@ -438,10 +458,9 @@
           <h1>产品广告调控中心</h1>
           <p class="subtitle">按远端业务库的产品、账户、时区和对象层级执行试算、关停、重启或保存规则。</p>
         </div>
-        <div class="top-actions">
-          <div id="userCard" class="user-card"></div>
-          <button class="btn" id="refreshBtn" type="button">刷新</button>
-          <button class="btn" id="logoutBtn" type="button">退出登录</button>
+        <div class="user">
+          <strong id="userName">--</strong>
+          <span id="userRole">--</span>
         </div>
       </header>
 
@@ -608,9 +627,8 @@
       loginGate: document.getElementById("loginGate"),
       permissionGate: document.getElementById("permissionGate"),
       workspace: document.getElementById("workspace"),
-      userCard: document.getElementById("userCard"),
-      refreshBtn: document.getElementById("refreshBtn"),
-      logoutBtn: document.getElementById("logoutBtn"),
+      userName: document.getElementById("userName"),
+      userRole: document.getElementById("userRole"),
       productSelect: document.getElementById("productSelect"),
       levelSelect: document.getElementById("levelSelect"),
       actionSelect: document.getElementById("actionSelect"),
@@ -697,26 +715,17 @@
       });
     }
 
-    function renderTopbar() {
-      if (!window.UiTopbar) return;
-      window.UiTopbar.render({
-        auth: state.auth,
-        userCard: els.userCard,
-        authButton: els.logoutBtn,
-        refreshButton: els.refreshBtn
-      });
-    }
-
     async function loadAuth() {
       const auth = await api("/api/auth/status");
       state.auth = auth;
       if (!auth.authenticated) {
         els.loginGate.classList.remove("hidden");
-        renderTopbar();
         await renderQuickNav();
         return false;
       }
-      renderTopbar();
+      const user = auth.user || {};
+      els.userName.textContent = user.name || "--";
+      els.userRole.textContent = `${user.is_admin ? "管理员" : "普通用户"} / tenant ${user.tenant_key || "--"}`;
       if (!hasPermission(auth)) {
         els.permissionGate.classList.remove("hidden");
         await renderQuickNav();
@@ -988,22 +997,6 @@
       els.executeBtn.addEventListener("click", executePreview);
       els.reloadRulesBtn.addEventListener("click", loadRules);
       els.ruleList.addEventListener("click", toggleRule);
-      els.logoutBtn.addEventListener("click", async () => {
-        try {
-          await window.UiTopbar.handleAuthAction({
-            auth: state.auth,
-            api,
-            afterLogout: () => { location.href = "/tasks.html"; }
-          });
-        } catch (error) {
-          toast(error.message, "error");
-        }
-      });
-    }
-
-    async function initData() {
-      await loadProducts();
-      await loadRules();
     }
 
     async function init() {
@@ -1011,7 +1004,8 @@
       try {
         const allowed = await loadAuth();
         if (!allowed) return;
-        await initData();
+        await loadProducts();
+        await loadRules();
       } catch (error) {
         toast(error.message, "error");
       }
