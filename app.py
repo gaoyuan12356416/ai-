@@ -86222,6 +86222,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        if parsed.path == "/api/ui/topbar":
+            json_response(self, 200, self._auth_payload())
+            return
+
 
 
 
