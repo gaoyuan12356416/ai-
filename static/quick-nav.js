@@ -86,14 +86,14 @@
   }
 
   const INTERNAL_VIEW_HREFS = {
-    tasks: "#tasks",
-    screenshots: "#screenshots",
-    adMaterials: "#adMaterials",
+    tasks: "/#tasks",
+    screenshots: "/screenshots.html",
+    adMaterials: "/#adMaterials",
     adControl: "/ad-control.html",
-    settings: "#settings",
-    navigation: "#navigation",
-    users: "#users",
-    logs: "#logs"
+    settings: "/#settings",
+    navigation: "/#navigation",
+    users: "/#users",
+    logs: "/#logs"
   };
 
   function navItemHref(item) {

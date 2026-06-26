@@ -4,7 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>产品广告调控中心</title>
-  <script src="/quick-nav.js?v=20260625-ad-control"></script>
+  <link rel="stylesheet" href="/ui-topbar.css?v=20260626-ad-control" />
+  <script src="/quick-nav.js?v=20260626-ad-control-nav"></script>
+  <script src="/ui-topbar.js?v=20260626-ad-control"></script>
   <style>
     :root {
       --bg: #f5f7fb;
@@ -69,13 +71,6 @@
       align-content: start;
     }
 
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-    }
-
     h1 {
       margin: 0 0 6px;
       font-size: 26px;
@@ -87,20 +82,6 @@
       margin: 0;
       color: var(--muted);
       font-size: 14px;
-    }
-
-    .user {
-      min-width: 180px;
-      text-align: right;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .user strong {
-      display: block;
-      color: var(--text);
-      font-size: 14px;
-      margin-bottom: 2px;
     }
 
     .toolbar, .panel {
@@ -432,8 +413,6 @@
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
       .main { padding: 20px 14px 34px; }
-      .topbar { align-items: flex-start; flex-direction: column; }
-      .user { text-align: left; }
       .filters, .summary { grid-template-columns: 1fr; }
       .actions { align-items: stretch; flex-direction: column; }
       .button-row { width: 100%; }
@@ -446,21 +425,22 @@
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <small>AI 后台</small>
-        <strong>广告调控中心</strong>
+        <small>ai.yingliangads.com</small>
+        <strong>AI自动后台</strong>
       </div>
-      <nav id="quickNav"></nav>
+      <nav id="quickNav" class="nav"></nav>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <div>
+        <div class="hero">
           <h1>产品广告调控中心</h1>
           <p class="subtitle">按远端业务库的产品、账户、时区和对象层级执行试算、关停、重启或保存规则。</p>
         </div>
-        <div class="user">
-          <strong id="userName">--</strong>
-          <span id="userRole">--</span>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <button class="btn" id="refreshBtn" type="button">刷新</button>
+          <button class="btn" id="authBtn" type="button">退出登录</button>
         </div>
       </header>
 
@@ -627,8 +607,9 @@
       loginGate: document.getElementById("loginGate"),
       permissionGate: document.getElementById("permissionGate"),
       workspace: document.getElementById("workspace"),
-      userName: document.getElementById("userName"),
-      userRole: document.getElementById("userRole"),
+      userCard: document.getElementById("userCard"),
+      refreshBtn: document.getElementById("refreshBtn"),
+      authBtn: document.getElementById("authBtn"),
       productSelect: document.getElementById("productSelect"),
       levelSelect: document.getElementById("levelSelect"),
       actionSelect: document.getElementById("actionSelect"),
@@ -706,6 +687,18 @@
       return !!(user && (user.is_admin || (user.permissions && user.permissions.ad_control_center)));
     }
 
+    function renderTopbar() {
+      if (!window.UiTopbar) return;
+      window.UiTopbar.render({
+        auth: state.auth || {},
+        userCard: els.userCard,
+        authButton: els.authBtn,
+        refreshButton: els.refreshBtn,
+        loginText: "登录",
+        logoutText: "退出登录"
+      });
+    }
+
     async function renderQuickNav() {
       if (!window.QuickNav) return;
       await window.QuickNav.render({
@@ -716,16 +709,17 @@
     }
 
     async function loadAuth() {
-      const auth = await api("/api/auth/status");
+      const auth = await api("/api/ui/topbar");
       state.auth = auth;
+      renderTopbar();
+      els.loginGate.classList.add("hidden");
+      els.permissionGate.classList.add("hidden");
+      els.workspace.classList.add("hidden");
       if (!auth.authenticated) {
         els.loginGate.classList.remove("hidden");
         await renderQuickNav();
         return false;
       }
-      const user = auth.user || {};
-      els.userName.textContent = user.name || "--";
-      els.userRole.textContent = `${user.is_admin ? "管理员" : "普通用户"} / tenant ${user.tenant_key || "--"}`;
       if (!hasPermission(auth)) {
         els.permissionGate.classList.remove("hidden");
         await renderQuickNav();
@@ -997,6 +991,14 @@
       els.executeBtn.addEventListener("click", executePreview);
       els.reloadRulesBtn.addEventListener("click", loadRules);
       els.ruleList.addEventListener("click", toggleRule);
+      els.authBtn.addEventListener("click", () => {
+        if (!window.UiTopbar) return;
+        window.UiTopbar.handleAuthAction({
+          auth: state.auth || {},
+          api,
+          afterLogout: () => window.location.assign("/")
+        });
+      });
     }
 
     async function init() {
