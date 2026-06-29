@@ -1,5 +1,23 @@
 [
   {
+    "key": "ad_control",
+    "label": "AI自动规则调控",
+    "order": 5,
+    "module": "ad_control_center",
+    "items": [
+      {
+        "key": "adControl",
+        "label": "AI自动规则调控",
+        "description": "按产品、账户组和规则组实时调控 Meta campaign",
+        "kind": "page",
+        "href": "/ad-control.html",
+        "enabled": true,
+        "order": 10,
+        "module": "ad_control_center"
+      }
+    ]
+  },
+  {
     "key": "drama",
     "label": "短剧任务列表",
     "order": 10,
@@ -42,6 +60,24 @@
         "enabled": true,
         "order": 10,
         "module": "ad_material_tasks"
+      }
+    ]
+  },
+  {
+    "key": "ad_material_test",
+    "label": "投放素材测试",
+    "order": 21,
+    "module": "ad_material_test",
+    "items": [
+      {
+        "key": "adMaterialTest",
+        "label": "投放素材测试环境",
+        "description": "独立测试服务，不影响线上任务",
+        "kind": "page",
+        "href": "https://ai.yingliangads.com/ad-material-test/#adMaterials",
+        "enabled": true,
+        "order": 10,
+        "module": "ad_material_test"
       }
     ]
   },
