@@ -353,23 +353,9 @@
     return JSON.parse(JSON.stringify(Array.isArray(config) ? config : []));
   }
 
-  function mergeDefaultNav(config) {
-    const groups = cloneNav(config);
-    for (const defaultGroup of DEFAULT_NAV) {
-      const group = groups.find(item => item.key === defaultGroup.key);
-      if (!group) {
-        groups.push(JSON.parse(JSON.stringify(defaultGroup)));
-        continue;
-      }
-      const existing = new Set((group.items || []).map(item => item.key));
-      for (const defaultItem of defaultGroup.items || []) {
-        if (!existing.has(defaultItem.key)) {
-          group.items = group.items || [];
-          group.items.push(JSON.parse(JSON.stringify(defaultItem)));
-        }
-      }
-    }
-    return groups;
+  function normalizeNavConfig(config) {
+    if (!Array.isArray(config)) return null;
+    return cloneNav(config);
   }
 
   async function loadConfig() {
@@ -377,7 +363,9 @@
     try {
       const response = await fetch("/navigation.json", { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error("navigation config request failed");
-      navCache = mergeDefaultNav(await response.json());
+      const config = normalizeNavConfig(await response.json());
+      if (!config) throw new Error("navigation config must be an array");
+      navCache = config;
     } catch (error) {
       navCache = cloneNav(DEFAULT_NAV);
     }
