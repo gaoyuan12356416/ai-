@@ -3,421 +3,123 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>产品广告调控中心</title>
-  <link rel="stylesheet" href="/ui-topbar.css?v=20260626-ad-control" />
-  <script src="/quick-nav.js?v=20260626-ad-control-nav"></script>
-  <script src="/ui-topbar.js?v=20260626-ad-control"></script>
+  <title>AI自动规则调控</title>
+  <link rel="stylesheet" href="/ui-topbar.css?v=20260629-ai-rule-control" />
+  <script src="/quick-nav.js?v=20260629-ai-rule-control"></script>
+  <script src="/ui-topbar.js?v=20260629-ai-rule-control"></script>
   <style>
     :root {
       --bg: #f5f7fb;
-      --panel: #ffffff;
-      --sidebar: #111827;
-      --line: #dbe3f0;
-      --text: #152033;
+      --panel: #fff;
+      --line: #d8e0ec;
+      --text: #172033;
       --muted: #667085;
+      --nav: #111827;
       --primary: #2563eb;
-      --primary-soft: rgba(37, 99, 235, .1);
-      --success: #15803d;
-      --warning: #b45309;
       --danger: #b42318;
-      --shadow: 0 18px 36px rgba(16, 24, 40, .08);
+      --ok: #15803d;
+      --warn: #b45309;
+      --soft: rgba(37, 99, 235, .1);
+      --shadow: 0 16px 34px rgba(16, 24, 40, .08);
     }
-
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       background: var(--bg);
       color: var(--text);
+      font-family: "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     }
-
     button, input, select, textarea { font: inherit; }
     button { cursor: pointer; }
-    a { color: inherit; text-decoration: none; }
-
-    .app {
-      min-height: 100vh;
-      display: grid;
-      grid-template-columns: 260px minmax(0, 1fr);
-    }
-
-    .sidebar {
-      background: var(--sidebar);
-      color: #fff;
-      padding: 24px 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 24px;
-    }
-
-    .brand small {
-      display: block;
-      color: rgba(255, 255, 255, .58);
-      font-size: 12px;
-      margin-bottom: 8px;
-    }
-
-    .brand strong {
-      display: block;
-      font-size: 22px;
-      line-height: 1.2;
-    }
-
-    .main {
-      min-width: 0;
-      padding: 28px 32px 44px;
-      display: grid;
-      gap: 20px;
-      align-content: start;
-    }
-
-    h1 {
-      margin: 0 0 6px;
-      font-size: 26px;
-      line-height: 1.25;
-      letter-spacing: 0;
-    }
-
-    .subtitle {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
-    .toolbar, .panel {
+    .app { min-height: 100vh; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
+    .sidebar { background: var(--nav); color: #fff; padding: 24px 18px; }
+    .brand small { display: block; color: rgba(255,255,255,.58); font-size: 12px; margin-bottom: 8px; }
+    .brand strong { display: block; font-size: 21px; line-height: 1.2; }
+    .main { min-width: 0; padding: 28px 32px 44px; display: grid; gap: 18px; align-content: start; }
+    h1 { margin: 0 0 6px; font-size: 26px; line-height: 1.25; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 17px; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 14px; }
+    .panel {
       background: var(--panel);
       border: 1px solid var(--line);
-      box-shadow: var(--shadow);
-    }
-
-    .toolbar {
       border-radius: 8px;
-      padding: 18px;
-      display: grid;
-      gap: 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
     }
-
-    .filters {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(180px, 1fr));
-      gap: 14px;
-      align-items: end;
+    .panel-head {
+      padding: 15px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
     }
-
-    .field {
-      display: grid;
-      gap: 7px;
-      min-width: 0;
-    }
-
-    .field label {
-      color: #344054;
-      font-size: 13px;
-      font-weight: 700;
-    }
-
+    .panel-body { padding: 16px 18px; display: grid; gap: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; align-items: end; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .field { display: grid; gap: 7px; min-width: 0; }
+    .field label { color: #344054; font-size: 13px; font-weight: 700; }
     input, select, textarea {
       width: 100%;
       min-height: 38px;
-      border: 1px solid #cfd8e8;
+      border: 1px solid #cbd5e1;
       border-radius: 6px;
       background: #fff;
       color: var(--text);
       padding: 8px 10px;
       outline: none;
     }
-
-    textarea {
-      resize: vertical;
-      min-height: 70px;
-    }
-
-    input:focus, select:focus, textarea:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px var(--primary-soft);
-    }
-
-    .checks {
-      min-height: 38px;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px 12px;
-    }
-
-    .check {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: #344054;
-      font-size: 13px;
-      white-space: nowrap;
-    }
-
-    .check input {
-      width: 16px;
-      height: 16px;
-      min-height: 0;
-      padding: 0;
-    }
-
-    .account-list {
-      border: 1px solid #dbe3f0;
-      border-radius: 6px;
-      background: #fbfcff;
-      max-height: 230px;
-      overflow: auto;
-      padding: 8px;
-      display: grid;
-      gap: 6px;
-    }
-
-    .account-option {
-      display: grid;
-      grid-template-columns: 18px minmax(0, 1fr) auto;
-      gap: 8px;
-      align-items: center;
-      border-radius: 6px;
-      padding: 8px;
-      background: #fff;
-      border: 1px solid transparent;
-    }
-
-    .account-option:hover {
-      border-color: #c7d7fe;
-    }
-
-    .account-title {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 13px;
-      color: #1d2939;
-    }
-
-    .account-meta {
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .button-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: center;
-    }
-
+    textarea { min-height: 180px; resize: vertical; font-family: Consolas, "SFMono-Regular", monospace; font-size: 12px; line-height: 1.45; }
+    input:focus, select:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--soft); }
     .btn {
       min-height: 38px;
-      border: 1px solid #cfd8e8;
+      border: 1px solid #cbd5e1;
       border-radius: 6px;
       background: #fff;
       color: #1d2939;
       padding: 8px 13px;
       font-weight: 700;
     }
-
     .btn:hover { border-color: var(--primary); color: var(--primary); }
-    .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-    .btn.danger { color: var(--danger); border-color: rgba(180, 35, 24, .35); }
+    .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .btn.danger { color: var(--danger); border-color: rgba(180,35,24,.35); }
     .btn:disabled { opacity: .5; cursor: not-allowed; }
-
-    .hint {
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .risk {
-      border: 1px solid #f6c773;
-      background: #fff8eb;
-      color: #7a4a06;
-      border-radius: 8px;
-      padding: 12px 14px;
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    .summary {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .metric {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-      padding: 14px;
-    }
-
-    .metric span {
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 8px;
-    }
-
-    .metric strong {
-      display: block;
-      font-size: 24px;
-      line-height: 1.1;
-    }
-
-    .panel {
-      border-radius: 8px;
-      overflow: hidden;
-    }
-
-    .panel-head {
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-
-    .panel-head h2 {
-      margin: 0;
-      font-size: 17px;
-      line-height: 1.3;
-    }
-
-    .table-wrap {
-      overflow: auto;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      min-width: 1080px;
-      font-size: 13px;
-    }
-
-    th, td {
-      border-bottom: 1px solid #edf1f7;
-      padding: 11px 12px;
-      text-align: left;
-      vertical-align: top;
-    }
-
-    th {
-      position: sticky;
-      top: 0;
-      z-index: 1;
-      background: #f8fafd;
-      color: #475467;
-      font-weight: 800;
-    }
-
-    td {
-      color: #1d2939;
-    }
-
-    .mono {
-      font-family: Consolas, "SFMono-Regular", monospace;
-      font-size: 12px;
-      word-break: break-all;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 3px 8px;
-      background: #eef2ff;
-      color: #3730a3;
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .badge.paused { background: #fff1f2; color: var(--danger); }
-    .badge.active { background: #ecfdf3; color: var(--success); }
-    .badge.warn { background: #fff7ed; color: var(--warning); }
-
-    .empty {
-      padding: 36px 18px;
-      color: var(--muted);
-      text-align: center;
-      font-size: 14px;
-    }
-
-    .rules {
-      display: grid;
-      gap: 10px;
-      padding: 16px 18px;
-    }
-
-    .rule-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
-      gap: 12px;
-      align-items: center;
-      border: 1px solid #edf1f7;
-      border-radius: 8px;
-      padding: 12px;
-      background: #fff;
-    }
-
-    .rule-row strong {
-      display: block;
-      margin-bottom: 5px;
-    }
-
-    .rule-row span {
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .toast {
-      position: fixed;
-      right: 24px;
-      bottom: 24px;
-      max-width: 420px;
-      border-radius: 8px;
-      background: #101828;
-      color: #fff;
-      padding: 12px 14px;
-      box-shadow: 0 16px 34px rgba(16, 24, 40, .24);
-      opacity: 0;
-      transform: translateY(10px);
-      pointer-events: none;
-      transition: .18s ease;
-      z-index: 20;
-      font-size: 13px;
-      line-height: 1.5;
-    }
-
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .hint { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .risk { border: 1px solid #f6c773; background: #fff8eb; color: #7a4a06; border-radius: 8px; padding: 11px 13px; font-size: 13px; line-height: 1.6; }
+    .account-list { border: 1px solid var(--line); border-radius: 6px; background: #fbfcff; max-height: 260px; overflow: auto; padding: 8px; display: grid; gap: 6px; }
+    .account-option { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid transparent; border-radius: 6px; padding: 8px; background: #fff; }
+    .account-option:hover { border-color: #bfdbfe; }
+    .account-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .account-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .metric { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 13px; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .metric strong { display: block; font-size: 23px; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 1180px; font-size: 13px; }
+    th, td { padding: 10px 11px; border-bottom: 1px solid #edf1f7; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; background: #f8fafd; color: #475467; font-weight: 800; }
+    .mono { font-family: Consolas, "SFMono-Regular", monospace; font-size: 12px; word-break: break-all; }
+    .badge { display: inline-flex; border-radius: 999px; padding: 3px 8px; background: #eef2ff; color: #3730a3; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .badge.ok { background: #ecfdf3; color: var(--ok); }
+    .badge.warn { background: #fff7ed; color: var(--warn); }
+    .badge.danger { background: #fff1f2; color: var(--danger); }
+    .list { display: grid; gap: 10px; }
+    .item { border: 1px solid #edf1f7; border-radius: 8px; padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+    .item strong { display: block; margin-bottom: 5px; }
+    .empty { padding: 30px 16px; text-align: center; color: var(--muted); font-size: 14px; }
+    .hidden { display: none !important; }
+    .toast { position: fixed; right: 24px; bottom: 24px; max-width: 420px; border-radius: 8px; background: #101828; color: #fff; padding: 12px 14px; box-shadow: 0 16px 34px rgba(16,24,40,.24); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .18s ease; z-index: 20; font-size: 13px; line-height: 1.5; }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.error { background: #7f1d1d; }
-
-    .hidden { display: none !important; }
-
-    @media (max-width: 1180px) {
-      .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-
+    @media (max-width: 1180px) { .grid, .grid.two, .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 760px) {
       .app { grid-template-columns: 1fr; }
       .sidebar { display: none; }
       .main { padding: 20px 14px 34px; }
-      .filters, .summary { grid-template-columns: 1fr; }
-      .actions { align-items: stretch; flex-direction: column; }
-      .button-row { width: 100%; }
-      .button-row .btn { flex: 1; }
-      .rule-row { grid-template-columns: 1fr; }
+      .grid, .grid.two, .cards { grid-template-columns: 1fr; }
+      .item { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -434,8 +136,8 @@
     <main class="main">
       <header class="topbar">
         <div class="hero">
-          <h1>产品广告调控中心</h1>
-          <p class="subtitle">按远端业务库的产品、账户、时区和对象层级执行试算、关停、重启或保存规则。</p>
+          <h1>AI自动规则调控</h1>
+          <p class="subtitle">按产品、账户组和规则组实时扫描 Meta 活跃 campaign，preview 确认后再执行关闭。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -444,213 +146,220 @@
         </div>
       </header>
 
-      <section id="loginGate" class="panel hidden">
-        <div class="empty">请先登录后台后再访问此页面。<a href="/">返回登录</a></div>
-      </section>
-
-      <section id="permissionGate" class="panel hidden">
-        <div class="empty">当前账号没有产品广告调控中心权限。</div>
-      </section>
+      <section id="loginGate" class="panel hidden"><div class="empty">请先登录后台后再访问此页面。<a href="/">返回登录</a></div></section>
+      <section id="permissionGate" class="panel hidden"><div class="empty">当前账号没有 AI自动规则调控权限。</div></section>
 
       <section id="workspace" class="hidden">
-        <div class="toolbar">
-          <div class="filters">
-            <div class="field">
-              <label for="productSelect">产品</label>
-              <select id="productSelect"></select>
-            </div>
-            <div class="field">
-              <label for="levelSelect">对象层级</label>
-              <select id="levelSelect">
-                <option value="campaign">Campaign</option>
-                <option value="adset">Ad Set</option>
-                <option value="ad">Ad</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="actionSelect">动作</label>
-              <select id="actionSelect">
-                <option value="preview">仅试算</option>
-                <option value="pause">关停</option>
-                <option value="reopen">重启</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="timezoneSelect">账户时区</label>
-              <select id="timezoneSelect">
-                <option value="">全部时区</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>状态</label>
-              <div class="checks" id="statusChecks">
-                <label class="check"><input type="checkbox" value="ACTIVE" checked /> ACTIVE</label>
-                <label class="check"><input type="checkbox" value="PAUSED" /> PAUSED</label>
-                <label class="check"><input type="checkbox" value="ARCHIVED" /> ARCHIVED</label>
-              </div>
-            </div>
-            <div class="field">
-              <label for="countryInput">国家</label>
-              <input id="countryInput" placeholder="US,CA" autocomplete="off" />
-            </div>
-            <div class="field">
-              <label for="languageInput">语言</label>
-              <input id="languageInput" placeholder="en,es" autocomplete="off" />
-            </div>
-            <div class="field">
-              <label for="searchInput">对象搜索</label>
-              <input id="searchInput" placeholder="campaign/adset/ad 名称或 ID" autocomplete="off" />
-            </div>
-            <div class="field">
-              <label for="metricDaysInput">指标天数</label>
-              <input id="metricDaysInput" type="number" min="1" max="30" value="3" />
-            </div>
-            <div class="field">
-              <label for="pageSizeInput">试算展示数量</label>
-              <input id="pageSizeInput" type="number" min="1" max="200" value="50" />
-            </div>
-            <div class="field">
-              <label for="closeTimeInput">关停时间</label>
-              <input id="closeTimeInput" type="time" value="16:00" />
-            </div>
-            <div class="field">
-              <label for="reopenTimeInput">重启时间</label>
-              <input id="reopenTimeInput" type="time" value="09:00" />
-            </div>
-          </div>
-
-          <div class="field">
-            <label>账户</label>
-            <div class="actions">
-              <span class="hint" id="accountHint">选择产品后加载账户</span>
-              <div class="button-row">
-                <button class="btn" id="selectAllAccountsBtn" type="button">全选</button>
-                <button class="btn" id="clearAccountsBtn" type="button">清空</button>
-              </div>
-            </div>
-            <div class="account-list" id="accountList"></div>
-          </div>
-
-          <div class="risk">
-            调控范围来自远端业务库对应产品的广告资产；页面试算不会调用 Meta 写接口。真实执行必须先生成 preview，再二次确认。
-          </div>
-
-          <div class="actions">
-            <div class="button-row">
-              <button class="btn primary" id="previewBtn" type="button">试算</button>
-              <button class="btn" id="saveRuleBtn" type="button">保存禁用规则</button>
-              <button class="btn danger" id="executeBtn" type="button" disabled>确认执行</button>
-            </div>
-            <span class="hint" id="previewMeta">尚未试算</span>
-          </div>
-        </div>
-
-        <div class="summary" id="summary">
-          <div class="metric"><span>命中对象</span><strong id="totalCount">0</strong></div>
-          <div class="metric"><span>当前页</span><strong id="pageCount">0</strong></div>
-          <div class="metric"><span>预估 Spend</span><strong id="spendCount">$0</strong></div>
-          <div class="metric"><span>Install</span><strong id="installCount">0</strong></div>
-        </div>
-
         <section class="panel">
           <div class="panel-head">
-            <h2>试算结果</h2>
-            <div class="button-row">
-              <button class="btn" id="prevPageBtn" type="button">上一页</button>
-              <button class="btn" id="nextPageBtn" type="button">下一页</button>
+            <h2>产品与账户范围</h2>
+            <span class="hint" id="runnerStatus">runner 状态加载中...</span>
+          </div>
+          <div class="panel-body">
+            <div class="grid">
+              <div class="field">
+                <label for="productSelect">产品</label>
+                <select id="productSelect"></select>
+              </div>
+              <div class="field">
+                <label for="accountGroupSelect">账户组</label>
+                <select id="accountGroupSelect"></select>
+              </div>
+              <div class="field">
+                <label for="ruleGroupSelect">规则组</label>
+                <select id="ruleGroupSelect"></select>
+              </div>
+              <div class="field">
+                <label>&nbsp;</label>
+                <div class="row">
+                  <button class="btn" id="selectAllAccountsBtn" type="button">全选账户</button>
+                  <button class="btn" id="clearAccountsBtn" type="button">清空账户</button>
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <label>账户</label>
+              <div class="account-list" id="accountList"></div>
+              <span class="hint" id="accountHint">选择产品后加载账户。</span>
+            </div>
+            <div class="risk">
+              实时调控按账户执行：Meta API 拉活跃 campaign 和实时表现，业务库只用于产品 campaign 白名单、token owner、规则和审计。真实关闭必须先 live preview，再二次确认。
             </div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>账户</th>
-                  <th>时区</th>
-                  <th>对象</th>
-                  <th>状态</th>
-                  <th>国家/语言</th>
-                  <th>预算</th>
-                  <th>最近指标</th>
-                  <th>更新时间</th>
-                </tr>
-              </thead>
-              <tbody id="previewRows"></tbody>
-            </table>
-          </div>
-          <div class="empty" id="previewEmpty">选择产品后点击试算。</div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>定时规则</h2>
-            <button class="btn" id="reloadRulesBtn" type="button">刷新</button>
+            <h2>Token 配置</h2>
+            <button class="btn" id="reloadTokenBtn" type="button">刷新配置</button>
           </div>
-          <div class="rules" id="ruleList"></div>
+          <div class="panel-body">
+            <div class="grid">
+              <div class="field">
+                <label for="tokenScopeAccount">配置范围</label>
+                <select id="tokenScopeAccount"><option value="">产品默认 token</option></select>
+              </div>
+              <div class="field">
+                <label for="tokenUserIdInput">token owner user_id</label>
+                <input id="tokenUserIdInput" placeholder="ads_facebook_info.user_id" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="tokenLabelInput">备注</label>
+                <input id="tokenLabelInput" placeholder="例如 Dramawave 控制 token" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>&nbsp;</label>
+                <div class="row">
+                  <button class="btn" id="validateTokenBtn" type="button">校验</button>
+                  <button class="btn primary" id="saveTokenBtn" type="button">保存</button>
+                </div>
+              </div>
+            </div>
+            <div class="list" id="tokenList"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>账户组</h2>
+            <button class="btn" id="saveAccountGroupBtn" type="button">保存账户组</button>
+          </div>
+          <div class="panel-body">
+            <div class="grid two">
+              <div class="field">
+                <label for="accountGroupNameInput">账户组名称</label>
+                <input id="accountGroupNameInput" placeholder="北美 +8 调控账户" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="accountGroupIdInput">编辑中的账户组 ID</label>
+                <input id="accountGroupIdInput" readonly />
+              </div>
+            </div>
+            <div class="list" id="accountGroupList"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>规则组</h2>
+            <div class="row">
+              <button class="btn" id="newRuleGroupBtn" type="button">新建</button>
+              <button class="btn primary" id="saveRuleGroupBtn" type="button">保存规则组</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="grid">
+              <div class="field">
+                <label for="ruleGroupNameInput">规则组名称</label>
+                <input id="ruleGroupNameInput" placeholder="7-8 小时低效关停" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="ruleGroupIdInput">规则组 ID</label>
+                <input id="ruleGroupIdInput" readonly />
+              </div>
+              <div class="field">
+                <label for="windowTypeSelect">默认指标窗口</label>
+                <select id="windowTypeSelect">
+                  <option value="since_start">起始至当前</option>
+                  <option value="today">账户当天</option>
+                  <option value="recent_hours">最近 N 小时</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="windowHoursInput">N 小时</label>
+                <input id="windowHoursInput" type="number" min="1" max="720" value="24" />
+              </div>
+            </div>
+            <div class="field">
+              <label for="rulesJsonInput">规则 JSON</label>
+              <textarea id="rulesJsonInput"></textarea>
+              <span class="hint">字段支持 age_hours、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status；操作符支持 gt/gte/lt/lte/eq/between/in。</span>
+            </div>
+            <div class="list" id="ruleGroupList"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Live Preview 与执行</h2>
+            <div class="row">
+              <button class="btn primary" id="previewLiveBtn" type="button">Live Preview</button>
+              <button class="btn" id="dryRunBtn" type="button" disabled>Dry-run 执行</button>
+              <button class="btn danger" id="executeLiveBtn" type="button" disabled>确认关闭</button>
+              <button class="btn danger" id="emergencyStopBtn" type="button">急停</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="cards">
+              <div class="metric"><span>命中 campaign</span><strong id="previewTotal">0</strong></div>
+              <div class="metric"><span>待关闭</span><strong id="previewPause">0</strong></div>
+              <div class="metric"><span>观察</span><strong id="previewObserve">0</strong></div>
+              <div class="metric"><span>异常</span><strong id="previewErrors">0</strong></div>
+            </div>
+            <span class="hint" id="previewMeta">尚未 preview</span>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>账户</th>
+                    <th>Campaign</th>
+                    <th>状态</th>
+                    <th>起始/运行</th>
+                    <th>实时指标</th>
+                    <th>命中规则</th>
+                    <th>动作</th>
+                  </tr>
+                </thead>
+                <tbody id="previewRows"></tbody>
+              </table>
+            </div>
+            <div class="empty" id="previewEmpty">选择规则组后点击 Live Preview。</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>执行日志</h2>
+            <button class="btn" id="reloadActionsBtn" type="button">刷新日志</button>
+          </div>
+          <div class="panel-body">
+            <div class="list" id="actionList"></div>
+          </div>
         </section>
       </section>
     </main>
   </div>
-
   <div class="toast" id="toast"></div>
 
   <script>
-    const state = {
-      auth: null,
-      products: [],
-      accounts: [],
-      preview: null,
-      currentPage: 1
-    };
-
+    const defaultRules = [
+      { name: "7小时+无安装关闭", action: "pause", enabled: true, window: { type: "since_start" }, conditions: [
+        { field: "age_hours", op: "gte", value: 7 },
+        { field: "install", op: "lte", value: 0 }
+      ] },
+      { name: "消耗30安装10-ROAS30-关闭", action: "pause", enabled: true, window: { type: "since_start" }, conditions: [
+        { field: "spend", op: "gt", value: 30 },
+        { field: "install", op: "lte", value: 10 },
+        { field: "roas_pct", op: "lt", value: 30 }
+      ] }
+    ];
+    const state = { auth: null, products: [], accounts: [], accountGroups: [], ruleGroups: [], tokenConfig: [], preview: null };
+    const $ = id => document.getElementById(id);
     const els = {
-      quickNav: document.getElementById("quickNav"),
-      loginGate: document.getElementById("loginGate"),
-      permissionGate: document.getElementById("permissionGate"),
-      workspace: document.getElementById("workspace"),
-      userCard: document.getElementById("userCard"),
-      refreshBtn: document.getElementById("refreshBtn"),
-      authBtn: document.getElementById("authBtn"),
-      productSelect: document.getElementById("productSelect"),
-      levelSelect: document.getElementById("levelSelect"),
-      actionSelect: document.getElementById("actionSelect"),
-      timezoneSelect: document.getElementById("timezoneSelect"),
-      statusChecks: document.getElementById("statusChecks"),
-      countryInput: document.getElementById("countryInput"),
-      languageInput: document.getElementById("languageInput"),
-      searchInput: document.getElementById("searchInput"),
-      metricDaysInput: document.getElementById("metricDaysInput"),
-      pageSizeInput: document.getElementById("pageSizeInput"),
-      closeTimeInput: document.getElementById("closeTimeInput"),
-      reopenTimeInput: document.getElementById("reopenTimeInput"),
-      accountHint: document.getElementById("accountHint"),
-      accountList: document.getElementById("accountList"),
-      selectAllAccountsBtn: document.getElementById("selectAllAccountsBtn"),
-      clearAccountsBtn: document.getElementById("clearAccountsBtn"),
-      previewBtn: document.getElementById("previewBtn"),
-      saveRuleBtn: document.getElementById("saveRuleBtn"),
-      executeBtn: document.getElementById("executeBtn"),
-      previewMeta: document.getElementById("previewMeta"),
-      totalCount: document.getElementById("totalCount"),
-      pageCount: document.getElementById("pageCount"),
-      spendCount: document.getElementById("spendCount"),
-      installCount: document.getElementById("installCount"),
-      previewRows: document.getElementById("previewRows"),
-      previewEmpty: document.getElementById("previewEmpty"),
-      prevPageBtn: document.getElementById("prevPageBtn"),
-      nextPageBtn: document.getElementById("nextPageBtn"),
-      reloadRulesBtn: document.getElementById("reloadRulesBtn"),
-      ruleList: document.getElementById("ruleList"),
-      toast: document.getElementById("toast")
+      quickNav: $("quickNav"), loginGate: $("loginGate"), permissionGate: $("permissionGate"), workspace: $("workspace"),
+      userCard: $("userCard"), refreshBtn: $("refreshBtn"), authBtn: $("authBtn"), runnerStatus: $("runnerStatus"),
+      productSelect: $("productSelect"), accountGroupSelect: $("accountGroupSelect"), ruleGroupSelect: $("ruleGroupSelect"),
+      accountList: $("accountList"), accountHint: $("accountHint"), selectAllAccountsBtn: $("selectAllAccountsBtn"), clearAccountsBtn: $("clearAccountsBtn"),
+      tokenScopeAccount: $("tokenScopeAccount"), tokenUserIdInput: $("tokenUserIdInput"), tokenLabelInput: $("tokenLabelInput"), validateTokenBtn: $("validateTokenBtn"), saveTokenBtn: $("saveTokenBtn"), reloadTokenBtn: $("reloadTokenBtn"), tokenList: $("tokenList"),
+      accountGroupNameInput: $("accountGroupNameInput"), accountGroupIdInput: $("accountGroupIdInput"), saveAccountGroupBtn: $("saveAccountGroupBtn"), accountGroupList: $("accountGroupList"),
+      ruleGroupNameInput: $("ruleGroupNameInput"), ruleGroupIdInput: $("ruleGroupIdInput"), windowTypeSelect: $("windowTypeSelect"), windowHoursInput: $("windowHoursInput"), rulesJsonInput: $("rulesJsonInput"), newRuleGroupBtn: $("newRuleGroupBtn"), saveRuleGroupBtn: $("saveRuleGroupBtn"), ruleGroupList: $("ruleGroupList"),
+      previewLiveBtn: $("previewLiveBtn"), dryRunBtn: $("dryRunBtn"), executeLiveBtn: $("executeLiveBtn"), emergencyStopBtn: $("emergencyStopBtn"), previewTotal: $("previewTotal"), previewPause: $("previewPause"), previewObserve: $("previewObserve"), previewErrors: $("previewErrors"), previewMeta: $("previewMeta"), previewRows: $("previewRows"), previewEmpty: $("previewEmpty"),
+      reloadActionsBtn: $("reloadActionsBtn"), actionList: $("actionList"), toast: $("toast")
     };
 
     function escapeHtml(value) {
-      return String(value == null ? "" : value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+      return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     }
-
     function toast(message, variant) {
       els.toast.textContent = message;
       els.toast.classList.toggle("error", variant === "error");
@@ -658,76 +367,36 @@
       clearTimeout(toast.timer);
       toast.timer = setTimeout(() => els.toast.classList.remove("show"), variant === "error" ? 5200 : 2600);
     }
-
     async function api(url, options) {
       const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || data.message || "请求失败");
-      }
+      if (!response.ok) throw new Error(data.message || data.error || "请求失败");
       return data;
     }
-
-    function selectedValues(selector) {
-      return Array.from(document.querySelectorAll(selector))
-        .filter(item => item.checked)
-        .map(item => item.value)
-        .filter(Boolean);
-    }
-
-    function splitList(value) {
-      return String(value || "")
-        .split(/[,，\s]+/)
-        .map(item => item.trim())
-        .filter(Boolean);
-    }
-
     function hasPermission(auth) {
       const user = auth && auth.user;
       return !!(user && (user.is_admin || (user.permissions && user.permissions.ad_control_center)));
     }
-
-    function renderTopbar() {
-      if (!window.UiTopbar) return;
-      window.UiTopbar.render({
-        auth: state.auth || {},
-        userCard: els.userCard,
-        authButton: els.authBtn,
-        refreshButton: els.refreshBtn,
-        loginText: "登录",
-        logoutText: "退出登录"
-      });
+    function selectedAccounts() {
+      return Array.from(document.querySelectorAll("#accountList input[type=checkbox]:checked")).map(item => item.value);
     }
-
-    async function renderQuickNav() {
-      if (!window.QuickNav) return;
-      await window.QuickNav.render({
-        container: els.quickNav,
-        auth: state.auth,
-        activeKey: "adControl"
-      });
-    }
+    function currentProduct() { return els.productSelect.value || ""; }
+    function currentRuleGroup() { return els.ruleGroupSelect.value || els.ruleGroupIdInput.value || ""; }
+    function money(value) { return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
 
     async function loadAuth() {
-      const auth = await api("/api/ui/topbar");
-      state.auth = auth;
-      renderTopbar();
+      state.auth = await api("/api/ui/topbar");
+      if (window.UiTopbar) {
+        window.UiTopbar.render({ auth: state.auth, userCard: els.userCard, authButton: els.authBtn, refreshButton: els.refreshBtn, loginText: "登录", logoutText: "退出登录" });
+      }
       els.loginGate.classList.add("hidden");
       els.permissionGate.classList.add("hidden");
       els.workspace.classList.add("hidden");
-      if (!auth.authenticated) {
-        els.loginGate.classList.remove("hidden");
-        await renderQuickNav();
-        return false;
-      }
-      if (!hasPermission(auth)) {
-        els.permissionGate.classList.remove("hidden");
-        await renderQuickNav();
-        return false;
-      }
-      els.workspace.classList.remove("hidden");
-      await renderQuickNav();
-      return true;
+      if (!state.auth.authenticated) els.loginGate.classList.remove("hidden");
+      else if (!hasPermission(state.auth)) els.permissionGate.classList.remove("hidden");
+      else els.workspace.classList.remove("hidden");
+      if (window.QuickNav) await window.QuickNav.render({ container: els.quickNav, auth: state.auth, activeKey: "adControl" });
+      return state.auth.authenticated && hasPermission(state.auth);
     }
 
     async function loadProducts() {
@@ -736,269 +405,196 @@
       els.productSelect.innerHTML = state.products.length
         ? state.products.map(item => `<option value="${escapeHtml(item.product)}">${escapeHtml(item.product)}${item.app_id ? " / " + escapeHtml(item.app_id) : ""}</option>`).join("")
         : `<option value="">暂无产品</option>`;
-      await loadAccounts();
+      await loadProductScopedData();
+    }
+
+    async function loadProductScopedData() {
+      await Promise.all([loadAccounts(), loadTokenConfig(), loadAccountGroups(), loadRuleGroups(), loadRunnerStatus()]);
+      renderRulesEditor();
     }
 
     async function loadAccounts() {
-      const product = els.productSelect.value;
+      const product = currentProduct();
       state.accounts = [];
       els.accountList.innerHTML = "";
-      els.timezoneSelect.innerHTML = `<option value="">全部时区</option>`;
-      if (!product) {
-        els.accountHint.textContent = "选择产品后加载账户";
-        return;
-      }
-      els.accountHint.textContent = "账户加载中...";
+      els.tokenScopeAccount.innerHTML = `<option value="">产品默认 token</option>`;
+      if (!product) return;
       const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(product)}`);
       state.accounts = data.items || [];
-      els.accountHint.textContent = `已加载 ${state.accounts.length} 个账户，默认全选`;
-      const timezones = Array.from(new Set(state.accounts.map(item => String(item.time_zone || "").trim()).filter(Boolean))).sort();
-      els.timezoneSelect.innerHTML = `<option value="">全部时区</option>` + timezones.map(tz => `<option value="${escapeHtml(tz)}">${escapeHtml(tz)}</option>`).join("");
-      renderAccounts();
-    }
-
-    function renderAccounts() {
-      const timezone = els.timezoneSelect.value;
-      const accounts = state.accounts.filter(item => !timezone || String(item.time_zone || "") === timezone);
-      if (!accounts.length) {
-        els.accountList.innerHTML = `<div class="empty" style="padding:18px 8px;">当前筛选下没有账户。</div>`;
-        return;
-      }
-      els.accountList.innerHTML = accounts.map(item => {
-        const account = escapeHtml(item.account_id || "");
-        const name = escapeHtml(item.account_name || "");
-        const meta = [
-          item.time_zone ? `TZ ${item.time_zone}` : "",
-          item.account_status ? `Status ${item.account_status}` : "",
-          item.is_inactive ? `Inactive ${item.is_inactive}` : ""
-        ].filter(Boolean).join(" / ");
-        return `
-          <label class="account-option">
-            <input type="checkbox" value="${account}" checked />
-            <span class="account-title">${account}${name ? " - " + name : ""}</span>
-            <span class="account-meta">${escapeHtml(meta)}</span>
-          </label>
-        `;
+      els.accountHint.textContent = `已加载 ${state.accounts.length} 个账户`;
+      els.accountList.innerHTML = state.accounts.map(item => {
+        const id = escapeHtml(String(item.account_id || "").replace(/^act_/i, ""));
+        const title = `${id}${item.account_name ? " - " + item.account_name : ""}`;
+        const meta = [`TZ ${item.time_zone || "--"}`, `Campaign ${item.campaign_count || 0}`].join(" / ");
+        return `<label class="account-option"><input type="checkbox" value="${id}" checked><span class="account-title">${escapeHtml(title)}</span><span class="account-meta">${escapeHtml(meta)}</span></label>`;
+      }).join("") || `<div class="empty">暂无账户</div>`;
+      els.tokenScopeAccount.innerHTML += state.accounts.map(item => {
+        const id = String(item.account_id || "").replace(/^act_/i, "");
+        return `<option value="${escapeHtml(id)}">${escapeHtml(id)}${item.account_name ? " / " + escapeHtml(item.account_name) : ""}</option>`;
       }).join("");
     }
 
-    function criteria(page) {
-      const action = els.actionSelect.value;
-      const timezone = els.timezoneSelect.value;
-      return {
-        product: els.productSelect.value,
-        level: els.levelSelect.value,
-        action,
-        accounts: selectedValues("#accountList input[type=checkbox]"),
-        timezones: timezone ? [timezone] : [],
-        statuses: selectedValues("#statusChecks input[type=checkbox]"),
-        countries: splitList(els.countryInput.value),
-        languages: splitList(els.languageInput.value),
-        search: els.searchInput.value.trim(),
-        metric_days: Number(els.metricDaysInput.value || 3),
-        page_size: Number(els.pageSizeInput.value || 50),
-        page: page || state.currentPage
-      };
+    async function loadTokenConfig() {
+      const product = currentProduct();
+      if (!product) return;
+      const data = await api(`/api/ad-control/token-config?product=${encodeURIComponent(product)}`);
+      state.tokenConfig = data.items || [];
+      els.tokenList.innerHTML = state.tokenConfig.length ? state.tokenConfig.map(item => {
+        const validation = item.validation || {};
+        return `<div class="item"><div><strong>${escapeHtml(item.scope === "account" ? "账户 " + item.account_id : "产品默认")}</strong><span class="hint">user_id ${escapeHtml(item.user_id)} / ${escapeHtml(item.label || "--")} / 校验 ${escapeHtml(validation.validated_at || "--")}</span></div><span class="badge ${validation.ok ? "ok" : "warn"}">${validation.ok ? "可用" : "待校验"}</span></div>`;
+      }).join("") : `<div class="empty">暂无 token 配置</div>`;
     }
 
-    function formatMoney(value) {
-      const number = Number(value || 0);
-      return `$${number.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    async function loadAccountGroups() {
+      const product = currentProduct();
+      if (!product) return;
+      const data = await api(`/api/ad-control/account-groups?product=${encodeURIComponent(product)}`);
+      state.accountGroups = data.items || [];
+      els.accountGroupSelect.innerHTML = `<option value="">临时选择账户</option>` + state.accountGroups.map(item => `<option value="${escapeHtml(item.group_id)}">${escapeHtml(item.name)}</option>`).join("");
+      els.accountGroupList.innerHTML = state.accountGroups.length ? state.accountGroups.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml((item.account_ids || []).join(", "))}</span></div><div class="row"><button class="btn" data-edit-account-group="${escapeHtml(item.group_id)}">编辑</button><button class="btn danger" data-delete-account-group="${escapeHtml(item.group_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无账户组</div>`;
     }
 
-    function metricValue(item, key) {
-      return item && item.metrics ? item.metrics[key] : 0;
+    async function loadRuleGroups() {
+      const product = currentProduct();
+      if (!product) return;
+      const data = await api(`/api/ad-control/rule-groups?product=${encodeURIComponent(product)}`);
+      state.ruleGroups = data.items || [];
+      els.ruleGroupSelect.innerHTML = state.ruleGroups.length ? state.ruleGroups.map(item => `<option value="${escapeHtml(item.group_id)}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">暂无规则组</option>`;
+      els.ruleGroupList.innerHTML = state.ruleGroups.length ? state.ruleGroups.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.group_id)} / ${item.enabled ? "已启用" : "已禁用"} / ${item.emergency_stopped ? "已急停" : "正常"}</span></div><div class="row"><button class="btn" data-edit-rule-group="${escapeHtml(item.group_id)}">编辑</button><button class="btn" data-toggle-rule-group="${escapeHtml(item.group_id)}" data-enabled="${item.enabled ? "0" : "1"}">${item.enabled ? "禁用" : "启用"}</button><button class="btn danger" data-delete-rule-group="${escapeHtml(item.group_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无规则组</div>`;
+      if (state.ruleGroups[0] && !els.ruleGroupIdInput.value) fillRuleGroup(state.ruleGroups[0]);
     }
 
-    function statusBadge(status) {
-      const value = String(status || "--").toUpperCase();
-      const cls = value === "ACTIVE" ? "active" : (value === "PAUSED" ? "paused" : "warn");
-      return `<span class="badge ${cls}">${escapeHtml(value)}</span>`;
+    async function loadRunnerStatus() {
+      const data = await api("/api/ad-control/runner/status");
+      const r = data.resource || {};
+      els.runnerStatus.textContent = `CPU ${r.cpu_percent == null ? "--" : r.cpu_percent.toFixed(1) + "%"} / 内存 ${r.memory_percent == null ? "--" : r.memory_percent.toFixed(1) + "%"} / 并发上限 ${data.max_workers}`;
     }
 
+    function renderRulesEditor() {
+      if (!els.rulesJsonInput.value.trim()) els.rulesJsonInput.value = JSON.stringify(defaultRules, null, 2);
+    }
+    function fillRuleGroup(item) {
+      els.ruleGroupIdInput.value = item.group_id || "";
+      els.ruleGroupNameInput.value = item.name || "";
+      els.accountGroupSelect.value = item.account_group_id || "";
+      els.rulesJsonInput.value = JSON.stringify(item.rules || defaultRules, null, 2);
+      document.querySelectorAll("#accountList input[type=checkbox]").forEach(input => { input.checked = !item.account_ids || !item.account_ids.length || item.account_ids.includes(input.value); });
+    }
+
+    async function saveTokenConfig() {
+      const body = { product: currentProduct(), account_id: els.tokenScopeAccount.value, user_id: els.tokenUserIdInput.value.trim(), label: els.tokenLabelInput.value.trim() };
+      await api("/api/ad-control/token-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast("token 配置已保存");
+      await loadTokenConfig();
+    }
+    async function validateTokenConfig() {
+      const accounts = els.tokenScopeAccount.value ? [els.tokenScopeAccount.value] : selectedAccounts();
+      const body = { product: currentProduct(), user_id: els.tokenUserIdInput.value.trim(), accounts };
+      const data = await api("/api/ad-control/token-config/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast(`校验完成：${data.ok_count}/${data.checked_count}`);
+    }
+    async function saveAccountGroup() {
+      const body = { group_id: els.accountGroupIdInput.value.trim(), product: currentProduct(), name: els.accountGroupNameInput.value.trim(), account_ids: selectedAccounts() };
+      await api("/api/ad-control/account-groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      els.accountGroupIdInput.value = "";
+      toast("账户组已保存");
+      await loadAccountGroups();
+    }
+    async function saveRuleGroup() {
+      let rules;
+      try { rules = JSON.parse(els.rulesJsonInput.value || "[]"); } catch (error) { toast("规则 JSON 格式错误", "error"); return; }
+      const body = { group_id: els.ruleGroupIdInput.value.trim(), product: currentProduct(), name: els.ruleGroupNameInput.value.trim(), account_group_id: els.accountGroupSelect.value, account_ids: selectedAccounts(), rules };
+      await api("/api/ad-control/rule-groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast("规则组已保存，默认禁用");
+      await loadRuleGroups();
+    }
+    function defaultWindow() { return { type: els.windowTypeSelect.value, hours: Number(els.windowHoursInput.value || 24) }; }
+    async function previewLive() {
+      const groupId = currentRuleGroup();
+      if (!groupId) { toast("请先选择或保存规则组", "error"); return; }
+      els.previewLiveBtn.disabled = true;
+      try {
+        const data = await api(`/api/ad-control/rule-groups/${encodeURIComponent(groupId)}/preview-live`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ window: defaultWindow() }) });
+        state.preview = data;
+        renderPreview(data);
+        toast("live preview 完成");
+      } catch (error) { toast(error.message, "error"); }
+      finally { els.previewLiveBtn.disabled = false; }
+    }
     function renderPreview(data) {
-      state.preview = data;
       const items = data.items || [];
-      const spend = items.reduce((sum, item) => sum + Number(metricValue(item, "spend_usd") || 0), 0);
-      const installs = items.reduce((sum, item) => sum + Number(metricValue(item, "install") || 0), 0);
-      els.totalCount.textContent = Number(data.total || 0).toLocaleString();
-      els.pageCount.textContent = items.length.toLocaleString();
-      els.spendCount.textContent = formatMoney(spend);
-      els.installCount.textContent = installs.toLocaleString();
-      els.previewMeta.textContent = data.preview_id ? `preview ${data.preview_id}，过期时间 ${data.expires_at || "--"}` : "尚未试算";
-      els.executeBtn.disabled = !(data.preview_id && ["pause", "reopen"].includes(data.action));
+      els.previewTotal.textContent = data.total || 0;
+      els.previewPause.textContent = data.pause_count || 0;
+      els.previewObserve.textContent = data.observe_count || 0;
+      els.previewErrors.textContent = data.error_count || 0;
+      els.previewMeta.textContent = `preview ${data.preview_id || "--"} / 过期 ${data.expires_at || "--"} / 剩余未展示 ${data.remaining_count || 0}`;
+      els.dryRunBtn.disabled = !data.preview_id;
+      els.executeLiveBtn.disabled = !data.preview_id || !(data.pause_count > 0);
       els.previewEmpty.classList.toggle("hidden", items.length > 0);
       els.previewRows.innerHTML = items.map(item => {
-        const metrics = [
-          `Spend ${formatMoney(metricValue(item, "spend_usd"))}`,
-          `Install ${Number(metricValue(item, "install") || 0).toLocaleString()}`,
-          metricValue(item, "metric_days") ? `${metricValue(item, "metric_days")} 天` : ""
-        ].filter(Boolean).join(" / ");
-        const objectTitle = item.object_name || item.campaign_name || item.adset_name || item.ad_name || "";
-        return `
-          <tr>
-            <td><div class="mono">${escapeHtml(item.account_id || "")}</div><div>${escapeHtml(item.account_name || "")}</div></td>
-            <td>${escapeHtml(item.time_zone || "--")}</td>
-            <td><div>${escapeHtml(objectTitle || "--")}</div><div class="mono">${escapeHtml(item.level || "")}: ${escapeHtml(item.object_id || "")}</div></td>
-            <td>${statusBadge(item.status)}<div class="hint">${escapeHtml(item.local_status || "")}</div></td>
-            <td>${escapeHtml(item.country || "--")} / ${escapeHtml(item.language || "--")}</td>
-            <td>${escapeHtml(item.budget || item.latest_budget || "0")}</td>
-            <td>${escapeHtml(metrics)}</td>
-            <td>${escapeHtml(item.updated_at || "--")}</td>
-          </tr>
-        `;
+        const m = item.metrics || {};
+        const rules = (item.matched_rules || []).map(rule => rule.name || rule.action).join(", ");
+        const targetCls = item.target_action === "pause" ? "danger" : (item.target_action === "observe" ? "warn" : "");
+        return `<tr><td><div class="mono">${escapeHtml(item.account_id)}</div><div class="hint">token ${escapeHtml(item.token_user_id || "--")}</div></td><td><div>${escapeHtml(item.campaign_name || "--")}</div><div class="mono">${escapeHtml(item.campaign_id)}</div></td><td><span class="badge ok">${escapeHtml(item.effective_status || item.status || "--")}</span></td><td>${escapeHtml(item.campaign_start_at || "--")}<div class="hint">${item.age_hours == null ? "缺起始时间" : item.age_hours.toFixed(1) + " 小时"}</div></td><td>Spend ${money(m.spend)} / Install ${m.install || 0}<br>Purchase ${m.purchase || 0} / ROAS% ${money(m.roas_pct)} / CPA ${m.purchase_cpa == null ? "--" : money(m.purchase_cpa)}</td><td>${escapeHtml(rules || item.skip_reason || "--")}</td><td><span class="badge ${targetCls}">${escapeHtml(item.target_action || "none")}</span></td></tr>`;
       }).join("");
     }
-
-    async function preview(page) {
-      if (!els.productSelect.value) {
-        toast("请选择产品", "error");
-        return;
+    async function executeLive(dryRun) {
+      if (!state.preview || !state.preview.preview_id) { toast("请先 live preview", "error"); return; }
+      const body = { preview_id: state.preview.preview_id, preview_hash: state.preview.preview_hash, dry_run: !!dryRun };
+      if (!dryRun) {
+        const confirmText = window.prompt("真实关闭会调用 Meta API。请输入 EXECUTE_LIVE_PAUSE 确认：");
+        if (confirmText !== "EXECUTE_LIVE_PAUSE") return;
+        body.confirm = "EXECUTE_LIVE_PAUSE";
       }
-      state.currentPage = page || 1;
-      els.previewBtn.disabled = true;
-      els.previewBtn.textContent = "试算中...";
-      try {
-        const data = await api("/api/ad-control/preview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(criteria(state.currentPage))
-        });
-        renderPreview(data);
-        toast("试算完成");
-      } catch (error) {
-        toast(error.message, "error");
-      } finally {
-        els.previewBtn.disabled = false;
-        els.previewBtn.textContent = "试算";
-      }
+      const groupId = currentRuleGroup();
+      const data = await api(`/api/ad-control/rule-groups/${encodeURIComponent(groupId)}/execute-live`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast(`${dryRun ? "dry-run" : "真实执行"}完成：成功 ${data.success_count}，跳过 ${data.skipped_count}，失败 ${data.error_count}`);
+      await loadActions();
     }
-
-    async function saveRule() {
-      const name = `${els.productSelect.value || "产品"} ${els.actionSelect.options[els.actionSelect.selectedIndex].text}`;
-      try {
-        await api("/api/ad-control/rules", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name,
-            enabled: false,
-            criteria: criteria(1),
-            schedule: {
-              close_time: els.closeTimeInput.value,
-              reopen_time: els.reopenTimeInput.value,
-              timezone: els.timezoneSelect.value || "account"
-            },
-            thresholds: {}
-          })
-        });
-        toast("规则已保存，默认禁用");
-        await loadRules();
-      } catch (error) {
-        toast(error.message, "error");
-      }
+    async function loadActions() {
+      const data = await api("/api/ad-control/actions?limit=20");
+      const items = data.items || [];
+      els.actionList.innerHTML = items.length ? items.map(item => `<div class="item"><div><strong>${escapeHtml(item.action_id)}</strong><span class="hint">${escapeHtml(item.created_at)} / ${escapeHtml(item.product)} / ${item.dry_run ? "dry-run" : "real"} / 成功 ${item.success_count} 跳过 ${item.skipped_count} 失败 ${item.error_count}</span></div><span class="badge">${escapeHtml(item.action)}</span></div>`).join("") : `<div class="empty">暂无执行日志</div>`;
     }
-
-    async function executePreview() {
-      const preview = state.preview;
-      if (!preview || !preview.preview_id) {
-        toast("请先试算", "error");
-        return;
-      }
-      if (!["pause", "reopen"].includes(preview.action)) {
-        toast("仅关停或重启动作可执行", "error");
-        return;
-      }
-      const actionName = preview.action === "pause" ? "关停" : "重启";
-      const ok = window.confirm(`确认执行 ${actionName}？这会调用 Meta API 并同步业务资产表状态。`);
-      if (!ok) return;
-      els.executeBtn.disabled = true;
-      try {
-        const data = await api("/api/ad-control/execute", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ preview_id: preview.preview_id, action: preview.action })
-        });
-        toast(`执行完成：成功 ${data.success_count}，跳过 ${data.skipped_count}，失败 ${data.error_count}`);
-      } catch (error) {
-        toast(error.message, "error");
-      } finally {
-        els.executeBtn.disabled = false;
-      }
-    }
-
-    async function loadRules() {
-      try {
-        const data = await api("/api/ad-control/rules");
-        const rules = data.items || [];
-        if (!rules.length) {
-          els.ruleList.innerHTML = `<div class="empty">暂无规则。新规则保存后默认禁用。</div>`;
-          return;
-        }
-        els.ruleList.innerHTML = rules.map(rule => {
-          const criteria = rule.criteria || {};
-          const schedule = rule.schedule || {};
-          const meta = [
-            criteria.level || rule.level,
-            criteria.action || rule.action,
-            schedule.close_time ? `关 ${schedule.close_time}` : "",
-            schedule.reopen_time ? `开 ${schedule.reopen_time}` : "",
-            schedule.timezone ? `TZ ${schedule.timezone}` : ""
-          ].filter(Boolean).join(" / ");
-          return `
-            <div class="rule-row">
-              <div>
-                <strong>${escapeHtml(rule.name || rule.rule_id)}</strong>
-                <span>${escapeHtml(rule.product || "")} / ${escapeHtml(meta)} / ${escapeHtml(rule.updated_at || "")}</span>
-              </div>
-              <span class="badge ${rule.enabled ? "active" : "warn"}">${rule.enabled ? "已启用" : "已禁用"}</span>
-              <button class="btn" data-rule-id="${escapeHtml(rule.rule_id)}" data-enabled="${rule.enabled ? "0" : "1"}" type="button">${rule.enabled ? "禁用" : "启用"}</button>
-            </div>
-          `;
-        }).join("");
-      } catch (error) {
-        els.ruleList.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
-      }
-    }
-
-    async function toggleRule(event) {
-      const button = event.target.closest("button[data-rule-id]");
-      if (!button) return;
-      const enabled = button.dataset.enabled === "1";
-      if (enabled && !window.confirm("确认启用规则？启用后 runner 才可能执行。")) return;
-      try {
-        await api(`/api/ad-control/rules/${encodeURIComponent(button.dataset.ruleId)}/enabled`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ enabled })
-        });
-        toast(enabled ? "规则已启用" : "规则已禁用");
-        await loadRules();
-      } catch (error) {
-        toast(error.message, "error");
-      }
+    async function emergencyStop() {
+      const groupId = currentRuleGroup();
+      if (!window.confirm("确认急停？急停只停止规则组/runner，不主动修改广告状态。")) return;
+      await api("/api/ad-control/emergency-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(groupId ? { scope: "rule_group", group_id: groupId } : { scope: "global" }) });
+      toast("已急停");
+      await loadRuleGroups();
     }
 
     function bindEvents() {
-      els.productSelect.addEventListener("change", () => loadAccounts().catch(error => toast(error.message, "error")));
-      els.timezoneSelect.addEventListener("change", renderAccounts);
+      els.productSelect.addEventListener("change", () => loadProductScopedData().catch(error => toast(error.message, "error")));
       els.selectAllAccountsBtn.addEventListener("click", () => document.querySelectorAll("#accountList input[type=checkbox]").forEach(item => item.checked = true));
       els.clearAccountsBtn.addEventListener("click", () => document.querySelectorAll("#accountList input[type=checkbox]").forEach(item => item.checked = false));
-      els.previewBtn.addEventListener("click", () => preview(1));
-      els.prevPageBtn.addEventListener("click", () => preview(Math.max(1, state.currentPage - 1)));
-      els.nextPageBtn.addEventListener("click", () => preview(state.currentPage + 1));
-      els.saveRuleBtn.addEventListener("click", saveRule);
-      els.executeBtn.addEventListener("click", executePreview);
-      els.reloadRulesBtn.addEventListener("click", loadRules);
-      els.ruleList.addEventListener("click", toggleRule);
-      els.authBtn.addEventListener("click", () => {
-        if (!window.UiTopbar) return;
-        window.UiTopbar.handleAuthAction({
-          auth: state.auth || {},
-          api,
-          afterLogout: () => window.location.assign("/")
-        });
+      els.reloadTokenBtn.addEventListener("click", () => loadTokenConfig().catch(error => toast(error.message, "error")));
+      els.saveTokenBtn.addEventListener("click", () => saveTokenConfig().catch(error => toast(error.message, "error")));
+      els.validateTokenBtn.addEventListener("click", () => validateTokenConfig().catch(error => toast(error.message, "error")));
+      els.saveAccountGroupBtn.addEventListener("click", () => saveAccountGroup().catch(error => toast(error.message, "error")));
+      els.newRuleGroupBtn.addEventListener("click", () => { els.ruleGroupIdInput.value = ""; els.ruleGroupNameInput.value = ""; els.rulesJsonInput.value = JSON.stringify(defaultRules, null, 2); });
+      els.saveRuleGroupBtn.addEventListener("click", () => saveRuleGroup().catch(error => toast(error.message, "error")));
+      els.previewLiveBtn.addEventListener("click", previewLive);
+      els.dryRunBtn.addEventListener("click", () => executeLive(true).catch(error => toast(error.message, "error")));
+      els.executeLiveBtn.addEventListener("click", () => executeLive(false).catch(error => toast(error.message, "error")));
+      els.emergencyStopBtn.addEventListener("click", () => emergencyStop().catch(error => toast(error.message, "error")));
+      els.reloadActionsBtn.addEventListener("click", () => loadActions().catch(error => toast(error.message, "error")));
+      els.ruleGroupSelect.addEventListener("change", () => { const item = state.ruleGroups.find(x => x.group_id === els.ruleGroupSelect.value); if (item) fillRuleGroup(item); });
+      els.accountGroupList.addEventListener("click", async event => {
+        const edit = event.target.closest("[data-edit-account-group]");
+        const del = event.target.closest("[data-delete-account-group]");
+        if (edit) { const item = state.accountGroups.find(x => x.group_id === edit.dataset.editAccountGroup); if (item) { els.accountGroupIdInput.value = item.group_id; els.accountGroupNameInput.value = item.name; document.querySelectorAll("#accountList input[type=checkbox]").forEach(input => input.checked = (item.account_ids || []).includes(input.value)); } }
+        if (del && window.confirm("确认删除账户组？")) { await api(`/api/ad-control/account-groups/${encodeURIComponent(del.dataset.deleteAccountGroup)}`, { method: "DELETE" }); await loadAccountGroups(); }
       });
+      els.ruleGroupList.addEventListener("click", async event => {
+        const edit = event.target.closest("[data-edit-rule-group]");
+        const del = event.target.closest("[data-delete-rule-group]");
+        const toggle = event.target.closest("[data-toggle-rule-group]");
+        if (edit) { const item = state.ruleGroups.find(x => x.group_id === edit.dataset.editRuleGroup); if (item) fillRuleGroup(item); }
+        if (del && window.confirm("确认删除规则组？")) { await api(`/api/ad-control/rule-groups/${encodeURIComponent(del.dataset.deleteRuleGroup)}`, { method: "DELETE" }); await loadRuleGroups(); }
+        if (toggle) { await api(`/api/ad-control/rule-groups/${encodeURIComponent(toggle.dataset.toggleRuleGroup)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: toggle.dataset.enabled === "1" }) }); await loadRuleGroups(); }
+      });
+      els.authBtn.addEventListener("click", () => window.UiTopbar && window.UiTopbar.handleAuthAction({ auth: state.auth || {}, api, afterLogout: () => window.location.assign("/") }));
     }
 
     async function init() {
@@ -1007,12 +603,9 @@
         const allowed = await loadAuth();
         if (!allowed) return;
         await loadProducts();
-        await loadRules();
-      } catch (error) {
-        toast(error.message, "error");
-      }
+        await loadActions();
+      } catch (error) { toast(error.message, "error"); }
     }
-
     init();
   </script>
 </body>

@@ -258,6 +258,7 @@ import secrets
 
 
 import shutil
+import socket
 
 
 
@@ -32652,6 +32653,18 @@ AD_CONTROL_PREVIEW_TTL_SECONDS = int(os.environ.get("AD_CONTROL_PREVIEW_TTL_SECO
 AD_CONTROL_MAX_PAGE_SIZE = int(os.environ.get("AD_CONTROL_MAX_PAGE_SIZE", "200"))
 AD_CONTROL_MAX_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_EXECUTE", "50"))
 AD_CONTROL_MAX_METRIC_IDS = int(os.environ.get("AD_CONTROL_MAX_METRIC_IDS", "200"))
+AD_CONTROL_MAX_LIVE_ACCOUNTS = int(os.environ.get("AD_CONTROL_MAX_LIVE_ACCOUNTS", "40"))
+AD_CONTROL_MAX_LIVE_CAMPAIGNS = int(os.environ.get("AD_CONTROL_MAX_LIVE_CAMPAIGNS", "1000"))
+AD_CONTROL_MAX_LIVE_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE", "200"))
+AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))
+AD_CONTROL_RESOURCE_LIMIT_PERCENT = float(os.environ.get("AD_CONTROL_RESOURCE_LIMIT_PERCENT", "85"))
+AD_CONTROL_REDIS_URL = os.environ.get("AD_CONTROL_REDIS_URL", "").strip()
+AD_CONTROL_INSIGHT_START_TABLE = os.environ.get("AD_CONTROL_INSIGHT_START_TABLE", "ads_facebook_hours_insights").strip() or "ads_facebook_hours_insights"
+AD_CONTROL_INSIGHT_START_FIELD = os.environ.get("AD_CONTROL_INSIGHT_START_FIELD", "dt").strip() or "dt"
+AD_CONTROL_INSIGHT_CAMPAIGN_FIELD = os.environ.get("AD_CONTROL_INSIGHT_CAMPAIGN_FIELD", "campaign_id").strip() or "campaign_id"
+AD_CONTROL_INSIGHT_ACCOUNT_FIELD = os.environ.get("AD_CONTROL_INSIGHT_ACCOUNT_FIELD", "ad_account_id").strip()
+AD_CONTROL_INSIGHT_PRODUCT_FIELD = os.environ.get("AD_CONTROL_INSIGHT_PRODUCT_FIELD", "").strip()
+AD_CONTROL_INSIGHTS_TIME_INCREMENT = os.environ.get("AD_CONTROL_INSIGHTS_TIME_INCREMENT", "1").strip() or "1"
 
 AD_CONTROL_LEVELS = {
     "campaign": {
@@ -32746,6 +32759,54 @@ CREATE TABLE IF NOT EXISTS ad_control_rule (
 )
 """
 
+AD_CONTROL_TOKEN_CONFIG_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_token_config (
+  product TEXT NOT NULL DEFAULT '',
+  account_id TEXT NOT NULL DEFAULT '',
+  user_id TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (product, account_id)
+)
+"""
+
+AD_CONTROL_ACCOUNT_GROUP_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_account_group (
+  group_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  account_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+AD_CONTROL_RULE_GROUP_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_rule_group (
+  group_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  account_group_id TEXT NOT NULL DEFAULT '',
+  account_ids_json TEXT NOT NULL DEFAULT '[]',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  emergency_stopped INTEGER NOT NULL DEFAULT 0,
+  last_preview_id TEXT NOT NULL DEFAULT '',
+  last_preview_hash TEXT NOT NULL DEFAULT '',
+  last_run_at TEXT NOT NULL DEFAULT '',
+  last_result_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
 
 def ensure_ad_control_tables():
     with JOB_DB_LOCK:
@@ -32755,10 +32816,15 @@ def ensure_ad_control_tables():
             conn.execute(AD_CONTROL_ACTION_TABLE_SQL)
             conn.execute(AD_CONTROL_OBJECT_TABLE_SQL)
             conn.execute(AD_CONTROL_RULE_TABLE_SQL)
+            conn.execute(AD_CONTROL_TOKEN_CONFIG_TABLE_SQL)
+            conn.execute(AD_CONTROL_ACCOUNT_GROUP_TABLE_SQL)
+            conn.execute(AD_CONTROL_RULE_GROUP_TABLE_SQL)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_preview_expires ON ad_control_preview(expires_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_action_created ON ad_control_action(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_object_product ON ad_control_object_state(product, level, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_enabled ON ad_control_rule(enabled, updated_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_account_group_product ON ad_control_account_group(product, deleted)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_group_product ON ad_control_rule_group(product, deleted, enabled)")
             conn.commit()
         finally:
             conn.close()
@@ -33553,6 +33619,1336 @@ def set_ad_control_rule_enabled(rule_id, enabled):
             return ad_control_rule_payload(row)
         finally:
             conn.close()
+
+
+def ad_control_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def ad_control_json_loads(value, default):
+    try:
+        if value is None or value == "":
+            return default
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def ad_control_json_dumps(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def ad_control_actor(session):
+    return str((session or {}).get("user_id") or "")
+
+
+def ad_control_rule_hash(payload):
+    return hashlib.sha256(ad_control_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def ad_control_account_key(account_id):
+    normalized = ad_control_normalize_account(account_id)
+    return "act_%s" % normalized if normalized else ""
+
+
+def ad_control_parse_rule_group_path(path, suffix=""):
+    prefix = "/api/ad-control/rule-groups/"
+    if not path.startswith(prefix):
+        return ""
+    value = path[len(prefix):]
+    if suffix:
+        if not value.endswith(suffix):
+            return ""
+        value = value[:-len(suffix)]
+    return value.strip("/")
+
+
+def ad_control_parse_account_group_path(path):
+    prefix = "/api/ad-control/account-groups/"
+    if not path.startswith(prefix):
+        return ""
+    return path[len(prefix):].strip("/")
+
+
+def ad_control_safe_json_list(value):
+    data = ad_control_json_loads(value, [])
+    return data if isinstance(data, list) else []
+
+
+def ad_control_safe_json_dict(value):
+    data = ad_control_json_loads(value, {})
+    return data if isinstance(data, dict) else {}
+
+
+def ad_control_token_config_payload(row):
+    item = dict(row)
+    item["validation"] = ad_control_safe_json_dict(item.pop("validation_json", "{}"))
+    item["account_id"] = item.get("account_id") or ""
+    item["scope"] = "account" if item["account_id"] else "product"
+    return item
+
+
+def list_ad_control_token_config(product):
+    product = str(product or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM ad_control_token_config
+                 WHERE product = ?
+                 ORDER BY CASE WHEN account_id='' THEN 0 ELSE 1 END, account_id
+                """,
+                (product,),
+            ).fetchall()
+            return {"items": [ad_control_token_config_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def save_ad_control_token_config(payload, session):
+    product = str(payload.get("product") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    account_id = ad_control_normalize_account(payload.get("account_id"))
+    user_id = str(payload.get("user_id") or "").strip()
+    if not user_id:
+        raise StructuredApiError("missing_user_id", "missing token owner user_id")
+    label = str(payload.get("label") or "").strip()
+    validation = payload.get("validation") if isinstance(payload.get("validation"), dict) else {}
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_token_config (
+                  product, account_id, user_id, label, validation_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(product, account_id) DO UPDATE SET
+                  user_id=excluded.user_id,
+                  label=excluded.label,
+                  validation_json=excluded.validation_json,
+                  updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    product,
+                    account_id,
+                    user_id,
+                    label,
+                    json.dumps(validation, ensure_ascii=False),
+                    ad_control_actor(session),
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM ad_control_token_config WHERE product=? AND account_id=?",
+                (product, account_id),
+            ).fetchone()
+            return ad_control_token_config_payload(row)
+        finally:
+            conn.close()
+
+
+def ad_control_token_for_user_id(user_id):
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return ""
+    sql = """
+        SELECT accessToken
+          FROM {table}
+         WHERE CAST(user_id AS CHAR)={user_id}
+           AND accessToken IS NOT NULL
+           AND accessToken<>''
+         LIMIT 1
+    """.format(
+        table=ad_control_table("ads_facebook_info"),
+        user_id=ad_control_quote(user_id),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    return str(rows[0][0] or "").strip() if rows else ""
+
+
+def ad_control_token_config_for_accounts(product, account_ids):
+    product = str(product or "").strip()
+    accounts = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_control_token_config WHERE product=?",
+                (product,),
+            ).fetchall()
+        finally:
+            conn.close()
+    by_account = {}
+    default_config = None
+    for row in rows:
+        item = ad_control_token_config_payload(row)
+        if item.get("account_id"):
+            by_account[ad_control_normalize_account(item["account_id"])] = item
+        else:
+            default_config = item
+    out = {}
+    for account_id in accounts:
+        out[account_id] = by_account.get(account_id) or default_config or {}
+    return out
+
+
+def validate_ad_control_token_config(payload):
+    product = str(payload.get("product") or "").strip()
+    user_id = str(payload.get("user_id") or "").strip()
+    accounts = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("accounts") or payload.get("account_ids"))]
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if not user_id:
+        raise StructuredApiError("missing_user_id", "missing token owner user_id")
+    token = ad_control_token_for_user_id(user_id)
+    if not token:
+        raise StructuredApiError("missing_meta_token", "token owner has no Meta token")
+    results = []
+    ok_count = 0
+    for account_id in accounts[:50]:
+        try:
+            meta = ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
+            results.append({"account_id": account_id, "ok": True, "name": meta.get("name", "")})
+            ok_count += 1
+        except Exception as exc:
+            results.append({"account_id": account_id, "ok": False, "reason": str(exc)})
+    return {
+        "product": product,
+        "user_id": user_id,
+        "ok": ok_count == len(accounts),
+        "checked_count": len(accounts),
+        "ok_count": ok_count,
+        "results": results,
+        "validated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def ad_control_validate_scope_token_access(scope):
+    token_configs = ad_control_token_config_for_accounts(scope["product"], scope["account_ids"])
+    errors = []
+    for account_id in scope["account_ids"]:
+        token_user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
+        if not token_user_id:
+            errors.append({"account_id": account_id, "reason": "missing_token_config"})
+            continue
+        token = ad_control_token_for_user_id(token_user_id)
+        if not token:
+            errors.append({"account_id": account_id, "token_user_id": token_user_id, "reason": "missing_meta_token"})
+            continue
+        try:
+            ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
+        except Exception as exc:
+            errors.append({"account_id": account_id, "token_user_id": token_user_id, "reason": str(exc)})
+    if errors:
+        raise StructuredApiError(
+            "token_access_failed",
+            "token cannot access selected accounts",
+            accounts=",".join(str(item.get("account_id") or "") for item in errors[:10]),
+            errors=errors[:10],
+        )
+    return {"ok": True, "checked_count": len(scope["account_ids"])}
+
+
+def ad_control_account_group_payload(row):
+    item = dict(row)
+    item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
+    item["deleted"] = bool(item.get("deleted"))
+    return item
+
+
+def list_ad_control_account_groups(product=None):
+    ensure_ad_control_tables()
+    where = "WHERE deleted=0"
+    params = []
+    if product:
+        where += " AND product=?"
+        params.append(str(product or "").strip())
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_control_account_group %s ORDER BY updated_at DESC" % where,
+                params,
+            ).fetchall()
+            return {"items": [ad_control_account_group_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def save_ad_control_account_group(payload, session):
+    product = str(payload.get("product") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if not name:
+        raise StructuredApiError("missing_name", "missing group name")
+    group_id = str(payload.get("group_id") or "").strip() or uuid.uuid4().hex
+    account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
+    account_ids = [item for item in account_ids if item]
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_account_group (
+                  group_id, name, product, account_ids_json, created_by, created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(group_id) DO UPDATE SET
+                  name=excluded.name,
+                  product=excluded.product,
+                  account_ids_json=excluded.account_ids_json,
+                  updated_at=CURRENT_TIMESTAMP,
+                  deleted=0
+                """,
+                (group_id, name, product, json.dumps(account_ids, ensure_ascii=False), ad_control_actor(session)),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_account_group WHERE group_id=?", (group_id,)).fetchone()
+            return ad_control_account_group_payload(row)
+        finally:
+            conn.close()
+
+
+def delete_ad_control_account_group(group_id):
+    ensure_ad_control_tables()
+    group_id = str(group_id or "").strip()
+    if not group_id:
+        raise StructuredApiError("missing_group_id", "missing account group id")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_control_account_group SET deleted=1, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                (group_id,),
+            )
+            if conn.total_changes < 1:
+                raise StructuredApiError("not_found", "account group not found")
+            conn.commit()
+            return {"message": "deleted", "group_id": group_id}
+        finally:
+            conn.close()
+
+
+def ad_control_rule_group_payload(row):
+    item = dict(row)
+    item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
+    item["rules"] = ad_control_safe_json_list(item.pop("rules_json", "[]"))
+    item["last_result"] = ad_control_safe_json_dict(item.pop("last_result_json", "{}"))
+    item["enabled"] = bool(item.get("enabled"))
+    item["emergency_stopped"] = bool(item.get("emergency_stopped"))
+    item["deleted"] = bool(item.get("deleted"))
+    return item
+
+
+def list_ad_control_rule_groups(product=None):
+    ensure_ad_control_tables()
+    where = "WHERE deleted=0"
+    params = []
+    if product:
+        where += " AND product=?"
+        params.append(str(product or "").strip())
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_control_rule_group %s ORDER BY updated_at DESC" % where,
+                params,
+            ).fetchall()
+            return {"items": [ad_control_rule_group_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def fetch_ad_control_rule_group(group_id):
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ad_control_rule_group WHERE group_id=? AND deleted=0",
+                (str(group_id or "").strip(),),
+            ).fetchone()
+            if not row:
+                raise StructuredApiError("not_found", "rule group not found")
+            return ad_control_rule_group_payload(row)
+        finally:
+            conn.close()
+
+
+def save_ad_control_rule_group(payload, session):
+    product = str(payload.get("product") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if not name:
+        raise StructuredApiError("missing_name", "missing rule group name")
+    group_id = str(payload.get("group_id") or "").strip() or uuid.uuid4().hex
+    account_group_id = str(payload.get("account_group_id") or "").strip()
+    account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
+    account_ids = [item for item in account_ids if item]
+    rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+    enabled = 1 if payload.get("enabled") else 0
+    if enabled:
+        validate_account_ids = list(account_ids)
+        if not validate_account_ids and account_group_id:
+            groups = list_ad_control_account_groups(product).get("items", [])
+            for account_group in groups:
+                if account_group.get("group_id") == account_group_id:
+                    validate_account_ids = [ad_control_normalize_account(item) for item in account_group.get("account_ids", [])]
+                    break
+        validate_account_ids = [item for item in validate_account_ids if item]
+        if not validate_account_ids:
+            raise StructuredApiError("missing_accounts", "select accounts before enabling rule group")
+        ad_control_validate_scope_token_access({
+            "product": product,
+            "account_ids": validate_account_ids,
+        })
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_rule_group (
+                  group_id, name, product, account_group_id, account_ids_json, rules_json,
+                  enabled, emergency_stopped, created_by, created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(group_id) DO UPDATE SET
+                  name=excluded.name,
+                  product=excluded.product,
+                  account_group_id=excluded.account_group_id,
+                  account_ids_json=excluded.account_ids_json,
+                  rules_json=excluded.rules_json,
+                  enabled=excluded.enabled,
+                  updated_at=CURRENT_TIMESTAMP,
+                  deleted=0
+                """,
+                (
+                    group_id,
+                    name,
+                    product,
+                    account_group_id,
+                    json.dumps(account_ids, ensure_ascii=False),
+                    json.dumps(rules, ensure_ascii=False),
+                    enabled,
+                    ad_control_actor(session),
+                ),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)).fetchone()
+            return ad_control_rule_group_payload(row)
+        finally:
+            conn.close()
+
+
+def delete_ad_control_rule_group(group_id):
+    ensure_ad_control_tables()
+    group_id = str(group_id or "").strip()
+    if not group_id:
+        raise StructuredApiError("missing_group_id", "missing rule group id")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_control_rule_group SET deleted=1, enabled=0, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                (group_id,),
+            )
+            if conn.total_changes < 1:
+                raise StructuredApiError("not_found", "rule group not found")
+            conn.commit()
+            return {"message": "deleted", "group_id": group_id}
+        finally:
+            conn.close()
+
+
+def set_ad_control_rule_group_enabled(group_id, enabled):
+    ensure_ad_control_tables()
+    group = fetch_ad_control_rule_group(group_id)
+    if enabled:
+        if group.get("emergency_stopped"):
+            raise StructuredApiError("emergency_stopped", "rule group is emergency stopped")
+        if not group.get("last_preview_id") or not group.get("last_preview_hash"):
+            raise StructuredApiError("preview_required", "preview this rule group before enabling it")
+        scope = ad_control_resolve_live_scope({"rule_group_id": group_id})
+        ad_control_validate_scope_token_access(scope)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                "UPDATE ad_control_rule_group SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                (1 if enabled else 0, group_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return fetch_ad_control_rule_group(group_id)
+
+
+def ad_control_emergency_stop(payload):
+    scope = str(payload.get("scope") or "global").strip()
+    group_id = str(payload.get("group_id") or "").strip()
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            if scope == "rule_group" and group_id:
+                conn.execute(
+                    "UPDATE ad_control_rule_group SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                    (group_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE ad_control_rule_group SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP WHERE deleted=0"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return {"message": "stopped", "scope": scope, "group_id": group_id}
+
+
+def ad_control_runner_status():
+    resource = ad_control_resource_snapshot()
+    groups = list_ad_control_rule_groups().get("items", [])
+    return {
+        "resource": resource,
+        "enabled_rule_groups": len([item for item in groups if item.get("enabled")]),
+        "emergency_stopped_groups": len([item for item in groups if item.get("emergency_stopped")]),
+        "max_workers": AD_CONTROL_LIVE_MAX_WORKERS,
+        "resource_limit_percent": AD_CONTROL_RESOURCE_LIMIT_PERCENT,
+    }
+
+
+def list_ad_control_actions(limit=50):
+    ensure_ad_control_tables()
+    limit = ad_control_int(limit, 50, 1, 200)
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ad_control_action ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
+                item["results"] = ad_control_safe_json_list(item.pop("results_json", "[]"))
+                item["dry_run"] = bool(item.get("dry_run"))
+                items.append(item)
+            return {"items": items}
+        finally:
+            conn.close()
+
+
+def ad_control_resource_snapshot():
+    cpu_percent = None
+    mem_percent = None
+    try:
+        if hasattr(os, "getloadavg"):
+            load1 = os.getloadavg()[0]
+            cpu_count = os.cpu_count() or 1
+            cpu_percent = min(100.0, max(0.0, (load1 / cpu_count) * 100.0))
+    except Exception:
+        cpu_percent = None
+    try:
+        meminfo = {}
+        with open("/proc/meminfo", "r") as handle:
+            for line in handle:
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    meminfo[parts[0]] = ad_control_float(parts[1].strip().split()[0], 0.0)
+        total = meminfo.get("MemTotal", 0.0)
+        available = meminfo.get("MemAvailable", 0.0)
+        if total > 0:
+            mem_percent = max(0.0, min(100.0, ((total - available) / total) * 100.0))
+    except Exception:
+        mem_percent = None
+    over_limit = any(
+        value is not None and value >= AD_CONTROL_RESOURCE_LIMIT_PERCENT
+        for value in (cpu_percent, mem_percent)
+    )
+    return {"cpu_percent": cpu_percent, "memory_percent": mem_percent, "over_limit": over_limit}
+
+
+def ad_control_redis_parse_url():
+    if not AD_CONTROL_REDIS_URL:
+        return None
+    parsed = urlparse(AD_CONTROL_REDIS_URL)
+    if parsed.scheme not in ("redis", "rediss"):
+        return None
+    return {
+        "host": parsed.hostname or "127.0.0.1",
+        "port": parsed.port or 6379,
+        "password": parsed.password or "",
+        "db": int((parsed.path or "/0").strip("/") or "0"),
+        "ssl": parsed.scheme == "rediss",
+    }
+
+
+def ad_control_redis_command(*parts):
+    config = ad_control_redis_parse_url()
+    if not config:
+        return None
+    payload = ("*%d\r\n" % len(parts)).encode("utf-8")
+    for part in parts:
+        raw = str(part).encode("utf-8")
+        payload += ("$%d\r\n" % len(raw)).encode("utf-8") + raw + b"\r\n"
+    sock = socket.create_connection((config["host"], config["port"]), timeout=1.5)
+    try:
+        if config["password"]:
+            ad_control_redis_send(sock, "AUTH", config["password"])
+        if config["db"]:
+            ad_control_redis_send(sock, "SELECT", str(config["db"]))
+        sock.sendall(payload)
+        return ad_control_redis_read(sock)
+    finally:
+        sock.close()
+
+
+def ad_control_redis_send(sock, *parts):
+    payload = ("*%d\r\n" % len(parts)).encode("utf-8")
+    for part in parts:
+        raw = str(part).encode("utf-8")
+        payload += ("$%d\r\n" % len(raw)).encode("utf-8") + raw + b"\r\n"
+    sock.sendall(payload)
+    return ad_control_redis_read(sock)
+
+
+def ad_control_redis_read(sock):
+    prefix = sock.recv(1)
+    if not prefix:
+        return None
+    line = b""
+    while not line.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            break
+        line += chunk
+    text = line[:-2].decode("utf-8", "replace")
+    if prefix == b"+":
+        return text
+    if prefix == b"-":
+        raise RuntimeError(text)
+    if prefix == b":":
+        return int(text or "0")
+    if prefix == b"$":
+        size = int(text or "-1")
+        if size < 0:
+            return None
+        data = b""
+        while len(data) < size + 2:
+            data += sock.recv(size + 2 - len(data))
+        return data[:size].decode("utf-8", "replace")
+    return text
+
+
+def ad_control_campaign_start_key(product, account_id, campaign_id):
+    return "ad_control:campaign_start:%s:%s:%s" % (
+        str(product or "").strip(),
+        ad_control_normalize_account(account_id),
+        str(campaign_id or "").strip(),
+    )
+
+
+def ad_control_get_cached_campaign_start(product, account_id, campaign_id):
+    key = ad_control_campaign_start_key(product, account_id, campaign_id)
+    try:
+        raw = ad_control_redis_command("GET", key)
+        data = ad_control_safe_json_dict(raw)
+        if data.get("campaign_start_at"):
+            data["cache"] = "redis"
+            return data
+    except Exception as exc:
+        logging.info("ad control redis get failed: %s", exc)
+    return {}
+
+
+def ad_control_set_cached_campaign_start(product, account_id, campaign_id, value):
+    key = ad_control_campaign_start_key(product, account_id, campaign_id)
+    payload = {
+        "campaign_start_at": value.get("campaign_start_at", ""),
+        "source_table": value.get("source_table", ""),
+        "source_field": value.get("source_field", ""),
+        "cached_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        ad_control_redis_command("SET", key, json.dumps(payload, ensure_ascii=False))
+        payload["cache"] = "redis"
+    except Exception as exc:
+        logging.info("ad control redis set failed: %s", exc)
+        payload["cache"] = "none"
+    return payload
+
+
+def ad_control_delete_cached_campaign_start(product, account_id, campaign_id):
+    key = ad_control_campaign_start_key(product, account_id, campaign_id)
+    try:
+        ad_control_redis_command("DEL", key)
+    except Exception as exc:
+        logging.info("ad control redis del failed: %s", exc)
+    return {"message": "refreshed", "key": key}
+
+
+def ad_control_validate_insight_start_schema():
+    columns = mysql_table_columns(AD_CONTROL_INSIGHT_START_TABLE, AD_CONTROL_DB_NAME)
+    required = [AD_CONTROL_INSIGHT_CAMPAIGN_FIELD, AD_CONTROL_INSIGHT_START_FIELD]
+    missing = [item for item in required if item not in columns]
+    if missing:
+        raise StructuredApiError(
+            "invalid_insight_start_schema",
+            "insight start table missing required fields",
+            table=AD_CONTROL_INSIGHT_START_TABLE,
+            missing=",".join(missing),
+        )
+    return columns
+
+
+def ad_control_query_campaign_starts(product, account_id, campaign_ids):
+    campaign_ids = [str(item or "").strip() for item in campaign_ids if str(item or "").strip()]
+    if not campaign_ids:
+        return {}
+    columns = ad_control_validate_insight_start_schema()
+    where = [
+        "%s IN %s" % (sql_identifier(AD_CONTROL_INSIGHT_CAMPAIGN_FIELD), ad_control_sql_in(campaign_ids)),
+        "%s IS NOT NULL" % sql_identifier(AD_CONTROL_INSIGHT_START_FIELD),
+    ]
+    if AD_CONTROL_INSIGHT_ACCOUNT_FIELD and AD_CONTROL_INSIGHT_ACCOUNT_FIELD in columns:
+        where.append("%s=%s" % (
+            ad_control_norm_account_sql(sql_identifier(AD_CONTROL_INSIGHT_ACCOUNT_FIELD)),
+            ad_control_quote(ad_control_normalize_account(account_id)),
+        ))
+    if AD_CONTROL_INSIGHT_PRODUCT_FIELD and AD_CONTROL_INSIGHT_PRODUCT_FIELD in columns:
+        where.append("%s=%s" % (sql_identifier(AD_CONTROL_INSIGHT_PRODUCT_FIELD), ad_control_quote(product)))
+    sql = """
+        SELECT CAST({campaign_field} AS CHAR), MIN({start_field})
+          FROM {table}
+         WHERE {where_sql}
+         GROUP BY CAST({campaign_field} AS CHAR)
+    """.format(
+        campaign_field=sql_identifier(AD_CONTROL_INSIGHT_CAMPAIGN_FIELD),
+        start_field=sql_identifier(AD_CONTROL_INSIGHT_START_FIELD),
+        table=ad_control_table(AD_CONTROL_INSIGHT_START_TABLE),
+        where_sql=" AND ".join(where),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    out = {}
+    for row in rows:
+        campaign_id = str(row[0] or "").strip()
+        start_at = str(row[1] or "").strip()
+        if campaign_id and start_at:
+            out[campaign_id] = {
+                "campaign_start_at": start_at,
+                "source_table": AD_CONTROL_INSIGHT_START_TABLE,
+                "source_field": AD_CONTROL_INSIGHT_START_FIELD,
+            }
+    return out
+
+
+def ad_control_campaign_start(product, account_id, campaign_id, refresh=False):
+    if not refresh:
+        cached = ad_control_get_cached_campaign_start(product, account_id, campaign_id)
+        if cached:
+            return cached
+    data = ad_control_query_campaign_starts(product, account_id, [campaign_id]).get(str(campaign_id), {})
+    if data.get("campaign_start_at"):
+        return ad_control_set_cached_campaign_start(product, account_id, campaign_id, data)
+    return {"campaign_start_at": "", "cache": "miss", "reason": "missing_campaign_start_at"}
+
+
+def ad_control_parse_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = text.replace("T", " ").replace("Z", "")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:26] if "%f" in fmt else text[:19 if "H" in fmt else 10], fmt)
+        except Exception:
+            pass
+    return None
+
+
+def ad_control_age_hours(start_at):
+    dt = ad_control_parse_datetime(start_at)
+    if not dt:
+        return None
+    return max(0.0, (datetime.utcnow() - dt).total_seconds() / 3600.0)
+
+
+def ad_control_product_campaign_whitelist(product, account_ids):
+    accounts = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    if not product or not accounts:
+        return {}
+    sql = """
+        SELECT {account_norm}, CAST(campaign_id AS CHAR), COALESCE(MAX(NULLIF(campaign_name,'')), '')
+          FROM {table}
+         WHERE product={product}
+           AND campaign_id IS NOT NULL
+           AND campaign_id<>''
+           AND {account_norm} IN {accounts}
+         GROUP BY {account_norm}, CAST(campaign_id AS CHAR)
+    """.format(
+        account_norm=ad_control_norm_account_sql("ad_account_id"),
+        table=ad_control_table("ads_facebook_auto_created_data"),
+        product=ad_control_quote(product),
+        accounts=ad_control_sql_in(accounts),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    out = {}
+    for row in rows:
+        account_id = ad_control_normalize_account(row[0])
+        campaign_id = str(row[1] or "").strip()
+        if account_id and campaign_id:
+            out.setdefault(account_id, {})[campaign_id] = {"campaign_name": str(row[2] or "")}
+    return out
+
+
+def ad_control_graph_paged_get(token, object_id, edge, params):
+    url = "https://graph.facebook.com/%s/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id, edge)
+    params = dict(params or {})
+    params["access_token"] = token
+    items = []
+    while url:
+        response = requests.get(url, params=params, timeout=AD_CONTROL_GRAPH_TIMEOUT)
+        payload = response.json() if response.content else {}
+        if response.status_code >= 400 or payload.get("error"):
+            raise RuntimeError(json.dumps(payload.get("error") or payload, ensure_ascii=False))
+        items.extend(payload.get("data") or [])
+        next_url = ((payload.get("paging") or {}).get("next") or "").strip()
+        url = next_url or ""
+        params = {}
+        if len(items) >= AD_CONTROL_MAX_LIVE_CAMPAIGNS:
+            break
+    return items
+
+
+def ad_control_meta_active_campaigns(token, account_id):
+    params = {
+        "fields": "id,name,status,effective_status",
+        "limit": "500",
+        "effective_status": json.dumps(["ACTIVE"]),
+    }
+    return ad_control_graph_paged_get(token, ad_control_account_key(account_id), "campaigns", params)
+
+
+def ad_control_metric_window(rule, default_window, start_at):
+    window = rule.get("window") if isinstance(rule, dict) else {}
+    if not isinstance(window, dict):
+        window = {}
+    if not window:
+        window = default_window if isinstance(default_window, dict) else {}
+    window_type = str(window.get("type") or "since_start").strip()
+    today = datetime.utcnow().date()
+    until = today.strftime("%Y-%m-%d")
+    if window_type == "today":
+        since = until
+    elif window_type == "recent_hours":
+        hours = ad_control_int(window.get("hours", 24), 24, 1, 720)
+        since = (datetime.utcnow() - timedelta(hours=hours)).date().strftime("%Y-%m-%d")
+    else:
+        start_dt = ad_control_parse_datetime(start_at)
+        since = start_dt.date().strftime("%Y-%m-%d") if start_dt else until
+        window_type = "since_start"
+    return {"type": window_type, "since": since, "until": until}
+
+
+def ad_control_extract_action(actions, names):
+    total = 0.0
+    for action in actions or []:
+        action_type = str(action.get("action_type") or "")
+        if action_type in names:
+            total += ad_control_float(action.get("value"), 0.0)
+    return total
+
+
+def ad_control_parse_insight_row(row):
+    spend = ad_control_float(row.get("spend"), 0.0)
+    install = ad_control_extract_action(row.get("actions"), {"mobile_app_install", "omni_app_install", "app_install"})
+    purchase = ad_control_extract_action(row.get("actions"), {"purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase"})
+    revenue = ad_control_extract_action(row.get("action_values"), {"purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase"})
+    roas = 0.0
+    purchase_roas = row.get("purchase_roas") or []
+    if purchase_roas:
+        roas = ad_control_float(purchase_roas[0].get("value"), 0.0)
+    if not roas and spend > 0 and revenue:
+        roas = revenue / spend
+    return {
+        "spend": spend,
+        "install": int(install),
+        "purchase": int(purchase),
+        "revenue": revenue,
+        "roas": roas,
+        "roas_pct": roas * 100.0,
+        "purchase_cpa": (spend / purchase) if purchase else None,
+    }
+
+
+def ad_control_merge_metrics(metrics):
+    out = {"spend": 0.0, "install": 0, "purchase": 0, "revenue": 0.0, "roas": 0.0, "roas_pct": 0.0, "purchase_cpa": None}
+    for item in metrics:
+        out["spend"] += ad_control_float(item.get("spend"), 0.0)
+        out["install"] += int(ad_control_float(item.get("install"), 0.0))
+        out["purchase"] += int(ad_control_float(item.get("purchase"), 0.0))
+        out["revenue"] += ad_control_float(item.get("revenue"), 0.0)
+    if out["spend"] > 0:
+        out["roas"] = out["revenue"] / out["spend"]
+        out["roas_pct"] = out["roas"] * 100.0
+    if out["purchase"] > 0:
+        out["purchase_cpa"] = out["spend"] / out["purchase"]
+    return out
+
+
+def ad_control_meta_account_insights(token, account_id, campaign_ids, since, until):
+    out = {}
+    fields = "campaign_id,campaign_name,spend,actions,action_values,purchase_roas"
+    ids = [str(item or "").strip() for item in campaign_ids if str(item or "").strip()]
+    for offset in range(0, len(ids), 50):
+        chunk = ids[offset:offset + 50]
+        filtering = [{"field": "campaign.id", "operator": "IN", "value": chunk}]
+        params = {
+            "level": "campaign",
+            "fields": fields,
+            "time_range": json.dumps({"since": since, "until": until}),
+            "filtering": json.dumps(filtering),
+            "limit": "500",
+        }
+        rows = ad_control_graph_paged_get(token, ad_control_account_key(account_id), "insights", params)
+        for row in rows:
+            campaign_id = str(row.get("campaign_id") or "").strip()
+            if campaign_id:
+                out[campaign_id] = ad_control_parse_insight_row(row)
+    return out
+
+
+def ad_control_condition_value(item, field):
+    metrics = item.get("metrics") or {}
+    field = str(field or "").strip()
+    if field.startswith("metrics."):
+        field = field.split(".", 1)[1]
+    aliases = {
+        "spend_usd": "spend",
+        "installs": "install",
+        "purchases": "purchase",
+        "roas": "roas_pct",
+        "purchase_cpa_usd": "purchase_cpa",
+        "cpa": "purchase_cpa",
+    }
+    field = aliases.get(field, field)
+    if field in ("age_hours", "runtime_hours"):
+        return item.get("age_hours")
+    if field in ("status", "effective_status"):
+        return item.get(field) or item.get("effective_status") or item.get("status")
+    if field in metrics:
+        return metrics.get(field)
+    return item.get(field)
+
+
+def ad_control_match_condition(item, condition):
+    field = condition.get("field")
+    op = str(condition.get("op") or condition.get("operator") or "eq").lower()
+    actual = ad_control_condition_value(item, field)
+    expected = condition.get("value")
+    if op in ("exists", "present"):
+        return actual is not None and actual != ""
+    if actual is None:
+        return False
+    if op in ("in", "not_in"):
+        values = expected if isinstance(expected, list) else ad_control_list(expected)
+        matched = str(actual) in [str(value) for value in values]
+        return not matched if op == "not_in" else matched
+    if op == "between":
+        values = expected if isinstance(expected, list) else [condition.get("min"), condition.get("max")]
+        if len(values) < 2:
+            return False
+        number = ad_control_float(actual, None)
+        if number is None:
+            return False
+        return number >= ad_control_float(values[0]) and number <= ad_control_float(values[1])
+    if op in ("gt", "gte", "lt", "lte"):
+        number = ad_control_float(actual, None)
+        target = ad_control_float(expected, None)
+        if number is None or target is None:
+            return False
+        if op == "gt":
+            return number > target
+        if op == "gte":
+            return number >= target
+        if op == "lt":
+            return number < target
+        return number <= target
+    if op in ("ne", "neq"):
+        return str(actual) != str(expected)
+    return str(actual) == str(expected)
+
+
+def ad_control_evaluate_rules(item, rules):
+    matched = []
+    target_action = "observe"
+    for rule in rules or []:
+        if not isinstance(rule, dict) or rule.get("enabled") is False:
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), list) else []
+        if conditions and not all(ad_control_match_condition(item, condition) for condition in conditions):
+            continue
+        action = str(rule.get("action") or "observe").lower()
+        if action in ("pause", "close", "stop"):
+            action = "pause"
+            target_action = "pause"
+        else:
+            action = "observe"
+        matched.append({"name": rule.get("name") or "", "action": action})
+    return {"matched_rules": matched, "target_action": target_action if matched else "none"}
+
+
+def ad_control_resolve_live_scope(payload):
+    group = None
+    if payload.get("rule_group_id"):
+        group = fetch_ad_control_rule_group(payload.get("rule_group_id"))
+        product = group["product"]
+        rules = group.get("rules") or []
+        account_group_id = group.get("account_group_id") or ""
+        account_ids = list(group.get("account_ids") or [])
+        if account_group_id:
+            account_group = list_ad_control_account_groups(product).get("items", [])
+            match = [item for item in account_group if item.get("group_id") == account_group_id]
+            if match:
+                account_ids = list(match[0].get("account_ids") or [])
+    else:
+        product = str(payload.get("product") or "").strip()
+        rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+        account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    account_ids = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    if not account_ids:
+        raise StructuredApiError("missing_accounts", "select at least one account")
+    if len(account_ids) > AD_CONTROL_MAX_LIVE_ACCOUNTS:
+        raise StructuredApiError("too_many_accounts", "too many accounts", max_accounts=AD_CONTROL_MAX_LIVE_ACCOUNTS)
+    if not rules:
+        rules = [{"name": "observe all", "action": "observe", "enabled": True, "conditions": []}]
+    return {
+        "product": product,
+        "account_ids": account_ids,
+        "rules": rules,
+        "rule_group": group,
+        "rule_group_id": (group or {}).get("group_id") or str(payload.get("rule_group_id") or ""),
+        "window": payload.get("window") if isinstance(payload.get("window"), dict) else {"type": "since_start"},
+    }
+
+
+def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
+    account_id = ad_control_normalize_account(account_id)
+    token_user_id = str((token_config or {}).get("user_id") or "").strip()
+    token = ad_control_token_for_user_id(token_user_id)
+    if not token:
+        return {"account_id": account_id, "items": [], "errors": [{"reason": "missing_meta_token", "token_user_id": token_user_id}]}
+    if not whitelist:
+        return {"account_id": account_id, "items": [], "errors": [{"reason": "no_product_campaign_whitelist"}]}
+    active_campaigns = ad_control_meta_active_campaigns(token, account_id)
+    active_by_id = {str(item.get("id") or "").strip(): item for item in active_campaigns}
+    campaign_ids = [campaign_id for campaign_id in whitelist.keys() if campaign_id in active_by_id]
+    campaign_ids = campaign_ids[:AD_CONTROL_MAX_LIVE_CAMPAIGNS]
+    starts = {}
+    missing = []
+    for campaign_id in campaign_ids:
+        start = ad_control_campaign_start(scope["product"], account_id, campaign_id)
+        if start.get("campaign_start_at"):
+            starts[campaign_id] = start
+        else:
+            missing.append(campaign_id)
+    metrics_by_campaign = {}
+    by_window = {}
+    for campaign_id, start in starts.items():
+        window = ad_control_metric_window({}, scope.get("window"), start.get("campaign_start_at"))
+        by_window.setdefault((window["since"], window["until"]), []).append(campaign_id)
+    for (since, until), ids in by_window.items():
+        metrics_by_campaign.update(ad_control_meta_account_insights(token, account_id, ids, since, until))
+    items = []
+    for campaign_id in campaign_ids:
+        campaign = active_by_id.get(campaign_id) or {}
+        start = starts.get(campaign_id) or {"reason": "missing_campaign_start_at"}
+        age_hours = ad_control_age_hours(start.get("campaign_start_at"))
+        metrics = metrics_by_campaign.get(campaign_id) or {}
+        item = {
+            "product": scope["product"],
+            "level": "campaign",
+            "account_id": account_id,
+            "campaign_id": campaign_id,
+            "object_id": campaign_id,
+            "object_key": "%s:campaign:%s:%s" % (scope["product"], account_id, campaign_id),
+            "campaign_name": campaign.get("name") or (whitelist.get(campaign_id) or {}).get("campaign_name", ""),
+            "status": campaign.get("status", ""),
+            "effective_status": campaign.get("effective_status", ""),
+            "campaign_start": start,
+            "campaign_start_at": start.get("campaign_start_at", ""),
+            "age_hours": age_hours,
+            "metrics": metrics,
+            "token_user_id": token_user_id,
+            "skip_reason": "" if age_hours is not None else "missing_campaign_start_at",
+        }
+        decision = ad_control_evaluate_rules(item, scope.get("rules") or []) if age_hours is not None else {"matched_rules": [], "target_action": "none"}
+        item.update(decision)
+        items.append(item)
+    return {
+        "account_id": account_id,
+        "items": items,
+        "errors": [],
+        "active_count": len(active_campaigns),
+        "candidate_count": len(campaign_ids),
+        "missing_start_count": len(missing),
+    }
+
+
+def create_ad_control_live_preview(payload, session):
+    ensure_ad_control_tables()
+    scope = ad_control_resolve_live_scope(payload or {})
+    resource = ad_control_resource_snapshot()
+    whitelist_by_account = ad_control_product_campaign_whitelist(scope["product"], scope["account_ids"])
+    token_configs = ad_control_token_config_for_accounts(scope["product"], scope["account_ids"])
+    workers = min(max(1, AD_CONTROL_LIVE_MAX_WORKERS), len(scope["account_ids"]))
+    if resource.get("over_limit"):
+        workers = 1
+    account_results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {}
+        for account_id in scope["account_ids"]:
+            future = executor.submit(
+                ad_control_collect_live_account,
+                scope,
+                account_id,
+                token_configs.get(account_id) or {},
+                whitelist_by_account.get(account_id) or {},
+            )
+            future_map[future] = account_id
+        for future in concurrent.futures.as_completed(future_map):
+            account_id = future_map[future]
+            try:
+                account_results.append(future.result())
+            except Exception as exc:
+                logging.exception("ad control live preview account failed: %s", account_id)
+                account_results.append({"account_id": account_id, "items": [], "errors": [{"reason": str(exc)}]})
+    items = []
+    errors = []
+    for result in account_results:
+        items.extend(result.get("items") or [])
+        for err in result.get("errors") or []:
+            err["account_id"] = result.get("account_id")
+            errors.append(err)
+    total = len(items)
+    pause_count = len([item for item in items if item.get("target_action") == "pause"])
+    observe_count = len([item for item in items if item.get("target_action") == "observe"])
+    preview_id = uuid.uuid4().hex
+    preview_hash = ad_control_rule_hash({
+        "product": scope["product"],
+        "accounts": scope["account_ids"],
+        "rules": scope["rules"],
+        "window": scope.get("window"),
+        "rule_group_id": scope.get("rule_group_id"),
+    })
+    expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    criteria = {
+        "mode": "live",
+        "product": scope["product"],
+        "accounts": scope["account_ids"],
+        "rules": scope["rules"],
+        "window": scope.get("window"),
+        "rule_group_id": scope.get("rule_group_id"),
+        "preview_hash": preview_hash,
+    }
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_preview (
+                  preview_id, actor_user_id, action, level, product, criteria_json,
+                  sample_json, total_count, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    preview_id,
+                    ad_control_actor(session),
+                    "pause",
+                    "campaign",
+                    scope["product"],
+                    json.dumps(criteria, ensure_ascii=False),
+                    json.dumps(items[:AD_CONTROL_MAX_LIVE_EXECUTE], ensure_ascii=False),
+                    total,
+                    expires_at,
+                ),
+            )
+            if scope.get("rule_group_id"):
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET last_preview_id=?, last_preview_hash=?, updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=?
+                    """,
+                    (preview_id, preview_hash, scope.get("rule_group_id")),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "preview_id": preview_id,
+        "expires_at": expires_at,
+        "preview_hash": preview_hash,
+        "product": scope["product"],
+        "account_count": len(scope["account_ids"]),
+        "total": total,
+        "pause_count": pause_count,
+        "observe_count": observe_count,
+        "error_count": len(errors),
+        "resource": resource,
+        "items": items[:200],
+        "errors": errors[:100],
+        "remaining_count": max(0, total - min(total, 200)),
+    }
+
+
+def execute_ad_control_live(payload, session):
+    ensure_ad_control_tables()
+    preview = fetch_ad_control_preview(payload.get("preview_id"))
+    criteria = ad_control_safe_json_dict(preview.get("criteria_json"))
+    if criteria.get("mode") != "live":
+        raise StructuredApiError("invalid_preview", "preview is not a live preview")
+    expected_hash = str(criteria.get("preview_hash") or "").strip()
+    confirmed_hash = str(payload.get("preview_hash") or "").strip()
+    if not expected_hash or confirmed_hash != expected_hash:
+        raise StructuredApiError("preview_hash_mismatch", "preview hash confirmation is required")
+    dry_run = bool(payload.get("dry_run", True))
+    if not dry_run and str(payload.get("confirm") or "") != "EXECUTE_LIVE_PAUSE":
+        raise StructuredApiError("confirm_required", "explicit confirmation required")
+    items = ad_control_safe_json_list(preview.get("sample_json"))
+    action_id = uuid.uuid4().hex
+    results = []
+    success_count = skipped_count = error_count = 0
+    token_configs = ad_control_token_config_for_accounts(criteria.get("product"), criteria.get("accounts") or [])
+    for item in items[:AD_CONTROL_MAX_LIVE_EXECUTE]:
+        if item.get("target_action") != "pause":
+            skipped_count += 1
+            results.append({"object_key": item.get("object_key"), "status": "skipped", "reason": "not_pause_target"})
+            continue
+        if item.get("skip_reason"):
+            skipped_count += 1
+            results.append({"object_key": item.get("object_key"), "status": "skipped", "reason": item.get("skip_reason")})
+            continue
+        account_id = ad_control_normalize_account(item.get("account_id"))
+        token_user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
+        token = ad_control_token_for_user_id(token_user_id)
+        if not token:
+            skipped_count += 1
+            results.append({"object_key": item.get("object_key"), "status": "skipped", "reason": "missing_meta_token"})
+            continue
+        try:
+            meta = ad_control_graph_get(token, item.get("campaign_id"), "account_id,status,effective_status,name")
+            meta_account = ad_control_normalize_account(meta.get("account_id"))
+            if meta_account and meta_account != account_id:
+                skipped_count += 1
+                results.append({"object_key": item.get("object_key"), "status": "skipped", "reason": "account_owner_mismatch"})
+                continue
+            if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                skipped_count += 1
+                results.append({"object_key": item.get("object_key"), "status": "skipped", "reason": "not_active"})
+                continue
+            if dry_run:
+                success_count += 1
+                results.append({"object_key": item.get("object_key"), "status": "dry_run", "meta": meta})
+                continue
+            payload_result = ad_control_graph_set_status(token, item.get("campaign_id"), "PAUSED")
+            ad_control_update_business_status({
+                "level": "campaign",
+                "product": criteria.get("product"),
+                "account_id": account_id,
+                "object_id": item.get("campaign_id"),
+            }, "PAUSED")
+            ad_control_save_object_state(action_id, {
+                "object_key": item.get("object_key"),
+                "product": criteria.get("product"),
+                "level": "campaign",
+                "account_id": account_id,
+                "object_id": item.get("campaign_id"),
+                "campaign_id": item.get("campaign_id"),
+            }, "paused")
+            success_count += 1
+            results.append({"object_key": item.get("object_key"), "status": "success", "meta": payload_result})
+        except Exception as exc:
+            error_count += 1
+            logging.exception("ad control live execute failed: %s", item.get("object_key"))
+            results.append({"object_key": item.get("object_key"), "status": "error", "reason": str(exc)})
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_action (
+                  action_id, preview_id, actor_user_id, action, level, product, criteria_json,
+                  requested_count, success_count, skipped_count, error_count, dry_run,
+                  results_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    action_id,
+                    preview["preview_id"],
+                    ad_control_actor(session),
+                    "pause",
+                    "campaign",
+                    criteria.get("product", ""),
+                    json.dumps(criteria, ensure_ascii=False),
+                    len(items),
+                    success_count,
+                    skipped_count,
+                    error_count,
+                    1 if dry_run else 0,
+                    json.dumps(results, ensure_ascii=False),
+                ),
+            )
+            if criteria.get("rule_group_id"):
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET last_run_at=CURRENT_TIMESTAMP, last_result_json=?, updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=?
+                    """,
+                    (
+                        json.dumps({"action_id": action_id, "success_count": success_count, "skipped_count": skipped_count, "error_count": error_count, "dry_run": dry_run}, ensure_ascii=False),
+                        criteria.get("rule_group_id"),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "action_id": action_id,
+        "preview_id": preview["preview_id"],
+        "dry_run": dry_run,
+        "requested_count": len(items),
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "error_count": error_count,
+        "results": results[:200],
+    }
+
+
+def refresh_ad_control_campaign_start(payload):
+    product = str(payload.get("product") or "").strip()
+    account_id = ad_control_normalize_account(payload.get("account_id"))
+    campaign_id = str(payload.get("campaign_id") or "").strip()
+    if not product or not account_id or not campaign_id:
+        raise StructuredApiError("missing_campaign", "product, account_id and campaign_id are required")
+    ad_control_delete_cached_campaign_start(product, account_id, campaign_id)
+    return ad_control_campaign_start(product, account_id, campaign_id, refresh=True)
 
 
 def lookup_admin_group_by_email(email):
@@ -86685,6 +88081,55 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/ad-control/token-config":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_token_config((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/account-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_account_groups((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rule-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_rule_groups((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/runner/status":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, ad_control_runner_status())
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/actions":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_actions((params.get("limit") or ["50"])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/ad-material/competitor-sources":
             if not self._require_module("ad_material_tasks"):
                 return
@@ -89301,6 +90746,106 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/ad-control/token-config":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_token_config(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_token_config", "ad_control_token_config", payload.get("product", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/token-config/validate":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, validate_ad_control_token_config(self._read_json()))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/account-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_account_group(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_account_group", "ad_control_account_group", payload.get("group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/rule-groups":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_rule_group(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_rule_group", "ad_control_rule_group", payload.get("group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rule-groups/") and parsed.path.endswith("/enabled"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                rule_group_id = ad_control_parse_rule_group_path(parsed.path, "/enabled")
+                body = self._read_json()
+                payload = set_ad_control_rule_group_enabled(rule_group_id, bool(body.get("enabled")))
+                append_audit_log(self._session(), "set_ad_control_rule_group_enabled", "ad_control_rule_group", payload.get("group_id", ""), {"enabled": payload.get("enabled", False)})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rule-groups/") and parsed.path.endswith("/preview-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_rule_group_path(parsed.path, "/preview-live")
+                payload = create_ad_control_live_preview(body, self._session())
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/rule-groups/") and parsed.path.endswith("/execute-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_rule_group_path(parsed.path, "/execute-live")
+                payload = execute_ad_control_live(body, self._session())
+                append_audit_log(self._session(), "execute_ad_control_live", "ad_control_rule_group", body.get("rule_group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/campaign-start/refresh":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, refresh_ad_control_campaign_start(self._read_json()))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/emergency-stop":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = ad_control_emergency_stop(self._read_json())
+                append_audit_log(self._session(), "ad_control_emergency_stop", "ad_control", payload.get("group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
         if screenshot_job_id and screenshot_action == "retry":
             if not self._require_module("cover_synthesis"):
@@ -89506,6 +91051,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+    def do_PUT(self):
+        self.do_POST()
+
+
     def do_DELETE(self):
 
 
@@ -89539,6 +91088,30 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        account_group_id = ad_control_parse_account_group_path(parsed.path)
+        if account_group_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_account_group(account_group_id)
+                append_audit_log(self._session(), "delete_ad_control_account_group", "ad_control_account_group", account_group_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_group_id = ad_control_parse_rule_group_path(parsed.path)
+        if rule_group_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_rule_group(rule_group_id)
+                append_audit_log(self._session(), "delete_ad_control_rule_group", "ad_control_rule_group", rule_group_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
 
         ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
         if ad_task_id and not ad_action:

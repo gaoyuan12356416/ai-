@@ -19,10 +19,10 @@
     },
     {
       key: "ad_control",
-      label: "产品广告调控",
+      label: "AI自动规则调控",
       module: "ad_control_center",
       items: [
-        { key: "adControl", label: "产品广告调控中心", description: "按产品、账户、时区和状态试算 Meta 广告调控", kind: "page", href: "/ad-control.html", module: "ad_control_center", enabled: true, order: 10 }
+        { key: "adControl", label: "AI自动规则调控", description: "按产品、账户组和规则组实时调控 Meta campaign", kind: "page", href: "/ad-control.html", module: "ad_control_center", enabled: true, order: 10 }
       ]
     },
     {
