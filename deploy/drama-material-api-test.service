@@ -1,0 +1,32 @@
+[Unit]
+Description=Drama Material API Test Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/drama_material_service_test
+Environment=PYTHONUNBUFFERED=1
+Environment=DRAMA_TEST_AUTH_BYPASS=1
+Environment=DRAMA_TEST_AUTH_USER=admin
+Environment=DRAMA_TEST_AUTH_NAME=测试管理员
+Environment=DRAMA_API_HOST=127.0.0.1
+Environment=DRAMA_API_PORT=8793
+Environment=DRAMA_SITE_BASE_URL=https://ai.yingliangads.com/ad-material-test
+Environment=DRAMA_JOB_DB_PATH=/root/drama_material_service_test/data/drama_material_jobs.sqlite3
+Environment=DRAMA_NAVIGATION_CONFIG_PATH=/root/drama_material_service_test/static/navigation.json
+Environment=DRAMA_PUBLIC_ROOT=/root/drama_material_service_test/static/drama-materials
+Environment=DRAMA_PUBLIC_BASE_URL=https://ai.yingliangads.com/ad-material-test/drama-materials
+Environment=AD_MATERIAL_WORK_ROOT=/root/drama_material_service_test/work/ad-material-tasks
+Environment=AD_MATERIAL_PUBLIC_ROOT=/root/drama_material_service_test/static/ad-materials
+Environment=AD_MATERIAL_PUBLIC_BASE_URL=https://ai.yingliangads.com/ad-material-test/ad-materials
+Environment=AD_MATERIAL_ADMIN_URL=https://ai.yingliangads.com/ad-material-test/#adMaterials
+Environment="AD_MATERIAL_REQUIREMENT_COMMAND=/root/miniconda3/bin/python /root/drama_material_service_test/scripts/ad_material_requirement_runner.py"
+Environment=AD_MATERIAL_GENERATION_COMMAND=
+Environment=AD_MATERIAL_SOURCE_API_TOKEN=
+Environment=AD_MATERIAL_CODEX_VISION_URL=http://127.0.0.1:18796/api/ad-material-vision/analyze
+ExecStart=/root/miniconda3/bin/python /root/drama_material_service_test/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

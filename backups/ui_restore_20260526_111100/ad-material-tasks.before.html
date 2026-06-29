@@ -1,0 +1,1101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>投放素材任务 - AI自动后台</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --panel: #ffffff;
+      --panel-soft: #f7fafc;
+      --line: #d9e3ef;
+      --text: #10233f;
+      --muted: #687894;
+      --blue: #2f66ff;
+      --green: #0f9f6e;
+      --amber: #d98500;
+      --red: #d93f3f;
+      --nav: #0e1d36;
+      --shadow: 0 18px 42px rgba(35, 55, 95, .11);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, select, textarea { font: inherit; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 256px minmax(0, 1fr); }
+    .sidebar { background: linear-gradient(180deg, #132a4f, #09162b); color: #eef5ff; padding: 24px 18px; min-height: 100vh; }
+    .brand { display: flex; gap: 12px; align-items: center; padding-bottom: 22px; border-bottom: 1px solid rgba(255,255,255,.1); }
+    .brand-mark { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--blue); font-weight: 800; }
+    .brand strong { display: block; font-size: 18px; }
+    .brand span, .nav span { color: rgba(238,245,255,.62); font-size: 12px; }
+    .nav { display: grid; gap: 10px; margin-top: 22px; }
+    .main { min-width: 0; padding: 28px; }
+    .topbar { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; margin-bottom: 20px; }
+    h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 18px; }
+    p { margin: 0; color: var(--muted); }
+    .user-card { background: rgba(255,255,255,.8); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; min-width: 220px; text-align: right; }
+    .grid { display: grid; gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    .panel-body { padding: 18px 20px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .field { display: grid; gap: 7px; }
+    label { color: #31476a; font-size: 13px; font-weight: 700; }
+    input, select, textarea { width: 100%; border: 1px solid #cbd8ea; border-radius: 12px; padding: 11px 12px; background: #fff; color: var(--text); outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(47,102,255,.12); }
+    textarea { resize: vertical; min-height: 88px; }
+    .btn { border: 1px solid #cbd8ea; background: #fff; color: var(--text); border-radius: 12px; padding: 10px 16px; cursor: pointer; font-weight: 700; }
+    .btn:hover { border-color: var(--blue); }
+    .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; box-shadow: 0 12px 24px rgba(47,102,255,.25); }
+    .btn.danger { background: #fff5f5; border-color: #ffc7c7; color: var(--red); }
+    .btn.small { padding: 7px 10px; font-size: 12px; border-radius: 10px; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stat { background: var(--panel-soft); border: 1px solid var(--line); border-radius: 14px; padding: 13px; }
+    .stat b { display: block; color: var(--blue); font-size: 24px; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+    table { border-collapse: collapse; width: 100%; min-width: 1180px; table-layout: fixed; background: #fff; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid #ecf1f6; text-align: left; vertical-align: top; font-size: 13px; overflow-wrap: break-word; }
+    th { background: #f8fbff; color: #627493; font-weight: 800; }
+    tr:last-child td { border-bottom: 0; }
+    .task-id { display: block; color: #0d2c57; font-weight: 900; line-height: 1.35; }
+    .task-desc { margin-top: 5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
+    .cell-muted { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 800; background: #eef4ff; color: var(--blue); }
+    .badge.green { background: #eaf8f2; color: var(--green); }
+    .badge.amber { background: #fff6dd; color: var(--amber); }
+    .badge.red { background: #fff0f0; color: var(--red); }
+    .badge.ok { background: #eaf8f2; color: var(--green); }
+    .badge.warn { background: #fff6dd; color: var(--amber); }
+    .badge.bad { background: #fff0f0; color: var(--red); }
+    .actions { display: grid; gap: 6px; justify-items: start; }
+    .actions-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .status-cell { display: grid; gap: 6px; justify-items: start; }
+    td:last-child .btn { min-width: 68px; }
+    .btn.btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; box-shadow: 0 12px 24px rgba(47,102,255,.25); }
+    .btn.btn-secondary { background: #fff; border-color: #cbd8ea; color: var(--text); box-shadow: none; }
+    .btn.btn-danger { background: #fff5f5; border-color: #ffc7c7; color: var(--red); box-shadow: none; }
+    .mini { padding: 7px 10px; font-size: 12px; border-radius: 10px; }
+    .stack { display: grid; gap: 12px; }
+    .card { border: 1px solid var(--line); border-radius: 14px; background: #fff; padding: 14px; }
+    .card .grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+    .card .grid > div { grid-column: span 3; min-width: 0; }
+    .card strong { color: #14284a; }
+    .card div div { overflow-wrap: anywhere; }
+    .detail-drawer { position: fixed; inset: 0; background: rgba(10, 18, 35, .42); display: none; justify-content: flex-end; z-index: 18; pointer-events: none; }
+    .detail-drawer.open { display: flex; overflow: hidden; }
+    .detail-panel { box-sizing: border-box; width: min(1180px, calc(100vw - 220px)); height: 100vh; background: #f7faff; pointer-events: auto; box-shadow: -24px 0 60px rgba(11,20,38,.22); padding: 22px; display: flex; flex-direction: column; }
+    .detail-panel > .panel { min-height: 0; flex: 1; display: flex; flex-direction: column; box-shadow: none; }
+    .detail-panel .panel-head { flex: 0 0 auto; }
+    .detail-panel .panel-body { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 48px; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(10, 22, 42, .62); display: grid; place-items: center; padding: 28px; z-index: 10; }
+    .modal { width: min(1080px, 100%); max-height: calc(100vh - 56px); overflow: auto; background: var(--panel); border-radius: 20px; box-shadow: 0 28px 80px rgba(0,0,0,.25); }
+    .ad-material-review-modal { width: min(1040px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: hidden; display: flex; flex-direction: column; }
+    .ad-material-review-modal .panel-body { min-height: 0; overflow-y: auto; }
+    .ad-material-review-modal .grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+    .review-asset-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fff; display: grid; gap: 10px; }
+    .review-asset-card img, .review-asset-card video { width: 100%; max-height: 420px; object-fit: contain; border-radius: 8px; background: #f6f8fb; }
+    .empty-card { display: grid; place-items: center; color: var(--muted); height: 72px; font-size: 12px; background: #f6f8fb; border-radius: 8px; }
+    .md-preview { border: 1px solid var(--line); border-radius: 12px; background: #fbfdff; padding: 14px; max-height: 520px; overflow: auto; line-height: 1.65; }
+    .md-preview table { min-width: 0; table-layout: auto; }
+    .md-preview img, .md-inline-image { max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+    .modal-head, .modal-foot { padding: 18px 22px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+    .modal-foot { border-top: 1px solid var(--line); border-bottom: 0; justify-content: flex-end; }
+    .modal-body { padding: 22px; }
+    .form-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+    .col-3 { grid-column: span 3; }
+    .col-4 { grid-column: span 4; }
+    .col-6 { grid-column: span 6; }
+    .col-8 { grid-column: span 8; }
+    .col-12 { grid-column: span 12; }
+    .hidden { display: none !important; }
+    .muted { color: var(--muted); }
+    .product-options { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 6px; max-height: 260px; overflow-y: auto; background: #fff; }
+    .product-options button { width: 100%; border: 0; background: #fff; text-align: left; padding: 10px 12px; border-bottom: 1px solid #edf2f7; cursor: pointer; }
+    .product-options button:hover { background: #f5f8ff; }
+    .size-plan { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 10px; }
+    .toast { position: fixed; right: 24px; bottom: 24px; background: #0e1d36; color: #fff; padding: 12px 16px; border-radius: 12px; box-shadow: var(--shadow); z-index: 20; }
+    .auth-panel { min-height: 70vh; display: grid; place-items: center; }
+    .auth-box { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px; width: min(420px, 100%); box-shadow: var(--shadow); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .main { padding: 18px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .form-grid { grid-template-columns: 1fr; }
+      .col-3, .col-4, .col-6, .col-8, .col-12 { grid-column: span 1; }
+      .size-plan { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+    <main class="main">
+      <div id="authPanel" class="auth-panel hidden">
+        <div class="auth-box">
+          <h2>需要登录</h2>
+          <p style="margin:10px 0 18px">请先通过飞书登录 AI 后台，再进入投放素材任务。</p>
+          <button id="loginBtn" class="btn primary" type="button">飞书登录</button>
+        </div>
+      </div>
+      <section id="pageContent" class="hidden">
+        <div class="topbar">
+          <div>
+            <h1>投放素材任务</h1>
+            <p>创建素材需求，跟进需求审核、素材审核和最终素材上报。</p>
+          </div>
+          <div class="user-card">
+            <strong id="userName">--</strong>
+            <div class="muted" id="userMeta">--</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>任务列表</h2>
+              <p id="summary">正在加载...</p>
+            </div>
+            <div class="toolbar">
+              <button id="createBtn" class="btn primary" type="button">创建任务</button>
+              <button id="reloadBtn" class="btn" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="toolbar" style="margin-bottom:16px">
+              <div class="field" style="min-width:180px">
+                <label>状态</label>
+                <select id="statusFilter">
+                  <option value="all">全部状态</option>
+                  <option value="draft">待发布</option>
+                  <option value="generating_demand">生成需求中</option>
+                  <option value="demand_review">需求待审核</option>
+                  <option value="generating_material">生成素材中</option>
+                  <option value="material_review">素材待审核</option>
+                  <option value="material_abandoned">已废弃</option>
+                  <option value="done">已完成</option>
+                  <option value="failed">失败</option>
+                </select>
+              </div>
+              <div class="field" style="min-width:320px; flex:1">
+                <label>搜索</label>
+                <input id="searchInput" placeholder="任务 ID / 产品 / 创建人 / 描述" />
+              </div>
+              <button id="searchBtn" class="btn primary" type="button">筛选</button>
+            </div>
+            <div class="stats">
+              <div class="stat"><b id="statTotal">0</b><span>任务总数</span></div>
+              <div class="stat"><b id="statDraft">0</b><span>待发布</span></div>
+              <div class="stat"><b id="statReview">0</b><span>待审核</span></div>
+              <div class="stat"><b id="statDone">0</b><span>已完成</span></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <colgroup>
+                  <col style="width:31%">
+                  <col style="width:8%">
+                  <col style="width:11%">
+                  <col style="width:7%">
+                  <col style="width:8%">
+                  <col style="width:7%">
+                  <col style="width:6%">
+                  <col style="width:10%">
+                  <col style="width:12%">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>任务</th>
+                    <th>产品</th>
+                    <th>类型</th>
+                    <th>国家/语言</th>
+                    <th>尺寸/数量</th>
+                    <th>状态</th>
+                    <th>创建人</th>
+                    <th>更新时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="taskBody"><tr><td colspan="9" class="muted">正在加载...</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="taskModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <div><h2 id="modalTitle">创建任务</h2><p id="modalSub">填写投放素材需求参数。</p></div>
+        <button class="btn" type="button" data-close>关闭</button>
+      </div>
+      <form id="taskForm">
+        <div class="modal-body form-grid">
+          <div class="field col-8">
+            <label>产品</label>
+            <input id="productSearch" placeholder="输入产品 ID / 名称后搜索" autocomplete="off" required />
+            <div id="productOptions" class="product-options hidden"></div>
+            <p id="productHint" class="muted">未选择产品</p>
+          </div>
+          <div class="field col-4">
+            <label>任务类型</label>
+            <select id="taskType" required>
+              <option value="素材迭代——根据老素材效果优化">素材迭代</option>
+              <option value="参考衍生——解析参考素材风格出新素材">参考衍生</option>
+              <option value="竞品借鉴——参考竞品优质素材">竞品借鉴</option>
+              <option value="综合策划——综合内外素材出方案">综合策划</option>
+            </select>
+          </div>
+          <div class="field col-3">
+            <label>竞品源</label>
+            <select id="competitorSource"><option value="">无</option></select>
+          </div>
+          <div class="field col-3">
+            <label>国家</label>
+            <input id="countryInput" placeholder="MX / US / BR" required />
+          </div>
+          <div class="field col-3">
+            <label>语言</label>
+            <input id="languageInput" placeholder="es / en / pt" required />
+          </div>
+          <div class="field col-3">
+            <label>Category</label>
+            <input id="categoryInput" placeholder="可选" />
+          </div>
+          <div class="field col-12">
+            <label>尺寸与数量</label>
+            <div class="size-plan" id="sizePlan"></div>
+          </div>
+          <div class="field col-4">
+            <label>标签</label>
+            <input id="tagInput" placeholder="可选" />
+          </div>
+          <div class="field col-4">
+            <label>标题</label>
+            <input id="titleInput" placeholder="可选" />
+          </div>
+          <div class="field col-4">
+            <label>正文</label>
+            <input id="bodyInput" placeholder="可选" />
+          </div>
+          <div class="field col-12">
+            <label>参考素材</label>
+            <input id="referenceFiles" type="file" accept="image/*,video/*" multiple />
+          </div>
+          <div class="field col-12">
+            <label>任务描述</label>
+            <textarea id="descriptionInput" placeholder="描述希望优化、借鉴或生成的方向"></textarea>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button id="resetBtn" class="btn" type="button">清空</button>
+          <button id="submitBtn" class="btn primary" type="submit">确认创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adMaterialDetailPanel" class="detail-drawer">
+    <div class="detail-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h3 class="panel-title">投放素材任务详情</h3>
+          <button id="adMaterialCloseDetailBtn" class="btn btn-secondary" type="button">关闭</button>
+        </div>
+        <div class="panel-body">
+          <div id="adMaterialDetailContent" class="stack"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="adMaterialReviewModal" class="modal-backdrop hidden">
+    <div class="modal ad-material-review-modal">
+      <div class="modal-head">
+        <div><h2 id="adMaterialReviewTitle">任务审核</h2></div>
+        <button id="adMaterialReviewCloseBtn" class="btn" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="adMaterialReviewContent" class="stack"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/quick-nav.js?v=202605251815"></script>
+  <script>
+    const els = {
+      authPanel: document.getElementById("authPanel"),
+      pageContent: document.getElementById("pageContent"),
+      loginBtn: document.getElementById("loginBtn"),
+      userName: document.getElementById("userName"),
+      userMeta: document.getElementById("userMeta"),
+      summary: document.getElementById("summary"),
+      createBtn: document.getElementById("createBtn"),
+      reloadBtn: document.getElementById("reloadBtn"),
+      statusFilter: document.getElementById("statusFilter"),
+      searchInput: document.getElementById("searchInput"),
+      searchBtn: document.getElementById("searchBtn"),
+      taskBody: document.getElementById("taskBody"),
+      taskModal: document.getElementById("taskModal"),
+      taskForm: document.getElementById("taskForm"),
+      modalTitle: document.getElementById("modalTitle"),
+      modalSub: document.getElementById("modalSub"),
+      productSearch: document.getElementById("productSearch"),
+      productOptions: document.getElementById("productOptions"),
+      productHint: document.getElementById("productHint"),
+      taskType: document.getElementById("taskType"),
+      competitorSource: document.getElementById("competitorSource"),
+      countryInput: document.getElementById("countryInput"),
+      languageInput: document.getElementById("languageInput"),
+      categoryInput: document.getElementById("categoryInput"),
+      sizePlan: document.getElementById("sizePlan"),
+      tagInput: document.getElementById("tagInput"),
+      titleInput: document.getElementById("titleInput"),
+      bodyInput: document.getElementById("bodyInput"),
+      referenceFiles: document.getElementById("referenceFiles"),
+      descriptionInput: document.getElementById("descriptionInput"),
+      resetBtn: document.getElementById("resetBtn"),
+      submitBtn: document.getElementById("submitBtn"),
+      adMaterialDetailPanel: document.getElementById("adMaterialDetailPanel"),
+      adMaterialDetailContent: document.getElementById("adMaterialDetailContent"),
+      adMaterialCloseDetailBtn: document.getElementById("adMaterialCloseDetailBtn"),
+      adMaterialReviewModal: document.getElementById("adMaterialReviewModal"),
+      adMaterialReviewTitle: document.getElementById("adMaterialReviewTitle"),
+      adMaterialReviewContent: document.getElementById("adMaterialReviewContent"),
+      adMaterialReviewCloseBtn: document.getElementById("adMaterialReviewCloseBtn"),
+      toast: document.getElementById("toast"),
+      statTotal: document.getElementById("statTotal"),
+      statDraft: document.getElementById("statDraft"),
+      statReview: document.getElementById("statReview"),
+      statDone: document.getElementById("statDone"),
+    };
+    const SIZE_OPTIONS = ["1:1", "4:5", "9:16", "1.91:1", "16:9"];
+    const state = {
+      auth: null,
+      tasks: [],
+      sources: [],
+      selectedProduct: null,
+      editingTaskId: "",
+      productTimer: null,
+      selectedAdMaterialTask: null,
+      reviewingAdMaterialTask: null,
+    };
+
+    function text(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+    function statusTone(status) {
+      if (["done"].includes(status)) return "green";
+      if (["failed", "material_abandoned"].includes(status)) return "red";
+      if (["demand_review", "material_review", "generating_demand", "generating_material"].includes(status)) return "amber";
+      return "";
+    }
+    function adMaterialStatusText(status, label) {
+      if (status === "draft") return "待发布";
+      return label || status || "--";
+    }
+    function adMaterialStatusBadge(status, label) {
+      const cls = status === "done" ? "ok" : status === "failed" || status === "material_abandoned" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${text(adMaterialStatusText(status, label))}</span>`;
+    }
+    function adMaterialCanCompleteUpload(task) {
+      const assets = task?.assets || [];
+      const readyStatuses = new Set(["approved", "uploaded", "abandoned"]);
+      const hasUploadable = assets.some(asset => asset.status === "approved" || asset.status === "uploaded");
+      return task && task.status !== "done" && assets.length > 0 && hasUploadable && assets.every(asset => readyStatuses.has(asset.status));
+    }
+    function adMaterialDisplayStatusText(task) {
+      if (adMaterialCanCompleteUpload(task)) return "待上报";
+      return adMaterialStatusText(task?.status, task?.status_label);
+    }
+    function adMaterialTaskStatusBadge(task) {
+      const status = task?.status || "";
+      const cls = status === "done" ? "ok" : status === "failed" || status === "material_abandoned" ? "bad" : "warn";
+      return `<span class="badge ${cls}">${text(adMaterialDisplayStatusText(task))}</span>`;
+    }
+    function adMaterialCanReview(task) {
+      return task && (task.status === "demand_review" || task.status === "material_review");
+    }
+    function adMaterialStatusCell(task) {
+      return `<div class="status-cell">
+        ${adMaterialTaskStatusBadge(task)}
+        ${adMaterialCanReview(task) ? `<button class="btn btn-primary mini" type="button" onclick="openAdMaterialReview('${text(task.task_id)}')">审核</button>` : ""}
+      </div>`;
+    }
+    function adMaterialTaskTypeText(value) {
+      return value || "";
+    }
+    function applyTaskSnapshot(task) {
+      if (!task || !task.task_id) return;
+      const index = state.tasks.findIndex(item => item.task_id === task.task_id);
+      if (index >= 0) state.tasks[index] = { ...state.tasks[index], ...task };
+      else state.tasks.unshift(task);
+      updateStats();
+      renderRows();
+    }
+    function adMaterialAssetPreviewUrl(asset) {
+      const url = String(asset?.url || "");
+      if (!url) return "";
+      const version = String(asset?.updated_at || asset?.source_api_id || "").replace(/[^0-9A-Za-z_-]+/g, "");
+      if (!version) return url;
+      return `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(version)}`;
+    }
+    function reviewAssetMedia(asset) {
+      const previewUrl = adMaterialAssetPreviewUrl(asset);
+      if (!previewUrl) return `<div class="empty-card">暂无素材预览</div>`;
+      const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(previewUrl);
+      return isVideo
+        ? `<video src="${text(previewUrl)}" controls></video>`
+        : `<a href="${text(previewUrl)}" target="_blank" rel="noopener noreferrer"><img src="${text(previewUrl)}" alt="${text(asset.name || asset.asset_id || "")}" loading="lazy" decoding="async" /></a>`;
+    }
+    function inlineMarkdown(value) {
+      let markdownText = String(value == null ? "" : value);
+      const inlineImages = [];
+      markdownText = markdownText.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, (_, alt, src) => {
+        const index = inlineImages.push({ src, alt: alt || "参考图" }) - 1;
+        return `@@MD_INLINE_IMAGE_${index}@@`;
+      });
+      return text(markdownText)
+        .replace(/@@MD_INLINE_IMAGE_(\d+)@@/g, (_, index) => {
+          const image = inlineImages[Number(index)] || {};
+          return `<a href="${text(image.src || "")}" target="_blank" rel="noopener noreferrer"><img class="md-inline-image" src="${text(image.src || "")}" alt="${text(image.alt || "参考图")}" loading="lazy" decoding="async" /></a>`;
+        })
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+    function renderMarkdownPreview(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const html = [];
+      let listType = "";
+      let tableOpen = false;
+      const closeList = () => {
+        if (listType) {
+          html.push(`</${listType}>`);
+          listType = "";
+        }
+      };
+      const closeTable = () => {
+        if (tableOpen) {
+          html.push("</tbody></table>");
+          tableOpen = false;
+        }
+      };
+      const openList = type => {
+        closeTable();
+        if (listType !== type) {
+          closeList();
+          html.push(`<${type}>`);
+          listType = type;
+        }
+      };
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          closeList();
+          closeTable();
+          continue;
+        }
+        const image = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)$/);
+        if (image) {
+          closeList();
+          closeTable();
+          html.push(`<figure class="md-image"><img src="${text(image[2])}" alt="${text(image[1])}" loading="lazy" /><figcaption>${text(image[1] || "参考图")}</figcaption></figure>`);
+          continue;
+        }
+        if (/^\|.+\|$/.test(line)) {
+          closeList();
+          const cells = line.slice(1, -1).split("|").map(cell => cell.trim());
+          if (cells.every(cell => /^:?-{3,}:?$/.test(cell))) continue;
+          if (!tableOpen) {
+            html.push("<table><tbody>");
+            tableOpen = true;
+          }
+          html.push(`<tr>${cells.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join("")}</tr>`);
+          continue;
+        }
+        closeTable();
+        const heading = line.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+          closeList();
+          const level = heading[1].length;
+          html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+          continue;
+        }
+        const bullet = line.match(/^[-*]\s+(.+)$/);
+        if (bullet) {
+          openList("ul");
+          html.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+          continue;
+        }
+        const ordered = line.match(/^\d+\.\s+(.+)$/);
+        if (ordered) {
+          openList("ol");
+          html.push(`<li>${inlineMarkdown(ordered[1])}</li>`);
+          continue;
+        }
+        closeList();
+        html.push(`<p>${inlineMarkdown(line)}</p>`);
+      }
+      closeList();
+      closeTable();
+      return html.join("") || `<div class="muted">暂无需求内容</div>`;
+    }
+    function taskKind(type) {
+      if (String(type || "").includes("素材迭代")) return "iteration";
+      if (String(type || "").includes("参考衍生")) return "reference";
+      if (String(type || "").includes("竞品借鉴")) return "competitor";
+      return "planning";
+    }
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options,
+      });
+      const raw = await response.text();
+      let data = {};
+      try { data = raw ? JSON.parse(raw) : {}; } catch (_) { data = { message: raw }; }
+      if (!response.ok) {
+        const message = data.message || data.error || response.statusText || "请求失败";
+        throw Object.assign(new Error(message), { status: response.status, data });
+      }
+      return data;
+    }
+    function toast(message, isError = false) {
+      els.toast.textContent = message;
+      els.toast.style.background = isError ? "#c92525" : "#0e1d36";
+      els.toast.classList.remove("hidden");
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => els.toast.classList.add("hidden"), 2600);
+    }
+    function userCan(moduleKey) {
+      const user = state.auth && state.auth.user;
+      return !!(user && (user.is_admin || (user.permissions && user.permissions[moduleKey])));
+    }
+    async function renderQuickNavigation() {
+      if (!window.QuickNav) return;
+      await window.QuickNav.render({
+        container: "#quickNav",
+        activeKey: "adMaterials",
+        auth: state.auth || {},
+        groupOrder: ["voiceover", "ad_material", "drama", "system"],
+      });
+    }
+    async function loadAuth() {
+      state.auth = await api("/api/auth/status");
+      await renderQuickNavigation();
+      if (!state.auth.authenticated) {
+        els.authPanel.classList.remove("hidden");
+        els.pageContent.classList.add("hidden");
+        els.loginBtn.onclick = () => { location.href = state.auth.login_url || "/api/auth/feishu/login"; };
+        return false;
+      }
+      if (!userCan("ad_material_tasks")) {
+        els.authPanel.classList.remove("hidden");
+        els.pageContent.classList.add("hidden");
+        els.authPanel.querySelector("h2").textContent = "无投放素材任务权限";
+        els.authPanel.querySelector("p").textContent = "请联系管理员在用户管理中开通投放素材任务权限。";
+        els.loginBtn.classList.add("hidden");
+        return false;
+      }
+      const user = state.auth.user || {};
+      els.userName.textContent = user.name || user.email || "已登录";
+      els.userMeta.textContent = `${user.role || "user"} / ${user.tenant_key || ""}`;
+      els.authPanel.classList.add("hidden");
+      els.pageContent.classList.remove("hidden");
+      return true;
+    }
+    async function loadSources() {
+      const data = await api("/api/ad-material/competitor-sources");
+      state.sources = data.items || [];
+      const options = ['<option value="">无</option>'].concat(
+        state.sources.filter(item => (item.status || "active") === "active").map(item => `<option value="${text(item.source)}">${text(item.source)}</option>`)
+      );
+      els.competitorSource.innerHTML = options.join("");
+    }
+    async function loadTasks() {
+      els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">加载中...</td></tr>`;
+      const params = new URLSearchParams();
+      if (els.statusFilter.value && els.statusFilter.value !== "all") params.set("status", els.statusFilter.value);
+      if (els.searchInput.value.trim()) params.set("q", els.searchInput.value.trim());
+      const data = await api(`/api/ad-material/tasks?${params.toString()}`);
+      state.tasks = data.items || [];
+      els.summary.textContent = `共 ${data.total || 0} 条任务`;
+      updateStats();
+      renderRows();
+    }
+    function updateStats() {
+      els.statTotal.textContent = String(state.tasks.length);
+      els.statDraft.textContent = String(state.tasks.filter(item => item.status === "draft").length);
+      els.statReview.textContent = String(state.tasks.filter(item => ["demand_review", "material_review"].includes(item.status)).length);
+      els.statDone.textContent = String(state.tasks.filter(item => item.status === "done").length);
+    }
+    function renderRows() {
+      if (!state.tasks.length) {
+        els.taskBody.innerHTML = `<tr><td colspan="9" class="muted">暂无投放素材任务</td></tr>`;
+        return;
+      }
+      els.taskBody.innerHTML = state.tasks.map(buildAdMaterialRow).join("");
+    }
+    function buildAdMaterialRow(task) {
+      const canEdit = task.status === "draft";
+      const canDelete = task.status !== "done";
+      const id = text(task.task_id);
+      return `
+        <tr>
+          <td><span class="task-id">${text(task.task_id)}</span><div class="task-desc cell-muted" title="${text(task.description || "-")}">${text(task.description || "-")}</div></td>
+          <td><div class="nowrap" title="${text(task.product_name || task.app_id || "")}">${text(task.product_name || task.app_id || "")}</div><div class="cell-muted nowrap">${text(task.app_id || "")}</div></td>
+          <td>${text(adMaterialTaskTypeText(task.task_type))}</td>
+          <td>${text(task.country || "")}/${text(task.language || "")}</td>
+          <td>${text(task.size_plan_summary || task.size || "-")}<div class="cell-muted">${text(task.quantity || 0)} 张</div></td>
+          <td>${adMaterialStatusCell(task)}</td>
+          <td><div class="nowrap" title="${text(task.creator_name || task.creator_email || "")}">${text(task.creator_name || task.creator_email || "")}</div></td>
+          <td>${text(task.updated_at || "-")}</td>
+          <td>
+            <div class="actions-inline">
+              <button class="btn btn-secondary mini" type="button" onclick="openAdMaterialDetail('${id}')">详情</button>
+              ${canEdit ? `<button class="btn btn-secondary mini" type="button" onclick="editTask('${id}')">编辑</button>` : ""}
+              ${task.status === "draft" ? `<button class="btn btn-primary mini" type="button" onclick="publishTask('${id}')">上架</button>` : ""}
+              ${adMaterialCanCompleteUpload(task) ? `<button class="btn btn-primary mini" type="button" onclick="completeUpload('${id}')">上传至盈量素材库</button>` : ""}
+              <button class="btn btn-secondary mini" type="button" onclick="copyTask('${id}')">复制</button>
+              ${canDelete ? `<button class="btn btn-danger mini" type="button" onclick="deleteTask('${id}')">删除</button>` : ""}
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+    function actionButtons(task) {
+      const id = text(task.task_id);
+      const buttons = [`<button class="btn small" onclick="openAdMaterialDetail('${id}')">详情</button>`];
+      if (task.status === "draft") {
+        buttons.push(`<button class="btn small" onclick="editTask('${id}')">编辑</button>`);
+        buttons.push(`<button class="btn small primary" onclick="publishTask('${id}')">发布</button>`);
+        buttons.push(`<button class="btn small danger" onclick="deleteTask('${id}')">删除</button>`);
+      }
+      if (adMaterialCanCompleteUpload(task)) buttons.push(`<button class="btn small primary" onclick="completeUpload('${id}')">上传至盈量素材库</button>`);
+      buttons.push(`<button class="btn small" onclick="copyTask('${id}')">复制</button>`);
+      return buttons.join("");
+    }
+    function renderSizePlan(plan = [{ size: "1:1", count: 1 }]) {
+      const map = Object.fromEntries(SIZE_OPTIONS.map(size => [size, 0]));
+      plan.forEach(item => { if (map[item.size] != null) map[item.size] = Number(item.count || 0); });
+      els.sizePlan.innerHTML = SIZE_OPTIONS.map(size => `
+        <div class="field"><label>${size}</label><input data-size="${size}" type="number" min="0" max="20" value="${map[size]}" /></div>
+      `).join("");
+    }
+    function collectSizePlan() {
+      const items = Array.from(els.sizePlan.querySelectorAll("[data-size]"))
+        .map(input => ({ size: input.dataset.size, count: Math.max(0, Number(input.value || 0)) }))
+        .filter(item => item.count > 0);
+      if (!items.length) throw new Error("至少选择一个尺寸数量");
+      if (items.reduce((sum, item) => sum + item.count, 0) > 20) throw new Error("单个任务最多 20 张");
+      return items;
+    }
+    async function filePayload() {
+      const files = Array.from(els.referenceFiles.files || []);
+      return Promise.all(files.map(file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, type: file.type, data_url: reader.result });
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      })));
+    }
+    function openModal(mode = "create") {
+      els.modalTitle.textContent = mode === "edit" ? "编辑任务" : "创建任务";
+      els.submitBtn.textContent = mode === "edit" ? "保存编辑" : "确认创建";
+      els.taskModal.classList.remove("hidden");
+    }
+    function closeModal() { els.taskModal.classList.add("hidden"); }
+    function resetForm() {
+      state.editingTaskId = "";
+      state.selectedProduct = null;
+      els.taskForm.reset();
+      els.productHint.textContent = "未选择产品";
+      els.productOptions.classList.add("hidden");
+      els.taskType.value = "素材迭代——根据老素材效果优化";
+      renderSizePlan();
+    }
+    function setProduct(product) {
+      state.selectedProduct = product;
+      const label = `${product.product_name || product.name || product.label || product.app_id} / ${product.app_id || product.id || ""}`;
+      els.productSearch.value = label;
+      els.productHint.textContent = `已选择：${label}`;
+      els.productOptions.classList.add("hidden");
+      if (product.country && !els.countryInput.value) els.countryInput.value = product.country;
+      if (product.language && !els.languageInput.value) els.languageInput.value = product.language;
+    }
+    async function searchProducts() {
+      const q = els.productSearch.value.trim();
+      if (!q) return;
+      els.productOptions.innerHTML = `<button type="button">搜索中...</button>`;
+      els.productOptions.classList.remove("hidden");
+      const data = await api(`/api/ad-material/products?q=${encodeURIComponent(q)}&limit=20`);
+      const items = data.items || [];
+      els.productOptions.innerHTML = items.length ? items.map((item, index) => `
+        <button type="button" data-product-index="${index}"><strong>${text(item.product_name || item.name || item.label || item.app_id)}</strong><div class="muted">${text(item.app_id || item.id || "")}</div></button>
+      `).join("") : `<button type="button">暂无匹配产品</button>`;
+      els.productOptions.querySelectorAll("[data-product-index]").forEach(button => {
+        button.onclick = () => setProduct(items[Number(button.dataset.productIndex)]);
+      });
+    }
+    async function submitTask(event) {
+      event.preventDefault();
+      try {
+        if (!state.selectedProduct && state.editingTaskId) {
+          state.selectedProduct = { app_id: els.productSearch.dataset.appId || "", product_name: els.productSearch.value };
+        }
+        if (!state.selectedProduct) throw new Error("请先搜索并选择产品");
+        const sizePlan = collectSizePlan();
+        const product = state.selectedProduct;
+        const payload = {
+          app_id: product.app_id || product.id || els.productSearch.dataset.appId || "",
+          product_name: product.product_name || product.name || product.label || els.productSearch.value,
+          store_url: product.store_url || "",
+          package_name: product.package_name || product.package || "",
+          product_icon_url: product.product_icon_url || "",
+          task_type: els.taskType.value,
+          competitor_source: els.competitorSource.value,
+          country: els.countryInput.value.trim(),
+          language: els.languageInput.value.trim(),
+          category: els.categoryInput.value.trim(),
+          tag_name: els.tagInput.value.trim(),
+          title: els.titleInput.value.trim(),
+          body: els.bodyInput.value.trim(),
+          description: els.descriptionInput.value.trim(),
+          quantity: sizePlan.reduce((sum, item) => sum + item.count, 0),
+          size_plan: sizePlan,
+          reference_files: await filePayload(),
+        };
+        const path = state.editingTaskId ? `/api/ad-material/tasks/${state.editingTaskId}` : "/api/ad-material/tasks";
+        await api(path, { method: "POST", body: JSON.stringify(payload) });
+        toast(state.editingTaskId ? "任务已更新" : "任务已创建");
+        closeModal();
+        resetForm();
+        await loadTasks();
+      } catch (error) {
+        toast(error.message || "保存失败", true);
+      }
+    }
+    function renderAdMaterialDetail(task) {
+      const referenceFiles = task.reference_files || [];
+      const artifacts = task.demand_artifacts || {};
+      const assets = task.assets || [];
+      els.adMaterialDetailPanel?.classList.add("open");
+      els.adMaterialDetailContent.innerHTML = `
+        <div class="card">
+          <div class="grid">
+            <div><strong>任务ID</strong><div><code>${text(task.task_id || "")}</code></div></div>
+            <div><strong>产品</strong><div>${text(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>产品ID</strong><div>${text(task.app_id || "")}</div></div>
+            <div><strong>类型</strong><div>${text(adMaterialTaskTypeText(task.task_type))}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${text(task.country || "")}/${text(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${text(task.quantity || 0)}</div></div>
+            <div><strong>尺寸</strong><div>${text(task.size_plan_summary || task.size || "未填写")}</div></div>
+            <div><strong>竞品源</strong><div>${text(task.competitor_source || "不使用")}</div></div>
+          </div>
+          ${task.status === "draft" ? `<div class="actions-inline" style="margin-top:12px;"><button class="btn btn-primary" type="button" onclick="publishTask('${text(task.task_id)}')">上架任务</button></div>` : ""}
+        </div>
+        <div class="card">
+          <strong>上报字段</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>category</strong><div>${text(task.category || "空")}</div></div>
+            <div><strong>tag_name</strong><div>${text(task.tag_name || "空")}</div></div>
+            <div><strong>title</strong><div>${text(task.title || "空")}</div></div>
+            <div><strong>body</strong><div>${text(task.body || "空")}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>产品与商店信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>包名</strong><div>${text(task.package_name || "未记录")}</div></div>
+            <div><strong>产品图标</strong><div>${task.product_icon_url ? `<a href="${text(task.product_icon_url)}" target="_blank" rel="noopener noreferrer">打开图标</a>` : "未记录"}</div></div>
+            <div style="grid-column:span 12;"><strong>商店链接</strong><div>${task.store_url ? `<a href="${text(task.store_url)}" target="_blank" rel="noopener noreferrer">${text(task.store_url)}</a>` : "未记录"}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>补充说明与参考文件</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div style="grid-column:span 12;"><strong>任务描述</strong><div>${text(task.description || "未填写")}</div></div>
+            <div><strong>参考文件</strong><div>${referenceFiles.length}</div></div>
+            <div><strong>生成素材</strong><div>${assets.length}</div></div>
+            <div><strong>需求MD</strong><div>${artifacts.markdown_url ? `<a href="${text(artifacts.markdown_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+            <div><strong>需求PDF</strong><div>${artifacts.pdf_url ? `<a href="${text(artifacts.pdf_url)}" target="_blank" rel="noopener noreferrer">打开</a>` : "未生成"}</div></div>
+          </div>
+          ${referenceFiles.length ? `<div class="actions-inline" style="margin-top:12px;">${referenceFiles.map((file, index) => `<a class="btn btn-secondary mini" href="${text(file.url || "")}" target="_blank" rel="noopener noreferrer">参考文件 ${index + 1}</a>`).join("")}</div>` : ""}
+        </div>
+        <div class="card">
+          <strong>创建信息</strong>
+          <div class="grid" style="margin-top:12px;">
+            <div><strong>发起人</strong><div>${text(task.creator_name || "")}</div></div>
+            <div><strong>邮箱</strong><div>${text(task.creator_email || "")}</div></div>
+            <div><strong>initiator</strong><div>${text(task.initiator_sub_user_id || "未定位")}</div></div>
+            <div><strong>创建时间</strong><div>${text(task.created_at || "")}</div></div>
+            <div><strong>更新时间</strong><div>${text(task.updated_at || "")}</div></div>
+          </div>
+        </div>
+        ${task.error_message ? `<div class="card"><strong>错误</strong><pre style="white-space:pre-wrap;">${text(task.error_message)}</pre></div>` : ""}
+      `;
+    }
+    async function openAdMaterialDetail(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+        state.selectedAdMaterialTask = task;
+        renderAdMaterialDetail(task);
+      } catch (error) {
+        toast(error.message || "加载详情失败", true);
+      }
+    }
+    function hideAdMaterialDetail() {
+      state.selectedAdMaterialTask = null;
+      els.adMaterialDetailPanel?.classList.remove("open");
+      if (els.adMaterialDetailContent) els.adMaterialDetailContent.innerHTML = "";
+    }
+    function renderAdMaterialDemandReview(task) {
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${text(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${text(task.country || "")}/${text(task.language || "")}</div></div>
+            <div><strong>数量</strong><div>${text(task.quantity || 0)}</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="actions-inline" style="justify-content:space-between;align-items:center;">
+            <strong>需求预览</strong>
+          </div>
+          <div class="md-preview">${renderMarkdownPreview(task.demand_text || "暂无需求内容")}</div>
+        </div>
+        <div class="card">
+          <label><strong>驳回原因</strong></label>
+          <textarea id="adMaterialDemandReviewReason" rows="3" placeholder="仅驳回时必填，会作为重新生成需求的方向"></textarea>
+          <div class="actions-inline" style="margin-top:12px;">
+            <button class="btn btn-primary" type="button" onclick="reviewAdMaterialDemand('${text(task.task_id)}','approved')">需求通过</button>
+            <button class="btn btn-danger" type="button" onclick="reviewAdMaterialDemand('${text(task.task_id)}','rejected', document.getElementById('adMaterialDemandReviewReason')?.value || '')">需求驳回</button>
+          </div>
+        </div>`;
+    }
+    function renderAdMaterialAssetReview(task) {
+      const assets = task.assets || [];
+      return `
+        <div class="card">
+          <div class="grid">
+            <div><strong>产品</strong><div>${text(task.product_name || task.app_id || "")}</div></div>
+            <div><strong>状态</strong><div>${adMaterialTaskStatusBadge(task)}</div></div>
+            <div><strong>国家/语言</strong><div>${text(task.country || "")}/${text(task.language || "")}</div></div>
+            <div><strong>素材数</strong><div>${assets.length}</div></div>
+          </div>
+        </div>
+        ${assets.length ? `<div class="grid">${assets.map(asset => `
+          <div class="review-asset-card" style="grid-column:span 6;">
+            ${reviewAssetMedia(asset)}
+            <div><strong>${text(asset.name || asset.asset_id || "")}</strong></div>
+            <div>${adMaterialStatusBadge(asset.status, asset.status_label)}</div>
+            ${asset.review_reason ? `<div class="muted">驳回原因：${text(asset.review_reason)}</div>` : ""}
+            ${asset.status === "pending_review" ? `
+              <textarea id="adMaterialAssetReason_${text(asset.asset_id)}" rows="2" placeholder="驳回时填写原因，废弃可不填"></textarea>
+              <div class="actions-inline">
+                <button class="btn btn-primary mini" type="button" onclick="reviewAdMaterialAsset('${text(task.task_id)}','${text(asset.asset_id)}','approved')">通过</button>
+                <button class="btn btn-danger mini" type="button" onclick="reviewAdMaterialAsset('${text(task.task_id)}','${text(asset.asset_id)}','rejected', document.getElementById('adMaterialAssetReason_${text(asset.asset_id)}')?.value || '')">驳回</button>
+                <button class="btn btn-secondary mini" type="button" onclick="reviewAdMaterialAsset('${text(task.task_id)}','${text(asset.asset_id)}','abandoned', document.getElementById('adMaterialAssetReason_${text(asset.asset_id)}')?.value || '')">废弃</button>
+              </div>` : ""}
+          </div>`).join("")}</div>` : `<div class="card muted">暂无素材</div>`}
+      `;
+    }
+    async function openAdMaterialReview(taskId) {
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+        state.reviewingAdMaterialTask = task;
+        if (els.adMaterialReviewTitle) {
+          els.adMaterialReviewTitle.textContent = task.status === "material_review" ? "素材审核" : "需求审核";
+        }
+        if (els.adMaterialReviewContent) {
+          els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+            ? renderAdMaterialAssetReview(task)
+            : renderAdMaterialDemandReview(task);
+        }
+        els.adMaterialReviewModal?.classList.remove("hidden");
+      } catch (error) {
+        toast(error.message || "加载审核任务失败", true);
+      }
+    }
+    function closeAdMaterialReviewModal() {
+      els.adMaterialReviewModal?.classList.add("hidden");
+      if (els.adMaterialReviewContent) els.adMaterialReviewContent.innerHTML = "";
+      state.reviewingAdMaterialTask = null;
+    }
+    async function refreshAdMaterialReview(taskId) {
+      if (!els.adMaterialReviewModal || els.adMaterialReviewModal.classList.contains("hidden")) return;
+      const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+      if (!adMaterialCanReview(task)) {
+        closeAdMaterialReviewModal();
+        return;
+      }
+      state.reviewingAdMaterialTask = task;
+      if (els.adMaterialReviewTitle) {
+        els.adMaterialReviewTitle.textContent = task.status === "material_review" ? "素材审核" : "需求审核";
+      }
+      if (els.adMaterialReviewContent) {
+        els.adMaterialReviewContent.innerHTML = task.status === "material_review"
+          ? renderAdMaterialAssetReview(task)
+          : renderAdMaterialDemandReview(task);
+      }
+    }
+    async function editTask(taskId) {
+      const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`);
+      resetForm();
+      state.editingTaskId = taskId;
+      state.selectedProduct = { app_id: task.app_id, product_name: task.product_name };
+      els.productSearch.value = `${task.product_name || task.app_id} / ${task.app_id}`;
+      els.productSearch.dataset.appId = task.app_id;
+      els.productHint.textContent = `已选择：${els.productSearch.value}`;
+      els.taskType.value = task.task_type || els.taskType.value;
+      els.competitorSource.value = task.competitor_source || "";
+      els.countryInput.value = task.country || "";
+      els.languageInput.value = task.language || "";
+      els.categoryInput.value = task.category || "";
+      els.tagInput.value = task.tag_name || "";
+      els.titleInput.value = task.title || "";
+      els.bodyInput.value = task.body || "";
+      els.descriptionInput.value = task.description || "";
+      renderSizePlan(task.size_plan || []);
+      openModal("edit");
+    }
+    async function publishTask(taskId) {
+      if (!confirm("确认发布并开始生成需求？")) return;
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/publish`, { method: "POST", body: "{}" });
+      toast("已发布");
+      await loadTasks();
+    }
+    async function copyTask(taskId) {
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/copy`, { method: "POST", body: "{}" });
+      toast("已复制");
+      await loadTasks();
+    }
+    async function deleteTask(taskId) {
+      if (!confirm("确认删除该任务？")) return;
+      await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+      toast("已删除");
+      await loadTasks();
+    }
+    async function reviewAdMaterialDemand(taskId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
+      if (result === "rejected" && !reason) return toast("驳回原因必填", true);
+      try {
+        await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/demand-review`, {
+          method: "POST",
+          body: JSON.stringify({ result, reason })
+        });
+        toast(result === "approved" ? "需求已通过，开始生成素材" : "已驳回并重新生成需求");
+        await loadTasks();
+        closeAdMaterialReviewModal();
+        if (state.selectedAdMaterialTask?.task_id === taskId) await openAdMaterialDetail(taskId);
+      } catch (error) {
+        toast(error.message || "审核需求失败", true);
+      }
+    }
+    async function reviewAdMaterialAsset(taskId, assetId, result, reasonOverride) {
+      const reason = result === "rejected" ? String(reasonOverride ?? "").trim() : "";
+      if (result === "rejected" && !reason) return toast("驳回原因必填", true);
+      if (result === "abandoned" && !confirm("确认废弃该素材？废弃后不会重新制作，也不会上传至素材库。")) return;
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(assetId)}/review`, {
+          method: "POST",
+          body: JSON.stringify({ result, reason })
+        });
+        applyTaskSnapshot(task);
+        toast(result === "approved" ? "素材已通过" : result === "abandoned" ? "素材已废弃" : "素材已驳回并重新生成");
+        if (state.selectedAdMaterialTask?.task_id === taskId) {
+          state.selectedAdMaterialTask = task;
+          renderAdMaterialDetail(task);
+        }
+        if (state.reviewingAdMaterialTask?.task_id === taskId) {
+          const hasPendingReview = (task.assets || []).some(asset => asset.status === "pending_review");
+          if (!hasPendingReview) closeAdMaterialReviewModal();
+          else await refreshAdMaterialReview(taskId);
+        }
+        loadTasks().catch(error => toast(error.message || "刷新投放素材任务失败", true));
+      } catch (error) {
+        toast(error.message || "审核素材失败", true);
+      }
+    }
+    async function reviewDemand(taskId, result) {
+      const reason = result === "rejected" ? prompt("请输入驳回原因") || "" : "";
+      return reviewAdMaterialDemand(taskId, result, reason);
+    }
+    async function reviewAsset(taskId, assetId, result) {
+      const reason = result === "rejected" ? prompt("请输入驳回原因") || "" : "";
+      return reviewAdMaterialAsset(taskId, assetId, result, reason);
+    }
+    async function completeUpload(taskId) {
+      if (!confirm("确认将审核通过的素材上传至盈量素材库？已废弃素材会跳过。")) return;
+      try {
+        const task = await api(`/api/ad-material/tasks/${encodeURIComponent(taskId)}/complete-upload`, { method: "POST", body: "{}" });
+        applyTaskSnapshot(task);
+        toast("素材已上传至盈量素材库");
+        if (state.selectedAdMaterialTask?.task_id === taskId) {
+          state.selectedAdMaterialTask = task;
+          renderAdMaterialDetail(task);
+        }
+        await loadTasks();
+      } catch (error) {
+        toast(error.message || "上传至盈量素材库失败", true);
+      }
+    }
+    window.viewTask = openAdMaterialDetail;
+    window.openAdMaterialDetail = openAdMaterialDetail;
+    window.openAdMaterialReview = openAdMaterialReview;
+    window.editTask = editTask;
+    window.publishTask = publishTask;
+    window.copyTask = copyTask;
+    window.deleteTask = deleteTask;
+    window.reviewDemand = reviewDemand;
+    window.reviewAsset = reviewAsset;
+    window.reviewAdMaterialDemand = reviewAdMaterialDemand;
+    window.reviewAdMaterialAsset = reviewAdMaterialAsset;
+    window.completeUpload = completeUpload;
+
+    document.querySelectorAll("[data-close]").forEach(button => button.onclick = closeModal);
+    els.adMaterialCloseDetailBtn.onclick = hideAdMaterialDetail;
+    els.adMaterialDetailPanel.addEventListener("click", event => {
+      if (event.target === els.adMaterialDetailPanel) hideAdMaterialDetail();
+    });
+    els.adMaterialReviewCloseBtn.onclick = closeAdMaterialReviewModal;
+    els.adMaterialReviewModal.addEventListener("click", event => {
+      if (event.target === els.adMaterialReviewModal) closeAdMaterialReviewModal();
+    });
+    els.createBtn.onclick = () => { resetForm(); openModal("create"); };
+    els.reloadBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
+    els.searchBtn.onclick = () => loadTasks().catch(error => toast(error.message, true));
+    els.statusFilter.onchange = () => loadTasks().catch(error => toast(error.message, true));
+    els.resetBtn.onclick = resetForm;
+    els.taskForm.onsubmit = submitTask;
+    els.productSearch.addEventListener("input", () => {
+      clearTimeout(state.productTimer);
+      state.selectedProduct = null;
+      state.productTimer = setTimeout(() => searchProducts().catch(error => toast(error.message, true)), 300);
+    });
+    (async function init() {
+      try {
+        renderSizePlan();
+        if (!(await loadAuth())) return;
+        await loadSources();
+        await loadTasks();
+      } catch (error) {
+        toast(error.message || "页面初始化失败", true);
+      }
+    })();
+  </script>
+</body>
+</html>

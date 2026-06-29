@@ -3287,6 +3287,7 @@ MODULE_PERMISSIONS = {
     "cover_synthesis": "封面图合成",
 
     "ad_material_tasks": "投放素材任务",
+    "voiceover_drama_tasks": "配音剧语种任务",
 
     "ad_control_center": "产品广告调控中心",
 
@@ -3341,6 +3342,7 @@ DEFAULT_USER_PERMISSIONS = {
     "cover_synthesis": False,
     "ad_material_tasks": False,
     "ad_control_center": False,
+    "voiceover_drama_tasks": False,
     "settings": False,
 }
 
@@ -32233,15 +32235,6 @@ def retry_screenshot_job(job_id):
     }
 
 
-def parse_screenshot_job_route(path):
-
-    match = re.match(r"^/api/drama-screenshot-material/jobs/([0-9a-f]{32})(?:/(retry))?$", path)
-
-    if not match:
-
-        return None, None
-
-    return match.group(1), match.group(2)
 
 
 
@@ -35523,6 +35516,20 @@ def ad_material_task_from_row(row):
     item["size_plan"] = ad_material_size_plan_from_task(item)
     item["size_plan_summary"] = format_ad_material_size_plan(item["size_plan"])
     item["assets"] = fetch_ad_material_assets(item["task_id"])
+    asset_statuses = {str(asset.get("status") or "").strip() for asset in item["assets"]}
+    ready_statuses = {"approved", "uploaded", "abandoned"}
+    item["review_pending"] = item.get("status") == "demand_review" or (
+        item.get("status") == "material_review"
+        and bool(asset_statuses & {"pending_review", "regenerating"})
+    )
+    item["material_upload_ready"] = (
+        item.get("status") not in {"draft", "generating_demand", "generating_material", "done"}
+        and bool(item["assets"])
+        and bool(asset_statuses & {"approved", "uploaded"})
+        and asset_statuses.issubset(ready_statuses)
+    )
+    if item["material_upload_ready"]:
+        item["status_label"] = "待上报"
     return item
 
 
@@ -37445,14 +37452,45 @@ def complete_ad_material_upload(task_id, session):
     return fetch_ad_material_task(task_id)
 
 
-def parse_ad_material_task_route(path):
-    match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})(?:/([a-z-]+))?$", path)
-    if match:
-        return match.group(1), match.group(2) or ""
-    match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})/assets/([^/]+)/review$", path)
-    if match:
-        return match.group(1), "asset-review:%s" % match.group(2)
-    return "", ""
+from features.ad_material_tasks.routes import (
+    configure_ad_material_task_routes,
+    parse_ad_material_task_route,
+    try_handle_ad_material_delete,
+    try_handle_ad_material_get,
+    try_handle_ad_material_post,
+)
+from features.cover_synthesis.routes import (
+    configure_cover_synthesis_routes,
+    try_handle_cover_synthesis_delete,
+    try_handle_cover_synthesis_get,
+    try_handle_cover_synthesis_post,
+)
+from features.drama_synthesis.routes import (
+    configure_drama_synthesis_routes,
+    try_handle_drama_synthesis_delete,
+    try_handle_drama_synthesis_get,
+    try_handle_drama_synthesis_post,
+)
+from features.voiceover_drama_tasks.service import (
+    configure_voiceover_drama_tasks,
+    create_voiceover_design_tasks,
+    list_voiceover_designers,
+    voiceover_filter_materials,
+    voiceover_material_counts,
+)
+
+configure_voiceover_drama_tasks(
+    ADMIN_MAPPING_MYSQL_DATABASE=ADMIN_MAPPING_MYSQL_DATABASE,
+    DB_NAME=DB_NAME,
+    StructuredApiError=StructuredApiError,
+    run_mysql=run_mysql,
+    mysql_escape_literal=mysql_escape_literal,
+    app_package_for_app_id=app_package_for_app_id,
+    ad_material_actor=ad_material_actor,
+    api_error_payload=api_error_payload,
+)
+
+
 
 
 def list_products(force=False):
@@ -54696,6 +54734,41 @@ def append_audit_log(actor_session, action, target_type="", target_id="", detail
 
 
             conn.close()
+
+configure_ad_material_task_routes(
+    json_response=json_response,
+    api_error_payload=api_error_payload,
+    append_audit_log=append_audit_log,
+    list_ad_material_competitor_sources=list_ad_material_competitor_sources,
+    list_ad_material_products=list_ad_material_products,
+    list_ad_material_tasks=list_ad_material_tasks,
+    fetch_ad_material_task=fetch_ad_material_task,
+    ensure_ad_material_access=ensure_ad_material_access,
+    create_ad_material_task=create_ad_material_task,
+    update_ad_material_task=update_ad_material_task,
+    copy_ad_material_task=copy_ad_material_task,
+    publish_ad_material_task=publish_ad_material_task,
+    review_ad_material_demand=review_ad_material_demand,
+    export_ad_material_demand_pdf=export_ad_material_demand_pdf,
+    complete_ad_material_upload=complete_ad_material_upload,
+    review_ad_material_asset=review_ad_material_asset,
+    delete_ad_material_task=delete_ad_material_task,
+)
+
+configure_cover_synthesis_routes(
+    json_response=json_response,
+    api_error_payload=api_error_payload,
+    append_audit_log=append_audit_log,
+    fetch_screenshot_job_row=fetch_screenshot_job_row,
+    fetch_screenshot_job_rows=fetch_screenshot_job_rows,
+    submit_screenshot_job=submit_screenshot_job,
+    submit_screenshot_job_batch=submit_screenshot_job_batch,
+    retry_screenshot_job=retry_screenshot_job,
+    delete_screenshot_job=delete_screenshot_job,
+    delete_screenshot_jobs=delete_screenshot_jobs,
+)
+
+
 
 
 
@@ -84620,6 +84693,17 @@ def retry_job(job_id):
 
     return {"job_id": job["job_id"], "resumed": True}
 
+configure_drama_synthesis_routes(
+    json_response=json_response,
+    api_error_payload=api_error_payload,
+    append_audit_log=append_audit_log,
+    list_products=list_products,
+    fetch_job_rows=fetch_job_rows,
+    fetch_job_row=fetch_job_row,
+    submit_job=submit_job,
+    retry_job=retry_job,
+    delete_job=delete_job,
+)
 
 
 
@@ -84714,135 +84798,8 @@ def retry_job(job_id):
 
 
 
-def parse_job_route(path):
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    match = re.match(r"^/api/drama-material/jobs/([0-9a-f]{32})(?:/(retry))?$", path)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if not match:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        return None, None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    return match.group(1), match.group(2)
 
 
 
@@ -87552,6 +87509,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if parsed.path == "/api/ui/topbar":
+            payload = self._auth_payload()
+            payload["ui"] = {
+                "brand": "AI自动后台",
+                "host": "ai.yingliangads.com",
+                "actions": ["refresh", "logout"],
+            }
+            json_response(self, 200, payload)
+            return
+
         if parsed.path == "/api/auth/status":
 
 
@@ -88130,55 +88097,20 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
-        if parsed.path == "/api/ad-material/competitor-sources":
-            if not self._require_module("ad_material_tasks"):
-                return
-            try:
-                include_disabled = (parse_qs(parsed.query).get("include_disabled") or [""])[0] in ("1", "true", "yes")
-                json_response(self, 200, {"items": list_ad_material_competitor_sources(include_disabled=include_disabled)})
-            except Exception as exc:
-                json_response(self, 400, api_error_payload(exc))
+        if try_handle_ad_material_get(self, parsed):
             return
 
-        if parsed.path == "/api/ad-material/products":
-            if not self._require_module("ad_material_tasks"):
-                return
-            try:
-                product_params = parse_qs(parsed.query)
-                product_query = (product_params.get("q") or [""])[0]
-                product_limit = (product_params.get("limit") or ["80"])[0]
-                json_response(
-                    self,
-                    200,
-                    list_ad_material_products(
-                        self._session(),
-                        query=product_query,
-                        limit=product_limit,
-                        with_total=True,
-                    ),
-                )
-            except Exception as exc:
-                json_response(self, 400, api_error_payload(exc))
+        if try_handle_drama_synthesis_get(self, parsed):
             return
 
-        if parsed.path == "/api/ad-material/tasks":
-            if not self._require_module("ad_material_tasks"):
-                return
-            try:
-                json_response(self, 200, list_ad_material_tasks(self._session(), parse_qs(parsed.query)))
-            except Exception as exc:
-                code = 403 if isinstance(exc, PermissionError) else 400
-                json_response(self, code, api_error_payload(exc))
+        if try_handle_cover_synthesis_get(self, parsed):
             return
 
-        ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
-        if ad_task_id and not ad_action:
-            if not self._require_module("ad_material_tasks"):
+        if parsed.path == "/api/voiceover-drama/designers":
+            if not self._require_module("voiceover_drama_tasks"):
                 return
             try:
-                task = fetch_ad_material_task(ad_task_id)
-                ensure_ad_material_access(self._session(), task)
-                json_response(self, 200, task)
+                json_response(self, 200, list_voiceover_designers())
             except Exception as exc:
                 code = 403 if isinstance(exc, PermissionError) else 400
                 json_response(self, code, api_error_payload(exc))
@@ -89048,1363 +88980,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
-        if parsed.path == "/api/drama-material/products":
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if not self._require_any_module(("drama_synthesis", "cover_synthesis")):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            try:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 200, {"items": list_products()})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            except Exception as exc:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 500, {"error": str(exc)})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
-
-        if screenshot_job_id and not screenshot_action:
-
-            if not self._require_module("cover_synthesis"):
-
-                return
-
-            try:
-
-                payload = fetch_screenshot_job_row(screenshot_job_id)
-
-                if not payload:
-
-                    json_response(self, 404, {"error": "not_found"})
-
-                    return
-
-                json_response(self, 200, payload)
-
-            except Exception as exc:
-
-                json_response(self, 500, {"error": str(exc)})
-
-            return
-
-        if parsed.path == "/api/drama-screenshot-material/jobs":
-
-            if not self._require_module("cover_synthesis"):
-
-                return
-
-            try:
-
-                params = parse_qs(parsed.query)
-
-                payload = fetch_screenshot_job_rows(
-
-                    job_id=(params.get("job_id") or [""])[0].strip() or None,
-
-                    app_id=(params.get("app_id") or [""])[0].strip() or None,
-
-                    content_id=(params.get("content_id") or [""])[0].strip() or None,
-
-                    status=(params.get("status") or [""])[0].strip() or None,
-
-                    query=(params.get("q") or [""])[0].strip() or None,
-
-                    date_from=(params.get("date_from") or [""])[0].strip() or None,
-
-                    date_to=(params.get("date_to") or [""])[0].strip() or None,
-
-                    page=int((params.get("page") or ["1"])[0]),
-
-                    page_size=int((params.get("page_size") or ["20"])[0]),
-
-                )
-
-                json_response(self, 200, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
-            return
-
-        if parsed.path == "/api/drama-screenshot-material/jobs/batch":
-
-            if not self._require_module("cover_synthesis"):
-
-                return
-
-            try:
-
-                payload = submit_screenshot_job_batch(self._read_json(), self._session())
-
-                append_audit_log(
-
-                    self._session(),
-
-                    "create_screenshot_job_batch",
-
-                    "screenshot_job",
-
-                    "",
-
-                    {
-
-                        "app_id": payload.get("app_id", ""),
-
-                        "count": payload.get("count", 0),
-
-                        "accepted_count": payload.get("accepted_count", 0),
-
-                        "duplicate_count": payload.get("duplicate_count", 0),
-
-                        "failed_count": payload.get("failed_count", 0),
-
-                    },
-
-                )
-
-                json_response(self, 202, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
-            return
-
-        if parsed.path == "/api/drama-screenshot-material/jobs":
-
-            if not self._require_module("cover_synthesis"):
-
-                return
-
-            try:
-
-                payload = submit_screenshot_job(self._read_json(), self._session())
-
-                append_audit_log(
-
-                    self._session(),
-
-                    "create_screenshot_job",
-
-                    "screenshot_job",
-
-                    payload.get("job_id", ""),
-
-                    payload,
-
-                )
-
-                json_response(self, 202, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
-            return
-
-        if parsed.path == "/api/drama-screenshot-material/jobs":
-
-            if not self._require_module("cover_synthesis"):
-
-                return
-
-            try:
-
-                payload = submit_screenshot_job(self._read_json(), self._session())
-
-                append_audit_log(
-
-                    self._session(),
-
-                    "create_screenshot_job",
-
-                    "screenshot_job",
-
-                    payload.get("job_id", ""),
-
-                    payload,
-
-                )
-
-                json_response(self, 202, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
-            return
-
-        if parsed.path == "/api/drama-material/jobs":
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if not self._require_module("drama_synthesis"):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            try:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                params = parse_qs(parsed.query)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                payload = fetch_job_rows(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    job_id=(params.get("job_id") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    app_id=(params.get("app_id") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    content_id=(params.get("content_id") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    status=(params.get("status") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    query=(params.get("q") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    date_from=(params.get("date_from") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    date_to=(params.get("date_to") or [""])[0].strip() or None,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    page=int((params.get("page") or ["1"])[0]),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    page_size=int((params.get("page_size") or ["20"])[0]),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 200, payload)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            except Exception as exc:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 400, api_error_payload(exc))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        job_id, action = parse_job_route(parsed.path)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if job_id and not action:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if not self._require_module("drama_synthesis"):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            job = fetch_job_row(job_id)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if not job:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 404, {"error": "not_found"})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            json_response(self, 200, job)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            return
 
 
 
@@ -90846,206 +89422,70 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
-        screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
-        if screenshot_job_id and screenshot_action == "retry":
-            if not self._require_module("cover_synthesis"):
+        if parsed.path == "/api/voiceover-drama/material-counts":
+            if not self._require_module("voiceover_drama_tasks"):
                 return
             try:
-                payload = retry_screenshot_job(screenshot_job_id)
-                append_audit_log(self._session(), "retry_screenshot_job", "screenshot_job", screenshot_job_id, payload)
-                json_response(self, 202, payload)
-            except Exception as exc:
-                json_response(self, 400, api_error_payload(exc))
-            return
-
-        if parsed.path == "/api/ad-material/tasks":
-            if not self._require_module("ad_material_tasks"):
-                return
-            try:
-                payload = create_ad_material_task(self._read_json(), self._session())
-                append_audit_log(self._session(), "create_ad_material_task", "ad_material_task", payload.get("task_id", ""), payload)
-                json_response(self, 201, payload)
+                payload = voiceover_material_counts(self._read_json())
+                append_audit_log(self._session(), "voiceover_material_counts", "voiceover_drama", "", {"total": payload.get("total", 0)})
+                json_response(self, 200, payload)
             except Exception as exc:
                 code = 403 if isinstance(exc, PermissionError) else 400
                 json_response(self, code, api_error_payload(exc))
             return
 
-        ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
-        if ad_task_id:
-            if not self._require_module("ad_material_tasks"):
+        if parsed.path == "/api/voiceover-drama/filter":
+            if not self._require_module("voiceover_drama_tasks"):
                 return
             try:
-                body = self._read_json()
-                if ad_action == "":
-                    payload = update_ad_material_task(ad_task_id, body, self._session())
-                    audit_action = "update_ad_material_task"
-                elif ad_action == "copy":
-                    payload = copy_ad_material_task(ad_task_id, self._session())
-                    audit_action = "copy_ad_material_task"
-                elif ad_action == "publish":
-                    payload = publish_ad_material_task(ad_task_id, self._session())
-                    audit_action = "publish_ad_material_task"
-                elif ad_action == "demand-review":
-                    payload = review_ad_material_demand(ad_task_id, body, self._session())
-                    audit_action = "review_ad_material_demand"
-                elif ad_action == "export-pdf":
-                    payload = export_ad_material_demand_pdf(ad_task_id, self._session())
-                    audit_action = "export_ad_material_demand_pdf"
-                elif ad_action == "complete-upload":
-                    payload = complete_ad_material_upload(ad_task_id, self._session())
-                    audit_action = "complete_ad_material_upload"
-                elif ad_action.startswith("asset-review:"):
-                    payload = review_ad_material_asset(ad_task_id, ad_action.split(":", 1)[1], body, self._session())
-                    audit_action = "review_ad_material_asset"
-                else:
-                    json_response(self, 404, {"error": "not_found"})
-                    return
-                append_audit_log(self._session(), audit_action, "ad_material_task", ad_task_id, {"status": payload.get("status", "")})
-                json_response(self, 202 if audit_action.startswith(("publish", "review")) else 200, payload)
-            except Exception as exc:
-                code = 403 if isinstance(exc, PermissionError) else 400
-                json_response(self, code, api_error_payload(exc))
-            return
-
-        if parsed.path == "/api/drama-screenshot-material/jobs/delete-batch":
-            if not self._require_cookie_module("cover_synthesis"):
-                return
-            try:
-                payload = self._read_json()
-                result = delete_screenshot_jobs(payload.get("job_ids", []))
+                payload = voiceover_filter_materials(self._read_json())
                 append_audit_log(
                     self._session(),
-                    "delete_screenshot_job_batch",
-                    "screenshot_job",
+                    "voiceover_filter_materials",
+                    "voiceover_drama",
                     "",
                     {
-                        "requested_count": result.get("requested_count", 0),
-                        "deleted_count": result.get("deleted_count", 0),
-                        "missing_count": result.get("missing_count", 0),
+                        "total": payload.get("total", 0),
+                        "groups": len(payload.get("groups") or []),
                     },
                 )
-                json_response(self, 200, result)
+                json_response(self, 200, payload)
             except Exception as exc:
-                json_response(self, 400, api_error_payload(exc))
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
             return
 
-        if parsed.path == "/api/drama-screenshot-material/jobs/batch":
-
-            if not self._require_module("cover_synthesis"):
-
+        if parsed.path == "/api/voiceover-drama/design-tasks":
+            if not self._require_module("voiceover_drama_tasks"):
                 return
-
             try:
-
-                payload = submit_screenshot_job_batch(self._read_json(), self._session())
-
+                payload = create_voiceover_design_tasks(self._read_json(), self._session())
                 append_audit_log(
-
                     self._session(),
-
-                    "create_screenshot_job_batch",
-
-                    "screenshot_job",
-
+                    "create_voiceover_design_tasks",
+                    "voiceover_drama",
                     "",
-
                     {
-
-                        "app_id": payload.get("app_id", ""),
-
-                        "count": payload.get("count", 0),
-
-                        "accepted_count": payload.get("accepted_count", 0),
-
-                        "duplicate_count": payload.get("duplicate_count", 0),
-
+                        "created_count": payload.get("created_count", 0),
                         "failed_count": payload.get("failed_count", 0),
-
                     },
-
                 )
-
-                json_response(self, 202, payload)
-
+                json_response(self, 200 if not payload.get("failed_count") else 207, payload)
             except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
+                code = 403 if isinstance(exc, PermissionError) else 400
+                json_response(self, code, api_error_payload(exc))
             return
 
-        if parsed.path == "/api/drama-screenshot-material/jobs":
-
-            if not self._require_module("cover_synthesis"):
-
-                return
-
-            try:
-
-                payload = submit_screenshot_job(self._read_json(), self._session())
-
-                append_audit_log(
-
-                    self._session(),
-
-                    "create_screenshot_job",
-
-                    "screenshot_job",
-
-                    payload.get("job_id", ""),
-
-                    payload,
-
-                )
-
-                json_response(self, 202, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
+        if try_handle_ad_material_post(self, parsed):
             return
 
-        if parsed.path == "/api/drama-material/jobs":
-
-            if not self._require_module("drama_synthesis"):
-
-                return
-
-            try:
-
-                payload = submit_job(self._read_json(), self._session())
-
-                append_audit_log(self._session(), "create_job", "job", payload.get("job_id", ""), payload)
-
-                json_response(self, 202, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
+        if try_handle_drama_synthesis_post(self, parsed):
             return
 
-        job_id, action = parse_job_route(parsed.path)
-
-        if job_id and action == "retry":
-
-            if not self._require_module("drama_synthesis"):
-
-                return
-
-            try:
-
-                payload = retry_job(job_id)
-
-                append_audit_log(self._session(), "retry_job", "job", job_id, payload)
-
-                json_response(self, 202, payload)
-
-            except Exception as exc:
-
-                json_response(self, 400, api_error_payload(exc))
-
+        if try_handle_cover_synthesis_post(self, parsed):
             return
+
+
 
         json_response(self, 404, {"error": "not_found"})
 
@@ -91113,29 +89553,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
-        ad_task_id, ad_action = parse_ad_material_task_route(parsed.path)
-        if ad_task_id and not ad_action:
-            if not self._require_module("ad_material_tasks"):
-                return
-            try:
-                result = delete_ad_material_task(ad_task_id, self._session())
-                append_audit_log(self._session(), "delete_ad_material_task", "ad_material_task", ad_task_id, {})
-                json_response(self, 200, result)
-            except Exception as exc:
-                code = 403 if isinstance(exc, PermissionError) else 400
-                json_response(self, code, api_error_payload(exc))
+        if try_handle_ad_material_delete(self, parsed):
             return
 
-        screenshot_job_id, screenshot_action = parse_screenshot_job_route(parsed.path)
-        if screenshot_job_id and not screenshot_action:
-            if not self._require_cookie_module("cover_synthesis"):
-                return
-            result = delete_screenshot_job(screenshot_job_id)
-            if result:
-                append_audit_log(self._session(), "delete_screenshot_job", "screenshot_job", screenshot_job_id, {})
-                json_response(self, 200, {"message": "deleted", "job_id": screenshot_job_id})
-            else:
-                json_response(self, 404, {"error": "not_found"})
+        if try_handle_drama_synthesis_delete(self, parsed):
+            return
+
+        if try_handle_cover_synthesis_delete(self, parsed):
             return
 
 
@@ -91168,295 +89592,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
-        job_id, action = parse_job_route(parsed.path)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if job_id and not action:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if not self._require_module("drama_synthesis"):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if delete_job(job_id):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                append_audit_log(self._session(), "delete_job", "job", job_id, {})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 200, {"message": "deleted", "job_id": job_id})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            else:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                json_response(self, 404, {"error": "not_found"})
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            return
 
 
 
@@ -92086,23 +90222,6 @@ if __name__ == "__main__":
 
 
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

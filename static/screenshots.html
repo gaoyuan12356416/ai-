@@ -982,6 +982,7 @@
     }
 
   </style>
+  <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
 
 </head>
 
@@ -1384,7 +1385,7 @@ const els = {
 
     async function loadAuth() {
 
-      const auth = await api("/api/auth/status");
+      const auth = await api("/api/ui/topbar");
 
       if (!auth.authenticated) {
 

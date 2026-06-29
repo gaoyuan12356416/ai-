@@ -1,0 +1,1354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>配音剧语种任务 - AI自动后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #edf3fb;
+      --panel: #fff;
+      --line: #dbe5f2;
+      --text: #0f2342;
+      --muted: #697891;
+      --brand: #2f63ff;
+      --success: #118557;
+      --warn: #d48706;
+      --danger: #c83226;
+      --sidebar: #0e1a2f;
+      --shadow: 0 18px 40px rgba(18, 38, 74, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      background: linear-gradient(135deg, #eef4ff 0%, #f7f9fc 42%, #e8f0fb 100%);
+      color: var(--text);
+    }
+    a { color: inherit; text-decoration: none; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 260px 1fr; }
+    .sidebar {
+      background: linear-gradient(180deg, #14213a 0%, #0b1528 100%);
+      color: #fff;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; padding: 8px; }
+    .brand-mark {
+      width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center;
+      background: linear-gradient(135deg, #3a73ff, #2352d9); font-weight: 900;
+    }
+    .brand strong { display: block; font-size: 19px; }
+    .brand span { color: #9eb0ca; font-size: 12px; }
+    .nav { display: grid; gap: 10px; }
+    .main { min-width: 0; padding: 28px; }
+    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
+    .title h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
+    .title p { margin: 0; color: var(--muted); }
+    .user-card, .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      min-height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 16px;
+      font-weight: 800;
+    }
+    .top-actions { display: flex; gap: 10px; align-items: center; }
+    .user-card { justify-content: flex-start; min-width: 220px; font-weight: 700; }
+    .user-card small { display: block; color: var(--muted); font-weight: 600; margin-top: 2px; }
+    .btn { cursor: pointer; }
+    .btn:disabled { cursor: not-allowed; opacity: .55; }
+    .btn-primary { background: var(--brand); color: #fff; border-color: var(--brand); box-shadow: 0 14px 24px rgba(47,99,255,.22); }
+    .btn-secondary { color: #223855; }
+    .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .btn.mini { min-height: 30px; padding: 0 10px; font-size: 12px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 18px 22px; border-bottom: 1px solid #e8eef7; }
+    .panel-title-row { display: flex; gap: 12px; align-items: center; }
+    .panel-icon {
+      width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center;
+      color: #1f55e6; background: #e9efff; font-weight: 900; font-size: 13px;
+    }
+    .panel h2 { margin: 0 0 4px; font-size: 20px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .panel-body { padding: 20px 22px; }
+    .actions-inline { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    .count-grid, .filter-grid { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 18px; }
+    .field { display: grid; gap: 8px; }
+    label { color: #223855; font-weight: 900; font-size: 14px; }
+    textarea, input, select {
+      width: 100%;
+      border: 1px solid #cfdbea;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--text);
+      min-height: 42px;
+      padding: 10px 12px;
+      font: inherit;
+      outline: none;
+    }
+    textarea { resize: vertical; min-height: 132px; line-height: 1.5; }
+    textarea:focus, input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(47,99,255,.12); }
+    .input-card, .result-card, .config-card {
+      border: 1px solid #d9e4f2;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #fff, #fbfdff);
+      padding: 16px;
+    }
+    .result-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .status-pill {
+      display: inline-flex; align-items: center; width: max-content; min-height: 28px;
+      border-radius: 999px; padding: 5px 10px; background: #f2f5fa; color: #50627d;
+      font-size: 12px; font-weight: 900;
+    }
+    .status-pill.is-loading { background: #e8efff; color: #2457ff; }
+    .status-pill.is-success { background: #e8f7ef; color: var(--success); }
+    .status-pill.is-error { background: #ffecec; color: var(--danger); }
+    .config-card { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 14px; align-content: start; }
+    .config-card .status-pill, .config-card .actions-inline, .config-card .product-field { grid-column: 1 / -1; }
+    .table-wrap { overflow: auto; border: 1px solid #e2eaf5; border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; min-width: 820px; }
+    th, td { padding: 12px 14px; border-bottom: 1px solid #eef2f8; text-align: left; font-size: 13px; vertical-align: middle; }
+    th { color: #667894; background: #fbfdff; font-weight: 900; }
+    tr:last-child td { border-bottom: 0; }
+    .sort-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: auto;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: 900;
+      box-shadow: none;
+      cursor: pointer;
+    }
+    .sort-button:hover,
+    .sort-button.is-active { color: var(--brand); }
+    .sort-arrow { font-size: 12px; opacity: .42; }
+    .sort-button.is-active .sort-arrow { opacity: 1; }
+    .table-wrap th:first-child, .table-wrap td:first-child { width: 52px; text-align: center; }
+    .table-wrap input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      min-height: 0;
+      padding: 0;
+      margin: 0;
+      border-radius: 4px;
+      accent-color: var(--brand);
+      cursor: pointer;
+      box-shadow: none;
+    }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stat { border: 1px solid #dce6f3; border-left: 4px solid var(--brand); border-radius: 12px; padding: 12px 14px; background: #fbfdff; }
+    .stat strong { display: block; color: var(--brand); font-size: 22px; }
+    .stat span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .risk { display: inline-flex; border-radius: 999px; padding: 4px 8px; background: #fff3da; color: #b46c00; font-size: 12px; font-weight: 900; }
+    .detail { margin-top: 12px; font-size: 13px; color: #42536d; }
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(13, 24, 43, .48); display: grid; place-items: center; z-index: 40; padding: 28px;
+    }
+    .modal-backdrop.hidden { display: none; }
+    .modal-panel { width: min(1120px, 96vw); max-height: 92vh; display: flex; flex-direction: column; background: #fff; border-radius: 18px; overflow: hidden; box-shadow: 0 32px 70px rgba(0,0,0,.28); }
+    .modal-panel .panel-body { overflow: auto; }
+    .modal-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .overview-item { border: 1px solid #dce6f3; border-radius: 12px; padding: 12px 14px; background: #fbfdff; }
+    .overview-item strong { display: block; color: var(--brand); font-size: 20px; }
+    .overview-item span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .material-card { border: 1px solid #d6e2f1; border-radius: 14px; padding: 16px; background: #fbfdff; margin-bottom: 12px; }
+    .card-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .task-form { display: grid; grid-template-columns: 150px minmax(240px, 1fr) 180px 240px; gap: 14px; align-items: end; }
+    .description-field { grid-column: 2 / -1; }
+    .batch-task-form { grid-template-columns: 150px 180px 240px; }
+    .batch-task-form .description-field { grid-column: 1 / -1; }
+    .selected-material-list { display: grid; gap: 8px; margin-top: 12px; }
+    .selected-material-item { display: grid; grid-template-columns: 120px minmax(180px, 1fr) minmax(180px, 1fr) 96px; gap: 12px; align-items: center; border: 1px solid #e0e8f3; border-radius: 10px; padding: 10px 12px; background: #fff; }
+    .batch-selected-item { grid-template-columns: 120px minmax(190px, 1fr) minmax(240px, 1.2fr) minmax(220px, 1fr) 110px; align-items: end; }
+    .batch-designer-field { display: grid; gap: 6px; }
+    .batch-designer-field label { font-size: 12px; color: #60728c; }
+    .designer-combo { position: relative; display: grid; gap: 6px; }
+    .designer-search { min-height: 38px; padding-right: 36px; }
+    .designer-selected { min-height: 16px; color: #60728c; font-size: 12px; line-height: 1.35; }
+    .designer-menu {
+      position: absolute;
+      z-index: 80;
+      left: 0;
+      right: 0;
+      top: calc(100% + 4px);
+      display: none;
+      max-height: 240px;
+      overflow: auto;
+      border: 1px solid #d5e1f0;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 18px 36px rgba(20, 38, 68, .18);
+      padding: 6px;
+    }
+    .designer-combo.is-open .designer-menu { display: grid; gap: 4px; }
+    .designer-option {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      border-radius: 8px;
+      padding: 8px 10px;
+      text-align: left;
+      color: #0f2342;
+      box-shadow: none;
+      min-height: auto;
+    }
+    .designer-option:hover,
+    .designer-option.is-selected { background: #edf4ff; color: #2457ff; }
+    .designer-option strong { display: block; font-size: 13px; }
+    .designer-option span { display: block; margin-top: 2px; color: #60728c; font-size: 12px; }
+    .designer-empty { padding: 12px 10px; color: #8a98ad; font-size: 12px; }
+    .stepper { display: grid; grid-template-columns: 42px 64px 42px; }
+    .stepper button, .stepper input { border-radius: 0; text-align: center; min-height: 42px; }
+    .stepper button:first-child { border-radius: 10px 0 0 10px; }
+    .stepper button:last-child { border-radius: 0 10px 10px 0; background: #00a96b; border-color: #00a96b; color: #fff; }
+    .checks { display: flex; gap: 18px; min-height: 42px; align-items: center; }
+    .check { display: inline-flex; gap: 6px; align-items: center; font-weight: 800; }
+    .check input { width: auto; min-height: auto; }
+    .product-checks { flex-wrap: wrap; gap: 10px; }
+    .product-checks .check {
+      min-height: 36px;
+      border: 1px solid #dbe5f2;
+      border-radius: 999px;
+      padding: 0 12px;
+      background: #f8fbff;
+    }
+    .target-config {
+      grid-column: 1 / -1;
+      border: 1px solid #dce7f5;
+      border-radius: 14px;
+      padding: 14px;
+      background: linear-gradient(180deg, #f8fbff, #fff);
+    }
+    .target-config.is-hidden { display: none; }
+    .target-config-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    .target-config-head strong { display: block; font-size: 14px; color: #17325d; }
+    .target-fields { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 14px; }
+    .input-mode { flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
+    .input-mode .check {
+      min-height: 36px;
+      border: 1px solid #dbe5f2;
+      border-radius: 999px;
+      padding: 0 12px;
+      background: #f8fbff;
+    }
+    .modal-footer { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-top: 1px solid var(--line); padding: 14px 18px; background: #fff; }
+    .toast { position: fixed; right: 22px; bottom: 22px; background: #0f2342; color: #fff; padding: 12px 14px; border-radius: 12px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .18s ease; z-index: 60; max-width: 520px; }
+    .toast.show { opacity: 1; }
+    .toast.error { background: var(--danger); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .count-grid, .filter-grid, .task-form, .selected-material-item, .batch-selected-item, .target-fields { grid-template-columns: 1fr; }
+      .description-field { grid-column: 1; }
+      .topbar, .modal-footer { flex-direction: column; align-items: stretch; }
+    }
+  </style>
+  <link rel="stylesheet" href="/ui-topbar.css?v=202605261220" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">剧</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div class="title">
+          <h1>配音剧语种任务</h1>
+          <p>按剧 ID 或资源 ID 查询系列素材，筛选候选素材并批量创建设计师需求。</p>
+        </div>
+        <div class="top-actions">
+          <div class="user-card" id="userCard">未登录<small>请先登录</small></div>
+          <button id="refreshBtn" class="btn btn-secondary" type="button">刷新</button>
+          <button id="loginBtn" class="btn btn-primary" type="button">登录</button>
+        </div>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title-row">
+            <div class="panel-icon">查</div>
+            <div><h2>批量素材数查询</h2><div class="muted">输入 10-20 个剧 ID / content_id，只统计该剧 ID 本身已入库素材数量。</div></div>
+          </div>
+          <div class="actions-inline">
+            <button id="countBtn" class="btn btn-primary" type="button">确认查询</button>
+            <button id="countClearBtn" class="btn btn-secondary" type="button">清空</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="count-grid">
+            <div class="field input-card">
+              <div class="field product-field">
+                <label>产品维度</label>
+                <div class="checks product-checks">
+                  <label class="check"><input class="count-product" type="checkbox" value="dramawave1479" checked /> Dramawave / 1479</label>
+                  <label class="check"><input class="count-product" type="checkbox" value="freereels979" checked /> FreeReels / 979</label>
+                </div>
+              </div>
+              <label>剧 ID / content_id 列表</label>
+              <textarea id="countContentIds" rows="7" placeholder="每行一个剧 ID，支持逗号或空格分隔"></textarea>
+            </div>
+            <div class="field result-card">
+              <div class="result-title"><label>查询结果</label><span id="countStatus" class="status-pill">待查询</span></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>剧 ID</th><th>产品归属</th><th>series_code</th><th>素材数</th><th>状态</th></tr></thead>
+                  <tbody id="countTableBody"><tr><td colspan="5" class="muted">暂无查询结果</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title-row">
+            <div class="panel-icon">筛</div>
+            <div><h2>筛选任务与配置</h2><div class="muted">批量填写剧 ID 或资源 ID，系统按资源维度筛选候选素材。</div></div>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="filter-grid">
+            <div class="field input-card">
+              <label>筛选输入类型</label>
+              <div class="checks input-mode">
+                <label class="check"><input name="filterInputMode" type="radio" value="content_id" checked /> 剧 ID</label>
+                <label class="check"><input name="filterInputMode" type="radio" value="series_code" /> 资源 ID</label>
+              </div>
+              <label id="filterInputLabel">批量剧 ID</label>
+              <textarea id="filterContentIds" rows="6" placeholder="每行一个剧 ID；系统按 series_code 查询该系列下的素材"></textarea>
+              <div id="filterInputHint" class="muted">输入剧 ID 时，系统先定位 series_code，再查该资源下的候选素材。</div>
+            </div>
+            <div class="config-card">
+              <div class="field product-field">
+                <label>产品维度</label>
+                <div class="checks product-checks">
+                  <label class="check"><input class="filter-product" type="checkbox" value="dramawave1479" checked /> Dramawave / 1479</label>
+                  <label class="check"><input class="filter-product" type="checkbox" value="freereels979" checked /> FreeReels / 979</label>
+                </div>
+              </div>
+              <div id="resourceTargetConfig" class="target-config is-hidden">
+                <div class="target-config-head">
+                  <div>
+                    <strong>资源 ID 下单目标</strong>
+                    <div class="muted">只决定创建任务时下哪部剧的单，不影响候选素材筛选范围。</div>
+                  </div>
+                  <span class="status-pill">必选</span>
+                </div>
+                <div class="target-fields">
+                  <div class="field">
+                    <label>目标语种</label>
+                    <select id="targetLanguage">
+                      <option value="">请选择目标语种</option>
+                      <option value="en">en / English</option>
+                      <option value="tr">tr / Turkish</option>
+                      <option value="ja">ja / Japanese</option>
+                      <option value="ko">ko / Korean</option>
+                      <option value="zh">zh / Chinese</option>
+                      <option value="es">es / Spanish</option>
+                      <option value="pt">pt / Portuguese</option>
+                      <option value="fr">fr / French</option>
+                      <option value="de">de / German</option>
+                      <option value="it">it / Italian</option>
+                      <option value="ru">ru / Russian</option>
+                      <option value="pl">pl / Polish</option>
+                      <option value="th">th / Thai</option>
+                      <option value="vi">vi / Vietnamese</option>
+                      <option value="id">id / Indonesian</option>
+                      <option value="ms">ms / Malay</option>
+                      <option value="bn">bn / Bengali</option>
+                      <option value="hi">hi / Hindi</option>
+                      <option value="ar">ar / Arabic</option>
+                      <option value="el">el / Greek</option>
+                      <option value="nl">nl / Dutch</option>
+                      <option value="sv">sv / Swedish</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>配音类型</label>
+                    <select id="targetAudioType">
+                      <option value="">请选择配音类型</option>
+                      <option value="0">0 / 非配音剧</option>
+                      <option value="1">1 / 人工配音剧</option>
+                      <option value="2">2 / AI 配音剧</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div class="field"><label>ROAS 阈值</label><input id="roasThreshold" type="number" min="0" step="0.1" value="45" /></div>
+              <div class="field"><label>候选素材数</label><input id="minCandidates" type="number" min="0" max="50" value="15" /></div>
+              <div id="filterStatus" class="status-pill">待筛选</div>
+              <div class="actions-inline">
+                <button id="filterBtn" class="btn btn-primary" type="button">筛选候选素材</button>
+                <button id="clearBtn" class="btn btn-secondary" type="button">清空</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title-row">
+            <div class="panel-icon">结</div>
+            <div><h2>候选素材筛选结果</h2><div class="muted" id="resultSummary">尚未筛选</div></div>
+          </div>
+          <div class="actions-inline">
+            <button id="exportBtn" class="btn btn-secondary" type="button" disabled>导出筛选明细</button>
+            <button id="openCreateBtn" class="btn btn-primary" type="button" disabled>创建任务</button>
+            <button id="openBatchCreateBtn" class="btn btn-primary" type="button" disabled>批量创建任务</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="stats" class="stats">
+            <div class="stat"><strong>0</strong><span>候选素材</span></div>
+            <div class="stat"><strong>0</strong><span>ROAS达标</span></div>
+            <div class="stat"><strong>0</strong><span>已选择</span></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th><input id="selectAll" type="checkbox" aria-label="选择全部素材" /></th><th>素材 ID</th><th>目标产品</th><th>素材剧 ID / 下单目标</th><th>剧名</th><th>素材名称</th><th>Category</th><th>语种</th><th>时长</th><th><button class="sort-button" type="button" data-sort-field="roas" aria-label="按 ROAS 倒序排序">ROAS <span class="sort-arrow">↓</span></button></th><th><button class="sort-button" type="button" data-sort-field="spend" aria-label="按消耗倒序排序">消耗 <span class="sort-arrow">↓</span></button></th><th>入选原因</th><th>风险</th><th>操作</th></tr></thead>
+              <tbody id="resultTableBody"><tr><td colspan="14" class="muted">暂无筛选结果</td></tr></tbody>
+            </table>
+          </div>
+          <div class="detail">素材级筛选说明：每一行就是一条可勾选素材；素材剧 ID 是参考素材所属剧，目标产品和目标剧 ID 仍按筛选条件保存并用于创建任务。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="taskModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <div><h2>批量创建设计师任务</h2><div class="muted" id="modalSummary">请逐条素材设置任务参数，确认后统一提交。</div></div>
+        <button id="modalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="modalOverview" class="modal-overview"></div>
+        <div id="taskCards"></div>
+      </div>
+      <div class="modal-footer">
+        <div>
+          <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+          <div id="submitStatus" class="status-pill" style="margin-top:8px;">待提交</div>
+        </div>
+        <div class="actions-inline">
+          <button id="modalResetBtn" class="btn btn-secondary" type="button">Reset</button>
+          <button id="submitTasksBtn" class="btn btn-primary" type="button">确认创建全部任务</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="batchTaskModal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="panel-head">
+        <div><h2>批量创建任务</h2><div class="muted" id="batchModalSummary">全局参数应用于全部已选素材，设计师按素材单独选择。</div></div>
+        <button id="batchModalCloseBtn" class="btn btn-secondary" type="button">关闭</button>
+      </div>
+      <div class="panel-body">
+        <div id="batchModalOverview" class="modal-overview"></div>
+        <div class="material-card">
+          <div class="card-head">
+            <div>
+              <strong>全局任务参数</strong>
+              <div class="muted">任务数量、截止时间、素材名规则和任务描述会复制到每条已选素材。</div>
+            </div>
+          </div>
+          <div class="task-form batch-task-form">
+            <div class="field">
+              <label>任务数量</label>
+              <div class="stepper">
+                <button type="button" onclick="stepBatchTaskNumber(-1)">-</button>
+                <input id="batchTaskNumber" type="number" min="1" max="100" value="1" oninput="renderBatchModalOverview()" />
+                <button type="button" onclick="stepBatchTaskNumber(1)">+</button>
+              </div>
+            </div>
+            <div class="field"><label>截止时间</label><input id="batchTaskEndDate" type="date" /></div>
+            <div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="batchOrigin" type="radio" value="1" checked /> 是</label><label class="check"><input name="batchOrigin" type="radio" value="0" /> 否</label></div></div>
+            <div class="field description-field"><label>任务描述</label><textarea id="batchTaskDescription" rows="3"></textarea></div>
+          </div>
+        </div>
+        <div class="material-card">
+          <div class="card-head">
+            <div>
+              <strong>已选素材目标</strong>
+              <div class="muted">每条素材单独选择设计师；有原设计师时默认带出，未匹配到则留空。</div>
+            </div>
+          </div>
+          <div id="batchSelectedList" class="selected-material-list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div>
+          <div class="muted">设计师下拉来源：[78]授权设计师接单权限用-设计师接单权限</div>
+          <div id="batchSubmitStatus" class="status-pill" style="margin-top:8px;">待提交</div>
+        </div>
+        <div class="actions-inline">
+          <button id="batchModalResetBtn" class="btn btn-secondary" type="button">Reset</button>
+          <button id="submitBatchTasksBtn" class="btn btn-primary" type="button">确认批量创建</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/ui-topbar.js?v=202605291130"></script>
+  <script src="/quick-nav.js?v=202605291130"></script>
+  <script>
+    const state = {
+      auth: { authenticated: false, user: null, login_url: "/api/auth/feishu/login" },
+      countRows: [],
+      materials: [],
+      selectedKeys: new Set(),
+      designers: [],
+      modalItems: [],
+      filterRequestSeq: 0,
+      resultSort: { field: "", direction: "desc" }
+    };
+    const els = {
+      quickNav: document.getElementById("quickNav"),
+      userCard: document.getElementById("userCard"),
+      refreshBtn: document.getElementById("refreshBtn"),
+      loginBtn: document.getElementById("loginBtn"),
+      countContentIds: document.getElementById("countContentIds"),
+      countBtn: document.getElementById("countBtn"),
+      countClearBtn: document.getElementById("countClearBtn"),
+      countStatus: document.getElementById("countStatus"),
+      countTableBody: document.getElementById("countTableBody"),
+      filterInputLabel: document.getElementById("filterInputLabel"),
+      filterInputHint: document.getElementById("filterInputHint"),
+      filterContentIds: document.getElementById("filterContentIds"),
+      resourceTargetConfig: document.getElementById("resourceTargetConfig"),
+      targetLanguage: document.getElementById("targetLanguage"),
+      targetAudioType: document.getElementById("targetAudioType"),
+      roasThreshold: document.getElementById("roasThreshold"),
+      minCandidates: document.getElementById("minCandidates"),
+      filterBtn: document.getElementById("filterBtn"),
+      clearBtn: document.getElementById("clearBtn"),
+      filterStatus: document.getElementById("filterStatus"),
+      resultSummary: document.getElementById("resultSummary"),
+      stats: document.getElementById("stats"),
+      resultTableBody: document.getElementById("resultTableBody"),
+      selectAll: document.getElementById("selectAll"),
+      exportBtn: document.getElementById("exportBtn"),
+      openCreateBtn: document.getElementById("openCreateBtn"),
+      openBatchCreateBtn: document.getElementById("openBatchCreateBtn"),
+      taskModal: document.getElementById("taskModal"),
+      modalSummary: document.getElementById("modalSummary"),
+      modalOverview: document.getElementById("modalOverview"),
+      taskCards: document.getElementById("taskCards"),
+      modalCloseBtn: document.getElementById("modalCloseBtn"),
+      modalResetBtn: document.getElementById("modalResetBtn"),
+      submitTasksBtn: document.getElementById("submitTasksBtn"),
+      submitStatus: document.getElementById("submitStatus"),
+      batchTaskModal: document.getElementById("batchTaskModal"),
+      batchModalSummary: document.getElementById("batchModalSummary"),
+      batchModalOverview: document.getElementById("batchModalOverview"),
+      batchTaskNumber: document.getElementById("batchTaskNumber"),
+      batchTaskEndDate: document.getElementById("batchTaskEndDate"),
+      batchTaskDescription: document.getElementById("batchTaskDescription"),
+      batchSelectedList: document.getElementById("batchSelectedList"),
+      batchModalCloseBtn: document.getElementById("batchModalCloseBtn"),
+      batchModalResetBtn: document.getElementById("batchModalResetBtn"),
+      submitBatchTasksBtn: document.getElementById("submitBatchTasksBtn"),
+      batchSubmitStatus: document.getElementById("batchSubmitStatus"),
+      toast: document.getElementById("toast")
+    };
+    function navText(value) {
+      const div = document.createElement("div");
+      div.textContent = value == null ? "" : String(value);
+      return div.innerHTML;
+    }
+    function inlineArg(value) {
+      return navText(JSON.stringify(String(value == null ? "" : value)));
+    }
+    function parseIds(text) {
+      return Array.from(new Set(String(text || "").split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean)));
+    }
+    function selectedProducts(selector) {
+      return Array.from(document.querySelectorAll(selector))
+        .filter(input => input.checked)
+        .map(input => input.value)
+        .filter(Boolean);
+    }
+    function filterInputMode() {
+      const checked = document.querySelector('input[name="filterInputMode"]:checked');
+      return checked ? checked.value : "content_id";
+    }
+    function audioTypeLabel(value) {
+      const map = { "0": "非配音剧", "1": "人工配音剧", "2": "AI 配音剧" };
+      const key = String(value ?? "").trim();
+      return key === "" ? "" : `${key} / ${map[key] || "未知类型"}`;
+    }
+    function filterInputMeta(mode = filterInputMode()) {
+      if (mode === "series_code") {
+        return {
+          label: "资源 ID",
+          fieldLabel: "批量资源 ID",
+          placeholder: "每行一个资源 ID / series_code；系统直接查询该资源下的素材",
+          hint: "输入资源 ID 时，系统直接按 series_code 查询该资源下所有符合条件的候选素材。"
+        };
+      }
+      return {
+        label: "剧 ID",
+        fieldLabel: "批量剧 ID",
+        placeholder: "每行一个剧 ID；系统按 series_code 查询该系列下的素材",
+        hint: "输入剧 ID 时，系统先定位 series_code，再查该资源下的候选素材。"
+      };
+    }
+    function syncFilterInputMode() {
+      const meta = filterInputMeta();
+      if (els.filterInputLabel) els.filterInputLabel.textContent = meta.fieldLabel;
+      if (els.filterContentIds) els.filterContentIds.placeholder = meta.placeholder;
+      if (els.filterInputHint) els.filterInputHint.textContent = meta.hint;
+      if (els.resourceTargetConfig) els.resourceTargetConfig.classList.toggle("is-hidden", filterInputMode() !== "series_code");
+    }
+    function toast(message, variant) {
+      els.toast.textContent = message;
+      els.toast.classList.toggle("error", variant === "error");
+      els.toast.classList.add("show");
+      clearTimeout(toast._timer);
+      toast._timer = setTimeout(() => els.toast.classList.remove("show"), variant === "error" ? 5200 : 2600);
+    }
+    function errorText(error) {
+      return error && error.message ? error.message : String(error || "请求失败");
+    }
+    function showError(prefix, error) {
+      console.warn(prefix, error);
+      toast(`${prefix}：${errorText(error)}`, "error");
+    }
+    function setStatus(element, text, type = "idle") {
+      if (!element) return;
+      element.textContent = text;
+      element.classList.remove("is-loading", "is-success", "is-error");
+      if (type && type !== "idle") element.classList.add(`is-${type}`);
+    }
+    function setButtonLoading(button, loading, loadingText) {
+      if (!button) return;
+      if (!button.dataset.defaultText) button.dataset.defaultText = button.textContent || "";
+      button.disabled = !!loading;
+      button.textContent = loading ? loadingText : button.dataset.defaultText;
+      button.setAttribute("aria-busy", loading ? "true" : "false");
+    }
+    function nextPaint() {
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    async function api(url, options) {
+      const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        state.auth = data.auth || { authenticated: false, login_url: "/api/auth/feishu/login" };
+        renderAuth();
+        throw new Error("请先登录");
+      }
+      if (!response.ok) {
+        const details = Array.isArray(data.errors)
+          ? data.errors.slice(0, 3).map(item => item && item.error ? item.error : "").filter(Boolean).join("；")
+          : "";
+        const message = data.message || data.error || `请求失败 (${response.status})`;
+        throw new Error(details ? `${message}：${details}` : message);
+      }
+      return data;
+    }
+    function userCan(moduleKey) {
+      const user = state.auth && state.auth.user;
+      if (!user) return false;
+      if (user.is_admin) return true;
+      return !!(user.permissions && user.permissions[moduleKey]);
+    }
+    function loginUrlWithNext() {
+      if (window.UiTopbar) return window.UiTopbar.loginUrl(state.auth);
+      const base = (state.auth && state.auth.login_url) || "/api/auth/feishu/login";
+      const next = `${location.pathname || "/"}${location.search || ""}`;
+      return `${base}${base.includes("?") ? "&" : "?"}next=${encodeURIComponent(next)}`;
+    }
+    async function loadAuthStatus() {
+      try {
+        state.auth = await api("/api/ui/topbar");
+      } catch (error) {
+        state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
+      }
+      await renderQuickNavigation();
+      renderAuth();
+    }
+    async function renderQuickNavigation() {
+      if (!window.QuickNav || !els.quickNav) return;
+      await window.QuickNav.render({
+        container: els.quickNav,
+        activeKey: "voiceoverTasks",
+        auth: state.auth || {},
+        onNavigate: item => {
+          if (item && item.href) window.location.assign(item.href);
+        },
+      });
+    }
+    function renderAuth() {
+      if (window.UiTopbar) {
+        window.UiTopbar.render({
+          auth: state.auth || {},
+          userCard: els.userCard,
+          authButton: els.loginBtn,
+          refreshButton: els.refreshBtn,
+          loginText: "登录",
+          logoutText: "退出登录",
+        });
+        return;
+      }
+      const user = state.auth && state.auth.user;
+      if (state.auth && state.auth.authenticated && user) {
+        els.userCard.innerHTML = `<div><strong>${navText(user.name || user.email || "已登录")}</strong><small>${navText(user.role || "")} / tenant ${navText(user.tenant_key || "")}</small></div>`;
+        els.loginBtn.textContent = "退出登录";
+      } else {
+        els.userCard.innerHTML = `未登录<small>请先登录</small>`;
+        els.loginBtn.textContent = "登录";
+      }
+    }
+    async function loginOrLogout() {
+      if (window.UiTopbar) {
+        await window.UiTopbar.handleAuthAction({
+          auth: state.auth || {},
+          api,
+          afterLogout: () => location.reload(),
+        });
+        return;
+      }
+      if (state.auth && state.auth.authenticated) {
+        await api("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+        location.reload();
+      } else {
+        location.href = loginUrlWithNext();
+      }
+    }
+    function materialKey(item) {
+      return `${item.target_app_id || ""}::${item.target_content_id || ""}::${item.material_id || ""}`;
+    }
+    function materialKeySet() {
+      return new Set(state.materials.map(materialKey));
+    }
+    function pruneSelection() {
+      const validKeys = materialKeySet();
+      state.selectedKeys = new Set(Array.from(state.selectedKeys).filter(key => validKeys.has(key)));
+    }
+    function syncSelectionFromDom() {
+      if (!els.resultTableBody || !state.materials.length) return;
+      const validKeys = materialKeySet();
+      const next = new Set();
+      els.resultTableBody.querySelectorAll("input.row-checkbox").forEach(input => {
+        const key = String(input.dataset.selectionKey || "");
+        if (input.checked && validKeys.has(key)) next.add(key);
+      });
+      state.selectedKeys = next;
+    }
+    function selectedItems() {
+      syncSelectionFromDom();
+      return state.materials.filter(item => state.selectedKeys.has(materialKey(item)));
+    }
+    function refreshButtons() {
+      pruneSelection();
+      const selectedCount = state.selectedKeys.size;
+      els.exportBtn.disabled = !state.materials.length;
+      els.openCreateBtn.disabled = selectedCount < 1;
+      els.openBatchCreateBtn.disabled = selectedCount < 1;
+      const selectable = state.materials.length;
+      els.selectAll.checked = selectable > 0 && selectedCount === selectable;
+      els.selectAll.indeterminate = selectedCount > 0 && selectedCount < selectable;
+      renderStats();
+    }
+    function renderStats() {
+      const total = state.materials.length;
+      const defaults = state.materials.filter(item => item.selected_by_default).length;
+      const selected = state.selectedKeys.size;
+      els.stats.innerHTML = [["候选素材", total], ["ROAS达标", defaults], ["已选择", selected]]
+        .map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
+    }
+    function numericSortValue(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : Number.NEGATIVE_INFINITY;
+    }
+    function sortedResultMaterials() {
+      const field = state.resultSort && state.resultSort.field;
+      if (!["roas", "spend"].includes(field)) return state.materials;
+      return state.materials
+        .map((item, index) => ({ item, index }))
+        .sort((left, right) => {
+          const diff = numericSortValue(right.item[field]) - numericSortValue(left.item[field]);
+          return diff || left.index - right.index;
+        })
+        .map(entry => entry.item);
+    }
+    function renderSortHeaders() {
+      document.querySelectorAll(".sort-button[data-sort-field]").forEach(button => {
+        const active = button.dataset.sortField === (state.resultSort && state.resultSort.field);
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-sort", active ? "descending" : "none");
+      });
+    }
+    function sortResultsBy(field) {
+      if (!["roas", "spend"].includes(field)) return;
+      state.resultSort = { field, direction: "desc" };
+      renderResults();
+    }
+    function renderCountRows() {
+      els.countTableBody.innerHTML = state.countRows.length
+        ? state.countRows.map(item => `<tr><td><strong>${navText(item.content_id || "")}</strong><div class="muted">${navText(item.drama_name || "")}</div></td><td><strong>${navText(item.product_label || item.product_owner || item.app || "-")}</strong><div class="muted">${navText(item.product_app_id || item.app_id || "")}</div></td><td>${navText(item.series_code || "-")}</td><td>${navText(item.material_count ?? 0)}</td><td>${item.status === "ok" ? '<span class="status-pill is-success">成功</span>' : `<span class="status-pill is-error">${navText(item.error || "失败")}</span>`}</td></tr>`).join("")
+        : `<tr><td colspan="5" class="muted">暂无查询结果</td></tr>`;
+    }
+    async function queryCounts() {
+      const contentIds = parseIds(els.countContentIds.value);
+      if (!contentIds.length) return toast("请先填写剧 ID", "error");
+      const products = selectedProducts(".count-product");
+      if (!products.length) return toast("请至少选择一个产品维度", "error");
+      setButtonLoading(els.countBtn, true, "查询中...");
+      setStatus(els.countStatus, `正在查询 ${contentIds.length} 个剧 ID × ${products.length} 个产品，请稍候`, "loading");
+      els.countTableBody.innerHTML = `<tr><td colspan="5" class="muted">正在按产品统计输入剧 ID 本身的素材数...</td></tr>`;
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/material-counts", { method: "POST", body: JSON.stringify({ content_ids: contentIds, products }) });
+        state.countRows = data.items || [];
+        renderCountRows();
+        setStatus(els.countStatus, `完成 ${state.countRows.length} 条`, "success");
+      } catch (error) {
+        setStatus(els.countStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.countBtn, false);
+      }
+    }
+    function clearCounts() {
+      els.countContentIds.value = "";
+      state.countRows = [];
+      setStatus(els.countStatus, "待查询");
+      renderCountRows();
+    }
+    function riskCell(item) {
+      return item.risk_label === "替补素材" ? `<span class="risk">替补素材</span>` : "";
+    }
+    function renderResults() {
+      pruneSelection();
+      const rows = sortedResultMaterials();
+      els.resultTableBody.innerHTML = rows.length
+        ? rows.map(item => {
+            const key = materialKey(item);
+            const checked = state.selectedKeys.has(key) ? "checked" : "";
+            const statusText = item.candidate_reason || item.candidate_status || "";
+            const targetProduct = item.target_product_label || item.target_app_id || "-";
+            const sourceProduct = item.source_product_label || item.product || "-";
+            const sourceContentId = item.source_content_id || item.target_content_id || "";
+            const targetMeta = [item.target_language || "", audioTypeLabel(item.target_audio_type)].filter(Boolean).join(" / ");
+            const targetLine = `目标：${navText(item.target_content_id || "")}${targetMeta ? ` · ${navText(targetMeta)}` : ""}`;
+            return `<tr><td><input class="row-checkbox" type="checkbox" data-selection-key="${navText(key)}" ${checked} aria-label="选择素材 ${navText(item.material_id || "")}" /></td><td><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属：${navText(sourceProduct)}</div></td><td><strong>${navText(targetProduct)}</strong><div class="muted">${navText(item.target_app_id || "")}</div></td><td><strong>${navText(sourceContentId)}</strong><div class="muted">${targetLine}</div></td><td>${navText(item.target_drama_name || "-")}</td><td>${navText(item.name || item.resource_name || "")}</td><td>${navText(item.category || "-")}</td><td>${navText(item.language || "-")}</td><td>${navText(item.duration || 0)}s</td><td><strong>${navText(item.roas ?? 0)}</strong></td><td>${navText(item.spend ?? 0)}</td><td>${navText(statusText)}</td><td>${riskCell(item)}</td><td>${item.url ? `<a class="btn btn-secondary mini" href="${navText(item.url)}" target="_blank" rel="noopener noreferrer">查看素材</a>` : `<span class="muted">无链接</span>`}</td></tr>`;
+          }).join("")
+        : `<tr><td colspan="14" class="muted">暂无筛选结果</td></tr>`;
+      els.resultSummary.textContent = state.materials.length ? `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条` : "尚未筛选";
+      renderSortHeaders();
+      refreshButtons();
+    }
+    async function filterMaterials() {
+      const mode = filterInputMode();
+      const meta = filterInputMeta(mode);
+      const targetIds = parseIds(els.filterContentIds.value);
+      if (!targetIds.length) return toast(`请先填写${meta.label}`, "error");
+      const products = selectedProducts(".filter-product");
+      if (!products.length) return toast("请至少选择一个产品维度", "error");
+      const targetLanguage = (els.targetLanguage?.value || "").trim();
+      const targetAudioType = (els.targetAudioType?.value || "").trim();
+      if (mode === "series_code" && !targetLanguage) return toast("资源 ID 模式请选择目标语种", "error");
+      if (mode === "series_code" && targetAudioType === "") return toast("资源 ID 模式请选择配音类型", "error");
+      const requestSeq = ++state.filterRequestSeq;
+      const roasThreshold = Number(els.roasThreshold.value || 45);
+      const minCandidates = Number(els.minCandidates.value || 15);
+      let completed = 0;
+      const failed = [];
+      state.materials = [];
+      state.selectedKeys = new Set();
+      setButtonLoading(els.filterBtn, true, "筛选中...");
+      setStatus(els.filterStatus, `正在筛选 ${targetIds.length} 个${meta.label} × ${products.length} 个产品，请稍候`, "loading");
+      els.resultSummary.textContent = "筛选中...";
+      els.resultTableBody.innerHTML = `<tr><td colspan="14" class="muted">正在按产品读取资源下素材并筛选达标候选...</td></tr>`;
+      renderStats();
+      refreshButtons();
+      await nextPaint();
+      try {
+        await runLimited(targetIds, 2, async targetId => {
+          try {
+            const requestBody = {
+              products,
+              roas_threshold: roasThreshold,
+              min_candidates: minCandidates
+            };
+            if (mode === "series_code") {
+              requestBody.series_codes = [targetId];
+              requestBody.target_language = targetLanguage;
+              requestBody.target_audio_type = targetAudioType;
+            } else {
+              requestBody.content_ids = [targetId];
+            }
+            const data = await api("/api/voiceover-drama/filter", {
+              method: "POST",
+              body: JSON.stringify(requestBody)
+            });
+            if (requestSeq !== state.filterRequestSeq) return;
+            const items = data.items || [];
+            state.materials = state.materials.concat(items);
+            completed += 1;
+            renderResults();
+            setStatus(els.filterStatus, `已完成 ${completed}/${targetIds.length} 个${meta.label}，累计 ${state.materials.length} 条候选素材`, completed === targetIds.length ? "success" : "loading");
+          } catch (error) {
+            if (requestSeq !== state.filterRequestSeq) return;
+            completed += 1;
+            failed.push({ targetId, error });
+            renderResults();
+            setStatus(els.filterStatus, `已完成 ${completed}/${targetIds.length} 个${meta.label}，${failed.length} 个失败`, "error");
+          }
+        });
+        if (requestSeq !== state.filterRequestSeq) return;
+        renderResults();
+        if (failed.length === targetIds.length) {
+          throw new Error(failed.map(item => `${item.targetId}: ${errorText(item.error)}`).join("；"));
+        }
+        const failedText = failed.length ? `，失败 ${failed.length} 个` : "";
+        setStatus(els.filterStatus, `完成 ${state.materials.length} 条候选素材${failedText}`, failed.length ? "error" : "success");
+        if (failed.length) toast(`部分${meta.label}筛选失败：${failed.map(item => item.targetId).join("、")}`, "error");
+      } catch (error) {
+        setStatus(els.filterStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.filterBtn, false);
+      }
+    }
+    async function runLimited(items, limit, worker) {
+      let nextIndex = 0;
+      const workerCount = Math.max(1, Math.min(limit, items.length));
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          await worker(items[index], index);
+        }
+      }));
+    }
+    function clearFilters() {
+      state.filterRequestSeq += 1;
+      els.filterContentIds.value = "";
+      if (els.targetLanguage) els.targetLanguage.value = "";
+      if (els.targetAudioType) els.targetAudioType.value = "";
+      state.materials = [];
+      state.selectedKeys = new Set();
+      setStatus(els.filterStatus, "待筛选");
+      renderResults();
+    }
+    function toggleSelection(key, checked) {
+      if (checked) state.selectedKeys.add(String(key || ""));
+      else state.selectedKeys.delete(String(key || ""));
+      els.resultSummary.textContent = `共 ${state.materials.length} 条素材，已选择 ${state.selectedKeys.size} 条`;
+      refreshButtons();
+    }
+    function toggleAllSelection(checked) {
+      state.selectedKeys = checked ? new Set(state.materials.map(materialKey)) : new Set();
+      renderResults();
+    }
+    async function loadDesigners() {
+      if (state.designers.length || !userCan("voiceover_drama_tasks")) return state.designers;
+      const data = await api("/api/voiceover-drama/designers");
+      state.designers = data.items || [];
+      return state.designers;
+    }
+    function designerDisplayLabel(item) {
+      if (!item) return "";
+      const value = String(item.user_id || "");
+      const label = item.label || item.name || item.username || value;
+      return value ? `${label} / ${value}` : label;
+    }
+    function designerSearchText(item) {
+      return [item.label, item.name, item.username, item.user_id, item.sub_user_id, item.email]
+        .map(normalizeDesignerKey)
+        .filter(Boolean)
+        .join(" ");
+    }
+    function designerById(value) {
+      const id = String(value || "").trim();
+      if (!id) return null;
+      return state.designers.find(item => String(item.user_id || "").trim() === id) || null;
+    }
+    function filterDesigners(keyword = "") {
+      const tokens = normalizeDesignerKey(keyword).split(/\s+/).filter(Boolean);
+      if (!tokens.length) return state.designers.slice(0, 40);
+      return state.designers
+        .filter(item => {
+          const text = designerSearchText(item);
+          return tokens.every(token => text.includes(token));
+        })
+        .slice(0, 40);
+    }
+    function invokeDesignerOverview(name) {
+      if (name === "renderBatchModalOverview") renderBatchModalOverview();
+      else renderModalOverview();
+    }
+    function searchableDesignerControl(fieldId, selectedValue = "", overviewFn = "renderModalOverview") {
+      const selected = designerById(selectedValue);
+      const selectedLabel = designerDisplayLabel(selected);
+      const placeholder = state.designers.length ? "输入姓名 / 用户名 / ID 搜索" : "暂无可选设计师";
+      return `<div class="designer-combo" data-designer-combo="${navText(fieldId)}"><input id="${navText(fieldId)}" type="hidden" value="${navText(selectedValue || "")}" /><input id="${navText(fieldId)}_search" class="designer-search" type="search" autocomplete="off" value="${navText(selectedLabel)}" placeholder="${placeholder}" data-designer-field="${navText(fieldId)}" data-overview-fn="${navText(overviewFn)}" /><div id="${navText(fieldId)}_menu" class="designer-menu"></div><div id="${navText(fieldId)}_selected" class="designer-selected">${selectedLabel ? `已选 ${navText(selectedLabel)}` : "未选择设计师"}</div></div>`;
+    }
+    function renderDesignerMenu(fieldId, keyword = "", overviewFn = "renderModalOverview") {
+      const menu = document.getElementById(`${fieldId}_menu`);
+      if (!menu) return;
+      const selectedValue = document.getElementById(fieldId)?.value || "";
+      const items = filterDesigners(keyword);
+      if (!items.length) {
+        menu.innerHTML = `<div class="designer-empty">无匹配设计师</div>`;
+        return;
+      }
+      menu.innerHTML = items.map(item => {
+        const value = String(item.user_id || "");
+        const label = designerDisplayLabel(item);
+        const meta = [item.username, item.email, item.sub_user_id ? `sub ${item.sub_user_id}` : ""].filter(Boolean).join(" · ");
+        const selected = value === String(selectedValue || "") ? " is-selected" : "";
+        return `<button class="designer-option${selected}" type="button" data-designer-field="${navText(fieldId)}" data-designer-value="${navText(value)}" data-overview-fn="${navText(overviewFn)}"><strong>${navText(label)}</strong>${meta ? `<span>${navText(meta)}</span>` : ""}</button>`;
+      }).join("");
+    }
+    function openDesignerCombo(fieldId, overviewFn = "renderModalOverview") {
+      const input = document.getElementById(`${fieldId}_search`);
+      if (!input) return;
+      closeDesignerCombos(fieldId);
+      input.closest(".designer-combo")?.classList.add("is-open");
+      renderDesignerMenu(fieldId, input.value, overviewFn);
+    }
+    function closeDesignerCombos(exceptFieldId = "") {
+      document.querySelectorAll(".designer-combo.is-open").forEach(combo => {
+        if (exceptFieldId && combo.dataset.designerCombo === exceptFieldId) return;
+        combo.classList.remove("is-open");
+      });
+    }
+    function setDesignerComboValue(fieldId, value, overviewFn = "renderModalOverview") {
+      const hidden = document.getElementById(fieldId);
+      const input = document.getElementById(`${fieldId}_search`);
+      const selectedText = document.getElementById(`${fieldId}_selected`);
+      const designer = designerById(value);
+      const label = designerDisplayLabel(designer);
+      if (hidden) hidden.value = designer ? String(designer.user_id || "") : "";
+      if (input) input.value = label;
+      if (selectedText) selectedText.textContent = label ? `已选 ${label}` : "未选择设计师";
+      closeDesignerCombos();
+      invokeDesignerOverview(overviewFn);
+    }
+    function normalizeDesignerKey(value) {
+      return String(value || "").trim().toLowerCase();
+    }
+    function originalDesignerCandidates(item) {
+      return [item.designer_id, item.designer, item.source_user_id, item.source_initiator]
+        .map(value => String(value || "").trim())
+        .filter(value => value && value !== "0" && value.toLowerCase() !== "null");
+    }
+    function resolveDefaultDesigner(item) {
+      const candidates = originalDesignerCandidates(item);
+      for (const candidate of candidates) {
+        const normalized = normalizeDesignerKey(candidate);
+        const exact = state.designers.find(designer => {
+          const keys = [designer.user_id, designer.sub_user_id, designer.username, designer.name]
+            .map(normalizeDesignerKey)
+            .filter(Boolean);
+          return keys.includes(normalized);
+        });
+        if (exact) return String(exact.user_id || "");
+      }
+      return "";
+    }
+    function originalDesignerHint(item) {
+      const candidate = originalDesignerCandidates(item)[0] || "";
+      if (!candidate) return "";
+      const matched = state.designers.find(designer => String(designer.user_id || "") === resolveDefaultDesigner(item));
+      return matched ? (matched.label || matched.name || candidate) : candidate;
+    }
+    function taskPayloadForItem(item, options) {
+      return {
+        target_content_id: item.target_content_id,
+        target_app_id: item.target_app_id,
+        target_product_key: item.target_product_key,
+        target_product_label: item.target_product_label,
+        material_id: item.material_id,
+        number: Number(options.number || 1),
+        designer: options.designer || "",
+        end_date: options.end_date || "",
+        origin_name: Number(options.origin_name ?? 1),
+        description: options.description || ""
+      };
+    }
+    function renderModalOverview() {
+      const selected = state.modalItems.length;
+      let totalQuantity = 0;
+      let incomplete = 0;
+      state.modalItems.forEach((item, index) => {
+        totalQuantity += Math.max(1, Number(document.getElementById(`taskNumber_${index}`)?.value || 1));
+        if (!document.getElementById(`taskDesigner_${index}`)?.value) incomplete += 1;
+      });
+      els.modalOverview.innerHTML = [["已选素材", selected], ["预计创建任务", selected], ["需求素材数", totalQuantity || selected], ["未完成配置", incomplete]]
+        .map(([label, value]) => `<div class="overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      els.modalSummary.textContent = `已选择 ${selected} 条素材；预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+    }
+    function renderTaskCards() {
+      els.taskCards.innerHTML = state.modalItems.map((item, index) => {
+        const defaultDesigner = resolveDefaultDesigner(item);
+        const designerHint = originalDesignerHint(item);
+        const targetProduct = item.target_product_label || item.target_app_id || "-";
+        const sourceProduct = item.source_product_label || item.product || "-";
+        const description = `参考素材 ${item.material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`;
+        return `<div class="material-card"><div class="card-head"><div><strong>[${navText(item.material_id || "")}] ${navText(item.target_drama_name || item.target_content_id || "")}</strong><div class="muted">目标产品 ${navText(targetProduct)} / 素材归属 ${navText(sourceProduct)} / ${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}${designerHint ? ` / 原设计师 ${navText(designerHint)}` : ""}</div></div>${riskCell(item)}</div><div class="task-form"><div class="field"><label>任务数量</label><div class="stepper"><button type="button" onclick="stepTaskNumber(${index}, -1)">-</button><input id="taskNumber_${index}" type="number" min="1" max="100" value="1" oninput="renderModalOverview()" /><button type="button" onclick="stepTaskNumber(${index}, 1)">+</button></div></div><div class="field"><label>指定设计师</label>${searchableDesignerControl(`taskDesigner_${index}`, defaultDesigner, "renderModalOverview")}</div><div class="field"><label>截止时间</label><input id="taskEndDate_${index}" type="date" /></div><div class="field"><label>是否使用原始素材名</label><div class="checks"><label class="check"><input name="origin_${index}" type="radio" value="1" checked /> 是</label><label class="check"><input name="origin_${index}" type="radio" value="0" /> 否</label></div></div><div class="field description-field"><label>任务描述</label><textarea id="taskDescription_${index}" rows="2">${navText(description)}</textarea></div></div></div>`;
+      }).join("");
+      renderModalOverview();
+    }
+    async function openTaskModal() {
+      syncSelectionFromDom();
+      const items = selectedItems();
+      if (!items.length) return toast("请先选择素材", "error");
+      setButtonLoading(els.openCreateBtn, true, "打开中...");
+      try {
+        await loadDesigners();
+        state.modalItems = items;
+        renderTaskCards();
+        setStatus(els.submitStatus, "待提交");
+        els.taskModal.classList.remove("hidden");
+      } finally {
+        setButtonLoading(els.openCreateBtn, false);
+      }
+    }
+    function closeTaskModal() {
+      state.modalItems = [];
+      els.taskModal.classList.add("hidden");
+      els.taskCards.innerHTML = "";
+      setStatus(els.submitStatus, "待提交");
+    }
+    function renderBatchSelectedList() {
+      els.batchSelectedList.innerHTML = state.modalItems.map((item, index) => {
+        const defaultDesigner = resolveDefaultDesigner(item);
+        const designerHint = originalDesignerHint(item);
+        const targetProduct = item.target_product_label || item.target_app_id || "-";
+        const sourceProduct = item.source_product_label || item.product || "-";
+        return `<div class="selected-material-item batch-selected-item"><div><strong>${navText(item.material_id || "")}</strong><div class="muted">素材归属 ${navText(sourceProduct)}</div></div><div>${navText(item.target_drama_name || "-")}<div class="muted">目标剧 ID ${navText(item.target_content_id || "")}</div></div><div>${navText(item.name || item.resource_name || "")}<div class="muted">${navText(item.language || "-")} / ${navText(item.duration || 0)}s / ROAS ${navText(item.roas ?? 0)}</div></div><div class="batch-designer-field"><label>指定设计师${designerHint ? ` / 原 ${navText(designerHint)}` : ""}</label>${searchableDesignerControl(`batchDesigner_${index}`, defaultDesigner, "renderBatchModalOverview")}</div><div>${navText(targetProduct)}</div></div>`;
+      }).join("");
+    }
+    function renderBatchModalOverview() {
+      const selected = state.modalItems.length;
+      const number = Math.max(1, Number(els.batchTaskNumber.value || 1));
+      const totalQuantity = selected * number;
+      let incomplete = 0;
+      state.modalItems.forEach((item, index) => {
+        if (!document.getElementById(`batchDesigner_${index}`)?.value) incomplete += 1;
+      });
+      els.batchModalOverview.innerHTML = [["已选素材", selected], ["预计创建任务", selected], ["需求素材数", totalQuantity || selected], ["未完成配置", incomplete]]
+        .map(([label, value]) => `<div class="overview-item"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      els.batchModalSummary.textContent = `已选择 ${selected} 条素材；全局参数应用于全部已选素材，设计师按素材单独选择，预计创建 ${selected} 个任务，共需求 ${totalQuantity || selected} 个素材。`;
+    }
+    function renderBatchTaskForm() {
+      els.batchTaskNumber.value = "1";
+      els.batchTaskEndDate.value = "";
+      const originYes = document.querySelector('input[name="batchOrigin"][value="1"]');
+      if (originYes) originYes.checked = true;
+      els.batchTaskDescription.value = state.modalItems.length === 1
+        ? `参考素材 ${state.modalItems[0].material_id} 的高 ROAS 表现和画面风格，扩展设计师任务。`
+        : `参考已选 ${state.modalItems.length} 条高 ROAS 素材的表现和画面风格，批量扩展设计师任务。`;
+      renderBatchSelectedList();
+      renderBatchModalOverview();
+    }
+    async function openBatchTaskModal() {
+      syncSelectionFromDom();
+      const items = selectedItems();
+      if (!items.length) return toast("请先选择素材", "error");
+      setButtonLoading(els.openBatchCreateBtn, true, "打开中...");
+      try {
+        await loadDesigners();
+        state.modalItems = items;
+        renderBatchTaskForm();
+        setStatus(els.batchSubmitStatus, "待提交");
+        els.batchTaskModal.classList.remove("hidden");
+      } finally {
+        setButtonLoading(els.openBatchCreateBtn, false);
+      }
+    }
+    function closeBatchTaskModal() {
+      state.modalItems = [];
+      els.batchTaskModal.classList.add("hidden");
+      els.batchSelectedList.innerHTML = "";
+      setStatus(els.batchSubmitStatus, "待提交");
+    }
+    function stepTaskNumber(index, delta) {
+      const input = document.getElementById(`taskNumber_${index}`);
+      if (!input) return;
+      input.value = String(Math.max(1, Math.min(100, Number(input.value || 1) + delta)));
+      renderModalOverview();
+    }
+    function stepBatchTaskNumber(delta) {
+      els.batchTaskNumber.value = String(Math.max(1, Math.min(100, Number(els.batchTaskNumber.value || 1) + delta)));
+      renderBatchModalOverview();
+    }
+    async function submitTasks() {
+      const items = state.modalItems.map((item, index) => taskPayloadForItem(item, {
+        number: document.getElementById(`taskNumber_${index}`)?.value || 1,
+        designer: document.getElementById(`taskDesigner_${index}`)?.value || "",
+        end_date: document.getElementById(`taskEndDate_${index}`)?.value || "",
+        origin_name: document.querySelector(`input[name="origin_${index}"]:checked`)?.value || "1",
+        description: document.getElementById(`taskDescription_${index}`)?.value || ""
+      }));
+      if (!items.length) return toast("请先选择素材", "error");
+      if (items.some(item => !item.designer)) {
+        setStatus(els.submitStatus, "每条素材都需要选择设计师", "error");
+        renderModalOverview();
+        return toast("每条素材都需要选择设计师", "error");
+      }
+      setButtonLoading(els.submitTasksBtn, true, "创建中...");
+      setStatus(els.submitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/design-tasks", { method: "POST", body: JSON.stringify({ items }) });
+        setStatus(els.submitStatus, `创建完成：成功 ${data.created_count || 0} 个${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`, data.failed_count ? "error" : "success");
+        toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
+        if (!data.failed_count) closeTaskModal();
+      } catch (error) {
+        setStatus(els.submitStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.submitTasksBtn, false);
+      }
+    }
+    async function submitBatchTasks() {
+      const common = {
+        number: els.batchTaskNumber.value || 1,
+        end_date: els.batchTaskEndDate.value || "",
+        origin_name: document.querySelector('input[name="batchOrigin"]:checked')?.value || "1",
+        description: els.batchTaskDescription.value || ""
+      };
+      const items = state.modalItems.map((item, index) => taskPayloadForItem(item, {
+        ...common,
+        designer: document.getElementById(`batchDesigner_${index}`)?.value || ""
+      }));
+      if (!items.length) return toast("请先选择素材", "error");
+      if (items.some(item => !item.designer)) {
+        setStatus(els.batchSubmitStatus, "每条素材都需要选择设计师", "error");
+        renderBatchModalOverview();
+        return toast("每条素材都需要选择设计师", "error");
+      }
+      setButtonLoading(els.submitBatchTasksBtn, true, "创建中...");
+      setStatus(els.batchSubmitStatus, `正在提交 ${items.length} 个任务，请稍候`, "loading");
+      await nextPaint();
+      try {
+        const data = await api("/api/voiceover-drama/design-tasks", { method: "POST", body: JSON.stringify({ items }) });
+        setStatus(els.batchSubmitStatus, `创建完成：成功 ${data.created_count || 0} 个${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`, data.failed_count ? "error" : "success");
+        toast(`已创建 ${data.created_count || 0} 个任务${data.failed_count ? `，失败 ${data.failed_count} 个` : ""}`);
+        if (!data.failed_count) closeBatchTaskModal();
+      } catch (error) {
+        setStatus(els.batchSubmitStatus, errorText(error), "error");
+        throw error;
+      } finally {
+        setButtonLoading(els.submitBatchTasksBtn, false);
+      }
+    }
+    function exportCsv() {
+      if (!state.materials.length) return;
+      const headers = ["target_app_id", "target_product_label", "target_content_id", "target_drama_name", "target_language", "target_audio_type", "source_content_id", "material_id", "source_product_label", "product", "name", "category", "language", "duration", "roas", "spend", "risk_label", "url"];
+      const csv = [headers.join(",")].concat(state.materials.map(item => headers.map(key => `"${String(item[key] ?? "").replace(/"/g, '""')}"`).join(","))).join("\n");
+      const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `voiceover_materials_${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+    window.toggleSelection = toggleSelection;
+    window.stepTaskNumber = stepTaskNumber;
+    window.stepBatchTaskNumber = stepBatchTaskNumber;
+    window.renderModalOverview = renderModalOverview;
+    window.renderBatchModalOverview = renderBatchModalOverview;
+
+    els.refreshBtn.onclick = () => location.reload();
+    els.loginBtn.onclick = () => loginOrLogout().catch(error => showError("登录状态切换失败", error));
+    els.countBtn.onclick = () => queryCounts().catch(error => showError("查询素材数失败", error));
+    els.countClearBtn.onclick = clearCounts;
+    els.filterBtn.onclick = () => filterMaterials().catch(error => showError("筛选素材失败", error));
+    els.clearBtn.onclick = clearFilters;
+    els.selectAll.onchange = event => toggleAllSelection(event.target.checked);
+    els.resultTableBody.addEventListener("change", event => {
+      const checkbox = event.target.closest("input.row-checkbox");
+      if (!checkbox) return;
+      toggleSelection(checkbox.dataset.selectionKey || "", checkbox.checked);
+    });
+    document.querySelectorAll(".sort-button[data-sort-field]").forEach(button => {
+      button.onclick = () => sortResultsBy(button.dataset.sortField || "");
+    });
+    document.addEventListener("input", event => {
+      const input = event.target.closest(".designer-search");
+      if (!input) return;
+      const fieldId = input.dataset.designerField || "";
+      const hidden = document.getElementById(fieldId);
+      if (hidden) hidden.value = "";
+      const selectedText = document.getElementById(`${fieldId}_selected`);
+      if (selectedText) selectedText.textContent = input.value.trim() ? "请选择下拉结果中的设计师" : "未选择设计师";
+      openDesignerCombo(fieldId, input.dataset.overviewFn || "renderModalOverview");
+      invokeDesignerOverview(input.dataset.overviewFn || "renderModalOverview");
+    });
+    document.addEventListener("focusin", event => {
+      const input = event.target.closest(".designer-search");
+      if (!input) return;
+      openDesignerCombo(input.dataset.designerField || "", input.dataset.overviewFn || "renderModalOverview");
+    });
+    document.addEventListener("keydown", event => {
+      const input = event.target.closest(".designer-search");
+      if (!input) return;
+      if (event.key === "Escape") {
+        closeDesignerCombos();
+        return;
+      }
+      if (event.key === "Enter") {
+        const fieldId = input.dataset.designerField || "";
+        const firstOption = document.querySelector(`#${fieldId}_menu .designer-option`);
+        if (firstOption) {
+          event.preventDefault();
+          setDesignerComboValue(fieldId, firstOption.dataset.designerValue || "", firstOption.dataset.overviewFn || input.dataset.overviewFn || "renderModalOverview");
+        }
+      }
+    });
+    document.addEventListener("click", event => {
+      const option = event.target.closest(".designer-option");
+      if (option) {
+        setDesignerComboValue(option.dataset.designerField || "", option.dataset.designerValue || "", option.dataset.overviewFn || "renderModalOverview");
+        return;
+      }
+      if (!event.target.closest(".designer-combo")) closeDesignerCombos();
+    });
+    els.exportBtn.onclick = exportCsv;
+    els.openCreateBtn.onclick = () => openTaskModal().catch(error => showError("打开创建任务弹窗失败", error));
+    els.openBatchCreateBtn.onclick = () => openBatchTaskModal().catch(error => showError("打开批量创建任务弹窗失败", error));
+    els.modalCloseBtn.onclick = closeTaskModal;
+    els.modalResetBtn.onclick = renderTaskCards;
+    els.submitTasksBtn.onclick = () => submitTasks().catch(error => showError("创建设计师任务失败", error));
+    els.batchModalCloseBtn.onclick = closeBatchTaskModal;
+    els.batchModalResetBtn.onclick = renderBatchTaskForm;
+    els.submitBatchTasksBtn.onclick = () => submitBatchTasks().catch(error => showError("批量创建设计师任务失败", error));
+    document.querySelectorAll('input[name="filterInputMode"]').forEach(input => input.onchange = syncFilterInputMode);
+    syncFilterInputMode();
+    loadAuthStatus().catch(error => showError("加载登录状态失败", error));
+  </script>
+</body>
+</html>
