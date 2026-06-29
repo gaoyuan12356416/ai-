@@ -57,6 +57,20 @@
     if (!window.UiTopbar) throw new Error("公共顶吸脚本 /ui-topbar.js 未加载");
     if (!window.QuickNav) throw new Error("公共快速导航脚本 /quick-nav.js 未加载");
   }
+  function quickNavOptions(auth) {
+    return {
+      container: $("quickNav"),
+      auth,
+      activeKey: TITLES[PAGE][2],
+      onNavigate: item => {
+        if (item && item.href) window.location.assign(item.href);
+      },
+    };
+  }
+  function renderWarmQuickNav() {
+    if (!window.QuickNav || !$("quickNav")) return;
+    window.QuickNav.render(quickNavOptions(null)).catch(error => console.warn("预渲染快速导航失败", error));
+  }
   async function loadAuth() {
     requireSharedUi();
     state.auth = await api("/api/ui/topbar");
@@ -68,14 +82,7 @@
       loginText: "登录",
       logoutText: "退出登录",
     });
-    await window.QuickNav.render({
-      container: $("quickNav"),
-      auth: state.auth,
-      activeKey: TITLES[PAGE][2],
-      onNavigate: item => {
-        if (item && item.href) window.location.assign(item.href);
-      },
-    });
+    await window.QuickNav.render(quickNavOptions(state.auth));
     $("loginGate").classList.toggle("hidden", !!state.auth.authenticated);
     $("permissionGate").classList.toggle("hidden", !state.auth.authenticated || hasPermission(state.auth));
     $("pageRoot").classList.toggle("hidden", !state.auth.authenticated || !hasPermission(state.auth));
@@ -376,6 +383,7 @@
     $("pageTitle").textContent = meta[0];
     $("pageSubtitle").textContent = meta[1];
     $("topActions").innerHTML = pageHeaderActions();
+    renderWarmQuickNav();
     $("refreshBtn").onclick = () => location.reload();
     $("authBtn").onclick = () => {
       requireSharedUi();

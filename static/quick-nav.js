@@ -210,6 +210,8 @@
     },
   ];
 
+  const CONFIG_CACHE_KEY = "quickNavConfigCache";
+  const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
   let styleInjected = false;
   const collapsedGroups = new Set();
@@ -358,6 +360,59 @@
     return cloneNav(config);
   }
 
+  function readStoredConfig() {
+    try {
+      const raw = localStorage.getItem(CONFIG_CACHE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      return normalizeNavConfig(cached && cached.items);
+    } catch (error) {
+      try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (storageError) {}
+      return null;
+    }
+  }
+
+  function writeStoredConfig(config) {
+    try {
+      const items = normalizeNavConfig(config);
+      if (!items) return;
+      localStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify({ items, updatedAt: Date.now() }));
+    } catch (error) {}
+  }
+
+  function readStoredAuth() {
+    try {
+      const raw = localStorage.getItem(AUTH_CACHE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (!cached || cached.expiresAt <= Date.now()) return null;
+      return cached.auth || null;
+    } catch (error) {
+      try { localStorage.removeItem(AUTH_CACHE_KEY); } catch (storageError) {}
+      return null;
+    }
+  }
+
+  function writeStoredAuth(auth) {
+    if (!(auth && auth.authenticated && auth.user)) {
+      try { localStorage.removeItem(AUTH_CACHE_KEY); } catch (error) {}
+      return;
+    }
+    try {
+      localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify({
+        auth,
+        authenticated: true,
+        user: auth.user,
+        expiresAt: Date.now() + 6 * 60 * 60 * 1000,
+      }));
+    } catch (error) {}
+  }
+
+  function renderOptions(options) {
+    const merged = Object.assign({}, options || {});
+    if (!merged.auth) merged.auth = readStoredAuth() || {};
+    else writeStoredAuth(merged.auth);
+    return merged;
+  }
+
   async function loadConfig() {
     if (navCache) return navCache;
     try {
@@ -366,8 +421,9 @@
       const config = normalizeNavConfig(await response.json());
       if (!config) throw new Error("navigation config must be an array");
       navCache = config;
+      writeStoredConfig(config);
     } catch (error) {
-      navCache = cloneNav(DEFAULT_NAV);
+      navCache = readStoredConfig() || cloneNav(DEFAULT_NAV);
     }
     return navCache;
   }
@@ -440,14 +496,19 @@
     if (!container) return;
     injectStyle();
     container.classList.add("quick-nav-root");
-    container.innerHTML = buildNavHtml(navCache || DEFAULT_NAV, options);
+    const initialOptions = renderOptions(options);
+    const initialConfig = navCache || readStoredConfig() || DEFAULT_NAV;
+    container.innerHTML = buildNavHtml(initialConfig, initialOptions);
+    bindEvents(container, initialConfig, initialOptions);
     const config = await loadConfig();
-    container.innerHTML = buildNavHtml(config, options);
-    bindEvents(container, config, options || {});
+    const finalOptions = renderOptions(options);
+    container.innerHTML = buildNavHtml(config, finalOptions);
+    bindEvents(container, config, finalOptions);
   }
 
   function clearCache() {
     navCache = null;
+    try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (error) {}
   }
 
   window.QuickNav = { render, loadConfig, clearCache, setActive };
