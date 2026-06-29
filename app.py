@@ -32788,11 +32788,26 @@ CREATE TABLE IF NOT EXISTS ad_control_account_group (
 )
 """
 
+AD_CONTROL_RULE_SET_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ad_control_rule_set (
+  rule_set_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  default_window_json TEXT NOT NULL DEFAULT '{"type":"since_start"}',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
 AD_CONTROL_RULE_GROUP_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS ad_control_rule_group (
   group_id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
   product TEXT NOT NULL DEFAULT '',
+  rule_set_id TEXT NOT NULL DEFAULT '',
   account_group_id TEXT NOT NULL DEFAULT '',
   account_ids_json TEXT NOT NULL DEFAULT '[]',
   rules_json TEXT NOT NULL DEFAULT '[]',
@@ -32820,13 +32835,49 @@ def ensure_ad_control_tables():
             conn.execute(AD_CONTROL_RULE_TABLE_SQL)
             conn.execute(AD_CONTROL_TOKEN_CONFIG_TABLE_SQL)
             conn.execute(AD_CONTROL_ACCOUNT_GROUP_TABLE_SQL)
+            conn.execute(AD_CONTROL_RULE_SET_TABLE_SQL)
             conn.execute(AD_CONTROL_RULE_GROUP_TABLE_SQL)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(ad_control_rule_group)").fetchall()}
+            if "rule_set_id" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN rule_set_id TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_preview_expires ON ad_control_preview(expires_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_action_created ON ad_control_action(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_object_product ON ad_control_object_state(product, level, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_enabled ON ad_control_rule(enabled, updated_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_account_group_product ON ad_control_account_group(product, deleted)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_set_product ON ad_control_rule_set(product, deleted)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_group_product ON ad_control_rule_group(product, deleted, enabled)")
+            legacy_rows = conn.execute(
+                """
+                SELECT group_id, name, product, rules_json, created_by, created_at, updated_at
+                  FROM ad_control_rule_group
+                 WHERE COALESCE(rule_set_id, '') = ''
+                """
+            ).fetchall()
+            for row in legacy_rows:
+                rule_set_id = "legacy_%s" % str(row["group_id"] or "").strip()
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ad_control_rule_set (
+                      rule_set_id, name, product, rules_json, default_window_json,
+                      created_by, created_at, updated_at, deleted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        rule_set_id,
+                        row["name"] or "",
+                        row["product"] or "",
+                        row["rules_json"] or "[]",
+                        '{"type":"since_start"}',
+                        row["created_by"] or "",
+                        row["created_at"] or "",
+                        row["updated_at"] or "",
+                    ),
+                )
+                conn.execute(
+                    "UPDATE ad_control_rule_group SET rule_set_id=? WHERE group_id=?",
+                    (rule_set_id, row["group_id"]),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -33668,6 +33719,25 @@ def ad_control_parse_rule_group_path(path, suffix=""):
     return value.strip("/")
 
 
+def ad_control_parse_rule_set_path(path):
+    prefix = "/api/ad-control/rule-sets/"
+    if not path.startswith(prefix):
+        return ""
+    return path[len(prefix):].strip("/")
+
+
+def ad_control_parse_binding_path(path, suffix=""):
+    prefix = "/api/ad-control/bindings/"
+    if not path.startswith(prefix):
+        return ""
+    value = path[len(prefix):]
+    if suffix:
+        if not value.endswith(suffix):
+            return ""
+        value = value[:-len(suffix)]
+    return value.strip("/")
+
+
 def ad_control_parse_account_group_path(path):
     prefix = "/api/ad-control/account-groups/"
     if not path.startswith(prefix):
@@ -33942,18 +34012,15 @@ def delete_ad_control_account_group(group_id):
             conn.close()
 
 
-def ad_control_rule_group_payload(row):
+def ad_control_rule_set_payload(row):
     item = dict(row)
-    item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
     item["rules"] = ad_control_safe_json_list(item.pop("rules_json", "[]"))
-    item["last_result"] = ad_control_safe_json_dict(item.pop("last_result_json", "{}"))
-    item["enabled"] = bool(item.get("enabled"))
-    item["emergency_stopped"] = bool(item.get("emergency_stopped"))
+    item["default_window"] = ad_control_safe_json_dict(item.pop("default_window_json", '{"type":"since_start"}'))
     item["deleted"] = bool(item.get("deleted"))
     return item
 
 
-def list_ad_control_rule_groups(product=None):
+def list_ad_control_rule_sets(product=None):
     ensure_ad_control_tables()
     where = "WHERE deleted=0"
     params = []
@@ -33964,12 +34031,158 @@ def list_ad_control_rule_groups(product=None):
         conn = get_job_db_connection()
         try:
             rows = conn.execute(
-                "SELECT * FROM ad_control_rule_group %s ORDER BY updated_at DESC" % where,
+                "SELECT * FROM ad_control_rule_set %s ORDER BY updated_at DESC" % where,
+                params,
+            ).fetchall()
+            return {"items": [ad_control_rule_set_payload(row) for row in rows]}
+        finally:
+            conn.close()
+
+
+def fetch_ad_control_rule_set(rule_set_id):
+    ensure_ad_control_tables()
+    rule_set_id = str(rule_set_id or "").strip()
+    if not rule_set_id:
+        raise StructuredApiError("missing_rule_set_id", "missing rule set id")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ad_control_rule_set WHERE rule_set_id=? AND deleted=0",
+                (rule_set_id,),
+            ).fetchone()
+            if not row:
+                raise StructuredApiError("not_found", "rule set not found")
+            return ad_control_rule_set_payload(row)
+        finally:
+            conn.close()
+
+
+def save_ad_control_rule_set(payload, session):
+    product = str(payload.get("product") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not product:
+        raise StructuredApiError("missing_product", "missing product")
+    if not name:
+        raise StructuredApiError("missing_name", "missing rule set name")
+    rule_set_id = str(payload.get("rule_set_id") or "").strip() or uuid.uuid4().hex
+    rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+    default_window = payload.get("default_window") if isinstance(payload.get("default_window"), dict) else {}
+    if not default_window:
+        default_window = payload.get("window") if isinstance(payload.get("window"), dict) else {"type": "since_start"}
+    ensure_ad_control_tables()
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_rule_set (
+                  rule_set_id, name, product, rules_json, default_window_json,
+                  created_by, created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(rule_set_id) DO UPDATE SET
+                  name=excluded.name,
+                  product=excluded.product,
+                  rules_json=excluded.rules_json,
+                  default_window_json=excluded.default_window_json,
+                  updated_at=CURRENT_TIMESTAMP,
+                  deleted=0
+                """,
+                (
+                    rule_set_id,
+                    name,
+                    product,
+                    json.dumps(rules, ensure_ascii=False),
+                    json.dumps(default_window, ensure_ascii=False),
+                    ad_control_actor(session),
+                ),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM ad_control_rule_set WHERE rule_set_id=?", (rule_set_id,)).fetchone()
+            return ad_control_rule_set_payload(row)
+        finally:
+            conn.close()
+
+
+def delete_ad_control_rule_set(rule_set_id):
+    ensure_ad_control_tables()
+    rule_set_id = str(rule_set_id or "").strip()
+    if not rule_set_id:
+        raise StructuredApiError("missing_rule_set_id", "missing rule set id")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            active_bindings = conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM ad_control_rule_group
+                 WHERE rule_set_id=? AND deleted=0
+                """,
+                (rule_set_id,),
+            ).fetchone()[0]
+            if active_bindings:
+                raise StructuredApiError("rule_set_in_use", "rule set is used by bindings", binding_count=active_bindings)
+            conn.execute(
+                "UPDATE ad_control_rule_set SET deleted=1, updated_at=CURRENT_TIMESTAMP WHERE rule_set_id=?",
+                (rule_set_id,),
+            )
+            if conn.total_changes < 1:
+                raise StructuredApiError("not_found", "rule set not found")
+            conn.commit()
+            return {"message": "deleted", "rule_set_id": rule_set_id}
+        finally:
+            conn.close()
+
+
+def ad_control_rule_group_payload(row):
+    item = dict(row)
+    item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
+    item["rules"] = ad_control_safe_json_list(item.pop("rules_json", "[]"))
+    rule_set_rules = ad_control_safe_json_list(item.pop("rule_set_rules_json", "[]"))
+    if not item["rules"] and rule_set_rules:
+        item["rules"] = rule_set_rules
+    item["rule_set_default_window"] = ad_control_safe_json_dict(item.pop("rule_set_default_window_json", "{}"))
+    item["last_result"] = ad_control_safe_json_dict(item.pop("last_result_json", "{}"))
+    item["enabled"] = bool(item.get("enabled"))
+    item["emergency_stopped"] = bool(item.get("emergency_stopped"))
+    item["deleted"] = bool(item.get("deleted"))
+    item["binding_id"] = item.get("group_id", "")
+    item["rule_set_id"] = item.get("rule_set_id", "")
+    return item
+
+
+def list_ad_control_rule_groups(product=None):
+    ensure_ad_control_tables()
+    where = "WHERE g.deleted=0"
+    params = []
+    if product:
+        where += " AND g.product=?"
+        params.append(str(product or "").strip())
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT g.*,
+                       rs.name AS rule_set_name,
+                       rs.rules_json AS rule_set_rules_json,
+                       rs.default_window_json AS rule_set_default_window_json
+                  FROM ad_control_rule_group g
+             LEFT JOIN ad_control_rule_set rs
+                    ON rs.rule_set_id = g.rule_set_id
+                   AND rs.deleted = 0
+                  %s
+              ORDER BY g.updated_at DESC
+                """ % where,
                 params,
             ).fetchall()
             return {"items": [ad_control_rule_group_payload(row) for row in rows]}
         finally:
             conn.close()
+
+
+def list_ad_control_bindings(product=None):
+    return list_ad_control_rule_groups(product)
 
 
 def fetch_ad_control_rule_group(group_id):
@@ -33978,7 +34191,17 @@ def fetch_ad_control_rule_group(group_id):
         conn = get_job_db_connection()
         try:
             row = conn.execute(
-                "SELECT * FROM ad_control_rule_group WHERE group_id=? AND deleted=0",
+                """
+                SELECT g.*,
+                       rs.name AS rule_set_name,
+                       rs.rules_json AS rule_set_rules_json,
+                       rs.default_window_json AS rule_set_default_window_json
+                  FROM ad_control_rule_group g
+             LEFT JOIN ad_control_rule_set rs
+                    ON rs.rule_set_id = g.rule_set_id
+                   AND rs.deleted = 0
+                 WHERE g.group_id=? AND g.deleted=0
+                """,
                 (str(group_id or "").strip(),),
             ).fetchone()
             if not row:
@@ -33986,6 +34209,10 @@ def fetch_ad_control_rule_group(group_id):
             return ad_control_rule_group_payload(row)
         finally:
             conn.close()
+
+
+def fetch_ad_control_binding(binding_id):
+    return fetch_ad_control_rule_group(binding_id)
 
 
 def save_ad_control_rule_group(payload, session):
@@ -33999,7 +34226,26 @@ def save_ad_control_rule_group(payload, session):
     account_group_id = str(payload.get("account_group_id") or "").strip()
     account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
     account_ids = [item for item in account_ids if item]
+    rule_set_id = str(payload.get("rule_set_id") or "").strip()
     rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+    if rule_set_id:
+        rule_set = fetch_ad_control_rule_set(rule_set_id)
+        if rule_set.get("product") != product:
+            raise StructuredApiError("rule_set_product_mismatch", "rule set product does not match binding product")
+        if not rules:
+            rules = rule_set.get("rules") or []
+    elif rules:
+        rule_set_id = "legacy_%s" % group_id
+        save_ad_control_rule_set(
+            {
+                "rule_set_id": rule_set_id,
+                "product": product,
+                "name": name,
+                "rules": rules,
+                "default_window": payload.get("default_window") if isinstance(payload.get("default_window"), dict) else {"type": "since_start"},
+            },
+            session,
+        )
     enabled = 1 if payload.get("enabled") else 0
     if enabled:
         validate_account_ids = list(account_ids)
@@ -34023,12 +34269,13 @@ def save_ad_control_rule_group(payload, session):
             conn.execute(
                 """
                 INSERT INTO ad_control_rule_group (
-                  group_id, name, product, account_group_id, account_ids_json, rules_json,
+                  group_id, name, product, rule_set_id, account_group_id, account_ids_json, rules_json,
                   enabled, emergency_stopped, created_by, created_at, updated_at, deleted
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
                 ON CONFLICT(group_id) DO UPDATE SET
                   name=excluded.name,
                   product=excluded.product,
+                  rule_set_id=excluded.rule_set_id,
                   account_group_id=excluded.account_group_id,
                   account_ids_json=excluded.account_ids_json,
                   rules_json=excluded.rules_json,
@@ -34040,6 +34287,7 @@ def save_ad_control_rule_group(payload, session):
                     group_id,
                     name,
                     product,
+                    rule_set_id,
                     account_group_id,
                     json.dumps(account_ids, ensure_ascii=False),
                     json.dumps(rules, ensure_ascii=False),
@@ -34052,6 +34300,10 @@ def save_ad_control_rule_group(payload, session):
             return ad_control_rule_group_payload(row)
         finally:
             conn.close()
+
+
+def save_ad_control_binding(payload, session):
+    return save_ad_control_rule_group(payload, session)
 
 
 def delete_ad_control_rule_group(group_id):
@@ -34072,6 +34324,10 @@ def delete_ad_control_rule_group(group_id):
             return {"message": "deleted", "group_id": group_id}
         finally:
             conn.close()
+
+
+def delete_ad_control_binding(binding_id):
+    return delete_ad_control_rule_group(binding_id)
 
 
 def set_ad_control_rule_group_enabled(group_id, enabled):
@@ -34095,6 +34351,10 @@ def set_ad_control_rule_group_enabled(group_id, enabled):
         finally:
             conn.close()
     return fetch_ad_control_rule_group(group_id)
+
+
+def set_ad_control_binding_enabled(binding_id, enabled):
+    return set_ad_control_rule_group_enabled(binding_id, enabled)
 
 
 def ad_control_emergency_stop(payload):
@@ -34131,15 +34391,36 @@ def ad_control_runner_status():
     }
 
 
-def list_ad_control_actions(limit=50):
+def list_ad_control_actions(limit=50, product="", binding_id="", action="", date_from="", date_to=""):
     ensure_ad_control_tables()
     limit = ad_control_int(limit, 50, 1, 200)
+    product = str(product or "").strip()
+    binding_id = str(binding_id or "").strip()
+    action = str(action or "").strip()
+    date_from = str(date_from or "").strip()
+    date_to = str(date_to or "").strip()
+    where = []
+    params = []
+    if product:
+        where.append("product=?")
+        params.append(product)
+    if action:
+        where.append("action=?")
+        params.append(action)
+    if date_from:
+        where.append("created_at>=?")
+        params.append(date_from + " 00:00:00")
+    if date_to:
+        where.append("created_at<=?")
+        params.append(date_to + " 23:59:59")
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    query_limit = limit if not binding_id else min(1000, max(limit * 5, 200))
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
             rows = conn.execute(
-                "SELECT * FROM ad_control_action ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM ad_control_action %s ORDER BY created_at DESC LIMIT ?" % where_sql,
+                tuple(params + [query_limit]),
             ).fetchall()
             items = []
             for row in rows:
@@ -34147,7 +34428,12 @@ def list_ad_control_actions(limit=50):
                 item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
                 item["results"] = ad_control_safe_json_list(item.pop("results_json", "[]"))
                 item["dry_run"] = bool(item.get("dry_run"))
+                item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+                if binding_id and item["binding_id"] != binding_id:
+                    continue
                 items.append(item)
+                if len(items) >= limit:
+                    break
             return {"items": items}
         finally:
             conn.close()
@@ -34619,6 +34905,7 @@ def ad_control_resolve_live_scope(payload):
         group = fetch_ad_control_rule_group(payload.get("rule_group_id"))
         product = group["product"]
         rules = group.get("rules") or []
+        default_window = group.get("rule_set_default_window") or {"type": "since_start"}
         account_group_id = group.get("account_group_id") or ""
         account_ids = list(group.get("account_ids") or [])
         if account_group_id:
@@ -34629,6 +34916,7 @@ def ad_control_resolve_live_scope(payload):
     else:
         product = str(payload.get("product") or "").strip()
         rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+        default_window = {"type": "since_start"}
         account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
     if not product:
         raise StructuredApiError("missing_product", "missing product")
@@ -34645,7 +34933,7 @@ def ad_control_resolve_live_scope(payload):
         "rules": rules,
         "rule_group": group,
         "rule_group_id": (group or {}).get("group_id") or str(payload.get("rule_group_id") or ""),
-        "window": payload.get("window") if isinstance(payload.get("window"), dict) else {"type": "since_start"},
+        "window": payload.get("window") if isinstance(payload.get("window"), dict) else default_window,
     }
 
 
@@ -34757,6 +35045,7 @@ def create_ad_control_live_preview(payload, session):
         "rules": scope["rules"],
         "window": scope.get("window"),
         "rule_group_id": scope.get("rule_group_id"),
+        "binding_id": scope.get("rule_group_id"),
     })
     expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
     criteria = {
@@ -34766,6 +35055,7 @@ def create_ad_control_live_preview(payload, session):
         "rules": scope["rules"],
         "window": scope.get("window"),
         "rule_group_id": scope.get("rule_group_id"),
+        "binding_id": scope.get("rule_group_id"),
         "preview_hash": preview_hash,
     }
     with JOB_DB_LOCK:
@@ -88146,6 +88436,46 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/ad-control/rule-sets":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_rule_sets((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_set_id = ad_control_parse_rule_set_path(parsed.path)
+        if rule_set_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, fetch_ad_control_rule_set(rule_set_id))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/bindings":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                params = parse_qs(parsed.query)
+                json_response(self, 200, list_ad_control_bindings((params.get("product") or [""])[0]))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        binding_id = ad_control_parse_binding_path(parsed.path)
+        if binding_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                json_response(self, 200, fetch_ad_control_binding(binding_id))
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/ad-control/rule-groups":
             if not self._require_module("ad_control_center"):
                 return
@@ -88170,7 +88500,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(parsed.query)
-                json_response(self, 200, list_ad_control_actions((params.get("limit") or ["50"])[0]))
+                json_response(
+                    self,
+                    200,
+                    list_ad_control_actions(
+                        limit=(params.get("limit") or ["50"])[0],
+                        product=(params.get("product") or [""])[0],
+                        binding_id=(params.get("binding_id") or [""])[0],
+                        action=(params.get("action") or [""])[0],
+                        date_from=(params.get("date_from") or [""])[0],
+                        date_to=(params.get("date_to") or [""])[0],
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90822,6 +91163,94 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/ad-control/rule-sets":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_rule_set(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_rule_set", "ad_control_rule_set", payload.get("rule_set_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_set_id = ad_control_parse_rule_set_path(parsed.path)
+        if rule_set_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_set_id"] = rule_set_id
+                payload = save_ad_control_rule_set(body, self._session())
+                append_audit_log(self._session(), "save_ad_control_rule_set", "ad_control_rule_set", payload.get("rule_set_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path == "/api/ad-control/bindings":
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = save_ad_control_binding(self._read_json(), self._session())
+                append_audit_log(self._session(), "save_ad_control_binding", "ad_control_binding", payload.get("binding_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/bindings/") and parsed.path.endswith("/enabled"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                binding_id = ad_control_parse_binding_path(parsed.path, "/enabled")
+                body = self._read_json()
+                payload = set_ad_control_binding_enabled(binding_id, bool(body.get("enabled")))
+                append_audit_log(self._session(), "set_ad_control_binding_enabled", "ad_control_binding", payload.get("binding_id", ""), {"enabled": payload.get("enabled", False)})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/bindings/") and parsed.path.endswith("/preview-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_binding_path(parsed.path, "/preview-live")
+                payload = create_ad_control_live_preview(body, self._session())
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        if parsed.path.startswith("/api/ad-control/bindings/") and parsed.path.endswith("/execute-live"):
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["rule_group_id"] = ad_control_parse_binding_path(parsed.path, "/execute-live")
+                payload = execute_ad_control_live(body, self._session())
+                append_audit_log(self._session(), "execute_ad_control_live", "ad_control_binding", body.get("rule_group_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        binding_id = ad_control_parse_binding_path(parsed.path)
+        if binding_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                body = self._read_json()
+                body["group_id"] = binding_id
+                payload = save_ad_control_binding(body, self._session())
+                append_audit_log(self._session(), "save_ad_control_binding", "ad_control_binding", payload.get("binding_id", ""), payload)
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
         if parsed.path == "/api/ad-control/rule-groups":
             if not self._require_module("ad_control_center"):
                 return
@@ -91195,6 +91624,30 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             try:
                 payload = delete_ad_control_account_group(account_group_id)
                 append_audit_log(self._session(), "delete_ad_control_account_group", "ad_control_account_group", account_group_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        rule_set_id = ad_control_parse_rule_set_path(parsed.path)
+        if rule_set_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_rule_set(rule_set_id)
+                append_audit_log(self._session(), "delete_ad_control_rule_set", "ad_control_rule_set", rule_set_id, {})
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 400, api_error_payload(exc))
+            return
+
+        binding_id = ad_control_parse_binding_path(parsed.path)
+        if binding_id:
+            if not self._require_module("ad_control_center"):
+                return
+            try:
+                payload = delete_ad_control_binding(binding_id)
+                append_audit_log(self._session(), "delete_ad_control_binding", "ad_control_binding", binding_id, {})
                 json_response(self, 200, payload)
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
