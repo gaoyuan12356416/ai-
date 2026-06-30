@@ -20,7 +20,10 @@
       { field: "roas_pct", op: "lt", value: 30 },
     ] },
   ];
-  const state = { auth: null, products: [], accounts: [], pools: [], ruleSets: [], bindings: [], preview: null };
+  const COUNTRY_GROUP_STORAGE_KEY = "adControlCountryGroups";
+  const defaultCountryGroups = ["WW-4", "WW-0", "JUWW"];
+  const defaultTimezones = ["8", "+8", "UTC+8"];
+  const state = { auth: null, products: [], accounts: [], pools: [], ruleSets: [], bindings: [], preview: null, bulkAccounts: {} };
   const $ = id => document.getElementById(id);
 
   function escapeHtml(value) {
@@ -52,6 +55,65 @@
   }
   function money(value) {
     return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  function splitValues(value) {
+    return String(value || "").split(/[,，\s]+/).map(item => item.trim()).filter(Boolean);
+  }
+  function countryGroups() {
+    try {
+      const values = JSON.parse(localStorage.getItem(COUNTRY_GROUP_STORAGE_KEY) || "[]");
+      if (Array.isArray(values) && values.length) return values;
+    } catch (error) {}
+    return defaultCountryGroups.slice();
+  }
+  function saveCountryGroups(values) {
+    const clean = Array.from(new Set((values || []).map(item => String(item || "").trim()).filter(Boolean)));
+    localStorage.setItem(COUNTRY_GROUP_STORAGE_KEY, JSON.stringify(clean));
+    return clean;
+  }
+  function timezoneValues(value) {
+    const text = String(value || "").trim();
+    if (!text) return new Set();
+    const values = new Set([text, text.toUpperCase()]);
+    const match = text.match(/([+-]?\d{1,2})(?:[:.]?(\d{1,2}))?$/);
+    if (match) {
+      const hour = Number(match[1]);
+      const minute = Number((match[2] || "0").slice(0, 2));
+      if (Number.isFinite(hour) && minute === 0) {
+        values.add(String(hour));
+        values.add(`${hour >= 0 ? "+" : ""}${hour}`);
+        values.add(`UTC${hour >= 0 ? "+" : ""}${hour}`);
+        values.add(`GMT${hour >= 0 ? "+" : ""}${hour}`);
+      }
+    }
+    return new Set(Array.from(values).map(item => item.toUpperCase()));
+  }
+  function isPlus8Timezone(value) {
+    const values = timezoneValues(value);
+    return ["8", "+8", "UTC+8", "GMT+8"].some(item => values.has(item));
+  }
+  function selectedProducts(containerId) {
+    return Array.from(document.querySelectorAll(`#${containerId} input[type=checkbox]:checked`)).map(input => input.value);
+  }
+  function renderProductChecks(containerId, products, selected) {
+    const node = $(containerId);
+    if (!node) return;
+    const selectedSet = new Set(selected || []);
+    node.innerHTML = (products || []).length ? products.map(item => {
+      const value = item.product || "";
+      const checked = selectedSet.has(value) ? "checked" : "";
+      return `<label class="check-option"><input type="checkbox" value="${escapeHtml(value)}" ${checked} /><span>${escapeHtml(value)}${item.app_id ? ` / ${escapeHtml(item.app_id)}` : ""}</span></label>`;
+    }).join("") : `<div class="empty">暂无产品</div>`;
+  }
+  function strategySummary(strategy) {
+    strategy = strategy || {};
+    const parts = [];
+    if (strategy.close_time) parts.push(`关闭 ${strategy.close_time}`);
+    if (strategy.execute_timezone) parts.push(`时区 ${strategy.execute_timezone}`);
+    if (strategy.block_same_day_reopen) parts.push("当天禁止重启");
+    if (strategy.allow_next_day_reopen) parts.push("隔天允许重启");
+    if (Array.isArray(strategy.country_groups) && strategy.country_groups.length) parts.push(`国家组 ${strategy.country_groups.join(",")}`);
+    return parts.join(" / ") || "--";
   }
   function requireSharedUi() {
     if (!window.UiTopbar) throw new Error("公共顶吸脚本 /ui-topbar.js 未加载");
@@ -170,14 +232,57 @@
   }
 
   async function renderRules() {
-    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>编辑规则集</h2><div class="row"><button class="btn" id="newBtn">新建</button><button class="btn primary" id="saveBtn">保存规则集</button></div></div><div class="panel-body">
+    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>+8跨区关停模板</h2><div class="row"><button class="btn" id="buildCrossRuleBtn">生成规则JSON</button><button class="btn primary" id="saveCrossRuleBatchBtn">按选中产品保存</button></div></div><div class="panel-body">
+      <div class="field"><label>投放产品（多选）</label><div class="check-list compact" id="ruleProductMulti"></div></div>
+      <div class="grid"><div class="field"><label>规则集名前缀</label><input id="crossRuleName" value="+8 跨区国家组关停" /></div><div class="field"><label>账户时区</label><input id="crossRuleTimezones" value="${escapeHtml(defaultTimezones.join(","))}" /></div><div class="field"><label>国家组 country</label><input id="crossRuleCountries" value="${escapeHtml(countryGroups().join(","))}" /></div><div class="field"><label>已运行小时 >=</label><input id="crossRuleAgeHours" type="number" min="0" value="0" /></div></div>
+      <div class="grid"><div class="field"><label>消耗 >=</label><input id="crossRuleSpendMin" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>安装 <=</label><input id="crossRuleInstallMax" type="number" min="0" placeholder="可选" /></div><div class="field"><label>ROAS% <=</label><input id="crossRuleRoasMax" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>购物 <=</label><input id="crossRulePurchaseMax" type="number" min="0" placeholder="可选" /></div></div>
+      <div class="row"><button class="btn" id="saveCountryGroupsBtn">保存常用国家组</button><span class="hint">命中只看 created_data.country 和账户 time_zone，不看 campaign 命名。</span></div>
+      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>编辑规则集</h2><div class="row"><button class="btn" id="newBtn">新建</button><button class="btn primary" id="saveBtn">保存规则集</button></div></div><div class="panel-body">
       <div class="grid"><div class="field"><label>规则集名称</label><input id="nameInput" placeholder="7-8 小时低效关停" /></div><div class="field"><label>规则集 ID</label><input id="idInput" readonly /></div><div class="field"><label>默认指标窗口</label><select id="windowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div><div class="field"><label>N 小时</label><input id="windowHours" type="number" min="1" max="720" value="24" /></div></div>
-      <div class="field"><label>规则 JSON</label><textarea id="rulesInput"></textarea><span class="hint">字段支持 age_hours、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status；操作符支持 gt/gte/lt/lte/eq/between/in。</span></div>
+      <div class="field"><label>规则 JSON</label><textarea id="rulesInput"></textarea><span class="hint">字段支持 age_hours、account_time_zone、country、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status；操作符支持 gt/gte/lt/lte/eq/between/in。</span></div>
       </div></section><section class="panel"><div class="panel-head"><h2>规则集列表</h2></div><div class="panel-body"><div class="list" id="ruleSetList"></div></div></section>`;
-    await loadProducts(); await loadRuleSets(); fillRuleSet(state.ruleSets[0] || null); renderRuleSetList();
+    await loadProducts(); renderProductChecks("ruleProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await loadRuleSets(); fillRuleSet(state.ruleSets[0] || null); renderRuleSetList();
     $("productSelect").onchange = async () => { await loadRuleSets(); fillRuleSet(null); renderRuleSetList(); };
     $("newBtn").onclick = () => fillRuleSet(null);
     $("saveBtn").onclick = saveRuleSet;
+    $("buildCrossRuleBtn").onclick = () => { fillCrossRuleJson(); toast("已生成规则 JSON"); };
+    $("saveCrossRuleBatchBtn").onclick = saveCrossRuleBatch;
+    $("saveCountryGroupsBtn").onclick = () => { saveCountryGroups(splitValues($("crossRuleCountries").value)); toast("常用国家组已保存到当前浏览器"); };
+  }
+  function buildCrossRule() {
+    const name = ($("crossRuleName").value || "+8 跨区国家组关停").trim();
+    const conditions = [
+      { field: "account_time_zone", op: "in", value: splitValues($("crossRuleTimezones").value) },
+      { field: "country", op: "in", value: splitValues($("crossRuleCountries").value) },
+    ];
+    const ageHours = Number($("crossRuleAgeHours").value || 0);
+    if (ageHours > 0) conditions.push({ field: "age_hours", op: "gte", value: ageHours });
+    if ($("crossRuleSpendMin").value !== "") conditions.push({ field: "spend", op: "gte", value: Number($("crossRuleSpendMin").value) });
+    if ($("crossRuleInstallMax").value !== "") conditions.push({ field: "install", op: "lte", value: Number($("crossRuleInstallMax").value) });
+    if ($("crossRuleRoasMax").value !== "") conditions.push({ field: "roas_pct", op: "lte", value: Number($("crossRuleRoasMax").value) });
+    if ($("crossRulePurchaseMax").value !== "") conditions.push({ field: "purchase", op: "lte", value: Number($("crossRulePurchaseMax").value) });
+    return [{ name, action: "pause", enabled: true, window: { type: "since_start" }, conditions }];
+  }
+  function fillCrossRuleJson() {
+    const rules = buildCrossRule();
+    $("nameInput").value = $("crossRuleName").value.trim();
+    $("windowType").value = "since_start";
+    $("rulesInput").value = JSON.stringify(rules, null, 2);
+  }
+  async function saveCrossRuleBatch() {
+    const products = selectedProducts("ruleProductMulti");
+    if (!products.length) return toast("请选择投放产品", "error");
+    const rules = buildCrossRule();
+    const baseName = ($("crossRuleName").value || "+8 跨区国家组关停").trim();
+    for (const productValue of products) {
+      await api("/api/ad-control/rule-sets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product: productValue, name: `${baseName} / ${productValue}`, rules, default_window: { type: "since_start" } }),
+      });
+    }
+    toast(`已保存 ${products.length} 个规则集`);
+    await loadRuleSets(); renderRuleSetList();
   }
   function fillRuleSet(item) {
     $("idInput").value = item ? item.rule_set_id : "";
@@ -204,15 +309,86 @@
   }
 
   async function renderPools() {
-    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>账户池</h2><button class="btn primary" id="savePoolBtn">保存账户池</button></div><div class="panel-body">
+    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>+8账户池批量创建</h2><div class="row"><button class="btn" id="loadBulkAccountsBtn">加载账户</button><button class="btn" id="selectPlus8Btn">选择+8账户</button><button class="btn primary" id="saveBulkPoolsBtn">批量保存账户池</button></div></div><div class="panel-body">
+      <div class="field"><label>投放产品（多选）</label><div class="check-list compact" id="poolProductMulti"></div></div>
+      <div class="grid"><div class="field"><label>账户池名前缀</label><input id="bulkPoolPrefix" value="北美 +8 调控账户" /></div><div class="field"><label>账户搜索</label><input id="bulkAccountSearch" placeholder="账户名 / ID" /></div><div class="field"><label>时区筛选</label><input id="bulkTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bulkPlus8Only" type="checkbox" checked /> 只看+8</label></div></div>
+      <div class="risk">批量保存会为每个产品分别创建账户池，不会创建跨产品绑定，也不会启用任何规则。</div>
+      <div class="bulk-groups" id="bulkAccountGroups"></div>
+      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>账户池</h2><button class="btn primary" id="savePoolBtn">保存账户池</button></div><div class="panel-body">
       <div class="grid two"><div class="field"><label>账户池名称</label><input id="poolName" placeholder="北美 +8 调控账户" /></div><div class="field"><label>账户池 ID</label><input id="poolId" readonly /></div></div>
       <div class="row"><button class="btn" id="selectAllBtn">全选账户</button><button class="btn" id="clearBtn">清空账户</button><span class="hint" id="accountHint"></span></div><div class="account-list" id="accountList"></div>
       </div></section><section class="panel"><div class="panel-head"><h2>账户池列表</h2></div><div class="panel-body"><div class="list" id="poolList"></div></div></section>`;
-    await loadProducts(); await refreshPoolPage();
+    await loadProducts(); renderProductChecks("poolProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await refreshPoolPage();
     $("productSelect").onchange = refreshPoolPage;
+    $("loadBulkAccountsBtn").onclick = loadBulkAccounts;
+    $("selectPlus8Btn").onclick = selectPlus8BulkAccounts;
+    $("saveBulkPoolsBtn").onclick = saveBulkPools;
+    $("bulkAccountSearch").oninput = renderBulkAccounts;
+    $("bulkTimezoneFilter").oninput = renderBulkAccounts;
+    $("bulkPlus8Only").onchange = renderBulkAccounts;
     $("savePoolBtn").onclick = savePool;
     $("selectAllBtn").onclick = () => document.querySelectorAll("#accountList input").forEach(input => input.checked = true);
     $("clearBtn").onclick = () => document.querySelectorAll("#accountList input").forEach(input => input.checked = false);
+  }
+  async function loadBulkAccounts() {
+    const products = selectedProducts("poolProductMulti");
+    if (!products.length) return toast("请选择投放产品", "error");
+    state.bulkAccounts = {};
+    await Promise.all(products.map(async value => {
+      const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`);
+      state.bulkAccounts[value] = data.items || [];
+    }));
+    renderBulkAccounts();
+    toast(`已加载 ${products.length} 个产品账户`);
+  }
+  function bulkAccountVisible(account) {
+    const query = ($("bulkAccountSearch")?.value || "").trim().toLowerCase();
+    const tzFilter = ($("bulkTimezoneFilter")?.value || "").trim();
+    const plus8Only = $("bulkPlus8Only")?.checked;
+    const haystack = `${account.account_id || ""} ${account.account_name || ""}`.toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (plus8Only && !isPlus8Timezone(account.time_zone)) return false;
+    if (tzFilter && !Array.from(timezoneValues(account.time_zone)).some(item => timezoneValues(tzFilter).has(item))) return false;
+    return true;
+  }
+  function renderBulkAccounts() {
+    const root = $("bulkAccountGroups");
+    if (!root) return;
+    const entries = Object.entries(state.bulkAccounts || {});
+    root.innerHTML = entries.length ? entries.map(([productValue, accounts]) => {
+      const visible = (accounts || []).filter(bulkAccountVisible);
+      return `<div class="bulk-group"><div class="bulk-head"><strong>${escapeHtml(productValue)}</strong><span class="hint">${visible.length}/${(accounts || []).length} 个账户</span></div><div class="account-list">${visible.length ? visible.map(account => {
+        const id = account.account_id || "";
+        return `<label class="account-option"><input type="checkbox" data-bulk-account="${escapeHtml(id)}" data-product="${escapeHtml(productValue)}" value="${escapeHtml(id)}" /><div class="account-title">${escapeHtml(account.account_name || id)}</div><div class="account-meta">${escapeHtml(id)} / ${escapeHtml(account.time_zone || "--")}</div></label>`;
+      }).join("") : `<div class="empty">无匹配账户</div>`}</div></div>`;
+    }).join("") : `<div class="empty">请选择产品后加载账户</div>`;
+  }
+  function selectPlus8BulkAccounts() {
+    document.querySelectorAll("[data-bulk-account]").forEach(input => {
+      const productValue = input.dataset.product || "";
+      const account = (state.bulkAccounts[productValue] || []).find(item => String(item.account_id || "") === input.value);
+      input.checked = !!account && isPlus8Timezone(account.time_zone);
+    });
+  }
+  async function saveBulkPools() {
+    const prefix = ($("bulkPoolPrefix").value || "北美 +8 调控账户").trim();
+    const byProduct = {};
+    document.querySelectorAll("[data-bulk-account]:checked").forEach(input => {
+      const productValue = input.dataset.product || "";
+      byProduct[productValue] = byProduct[productValue] || [];
+      byProduct[productValue].push(input.value);
+    });
+    const products = Object.keys(byProduct).filter(key => byProduct[key].length);
+    if (!products.length) return toast("请先选择账户", "error");
+    for (const productValue of products) {
+      await api("/api/ad-control/account-groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product: productValue, name: `${prefix} / ${productValue} / +8`, account_ids: byProduct[productValue] }),
+      });
+    }
+    toast(`已保存 ${products.length} 个账户池`);
+    await refreshPoolPage();
   }
   async function refreshPoolPage() {
     await loadAccounts(); await loadPools(); $("accountHint").textContent = `已加载 ${state.accounts.length} 个账户`; renderPoolList();
@@ -232,13 +408,21 @@
   }
 
   async function renderBindings() {
-    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>绑定关系</h2><div class="row"><button class="btn" id="newBindingBtn">新建</button><button class="btn primary" id="saveBindingBtn">保存绑定</button></div></div><div class="panel-body">
+    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>跨区调控绑定向导</h2><button class="btn primary" id="batchBindingBtn">批量创建绑定</button></div><div class="panel-body">
+      <div class="field"><label>投放产品（多选）</label><div class="check-list compact" id="bindingProductMulti"></div></div>
+      <div class="grid"><div class="field"><label>绑定名前缀</label><input id="batchBindingPrefix" value="+8 跨区国家组关停" /></div><div class="field"><label>账户池名称包含</label><input id="batchPoolKeyword" value="北美 +8 调控账户" /></div><div class="field"><label>规则集名称包含</label><input id="batchRuleKeyword" value="+8 跨区国家组关停" /></div><div class="field"><label>国家组</label><input id="bindingCountryGroups" value="${escapeHtml(countryGroups().join(","))}" /></div></div>
+      <div class="grid"><div class="field"><label>关闭时间</label><input id="bindingCloseTime" type="time" value="16:00" /></div><div class="field"><label>执行时区</label><input id="bindingExecuteTimezone" value="account" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bindingBlockSameDay" type="checkbox" checked /> 当天禁止重启</label></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bindingAllowNextDay" type="checkbox" checked /> 隔天允许程序重启</label></div></div>
+      <div class="risk">批量创建只保存 disabled 绑定，不会自动执行。账户池和规则集按名称包含匹配，每个产品单独生成一条绑定。</div>
+      <div class="list" id="batchBindingResult"></div>
+      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>绑定关系</h2><div class="row"><button class="btn" id="newBindingBtn">新建</button><button class="btn primary" id="saveBindingBtn">保存绑定</button></div></div><div class="panel-body">
       <div class="grid"><div class="field"><label>绑定名称</label><input id="bindingName" placeholder="北美账户池 + 7小时规则" /></div><div class="field"><label>绑定 ID</label><input id="bindingId" readonly /></div><div class="field"><label>账户池</label><select id="poolSelect"></select></div><div class="field"><label>规则集</label><select id="ruleSetSelect"></select></div></div>
+      <div class="grid"><div class="field"><label>关闭时间</label><input id="bindingStrategyCloseTime" type="time" /></div><div class="field"><label>执行时区</label><input id="bindingStrategyTimezone" placeholder="account / UTC+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bindingStrategyBlockSameDay" type="checkbox" /> 当天禁止重启</label></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bindingStrategyNextDay" type="checkbox" /> 隔天允许重启</label></div></div>
       <div class="risk">新绑定默认禁用。启用前必须在运行控制台完成 live preview，且 token 校验通过。</div></div></section><section class="panel"><div class="panel-head"><h2>绑定列表</h2></div><div class="panel-body"><div class="list" id="bindingList"></div></div></section>`;
-    await loadProducts(); await refreshBindingPage();
+    await loadProducts(); renderProductChecks("bindingProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await refreshBindingPage();
     $("productSelect").onchange = refreshBindingPage;
     $("newBindingBtn").onclick = () => fillBinding(null);
     $("saveBindingBtn").onclick = saveBinding;
+    $("batchBindingBtn").onclick = saveBatchBindings;
   }
   async function refreshBindingPage() {
     await Promise.all([loadPools(), loadRuleSets(), loadBindings()]);
@@ -251,13 +435,64 @@
     $("bindingName").value = item ? item.name : "";
     $("poolSelect").value = item ? item.account_group_id : "";
     $("ruleSetSelect").value = item ? item.rule_set_id : "";
+    const strategy = (item && item.strategy) || {};
+    $("bindingStrategyCloseTime").value = strategy.close_time || "";
+    $("bindingStrategyTimezone").value = strategy.execute_timezone || "";
+    $("bindingStrategyBlockSameDay").checked = !!strategy.block_same_day_reopen;
+    $("bindingStrategyNextDay").checked = !!strategy.allow_next_day_reopen;
   }
   async function saveBinding() {
-    await api("/api/ad-control/bindings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: $("bindingId").value, product: product(), name: $("bindingName").value.trim(), account_group_id: $("poolSelect").value, rule_set_id: $("ruleSetSelect").value, enabled: false }) });
+    await api("/api/ad-control/bindings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: $("bindingId").value, product: product(), name: $("bindingName").value.trim(), account_group_id: $("poolSelect").value, rule_set_id: $("ruleSetSelect").value, enabled: false, strategy: bindingStrategyFromForm() }) });
     toast("绑定已保存，默认禁用"); await refreshBindingPage();
   }
+  function bindingStrategyFromForm() {
+    return {
+      close_time: $("bindingStrategyCloseTime").value || "",
+      execute_timezone: $("bindingStrategyTimezone").value || "",
+      block_same_day_reopen: $("bindingStrategyBlockSameDay").checked,
+      allow_next_day_reopen: $("bindingStrategyNextDay").checked,
+    };
+  }
+  function batchBindingStrategy() {
+    return {
+      close_time: $("bindingCloseTime").value || "",
+      execute_timezone: $("bindingExecuteTimezone").value || "account",
+      block_same_day_reopen: $("bindingBlockSameDay").checked,
+      allow_next_day_reopen: $("bindingAllowNextDay").checked,
+      country_groups: splitValues($("bindingCountryGroups").value),
+    };
+  }
+  async function saveBatchBindings() {
+    const products = selectedProducts("bindingProductMulti");
+    if (!products.length) return toast("请选择投放产品", "error");
+    const poolKeyword = ($("batchPoolKeyword").value || "").trim();
+    const ruleKeyword = ($("batchRuleKeyword").value || "").trim();
+    const prefix = ($("batchBindingPrefix").value || "+8 跨区国家组关停").trim();
+    const results = [];
+    for (const productValue of products) {
+      const [poolsData, ruleData] = await Promise.all([
+        api(`/api/ad-control/account-groups?product=${encodeURIComponent(productValue)}`),
+        api(`/api/ad-control/rule-sets?product=${encodeURIComponent(productValue)}`),
+      ]);
+      const pool = (poolsData.items || []).find(item => !poolKeyword || String(item.name || "").includes(poolKeyword));
+      const ruleSet = (ruleData.items || []).find(item => !ruleKeyword || String(item.name || "").includes(ruleKeyword));
+      if (!pool || !ruleSet) {
+        results.push({ product: productValue, status: "skipped", reason: !pool ? "未找到账户池" : "未找到规则集" });
+        continue;
+      }
+      const payload = await api("/api/ad-control/bindings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ product: productValue, name: `${prefix} / ${productValue}`, account_group_id: pool.group_id, rule_set_id: ruleSet.rule_set_id, enabled: false, strategy: batchBindingStrategy() }),
+      });
+      results.push({ product: productValue, status: "created", binding_id: payload.binding_id });
+    }
+    $("batchBindingResult").innerHTML = results.map(item => `<div class="item"><div><strong>${escapeHtml(item.product)}</strong><span class="hint">${escapeHtml(item.status)} ${escapeHtml(item.binding_id || item.reason || "")}</span></div></div>`).join("");
+    toast(`批量绑定完成：${results.filter(item => item.status === "created").length}/${products.length}`);
+    await refreshBindingPage();
+  }
   function renderBindingList() {
-    $("bindingList").innerHTML = state.bindings.length ? state.bindings.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.binding_id)} / 账户池 ${escapeHtml(item.account_group_id || "--")} / 规则集 ${escapeHtml(item.rule_set_name || item.rule_set_id || "--")} / ${item.enabled ? "已启用" : "已禁用"} / ${item.emergency_stopped ? "已急停" : "正常"}</span></div><div class="row"><button class="btn" data-edit-binding="${escapeHtml(item.binding_id)}">编辑</button><button class="btn" data-toggle-binding="${escapeHtml(item.binding_id)}" data-enabled="${item.enabled ? "0" : "1"}">${item.enabled ? "禁用" : "启用"}</button><button class="btn danger" data-delete-binding="${escapeHtml(item.binding_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无绑定</div>`;
+    $("bindingList").innerHTML = state.bindings.length ? state.bindings.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.binding_id)} / 账户池 ${escapeHtml(item.account_group_id || "--")} / 规则集 ${escapeHtml(item.rule_set_name || item.rule_set_id || "--")} / ${item.enabled ? "已启用" : "已禁用"} / ${item.emergency_stopped ? "已急停" : "正常"} / ${escapeHtml(strategySummary(item.strategy))}</span></div><div class="row"><button class="btn" data-edit-binding="${escapeHtml(item.binding_id)}">编辑</button><button class="btn" data-toggle-binding="${escapeHtml(item.binding_id)}" data-enabled="${item.enabled ? "0" : "1"}">${item.enabled ? "禁用" : "启用"}</button><button class="btn danger" data-delete-binding="${escapeHtml(item.binding_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无绑定</div>`;
     $("bindingList").onclick = async event => {
       const edit = event.target.closest("[data-edit-binding]");
       const toggle = event.target.closest("[data-toggle-binding]");
@@ -272,7 +507,7 @@
     $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>运行控制台</h2><div class="row"><button class="btn primary" id="previewBtn">Live Preview</button><button class="btn" id="dryRunBtn" disabled>Dry-run执行</button><button class="btn danger" id="executeBtn" disabled>确认关闭</button><button class="btn danger" id="stopBtn">急停</button></div></div><div class="panel-body">
       <div class="grid three"><div class="field"><label>绑定关系</label><select id="bindingSelect"></select></div><div class="field"><label>指标窗口</label><select id="windowType"><option value="">使用规则集默认</option><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div><div class="field"><label>N 小时</label><input id="windowHours" type="number" min="1" max="720" value="24" /></div></div>
       <span class="hint" id="previewMeta">尚未 preview</span><div class="cards"><div class="metric"><span>命中 campaign</span><strong id="previewTotal">0</strong></div><div class="metric"><span>待关闭</span><strong id="previewPause">0</strong></div><div class="metric"><span>观察</span><strong id="previewObserve">0</strong></div><div class="metric"><span>异常</span><strong id="previewErrors">0</strong></div></div>
-      <div class="table-wrap"><table><thead><tr><th>账户</th><th>Campaign</th><th>状态</th><th>起始/运行</th><th>实时指标</th><th>命中规则</th><th>动作</th></tr></thead><tbody id="previewRows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>账户/时区</th><th>Campaign</th><th>国家组</th><th>状态</th><th>起始/运行</th><th>实时指标</th><th>命中规则</th><th>策略</th><th>动作</th></tr></thead><tbody id="previewRows"></tbody></table></div>
       </div></section><section class="panel"><div class="panel-head"><h2>刷新 campaign 起始时间缓存</h2></div><div class="panel-body"><div class="grid"><div class="field"><label>账户 ID</label><input id="refreshAccount" /></div><div class="field"><label>Campaign ID</label><input id="refreshCampaign" /></div><div class="field"><label>&nbsp;</label><button class="btn" id="refreshStartBtn">刷新缓存</button></div></div><div class="hint" id="refreshStartResult"></div></div></section>`;
     await loadProducts(); await refreshRunBindings();
     $("productSelect").onchange = refreshRunBindings;
@@ -298,18 +533,19 @@
     state.preview = data; renderPreview(data); toast("live preview 完成");
   }
   function renderPreview(data) {
+    const strategy = data.strategy || {};
     $("previewTotal").textContent = data.total || 0;
     $("previewPause").textContent = data.pause_count || 0;
     $("previewObserve").textContent = data.observe_count || 0;
     $("previewErrors").textContent = data.error_count || 0;
-    $("previewMeta").textContent = `preview ${data.preview_id || "--"} / 过期 ${data.expires_at || "--"} / 剩余未展示 ${data.remaining_count || 0}`;
+    $("previewMeta").textContent = `preview ${data.preview_id || "--"} / 过期 ${data.expires_at || "--"} / 剩余未展示 ${data.remaining_count || 0} / 策略 ${strategySummary(strategy)}`;
     $("dryRunBtn").disabled = !data.preview_id;
     $("executeBtn").disabled = !data.preview_id || !(data.pause_count > 0);
     $("previewRows").innerHTML = (data.items || []).map(item => {
       const m = item.metrics || {};
       const rules = (item.matched_rules || []).map(rule => rule.name || rule.action).join(", ");
       const targetCls = item.target_action === "pause" ? "danger" : (item.target_action === "observe" ? "warn" : "");
-      return `<tr><td><div class="mono">${escapeHtml(item.account_id)}</div><div class="hint">token ${escapeHtml(item.token_user_id || "--")}</div></td><td><div>${escapeHtml(item.campaign_name || "--")}</div><div class="mono">${escapeHtml(item.campaign_id)}</div></td><td><span class="badge ok">${escapeHtml(item.effective_status || item.status || "--")}</span></td><td>${escapeHtml(item.campaign_start_at || "--")}<div class="hint">${item.age_hours == null ? "缺起始时间" : item.age_hours.toFixed(1) + " 小时"}</div></td><td>Spend ${money(m.spend)} / Install ${m.install || 0}<br>Purchase ${m.purchase || 0} / ROAS% ${money(m.roas_pct)} / CPA ${m.purchase_cpa == null ? "--" : money(m.purchase_cpa)}</td><td>${escapeHtml(rules || item.skip_reason || "--")}</td><td><span class="badge ${targetCls}">${escapeHtml(item.target_action || "none")}</span></td></tr>`;
+      return `<tr><td><div class="mono">${escapeHtml(item.account_id)}</div><div class="hint">时区 ${escapeHtml(item.account_time_zone || "--")} / token ${escapeHtml(item.token_user_id || "--")}</div></td><td><div>${escapeHtml(item.campaign_name || "--")}</div><div class="mono">${escapeHtml(item.campaign_id)}</div></td><td>${escapeHtml(item.country || "--")}<div class="hint">${escapeHtml(item.language || "")}</div></td><td><span class="badge ok">${escapeHtml(item.effective_status || item.status || "--")}</span></td><td>${escapeHtml(item.campaign_start_at || "--")}<div class="hint">${item.age_hours == null ? "缺起始时间" : item.age_hours.toFixed(1) + " 小时"}</div></td><td>Spend ${money(m.spend)} / Install ${m.install || 0}<br>Purchase ${m.purchase || 0} / ROAS% ${money(m.roas_pct)} / CPA ${m.purchase_cpa == null ? "--" : money(m.purchase_cpa)}</td><td>${escapeHtml(rules || item.skip_reason || "--")}</td><td>${escapeHtml(strategySummary(strategy))}</td><td><span class="badge ${targetCls}">${escapeHtml(item.target_action || "none")}</span></td></tr>`;
     }).join("");
   }
   async function executeLive(dryRun) {
@@ -374,7 +610,11 @@
     renderActionList(data.items || [], $("actionList"));
   }
   function renderActionList(items, node) {
-    node.innerHTML = items.length ? items.map(item => `<div class="item"><div><strong>${escapeHtml(item.action_id)}</strong><span class="hint">${escapeHtml(item.created_at)} / ${escapeHtml(item.product)} / 绑定 ${escapeHtml(item.binding_id || "--")} / ${item.dry_run ? "dry-run" : "real"} / 成功 ${item.success_count} 跳过 ${item.skipped_count} 失败 ${item.error_count}</span><details><summary>结果详情</summary><pre class="mono">${escapeHtml(JSON.stringify(item.results || [], null, 2))}</pre></details></div><span class="badge">${escapeHtml(item.action)}</span></div>`).join("") : `<div class="empty">暂无执行日志</div>`;
+    node.innerHTML = items.length ? items.map(item => {
+      const strategy = (item.criteria || {}).strategy || {};
+      const reasons = Array.from(new Set((item.results || []).map(result => result.reason).filter(Boolean))).slice(0, 6);
+      return `<div class="item"><div><strong>${escapeHtml(item.action_id)}</strong><span class="hint">${escapeHtml(item.created_at)} / ${escapeHtml(item.product)} / 绑定 ${escapeHtml(item.binding_id || "--")} / ${item.dry_run ? "dry-run" : "real"} / 成功 ${item.success_count} 跳过 ${item.skipped_count} 失败 ${item.error_count} / 策略 ${escapeHtml(strategySummary(strategy))}${reasons.length ? " / 原因 " + escapeHtml(reasons.join(",")) : ""}</span><details><summary>结果详情</summary><pre class="mono">${escapeHtml(JSON.stringify(item.results || [], null, 2))}</pre></details></div><span class="badge">${escapeHtml(item.action)}</span></div>`;
+    }).join("") : `<div class="empty">暂无执行日志</div>`;
   }
 
   async function init() {

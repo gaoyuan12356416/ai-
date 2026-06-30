@@ -32811,6 +32811,7 @@ CREATE TABLE IF NOT EXISTS ad_control_rule_group (
   account_group_id TEXT NOT NULL DEFAULT '',
   account_ids_json TEXT NOT NULL DEFAULT '[]',
   rules_json TEXT NOT NULL DEFAULT '[]',
+  strategy_json TEXT NOT NULL DEFAULT '{}',
   enabled INTEGER NOT NULL DEFAULT 0,
   emergency_stopped INTEGER NOT NULL DEFAULT 0,
   last_preview_id TEXT NOT NULL DEFAULT '',
@@ -32840,6 +32841,8 @@ def ensure_ad_control_tables():
             columns = {row[1] for row in conn.execute("PRAGMA table_info(ad_control_rule_group)").fetchall()}
             if "rule_set_id" not in columns:
                 conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN rule_set_id TEXT NOT NULL DEFAULT ''")
+            if "strategy_json" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN strategy_json TEXT NOT NULL DEFAULT '{}'")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_preview_expires ON ad_control_preview(expires_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_action_created ON ad_control_action(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_object_product ON ad_control_object_state(product, level, status)")
@@ -34138,6 +34141,7 @@ def ad_control_rule_group_payload(row):
     item = dict(row)
     item["account_ids"] = ad_control_safe_json_list(item.pop("account_ids_json", "[]"))
     item["rules"] = ad_control_safe_json_list(item.pop("rules_json", "[]"))
+    item["strategy"] = ad_control_safe_json_dict(item.pop("strategy_json", "{}"))
     rule_set_rules = ad_control_safe_json_list(item.pop("rule_set_rules_json", "[]"))
     if not item["rules"] and rule_set_rules:
         item["rules"] = rule_set_rules
@@ -34228,6 +34232,7 @@ def save_ad_control_rule_group(payload, session):
     account_ids = [item for item in account_ids if item]
     rule_set_id = str(payload.get("rule_set_id") or "").strip()
     rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
+    strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
     if rule_set_id:
         rule_set = fetch_ad_control_rule_set(rule_set_id)
         if rule_set.get("product") != product:
@@ -34269,9 +34274,9 @@ def save_ad_control_rule_group(payload, session):
             conn.execute(
                 """
                 INSERT INTO ad_control_rule_group (
-                  group_id, name, product, rule_set_id, account_group_id, account_ids_json, rules_json,
+                  group_id, name, product, rule_set_id, account_group_id, account_ids_json, rules_json, strategy_json,
                   enabled, emergency_stopped, created_by, created_at, updated_at, deleted
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
                 ON CONFLICT(group_id) DO UPDATE SET
                   name=excluded.name,
                   product=excluded.product,
@@ -34279,6 +34284,7 @@ def save_ad_control_rule_group(payload, session):
                   account_group_id=excluded.account_group_id,
                   account_ids_json=excluded.account_ids_json,
                   rules_json=excluded.rules_json,
+                  strategy_json=excluded.strategy_json,
                   enabled=excluded.enabled,
                   updated_at=CURRENT_TIMESTAMP,
                   deleted=0
@@ -34291,6 +34297,7 @@ def save_ad_control_rule_group(payload, session):
                     account_group_id,
                     json.dumps(account_ids, ensure_ascii=False),
                     json.dumps(rules, ensure_ascii=False),
+                    json.dumps(strategy, ensure_ascii=False),
                     enabled,
                     ad_control_actor(session),
                 ),
@@ -34679,16 +34686,27 @@ def ad_control_product_campaign_whitelist(product, account_ids):
     if not product or not accounts:
         return {}
     sql = """
-        SELECT {account_norm}, CAST(campaign_id AS CHAR), COALESCE(MAX(NULLIF(campaign_name,'')), '')
-          FROM {table}
-         WHERE product={product}
-           AND campaign_id IS NOT NULL
-           AND campaign_id<>''
+        SELECT
+          {account_norm},
+          CAST(d.campaign_id AS CHAR),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\\n'), '\\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), '')
+          FROM {table} d
+     LEFT JOIN {accounts_table} s
+            ON s.platform_id=1
+           AND {account_norm}= {setting_norm}
+         WHERE d.product={product}
+           AND d.campaign_id IS NOT NULL
+           AND d.campaign_id<>''
            AND {account_norm} IN {accounts}
-         GROUP BY {account_norm}, CAST(campaign_id AS CHAR)
+         GROUP BY {account_norm}, CAST(d.campaign_id AS CHAR)
     """.format(
-        account_norm=ad_control_norm_account_sql("ad_account_id"),
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
         table=ad_control_table("ads_facebook_auto_created_data"),
+        accounts_table=ad_control_table("ads_accounts_setting"),
         product=ad_control_quote(product),
         accounts=ad_control_sql_in(accounts),
     )
@@ -34698,7 +34716,12 @@ def ad_control_product_campaign_whitelist(product, account_ids):
         account_id = ad_control_normalize_account(row[0])
         campaign_id = str(row[1] or "").strip()
         if account_id and campaign_id:
-            out.setdefault(account_id, {})[campaign_id] = {"campaign_name": str(row[2] or "")}
+            out.setdefault(account_id, {})[campaign_id] = {
+                "campaign_name": str(row[2] or ""),
+                "country": str(row[3] or "").strip(),
+                "language": str(row[4] or "").strip(),
+                "account_time_zone": str(row[5] or "").strip(),
+            }
     return out
 
 
@@ -34831,6 +34854,12 @@ def ad_control_condition_value(item, field):
         "roas": "roas_pct",
         "purchase_cpa_usd": "purchase_cpa",
         "cpa": "purchase_cpa",
+        "country_group": "country",
+        "geo": "country",
+        "region": "country",
+        "time_zone": "account_time_zone",
+        "timezone": "account_time_zone",
+        "account_timezone": "account_time_zone",
     }
     field = aliases.get(field, field)
     if field in ("age_hours", "runtime_hours"):
@@ -34842,8 +34871,38 @@ def ad_control_condition_value(item, field):
     return item.get(field)
 
 
+def ad_control_timezone_values(value):
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    values = {text, text.upper()}
+    match = re.search(r"([+-]?\d{1,2})(?:[:.]?(\d{1,2}))?$", text)
+    if not match:
+        return values
+    try:
+        hours = int(match.group(1))
+        minutes = int((match.group(2) or "0")[:2])
+    except Exception:
+        return values
+    if minutes == 0:
+        values.update({
+            str(hours),
+            "%+d" % hours,
+            "UTC%+d" % hours,
+            "UTC%+03d:00" % hours,
+            "GMT%+d" % hours,
+            "GMT%+03d:00" % hours,
+        })
+    return {item.upper() for item in values if item}
+
+
+def ad_control_string_values(value):
+    return {str(value or "").strip(), str(value or "").strip().upper()}
+
+
 def ad_control_match_condition(item, condition):
     field = condition.get("field")
+    field_key = str(field or "").strip()
     op = str(condition.get("op") or condition.get("operator") or "eq").lower()
     actual = ad_control_condition_value(item, field)
     expected = condition.get("value")
@@ -34853,7 +34912,15 @@ def ad_control_match_condition(item, condition):
         return False
     if op in ("in", "not_in"):
         values = expected if isinstance(expected, list) else ad_control_list(expected)
-        matched = str(actual) in [str(value) for value in values]
+        if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
+            expected_values = set()
+            for value in values:
+                expected_values.update(ad_control_timezone_values(value))
+            matched = bool(ad_control_timezone_values(actual) & expected_values)
+        elif field_key in ("country", "country_group", "geo", "region"):
+            matched = str(actual or "").strip().upper() in [str(value or "").strip().upper() for value in values]
+        else:
+            matched = str(actual) in [str(value) for value in values]
         return not matched if op == "not_in" else matched
     if op == "between":
         values = expected if isinstance(expected, list) else [condition.get("min"), condition.get("max")]
@@ -34876,7 +34943,15 @@ def ad_control_match_condition(item, condition):
             return number < target
         return number <= target
     if op in ("ne", "neq"):
+        if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
+            return not bool(ad_control_timezone_values(actual) & ad_control_timezone_values(expected))
+        if field_key in ("country", "country_group", "geo", "region"):
+            return str(actual or "").strip().upper() != str(expected or "").strip().upper()
         return str(actual) != str(expected)
+    if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
+        return bool(ad_control_timezone_values(actual) & ad_control_timezone_values(expected))
+    if field_key in ("country", "country_group", "geo", "region"):
+        return str(actual or "").strip().upper() == str(expected or "").strip().upper()
     return str(actual) == str(expected)
 
 
@@ -34927,12 +35002,16 @@ def ad_control_resolve_live_scope(payload):
         raise StructuredApiError("too_many_accounts", "too many accounts", max_accounts=AD_CONTROL_MAX_LIVE_ACCOUNTS)
     if not rules:
         rules = [{"name": "observe all", "action": "observe", "enabled": True, "conditions": []}]
+    strategy = (group or {}).get("strategy") if isinstance((group or {}).get("strategy"), dict) else {}
+    if not strategy and isinstance(payload.get("strategy"), dict):
+        strategy = payload.get("strategy") or {}
     return {
         "product": product,
         "account_ids": account_ids,
         "rules": rules,
         "rule_group": group,
         "rule_group_id": (group or {}).get("group_id") or str(payload.get("rule_group_id") or ""),
+        "strategy": strategy,
         "window": payload.get("window") if isinstance(payload.get("window"), dict) else default_window,
     }
 
@@ -34967,6 +35046,7 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
     items = []
     for campaign_id in campaign_ids:
         campaign = active_by_id.get(campaign_id) or {}
+        whitelist_item = whitelist.get(campaign_id) or {}
         start = starts.get(campaign_id) or {"reason": "missing_campaign_start_at"}
         age_hours = ad_control_age_hours(start.get("campaign_start_at"))
         metrics = metrics_by_campaign.get(campaign_id) or {}
@@ -34977,7 +35057,10 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
             "campaign_id": campaign_id,
             "object_id": campaign_id,
             "object_key": "%s:campaign:%s:%s" % (scope["product"], account_id, campaign_id),
-            "campaign_name": campaign.get("name") or (whitelist.get(campaign_id) or {}).get("campaign_name", ""),
+            "campaign_name": campaign.get("name") or whitelist_item.get("campaign_name", ""),
+            "country": whitelist_item.get("country", ""),
+            "language": whitelist_item.get("language", ""),
+            "account_time_zone": whitelist_item.get("account_time_zone", ""),
             "status": campaign.get("status", ""),
             "effective_status": campaign.get("effective_status", ""),
             "campaign_start": start,
@@ -35044,6 +35127,7 @@ def create_ad_control_live_preview(payload, session):
         "accounts": scope["account_ids"],
         "rules": scope["rules"],
         "window": scope.get("window"),
+        "strategy": scope.get("strategy") or {},
         "rule_group_id": scope.get("rule_group_id"),
         "binding_id": scope.get("rule_group_id"),
     })
@@ -35054,6 +35138,7 @@ def create_ad_control_live_preview(payload, session):
         "accounts": scope["account_ids"],
         "rules": scope["rules"],
         "window": scope.get("window"),
+        "strategy": scope.get("strategy") or {},
         "rule_group_id": scope.get("rule_group_id"),
         "binding_id": scope.get("rule_group_id"),
         "preview_hash": preview_hash,
@@ -35103,6 +35188,7 @@ def create_ad_control_live_preview(payload, session):
         "observe_count": observe_count,
         "error_count": len(errors),
         "resource": resource,
+        "strategy": scope.get("strategy") or {},
         "items": items[:200],
         "errors": errors[:100],
         "remaining_count": max(0, total - min(total, 200)),
