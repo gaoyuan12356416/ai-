@@ -34860,6 +34860,8 @@ def ad_control_condition_value(item, field):
         "country_group": "country",
         "geo": "country",
         "region": "country",
+        "lang": "language",
+        "locale": "language",
         "time_zone": "account_time_zone",
         "timezone": "account_time_zone",
         "account_timezone": "account_time_zone",
@@ -34922,6 +34924,8 @@ def ad_control_match_condition(item, condition):
             matched = bool(ad_control_timezone_values(actual) & expected_values)
         elif field_key in ("country", "country_group", "geo", "region"):
             matched = str(actual or "").strip().upper() in [str(value or "").strip().upper() for value in values]
+        elif field_key in ("language", "lang", "locale"):
+            matched = str(actual or "").strip().upper() in [str(value or "").strip().upper() for value in values]
         else:
             matched = str(actual) in [str(value) for value in values]
         return not matched if op == "not_in" else matched
@@ -34950,10 +34954,14 @@ def ad_control_match_condition(item, condition):
             return not bool(ad_control_timezone_values(actual) & ad_control_timezone_values(expected))
         if field_key in ("country", "country_group", "geo", "region"):
             return str(actual or "").strip().upper() != str(expected or "").strip().upper()
+        if field_key in ("language", "lang", "locale"):
+            return str(actual or "").strip().upper() != str(expected or "").strip().upper()
         return str(actual) != str(expected)
     if field_key in ("account_time_zone", "time_zone", "timezone", "account_timezone"):
         return bool(ad_control_timezone_values(actual) & ad_control_timezone_values(expected))
     if field_key in ("country", "country_group", "geo", "region"):
+        return str(actual or "").strip().upper() == str(expected or "").strip().upper()
+    if field_key in ("language", "lang", "locale"):
         return str(actual or "").strip().upper() == str(expected or "").strip().upper()
     return str(actual) == str(expected)
 

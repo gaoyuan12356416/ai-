@@ -27,8 +27,9 @@
     hotdrama: "hotdrama",
     freereels: "freereels",
   };
-  const defaultCountryGroups = ["WW-4", "WW-0", "JUWW"];
+  const defaultCountryGroups = [];
   const defaultTimezones = ["8", "+8", "UTC+8"];
+  const defaultExcludedLanguages = ["JA", "KO", "ZHTW", "TH", "ID", "VI", "MS", "TL"];
   const state = {
     auth: null,
     products: [],
@@ -91,6 +92,9 @@
     const clean = Array.from(new Set((values || []).map(item => String(item || "").trim()).filter(Boolean)));
     localStorage.setItem(COUNTRY_GROUP_STORAGE_KEY, JSON.stringify(clean));
     return clean;
+  }
+  function countryGroupLabel(values) {
+    return Array.isArray(values) && values.length ? values.join(", ") : "不限国家组";
   }
   function timezoneValues(value) {
     const text = String(value || "").trim();
@@ -220,9 +224,30 @@
       window: { type: "since_start" },
       conditions: [
         { field: "account_time_zone", op: "in", value: defaultTimezones.slice() },
-        { field: "country", op: "in", value: countryGroups() },
+        { field: "language", op: "not_in", value: defaultExcludedLanguages.slice() },
       ],
     }];
+  }
+  function primaryRuleFromDraft(draft) {
+    return Array.isArray((draft || {}).rules) && draft.rules.length && typeof draft.rules[0] === "object" ? draft.rules[0] : {};
+  }
+  function ruleConditions(rule) {
+    return Array.isArray((rule || {}).conditions) ? rule.conditions : [];
+  }
+  function conditionFor(rule, fields, ops) {
+    const fieldSet = new Set((Array.isArray(fields) ? fields : [fields]).map(item => String(item || "").toLowerCase()));
+    const opSet = new Set((Array.isArray(ops) ? ops : [ops]).map(item => String(item || "").toLowerCase()));
+    return ruleConditions(rule).find(condition => fieldSet.has(String(condition.field || "").toLowerCase()) && (!opSet.size || opSet.has(String(condition.op || condition.operator || "").toLowerCase())));
+  }
+  function conditionList(rule, fields, ops, fallback) {
+    const condition = conditionFor(rule, fields, ops);
+    if (!condition) return (fallback || []).slice();
+    return Array.isArray(condition.value) ? condition.value : splitValues(condition.value);
+  }
+  function conditionNumber(rule, fields, ops, fallback) {
+    const condition = conditionFor(rule, fields, ops);
+    if (!condition || condition.value == null || condition.value === "") return fallback == null ? "" : fallback;
+    return condition.value;
   }
   function ruleGroupBindingId(frontendId, productValue) {
     return `${safeIdPart(frontendId)}_${safeIdPart(productValue)}_binding`;
@@ -422,7 +447,7 @@
         <td><strong>${escapeHtml(group.name)}</strong><div class="mono">${escapeHtml(group.id)}</div><div class="hint">${escapeHtml(group.description || "无说明")}</div></td>
         <td><div class="chip-row">${productBadgeList(group.products)}</div></td>
         <td><strong>${group.account_count || "--"}</strong><div class="hint">${group.bindings.length} 个底层绑定</div></td>
-        <td>${group.rule_count || "--"} 条<div class="hint">${escapeHtml((group.country_groups || []).join(", ") || "未配置国家组")}</div></td>
+        <td>${group.rule_count || "--"} 条<div class="hint">${escapeHtml(countryGroupLabel(group.country_groups || []))}</div></td>
         <td>${escapeHtml(strategySummary(group))}</td>
         <td>${stateLabel}</td>
         <td><div class="row action-row">
@@ -486,11 +511,11 @@
       id,
       originalId: group ? group.id : "",
       existingBindings: group && !copy ? group.bindings.slice() : [],
-      name: group ? `${group.name}${copy ? " 副本" : ""}` : "+8跨区国家组关停",
-      description: group ? (group.description || strategy.description || "") : "账户时区为 +8，投放国家组命中后自动控停；当天禁止重启，隔天允许按规则重启。",
+      name: group ? `${group.name}${copy ? " 副本" : ""}` : "+8非亚洲语种10点关停",
+      description: group ? (group.description || strategy.description || "") : "账户时区为 +8，排除 JA/KO/ZHTW/TH/ID/VI/MS/TL 后，其他语种到关闭时间控停；不限制国家组，当天禁止重启。",
       products: products.length ? products : ["dramawave"],
-      country_groups: group && group.country_groups && group.country_groups.length ? group.country_groups : countryGroups(),
-      close_time: group ? (group.close_time || strategy.close_time || "16:00") : "16:00",
+      country_groups: group ? (Array.isArray(group.country_groups) ? group.country_groups : []) : [],
+      close_time: group ? (group.close_time || strategy.close_time || "10:00") : "10:00",
       execute_timezone: group ? (group.execute_timezone || strategy.execute_timezone || "account") : "account",
       block_same_day_reopen: group ? group.block_same_day_reopen : true,
       allow_next_day_reopen: group ? group.allow_next_day_reopen : true,
@@ -513,6 +538,18 @@
   }
   function renderRuleGroupDrawer() {
     const draft = state.ruleGroupDraft;
+    const builderRule = primaryRuleFromDraft(draft);
+    const builderRuleName = builderRule.name || "+8非亚洲语种10点关停";
+    const builderAction = builderRule.action || "pause";
+    const builderTimezones = conditionList(builderRule, ["account_time_zone", "time_zone", "timezone", "account_timezone"], ["in"], defaultTimezones);
+    const builderLanguages = conditionList(builderRule, "language", ["not_in"], defaultExcludedLanguages);
+    const builderCountries = (draft.country_groups || []).length ? draft.country_groups : conditionList(builderRule, ["country", "country_group", "geo", "region"], ["in"], []);
+    const builderAgeHours = conditionNumber(builderRule, "age_hours", ["gte"], "");
+    const builderSpendMin = conditionNumber(builderRule, "spend", ["gte", "gt"], "");
+    const builderInstallMax = conditionNumber(builderRule, "install", ["lte", "lt"], "");
+    const builderRoasMax = conditionNumber(builderRule, "roas_pct", ["lte", "lt"], "");
+    const builderPurchaseMax = conditionNumber(builderRule, "purchase", ["lte", "lt"], "");
+    const builderCpaMin = conditionNumber(builderRule, "purchase_cpa", ["gte", "gt"], "");
     $("drawerTitle").textContent = draft.mode === "edit" ? "编辑规则组" : "新建规则组";
     $("drawerSubTitle").textContent = draft.mode === "edit" ? `正在编辑 ${draft.id}` : "保存后会生成一个前端规则组，并按产品拆成底层配置";
     $("ruleGroupDrawerBody").innerHTML = `
@@ -524,18 +561,19 @@
       <section class="drawer-section">
         <div class="section-title"><span>2</span><h3>产品与账号</h3></div>
         <div class="field"><label>产品（固定枚举，多选）</label><div class="check-list compact fixed-products" id="drawerProducts">${ALLOWED_PRODUCTS.map(value => `<label class="check-option"><input type="checkbox" value="${value}" ${draft.products.includes(value) ? "checked" : ""} /><span>${PRODUCT_LABELS[value]}</span></label>`).join("")}</div></div>
-        <div class="grid"><div class="field"><label>账号搜索</label><input id="drawerAccountSearch" placeholder="账户名 / account_id" /></div><div class="field"><label>时区筛选</label><input id="drawerTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerPlus8Only" type="checkbox" checked /> 只看 +8</label></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="drawerSelectVisibleAccounts" type="button">全选可见</button><button class="btn" id="drawerClearVisibleAccounts" type="button">清空可见</button></div></div></div>
+        <div class="grid"><div class="field"><label>账号搜索</label><input id="drawerAccountSearch" placeholder="搜索账号名 / ID；输入 act_... 可直接加入" /></div><div class="field"><label>时区筛选</label><input id="drawerTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerPlus8Only" type="checkbox" checked /> 只看 +8</label></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="drawerAddSearchAccount" type="button">加入搜索账号</button><button class="btn" id="drawerSelectVisibleAccounts" type="button">全选可见</button><button class="btn" id="drawerClearVisibleAccounts" type="button">清空可见</button></div></div></div>
         <div class="manual-account-box"><div class="field"><label>手动添加账号 ID</label><textarea id="drawerManualAccounts" class="short-textarea" placeholder="支持粘贴 act_1146901540906487、1026707669580137；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">手动账号会加入当前选中的每个产品；适合账号未出现在接口列表时使用。</span></div><button class="btn" id="drawerAddManualAccounts" type="button">加入选中产品</button></div>
         <div class="selected-account-box"><div class="bulk-head"><strong>已选账号</strong><span class="hint" id="drawerSelectedAccountHint">0 个</span></div><div class="selected-account-list" id="drawerSelectedAccounts"></div></div>
         <div class="account-product-list" id="drawerAccounts"></div>
       </section>
       <section class="drawer-section">
         <div class="section-title"><span>3</span><h3>规则阈值</h3></div>
-        <div class="grid"><div class="field"><label>规则名称</label><input id="builderRuleName" value="+8跨区国家组关停" /></div><div class="field"><label>动作</label><select id="builderAction"><option value="pause">pause 关闭</option><option value="observe">observe 观望</option></select></div><div class="field"><label>账户时区 in</label><input id="builderTimezones" value="${escapeHtml(defaultTimezones.join(","))}" /></div><div class="field"><label>国家组 in</label><input id="builderCountries" value="${escapeHtml(draft.country_groups.join(","))}" /></div></div>
-        <div class="grid"><div class="field"><label>已运行小时 >=</label><input id="builderAgeHours" type="number" min="0" placeholder="可选" /></div><div class="field"><label>消耗 >=</label><input id="builderSpendMin" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>安装 <=</label><input id="builderInstallMax" type="number" min="0" placeholder="可选" /></div><div class="field"><label>ROAS% <=</label><input id="builderRoasMax" type="number" min="0" step="0.01" placeholder="可选" /></div></div>
-        <div class="grid"><div class="field"><label>购物 <=</label><input id="builderPurchaseMax" type="number" min="0" placeholder="可选" /></div><div class="field"><label>Purchase CPA >=</label><input id="builderCpaMin" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>默认指标窗口</label><select id="drawerWindowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div><div class="field"><label>N 小时</label><input id="drawerWindowHours" type="number" min="1" max="720" value="${escapeHtml(draft.default_window.hours || 24)}" /></div></div>
+        <div class="grid"><div class="field"><label>规则名称</label><input id="builderRuleName" value="${escapeHtml(builderRuleName)}" /></div><div class="field"><label>动作</label><select id="builderAction"><option value="pause">pause 关闭</option><option value="observe">observe 观望</option></select></div><div class="field"><label>账户时区 in</label><input id="builderTimezones" value="${escapeHtml(builderTimezones.join(","))}" /></div><div class="field"><label>国家组 in（留空=不限）</label><input id="builderCountries" value="${escapeHtml(builderCountries.join(","))}" placeholder="留空表示所有国家组" /></div></div>
+        <div class="grid"><div class="field"><label>排除语种 not in</label><input id="builderLanguages" value="${escapeHtml(builderLanguages.join(","))}" /></div><div class="field"><label>已运行小时 >=</label><input id="builderAgeHours" type="number" min="0" placeholder="可选" value="${escapeHtml(builderAgeHours)}" /></div><div class="field"><label>消耗 >=</label><input id="builderSpendMin" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderSpendMin)}" /></div><div class="field"><label>安装 <=</label><input id="builderInstallMax" type="number" min="0" placeholder="可选" value="${escapeHtml(builderInstallMax)}" /></div></div>
+        <div class="grid"><div class="field"><label>ROAS% <=</label><input id="builderRoasMax" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderRoasMax)}" /></div><div class="field"><label>购物 <=</label><input id="builderPurchaseMax" type="number" min="0" placeholder="可选" value="${escapeHtml(builderPurchaseMax)}" /></div><div class="field"><label>Purchase CPA >=</label><input id="builderCpaMin" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderCpaMin)}" /></div><div class="field"><label>默认指标窗口</label><select id="drawerWindowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div></div>
+        <div class="grid single"><div class="field"><label>N 小时</label><input id="drawerWindowHours" type="number" min="1" max="720" value="${escapeHtml(draft.default_window.hours || 24)}" /></div></div>
         <div class="row"><button class="btn" id="buildDrawerRuleBtn" type="button">按上方阈值生成规则 JSON</button><span class="hint">可视化阈值会覆盖下面 JSON；需要多条规则时可直接编辑 JSON。</span></div>
-        <div class="field"><label>规则 JSON</label><textarea id="drawerRulesJson">${escapeHtml(JSON.stringify(draft.rules, null, 2))}</textarea><span class="hint">字段支持 age_hours、account_time_zone、country、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status。</span></div>
+        <div class="field"><label>规则 JSON</label><textarea id="drawerRulesJson">${escapeHtml(JSON.stringify(draft.rules, null, 2))}</textarea><span class="hint">字段支持 age_hours、account_time_zone、language、country、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status；国家组留空不会生成 country 条件。</span></div>
       </section>
       <section class="drawer-section">
         <div class="section-title"><span>4</span><h3>绑定策略</h3></div>
@@ -546,6 +584,7 @@
         <div class="summary-box" id="drawerSummary"></div>
       </section>`;
     $("drawerWindowType").value = draft.default_window.type || "since_start";
+    $("builderAction").value = builderAction;
     $("drawerProducts").onchange = async () => {
       captureDraftSelectedAccounts();
       const products = selectedProducts("drawerProducts");
@@ -554,8 +593,15 @@
       updateRuleGroupSummary();
     };
     $("drawerAccountSearch").oninput = renderRuleGroupAccounts;
+    $("drawerAccountSearch").onkeydown = event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addSearchRuleAccounts();
+      }
+    };
     $("drawerTimezoneFilter").oninput = renderRuleGroupAccounts;
     $("drawerPlus8Only").onchange = renderRuleGroupAccounts;
+    $("drawerAddSearchAccount").onclick = addSearchRuleAccounts;
     $("drawerSelectVisibleAccounts").onclick = () => setVisibleRuleAccounts(true);
     $("drawerClearVisibleAccounts").onclick = () => setVisibleRuleAccounts(false);
     $("drawerAddManualAccounts").onclick = addManualRuleAccounts;
@@ -611,6 +657,16 @@
     if (tzFilter && !Array.from(timezoneValues(account.time_zone)).some(item => timezoneValues(tzFilter).has(item))) return false;
     return true;
   }
+  function searchAccountQuery() {
+    return ($("drawerAccountSearch")?.value || "").trim().toLowerCase();
+  }
+  function accountMatchesSearch(productValue, accountId, display) {
+    const query = searchAccountQuery();
+    if (!query) return true;
+    const normalizedQuery = normalizeAccountId(query);
+    const haystack = `${productValue} ${accountId} ${display.title || ""} ${display.meta || ""}`.toLowerCase();
+    return haystack.includes(query) || (!!normalizedQuery && String(accountId || "").toLowerCase().includes(normalizedQuery.toLowerCase()));
+  }
   function renderRuleGroupAccounts() {
     const root = $("drawerAccounts");
     const draft = state.ruleGroupDraft;
@@ -637,12 +693,26 @@
     if (!products.length) return toast("请先选择产品", "error");
     const ids = Array.from(new Set(splitValues($("drawerManualAccounts").value).map(normalizeAccountId).filter(Boolean)));
     if (!ids.length) return toast("请粘贴账号 ID", "error");
-    products.forEach(productValue => {
-      ids.forEach(id => draft.selectedAccountKeys.add(`${productValue}:${id}`));
-    });
+    addRuleAccountIds(products, ids);
     $("drawerManualAccounts").value = "";
     renderRuleGroupAccounts();
     toast(`已加入 ${ids.length} 个账号到 ${products.length} 个产品`);
+  }
+  function addSearchRuleAccounts() {
+    const products = selectedProducts("drawerProducts");
+    if (!products.length) return toast("请先选择产品", "error");
+    const ids = Array.from(new Set(splitValues($("drawerAccountSearch").value).map(normalizeAccountId).filter(Boolean)));
+    if (!ids.length) return toast("请在账号搜索框输入 account_id", "error");
+    addRuleAccountIds(products, ids);
+    renderRuleGroupAccounts();
+    toast(`已从搜索框加入 ${ids.length} 个账号`);
+  }
+  function addRuleAccountIds(products, ids) {
+    const draft = state.ruleGroupDraft;
+    if (!draft) return;
+    (products || []).forEach(productValue => {
+      (ids || []).forEach(id => draft.selectedAccountKeys.add(`${productValue}:${id}`));
+    });
   }
   function selectedAccountDisplay(productValue, accountId) {
     const account = (state.ruleGroupAccounts[productValue] || []).find(item => accountValue(item) === accountId);
@@ -658,13 +728,17 @@
     const draft = state.ruleGroupDraft;
     if (!root || !draft) return;
     const products = selectedProducts("drawerProducts");
-    const selected = Array.from(draft.selectedAccountKeys).filter(key => products.some(productValue => key.startsWith(`${productValue}:`))).sort();
-    if (hint) hint.textContent = `${selected.length} 个`;
+    const allSelected = Array.from(draft.selectedAccountKeys).filter(key => products.some(productValue => key.startsWith(`${productValue}:`))).sort();
+    const selected = allSelected.filter(key => {
+      const [productValue, accountId] = key.split(":", 2);
+      return accountMatchesSearch(productValue, accountId, selectedAccountDisplay(productValue, accountId));
+    });
+    if (hint) hint.textContent = searchAccountQuery() ? `${selected.length}/${allSelected.length} 个` : `${allSelected.length} 个`;
     root.innerHTML = selected.length ? selected.map(key => {
       const [productValue, accountId] = key.split(":", 2);
       const display = selectedAccountDisplay(productValue, accountId);
       return `<div class="selected-account-item"><div><strong>${escapeHtml(productValue)}</strong><span>${escapeHtml(display.title)}</span><small>${escapeHtml(display.meta)}</small></div><button class="btn" data-remove-account-key="${escapeHtml(key)}" type="button">移除</button></div>`;
-    }).join("") : `<div class="empty compact-empty">暂无已选账号，可从下方列表勾选或手动粘贴 account_id。</div>`;
+    }).join("") : (allSelected.length ? `<div class="empty compact-empty">已选账号中无匹配。可以清空搜索，或点“加入搜索账号”把当前输入加入选中产品。</div>` : `<div class="empty compact-empty">暂无已选账号，可从下方列表勾选或手动粘贴 account_id。</div>`);
   }
   function setVisibleRuleAccounts(checked) {
     const draft = state.ruleGroupDraft;
@@ -678,10 +752,13 @@
     updateRuleGroupSummary();
   }
   function buildDrawerRulesFromThresholds() {
-    const conditions = [
-      { field: "account_time_zone", op: "in", value: splitValues($("builderTimezones").value) },
-      { field: "country", op: "in", value: splitValues($("builderCountries").value) },
-    ];
+    const conditions = [];
+    const timezones = splitValues($("builderTimezones").value);
+    const languages = splitValues($("builderLanguages").value);
+    const countries = splitValues($("builderCountries").value);
+    if (timezones.length) conditions.push({ field: "account_time_zone", op: "in", value: timezones });
+    if (languages.length) conditions.push({ field: "language", op: "not_in", value: languages });
+    if (countries.length) conditions.push({ field: "country", op: "in", value: countries });
     const addNumber = (id, field, op) => {
       if ($(id).value !== "") conditions.push({ field, op, value: Number($(id).value) });
     };
@@ -691,7 +768,7 @@
     addNumber("builderRoasMax", "roas_pct", "lte");
     addNumber("builderPurchaseMax", "purchase", "lte");
     addNumber("builderCpaMin", "purchase_cpa", "gte");
-    return [{ name: $("builderRuleName").value.trim() || "+8跨区国家组关停", action: $("builderAction").value || "pause", enabled: true, window: { type: $("drawerWindowType").value || "since_start" }, conditions }];
+    return [{ name: $("builderRuleName").value.trim() || "+8非亚洲语种10点关停", action: $("builderAction").value || "pause", enabled: true, window: { type: $("drawerWindowType").value || "since_start" }, conditions }];
   }
   function readRuleGroupDraftFromDrawer() {
     const draft = state.ruleGroupDraft;
