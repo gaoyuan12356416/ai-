@@ -2,7 +2,7 @@
   const PAGE = document.body.dataset.page || "overview";
   const TITLES = {
     overview: ["AI自动规则调控", "查看调控中心状态、风险提示和常用入口。", "adControl"],
-    rules: ["规则集", "创建和维护可复用的调控规则集，不绑定账户。", "adControlRules"],
+    rules: ["规则组管理", "用规则组统一管理产品、账号、规则阈值、绑定策略和执行入口。", "adControlRules"],
     pools: ["账户池", "按产品创建账户池，后续在绑定关系中复用。", "adControlPools"],
     bindings: ["绑定关系", "配置产品、账户池和规则集的绑定，并控制启停。", "adControlBindings"],
     run: ["运行控制台", "选择绑定关系后执行 live preview、dry-run、确认关闭和急停。", "adControlRun"],
@@ -21,9 +21,27 @@
     ] },
   ];
   const COUNTRY_GROUP_STORAGE_KEY = "adControlCountryGroups";
+  const ALLOWED_PRODUCTS = ["dramawave", "hotdrama", "freereels"];
+  const PRODUCT_LABELS = {
+    dramawave: "dramawave",
+    hotdrama: "hotdrama",
+    freereels: "freereels",
+  };
   const defaultCountryGroups = ["WW-4", "WW-0", "JUWW"];
   const defaultTimezones = ["8", "+8", "UTC+8"];
-  const state = { auth: null, products: [], accounts: [], pools: [], ruleSets: [], bindings: [], preview: null, bulkAccounts: {} };
+  const state = {
+    auth: null,
+    products: [],
+    accounts: [],
+    pools: [],
+    ruleSets: [],
+    bindings: [],
+    preview: null,
+    bulkAccounts: {},
+    ruleGroupAccounts: {},
+    frontendRuleGroups: [],
+    ruleGroupDraft: null,
+  };
   const $ = id => document.getElementById(id);
 
   function escapeHtml(value) {
@@ -49,6 +67,9 @@
   }
   function product() {
     return ($("productSelect") || {}).value || "";
+  }
+  function productOptions() {
+    return ALLOWED_PRODUCTS.map(value => ({ product: value, label: PRODUCT_LABELS[value] || value }));
   }
   function selectedAccounts() {
     return Array.from(document.querySelectorAll("#accountList input[type=checkbox]:checked")).map(item => item.value);
@@ -126,6 +147,92 @@
     if (Array.isArray(strategy.country_groups) && strategy.country_groups.length) parts.push(`国家组 ${strategy.country_groups.join(",")}`);
     return parts.join(" / ") || "--";
   }
+  function safeIdPart(value) {
+    return String(value || "").trim().replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "item";
+  }
+  function newFrontendRuleGroupId() {
+    return `frg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+  function bindingId(item) {
+    return (item && (item.binding_id || item.group_id)) || "";
+  }
+  function productBadgeList(products) {
+    const values = Array.from(new Set((products || []).filter(Boolean)));
+    return values.length ? values.map(value => `<span class="badge">${escapeHtml(PRODUCT_LABELS[value] || value)}</span>`).join("") : `<span class="hint">未设置</span>`;
+  }
+  function bindingFrontendGroupId(binding) {
+    const strategy = (binding && binding.strategy) || {};
+    return strategy.frontend_rule_group_id || bindingId(binding);
+  }
+  function bindingFrontendGroupName(binding) {
+    const strategy = (binding && binding.strategy) || {};
+    return strategy.frontend_rule_group_name || binding.name || bindingId(binding);
+  }
+  function aggregateRuleGroups(bindings) {
+    const map = new Map();
+    (bindings || []).forEach(binding => {
+      const id = bindingFrontendGroupId(binding);
+      const strategy = binding.strategy || {};
+      if (!map.has(id)) {
+        map.set(id, {
+          id,
+          name: bindingFrontendGroupName(binding),
+          description: strategy.description || "",
+          products: [],
+          bindings: [],
+          country_groups: Array.isArray(strategy.country_groups) ? strategy.country_groups : [],
+          close_time: strategy.close_time || "",
+          execute_timezone: strategy.execute_timezone || "",
+          block_same_day_reopen: !!strategy.block_same_day_reopen,
+          allow_next_day_reopen: !!strategy.allow_next_day_reopen,
+          enabled: false,
+          emergency_stopped: false,
+          rule_count: 0,
+          account_count: 0,
+          updated_at: binding.updated_at || "",
+        });
+      }
+      const group = map.get(id);
+      group.bindings.push(binding);
+      if (binding.product && !group.products.includes(binding.product)) group.products.push(binding.product);
+      (strategy.selected_products || []).forEach(value => {
+        if (ALLOWED_PRODUCTS.includes(value) && !group.products.includes(value)) group.products.push(value);
+      });
+      if (!group.description && strategy.description) group.description = strategy.description;
+      if (!group.close_time && strategy.close_time) group.close_time = strategy.close_time;
+      if (!group.execute_timezone && strategy.execute_timezone) group.execute_timezone = strategy.execute_timezone;
+      group.block_same_day_reopen = group.block_same_day_reopen || !!strategy.block_same_day_reopen;
+      group.allow_next_day_reopen = group.allow_next_day_reopen || !!strategy.allow_next_day_reopen;
+      group.enabled = group.enabled || !!binding.enabled;
+      group.emergency_stopped = group.emergency_stopped || !!binding.emergency_stopped;
+      group.rule_count += Array.isArray(binding.rules) ? binding.rules.length : 0;
+      group.account_count += Number(strategy.account_count || (Array.isArray(strategy.selected_account_ids) ? strategy.selected_account_ids.length : 0) || (Array.isArray(binding.account_ids) ? binding.account_ids.length : 0) || 0);
+      if (binding.updated_at && (!group.updated_at || binding.updated_at > group.updated_at)) group.updated_at = binding.updated_at;
+      if ((!group.country_groups || !group.country_groups.length) && Array.isArray(strategy.country_groups)) group.country_groups = strategy.country_groups;
+    });
+    return Array.from(map.values()).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  }
+  function defaultCrossRegionRules() {
+    return [{
+      name: "+8跨区国家组关停",
+      action: "pause",
+      enabled: true,
+      window: { type: "since_start" },
+      conditions: [
+        { field: "account_time_zone", op: "in", value: defaultTimezones.slice() },
+        { field: "country", op: "in", value: countryGroups() },
+      ],
+    }];
+  }
+  function ruleGroupBindingId(frontendId, productValue) {
+    return `${safeIdPart(frontendId)}_${safeIdPart(productValue)}_binding`;
+  }
+  function ruleGroupRuleSetId(frontendId, productValue) {
+    return `${safeIdPart(frontendId)}_${safeIdPart(productValue)}_rules`;
+  }
+  function ruleGroupAccountGroupId(frontendId, productValue) {
+    return `${safeIdPart(frontendId)}_${safeIdPart(productValue)}_accounts`;
+  }
   function requireSharedUi() {
     if (!window.UiTopbar) throw new Error("公共顶吸脚本 /ui-topbar.js 未加载");
     if (!window.QuickNav) throw new Error("公共快速导航脚本 /quick-nav.js 未加载");
@@ -162,13 +269,12 @@
     return state.auth.authenticated && hasPermission(state.auth);
   }
   async function loadProducts() {
-    const data = await api("/api/ad-control/products");
-    state.products = data.items || [];
+    state.products = productOptions();
     const select = $("productSelect");
     if (select) {
       const previous = select.value;
       select.innerHTML = state.products.map(item => `<option value="${escapeHtml(item.product)}">${escapeHtml(productLabel(item))}</option>`).join("");
-      if (previous) select.value = previous;
+      if (previous && ALLOWED_PRODUCTS.includes(previous)) select.value = previous;
     }
   }
   async function loadAccounts() {
@@ -243,80 +349,449 @@
   }
 
   async function renderRules() {
-    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>+8跨区关停模板</h2><div class="row"><button class="btn" id="buildCrossRuleBtn">生成规则JSON</button><button class="btn primary" id="saveCrossRuleBatchBtn">按选中产品保存</button></div></div><div class="panel-body">
-      <div class="field"><label>投放产品（多选）</label><div class="check-list compact" id="ruleProductMulti"></div></div>
-      <div class="grid"><div class="field"><label>规则集名前缀</label><input id="crossRuleName" value="+8 跨区国家组关停" /></div><div class="field"><label>账户时区</label><input id="crossRuleTimezones" value="${escapeHtml(defaultTimezones.join(","))}" /></div><div class="field"><label>国家组 country</label><input id="crossRuleCountries" value="${escapeHtml(countryGroups().join(","))}" /></div><div class="field"><label>已运行小时 >=</label><input id="crossRuleAgeHours" type="number" min="0" value="0" /></div></div>
-      <div class="grid"><div class="field"><label>消耗 >=</label><input id="crossRuleSpendMin" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>安装 <=</label><input id="crossRuleInstallMax" type="number" min="0" placeholder="可选" /></div><div class="field"><label>ROAS% <=</label><input id="crossRuleRoasMax" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>购物 <=</label><input id="crossRulePurchaseMax" type="number" min="0" placeholder="可选" /></div></div>
-      <div class="row"><button class="btn" id="saveCountryGroupsBtn">保存常用国家组</button><span class="hint">命中只看 created_data.country 和账户 time_zone，不看 campaign 命名。</span></div>
-      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>编辑规则集</h2><div class="row"><button class="btn" id="newBtn">新建</button><button class="btn primary" id="saveBtn">保存规则集</button></div></div><div class="panel-body">
-      <div class="grid"><div class="field"><label>规则集名称</label><input id="nameInput" placeholder="7-8 小时低效关停" /></div><div class="field"><label>规则集 ID</label><input id="idInput" readonly /></div><div class="field"><label>默认指标窗口</label><select id="windowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div><div class="field"><label>N 小时</label><input id="windowHours" type="number" min="1" max="720" value="24" /></div></div>
-      <div class="field"><label>规则 JSON</label><textarea id="rulesInput"></textarea><span class="hint">字段支持 age_hours、account_time_zone、country、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status；操作符支持 gt/gte/lt/lte/eq/between/in。</span></div>
-      </div></section><section class="panel"><div class="panel-head"><h2>规则集列表</h2></div><div class="panel-body"><div class="list" id="ruleSetList"></div></div></section>`;
-    await loadProducts(); renderProductChecks("ruleProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await loadRuleSets(); fillRuleSet(state.ruleSets[0] || null); renderRuleSetList();
-    $("productSelect").onchange = async () => { await loadRuleSets(); fillRuleSet(null); renderRuleSetList(); };
-    $("newBtn").onclick = () => fillRuleSet(null);
-    $("saveBtn").onclick = saveRuleSet;
-    $("buildCrossRuleBtn").onclick = () => { fillCrossRuleJson(); toast("已生成规则 JSON"); };
-    $("saveCrossRuleBatchBtn").onclick = saveCrossRuleBatch;
-    $("saveCountryGroupsBtn").onclick = () => { saveCountryGroups(splitValues($("crossRuleCountries").value)); toast("常用国家组已保存到当前浏览器"); };
+    $("pageRoot").innerHTML = `
+      <section class="panel">
+        <div class="panel-head">
+          <div><h2>规则组管理</h2><span class="hint">一个前端规则组会按产品拆成底层规则集、账户池和绑定关系，新建后默认 disabled。</span></div>
+          <div class="row"><button class="btn" id="reloadRuleGroupsBtn" type="button">刷新</button><button class="btn primary" id="newRuleGroupBtn" type="button">新建规则组</button></div>
+        </div>
+        <div class="panel-body">
+          <div class="rule-toolbar">
+            <div class="field"><label>搜索</label><input id="ruleGroupSearch" placeholder="规则组名称 / ID / 国家组" /></div>
+            <div class="field"><label>产品筛选</label><select id="ruleGroupProductFilter"><option value="">全部三个产品</option>${ALLOWED_PRODUCTS.map(value => `<option value="${value}">${PRODUCT_LABELS[value]}</option>`).join("")}</select></div>
+            <div class="field"><label>状态筛选</label><select id="ruleGroupStatusFilter"><option value="">全部</option><option value="enabled">已启用</option><option value="disabled">已禁用</option><option value="stopped">已急停</option></select></div>
+            <div class="field"><label>&nbsp;</label><button class="btn" id="clearRuleGroupFilterBtn" type="button">清空筛选</button></div>
+          </div>
+          <div class="risk">本页不调用 Meta 写接口。保存规则组只写本后台配置；Preview 入口会跳到运行控制台，真实关闭仍需要二次确认。</div>
+          <div class="table-wrap compact-table"><table><thead><tr><th>规则组</th><th>产品范围</th><th>账号范围</th><th>规则</th><th>策略</th><th>状态</th><th>操作</th></tr></thead><tbody id="ruleGroupRows"></tbody></table></div>
+        </div>
+      </section>
+      <div class="drawer-overlay hidden" id="ruleGroupDrawer">
+        <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+          <div class="drawer-head"><div><h2 id="drawerTitle">新建规则组</h2><span class="hint" id="drawerSubTitle"></span></div><button class="btn" id="closeRuleGroupDrawerBtn" type="button">关闭</button></div>
+          <div class="drawer-body" id="ruleGroupDrawerBody"></div>
+          <div class="drawer-foot">
+            <span class="hint" id="drawerSaveHint">保存后底层按产品拆分，且默认 disabled。</span>
+            <div class="row"><button class="btn" id="drawerPreviewBtn" type="button">保存后去 Preview</button><button class="btn primary" id="saveRuleGroupBtn" type="button">保存规则组</button></div>
+          </div>
+        </div>
+      </div>`;
+    $("newRuleGroupBtn").onclick = () => openRuleGroupDrawer(null, false);
+    $("reloadRuleGroupsBtn").onclick = refreshRuleGroups;
+    $("ruleGroupSearch").oninput = renderRuleGroupList;
+    $("ruleGroupProductFilter").onchange = renderRuleGroupList;
+    $("ruleGroupStatusFilter").onchange = renderRuleGroupList;
+    $("clearRuleGroupFilterBtn").onclick = () => {
+      $("ruleGroupSearch").value = "";
+      $("ruleGroupProductFilter").value = "";
+      $("ruleGroupStatusFilter").value = "";
+      renderRuleGroupList();
+    };
+    $("closeRuleGroupDrawerBtn").onclick = closeRuleGroupDrawer;
+    $("saveRuleGroupBtn").onclick = () => saveFrontendRuleGroup(false);
+    $("drawerPreviewBtn").onclick = () => saveFrontendRuleGroup(true);
+    await refreshRuleGroups();
   }
-  function buildCrossRule() {
-    const name = ($("crossRuleName").value || "+8 跨区国家组关停").trim();
-    const conditions = [
-      { field: "account_time_zone", op: "in", value: splitValues($("crossRuleTimezones").value) },
-      { field: "country", op: "in", value: splitValues($("crossRuleCountries").value) },
-    ];
-    const ageHours = Number($("crossRuleAgeHours").value || 0);
-    if (ageHours > 0) conditions.push({ field: "age_hours", op: "gte", value: ageHours });
-    if ($("crossRuleSpendMin").value !== "") conditions.push({ field: "spend", op: "gte", value: Number($("crossRuleSpendMin").value) });
-    if ($("crossRuleInstallMax").value !== "") conditions.push({ field: "install", op: "lte", value: Number($("crossRuleInstallMax").value) });
-    if ($("crossRuleRoasMax").value !== "") conditions.push({ field: "roas_pct", op: "lte", value: Number($("crossRuleRoasMax").value) });
-    if ($("crossRulePurchaseMax").value !== "") conditions.push({ field: "purchase", op: "lte", value: Number($("crossRulePurchaseMax").value) });
-    return [{ name, action: "pause", enabled: true, window: { type: "since_start" }, conditions }];
+  async function refreshRuleGroups() {
+    const results = await Promise.all(ALLOWED_PRODUCTS.map(value => api(`/api/ad-control/bindings?product=${encodeURIComponent(value)}`).catch(() => ({ items: [] }))));
+    state.bindings = results.flatMap(result => result.items || []);
+    state.frontendRuleGroups = aggregateRuleGroups(state.bindings);
+    renderRuleGroupList();
   }
-  function fillCrossRuleJson() {
-    const rules = buildCrossRule();
-    $("nameInput").value = $("crossRuleName").value.trim();
-    $("windowType").value = "since_start";
-    $("rulesInput").value = JSON.stringify(rules, null, 2);
+  function filteredRuleGroups() {
+    const query = ($("ruleGroupSearch")?.value || "").trim().toLowerCase();
+    const productFilterValue = $("ruleGroupProductFilter")?.value || "";
+    const status = $("ruleGroupStatusFilter")?.value || "";
+    return state.frontendRuleGroups.filter(group => {
+      const haystack = `${group.id} ${group.name} ${(group.country_groups || []).join(" ")} ${(group.products || []).join(" ")}`.toLowerCase();
+      if (query && !haystack.includes(query)) return false;
+      if (productFilterValue && !(group.products || []).includes(productFilterValue)) return false;
+      if (status === "enabled" && !group.enabled) return false;
+      if (status === "disabled" && (group.enabled || group.emergency_stopped)) return false;
+      if (status === "stopped" && !group.emergency_stopped) return false;
+      return true;
+    });
   }
-  async function saveCrossRuleBatch() {
-    const products = selectedProducts("ruleProductMulti");
-    if (!products.length) return toast("请选择投放产品", "error");
-    const rules = buildCrossRule();
-    const baseName = ($("crossRuleName").value || "+8 跨区国家组关停").trim();
-    for (const productValue of products) {
-      await api("/api/ad-control/rule-sets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product: productValue, name: `${baseName} / ${productValue}`, rules, default_window: { type: "since_start" } }),
+  function renderRuleGroupList() {
+    const rows = $("ruleGroupRows");
+    if (!rows) return;
+    const groups = filteredRuleGroups();
+    rows.innerHTML = groups.length ? groups.map(group => {
+      const stateLabel = group.emergency_stopped ? `<span class="badge danger">已急停</span>` : (group.enabled ? `<span class="badge ok">已启用</span>` : `<span class="badge warn">已禁用</span>`);
+      return `<tr>
+        <td><strong>${escapeHtml(group.name)}</strong><div class="mono">${escapeHtml(group.id)}</div><div class="hint">${escapeHtml(group.description || "无说明")}</div></td>
+        <td><div class="chip-row">${productBadgeList(group.products)}</div></td>
+        <td><strong>${group.account_count || "--"}</strong><div class="hint">${group.bindings.length} 个底层绑定</div></td>
+        <td>${group.rule_count || "--"} 条<div class="hint">${escapeHtml((group.country_groups || []).join(", ") || "未配置国家组")}</div></td>
+        <td>${escapeHtml(strategySummary(group))}</td>
+        <td>${stateLabel}</td>
+        <td><div class="row action-row">
+          <button class="btn" data-rule-action="edit" data-group="${escapeHtml(group.id)}" type="button">编辑</button>
+          <button class="btn" data-rule-action="copy" data-group="${escapeHtml(group.id)}" type="button">复制</button>
+          <button class="btn" data-rule-action="preview" data-group="${escapeHtml(group.id)}" type="button">Preview</button>
+          <button class="btn" data-rule-action="logs" data-group="${escapeHtml(group.id)}" type="button">日志</button>
+          <button class="btn" data-rule-action="toggle" data-enabled="${group.enabled ? "0" : "1"}" data-group="${escapeHtml(group.id)}" type="button">${group.enabled ? "禁用" : "启用"}</button>
+          <button class="btn danger" data-rule-action="stop" data-group="${escapeHtml(group.id)}" type="button">急停</button>
+          <button class="btn danger" data-rule-action="delete" data-group="${escapeHtml(group.id)}" type="button">删除</button>
+        </div></td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="7"><div class="empty">暂无规则组。点击“新建规则组”开始配置。</div></td></tr>`;
+    rows.onclick = handleRuleGroupAction;
+  }
+  function findFrontendRuleGroup(id) {
+    return state.frontendRuleGroups.find(group => group.id === id);
+  }
+  async function handleRuleGroupAction(event) {
+    const button = event.target.closest("[data-rule-action]");
+    if (!button) return;
+    const group = findFrontendRuleGroup(button.dataset.group);
+    if (!group) return toast("规则组不存在，请刷新", "error");
+    const action = button.dataset.ruleAction;
+    try {
+      if (action === "edit") return await openRuleGroupDrawer(group, false);
+      if (action === "copy") return await openRuleGroupDrawer(group, true);
+      if (action === "preview") return openRuleGroupPreview(group);
+      if (action === "logs") return openRuleGroupLogs(group);
+      if (action === "toggle") return await setFrontendRuleGroupEnabled(group, button.dataset.enabled === "1");
+      if (action === "stop") return await emergencyStopFrontendRuleGroup(group);
+      if (action === "delete") return await deleteFrontendRuleGroup(group);
+    } catch (error) {
+      toast(error.message || String(error), "error");
+    }
+  }
+  function firstRuleBinding(group) {
+    return (group.bindings || []).find(item => Array.isArray(item.rules) && item.rules.length) || (group.bindings || [])[0] || null;
+  }
+  function buildRuleGroupDraft(group, copy) {
+    const first = group ? firstRuleBinding(group) : null;
+    const strategy = (first && first.strategy) || {};
+    const id = group && !copy ? group.id : newFrontendRuleGroupId();
+    const products = group ? (group.products || []).filter(value => ALLOWED_PRODUCTS.includes(value)) : ["dramawave"];
+    const rules = first && Array.isArray(first.rules) && first.rules.length ? first.rules : defaultCrossRegionRules();
+    const defaultWindow = (first && first.rule_set_default_window) || { type: "since_start", hours: 24 };
+    const selectedAccountKeys = new Set();
+    if (group && !copy) {
+      group.bindings.forEach(binding => {
+        const ids = Array.isArray((binding.strategy || {}).selected_account_ids) ? binding.strategy.selected_account_ids : (binding.account_ids || []);
+        ids.forEach(accountId => selectedAccountKeys.add(`${binding.product}:${String(accountId || "").replace(/^act_/, "")}`));
+      });
+    } else if (group && copy) {
+      group.bindings.forEach(binding => {
+        const ids = Array.isArray((binding.strategy || {}).selected_account_ids) ? binding.strategy.selected_account_ids : (binding.account_ids || []);
+        ids.forEach(accountId => selectedAccountKeys.add(`${binding.product}:${String(accountId || "").replace(/^act_/, "")}`));
       });
     }
-    toast(`已保存 ${products.length} 个规则集`);
-    await loadRuleSets(); renderRuleSetList();
-  }
-  function fillRuleSet(item) {
-    $("idInput").value = item ? item.rule_set_id : "";
-    $("nameInput").value = item ? item.name : "";
-    const win = (item && item.default_window) || { type: "since_start", hours: 24 };
-    $("windowType").value = win.type || "since_start";
-    $("windowHours").value = win.hours || 24;
-    $("rulesInput").value = JSON.stringify(item ? (item.rules || []) : defaultRules, null, 2);
-  }
-  async function saveRuleSet() {
-    let rules;
-    try { rules = JSON.parse($("rulesInput").value || "[]"); } catch (error) { toast("规则 JSON 格式错误", "error"); return; }
-    await api("/api/ad-control/rule-sets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rule_set_id: $("idInput").value, product: product(), name: $("nameInput").value.trim(), rules, default_window: { type: $("windowType").value, hours: Number($("windowHours").value || 24) } }) });
-    toast("规则集已保存"); await loadRuleSets(); renderRuleSetList();
-  }
-  function renderRuleSetList() {
-    $("ruleSetList").innerHTML = state.ruleSets.length ? state.ruleSets.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.rule_set_id)} / ${escapeHtml((item.default_window || {}).type || "since_start")} / ${item.rules.length} 条规则</span></div><div class="row"><button class="btn" data-edit-rule-set="${escapeHtml(item.rule_set_id)}">编辑</button><button class="btn danger" data-delete-rule-set="${escapeHtml(item.rule_set_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无规则集</div>`;
-    $("ruleSetList").onclick = async event => {
-      const edit = event.target.closest("[data-edit-rule-set]");
-      const del = event.target.closest("[data-delete-rule-set]");
-      if (edit) fillRuleSet(state.ruleSets.find(item => item.rule_set_id === edit.dataset.editRuleSet));
-      if (del && confirm("确认删除规则集？已被绑定使用的规则集不能删除。")) { await api(`/api/ad-control/rule-sets/${encodeURIComponent(del.dataset.deleteRuleSet)}`, { method: "DELETE" }); await loadRuleSets(); renderRuleSetList(); }
+    return {
+      mode: group && !copy ? "edit" : "create",
+      id,
+      originalId: group ? group.id : "",
+      existingBindings: group && !copy ? group.bindings.slice() : [],
+      name: group ? `${group.name}${copy ? " 副本" : ""}` : "+8跨区国家组关停",
+      description: group ? (group.description || strategy.description || "") : "账户时区为 +8，投放国家组命中后自动控停；当天禁止重启，隔天允许按规则重启。",
+      products: products.length ? products : ["dramawave"],
+      country_groups: group && group.country_groups && group.country_groups.length ? group.country_groups : countryGroups(),
+      close_time: group ? (group.close_time || strategy.close_time || "16:00") : "16:00",
+      execute_timezone: group ? (group.execute_timezone || strategy.execute_timezone || "account") : "account",
+      block_same_day_reopen: group ? group.block_same_day_reopen : true,
+      allow_next_day_reopen: group ? group.allow_next_day_reopen : true,
+      default_window: defaultWindow,
+      rules,
+      selectedAccountKeys,
     };
+  }
+  async function openRuleGroupDrawer(group, copy) {
+    state.ruleGroupDraft = buildRuleGroupDraft(group, copy);
+    $("ruleGroupDrawer").classList.remove("hidden");
+    renderRuleGroupDrawer();
+    await ensureRuleGroupAccountsForProducts(state.ruleGroupDraft.products);
+    renderRuleGroupAccounts();
+    updateRuleGroupSummary();
+  }
+  function closeRuleGroupDrawer() {
+    state.ruleGroupDraft = null;
+    $("ruleGroupDrawer").classList.add("hidden");
+  }
+  function renderRuleGroupDrawer() {
+    const draft = state.ruleGroupDraft;
+    $("drawerTitle").textContent = draft.mode === "edit" ? "编辑规则组" : "新建规则组";
+    $("drawerSubTitle").textContent = draft.mode === "edit" ? `正在编辑 ${draft.id}` : "保存后会生成一个前端规则组，并按产品拆成底层配置";
+    $("ruleGroupDrawerBody").innerHTML = `
+      <section class="drawer-section">
+        <div class="section-title"><span>1</span><h3>基础信息</h3></div>
+        <div class="grid two"><div class="field"><label>规则组名称</label><input id="drawerGroupName" value="${escapeHtml(draft.name)}" /></div><div class="field"><label>规则组 ID</label><input id="drawerGroupId" value="${escapeHtml(draft.id)}" readonly /></div></div>
+        <div class="field"><label>规则组说明</label><textarea id="drawerGroupDescription" class="short-textarea">${escapeHtml(draft.description)}</textarea></div>
+      </section>
+      <section class="drawer-section">
+        <div class="section-title"><span>2</span><h3>产品与账号</h3></div>
+        <div class="field"><label>产品（固定枚举，多选）</label><div class="check-list compact fixed-products" id="drawerProducts">${ALLOWED_PRODUCTS.map(value => `<label class="check-option"><input type="checkbox" value="${value}" ${draft.products.includes(value) ? "checked" : ""} /><span>${PRODUCT_LABELS[value]}</span></label>`).join("")}</div></div>
+        <div class="grid"><div class="field"><label>账号搜索</label><input id="drawerAccountSearch" placeholder="账户名 / account_id" /></div><div class="field"><label>时区筛选</label><input id="drawerTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerPlus8Only" type="checkbox" checked /> 只看 +8</label></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="drawerSelectVisibleAccounts" type="button">全选可见</button><button class="btn" id="drawerClearVisibleAccounts" type="button">清空可见</button></div></div></div>
+        <div class="account-product-list" id="drawerAccounts"></div>
+      </section>
+      <section class="drawer-section">
+        <div class="section-title"><span>3</span><h3>规则阈值</h3></div>
+        <div class="grid"><div class="field"><label>规则名称</label><input id="builderRuleName" value="+8跨区国家组关停" /></div><div class="field"><label>动作</label><select id="builderAction"><option value="pause">pause 关闭</option><option value="observe">observe 观望</option></select></div><div class="field"><label>账户时区 in</label><input id="builderTimezones" value="${escapeHtml(defaultTimezones.join(","))}" /></div><div class="field"><label>国家组 in</label><input id="builderCountries" value="${escapeHtml(draft.country_groups.join(","))}" /></div></div>
+        <div class="grid"><div class="field"><label>已运行小时 >=</label><input id="builderAgeHours" type="number" min="0" placeholder="可选" /></div><div class="field"><label>消耗 >=</label><input id="builderSpendMin" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>安装 <=</label><input id="builderInstallMax" type="number" min="0" placeholder="可选" /></div><div class="field"><label>ROAS% <=</label><input id="builderRoasMax" type="number" min="0" step="0.01" placeholder="可选" /></div></div>
+        <div class="grid"><div class="field"><label>购物 <=</label><input id="builderPurchaseMax" type="number" min="0" placeholder="可选" /></div><div class="field"><label>Purchase CPA >=</label><input id="builderCpaMin" type="number" min="0" step="0.01" placeholder="可选" /></div><div class="field"><label>默认指标窗口</label><select id="drawerWindowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div><div class="field"><label>N 小时</label><input id="drawerWindowHours" type="number" min="1" max="720" value="${escapeHtml(draft.default_window.hours || 24)}" /></div></div>
+        <div class="row"><button class="btn" id="buildDrawerRuleBtn" type="button">按上方阈值生成规则 JSON</button><span class="hint">可视化阈值会覆盖下面 JSON；需要多条规则时可直接编辑 JSON。</span></div>
+        <div class="field"><label>规则 JSON</label><textarea id="drawerRulesJson">${escapeHtml(JSON.stringify(draft.rules, null, 2))}</textarea><span class="hint">字段支持 age_hours、account_time_zone、country、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status。</span></div>
+      </section>
+      <section class="drawer-section">
+        <div class="section-title"><span>4</span><h3>绑定策略</h3></div>
+        <div class="grid"><div class="field"><label>关闭时间</label><input id="drawerCloseTime" type="time" value="${escapeHtml(draft.close_time)}" /></div><div class="field"><label>执行时区</label><input id="drawerExecuteTimezone" value="${escapeHtml(draft.execute_timezone)}" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerBlockSameDay" type="checkbox" ${draft.block_same_day_reopen ? "checked" : ""} /> 当天禁止重启</label></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerAllowNextDay" type="checkbox" ${draft.allow_next_day_reopen ? "checked" : ""} /> 隔天允许程序重启</label></div></div>
+      </section>
+      <section class="drawer-section">
+        <div class="section-title"><span>5</span><h3>保存与 Preview</h3></div>
+        <div class="summary-box" id="drawerSummary"></div>
+      </section>`;
+    $("drawerWindowType").value = draft.default_window.type || "since_start";
+    $("drawerProducts").onchange = async () => {
+      captureDraftSelectedAccounts();
+      const products = selectedProducts("drawerProducts");
+      await ensureRuleGroupAccountsForProducts(products);
+      renderRuleGroupAccounts();
+      updateRuleGroupSummary();
+    };
+    $("drawerAccountSearch").oninput = renderRuleGroupAccounts;
+    $("drawerTimezoneFilter").oninput = renderRuleGroupAccounts;
+    $("drawerPlus8Only").onchange = renderRuleGroupAccounts;
+    $("drawerSelectVisibleAccounts").onclick = () => setVisibleRuleAccounts(true);
+    $("drawerClearVisibleAccounts").onclick = () => setVisibleRuleAccounts(false);
+    $("drawerAccounts").onchange = event => {
+      const input = event.target.closest("[data-rule-account]");
+      if (!input) return;
+      if (input.checked) state.ruleGroupDraft.selectedAccountKeys.add(input.dataset.accountKey);
+      else state.ruleGroupDraft.selectedAccountKeys.delete(input.dataset.accountKey);
+      updateRuleGroupSummary();
+    };
+    $("buildDrawerRuleBtn").onclick = () => {
+      $("drawerRulesJson").value = JSON.stringify(buildDrawerRulesFromThresholds(), null, 2);
+      $("builderCountries").value = splitValues($("builderCountries").value).join(",");
+      updateRuleGroupSummary();
+      toast("已生成规则 JSON");
+    };
+  }
+  function accountValue(item) {
+    return String((item && (item.account_id || item.ad_account_id)) || "").replace(/^act_/, "");
+  }
+  async function ensureRuleGroupAccountsForProducts(products) {
+    await Promise.all((products || []).filter(value => ALLOWED_PRODUCTS.includes(value)).map(async value => {
+      if (state.ruleGroupAccounts[value]) return;
+      const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`);
+      state.ruleGroupAccounts[value] = data.items || [];
+    }));
+  }
+  function captureDraftSelectedAccounts() {
+    const draft = state.ruleGroupDraft;
+    if (!draft) return;
+    document.querySelectorAll("[data-rule-account]").forEach(input => {
+      if (input.checked) draft.selectedAccountKeys.add(input.dataset.accountKey);
+      else draft.selectedAccountKeys.delete(input.dataset.accountKey);
+    });
+  }
+  function ruleAccountVisible(account) {
+    const query = ($("drawerAccountSearch")?.value || "").trim().toLowerCase();
+    const tzFilter = ($("drawerTimezoneFilter")?.value || "").trim();
+    const plus8Only = $("drawerPlus8Only")?.checked;
+    const haystack = `${accountValue(account)} ${account.account_name || account.name || ""}`.toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (plus8Only && !isPlus8Timezone(account.time_zone)) return false;
+    if (tzFilter && !Array.from(timezoneValues(account.time_zone)).some(item => timezoneValues(tzFilter).has(item))) return false;
+    return true;
+  }
+  function renderRuleGroupAccounts() {
+    const root = $("drawerAccounts");
+    const draft = state.ruleGroupDraft;
+    if (!root || !draft) return;
+    captureDraftSelectedAccounts();
+    const products = selectedProducts("drawerProducts");
+    root.innerHTML = products.length ? products.map(productValue => {
+      const accounts = state.ruleGroupAccounts[productValue] || [];
+      const visible = accounts.filter(ruleAccountVisible);
+      return `<div class="account-product-block"><div class="bulk-head"><strong>${escapeHtml(productValue)}</strong><span class="hint">${visible.length}/${accounts.length} 个账号</span></div><div class="account-list">${visible.length ? visible.map(account => {
+        const id = accountValue(account);
+        const key = `${productValue}:${id}`;
+        const checked = draft.selectedAccountKeys.has(key) ? "checked" : "";
+        return `<label class="account-option"><input type="checkbox" data-rule-account="1" data-account-key="${escapeHtml(key)}" value="${escapeHtml(id)}" ${checked} /><div class="account-title">${escapeHtml(account.account_name || account.name || id)}</div><div class="account-meta">${escapeHtml(id)} / ${escapeHtml(account.time_zone || "--")}</div></label>`;
+      }).join("") : `<div class="empty">无匹配账号</div>`}</div></div>`;
+    }).join("") : `<div class="empty">请先选择产品</div>`;
+    updateRuleGroupSummary();
+  }
+  function setVisibleRuleAccounts(checked) {
+    const draft = state.ruleGroupDraft;
+    if (!draft) return;
+    document.querySelectorAll("[data-rule-account]").forEach(input => {
+      input.checked = checked;
+      if (checked) draft.selectedAccountKeys.add(input.dataset.accountKey);
+      else draft.selectedAccountKeys.delete(input.dataset.accountKey);
+    });
+    updateRuleGroupSummary();
+  }
+  function buildDrawerRulesFromThresholds() {
+    const conditions = [
+      { field: "account_time_zone", op: "in", value: splitValues($("builderTimezones").value) },
+      { field: "country", op: "in", value: splitValues($("builderCountries").value) },
+    ];
+    const addNumber = (id, field, op) => {
+      if ($(id).value !== "") conditions.push({ field, op, value: Number($(id).value) });
+    };
+    addNumber("builderAgeHours", "age_hours", "gte");
+    addNumber("builderSpendMin", "spend", "gte");
+    addNumber("builderInstallMax", "install", "lte");
+    addNumber("builderRoasMax", "roas_pct", "lte");
+    addNumber("builderPurchaseMax", "purchase", "lte");
+    addNumber("builderCpaMin", "purchase_cpa", "gte");
+    return [{ name: $("builderRuleName").value.trim() || "+8跨区国家组关停", action: $("builderAction").value || "pause", enabled: true, window: { type: $("drawerWindowType").value || "since_start" }, conditions }];
+  }
+  function readRuleGroupDraftFromDrawer() {
+    const draft = state.ruleGroupDraft;
+    captureDraftSelectedAccounts();
+    let rules;
+    try { rules = JSON.parse($("drawerRulesJson").value || "[]"); } catch (error) { throw new Error("规则 JSON 格式错误"); }
+    if (!Array.isArray(rules) || !rules.length) throw new Error("至少需要一条规则");
+    const products = selectedProducts("drawerProducts");
+    if (!products.length) throw new Error("请选择至少一个产品");
+    const accountsByProduct = {};
+    products.forEach(productValue => {
+      accountsByProduct[productValue] = Array.from(draft.selectedAccountKeys)
+        .filter(key => key.startsWith(`${productValue}:`))
+        .map(key => key.slice(productValue.length + 1))
+        .filter(Boolean);
+    });
+    const missingProduct = products.find(productValue => !accountsByProduct[productValue].length);
+    if (missingProduct) throw new Error(`${missingProduct} 还没有选择账号`);
+    return {
+      id: draft.id,
+      name: $("drawerGroupName").value.trim(),
+      description: $("drawerGroupDescription").value.trim(),
+      products,
+      accountsByProduct,
+      country_groups: splitValues($("builderCountries").value),
+      rules,
+      default_window: { type: $("drawerWindowType").value || "since_start", hours: Number($("drawerWindowHours").value || 24) },
+      close_time: $("drawerCloseTime").value || "",
+      execute_timezone: $("drawerExecuteTimezone").value || "account",
+      block_same_day_reopen: $("drawerBlockSameDay").checked,
+      allow_next_day_reopen: $("drawerAllowNextDay").checked,
+    };
+  }
+  function updateRuleGroupSummary() {
+    const box = $("drawerSummary");
+    if (!box || !state.ruleGroupDraft) return;
+    let summary;
+    try {
+      summary = readRuleGroupDraftFromDrawer();
+    } catch (error) {
+      box.innerHTML = `<div class="hint">${escapeHtml(error.message)}</div>`;
+      return;
+    }
+    const accountTotal = Object.values(summary.accountsByProduct).reduce((total, ids) => total + ids.length, 0);
+    box.innerHTML = `<div class="summary-grid"><div><span>产品</span><strong>${summary.products.map(value => PRODUCT_LABELS[value]).join(" / ")}</strong></div><div><span>账号</span><strong>${accountTotal} 个</strong></div><div><span>规则</span><strong>${summary.rules.length} 条</strong></div><div><span>策略</span><strong>${escapeHtml(strategySummary(summary))}</strong></div></div>
+      <div class="hint">保存后写入 ad_control_rule_set、ad_control_account_group、ad_control_rule_group；所有底层 binding 默认 disabled。</div>`;
+  }
+  async function saveFrontendRuleGroup(goPreview) {
+    let draft;
+    try { draft = readRuleGroupDraftFromDrawer(); } catch (error) { toast(error.message, "error"); return; }
+    if (!draft.name) return toast("请填写规则组名称", "error");
+    try {
+      saveCountryGroups(draft.country_groups);
+      const existingByProduct = new Map((state.ruleGroupDraft.existingBindings || []).map(binding => [binding.product, binding]));
+      const removedBindings = (state.ruleGroupDraft.existingBindings || []).filter(binding => !draft.products.includes(binding.product));
+      for (const binding of removedBindings) {
+        await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId(binding))}`, { method: "DELETE" });
+      }
+      const savedBindings = [];
+      for (const productValue of draft.products) {
+        const existing = existingByProduct.get(productValue) || {};
+        const ruleSetId = existing.rule_set_id || ruleGroupRuleSetId(draft.id, productValue);
+        const accountGroupId = existing.account_group_id || ruleGroupAccountGroupId(draft.id, productValue);
+        const currentBindingId = bindingId(existing) || ruleGroupBindingId(draft.id, productValue);
+        const accountIds = draft.accountsByProduct[productValue] || [];
+        await api("/api/ad-control/rule-sets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rule_set_id: ruleSetId, product: productValue, name: `${draft.name} / ${productValue}`, rules: draft.rules, default_window: draft.default_window }),
+        });
+        await api("/api/ad-control/account-groups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ group_id: accountGroupId, product: productValue, name: `${draft.name} / ${productValue} / 账号池`, account_ids: accountIds }),
+        });
+        const binding = await api("/api/ad-control/bindings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            group_id: currentBindingId,
+            product: productValue,
+            name: `${draft.name} / ${productValue}`,
+            account_group_id: accountGroupId,
+            rule_set_id: ruleSetId,
+            enabled: false,
+            strategy: {
+              frontend_rule_group_id: draft.id,
+              frontend_rule_group_name: draft.name,
+              selected_products: draft.products,
+              selected_account_ids: accountIds,
+              account_count: accountIds.length,
+              country_groups: draft.country_groups,
+              close_time: draft.close_time,
+              execute_timezone: draft.execute_timezone,
+              block_same_day_reopen: draft.block_same_day_reopen,
+              allow_next_day_reopen: draft.allow_next_day_reopen,
+              description: draft.description,
+            },
+          }),
+        });
+        savedBindings.push(binding);
+      }
+      toast(`规则组已保存：${savedBindings.length} 个产品绑定，默认禁用`);
+      closeRuleGroupDrawer();
+      await refreshRuleGroups();
+      if (goPreview && savedBindings.length) {
+        openBindingInRun(savedBindings[0]);
+      }
+    } catch (error) {
+      toast(error.message || String(error), "error");
+    }
+  }
+  async function setFrontendRuleGroupEnabled(group, enabled) {
+    const label = enabled ? "启用" : "禁用";
+    if (enabled && !confirm("启用前必须完成对应绑定的 live preview 和 token 校验。确认继续？")) return;
+    let ok = 0;
+    for (const binding of group.bindings) {
+      await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId(binding))}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) });
+      ok += 1;
+    }
+    toast(`${label}完成：${ok} 个底层绑定`);
+    await refreshRuleGroups();
+  }
+  async function emergencyStopFrontendRuleGroup(group) {
+    if (!confirm("确认急停当前规则组？只停止该规则组的底层绑定，不会主动改广告状态。")) return;
+    for (const binding of group.bindings) {
+      await api("/api/ad-control/emergency-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "rule_group", group_id: bindingId(binding) }) });
+    }
+    toast("当前规则组已急停");
+    await refreshRuleGroups();
+  }
+  async function deleteFrontendRuleGroup(group) {
+    if (!confirm("确认删除当前规则组？历史执行日志不会删除。")) return;
+    for (const binding of group.bindings) {
+      await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId(binding))}`, { method: "DELETE" });
+    }
+    toast("规则组已删除");
+    await refreshRuleGroups();
+  }
+  function openBindingInRun(binding) {
+    window.location.assign(`/ad-control-run.html?product=${encodeURIComponent(binding.product || "")}&binding_id=${encodeURIComponent(bindingId(binding))}`);
+  }
+  function openRuleGroupPreview(group) {
+    const binding = group.bindings[0];
+    if (!binding) return toast("规则组没有可预览的绑定", "error");
+    openBindingInRun(binding);
+  }
+  function openRuleGroupLogs(group) {
+    const binding = group.bindings[0];
+    if (!binding) return toast("规则组没有日志绑定", "error");
+    window.location.assign(`/ad-control-logs.html?product=${encodeURIComponent(binding.product || "")}&binding_id=${encodeURIComponent(bindingId(binding))}`);
   }
 
   async function renderPools() {
@@ -520,7 +995,10 @@
       <span class="hint" id="previewMeta">尚未 preview</span><div class="cards"><div class="metric"><span>命中 campaign</span><strong id="previewTotal">0</strong></div><div class="metric"><span>待关闭</span><strong id="previewPause">0</strong></div><div class="metric"><span>观察</span><strong id="previewObserve">0</strong></div><div class="metric"><span>异常</span><strong id="previewErrors">0</strong></div></div>
       <div class="table-wrap"><table><thead><tr><th>账户/时区</th><th>Campaign</th><th>国家组</th><th>状态</th><th>起始/运行</th><th>实时指标</th><th>命中规则</th><th>策略</th><th>动作</th></tr></thead><tbody id="previewRows"></tbody></table></div>
       </div></section><section class="panel"><div class="panel-head"><h2>刷新 campaign 起始时间缓存</h2></div><div class="panel-body"><div class="grid"><div class="field"><label>账户 ID</label><input id="refreshAccount" /></div><div class="field"><label>Campaign ID</label><input id="refreshCampaign" /></div><div class="field"><label>&nbsp;</label><button class="btn" id="refreshStartBtn">刷新缓存</button></div></div><div class="hint" id="refreshStartResult"></div></div></section>`;
-    await loadProducts(); await refreshRunBindings();
+    const params = new URLSearchParams(window.location.search);
+    await loadProducts();
+    if (params.get("product") && $("productSelect")) $("productSelect").value = params.get("product");
+    await refreshRunBindings();
     $("productSelect").onchange = refreshRunBindings;
     $("previewBtn").onclick = previewLive;
     $("dryRunBtn").onclick = () => executeLive(true);
@@ -531,6 +1009,8 @@
   async function refreshRunBindings() {
     await loadBindings();
     $("bindingSelect").innerHTML = optionHtml(state.bindings, "binding_id", "name", "请选择绑定关系");
+    const requested = new URLSearchParams(window.location.search).get("binding_id");
+    if (requested && state.bindings.some(item => bindingId(item) === requested)) $("bindingSelect").value = requested;
   }
   function selectedWindow() {
     return $("windowType").value ? { type: $("windowType").value, hours: Number($("windowHours").value || 24) } : null;
@@ -607,13 +1087,20 @@
 
   async function renderLogs() {
     $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>绑定关系</label><select id="bindingFilter"><option value="">全部绑定</option></select></div>`)}<section class="panel"><div class="panel-head"><h2>执行日志</h2><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部</option><option value="pause">pause</option><option value="preview">preview</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>条数</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
-    await loadProducts(); await refreshLogBindings(); await loadLogs();
+    const params = new URLSearchParams(window.location.search);
+    await loadProducts();
+    if (params.get("product") && $("productSelect")) $("productSelect").value = params.get("product");
+    await refreshLogBindings();
+    if (params.get("binding_id")) $("bindingFilter").value = params.get("binding_id");
+    await loadLogs();
     $("productSelect").onchange = async () => { await refreshLogBindings(); await loadLogs(); };
     $("loadLogsBtn").onclick = loadLogs;
   }
   async function refreshLogBindings() {
     await loadBindings();
     $("bindingFilter").innerHTML = optionHtml(state.bindings, "binding_id", "name", "全部绑定");
+    const requested = new URLSearchParams(window.location.search).get("binding_id");
+    if (requested && state.bindings.some(item => bindingId(item) === requested)) $("bindingFilter").value = requested;
   }
   async function loadLogs() {
     const qs = new URLSearchParams({ product: product(), binding_id: $("bindingFilter").value || "", action: $("actionFilter").value || "", date_from: $("dateFrom").value || "", date_to: $("dateTo").value || "", limit: $("limitInput").value || "50" });

@@ -18,8 +18,8 @@
         },
         {
           key: "adControlRules",
-          label: "规则集",
-          description: "创建和维护可复用调控规则",
+          label: "规则组管理",
+          description: "创建、编辑、复制、启停规则组",
           kind: "page",
           href: "/ad-control-rules.html",
           module: "ad_control_center",
@@ -39,7 +39,7 @@
         {
           key: "adControlBindings",
           label: "绑定关系",
-          description: "绑定产品、账户池和规则集",
+          description: "绑定产品、账户池和规则组",
           kind: "page",
           href: "/ad-control-bindings.html",
           module: "ad_control_center",
