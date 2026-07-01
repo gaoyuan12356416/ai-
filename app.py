@@ -33209,21 +33209,24 @@ def list_ad_control_products(query="", limit=200):
         product_value = str(row[1] or "").strip()
         app_id = str(row[2] or "").strip()
         updated_at = row[3] if len(row) > 3 else ""
-        for value in (name, product_value):
-            if not value or value in seen:
-                continue
-            seen.add(value)
-            items.append({
-                "product": value,
-                "name": name,
-                "product_value": product_value,
-                "app_id": app_id,
-                "account_count": "",
-                "campaign_count": "",
-                "updated_at": updated_at,
-            })
-            if len(items) >= limit:
-                break
+        product_key = product_value or name
+        if not product_key or product_key in seen:
+            continue
+        seen.add(product_key)
+        label_parts = []
+        for value in (name, product_value, app_id):
+            if value and value not in label_parts:
+                label_parts.append(value)
+        items.append({
+            "product": product_key,
+            "label": " / ".join(label_parts) if label_parts else product_key,
+            "name": name,
+            "product_value": product_value,
+            "app_id": app_id,
+            "account_count": "",
+            "campaign_count": "",
+            "updated_at": updated_at,
+        })
         if len(items) >= limit:
             break
     return {"items": items}

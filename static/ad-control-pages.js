@@ -95,6 +95,17 @@
   function selectedProducts(containerId) {
     return Array.from(document.querySelectorAll(`#${containerId} input[type=checkbox]:checked`)).map(input => input.value);
   }
+  function productLabel(item) {
+    item = item || {};
+    const explicit = String(item.label || "").trim();
+    if (explicit) return explicit;
+    const parts = [];
+    [item.name, item.product_value || item.product, item.app_id || item.app_package].forEach(value => {
+      value = String(value || "").trim();
+      if (value && !parts.includes(value)) parts.push(value);
+    });
+    return parts.length ? parts.join(" / ") : String(item.product || "");
+  }
   function renderProductChecks(containerId, products, selected) {
     const node = $(containerId);
     if (!node) return;
@@ -102,7 +113,7 @@
     node.innerHTML = (products || []).length ? products.map(item => {
       const value = item.product || "";
       const checked = selectedSet.has(value) ? "checked" : "";
-      return `<label class="check-option"><input type="checkbox" value="${escapeHtml(value)}" ${checked} /><span>${escapeHtml(value)}${item.app_id ? ` / ${escapeHtml(item.app_id)}` : ""}</span></label>`;
+      return `<label class="check-option"><input type="checkbox" value="${escapeHtml(value)}" ${checked} /><span>${escapeHtml(productLabel(item))}</span></label>`;
     }).join("") : `<div class="empty">暂无产品</div>`;
   }
   function strategySummary(strategy) {
@@ -156,7 +167,7 @@
     const select = $("productSelect");
     if (select) {
       const previous = select.value;
-      select.innerHTML = state.products.map(item => `<option value="${escapeHtml(item.product)}">${escapeHtml(item.product)}${item.app_package ? " / " + escapeHtml(item.app_package) : ""}</option>`).join("");
+      select.innerHTML = state.products.map(item => `<option value="${escapeHtml(item.product)}">${escapeHtml(productLabel(item))}</option>`).join("");
       if (previous) select.value = previous;
     }
   }
