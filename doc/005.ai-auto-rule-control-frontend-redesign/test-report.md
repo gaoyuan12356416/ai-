@@ -20,6 +20,9 @@
 - 截图：`prototype/ad-control-redesign-preview.png`。
 - 页面标题：`AI自动规则调控 - 前端重设计原型`。
 - 渲染尺寸：`1600 x 1757`。
+- Playwright 打开 `usage-guide.html` 成功。
+- 使用说明截图：`usage-guide.png`。
+- 使用说明包含 14 个章节、14 个目录项，覆盖产品枚举、账号加载、规则组保存映射、Preview/执行、日志和检查表。
 
 ## 遗留风险
 - 用户未确认信息架构。
