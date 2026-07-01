@@ -9,7 +9,8 @@
 | --- | --- | --- | --- |
 | 梳理现有前端问题 | Codex | `static/ad-control-pages.js` | 完成 |
 | 创建需求目录 | Codex | `doc/005...` | 完成 |
-| 设计方案向导原型 | Codex | `prototype/ad-control-redesign-preview.html` | 完成 |
+| 设计规则组管理原型 | Codex | `prototype/ad-control-redesign-preview.html` | 完成 |
+| 补充产品枚举和账号加载口径 | Codex | `requirements.md`、原型 | 完成 |
 | 补充评审文档 | Codex | `requirements.md`、`sa-review.md` | 完成 |
 | 用户评审 | 用户 | 原型页面 | 待确认 |
 | 正式实现 | Codex | `static/*`、必要 API | 待评审后执行 |
@@ -29,3 +30,4 @@ node --check static/ad-control-pages.js
 
 ## 完成记录
 2026-07-01：完成静态原型，等待评审。
+2026-07-01：按反馈调整为规则组管理口径，补充产品线限制和账号按产品加载。
