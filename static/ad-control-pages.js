@@ -1213,13 +1213,21 @@
     return state.accounts.map(item => item.account_id).filter(Boolean);
   }
   async function validateToken() {
-    const accounts = tokenValidationAccounts();
-    const data = await api("/api/ad-control/token-config/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), user_id: $("tokenUserId").value.trim(), accounts }) });
-    toast(`校验完成：${data.ok_count}/${data.checked_count} 通过`);
+    try {
+      const accounts = tokenValidationAccounts();
+      const data = await api("/api/ad-control/token-config/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), user_id: $("tokenUserId").value.trim(), accounts }) });
+      toast(`校验完成：${data.ok_count}/${data.checked_count} 通过`);
+    } catch (error) {
+      toast(error.message || String(error), "error");
+    }
   }
   async function saveToken() {
-    await api("/api/ad-control/token-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), account_id: tokenOverrideAccountId(), user_id: $("tokenUserId").value.trim(), label: $("tokenLabel").value.trim() }) });
-    toast("token 配置已保存"); await refreshTokenPage();
+    try {
+      await api("/api/ad-control/token-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), account_id: tokenOverrideAccountId(), user_id: $("tokenUserId").value.trim(), label: $("tokenLabel").value.trim() }) });
+      toast("token 配置已保存"); await refreshTokenPage();
+    } catch (error) {
+      toast(error.message || String(error), "error");
+    }
   }
 
   async function renderLogs() {
