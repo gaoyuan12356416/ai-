@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI自动规则调控 - 前端重设计原型</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --panel: #ffffff;
+      --line: #d7dfec;
+      --line-soft: #e8edf5;
+      --text: #172033;
+      --muted: #667085;
+      --blue: #2563eb;
+      --blue-2: #1d4ed8;
+      --green: #15803d;
+      --amber: #b45309;
+      --red: #b42318;
+      --nav: #101b2f;
+      --nav-2: #15243e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      letter-spacing: 0;
+    }
+    button, input, select { font: inherit; }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 248px minmax(0, 1fr);
+    }
+    .sidebar {
+      background: linear-gradient(180deg, var(--nav) 0%, #0b1425 100%);
+      color: #edf4ff;
+      padding: 20px 14px;
+      display: grid;
+      align-content: start;
+      gap: 18px;
+    }
+    .brand {
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 4px 4px 14px;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+    }
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      background: var(--blue);
+      font-weight: 900;
+    }
+    .brand strong { display: block; font-size: 17px; line-height: 1.2; }
+    .brand span { color: #9eb1cc; font-size: 12px; }
+    .nav-group { display: grid; gap: 7px; }
+    .nav-title {
+      color: #9eb1cc;
+      font-size: 12px;
+      font-weight: 800;
+      padding: 10px 8px 3px;
+    }
+    .nav-item {
+      display: grid;
+      gap: 2px;
+      padding: 11px 12px;
+      border-radius: 8px;
+      color: #dbe7fb;
+      text-decoration: none;
+      border: 1px solid transparent;
+    }
+    .nav-item strong { font-size: 13px; }
+    .nav-item span { color: #9eb1cc; font-size: 11px; line-height: 1.45; }
+    .nav-item.active {
+      background: var(--blue);
+      color: #fff;
+      border-color: rgba(255,255,255,.12);
+    }
+    .nav-item.active span { color: rgba(255,255,255,.82); }
+    .main {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      min-height: 72px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 18px;
+      padding: 14px 24px;
+      background: rgba(243,246,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .title h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.22;
+    }
+    .title p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      white-space: nowrap;
+    }
+    .user-card {
+      display: grid;
+      grid-template-columns: 34px auto;
+      gap: 9px;
+      align-items: center;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-size: 12px;
+    }
+    .avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: #1f2937;
+    }
+    .btn {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: #1d2939;
+      padding: 8px 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .btn.primary {
+      background: var(--blue);
+      color: #fff;
+      border-color: var(--blue);
+    }
+    .btn.danger {
+      color: var(--red);
+      border-color: rgba(180,35,24,.35);
+    }
+    .btn.ghost {
+      background: #f8fafc;
+    }
+    .workspace {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 324px;
+      gap: 16px;
+      padding: 18px 24px 32px;
+      align-items: start;
+    }
+    .content {
+      min-width: 0;
+      display: grid;
+      gap: 14px;
+    }
+    .rail {
+      position: sticky;
+      top: 90px;
+      display: grid;
+      gap: 14px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 12px 26px rgba(16,24,40,.06);
+    }
+    .panel-head {
+      min-height: 50px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line-soft);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .panel-head h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+    .panel-body {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px;
+      background: #eef3fb;
+      border-radius: 8px;
+    }
+    .step {
+      min-height: 50px;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 8px;
+      background: #fff;
+      color: var(--muted);
+    }
+    .step b {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #e5eaf2;
+      color: #344054;
+      font-size: 12px;
+    }
+    .step strong {
+      display: block;
+      color: #344054;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .step.active {
+      border-color: rgba(37,99,235,.28);
+      background: #eff6ff;
+    }
+    .step.active b {
+      background: var(--blue);
+      color: #fff;
+    }
+    .scenario {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr) minmax(0, .8fr);
+      gap: 10px;
+    }
+    .scenario-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 13px;
+      display: grid;
+      gap: 8px;
+      background: #fff;
+    }
+    .scenario-card.active {
+      border-color: rgba(37,99,235,.36);
+      background: #f8fbff;
+    }
+    .scenario-card strong { font-size: 14px; }
+    .muted { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    .field label {
+      color: #344054;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    input, select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 8px 10px;
+      outline: none;
+    }
+    input:focus, select:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+    }
+    .selection-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcff;
+      padding: 8px;
+      display: grid;
+      gap: 7px;
+      max-height: 206px;
+      overflow: auto;
+    }
+    .selection-item {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      background: #fff;
+    }
+    .selection-item strong {
+      display: block;
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .selection-item small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 2px;
+    }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      border-radius: 999px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #344054;
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .pill.blue { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+    .pill.green { background: #ecfdf3; border-color: #bbf7d0; color: #15803d; }
+    .pill.amber { background: #fff7ed; border-color: #fed7aa; color: #b45309; }
+    .pill.red { background: #fff1f2; border-color: #fecdd3; color: #b42318; }
+    .rule-list {
+      display: grid;
+      gap: 9px;
+    }
+    .rule-row {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) 110px;
+      gap: 10px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+    .rule-index {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-weight: 900;
+      font-size: 13px;
+    }
+    .rule-row h3 {
+      margin: 0 0 6px;
+      font-size: 14px;
+    }
+    .conditions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .condition {
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      padding: 5px 7px;
+      background: #f8fafc;
+      color: #344054;
+      font-size: 12px;
+      font-family: Consolas, "SFMono-Regular", monospace;
+    }
+    .status-card {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 12px;
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 7px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 24px;
+      line-height: 1.1;
+    }
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      min-width: 1040px;
+      border-collapse: collapse;
+      background: #fff;
+      font-size: 12px;
+    }
+    th, td {
+      padding: 10px 11px;
+      border-bottom: 1px solid var(--line-soft);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #f8fafc;
+      color: #475467;
+      font-weight: 900;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .mono {
+      font-family: Consolas, "SFMono-Regular", monospace;
+      word-break: break-all;
+    }
+    .rail-card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 12px 26px rgba(16,24,40,.06);
+    }
+    .rail-card h3 {
+      margin: 0;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      font-size: 15px;
+    }
+    .rail-body {
+      padding: 13px 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .checkline {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      color: #344054;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .checkline b {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: #ecfdf3;
+      color: var(--green);
+      font-size: 12px;
+    }
+    .footer-actions {
+      position: sticky;
+      bottom: 0;
+      z-index: 3;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background: rgba(255,255,255,.94);
+      border-top: 1px solid var(--line);
+    }
+    @media (max-width: 1280px) {
+      .workspace { grid-template-columns: 1fr; }
+      .rail { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .workspace { padding: 14px; }
+      .topbar { position: static; align-items: flex-start; flex-direction: column; }
+      .steps, .scenario, .grid, .grid.two, .rail, .status-card { grid-template-columns: 1fr; }
+      .rule-row { grid-template-columns: 34px minmax(0, 1fr); }
+      .rule-row .pill { grid-column: 2; justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动规则调控</strong><span>campaign control</span></div>
+      </div>
+      <nav class="nav-group">
+        <div class="nav-title">调控工作流</div>
+        <a class="nav-item active" href="#"><strong>创建调控方案</strong><span>场景、范围、规则、策略一次配置</span></a>
+        <a class="nav-item" href="#"><strong>运行控制台</strong><span>Preview / dry-run / 执行确认</span></a>
+        <a class="nav-item" href="#"><strong>执行日志</strong><span>命中、跳过、失败原因</span></a>
+      </nav>
+      <nav class="nav-group">
+        <div class="nav-title">专家配置</div>
+        <a class="nav-item" href="#"><strong>账户池</strong><span>产品维度维护账户范围</span></a>
+        <a class="nav-item" href="#"><strong>规则库</strong><span>可复用规则集</span></a>
+        <a class="nav-item" href="#"><strong>绑定策略</strong><span>产品 + 账户池 + 规则集</span></a>
+        <a class="nav-item" href="#"><strong>Token 与权限</strong><span>产品默认与账户覆盖</span></a>
+      </nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>创建跨区调控方案</h1>
+          <p>按“调控场景”组织配置，保存后生成产品级账户池、规则集和绑定关系。</p>
+        </div>
+        <div class="top-actions">
+          <div class="user-card"><div class="avatar"></div><div><strong>郜远</strong><br><span class="muted">admin / tenant</span></div></div>
+          <button class="btn ghost">刷新</button>
+          <button class="btn">返回概览</button>
+        </div>
+      </header>
+      <div class="workspace">
+        <section class="content">
+          <div class="panel">
+            <div class="panel-body">
+              <div class="steps">
+                <div class="step active"><b>1</b><strong>选择场景</strong></div>
+                <div class="step active"><b>2</b><strong>产品与账户</strong></div>
+                <div class="step active"><b>3</b><strong>规则阈值</strong></div>
+                <div class="step"><b>4</b><strong>绑定策略</strong></div>
+                <div class="step"><b>5</b><strong>预览保存</strong></div>
+              </div>
+            </div>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>调控场景</h2>
+              <span class="pill blue">v1 campaign</span>
+            </div>
+            <div class="panel-body">
+              <div class="scenario">
+                <div class="scenario-card active">
+                  <strong>+8 账户跑跨区国家组自动关停</strong>
+                  <div class="muted">命中账户时区 + 投放区域国家组，到关闭窗口后按规则关停；当天禁止重启，隔天允许程序按规则重启。</div>
+                  <div class="pill-row"><span class="pill blue">+8</span><span class="pill amber">WW-4</span><span class="pill amber">WW-0</span><span class="pill amber">JUWW</span></div>
+                </div>
+                <div class="scenario-card">
+                  <strong>低效消耗关停</strong>
+                  <div class="muted">按消耗、安装、ROAS、购买、CPA 组合阈值关停。</div>
+                </div>
+                <div class="scenario-card">
+                  <strong>观望名单</strong>
+                  <div class="muted">高消耗但接近保留线时只记录观察，不拦截其他关闭规则。</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>产品与账户范围</h2>
+              <div class="pill-row"><span class="pill green">按产品分别生成配置</span><span class="pill blue">账户时区 +8</span></div>
+            </div>
+            <div class="panel-body">
+              <div class="grid">
+                <div class="field">
+                  <label>投放产品</label>
+                  <input value="PrestaGo / 3348, Fofi-HiDream / 3314" />
+                </div>
+                <div class="field">
+                  <label>账户时区</label>
+                  <select><option>仅 +8 / UTC+8 / GMT+8</option></select>
+                </div>
+                <div class="field">
+                  <label>投放区域国家组</label>
+                  <input value="WW-4, WW-0, JUWW" />
+                </div>
+              </div>
+              <div class="grid two">
+                <div>
+                  <div class="muted" style="margin-bottom: 7px;">产品选择</div>
+                  <div class="selection-box">
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>[w2a]PrestaGo: ¡Efectivo rápido! / 3348</strong><small>product key: 3348</small></div><span class="pill green">18账户</span></label>
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>Fofi-HiDream / 3314 / com.fofi.pet.effects.ai.peteffects</strong><small>product key: 3314</small></div><span class="pill green">7账户</span></label>
+                    <label class="selection-item"><input type="checkbox" /><div><strong>LoadCash / 3353 / com.take.cash</strong><small>product key: 3353</small></div><span class="pill">12账户</span></label>
+                  </div>
+                </div>
+                <div>
+                  <div class="muted" style="margin-bottom: 7px;">账户匹配结果</div>
+                  <div class="selection-box">
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>act_1980...4432</strong><small>UTC+8 / ACTIVE / PrestaGo</small></div><span class="pill blue">命中</span></label>
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>act_2671...9981</strong><small>+8 / ACTIVE / Fofi-HiDream</small></div><span class="pill blue">命中</span></label>
+                    <label class="selection-item"><input type="checkbox" /><div><strong>act_3100...7096</strong><small>UTC-5 / ACTIVE / PrestaGo</small></div><span class="pill amber">时区不符</span></label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>规则阈值</h2>
+              <div class="pill-row"><span class="pill red">关闭优先</span><span class="pill">窗口：起始至当前</span></div>
+            </div>
+            <div class="panel-body">
+              <div class="rule-list">
+                <div class="rule-row">
+                  <div class="rule-index">1</div>
+                  <div>
+                    <h3>7小时+ 无安装关闭</h3>
+                    <div class="conditions"><span class="condition">age_hours >= 7</span><span class="condition">install <= 0</span><span class="condition">country in WW-4, WW-0, JUWW</span><span class="condition">account_time_zone in +8</span></div>
+                  </div>
+                  <span class="pill red">pause</span>
+                </div>
+                <div class="rule-row">
+                  <div class="rule-index">2</div>
+                  <div>
+                    <h3>消耗 30+ 且安装、ROAS 不达标关闭</h3>
+                    <div class="conditions"><span class="condition">spend > 30</span><span class="condition">install <= 10</span><span class="condition">roas_pct < 30</span></div>
+                  </div>
+                  <span class="pill red">pause</span>
+                </div>
+                <div class="rule-row">
+                  <div class="rule-index">3</div>
+                  <div>
+                    <h3>消耗 40+ 且购买弱、CPA 高关闭</h3>
+                    <div class="conditions"><span class="condition">spend > 40</span><span class="condition">roas_pct < 35</span><span class="condition">purchase between 0..1</span><span class="condition">purchase_cpa > 50</span></div>
+                  </div>
+                  <span class="pill red">pause</span>
+                </div>
+                <div class="rule-row">
+                  <div class="rule-index">4</div>
+                  <div>
+                    <h3>8小时附近接近保留线观望</h3>
+                    <div class="conditions"><span class="condition">age_hours between 7.5..8.5</span><span class="condition">roas_pct between 35..45</span><span class="condition">purchase > 1</span></div>
+                  </div>
+                  <span class="pill amber">observe</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>绑定策略与预览</h2>
+              <button class="btn primary">生成只读 Preview</button>
+            </div>
+            <div class="panel-body">
+              <div class="grid">
+                <div class="field"><label>关闭窗口</label><select><option>账户本地时间 15:00 后</option></select></div>
+                <div class="field"><label>执行时区</label><select><option>按账户时区</option></select></div>
+                <div class="field"><label>重启策略</label><select><option>当天禁止重启，隔天允许按规则重启</option></select></div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>账户</th><th>产品</th><th>campaign</th><th>国家组</th><th>运行</th><th>实时表现</th><th>命中</th><th>动作</th></tr></thead>
+                  <tbody>
+                    <tr><td><div class="mono">act_1980...4432</div><span class="pill blue">UTC+8</span></td><td>PrestaGo / 3348</td><td><div>WW-4 AEO 0701 01</div><div class="mono">120214857...</div></td><td>WW-4</td><td>7.3h</td><td>Spend 33.4 / Install 0 / ROAS 0%</td><td>规则 1</td><td><span class="pill red">pause</span></td></tr>
+                    <tr><td><div class="mono">act_2671...9981</div><span class="pill blue">+8</span></td><td>Fofi-HiDream / 3314</td><td><div>JUWW VO 0701 03</div><div class="mono">120214860...</div></td><td>JUWW</td><td>8.1h</td><td>Spend 41.8 / Purchase 1 / CPA 58</td><td>规则 3</td><td><span class="pill red">pause</span></td></tr>
+                    <tr><td><div class="mono">act_3100...7096</div><span class="pill amber">UTC-5</span></td><td>PrestaGo / 3348</td><td><div>US AEO 0701 02</div><div class="mono">120214861...</div></td><td>US</td><td>6.8h</td><td>Spend 18.2 / Install 4 / ROAS 52%</td><td>timezone_not_match</td><td><span class="pill">skip</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="footer-actions">
+              <span class="muted">保存后生成 2 个账户池、2 个规则集、2 个绑定；默认 disabled。</span>
+              <div class="top-actions"><button class="btn">保存草稿</button><button class="btn primary">保存方案</button></div>
+            </div>
+          </section>
+        </section>
+
+        <aside class="rail">
+          <div class="rail-card">
+            <h3>方案摘要</h3>
+            <div class="rail-body">
+              <div class="status-card">
+                <div class="metric"><span>产品</span><strong>2</strong></div>
+                <div class="metric"><span>+8账户</span><strong>25</strong></div>
+                <div class="metric"><span>国家组</span><strong>3</strong></div>
+                <div class="metric"><span>关闭规则</span><strong>3</strong></div>
+              </div>
+              <div class="pill-row"><span class="pill blue">disabled</span><span class="pill green">preview required</span><span class="pill amber">same-day reopen blocked</span></div>
+            </div>
+          </div>
+          <div class="rail-card">
+            <h3>上线安全</h3>
+            <div class="rail-body">
+              <div class="checkline"><b>✓</b><span>新方案默认 disabled，不自动进入 runner。</span></div>
+              <div class="checkline"><b>✓</b><span>真实执行必须先 live preview，再输入确认口令。</span></div>
+              <div class="checkline"><b>✓</b><span>Preview 只读，表现数据来自 Meta API，不写广告状态。</span></div>
+              <div class="checkline"><b>✓</b><span>只控制产品白名单内 campaign。</span></div>
+            </div>
+          </div>
+          <div class="rail-card">
+            <h3>专家入口</h3>
+            <div class="rail-body">
+              <button class="btn">账户池明细</button>
+              <button class="btn">规则 JSON</button>
+              <button class="btn">Token 校验</button>
+              <button class="btn danger">急停设置</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
