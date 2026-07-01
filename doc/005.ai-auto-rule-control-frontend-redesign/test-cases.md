@@ -5,7 +5,7 @@
 
 ## 测试数据
 - 原型文件：`doc/005.ai-auto-rule-control-frontend-redesign/prototype/ad-control-redesign-preview.html`
-- 示例产品线：`dramawave`、`hotdrama`、`freereels`
+- 示例产品：`dramawave`、`hotdrama`、`freereels`
 - 示例国家组：`WW-4`、`WW-0`、`JUWW`
 
 ## 用例列表
@@ -17,7 +17,7 @@
 | TC-003 | 跨区配置完整 | 原型打开 | 查看场景、产品、账户、国家组、规则、策略 | 覆盖 +8、国家组、关闭窗口、重启策略 | P0 | 待评审 |
 | TC-004 | 专家页不混乱 | 原型打开 | 查看右侧专家入口和侧边导航 | 专家配置与主流程分离 | P1 | 待评审 |
 | TC-005 | 安全边界明确 | 原型打开 | 查看方案摘要和上线安全 | 显示 disabled、preview required、同日禁止重启等状态 | P0 | 通过 |
-| TC-006 | 产品枚举限制 | 原型打开 | 查看产品与账号范围 | 只展示 dramawave/hotdrama/freereels 对应产品，不展示其他业务产品 | P0 | 待评审 |
+| TC-006 | 产品枚举限制 | 原型打开 | 查看产品与账号范围 | 产品下拉只展示 dramawave/hotdrama/freereels 三个枚举值 | P0 | 待评审 |
 | TC-007 | 账号按产品加载 | 原型打开 | 查看账号列表说明 | 账号列表依赖已选产品加载，支持多选 | P0 | 待评审 |
 | TC-008 | 多规则组管理 | 原型打开 | 查看规则组管理表格 | 可理解规则组保存后在列表中编辑、复制、启停、急停、Preview | P0 | 待评审 |
 

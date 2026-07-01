@@ -568,7 +568,7 @@
             </div>
             <div class="panel-body">
               <div class="grid">
-                <div class="field"><label>产品线</label><select><option>全部：Dramawave / HotDrama / FreeReels</option></select></div>
+                <div class="field"><label>产品</label><select><option>全部：dramawave / hotdrama / freereels</option></select></div>
                 <div class="field"><label>状态</label><select><option>全部状态</option><option>草稿</option><option>禁用</option><option>启用</option><option>急停</option></select></div>
                 <div class="field"><label>搜索</label><input value="+8 跨区" /></div>
               </div>
@@ -576,8 +576,8 @@
                 <table>
                   <thead><tr><th>规则组</th><th>产品范围</th><th>账号范围</th><th>规则</th><th>策略</th><th>状态</th><th>操作</th></tr></thead>
                   <tbody>
-                    <tr><td><strong>+8跨区国家组关停</strong><br><span class="muted">RG-20260701-001</span></td><td>Dramawave, HotDrama<br><span class="muted">12 个具体产品</span></td><td>已选 25 个账号<br><span class="muted">按产品加载，可编辑</span></td><td>3 pause / 1 observe</td><td>15:00 关停<br>当天禁止重启</td><td><span class="pill blue">disabled</span></td><td><button class="btn">编辑</button> <button class="btn">Preview</button></td></tr>
-                    <tr><td><strong>低效消耗保护</strong><br><span class="muted">RG-20260630-003</span></td><td>FreeReels<br><span class="muted">4 个具体产品</span></td><td>已选 9 个账号</td><td>2 pause</td><td>按账户时区</td><td><span class="pill green">enabled</span></td><td><button class="btn">编辑</button> <button class="btn danger">急停</button></td></tr>
+                    <tr><td><strong>+8跨区国家组关停</strong><br><span class="muted">RG-20260701-001</span></td><td>dramawave, hotdrama</td><td>已选 25 个账号<br><span class="muted">按产品加载，可编辑</span></td><td>3 pause / 1 observe</td><td>15:00 关停<br>当天禁止重启</td><td><span class="pill blue">disabled</span></td><td><button class="btn">编辑</button> <button class="btn">Preview</button></td></tr>
+                    <tr><td><strong>低效消耗保护</strong><br><span class="muted">RG-20260630-003</span></td><td>freereels</td><td>已选 9 个账号</td><td>2 pause</td><td>按账户时区</td><td><span class="pill green">enabled</span></td><td><button class="btn">编辑</button> <button class="btn danger">急停</button></td></tr>
                   </tbody>
                 </table>
               </div>
@@ -611,17 +611,17 @@
           <section class="panel">
             <div class="panel-head">
               <h2>产品与账号范围</h2>
-              <div class="pill-row"><span class="pill green">仅 Dramawave / HotDrama / FreeReels</span><span class="pill blue">选产品后加载账号</span></div>
+              <div class="pill-row"><span class="pill green">仅 dramawave / hotdrama / freereels</span><span class="pill blue">选产品后加载账号</span></div>
             </div>
             <div class="panel-body">
               <div class="grid">
                 <div class="field">
-                  <label>产品线限制</label>
-                  <select><option>Dramawave + HotDrama + FreeReels</option></select>
+                  <label>产品下拉枚举</label>
+                  <select><option>dramawave</option><option>hotdrama</option><option>freereels</option></select>
                 </div>
                 <div class="field">
-                  <label>具体投放产品</label>
-                  <input value="Dramawave / HotDrama / FreeReels 下属产品多选" />
+                  <label>已选产品</label>
+                  <input value="dramawave, hotdrama" />
                 </div>
                 <div class="field">
                   <label>账号筛选</label>
@@ -630,19 +630,19 @@
               </div>
               <div class="grid two">
                 <div>
-                  <div class="muted" style="margin-bottom: 7px;">具体产品枚举，仅来自三条产品线</div>
+                  <div class="muted" style="margin-bottom: 7px;">产品枚举值，只保留三个产品</div>
                   <div class="selection-box">
-                    <label class="selection-item"><input type="checkbox" checked /><div><strong>Dramawave / 1479</strong><small>产品线：dramawave，product key: dramawave</small></div><span class="pill green">18账号</span></label>
-                    <label class="selection-item"><input type="checkbox" checked /><div><strong>HotDrama / 1721</strong><small>产品线：hotdrama，product key: hotdrama</small></div><span class="pill green">11账号</span></label>
-                    <label class="selection-item"><input type="checkbox" /><div><strong>FreeReels / 1688</strong><small>产品线：freereels，product key: freereels</small></div><span class="pill">9账号</span></label>
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>dramawave</strong><small>product key: dramawave</small></div><span class="pill green">18账号</span></label>
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>hotdrama</strong><small>product key: hotdrama</small></div><span class="pill green">11账号</span></label>
+                    <label class="selection-item"><input type="checkbox" /><div><strong>freereels</strong><small>product key: freereels</small></div><span class="pill">9账号</span></label>
                   </div>
                 </div>
                 <div>
                   <div class="muted" style="margin-bottom: 7px;">账号列表：根据已选产品实时加载，支持多选</div>
                   <div class="selection-box">
-                    <label class="selection-item"><input type="checkbox" checked /><div><strong>act_1980...4432</strong><small>UTC+8 / ACTIVE / Dramawave</small></div><span class="pill blue">已选</span></label>
-                    <label class="selection-item"><input type="checkbox" checked /><div><strong>act_2671...9981</strong><small>+8 / ACTIVE / HotDrama</small></div><span class="pill blue">已选</span></label>
-                    <label class="selection-item"><input type="checkbox" /><div><strong>act_3100...7096</strong><small>UTC-5 / ACTIVE / Dramawave</small></div><span class="pill amber">时区不符</span></label>
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>act_1980...4432</strong><small>UTC+8 / ACTIVE / dramawave</small></div><span class="pill blue">已选</span></label>
+                    <label class="selection-item"><input type="checkbox" checked /><div><strong>act_2671...9981</strong><small>+8 / ACTIVE / hotdrama</small></div><span class="pill blue">已选</span></label>
+                    <label class="selection-item"><input type="checkbox" /><div><strong>act_3100...7096</strong><small>UTC-5 / ACTIVE / dramawave</small></div><span class="pill amber">时区不符</span></label>
                   </div>
                 </div>
               </div>
@@ -712,9 +712,9 @@
                 <table>
                   <thead><tr><th>账户</th><th>产品</th><th>campaign</th><th>国家组</th><th>运行</th><th>实时表现</th><th>命中</th><th>动作</th></tr></thead>
                   <tbody>
-                    <tr><td><div class="mono">act_1980...4432</div><span class="pill blue">UTC+8</span></td><td>Dramawave</td><td><div>WW-4 AEO 0701 01</div><div class="mono">120214857...</div></td><td>WW-4</td><td>7.3h</td><td>Spend 33.4 / Install 0 / ROAS 0%</td><td>规则 1</td><td><span class="pill red">pause</span></td></tr>
-                    <tr><td><div class="mono">act_2671...9981</div><span class="pill blue">+8</span></td><td>HotDrama</td><td><div>JUWW VO 0701 03</div><div class="mono">120214860...</div></td><td>JUWW</td><td>8.1h</td><td>Spend 41.8 / Purchase 1 / CPA 58</td><td>规则 3</td><td><span class="pill red">pause</span></td></tr>
-                    <tr><td><div class="mono">act_3100...7096</div><span class="pill amber">UTC-5</span></td><td>Dramawave</td><td><div>US AEO 0701 02</div><div class="mono">120214861...</div></td><td>US</td><td>6.8h</td><td>Spend 18.2 / Install 4 / ROAS 52%</td><td>timezone_not_match</td><td><span class="pill">skip</span></td></tr>
+                    <tr><td><div class="mono">act_1980...4432</div><span class="pill blue">UTC+8</span></td><td>dramawave</td><td><div>WW-4 AEO 0701 01</div><div class="mono">120214857...</div></td><td>WW-4</td><td>7.3h</td><td>Spend 33.4 / Install 0 / ROAS 0%</td><td>规则 1</td><td><span class="pill red">pause</span></td></tr>
+                    <tr><td><div class="mono">act_2671...9981</div><span class="pill blue">+8</span></td><td>hotdrama</td><td><div>JUWW VO 0701 03</div><div class="mono">120214860...</div></td><td>JUWW</td><td>8.1h</td><td>Spend 41.8 / Purchase 1 / CPA 58</td><td>规则 3</td><td><span class="pill red">pause</span></td></tr>
+                    <tr><td><div class="mono">act_3100...7096</div><span class="pill amber">UTC-5</span></td><td>dramawave</td><td><div>US AEO 0701 02</div><div class="mono">120214861...</div></td><td>US</td><td>6.8h</td><td>Spend 18.2 / Install 4 / ROAS 52%</td><td>timezone_not_match</td><td><span class="pill">skip</span></td></tr>
                   </tbody>
                 </table>
               </div>
@@ -731,7 +731,7 @@
             <h3>规则组摘要</h3>
             <div class="rail-body">
               <div class="status-card">
-                <div class="metric"><span>产品线</span><strong>3</strong></div>
+                <div class="metric"><span>产品</span><strong>3</strong></div>
                 <div class="metric"><span>已选账号</span><strong>29</strong></div>
                 <div class="metric"><span>国家组</span><strong>3</strong></div>
                 <div class="metric"><span>关闭规则</span><strong>3</strong></div>
