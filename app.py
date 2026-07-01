@@ -33800,6 +33800,29 @@ def save_ad_control_token_config(payload, session):
         raise StructuredApiError("missing_user_id", "missing token owner user_id")
     label = str(payload.get("label") or "").strip()
     validation = payload.get("validation") if isinstance(payload.get("validation"), dict) else {}
+    token = ad_control_token_for_user_id(user_id)
+    if not token:
+        raise StructuredApiError("missing_meta_token", "token owner has no Meta token")
+    if account_id:
+        try:
+            meta = ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
+            validation = {
+                "ok": True,
+                "checked_count": 1,
+                "ok_count": 1,
+                "results": [{"account_id": account_id, "ok": True, "name": meta.get("name", "")}],
+                "validated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except Exception as exc:
+            raise StructuredApiError("token_access_failed", "token cannot access selected account", account_id=account_id, reason=str(exc))
+    elif not validation:
+        validation = {
+            "ok": True,
+            "checked_count": 0,
+            "ok_count": 0,
+            "results": [],
+            "validated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
     ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()

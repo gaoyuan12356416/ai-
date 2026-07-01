@@ -1190,10 +1190,11 @@
   }
 
   async function renderTokens() {
-    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>Token配置</h2><button class="btn" id="reloadBtn">刷新配置</button></div><div class="panel-body"><div class="grid"><div class="field"><label>配置范围</label><select id="tokenScope"><option value="">产品默认 token</option></select></div><div class="field"><label>token owner user_id</label><input id="tokenUserId" placeholder="ads_facebook_info.user_id" /></div><div class="field"><label>备注</label><input id="tokenLabel" placeholder="例如 Dramawave 控制 token" /></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="validateBtn">校验</button><button class="btn primary" id="saveTokenBtn">保存</button></div></div></div><div class="list" id="tokenList"></div></div></section>`;
+    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>Token配置</h2><button class="btn" id="reloadBtn">刷新配置</button></div><div class="panel-body"><div class="grid"><div class="field"><label>配置范围</label><select id="tokenScope"><option value="">产品默认 token</option></select><span class="hint">选择账号或在下方手动填 account_id；留空表示产品默认 token。</span></div><div class="field"><label>账户 override account_id</label><input id="tokenAccountId" placeholder="可选，支持 act_1146901540906487" /></div><div class="field"><label>token owner user_id</label><input id="tokenUserId" placeholder="ads_facebook_info.user_id" /></div><div class="field"><label>备注</label><input id="tokenLabel" placeholder="例如 Dramawave 控制 token" /></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="validateBtn">校验</button><button class="btn primary" id="saveTokenBtn">保存</button></div></div></div><div class="list" id="tokenList"></div></div></section>`;
     await loadProducts(); await refreshTokenPage();
     $("productSelect").onchange = refreshTokenPage;
     $("reloadBtn").onclick = refreshTokenPage;
+    $("tokenScope").onchange = () => { $("tokenAccountId").value = $("tokenScope").value || ""; };
     $("validateBtn").onclick = validateToken;
     $("saveTokenBtn").onclick = saveToken;
   }
@@ -1203,13 +1204,21 @@
     const data = await api(`/api/ad-control/token-config?product=${encodeURIComponent(product())}`);
     $("tokenList").innerHTML = (data.items || []).length ? data.items.map(item => `<div class="item"><div><strong>${item.scope === "product" ? "产品默认 token" : escapeHtml(item.account_id)}</strong><span class="hint">owner ${escapeHtml(item.user_id)} / ${escapeHtml(item.label || "--")} / 最近校验 ${escapeHtml((item.validation || {}).validated_at || "--")}</span></div><span class="badge ${((item.validation || {}).ok) ? "ok" : "warn"}">${((item.validation || {}).ok) ? "校验通过" : "未校验或失败"}</span></div>`).join("") : `<div class="empty">暂无 token 配置</div>`;
   }
+  function tokenOverrideAccountId() {
+    return normalizeAccountId($("tokenAccountId")?.value || $("tokenScope")?.value || "");
+  }
+  function tokenValidationAccounts() {
+    const accountId = tokenOverrideAccountId();
+    if (accountId) return [accountId];
+    return state.accounts.map(item => item.account_id).filter(Boolean);
+  }
   async function validateToken() {
-    const accounts = $("tokenScope").value ? [$("tokenScope").value] : state.accounts.map(item => item.account_id).filter(Boolean);
+    const accounts = tokenValidationAccounts();
     const data = await api("/api/ad-control/token-config/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), user_id: $("tokenUserId").value.trim(), accounts }) });
     toast(`校验完成：${data.ok_count}/${data.checked_count} 通过`);
   }
   async function saveToken() {
-    await api("/api/ad-control/token-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), account_id: $("tokenScope").value, user_id: $("tokenUserId").value.trim(), label: $("tokenLabel").value.trim() }) });
+    await api("/api/ad-control/token-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), account_id: tokenOverrideAccountId(), user_id: $("tokenUserId").value.trim(), label: $("tokenLabel").value.trim() }) });
     toast("token 配置已保存"); await refreshTokenPage();
   }
 

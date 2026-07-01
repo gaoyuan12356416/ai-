@@ -13,6 +13,7 @@
 | 静态检查 | 4 | 4 | 0 | 0 |
 | 浏览器 mock 验收 | 9 | 9 | 0 | 0 |
 | 后端规则匹配 | 1 | 1 | 0 | 0 |
+| Token 配置保护 | 2 | 2 | 0 | 0 |
 
 ## 缺陷情况
 暂无。
@@ -23,6 +24,8 @@
 - `node --check static/ad-control-pages.js` 通过。
 - `git diff --check` 通过。
 - `ad_control_evaluate_rules` 小验证通过：`language=ja` 不命中，`language=EN` 命中；`country=WW-4` 和 `country=BR` 均命中，确认当前规则不限制国家组。
+- Token 配置保存入口验证通过：不存在的 `token owner user_id` 不能保存；账号级 override 在 token 无法访问账号时不能保存。
+- Token 配置页面支持手动填写 `account_id` 作为账户级 override，适配账号未出现在接口下拉列表的场景。
 - Playwright 使用本机 Chrome 打开本地 `ad-control-rules.html`，mock `/api/ui/topbar`、`/api/ad-control/bindings`、`/api/ad-control/accounts`。
 - 抽屉产品枚举为 `dramawave`、`hotdrama`、`freereels`，未出现 `3348`、`bestreels`、`PrestaGo`、`LoadCash` 等无关产品。
 - 选择 `dramawave + hotdrama` 后，账号列表只展示这两个产品下的账号。
