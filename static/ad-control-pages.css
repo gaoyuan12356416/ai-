@@ -92,6 +92,15 @@ th { position: sticky; top: 0; z-index: 1; background: #f8fafd; color: #475467; 
 .fixed-products .check-option span { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 .account-product-list { display: grid; gap: 12px; }
 .account-product-block { border: 1px solid #d8e0ec; border-radius: 8px; overflow: hidden; background: #fff; }
+.manual-account-box { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; border: 1px solid #d8e0ec; border-radius: 8px; background: #fbfcff; padding: 12px; }
+.manual-account-box .btn { margin-bottom: 24px; }
+.selected-account-box { border: 1px solid #d8e0ec; border-radius: 8px; overflow: hidden; background: #fff; }
+.selected-account-list { max-height: 190px; overflow: auto; padding: 8px; display: grid; gap: 6px; background: #fbfcff; }
+.selected-account-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid #edf1f7; border-radius: 6px; background: #fff; padding: 8px 10px; }
+.selected-account-item strong { display: inline-block; margin-right: 8px; color: #1d4ed8; font-size: 12px; }
+.selected-account-item span { font-size: 13px; overflow-wrap: anywhere; }
+.selected-account-item small { display: block; color: #667085; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+.compact-empty { padding: 14px 12px; }
 .summary-box { border: 1px solid #d8e0ec; border-radius: 8px; background: #fbfcff; padding: 12px; display: grid; gap: 10px; }
 .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .summary-grid div { border: 1px solid #edf1f7; border-radius: 6px; background: #fff; padding: 10px; min-width: 0; }
@@ -109,6 +118,8 @@ th { position: sticky; top: 0; z-index: 1; background: #f8fafd; color: #475467; 
   .item { grid-template-columns: 1fr; }
   .account-option { grid-template-columns: 18px minmax(0, 1fr); }
   .account-meta { grid-column: 2; white-space: normal; }
+  .manual-account-box, .selected-account-item { grid-template-columns: 1fr; }
+  .manual-account-box .btn { margin-bottom: 0; }
   .drawer-panel { width: 100vw; }
   .drawer-head, .drawer-foot { align-items: flex-start; flex-direction: column; }
 }

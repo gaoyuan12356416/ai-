@@ -525,6 +525,8 @@
         <div class="section-title"><span>2</span><h3>产品与账号</h3></div>
         <div class="field"><label>产品（固定枚举，多选）</label><div class="check-list compact fixed-products" id="drawerProducts">${ALLOWED_PRODUCTS.map(value => `<label class="check-option"><input type="checkbox" value="${value}" ${draft.products.includes(value) ? "checked" : ""} /><span>${PRODUCT_LABELS[value]}</span></label>`).join("")}</div></div>
         <div class="grid"><div class="field"><label>账号搜索</label><input id="drawerAccountSearch" placeholder="账户名 / account_id" /></div><div class="field"><label>时区筛选</label><input id="drawerTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerPlus8Only" type="checkbox" checked /> 只看 +8</label></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="drawerSelectVisibleAccounts" type="button">全选可见</button><button class="btn" id="drawerClearVisibleAccounts" type="button">清空可见</button></div></div></div>
+        <div class="manual-account-box"><div class="field"><label>手动添加账号 ID</label><textarea id="drawerManualAccounts" class="short-textarea" placeholder="支持粘贴 act_1146901540906487、1026707669580137；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">手动账号会加入当前选中的每个产品；适合账号未出现在接口列表时使用。</span></div><button class="btn" id="drawerAddManualAccounts" type="button">加入选中产品</button></div>
+        <div class="selected-account-box"><div class="bulk-head"><strong>已选账号</strong><span class="hint" id="drawerSelectedAccountHint">0 个</span></div><div class="selected-account-list" id="drawerSelectedAccounts"></div></div>
         <div class="account-product-list" id="drawerAccounts"></div>
       </section>
       <section class="drawer-section">
@@ -556,12 +558,20 @@
     $("drawerPlus8Only").onchange = renderRuleGroupAccounts;
     $("drawerSelectVisibleAccounts").onclick = () => setVisibleRuleAccounts(true);
     $("drawerClearVisibleAccounts").onclick = () => setVisibleRuleAccounts(false);
+    $("drawerAddManualAccounts").onclick = addManualRuleAccounts;
     $("drawerAccounts").onchange = event => {
       const input = event.target.closest("[data-rule-account]");
       if (!input) return;
       if (input.checked) state.ruleGroupDraft.selectedAccountKeys.add(input.dataset.accountKey);
       else state.ruleGroupDraft.selectedAccountKeys.delete(input.dataset.accountKey);
+      renderSelectedRuleAccounts();
       updateRuleGroupSummary();
+    };
+    $("drawerSelectedAccounts").onclick = event => {
+      const button = event.target.closest("[data-remove-account-key]");
+      if (!button) return;
+      state.ruleGroupDraft.selectedAccountKeys.delete(button.dataset.removeAccountKey);
+      renderRuleGroupAccounts();
     };
     $("buildDrawerRuleBtn").onclick = () => {
       $("drawerRulesJson").value = JSON.stringify(buildDrawerRulesFromThresholds(), null, 2);
@@ -571,7 +581,10 @@
     };
   }
   function accountValue(item) {
-    return String((item && (item.account_id || item.ad_account_id)) || "").replace(/^act_/, "");
+    return normalizeAccountId((item && (item.account_id || item.ad_account_id)) || "");
+  }
+  function normalizeAccountId(value) {
+    return String(value || "").trim().replace(/^act_/i, "");
   }
   async function ensureRuleGroupAccountsForProducts(products) {
     await Promise.all((products || []).filter(value => ALLOWED_PRODUCTS.includes(value)).map(async value => {
@@ -614,7 +627,44 @@
         return `<label class="account-option"><input type="checkbox" data-rule-account="1" data-account-key="${escapeHtml(key)}" value="${escapeHtml(id)}" ${checked} /><div class="account-title">${escapeHtml(account.account_name || account.name || id)}</div><div class="account-meta">${escapeHtml(id)} / ${escapeHtml(account.time_zone || "--")}</div></label>`;
       }).join("") : `<div class="empty">无匹配账号</div>`}</div></div>`;
     }).join("") : `<div class="empty">请先选择产品</div>`;
+    renderSelectedRuleAccounts();
     updateRuleGroupSummary();
+  }
+  function addManualRuleAccounts() {
+    const draft = state.ruleGroupDraft;
+    if (!draft) return;
+    const products = selectedProducts("drawerProducts");
+    if (!products.length) return toast("请先选择产品", "error");
+    const ids = Array.from(new Set(splitValues($("drawerManualAccounts").value).map(normalizeAccountId).filter(Boolean)));
+    if (!ids.length) return toast("请粘贴账号 ID", "error");
+    products.forEach(productValue => {
+      ids.forEach(id => draft.selectedAccountKeys.add(`${productValue}:${id}`));
+    });
+    $("drawerManualAccounts").value = "";
+    renderRuleGroupAccounts();
+    toast(`已加入 ${ids.length} 个账号到 ${products.length} 个产品`);
+  }
+  function selectedAccountDisplay(productValue, accountId) {
+    const account = (state.ruleGroupAccounts[productValue] || []).find(item => accountValue(item) === accountId);
+    if (!account) return { title: accountId, meta: "手动添加" };
+    return {
+      title: account.account_name || account.name || accountId,
+      meta: `${accountId} / ${account.time_zone || "--"}`,
+    };
+  }
+  function renderSelectedRuleAccounts() {
+    const root = $("drawerSelectedAccounts");
+    const hint = $("drawerSelectedAccountHint");
+    const draft = state.ruleGroupDraft;
+    if (!root || !draft) return;
+    const products = selectedProducts("drawerProducts");
+    const selected = Array.from(draft.selectedAccountKeys).filter(key => products.some(productValue => key.startsWith(`${productValue}:`))).sort();
+    if (hint) hint.textContent = `${selected.length} 个`;
+    root.innerHTML = selected.length ? selected.map(key => {
+      const [productValue, accountId] = key.split(":", 2);
+      const display = selectedAccountDisplay(productValue, accountId);
+      return `<div class="selected-account-item"><div><strong>${escapeHtml(productValue)}</strong><span>${escapeHtml(display.title)}</span><small>${escapeHtml(display.meta)}</small></div><button class="btn" data-remove-account-key="${escapeHtml(key)}" type="button">移除</button></div>`;
+    }).join("") : `<div class="empty compact-empty">暂无已选账号，可从下方列表勾选或手动粘贴 account_id。</div>`;
   }
   function setVisibleRuleAccounts(checked) {
     const draft = state.ruleGroupDraft;
@@ -624,6 +674,7 @@
       if (checked) draft.selectedAccountKeys.add(input.dataset.accountKey);
       else draft.selectedAccountKeys.delete(input.dataset.accountKey);
     });
+    renderSelectedRuleAccounts();
     updateRuleGroupSummary();
   }
   function buildDrawerRulesFromThresholds() {

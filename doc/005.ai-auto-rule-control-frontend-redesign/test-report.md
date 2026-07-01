@@ -11,7 +11,7 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 静态检查 | 4 | 4 | 0 | 0 |
-| 浏览器 mock 验收 | 6 | 6 | 0 | 0 |
+| 浏览器 mock 验收 | 7 | 7 | 0 | 0 |
 
 ## 缺陷情况
 暂无。
@@ -26,7 +26,9 @@
 - 选择 `dramawave + hotdrama` 后，账号列表只展示这两个产品下的账号。
 - 规则组列表能把 `dramawave/hotdrama` 两条底层 binding 聚合为一个前端规则组。
 - 保存流程 mock 验证通过：`dramawave + hotdrama` 会生成 2 条 `rule_set`、2 条 `account_group`、2 条 `binding`；binding 均为 `enabled=false`，并使用同一个 `strategy.frontend_rule_group_id` 聚合。
+- 手动添加账号 mock 验证通过：当 `/api/ad-control/accounts` 未返回目标账号时，在抽屉粘贴 account_id 仍能加入已选账号，并保存到 3 个产品的 `account_group` 与 `binding.strategy.selected_account_ids`；binding 仍为 `enabled=false`。
 - 截图：`implemented-rules-drawer.png`。
+- 截图：`manual-account-add.png`。
 - Playwright 打开 `prototype/ad-control-redesign-preview.html` 成功。
 - 截图：`prototype/ad-control-redesign-preview.png`。
 - 页面标题：`AI自动规则调控 - 前端重设计原型`。
