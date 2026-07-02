@@ -38,7 +38,6 @@
     ruleSets: [],
     bindings: [],
     preview: null,
-    bulkAccounts: {},
     ruleGroupAccounts: {},
     frontendRuleGroups: [],
     ruleGroupDraft: null,
@@ -956,24 +955,13 @@
   }
 
   async function renderPools() {
-    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>+8账户池批量创建</h2><div class="row"><button class="btn" id="loadBulkAccountsBtn">加载账户</button><button class="btn" id="selectPlus8Btn">选择+8账户</button><button class="btn primary" id="saveBulkPoolsBtn">批量保存账户池</button></div></div><div class="panel-body">
-      <div class="field"><label>投放产品（多选）</label><div class="check-list compact" id="poolProductMulti"></div></div>
-      <div class="grid"><div class="field"><label>账户池名前缀</label><input id="bulkPoolPrefix" value="北美 +8 调控账户" /></div><div class="field"><label>账户搜索</label><input id="bulkAccountSearch" placeholder="账户名 / ID" /></div><div class="field"><label>时区筛选</label><input id="bulkTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bulkPlus8Only" type="checkbox" checked /> 只看+8</label></div></div>
-      <div class="risk">批量保存会为每个产品分别创建账户池，不会创建跨产品绑定，也不会启用任何规则。</div>
-      <div class="bulk-groups" id="bulkAccountGroups"></div>
-      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>账户池</h2><div class="row"><button class="btn" id="newPoolBtn">新建账户池</button><button class="btn primary" id="savePoolBtn">保存账户池</button></div></div><div class="panel-body">
+    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>账户池</h2><div class="row"><button class="btn" id="newPoolBtn">新建账户池</button><button class="btn primary" id="savePoolBtn">保存账户池</button></div></div><div class="panel-body">
       <div class="grid two"><div class="field"><label>账户池名称</label><input id="poolName" placeholder="北美 +8 调控账户" /></div><div class="field"><label>账户池 ID</label><input id="poolId" readonly /></div></div>
       <div class="row"><button class="btn" id="selectAllBtn">全选账户</button><button class="btn" id="clearBtn">清空账户</button><span class="hint" id="accountHint"></span></div><div class="account-list" id="accountList"></div>
       <div class="manual-account-box" style="margin-top:12px;"><div class="field"><label>手动添加账号 ID</label><textarea id="poolManualAccounts" class="short-textarea" placeholder="支持粘贴 act_1146901540906487、1026707669580137；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">手动账号会写入当前产品的账户池；适合账号未出现在接口列表时使用。</span></div><button class="btn" id="poolAddManualAccounts" type="button">加入账户池</button></div>
       </div></section><section class="panel"><div class="panel-head"><h2>账户池列表</h2></div><div class="panel-body"><div class="list" id="poolList"></div></div></section>`;
-    await loadProducts(); renderProductChecks("poolProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await refreshPoolPage();
+    await loadProducts(); await refreshPoolPage();
     $("productSelect").onchange = refreshPoolPage;
-    $("loadBulkAccountsBtn").onclick = loadBulkAccounts;
-    $("selectPlus8Btn").onclick = selectPlus8BulkAccounts;
-    $("saveBulkPoolsBtn").onclick = saveBulkPools;
-    $("bulkAccountSearch").oninput = renderBulkAccounts;
-    $("bulkTimezoneFilter").oninput = renderBulkAccounts;
-    $("bulkPlus8Only").onchange = renderBulkAccounts;
     $("newPoolBtn").onclick = resetPoolForm;
     $("savePoolBtn").onclick = savePool;
     $("selectAllBtn").onclick = () => document.querySelectorAll("#accountList input").forEach(input => input.checked = true);
@@ -985,66 +973,6 @@
       event.preventDefault();
       renderAccounts(selectedAccounts().filter(id => id !== normalizeAccountId(remove.dataset.removePoolAccount)));
     };
-  }
-  async function loadBulkAccounts() {
-    const products = selectedProducts("poolProductMulti");
-    if (!products.length) return toast("请选择投放产品", "error");
-    state.bulkAccounts = {};
-    await Promise.all(products.map(async value => {
-      const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`);
-      state.bulkAccounts[value] = data.items || [];
-    }));
-    renderBulkAccounts();
-    toast(`已加载 ${products.length} 个产品账户`);
-  }
-  function bulkAccountVisible(account) {
-    const query = ($("bulkAccountSearch")?.value || "").trim().toLowerCase();
-    const tzFilter = ($("bulkTimezoneFilter")?.value || "").trim();
-    const plus8Only = $("bulkPlus8Only")?.checked;
-    const haystack = `${account.account_id || ""} ${account.account_name || ""}`.toLowerCase();
-    if (query && !haystack.includes(query)) return false;
-    if (plus8Only && !isPlus8Timezone(account.time_zone)) return false;
-    if (tzFilter && !Array.from(timezoneValues(account.time_zone)).some(item => timezoneValues(tzFilter).has(item))) return false;
-    return true;
-  }
-  function renderBulkAccounts() {
-    const root = $("bulkAccountGroups");
-    if (!root) return;
-    const entries = Object.entries(state.bulkAccounts || {});
-    root.innerHTML = entries.length ? entries.map(([productValue, accounts]) => {
-      const visible = (accounts || []).filter(bulkAccountVisible);
-      return `<div class="bulk-group"><div class="bulk-head"><strong>${escapeHtml(productValue)}</strong><span class="hint">${visible.length}/${(accounts || []).length} 个账户</span></div><div class="account-list">${visible.length ? visible.map(account => {
-        const id = account.account_id || "";
-        return `<label class="account-option"><input type="checkbox" data-bulk-account="${escapeHtml(id)}" data-product="${escapeHtml(productValue)}" value="${escapeHtml(id)}" /><div class="account-title">${escapeHtml(account.account_name || id)}</div><div class="account-meta">${escapeHtml(id)} / ${escapeHtml(account.time_zone || "--")}</div></label>`;
-      }).join("") : `<div class="empty">无匹配账户</div>`}</div></div>`;
-    }).join("") : `<div class="empty">请选择产品后加载账户</div>`;
-  }
-  function selectPlus8BulkAccounts() {
-    document.querySelectorAll("[data-bulk-account]").forEach(input => {
-      const productValue = input.dataset.product || "";
-      const account = (state.bulkAccounts[productValue] || []).find(item => String(item.account_id || "") === input.value);
-      input.checked = !!account && isPlus8Timezone(account.time_zone);
-    });
-  }
-  async function saveBulkPools() {
-    const prefix = ($("bulkPoolPrefix").value || "北美 +8 调控账户").trim();
-    const byProduct = {};
-    document.querySelectorAll("[data-bulk-account]:checked").forEach(input => {
-      const productValue = input.dataset.product || "";
-      byProduct[productValue] = byProduct[productValue] || [];
-      byProduct[productValue].push(input.value);
-    });
-    const products = Object.keys(byProduct).filter(key => byProduct[key].length);
-    if (!products.length) return toast("请先选择账户", "error");
-    for (const productValue of products) {
-      await api("/api/ad-control/account-groups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product: productValue, name: `${prefix} / ${productValue} / +8`, account_ids: byProduct[productValue] }),
-      });
-    }
-    toast(`已保存 ${products.length} 个账户池`);
-    await refreshPoolPage();
   }
   async function refreshPoolPage() {
     await loadAccounts(); await loadPools(); $("accountHint").textContent = `已加载 ${state.accounts.length} 个账户`; renderPoolList();
