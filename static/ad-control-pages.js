@@ -73,7 +73,7 @@
     return ALLOWED_PRODUCTS.map(value => ({ product: value, label: PRODUCT_LABELS[value] || value }));
   }
   function selectedAccounts() {
-    return Array.from(document.querySelectorAll("#accountList input[type=checkbox]:checked")).map(item => item.value);
+    return Array.from(new Set(Array.from(document.querySelectorAll("#accountList input[type=checkbox]:checked")).map(item => normalizeAccountId(item.value)).filter(Boolean)));
   }
   function money(value) {
     return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -318,12 +318,18 @@
   function renderAccounts(selected) {
     const list = $("accountList");
     if (!list) return;
-    const selectedSet = new Set(selected || []);
-    list.innerHTML = state.accounts.length ? state.accounts.map(item => {
+    const selectedIds = Array.from(new Set((selected || []).map(normalizeAccountId).filter(Boolean)));
+    const selectedSet = new Set(selectedIds);
+    const knownIds = new Set((state.accounts || []).map(item => normalizeAccountId(item.account_id || item.ad_account_id || "")).filter(Boolean));
+    const manualIds = selectedIds.filter(id => !knownIds.has(id));
+    const manualHtml = manualIds.map(id => `<label class="account-option manual-account-option"><input type="checkbox" value="${escapeHtml(id)}" checked /><div><div class="account-title">手动账号 ${escapeHtml(id)}</div><div class="account-meta">${escapeHtml(id)} / 手动添加</div></div><button class="btn" type="button" data-remove-pool-account="${escapeHtml(id)}">移除</button></label>`).join("");
+    const accountHtml = state.accounts.length ? state.accounts.map(item => {
       const id = item.account_id || item.ad_account_id || "";
-      const checked = selectedSet.has(id) ? "checked" : "";
+      const normalizedId = normalizeAccountId(id);
+      const checked = selectedSet.has(normalizedId) ? "checked" : "";
       return `<label class="account-option"><input type="checkbox" value="${escapeHtml(id)}" ${checked} /><div class="account-title">${escapeHtml(item.account_name || item.name || id)}</div><div class="account-meta">${escapeHtml(id)} / ${escapeHtml(item.time_zone || "--")}</div></label>`;
-    }).join("") : `<div class="empty">暂无账户</div>`;
+    }).join("") : `<div class="empty">暂无接口账户，可手动添加账号 ID</div>`;
+    list.innerHTML = manualHtml || accountHtml ? `${manualHtml}${accountHtml}` : `<div class="empty">暂无账户</div>`;
   }
   async function loadPools() {
     const data = await api(`/api/ad-control/account-groups?product=${encodeURIComponent(product())}`);
@@ -955,9 +961,10 @@
       <div class="grid"><div class="field"><label>账户池名前缀</label><input id="bulkPoolPrefix" value="北美 +8 调控账户" /></div><div class="field"><label>账户搜索</label><input id="bulkAccountSearch" placeholder="账户名 / ID" /></div><div class="field"><label>时区筛选</label><input id="bulkTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bulkPlus8Only" type="checkbox" checked /> 只看+8</label></div></div>
       <div class="risk">批量保存会为每个产品分别创建账户池，不会创建跨产品绑定，也不会启用任何规则。</div>
       <div class="bulk-groups" id="bulkAccountGroups"></div>
-      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>账户池</h2><button class="btn primary" id="savePoolBtn">保存账户池</button></div><div class="panel-body">
+      </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>账户池</h2><div class="row"><button class="btn" id="newPoolBtn">新建账户池</button><button class="btn primary" id="savePoolBtn">保存账户池</button></div></div><div class="panel-body">
       <div class="grid two"><div class="field"><label>账户池名称</label><input id="poolName" placeholder="北美 +8 调控账户" /></div><div class="field"><label>账户池 ID</label><input id="poolId" readonly /></div></div>
       <div class="row"><button class="btn" id="selectAllBtn">全选账户</button><button class="btn" id="clearBtn">清空账户</button><span class="hint" id="accountHint"></span></div><div class="account-list" id="accountList"></div>
+      <div class="manual-account-box" style="margin-top:12px;"><div class="field"><label>手动添加账号 ID</label><textarea id="poolManualAccounts" class="short-textarea" placeholder="支持粘贴 act_1146901540906487、1026707669580137；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">手动账号会写入当前产品的账户池；适合账号未出现在接口列表时使用。</span></div><button class="btn" id="poolAddManualAccounts" type="button">加入账户池</button></div>
       </div></section><section class="panel"><div class="panel-head"><h2>账户池列表</h2></div><div class="panel-body"><div class="list" id="poolList"></div></div></section>`;
     await loadProducts(); renderProductChecks("poolProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await refreshPoolPage();
     $("productSelect").onchange = refreshPoolPage;
@@ -967,9 +974,17 @@
     $("bulkAccountSearch").oninput = renderBulkAccounts;
     $("bulkTimezoneFilter").oninput = renderBulkAccounts;
     $("bulkPlus8Only").onchange = renderBulkAccounts;
+    $("newPoolBtn").onclick = resetPoolForm;
     $("savePoolBtn").onclick = savePool;
     $("selectAllBtn").onclick = () => document.querySelectorAll("#accountList input").forEach(input => input.checked = true);
     $("clearBtn").onclick = () => document.querySelectorAll("#accountList input").forEach(input => input.checked = false);
+    $("poolAddManualAccounts").onclick = addPoolManualAccounts;
+    $("accountList").onclick = event => {
+      const remove = event.target.closest("[data-remove-pool-account]");
+      if (!remove) return;
+      event.preventDefault();
+      renderAccounts(selectedAccounts().filter(id => id !== normalizeAccountId(remove.dataset.removePoolAccount)));
+    };
   }
   async function loadBulkAccounts() {
     const products = selectedProducts("poolProductMulti");
@@ -1036,7 +1051,22 @@
   }
   async function savePool() {
     await api("/api/ad-control/account-groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: $("poolId").value, product: product(), name: $("poolName").value.trim(), account_ids: selectedAccounts() }) });
-    toast("账户池已保存"); $("poolId").value = ""; $("poolName").value = ""; await refreshPoolPage();
+    toast("账户池已保存"); resetPoolForm(); await refreshPoolPage();
+  }
+  function resetPoolForm() {
+    $("poolId").value = "";
+    $("poolName").value = "";
+    if ($("poolManualAccounts")) $("poolManualAccounts").value = "";
+    renderAccounts([]);
+  }
+  function addPoolManualAccounts() {
+    const ids = Array.from(new Set(splitValues($("poolManualAccounts").value).map(normalizeAccountId).filter(Boolean)));
+    if (!ids.length) return toast("请粘贴账号 ID", "error");
+    const selected = new Set(selectedAccounts());
+    ids.forEach(id => selected.add(id));
+    renderAccounts(Array.from(selected));
+    $("poolManualAccounts").value = "";
+    toast(`已加入 ${ids.length} 个账号`);
   }
   function renderPoolList() {
     $("poolList").innerHTML = state.pools.length ? state.pools.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.group_id)} / ${item.account_ids.length} 个账户</span></div><div class="row"><button class="btn" data-edit-pool="${escapeHtml(item.group_id)}">编辑</button><button class="btn danger" data-delete-pool="${escapeHtml(item.group_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无账户池</div>`;
