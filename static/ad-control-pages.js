@@ -898,7 +898,10 @@
   }
   async function setFrontendRuleGroupEnabled(group, enabled) {
     const label = enabled ? "启用" : "禁用";
-    if (enabled && !confirm("启用前必须完成对应绑定的 live preview 和 token 校验。确认继续？")) return;
+    const enableMessage = group.emergency_stopped
+      ? "当前规则组已急停。启用会在完成 live preview 和 token 校验后解除急停并重新启用，确认继续？"
+      : "启用前必须完成对应绑定的 live preview 和 token 校验。确认继续？";
+    if (enabled && !confirm(enableMessage)) return;
     const targets = (group.bindings || []).map(binding => ({ binding, id: bindingId(binding) })).filter(item => item.id);
     const results = await Promise.allSettled(targets.map(item => api(`/api/ad-control/bindings/${encodeURIComponent(item.id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) })));
     const failed = results

@@ -34367,8 +34367,6 @@ def set_ad_control_rule_group_enabled(group_id, enabled):
     ensure_ad_control_tables()
     group = fetch_ad_control_rule_group(group_id)
     if enabled:
-        if group.get("emergency_stopped"):
-            raise StructuredApiError("emergency_stopped", "rule group is emergency stopped")
         if not group.get("last_preview_id") or not group.get("last_preview_hash"):
             raise StructuredApiError("preview_required", "preview this rule group before enabling it")
         scope = ad_control_resolve_live_scope({"rule_group_id": group_id})
@@ -34376,10 +34374,27 @@ def set_ad_control_rule_group_enabled(group_id, enabled):
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            conn.execute(
-                "UPDATE ad_control_rule_group SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
-                (1 if enabled else 0, group_id),
-            )
+            if enabled:
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET enabled=1,
+                           emergency_stopped=0,
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=?
+                    """,
+                    (group_id,),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE ad_control_rule_group
+                       SET enabled=0,
+                           updated_at=CURRENT_TIMESTAMP
+                     WHERE group_id=?
+                    """,
+                    (group_id,),
+                )
             conn.commit()
         finally:
             conn.close()
