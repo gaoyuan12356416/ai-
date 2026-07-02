@@ -190,6 +190,8 @@
           block_same_day_reopen: !!strategy.block_same_day_reopen,
           allow_next_day_reopen: !!strategy.allow_next_day_reopen,
           enabled: false,
+          enabled_count: 0,
+          partial_enabled: false,
           emergency_stopped: false,
           rule_count: 0,
           account_count: 0,
@@ -207,14 +209,19 @@
       if (!group.execute_timezone && strategy.execute_timezone) group.execute_timezone = strategy.execute_timezone;
       group.block_same_day_reopen = group.block_same_day_reopen || !!strategy.block_same_day_reopen;
       group.allow_next_day_reopen = group.allow_next_day_reopen || !!strategy.allow_next_day_reopen;
-      group.enabled = group.enabled || !!binding.enabled;
+      if (binding.enabled) group.enabled_count += 1;
       group.emergency_stopped = group.emergency_stopped || !!binding.emergency_stopped;
       group.rule_count += Array.isArray(binding.rules) ? binding.rules.length : 0;
       group.account_count += Number(strategy.account_count || (Array.isArray(strategy.selected_account_ids) ? strategy.selected_account_ids.length : 0) || (Array.isArray(binding.account_ids) ? binding.account_ids.length : 0) || 0);
       if (binding.updated_at && (!group.updated_at || binding.updated_at > group.updated_at)) group.updated_at = binding.updated_at;
       if ((!group.country_groups || !group.country_groups.length) && Array.isArray(strategy.country_groups)) group.country_groups = strategy.country_groups;
     });
-    return Array.from(map.values()).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    return Array.from(map.values()).map(group => {
+      const total = group.bindings.length;
+      group.enabled = total > 0 && group.enabled_count === total;
+      group.partial_enabled = group.enabled_count > 0 && group.enabled_count < total;
+      return group;
+    }).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
   }
   function defaultCrossRegionRules() {
     return [{
@@ -384,7 +391,7 @@
           <div class="rule-toolbar">
             <div class="field"><label>搜索</label><input id="ruleGroupSearch" placeholder="规则组名称 / ID / 国家组" /></div>
             <div class="field"><label>产品筛选</label><select id="ruleGroupProductFilter"><option value="">全部三个产品</option>${ALLOWED_PRODUCTS.map(value => `<option value="${value}">${PRODUCT_LABELS[value]}</option>`).join("")}</select></div>
-            <div class="field"><label>状态筛选</label><select id="ruleGroupStatusFilter"><option value="">全部</option><option value="enabled">已启用</option><option value="disabled">已禁用</option><option value="stopped">已急停</option></select></div>
+            <div class="field"><label>状态筛选</label><select id="ruleGroupStatusFilter"><option value="">全部</option><option value="enabled">已启用</option><option value="partial">部分启用</option><option value="disabled">已禁用</option><option value="stopped">已急停</option></select></div>
             <div class="field"><label>&nbsp;</label><button class="btn" id="clearRuleGroupFilterBtn" type="button">清空筛选</button></div>
           </div>
           <div class="risk">本页不调用 Meta 写接口。保存规则组只写本后台配置；Preview 入口会跳到运行控制台，真实关闭仍需要二次确认。</div>
@@ -432,7 +439,8 @@
       if (query && !haystack.includes(query)) return false;
       if (productFilterValue && !(group.products || []).includes(productFilterValue)) return false;
       if (status === "enabled" && !group.enabled) return false;
-      if (status === "disabled" && (group.enabled || group.emergency_stopped)) return false;
+      if (status === "disabled" && (group.enabled || group.partial_enabled || group.emergency_stopped)) return false;
+      if (status === "partial" && !group.partial_enabled) return false;
       if (status === "stopped" && !group.emergency_stopped) return false;
       return true;
     });
@@ -442,7 +450,14 @@
     if (!rows) return;
     const groups = filteredRuleGroups();
     rows.innerHTML = groups.length ? groups.map(group => {
-      const stateLabel = group.emergency_stopped ? `<span class="badge danger">已急停</span>` : (group.enabled ? `<span class="badge ok">已启用</span>` : `<span class="badge warn">已禁用</span>`);
+      const stateLabel = group.emergency_stopped
+        ? `<span class="badge danger">已急停</span>`
+        : (group.enabled
+          ? `<span class="badge ok">已启用</span>`
+          : (group.partial_enabled
+            ? `<span class="badge warn">部分启用 ${group.enabled_count}/${group.bindings.length}</span>`
+            : `<span class="badge warn">已禁用</span>`));
+      const toggleLabel = group.enabled ? "禁用" : (group.partial_enabled ? "继续启用" : "启用");
       return `<tr>
         <td><strong>${escapeHtml(group.name)}</strong><div class="mono">${escapeHtml(group.id)}</div><div class="hint">${escapeHtml(group.description || "无说明")}</div></td>
         <td><div class="chip-row">${productBadgeList(group.products)}</div></td>
@@ -455,7 +470,7 @@
           <button class="btn" data-rule-action="copy" data-group="${escapeHtml(group.id)}" type="button">复制</button>
           <button class="btn" data-rule-action="preview" data-group="${escapeHtml(group.id)}" type="button">Preview</button>
           <button class="btn" data-rule-action="logs" data-group="${escapeHtml(group.id)}" type="button">日志</button>
-          <button class="btn" data-rule-action="toggle" data-enabled="${group.enabled ? "0" : "1"}" data-group="${escapeHtml(group.id)}" type="button">${group.enabled ? "禁用" : "启用"}</button>
+          <button class="btn" data-rule-action="toggle" data-enabled="${group.enabled ? "0" : "1"}" data-group="${escapeHtml(group.id)}" type="button">${toggleLabel}</button>
           <button class="btn danger" data-rule-action="stop" data-group="${escapeHtml(group.id)}" type="button">急停</button>
           <button class="btn danger" data-rule-action="delete" data-group="${escapeHtml(group.id)}" type="button">删除</button>
         </div></td>
@@ -884,13 +899,22 @@
   async function setFrontendRuleGroupEnabled(group, enabled) {
     const label = enabled ? "启用" : "禁用";
     if (enabled && !confirm("启用前必须完成对应绑定的 live preview 和 token 校验。确认继续？")) return;
-    let ok = 0;
-    for (const binding of group.bindings) {
-      await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId(binding))}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) });
-      ok += 1;
+    const targets = (group.bindings || []).map(binding => ({ binding, id: bindingId(binding) })).filter(item => item.id);
+    const results = await Promise.allSettled(targets.map(item => api(`/api/ad-control/bindings/${encodeURIComponent(item.id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) })));
+    const failed = results
+      .map((result, index) => ({ result, id: targets[index].id, product: targets[index].binding.product || "" }))
+      .filter(item => item.result.status === "rejected");
+    const ok = results.length - failed.length;
+    if (failed.length) {
+      toast(`${label}部分完成：成功 ${ok} 个，失败 ${failed.length} 个`);
+      console.warn("ad-control toggle failed", failed.map(item => ({ id: item.id, product: item.product, error: item.result.reason && item.result.reason.message ? item.result.reason.message : String(item.result.reason) })));
+    } else {
+      toast(`${label}完成：${ok} 个底层绑定`);
     }
-    toast(`${label}完成：${ok} 个底层绑定`);
     await refreshRuleGroups();
+    if (failed.length) {
+      throw new Error(`${label}失败：${failed.map(item => item.product || item.id).join(", ")}`);
+    }
   }
   async function emergencyStopFrontendRuleGroup(group) {
     if (!confirm("确认急停当前规则组？只停止该规则组的底层绑定，不会主动改广告状态。")) return;
