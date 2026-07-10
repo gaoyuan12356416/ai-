@@ -1,5 +1,11 @@
 # Meta playable preview packaging
 
+Public API document source: `doc/deployment/playable-preview-api.md`
+
+Published document:
+
+`https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md`
+
 Endpoints:
 
 - `POST /api/ad-material/playable-preview` (legacy-compatible)
@@ -26,6 +32,15 @@ Validation:
 python -m py_compile app.py fb_playable_generator.py scripts\test_fb_playable_generator.py
 python scripts\test_fb_playable_generator.py
 python scripts\test_fb_playable_generator.py --source-zip <game.zip> --output-html <preview.html>
+python scripts\publish_playable_preview_docs.py --check-only
 ```
 
-The response includes `meta_compatible`, `compatibility`, `html_size`, `zip_size`, `meta_size_limit_bytes`, `size_headroom_bytes`, `manifest_url`, the original `source_entry`, and final `entry=index.html`.
+After deploying the exact Git commit to the CPU server, publish the tracked API document with the server-only COS environment:
+
+```bash
+python scripts/publish_playable_preview_docs.py
+```
+
+The publisher atomically refreshes the nginx copy and force-overwrites the fixed COS object with `text/markdown; charset=utf-8` and `Cache-Control: no-cache`. Verify the public document body, SHA-256, `Content-Type`, `Last-Modified`, and `ETag` after publishing.
+
+The response includes `meta_compatible`, `compatibility`, `html_size`, `zip_size`, `meta_size_limit_bytes`, `size_headroom_bytes`, `manifest_url`, `documentation_url`, the original `source_entry`, and final `entry=index.html`.

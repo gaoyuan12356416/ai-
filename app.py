@@ -1256,6 +1256,7 @@ PLAYABLE_PREVIEW_MAX_ZIP_BYTES = min(
     int(os.environ.get("PLAYABLE_PREVIEW_MAX_ZIP_BYTES", str(PLAYABLE_PREVIEW_MAX_ASSET_BYTES))),
 )
 PLAYABLE_PREVIEW_TRIAL_SECONDS = int(os.environ.get("PLAYABLE_PREVIEW_TRIAL_SECONDS", "20"))
+PLAYABLE_PREVIEW_DOC_OBJECT_KEY = "ad-materials/docs/playable-preview-api.md"
 
 
 AI_SOURCE_CALLBACK_URL = os.environ.get(
@@ -21992,6 +21993,9 @@ def guess_content_type(path):
     if lower.endswith(".json"):
 
         return "application/json; charset=utf-8"
+    if lower.endswith(".md") or lower.endswith(".markdown"):
+
+        return "text/markdown; charset=utf-8"
     if lower.endswith(".wasm"):
 
         return "application/wasm"
@@ -22116,6 +22120,12 @@ def playable_preview_public_base_url():
     return AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/playable-preview"
 
 
+def playable_preview_doc_url():
+    if cos_enabled():
+        return build_cos_url(PLAYABLE_PREVIEW_DOC_OBJECT_KEY)
+    return AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/docs/playable-preview-api.md"
+
+
 def sanitize_playable_filename(value, fallback):
     name = os.path.basename(str(value or "").strip())
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
@@ -22230,7 +22240,10 @@ def parse_playable_preview_request(handler):
         payload["content"] = str(static_html or "").encode("utf-8")
         payload["filename"] = payload.get("filename") or "index.html"
     else:
-        raise ValueError("missing html, html_base64 or zip_base64")
+        raise ValueError(
+            "missing static_html, static_html_base64 or static_zip_base64 "
+            "(legacy html, html_base64 and zip_base64 are also accepted)"
+        )
     return payload
 
 
@@ -22298,76 +22311,6 @@ def playable_preview_translations(payload):
     return translations
 
 
-def render_playable_preview_html(title, game_src, store_url, play_count, trial_seconds, translations):
-    safe_title = escape(title or "Playable Preview")
-    safe_game_src = escape(game_src, quote=True)
-    safe_store_url = escape(store_url, quote=True)
-    safe_play_count = escape(str(play_count))
-    translations_json = json.dumps(translations or PLAYABLE_PREVIEW_TRANSLATIONS, ensure_ascii=False)
-    return """<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <title>{title}</title>
-  <style>
-    html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#05070a;font-family:Arial,Helvetica,sans-serif;color:#fff;}}
-    .game-frame{{position:fixed;inset:0;width:100%;height:100%;border:0;background:#000;}}
-    .play-count{{position:fixed;top:12px;left:12px;z-index:5;padding:7px 10px;border-radius:999px;background:rgba(0,0,0,.55);font-size:13px;line-height:1;backdrop-filter:blur(6px);}}
-    .install-layer{{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(5,7,10,.78);opacity:0;visibility:hidden;transition:opacity .25s ease,visibility .25s ease;}}
-    .install-layer.show{{opacity:1;visibility:visible;}}
-    .install-panel{{width:min(380px,100%);text-align:center;}}
-    .install-title{{margin:0 0 8px;font-size:25px;line-height:1.18;font-weight:800;}}
-    .install-subtitle{{margin:0 0 18px;color:rgba(255,255,255,.78);font-size:15px;line-height:1.35;font-weight:600;}}
-    .install-button{{display:inline-flex;align-items:center;justify-content:center;min-height:52px;padding:0 22px;border-radius:10px;background:#18c964;color:#06110a;text-decoration:none;font-size:17px;font-weight:800;box-shadow:0 12px 34px rgba(24,201,100,.35);}}
-  </style>
-</head>
-<body>
-  <iframe class="game-frame" src="{game_src}" allow="autoplay; fullscreen; gamepad; clipboard-read; clipboard-write"></iframe>
-  <div class="play-count"><span id="playLabel">Plays</span>: {play_count}</div>
-  <div class="install-layer" id="installLayer">
-    <div class="install-panel">
-      <h1 class="install-title" data-i18n="headline">Trial Complete</h1>
-      <p class="install-subtitle" data-i18n="subtitle">Install the app to keep playing.</p>
-      <a class="install-button" data-i18n="cta" href="{store_url}" target="_blank" rel="noopener">Install to Play More</a>
-    </div>
-  </div>
-  <script>
-    var translations = {translations_json};
-    function normalizeLang(value) {{
-      return String(value || '').toLowerCase().replace(/_/g, '-');
-    }}
-    function selectCopy() {{
-      var langs = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || 'en']).map(normalizeLang);
-      for (var i = 0; i < langs.length; i += 1) {{
-        if (translations[langs[i]]) return translations[langs[i]];
-        var base = langs[i].split('-')[0];
-        if (translations[base]) return translations[base];
-      }}
-      return translations.en || {{headline: 'Trial Complete', subtitle: 'Install the app to keep playing.', cta: 'Install to Play More', plays: 'Plays'}};
-    }}
-    var copy = selectCopy();
-    document.documentElement.lang = normalizeLang((navigator.languages && navigator.languages[0]) || navigator.language || 'en') || 'en';
-    document.querySelector('[data-i18n="headline"]').textContent = copy.headline || 'Trial Complete';
-    document.querySelector('[data-i18n="subtitle"]').textContent = copy.subtitle || 'Install the app to keep playing.';
-    document.querySelector('[data-i18n="cta"]').textContent = copy.cta || 'Install to Play More';
-    document.getElementById('playLabel').textContent = copy.plays || 'Plays';
-    setTimeout(function() {{
-      document.getElementById('installLayer').classList.add('show');
-    }}, {trial_ms});
-  </script>
-</body>
-</html>
-""".format(
-        title=safe_title,
-        game_src=safe_game_src,
-        store_url=safe_store_url,
-        play_count=safe_play_count,
-        translations_json=translations_json,
-        trial_ms=max(1, int(trial_seconds)) * 1000,
-    )
-
-
 def create_playable_preview(payload):
     store_url = str(payload.get("store_url") or "").strip()
     if not store_url:
@@ -22408,6 +22351,7 @@ def create_playable_preview(payload):
     entry_relative = game_src[len("game/"):] if game_src.startswith("game/") else game_src
     title = str(payload.get("title") or "Playable Preview").strip() or "Playable Preview"
     translations = playable_preview_translations(payload)
+    documentation_url = playable_preview_doc_url()
     index_path = os.path.join(output_dir, "index.html")
     try:
         document, compatibility = build_meta_playable_html(
@@ -22461,6 +22405,7 @@ def create_playable_preview(payload):
         "trial_seconds": trial_seconds,
         "play_count": max(1, play_count),
         "store_url": store_url,
+        "documentation_url": documentation_url,
         "source_entry": game_src,
         "entry": "index.html",
         "html_size": html_size,
@@ -22494,6 +22439,7 @@ def create_playable_preview(payload):
         "trial_seconds": trial_seconds,
         "play_count": max(1, play_count),
         "store_url": store_url,
+        "documentation_url": documentation_url,
         "entry": "index.html",
         "source_entry": game_src,
         "html_size": html_size,
