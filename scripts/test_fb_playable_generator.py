@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import ast
 import html as html_lib
+import io
 import json
 import lzma
 import os
@@ -33,6 +35,51 @@ TRANSLATIONS = {
         "plays": "Plays",
     }
 }
+
+
+def assert_multipart_trial_seconds_contract():
+    app_path = os.path.join(ROOT, "app.py")
+    with open(app_path, "r", encoding="utf-8") as handle:
+        app_source = handle.read()
+    tree = ast.parse(app_source, filename=app_path)
+    parser_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "parse_playable_preview_multipart"
+    )
+
+    class FormItem:
+        def __init__(self, value="", filename="", data=b""):
+            self.value = value
+            self.filename = filename
+            self.file = io.BytesIO(data) if filename else None
+
+    form = {
+        "static_page": FormItem(
+            filename="index.html",
+            data=b"<!doctype html><html></html>",
+        ),
+        "store_url": FormItem(value="https://play.google.com/store/apps/details?id=fixture"),
+        "trial_seconds": FormItem(value="7"),
+    }
+
+    class FakeCgi:
+        @staticmethod
+        def FieldStorage(**_kwargs):
+            return form
+
+    class FakeHandler:
+        headers = {"Content-Type": "multipart/form-data; boundary=fixture"}
+        rfile = io.BytesIO()
+
+    namespace = {"cgi": FakeCgi}
+    module = ast.Module(body=[parser_node], type_ignores=[])
+    exec(compile(module, app_path, "exec"), namespace)
+    payload = namespace["parse_playable_preview_multipart"](FakeHandler(), 1)
+    if payload.get("trial_seconds") != "7":
+        raise AssertionError("multipart trial_seconds was not preserved")
+    return True
 
 
 def write_fixture(root):
@@ -194,6 +241,7 @@ def main():
                 result["assertions"]["oversize_guard"] = True
             else:
                 raise AssertionError("HTML size guard did not reject an oversized asset")
+            result["assertions"]["multipart_trial_seconds"] = assert_multipart_trial_seconds_contract()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

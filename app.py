@@ -22196,6 +22196,7 @@ def parse_playable_preview_multipart(handler, content_length):
             break
     for key in (
         "play_count",
+        "trial_seconds",
         "store_url",
         "title",
         "filename",
