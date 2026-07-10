@@ -745,6 +745,8 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import requests
 
+from fb_playable_generator import build_meta_playable_html
+
 try:
 
     from qcloud_cos import CosConfig, CosS3Client
@@ -1243,8 +1245,12 @@ AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID = os.environ.get("AD_MATERIAL_COMPETITOR
 AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS = [
     item.strip() for item in os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS", "").split(",") if item.strip()
 ]
-PLAYABLE_PREVIEW_API_TOKEN = os.environ.get("PLAYABLE_PREVIEW_API_TOKEN", "").strip()
+PLAYABLE_PREVIEW_API_TOKEN = (
+    os.environ.get("PLAYABLE_PREVIEW_API_TOKEN", "")
+    or os.environ.get("FB_PLAYABLE_API_TOKEN", "")
+).strip()
 PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
+PLAYABLE_PREVIEW_MAX_ZIP_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_ZIP_BYTES", str(5 * 1024 * 1024)))
 PLAYABLE_PREVIEW_TRIAL_SECONDS = int(os.environ.get("PLAYABLE_PREVIEW_TRIAL_SECONDS", "20"))
 
 
@@ -22165,7 +22171,7 @@ def parse_playable_preview_multipart(handler, content_length):
     form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ=environ)
     payload = {}
     upload = None
-    for key in ("file", "static_file", "game_file", "zip", "html"):
+    for key in ("static_page", "file", "static_file", "game_file", "zip", "html"):
         item = form[key] if key in form else None
         if item is not None and getattr(item, "file", None) is not None and getattr(item, "filename", ""):
             data = item.file.read()
@@ -22207,14 +22213,17 @@ def parse_playable_preview_request(handler):
         return parse_playable_preview_multipart(handler, content_length)
     body = handler.rfile.read(content_length)
     payload = json.loads(body.decode("utf-8")) if body else {}
-    if payload.get("zip_base64"):
-        payload["content"] = base64.b64decode(str(payload.get("zip_base64") or ""))
+    zip_base64 = payload.get("static_zip_base64") or payload.get("zip_base64")
+    html_base64 = payload.get("static_html_base64") or payload.get("html_base64")
+    static_html = payload.get("static_html") or payload.get("html")
+    if zip_base64:
+        payload["content"] = base64.b64decode(str(zip_base64 or ""))
         payload["filename"] = payload.get("filename") or "game.zip"
-    elif payload.get("html_base64"):
-        payload["content"] = base64.b64decode(str(payload.get("html_base64") or ""))
+    elif html_base64:
+        payload["content"] = base64.b64decode(str(html_base64 or ""))
         payload["filename"] = payload.get("filename") or "index.html"
-    elif payload.get("html"):
-        payload["content"] = str(payload.get("html") or "").encode("utf-8")
+    elif static_html:
+        payload["content"] = str(static_html or "").encode("utf-8")
         payload["filename"] = payload.get("filename") or "index.html"
     else:
         raise ValueError("missing html, html_base64 or zip_base64")
@@ -22392,20 +22401,49 @@ def create_playable_preview(payload):
             fp.write(content)
 
     game_src = find_playable_entry(game_dir)
+    entry_relative = game_src[len("game/"):] if game_src.startswith("game/") else game_src
     title = str(payload.get("title") or "Playable Preview").strip() or "Playable Preview"
     translations = playable_preview_translations(payload)
     index_path = os.path.join(output_dir, "index.html")
+    document, compatibility = build_meta_playable_html(
+        game_dir,
+        entry_relative,
+        title,
+        play_count,
+        trial_seconds,
+        translations,
+    )
     with open(index_path, "w", encoding="utf-8") as fp:
-        fp.write(render_playable_preview_html(title, game_src, store_url, play_count, trial_seconds, translations))
+        fp.write(document)
+
+    shutil.rmtree(game_dir, ignore_errors=True)
+    if source_path != index_path and os.path.exists(source_path):
+        os.remove(source_path)
+
+    manifest_path = os.path.join(output_dir, "manifest.json")
+    manifest = {
+        "preview_id": preview_id,
+        "title": title,
+        "trial_seconds": trial_seconds,
+        "play_count": max(1, play_count),
+        "store_url": store_url,
+        "source_entry": game_src,
+        "entry": "index.html",
+        "compatibility": compatibility,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as fp:
+        json.dump(manifest, fp, ensure_ascii=False, indent=2)
 
     zip_path = os.path.join(output_dir, "playable-preview.zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(output_dir):
-            for item in files:
-                path = os.path.join(root, item)
-                if path == zip_path or (path == source_path and source_path != index_path):
-                    continue
-                zf.write(path, os.path.relpath(path, output_dir).replace(os.sep, "/"))
+        zf.write(index_path, "index.html")
+    zip_size = os.path.getsize(zip_path)
+    if zip_size > PLAYABLE_PREVIEW_MAX_ZIP_BYTES:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise ValueError(
+            "generated Meta playable zip exceeds limit: %s > %s"
+            % (zip_size, PLAYABLE_PREVIEW_MAX_ZIP_BYTES)
+        )
 
     if cos_enabled():
         for root, _, files in os.walk(output_dir):
@@ -22416,17 +22454,24 @@ def create_playable_preview(payload):
                 upload_file_to_cos(path)
         preview_url = build_cos_url(build_cos_object_key(index_path))
         zip_url = build_cos_url(build_cos_object_key(zip_path))
+        manifest_url = build_cos_url(build_cos_object_key(manifest_path))
     else:
         preview_url = build_public_url(index_path)
         zip_url = build_public_url(zip_path)
+        manifest_url = build_public_url(manifest_path)
     return {
         "preview_id": preview_id,
         "preview_html_url": preview_url,
         "zip_url": zip_url,
+        "manifest_url": manifest_url,
         "trial_seconds": trial_seconds,
-        "play_count": play_count,
+        "play_count": max(1, play_count),
         "store_url": store_url,
-        "entry": game_src,
+        "entry": "index.html",
+        "source_entry": game_src,
+        "zip_size": zip_size,
+        "meta_compatible": True,
+        "compatibility": compatibility,
         "languages": sorted(translations.keys()),
     }
 
@@ -91927,11 +91972,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
-        if parsed.path == "/api/ad-material/playable-preview":
+        if parsed.path in ("/api/ad-material/playable-preview", "/api/fb-playable/preview"):
             try:
                 if PLAYABLE_PREVIEW_API_TOKEN:
                     auth = self.headers.get("Authorization", "")
                     token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+                    token = token or self.headers.get("X-API-Token", "").strip()
                     if not secrets.compare_digest(token, PLAYABLE_PREVIEW_API_TOKEN):
                         json_response(self, 403, {"error": "forbidden"})
                         return
