@@ -11,6 +11,8 @@ Endpoints:
 - `POST /api/ad-material/playable-preview` (legacy-compatible)
 - `POST /api/fb-playable/preview`
 
+The canonical `/api/fb-playable/preview` route also requires the tracked nginx include `deploy/nginx/fb-playable-preview.conf`, installed as `/etc/nginx/default.d/fb-playable-preview.conf`. Validate with `nginx -t` before reloading nginx.
+
 Authentication uses `PLAYABLE_PREVIEW_API_TOKEN`, with `FB_PLAYABLE_API_TOKEN` as an alias. Send it as a bearer token or `X-API-Token`.
 
 Accepted sources are an HTML file or ZIP uploaded as multipart field `static_page` (legacy field names remain supported), or JSON fields `static_html`, `static_html_base64`, or `static_zip_base64`.
