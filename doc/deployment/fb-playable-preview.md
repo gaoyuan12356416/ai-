@@ -16,7 +16,9 @@ The service converts the source into a Meta-oriented single-file package:
 - source `XMLHttpRequest` and `fetch` loaders are redirected to the embedded resource map;
 - direct JavaScript redirects are rejected, while Defold `sys.open_url` is bridged to the parent CTA;
 - the install button only calls `FbPlayableAd.onCTAClick()` and never opens the store URL directly;
-- output above `PLAYABLE_PREVIEW_MAX_ZIP_BYTES` (default 5 MB) is rejected.
+- large runtime resources are compacted as LZMA plus script-safe Base91 and decoded before original game scripts execute;
+- both final UTF-8 `index.html` and the ZIP must be at or below `PLAYABLE_PREVIEW_MAX_ASSET_BYTES` (default `4,800,000` decimal bytes);
+- `PLAYABLE_PREVIEW_MAX_ZIP_BYTES` remains as a backwards-compatible stricter ZIP cap, but can never raise the overall asset limit.
 
 Validation:
 
@@ -26,4 +28,4 @@ python scripts\test_fb_playable_generator.py
 python scripts\test_fb_playable_generator.py --source-zip <game.zip> --output-html <preview.html>
 ```
 
-The response includes `meta_compatible`, `compatibility`, `zip_size`, `manifest_url`, the original `source_entry`, and final `entry=index.html`.
+The response includes `meta_compatible`, `compatibility`, `html_size`, `zip_size`, `meta_size_limit_bytes`, `size_headroom_bytes`, `manifest_url`, the original `source_entry`, and final `entry=index.html`.

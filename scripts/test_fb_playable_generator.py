@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import argparse
-import base64
 import html as html_lib
 import json
+import lzma
 import os
 import re
 import shutil
@@ -15,7 +15,14 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from fb_playable_generator import build_meta_playable_html, validate_meta_playable_html
+from fb_playable_generator import (
+    DEFAULT_META_ASSET_LIMIT_BYTES,
+    PlayableCompatibilityError,
+    RESOURCE_ENCODING,
+    _base91_decode,
+    build_meta_playable_html,
+    validate_meta_playable_html,
+)
 
 
 TRANSLATIONS = {
@@ -61,17 +68,20 @@ def decode_inner(document):
 
 def decode_embedded_scripts(inner):
     match = re.search(
-        r"var __playableEncodedFiles=(\{.*?\});\s*var __playableByteCache",
+        r"var __playablePackageMeta=(\{.*?\});\s*var __playablePackageData=`(.*?)`;",
         inner,
         re.S,
     )
     if not match:
-        raise AssertionError("embedded resource map not found")
+        raise AssertionError("embedded compact resource package not found")
     resources = json.loads(match.group(1))
+    encoded = match.group(2).replace("\\${", "${")
+    compressed = _base91_decode(encoded)
+    payload = lzma.decompress(compressed, format=lzma.FORMAT_ALONE)
     scripts = []
-    for key, (_, encoded) in resources.items():
+    for key, (_, offset, length) in resources.items():
         if key.lower().endswith((".js", ".mjs")):
-            scripts.append(base64.b64decode(encoded).decode("utf-8"))
+            scripts.append(payload[offset:offset + length].decode("utf-8"))
     return "\n".join(scripts)
 
 
@@ -90,6 +100,8 @@ def run_fixture(game_dir, entry="index.html", output_html=""):
     runtime_source = inner + "\n" + embedded_scripts
     assertions = {
         "single_file": compatibility.get("single_file") is True,
+        "compact_resource_package": compatibility.get("resource_encoding") == RESOURCE_ENCODING,
+        "under_html_size_limit": compatibility.get("html_size", DEFAULT_META_ASSET_LIMIT_BYTES + 1) <= DEFAULT_META_ASSET_LIMIT_BYTES,
         "meta_cta": "FbPlayableAd.onCTAClick" in document,
         "no_native_xhr": "XMLHttpRequest" not in runtime_source and "XMLHttpRequest" not in document,
         "no_native_fetch": re.search(r"\bfetch\s*\(", runtime_source) is None,
@@ -98,26 +110,28 @@ def run_fixture(game_dir, entry="index.html", output_html=""):
         "no_direct_redirect": "window.location=" not in runtime_source and "window.open(" not in runtime_source,
         "no_store_href": re.search(r"href=[\"']https?://", document, re.I) is None,
     }
-    failed = [name for name, passed in assertions.items() if not passed]
-    if failed:
-        raise AssertionError("compatibility assertions failed: %s" % ", ".join(failed))
-
     with tempfile.TemporaryDirectory() as package_dir:
         index_path = os.path.join(package_dir, "index.html")
         zip_path = os.path.join(package_dir, "playable.zip")
-        with open(index_path, "w", encoding="utf-8") as handle:
-            handle.write(document)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        with open(index_path, "wb") as handle:
+            handle.write(document.encode("utf-8"))
+        with zipfile.ZipFile(
+            zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=8
+        ) as archive:
             archive.write(index_path, "index.html")
         with zipfile.ZipFile(zip_path) as archive:
             if archive.namelist() != ["index.html"]:
                 raise AssertionError("Meta package must contain only top-level index.html")
         zip_size = os.path.getsize(zip_path)
+    assertions["under_zip_size_limit"] = zip_size <= DEFAULT_META_ASSET_LIMIT_BYTES
+    failed = [name for name, passed in assertions.items() if not passed]
+    if failed:
+        raise AssertionError("compatibility assertions failed: %s" % ", ".join(failed))
 
     if output_html:
         os.makedirs(os.path.dirname(os.path.abspath(output_html)), exist_ok=True)
-        with open(output_html, "w", encoding="utf-8") as handle:
-            handle.write(document)
+        with open(output_html, "wb") as handle:
+            handle.write(document.encode("utf-8"))
     return {
         "ok": True,
         "html_size": len(document.encode("utf-8")),
@@ -164,6 +178,22 @@ def main():
         else:
             write_fixture(root)
             result = run_fixture(root, "index.html", args.output_html)
+            try:
+                build_meta_playable_html(
+                    root,
+                    "index.html",
+                    "Fixture Playable",
+                    1,
+                    20,
+                    TRANSLATIONS,
+                    max_asset_bytes=1024,
+                )
+            except PlayableCompatibilityError as error:
+                if "exceeds safety limit" not in str(error):
+                    raise
+                result["assertions"]["oversize_guard"] = True
+            else:
+                raise AssertionError("HTML size guard did not reject an oversized asset")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

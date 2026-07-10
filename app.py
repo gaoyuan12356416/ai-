@@ -1250,7 +1250,11 @@ PLAYABLE_PREVIEW_API_TOKEN = (
     or os.environ.get("FB_PLAYABLE_API_TOKEN", "")
 ).strip()
 PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
-PLAYABLE_PREVIEW_MAX_ZIP_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_ZIP_BYTES", str(5 * 1024 * 1024)))
+PLAYABLE_PREVIEW_MAX_ASSET_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_ASSET_BYTES", "4800000"))
+PLAYABLE_PREVIEW_MAX_ZIP_BYTES = min(
+    PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+    int(os.environ.get("PLAYABLE_PREVIEW_MAX_ZIP_BYTES", str(PLAYABLE_PREVIEW_MAX_ASSET_BYTES))),
+)
 PLAYABLE_PREVIEW_TRIAL_SECONDS = int(os.environ.get("PLAYABLE_PREVIEW_TRIAL_SECONDS", "20"))
 
 
@@ -22405,21 +22409,51 @@ def create_playable_preview(payload):
     title = str(payload.get("title") or "Playable Preview").strip() or "Playable Preview"
     translations = playable_preview_translations(payload)
     index_path = os.path.join(output_dir, "index.html")
-    document, compatibility = build_meta_playable_html(
-        game_dir,
-        entry_relative,
-        title,
-        play_count,
-        trial_seconds,
-        translations,
-    )
-    with open(index_path, "w", encoding="utf-8") as fp:
-        fp.write(document)
+    try:
+        document, compatibility = build_meta_playable_html(
+            game_dir,
+            entry_relative,
+            title,
+            play_count,
+            trial_seconds,
+            translations,
+            max_asset_bytes=PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        )
+    except Exception:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+    document_bytes = document.encode("utf-8")
+    html_size = len(document_bytes)
+    with open(index_path, "wb") as fp:
+        fp.write(document_bytes)
 
     shutil.rmtree(game_dir, ignore_errors=True)
     if source_path != index_path and os.path.exists(source_path):
         os.remove(source_path)
 
+    zip_path = os.path.join(output_dir, "playable-preview.zip")
+    with zipfile.ZipFile(
+        zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=8
+    ) as zf:
+        zf.write(index_path, "index.html")
+    zip_size = os.path.getsize(zip_path)
+    if zip_size > PLAYABLE_PREVIEW_MAX_ZIP_BYTES:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise ValueError(
+            "generated Meta playable zip exceeds limit: %s > %s"
+            % (zip_size, PLAYABLE_PREVIEW_MAX_ZIP_BYTES)
+        )
+
+    size_headroom = min(
+        PLAYABLE_PREVIEW_MAX_ASSET_BYTES - html_size,
+        PLAYABLE_PREVIEW_MAX_ZIP_BYTES - zip_size,
+    )
+    compatibility.update({
+        "html_size": html_size,
+        "zip_size": zip_size,
+        "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        "size_headroom_bytes": size_headroom,
+    })
     manifest_path = os.path.join(output_dir, "manifest.json")
     manifest = {
         "preview_id": preview_id,
@@ -22429,21 +22463,14 @@ def create_playable_preview(payload):
         "store_url": store_url,
         "source_entry": game_src,
         "entry": "index.html",
+        "html_size": html_size,
+        "zip_size": zip_size,
+        "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        "size_headroom_bytes": size_headroom,
         "compatibility": compatibility,
     }
     with open(manifest_path, "w", encoding="utf-8") as fp:
         json.dump(manifest, fp, ensure_ascii=False, indent=2)
-
-    zip_path = os.path.join(output_dir, "playable-preview.zip")
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(index_path, "index.html")
-    zip_size = os.path.getsize(zip_path)
-    if zip_size > PLAYABLE_PREVIEW_MAX_ZIP_BYTES:
-        shutil.rmtree(output_dir, ignore_errors=True)
-        raise ValueError(
-            "generated Meta playable zip exceeds limit: %s > %s"
-            % (zip_size, PLAYABLE_PREVIEW_MAX_ZIP_BYTES)
-        )
 
     if cos_enabled():
         for root, _, files in os.walk(output_dir):
@@ -22469,7 +22496,10 @@ def create_playable_preview(payload):
         "store_url": store_url,
         "entry": "index.html",
         "source_entry": game_src,
+        "html_size": html_size,
         "zip_size": zip_size,
+        "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
+        "size_headroom_bytes": size_headroom,
         "meta_compatible": True,
         "compatibility": compatibility,
         "languages": sorted(translations.keys()),
