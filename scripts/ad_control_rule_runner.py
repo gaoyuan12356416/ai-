@@ -291,8 +291,30 @@ def run_group_event(rule_group, action, event_key):
         "dry_run": False,
         "confirm": "EXECUTE_LIVE_PAUSE",
     }, session)
-    status = "error" if int(result.get("error_count") or 0) > 0 else "executed"
-    return event_payload(rule_group, action, event_key, status, result=result, reason="live_execute_errors" if status == "error" else "")
+    pause_count = int(preview.get("pause_count") or 0)
+    requested_count = int(result.get("requested_count") or 0)
+    remaining_count = max(0, pause_count - requested_count)
+    result["preview_pause_count"] = pause_count
+    result["remaining_target_count"] = remaining_count
+    if int(result.get("error_count") or 0) > 0:
+        status = "error"
+        reason = "live_execute_errors"
+    elif remaining_count > 0:
+        status = "partial"
+        reason = "live_execute_partial"
+    else:
+        status = "executed"
+        reason = ""
+    return event_payload(rule_group, action, event_key, status, result=result, reason=reason)
+
+
+def group_event_is_continuation(last, action, action_key):
+    event = last.get("last_event") or {}
+    return (
+        event.get("status") == "partial"
+        and event.get("action") == action
+        and event.get("event_key") == action_key
+    )
 
 
 def run_rule_groups():
@@ -306,18 +328,21 @@ def run_rule_groups():
         last_keys = dict(last.get("last_keys") or {})
         for action, hhmm in (("pause", schedule.get("close_time")), ("reopen", schedule.get("reopen_time"))):
             due, event_key = event_due(now, hhmm)
-            if not due:
-                continue
             action_key = "%s:%s:%s" % (action, tz_label, event_key)
-            if last_keys.get(action) == action_key:
+            continuing = group_event_is_continuation(last, action, action_key)
+            if not due and not continuing:
+                continue
+            if last_keys.get(action) == action_key and not continuing:
                 continue
             try:
                 payload = run_group_event(group, action, action_key)
             except Exception as exc:
                 logging.exception("ad control rule group failed group_id=%s action=%s", group.get("group_id"), action)
                 payload = event_payload(group, action, action_key, "error", reason=str(exc))
-            if payload.get("status") != "error" and not execution_has_errors(payload):
+            if payload.get("status") == "executed" and not execution_has_errors(payload):
                 last_keys[action] = action_key
+            elif payload.get("status") == "partial":
+                last_keys.pop(action, None)
             updated = dict(last)
             updated["last_keys"] = last_keys
             updated["last_event"] = payload
