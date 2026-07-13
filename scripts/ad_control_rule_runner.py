@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 # already serializes each invocation and the application opens a fresh mysql
 # client per query, so bypass only that incompatible wrapper behavior here.
 os.environ.setdefault("MYSQL_QUERY_GUARD_BYPASS", "1")
+os.environ.setdefault("AD_CONTROL_LIVE_MAX_WORKERS", "4")
 
 import app  # noqa: E402
 
@@ -266,7 +267,16 @@ def run_group_event(rule_group, action, event_key):
     if not rule_group.get("product"):
         return event_payload(rule_group, action, event_key, "skipped", reason="missing_product")
     session = {"user_id": "ad_control_rule_runner"}
-    preview = app.create_ad_control_live_preview({"rule_group_id": rule_group.get("group_id")}, session)
+    # Validate the configured insight schema once before the account worker
+    # pool starts. Without this cache every account issues SHOW COLUMNS in
+    # parallel, which can exhaust the remote database connection allowance.
+    insight_columns = app.ad_control_validate_insight_start_schema()
+    validate_schema = app.ad_control_validate_insight_start_schema
+    app.ad_control_validate_insight_start_schema = lambda: insight_columns
+    try:
+        preview = app.create_ad_control_live_preview({"rule_group_id": rule_group.get("group_id")}, session)
+    finally:
+        app.ad_control_validate_insight_start_schema = validate_schema
     if int(preview.get("error_count") or 0) > 0:
         action_id = record_rule_group_preview_failure(rule_group, preview, event_key)
         return event_payload(rule_group, action, event_key, "error", result={
