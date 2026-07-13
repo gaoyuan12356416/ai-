@@ -331,15 +331,12 @@ def _defer_game_scripts(document):
             return match.group(0)
         code = re.sub(r"</script", r"<\/script", match.group("body"), flags=re.I)
         inert = '<script type="application/x-playable-code">%s</script>' % code
-        if script_type == "module":
-            runner = (
-                "(function(r){window.__playableReady.then(function(){var s=document.createElement('script');"
-                "s.type='module';s.textContent=r.previousElementSibling.textContent;document.body.appendChild(s);});})(document.currentScript);"
-            )
-        else:
-            runner = (
-                "(function(r){window.__playableReady.then(function(){(0,eval)(r.previousElementSibling.textContent);});})(document.currentScript);"
-            )
+        module_type = "s.type='module';" if script_type == "module" else ""
+        runner = (
+            "(function(r){window.__playableReady.then(function(){var s=document.createElement('script');"
+            "%ss.textContent=r.previousElementSibling.textContent;r.parentNode.insertBefore(s,r);});})(document.currentScript);"
+            % module_type
+        )
         return "%s<script>%s</script>" % (inert, runner)
 
     return pattern.sub(replace, document)
@@ -645,6 +642,7 @@ def validate_meta_playable_html(document):
         "window_open": r"\bwindow\s*\.\s*open\s*\(",
         "direct_location": r"\b(?:window|document|top|parent)\s*\.\s*location\s*=|\blocation\s*\.\s*(?:href\s*=|assign\s*\(|replace\s*\()",
         "external_markup": r"<(?:script|link|img|audio|video|source|track|iframe|a)\b[^>]*\b(?:src|href|poster)\s*=\s*(['\"])(?:https?:)?//",
+        "unsafe_eval_bootstrap": r"\(\s*0\s*,\s*eval\s*\)\s*\(",
     }
     failures = [name for name, pattern in checks.items() if re.search(pattern, document, re.I | re.S)]
     if META_CTA_HOOK not in document:
@@ -655,6 +653,8 @@ def validate_meta_playable_html(document):
         "single_file": True,
         "native_network_requests": 0,
         "direct_redirects": 0,
+        "unsafe_eval_calls": 0,
+        "csp_safe_script_bootstrap": True,
         "cta_hook": META_CTA_HOOK,
     }
 

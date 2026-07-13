@@ -153,6 +153,15 @@ def run_fixture(game_dir, entry="index.html", output_html=""):
         "no_native_xhr": "XMLHttpRequest" not in runtime_source and "XMLHttpRequest" not in document,
         "no_native_fetch": re.search(r"\bfetch\s*\(", runtime_source) is None,
         "embedded_loader": "__PlayableXHR" in inner and "__playableRead" in inner,
+        "no_unsafe_eval_bootstrap": re.search(
+            r"\(\s*0\s*,\s*eval\s*\)\s*\(", inner
+        ) is None,
+        "csp_safe_script_bootstrap": (
+            "document.createElement('script')" in inner
+            and "r.parentNode.insertBefore(s,r)" in inner
+            and compatibility.get("unsafe_eval_calls") == 0
+            and compatibility.get("csp_safe_script_bootstrap") is True
+        ),
         "defold_cta_bridge": 'meta-playable-cta' in runtime_source,
         "no_direct_redirect": "window.location=" not in runtime_source and "window.open(" not in runtime_source,
         "no_store_href": re.search(r"href=[\"']https?://", document, re.I) is None,

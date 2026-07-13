@@ -153,6 +153,8 @@ HTTP 状态码为 `200`，示例：
     "single_file": true,
     "native_network_requests": 0,
     "direct_redirects": 0,
+    "unsafe_eval_calls": 0,
+    "csp_safe_script_bootstrap": true,
     "cta_hook": "FbPlayableAd.onCTAClick",
     "resource_encoding": "lzma+base91",
     "embedded_file_count": 17,
@@ -179,7 +181,7 @@ HTTP 状态码为 `200`，示例：
 | `meta_size_limit_bytes` | 当前服务采用的安全上限 |
 | `size_headroom_bytes` | HTML 与 ZIP 两项中较小的剩余空间 |
 | `meta_compatible` | 只有最终 HTML 与 ZIP 均通过校验时才为 `true` |
-| `compatibility` | 单文件、网络请求、跳转、CTA 和资源压缩等校验结果 |
+| `compatibility` | 单文件、网络请求、跳转、CSP 安全启动、CTA 和资源压缩等校验结果 |
 
 ## 6. 产物结构
 
@@ -213,6 +215,7 @@ Meta 上传页面提示的“最大 5 MB”不能按 `5 MiB` 或只检查压缩 
 - 最终 `playable-preview.zip <= 4,800,000 bytes`；
 - ZIP 只包含顶层 `index.html`；
 - HTML 中没有外部资源 URL、原生 `XMLHttpRequest`/`fetch`、`window.open` 或 location 直接跳转；
+- 游戏脚本通过真实 `<script>` 节点顺序启动，不使用 Meta 沙箱禁止的 `eval` / `unsafe-eval`；
 - CTA 只调用 `FbPlayableAd.onCTAClick()`。
 
 因此，即使 ZIP 小于 5 MB，只要解压后的 HTML 超过安全上限，接口仍会拒绝生成。
@@ -281,7 +284,7 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 | `generated Meta playable HTML exceeds safety limit` | 最终 HTML 超过安全上限 |
 | `generated Meta playable zip exceeds limit` | 最终 ZIP 超过安全上限 |
 | `external markup URL remains` | HTML 仍引用外部资源 |
-| `Meta compatibility validation failed` | 仍有原生网络调用、直接跳转或缺少 CTA Hook |
+| `Meta compatibility validation failed` | 仍有原生网络调用、直接跳转、unsafe-eval 启动器或缺少 CTA Hook |
 
 鉴权失败返回 HTTP `403`：
 
@@ -298,5 +301,5 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 1. 下载 `preview_html_url` 和 `zip_url`，按实际下载字节重新测量体积；
 2. 解压 ZIP，确认文件列表严格为 `index.html`；
 3. 扫描 HTML，确认没有直接商店跳转和外部资源；
-4. 在浏览器中注入 `FbPlayableAd.onCTAClick` 测试桩，确认游戏启动、倒计时、重玩次数和 CTA；
+4. 在禁止 `unsafe-eval` 的 CSP 浏览器沙箱中注入 `FbPlayableAd.onCTAClick` 测试桩，确认无 CSP 报错且游戏进入可交互场景；
 5. 最后在 Meta Ads Manager 预览环境中完成平台侧验证。

@@ -25,6 +25,7 @@ The service converts the source into a Meta-oriented single-file package:
 - direct JavaScript redirects are rejected, while Defold `sys.open_url` is bridged to the parent CTA;
 - the install button only calls `FbPlayableAd.onCTAClick()` and never opens the store URL directly;
 - large runtime resources are compacted as LZMA plus script-safe Base91 and decoded before original game scripts execute;
+- original scripts are resumed with CSP-safe script-node injection; generated playables never require `unsafe-eval`;
 - both final UTF-8 `index.html` and the ZIP must be at or below `PLAYABLE_PREVIEW_MAX_ASSET_BYTES` (default `4,800,000` decimal bytes);
 - `PLAYABLE_PREVIEW_MAX_ZIP_BYTES` remains as a backwards-compatible stricter ZIP cap, but can never raise the overall asset limit.
 
@@ -36,6 +37,8 @@ python scripts\test_fb_playable_generator.py
 python scripts\test_fb_playable_generator.py --source-zip <game.zip> --output-html <preview.html>
 python scripts\publish_playable_preview_docs.py --check-only
 ```
+
+For browser acceptance, serve the generated HTML over HTTP and test it with a CSP that allows inline scripts and WebAssembly but omits `unsafe-eval`. The game must reach its interactive scene with no CSP console errors.
 
 After deploying the exact Git commit to the CPU server, publish the tracked API document with the server-only COS environment:
 
