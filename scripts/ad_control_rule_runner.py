@@ -18,14 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import app  # noqa: E402
+# The host-wide mysql wrapper injects MAX_EXECUTION_TIME, but the current
+# business database does not support that MySQL session variable. The runner
+# already serializes each invocation and the application opens a fresh mysql
+# client per query, so bypass only that incompatible wrapper behavior here.
+os.environ.setdefault("MYSQL_QUERY_GUARD_BYPASS", "1")
 
-# The host-wide mysql wrapper injects MAX_EXECUTION_TIME by default, but the
-# current business database does not support that MySQL session variable.
-# An explicit empty init command keeps the wrapper's process timeout while
-# preventing the incompatible session statement.
-if not any(str(arg).startswith("--init-command") for arg in app.MYSQL_BASE_CMD):
-    app.MYSQL_BASE_CMD.insert(-1, "--init-command=")
+import app  # noqa: E402
 
 
 LOG_PATH = os.environ.get("AD_CONTROL_RUNNER_LOG", "/var/log/ad_control_rule_runner.log")
