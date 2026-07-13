@@ -69,13 +69,13 @@ RUNNER_REPLACEMENTS = [
     ),
     (
         "runner continuation gate",
-        '''            due, event_key = event_due(now, hhmm)\n            if not due:\n                continue\n            action_key = "%s:%s:%s" % (action, tz_label, event_key)\n            if last_keys.get(action) == action_key:\n                continue\n''',
-        '''            due, event_key = event_due(now, hhmm)\n            action_key = "%s:%s:%s" % (action, tz_label, event_key)\n            continuing = group_event_is_continuation(last, action, action_key)\n            if not due and not continuing:\n                continue\n            if last_keys.get(action) == action_key and not continuing:\n                continue\n''',
+        '''            due, event_key = event_due(now, hhmm)\n            if not due:\n                continue\n            action_key = "%s:%s:%s" % (action, tz_label, event_key)\n            if last_keys.get(action) == action_key:\n                continue\n            try:\n                payload = run_group_event(group, action, action_key)\n''',
+        '''            due, event_key = event_due(now, hhmm)\n            action_key = "%s:%s:%s" % (action, tz_label, event_key)\n            continuing = group_event_is_continuation(last, action, action_key)\n            if not due and not continuing:\n                continue\n            if last_keys.get(action) == action_key and not continuing:\n                continue\n            try:\n                payload = run_group_event(group, action, action_key)\n''',
     ),
     (
         "runner completion marker",
-        '''            if payload.get("status") != "error" and not execution_has_errors(payload):\n                last_keys[action] = action_key\n            updated = dict(last)\n''',
-        '''            if payload.get("status") == "executed" and not execution_has_errors(payload):\n                last_keys[action] = action_key\n            elif payload.get("status") == "partial":\n                last_keys.pop(action, None)\n            updated = dict(last)\n''',
+        '''            if payload.get("status") != "error" and not execution_has_errors(payload):\n                last_keys[action] = action_key\n            updated = dict(last)\n            updated["last_keys"] = last_keys\n            updated["last_event"] = payload\n            update_rule_group_result(group.get("group_id"), updated)\n''',
+        '''            if payload.get("status") == "executed" and not execution_has_errors(payload):\n                last_keys[action] = action_key\n            elif payload.get("status") == "partial":\n                last_keys.pop(action, None)\n            updated = dict(last)\n            updated["last_keys"] = last_keys\n            updated["last_event"] = payload\n            update_rule_group_result(group.get("group_id"), updated)\n''',
     ),
 ]
 
