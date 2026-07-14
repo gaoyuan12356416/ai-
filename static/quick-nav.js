@@ -129,12 +129,23 @@
         {
           key: "xAccounts",
           label: "X账号授权",
-          description: "授权并管理用于自动发帖的X账号",
+          description: "授权并管理自己的多个X账号",
           kind: "page",
           href: "/x-accounts.html",
           module: "x_accounts",
           enabled: true,
           order: 10,
+        },
+        {
+          key: "xAccountList",
+          label: "X账号列表",
+          description: "查看全部X账号及授权状态",
+          kind: "page",
+          href: "/x-account-list.html",
+          module: "x_accounts",
+          adminOnly: true,
+          enabled: true,
+          order: 20,
         },
       ],
     },
@@ -188,7 +199,8 @@
     },
   ];
 
-  const CONFIG_CACHE_KEY = "quickNavConfigCache";
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v2";
+  const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
   let styleInjected = false;
@@ -312,6 +324,7 @@
     adMaterials: "/ad-material-tasks.html",
     voiceoverTasks: "/voiceover-drama.html",
     xAccounts: "/x-accounts.html",
+    xAccountList: "/x-account-list.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
@@ -343,6 +356,10 @@
     try {
       const raw = localStorage.getItem(CONFIG_CACHE_KEY);
       const cached = raw ? JSON.parse(raw) : null;
+      if (!cached || !cached.updatedAt || cached.updatedAt + CONFIG_CACHE_TTL_MS <= Date.now()) {
+        try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (storageError) {}
+        return null;
+      }
       return normalizeNavConfig(cached && cached.items);
     } catch (error) {
       try { localStorage.removeItem(CONFIG_CACHE_KEY); } catch (storageError) {}

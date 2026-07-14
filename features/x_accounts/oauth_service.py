@@ -34,7 +34,18 @@ EXPECTED_SCOPE_DEFAULT = "tweet.read tweet.write users.read offline.access media
 REQUIRED_SCOPES = tuple(EXPECTED_SCOPE_DEFAULT.split())
 AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 TOKEN_URL = "https://api.x.com/2/oauth2/token"
-USERS_ME_URL = "https://api.x.com/2/users/me?user.fields=profile_image_url"
+REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
+USER_FIELDS = (
+    "profile_image_url",
+    "public_metrics",
+    "created_at",
+    "verified",
+    "protected",
+    "location",
+)
+USERS_ME_URL = "https://api.x.com/2/users/me?" + urllib.parse.urlencode(
+    {"user.fields": ",".join(USER_FIELDS)}
+)
 MAX_BODY_BYTES = 16 * 1024
 MAX_ERROR_TEXT = 240
 
@@ -185,6 +196,25 @@ def ensure_storage():
                     authorized_by_user_id TEXT NOT NULL DEFAULT '',
                     authorized_by_name TEXT NOT NULL DEFAULT '',
                     authorized_by_email TEXT NOT NULL DEFAULT '',
+                    owner_tenant_key TEXT NOT NULL DEFAULT '',
+                    owner_user_id TEXT NOT NULL DEFAULT '',
+                    owner_name TEXT NOT NULL DEFAULT '',
+                    owner_email TEXT NOT NULL DEFAULT '',
+                    followers_count INTEGER,
+                    following_count INTEGER,
+                    tweet_count INTEGER,
+                    listed_count INTEGER,
+                    like_count INTEGER,
+                    media_count INTEGER,
+                    verified INTEGER,
+                    protected INTEGER,
+                    location TEXT,
+                    x_created_at TEXT,
+                    profile_synced_at TEXT NOT NULL DEFAULT '',
+                    disconnected_at TEXT NOT NULL DEFAULT '',
+                    disconnected_by_tenant_key TEXT NOT NULL DEFAULT '',
+                    disconnected_by_user_id TEXT NOT NULL DEFAULT '',
+                    disconnected_by_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -192,6 +222,7 @@ def ensure_storage():
                     state_hash TEXT PRIMARY KEY,
                     code_verifier TEXT NOT NULL,
                     actor_user_id TEXT NOT NULL DEFAULT '',
+                    actor_tenant_key TEXT NOT NULL DEFAULT '',
                     actor_name TEXT NOT NULL DEFAULT '',
                     actor_email TEXT NOT NULL DEFAULT '',
                     actor_role TEXT NOT NULL DEFAULT '',
@@ -205,6 +236,7 @@ def ensure_storage():
                     outcome TEXT NOT NULL,
                     x_user_id TEXT NOT NULL DEFAULT '',
                     actor_user_id TEXT NOT NULL DEFAULT '',
+                    actor_tenant_key TEXT NOT NULL DEFAULT '',
                     actor_name TEXT NOT NULL DEFAULT '',
                     error_code TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
@@ -213,6 +245,59 @@ def ensure_storage():
                 CREATE INDEX IF NOT EXISTS idx_x_oauth_state_expires ON x_oauth_state(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_x_oauth_event_created ON x_oauth_event(created_at DESC);
                 """
+            )
+            account_columns = {
+                "owner_tenant_key": "TEXT NOT NULL DEFAULT ''",
+                "owner_user_id": "TEXT NOT NULL DEFAULT ''",
+                "owner_name": "TEXT NOT NULL DEFAULT ''",
+                "owner_email": "TEXT NOT NULL DEFAULT ''",
+                "followers_count": "INTEGER",
+                "following_count": "INTEGER",
+                "tweet_count": "INTEGER",
+                "listed_count": "INTEGER",
+                "like_count": "INTEGER",
+                "media_count": "INTEGER",
+                "verified": "INTEGER",
+                "protected": "INTEGER",
+                "location": "TEXT",
+                "x_created_at": "TEXT",
+                "profile_synced_at": "TEXT NOT NULL DEFAULT ''",
+                "disconnected_at": "TEXT NOT NULL DEFAULT ''",
+                "disconnected_by_tenant_key": "TEXT NOT NULL DEFAULT ''",
+                "disconnected_by_user_id": "TEXT NOT NULL DEFAULT ''",
+                "disconnected_by_name": "TEXT NOT NULL DEFAULT ''",
+            }
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
+            for column, definition in account_columns.items():
+                if column not in existing:
+                    conn.execute("ALTER TABLE x_authorized_account ADD COLUMN %s %s" % (column, definition))
+
+            state_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_oauth_state)")}
+            if "actor_tenant_key" not in state_columns:
+                conn.execute("ALTER TABLE x_oauth_state ADD COLUMN actor_tenant_key TEXT NOT NULL DEFAULT ''")
+            event_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_oauth_event)")}
+            if "actor_tenant_key" not in event_columns:
+                conn.execute("ALTER TABLE x_oauth_event ADD COLUMN actor_tenant_key TEXT NOT NULL DEFAULT ''")
+
+            # Historical rows did not capture tenant_key. Preserve their known user
+            # identity but leave tenant blank so owner-scoped operations fail closed
+            # until an operator performs an explicit tenant backfill.
+            conn.execute(
+                """
+                UPDATE x_authorized_account
+                SET owner_user_id=authorized_by_user_id,
+                    owner_name=authorized_by_name,
+                    owner_email=authorized_by_email
+                WHERE owner_user_id='' AND authorized_by_user_id<>''
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_account_owner_updated "
+                "ON x_authorized_account(owner_tenant_key,owner_user_id,updated_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_account_status_updated "
+                "ON x_authorized_account(status,updated_at DESC)"
             )
             conn.commit()
         finally:
@@ -244,10 +329,44 @@ def normalize_actor(actor):
     actor = actor if isinstance(actor, dict) else {}
     return {
         "user_id": clean_text(actor.get("user_id", ""), 255),
+        "tenant_key": clean_text(actor.get("tenant_key", ""), 255),
         "name": clean_text(actor.get("name", ""), 255),
         "email": clean_text(actor.get("email", ""), 255),
         "role": clean_text(actor.get("role", "user"), 32),
     }
+
+
+def require_actor_subject(actor):
+    actor = normalize_actor(actor)
+    if not actor["tenant_key"] or not actor["user_id"]:
+        raise ServiceError("invalid_request", "后台用户身份不完整", 400)
+    return actor
+
+
+def owner_lock_key(actor):
+    actor = require_actor_subject(actor)
+    tenant_key = actor["tenant_key"]
+    user_id = actor["user_id"]
+    return "owner:%d:%s:%d:%s" % (len(tenant_key), tenant_key, len(user_id), user_id)
+
+
+def ensure_owner_not_pending(actor):
+    actor = require_actor_subject(actor)
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT id FROM x_authorized_account
+                WHERE owner_tenant_key=? AND owner_user_id=? AND status='revoke_pending'
+                LIMIT 1
+                """,
+                (actor["tenant_key"], actor["user_id"]),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row:
+        raise ServiceError("x_disconnect_pending", "请先完成待处理账号的退出授权", 409)
 
 
 def record_event(event_type, outcome, actor=None, x_user_id="", error_code=""):
@@ -256,10 +375,10 @@ def record_event(event_type, outcome, actor=None, x_user_id="", error_code=""):
         conn = db_connect()
         try:
             conn.execute(
-                "INSERT INTO x_oauth_event(event_type,outcome,x_user_id,actor_user_id,actor_name,error_code,created_at) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO x_oauth_event(event_type,outcome,x_user_id,actor_user_id,actor_tenant_key,actor_name,error_code,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     clean_text(event_type, 64), clean_text(outcome, 32), clean_text(x_user_id, 64),
-                    actor["user_id"], actor["name"], clean_text(error_code, 64), iso_utc(),
+                    actor["user_id"], actor["tenant_key"], actor["name"], clean_text(error_code, 64), iso_utc(),
                 ),
             )
             conn.commit()
@@ -278,7 +397,13 @@ def safe_record_event(event_type, outcome, actor=None, x_user_id="", error_code=
 
 def create_authorization(actor):
     require_oauth_config()
-    actor = normalize_actor(actor)
+    actor = require_actor_subject(actor)
+    with account_lock(owner_lock_key(actor)):
+        ensure_owner_not_pending(actor)
+        return create_authorization_state(actor)
+
+
+def create_authorization_state(actor):
     raw_state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     created = now_epoch()
@@ -288,9 +413,9 @@ def create_authorization(actor):
         try:
             conn.execute("DELETE FROM x_oauth_state WHERE expires_at <= ?", (iso_utc(created),))
             conn.execute(
-                "INSERT INTO x_oauth_state(state_hash,code_verifier,actor_user_id,actor_name,actor_email,actor_role,redirect_uri,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO x_oauth_state(state_hash,code_verifier,actor_user_id,actor_tenant_key,actor_name,actor_email,actor_role,redirect_uri,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
-                    state_digest(raw_state), verifier, actor["user_id"], actor["name"], actor["email"],
+                    state_digest(raw_state), verifier, actor["user_id"], actor["tenant_key"], actor["name"], actor["email"],
                     actor["role"], callback_url(), iso_utc(created), iso_utc(expires),
                 ),
             )
@@ -341,7 +466,7 @@ def basic_auth_header():
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
 
-def http_json(url, method="GET", headers=None, body=None):
+def http_json(url, method="GET", headers=None, body=None, allow_revoked=False, allow_non_json=False):
     request = urllib.request.Request(url, data=body, method=method)
     for key, value in (headers or {}).items():
         request.add_header(key, value)
@@ -350,7 +475,14 @@ def http_json(url, method="GET", headers=None, body=None):
             raw = response.read(2 * 1024 * 1024 + 1)
             if len(raw) > 2 * 1024 * 1024:
                 raise ServiceError("x_upstream_error", "X API响应过大", 502)
-            return json.loads(raw.decode("utf-8")) if raw else {}
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                if allow_non_json:
+                    return {}
+                raise
     except ServiceError:
         raise
     except urllib.error.HTTPError as exc:
@@ -362,6 +494,8 @@ def http_json(url, method="GET", headers=None, body=None):
         finally:
             exc.close()
         upstream_code = clean_text(payload.get("error") or payload.get("title") or "http_%s" % exc.code, 64)
+        if allow_revoked and upstream_code.lower() in {"invalid_token", "invalid_grant", "token_revoked"}:
+            return {"revoked": True}
         if exc.code in {400, 401, 403} and upstream_code.lower() in {"invalid_grant", "unauthorized", "client forbidden"}:
             raise ServiceError("x_token_revoked", "X授权已失效，请重新授权", 409) from None
         raise ServiceError("x_upstream_error", "X API请求失败（HTTP %s，%s）" % (exc.code, upstream_code), 502) from None
@@ -390,6 +524,24 @@ def user_request(access_token):
     return http_json(
         USERS_ME_URL,
         headers={"Authorization": "Bearer " + str(access_token), "Accept": "application/json"},
+    )
+
+
+def revoke_token(token):
+    if not token:
+        return {"revoked": True}
+    body = urllib.parse.urlencode({"token": str(token)}).encode("utf-8")
+    return http_json(
+        REVOKE_URL,
+        method="POST",
+        headers={
+            "Authorization": basic_auth_header(),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        body=body,
+        allow_revoked=True,
+        allow_non_json=True,
     )
 
 
@@ -457,6 +609,7 @@ def account_lock(account_id):
 def actor_from_state(state_row):
     return {
         "user_id": state_row.get("actor_user_id", ""),
+        "tenant_key": state_row.get("actor_tenant_key", ""),
         "name": state_row.get("actor_name", ""),
         "email": state_row.get("actor_email", ""),
         "role": state_row.get("actor_role", ""),
@@ -464,7 +617,7 @@ def actor_from_state(state_row):
 
 
 def status_for(scopes, access_expires_at, token=None, stored="active"):
-    if stored in {"revoked", "error", "token_missing"}:
+    if stored in {"revoked", "error", "token_missing", "revoke_pending", "disconnected"}:
         return stored, [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
     missing = [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
     if missing:
@@ -474,13 +627,77 @@ def status_for(scopes, access_expires_at, token=None, stored="active"):
     return "active", []
 
 
+def optional_nonnegative_int(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < 0 or parsed > 9223372036854775807:
+        return None
+    return parsed
+
+
+def optional_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return None
+
+
+def optional_clean_text(value, limit):
+    if value is None:
+        return None
+    return clean_text(value, limit)
+
+
+def profile_snapshot(account, previous=None, timestamp=None):
+    account = account if isinstance(account, dict) else {}
+    previous = previous or {}
+    metrics = account.get("public_metrics")
+    if not isinstance(metrics, dict):
+        metrics = None
+
+    result = {}
+    for field in ("followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count"):
+        if metrics is not None and field in metrics:
+            result[field] = optional_nonnegative_int(metrics.get(field))
+        else:
+            result[field] = previous.get(field)
+    result["verified"] = optional_bool(account.get("verified")) if "verified" in account else previous.get("verified")
+    result["protected"] = optional_bool(account.get("protected")) if "protected" in account else previous.get("protected")
+    result["location"] = optional_clean_text(account.get("location"), 255) if "location" in account else previous.get("location")
+    result["x_created_at"] = optional_clean_text(account.get("created_at"), 64) if "created_at" in account else previous.get("x_created_at")
+    result["profile_synced_at"] = timestamp or iso_utc()
+    return result
+
+
+def same_owner(row, actor):
+    actor = require_actor_subject(actor)
+    return bool(
+        row
+        and str(row["owner_tenant_key"] or "") == actor["tenant_key"]
+        and str(row["owner_user_id"] or "") == actor["user_id"]
+    )
+
+
 def complete_authorization(code, raw_state):
     actor = {}
+    event_x_user_id = ""
     state_consumed = False
+    owner_guard = None
     try:
         state_row = consume_state(raw_state)
         state_consumed = True
-        actor = actor_from_state(state_row)
+        actor = require_actor_subject(actor_from_state(state_row))
+        owner_guard = account_lock(owner_lock_key(actor))
+        owner_guard.acquire()
+        # This check is intentionally before the code exchange. It prevents X
+        # from minting an orphan token while any account for this owner needs a
+        # revoke retry. Logout uses the same owner lock before changing state.
+        ensure_owner_not_pending(actor)
         token = token_request(
             {
                 "code": str(code),
@@ -497,40 +714,71 @@ def complete_authorization(code, raw_state):
         account_payload = user_request(token.get("access_token", ""))
         account = account_payload.get("data", {}) if isinstance(account_payload, dict) else {}
         x_user_id = str(account.get("id", "") or "")
+        event_x_user_id = x_user_id
         token_file = token_path(x_user_id)
         with account_lock("x:" + x_user_id):
+            with _DB_LOCK:
+                conn = db_connect()
+                try:
+                    existing_row = conn.execute(
+                        "SELECT * FROM x_authorized_account WHERE x_user_id=?", (x_user_id,)
+                    ).fetchone()
+                finally:
+                    conn.close()
+            if existing_row and not same_owner(existing_row, actor):
+                raise ServiceError("x_account_owned_by_other", "该X账号已由其他后台用户管理", 409)
+            if existing_row and str(existing_row["status"] or "") == "revoke_pending":
+                # Preserve the old refresh token needed to finish the pending
+                # revocation. The owner must retry logout before reauthorizing.
+                raise ServiceError("x_disconnect_pending", "该X账号退出授权尚未完成，请先重试退出", 409)
+
             previous_token = token_file.read_bytes() if token_file.exists() else None
             atomic_write_json(token_file, token)
             timestamp = iso_utc(obtained)
             status, _missing = status_for(scopes, expires, token, "active")
+            profile = profile_snapshot(account, dict(existing_row) if existing_row else {}, timestamp)
+            columns = (
+                "x_user_id", "username", "display_name", "profile_image_url", "token_store_key", "token_type",
+                "scopes_json", "status", "first_authorized_at", "last_authorized_at", "access_expires_at",
+                "last_token_refresh_at", "last_verified_at", "last_error_at", "last_error",
+                "authorized_by_user_id", "authorized_by_name", "authorized_by_email",
+                "owner_tenant_key", "owner_user_id", "owner_name", "owner_email",
+                "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
+                "verified", "protected", "location", "x_created_at", "profile_synced_at",
+                "disconnected_at", "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name",
+                "created_at", "updated_at",
+            )
+            values = (
+                x_user_id, clean_text(account.get("username", ""), 255), clean_text(account.get("name", ""), 255),
+                clean_text(account.get("profile_image_url", ""), 1024), token_file.name,
+                clean_text(token.get("token_type", "bearer"), 32).lower(), json.dumps(scopes), status,
+                timestamp, timestamp, expires, "", timestamp, "", "", actor["user_id"], actor["name"],
+                actor["email"], actor["tenant_key"], actor["user_id"], actor["name"], actor["email"],
+                profile["followers_count"], profile["following_count"], profile["tweet_count"],
+                profile["listed_count"], profile["like_count"], profile["media_count"], profile["verified"],
+                profile["protected"], profile["location"], profile["x_created_at"], profile["profile_synced_at"],
+                "", "", "", "", timestamp, timestamp,
+            )
+            update_columns = (
+                "username", "display_name", "profile_image_url", "token_store_key", "token_type", "scopes_json",
+                "status", "last_authorized_at", "access_expires_at", "last_token_refresh_at", "last_verified_at",
+                "last_error_at", "last_error", "authorized_by_user_id", "authorized_by_name", "authorized_by_email",
+                "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
+                "verified", "protected", "location", "x_created_at", "profile_synced_at", "disconnected_at",
+                "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at",
+            )
             try:
                 with _DB_LOCK:
                     conn = db_connect()
                     try:
                         conn.execute(
-                            """
-                            INSERT INTO x_authorized_account(
-                                x_user_id,username,display_name,profile_image_url,token_store_key,token_type,scopes_json,status,
-                                first_authorized_at,last_authorized_at,access_expires_at,last_token_refresh_at,last_verified_at,
-                                last_error_at,last_error,authorized_by_user_id,authorized_by_name,authorized_by_email,created_at,updated_at
-                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                            ON CONFLICT(x_user_id) DO UPDATE SET
-                                username=excluded.username,display_name=excluded.display_name,profile_image_url=excluded.profile_image_url,
-                                token_store_key=excluded.token_store_key,token_type=excluded.token_type,scopes_json=excluded.scopes_json,
-                                status=excluded.status,last_authorized_at=excluded.last_authorized_at,
-                                access_expires_at=excluded.access_expires_at,last_token_refresh_at=excluded.last_token_refresh_at,
-                                last_verified_at=excluded.last_verified_at,
-                                last_error_at='',last_error='',authorized_by_user_id=excluded.authorized_by_user_id,
-                                authorized_by_name=excluded.authorized_by_name,authorized_by_email=excluded.authorized_by_email,
-                                updated_at=excluded.updated_at
-                            """,
-                            (
-                                x_user_id, clean_text(account.get("username", ""), 255), clean_text(account.get("name", ""), 255),
-                                clean_text(account.get("profile_image_url", ""), 1024), token_file.name,
-                                clean_text(token.get("token_type", "bearer"), 32).lower(), json.dumps(scopes), status,
-                                timestamp, timestamp, expires, "", timestamp, "", "", actor["user_id"], actor["name"],
-                                actor["email"], timestamp, timestamp,
+                            "INSERT INTO x_authorized_account(%s) VALUES(%s) ON CONFLICT(x_user_id) DO UPDATE SET %s"
+                            % (
+                                ",".join(columns),
+                                ",".join("?" for _column in columns),
+                                ",".join("%s=excluded.%s" % (column, column) for column in update_columns),
                             ),
+                            values,
                         )
                         conn.commit()
                     finally:
@@ -545,12 +793,15 @@ def complete_authorization(code, raw_state):
         return find_account_by_x_user_id(x_user_id)
     except ServiceError as exc:
         if state_consumed:
-            safe_record_event("authorization", "failed", actor, error_code=exc.code)
+            safe_record_event("authorization", "failed", actor, x_user_id=event_x_user_id, error_code=exc.code)
         raise
     except Exception:
         if state_consumed:
-            safe_record_event("authorization", "failed", actor, error_code="x_accounts_unavailable")
+            safe_record_event("authorization", "failed", actor, x_user_id=event_x_user_id, error_code="x_accounts_unavailable")
         raise ServiceError("x_accounts_unavailable", "X授权处理失败", 503) from None
+    finally:
+        if owner_guard is not None:
+            owner_guard.release()
 
 
 def row_to_item(row):
@@ -559,27 +810,60 @@ def row_to_item(row):
         scopes = parse_scopes(json.loads(item.pop("scopes_json", "[]")))
     except (TypeError, ValueError, json.JSONDecodeError):
         scopes = []
+    stored_status = item.get("status", "active")
     token = None
-    try:
-        token = read_token_file(item["x_user_id"])
-    except ServiceError:
-        pass
-    status, missing = status_for(scopes, item.get("access_expires_at", ""), token, item.get("status", "active"))
-    if token is None:
+    terminal_statuses = {"revoke_pending", "disconnected"}
+    if stored_status not in terminal_statuses:
+        try:
+            token = read_token_file(item["x_user_id"])
+        except ServiceError:
+            pass
+    status, missing = status_for(scopes, item.get("access_expires_at", ""), token, stored_status)
+    if token is None and stored_status not in terminal_statuses:
         status = "token_missing"
     item["status"] = status
     item["scopes"] = scopes
     item["missing_scopes"] = missing
+    for field in ("verified", "protected"):
+        if item.get(field) is not None:
+            item[field] = bool(item[field])
+    username = str(item.get("username", "") or "")
+    item["profile_url"] = "https://x.com/" + username if re.fullmatch(r"[A-Za-z0-9_]{1,50}", username) else ""
+    item["last_profile_sync_at"] = item.get("profile_synced_at", "")
+    item["owner"] = {
+        "tenant_key": item.get("owner_tenant_key", ""),
+        "user_id": item.get("owner_user_id", ""),
+        "name": item.get("owner_name", ""),
+        "email": item.get("owner_email", ""),
+    }
     item.pop("token_store_key", None)
     item.pop("token_type", None)
     return item
 
 
-def list_accounts():
+def normalize_account_scope(actor, scope):
+    actor = require_actor_subject(actor)
+    scope = str(scope or "mine").strip().lower()
+    if scope not in {"mine", "all"}:
+        raise ServiceError("invalid_request", "X账号查询范围无效", 400)
+    if scope == "all" and actor.get("role") != "admin":
+        raise ServiceError("x_admin_required", "仅管理员可查看全部X账号", 403)
+    return actor, scope
+
+
+def list_accounts(actor, scope="mine"):
+    actor, scope = normalize_account_scope(actor, scope)
     with _DB_LOCK:
         conn = db_connect()
         try:
-            rows = conn.execute("SELECT * FROM x_authorized_account ORDER BY updated_at DESC,id DESC").fetchall()
+            if scope == "all":
+                rows = conn.execute("SELECT * FROM x_authorized_account ORDER BY updated_at DESC,id DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM x_authorized_account WHERE owner_tenant_key=? AND owner_user_id=? "
+                    "ORDER BY updated_at DESC,id DESC",
+                    (actor["tenant_key"], actor["user_id"]),
+                ).fetchall()
         finally:
             conn.close()
     items = [row_to_item(row) for row in rows]
@@ -596,6 +880,25 @@ def find_account(account_id):
     if not row:
         raise ServiceError("x_account_not_found", "X账号记录不存在", 404)
     return row_to_item(row)
+
+
+def find_scoped_account_row(account_id, actor, scope="mine"):
+    actor, scope = normalize_account_scope(actor, scope)
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            if scope == "all":
+                row = conn.execute("SELECT * FROM x_authorized_account WHERE id=?", (int(account_id),)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM x_authorized_account WHERE id=? AND owner_tenant_key=? AND owner_user_id=?",
+                    (int(account_id), actor["tenant_key"], actor["user_id"]),
+                ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise ServiceError("x_account_not_found", "X账号记录不存在", 404)
+    return row
 
 
 def find_account_by_x_user_id(x_user_id):
@@ -624,13 +927,19 @@ def update_account_error(account_id, status, error):
             conn.close()
 
 
-def verify_account(account_id):
+def verify_account(account_id, actor, scope="mine"):
     account_id = int(account_id)
-    initial_item = find_account(account_id)
-    x_user_id = initial_item["x_user_id"]
+    actor, scope = normalize_account_scope(actor, scope)
+    initial_row = find_scoped_account_row(account_id, actor, scope)
+    x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
-        item = find_account(account_id)
-        actor = {"user_id": "system", "name": "AI后台主动校验"}
+        row = find_scoped_account_row(account_id, actor, scope)
+        stored_status = str(row["status"] or "")
+        if stored_status == "disconnected":
+            raise ServiceError("x_token_missing", "X账号已解除授权，请重新授权", 409)
+        if stored_status == "revoke_pending":
+            raise ServiceError("x_disconnect_pending", "X账号正在退出授权，请先重试退出", 409)
+        item = row_to_item(row)
         try:
             token = read_token_file(item["x_user_id"])
             timestamp = iso_utc()
@@ -657,20 +966,27 @@ def verify_account(account_id):
                 raise ServiceError("x_identity_mismatch", "X Token账号身份不匹配，请重新授权", 409)
             scopes = parse_scopes(token.get("scope"), fallback=item.get("scopes", []))
             status, _missing = status_for(scopes, expires_at, token, "active")
+            profile = profile_snapshot(account, item, timestamp)
             with _DB_LOCK:
                 conn = db_connect()
                 try:
                     conn.execute(
                         """
                         UPDATE x_authorized_account SET username=?,display_name=?,profile_image_url=?,scopes_json=?,status=?,
-                            access_expires_at=?,last_token_refresh_at=?,last_verified_at=?,last_error_at='',last_error='',updated_at=?
+                            access_expires_at=?,last_token_refresh_at=?,last_verified_at=?,last_error_at='',last_error='',
+                            followers_count=?,following_count=?,tweet_count=?,listed_count=?,like_count=?,media_count=?,
+                            verified=?,protected=?,location=?,x_created_at=?,profile_synced_at=?,updated_at=?
                         WHERE id=?
                         """,
                         (
                             clean_text(account.get("username", item.get("username", "")), 255),
                             clean_text(account.get("name", item.get("display_name", "")), 255),
                             clean_text(account.get("profile_image_url", item.get("profile_image_url", "")), 1024),
-                            json.dumps(scopes), status, expires_at, refresh_at, timestamp, timestamp, account_id,
+                            json.dumps(scopes), status, expires_at, refresh_at, timestamp,
+                            profile["followers_count"], profile["following_count"], profile["tweet_count"],
+                            profile["listed_count"], profile["like_count"], profile["media_count"], profile["verified"],
+                            profile["protected"], profile["location"], profile["x_created_at"],
+                            profile["profile_synced_at"], timestamp, account_id,
                         ),
                     )
                     conn.commit()
@@ -687,6 +1003,124 @@ def verify_account(account_id):
             update_account_error(account_id, "error", "X账号校验失败")
             safe_record_event("verify", "failed", actor, x_user_id=item["x_user_id"], error_code="x_accounts_unavailable")
             raise ServiceError("x_accounts_unavailable", "X账号校验失败", 503) from None
+
+
+def delete_token_artifacts(x_user_id):
+    """Delete the live token and any legacy disconnect tombstones for one X user."""
+    token_file = token_path(x_user_id)
+    candidates = [token_file]
+    candidates.extend(TOKENS_DIR.glob(".%s.*.disconnecting" % token_file.name))
+    for candidate in candidates:
+        try:
+            candidate.unlink(missing_ok=True)
+        except TypeError:  # Python 3.7 compatibility for Path.unlink(missing_ok=...).
+            if candidate.exists():
+                candidate.unlink()
+
+
+def cleanup_disconnected_token_artifacts():
+    """One-time startup cleanup for credentials left by an interrupted old logout."""
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT x_user_id FROM x_authorized_account WHERE status='disconnected'"
+            ).fetchall()
+        finally:
+            conn.close()
+    for row in rows:
+        x_user_id = str(row["x_user_id"])
+        with account_lock("x:" + x_user_id):
+            delete_token_artifacts(x_user_id)
+
+
+def logout_account(account_id, actor):
+    account_id = int(account_id)
+    actor = require_actor_subject(actor)
+    with account_lock(owner_lock_key(actor)):
+        return logout_account_for_owner(account_id, actor)
+
+
+def logout_account_for_owner(account_id, actor):
+    initial_row = find_scoped_account_row(account_id, actor, "mine")
+    x_user_id = str(initial_row["x_user_id"])
+    with account_lock("x:" + x_user_id):
+        row = find_scoped_account_row(account_id, actor, "mine")
+        if str(row["status"] or "") == "disconnected":
+            try:
+                delete_token_artifacts(x_user_id)
+            except OSError:
+                safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
+                raise ServiceError("x_disconnect_failed", "X本地授权凭证清理失败，请稍后重试", 502) from None
+            return row_to_item(row)
+
+        token_file = token_path(x_user_id)
+        try:
+            token = read_token_file(x_user_id)
+        except ServiceError as exc:
+            if exc.code != "x_token_missing":
+                raise
+            if token_file.exists():
+                update_account_error(account_id, "revoke_pending", "X本地授权凭证不可读取，无法完成远端撤销")
+                safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
+                raise ServiceError("x_disconnect_failed", "X本地授权凭证不可读取，请联系管理员处理", 502) from None
+            token = {}
+
+        # Persist the non-active state before the first remote mutation. A crash or
+        # partial revoke can then be retried without presenting this account as active.
+        update_account_error(account_id, "revoke_pending", "X解除授权处理中，请重试退出以完成")
+        safe_record_event("logout", "started", actor, x_user_id=x_user_id)
+        seen_tokens = set()
+        try:
+            # Revoke the short-lived access token first and the refresh token last.
+            # If either call fails, the local token is retained only for a retry.
+            for field in ("access_token", "refresh_token"):
+                value = str(token.get(field, "") or "")
+                if not value or value in seen_tokens:
+                    continue
+                seen_tokens.add(value)
+                revoke_token(value)
+        except Exception:
+            update_account_error(account_id, "revoke_pending", "X解除授权未完成，请重试退出")
+            safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
+            raise ServiceError("x_disconnect_failed", "X解除授权失败，请稍后重试", 502) from None
+
+        try:
+            delete_token_artifacts(x_user_id)
+        except OSError:
+            update_account_error(account_id, "revoke_pending", "X本地授权凭证清理失败，请重试退出")
+            safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
+            raise ServiceError("x_disconnect_failed", "X本地授权凭证清理失败，请稍后重试", 502) from None
+
+        timestamp = iso_utc()
+        try:
+            with _DB_LOCK:
+                conn = db_connect()
+                try:
+                    cursor = conn.execute(
+                        """
+                        UPDATE x_authorized_account SET status='disconnected',access_expires_at='',
+                            last_error_at='',last_error='',disconnected_at=?,disconnected_by_tenant_key=?,
+                            disconnected_by_user_id=?,disconnected_by_name=?,updated_at=?
+                        WHERE id=? AND owner_tenant_key=? AND owner_user_id=?
+                        """,
+                        (
+                            timestamp, actor["tenant_key"], actor["user_id"], actor["name"], timestamp,
+                            account_id, actor["tenant_key"], actor["user_id"],
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ServiceError("x_account_not_found", "X账号记录不存在", 404)
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception as exc:
+            safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_accounts_unavailable")
+            if isinstance(exc, ServiceError):
+                raise
+            raise ServiceError("x_accounts_unavailable", "X账号退出状态保存失败，请重试", 503) from None
+        safe_record_event("logout", "completed", actor, x_user_id=x_user_id)
+        return find_account(account_id)
 
 
 def config_payload():
@@ -832,15 +1266,6 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     self.send_service_error(ServiceError("x_accounts_unavailable", "X账号服务暂不可用", 503))
             return
-        if parsed.path == "/internal/accounts":
-            if self.require_internal():
-                try:
-                    self.send_json(200, list_accounts())
-                except ServiceError as exc:
-                    self.send_service_error(exc)
-                except Exception:
-                    self.send_service_error(ServiceError("x_accounts_unavailable", "X账号服务暂不可用", 503))
-            return
         self.send_text(404, "not found\n")
 
     def do_POST(self):  # noqa: N802
@@ -855,9 +1280,26 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/internal/authorize":
                 self.send_json(200, create_authorization(payload.get("actor", {})))
                 return
+            if parsed.path == "/internal/accounts/query":
+                self.send_json(
+                    200,
+                    list_accounts(payload.get("actor", {}), payload.get("scope", "mine")),
+                )
+                return
             match = re.fullmatch(r"/internal/accounts/([0-9]+)/verify", parsed.path)
             if match:
-                self.send_json(200, {"item": verify_account(match.group(1))})
+                self.send_json(
+                    200,
+                    {
+                        "item": verify_account(
+                            match.group(1), payload.get("actor", {}), payload.get("scope", "mine")
+                        )
+                    },
+                )
+                return
+            match = re.fullmatch(r"/internal/accounts/([0-9]+)/logout", parsed.path)
+            if match:
+                self.send_json(200, {"item": logout_account(match.group(1), payload.get("actor", {}))})
                 return
             self.send_text(404, "not found\n")
         except ServiceError as exc:
@@ -874,6 +1316,7 @@ def serve():
     require_oauth_config()
     os.umask(0o077)
     ensure_storage()
+    cleanup_disconnected_token_artifacts()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print("X account sidecar listening on %s:%s" % (LISTEN_HOST, LISTEN_PORT), flush=True)

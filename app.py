@@ -11234,7 +11234,7 @@ def shell_quote(value):
 
 
 
-def json_response(handler, status_code, payload):
+def json_response(handler, status_code, payload, no_store=False):
 
 
 
@@ -11331,6 +11331,10 @@ def json_response(handler, status_code, payload):
 
 
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+
+    if no_store:
+
+        handler.send_header("Cache-Control", "no-store")
 
 
 
@@ -39211,7 +39215,8 @@ from features.x_accounts.client import (
     XAccountsClientError,
     configure_x_accounts_client,
     get_x_accounts_config,
-    list_x_accounts as list_x_authorized_accounts,
+    query_x_accounts as query_x_authorized_accounts,
+    logout_x_account,
     start_x_authorization,
     verify_x_account,
 )
@@ -39238,6 +39243,10 @@ except ValueError:
 X_ACCOUNTS_ERROR_META = {
     "invalid_request": (400, "请求参数无效"),
     "x_account_not_found": (404, "X账号记录不存在"),
+    "x_account_owned_by_other": (409, "该X账号已归属其他后台用户，请联系管理员处理"),
+    "x_admin_required": (403, "仅管理员可查看全部X账号"),
+    "x_disconnect_failed": (502, "X远端解除授权失败，请稍后重试"),
+    "x_disconnect_pending": (409, "X账号正在退出授权，请重试退出以完成"),
     "x_identity_mismatch": (409, "X Token账号身份不匹配，请重新授权"),
     "x_oauth_not_configured": (503, "X OAuth客户端尚未完整配置"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
@@ -39251,6 +39260,17 @@ def x_accounts_error_payload(exc):
     code = str(getattr(exc, "code", "x_accounts_unavailable") or "x_accounts_unavailable")
     status, message = X_ACCOUNTS_ERROR_META.get(code, X_ACCOUNTS_ERROR_META["x_accounts_unavailable"])
     return status, {"error": code if code in X_ACCOUNTS_ERROR_META else "x_accounts_unavailable", "message": message}
+
+
+def x_accounts_actor(session):
+    session = session if isinstance(session, dict) else {}
+    return {
+        "tenant_key": str(session.get("tenant_key", "") or ""),
+        "user_id": str(session.get("user_id", "") or ""),
+        "name": str(session.get("name", "") or ""),
+        "email": str(session.get("email", "") or ""),
+        "role": str(session.get("role", "user") or "user"),
+    }
 
 
 
@@ -88993,6 +89013,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         json_response(self, 403, {"error": "permission_denied", "module": module_key})
         return False
 
+    def _require_cookie_admin(self):
+        if not self._require_auth():
+            return False
+        session = self._session()
+        if session and session.get("auth_type") == "api_token":
+            json_response(self, 403, {"error": "cookie_auth_required", "module": "admin"})
+            return False
+        if session and session.get("role") == "admin":
+            return True
+        json_response(self, 403, {"error": "admin_required"})
+        return False
+
     def _require_same_origin_json(self):
         content_type = str(self.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
@@ -89467,20 +89499,32 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_cookie_module("x_accounts"):
                 return
             try:
-                json_response(self, 200, get_x_accounts_config())
+                json_response(self, 200, get_x_accounts_config(), no_store=True)
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
-                json_response(self, status, payload)
+                json_response(self, status, payload, no_store=True)
             return
 
         if parsed.path == "/api/x-accounts":
             if not self._require_cookie_module("x_accounts"):
                 return
             try:
-                json_response(self, 200, list_x_authorized_accounts())
+                session = self._session() or {}
+                json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="mine"), no_store=True)
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
-                json_response(self, status, payload)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-accounts":
+            if not self._require_cookie_admin():
+                return
+            try:
+                session = self._session() or {}
+                json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="all"), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
 
@@ -92583,13 +92627,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             session = self._session() or {}
             append_audit_log(session, "authorize_x_account_attempted", "x_account", "pending", {})
             try:
-                actor = {
-                    "user_id": str(session.get("user_id", "") or ""),
-                    "name": str(session.get("name", "") or ""),
-                    "email": str(session.get("email", "") or ""),
-                    "role": str(session.get("role", "user") or "user"),
-                }
-                result = start_x_authorization(actor)
+                result = start_x_authorization(x_accounts_actor(session))
                 append_audit_log(
                     session,
                     "authorize_x_account_started",
@@ -92597,7 +92635,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     "pending",
                     {"callback_url": result.get("callback_url", ""), "scopes": result.get("scopes", [])},
                 )
-                json_response(self, 200, result)
+                json_response(self, 200, result, no_store=True)
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 append_audit_log(
@@ -92607,7 +92645,39 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     "pending",
                     {"error": payload["error"]},
                 )
-                json_response(self, status, payload)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        x_admin_verify_match = re.match(r"^/api/admin/x-accounts/(\d+)/verify$", parsed.path)
+        if x_admin_verify_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_admin_verify_match.group(1)
+            append_audit_log(session, "admin_verify_x_account_attempted", "x_account", account_id, {})
+            try:
+                result = verify_x_account(account_id, x_accounts_actor(session), scope="all")
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "admin_verify_x_account",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {"status": item.get("status", ""), "username": item.get("username", "")},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "admin_verify_x_account_failed",
+                    "x_account",
+                    account_id,
+                    {"error": payload["error"]},
+                )
+                json_response(self, status, payload, no_store=True)
             return
 
         x_verify_match = re.match(r"^/api/x-accounts/(\d+)/verify$", parsed.path)
@@ -92620,7 +92690,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             account_id = x_verify_match.group(1)
             append_audit_log(session, "verify_x_account_attempted", "x_account", account_id, {})
             try:
-                result = verify_x_account(account_id)
+                result = verify_x_account(account_id, x_accounts_actor(session), scope="mine")
                 item = result.get("item", result) if isinstance(result, dict) else {}
                 append_audit_log(
                     session,
@@ -92629,7 +92699,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     str(item.get("x_user_id", account_id) or account_id),
                     {"status": item.get("status", ""), "username": item.get("username", "")},
                 )
-                json_response(self, 200, result)
+                json_response(self, 200, result, no_store=True)
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 append_audit_log(
@@ -92639,7 +92709,43 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     account_id,
                     {"error": payload["error"]},
                 )
-                json_response(self, status, payload)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        x_logout_match = re.match(r"^/api/x-accounts/(\d+)/logout$", parsed.path)
+        if x_logout_match:
+            if not self._require_cookie_module("x_accounts"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_logout_match.group(1)
+            append_audit_log(session, "logout_x_account_attempted", "x_account", account_id, {})
+            try:
+                result = logout_x_account(account_id, x_accounts_actor(session))
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "logout_x_account",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {
+                        "status": item.get("status", ""),
+                        "username": item.get("username", ""),
+                        "disconnected_at": item.get("disconnected_at", ""),
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "logout_x_account_failed",
+                    "x_account",
+                    account_id,
+                    {"error": payload["error"]},
+                )
+                json_response(self, status, payload, no_store=True)
             return
 
         if parsed.path == "/api/admin/users/role":

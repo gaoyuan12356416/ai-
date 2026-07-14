@@ -128,12 +128,23 @@
       {
         "key": "xAccounts",
         "label": "X账号授权",
-        "description": "授权并管理用于自动发帖的X账号",
+        "description": "授权并管理自己的多个X账号",
         "kind": "page",
         "href": "/x-accounts.html",
         "enabled": true,
         "order": 10,
         "module": "x_accounts"
+      },
+      {
+        "key": "xAccountList",
+        "label": "X账号列表",
+        "description": "查看全部X账号及授权状态",
+        "kind": "page",
+        "href": "/x-account-list.html",
+        "enabled": true,
+        "order": 20,
+        "module": "x_accounts",
+        "adminOnly": true
       }
     ]
   },
