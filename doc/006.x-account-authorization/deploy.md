@@ -113,13 +113,24 @@ https://ai.yingliangads.com/x-oauth/callback
 - V1 两服务 active，Nginx、Cookie/API Token 边界、callback 日志探针和文件权限验证通过；服务器测试 16/16。
 - 用户提供的生产页面截图表明当前已有 1 条授权账号。V2 部署前仍必须从 live SQLite/Token 目录重新只读确认数量和 hash，不能仅以截图代替迁移基线。
 
-## V2 部署前验证记录（2026-07-14）
+## V2 本地与生产部署记录（2026-07-14）
 
 - `python scripts/test_x_accounts.py`：28/28 通过。
 - `python scripts/test_x_accounts_app_contract.py`：5/5 通过。
 - Backfill 专项自动化：4/4 通过。
 - 全量 `py_compile`、QuickNav/两个页面内联 JS、navigation JSON、`git diff --check` 和 Playwright 三路径均通过，浏览器 console 0 error。
-- V2 精确 commit、服务器 release/backup 路径、生产 owner 回填、Token hash 和真实页面/revoke 结果须在实际部署后追加，不能复用 V1 记录冒充 V2。
+- V2 GitHub 精确提交：`e00bd30adb466f92b38f218bfb7f288ea7ff0a69`。
+- 服务器精确 release：`/root/releases/ai-x-account-authorization-e00bd30adb466`。
+- V2 部署前备份：`/root/backups/drama_material_service/20260714T070906Z-x-accounts-v2-e00bd30`；备份包含 live 代码/静态、Nginx、systemd、两个 env、SQLite 在线备份及 Token 目录，敏感文件保持 root-only。
+- 在生产数据副本先执行 `ensure_storage()`，随后 backfill 严格 dry-run 得到 `legacy=1, resolved=1, unresolved=0, updated=0`，apply 得到 `legacy=1, resolved=1, unresolved=0, updated=1`。副本演练通过后才进入 live 迁移。
+- Live sidecar 停写期间执行相同 additive migration 与 backfill：严格 dry-run 为 1 条可解析、0 条未解析，apply 更新 1 条。旧记录的 row ID、X user ID 与 `active` 状态保持不变，owner 回填到唯一匹配的非空 tenant/user；真实账号标识不写入 Git。
+- Token SHA-256 为 `cc6040d3f8e20a00561785f18209858ee3f89a5dd058a707cc66d9dea5888a6f`，文件权限 `0600`；该 hash/权限在副本演练、live migration、sidecar 启动及真实 `/2/users/me` 同步后均保持不变。Sidecar SQLite 权限为 `0600`。
+- `x-post-automation.service` 与 `drama-material-api.service` 部署后均为 active。该机器的 Nginx 不是 systemd unit，配置校验通过后使用 `nginx -s reload` 完成重载。
+- `/x-oauth/health`、`/x-accounts.html`、`/x-account-list.html` 均返回 200；未登录访问 owner/admin API 均返回 401，且响应带 `Cache-Control: no-store`。
+- 生产模块级隔离探针结果：回填 owner 的 `mine=1`，admin `all=1`，其他 tenant/user `mine=0`；其他 owner 对现有记录执行 verify/logout 均返回 404，Token hash 不变。Live/release、公网页面副本与 Nginx 配置的部署文件 hash 一致。
+- 2026-07-14T07:17:10Z 使用现有凭证真实调用 `/2/users/me` 同步成功，账号保持 `active`；public metrics 快照为 followers/following/tweet/listed/like/media=`0/1/2/0/0/0`，Token hash 未变化。
+- 部署窗口内 sidecar/main journal 对 access/refresh token、Client Secret、state/code 等敏感字段的命中为 0；Nginx 最近 500 条中带查询串的 `/x-oauth/callback?` 固定字符串命中为 0。未执行真实 callback/revoke，因此该结论只覆盖本次实际流量。
+- 为避免取消现有生产账号，本次未执行真实 logout/revoke；也未执行真实跨 owner OAuth callback 或带真实 Feishu Cookie 的生产浏览器验收。页面三路径仅在本地 Playwright mock 环境通过，不能据此宣称上述生产链路已验收。
 
 ## V2 回滚方案
 
@@ -135,4 +146,4 @@ https://ai.yingliangads.com/x-oauth/callback
 - 不整体覆盖生产复合单体；以 live `app.py` 做三方比对并保存 rollback point。
 - Revoke 是外部不可逆动作，生产真实 logout 必须由用户确认，不能作为无人值守部署 smoke test。
 - Legacy owner 未唯一匹配时宁可 admin-only，也不能按 user_id 便利性放开。
-- V2 本地 Sidecar 28/28、App contract 5/5、backfill 4/4、编译/静态和 Playwright 三路径均通过。生产 owner 回填/Token hash、真实 Cookie 生产验收和真实 X revoke 完成前，不能标记生产通过。
+- V2 已部署，生产迁移/Token 保全、服务/API smoke、模块级 owner/admin 查询与真实 `/2/users/me` 同步通过；结论仅限这些已执行项目。真实 Cookie 浏览器、真实跨 owner OAuth 与真实 logout/revoke 完成前，不得标记“全量生产验收通过”。
