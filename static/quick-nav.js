@@ -121,6 +121,24 @@
       ],
     },
     {
+      key: "x_platform",
+      label: "X平台推广",
+      order: 40,
+      module: "x_accounts",
+      items: [
+        {
+          key: "xAccounts",
+          label: "X账号授权",
+          description: "授权并管理用于自动发帖的X账号",
+          kind: "page",
+          href: "/x-accounts.html",
+          module: "x_accounts",
+          enabled: true,
+          order: 10,
+        },
+      ],
+    },
+    {
       key: "system",
       label: "设置",
       order: 90,
@@ -293,6 +311,7 @@
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
     voiceoverTasks: "/voiceover-drama.html",
+    xAccounts: "/x-accounts.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
