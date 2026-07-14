@@ -2,7 +2,7 @@
 
 ## 结论
 
-V1 两轮评审问题均已修复。V2 本地代码评审与验证通过：Sidecar 28/28、App 5/5、backfill 4/4、全量编译/静态及 Playwright 三路径通过，console 0 error。生产迁移、真实 Cookie 生产验收与真实 X revoke 未执行。
+V1 两轮评审问题均已修复。V2 本地代码评审与验证通过：Sidecar 28/28、App 5/5、backfill 4/4、全量编译/静态及 Playwright 三路径通过，console 0 error。精确提交已部署；生产迁移/Token 保全、服务/API smoke、模块级查询及真实 `/2/users/me` 同步通过。真实 Cookie 生产浏览器、真实跨 owner OAuth 与真实 X revoke 未执行。
 
 ## 评审范围
 
@@ -30,12 +30,12 @@ V1 两轮评审问题均已修复。V2 本地代码评审与验证通过：Sidec
 | CR-011 | P0 | `verify_account(account_id)` | 只按整数 ID 查找/更新，任何有模块权限用户可校验他人账号 | owner verify 在锁前后都按 `id+tenant+user` 重查；越权统一 404 | 本地回归通过 |
 | CR-012 | P0 | callback upsert | `ON CONFLICT(x_user_id)` 无 owner 条件，会覆盖其他 owner 的 Token/授权人 | 锁内先读 owner；跨 owner 在写 Token 前拒绝，比较旧 Token hash/DB 不变 | 本地回归通过 |
 | CR-013 | P0 | state/actor | V1 state 未保存 tenant，callback 无法恢复联合 owner | schema additive 增 actor tenant；主 API 拒绝 owner tenant/user 缺失 | App 5/5 通过 |
-| CR-014 | P1 | admin API/page | 若复用 owner 模块权限或前端隐藏，非 admin 仍可能访问全量 | `/api/admin/x-accounts*` 必须 Cookie admin；admin 页面不调用 owner API | 实现已复核；最新静态/浏览器套件待验收 |
+| CR-014 | P1 | admin API/page | 若复用 owner 模块权限或前端隐藏，非 admin 仍可能访问全量 | `/api/admin/x-accounts*` 必须 Cookie admin；admin 页面不调用 owner API | 实现/App/本地 Playwright 通过；生产未登录 401/no-store，通过真实 Cookie 待验收 |
 | CR-015 | P1 | logout/revoke | 失败时若保持 active、允许 verify 或提前删 Token，会把半完成远端撤销误当作正常授权 | 同账号锁；远端前写 `revoke_pending`；Access 先、Refresh 最后；失败保留 live Token、禁 verify、允许 logout 重试；全部成功后才删凭证并置 disconnected | 实现已复核；最新失败/重试套件与真实 revoke 待验收 |
-| CR-016 | P1 | owner backfill | owner 默认空后若按 user_id 兜底会跨租户认领；人工 SQL 易误写 | 标准脚本默认 dry-run，只回填唯一非空 tenant 匹配；`--require-all-resolved` 阻断；apply 使用事务与 guarded update | Backfill 4/4 通过；生产回填待执行 |
+| CR-016 | P1 | owner backfill | owner 默认空后若按 user_id 兜底会跨租户认领；人工 SQL 易误写 | 标准脚本默认 dry-run，只回填唯一非空 tenant 匹配；`--require-all-resolved` 阻断；apply 使用事务与 guarded update | Backfill 4/4；生产副本/live dry-run/apply 均通过，更新 1 条 |
 | CR-017 | P2 | profile DTO/UI | X 用户主页必须安全构造，optional 字段可能缺失 | 链接仅接受 `[A-Za-z0-9_]{1,50}`；所有可选字段空值安全 | Sidecar/Playwright 通过 |
 | CR-018 | P1 | startup cleanup | disconnected 行对应的 live Token/旧 tombstone 可能在异常中断后残留 | sidecar 启动完成 storage 初始化后按账号锁清理 live Token 与 `.*.disconnecting` | Sidecar 28/28 通过 |
-| CR-019 | P2 | owner/admin UI | 缺少刷新、同步、更新和退出时间会降低状态可诊断性 | 个人页显示 refresh/verify、updated/disconnected；admin 页显示 expiry/refresh、verify/profile sync、updated/disconnected | 实现已复核；登录态页面待验收 |
+| CR-019 | P2 | owner/admin UI | 缺少刷新、同步、更新和退出时间会降低状态可诊断性 | 个人页显示 refresh/verify、updated/disconnected；admin 页显示 expiry/refresh、verify/profile sync、updated/disconnected | 实现与本地 Playwright 已复核；生产登录态页面待验收 |
 
 ## V2 代码门槛与当前结果
 
@@ -44,8 +44,8 @@ V1 两轮评审问题均已修复。V2 本地代码评审与验证通过：Sidec
 - Admin query/verify 与 owner query/verify 走独立主 API 权限门；admin verify 是明确的“同步资料/状态”能力，不改变 owner。
 - Callback 在 Token 文件写入前完成跨 owner 判断，冲突测试逐字节确认旧 Token 不变。
 - Logout 状态机与 startup cleanup 已由 Sidecar 28/28 验证。
-- Backfill CLI 符合默认 dry-run、唯一匹配、`--require-all-resolved` 和 guarded apply 契约；自动化与生产 `drama_admin_user` 回填/Token hash 断言仍待执行。
-- Admin API、Nginx 与页面 fetch 的 no-store 以及两页时间列、username 50 字符上限已完成静态契约复核；完整静态/浏览器验证待执行。
+- Backfill CLI 符合默认 dry-run、唯一匹配、`--require-all-resolved` 和 guarded apply 契约；生产副本/live 各解析并更新 1 条，原 row/x_user_id/status、Token SHA-256 与 `0600` 保持。
+- Admin API、Nginx 与页面 fetch 的 no-store 以及两页时间列、username 50 字符上限已完成静态契约和本地 Playwright 复核；生产未登录 API no-store 通过，真实 Cookie 浏览器仍待执行。
 
 ## 编译 / 验证结果
 
@@ -61,4 +61,4 @@ V2 本地证据：
 - `python scripts/test_x_accounts_app_contract.py`：5/5 通过。
 - backfill 4/4、全量 `py_compile`、QuickNav/两个页面内联 JS、navigation JSON、`git diff --check` 通过。
 - Playwright 管理员个人页、管理员全量页、普通用户权限门三路径通过，console 0 error。
-- 生产部署、真实 Cookie/浏览器、真实 X revoke 和 legacy owner 实库回填待执行。
+- 生产已部署；legacy owner 实库回填、Token 保全、服务/API smoke、模块级隔离和真实 `/2/users/me` 同步通过。真实 Cookie/浏览器、真实跨 owner OAuth 与真实 X revoke 待执行。

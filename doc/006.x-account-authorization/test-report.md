@@ -2,9 +2,9 @@
 
 ## 测试结论
 
-V2 本地验证通过：Sidecar 28/28、主后台 App 5/5、legacy owner backfill 4/4、全量 py_compile、两页 inline JS、QuickNav、navigation JSON、diff check 和 Playwright 三路径均通过，console 0 error。
+V2 已部署；本地 Sidecar 28/28、主后台 App 5/5、legacy owner backfill 4/4、全量 py_compile、两页 inline JS、QuickNav、navigation JSON、diff check 和 Playwright 三路径均通过，console 0 error。生产数据副本演练、live additive migration/backfill、Token 保全、服务/API smoke、模块级 owner/admin 查询及真实 `/2/users/me` 同步也已通过。
 
-当前结论是“本地发布门槛通过”，不是“生产通过”。生产 owner 回填、Token hash 保全、真实 Cookie 生产验收、真实 `/2/users/me` 和真实 X revoke 尚未执行。
+当前结论是“V2 已上线，已执行的有限生产验证通过”，不是“全量生产验收通过”。真实 Feishu Cookie 浏览器链路、真实跨 owner OAuth callback 和真实 X logout/revoke 尚未执行。
 
 ## 测试范围
 
@@ -29,9 +29,12 @@ V2 本地验证通过：Sidecar 28/28、主后台 App 5/5、legacy owner backfil
 | V2 Backfill 专项自动化 | 4 | 4 | 0 | 0 |
 | V2 Python/JS/JSON/diff 检查组 | 1 组 | 1 组 | 0 | 0 |
 | V2 Playwright 三路径 | 3 | 3 | 0 | 0 |
-| 生产 legacy owner/Token 保全迁移 | 1 | 0 | 0 | 1 |
+| 生产副本演练 + live legacy owner/Token 保全迁移 | 2 | 2 | 0 | 0 |
+| 生产服务/API/模块查询 smoke | 1 组 | 1 组 | 0 | 0 |
+| 真实 X `/2/users/me` 资料同步 | 1 | 1 | 0 | 0 |
 | 登录态浏览器 Owner/Admin 验收 | 1 | 0 | 0 | 1 |
-| 真实 X 资料同步与 revoke | 1 | 0 | 0 | 1 |
+| 真实跨 owner OAuth callback | 1 | 0 | 0 | 1 |
+| 真实 X logout/revoke | 1 | 0 | 0 | 1 |
 
 ## 缺陷情况
 
@@ -76,22 +79,31 @@ V1 生产历史：
 - 备份：`/root/backups/drama_material_service/20260714T041337Z-x-accounts-eccabcb`。
 - 用户提供的生产页面截图显示已有 1 条授权账号；该截图是 legacy migration 的需求证据，但不是 V2 live DB/Token hash 证明。
 
+V2 生产证据：
+
+- 精确提交 `e00bd30adb466f92b38f218bfb7f288ea7ff0a69`；release `/root/releases/ai-x-account-authorization-e00bd30adb466`；部署前备份 `/root/backups/drama_material_service/20260714T070906Z-x-accounts-v2-e00bd30`。
+- 迁移副本：`ensure_storage()` 成功；backfill dry-run 为 1 条可解析/0 条未解析，apply 更新 1 条。Live 使用相同门槛，dry-run 为 1 条可解析/0 条未解析，apply 更新 1 条。
+- Live 原记录的 row ID、X user ID 与 `active` 状态保持，owner 已回填到唯一匹配的非空 tenant/user；真实账号标识不写入 Git。
+- Token SHA-256 `cc6040d3f8e20a00561785f18209858ee3f89a5dd058a707cc66d9dea5888a6f`、权限 `0600`；在迁移、服务启动和真实 `/2/users/me` 同步后仍不变。Sidecar DB 权限 `0600`。
+- 两个应用服务均 active。Nginx 非 systemd unit，`nginx -s reload` 成功；health/两个页面均 200，owner/admin API 未登录均 401 且 no-store。
+- 模块级查询：回填 owner `mine=1`、admin `all=1`、其他 tenant/user `mine=0`；其他 owner 对现有记录执行 verify/logout 均返回 404，Token hash 不变。Live/release、公网静态副本与 Nginx 配置文件 hash 一致。
+- 2026-07-14T07:17:10Z 真实 `/2/users/me` 同步成功，账号保持 active；followers/following/tweet/listed/like/media=`0/1/2/0/0/0`，Token hash 不变。
+- 部署窗口应用 journal 的敏感字段命中为 0；Nginx 最近 500 条中固定字符串 `/x-oauth/callback?` 命中为 0。因本次未执行真实 callback/revoke，这不是完整 OAuth 流量泄漏验收。
+
 ## 遗留风险
 
-- V2 尚未部署，线上仍是 V1 页面/接口语义；本地修复不等于线上已生效。
-- 生产 legacy owner 必须从 `drama_admin_user` 唯一匹配回填；零/多匹配保持 admin-only，不能按 user_id 自动认领。
-- 最新 backfill 自动化覆盖 dry-run/唯一匹配/fail closed/严格门槛，但生产主库回填、原 Token SHA-256/权限和 rollback 仍需现场验证。
+- V2 已部署且唯一 legacy owner 已成功回填；零/多匹配的 fail-closed 行为由自动化覆盖，本次 live 数据没有该分支。
 - X API 可用性/计费由平台控制；资料是 callback/主动同步时的快照，粉丝量不是实时值。
-- OAuth revoke 是外部不可逆操作；Mock 不可替代真实撤销，回滚也不能恢复 X 侧已撤销的 Token。
-- 静态检查不能替代登录态浏览器对导航、权限门、表格和操作确认的验收。
+- OAuth revoke 是外部不可逆操作；本次为保护现有账号未执行真实 logout/revoke。Mock 不可替代真实撤销，回滚也不能恢复 X 侧已撤销的 Token。
+- 未执行真实跨 owner OAuth callback；跨 owner 防覆盖结论当前来自自动化，不是生产真实 OAuth 证据。
+- 未使用真实 Feishu Cookie 完成生产浏览器 owner/admin/非 admin 三路径；本地 Playwright 通过不能替代该项。
+- 未执行 rollback 实际恢复演练；已验证部署前备份及非敏感 hash，但远端 revoke 后的回滚分支仍需单独受控验收。
 
 ## 发布建议
 
-建议进入 GitHub-first 生产部署；随后必须按以下步骤执行并更新本文档：
+V2 可维持当前上线状态；迁移与现有账号保全无需重复执行。后续全量验收应单独安排：
 
-1. 服务器检出精确 commit，部署前备份 app、静态、Nginx/systemd、两个 env、SQLite 与 Token 目录。
-2. Live 只读盘点确认预期 legacy 记录；记录 row/token 非敏感 hash，执行 additive migration，再依次运行 backfill `--require-all-resolved` dry-run 与 `--apply --require-all-resolved`。
-3. 迁移后断言 row ID/x_user_id/token_store_key、Token SHA-256/权限不变；不满足立即回滚。
-4. A/B/C Cookie 验证 owner/跨 tenant 隔离；admin 验证全量列表与同步，非 admin 只能看到权限门/API 403。
-5. 完成真实 `/2/users/me` 资料快照；经用户确认后执行一次真实 logout，观察 `revoke_pending`、Access-first/Refresh-last、失败重试与 disconnected 清理，再验证重新授权恢复。
-6. Nginx/sidecar/main/audit 日志敏感信息扫描为 0，再给出生产通过结论。
+1. 使用真实 admin/owner/非 admin Feishu Cookie 跑生产浏览器三路径，验证导航、全量/个人列表、权限门和 no-store。
+2. 使用隔离测试 owner 执行真实跨 owner OAuth callback，确认冲突且原 owner/Token/时间不变；不得拿当前唯一生产账号做破坏性转移实验。
+3. 仅在用户明确确认后执行真实 logout/revoke，观察 `revoke_pending`、Access-first/Refresh-last、失败重试、disconnected 清理与重新授权恢复。
+4. 完成上述项目及受控 rollback 演练后，才能把结论升级为“全量生产验收通过”。
