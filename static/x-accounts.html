@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>X账号授权管理 - AI自动后台</title>
+  <title>我的 X 账号授权 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <style>
     :root { color-scheme: light; --ink:#13233a; --muted:#687894; --line:#dce5f1; --blue:#2563eb; --green:#149b67; --amber:#c47a0a; --red:#d13f4d; --panel:#fff; }
@@ -25,6 +25,8 @@
     .button:hover { border-color:#aabbd3; transform:translateY(-1px); }
     .button:disabled { opacity:.55; cursor:not-allowed; transform:none; }
     .button.primary { border-color:transparent; background:linear-gradient(135deg,#2563eb,#1746b5); color:#fff; }
+    .button.danger { border-color:#efbcc3; background:#fff5f6; color:#b42335; }
+    .button.danger:hover { border-color:#d65b69; }
     .button.small { min-height:32px; padding:0 11px; border-radius:9px; font-size:12px; }
     .panel { padding:20px; border:1px solid rgba(210,222,238,.9); border-radius:18px; background:rgba(255,255,255,.92); box-shadow:0 16px 42px rgba(30,51,83,.07); }
     .hidden { display:none !important; }
@@ -54,10 +56,14 @@
     .account-avatar img { width:100%; height:100%; object-fit:cover; }
     .account strong,.account span { display:block; }
     .account span,.subtle { margin-top:3px; color:var(--muted); font-size:12px; }
+    .profile-link { color:var(--ink); text-decoration:none; }
+    .profile-link:hover { color:var(--blue); text-decoration:underline; }
+    .row-actions { display:flex; flex-wrap:wrap; gap:8px; min-width:160px; }
     .status { display:inline-flex; align-items:center; gap:6px; min-height:28px; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; }
     .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
     .status.active { color:#08734f; background:#e8f8f1; }
     .status.refresh_required { color:#9a6000; background:#fff5dd; }
+    .status.disconnected { color:#687894; background:#edf1f6; }
     .status.scope_missing,.status.revoked,.status.token_missing,.status.error { color:#ad2f3b; background:#ffedef; }
     .scope-list { display:flex; flex-wrap:wrap; gap:5px; max-width:290px; }
     .empty { padding:44px 18px; text-align:center; color:var(--muted); }
@@ -76,7 +82,7 @@
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>X账号授权管理</h1><p>授权并维护用于自动发帖的 X 账号；Token 仅保存在服务器。</p></div>
+        <div class="title"><h1>我的 X 账号授权</h1><p>授权并管理你本人用于自动发帖的多个 X 账号；Token 仅保存在服务器。</p></div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
@@ -90,7 +96,7 @@
       <div id="pageRoot" class="hidden">
         <div id="oauthNotice" class="notice hidden"><span id="oauthNoticeText"></span><button id="dismissNotice" type="button" aria-label="关闭">×</button></div>
         <section class="stats">
-          <article class="stat"><span>已授权账号</span><strong id="totalCount">0</strong></article>
+          <article class="stat"><span>我的 X 账号</span><strong id="totalCount">0</strong></article>
           <article class="stat"><span>状态有效</span><strong id="activeCount">0</strong></article>
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
           <article class="stat"><span>最近更新时间</span><strong id="latestUpdate" style="font-size:16px;line-height:1.5;">—</strong></article>
@@ -98,7 +104,7 @@
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>已授权账号</h2><p>列表不会自动请求 X；点击“校验状态”才会刷新 Token并验证账号。</p></div>
+            <div><h2>我的已授权账号</h2><p>你可以授权多个 X 账号；点击“校验状态”才会刷新 Token 并同步账号资料。</p></div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
               <button id="reloadAccounts" class="button" type="button">刷新列表</button>
               <button id="authorizeAccount" class="button primary" type="button" disabled>授权新的 X 账号</button>
@@ -107,15 +113,15 @@
           <div id="configChips" class="config"></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>状态</th><th>已授权权限</th><th>首次授权</th><th>最近授权</th><th>Token到期</th><th>最近刷新/校验</th><th>更新时间</th><th>授权人</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>状态</th><th>已授权权限</th><th>首次/最近授权</th><th>Token到期</th><th>最近刷新/校验</th><th>更新/退出时间</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
       </div>
     </main>
   </div>
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js"></script>
@@ -125,12 +131,18 @@
       const statusMeta = {
         active: ["有效", "active"], refresh_required: ["待刷新", "refresh_required"],
         scope_missing: ["权限不完整", "scope_missing"], revoked: ["授权已失效", "revoked"],
-        token_missing: ["缺少Token", "token_missing"], error: ["异常", "error"],
+        token_missing: ["缺少Token", "token_missing"], revoke_pending: ["退出待完成", "error"],
+        disconnected: ["已退出", "disconnected"],
+        error: ["异常", "error"],
       };
 
       const el = id => document.getElementById(id);
       const escapeHtml = value => String(value == null ? "" : value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
       const safeImage = value => { try { const url = new URL(String(value || ""), location.origin); return /^https?:$/.test(url.protocol) ? url.href : ""; } catch (_) { return ""; } };
+      const profileUrl = value => {
+        const username = String(value || "").trim().replace(/^@/, "");
+        return /^[A-Za-z0-9_]{1,50}$/.test(username) ? `https://x.com/${encodeURIComponent(username)}` : "";
+      };
       const formatTime = value => {
         if (!value) return "—";
         const raw = String(value);
@@ -167,55 +179,67 @@
       function renderConfig() {
         const config = state.config || {};
         const scopes = Array.isArray(config.scopes) ? config.scopes : [];
+        const hasPendingLogout = state.accounts.some(item => item.status === "revoke_pending");
         el("configChips").innerHTML = `<span class="chip">OAuth：${config.configured ? "已配置" : "未配置"}</span><span class="chip">Callback：${escapeHtml(config.callback_url || "未配置")}</span>${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("")}`;
-        el("authorizeAccount").disabled = !config.configured || state.busy;
+        el("authorizeAccount").disabled = !config.configured || state.busy || hasPendingLogout;
+        el("authorizeAccount").title = hasPendingLogout ? "请先重试并完成待处理账号的退出授权" : "";
       }
 
       function renderStats() {
         const items = state.accounts;
         const active = items.filter(item => item.status === "active").length;
+        const disconnected = items.filter(item => item.status === "disconnected").length;
         el("totalCount").textContent = String(items.length);
         el("activeCount").textContent = String(active);
-        el("attentionCount").textContent = String(items.length - active);
+        el("attentionCount").textContent = String(Math.max(0, items.length - active - disconnected));
         const latest = items.map(item => item.updated_at).filter(Boolean).sort().pop();
         el("latestUpdate").textContent = formatTime(latest);
       }
 
       function renderRows() {
         const body = el("accountRows");
-        if (!state.accounts.length) { body.innerHTML = `<tr><td colspan="10" class="empty">暂无已授权账号，点击右上角开始授权。</td></tr>`; return; }
+        if (!state.accounts.length) { body.innerHTML = `<tr><td colspan="8" class="empty">暂无已授权账号，点击右上角开始授权。</td></tr>`; return; }
         body.innerHTML = state.accounts.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
+          const accountUrl = profileUrl(item.username);
           const scopes = Array.isArray(item.scopes) ? item.scopes : [];
           const missingScopes = Array.isArray(item.missing_scopes) ? item.missing_scopes : [];
           const meta = statusMeta[item.status] || [item.status || "未知", "error"];
-          const actor = item.authorized_by_name || item.authorized_by_email || item.authorized_by_user_id || "—";
+          const isDisconnected = item.status === "disconnected";
+          const isRevokePending = item.status === "revoke_pending";
           const refreshVerify = `<div>刷新：${escapeHtml(formatTime(item.last_token_refresh_at))}</div><div class="subtle">校验：${escapeHtml(formatTime(item.last_verified_at))}</div>`;
+          const accountName = escapeHtml(item.display_name || username);
+          const accountHeading = accountUrl
+            ? `<a class="profile-link" href="${escapeHtml(accountUrl)}" target="_blank" rel="noopener noreferrer"><strong>${accountName}</strong></a>`
+            : `<strong>${accountName}</strong>`;
+          const actions = isDisconnected
+            ? `<button class="button small" type="button" disabled>已退出</button>`
+            : (isRevokePending
+              ? `<button class="button small" type="button" disabled>禁止校验</button><button class="button small danger" type="button" data-logout-id="${escapeHtml(item.id)}">重试退出</button>`
+              : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">校验状态</button><button class="button small danger" type="button" data-logout-id="${escapeHtml(item.id)}">退出授权</button>`);
           return `<tr>
-            <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div><strong>${escapeHtml(item.display_name || username)}</strong><span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span></div></div></td>
+            <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span></div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
             <td><div class="scope-list">${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("") || "—"}${missingScopes.map(scope => `<span class="chip missing">缺少 ${escapeHtml(scope)}</span>`).join("")}</div></td>
-            <td>${escapeHtml(formatTime(item.first_authorized_at))}</td>
-            <td>${escapeHtml(formatTime(item.last_authorized_at))}</td>
+            <td><div>首次：${escapeHtml(formatTime(item.first_authorized_at))}</div><div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></td>
             <td>${escapeHtml(formatTime(item.access_expires_at))}</td>
             <td>${refreshVerify}</td>
-            <td>${escapeHtml(formatTime(item.updated_at))}</td>
-            <td>${escapeHtml(actor)}${item.authorized_by_email && item.authorized_by_name ? `<div class="subtle">${escapeHtml(item.authorized_by_email)}</div>` : ""}</td>
-            <td><button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">校验状态</button></td>
+            <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">退出：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
+            <td><div class="row-actions">${actions}</div></td>
           </tr>`;
         }).join("");
       }
 
       async function loadData() {
-        el("accountRows").innerHTML = `<tr><td colspan="10" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">正在加载…</td></tr>`;
         try {
           const [config, result] = await Promise.all([api("/api/x-accounts/config"), api("/api/x-accounts")]);
           state.config = config;
           state.accounts = Array.isArray(result.items) ? result.items : [];
           renderConfig(); renderStats(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="10" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           toast(`加载失败：${error.message}`);
         }
       }
@@ -239,6 +263,22 @@
         finally { button.disabled = false; button.textContent = "校验状态"; }
       }
 
+      async function logoutAccount(id, button) {
+        const confirmed = window.confirm("确认退出这个 X 账号的授权吗？退出后该账号将停止自动发帖，服务端保存的 Token 会被删除；这不会退出 x.com 网站或其他 X 客户端。如需恢复，请重新授权。");
+        if (!confirmed) return;
+        button.disabled = true; button.textContent = "退出中…";
+        try {
+          await api(`/api/x-accounts/${encodeURIComponent(id)}/logout`, { method:"POST", body:"{}" });
+          toast("已退出该 X 账号授权");
+          await loadData();
+        } catch (error) {
+          toast(`退出授权失败：${error.message}`);
+          await loadData();
+        } finally {
+          button.disabled = false; button.textContent = "退出授权";
+        }
+      }
+
       async function init() {
         try { state.auth = await api("/api/ui/topbar"); }
         catch (_) { state.auth = { authenticated:false, login_url:"/api/auth/feishu/login" }; }
@@ -255,7 +295,12 @@
       el("authorizeAccount").addEventListener("click", startAuthorization);
       el("reloadAccounts").addEventListener("click", loadData);
       el("dismissNotice").addEventListener("click", () => el("oauthNotice").classList.add("hidden"));
-      el("accountRows").addEventListener("click", event => { const button = event.target.closest("[data-verify-id]"); if (button) verifyAccount(button.dataset.verifyId, button); });
+      el("accountRows").addEventListener("click", event => {
+        const verifyButton = event.target.closest("[data-verify-id]");
+        if (verifyButton) { verifyAccount(verifyButton.dataset.verifyId, verifyButton); return; }
+        const logoutButton = event.target.closest("[data-logout-id]");
+        if (logoutButton) logoutAccount(logoutButton.dataset.logoutId, logoutButton);
+      });
       init();
     })();
   </script>

@@ -10,8 +10,12 @@ import urllib.request
 
 SAFE_ERROR_CODES = {
     "invalid_request",
+    "x_account_owned_by_other",
     "x_account_not_found",
+    "x_admin_required",
     "x_accounts_unavailable",
+    "x_disconnect_failed",
+    "x_disconnect_pending",
     "x_identity_mismatch",
     "x_internal_auth_failed",
     "x_oauth_not_configured",
@@ -92,7 +96,7 @@ def _request(path, method="GET", payload=None):
         if code not in SAFE_ERROR_CODES:
             code = "x_accounts_unavailable"
         message = str(data.get("message", "") or "X账号服务请求失败")
-        status = exc.code if exc.code in {400, 404, 409, 429, 502, 503} else 503
+        status = exc.code if exc.code in {400, 403, 404, 409, 429, 502, 503} else 503
         raise XAccountsClientError(code, message, status) from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
         raise XAccountsClientError("x_accounts_unavailable", "X账号服务暂不可用", 503) from None
@@ -102,22 +106,53 @@ def get_x_accounts_config():
     return _request("/internal/config")
 
 
-def list_x_accounts():
-    return _request("/internal/accounts")
+def normalize_actor(actor):
+    actor = actor or {}
+    return {
+        "user_id": str(actor.get("user_id", "") or "")[:255],
+        "tenant_key": str(actor.get("tenant_key", "") or "")[:255],
+        "name": str(actor.get("name", "") or "")[:255],
+        "email": str(actor.get("email", "") or "")[:255],
+        "role": str(actor.get("role", "user") or "user")[:32],
+    }
+
+
+def normalize_scope(scope):
+    value = str(scope or "mine").strip().lower()
+    if value not in {"mine", "all"}:
+        raise XAccountsClientError("invalid_request", "X账号查询范围无效", 400)
+    return value
+
+
+def query_x_accounts(actor, scope="mine"):
+    return _request(
+        "/internal/accounts/query",
+        method="POST",
+        payload={"actor": normalize_actor(actor), "scope": normalize_scope(scope)},
+    )
 
 
 def start_x_authorization(actor):
-    safe_actor = {
-        "user_id": str((actor or {}).get("user_id", "") or "")[:255],
-        "name": str((actor or {}).get("name", "") or "")[:255],
-        "email": str((actor or {}).get("email", "") or "")[:255],
-        "role": str((actor or {}).get("role", "user") or "user")[:32],
-    }
-    return _request("/internal/authorize", method="POST", payload={"actor": safe_actor})
+    return _request("/internal/authorize", method="POST", payload={"actor": normalize_actor(actor)})
 
 
-def verify_x_account(account_id):
+def verify_x_account(account_id, actor, scope="mine"):
     account_id = str(account_id or "")
     if not account_id.isdigit():
         raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
-    return _request("/internal/accounts/%s/verify" % account_id, method="POST", payload={})
+    return _request(
+        "/internal/accounts/%s/verify" % account_id,
+        method="POST",
+        payload={"actor": normalize_actor(actor), "scope": normalize_scope(scope)},
+    )
+
+
+def logout_x_account(account_id, actor):
+    account_id = str(account_id or "")
+    if not account_id.isdigit():
+        raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
+    return _request(
+        "/internal/accounts/%s/logout" % account_id,
+        method="POST",
+        payload={"actor": normalize_actor(actor)},
+    )
