@@ -4,7 +4,7 @@
 
 > 本节是当前有效测试结论。下文 V2 的远端 revoke/`revoke_pending` 验收仅为历史证据，已被用户明确选择的 V3 本地软停用方案取代。
 
-V3 本地回归通过，当前结论为“允许进入受控生产部署”，尚不是“V3 全量生产验收通过”。
+V3 已部署，自动化及已执行的有限生产验证通过；当前结论不是“V3 全量生产验收通过”。
 
 - `POST /api/x-accounts/{id}/logout` 保持兼容路径，但只在本地写 `disabled`；自动化确认不读取 Token、不调用 X、不删除 Token，重复操作幂等。
 - `disabled` 在列表中保持终态并输出 `publish_eligible=false`；owner/admin 校验 fail closed，同 owner 重新授权可恢复 `active`。
@@ -24,7 +24,11 @@ Playwright mock admin flow -> 已停用/解除授权统计与筛选显示正确�
 git diff --check -> exit 0
 ```
 
-生产待验证项：精确 commit/release/backup、目标 pending→disabled、目标及其他账号 Token hash/权限保全、两服务和页面/API smoke、日志检查，以及真实登录态个人页/管理员页显示。真实 X revoke 已退出当前范围，不应再执行。
+服务器对相同精确 release 重跑结果：Sidecar 28/28、App contract 5/5、Backfill 4/4，Python 编译通过。
+
+生产验证结果：精确 commit/release/backup 和备份 manifest 已验证；目标账号完成 `revoke_pending`→`disabled`；4 个 Token 文件数量、字节和 `0600` 权限均未变化；两服务、health、页面、未登录 API no-store、公网 internal 404、部署文件一致性和日志检查均通过。真实 X revoke 已退出当前范围，部署中未执行。
+
+仍未使用生产登录 Cookie 点击个人页/管理员页。实际 X Post 发布端点也尚未实现；本次仅验证未来发布凭证入口会拒绝 disabled/不可发布账号，不能据此宣称端到端发布已完成。
 
 ## 测试结论
 
@@ -55,6 +59,10 @@ V2 已部署；本地 Sidecar 28/28、主后台 App 5/5、legacy owner backfill 
 | V2 Backfill 专项自动化 | 4 | 4 | 0 | 0 |
 | V2 Python/JS/JSON/diff 检查组 | 1 组 | 1 组 | 0 | 0 |
 | V2 Playwright 三路径 | 3 | 3 | 0 | 0 |
+| V3 本地/服务器 Sidecar 自动化 | 2 组 | 2 组 | 0 | 0 |
+| V3 本地/服务器 App contract | 2 组 | 2 组 | 0 | 0 |
+| V3 本地/服务器 Backfill 专项 | 2 组 | 2 组 | 0 | 0 |
+| V3 生产软停用、Token 保全与服务/API smoke | 1 组 | 1 组 | 0 | 0 |
 | 生产副本演练 + live legacy owner/Token 保全迁移 | 2 | 2 | 0 | 0 |
 | 生产服务/API/模块查询 smoke | 1 组 | 1 组 | 0 | 0 |
 | 真实 X `/2/users/me` 资料同步 | 1 | 1 | 0 | 0 |
@@ -69,6 +77,7 @@ V2 已部署；本地 Sidecar 28/28、主后台 App 5/5、legacy owner backfill 
 - BUG-003：Token 属主与必需 scope 校验，V1 已修复。
 - BUG-004：跨用户全局列表/verify/logout IDOR，V2 已修复，最新核心自动化回归通过；生产 Cookie 验收待执行。
 - BUG-005：跨 owner 重授权覆盖原 Token/归属风险，V2 已修复，最新核心自动化包含 Token 逐字节不变与最终 owner lock 回归；生产真实 OAuth 验收待执行。
+- BUG-006：X 账号退出失败并改为后台软停用，V3 已修复并部署；生产账号 1 已从 `revoke_pending` 收敛为 `disabled`，Token 保全验证通过。
 
 历史独立安全复核曾提出“admin 可同步非本人账号”为 P1，但 `/api/admin/x-accounts/{id}/verify` 是本需求明确指定的 admin 同步能力，且只能经 Cookie admin 路由进入、不改变 owner，因此不作为适用缺陷。Owner 路由仍对非本人记录返回 404；pending、锁序与 backfill 最新差异已完成独立复核，未发现剩余 P0–P3。
 
@@ -98,6 +107,17 @@ Playwright admin-owner/admin-all/non-admin-gate -> passed, console 0 error
 - Backfill 默认 dry-run；仅唯一且 tenant 非空的匹配可 apply；零/多匹配在 `--require-all-resolved` 下退出 2；guarded update 不一致整笔回滚。
 - Profile metrics 完整/缺失、verify 更新、username 1–50 位合法与超长/非法 profile URL 边界已纳入最新套件。
 
+V3 生产证据：
+
+- 精确提交 `0e2f6362b2f2705c3b662704225c2f0e4a5da4bf`；release `/root/releases/ai-x-soft-logout-0e2f6362b2f2`；部署前备份 `/root/backups/drama_material_service/20260714T111829Z-x-soft-logout-0e2f636`，备份 manifest 校验通过。部署窗口约从 `2026-07-14T11:18:20Z` 开始。
+- 账号 1 从原始状态 `revoke_pending` 更新为 `disabled`，`last_error` 为空且 `disabled_at` 已设置；最后一条 logout 事件为 `completed`，时间 `2026-07-14T11:18:32Z`。
+- Token 文件部署前后均为 4 个，全部与备份逐字节一致且权限为 `0600`；数据目录为 `0700`，Sidecar DB 为 `0600`。
+- Raw DB 中账号 1 为 `disabled`，账号 2–4 仍为 `active`。因 access token 已过期，模块把账号 2–4 动态投影为 `refresh_required`；四个账号当前均为 `publish_eligible=false`。该动态投影没有改写账号 2–4 的 raw DB 状态。
+- Disabled verify 与发布凭证入口都返回 HTTP 409、`x_account_disabled`。这只证明凭证门禁 fail closed；真实 X Post 发布端点尚未实现，未来发帖必须在 sidecar `publish_credentials` context 内执行。
+- 两服务 active；local/public health 和两个页面为 200；未登录 owner/admin API 为 401 且 no-store；公网 internal 为 404。Release/live/public 文件一致。
+- 部署后两服务 serious journal 命中 0、revoke 相关日志命中 0。
+- Playwright 证据仅来自本地 mock owner/admin UI；未执行生产登录 Cookie 页面点击。
+
 V1 生产历史：
 
 - 提交：`eccabcb0d49714efa90403b140c0d2f77e5182dc`。
@@ -119,6 +139,8 @@ V2 生产证据：
 
 ## 遗留风险
 
+- V3 本地软停用已部署，账号 1 与全部 Token 的生产保全验证通过；账号 2–4 因 Access Token 到期被动态投影为 `refresh_required`，在刷新/重新校验前不可发布。
+- 真实 X Post 发布端点尚未实现；`publish_credentials` 只是未来发布的受锁凭证入口。实现真实发帖时必须在同一 sidecar context 内完成上游调用，不能在 context 外或其他进程复用取出的 Token。
 - V2 已部署且唯一 legacy owner 已成功回填；零/多匹配的 fail-closed 行为由自动化覆盖，本次 live 数据没有该分支。
 - X API 可用性/计费由平台控制；资料是 callback/主动同步时的快照，粉丝量不是实时值。
 - OAuth revoke 是外部不可逆操作；本次为保护现有账号未执行真实 logout/revoke。Mock 不可替代真实撤销，回滚也不能恢复 X 侧已撤销的 Token。
@@ -128,9 +150,9 @@ V2 生产证据：
 
 ## 发布建议
 
-V2 可维持当前上线状态；迁移与现有账号保全无需重复执行。后续全量验收应单独安排：
+V3 可维持当前上线状态；账号 1 已在后台停用且 Token 无损保留，无需再尝试 X revoke。后续全量验收/功能开发应单独安排：
 
 1. 使用真实 admin/owner/非 admin Feishu Cookie 跑生产浏览器三路径，验证导航、全量/个人列表、权限门和 no-store。
 2. 使用隔离测试 owner 执行真实跨 owner OAuth callback，确认冲突且原 owner/Token/时间不变；不得拿当前唯一生产账号做破坏性转移实验。
-3. 仅在用户明确确认后执行真实 logout/revoke，观察 `revoke_pending`、Access-first/Refresh-last、失败重试、disconnected 清理与重新授权恢复。
+3. 如需自动发帖，另行实现真实 X Post 发布端点，并确保上游调用始终位于 sidecar `publish_credentials` context 内；补充真实发布的权限、幂等、失败重试和审计测试。
 4. 完成上述项目及受控 rollback 演练后，才能把结论升级为“全量生产验收通过”。

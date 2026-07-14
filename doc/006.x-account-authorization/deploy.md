@@ -19,7 +19,18 @@ V3 部署步骤：
 
 V3 回滚必须同时恢复部署前代码和 sidecar SQLite/Token 备份。旧 V2 代码不认识 `disabled` 终态，禁止只回滚代码而保留 V3 数据库，否则保留的 Token 可能被旧状态投影误判为 active。
 
-V3 生产部署记录将在实际部署完成后补录精确 commit、release、backup、状态和 Token hash 验证结果。
+## V3 生产部署记录（2026-07-14）
+
+- GitHub 精确提交：`0e2f6362b2f2705c3b662704225c2f0e4a5da4bf`；服务器 release：`/root/releases/ai-x-soft-logout-0e2f6362b2f2`。
+- 部署前备份：`/root/backups/drama_material_service/20260714T111829Z-x-soft-logout-0e2f636`；备份 `manifest` 校验通过。部署窗口约从 `2026-07-14T11:18:20Z` 开始。
+- 停写窗口内通过 V3 sidecar 业务函数将账号 1 从 `revoke_pending` 收敛为 `disabled`，旧 `last_error` 已清空，`disabled_at` 已设置；最后一条 logout 审计事件为 `completed`，时间 `2026-07-14T11:18:32Z`。
+- 部署前后 Token 文件均为 4 个，数量不变；4 个 live Token 均与备份逐字节一致，权限均为 `0600`。数据目录权限为 `0700`，Sidecar SQLite 权限为 `0600`。
+- SQLite 原始状态为账号 1=`disabled`、账号 2–4=`active`。模块动态投影会根据凭证有效期把账号 2–4 显示为 `refresh_required`；账号 1–4 当前均为 `publish_eligible=false`。这是动态可发布性投影，不是把账号 2–4 的数据库原始状态改成了 `refresh_required`。
+- 对 disabled 账号执行 verify 和发布凭证入口均返回 HTTP 409、错误码 `x_account_disabled`；没有读取或删除 Token，也没有产生 X revoke 请求。
+- `x-post-automation.service` 与 `drama-material-api.service` 均为 active；local/public health、`/x-accounts.html`、`/x-account-list.html` 均返回 200。未登录 owner/admin API 均返回 401 且带 `Cache-Control: no-store`；公网 internal 路径返回 404。
+- Release、live 与 public 静态部署文件逐文件一致。部署后两个服务的 serious journal 命中为 0，revoke 相关日志命中为 0。
+- 本地及服务器 `scripts/test_x_accounts.py` 均为 28/28，App contract 为 5/5，Backfill 专项为 4/4；Python 编译和两页 inline JavaScript 检查通过。
+- Playwright 只在本地 mock 环境验证了 owner/admin 页面，没有使用生产登录 Cookie 点击页面。本项目仍未实现真实 X Post 发布端点；未来实现必须在 sidecar 的 `publish_credentials` context 内完成发帖，不能把 Access Token 取出后跨进程或脱离锁使用。
 
 ## 变更内容
 
