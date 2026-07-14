@@ -1,5 +1,31 @@
 # 测试报告
 
+## V3 本地软停用增量结论（2026-07-14）
+
+> 本节是当前有效测试结论。下文 V2 的远端 revoke/`revoke_pending` 验收仅为历史证据，已被用户明确选择的 V3 本地软停用方案取代。
+
+V3 本地回归通过，当前结论为“允许进入受控生产部署”，尚不是“V3 全量生产验收通过”。
+
+- `POST /api/x-accounts/{id}/logout` 保持兼容路径，但只在本地写 `disabled`；自动化确认不读取 Token、不调用 X、不删除 Token，重复操作幂等。
+- `disabled` 在列表中保持终态并输出 `publish_eligible=false`；owner/admin 校验 fail closed，同 owner 重新授权可恢复 `active`。
+- legacy `revoke_pending` 即使 Token 不可读也可直接收敛为 `disabled`；legacy `disconnected` 继续保持历史终态，启动清理不会碰 `disabled` Token。
+- `publish_credentials` 只接受精确 `active` 和非空 Access Token，敏感凭证只 yield `access_token` 字符串（不返回完整 Token 字典或 Refresh Token），并从锁内重查直到上游发布工作结束持续持有账号锁。实际 X Post 发布尚未接入；未来发布调用必须留在同一 context 内。
+- 个人页和管理员页已统一“已停用/完成停用/更新与停用时间”语义，确认框明确 Token 保留且不会调用 X 解除授权。
+
+V3 当前证据：
+
+```text
+python scripts/test_x_accounts.py -> Ran 28 tests, OK
+python scripts/test_x_accounts_app_contract.py -> Ran 5 tests, OK
+python -m py_compile app.py features/x_accounts/oauth_service.py features/x_accounts/client.py scripts/test_x_accounts.py scripts/test_x_accounts_app_contract.py -> exit 0
+inline JavaScript syntax check -> x-accounts.html OK; x-account-list.html OK
+Playwright mock owner flow -> pending “完成停用”确认框 -> POST 200 -> 已停用；console 0 error
+Playwright mock admin flow -> 已停用/解除授权统计与筛选显示正确；console 0 error
+git diff --check -> exit 0
+```
+
+生产待验证项：精确 commit/release/backup、目标 pending→disabled、目标及其他账号 Token hash/权限保全、两服务和页面/API smoke、日志检查，以及真实登录态个人页/管理员页显示。真实 X revoke 已退出当前范围，不应再执行。
+
 ## 测试结论
 
 V2 已部署；本地 Sidecar 28/28、主后台 App 5/5、legacy owner backfill 4/4、全量 py_compile、两页 inline JS、QuickNav、navigation JSON、diff check 和 Playwright 三路径均通过，console 0 error。生产数据副本演练、live additive migration/backfill、Token 保全、服务/API smoke、模块级 owner/admin 查询及真实 `/2/users/me` 同步也已通过。

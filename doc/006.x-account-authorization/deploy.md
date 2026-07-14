@@ -1,5 +1,26 @@
 # 部署文档
 
+## V3 本地软停用部署增量（2026-07-14）
+
+> 本节是当前有效部署规范。下文 V2 的远端 revoke、`revoke_pending` 重试和成功后删除 Token 内容仅保留为历史记录，不得在 V3 部署或验收中执行。
+
+V3 保留既有 `/api/x-accounts/{id}/logout` 路径，但业务行为改为本地软停用：owner-scoped 账号在账号锁内写为 `disabled`，不读取 Token、不调用 X revoke、不删除 Token。`disabled` 禁止校验和发布；同 owner 重新授权后恢复 `active`。旧 `revoke_pending` 可通过同一路径直接收敛为 `disabled`；legacy `disconnected` 保留原语义和启动清理。
+
+本次无新配置项、无 schema 变更、无 Client ID/Secret/Token 变更。上线仍必须 backup-first、GitHub-first，并保全 `/var/lib/x-post-automation/accounts.sqlite3` 与整个 Token 目录。
+
+V3 部署步骤：
+
+1. 本地执行 Sidecar、App contract、Python 编译、两页 inline JavaScript 和 `git diff --check`；代码评审无阻断项后提交并推送。
+2. 服务器只从 GitHub 检出精确 commit 到新 release，先在 release 运行相同测试，不从本地直传未提交源码。
+3. 只读记录全部账号的 row ID/status、Token 文件 SHA-256/权限；停止 sidecar 与主 API 后备份 live 代码、SQLite 和整个 Token 目录。
+4. 仅部署精确 release 中本次变化的 `app.py`、`features/x_accounts/*` 与两个 X 页面；不修改 OAuth env、Nginx 或 systemd。
+5. 在服务停写窗口内，使用新 sidecar 业务函数把目标 legacy `revoke_pending` 行收敛为 `disabled`；操作前后目标 Token SHA-256/权限必须一致，其他账号状态和 Token hash 必须不变。
+6. 依次启动 sidecar 与主 API，验证 health、两个页面、未登录 no-store、模块查询、disabled 校验拒绝、日志和文件权限。
+
+V3 回滚必须同时恢复部署前代码和 sidecar SQLite/Token 备份。旧 V2 代码不认识 `disabled` 终态，禁止只回滚代码而保留 V3 数据库，否则保留的 Token 可能被旧状态投影误判为 active。
+
+V3 生产部署记录将在实际部署完成后补录精确 commit、release、backup、状态和 Token hash 验证结果。
+
 ## 变更内容
 
 V2 在现有 X OAuth sidecar 上新增：

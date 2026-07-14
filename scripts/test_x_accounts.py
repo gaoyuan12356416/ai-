@@ -157,11 +157,11 @@ class XAccountsTestCase(unittest.TestCase):
                 service.verify_account(second["id"], self.owner)
         self.assertEqual(denied.exception.code, "x_account_not_found")
         read_mock.assert_not_called()
-        with mock.patch.object(service, "revoke_token") as revoke_mock:
+        with mock.patch.object(service, "read_token_file") as token_read_mock:
             with self.assertRaises(service.ServiceError) as logout_denied:
                 service.logout_account(second["id"], self.owner)
         self.assertEqual(logout_denied.exception.code, "x_account_not_found")
-        revoke_mock.assert_not_called()
+        token_read_mock.assert_not_called()
 
         with self.assertRaises(service.ServiceError) as cross_tenant_verify:
             service.verify_account(first["id"], self.same_user_other_tenant)
@@ -344,127 +344,158 @@ class XAccountsTestCase(unittest.TestCase):
                 service.complete_authorization("legacy-code", state)
         self.assertEqual(legacy_conflict.exception.code, "x_account_owned_by_other")
 
-    def test_logout_revokes_access_then_refresh_is_idempotent_and_preserves_metadata(self):
+    def test_logout_soft_disables_idempotently_without_touching_token_or_x(self):
         item = self.complete(
             username="logout_user",
             account_fields={"public_metrics": {"followers_count": 88, "like_count": 99, "media_count": 7}},
         )
         token_file = service.token_path(item["x_user_id"])
-        with mock.patch.object(service, "revoke_token", return_value={"revoked": True}) as revoke_mock:
-            logged_out = service.logout_account(item["id"], self.owner)
-        self.assertEqual([call.args[0] for call in revoke_mock.call_args_list], ["access-secret", "refresh-secret"])
-        self.assertFalse(token_file.exists())
-        self.assertEqual(logged_out["status"], "disconnected")
-        self.assertEqual(logged_out["followers_count"], 88)
-        self.assertEqual(logged_out["like_count"], 99)
-        self.assertTrue(logged_out["disconnected_at"].endswith("Z"))
-        self.assertEqual(logged_out["disconnected_by_user_id"], self.owner["user_id"])
-
-        token_file.write_text("legacy-residual", encoding="utf-8")
-        legacy_tombstone = service.TOKENS_DIR / (".%s.legacy.disconnecting" % token_file.name)
-        legacy_tombstone.write_text("legacy-tombstone", encoding="utf-8")
-        service.cleanup_disconnected_token_artifacts()
-        self.assertFalse(token_file.exists())
-        self.assertFalse(legacy_tombstone.exists())
-        with mock.patch.object(service, "revoke_token") as second_revoke:
-            second = service.logout_account(item["id"], self.owner)
-        second_revoke.assert_not_called()
-        self.assertEqual(second["status"], "disconnected")
-        self.assertEqual(second["disconnected_at"], logged_out["disconnected_at"])
-
-        with self.assertRaises(service.ServiceError) as verify_denied:
-            service.verify_account(item["id"], self.owner)
-        self.assertEqual(verify_denied.exception.code, "x_token_missing")
-        self.assertEqual(service.find_account(item["id"])["status"], "disconnected")
-
-    def test_logout_partial_failure_persists_pending_and_can_retry(self):
-        item = self.complete(username="retry_logout")
-        token_file = service.token_path(item["x_user_id"])
         before = token_file.read_bytes()
-        _result, stale_state = self.new_state(self.owner)
-        failure = service.ServiceError("x_upstream_error", "temporary", 502)
-        with mock.patch.object(service, "revoke_token", side_effect=[{"revoked": True}, failure]) as revoke_mock:
-            with self.assertRaises(service.ServiceError) as caught:
-                service.logout_account(item["id"], self.owner)
-        self.assertEqual(caught.exception.code, "x_disconnect_failed")
-        self.assertEqual(revoke_mock.call_count, 2)
-        self.assertTrue(token_file.exists())
+        with mock.patch.object(service, "read_token_file") as token_read_mock, \
+                mock.patch.object(service, "http_json") as upstream_mock, \
+                mock.patch.object(service, "delete_token_artifacts") as delete_mock:
+            disabled = service.logout_account(item["id"], self.owner)
+            second = service.logout_account(item["id"], self.owner)
+        token_read_mock.assert_not_called()
+        upstream_mock.assert_not_called()
+        delete_mock.assert_not_called()
         self.assertEqual(token_file.read_bytes(), before)
-        self.assertEqual(service.find_account(item["id"])["status"], "revoke_pending")
+        service.cleanup_disconnected_token_artifacts()
+        self.assertEqual(token_file.read_bytes(), before)
+        self.assertEqual(disabled["status"], "disabled")
+        self.assertFalse(disabled["publish_eligible"])
+        self.assertEqual(disabled["followers_count"], 88)
+        self.assertEqual(disabled["like_count"], 99)
+        self.assertTrue(disabled["disconnected_at"].endswith("Z"))
+        self.assertEqual(disabled["disconnected_by_user_id"], self.owner["user_id"])
+        self.assertEqual(second["status"], "disabled")
+        self.assertEqual(second["disconnected_at"], disabled["disconnected_at"])
 
-        with mock.patch.object(service, "token_request") as refresh_mock, mock.patch.object(service, "user_request") as user_mock:
-            with self.assertRaises(service.ServiceError) as pending_verify:
+        with mock.patch.object(service, "read_token_file") as verify_token, \
+                mock.patch.object(service, "user_request") as verify_user:
+            with self.assertRaises(service.ServiceError) as verify_denied:
                 service.verify_account(item["id"], self.owner)
-        self.assertEqual(pending_verify.exception.code, "x_disconnect_pending")
-        refresh_mock.assert_not_called()
-        user_mock.assert_not_called()
+        self.assertEqual(verify_denied.exception.code, "x_account_disabled")
+        verify_token.assert_not_called()
+        verify_user.assert_not_called()
 
-        with self.assertRaises(service.ServiceError) as pending_start:
-            service.create_authorization(self.owner)
-        self.assertEqual(pending_start.exception.code, "x_disconnect_pending")
-
-        with mock.patch.object(service, "token_request") as token_exchange, mock.patch.object(service, "user_request") as user_lookup:
-            with self.assertRaises(service.ServiceError) as pending_reauthorize:
-                service.complete_authorization("replacement-code", stale_state)
-        self.assertEqual(pending_reauthorize.exception.code, "x_disconnect_pending")
-        token_exchange.assert_not_called()
-        user_lookup.assert_not_called()
-        self.assertEqual(token_file.read_bytes(), before)
-        self.assertEqual(service.find_account(item["id"])["status"], "revoke_pending")
-
-        with mock.patch.object(service, "revoke_token", return_value={"revoked": True}) as retry_revoke:
-            disconnected = service.logout_account(item["id"], self.owner)
-        self.assertEqual([call.args[0] for call in retry_revoke.call_args_list], ["access-secret", "refresh-secret"])
-        self.assertEqual(disconnected["status"], "disconnected")
-        self.assertFalse(token_file.exists())
+        with mock.patch.object(service, "read_token_file") as publish_token:
+            with self.assertRaises(service.ServiceError) as publish_denied:
+                with service.publish_credentials(item["id"], self.owner):
+                    self.fail("disabled account must not yield publishing credentials")
+        self.assertEqual(publish_denied.exception.code, "x_account_disabled")
+        publish_token.assert_not_called()
 
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
             events = conn.execute(
                 "SELECT outcome,error_code,actor_tenant_key FROM x_oauth_event WHERE event_type='logout' ORDER BY id"
             ).fetchall()
-        self.assertIn(("failed", "x_disconnect_failed", self.owner["tenant_key"]), events)
+        self.assertEqual(events, [("completed", "", self.owner["tenant_key"])])
 
-    def test_logout_retains_unreadable_token_as_pending_for_operator_recovery(self):
-        item = self.complete(username="corrupt_logout")
+    def test_legacy_revoke_pending_soft_disables_even_with_unreadable_token(self):
+        item = self.complete(username="legacy_pending")
         token_file = service.token_path(item["x_user_id"])
         token_file.write_text("not-json", encoding="utf-8")
-        with mock.patch.object(service, "revoke_token") as revoke_mock:
-            with self.assertRaises(service.ServiceError) as caught:
-                service.logout_account(item["id"], self.owner)
-        self.assertEqual(caught.exception.code, "x_disconnect_failed")
-        revoke_mock.assert_not_called()
-        self.assertTrue(token_file.exists())
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET status='revoke_pending',last_error='legacy remote failure' WHERE id=?",
+                (item["id"],),
+            )
+            conn.commit()
+
+        with mock.patch.object(service, "read_token_file") as token_read_mock, \
+                mock.patch.object(service, "http_json") as upstream_mock, \
+                mock.patch.object(service, "delete_token_artifacts") as delete_mock:
+            disabled = service.logout_account(item["id"], self.owner)
+        token_read_mock.assert_not_called()
+        upstream_mock.assert_not_called()
+        delete_mock.assert_not_called()
+        self.assertEqual(disabled["status"], "disabled")
+        self.assertEqual(disabled["last_error"], "")
         self.assertEqual(token_file.read_text(encoding="utf-8"), "not-json")
-        self.assertEqual(service.find_account(item["id"])["status"], "revoke_pending")
+        self.assertIn("authorization_url", service.create_authorization(self.owner))
 
-    def test_logout_local_delete_failure_stays_pending_with_token_for_retry(self):
-        item = self.complete(username="delete_failure")
+    def test_publish_credentials_require_active_status_and_access_token(self):
+        item = self.complete(username="publishable")
+        with service.publish_credentials(item["id"], self.owner) as (account, access_token):
+            self.assertTrue(account["publish_eligible"])
+            self.assertEqual(account["status"], "active")
+            self.assertEqual(access_token, "access-secret")
+
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute("UPDATE x_authorized_account SET status='error' WHERE id=?", (item["id"],))
+            conn.commit()
+        with self.assertRaises(service.ServiceError) as not_publishable:
+            with service.publish_credentials(item["id"], self.owner):
+                self.fail("non-active account must not yield publishing credentials")
+        self.assertEqual(not_publishable.exception.code, "x_account_not_publishable")
+
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute("UPDATE x_authorized_account SET status='active' WHERE id=?", (item["id"],))
+            conn.commit()
+        token_without_access = json.loads(service.token_path(item["x_user_id"]).read_text(encoding="utf-8"))
+        token_without_access.pop("access_token", None)
+        service.atomic_write_json(service.token_path(item["x_user_id"]), token_without_access)
+        with self.assertRaises(service.ServiceError) as token_missing:
+            with service.publish_credentials(item["id"], self.owner):
+                self.fail("account without access token must not publish")
+        self.assertEqual(token_missing.exception.code, "x_token_missing")
+
+    def test_legacy_disconnected_logout_still_cleans_residual_token_artifacts(self):
+        item = self.complete(username="legacy_disconnected")
         token_file = service.token_path(item["x_user_id"])
-        before = token_file.read_bytes()
-        with mock.patch.object(service, "revoke_token", return_value={"revoked": True}) as revoke_mock, mock.patch.object(service, "delete_token_artifacts", side_effect=OSError("read only")):
-            with self.assertRaises(service.ServiceError) as caught:
-                service.logout_account(item["id"], self.owner)
-        self.assertEqual(caught.exception.code, "x_disconnect_failed")
-        self.assertEqual(revoke_mock.call_count, 2)
-        self.assertTrue(token_file.exists())
-        self.assertEqual(token_file.read_bytes(), before)
-        self.assertEqual(service.find_account(item["id"])["status"], "revoke_pending")
+        tombstone = service.TOKENS_DIR / (".%s.legacy.disconnecting" % token_file.name)
+        tombstone.write_text("legacy", encoding="utf-8")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute("UPDATE x_authorized_account SET status='disconnected' WHERE id=?", (item["id"],))
+            conn.commit()
 
-    def test_same_owner_can_reauthorize_disconnected_account(self):
+        result = service.logout_account(item["id"], self.owner)
+        self.assertEqual(result["status"], "disconnected")
+        self.assertFalse(token_file.exists())
+        self.assertFalse(tombstone.exists())
+
+    def test_same_owner_can_reauthorize_disabled_account(self):
         original = self.complete(username="before_logout")
         first_authorized_at = original["first_authorized_at"]
-        with mock.patch.object(service, "revoke_token", return_value={"revoked": True}):
-            service.logout_account(original["id"], self.owner)
+        old_payload = json.loads(service.token_path(original["x_user_id"]).read_text(encoding="utf-8"))
+        old_payload["access_token"] = "retained-old-access"
+        service.atomic_write_json(service.token_path(original["x_user_id"]), old_payload)
+        old_token = service.token_path(original["x_user_id"]).read_bytes()
+        service.logout_account(original["id"], self.owner)
+        self.assertEqual(service.token_path(original["x_user_id"]).read_bytes(), old_token)
 
         restored = self.complete(username="after_logout", actor=dict(self.owner, name="Owner Renamed"))
         self.assertEqual(restored["id"], original["id"])
         self.assertEqual(restored["status"], "active")
+        self.assertTrue(restored["publish_eligible"])
         self.assertEqual(restored["username"], "after_logout")
         self.assertEqual(restored["first_authorized_at"], first_authorized_at)
         self.assertEqual(restored["disconnected_at"], "")
         self.assertEqual(restored["owner_name"], self.owner["name"])
         self.assertEqual(restored["authorized_by_name"], "Owner Renamed")
-        self.assertTrue(service.token_path(restored["x_user_id"]).exists())
+        restored_token = service.token_path(restored["x_user_id"]).read_bytes()
+        self.assertNotEqual(restored_token, old_token)
+        self.assertEqual(json.loads(restored_token.decode("utf-8"))["access_token"], "access-secret")
+
+    def test_oauth_callback_completed_after_disable_is_explicit_reauthorization(self):
+        item = self.complete(username="before_delayed_callback")
+        _result, delayed_state = self.new_state(self.owner)
+        service.logout_account(item["id"], self.owner)
+        replacement = {
+            "access_token": "delayed-access",
+            "refresh_token": "delayed-refresh",
+            "expires_in": 7200,
+            "scope": " ".join(service.SCOPES),
+        }
+        account = {"data": {"id": item["x_user_id"], "username": "after_delayed_callback", "name": "Restored"}}
+        with mock.patch.object(service, "token_request", return_value=replacement), \
+                mock.patch.object(service, "user_request", return_value=account):
+            restored = service.complete_authorization("delayed-code", delayed_state)
+        self.assertEqual(restored["status"], "active")
+        self.assertTrue(restored["publish_eligible"])
+        saved = json.loads(service.token_path(item["x_user_id"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved["access_token"], "delayed-access")
 
     def test_required_scopes_cannot_be_removed_by_environment_config(self):
         original_scopes = service.SCOPES
@@ -652,25 +683,47 @@ class XAccountsTestCase(unittest.TestCase):
         account = {
             "data": {"id": item["x_user_id"], "username": "owner_locked", "name": "Owner Locked"}
         }
-        with mock.patch.object(service, "token_request", side_effect=blocked_exchange), mock.patch.object(service, "user_request", return_value=account), mock.patch.object(service, "revoke_token", return_value={"revoked": True}) as revoke_mock:
+        with mock.patch.object(service, "token_request", side_effect=blocked_exchange), mock.patch.object(service, "user_request", return_value=account):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 callback_future = pool.submit(service.complete_authorization, "owner-lock-code", state)
                 self.assertTrue(exchange_started.wait(timeout=5))
                 logout_future = pool.submit(service.logout_account, item["id"], self.owner)
                 time.sleep(0.1)
                 self.assertFalse(logout_future.done())
-                revoke_mock.assert_not_called()
                 release_exchange.set()
                 callback_result = callback_future.result(timeout=5)
                 logout_result = logout_future.result(timeout=5)
 
         self.assertEqual(callback_result["username"], "owner_locked")
-        self.assertEqual(logout_result["status"], "disconnected")
-        self.assertEqual(
-            [call.args[0] for call in revoke_mock.call_args_list],
-            ["owner-lock-access", "owner-lock-refresh"],
-        )
-        self.assertFalse(service.token_path(item["x_user_id"]).exists())
+        self.assertEqual(logout_result["status"], "disabled")
+        saved_token = json.loads(service.token_path(item["x_user_id"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved_token["refresh_token"], "owner-lock-refresh")
+
+    def test_publish_context_holds_account_lock_until_upstream_work_finishes(self):
+        item = self.complete(username="publish_lock")
+        publish_started = threading.Event()
+        release_publish = threading.Event()
+
+        def publish_work():
+            with service.publish_credentials(item["id"], self.owner) as (_account, access_token):
+                self.assertEqual(access_token, "access-secret")
+                publish_started.set()
+                self.assertTrue(release_publish.wait(timeout=5))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            publish_future = pool.submit(publish_work)
+            self.assertTrue(publish_started.wait(timeout=5))
+            logout_future = pool.submit(service.logout_account, item["id"], self.owner)
+            time.sleep(0.1)
+            self.assertFalse(logout_future.done())
+            release_publish.set()
+            publish_future.result(timeout=5)
+            disabled = logout_future.result(timeout=5)
+        self.assertEqual(disabled["status"], "disabled")
+        with self.assertRaises(service.ServiceError) as blocked:
+            with service.publish_credentials(item["id"], self.owner):
+                self.fail("disabled account must not publish")
+        self.assertEqual(blocked.exception.code, "x_account_disabled")
 
     def test_handler_log_drops_callback_query(self):
         handler = object.__new__(service.Handler)
@@ -725,62 +778,10 @@ class XAccountsTestCase(unittest.TestCase):
             with mock.patch.object(service, "user_request", return_value=account_payload):
                 verified = client.verify_x_account(item["id"], self.owner)
             self.assertEqual(verified["item"]["username"], "via-client")
-            with mock.patch.object(service, "revoke_token", return_value={"revoked": True}) as revoke_mock:
-                logged_out = client.logout_x_account(item["id"], self.owner)
-            self.assertEqual(logged_out["item"]["status"], "disconnected")
-            self.assertEqual(revoke_mock.call_count, 2)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-
-    def test_revoke_request_uses_confidential_client_auth_and_form_body(self):
-        with mock.patch.object(service, "http_json", return_value={"revoked": True}) as request_mock:
-            result = service.revoke_token("token-value")
-        self.assertEqual(result, {"revoked": True})
-        args, kwargs = request_mock.call_args
-        self.assertEqual(args[0], service.REVOKE_URL)
-        self.assertEqual(kwargs["method"], "POST")
-        self.assertTrue(kwargs["headers"]["Authorization"].startswith("Basic "))
-        self.assertEqual(
-            urllib.parse.parse_qs(kwargs["body"].decode("utf-8")),
-            {"token": ["token-value"]},
-        )
-        self.assertTrue(kwargs["allow_revoked"])
-        self.assertTrue(kwargs["allow_non_json"])
-
-    def test_revoke_http_accepts_empty_or_non_json_2xx_body(self):
-        class RevokeResponseHandler(service.BaseHTTPRequestHandler):
-            def do_POST(self):  # noqa: N802
-                if self.path == "/empty":
-                    self.send_response(204)
-                    self.end_headers()
-                    return
-                body = b"revoked"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, _format, *_args):
-                return
-
-        server = service.ThreadingHTTPServer(("127.0.0.1", 0), RevokeResponseHandler)
-        server.daemon_threads = True
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        base_url = "http://127.0.0.1:%s" % server.server_address[1]
-        try:
-            for path in ("/empty", "/text"):
-                with self.subTest(path=path):
-                    result = service.http_json(
-                        base_url + path,
-                        method="POST",
-                        body=b"token=redacted",
-                        allow_non_json=True,
-                    )
-                    self.assertEqual(result, {})
+            token_before = service.token_path(item["x_user_id"]).read_bytes()
+            logged_out = client.logout_x_account(item["id"], self.owner)
+            self.assertEqual(logged_out["item"]["status"], "disabled")
+            self.assertEqual(service.token_path(item["x_user_id"]).read_bytes(), token_before)
         finally:
             server.shutdown()
             server.server_close()

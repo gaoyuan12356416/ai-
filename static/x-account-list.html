@@ -58,7 +58,7 @@
     .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
     .status.active { color:#08734f; background:#e8f8f1; }
     .status.refresh_required { color:#9a6000; background:#fff5dd; }
-    .status.disconnected { color:#687894; background:#edf1f6; }
+    .status.disabled,.status.disconnected { color:#687894; background:#edf1f6; }
     .status.scope_missing,.status.revoked,.status.token_missing,.status.error { color:#ad2f3b; background:#ffedef; }
     .chip-list { display:flex; flex-wrap:wrap; gap:5px; max-width:300px; }
     .chip { display:inline-flex; align-items:center; min-height:25px; padding:3px 8px; border-radius:999px; background:#eef3fa; color:#455a78; font-size:11px; }
@@ -86,7 +86,7 @@
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>X 账号列表</h1><p>管理员查看全部已接入的 X 账号、公众资料及授权健康状态。</p></div>
+        <div class="title"><h1>X 账号列表</h1><p>管理员查看全部已接入的 X 账号、公众资料及后台启用状态。</p></div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
@@ -101,7 +101,7 @@
         <section class="stats">
           <article class="stat"><span>全部 X 账号</span><strong id="totalCount">0</strong></article>
           <article class="stat"><span>状态有效</span><strong id="activeCount">0</strong></article>
-          <article class="stat"><span>已退出授权</span><strong id="disconnectedCount">0</strong></article>
+          <article class="stat"><span>已停用/解除授权</span><strong id="disconnectedCount">0</strong></article>
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
         </section>
 
@@ -117,8 +117,9 @@
               <option value="active">有效</option>
               <option value="refresh_required">待刷新</option>
               <option value="scope_missing">权限不完整</option>
-              <option value="revoke_pending">退出待完成</option>
-              <option value="disconnected">已退出</option>
+              <option value="revoke_pending">旧退出待处理</option>
+              <option value="disabled">已停用</option>
+              <option value="disconnected">已解除授权</option>
               <option value="revoked">授权已失效</option>
               <option value="token_missing">缺少 Token</option>
               <option value="error">异常</option>
@@ -127,7 +128,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>公众数据</th><th>账号资料</th><th>授权状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/退出时间</th><th>操作</th></tr></thead>
+              <thead><tr><th>X账号</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
               <tbody id="accountRows"><tr><td colspan="11" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
@@ -145,8 +146,8 @@
       const statusMeta = {
         active:["有效","active"], refresh_required:["待刷新","refresh_required"],
         scope_missing:["权限不完整","scope_missing"], revoked:["授权已失效","revoked"],
-        token_missing:["缺少Token","token_missing"], revoke_pending:["退出待完成","error"],
-        disconnected:["已退出","disconnected"],
+        token_missing:["缺少Token","token_missing"], revoke_pending:["旧退出待处理","error"],
+        disabled:["已停用","disabled"], disconnected:["已解除授权","disconnected"],
         error:["异常","error"],
       };
 
@@ -193,7 +194,7 @@
       function renderStats() {
         const items = state.accounts;
         const active = items.filter(item => item.status === "active").length;
-        const disconnected = items.filter(item => item.status === "disconnected").length;
+        const disconnected = items.filter(item => item.status === "disabled" || item.status === "disconnected").length;
         el("totalCount").textContent = String(items.length);
         el("activeCount").textContent = String(active);
         el("disconnectedCount").textContent = String(disconnected);
@@ -250,8 +251,8 @@
           const ownerEmail = item.owner_email || item.authorized_by_email || "";
           const xCreatedAt = item.x_created_at || "";
           const profileSyncAt = item.last_profile_sync_at || "";
-          const verifyButton = item.status === "disconnected" || item.status === "revoke_pending"
-            ? `<button class="button small" type="button" disabled>${item.status === "disconnected" ? "已退出" : "退出待完成"}</button>`
+          const verifyButton = item.status === "disabled" || item.status === "disconnected" || item.status === "revoke_pending"
+            ? `<button class="button small" type="button" disabled>${item.status === "disabled" ? "已停用" : (item.status === "disconnected" ? "已解除授权" : "旧退出待处理")}</button>`
             : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">同步/校验</button>`;
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
@@ -263,7 +264,7 @@
             <td><div class="meta-stack">首次：${escapeHtml(formatTime(item.first_authorized_at))}<div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></div></td>
             <td><div>到期：${escapeHtml(formatTime(item.access_expires_at))}</div><div class="subtle">刷新：${escapeHtml(formatTime(item.last_token_refresh_at))}</div></td>
             <td><div class="meta-stack">校验：${escapeHtml(formatTime(item.last_verified_at))}<div class="subtle">资料：${escapeHtml(formatTime(profileSyncAt))}</div></div></td>
-            <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">退出：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
+            <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">停用：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
             <td>${verifyButton}</td>
           </tr>`;
         }).join("");

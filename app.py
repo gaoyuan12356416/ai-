@@ -39242,11 +39242,13 @@ except ValueError:
 
 X_ACCOUNTS_ERROR_META = {
     "invalid_request": (400, "请求参数无效"),
+    "x_account_disabled": (409, "X账号已在后台停用，请重新授权后再使用"),
+    "x_account_not_publishable": (409, "X账号当前状态不可用于发布"),
     "x_account_not_found": (404, "X账号记录不存在"),
     "x_account_owned_by_other": (409, "该X账号已归属其他后台用户，请联系管理员处理"),
     "x_admin_required": (403, "仅管理员可查看全部X账号"),
-    "x_disconnect_failed": (502, "X远端解除授权失败，请稍后重试"),
-    "x_disconnect_pending": (409, "X账号正在退出授权，请重试退出以完成"),
+    "x_disconnect_failed": (502, "X账号停用失败，请稍后重试"),
+    "x_disconnect_pending": (409, "X账号存在旧退出待处理状态，请先完成停用"),
     "x_identity_mismatch": (409, "X Token账号身份不匹配，请重新授权"),
     "x_oauth_not_configured": (503, "X OAuth客户端尚未完整配置"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
