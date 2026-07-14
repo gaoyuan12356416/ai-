@@ -38,9 +38,28 @@ sidecar 启动时幂等创建 `/var/lib/x-post-automation/accounts.sqlite3` 的�
 - 完成真实 OAuth后列表显示账号和五项scope。
 - 搜索响应、DOM、日志、审计无敏感值。
 
+## 生产部署记录（2026-07-14）
+
+- GitHub 精确提交：`eccabcb0d49714efa90403b140c0d2f77e5182dc`。
+- 服务器发布目录：`/root/releases/ai-x-account-authorization-eccabcb0d497`，已核对为上述精确提交。
+- 部署前备份：`/root/backups/drama_material_service/20260714T041337Z-x-accounts-eccabcb`。
+- 已部署主后台、X OAuth sidecar、页面/导航、systemd unit 和 Nginx 配置；服务器内部 token 已同步写入两个 root-only env，未输出真实值。
+- `x-post-automation.service` 与 `drama-material-api.service` 重启后均为 active/running；Nginx 配置检查通过并完成 reload。
+- 服务器 Python 3.9 环境执行 X 功能测试 16/16 通过。
+
+## 生产验证结果（2026-07-14）
+
+- sidecar 内部配置接口显示 OAuth 已配置，callback 为 `https://ai.yingliangads.com/x-oauth/callback`，五项必需 scope 完整。
+- 公网 `/x-oauth/health` 与 `/x-accounts.html` 返回 200；未登录 `/api/x-accounts` 返回 401。
+- 公网 `/x-oauth/internal/accounts` 返回 404，internal API 未暴露。
+- 使用现有 API Token 访问 X 账号接口返回 403 `cookie_auth_required`，授权操作只接受后台 Cookie 会话。
+- 伪 callback 请求返回 302；查询参数探针在 Nginx 日志和 sidecar journal 中命中数为 0，sidecar 仅记录请求方法与 `/callback` 路径。
+- 权限模式已核对：`/var/lib/x-post-automation` 为 0700、`accounts.sqlite3` 为 0600、Token 目录为 0700、两个 env 为 0600。
+- 真实 X 账号授权尚未执行，当前仅能确认服务、路由、配置、权限和日志保护；账号写入、真实 Token 刷新及授权后列表展示须由用户在 X 官方授权页确认后验收。
+
 ## 回滚方案
 
-- 恢复部署前 app.py、静态文件、systemd unit、Nginx和 env备份。
+- 从 `/root/backups/drama_material_service/20260714T041337Z-x-accounts-eccabcb` 恢复部署前 app.py、静态文件、systemd unit、Nginx、env 及 X 数据备份。
 - 恢复上一个 GitHub commit并重启受影响的两个服务。
 - 保留 `/var/lib/x-post-automation` 数据，不删除授权记录，便于恢复和诊断。
 
