@@ -6,16 +6,6 @@
     "module": "ad_control_center",
     "items": [
       {
-        "key": "adControl",
-        "label": "调控概览",
-        "description": "查看状态、风险提示和常用入口",
-        "kind": "page",
-        "href": "/ad-control.html",
-        "enabled": true,
-        "order": 10,
-        "module": "ad_control_center"
-      },
-      {
         "key": "adControlRules",
         "label": "规则组管理",
         "description": "创建、编辑、复制、启停规则组",
@@ -33,36 +23,6 @@
         "href": "/ad-control-account-pools.html",
         "enabled": true,
         "order": 30,
-        "module": "ad_control_center"
-      },
-      {
-        "key": "adControlBindings",
-        "label": "绑定关系",
-        "description": "绑定产品、账户池和规则组",
-        "kind": "page",
-        "href": "/ad-control-bindings.html",
-        "enabled": true,
-        "order": 40,
-        "module": "ad_control_center"
-      },
-      {
-        "key": "adControlRun",
-        "label": "运行控制台",
-        "description": "Preview、dry-run、确认关闭和急停",
-        "kind": "page",
-        "href": "/ad-control-run.html",
-        "enabled": true,
-        "order": 50,
-        "module": "ad_control_center"
-      },
-      {
-        "key": "adControlTokens",
-        "label": "Token配置",
-        "description": "配置产品默认和账户级 token",
-        "kind": "page",
-        "href": "/ad-control-tokens.html",
-        "enabled": true,
-        "order": 60,
         "module": "ad_control_center"
       },
       {

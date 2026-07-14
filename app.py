@@ -36467,7 +36467,13 @@ def create_ad_control_live_preview(payload, session):
             err["account_id"] = result.get("account_id")
             errors.append(err)
     total = len(items)
-    pause_count = len([item for item in items if item.get("target_action") == "pause"])
+    pause_items = [item for item in items if item.get("target_action") == "pause"]
+    pause_items.sort(key=lambda item: (
+        ad_control_normalize_account(item.get("account_id")),
+        str(item.get("campaign_id") or item.get("object_id") or ""),
+    ))
+    pause_count = len(pause_items)
+    execution_items = pause_items[:AD_CONTROL_MAX_LIVE_EXECUTE]
     observe_count = len([item for item in items if item.get("target_action") == "observe"])
     preview_id = uuid.uuid4().hex
     preview_hash = ad_control_live_scope_hash(scope)
@@ -36482,6 +36488,9 @@ def create_ad_control_live_preview(payload, session):
         "rule_group_id": scope.get("rule_group_id"),
         "binding_id": scope.get("rule_group_id"),
         "preview_hash": preview_hash,
+        "execution_target_count": pause_count,
+        "execution_batch_count": len(execution_items),
+        "execution_truncated": pause_count > len(execution_items),
     }
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
@@ -36500,7 +36509,7 @@ def create_ad_control_live_preview(payload, session):
                     "campaign",
                     scope["product"],
                     json.dumps(criteria, ensure_ascii=False),
-                    json.dumps(items[:AD_CONTROL_MAX_LIVE_EXECUTE], ensure_ascii=False),
+                    json.dumps(execution_items, ensure_ascii=False),
                     total,
                     expires_at,
                 ),
@@ -36525,11 +36534,13 @@ def create_ad_control_live_preview(payload, session):
         "account_count": len(scope["account_ids"]),
         "total": total,
         "pause_count": pause_count,
+        "execution_count": len(execution_items),
+        "execution_remaining_count": max(0, pause_count - len(execution_items)),
         "observe_count": observe_count,
         "error_count": len(errors),
         "resource": resource,
         "strategy": scope.get("strategy") or {},
-        "items": items[:200],
+        "items": execution_items[:200],
         "errors": errors[:100],
         "remaining_count": max(0, total - min(total, 200)),
     }
