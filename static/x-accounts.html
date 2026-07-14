@@ -63,7 +63,7 @@
     .status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
     .status.active { color:#08734f; background:#e8f8f1; }
     .status.refresh_required { color:#9a6000; background:#fff5dd; }
-    .status.disconnected { color:#687894; background:#edf1f6; }
+    .status.disabled,.status.disconnected { color:#687894; background:#edf1f6; }
     .status.scope_missing,.status.revoked,.status.token_missing,.status.error { color:#ad2f3b; background:#ffedef; }
     .scope-list { display:flex; flex-wrap:wrap; gap:5px; max-width:290px; }
     .empty { padding:44px 18px; text-align:center; color:var(--muted); }
@@ -82,7 +82,7 @@
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>我的 X 账号授权</h1><p>授权并管理你本人用于自动发帖的多个 X 账号；Token 仅保存在服务器。</p></div>
+        <div class="title"><h1>我的 X 账号授权</h1><p>授权并管理你本人用于自动发帖的多个 X 账号；停用后保留 Token，但后台不会再使用该账号发布。</p></div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
@@ -104,7 +104,7 @@
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>我的已授权账号</h2><p>你可以授权多个 X 账号；点击“校验状态”才会刷新 Token 并同步账号资料。</p></div>
+            <div><h2>我的已授权账号</h2><p>你可以授权多个 X 账号；只有“有效”账号可用于发布，停用账号可通过重新授权恢复。</p></div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
               <button id="reloadAccounts" class="button" type="button">刷新列表</button>
               <button id="authorizeAccount" class="button primary" type="button" disabled>授权新的 X 账号</button>
@@ -113,7 +113,7 @@
           <div id="configChips" class="config"></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>状态</th><th>已授权权限</th><th>首次/最近授权</th><th>Token到期</th><th>最近刷新/校验</th><th>更新/退出时间</th><th>操作</th></tr></thead>
+              <thead><tr><th>X账号</th><th>状态</th><th>已授权权限</th><th>首次/最近授权</th><th>Token到期</th><th>最近刷新/校验</th><th>更新/停用时间</th><th>操作</th></tr></thead>
               <tbody id="accountRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
@@ -131,8 +131,8 @@
       const statusMeta = {
         active: ["有效", "active"], refresh_required: ["待刷新", "refresh_required"],
         scope_missing: ["权限不完整", "scope_missing"], revoked: ["授权已失效", "revoked"],
-        token_missing: ["缺少Token", "token_missing"], revoke_pending: ["退出待完成", "error"],
-        disconnected: ["已退出", "disconnected"],
+        token_missing: ["缺少Token", "token_missing"], revoke_pending: ["旧退出待处理", "error"],
+        disabled: ["已停用", "disabled"], disconnected: ["已解除授权", "disconnected"],
         error: ["异常", "error"],
       };
 
@@ -179,19 +179,18 @@
       function renderConfig() {
         const config = state.config || {};
         const scopes = Array.isArray(config.scopes) ? config.scopes : [];
-        const hasPendingLogout = state.accounts.some(item => item.status === "revoke_pending");
         el("configChips").innerHTML = `<span class="chip">OAuth：${config.configured ? "已配置" : "未配置"}</span><span class="chip">Callback：${escapeHtml(config.callback_url || "未配置")}</span>${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("")}`;
-        el("authorizeAccount").disabled = !config.configured || state.busy || hasPendingLogout;
-        el("authorizeAccount").title = hasPendingLogout ? "请先重试并完成待处理账号的退出授权" : "";
+        el("authorizeAccount").disabled = !config.configured || state.busy;
+        el("authorizeAccount").title = "";
       }
 
       function renderStats() {
         const items = state.accounts;
         const active = items.filter(item => item.status === "active").length;
-        const disconnected = items.filter(item => item.status === "disconnected").length;
+        const inactive = items.filter(item => item.status === "disabled" || item.status === "disconnected").length;
         el("totalCount").textContent = String(items.length);
         el("activeCount").textContent = String(active);
-        el("attentionCount").textContent = String(Math.max(0, items.length - active - disconnected));
+        el("attentionCount").textContent = String(Math.max(0, items.length - active - inactive));
         const latest = items.map(item => item.updated_at).filter(Boolean).sort().pop();
         el("latestUpdate").textContent = formatTime(latest);
       }
@@ -206,6 +205,7 @@
           const scopes = Array.isArray(item.scopes) ? item.scopes : [];
           const missingScopes = Array.isArray(item.missing_scopes) ? item.missing_scopes : [];
           const meta = statusMeta[item.status] || [item.status || "未知", "error"];
+          const isDisabled = item.status === "disabled";
           const isDisconnected = item.status === "disconnected";
           const isRevokePending = item.status === "revoke_pending";
           const refreshVerify = `<div>刷新：${escapeHtml(formatTime(item.last_token_refresh_at))}</div><div class="subtle">校验：${escapeHtml(formatTime(item.last_verified_at))}</div>`;
@@ -213,11 +213,13 @@
           const accountHeading = accountUrl
             ? `<a class="profile-link" href="${escapeHtml(accountUrl)}" target="_blank" rel="noopener noreferrer"><strong>${accountName}</strong></a>`
             : `<strong>${accountName}</strong>`;
-          const actions = isDisconnected
-            ? `<button class="button small" type="button" disabled>已退出</button>`
+          const actions = isDisabled
+            ? `<button class="button small" type="button" disabled>已停用</button>`
+            : (isDisconnected
+            ? `<button class="button small" type="button" disabled>已解除授权</button>`
             : (isRevokePending
-              ? `<button class="button small" type="button" disabled>禁止校验</button><button class="button small danger" type="button" data-logout-id="${escapeHtml(item.id)}">重试退出</button>`
-              : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">校验状态</button><button class="button small danger" type="button" data-logout-id="${escapeHtml(item.id)}">退出授权</button>`);
+              ? `<button class="button small" type="button" disabled>禁止校验</button><button class="button small danger" type="button" data-logout-id="${escapeHtml(item.id)}">完成停用</button>`
+              : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">校验状态</button><button class="button small danger" type="button" data-logout-id="${escapeHtml(item.id)}">停用账号</button>`));
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span></div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
@@ -225,7 +227,7 @@
             <td><div>首次：${escapeHtml(formatTime(item.first_authorized_at))}</div><div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></td>
             <td>${escapeHtml(formatTime(item.access_expires_at))}</td>
             <td>${refreshVerify}</td>
-            <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">退出：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
+            <td><div>更新：${escapeHtml(formatTime(item.updated_at))}</div><div class="subtle">停用：${escapeHtml(formatTime(item.disconnected_at))}</div></td>
             <td><div class="row-actions">${actions}</div></td>
           </tr>`;
         }).join("");
@@ -264,18 +266,18 @@
       }
 
       async function logoutAccount(id, button) {
-        const confirmed = window.confirm("确认退出这个 X 账号的授权吗？退出后该账号将停止自动发帖，服务端保存的 Token 会被删除；这不会退出 x.com 网站或其他 X 客户端。如需恢复，请重新授权。");
+        const confirmed = window.confirm("确认在后台停用这个 X 账号吗？停用后后台不会使用该账号发布，也不会调用 X 的解除授权接口；服务器上已有的 Token 不会被删除。如需恢复，请重新授权同一账号。");
         if (!confirmed) return;
-        button.disabled = true; button.textContent = "退出中…";
+        button.disabled = true; button.textContent = "停用中…";
         try {
           await api(`/api/x-accounts/${encodeURIComponent(id)}/logout`, { method:"POST", body:"{}" });
-          toast("已退出该 X 账号授权");
+          toast("该 X 账号已在后台停用");
           await loadData();
         } catch (error) {
-          toast(`退出授权失败：${error.message}`);
+          toast(`停用失败：${error.message}`);
           await loadData();
         } finally {
-          button.disabled = false; button.textContent = "退出授权";
+          button.disabled = false; button.textContent = "停用账号";
         }
       }
 

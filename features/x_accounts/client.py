@@ -10,6 +10,8 @@ import urllib.request
 
 SAFE_ERROR_CODES = {
     "invalid_request",
+    "x_account_disabled",
+    "x_account_not_publishable",
     "x_account_owned_by_other",
     "x_account_not_found",
     "x_admin_required",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -34,7 +35,6 @@ EXPECTED_SCOPE_DEFAULT = "tweet.read tweet.write users.read offline.access media
 REQUIRED_SCOPES = tuple(EXPECTED_SCOPE_DEFAULT.split())
 AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 TOKEN_URL = "https://api.x.com/2/oauth2/token"
-REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
 USER_FIELDS = (
     "profile_image_url",
     "public_metrics",
@@ -350,25 +350,6 @@ def owner_lock_key(actor):
     return "owner:%d:%s:%d:%s" % (len(tenant_key), tenant_key, len(user_id), user_id)
 
 
-def ensure_owner_not_pending(actor):
-    actor = require_actor_subject(actor)
-    with _DB_LOCK:
-        conn = db_connect()
-        try:
-            row = conn.execute(
-                """
-                SELECT id FROM x_authorized_account
-                WHERE owner_tenant_key=? AND owner_user_id=? AND status='revoke_pending'
-                LIMIT 1
-                """,
-                (actor["tenant_key"], actor["user_id"]),
-            ).fetchone()
-        finally:
-            conn.close()
-    if row:
-        raise ServiceError("x_disconnect_pending", "请先完成待处理账号的退出授权", 409)
-
-
 def record_event(event_type, outcome, actor=None, x_user_id="", error_code=""):
     actor = normalize_actor(actor)
     with _DB_LOCK:
@@ -399,7 +380,6 @@ def create_authorization(actor):
     require_oauth_config()
     actor = require_actor_subject(actor)
     with account_lock(owner_lock_key(actor)):
-        ensure_owner_not_pending(actor)
         return create_authorization_state(actor)
 
 
@@ -527,24 +507,6 @@ def user_request(access_token):
     )
 
 
-def revoke_token(token):
-    if not token:
-        return {"revoked": True}
-    body = urllib.parse.urlencode({"token": str(token)}).encode("utf-8")
-    return http_json(
-        REVOKE_URL,
-        method="POST",
-        headers={
-            "Authorization": basic_auth_header(),
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-        },
-        body=body,
-        allow_revoked=True,
-        allow_non_json=True,
-    )
-
-
 def parse_scopes(value, fallback=()):
     if isinstance(value, str):
         values = value.replace(",", " ").split()
@@ -617,7 +579,7 @@ def actor_from_state(state_row):
 
 
 def status_for(scopes, access_expires_at, token=None, stored="active"):
-    if stored in {"revoked", "error", "token_missing", "revoke_pending", "disconnected"}:
+    if stored in {"revoked", "error", "token_missing", "revoke_pending", "disabled", "disconnected"}:
         return stored, [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
     missing = [scope for scope in REQUIRED_SCOPES if scope not in set(scopes)]
     if missing:
@@ -694,10 +656,6 @@ def complete_authorization(code, raw_state):
         actor = require_actor_subject(actor_from_state(state_row))
         owner_guard = account_lock(owner_lock_key(actor))
         owner_guard.acquire()
-        # This check is intentionally before the code exchange. It prevents X
-        # from minting an orphan token while any account for this owner needs a
-        # revoke retry. Logout uses the same owner lock before changing state.
-        ensure_owner_not_pending(actor)
         token = token_request(
             {
                 "code": str(code),
@@ -727,11 +685,6 @@ def complete_authorization(code, raw_state):
                     conn.close()
             if existing_row and not same_owner(existing_row, actor):
                 raise ServiceError("x_account_owned_by_other", "该X账号已由其他后台用户管理", 409)
-            if existing_row and str(existing_row["status"] or "") == "revoke_pending":
-                # Preserve the old refresh token needed to finish the pending
-                # revocation. The owner must retry logout before reauthorizing.
-                raise ServiceError("x_disconnect_pending", "该X账号退出授权尚未完成，请先重试退出", 409)
-
             previous_token = token_file.read_bytes() if token_file.exists() else None
             atomic_write_json(token_file, token)
             timestamp = iso_utc(obtained)
@@ -812,7 +765,7 @@ def row_to_item(row):
         scopes = []
     stored_status = item.get("status", "active")
     token = None
-    terminal_statuses = {"revoke_pending", "disconnected"}
+    terminal_statuses = {"revoke_pending", "disabled", "disconnected"}
     if stored_status not in terminal_statuses:
         try:
             token = read_token_file(item["x_user_id"])
@@ -822,6 +775,7 @@ def row_to_item(row):
     if token is None and stored_status not in terminal_statuses:
         status = "token_missing"
     item["status"] = status
+    item["publish_eligible"] = status == "active"
     item["scopes"] = scopes
     item["missing_scopes"] = missing
     for field in ("verified", "protected"):
@@ -935,10 +889,12 @@ def verify_account(account_id, actor, scope="mine"):
     with account_lock("x:" + x_user_id):
         row = find_scoped_account_row(account_id, actor, scope)
         stored_status = str(row["status"] or "")
+        if stored_status == "disabled":
+            raise ServiceError("x_account_disabled", "X账号已在后台停用；重新授权后才能校验", 409)
         if stored_status == "disconnected":
             raise ServiceError("x_token_missing", "X账号已解除授权，请重新授权", 409)
         if stored_status == "revoke_pending":
-            raise ServiceError("x_disconnect_pending", "X账号正在退出授权，请先重试退出", 409)
+            raise ServiceError("x_disconnect_pending", "X账号存在旧退出待处理状态，请先完成停用", 409)
         item = row_to_item(row)
         try:
             token = read_token_file(item["x_user_id"])
@@ -1005,6 +961,31 @@ def verify_account(account_id, actor, scope="mine"):
             raise ServiceError("x_accounts_unavailable", "X账号校验失败", 503) from None
 
 
+@contextlib.contextmanager
+def publish_credentials(account_id, actor, scope="mine"):
+    """Yield active credentials while holding the account's publish/disable lock.
+
+    Future X publishing code must perform the upstream publish inside this
+    context. Callers must never serialize or expose the yielded token.
+    """
+    account_id = int(account_id)
+    actor, scope = normalize_account_scope(actor, scope)
+    initial_row = find_scoped_account_row(account_id, actor, scope)
+    x_user_id = str(initial_row["x_user_id"])
+    with account_lock("x:" + x_user_id):
+        row = find_scoped_account_row(account_id, actor, scope)
+        item = row_to_item(row)
+        if item["status"] == "disabled":
+            raise ServiceError("x_account_disabled", "X账号已在后台停用，禁止用于发布", 409)
+        if item["status"] != "active":
+            raise ServiceError("x_account_not_publishable", "X账号当前状态不可用于发布", 409)
+        token = read_token_file(x_user_id)
+        access_token = str(token.get("access_token", "") or "")
+        if not access_token:
+            raise ServiceError("x_token_missing", "X账号Access Token不存在，请重新授权", 409)
+        yield item, access_token
+
+
 def delete_token_artifacts(x_user_id):
     """Delete the live token and any legacy disconnect tombstones for one X user."""
     token_file = token_path(x_user_id)
@@ -1046,51 +1027,16 @@ def logout_account_for_owner(account_id, actor):
     x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
         row = find_scoped_account_row(account_id, actor, "mine")
-        if str(row["status"] or "") == "disconnected":
+        current_status = str(row["status"] or "")
+        if current_status == "disabled":
+            return row_to_item(row)
+        if current_status == "disconnected":
             try:
                 delete_token_artifacts(x_user_id)
             except OSError:
                 safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
-                raise ServiceError("x_disconnect_failed", "X本地授权凭证清理失败，请稍后重试", 502) from None
+                raise ServiceError("x_disconnect_failed", "X历史授权凭证清理失败，请稍后重试", 502) from None
             return row_to_item(row)
-
-        token_file = token_path(x_user_id)
-        try:
-            token = read_token_file(x_user_id)
-        except ServiceError as exc:
-            if exc.code != "x_token_missing":
-                raise
-            if token_file.exists():
-                update_account_error(account_id, "revoke_pending", "X本地授权凭证不可读取，无法完成远端撤销")
-                safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
-                raise ServiceError("x_disconnect_failed", "X本地授权凭证不可读取，请联系管理员处理", 502) from None
-            token = {}
-
-        # Persist the non-active state before the first remote mutation. A crash or
-        # partial revoke can then be retried without presenting this account as active.
-        update_account_error(account_id, "revoke_pending", "X解除授权处理中，请重试退出以完成")
-        safe_record_event("logout", "started", actor, x_user_id=x_user_id)
-        seen_tokens = set()
-        try:
-            # Revoke the short-lived access token first and the refresh token last.
-            # If either call fails, the local token is retained only for a retry.
-            for field in ("access_token", "refresh_token"):
-                value = str(token.get(field, "") or "")
-                if not value or value in seen_tokens:
-                    continue
-                seen_tokens.add(value)
-                revoke_token(value)
-        except Exception:
-            update_account_error(account_id, "revoke_pending", "X解除授权未完成，请重试退出")
-            safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
-            raise ServiceError("x_disconnect_failed", "X解除授权失败，请稍后重试", 502) from None
-
-        try:
-            delete_token_artifacts(x_user_id)
-        except OSError:
-            update_account_error(account_id, "revoke_pending", "X本地授权凭证清理失败，请重试退出")
-            safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_disconnect_failed")
-            raise ServiceError("x_disconnect_failed", "X本地授权凭证清理失败，请稍后重试", 502) from None
 
         timestamp = iso_utc()
         try:
@@ -1099,7 +1045,7 @@ def logout_account_for_owner(account_id, actor):
                 try:
                     cursor = conn.execute(
                         """
-                        UPDATE x_authorized_account SET status='disconnected',access_expires_at='',
+                        UPDATE x_authorized_account SET status='disabled',
                             last_error_at='',last_error='',disconnected_at=?,disconnected_by_tenant_key=?,
                             disconnected_by_user_id=?,disconnected_by_name=?,updated_at=?
                         WHERE id=? AND owner_tenant_key=? AND owner_user_id=?
@@ -1118,7 +1064,7 @@ def logout_account_for_owner(account_id, actor):
             safe_record_event("logout", "failed", actor, x_user_id=x_user_id, error_code="x_accounts_unavailable")
             if isinstance(exc, ServiceError):
                 raise
-            raise ServiceError("x_accounts_unavailable", "X账号退出状态保存失败，请重试", 503) from None
+            raise ServiceError("x_accounts_unavailable", "X账号停用状态保存失败，请重试", 503) from None
         safe_record_event("logout", "completed", actor, x_user_id=x_user_id)
         return find_account(account_id)
 
