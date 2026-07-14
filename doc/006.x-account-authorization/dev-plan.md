@@ -13,7 +13,8 @@
 | AI 后台 loopback client/API/权限 | Codex | `features/x_accounts/client.py`, `app.py` | 已完成 |
 | 页面与导航 | Codex | `static/x-accounts.html`, nav files | 已完成 |
 | 自动化测试与安全扫描 | Codex | `scripts/test_x_accounts.py` | 已完成 |
-| GitHub-first 部署与浏览器验收 | Codex | deploy/docs/server | 待执行 |
+| GitHub-first 生产部署 | Codex | deploy/docs/server | 已完成 |
+| 登录态浏览器与真实 X OAuth 验收 | 用户 + Codex | `https://ai.yingliangads.com/x-accounts.html` | 待用户授权 |
 
 ## 编译 / 构建命令
 
@@ -32,4 +33,4 @@ git diff --check
 
 ## 完成记录
 
-本地 16 项 X功能测试、Python编译、JS/JSON语法和 diff检查均通过；生产部署与真实浏览器授权待执行。
+本地 16 项 X功能测试、Python编译、JS/JSON语法和 diff检查均通过。提交 `eccabcb0d49714efa90403b140c0d2f77e5182dc` 已从 GitHub 精确检出到 `/root/releases/ai-x-account-authorization-eccabcb0d497` 并完成生产部署；备份位于 `/root/backups/drama_material_service/20260714T041337Z-x-accounts-eccabcb`。生产服务、API边界、Cookie鉴权、日志脱敏和文件模式验证通过。真实 X OAuth 必须由用户在 X 官方页面确认，授权后列表与 Token 生命周期验收仍待执行。

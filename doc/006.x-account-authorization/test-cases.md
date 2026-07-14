@@ -14,9 +14,9 @@
 
 | 编号 | 场景 | 前置条件 | 步骤 | 预期结果 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| TC-001 | 未登录访问列表 | 无 Cookie | GET `/api/x-accounts` | 401 | P0 | 待执行 |
+| TC-001 | 未登录访问列表 | 无 Cookie | GET `/api/x-accounts` | 401 | P0 | 生产通过 |
 | TC-002 | 无模块权限 | 普通用户 | GET/POST X API | 403 | P0 | 待执行 |
-| TC-003 | API Token 尝试授权 | 有 API Token | POST authorize | 403 cookie_auth_required | P0 | 待执行 |
+| TC-003 | API Token 尝试授权 | 有 API Token | POST authorize | 403 cookie_auth_required | P0 | 生产通过 |
 | TC-004 | 发起授权 | 有权限 Cookie | POST authorize | URL含五项scope、S256、正确 callback | P0 | 自动化通过 |
 | TC-005 | state 错误/过期/重放 | 构造异常 callback | 访问 callback | 拒绝且不写 Token | P0 | 自动化通过 |
 | TC-006 | 首次授权 | Mock token/user成功 | callback | 新增1账号，Token文件0600 | P0 | 自动化通过 |
@@ -27,9 +27,9 @@
 | TC-011 | 主动校验/刷新 | token过期 | POST verify | 刷新、轮换Token、状态active | P0 | 自动化通过 |
 | TC-012 | 授权撤销 | refresh invalid_grant | POST verify | 状态revoked，错误脱敏 | P0 | 自动化通过 |
 | TC-013 | 内部接口鉴权 | 无/错 internal token | 访问 `/internal/*` | 403 | P0 | 自动化通过 |
-| TC-014 | 敏感数据泄漏扫描 | 完成授权 | 搜索API/HTML/log | 无Secret/Token/code/verifier | P0 | 本地通过，生产待验 |
-| TC-015 | 导航与页面 | 有/无权限用户 | 浏览器打开后台 | 可见性、登录门、权限门正确 | P0 | 待执行 |
-| TC-016 | 服务重启恢复 | 已授权 | 重启两个服务 | 账号列表仍存在 | P1 | 待执行 |
+| TC-014 | 敏感数据泄漏扫描 | 完成授权 | 搜索API/HTML/log | 无Secret/Token/code/verifier | P0 | 本地通过；生产 callback 查询日志探针通过，真实授权后复验待执行 |
+| TC-015 | 导航与页面 | 有/无权限用户 | 浏览器打开后台 | 可见性、登录门、权限门正确 | P0 | 页面生产 200；登录态权限/导航待执行 |
+| TC-016 | 服务重启恢复 | 已授权 | 重启两个服务 | 账号列表仍存在 | P1 | 两服务重启通过；授权数据持久化待真实授权后验证 |
 | TC-017 | Token属主不一致 | `/users/me` 空或错误ID | POST verify | `x_identity_mismatch`，不标active | P0 | 自动化通过 |
 | TC-018 | 必需 scope配置被删减 | env缺 `media.write` | 启动/发起授权 | fail closed，不显示配置完整 | P0 | 自动化通过 |
 | TC-019 | 并发刷新/重新授权 | 两个并发请求 | verify/callback | 只刷新一次，最终Token与元数据一致 | P0 | 自动化通过 |
@@ -41,3 +41,11 @@
 - 主后台 health/auth API。
 - 原 X callback/health 地址。
 - 现有 drama/ad-control/playable API仅做冒烟，不改业务逻辑。
+
+## 生产验证补充（2026-07-14）
+
+- 部署提交：`eccabcb0d49714efa90403b140c0d2f77e5182dc`；发布目录：`/root/releases/ai-x-account-authorization-eccabcb0d497`。
+- `/x-oauth/health`、`/x-accounts.html` 返回 200；未登录列表返回 401；公网 internal 路径返回 404；API Token 返回 403 `cookie_auth_required`。
+- sidecar 与主 API 均为 active/running，服务器测试 16/16 通过；Nginx 检查和 reload 通过。
+- callback 查询参数日志泄漏探针为 0；数据目录、SQLite、Token 目录与 env 权限分别为 0700/0600/0700/0600。
+- TC-002、TC-004 的真实 Cookie/权限流程，以及 TC-006 至 TC-012、TC-014 至 TC-016 的真实账号部分，仍需用户完成 X 官方授权后验收；不得将 Mock 或公网 200 视为真实 OAuth 通过。
