@@ -122,6 +122,7 @@ https://ai.yingliangads.com/x-oauth/callback
 - V2 GitHub 精确提交：`e00bd30adb466f92b38f218bfb7f288ea7ff0a69`。
 - 服务器精确 release：`/root/releases/ai-x-account-authorization-e00bd30adb466`。
 - V2 部署前备份：`/root/backups/drama_material_service/20260714T070906Z-x-accounts-v2-e00bd30`；备份包含 live 代码/静态、Nginx、systemd、两个 env、SQLite 在线备份及 Token 目录，敏感文件保持 root-only。
+- 备份中的 `source-live-manifest.sha256` 保留部署前 live 路径/hash 基线；`manifest.sha256` 使用备份目录相对路径并覆盖全部备份文件，现场 `sha256sum -c manifest.sha256` 全部通过。备份目录为 `0700`，两个清单、SQLite 与 Token 文件均为 `0600`。
 - 在生产数据副本先执行 `ensure_storage()`，随后 backfill 严格 dry-run 得到 `legacy=1, resolved=1, unresolved=0, updated=0`，apply 得到 `legacy=1, resolved=1, unresolved=0, updated=1`。副本演练通过后才进入 live 迁移。
 - Live sidecar 停写期间执行相同 additive migration 与 backfill：严格 dry-run 为 1 条可解析、0 条未解析，apply 更新 1 条。旧记录的 row ID、X user ID 与 `active` 状态保持不变，owner 回填到唯一匹配的非空 tenant/user；真实账号标识不写入 Git。
 - Token SHA-256 为 `cc6040d3f8e20a00561785f18209858ee3f89a5dd058a707cc66d9dea5888a6f`，文件权限 `0600`；该 hash/权限在副本演练、live migration、sidecar 启动及真实 `/2/users/me` 同步后均保持不变。Sidecar SQLite 权限为 `0600`。
