@@ -82,6 +82,7 @@ V1 生产历史：
 V2 生产证据：
 
 - 精确提交 `e00bd30adb466f92b38f218bfb7f288ea7ff0a69`；release `/root/releases/ai-x-account-authorization-e00bd30adb466`；部署前备份 `/root/backups/drama_material_service/20260714T070906Z-x-accounts-v2-e00bd30`。
+- 备份保留部署前 live 基线清单 `source-live-manifest.sha256`，并以相对路径 `manifest.sha256` 完成目录内自校验；`sha256sum -c` 全部通过，备份目录 `0700`、清单/SQLite/Token `0600`。
 - 迁移副本：`ensure_storage()` 成功；backfill dry-run 为 1 条可解析/0 条未解析，apply 更新 1 条。Live 使用相同门槛，dry-run 为 1 条可解析/0 条未解析，apply 更新 1 条。
 - Live 原记录的 row ID、X user ID 与 `active` 状态保持，owner 已回填到唯一匹配的非空 tenant/user；真实账号标识不写入 Git。
 - Token SHA-256 `cc6040d3f8e20a00561785f18209858ee3f89a5dd058a707cc66d9dea5888a6f`、权限 `0600`；在迁移、服务启动和真实 `/2/users/me` 同步后仍不变。Sidecar DB 权限 `0600`。
