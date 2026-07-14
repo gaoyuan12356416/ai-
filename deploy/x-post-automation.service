@@ -1,0 +1,23 @@
+[Unit]
+Description=X OAuth account authorization sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=/etc/x-post-automation.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/features/x_accounts/oauth_service.py serve
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/x-post-automation
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
