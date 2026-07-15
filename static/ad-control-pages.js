@@ -358,13 +358,18 @@
     $("pageRoot").classList.toggle("hidden", !state.auth.authenticated || !hasPermission(state.auth));
     return state.auth.authenticated && hasPermission(state.auth);
   }
-  async function loadProducts() {
+  async function loadProducts(options = {}) {
+    const includeAll = !!options.includeAll;
     state.products = productOptions();
     const select = $("productSelect");
     if (select) {
       const previous = select.value;
-      select.innerHTML = state.products.map(item => `<option value="${escapeHtml(item.product)}">${escapeHtml(productLabel(item))}</option>`).join("");
-      if (previous && ALLOWED_PRODUCTS.includes(previous)) select.value = previous;
+      const items = includeAll
+        ? [{ product: "", label: "全部产品（含账号规则）" }].concat(state.products)
+        : state.products;
+      select.innerHTML = items.map(item => `<option value="${escapeHtml(item.product)}">${escapeHtml(productLabel(item))}</option>`).join("");
+      if (includeAll && !previous) select.value = "";
+      else if (previous && ALLOWED_PRODUCTS.includes(previous)) select.value = previous;
     }
   }
   async function loadAccounts(selected) {
@@ -1602,9 +1607,9 @@
   }
 
   async function renderLogs() {
-    $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>绑定关系</label><select id="bindingFilter"><option value="">全部绑定</option></select></div>`)}<section class="panel"><div class="panel-head"><div><h2>执行日志</h2><span class="hint" id="logStorageHint">正在读取 ads_ai 调控日志...</span></div><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部执行动作</option><option value="pause">关停 pause</option><option value="reopen">重启 reopen</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>条数</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
+    $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>规则组</label><select id="bindingFilter"><option value="">全部规则组</option></select></div>`)}<section class="panel"><div class="panel-head"><div><h2>执行日志</h2><span class="hint" id="logStorageHint">正在读取 ads_ai 调控日志...</span></div><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部执行动作</option><option value="pause">关闭 pause</option><option value="copy">复制 copy</option><option value="mixed">混合 mixed</option><option value="reopen">重启 reopen</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>条数</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
     const params = new URLSearchParams(window.location.search);
-    await loadProducts();
+    await loadProducts({ includeAll: true });
     if (params.get("product") && $("productSelect")) $("productSelect").value = params.get("product");
     await refreshLogBindings();
     if (params.get("binding_id")) $("bindingFilter").value = params.get("binding_id");
@@ -1614,7 +1619,7 @@
   }
   async function refreshLogBindings() {
     await loadBindings();
-    $("bindingFilter").innerHTML = optionHtml(state.bindings, "binding_id", "name", "全部绑定");
+    $("bindingFilter").innerHTML = optionHtml(state.bindings, "binding_id", "name", "全部规则组");
     const requested = new URLSearchParams(window.location.search).get("binding_id");
     if (requested && state.bindings.some(item => bindingId(item) === requested)) $("bindingFilter").value = requested;
   }
