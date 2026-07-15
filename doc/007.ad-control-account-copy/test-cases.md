@@ -59,17 +59,21 @@
 | TC-042 | 日志目标明细 owner 隔离 | 两个 owner 各有 action/target | 调用 target 函数和 HTTP 明细路由 | 只返回本人目标；跨 owner 返回 not found/forbidden；路由显式传递当前 owner | P0 | 通过（自动化） |
 | TC-043 | 账号规则日志可见 | 存在 `product=''` 的 V2 action log | 打开日志页默认筛选并加载绑定 | 默认显示“全部产品（含账号规则）”，账号规则及其本人绑定可见，不扩大跨 owner 范围 | P1 | 通过（自动化/静态契约） |
 | TC-044 | 静态资源缓存版本一致 | 七个 ad-control HTML 页面 | 检查 CSS/JS URL | 全部使用 `v=20260715copylog3`，不存在本次旧 cache buster，且保留 daily/raw 日志 UI | P1 | 通过（自动化） |
-| TC-045 | Legacy standalone 生产基线 | 线上 SQLite `ad_control_rule` | 发布前、overlay 演练后、发布后只读比较 total/enabled 集合 | 三次结果一致；不改变其 grandfather 启停/急停语义，不读取 Token | P0 | 前置基线通过（0/0）；overlay/发布后待验证 |
+| TC-045 | Legacy standalone 生产基线 | 线上 SQLite `ad_control_rule` | 发布前、overlay 演练后、发布后只读比较 total/enabled 集合 | 三次结果一致；不改变其 grandfather 启停/急停语义，不读取 Token | P0 | 通过（前置/演练/发布后均 0/0） |
 | TC-046 | 补丁后观察日志语义 | `criteria.run_mode=observe` 的 action，current-live/旧基线临时副本 | 应用真实部署补丁，分别读取日志列表和 target 明细并重跑日志/API测试 | 两条路径均为 `audit.mode=observe`、`mode_label=只观察`、状态 `observed/观察完成`；不得回退成 real/正式执行 | P0 | 通过（部署补丁全量回归） |
-| TC-047 | Exact-source V2 app 窄合并 | live app 精确等于已审核 source commit | check、apply、二次 apply | check 零写；临时 Git diff 结果等于 target blob；首次唯一字节备份并原子安装；二次 unchanged/零新增备份 | P0 | 通过（自动化），生产 staging 待验证 |
+| TC-047 | Exact-source V2 app 窄合并 | live app 精确等于已审核 source commit | check、apply、二次 apply | check 零写；临时 Git diff 结果等于 target blob；首次唯一字节备份并原子安装；二次 unchanged/零新增备份 | P0 | 通过（自动化、生产 staging 与 overlay） |
 | TC-048 | 并发 source 漂移阻断 | live app 不等于 source/target blob | 运行 exact-source 发布器 | 在备份和写入前失败，live 字节不变 | P0 | 通过（自动化） |
 | TC-049 | Mixed 超额批次不被 copy 占位 | 同账号命中 21 个 pause 和 1 个 copy，每账号上限 20 | preview 后正式 execute，再进入 runner continuation | 首批恰好 20 个 pause、0 个 copy；copy 不消费 pause 额度，剩余 2 个目标使事件保持 partial 和 continuation key | P0 | 通过（自动化） |
-| TC-050 | SQLite owner 精确迁移 | 三条已核实 legacy 组、关联账户池、standalone 0/0 | 默认 check、首次 apply、二次 apply；另注入 mixed owner、坏 pool 和事务中途失败 | check 只改临时副本；首次只更新3个 owner、二次0行；逐ID状态、非owner字段、账户ID、standalone、integrity保持；异常完整回滚/失败关闭 | P0 | 通过（自动化），生产 C1 演练待验证 |
+| TC-050 | SQLite owner 精确迁移 | 三条已核实 legacy 组、关联账户池、standalone 0/0 | 默认 check、首次 apply、二次 apply；另注入 mixed owner、坏 pool 和事务中途失败 | check 只改临时副本；首次只更新3个 owner、二次0行；逐ID状态、非owner字段、账户ID、standalone、integrity保持；异常完整回滚/失败关闭 | P0 | 通过（自动化、C2 副本演练、生产 3/0） |
 | TC-051 | 产品账号列表 owner 贯穿和缓存隔离 | 同一产品下两个 owner 各有 saved-only 账户池，另有 245 账号池 | 静态断言 route 从 session 注入 owner；service 运行时模拟业务库失败、并发请求和缓存复用 | owner 逐层贯穿到 saved pool；缓存键为 owner+product；fallback 只显示本人账户；6 并发仅刷新一次且两个 owner 永不互见 | P0 | 通过（route 静态契约 + service 自动化） |
+| TC-052 | 并发发布基线刷新 | 发布窗口中 live app 被 playable 发布改变 | 再次读取 live hash、停止旧流程、合入精确提交并重建 staging/C2 | 不覆盖 playable generator、vendor、Nginx、静态文件和 9 个环境键；全部回归从新 source 重跑 | P0 | 通过（原 V2 基线 8c559a7 -> b3c3e6a） |
+| TC-053 | 生产静态双路径 | 项目 static 与 Nginx 实际 `/usr/share/nginx/html` | 原子 overlay、hash 与 HTTP 页面核验 | 两处目标均与发布包一致，页面 200 且加载 `20260715copylog3` | P0 | 通过（生产） |
+| TC-054 | 原 V2 首次自然 runner tick | 恢复 C2 exact crontab | 等待一个 5 分钟自然 tick | 任何预览错误均安全阻断，requested/success/Meta 写保持0；异常时下一 tick 前可只暂停 ad-control cron | P0 | 发现 BUG-007：`live_preview_blocked`、error=108、requested/success=0/0、零 Meta 写；安全门禁通过，业务语义失败 |
+| TC-055 | BUG-007 热修自然 tick | 部署 `4527303` 并恢复 C2 exact crontab | 等待19:25自然 tick，对账日志、preview、action和对象状态 | `skipped/no_accounts_due`；requested/success/error=0；`scheduled_due_count=0`；action数量不增长；无 Token/Graph/Meta 写 | P0 | 通过（action 17→17，preview 44→45，最新对象状态未变化） |
 
 ## 执行结果说明
 
-2026-07-15 合并 16:01 daily-log 生产组合并收口发布安全门禁后，使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 171 tests`、`OK`。其中新增纳管生产遗留的 245 账号池、产品账号列表 fallback/并发及跨 owner 缓存隔离回归。exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过；execution-log 补丁继续单独验证 daily/raw、owner 和 observe 审计兼容。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 exact-commit staging、C1、暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
+2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 ad-control 全量测试，最终结果 `Ran 174 tests`、`OK`；exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过。原 V2 以并发 playable 提交 `8c559a7` 为 source 形成 `b3c3e6a`；首次自然 tick 安全发现 BUG-007 后，再以 `7f65cf9`、`4527303` 修复并重建 staging/C3。当前生产 runtime 为 `4527303`；owner 迁移 3/0、静态双路径、真实浏览器、API/worker/Nginx、playable 回归及19:25自然 tick通过。全过程未调用真实 Meta copy、未建写 copied created_data/lineage/intent，也未开放 Ad 执行。
 
 ## 回归范围
 

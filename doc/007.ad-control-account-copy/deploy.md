@@ -80,7 +80,7 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 
 ## 部署步骤
 
-1. 本地完成 Python/JavaScript 语法检查、171/171 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
+1. 本地完成 Python/JavaScript 语法检查、174/174 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
 2. 刷新 current-live `app.py` 和 SHA-256，通过上述 action-log 兼容门禁；这一步必须在最终发布文件冻结前重跑。
 3. 精确 commit/push 到 GitHub，记录 commit 和文件 hash。
 4. 建立排他发布窗口并确认其他生产 `app.py` 写入者均停用或使用统一锁。备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 rule-group owner 基线及 legacy standalone total/enabled 集合。
@@ -130,8 +130,16 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 
 ## 当前发布状态
 
-2026-07-15 合并 16:01 daily-log 生产组合、修复产品账号列表 owner/cache 回归并收口发布安全门禁后已完成本地 fresh-cache 171/171 回归；exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过。`apply_ad_control_execution_log_fix.py` 仅保留为 execution-log 兼容验证器，不再被误用为完整 V2 发布器。
+2026-07-15 已完成生产部署与自然 runner 复验。发布窗口内发现 18:22 并发上线的 playable preview hardening 后，立即停止原发布、恢复服务，并以其精确提交 `8c559a78475a7972542746f1f8de1fcab4e7be3f` 和线上 `app.py` SHA-256 `8779e156...` 作为新 source。合并并保留 playable generator、vendor、Nginx 和 9 个 `PLAYABLE_PREVIEW_*` 环境配置后，原 V2 运行提交为 `b3c3e6a2d6556d7dad4c79082a324235ad0f8379`。
 
-服务器异常重启后再次只读核验：`drama-material-api.service`、crond 和 5 分钟 runner 均正常；SQLite `integrity_check/quick_check=ok`；legacy standalone `ad_control_rule` total/enabled 均为 0；V2 标记、V2 schema 列和 copy intent/lineage/quota 表均不存在。16:01 的 daily-log overlay 已改变 app/action-log service/全套静态文件，当前生产组合精确对应 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c`；旧 `146cb1b` 基线已过期。仅存在 C0 与 daily-log 回滚点，V2 C1 尚未建立。
+原 V2 staging `/root/releases/ad-control-v2-20260715-183100-b3c3e6a` 和 C2 回滚点 `/root/backups/drama_material_service/20260715T103332Z-ad-control-v2-c2-b3c3e6a` 均完整保留。首次恢复 cron 的 18:50 自然 tick 暴露 BUG-007：空 Campaign 白名单被误计为 108 个 preview 错误，runner 安全阻断为 `live_preview_blocked`；requested/success 均为 0，未读取 Token、未调用 Graph、未发生 Meta 写入。下一 tick 前仅暂停 ad-control cron，API/worker 未受影响。
 
-只读核验同时发现无关文件 `doc/deployment/playable-preview-api.md` 有并发修改。正式部署前必须重新抓取 live 全量基线并保留该变更，只覆盖本需求精确文件。生产 overlay 在生产 Python/依赖环境的完整测试、GitHub exact-commit 发布、C1 备份、服务重启、暗发布与线上 smoke test 均尚未完成；本文档不得作为“已上线”证据。
+热修提交为 `7f65cf9bf6799fb0a086238d41f569c2b206e820` 和 `4527303100a38db26f0f2ac0825ed6616c16247a`，staging 为 `/root/releases/ad-control-v2-hotfix-20260715-190000-7f65cf9`，生产 Python 环境 fresh-cache 174/174 通过。当前生产运行提交为 `4527303100a38db26f0f2ac0825ed6616c16247a`，`app.py` SHA-256 为 `39b81d10cab7bf28a60132fb5445d0a2bedbc817bad3160dc6b39d495667764e`，runner SHA-256 为 `2e285a46f5054f7e8dbfa7ae66bbe7145ca9d28a701cfdd94efe46f3ee990347`。热修 C3 回滚点为 `/root/backups/drama_material_service/20260715T111700Z-ad-control-v2-hotfix-c3-4527303`，C2/C3 权限均为 `700`。
+
+生产 SQLite 迁移默认 check 零写，首次 apply 精确更新 3 个已核实规则组 owner，二次 apply 更新 0 行；`integrity_check=ok`，当前用户 owner 为 `892fd2e8`，active Dramawave 规则组解析 245 个账号，legacy standalone total/enabled 保持 0/0，未创建 copy intent/lineage/quota 表。API、worker、Nginx、认证页面、playable 未授权 403、真实浏览器规则组页面和静态版本 `20260715copylog3` 均通过；浏览器未保存任何编辑。
+
+原 crontab 已与 C2 备份逐字节恢复，SHA-256 为 `9f89d934...`，唯一 runner 条目为 1。19:25 自然 tick 返回 `skipped/no_accounts_due`，requested/success/error 均为 0、action_id 为空；SQLite action 数量前后保持 17，最新 preview 的 `scheduled_due_count=0`、`preview_error_count=0`、candidate/pause/copy target 均为 0。API/worker/crond 均 active，应用日志无 Traceback/SyntaxError/ImportError。
+
+最终安全审计期间曾有一次只读审计误触 exact deployer 的默认 apply，将磁盘 `app.py` 从 `b3c3e6a` 反向应用到 `8c559a7`；运行中的 API 进程未重启，检测到哈希漂移后于 18:49:29 使用相同 exact-source 链恢复到 `b3c3e6a`，早于 18:50 cron tick，未有请求在错误磁盘版本上执行。后续 staging、174/174、热修 overlay 和自然 tick 均基于重新读取的精确哈希完成。只读审计今后禁止运行 deployer；如确需验证只能显式使用 `--check`。
+
+本次只上线配置、观察/试算、既有 pause 兼容和复制前置熔断。`AD_CONTROL_COPY_ENABLED`、`AD_CONTROL_AD_COPY_ENABLED` 未配置/保持关闭；正式 Campaign copy 在 Token/Graph 前失败关闭，Ad 执行仍返回 `phase_not_enabled`，没有 Meta copy、没有 copied created_data/lineage/intent DDL/DML，也没有复制 Canary。
