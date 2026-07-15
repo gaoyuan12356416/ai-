@@ -21,18 +21,20 @@
 | SA-011 | P0 | 迁移幂等 | `product=''` 的 V2 账号组可能在重启时被当成 legacy 再次迁移 | legacy 选择条件限定 `product <> ''`，专门回归重复 ensure | 已采纳 |
 | SA-012 | P0 | 状态机/preview | save payload 或损坏的过期时间可能绕过专用启用与 preview 门禁 | save 不写 enabled；损坏 expires_at 返回 `preview_invalid` 并且零 Meta 写 | 已采纳 |
 | SA-013 | P2 | 并发/性能 | 每次 pause 的最终一致性锁跨越 Graph GET/POST，可阻塞其他 SQLite 写 | 本期优先保证 stale preview 不写；记录约 60 秒最坏阻塞边界，暗发布监控耗时/排队，异常先停 runner/live 规则再回滚 | 已接受，需生产观察 |
+| SA-014 | P0 | 共享 monolith 部署 | 线上新版 action-log 已有独立 writer/reader 和超时/并发/重试保护，旧部署补丁可能回退这些安全契约 | 补丁显式保留 writer/reader 分离、固定 action-log 库表、现行超时/并发上限与无立即 upsert 重试；部署前对 current-live fixture 执行 check/apply/幂等与契约断言 | 已采纳，上线前必验 |
 
 ## 决策记录
 
 - 隔离 Stub 适配器按 Meta Campaign copy 契约使用 `POST /{campaign_id}/copies`，并固定 `deep_copy=true,status_option=PAUSED`；该适配器本期不接入生产 app/runner。
 - Copy 响应只作为新 Campaign 入口，Ad Set/Ad 映射必须回读 `source_adset_id`/`source_ad_id` 验证，不能假定响应含完整映射。
-- 本期不建立 FB/TT 复制结果表，也不进行 copied created_data/lineage/intent DDL/DML；既有 action log 审计不变。
+- 本期不建立 FB/TT 复制结果表，也不进行 copied created_data/lineage/intent DDL/DML；既有 `ads_ai.ad_control_action_log` 只是执行审计，不是复制结果落表。DDL 环境问题已修复不会自动扩大本期范围，后续建表/写入仍等待用户明确授权。
 - Campaign 观察模式不创建生产 copy intent、不预占真实额度；可写 SQLite preview/runner 状态及既有 `ads_ai.ad_control_action_log` 审计，但不写 copied created_data/lineage/intent。Ad 观察 runner 本期不可启用。
 - 旧聚合组迁移必须显式提交 `migrate_from_group_ids` 并在同一事务中收敛旧行；迁移前 `partial_enabled` 必须如实显示。旧 `action=observe` 显式转为 `run_mode=observe` + `action=pause`，未知 action 拒绝保存。
 - ownerless legacy 组默认禁用+急停；新 V2 账号组不参与 `product` 维度的 legacy 重运移。普通 save 只保存配置，不承担 enabled 状态转换。
 - preview 过期时间损坏与 stale/missing/expired 一样 fail-closed；不能将解析异常当作“永不过期”。
+- 共享 monolith 的补丁验收必须包含 current-live fixture；不能只用仓库旧基线证明安全。如补丁改变 action-log writer/reader 分流、连接/读写超时、live worker 上限或 runner 状态更新不立即 upsert 重试契约，必须停止发布。
 - 未来正式复制仍须遵守“PAUSED 创建 -> 一一映射 -> 持久化 -> 回读校验 -> 激活”，但本期生产路径不会调用该状态机。
 
 ## PM 修订确认
 
-2026-07-15 用户已确认修正版方案并要求实施，随后明确本期跳过复制结果 ads_ai 写入。此次只能上线 Campaign observe/preview 与既有 pause；Ad 仅保存配置，任何复制 Canary 后置。
+2026-07-15 用户已确认修正版方案并要求实施，随后明确本期跳过复制结果 ads_ai 写入。用户后续确认 DDL 问题已修复，仅表示后续获得明确授权时可再尝试，不改变本轮边界。此次只能上线 Campaign observe/preview 与既有 pause；Ad 仅保存配置，任何复制 Canary 后置。

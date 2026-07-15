@@ -14,7 +14,8 @@
 | TR-004 | 权限 | 需覆盖列表/更新/删除/启停 | 双用户矩阵，均返回 owner_forbidden/not_found | 已补充 |
 | TR-005 | 旧功能 | copy 熔断可能误伤 pause | 增加旧 Campaign pause 完整回归 | 已补充 |
 | TR-006 | 剧目范围 | created_data 无直接剧目标识 | 通过明确映射表解析，缺失/歧义时 fail-closed | 已补充 |
+| TR-007 | 共享 monolith 补丁 | 只测仓库旧基线无法发现当前线上 action-log writer/reader 安全更新被回退 | 部署前抓取 current-live fixture，只读 check、临时 apply、二次幂等，并断言 writer/reader、超时/并发、无立即 upsert 重试和安全函数 hash 不变 | 已补充 |
 
 ## QA 修订确认
 
-测试数据全部使用临时 SQLite、只读 SQL spy 和 Stub Meta；任何测试命令不得读取生产 token、连接生产写节点或执行复制结果 MySQL DDL/DML。
+测试数据全部使用临时 SQLite、只读 SQL spy、Stub Meta 和 current-live 文件的只读副本；任何测试命令不得读取生产 token、连接生产写节点或执行复制结果 MySQL DDL/DML。DDL 环境已修复不改变本轮零 copied created_data/lineage/intent 建表与写入的边界；既有 `ads_ai.ad_control_action_log` 只是执行审计。

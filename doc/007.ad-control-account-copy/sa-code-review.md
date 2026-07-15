@@ -2,7 +2,7 @@
 
 ## 结论
 
-2026-07-15 完成当前工作树第三轮代码评审。阻断项均已修复，Python/JavaScript 静态检查、84 条 ad-control fresh-cache 全量自动化测试及 `git diff --check` 均通过，可进入提交与生产部署前验收。
+2026-07-15 完成当前工作树第四轮代码评审。阻断项均已修复，Python/JavaScript 静态检查、90 条 ad-control fresh-cache 全量自动化测试及 `git diff --check` 均通过，可进入提交与生产部署前验收。该结论仍不是生产已部署证明。
 
 该结论只覆盖本期实际开放边界：Campaign 规则配置、观察/试算、runner 观察链路及既有 Campaign pause 回归。真实 Meta Campaign copy 因复制结果持久化未配置而在任何 Token/Graph 访问前失败关闭；Ad 仅允许保存配置，启用、候选、试算、runner 和正式执行均未开放。本次尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实 Meta copy Canary。
 
@@ -12,11 +12,12 @@
 - `features/ad_control_copy_engine/`：规则归一化、冲突消解、计划/额度/冷却和隔离的 Meta copy 编排契约。
 - `scripts/ad_control_rule_runner.py`：规则组观察执行、`would_pause`/`would_copy` 汇总及既有 runner 状态回归。
 - `static/ad-control-pages.js`、`static/ad-control-rules.html`、`static/ad-control-pages.css`：去产品维度、对象层级/运行模式拆分、复制参数、旧规则组兼容及页面缓存版本。
-- `features/ad_control_execution_log/`、`deploy/apply_ad_control_execution_log_fix.py`：既有 `ads_ai.ad_control_action_log` 审计兼容与权限回归。
-- `tests/test_ad_control*.py`：共 84 条规则模型、API、UI、runner、执行日志、部署补丁兼容和隔离编排测试。
+- `features/ad_control_execution_log/`、`deploy/apply_ad_control_execution_log_fix.py`：既有 `ads_ai.ad_control_action_log` 审计兼容与权限回归，包含线上新版 writer/reader 分离、超时/并发上限及无立即 upsert 重试的保护。
+- `tests/test_ad_control*.py`：共 90 条规则模型、API、UI、runner、执行日志、部署补丁兼容和隔离编排测试。
 - `tests/validate_ad_control_deploy_patch.py`：将部署补丁真实应用到临时 app，校验首次写前备份 hash、二次幂等 `unchanged`，并对补丁后 app 重跑同一全量测试。
+- `tests/validate_ad_control_live_action_log_compat.py`：对当前线上 `app.py` 只读 fixture 执行 check，只在临时副本 apply，验证写前备份、二次幂等以及 7 个线上 action-log 安全函数 hash 不变。
 
-不在本次评审放行范围：复制结果 copied created_data/lineage/intent 的 `ads_ai` 表结构与写入、真实 Meta Campaign copy、全部 Ad 扫描/执行链路、生产部署和线上数据验证。既有 `ads_ai.ad_control_action_log` 不属于上述延后范围，仍按原审计链路保留。
+不在本次评审放行范围：复制结果 copied created_data/lineage/intent 的 `ads_ai` 建表与写入、真实 Meta Campaign copy、全部 Ad 扫描/执行链路、生产部署和线上数据验证。DDL 环境问题已修复不代表本轮获得了建表/写入授权。既有 `ads_ai.ad_control_action_log` 不属于上述延后范围，仍按原审计链路保留，但它不是复制结果落表。
 
 ## 问题清单
 
@@ -41,6 +42,7 @@
 | CR-017 | P0 | `deploy/apply_ad_control_execution_log_fix.py` | 旧基线缺少可选函数/源码块时补丁 `--check` 中断，无法形成可回滚发布链 | 可选目标安全跳过；当前 merged app 与有/无 legacy 目标均验证 check/apply/幂等/写前备份 | 已修复 |
 | CR-018 | P2 | `ad_control_guarded_campaign_pause` | 为保证每次 Graph POST 前 preview 仍有效，全局 `JOB_DB_LOCK` + `BEGIN IMMEDIATE` 跨越 Graph GET/POST，最坏可阻塞其他 SQLite 写约 60 秒/对象 | 本期保留一致性优先实现；暗发布监控 API/runner 耗时、Graph 超时与 job 写入排队，异常时停 runner/live 组后回滚代码 | 已接受，生产待验证 |
 | CR-019 | P0 | 部署模板 mixed 执行 | 账号维度 V2 组若回退调用旧产品/账号白名单，会在 `product=''` 时错误过滤 pause 候选；模板对主 app audit helper 的隐式依赖也可导致旧基线 `NameError` | 补丁模板自包含 audit 依赖；copy 对象预先 fail-closed，pause 只按 preview 中已验证账号重检，不再回查 product/account 白名单 | 已修复 |
+| CR-020 | P0 | action-log 部署补丁 | 当前线上版本已有安全性更新；仅对仓库旧基线测试会漏掉 writer/reader、3/5 秒超时、live worker=4 和无立即 upsert 重试被旧模板回退的风险 | 补丁内置安全契约断言，新增 current-live fixture 只读/check/临时 apply/二次幂等验证，对 7 个已有线上安全函数做 hash 不变断言 | 已修复，每次部署前必须重跑 |
 
 ## 编译 / 验证结果
 
@@ -48,10 +50,11 @@
 | --- | --- | --- |
 | Python 编译 | `python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py` | 通过，退出码 0 |
 | JavaScript 语法 | `node --check static/ad-control-pages.js` | 通过，退出码 0 |
-| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 84/84 通过，0 失败，0 阻塞；`Ran 84 tests in 4.415s` |
-| 真实部署补丁链 | `python tests/validate_ad_control_deploy_patch.py` | 首次 apply 变更 + 写前备份 hash 匹配；二次 apply `unchanged`；补丁后 84/84 通过，`Ran 84 tests in 4.577s` |
+| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 90/90 通过，0 失败，0 阻塞 |
+| 真实部署补丁链 | `python tests/validate_ad_control_deploy_patch.py` | 首次 apply 变更 + 写前备份 hash 匹配；二次 apply `unchanged`；补丁后 90/90 通过 |
+| Current-live action-log 兼容 | `python tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` | 原 fixture 只读；临时 apply 首次备份 hash 匹配；二次 check/apply `unchanged`；writer 63353、reader 63350、3/5 秒超时、live worker=4 及 7 个安全函数 hash 保留 |
 | 差异格式检查 | `git diff --check` | 通过，退出码 0 |
 
-新增安全回归覆盖 stale/损坏 preview、执行前及每次 Meta POST 前重检、enable TOCTOU、save-enabled 绕过阻断、ownerless legacy fail-close、V2 不误迁移、legacy 配置资源 owner 隔离、Ad execute 顶层门禁、observe pause 零 Token、mixed copy/pause 隔离以及部署补丁的旧基线/幂等兼容。
+新增安全回归覆盖 stale/损坏 preview、执行前及每次 Meta POST 前重检、enable TOCTOU、save-enabled 绕过阻断、ownerless legacy fail-close、V2 不误迁移、legacy 配置资源 owner 隔离、Ad execute 顶层门禁、observe pause 零 Token、mixed copy/pause 隔离，以及部署补丁对旧基线、先前泛化 action-log 补丁输出和 current-live writer/reader 安全契约的兼容/幂等校验。
 
-验证全部使用本地临时 SQLite、fake/stub 或静态契约；没有连接 Meta 写接口，没有写 copied created_data/lineage/intent，也没有完成生产 overlay 全量验证或暗发布。`ads_ai.ad_control_action_log` 相关测试属于既有审计链路回归，不代表复制结果落表已实现。
+验证全部使用本地临时 SQLite、fake/stub、静态契约或当前线上文件的只读副本；没有连接 Meta 写接口，没有建或写 copied created_data/lineage/intent，也没有完成生产 overlay 全量验证或暗发布。`ads_ai.ad_control_action_log` 相关测试属于既有审计链路回归，不代表复制结果落表已实现。

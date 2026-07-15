@@ -9,7 +9,7 @@
 - 临时 SQLite。
 - Stub Meta，构造 CBO、ABO、兼容/不兼容 ROAS、N 条 Ad、超时和进程退出；仅供隔离编排模块测试。
 - 两个用户、两个账号时区、剧目映射缺失或歧义数据。
-- MySQL 使用 fake/spy，证明本期没有 copied created_data/lineage/intent DDL/DML；既有 action-log 适配器可单独 mock 验证其原有审计写入。测试不得连接生产库。
+- MySQL 使用 fake/spy，证明本期没有 copied created_data/lineage/intent DDL/DML；既有 `ads_ai.ad_control_action_log` 适配器可单独 mock 验证其原有审计写入，但该表不是复制结果落表。测试不得连接生产库。
 
 ## 用例列表
 
@@ -51,10 +51,11 @@
 | TC-034 | 部署补丁旧基线兼容 | 当前合并 app 及可缺少旧函数/源码块的基线 | 执行 `--check`、apply、再次 apply | 可选目标缺失时安全跳过；首次写前备份，第二次幂等，不产生半成品 | P0 | 通过（自动化/本地补丁链验证） |
 | TC-035 | 最终 pause 锁边界 | 正式 pause 已通过 preview | Graph GET/POST 慢响应或超时 | 锁内每次 POST 前仍能阻断 stale preview；同时记录全局 `JOB_DB_LOCK` 最坏约 60 秒 SQLite 写阻塞的 P2 生产监控项 | P2 | 通过（安全回归），生产性能待暗发布 |
 | TC-036 | 账号维度 mixed 执行不回退产品白名单 | `product=''` 的 V2 组同时有 copy/pause 候选 | 执行 mixed 组并 spy 候选/白名单查询 | copy 在 Token 前隔离，pause 仅按 preview 账号归属重检，不再查 product/account 白名单、不把账号组退化成旧产品维度 | P0 | 通过（自动化） |
+| TC-037 | Current-live action-log 兼容门禁 | 当前线上 `app.py` 的只读 fixture | 先执行 `--check`，再复制到临时目录 apply 两次并比较函数 hash | 原 fixture 字节不变；首次临时 apply 仅产生一份字节一致备份；二次 check/apply 均 `unchanged`；writer 63353、reader 63350、3/5 秒超时、`AD_CONTROL_LIVE_MAX_WORKERS=4`、无立即 upsert 重试和 7 个线上安全函数 hash 全部保留 | P0 | 通过（自动化/本地 fixture 验证） |
 
 ## 执行结果说明
 
-2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 84 tests in 4.415s`、`OK`。另执行 `python tests/validate_ad_control_deploy_patch.py`，在临时 app 上真实 apply 后再跑全量 84/84（`Ran 84 tests in 4.577s`），确认首次备份 SHA-256 与源 app 一致，二次 apply 报 `unchanged` 且未新增备份。所有“通过”均为本地自动化、隔离测试、本地补丁链验证或静态审查结果；尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
+2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 90 tests`、`OK`。另执行 `python tests/validate_ad_control_deploy_patch.py`，在旧基线临时 app 上真实 apply 后再跑全量 90/90，确认首次备份 SHA-256 与源 app 一致，二次 apply 报 `unchanged` 且未新增备份。另用 `tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` 完成 current-live fixture 只读 check、临时 apply、备份 hash、二次幂等和 action-log writer/reader 安全契约验证。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
 
 ## 回归范围
 
@@ -63,4 +64,4 @@
 - Token 与账号池现有读取。
 - 现有 Campaign pause 执行及执行日志持久化。
 - runner 锁、续批、资源熔断、cron 兼容。
-- 本期不包含复制后 created_data 再扫描；该能力随用户后续指定的复制结果 ads_ai 写入方案实现。
+- 本期不包含复制后 created_data 再扫描，也不建/写 copied created_data、copy lineage 或 copy intent；DDL 环境已修复不改变本轮范围，该能力随用户后续明确授权的复制结果 ads_ai 写入方案实现。既有 `ads_ai.ad_control_action_log` 仅是执行审计。
