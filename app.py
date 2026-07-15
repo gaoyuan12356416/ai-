@@ -33794,10 +33794,12 @@ def ad_control_run_mysql(query, timeout_seconds=None):
     return [line.split("\t") for line in proc.stdout.splitlines() if line.strip()]
 
 
-def ad_control_saved_pool_account_ids(product):
+def ad_control_saved_pool_account_ids(product, owner_user_id=None):
     ids = []
     seen = set()
-    for group in list_ad_control_account_groups(product).get("items", []):
+    for group in list_ad_control_account_groups(
+        product, owner_user_id=owner_user_id
+    ).get("items", []):
         for value in group.get("account_ids") or []:
             account_id = ad_control_normalize_account(value)
             if account_id and account_id not in seen:
@@ -33806,20 +33808,26 @@ def ad_control_saved_pool_account_ids(product):
     return ids
 
 
-def ad_control_list_accounts_by_product_legacy(product):
+def ad_control_list_accounts_by_product_legacy(product, owner_user_id=None):
     product = str(product or "").strip()
     if not product:
         raise StructuredApiError("missing_product", "请选择产品")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    cache_key = (owner_user_id, product)
     now = time.time()
     with AD_CONTROL_ACCOUNT_LIST_CACHE_LOCK:
-        cached = AD_CONTROL_ACCOUNT_LIST_CACHE.get(product) or {}
+        cached = AD_CONTROL_ACCOUNT_LIST_CACHE.get(cache_key) or {}
         if cached.get("expires_at", 0) > now:
             return {
                 "items": [dict(item) for item in cached.get("items", [])],
                 "source": "cache",
             }
 
-        saved_ids = ad_control_saved_pool_account_ids(product)
+        saved_ids = ad_control_saved_pool_account_ids(
+            product, owner_user_id=owner_user_id
+        )
         try:
             account_sql = """
                 SELECT d.ad_account_id, MAX(d.updated_at)
@@ -33881,7 +33889,7 @@ def ad_control_list_accounts_by_product_legacy(product):
                     "ad_count": 0,
                     "updated_at": updated_by_id.get(account_id, ""),
                 })
-            AD_CONTROL_ACCOUNT_LIST_CACHE[product] = {
+            AD_CONTROL_ACCOUNT_LIST_CACHE[cache_key] = {
                 "items": [dict(item) for item in items],
                 "expires_at": time.time() + AD_CONTROL_ACCOUNT_LIST_CACHE_SECONDS,
             }
@@ -33911,10 +33919,12 @@ def ad_control_list_accounts_by_product_legacy(product):
                 "source": "saved_pools",
                 "warning": "业务库账户列表暂不可用，已显示账户池中保存的账号。",
             }
-def list_ad_control_accounts(product=None):
+def list_ad_control_accounts(product=None, owner_user_id=None):
     product = str(product or "").strip()
     if product:
-        return ad_control_list_accounts_by_product_legacy(product)
+        return ad_control_list_accounts_by_product_legacy(
+            product, owner_user_id=owner_user_id
+        )
     source_queries = [
         "SELECT ad_account_id,product,campaign_id,adset_id,ad_id,updated_at "
         "FROM %s" % ad_control_table("ads_facebook_auto_created_data")
@@ -91470,7 +91480,14 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(parsed.query)
-                json_response(self, 200, list_ad_control_accounts((params.get("product") or [""])[0]))
+                json_response(
+                    self,
+                    200,
+                    list_ad_control_accounts(
+                        (params.get("product") or [""])[0],
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return

@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-2026-07-15 最终本地冻结验证通过：合并 16:01 daily-log 生产组合并收口 mixed 批次、exact deploy 与 owner 迁移门禁后，Python 编译与 `node --check` 通过，ad-control 使用独立 Python 缓存的全量自动化测试 161/161 通过，exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过，`git diff --check` 通过。当前未发现未关闭的 P0/P1 缺陷。
+2026-07-15 最终本地冻结验证通过：合并 16:01 daily-log 生产组合并收口 mixed 批次、exact deploy、owner 迁移与产品账号列表 owner 贯穿门禁后，Python 编译与 `node --check` 通过，ad-control 使用独立 Python 缓存的全量自动化测试 171/171 通过，exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过，`git diff --check` 通过。当前未发现未关闭的 P0/P1 缺陷。
 
 本报告证明的是当前工作树在本期安全边界内通过测试，不是生产部署证明。测试未调用真实 Meta 写接口，未开放真实 Campaign copy 或任何 Ad 执行能力，生产 overlay 完整验证、GitHub-first 暗发布、服务重启、定时任务切换和线上 Canary 均尚未完成。
 
@@ -22,6 +22,7 @@
 - 部署补丁在当前 merged app 和缺失可选 legacy 目标的旧基线上均能完成 check/apply/幂等判定；当前 merged app 已对齐时首次为 `unchanged` 且不生成冗余备份，确需变更的基线会在首次写入前生成唯一、字节一致的备份。
 - 部署模板自包含执行审计依赖；账号维度 mixed copy/pause 不会回退调用旧 product/account 白名单而误过滤 pause。
 - current-live fixture 只读验证：线上既有 writer 63353、reader 63350、3/5 秒超时、`AD_CONTROL_LIVE_MAX_WORKERS=4`、runner 状态更新不立即 upsert 重试和 7 个 action-log 安全函数 hash 均未被补丁回退；临时副本二次 check/apply 均为 `unchanged`。
+- 生产遗留的 245 账号池回归已纳入版本化测试：HTTP route 从 session 注入 owner 由静态契约断言覆盖，service 到 saved pool 由运行时测试覆盖；缓存按 `(owner, product)` 隔离，业务库失败 fallback、并发单次刷新及跨用户缓存不可见均通过。
 - 隔离 copy engine 的 CBO/ABO、轮询、映射、幂等、临时 intent/lineage 契约；这些用例使用 fake/stub 与临时 SQLite，不代表生产复制链路已放开。
 
 ## 执行统计
@@ -30,7 +31,7 @@
 | --- | --- | --- | --- | --- |
 | Python 编译文件 | 7 | 7 | 0 | 0 |
 | JavaScript 语法文件 | 1 | 1 | 0 | 0 |
-| ad-control 自动化用例 | 161 | 161 | 0 | 0 |
+| ad-control 自动化用例 | 171 | 171 | 0 | 0 |
 | Exact-source app 合并器 | 12 | 12 | 0 | 0 |
 | SQLite owner 迁移器 | 8 | 8 | 0 | 0 |
 | 真实部署补丁链 | 1 | 1 | 0 | 0 |
@@ -45,8 +46,10 @@
 - `BUG-003`：部署补丁模板及 target 明细审计会把观察日志误标成正式执行，已修复列表/明细两条路径并在补丁后临时 app 上 107/107 回归通过。
 - `BUG-004`：execution-log 补丁不能生成完整 V2 app，已新增 source/target Git blob、隔离 diff、唯一备份和原子替换门禁；生产 staging 尚待验证。
 - `BUG-005`：deferred copy 会占用同账号 pause 批次额度并可能终止续批，已改为 pause 优先分批，并通过 21 pause + 1 copy 的真实 preview→execute/runner continuation 回归。
+- `BUG-006`：owner 隔离改造后，legacy 产品账号列表未传当前用户且缓存仅按产品区分，缓存未命中会报 `missing_owner`，简单放宽后还可能形成跨用户缓存污染；现已贯穿当前 owner 并按 `(owner, product)` 隔离缓存，245 账号池、fallback、并发和双 owner 回归通过。
 - 当前无未关闭 P0/P1 缺陷。
-- 存在非阻断技术债：`app.py` 的 `datetime.utcnow()` 在测试中产生弃用告警，未影响 161 条测试结果。
+- 存在非阻断技术债：`app.py` 的 `datetime.utcnow()` 在测试中产生弃用告警，未影响 171 条测试结果。
+- 存在已接受的 P2 兼容取舍：legacy 产品账号列表缓存仍为 300 秒 TTL，账户池保存/删除不会主动清除同一 owner 的旧缓存；最多短暂显示本人旧数据，不造成跨用户可见，V2 无产品列表分支不使用该缓存。
 - 存在已接受的 P2 运行取舍：正式 Campaign pause 的最终一致性检查持有全局 `JOB_DB_LOCK` + SQLite `BEGIN IMMEDIATE` 跨 Graph GET/POST，两次 30 秒超时时可使同进程其他 job SQLite 写阻塞约 60 秒/对象。安全回归已通过，生产性能影响必须在暗发布中观察。
 
 ## 验证证据
@@ -59,7 +62,7 @@ node --check static/ad-control-pages.js
 结果：退出码 0
 
 独立 PYTHONPYCACHEPREFIX + python -m unittest discover -s tests -p "test_ad_control*.py" -v
-结果：Ran 161 tests / OK / 退出码 0
+结果：Ran 171 tests / OK / 退出码 0
 
 python -m unittest tests.test_ad_control_account_copy_deploy -v
 结果：Ran 12 tests / OK；check 零写、共享锁、source/备份后漂移阻断、持久化唯一备份、mode-before-fsync、安装失败恢复、未知字节不覆盖、二次幂等 / 退出码 0

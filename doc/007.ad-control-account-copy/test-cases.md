@@ -65,10 +65,11 @@
 | TC-048 | 并发 source 漂移阻断 | live app 不等于 source/target blob | 运行 exact-source 发布器 | 在备份和写入前失败，live 字节不变 | P0 | 通过（自动化） |
 | TC-049 | Mixed 超额批次不被 copy 占位 | 同账号命中 21 个 pause 和 1 个 copy，每账号上限 20 | preview 后正式 execute，再进入 runner continuation | 首批恰好 20 个 pause、0 个 copy；copy 不消费 pause 额度，剩余 2 个目标使事件保持 partial 和 continuation key | P0 | 通过（自动化） |
 | TC-050 | SQLite owner 精确迁移 | 三条已核实 legacy 组、关联账户池、standalone 0/0 | 默认 check、首次 apply、二次 apply；另注入 mixed owner、坏 pool 和事务中途失败 | check 只改临时副本；首次只更新3个 owner、二次0行；逐ID状态、非owner字段、账户ID、standalone、integrity保持；异常完整回滚/失败关闭 | P0 | 通过（自动化），生产 C1 演练待验证 |
+| TC-051 | 产品账号列表 owner 贯穿和缓存隔离 | 同一产品下两个 owner 各有 saved-only 账户池，另有 245 账号池 | 静态断言 route 从 session 注入 owner；service 运行时模拟业务库失败、并发请求和缓存复用 | owner 逐层贯穿到 saved pool；缓存键为 owner+product；fallback 只显示本人账户；6 并发仅刷新一次且两个 owner 永不互见 | P0 | 通过（route 静态契约 + service 自动化） |
 
 ## 执行结果说明
 
-2026-07-15 合并 16:01 daily-log 生产组合并收口发布安全门禁后，使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 161 tests`、`OK`。exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过；execution-log 补丁继续单独验证 daily/raw、owner 和 observe 审计兼容。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 exact-commit staging、C1、暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
+2026-07-15 合并 16:01 daily-log 生产组合并收口发布安全门禁后，使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 171 tests`、`OK`。其中新增纳管生产遗留的 245 账号池、产品账号列表 fallback/并发及跨 owner 缓存隔离回归。exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过；execution-log 补丁继续单独验证 daily/raw、owner 和 observe 审计兼容。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 exact-commit staging、C1、暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
 
 ## 回归范围
 

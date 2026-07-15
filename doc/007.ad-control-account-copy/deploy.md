@@ -80,7 +80,7 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 
 ## 部署步骤
 
-1. 本地完成 Python/JavaScript 语法检查、161/161 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
+1. 本地完成 Python/JavaScript 语法检查、171/171 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
 2. 刷新 current-live `app.py` 和 SHA-256，通过上述 action-log 兼容门禁；这一步必须在最终发布文件冻结前重跑。
 3. 精确 commit/push 到 GitHub，记录 commit 和文件 hash。
 4. 建立排他发布窗口并确认其他生产 `app.py` 写入者均停用或使用统一锁。备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 rule-group owner 基线及 legacy standalone total/enabled 集合。
@@ -130,7 +130,7 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 
 ## 当前发布状态
 
-2026-07-15 合并 16:01 daily-log 生产组合并收口发布安全门禁后已完成本地 fresh-cache 161/161 回归；exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过。`apply_ad_control_execution_log_fix.py` 仅保留为 execution-log 兼容验证器，不再被误用为完整 V2 发布器。
+2026-07-15 合并 16:01 daily-log 生产组合、修复产品账号列表 owner/cache 回归并收口发布安全门禁后已完成本地 fresh-cache 171/171 回归；exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过。`apply_ad_control_execution_log_fix.py` 仅保留为 execution-log 兼容验证器，不再被误用为完整 V2 发布器。
 
 服务器异常重启后再次只读核验：`drama-material-api.service`、crond 和 5 分钟 runner 均正常；SQLite `integrity_check/quick_check=ok`；legacy standalone `ad_control_rule` total/enabled 均为 0；V2 标记、V2 schema 列和 copy intent/lineage/quota 表均不存在。16:01 的 daily-log overlay 已改变 app/action-log service/全套静态文件，当前生产组合精确对应 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c`；旧 `146cb1b` 基线已过期。仅存在 C0 与 daily-log 回滚点，V2 C1 尚未建立。
 

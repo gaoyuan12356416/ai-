@@ -13,7 +13,7 @@
 | 复制结果 ads_ai schema/事务写入 | 后续需求 | 用户后续明确授权并指定写法 | 本期取消（DDL 环境已修复，仍不在本轮执行） |
 | 规则模型、旧聚合迁移和 Campaign 观察链路 | created_data_write_patterns | `app.py`、runner、copy engine | 已完成（本地） |
 | 规则组页面升级、`partial_enabled` 与 legacy action 兼容 | rule_dimension_review | `static/ad-control-*` | 已完成（本地） |
-| 集成、回归、代码评审 | Codex | 全部变更 | 已完成（合并 16:01 daily-log 生产基线并收口发布安全门禁后 fresh-cache 161/161） |
+| 集成、回归、代码评审 | Codex | 全部变更 | 已完成（合并 16:01 daily-log 生产基线、纳管 245 账号池回归并收口发布安全门禁后 fresh-cache 171/171） |
 | 生产 overlay 合并与生产 Python 环境完整验证 | Codex | 线上共享 monolith 副本/发布包 | 未完成 |
 | GitHub-first 暗发布 | Codex | 精确 commit/发布包/线上检查点 | 未完成 |
 | Campaign 观察验收 | Codex + 业务方 | 已批准测试账号 | 待批准 |
@@ -43,4 +43,4 @@ python -m unittest tests.test_ad_control_account_copy_deploy -v
 
 - 2026-07-15：从 commit `352bfb4e96abe6bf50b76cacb3f25e4608774c92` 创建独立工作树 `D:\codex\ai-drama-material-service-ad-control-copy` 和分支 `codex/ad-control-copy-rules`。
 - 2026-07-15：C0 本地 bundle 与线上全量配置/SQLite 备份已完成并校验。
-- 2026-07-15：发现 16:01 已并发上线 daily-log overlay，重新以生产组合提交 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c` 为合并基线；V2、daily/raw 日志读模型和统一缓存版本合并并收口 mixed 批次、exact deploy、owner 迁移后 fresh-cache 161/161 通过。exact-source Git diff 部署器 12/12、SQLite owner 迁移器 8/8（含真实 target app ensure/owner 可见性集成）通过；生产 staging、C1 与线上 smoke 仍待完成。
+- 2026-07-15：发现 16:01 已并发上线 daily-log overlay，重新以生产组合提交 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c` 为合并基线；V2、daily/raw 日志读模型和统一缓存版本合并，并收口 mixed 批次、exact deploy、owner 迁移以及产品账号列表 owner/cache 回归后 fresh-cache 171/171 通过。exact-source Git diff 部署器 12/12、SQLite owner 迁移器 8/8（含真实 target app ensure/owner 可见性集成）通过；生产 staging、C1 与线上 smoke 仍待完成。
