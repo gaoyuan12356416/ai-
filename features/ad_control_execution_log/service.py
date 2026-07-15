@@ -400,6 +400,30 @@ def list_actions(config, filters=None, limit=50, table=DEFAULT_TABLE):
         if value:
             where.append("%s=%%s" % _identifier(key))
             params.append(value)
+    owned_binding_ids = [
+        str(value or "").strip()
+        for value in filters.get("owned_binding_ids") or []
+        if str(value or "").strip()
+    ]
+    legacy_actor_user_id = str(filters.get("legacy_actor_user_id") or "").strip()
+    if filters.get("owner_filter"):
+        visibility = []
+        if owned_binding_ids:
+            visibility.append(
+                "%s IN (%s)" % (
+                    _identifier("binding_id"),
+                    ",".join(["%s"] * len(owned_binding_ids)),
+                )
+            )
+            params.extend(owned_binding_ids)
+        if legacy_actor_user_id:
+            visibility.append(
+                "(%s='' AND %s=%%s)" % (
+                    _identifier("binding_id"), _identifier("actor_user_id")
+                )
+            )
+            params.append(legacy_actor_user_id)
+        where.append("(" + " OR ".join(visibility or ["1=0"]) + ")")
     if filters.get("date_from"):
         where.append("created_at>=%s")
         params.append(str(filters["date_from"]))

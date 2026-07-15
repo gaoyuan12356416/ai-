@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 
@@ -48,10 +49,62 @@ class RunnerStateTests(unittest.TestCase):
     def test_zero_target_verification_precedes_continuation_limit(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertLess(
-            source.index("if pause_count == 0 and preview_error_count == 0:"),
+            source.index("if pause_count + copy_count == 0 and preview_error_count == 0:"),
             source.index("if continuation_attempt > MAX_CONTINUATIONS:"),
         )
         self.assertIn('"blocked" if status == "error" else status', source)
+
+    def test_observe_group_persists_object_level_would_actions(self):
+        tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.FunctionDef) and item.name == "run_group_event"
+        )
+        calls = []
+        preview = {
+            "preview_id": "preview-1",
+            "preview_hash": "hash-1",
+            "pause_count": 1,
+            "copy_count": 1,
+            "execution_count": 2,
+            "error_count": 0,
+            "errors": [],
+        }
+        fake_app = SimpleNamespace(
+            ad_control_validate_insight_start_schema=lambda: {"campaign_id"},
+            create_ad_control_live_preview=lambda payload, session, internal=False: preview,
+            execute_ad_control_live=lambda payload, session: calls.append(payload) or {
+                "action_id": "action-1",
+                "preview_id": "preview-1",
+                "requested_count": 2,
+                "success_count": 0,
+                "skipped_count": 2,
+                "error_count": 0,
+                "results": [
+                    {"object_id": "c1", "status": "observed", "reason": "would_pause"},
+                    {"object_id": "c2", "status": "observed", "reason": "would_copy"},
+                ],
+            },
+        )
+        namespace = {
+            "app": fake_app,
+            "continuation_state": lambda previous, action, key: ({}, 1),
+            "event_payload": lambda rule, action, key, status, result=None, reason="": {
+                "status": status, "reason": reason, "result": result or {},
+            },
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
+        result = namespace["run_group_event"](
+            {"group_id": "g1", "run_mode": "observe"}, "pause", "tick-1"
+        )
+        self.assertEqual([{
+            "preview_id": "preview-1", "preview_hash": "hash-1", "dry_run": True,
+        }], calls)
+        self.assertEqual("executed", result["status"])
+        self.assertEqual("action-1", result["result"]["action_id"])
+        self.assertEqual(1, result["result"]["would_pause_count"])
+        self.assertEqual(1, result["result"]["would_copy_count"])
+        self.assertTrue(result["result"]["observation_only"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,57 @@
+# SA 代码评审
+
+## 结论
+
+2026-07-15 完成当前工作树第三轮代码评审。阻断项均已修复，Python/JavaScript 静态检查、84 条 ad-control fresh-cache 全量自动化测试及 `git diff --check` 均通过，可进入提交与生产部署前验收。
+
+该结论只覆盖本期实际开放边界：Campaign 规则配置、观察/试算、runner 观察链路及既有 Campaign pause 回归。真实 Meta Campaign copy 因复制结果持久化未配置而在任何 Token/Graph 访问前失败关闭；Ad 仅允许保存配置，启用、候选、试算、runner 和正式执行均未开放。本次尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实 Meta copy Canary。
+
+## 评审范围
+
+- `app.py`：账号级规则组 API、本人数据隔离、旧聚合组原子迁移、preview/enable 并发重检、Campaign 观察/试算、正式 copy 前置熔断、Ad 顶层阶段熔断。
+- `features/ad_control_copy_engine/`：规则归一化、冲突消解、计划/额度/冷却和隔离的 Meta copy 编排契约。
+- `scripts/ad_control_rule_runner.py`：规则组观察执行、`would_pause`/`would_copy` 汇总及既有 runner 状态回归。
+- `static/ad-control-pages.js`、`static/ad-control-rules.html`、`static/ad-control-pages.css`：去产品维度、对象层级/运行模式拆分、复制参数、旧规则组兼容及页面缓存版本。
+- `features/ad_control_execution_log/`、`deploy/apply_ad_control_execution_log_fix.py`：既有 `ads_ai.ad_control_action_log` 审计兼容与权限回归。
+- `tests/test_ad_control*.py`：共 84 条规则模型、API、UI、runner、执行日志、部署补丁兼容和隔离编排测试。
+- `tests/validate_ad_control_deploy_patch.py`：将部署补丁真实应用到临时 app，校验首次写前备份 hash、二次幂等 `unchanged`，并对补丁后 app 重跑同一全量测试。
+
+不在本次评审放行范围：复制结果 copied created_data/lineage/intent 的 `ads_ai` 表结构与写入、真实 Meta Campaign copy、全部 Ad 扫描/执行链路、生产部署和线上数据验证。既有 `ads_ai.ad_control_action_log` 不属于上述延后范围，仍按原审计链路保留。
+
+## 问题清单
+
+| 编号 | 严重级别 | 文件/位置 | 问题 | 建议 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| CR-001 | P0 | `app.py` 正式 copy 执行入口 | 未接入复制结果持久化时不得先读 Token 或调用 Meta，否则可能形成无落表对象 | 在 Token/Graph 访问前固定返回 `copy_persistence_not_configured` | 已修复 |
+| CR-002 | P0 | `app.py`、runner、规则组 UI | Ad 第二阶段不可复用 Campaign 候选或被误启用 | 保存配置以外的全部 Ad 入口统一返回 `phase_not_enabled` | 已修复 |
+| CR-003 / BUG-001 | P1 | `app.py`、`static/ad-control-pages.js` | 去产品维度后，旧 fan-out 聚合规则组可能被误报为已禁用，编辑保存缺少安全收敛 | 显示 `partial_enabled`，显式提交迁移源并在同一事务内校验、保存、禁用和软删除旧行 | 已修复 |
+| CR-004 | P1 | API/UI 兼容层 | 旧 `action=observe` 与未知 action 若静默按 pause 处理会改变语义 | 旧 observe 显式迁移为观察模式 + pause；未知 action 拒绝保存 | 已修复 |
+| CR-005 | P1 | 执行日志查询 | MySQL 权限错误不得被 SQLite fallback 吞掉，且删除后的本人规则组仍需保留历史审计 | 保留结构化权限错误并按 owner/binding 分页过滤日志 | 已修复 |
+| CR-006 / BUG-002 | P0 | `app.py` preview/execute | 规则修改、禁用或急停后，旧 preview 仍可能继续触发 Meta pause；多对象执行期间状态变化也可能越过旧检查 | 执行入口绑定当前规则 hash/最后 preview/owner/active 状态，并在每次 Meta POST 前持 SQLite 写锁再次校验 | 已修复 |
+| CR-007 / BUG-002 | P0 | `app.py` enabled 切换 | Token 校验在锁外执行，校验结束到 enabled 写入之间存在 TOCTOU，可能启用另一份已变化配置 | `BEGIN IMMEDIATE` 后重读全部行为字段、Ad 门禁和 preview hash，不一致返回 `preview_stale` | 已修复 |
+| CR-008 | P0 | legacy rule/account-group/rule-set API | 旧配置资源接口缺少完整 owner 过滤与写前校验，存在跨用户读写 ID 的可能 | 列表、读取、保存、启停和删除全部绑定当前 owner；外部调用不得使用 internal 绕过 | 已修复 |
+| CR-009 | P0 | `execute_ad_control_live` | Ad 仅在候选阶段短路仍不够，构造旧 preview 可能进入 Campaign 执行分支 | 解析 preview 后在顶层立即检查 `object_level=ad` 并返回 `phase_not_enabled` | 已修复 |
+| CR-010 | P0 | observe pause 执行 | 观察模式 pause 若先解析 Token，会产生不必要外部依赖和潜在副作用 | 仅正式 pause 解析 Token；observe pause/copy 均直接记录 `would_*` | 已修复 |
+| CR-011 | P0 | mixed pause/copy 规则组 | 未配置复制落表时，copy 熔断若在整组级处理会同时阻断既有 pause | 在任何 Token 访问前逐对象隔离 copy 并记录 `copy_persistence_not_configured`，其余 pause 继续正常执行 | 已修复 |
+| CR-012 | P2 | `app.py` 时间处理 | 测试输出出现 `datetime.utcnow()` 弃用告警 | 后续技术债改为 timezone-aware UTC；当前不影响测试与运行结果 | 待后续优化 |
+| CR-013 | P0 | SQLite legacy schema ensure | owner/created_by 双空的启用组无人可管理，但可被 internal runner 执行 | 迁移时自动 `enabled=0, emergency_stopped=1`；生产只为已核实主体精确赋 owner | 已修复 |
+| CR-014 | P0 | SQLite legacy 识别 | 空 product 的账号维度 V2 组可能被重复归类成 legacy | 只迁移 `product <> ''` 的历史绑定，重复 ensure 保持 V2 不变 | 已修复 |
+| CR-015 | P0 | 规则组 save | payload 中的 `enabled=true` 可能绕过 preview/Token/二次确认的专用启用流程 | normalize/save 只保留数据库现有 enabled，新组强制 disabled；行为变更禁用并失效 preview | 已修复 |
+| CR-016 | P0 | preview 过期检查 | 非法 `expires_at` 原先可能被当作不过期，导致损坏 preview 继续可用 | 解析异常返回 `preview_invalid`，执行 fail-closed | 已修复 |
+| CR-017 | P0 | `deploy/apply_ad_control_execution_log_fix.py` | 旧基线缺少可选函数/源码块时补丁 `--check` 中断，无法形成可回滚发布链 | 可选目标安全跳过；当前 merged app 与有/无 legacy 目标均验证 check/apply/幂等/写前备份 | 已修复 |
+| CR-018 | P2 | `ad_control_guarded_campaign_pause` | 为保证每次 Graph POST 前 preview 仍有效，全局 `JOB_DB_LOCK` + `BEGIN IMMEDIATE` 跨越 Graph GET/POST，最坏可阻塞其他 SQLite 写约 60 秒/对象 | 本期保留一致性优先实现；暗发布监控 API/runner 耗时、Graph 超时与 job 写入排队，异常时停 runner/live 组后回滚代码 | 已接受，生产待验证 |
+| CR-019 | P0 | 部署模板 mixed 执行 | 账号维度 V2 组若回退调用旧产品/账号白名单，会在 `product=''` 时错误过滤 pause 候选；模板对主 app audit helper 的隐式依赖也可导致旧基线 `NameError` | 补丁模板自包含 audit 依赖；copy 对象预先 fail-closed，pause 只按 preview 中已验证账号重检，不再回查 product/account 白名单 | 已修复 |
+
+## 编译 / 验证结果
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| Python 编译 | `python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py` | 通过，退出码 0 |
+| JavaScript 语法 | `node --check static/ad-control-pages.js` | 通过，退出码 0 |
+| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 84/84 通过，0 失败，0 阻塞；`Ran 84 tests in 4.415s` |
+| 真实部署补丁链 | `python tests/validate_ad_control_deploy_patch.py` | 首次 apply 变更 + 写前备份 hash 匹配；二次 apply `unchanged`；补丁后 84/84 通过，`Ran 84 tests in 4.577s` |
+| 差异格式检查 | `git diff --check` | 通过，退出码 0 |
+
+新增安全回归覆盖 stale/损坏 preview、执行前及每次 Meta POST 前重检、enable TOCTOU、save-enabled 绕过阻断、ownerless legacy fail-close、V2 不误迁移、legacy 配置资源 owner 隔离、Ad execute 顶层门禁、observe pause 零 Token、mixed copy/pause 隔离以及部署补丁的旧基线/幂等兼容。
+
+验证全部使用本地临时 SQLite、fake/stub 或静态契约；没有连接 Meta 写接口，没有写 copied created_data/lineage/intent，也没有完成生产 overlay 全量验证或暗发布。`ads_ai.ad_control_action_log` 相关测试属于既有审计链路回归，不代表复制结果落表已实现。

@@ -72,6 +72,10 @@ def fixed_offset_timezone(value):
 
 
 def now_for_timezone(tz_name):
+    if str(tz_name or "").strip().lower() == "account":
+        # This timestamp only forms a five-minute runner tick key. Actual due
+        # evaluation happens per account in its Meta account timezone.
+        return datetime.now(timezone.utc).replace(tzinfo=None), "account"
     fixed = fixed_offset_timezone(tz_name)
     if fixed:
         return datetime.now(fixed).replace(tzinfo=None), str(tz_name)
@@ -333,9 +337,12 @@ def run_event(rule, action, event_key):
 
 def group_schedule(rule_group):
     strategy = rule_group.get("strategy") or {}
+    schedule = strategy.get("schedule") if isinstance(strategy.get("schedule"), dict) else {}
     return {
-        "timezone": strategy.get("timezone") or strategy.get("execute_timezone"),
-        "close_time": strategy.get("close_time") or strategy.get("pause_time"),
+        "timezone": schedule.get("timezone") or strategy.get("timezone") or strategy.get("execute_timezone"),
+        "type": schedule.get("type") or "fixed_time",
+        "interval_minutes": int(schedule.get("interval_minutes") or 60),
+        "close_time": schedule.get("time") or strategy.get("execute_time") or strategy.get("close_time") or strategy.get("pause_time"),
         "reopen_time": strategy.get("reopen_time") or strategy.get("restart_time"),
     }
 
@@ -354,8 +361,6 @@ def continuation_state(previous_event, action, event_key):
 def run_group_event(rule_group, action, event_key, previous_event=None):
     if action != "pause":
         return event_payload(rule_group, action, event_key, "skipped", reason="unsupported_group_action")
-    if not rule_group.get("product"):
-        return event_payload(rule_group, action, event_key, "skipped", reason="missing_product")
     session = {"user_id": "ad_control_rule_runner"}
     # Validate the configured insight schema once before the account worker
     # pool starts. Without this cache every account issues SHOW COLUMNS in
@@ -364,7 +369,10 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
     validate_schema = app.ad_control_validate_insight_start_schema
     app.ad_control_validate_insight_start_schema = lambda: insight_columns
     try:
-        preview = app.create_ad_control_live_preview({"rule_group_id": rule_group.get("group_id")}, session)
+        preview = app.create_ad_control_live_preview({
+            "rule_group_id": rule_group.get("group_id"),
+            "scheduled": True,
+        }, session, internal=True)
     finally:
         app.ad_control_validate_insight_start_schema = validate_schema
     previous_result, continuation_attempt = continuation_state(
@@ -372,8 +380,35 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
     )
     preview_error_count = int(preview.get("error_count") or 0)
     pause_count = int(preview.get("pause_count") or 0)
+    copy_count = int(preview.get("copy_count") or 0)
     execution_count = int(preview.get("execution_count") or 0)
-    if pause_count == 0 and preview_error_count == 0:
+    if str(rule_group.get("run_mode") or "observe").lower() != "live":
+        # Persist the bounded object-level would_pause/would_copy results via
+        # the normal action-audit path. execute_ad_control_live exits before
+        # token lookup or any Graph write whenever the preview is observe-mode.
+        observed = app.execute_ad_control_live({
+            "preview_id": preview.get("preview_id"),
+            "preview_hash": preview.get("preview_hash"),
+            "dry_run": True,
+        }, session)
+        observed["preview_pause_count"] = pause_count
+        observed["preview_copy_count"] = copy_count
+        observed["would_pause_count"] = pause_count
+        observed["would_copy_count"] = copy_count
+        observed["preview_error_count"] = preview_error_count
+        observed["errors"] = (preview.get("errors") or [])[:10]
+        observed["remaining_target_count"] = int(
+            preview.get("execution_remaining_count") or preview.get("remaining_count") or 0
+        )
+        observed["continuation_attempt"] = continuation_attempt
+        observed["observation_only"] = True
+        observe_status = "error" if preview_error_count else "executed"
+        observe_reason = "observe_preview_errors" if preview_error_count else "observe_mode"
+        return event_payload(
+            rule_group, action, event_key, observe_status,
+            result=observed, reason=observe_reason,
+        )
+    if pause_count + copy_count == 0 and preview_error_count == 0:
         verification_action_id = record_rule_group_verification(rule_group, preview, event_key)
         return event_payload(rule_group, action, event_key, "executed", result={
             "action_id": verification_action_id,
@@ -383,6 +418,7 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
             "skipped_count": 0,
             "error_count": 0,
             "preview_pause_count": 0,
+            "preview_copy_count": 0,
             "remaining_target_count": 0,
             "continuation_attempt": continuation_attempt,
             "verification_only": True,
@@ -396,7 +432,7 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
                     event_key,
                     "blocked",
                     "continuation_limit_reached",
-                    pause_count,
+                    pause_count + copy_count,
                 )
             except Exception:
                 logging.exception("failed to block ads_ai action log action_id=%s", previous_action_id)
@@ -404,7 +440,7 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
             "action_id": previous_action_id,
             "preview_id": preview.get("preview_id"),
             "error_count": int(preview.get("error_count") or 0),
-            "remaining_target_count": pause_count,
+            "remaining_target_count": pause_count + copy_count,
             "continuation_attempt": continuation_attempt,
         }, reason="continuation_limit_reached")
     if preview_error_count > 0 and execution_count <= 0:
@@ -431,13 +467,14 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
         "preview_id": preview.get("preview_id"),
         "preview_hash": preview.get("preview_hash"),
         "dry_run": False,
-        "confirm": "EXECUTE_LIVE_PAUSE",
+        "confirm": "EXECUTE_LIVE_RULE_GROUP" if copy_count else "EXECUTE_LIVE_PAUSE",
     }, session)
     remaining_count = int(result.get("remaining_count") or 0)
     if not remaining_count:
-        remaining_count = max(0, pause_count - int(result.get("requested_count") or 0))
+        remaining_count = max(0, pause_count + copy_count - int(result.get("requested_count") or 0))
         remaining_count += int(result.get("retryable_error_count") or 0)
     result["preview_pause_count"] = pause_count
+    result["preview_copy_count"] = copy_count
     result["remaining_target_count"] = remaining_count
     result["continuation_attempt"] = continuation_attempt
     permanent_errors = int(result.get("permanent_error_count") or 0)
@@ -477,7 +514,7 @@ def group_event_continuation_key(last, action):
 
 
 def run_rule_groups():
-    groups = app.list_ad_control_rule_groups().get("items", [])
+    groups = app.list_ad_control_rule_groups(internal=True).get("items", [])
     enabled = [group for group in groups if group.get("enabled") and not group.get("emergency_stopped")]
     actions = []
     for group in enabled:
@@ -486,7 +523,18 @@ def run_rule_groups():
         last = load_last_result(group)
         last_keys = dict(last.get("last_keys") or {})
         for action, hhmm in (("pause", schedule.get("close_time")),):
-            due, event_key = event_due(now, hhmm)
+            account_scheduled = str(schedule.get("timezone") or "").lower() == "account"
+            interval_scheduled = str(schedule.get("type") or "").lower() == "interval"
+            if account_scheduled or interval_scheduled:
+                # Per-account timezone/window eligibility is evaluated inside
+                # the scheduled preview. The runner only creates a stable
+                # five-minute tick key and must not reinterpret account time as
+                # server local time.
+                bucket_minute = now.minute - (now.minute % 5)
+                due = True
+                event_key = now.replace(minute=bucket_minute, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+            else:
+                due, event_key = event_due(now, hhmm)
             action_key = "%s:%s:%s" % (action, tz_label, event_key)
             continuation_key = group_event_continuation_key(last, action)
             continuing = bool(continuation_key)
@@ -518,7 +566,7 @@ def run_rule_groups():
 def run_once():
     app.ensure_ad_control_tables()
     group_summary = run_rule_groups()
-    rules = app.list_ad_control_rules().get("items", [])
+    rules = app.list_ad_control_rules(internal=True).get("items", [])
     enabled = [rule for rule in rules if rule.get("enabled")]
     actions = []
     for rule in enabled:

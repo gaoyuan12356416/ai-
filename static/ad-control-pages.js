@@ -2,7 +2,7 @@
   const PAGE = document.body.dataset.page || "overview";
   const TITLES = {
     overview: ["AI自动规则调控", "查看调控中心状态、风险提示和常用入口。", "adControl"],
-    rules: ["规则组管理", "用规则组统一管理产品、账号、规则阈值、绑定策略和执行入口。", "adControlRules"],
+    rules: ["规则组管理", "按账号配置调控对象、命中动作、运行模式和自动复制策略。", "adControlRules"],
     pools: ["账户池", "按产品创建账户池，后续在绑定关系中复用。", "adControlPools"],
     bindings: ["绑定关系", "配置产品、账户池和规则集的绑定，并控制启停。", "adControlBindings"],
     run: ["运行控制台已下线", "规则组现在直接在管理页启停，不再使用 Preview 流程。", "adControlRules"],
@@ -27,6 +27,14 @@
     hotdrama: "hotdrama",
     freereels: "freereels",
   };
+  const OBJECT_LEVEL_LABELS = {
+    campaign: "广告系列 Campaign",
+    ad: "广告 Ad",
+  };
+  const RUN_MODE_LABELS = {
+    observe: "观察模式",
+    live: "正式执行",
+  };
   const defaultCountryGroups = [];
   const defaultTimezones = ["8", "+8", "UTC+8"];
   const defaultExcludedLanguages = ["JA", "KO", "ZHTW", "TH", "ID", "VI", "MS", "TL"];
@@ -37,7 +45,7 @@
     pools: [],
     ruleSets: [],
     bindings: [],
-    ruleGroupAccounts: {},
+    ruleGroupAccounts: [],
     frontendRuleGroups: [],
     ruleGroupDraft: null,
     logLoadSequence: 0,
@@ -148,6 +156,15 @@
   function strategySummary(strategy) {
     strategy = strategy || {};
     const parts = [];
+    const schedule = strategy.schedule || {};
+    const limits = strategy.limits || {};
+    const candidateSelection = strategy.candidate_selection || strategy.copy?.candidate_selection || {};
+    if (schedule.type === "interval") parts.push(`每隔 ${schedule.interval_minutes || "--"} 分钟`);
+    else if (schedule.time || strategy.close_time) parts.push(`每天 ${schedule.time || strategy.close_time}`);
+    if (schedule.allowed_start || schedule.allowed_end || schedule.execute_before) parts.push(`${schedule.allowed_start || "00:00"}-${schedule.allowed_end || schedule.execute_before || "23:59"}`);
+    if (limits.rule_daily_limit) parts.push(`规则日限 ${limits.rule_daily_limit}`);
+    if (candidateSelection.mode === "all") parts.push("全部符合条件");
+    else if (candidateSelection.mode === "top_n_per_account" || strategy.top_n_per_account) parts.push(`每账号 Top ${candidateSelection.top_n || strategy.top_n_per_account || 1}`);
     if (strategy.close_time) parts.push(`关闭 ${strategy.close_time}`);
     if (strategy.execute_timezone) parts.push(`时区 ${strategy.execute_timezone}`);
     if (strategy.block_same_day_reopen) parts.push("当天禁止重启");
@@ -186,8 +203,9 @@
           id,
           name: bindingFrontendGroupName(binding),
           description: strategy.description || "",
-          products: [],
           bindings: [],
+          target_ids: [],
+          account_ids: [],
           country_groups: Array.isArray(strategy.country_groups) ? strategy.country_groups : [],
           close_time: strategy.close_time || "",
           execute_timezone: strategy.execute_timezone || "",
@@ -196,34 +214,52 @@
           enabled: false,
           enabled_count: 0,
           partial_enabled: false,
+          reported_partial_enabled: false,
           emergency_stopped: false,
           rule_count: 0,
           account_count: 0,
+          object_level: binding.object_level || strategy.object_level || strategy.target_level || "campaign",
+          run_mode: binding.run_mode || strategy.run_mode || strategy.execution_mode || "observe",
+          has_copy_action: false,
           updated_at: binding.updated_at || "",
         });
       }
       const group = map.get(id);
       group.bindings.push(binding);
-      if (binding.product && !group.products.includes(binding.product)) group.products.push(binding.product);
-      (strategy.selected_products || []).forEach(value => {
-        if (ALLOWED_PRODUCTS.includes(value) && !group.products.includes(value)) group.products.push(value);
+      const bindingTargetIds = (Array.isArray(binding.target_ids) ? binding.target_ids : [bindingId(binding)])
+        .map(value => String(value || "").trim()).filter(Boolean);
+      bindingTargetIds.forEach(targetId => {
+        if (!group.target_ids.includes(targetId)) group.target_ids.push(targetId);
       });
       if (!group.description && strategy.description) group.description = strategy.description;
       if (!group.close_time && strategy.close_time) group.close_time = strategy.close_time;
       if (!group.execute_timezone && strategy.execute_timezone) group.execute_timezone = strategy.execute_timezone;
       group.block_same_day_reopen = group.block_same_day_reopen || !!strategy.block_same_day_reopen;
       group.allow_next_day_reopen = group.allow_next_day_reopen || !!strategy.allow_next_day_reopen;
-      if (binding.enabled) group.enabled_count += 1;
+      if (binding.enabled_count != null && Number.isFinite(Number(binding.enabled_count))) {
+        group.enabled_count += Number(binding.enabled_count);
+      } else if (binding.enabled) {
+        group.enabled_count += Math.max(1, bindingTargetIds.length);
+      }
+      group.reported_partial_enabled = group.reported_partial_enabled || binding.partial_enabled === true;
       group.emergency_stopped = group.emergency_stopped || !!binding.emergency_stopped;
-      group.rule_count += Array.isArray(binding.rules) ? binding.rules.length : 0;
-      group.account_count += Number(strategy.account_count || (Array.isArray(strategy.selected_account_ids) ? strategy.selected_account_ids.length : 0) || (Array.isArray(binding.account_ids) ? binding.account_ids.length : 0) || 0);
+      const rules = Array.isArray(binding.rules) ? binding.rules : [];
+      group.rule_count = Math.max(group.rule_count, rules.length);
+      group.has_copy_action = group.has_copy_action || rules.some(rule => String(rule.action || "").toLowerCase() === "copy");
+      const accountIds = Array.isArray(strategy.selected_account_ids) ? strategy.selected_account_ids : (Array.isArray(binding.account_ids) ? binding.account_ids : []);
+      accountIds.map(normalizeAccountId).filter(Boolean).forEach(accountId => {
+        if (!group.account_ids.includes(accountId)) group.account_ids.push(accountId);
+      });
+      group.account_count = group.account_ids.length;
+      group.object_level = binding.object_level || strategy.object_level || strategy.target_level || group.object_level;
+      group.run_mode = binding.run_mode || strategy.run_mode || strategy.execution_mode || group.run_mode;
       if (binding.updated_at && (!group.updated_at || binding.updated_at > group.updated_at)) group.updated_at = binding.updated_at;
       if ((!group.country_groups || !group.country_groups.length) && Array.isArray(strategy.country_groups)) group.country_groups = strategy.country_groups;
     });
     return Array.from(map.values()).map(group => {
-      const total = group.bindings.length;
-      group.enabled = total > 0 && group.enabled_count === total;
-      group.partial_enabled = group.enabled_count > 0 && group.enabled_count < total;
+      const total = group.target_ids.length || group.bindings.length;
+      group.partial_enabled = group.reported_partial_enabled || (group.enabled_count > 0 && group.enabled_count < total);
+      group.enabled = !group.partial_enabled && total > 0 && group.enabled_count >= total;
       return group;
     }).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
   }
@@ -241,6 +277,24 @@
   }
   function primaryRuleFromDraft(draft) {
     return Array.isArray((draft || {}).rules) && draft.rules.length && typeof draft.rules[0] === "object" ? draft.rules[0] : {};
+  }
+  function firstCopyRuleIndex(rules) {
+    return (Array.isArray(rules) ? rules : []).findIndex(rule => String(rule?.action || "").trim().toLowerCase() === "copy");
+  }
+  function mergeGeneratedPrimaryRule(existingRules, generatedRule) {
+    const rules = Array.isArray(existingRules) ? existingRules.slice() : [];
+    const previous = rules.length && rules[0] && typeof rules[0] === "object" ? rules[0] : {};
+    const next = Object.assign({}, previous, generatedRule || {});
+    if (String(next.action || "").toLowerCase() !== "copy") {
+      delete next.copy;
+      delete next.copy_config;
+      delete next.drama_scope;
+      delete next.candidate_selection;
+      delete next.top_n_per_account;
+    }
+    if (rules.length) rules[0] = next;
+    else rules.push(next);
+    return rules;
   }
   function ruleConditions(rule) {
     return Array.isArray((rule || {}).conditions) ? rule.conditions : [];
@@ -393,18 +447,23 @@
     $("pageRoot").innerHTML = `
       <section class="panel">
         <div class="panel-head">
-          <div><h2>规则组管理</h2><span class="hint">一个前端规则组会按产品拆成底层规则集、账户池和绑定关系，新建后默认 disabled。</span></div>
+          <div><h2>规则组管理</h2><span class="hint">只按账号配置。调控对象、命中动作和运行模式彼此独立；新建规则组默认禁用且处于观察模式。</span></div>
           <div class="row"><button class="btn" id="reloadRuleGroupsBtn" type="button">刷新</button><button class="btn primary" id="newRuleGroupBtn" type="button">新建规则组</button></div>
         </div>
         <div class="panel-body">
-          <div class="rule-toolbar">
-            <div class="field"><label>搜索</label><input id="ruleGroupSearch" placeholder="规则组名称 / ID / 国家组" /></div>
-            <div class="field"><label>产品筛选</label><select id="ruleGroupProductFilter"><option value="">全部三个产品</option>${ALLOWED_PRODUCTS.map(value => `<option value="${value}">${PRODUCT_LABELS[value]}</option>`).join("")}</select></div>
+          <div class="capability-grid">
+            <div class="capability-card"><span>复制总熔断</span><strong id="copyFuseState">正式复制未开放</strong><small>复制落表方案待确认，本期 copy 只允许配置、保存和观察，不得产生 Meta 写入。</small></div>
+            <div class="capability-card muted"><span>第二阶段</span><strong>广告 Ad 级调控尚未开放</strong><small>Ad 配置可以保存；本期没有 Ad-level insights，立即试算和 runner 会返回 phase_not_enabled。</small></div>
+          </div>
+          <div class="rule-toolbar account-only-toolbar">
+            <div class="field"><label>搜索</label><input id="ruleGroupSearch" placeholder="规则组名称 / ID / 账号 / 剧目" /></div>
+            <div class="field"><label>调控对象</label><select id="ruleGroupObjectFilter"><option value="">全部</option><option value="campaign">广告系列 Campaign</option><option value="ad">广告 Ad</option></select></div>
+            <div class="field"><label>运行模式</label><select id="ruleGroupModeFilter"><option value="">全部</option><option value="observe">观察模式</option><option value="live">正式执行</option></select></div>
             <div class="field"><label>状态筛选</label><select id="ruleGroupStatusFilter"><option value="">全部</option><option value="enabled">已启用</option><option value="partial">部分启用</option><option value="disabled">已禁用</option><option value="stopped">已急停</option></select></div>
             <div class="field"><label>&nbsp;</label><button class="btn" id="clearRuleGroupFilterBtn" type="button">清空筛选</button></div>
           </div>
-          <div class="risk">本页启停只修改后台规则状态；启用时会校验当前账户池及所有账号的 Token 权限，不会立即修改广告状态。</div>
-          <div class="table-wrap compact-table"><table><thead><tr><th>规则组</th><th>产品范围</th><th>账号范围</th><th>规则</th><th>策略</th><th>状态</th><th>操作</th></tr></thead><tbody id="ruleGroupRows"></tbody></table></div>
+          <div class="risk">观察模式会按计划真实扫描和计算“原本会关闭/复制”的对象，但不会调用 Meta 写接口。立即试算是一次性预览，与持续观察模式分开。</div>
+          <div class="table-wrap compact-table"><table><thead><tr><th>规则组</th><th>调控对象</th><th>账号范围</th><th>命中动作</th><th>运行与计划</th><th>状态</th><th>操作</th></tr></thead><tbody id="ruleGroupRows"></tbody></table></div>
         </div>
       </section>
       <div class="drawer-overlay hidden" id="ruleGroupDrawer">
@@ -412,47 +471,85 @@
           <div class="drawer-head"><div><h2 id="drawerTitle">新建规则组</h2><span class="hint" id="drawerSubTitle"></span></div><button class="btn" id="closeRuleGroupDrawerBtn" type="button">关闭</button></div>
           <div class="drawer-body" id="ruleGroupDrawerBody"></div>
           <div class="drawer-foot">
-            <span class="hint" id="drawerSaveHint">保存后底层按产品拆分，且默认 disabled。</span>
-            <div class="row"><button class="btn primary" id="saveRuleGroupBtn" type="button">保存规则组</button></div>
+            <span class="hint" id="drawerSaveHint">新建或编辑后均保持 disabled；需要先试算，再显式启用。</span>
+            <div class="row"><button class="btn" id="previewRuleGroupBtn" type="button">立即试算</button><button class="btn primary" id="saveRuleGroupBtn" type="button">保存规则组</button></div>
           </div>
         </div>
       </div>`;
     $("newRuleGroupBtn").onclick = () => openRuleGroupDrawer(null, false);
     $("reloadRuleGroupsBtn").onclick = refreshRuleGroups;
     $("ruleGroupSearch").oninput = renderRuleGroupList;
-    $("ruleGroupProductFilter").onchange = renderRuleGroupList;
+    $("ruleGroupObjectFilter").onchange = renderRuleGroupList;
+    $("ruleGroupModeFilter").onchange = renderRuleGroupList;
     $("ruleGroupStatusFilter").onchange = renderRuleGroupList;
     $("clearRuleGroupFilterBtn").onclick = () => {
       $("ruleGroupSearch").value = "";
-      $("ruleGroupProductFilter").value = "";
+      $("ruleGroupObjectFilter").value = "";
+      $("ruleGroupModeFilter").value = "";
       $("ruleGroupStatusFilter").value = "";
       renderRuleGroupList();
     };
     $("closeRuleGroupDrawerBtn").onclick = closeRuleGroupDrawer;
     $("saveRuleGroupBtn").onclick = saveFrontendRuleGroup;
-    await refreshRuleGroups();
+    $("previewRuleGroupBtn").onclick = previewDraftRuleGroup;
+    await Promise.all([refreshRuleGroups(), refreshCopyCapability()]);
   }
+
+  async function refreshCopyCapability() {
+    const node = $("copyFuseState");
+    if (!node) return;
+    try {
+      const status = await api("/api/ad-control/runner/status");
+      const capability = status.copy_campaign_enabled ?? status.copy_enabled ?? status.capabilities?.copy_campaign;
+      const persistenceReady = status.copy_persistence_ready === true;
+      node.textContent = capability === true && persistenceReady ? "已开启" : "正式复制未开放";
+      node.className = capability === true && persistenceReady ? "text-ok" : "text-warn";
+    } catch (error) {
+      node.textContent = "正式复制未开放";
+      node.className = "text-warn";
+    }
+  }
+
   async function refreshRuleGroups() {
-    const results = await Promise.all(ALLOWED_PRODUCTS.map(value => api(`/api/ad-control/bindings?product=${encodeURIComponent(value)}`).catch(() => ({ items: [] }))));
-    state.bindings = results.flatMap(result => result.items || []);
+    let data;
+    try {
+      data = await api("/api/ad-control/rule-groups");
+    } catch (error) {
+      data = await api("/api/ad-control/bindings");
+    }
+    state.bindings = data.items || [];
     state.frontendRuleGroups = aggregateRuleGroups(state.bindings);
     renderRuleGroupList();
   }
+
   function filteredRuleGroups() {
     const query = ($("ruleGroupSearch")?.value || "").trim().toLowerCase();
-    const productFilterValue = $("ruleGroupProductFilter")?.value || "";
+    const objectLevel = $("ruleGroupObjectFilter")?.value || "";
+    const runMode = $("ruleGroupModeFilter")?.value || "";
     const status = $("ruleGroupStatusFilter")?.value || "";
     return state.frontendRuleGroups.filter(group => {
-      const haystack = `${group.id} ${group.name} ${(group.country_groups || []).join(" ")} ${(group.products || []).join(" ")}`.toLowerCase();
+      const haystack = `${group.id} ${group.name} ${(group.account_ids || []).join(" ")} ${(group.country_groups || []).join(" ")} ${JSON.stringify((group.bindings[0] || {}).strategy || {})}`.toLowerCase();
       if (query && !haystack.includes(query)) return false;
-      if (productFilterValue && !(group.products || []).includes(productFilterValue)) return false;
+      if (objectLevel && group.object_level !== objectLevel) return false;
+      if (runMode && group.run_mode !== runMode) return false;
       if (status === "enabled" && !group.enabled) return false;
-      if (status === "disabled" && (group.enabled || group.partial_enabled || group.emergency_stopped)) return false;
       if (status === "partial" && !group.partial_enabled) return false;
+      if (status === "disabled" && (group.enabled || group.partial_enabled || group.emergency_stopped)) return false;
       if (status === "stopped" && !group.emergency_stopped) return false;
       return true;
     });
   }
+
+  function actionSummary(group) {
+    const rules = firstRuleBinding(group)?.rules || [];
+    const pauseCount = rules.filter(rule => String(rule.action || "").toLowerCase() === "pause").length;
+    const copyCount = rules.filter(rule => String(rule.action || "").toLowerCase() === "copy").length;
+    const parts = [];
+    if (pauseCount) parts.push(`关闭 ${pauseCount}`);
+    if (copyCount) parts.push(`复制 ${copyCount}`);
+    return parts.join(" / ") || "--";
+  }
+
   function renderRuleGroupList() {
     const rows = $("ruleGroupRows");
     if (!rows) return;
@@ -463,21 +560,23 @@
         : (group.enabled
           ? `<span class="badge ok">已启用</span>`
           : (group.partial_enabled
-            ? `<span class="badge warn">部分启用 ${group.enabled_count}/${group.bindings.length}</span>`
+            ? `<span class="badge warn">部分启用 ${group.enabled_count}/${group.target_ids.length || group.bindings.length}</span>`
             : `<span class="badge warn">已禁用</span>`));
-      const toggleLabel = group.enabled ? "禁用" : (group.partial_enabled ? "继续启用" : "启用");
+      const toggleToEnabled = !group.enabled && !group.partial_enabled;
+      const modeClass = group.run_mode === "live" ? "danger" : "ok";
       return `<tr>
         <td><strong>${escapeHtml(group.name)}</strong><div class="mono">${escapeHtml(group.id)}</div><div class="hint">${escapeHtml(group.description || "无说明")}</div></td>
-        <td><div class="chip-row">${productBadgeList(group.products)}</div></td>
-        <td><strong>${group.account_count || "--"}</strong><div class="hint">${group.bindings.length} 个底层绑定</div></td>
-        <td>${group.rule_count || "--"} 条<div class="hint">${escapeHtml(countryGroupLabel(group.country_groups || []))}</div></td>
-        <td>${escapeHtml(strategySummary(group))}</td>
+        <td><strong>${escapeHtml(OBJECT_LEVEL_LABELS[group.object_level] || group.object_level)}</strong>${group.object_level === "ad" ? `<div class="hint text-warn">仅保存配置，暂无候选数据</div>` : ""}</td>
+        <td><strong>${group.account_count || "--"} 个</strong><div class="hint">${escapeHtml((group.account_ids || []).slice(0, 3).map(id => `act_${id}`).join("、"))}${group.account_count > 3 ? "…" : ""}</div></td>
+        <td><strong>${escapeHtml(actionSummary(group))}</strong><div class="hint">${group.rule_count || 0} 条规则</div></td>
+        <td><span class="badge ${modeClass}">${escapeHtml(RUN_MODE_LABELS[group.run_mode] || group.run_mode)}</span><div class="hint">${escapeHtml(strategySummary((group.bindings[0] || {}).strategy || group))}</div></td>
         <td>${stateLabel}</td>
         <td><div class="row action-row">
           <button class="btn" data-rule-action="edit" data-group="${escapeHtml(group.id)}" type="button">编辑</button>
-          <button class="btn" data-rule-action="copy" data-group="${escapeHtml(group.id)}" type="button">复制</button>
+          <button class="btn" data-rule-action="duplicate" data-group="${escapeHtml(group.id)}" type="button">复制规则组</button>
+          <button class="btn" data-rule-action="preview" data-group="${escapeHtml(group.id)}" type="button">立即试算</button>
           <button class="btn" data-rule-action="logs" data-group="${escapeHtml(group.id)}" type="button">日志</button>
-          <button class="btn" data-rule-action="toggle" data-enabled="${group.enabled ? "0" : "1"}" data-group="${escapeHtml(group.id)}" type="button">${toggleLabel}</button>
+          <button class="btn" data-rule-action="toggle" data-enabled="${toggleToEnabled ? "1" : "0"}" data-group="${escapeHtml(group.id)}" type="button">${group.partial_enabled ? "禁用全部" : (group.enabled ? "禁用" : "启用")}</button>
           <button class="btn danger" data-rule-action="stop" data-group="${escapeHtml(group.id)}" type="button">急停</button>
           <button class="btn danger" data-rule-action="delete" data-group="${escapeHtml(group.id)}" type="button">删除</button>
         </div></td>
@@ -485,86 +584,143 @@
     }).join("") : `<tr><td colspan="7"><div class="empty">暂无规则组。点击“新建规则组”开始配置。</div></td></tr>`;
     rows.onclick = handleRuleGroupAction;
   }
+
   function findFrontendRuleGroup(id) {
     return state.frontendRuleGroups.find(group => group.id === id);
   }
+
   async function handleRuleGroupAction(event) {
     const button = event.target.closest("[data-rule-action]");
     if (!button) return;
     const group = findFrontendRuleGroup(button.dataset.group);
     if (!group) return toast("规则组不存在，请刷新", "error");
-    const action = button.dataset.ruleAction;
     try {
-      if (action === "edit") return await openRuleGroupDrawer(group, false);
-      if (action === "copy") return await openRuleGroupDrawer(group, true);
-      if (action === "logs") return openRuleGroupLogs(group);
-      if (action === "toggle") return await setFrontendRuleGroupEnabled(group, button.dataset.enabled === "1");
-      if (action === "stop") return await emergencyStopFrontendRuleGroup(group);
-      if (action === "delete") return await deleteFrontendRuleGroup(group);
+      if (button.dataset.ruleAction === "edit") return await openRuleGroupDrawer(group, false);
+      if (button.dataset.ruleAction === "duplicate") return await openRuleGroupDrawer(group, true);
+      if (button.dataset.ruleAction === "preview") return await previewFrontendRuleGroup(group);
+      if (button.dataset.ruleAction === "logs") return openRuleGroupLogs(group);
+      if (button.dataset.ruleAction === "toggle") return await setFrontendRuleGroupEnabled(group, button.dataset.enabled === "1");
+      if (button.dataset.ruleAction === "stop") return await emergencyStopFrontendRuleGroup(group);
+      if (button.dataset.ruleAction === "delete") return await deleteFrontendRuleGroup(group);
     } catch (error) {
       toast(error.message || String(error), "error");
     }
   }
+
   function firstRuleBinding(group) {
-    return (group.bindings || []).find(item => Array.isArray(item.rules) && item.rules.length) || (group.bindings || [])[0] || null;
+    return (group?.bindings || []).find(item => Array.isArray(item.rules) && item.rules.length) || (group?.bindings || [])[0] || null;
   }
-  function buildRuleGroupDraft(group, copy) {
-    const first = group ? firstRuleBinding(group) : null;
-    const strategy = (first && first.strategy) || {};
-    const id = group && !copy ? group.id : newFrontendRuleGroupId();
-    const products = group ? (group.products || []).filter(value => ALLOWED_PRODUCTS.includes(value)) : ["dramawave"];
-    const rules = first && Array.isArray(first.rules) && first.rules.length ? first.rules : defaultCrossRegionRules();
-    const defaultWindow = (first && first.rule_set_default_window) || { type: "since_start", hours: 24 };
-    const selectedAccountKeys = new Set();
-    if (group && !copy) {
-      group.bindings.forEach(binding => {
-        const ids = Array.isArray((binding.strategy || {}).selected_account_ids) ? binding.strategy.selected_account_ids : (binding.account_ids || []);
-        ids.forEach(accountId => selectedAccountKeys.add(`${binding.product}:${String(accountId || "").replace(/^act_/, "")}`));
-      });
-    } else if (group && copy) {
-      group.bindings.forEach(binding => {
-        const ids = Array.isArray((binding.strategy || {}).selected_account_ids) ? binding.strategy.selected_account_ids : (binding.account_ids || []);
-        ids.forEach(accountId => selectedAccountKeys.add(`${binding.product}:${String(accountId || "").replace(/^act_/, "")}`));
-      });
-    }
+
+  function normalizedRules(rules) {
+    return (Array.isArray(rules) && rules.length ? rules : defaultRules).map(rule => {
+      const item = Object.assign({}, rule);
+      const action = String(item.action || "").trim().toLowerCase();
+      item.action = action === "observe" ? "pause" : action;
+      item.enabled = item.enabled !== false;
+      return item;
+    });
+  }
+
+  function copyDraftConfig(raw) {
+    raw = raw && typeof raw === "object" ? raw : {};
+    const budget = raw.budget && typeof raw.budget === "object" ? raw.budget : raw;
+    let mode = String(budget.type || budget.mode || raw.budget_strategy || "actual_cpi_multiplier").toLowerCase();
+    if (mode === "cpi_multiple") mode = "actual_cpi_multiplier";
+    if (mode === "x_cpi") mode = (budget.fixed_cpi || budget.target_cpi) ? "fixed_target_cpi_multiplier" : "actual_cpi_multiplier";
+    if (mode === "source_ratio") mode = "source_budget_ratio";
+    const roas = raw.roas_bid && typeof raw.roas_bid === "object"
+      ? raw.roas_bid
+      : (raw.roas && typeof raw.roas === "object" ? raw.roas : raw);
     return {
-      mode: group && !copy ? "edit" : "create",
-      id,
-      originalId: group ? group.id : "",
-      existingBindings: group && !copy ? group.bindings.slice() : [],
-      name: group ? `${group.name}${copy ? " 副本" : ""}` : "+8非亚洲语种10点关停",
-      description: group ? (group.description || strategy.description || "") : "账户时区为 +8，排除 JA/KO/ZHTW/TH/ID/VI/MS/TL 后，其他语种到关闭时间控停；不限制国家组，当天禁止重启。",
-      products: products.length ? products : ["dramawave"],
-      country_groups: group ? (Array.isArray(group.country_groups) ? group.country_groups : []) : [],
-      close_time: group ? (group.close_time || strategy.close_time || "10:00") : "10:00",
-      execute_timezone: group ? (group.execute_timezone || strategy.execute_timezone || "account") : "account",
-      block_same_day_reopen: group ? group.block_same_day_reopen : true,
-      allow_next_day_reopen: group ? group.allow_next_day_reopen : true,
-      default_window: defaultWindow,
-      rules,
-      selectedAccountKeys,
+      budget_strategy: mode,
+      cpi_multiplier: Number(budget.multiplier || budget.x || raw.cpi_multiplier || raw.cpi_multiple || 10),
+      fixed_target_cpi: Number(budget.target_cpi || budget.fixed_cpi || raw.fixed_target_cpi || 1),
+      source_budget_ratio: Number(budget.ratio || budget.source_ratio || raw.source_budget_ratio || 0.5),
+      roas_direction: roas.direction || raw.roas_direction || "decrease",
+      roas_percent: Number(roas.percent ?? raw.roas_percent ?? 10),
     };
   }
-  async function openRuleGroupDrawer(group, copy) {
-    state.ruleGroupDraft = buildRuleGroupDraft(group, copy);
+
+  function buildRuleGroupDraft(group, duplicate) {
+    const first = group ? firstRuleBinding(group) : null;
+    const strategy = (first && first.strategy) || {};
+    const rules = normalizedRules(first?.rules);
+    const legacyObserve = Array.isArray(first?.rules) && first.rules.some(rule => String(rule.action || "").toLowerCase() === "observe");
+    const unknownActions = Array.from(new Set(rules.map(rule => rule.action).filter(action => !["pause", "copy"].includes(action))));
+    const accountIds = group?.account_ids?.length ? group.account_ids : (strategy.selected_account_ids || first?.account_ids || []);
+    const schedule = strategy.schedule || {};
+    const limits = strategy.limits || {};
+    const dramaScope = strategy.drama_scope || {};
+    const firstCopyRule = rules.find(rule => rule.action === "copy") || {};
+    const copyConfig = copyDraftConfig(firstCopyRule.copy || firstCopyRule.copy_config || strategy.copy || strategy.copy_config || {});
+    const ruleDramaScope = firstCopyRule.drama_scope || dramaScope;
+    const groupCopy = strategy.copy && typeof strategy.copy === "object" ? strategy.copy : {};
+    const candidateSelection = firstCopyRule.candidate_selection || strategy.candidate_selection || groupCopy.candidate_selection || {};
+    const candidateSelectionMode = candidateSelection.mode || "top_n_per_account";
+    const id = group && !duplicate ? group.id : newFrontendRuleGroupId();
+    const sourceTargetIds = group ? ruleGroupTargetIds(group) : [];
+    return {
+      mode: group && !duplicate ? "edit" : "create",
+      id,
+      sourceGroup: group || null,
+      migrate_from_group_ids: group && !duplicate ? sourceTargetIds.filter(targetId => targetId !== id) : [],
+      legacy_observe_migrated: legacyObserve,
+      unknown_actions: unknownActions,
+      name: group ? `${group.name}${duplicate ? " 副本" : ""}` : "账号自动调控规则",
+      description: group ? (group.description || strategy.description || "") : "按账号扫描广告系列，命中后关闭或复制；默认观察且禁用。",
+      object_level: first?.object_level || strategy.object_level || strategy.target_level || group?.object_level || "campaign",
+      run_mode: !group || duplicate ? "observe" : (legacyObserve ? "observe" : (first?.run_mode || strategy.run_mode || strategy.execution_mode || group?.run_mode || "observe")),
+      rules,
+      default_window: first?.rule_set_default_window || { type: "since_start", hours: 24 },
+      selectedAccountKeys: new Set((accountIds || []).map(normalizeAccountId).filter(Boolean)),
+      schedule: {
+        type: schedule.type || "fixed_time",
+        time: schedule.time || strategy.close_time || "10:00",
+        interval_minutes: Number(schedule.interval_minutes || 60),
+        allowed_start: schedule.allowed_start || "00:00",
+        allowed_end: schedule.allowed_end || schedule.execute_before || "23:00",
+        timezone: "account",
+      },
+      limits: {
+        rule_daily_limit: Number(limits.rule_daily_limit || 1),
+        user_daily_limit: Number(limits.user_daily_limit || 10),
+        source_cooldown_days: Number(limits.source_cooldown_days || 1),
+      },
+      drama_scope: {
+        type: ruleDramaScope.type || "all",
+        recent_days: Number(ruleDramaScope.recent_days || 7),
+        drama_ids: Array.isArray(ruleDramaScope.drama_ids) ? ruleDramaScope.drama_ids : [],
+      },
+      candidate_selection_mode: candidateSelectionMode,
+      top_n_per_account: Number(firstCopyRule.top_n_per_account || candidateSelection.top_n || strategy.top_n_per_account || groupCopy.top_n_per_account || 1),
+      copy_config: copyConfig,
+    };
+  }
+
+  async function openRuleGroupDrawer(group, duplicate) {
+    state.ruleGroupDraft = buildRuleGroupDraft(group, duplicate);
     $("ruleGroupDrawer").classList.remove("hidden");
     renderRuleGroupDrawer();
-    await ensureRuleGroupAccountsForProducts(state.ruleGroupDraft.products);
+    await ensureRuleGroupAccounts();
     renderRuleGroupAccounts();
     updateRuleGroupSummary();
   }
+
   function closeRuleGroupDrawer() {
     state.ruleGroupDraft = null;
     $("ruleGroupDrawer").classList.add("hidden");
   }
+
   function renderRuleGroupDrawer() {
     const draft = state.ruleGroupDraft;
     const builderRule = primaryRuleFromDraft(draft);
-    const builderRuleName = builderRule.name || "+8非亚洲语种10点关停";
-    const builderAction = builderRule.action || "pause";
-    const builderTimezones = conditionList(builderRule, ["account_time_zone", "time_zone", "timezone", "account_timezone"], ["in"], defaultTimezones);
-    const builderLanguages = conditionList(builderRule, "language", ["not_in"], defaultExcludedLanguages);
-    const builderCountries = (draft.country_groups || []).length ? draft.country_groups : conditionList(builderRule, ["country", "country_group", "geo", "region"], ["in"], []);
+    const copyRules = (draft.rules || []).filter(rule => String(rule?.action || "").toLowerCase() === "copy");
+    const editableCopyRule = copyRules[0] || {};
+    const builderRuleName = builderRule.name || "账号自动调控规则";
+    const builderAction = ["pause", "copy"].includes(builderRule.action) ? builderRule.action : "";
+    const builderTimezones = conditionList(builderRule, ["account_time_zone", "time_zone", "timezone", "account_timezone"], ["in"], []);
+    const builderLanguages = conditionList(builderRule, "language", ["not_in"], []);
+    const builderCountries = conditionList(builderRule, ["country", "country_group", "geo", "region"], ["in"], []);
     const builderAgeHours = conditionNumber(builderRule, "age_hours", ["gte"], "");
     const builderSpendMin = conditionNumber(builderRule, "spend", ["gte", "gt"], "");
     const builderInstallMax = conditionNumber(builderRule, "install", ["lte", "lt"], "");
@@ -572,47 +728,66 @@
     const builderPurchaseMax = conditionNumber(builderRule, "purchase", ["lte", "lt"], "");
     const builderCpaMin = conditionNumber(builderRule, "purchase_cpa", ["gte", "gt"], "");
     $("drawerTitle").textContent = draft.mode === "edit" ? "编辑规则组" : "新建规则组";
-    $("drawerSubTitle").textContent = draft.mode === "edit" ? `正在编辑 ${draft.id}` : "保存后会生成一个前端规则组，并按产品拆成底层配置";
+    $("drawerSubTitle").textContent = draft.mode === "edit" ? `正在编辑 ${draft.id}` : "账号是唯一业务范围；保存后默认 disabled + 观察模式";
     $("ruleGroupDrawerBody").innerHTML = `
       <section class="drawer-section">
-        <div class="section-title"><span>1</span><h3>基础信息</h3></div>
+        <div class="section-title"><span>1</span><h3>基础信息与运行模式</h3></div>
         <div class="grid two"><div class="field"><label>规则组名称</label><input id="drawerGroupName" value="${escapeHtml(draft.name)}" /></div><div class="field"><label>规则组 ID</label><input id="drawerGroupId" value="${escapeHtml(draft.id)}" readonly /></div></div>
         <div class="field"><label>规则组说明</label><textarea id="drawerGroupDescription" class="short-textarea">${escapeHtml(draft.description)}</textarea></div>
+        <div class="grid two"><div class="field"><label>调控对象</label><select id="drawerObjectLevel"><option value="campaign">广告系列 Campaign</option><option value="ad">广告 Ad（第二阶段仅保存）</option></select><span class="hint">调控对象决定筛选和关闭/复制发生在哪一层，不是规则动作。</span></div><div class="field"><label>运行模式</label><div class="mode-options"><label class="mode-option"><input type="radio" name="drawerRunMode" value="observe" ${draft.run_mode !== "live" ? "checked" : ""} /><span><strong>观察模式</strong><small>Campaign 会扫描；Ad 本期只保存配置</small></span></label><label class="mode-option danger-option"><input type="radio" name="drawerRunMode" value="live" ${draft.run_mode === "live" ? "checked" : ""} ${draft.mode === "create" ? "disabled" : ""} /><span><strong>正式执行</strong><small>${draft.mode === "create" ? "新组先保存为观察，再单独切换" : "启用时需要再次确认"}</small></span></label></div></div></div>
+        ${draft.legacy_observe_migrated ? `<div class="risk compact-risk">检测到旧规则动作 observe：本次保存会显式迁移为运行模式 observe + 命中动作 pause；迁移后仍保持禁用。</div>` : ""}
+        ${draft.unknown_actions.length ? `<div class="risk compact-risk">检测到未知 action：${escapeHtml(draft.unknown_actions.join("、") || "空值")}。不会自动改成关闭，请在规则 JSON 中明确改为 pause 或 copy 后再保存。</div>` : ""}
+        <div class="risk compact-risk hidden" id="adPhaseNotice">Ad 属于第二阶段：本期没有 Ad-level insights，仅允许保存配置；立即试算和 runner 会返回 phase_not_enabled，不会展示 Ad 候选。</div>
+        <div class="risk compact-risk">新规则组即使选择“正式执行”，保存后仍为禁用；正式启用需要二次确认。复制熔断未开启时，后端必须拒绝复制写入。</div>
       </section>
       <section class="drawer-section">
-        <div class="section-title"><span>2</span><h3>产品与账号</h3></div>
-        <div class="field"><label>产品（固定枚举，多选）</label><div class="check-list compact fixed-products" id="drawerProducts">${ALLOWED_PRODUCTS.map(value => `<label class="check-option"><input type="checkbox" value="${value}" ${draft.products.includes(value) ? "checked" : ""} /><span>${PRODUCT_LABELS[value]}</span></label>`).join("")}</div></div>
-        <div class="grid"><div class="field"><label>账号搜索</label><input id="drawerAccountSearch" placeholder="搜索账号名 / ID；输入 act_... 可直接加入" /></div><div class="field"><label>时区筛选</label><input id="drawerTimezoneFilter" value="+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerPlus8Only" type="checkbox" checked /> 只看 +8</label></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="drawerAddSearchAccount" type="button">加入搜索账号</button><button class="btn" id="drawerSelectVisibleAccounts" type="button">全选可见</button><button class="btn" id="drawerClearVisibleAccounts" type="button">清空可见</button></div></div></div>
-        <div class="manual-account-box"><div class="field"><label>手动添加账号 ID</label><textarea id="drawerManualAccounts" class="short-textarea" placeholder="支持粘贴 act_1146901540906487、1026707669580137；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">手动账号会加入当前选中的每个产品；适合账号未出现在接口列表时使用。</span></div><button class="btn" id="drawerAddManualAccounts" type="button">加入选中产品</button></div>
+        <div class="section-title"><span>2</span><h3>账号范围</h3></div>
+        <div class="grid"><div class="field"><label>账号搜索</label><input id="drawerAccountSearch" placeholder="搜索账号名 / ID；输入 act_... 可直接加入" /></div><div class="field"><label>时区筛选</label><input id="drawerTimezoneFilter" placeholder="+8 / UTC+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerPlus8Only" type="checkbox" /> 只看 +8</label></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="drawerAddSearchAccount" type="button">加入搜索账号</button><button class="btn" id="drawerSelectVisibleAccounts" type="button">全选可见</button><button class="btn" id="drawerClearVisibleAccounts" type="button">清空可见</button></div></div></div>
+        <div class="manual-account-box"><div class="field"><label>手动添加账号 ID</label><textarea id="drawerManualAccounts" class="short-textarea" placeholder="支持 act_1146901540906487 或裸 ID；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">未知账号也可以保存请求，由后端校验账号、渠道和 Token；前端不会推测产品归属。</span></div><button class="btn" id="drawerAddManualAccounts" type="button">加入账号</button></div>
         <div class="selected-account-box"><div class="bulk-head"><strong>已选账号</strong><span class="hint" id="drawerSelectedAccountHint">0 个</span></div><div class="selected-account-list" id="drawerSelectedAccounts"></div></div>
-        <div class="account-product-list" id="drawerAccounts"></div>
+        <div class="account-product-block"><div class="bulk-head"><strong>可选账号</strong><span class="hint" id="drawerAvailableAccountHint">加载中...</span></div><div class="account-list" id="drawerAccounts"></div></div>
       </section>
       <section class="drawer-section">
-        <div class="section-title"><span>3</span><h3>规则阈值</h3></div>
-        <div class="grid"><div class="field"><label>规则名称</label><input id="builderRuleName" value="${escapeHtml(builderRuleName)}" /></div><div class="field"><label>动作</label><select id="builderAction"><option value="pause">pause 关闭</option><option value="observe">observe 观望</option></select></div><div class="field"><label>账户时区 in</label><input id="builderTimezones" value="${escapeHtml(builderTimezones.join(","))}" /></div><div class="field"><label>国家组 in（留空=不限）</label><input id="builderCountries" value="${escapeHtml(builderCountries.join(","))}" placeholder="留空表示所有国家组" /></div></div>
-        <div class="grid"><div class="field"><label>排除语种 not in</label><input id="builderLanguages" value="${escapeHtml(builderLanguages.join(","))}" /></div><div class="field"><label>已运行小时 >=</label><input id="builderAgeHours" type="number" min="0" placeholder="可选" value="${escapeHtml(builderAgeHours)}" /></div><div class="field"><label>消耗 >=</label><input id="builderSpendMin" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderSpendMin)}" /></div><div class="field"><label>安装 <=</label><input id="builderInstallMax" type="number" min="0" placeholder="可选" value="${escapeHtml(builderInstallMax)}" /></div></div>
-        <div class="grid"><div class="field"><label>ROAS% <=</label><input id="builderRoasMax" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderRoasMax)}" /></div><div class="field"><label>购物 <=</label><input id="builderPurchaseMax" type="number" min="0" placeholder="可选" value="${escapeHtml(builderPurchaseMax)}" /></div><div class="field"><label>Purchase CPA >=</label><input id="builderCpaMin" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderCpaMin)}" /></div><div class="field"><label>默认指标窗口</label><select id="drawerWindowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div></div>
+        <div class="section-title"><span>3</span><h3>规则条件与命中动作</h3></div>
+        <div class="grid"><div class="field"><label>规则名称</label><input id="builderRuleName" value="${escapeHtml(builderRuleName)}" /></div><div class="field"><label>命中动作</label><select id="builderAction"><option value="">请选择动作</option><option value="pause">关闭</option><option value="copy">复制</option></select><span class="hint">观察不再是动作，由规则组顶部运行模式控制。</span></div><div class="field"><label>账户时区 in</label><input id="builderTimezones" value="${escapeHtml(builderTimezones.join(","))}" placeholder="留空=不限" /></div><div class="field"><label>国家组 in</label><input id="builderCountries" value="${escapeHtml(builderCountries.join(","))}" placeholder="留空=不限" /></div></div>
+        <div class="grid"><div class="field"><label>排除语种 not in</label><input id="builderLanguages" value="${escapeHtml(builderLanguages.join(","))}" placeholder="留空=不限" /></div><div class="field"><label>已运行小时 >=</label><input id="builderAgeHours" type="number" min="0" placeholder="可选" value="${escapeHtml(builderAgeHours)}" /></div><div class="field"><label>消耗 >=</label><input id="builderSpendMin" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderSpendMin)}" /></div><div class="field"><label>安装 <=</label><input id="builderInstallMax" type="number" min="0" placeholder="可选" value="${escapeHtml(builderInstallMax)}" /></div></div>
+        <div class="grid"><div class="field"><label>ROAS% <=</label><input id="builderRoasMax" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderRoasMax)}" /></div><div class="field"><label>购物 <=</label><input id="builderPurchaseMax" type="number" min="0" placeholder="可选" value="${escapeHtml(builderPurchaseMax)}" /></div><div class="field"><label>Purchase CPA >=</label><input id="builderCpaMin" type="number" min="0" step="0.01" placeholder="可选" value="${escapeHtml(builderCpaMin)}" /></div><div class="field"><label>指标窗口</label><select id="drawerWindowType"><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div></div>
         <div class="grid single"><div class="field"><label>N 小时</label><input id="drawerWindowHours" type="number" min="1" max="720" value="${escapeHtml(draft.default_window.hours || 24)}" /></div></div>
-        <div class="row"><button class="btn" id="buildDrawerRuleBtn" type="button">按上方阈值生成规则 JSON</button><span class="hint">可视化阈值会覆盖下面 JSON；需要多条规则时可直接编辑 JSON。</span></div>
-        <div class="field"><label>规则 JSON</label><textarea id="drawerRulesJson">${escapeHtml(JSON.stringify(draft.rules, null, 2))}</textarea><span class="hint">字段支持 age_hours、account_time_zone、language、country、spend、install、purchase、revenue、roas_pct、purchase_cpa、effective_status；国家组留空不会生成 country 条件。</span></div>
+        <div class="row"><button class="btn" id="buildDrawerRuleBtn" type="button">按上方配置生成规则 JSON</button><span class="hint">同一对象命中多条规则时关闭优先；同动作再按 priority，只执行一条，其余记录为 shadowed。</span></div>
+        <div class="field"><label>高级规则 JSON</label><textarea id="drawerRulesJson">${escapeHtml(JSON.stringify(draft.rules, null, 2))}</textarea><span class="hint">action 仅允许 pause 或 copy；运行模式不写入单条规则。生成按钮只更新第一条主规则，不会删除后续规则。</span></div>
       </section>
       <section class="drawer-section">
-        <div class="section-title"><span>4</span><h3>绑定策略</h3></div>
-        <div class="grid"><div class="field"><label>关闭时间</label><input id="drawerCloseTime" type="time" value="${escapeHtml(draft.close_time)}" /></div><div class="field"><label>执行时区</label><input id="drawerExecuteTimezone" value="${escapeHtml(draft.execute_timezone)}" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerBlockSameDay" type="checkbox" ${draft.block_same_day_reopen ? "checked" : ""} /> 当天禁止重启</label></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerAllowNextDay" type="checkbox" ${draft.allow_next_day_reopen ? "checked" : ""} /> 隔天允许程序重启</label></div></div>
+        <div class="section-title"><span>4</span><h3>执行时间与额度</h3></div>
+        <div class="grid"><div class="field"><label>执行计划</label><select id="drawerScheduleType"><option value="fixed_time">每天固定时间</option><option value="interval">间隔执行</option></select></div><div class="field" id="drawerFixedTimeField"><label>每天执行时间</label><input id="drawerExecuteTime" type="time" value="${escapeHtml(draft.schedule.time)}" /></div><div class="field hidden" id="drawerIntervalField"><label>间隔分钟</label><input id="drawerIntervalMinutes" type="number" min="5" step="5" value="${escapeHtml(draft.schedule.interval_minutes)}" /></div><div class="field"><label>允许开始时间</label><input id="drawerAllowedStart" type="time" value="${escapeHtml(draft.schedule.allowed_start)}" /></div><div class="field"><label>允许截止时间</label><input id="drawerExecuteBefore" type="time" value="${escapeHtml(draft.schedule.allowed_end)}" /></div><div class="field"><label>执行时区</label><input value="目标广告账号时区" disabled /></div></div>
+        <div class="grid three hidden" id="drawerCopyLimits"><div class="field"><label>单规则每天最多复制</label><input id="drawerRuleDailyLimit" type="number" min="1" max="100" value="${escapeHtml(draft.limits.rule_daily_limit)}" /></div><div class="field"><label>当前用户每天最多复制</label><input id="drawerUserDailyLimit" type="number" min="1" max="500" value="${escapeHtml(draft.limits.user_daily_limit)}" /></div><div class="field"><label>同一来源冷却天数</label><input id="drawerSourceCooldown" type="number" min="0" max="30" value="${escapeHtml(draft.limits.source_cooldown_days)}" /></div></div>
+      </section>
+      <section class="drawer-section hidden" id="copyScopePanel">
+        <div class="section-title"><span>5</span><h3>剧目与排名范围</h3></div>
+        <div class="grid"><div class="field"><label>剧目范围</label><select id="drawerDramaScope"><option value="all">全部剧</option><option value="recent_days">最近 X 天的剧</option><option value="specified">指定剧</option></select></div><div class="field" id="drawerDramaDaysField"><label>最近天数</label><input id="drawerDramaDays" type="number" min="1" max="365" value="${escapeHtml(draft.drama_scope.recent_days)}" /></div><div class="field hidden" id="drawerDramaIdsField"><label>指定剧 ID / series_code</label><textarea id="drawerDramaIds" class="short-textarea" placeholder="多个值用换行、逗号或空格分隔">${escapeHtml(draft.drama_scope.drama_ids.join("\n"))}</textarea></div><div class="field"><label>候选选择</label><select id="drawerCandidateSelectionMode"><option value="all">全部符合条件</option><option value="top_n_per_account">每账号 Top N</option></select></div><div class="field" id="drawerTopNField"><label>每账号 Top N</label><input id="drawerTopN" type="number" min="1" max="50" value="${escapeHtml(draft.top_n_per_account)}" /><span class="hint">仅 Top N 模式生效，默认按 ROAS、消耗、对象 ID 稳定排序。</span></div></div>
+      </section>
+      <section class="drawer-section hidden" id="copyConfigPanel">
+        <div class="section-title"><span>6</span><h3>复制后预算与 ROAS</h3></div>
+        <div class="risk compact-risk">复制落表方案待确认。本期可配置、保存和观察 copy；正式复制后端会 fail-closed，不会调用 Meta copy。</div>
+        ${copyRules.length > 1 ? `<div class="risk compact-risk">当前有 ${copyRules.length} 条 copy 规则。本区表单只编辑第一条 copy 规则“${escapeHtml(editableCopyRule.name || editableCopyRule.rule_id || "未命名")}”；其他 copy 规则的候选、剧目、预算和 ROAS 会原样保留，请在“高级规则 JSON”中单独维护。</div>` : ""}
+        <div class="grid"><div class="field"><label>预算策略</label><select id="drawerBudgetStrategy"><option value="actual_cpi_multiplier">实际 CPI × 倍数</option><option value="fixed_target_cpi_multiplier">固定目标 CPI × 倍数</option><option value="source_budget_ratio">来源预算 × 比例</option></select></div><div class="field" id="drawerCpiMultipleField"><label>CPI 倍数 X</label><input id="drawerCpiMultiple" type="number" min="0.01" step="0.01" value="${escapeHtml(draft.copy_config.cpi_multiplier)}" /></div><div class="field hidden" id="drawerFixedTargetCpiField"><label>固定目标 CPI</label><input id="drawerFixedTargetCpi" type="number" min="0.01" step="0.01" value="${escapeHtml(draft.copy_config.fixed_target_cpi)}" /></div><div class="field hidden" id="drawerBudgetRatioField"><label>来源预算比例</label><input id="drawerBudgetRatio" type="number" min="0.01" max="10" step="0.01" value="${escapeHtml(draft.copy_config.source_budget_ratio)}" /></div><div class="field"><label>ROAS 出价调整</label><select id="drawerRoasDirection"><option value="increase">提高</option><option value="decrease">降低</option></select></div><div class="field"><label>调整百分比</label><input id="drawerRoasPercent" type="number" min="0" max="100" step="0.1" value="${escapeHtml(draft.copy_config.roas_percent)}" /></div></div>
       </section>
       <section class="drawer-section">
-        <div class="section-title"><span>5</span><h3>保存配置</h3></div>
+        <div class="section-title"><span>7</span><h3>保存前摘要</h3></div>
         <div class="summary-box" id="drawerSummary"></div>
       </section>`;
+    $("drawerObjectLevel").value = draft.object_level;
     $("drawerWindowType").value = draft.default_window.type || "since_start";
     $("builderAction").value = builderAction;
-    $("drawerProducts").onchange = async () => {
-      captureDraftSelectedAccounts();
-      const products = selectedProducts("drawerProducts");
-      await ensureRuleGroupAccountsForProducts(products);
-      renderRuleGroupAccounts();
-      updateRuleGroupSummary();
-    };
+    $("drawerScheduleType").value = draft.schedule.type;
+    $("drawerDramaScope").value = draft.drama_scope.type;
+    $("drawerCandidateSelectionMode").value = draft.candidate_selection_mode;
+    $("drawerBudgetStrategy").value = draft.copy_config.budget_strategy;
+    $("drawerRoasDirection").value = draft.copy_config.roas_direction;
+    bindRuleGroupDrawerEvents();
+    updateRuleGroupConditionalFields();
+  }
+
+  function bindRuleGroupDrawerEvents() {
     $("drawerAccountSearch").oninput = renderRuleGroupAccounts;
     $("drawerAccountSearch").onkeydown = event => {
       if (event.key === "Enter") {
@@ -641,31 +816,104 @@
       renderRuleGroupAccounts();
     };
     $("buildDrawerRuleBtn").onclick = () => {
-      $("drawerRulesJson").value = JSON.stringify(buildDrawerRulesFromThresholds(), null, 2);
-      $("builderCountries").value = splitValues($("builderCountries").value).join(",");
+      try {
+        const existingRules = JSON.parse($("drawerRulesJson").value || "[]");
+        if (!Array.isArray(existingRules)) throw new Error("规则 JSON 必须是数组");
+        const generatedRule = buildDrawerRulesFromThresholds()[0];
+        $("drawerRulesJson").value = JSON.stringify(mergeGeneratedPrimaryRule(existingRules, generatedRule), null, 2);
+        updateRuleGroupConditionalFields();
+        updateRuleGroupSummary();
+        toast("已更新第一条主规则，其他规则保持不变");
+      } catch (error) {
+        toast(error.message || String(error), "error");
+      }
+    };
+    $("builderAction").onchange = () => {
+      updateRuleGroupConditionalFields();
       updateRuleGroupSummary();
-      toast("已生成规则 JSON");
+    };
+    $("drawerObjectLevel").onchange = () => {
+      updateRuleGroupConditionalFields();
+      updateRuleGroupSummary();
+    };
+    $("drawerScheduleType").onchange = () => { updateRuleGroupConditionalFields(); updateRuleGroupSummary(); };
+    $("drawerDramaScope").onchange = () => { updateRuleGroupConditionalFields(); updateRuleGroupSummary(); };
+    $("drawerCandidateSelectionMode").onchange = () => { updateRuleGroupConditionalFields(); updateRuleGroupSummary(); };
+    $("drawerBudgetStrategy").onchange = () => { updateRuleGroupConditionalFields(); updateRuleGroupSummary(); };
+    $("drawerRulesJson").onblur = () => { updateRuleGroupConditionalFields(); updateRuleGroupSummary(); };
+    document.querySelectorAll('input[name="drawerRunMode"]').forEach(input => {
+      input.onchange = () => {
+        if (input.value === "live" && input.checked && !confirm("正式执行会在启用后允许 pause 写动作；copy 落表未确认时仍会被后端阻断。当前只是在配置模式，保存后保持禁用，确认选择？")) {
+          document.querySelector('input[name="drawerRunMode"][value="observe"]').checked = true;
+        } else if (input.value === "live" && input.checked) {
+          state.ruleGroupDraft.liveModeConfirmed = true;
+        }
+        updateRuleGroupSummary();
+      };
+    });
+    $("ruleGroupDrawerBody").oninput = event => {
+      if (event.target.id !== "drawerRulesJson") updateRuleGroupSummary();
     };
   }
-  function accountValue(item) {
-    return normalizeAccountId((item && (item.account_id || item.ad_account_id)) || "");
-  }
-  function normalizeAccountId(value) {
-    return String(value || "").trim().replace(/^act_/i, "");
-  }
-  async function ensureRuleGroupAccountsForProducts(products) {
-    await Promise.all((products || []).filter(value => ALLOWED_PRODUCTS.includes(value)).map(async value => {
-      if (state.ruleGroupAccounts[value]) return;
-      try {
-        const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`);
-        state.ruleGroupAccounts[value] = data.items || [];
-        if (data.warning) console.warn(`ad-control accounts ${value}: ${data.warning}`);
-      } catch (error) {
-        state.ruleGroupAccounts[value] = [];
-        console.warn(`ad-control accounts ${value} failed`, error);
+
+  function updateRuleGroupConditionalFields() {
+    const action = $("builderAction")?.value || "pause";
+    let hasCopy = action === "copy";
+    try {
+      hasCopy = hasCopy || JSON.parse($("drawerRulesJson")?.value || "[]").some(rule => String(rule?.action || "").toLowerCase() === "copy");
+    } catch (error) {}
+    $("copyConfigPanel")?.classList.toggle("hidden", !hasCopy);
+    $("copyScopePanel")?.classList.toggle("hidden", !hasCopy);
+    $("drawerCopyLimits")?.classList.toggle("hidden", !hasCopy);
+    const scheduleType = $("drawerScheduleType")?.value || "fixed_time";
+    $("drawerFixedTimeField")?.classList.toggle("hidden", scheduleType !== "fixed_time");
+    $("drawerIntervalField")?.classList.toggle("hidden", scheduleType !== "interval");
+    const dramaType = $("drawerDramaScope")?.value || "all";
+    $("drawerDramaDaysField")?.classList.toggle("hidden", dramaType !== "recent_days");
+    $("drawerDramaIdsField")?.classList.toggle("hidden", dramaType !== "specified");
+    const candidateSelectionMode = $("drawerCandidateSelectionMode")?.value || "top_n_per_account";
+    $("drawerTopNField")?.classList.toggle("hidden", candidateSelectionMode !== "top_n_per_account");
+    const budgetType = $("drawerBudgetStrategy")?.value || "actual_cpi_multiplier";
+    $("drawerCpiMultipleField")?.classList.toggle("hidden", budgetType === "source_budget_ratio");
+    $("drawerFixedTargetCpiField")?.classList.toggle("hidden", budgetType !== "fixed_target_cpi_multiplier");
+    $("drawerBudgetRatioField")?.classList.toggle("hidden", budgetType !== "source_budget_ratio");
+    const isAd = $("drawerObjectLevel")?.value === "ad";
+    $("adPhaseNotice")?.classList.toggle("hidden", !isAd);
+    const liveInput = document.querySelector('input[name="drawerRunMode"][value="live"]');
+    if (liveInput) {
+      liveInput.disabled = state.ruleGroupDraft?.mode === "create" || isAd;
+      if (isAd && liveInput.checked) {
+        document.querySelector('input[name="drawerRunMode"][value="observe"]').checked = true;
       }
-    }));
+    }
   }
+
+  function mergeRuleGroupAccounts(groups) {
+    const map = new Map();
+    (groups || []).flat().forEach(item => {
+      const id = accountValue(item);
+      if (!id) return;
+      const existing = map.get(id) || {};
+      map.set(id, Object.assign({}, existing, item, {
+        account_id: id,
+        account_name: item.account_name || item.name || existing.account_name || existing.name || id,
+        time_zone: item.time_zone || existing.time_zone || "",
+      }));
+    });
+    return Array.from(map.values()).sort((a, b) => String(a.account_name || a.account_id).localeCompare(String(b.account_name || b.account_id), "zh-CN"));
+  }
+
+  async function ensureRuleGroupAccounts() {
+    try {
+      const data = await api("/api/ad-control/accounts");
+      state.ruleGroupAccounts = mergeRuleGroupAccounts([data.items || []]);
+      return;
+    } catch (error) {
+      const legacy = await Promise.all(ALLOWED_PRODUCTS.map(value => api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`).catch(() => ({ items: [] }))));
+      state.ruleGroupAccounts = mergeRuleGroupAccounts(legacy.map(item => item.items || []));
+    }
+  }
+
   function captureDraftSelectedAccounts() {
     const draft = state.ruleGroupDraft;
     if (!draft) return;
@@ -674,110 +922,156 @@
       else draft.selectedAccountKeys.delete(input.dataset.accountKey);
     });
   }
+
+  function accountValue(item) {
+    return normalizeAccountId((item && (item.account_id || item.ad_account_id)) || "");
+  }
+
+  function normalizeAccountId(value) {
+    return String(value || "").trim().replace(/^act_/i, "");
+  }
+
   function ruleAccountVisible(account) {
     const query = ($("drawerAccountSearch")?.value || "").trim().toLowerCase();
     const tzFilter = ($("drawerTimezoneFilter")?.value || "").trim();
     const plus8Only = $("drawerPlus8Only")?.checked;
     const haystack = `${accountValue(account)} ${account.account_name || account.name || ""}`.toLowerCase();
-    if (query && !haystack.includes(query)) return false;
+    if (query && !haystack.includes(normalizeAccountId(query).toLowerCase()) && !haystack.includes(query)) return false;
     if (plus8Only && !isPlus8Timezone(account.time_zone)) return false;
     if (tzFilter && !Array.from(timezoneValues(account.time_zone)).some(item => timezoneValues(tzFilter).has(item))) return false;
     return true;
   }
-  function searchAccountQuery() {
-    return ($("drawerAccountSearch")?.value || "").trim().toLowerCase();
-  }
-  function accountMatchesSearch(productValue, accountId, display) {
-    const query = searchAccountQuery();
-    if (!query) return true;
-    const normalizedQuery = normalizeAccountId(query);
-    const haystack = `${productValue} ${accountId} ${display.title || ""} ${display.meta || ""}`.toLowerCase();
-    return haystack.includes(query) || (!!normalizedQuery && String(accountId || "").toLowerCase().includes(normalizedQuery.toLowerCase()));
-  }
+
   function renderRuleGroupAccounts() {
     const root = $("drawerAccounts");
     const draft = state.ruleGroupDraft;
     if (!root || !draft) return;
     captureDraftSelectedAccounts();
-    const products = selectedProducts("drawerProducts");
-    root.innerHTML = products.length ? products.map(productValue => {
-      const accounts = state.ruleGroupAccounts[productValue] || [];
-      const visible = accounts.filter(ruleAccountVisible);
-      return `<div class="account-product-block"><div class="bulk-head"><strong>${escapeHtml(productValue)}</strong><span class="hint">${visible.length}/${accounts.length} 个账号</span></div><div class="account-list">${visible.length ? visible.map(account => {
-        const id = accountValue(account);
-        const key = `${productValue}:${id}`;
-        const checked = draft.selectedAccountKeys.has(key) ? "checked" : "";
-        return `<label class="account-option"><input type="checkbox" data-rule-account="1" data-account-key="${escapeHtml(key)}" value="${escapeHtml(id)}" ${checked} /><div class="account-title">${escapeHtml(account.account_name || account.name || id)}</div><div class="account-meta">${escapeHtml(id)} / ${escapeHtml(account.time_zone || "--")}</div></label>`;
-      }).join("") : `<div class="empty">无匹配账号</div>`}</div></div>`;
-    }).join("") : `<div class="empty">请先选择产品</div>`;
+    const visible = state.ruleGroupAccounts.filter(ruleAccountVisible);
+    $("drawerAvailableAccountHint").textContent = `${visible.length}/${state.ruleGroupAccounts.length} 个账号`;
+    root.innerHTML = visible.length ? visible.map(account => {
+      const id = accountValue(account);
+      const checked = draft.selectedAccountKeys.has(id) ? "checked" : "";
+      return `<label class="account-option"><input type="checkbox" data-rule-account="1" data-account-key="${escapeHtml(id)}" value="${escapeHtml(id)}" ${checked} /><div><div class="account-title">${escapeHtml(account.account_name || account.name || id)}</div><div class="account-meta">act_${escapeHtml(id)} / ${escapeHtml(account.time_zone || "--")}</div></div></label>`;
+    }).join("") : `<div class="empty">无匹配账号；可以手动添加 account_id。</div>`;
     renderSelectedRuleAccounts();
     updateRuleGroupSummary();
   }
+
   function addManualRuleAccounts() {
-    const draft = state.ruleGroupDraft;
-    if (!draft) return;
-    const products = selectedProducts("drawerProducts");
-    if (!products.length) return toast("请先选择产品", "error");
-    const ids = Array.from(new Set(splitValues($("drawerManualAccounts").value).map(normalizeAccountId).filter(Boolean)));
-    if (!ids.length) return toast("请粘贴账号 ID", "error");
-    addRuleAccountIds(products, ids);
+    const ids = Array.from(new Set(splitValues($("drawerManualAccounts").value).map(normalizeAccountId).filter(value => /^\d+$/.test(value))));
+    if (!ids.length) return toast("请粘贴有效的数字账号 ID", "error");
+    ids.forEach(id => state.ruleGroupDraft.selectedAccountKeys.add(id));
     $("drawerManualAccounts").value = "";
     renderRuleGroupAccounts();
-    toast(`已加入 ${ids.length} 个账号到 ${products.length} 个产品`);
+    toast(`已加入 ${ids.length} 个账号`);
   }
+
   function addSearchRuleAccounts() {
-    const products = selectedProducts("drawerProducts");
-    if (!products.length) return toast("请先选择产品", "error");
-    const ids = Array.from(new Set(splitValues($("drawerAccountSearch").value).map(normalizeAccountId).filter(Boolean)));
-    if (!ids.length) return toast("请在账号搜索框输入 account_id", "error");
-    addRuleAccountIds(products, ids);
+    const ids = Array.from(new Set(splitValues($("drawerAccountSearch").value).map(normalizeAccountId).filter(value => /^\d+$/.test(value))));
+    if (!ids.length) return toast("请在搜索框输入有效的 account_id", "error");
+    ids.forEach(id => state.ruleGroupDraft.selectedAccountKeys.add(id));
     renderRuleGroupAccounts();
     toast(`已从搜索框加入 ${ids.length} 个账号`);
   }
-  function addRuleAccountIds(products, ids) {
-    const draft = state.ruleGroupDraft;
-    if (!draft) return;
-    (products || []).forEach(productValue => {
-      (ids || []).forEach(id => draft.selectedAccountKeys.add(`${productValue}:${id}`));
-    });
-  }
-  function selectedAccountDisplay(productValue, accountId) {
-    const account = (state.ruleGroupAccounts[productValue] || []).find(item => accountValue(item) === accountId);
-    if (!account) return { title: accountId, meta: "手动添加" };
+
+  function selectedAccountDisplay(accountId) {
+    const account = state.ruleGroupAccounts.find(item => accountValue(item) === accountId);
+    if (!account) return { title: accountId, meta: "手动添加，等待后端校验" };
     return {
       title: account.account_name || account.name || accountId,
-      meta: `${accountId} / ${account.time_zone || "--"}`,
+      meta: `act_${accountId} / ${account.time_zone || "--"}`,
     };
   }
+
   function renderSelectedRuleAccounts() {
     const root = $("drawerSelectedAccounts");
     const hint = $("drawerSelectedAccountHint");
     const draft = state.ruleGroupDraft;
     if (!root || !draft) return;
-    const products = selectedProducts("drawerProducts");
-    const allSelected = Array.from(draft.selectedAccountKeys).filter(key => products.some(productValue => key.startsWith(`${productValue}:`))).sort();
-    const selected = allSelected.filter(key => {
-      const [productValue, accountId] = key.split(":", 2);
-      return accountMatchesSearch(productValue, accountId, selectedAccountDisplay(productValue, accountId));
-    });
-    if (hint) hint.textContent = searchAccountQuery() ? `${selected.length}/${allSelected.length} 个` : `${allSelected.length} 个`;
-    root.innerHTML = selected.length ? selected.map(key => {
-      const [productValue, accountId] = key.split(":", 2);
-      const display = selectedAccountDisplay(productValue, accountId);
-      return `<div class="selected-account-item"><div><strong>${escapeHtml(productValue)}</strong><span>${escapeHtml(display.title)}</span><small>${escapeHtml(display.meta)}</small></div><button class="btn" data-remove-account-key="${escapeHtml(key)}" type="button">移除</button></div>`;
-    }).join("") : (allSelected.length ? `<div class="empty compact-empty">已选账号中无匹配。可以清空搜索，或点“加入搜索账号”把当前输入加入选中产品。</div>` : `<div class="empty compact-empty">暂无已选账号，可从下方列表勾选或手动粘贴 account_id。</div>`);
+    const selected = Array.from(draft.selectedAccountKeys).sort();
+    if (hint) hint.textContent = `${selected.length} 个`;
+    root.innerHTML = selected.length ? selected.map(accountId => {
+      const display = selectedAccountDisplay(accountId);
+      return `<div class="selected-account-item"><div><span>${escapeHtml(display.title)}</span><small>${escapeHtml(display.meta)}</small></div><button class="btn" data-remove-account-key="${escapeHtml(accountId)}" type="button">移除</button></div>`;
+    }).join("") : `<div class="empty compact-empty">暂无已选账号，可从下方列表勾选或手动粘贴 account_id。</div>`;
   }
+
   function setVisibleRuleAccounts(checked) {
-    const draft = state.ruleGroupDraft;
-    if (!draft) return;
     document.querySelectorAll("[data-rule-account]").forEach(input => {
       input.checked = checked;
-      if (checked) draft.selectedAccountKeys.add(input.dataset.accountKey);
-      else draft.selectedAccountKeys.delete(input.dataset.accountKey);
+      if (checked) state.ruleGroupDraft.selectedAccountKeys.add(input.dataset.accountKey);
+      else state.ruleGroupDraft.selectedAccountKeys.delete(input.dataset.accountKey);
     });
     renderSelectedRuleAccounts();
     updateRuleGroupSummary();
   }
+
+  function copyConfigFromDrawer() {
+    return {
+      budget_strategy: $("drawerBudgetStrategy")?.value || "actual_cpi_multiplier",
+      cpi_multiplier: Number($("drawerCpiMultiple")?.value || 0),
+      fixed_target_cpi: Number($("drawerFixedTargetCpi")?.value || 0),
+      source_budget_ratio: Number($("drawerBudgetRatio")?.value || 0),
+      roas_direction: $("drawerRoasDirection")?.value || "decrease",
+      roas_percent: Number($("drawerRoasPercent")?.value || 0),
+    };
+  }
+
+  function copyPayloadFromDrawer() {
+    const values = copyConfigFromDrawer();
+    const budget = {
+      type: values.budget_strategy,
+      mode: values.budget_strategy,
+      multiplier: values.cpi_multiplier,
+    };
+    if (values.budget_strategy === "fixed_target_cpi_multiplier") {
+      budget.target_cpi = values.fixed_target_cpi;
+      budget.fixed_cpi = values.fixed_target_cpi;
+    }
+    if (values.budget_strategy === "source_budget_ratio") {
+      budget.ratio = values.source_budget_ratio;
+      budget.source_ratio = values.source_budget_ratio;
+    }
+    const roas = {
+      direction: values.roas_direction,
+      percent: values.roas_percent,
+    };
+    return {
+      budget,
+      roas_bid: Object.assign({}, roas),
+      roas: Object.assign({}, roas),
+      final_status: "ACTIVE",
+    };
+  }
+
+  function mergeRuleCopy(defaultCopy, overrideCopy) {
+    const override = overrideCopy && typeof overrideCopy === "object" ? overrideCopy : {};
+    return Object.assign({}, defaultCopy, override, {
+      budget: Object.assign({}, defaultCopy.budget || {}, override.budget || {}),
+      roas_bid: Object.assign({}, defaultCopy.roas_bid || {}, override.roas_bid || {}),
+      roas: Object.assign({}, defaultCopy.roas || {}, override.roas || {}),
+    });
+  }
+
+  function dramaScopeFromDrawer() {
+    const days = Number($("drawerDramaDays")?.value || 0);
+    return {
+      type: $("drawerDramaScope")?.value || "all",
+      days,
+      recent_days: days,
+      drama_ids: splitValues($("drawerDramaIds")?.value),
+    };
+  }
+
+  function candidateSelectionFromDrawer() {
+    const mode = $("drawerCandidateSelectionMode")?.value || "top_n_per_account";
+    return {
+      mode,
+      top_n: mode === "top_n_per_account" ? Number($("drawerTopN")?.value || 0) : 0,
+    };
+  }
+
   function buildDrawerRulesFromThresholds() {
     const conditions = [];
     const timezones = splitValues($("builderTimezones").value);
@@ -795,40 +1089,164 @@
     addNumber("builderRoasMax", "roas_pct", "lte");
     addNumber("builderPurchaseMax", "purchase", "lte");
     addNumber("builderCpaMin", "purchase_cpa", "gte");
-    return [{ name: $("builderRuleName").value.trim() || "+8非亚洲语种10点关停", action: $("builderAction").value || "pause", enabled: true, window: { type: $("drawerWindowType").value || "since_start" }, conditions }];
+    const action = $("builderAction").value;
+    if (!["pause", "copy"].includes(action)) throw new Error("请明确选择关闭或复制动作");
+    const rule = {
+      name: $("builderRuleName").value.trim() || "账号自动调控规则",
+      action,
+      enabled: true,
+      level: $("drawerObjectLevel").value || "campaign",
+      window: { type: $("drawerWindowType").value || "since_start" },
+      conditions,
+    };
+    if (action === "copy") {
+      const candidateSelection = candidateSelectionFromDrawer();
+      rule.copy = copyPayloadFromDrawer();
+      rule.drama_scope = dramaScopeFromDrawer();
+      rule.candidate_selection = candidateSelection;
+      rule.top_n_per_account = candidateSelection.mode === "top_n_per_account" ? candidateSelection.top_n : 0;
+    }
+    return [rule];
   }
+
   function readRuleGroupDraftFromDrawer() {
     const draft = state.ruleGroupDraft;
     captureDraftSelectedAccounts();
     let rules;
-    try { rules = JSON.parse($("drawerRulesJson").value || "[]"); } catch (error) { throw new Error("规则 JSON 格式错误"); }
+    try {
+      rules = JSON.parse($("drawerRulesJson").value || "[]");
+    } catch (error) {
+      throw new Error("规则 JSON 格式错误");
+    }
     if (!Array.isArray(rules) || !rules.length) throw new Error("至少需要一条规则");
-    const products = selectedProducts("drawerProducts");
-    if (!products.length) throw new Error("请选择至少一个产品");
-    const accountsByProduct = {};
-    products.forEach(productValue => {
-      accountsByProduct[productValue] = Array.from(draft.selectedAccountKeys)
-        .filter(key => key.startsWith(`${productValue}:`))
-        .map(key => key.slice(productValue.length + 1))
-        .filter(Boolean);
+    const objectLevel = $("drawerObjectLevel").value || "campaign";
+    const sharedCopyConfig = copyConfigFromDrawer();
+    const sharedCopyPayload = copyPayloadFromDrawer();
+    const sharedDramaScope = dramaScopeFromDrawer();
+    const sharedCandidateSelection = candidateSelectionFromDrawer();
+    const sharedTopN = sharedCandidateSelection.mode === "top_n_per_account" ? sharedCandidateSelection.top_n : 0;
+    const editableCopyRuleIndex = firstCopyRuleIndex(rules);
+    rules = rules.map((rule, index) => {
+      if (!rule || typeof rule !== "object") throw new Error(`第 ${index + 1} 条规则格式错误`);
+      const action = String(rule.action || "").toLowerCase();
+      if (!["pause", "copy"].includes(action)) throw new Error(`第 ${index + 1} 条规则 action 仅允许 pause 或 copy`);
+      const item = Object.assign({}, rule, { action, level: objectLevel, enabled: rule.enabled !== false });
+      if (action === "copy" && index === editableCopyRuleIndex) {
+        const ruleCandidateSelection = rule.candidate_selection && typeof rule.candidate_selection === "object" ? rule.candidate_selection : {};
+        const itemCandidateSelection = Object.assign({}, ruleCandidateSelection, sharedCandidateSelection);
+        itemCandidateSelection.mode = sharedCandidateSelection.mode;
+        const itemTopN = itemCandidateSelection.mode === "top_n_per_account" ? sharedTopN : 0;
+        itemCandidateSelection.top_n = itemTopN;
+        item.copy = mergeRuleCopy(rule.copy || rule.copy_config, sharedCopyPayload);
+        item.drama_scope = Object.assign({}, rule.drama_scope || {}, sharedDramaScope);
+        item.candidate_selection = itemCandidateSelection;
+        item.top_n_per_account = itemTopN;
+        delete item.copy_config;
+      } else if (action !== "copy") {
+        delete item.copy;
+        delete item.copy_config;
+        delete item.drama_scope;
+        delete item.candidate_selection;
+        delete item.top_n_per_account;
+      }
+      return item;
     });
-    const missingProduct = products.find(productValue => !accountsByProduct[productValue].length);
-    if (missingProduct) throw new Error(`${missingProduct} 还没有选择账号`);
-    return {
-      id: draft.id,
+    const accountIds = Array.from(draft.selectedAccountKeys).map(normalizeAccountId).filter(Boolean);
+    if (!accountIds.length) throw new Error("请至少选择一个账号");
+    const runMode = document.querySelector('input[name="drawerRunMode"]:checked')?.value || "observe";
+    if (objectLevel === "ad" && runMode === "live") throw new Error("广告 Ad 第二阶段目前只允许保存配置，不能切换正式执行");
+    const scheduleType = $("drawerScheduleType").value || "fixed_time";
+    const schedule = {
+      type: scheduleType,
+      time: $("drawerExecuteTime").value || "",
+      interval_minutes: Number($("drawerIntervalMinutes").value || 0),
+      allowed_start: $("drawerAllowedStart").value || "",
+      allowed_end: $("drawerExecuteBefore").value || "",
+      timezone: "account",
+    };
+    if (scheduleType === "fixed_time" && !schedule.time) throw new Error("请选择每天执行时间");
+    if (scheduleType === "interval" && schedule.interval_minutes < 5) throw new Error("间隔执行最小为 5 分钟");
+    if (!schedule.allowed_start || !schedule.allowed_end) throw new Error("请设置允许执行的开始和截止时间");
+    const limits = {
+      rule_daily_limit: Number($("drawerRuleDailyLimit").value || 0),
+      user_daily_limit: Number($("drawerUserDailyLimit").value || 0),
+      source_cooldown_days: Number($("drawerSourceCooldown").value || 0),
+    };
+    const hasCopy = rules.some(rule => rule.action === "copy");
+    if (hasCopy) {
+      if (limits.rule_daily_limit < 1 || limits.user_daily_limit < 1) throw new Error("每日复制额度必须大于 0");
+      if (sharedDramaScope.type === "recent_days" && sharedDramaScope.recent_days < 1) throw new Error("最近剧目天数必须大于 0");
+      if (sharedDramaScope.type === "specified" && !sharedDramaScope.drama_ids.length) throw new Error("请填写指定剧 ID 或 series_code");
+      rules.forEach((rule, index) => {
+        if (rule.action !== "copy") return;
+        const selection = rule.candidate_selection;
+        if (selection != null && (typeof selection !== "object" || Array.isArray(selection))) {
+          throw new Error(`第 ${index + 1} 条复制规则的 candidate_selection 必须是对象`);
+        }
+        const selectionMode = String(selection?.mode || "").toLowerCase();
+        if (selectionMode && !["all", "top_n_per_account", "top_n", "topn", "top"].includes(selectionMode)) {
+          throw new Error(`第 ${index + 1} 条复制规则的候选选择仅允许 all 或 top_n_per_account`);
+        }
+        const explicitTopN = rule.top_n_per_account ?? selection?.top_n_per_account ?? selection?.top_n;
+        if (["top_n_per_account", "top_n", "topn", "top"].includes(selectionMode) && (!Number.isFinite(Number(explicitTopN)) || Number(explicitTopN) < 1)) {
+          throw new Error(`第 ${index + 1} 条复制规则的每账号 Top N 必须大于 0`);
+        }
+      });
+      if (sharedCopyConfig.budget_strategy === "actual_cpi_multiplier" && sharedCopyConfig.cpi_multiplier <= 0) throw new Error("实际 CPI 倍数必须大于 0");
+      if (sharedCopyConfig.budget_strategy === "fixed_target_cpi_multiplier" && (sharedCopyConfig.fixed_target_cpi <= 0 || sharedCopyConfig.cpi_multiplier <= 0)) throw new Error("固定目标 CPI 和倍数必须大于 0");
+      if (sharedCopyConfig.budget_strategy === "source_budget_ratio" && sharedCopyConfig.source_budget_ratio <= 0) throw new Error("来源预算比例必须大于 0");
+      if (sharedCopyConfig.roas_percent < 0 || sharedCopyConfig.roas_percent > 100) throw new Error("ROAS 调整百分比必须在 0 到 100 之间");
+    }
+    const strategyCopy = hasCopy ? Object.assign({}, sharedCopyPayload, {
+      allowed_after: schedule.allowed_start,
+      allowed_before: schedule.allowed_end,
+      schedule,
+      interval_minutes: schedule.interval_minutes,
+      candidate_selection: sharedCandidateSelection,
+      top_n_per_account: sharedTopN,
+      daily_rule_limit: limits.rule_daily_limit,
+      daily_user_limit: limits.user_daily_limit,
+      source_cooldown_days: limits.source_cooldown_days,
+      drama_scope: sharedDramaScope,
+    }) : {};
+    const payload = {
+      group_id: draft.id,
       name: $("drawerGroupName").value.trim(),
-      description: $("drawerGroupDescription").value.trim(),
-      products,
-      accountsByProduct,
-      country_groups: splitValues($("builderCountries").value),
+      account_ids: accountIds,
+      object_level: objectLevel,
+      run_mode: runMode,
       rules,
       default_window: { type: $("drawerWindowType").value || "since_start", hours: Number($("drawerWindowHours").value || 24) },
-      close_time: $("drawerCloseTime").value || "",
-      execute_timezone: $("drawerExecuteTimezone").value || "account",
-      block_same_day_reopen: $("drawerBlockSameDay").checked,
-      allow_next_day_reopen: $("drawerAllowNextDay").checked,
+      enabled: false,
+      strategy: {
+        frontend_rule_group_id: draft.id,
+        frontend_rule_group_name: $("drawerGroupName").value.trim(),
+        description: $("drawerGroupDescription").value.trim(),
+        selected_account_ids: accountIds,
+        account_count: accountIds.length,
+        object_level: objectLevel,
+        run_mode: runMode,
+        schedule,
+        limits: hasCopy ? limits : {},
+        drama_scope: hasCopy ? sharedDramaScope : {},
+        candidate_selection: hasCopy ? sharedCandidateSelection : {},
+        top_n_per_account: hasCopy ? sharedTopN : 0,
+        copy: strategyCopy,
+        execute_timezone: "account",
+      },
     };
+    if (draft.mode === "edit") {
+      payload.migrate_from_group_ids = Array.from(new Set((draft.migrate_from_group_ids || [])
+        .map(value => String(value || "").trim()).filter(value => value && value !== payload.group_id)));
+    }
+    if (runMode === "live" && draft.run_mode !== "live") {
+      if (!draft.liveModeConfirmed) throw new Error("切换正式执行需要完成二次确认");
+      payload.confirm = "ENABLE_LIVE_MODE";
+      payload.live_mode_confirm = "ENABLE_LIVE_MODE";
+    }
+    return payload;
   }
+
   function updateRuleGroupSummary() {
     const box = $("drawerSummary");
     if (!box || !state.ruleGroupDraft) return;
@@ -839,118 +1257,133 @@
       box.innerHTML = `<div class="hint">${escapeHtml(error.message)}</div>`;
       return;
     }
-    const accountTotal = Object.values(summary.accountsByProduct).reduce((total, ids) => total + ids.length, 0);
-    box.innerHTML = `<div class="summary-grid"><div><span>产品</span><strong>${summary.products.map(value => PRODUCT_LABELS[value]).join(" / ")}</strong></div><div><span>账号</span><strong>${accountTotal} 个</strong></div><div><span>规则</span><strong>${summary.rules.length} 条</strong></div><div><span>策略</span><strong>${escapeHtml(strategySummary(summary))}</strong></div></div>
-      <div class="hint">保存后写入 ad_control_rule_set、ad_control_account_group、ad_control_rule_group；所有底层 binding 默认 disabled。</div>`;
+    const actions = summary.rules.map(rule => rule.action === "copy" ? "复制" : "关闭");
+    const hasCopy = summary.rules.some(rule => rule.action === "copy");
+    const candidateSelection = summary.strategy.candidate_selection || {};
+    const candidateSelectionLabel = !hasCopy
+      ? "不适用"
+      : (candidateSelection.mode === "all" ? "全部符合条件" : `每账号 Top ${candidateSelection.top_n}`);
+    box.innerHTML = `<div class="summary-grid"><div><span>调控对象</span><strong>${escapeHtml(OBJECT_LEVEL_LABELS[summary.object_level])}</strong></div><div><span>账号</span><strong>${summary.account_ids.length} 个</strong></div><div><span>命中动作</span><strong>${escapeHtml(Array.from(new Set(actions)).join(" / "))}</strong></div><div><span>运行模式</span><strong>${escapeHtml(RUN_MODE_LABELS[summary.run_mode])}</strong></div><div><span>候选选择</span><strong>${escapeHtml(candidateSelectionLabel)}</strong></div></div>
+      <div class="hint">保存请求仅包含账号、对象层级、运行模式、规则和策略；不提交产品或 owner。保存后默认 disabled。</div>`;
   }
+
   async function saveFrontendRuleGroup() {
-    let draft;
-    try { draft = readRuleGroupDraftFromDrawer(); } catch (error) { toast(error.message, "error"); return; }
-    if (!draft.name) return toast("请填写规则组名称", "error");
+    let payload;
     try {
-      saveCountryGroups(draft.country_groups);
-      const existingByProduct = new Map((state.ruleGroupDraft.existingBindings || []).map(binding => [binding.product, binding]));
-      const removedBindings = (state.ruleGroupDraft.existingBindings || []).filter(binding => !draft.products.includes(binding.product));
-      for (const binding of removedBindings) {
-        await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId(binding))}`, { method: "DELETE" });
-      }
-      const savedBindings = [];
-      for (const productValue of draft.products) {
-        const existing = existingByProduct.get(productValue) || {};
-        const ruleSetId = existing.rule_set_id || ruleGroupRuleSetId(draft.id, productValue);
-        const accountGroupId = existing.account_group_id || ruleGroupAccountGroupId(draft.id, productValue);
-        const currentBindingId = bindingId(existing) || ruleGroupBindingId(draft.id, productValue);
-        const accountIds = draft.accountsByProduct[productValue] || [];
-        await api("/api/ad-control/rule-sets", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rule_set_id: ruleSetId, product: productValue, name: `${draft.name} / ${productValue}`, rules: draft.rules, default_window: draft.default_window }),
-        });
-        await api("/api/ad-control/account-groups", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ group_id: accountGroupId, product: productValue, name: `${draft.name} / ${productValue} / 账号池`, account_ids: accountIds }),
-        });
-        const binding = await api("/api/ad-control/bindings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            group_id: currentBindingId,
-            product: productValue,
-            name: `${draft.name} / ${productValue}`,
-            account_group_id: accountGroupId,
-            rule_set_id: ruleSetId,
-            enabled: false,
-            strategy: {
-              frontend_rule_group_id: draft.id,
-              frontend_rule_group_name: draft.name,
-              selected_products: draft.products,
-              selected_account_ids: accountIds,
-              account_count: accountIds.length,
-              country_groups: draft.country_groups,
-              close_time: draft.close_time,
-              execute_timezone: draft.execute_timezone,
-              block_same_day_reopen: draft.block_same_day_reopen,
-              allow_next_day_reopen: draft.allow_next_day_reopen,
-              description: draft.description,
-            },
-          }),
-        });
-        savedBindings.push(binding);
-      }
-      toast(`规则组已保存：${savedBindings.length} 个产品绑定，默认禁用`);
+      payload = readRuleGroupDraftFromDrawer();
+    } catch (error) {
+      toast(error.message, "error");
+      return;
+    }
+    if (!payload.name) return toast("请填写规则组名称", "error");
+    try {
+      await api("/api/ad-control/rule-groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      toast("规则组已保存，当前保持禁用");
       closeRuleGroupDrawer();
       await refreshRuleGroups();
     } catch (error) {
       toast(error.message || String(error), "error");
     }
   }
+
+  function ruleGroupTargetIds(group) {
+    const ids = Array.isArray(group?.target_ids) && group.target_ids.length
+      ? group.target_ids.map(value => String(value || "").trim()).filter(Boolean)
+      : (group.bindings || []).map(bindingId).filter(Boolean);
+    return ids.length ? Array.from(new Set(ids)) : [group.id];
+  }
+
+  function firstPreviewErrorReason(results) {
+    for (const result of results || []) {
+      for (const error of result?.errors || []) {
+        const reason = typeof error === "string" ? error : (error?.reason || error?.message || error?.code);
+        if (reason) return String(reason);
+      }
+    }
+    return "";
+  }
+
+  async function previewFrontendRuleGroup(group) {
+    const results = await Promise.all(ruleGroupTargetIds(group).map(id => api(`/api/ad-control/rule-groups/${encodeURIComponent(id)}/preview-live`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: true }),
+    })));
+    const targets = results.reduce((sum, item) => sum + Number(item.execution_count ?? item.pause_count ?? item.copy_count ?? 0), 0);
+    const errors = results.reduce((sum, item) => sum + Number(item.error_count || 0), 0);
+    const firstReason = firstPreviewErrorReason(results);
+    toast(`试算完成：拟执行 ${targets} 个，错误 ${errors} 个${firstReason ? `；首个原因 ${firstReason}` : ""}；未调用 Meta 写接口`);
+    await refreshRuleGroups();
+  }
+
+  async function previewDraftRuleGroup() {
+    const draft = state.ruleGroupDraft;
+    if (!draft?.sourceGroup || draft.mode !== "edit") return toast("请先保存规则组，再执行独立试算", "error");
+    await previewFrontendRuleGroup(draft.sourceGroup);
+  }
+
   async function setFrontendRuleGroupEnabled(group, enabled) {
     const label = enabled ? "启用" : "禁用";
-    const enableMessage = group.emergency_stopped
-      ? "当前规则组已急停。启用会校验所有账户的 Token 权限，并解除急停后重新启用，确认继续？"
-      : "启用会校验当前账户池及所有账号的 Token 权限，通过后直接启用规则组，确认继续？";
-    if (enabled && !confirm(enableMessage)) return;
-    const targets = (group.bindings || []).map(binding => ({ binding, id: bindingId(binding) })).filter(item => item.id);
-    const results = await Promise.allSettled(targets.map(item => api(`/api/ad-control/bindings/${encodeURIComponent(item.id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) })));
-    const detailed = results.map((result, index) => ({ result, id: targets[index].id, product: targets[index].binding.product || "" }));
-    const failed = detailed.filter(item => item.result.status === "rejected");
-    const ok = results.length - failed.length;
-    if (failed.length) {
-      if (enabled && ok) {
-        const succeeded = detailed.filter(item => item.result.status === "fulfilled");
-        await Promise.allSettled(succeeded.map(item => api(`/api/ad-control/bindings/${encodeURIComponent(item.id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false }) })));
+    let liveModeConfirmed = false;
+    if (enabled) {
+      if (group.object_level === "ad") {
+        return toast("Ad 第二阶段目前仅允许保存配置，暂不能启用；runner 会返回 phase_not_enabled", "error");
       }
-      console.warn("ad-control toggle failed", failed.map(item => ({ id: item.id, product: item.product, error: item.result.reason && item.result.reason.message ? item.result.reason.message : String(item.result.reason) })));
-    } else {
-      toast(`${label}完成：${ok} 个底层绑定`);
+      const message = group.run_mode === "live"
+        ? (group.has_copy_action
+          ? "当前规则组包含 copy。复制落表尚未确认，正式 copy 会被后端 fail-closed；pause 仍可能正式执行。确认继续第一步？"
+          : "当前规则组是正式执行模式，启用后 pause 会按计划调用 Meta 写接口。确认继续第一步？")
+        : "当前规则组是观察模式，启用后只会扫描和记录拟执行结果。确认继续？";
+      if (!confirm(message)) return;
+      if (group.run_mode === "live" && prompt("二次确认：请输入 ENABLE_LIVE_MODE") !== "ENABLE_LIVE_MODE") {
+        return toast("二次确认未通过，规则组保持禁用", "error");
+      }
+      liveModeConfirmed = group.run_mode === "live";
     }
+    const results = await Promise.allSettled(ruleGroupTargetIds(group).map(id => api(`/api/ad-control/rule-groups/${encodeURIComponent(id)}/enabled`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign(
+        { enabled },
+        enabled && group.run_mode === "live" && liveModeConfirmed ? { live_mode_confirm: "ENABLE_LIVE_MODE" } : {},
+      )),
+    })));
+    const failed = results.filter(item => item.status === "rejected");
     await refreshRuleGroups();
-    if (failed.length) {
-      const reasons = failed.map(item => `${item.product || item.id}：${item.result.reason?.message || String(item.result.reason)}`);
-      throw new Error(`${label}失败；已保持整组禁用。${reasons.join("；")}`);
-    }
+    if (failed.length) throw new Error(`${label}失败：${failed.map(item => item.reason?.message || String(item.reason)).join("；")}`);
+    toast(`${label}完成`);
   }
+
   async function emergencyStopFrontendRuleGroup(group) {
-    if (!confirm("确认急停当前规则组？只停止该规则组的底层绑定，不会主动改广告状态。")) return;
-    for (const binding of group.bindings) {
-      await api("/api/ad-control/emergency-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "rule_group", group_id: bindingId(binding) }) });
+    if (!confirm("确认急停当前规则组？只停止该规则组后续动作，不会主动恢复或删除广告。")) return;
+    for (const id of ruleGroupTargetIds(group)) {
+      await api("/api/ad-control/emergency-stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "rule_group", group_id: id }),
+      });
     }
     toast("当前规则组已急停");
     await refreshRuleGroups();
   }
+
   async function deleteFrontendRuleGroup(group) {
     if (!confirm("确认删除当前规则组？历史执行日志不会删除。")) return;
-    for (const binding of group.bindings) {
-      await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId(binding))}`, { method: "DELETE" });
+    for (const id of ruleGroupTargetIds(group)) {
+      await api(`/api/ad-control/rule-groups/${encodeURIComponent(id)}`, { method: "DELETE" });
     }
     toast("规则组已删除");
     await refreshRuleGroups();
   }
+
   function openRuleGroupLogs(group) {
-    const binding = group.bindings[0];
-    if (!binding) return toast("规则组没有日志绑定", "error");
-    window.location.assign(`/ad-control-logs.html?product=${encodeURIComponent(binding.product || "")}&binding_id=${encodeURIComponent(bindingId(binding))}`);
+    const id = ruleGroupTargetIds(group)[0];
+    if (!id) return toast("规则组没有日志标识", "error");
+    window.location.assign(`/ad-control-logs.html?binding_id=${encodeURIComponent(id)}`);
   }
 
   async function renderPools() {

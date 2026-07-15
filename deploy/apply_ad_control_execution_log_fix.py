@@ -7,8 +7,11 @@ are copied from the same verified Git commit by the deployment procedure.
 """
 
 import argparse
+import hashlib
 import os
 import re
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 
@@ -25,9 +28,29 @@ def replace_once(text, old, new, label):
     return text.replace(old, new, 1), True
 
 
+def replace_optional_once(text, old, new, label):
+    """Apply an older-baseline source block when that surface still exists."""
+
+    if new in text:
+        print("%s: already applied" % label)
+        return text, False
+    count = text.count(old)
+    if count == 0:
+        print("%s: optional target absent" % label)
+        return text, False
+    if count != 1:
+        raise RuntimeError("%s: expected at most one source block, found %s" % (label, count))
+    return text.replace(old, new, 1), True
+
+
+def function_matches(text, name):
+    header = r"^def %s\((?:[^\n]*\):\n|.*?^\s*\):\n)" % re.escape(name)
+    pattern = re.compile(header + r".*?(?=^def |\Z)", re.M | re.S)
+    return list(pattern.finditer(text))
+
+
 def replace_function(text, name, new_source):
-    pattern = re.compile(r"^def %s\([^\n]*\):\n.*?(?=^def |\Z)" % re.escape(name), re.M | re.S)
-    matches = list(pattern.finditer(text))
+    matches = function_matches(text, name)
     if len(matches) != 1:
         raise RuntimeError("function %s: expected one match, found %s" % (name, len(matches)))
     current = matches[0].group(0).rstrip() + "\n\n\n"
@@ -36,6 +59,24 @@ def replace_function(text, name, new_source):
         print("function %s: already applied" % name)
         return text, False
     return text[: matches[0].start()] + desired + text[matches[0].end() :], True
+
+
+def replace_optional_function(text, name, new_source):
+    """Replace a legacy compatibility hook when the target baseline has it.
+
+    The merged application delegates action status formatting to the feature
+    service and therefore no longer defines ``ad_control_action_status``.
+    Older supported baselines still define it and must receive the verified
+    replacement.  Multiple definitions remain a hard failure in both cases.
+    """
+
+    matches = function_matches(text, name)
+    if not matches:
+        print("function %s: optional target absent" % name)
+        return text, False
+    if len(matches) != 1:
+        raise RuntimeError("function %s: expected at most one match, found %s" % (name, len(matches)))
+    return replace_function(text, name, new_source)
 
 
 INTEGRATION_BLOCK = r'''
@@ -191,7 +232,10 @@ def ad_control_action_log_utc_bound(value, end=False):
     return (local_dt - timedelta(hours=AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def ad_control_mysql_action_items(limit, product="", binding_id="", action="", date_from="", date_to=""):
+def ad_control_mysql_action_items(
+    limit, product="", binding_id="", action="", date_from="", date_to="",
+    owned_binding_ids=None, legacy_actor_user_id="", owner_filter=False,
+):
 
     return ad_control_execution_log_service.list_actions(
         ad_control_action_log_config(),
@@ -201,6 +245,9 @@ def ad_control_mysql_action_items(limit, product="", binding_id="", action="", d
             "action": action,
             "date_from": ad_control_action_log_utc_bound(date_from),
             "date_to": ad_control_action_log_utc_bound(date_to, end=True),
+            "owned_binding_ids": list(owned_binding_ids or []),
+            "legacy_actor_user_id": legacy_actor_user_id,
+            "owner_filter": bool(owner_filter),
         },
         limit=limit,
         table=AD_CONTROL_ACTION_LOG_TABLE,
@@ -241,7 +288,10 @@ def ad_control_action_status(item):
 
 
 LIST_ACTIONS_FUNCTION = r'''
-def list_ad_control_actions(limit=50, product="", binding_id="", action="", date_from="", date_to="", include_targets=False):
+def list_ad_control_actions(
+    limit=50, product="", binding_id="", action="", date_from="", date_to="",
+    include_targets=False, owner_user_id=None, internal=False,
+):
     ensure_ad_control_tables()
     limit = ad_control_int(limit, 50, 1, 200)
     product = str(product or "").strip()
@@ -249,6 +299,26 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     action = str(action or "").strip()
     date_from = str(date_from or "").strip()
     date_to = str(date_to or "").strip()
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    owned_group_ids = set()
+    if not internal:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                owned_group_ids = {
+                    str(row[0] or "")
+                    for row in conn.execute(
+                        "SELECT group_id FROM ad_control_rule_group "
+                        "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=?",
+                        (owner_user_id,),
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+        if binding_id and binding_id not in owned_group_ids:
+            raise StructuredApiError("not_found", "rule group not found")
     date_from_utc = ad_control_action_log_utc_bound(date_from)
     date_to_utc = ad_control_action_log_utc_bound(date_to, end=True)
     mysql_items = []
@@ -256,7 +326,10 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     storage_error = ""
     try:
         mysql_items = ad_control_mysql_action_items(
-            limit, product, binding_id, action, date_from, date_to
+            limit, product, binding_id, action, date_from, date_to,
+            owned_binding_ids=owned_group_ids,
+            legacy_actor_user_id=owner_user_id,
+            owner_filter=not internal,
         )
         mysql_available = True
     except Exception as exc:
@@ -277,29 +350,44 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
         where.append("created_at<=?")
         params.append(date_to_utc)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    query_limit = min(1000, max(limit * 5, 200))
     sqlite_items = []
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            rows = conn.execute(
-                """SELECT action_id, preview_id, actor_user_id, action, level, product,
-                          criteria_json, requested_count, success_count, skipped_count,
-                          error_count, dry_run, created_at
-                     FROM ad_control_action %s
-                 ORDER BY created_at DESC LIMIT ?""" % where_sql,
-                tuple(params + [query_limit]),
-            ).fetchall()
-            for row in rows:
-                item = dict(row)
-                item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
-                item["results"] = []
-                item["dry_run"] = bool(item.get("dry_run"))
-                item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
-                item["log_store"] = "sqlite_fallback"
-                if binding_id and item["binding_id"] != binding_id:
-                    continue
-                sqlite_items.append(item)
+            offset = 0
+            batch_size = max(200, min(1000, limit * 10))
+            while len(sqlite_items) < limit:
+                rows = conn.execute(
+                    """SELECT action_id, preview_id, actor_user_id, action, level, product,
+                              criteria_json, requested_count, success_count, skipped_count,
+                              error_count, dry_run, results_json, created_at
+                         FROM ad_control_action %s
+                     ORDER BY created_at DESC, action_id DESC LIMIT ? OFFSET ?""" % where_sql,
+                    tuple(params + [batch_size, offset]),
+                ).fetchall()
+                if not rows:
+                    break
+                offset += len(rows)
+                for row in rows:
+                    item = dict(row)
+                    item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
+                    item["results"] = ad_control_safe_json_list(item.pop("results_json", "[]"))
+                    item["dry_run"] = bool(item.get("dry_run"))
+                    item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+                    item["log_store"] = "sqlite_fallback"
+                    if not internal:
+                        if item["binding_id"]:
+                            if item["binding_id"] not in owned_group_ids:
+                                continue
+                        elif str(item.get("actor_user_id") or "") != owner_user_id:
+                            continue
+                    if binding_id and item["binding_id"] != binding_id:
+                        continue
+                    sqlite_items.append(item)
+                    if len(sqlite_items) >= limit:
+                        break
+                if len(rows) < batch_size:
+                    break
         finally:
             conn.close()
     merged = {}
@@ -310,16 +398,119 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     items = sorted(
         merged.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True
     )[:limit]
-    rule_map = ad_control_action_rule_map(items)
+    group_ids = sorted({
+        str(
+            (item.get("criteria") or {}).get("rule_group_id")
+            or (item.get("criteria") or {}).get("binding_id")
+            or item.get("binding_id")
+            or ""
+        ).strip()
+        for item in items
+        if str(
+            (item.get("criteria") or {}).get("rule_group_id")
+            or (item.get("criteria") or {}).get("binding_id")
+            or item.get("binding_id")
+            or ""
+        ).strip()
+    })
+    rule_map = {}
+    if group_ids:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                placeholders = ",".join(["?"] * len(group_ids))
+                rows = conn.execute(
+                    "SELECT group_id,name,rule_set_id,account_group_id "
+                    "FROM ad_control_rule_group WHERE group_id IN (%s)" % placeholders,
+                    tuple(group_ids),
+                ).fetchall()
+                rule_map = {str(row["group_id"] or ""): dict(row) for row in rows}
+            finally:
+                conn.close()
     include_targets = bool(include_targets)
     for item in items:
-        item["audit"] = ad_control_action_audit(item, rule_map, include_samples=include_targets)
-        if item.get("reason_summary"):
-            item["audit"]["reason_summary"] = item.get("reason_summary")
-        item["audit"]["log_store"] = item.get("log_store") or "sqlite_fallback"
+        criteria = item.get("criteria") or {}
+        results = item.get("results") or []
+        execution_summary = criteria.get("execution_summary") or {}
+        group_id = str(
+            criteria.get("rule_group_id")
+            or criteria.get("binding_id")
+            or item.get("binding_id")
+            or ""
+        ).strip()
+        rule_group = rule_map.get(group_id) or {}
+        warning_counts = {}
+        for result in results:
+            for warning in result.get("warnings") or []:
+                warning_text = str(warning or "").strip()
+                if warning_text:
+                    warning_counts[warning_text] = warning_counts.get(warning_text, 0) + 1
+        warning_summary = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                warning_counts.items(), key=lambda value: (-value[1], value[0])
+            )[:8]
+        ]
+        reason_summary = item.get("reason_summary") or ad_control_execution_log_service.reason_summary(results)
+        run_status = str(
+            item.get("run_status")
+            or criteria.get("runner_status")
+            or execution_summary.get("run_status")
+            or ""
+        ).strip().lower()
+        status = {
+            "partial": {"key": "partial", "label": "部分完成，待续跑", "class": "warn"},
+            "blocked": {"key": "blocked", "label": "执行受阻", "class": "danger"},
+            "executed": {"key": "success", "label": "执行完成", "class": "ok"},
+            "error": {"key": "failed", "label": "执行失败", "class": "danger"},
+            "failed": {"key": "failed", "label": "执行失败", "class": "danger"},
+        }.get(run_status)
+        if not status:
+            if int(item.get("error_count") or 0) > 0:
+                status = {"key": "failed", "label": "失败", "class": "danger"}
+            elif item.get("dry_run") and int(item.get("success_count") or 0) > 0:
+                status = {"key": "dry_run_ok", "label": "Dry-run 通过", "class": "warn"}
+            elif int(item.get("success_count") or 0) > 0:
+                status = {"key": "success", "label": "成功", "class": "ok"}
+            else:
+                status = {"key": "noop", "label": "无执行目标", "class": "warn"}
+        item["audit"] = {
+            "status": status,
+            "created_at_local": str(item.get("created_at") or ""),
+            "mode": "dry-run" if item.get("dry_run") else "real",
+            "mode_label": "Dry-run 试跑" if item.get("dry_run") else "正式执行",
+            "action_label": {
+                "pause": "关停", "copy": "复制", "mixed": "关闭/复制",
+                "reopen": "重启", "preview": "预览",
+            }.get(str(item.get("action") or ""), item.get("action") or ""),
+            "rule_group_id": group_id,
+            "rule_group_name": rule_group.get("name") or group_id or "--",
+            "rule_set_id": rule_group.get("rule_set_id") or criteria.get("rule_set_id") or "",
+            "account_group_id": rule_group.get("account_group_id") or criteria.get("account_group_id") or "",
+            "counts": {
+                "requested": int(item.get("requested_count") or 0),
+                "success": int(item.get("success_count") or 0),
+                "skipped": int(item.get("skipped_count") or 0),
+                "error": int(item.get("error_count") or 0),
+            },
+            "flow": {
+                "scanned": int(item.get("scanned_count") or criteria.get("scan_count") or 0),
+                "candidate": int(item.get("candidate_count") or criteria.get("candidate_count") or 0),
+                "matched": int(item.get("matched_count") or criteria.get("execution_target_count") or 0),
+                "batch_planned": int(item.get("batch_planned_count") or criteria.get("execution_batch_count") or item.get("requested_count") or 0),
+                "deferred": int(item.get("deferred_count") or 0),
+                "remaining": int(item.get("remaining_count") or 0),
+                "retryable": int(item.get("retryable_error_count") or 0),
+                "blocked": int(item.get("blocked_count") or 0),
+            },
+            "reason_summary": reason_summary,
+            "warning_summary": warning_summary,
+            "samples": [],
+            "raw_result_count": len(results),
+            "log_store": item.get("log_store") or "sqlite_fallback",
+        }
         if not include_targets:
             item["results"] = []
-            item["audit"]["samples"] = []
     return {
         "items": items,
         "storage": "ads_ai" if mysql_available else "sqlite_fallback",
@@ -329,14 +520,45 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
 
 
 FETCH_ACTION_FUNCTION = r'''
-def fetch_ad_control_action(action_id):
+def fetch_ad_control_action(action_id, owner_user_id=None, internal=False):
     action_id = str(action_id or "").strip()
     if not action_id:
         raise StructuredApiError("missing_action_id", "缺少 action_id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    owned_group_ids = set()
+    if not internal:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                owned_group_ids = {
+                    str(row[0] or "")
+                    for row in conn.execute(
+                        "SELECT group_id FROM ad_control_rule_group "
+                        "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=?",
+                        (owner_user_id,),
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+
+    def visible(item):
+        if internal:
+            return True
+        group_ref = str(item.get("binding_id") or (item.get("criteria") or {}).get("rule_group_id") or "")
+        if group_ref:
+            return group_ref in owned_group_ids
+        return str(item.get("actor_user_id") or "") == owner_user_id
+
     try:
         item = ad_control_mysql_action(action_id)
         if item:
-            return item
+            if visible(item):
+                return item
+            raise StructuredApiError("action_not_found", "执行日志不存在")
+    except StructuredApiError:
+        raise
     except Exception:
         logging.exception("failed to fetch ads_ai ad-control action log action_id=%s", action_id)
     with JOB_DB_LOCK:
@@ -353,6 +575,8 @@ def fetch_ad_control_action(action_id):
     item["dry_run"] = bool(item.get("dry_run"))
     item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
     item["log_store"] = "sqlite_fallback"
+    if not visible(item):
+        raise StructuredApiError("action_not_found", "执行日志不存在")
     return item
 '''.strip()
 
@@ -361,6 +585,8 @@ EXECUTE_LIVE_FUNCTION = r'''
 def execute_ad_control_live(payload, session):
     ensure_ad_control_tables()
     preview = fetch_ad_control_preview(payload.get("preview_id"))
+    if str(preview.get("actor_user_id") or "") != ad_control_actor(session):
+        raise StructuredApiError("not_found", "preview not found")
     criteria = ad_control_safe_json_dict(preview.get("criteria_json"))
     if criteria.get("mode") != "live":
         raise StructuredApiError("invalid_preview", "preview is not a live preview")
@@ -368,28 +594,99 @@ def execute_ad_control_live(payload, session):
     confirmed_hash = str(payload.get("preview_hash") or "").strip()
     if not expected_hash or confirmed_hash != expected_hash:
         raise StructuredApiError("preview_hash_mismatch", "preview hash confirmation is required")
+    requested_group_id = str(payload.get("rule_group_id") or "").strip()
+    preview_group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+    if requested_group_id and requested_group_id != preview_group_id:
+        raise StructuredApiError("preview_group_mismatch", "preview does not belong to this rule group")
     dry_run = bool(payload.get("dry_run", True))
-    if not dry_run and str(payload.get("confirm") or "") != "EXECUTE_LIVE_PAUSE":
-        raise StructuredApiError("confirm_required", "explicit confirmation required")
+    run_mode = str(criteria.get("run_mode") or "live").lower()
+    if str(criteria.get("object_level") or "campaign").lower() == "ad":
+        raise StructuredApiError("phase_not_enabled", "Ad copy phase is not enabled")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=False)
+        finally:
+            conn.close()
     items = ad_control_safe_json_list(preview.get("sample_json"))[:AD_CONTROL_MAX_LIVE_EXECUTE]
+    has_copy = any(str(item.get("target_action") or "").lower() == "copy" for item in items)
+    accepted_confirmations = {"EXECUTE_LIVE_PAUSE"}
+    if has_copy:
+        accepted_confirmations.add("EXECUTE_LIVE_RULE_GROUP")
+    if run_mode == "live" and not dry_run and str(payload.get("confirm") or "") not in accepted_confirmations:
+        raise StructuredApiError("confirm_required", "explicit confirmation required")
+    if run_mode == "live" and not dry_run:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=True)
+            finally:
+                conn.close()
     action_id = uuid.uuid4().hex
-    token_configs = ad_control_token_config_for_accounts(criteria.get("product"), criteria.get("accounts") or [])
+    pre_results = []
+    pause_items = []
+    for item in items:
+        target_action = str(item.get("target_action") or "").lower()
+        base = {
+            "object_key": item.get("object_key") or "",
+            "object_id": item.get("object_id") or item.get("campaign_id") or item.get("ad_id") or "",
+            "account_id": ad_control_normalize_account(item.get("account_id")),
+            "campaign_id": str(item.get("campaign_id") or item.get("object_id") or ""),
+            "campaign_name": item.get("campaign_name") or "",
+            "target_action": target_action,
+            "target_rule_id": item.get("target_rule_id") or "",
+        }
+        if run_mode != "live":
+            pre_results.append(dict(
+                base,
+                status="observed",
+                reason="would_%s" % target_action if target_action in ("pause", "copy") else "observe_mode",
+            ))
+        elif target_action == "copy":
+            pre_results.append(dict(
+                base,
+                status="skipped",
+                reason="phase_not_enabled" if criteria.get("object_level") == "ad" else "copy_persistence_not_configured",
+            ))
+        elif target_action == "pause":
+            pause_items.append(item)
+        else:
+            pre_results.append(dict(base, status="skipped", reason="not_write_target"))
+
+    token_configs = (
+        ad_control_token_config_for_accounts(criteria.get("product"), criteria.get("accounts") or [])
+        if pause_items and criteria.get("product") else {}
+    )
     token_by_user = {}
     token_by_account = {}
     selected_accounts = []
-    for item in items:
+    for item in pause_items:
         account_id = ad_control_normalize_account(item.get("account_id"))
         if account_id and account_id not in selected_accounts:
             selected_accounts.append(account_id)
     for account_id in selected_accounts:
-        user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
+        account_item = next(
+            (item for item in pause_items if ad_control_normalize_account(item.get("account_id")) == account_id),
+            {},
+        )
+        user_id = str(
+            account_item.get("token_user_id")
+            or (token_configs.get(account_id) or {}).get("user_id")
+            or ""
+        ).strip()
         if user_id and user_id not in token_by_user:
             token_by_user[user_id] = ad_control_token_for_user_id(user_id)
         token_by_account[account_id] = token_by_user.get(user_id, "")
-    whitelist_by_account = ad_control_product_campaign_whitelist(criteria.get("product"), selected_accounts)
+    enforce_product_whitelist = bool(selected_accounts and criteria.get("product"))
+    if enforce_product_whitelist:
+        whitelist_by_account = ad_control_product_campaign_whitelist(
+            criteria.get("product"), selected_accounts
+        )
+    else:
+        whitelist_by_account = {}
     grouped = {}
     order = {}
-    for index, item in enumerate(items):
+    for index, item in enumerate(pause_items):
         account_id = ad_control_normalize_account(item.get("account_id"))
         grouped.setdefault(account_id, []).append(item)
         order[item.get("object_key") or "%s:%s" % (account_id, item.get("campaign_id"))] = index
@@ -429,31 +726,37 @@ def execute_ad_control_live(payload, session):
                 "campaign_id": campaign_id,
                 "campaign_name": item.get("campaign_name") or "",
             }
-            if item.get("target_action") != "pause":
-                account_results.append(dict(base, status="skipped", reason="not_pause_target"))
-                continue
             if item.get("skip_reason"):
                 account_results.append(dict(base, status="skipped", reason=item.get("skip_reason")))
                 continue
-            if campaign_id not in whitelist:
+            if enforce_product_whitelist and campaign_id not in whitelist:
                 account_results.append(dict(base, status="skipped", reason="outside_product_whitelist"))
                 continue
             if not token:
                 account_results.append(dict(base, status="skipped", reason="missing_meta_token"))
                 continue
             try:
-                meta = ad_control_graph_get(token, campaign_id, "account_id,status,effective_status,name")
-                meta_account = ad_control_normalize_account(meta.get("account_id"))
-                if not meta_account or meta_account != account_id:
-                    account_results.append(dict(base, status="skipped", reason="account_owner_mismatch", meta=meta))
-                    continue
-                if str(meta.get("effective_status") or "").upper() != "ACTIVE":
-                    account_results.append(dict(base, status="skipped", reason="not_active", meta=meta))
-                    continue
                 if dry_run:
+                    meta = ad_control_graph_get(token, campaign_id, "account_id,status,effective_status,name")
+                    meta_account = ad_control_normalize_account(meta.get("account_id"))
+                    if not meta_account or meta_account != account_id:
+                        account_results.append(dict(base, status="skipped", reason="account_owner_mismatch", meta=meta))
+                        continue
+                    if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                        account_results.append(dict(base, status="skipped", reason="not_active", meta=meta))
+                        continue
                     account_results.append(dict(base, status="dry_run", meta=meta))
                     continue
-                graph_response = ad_control_graph_set_status(token, campaign_id, "PAUSED")
+                guarded = ad_control_guarded_campaign_pause(
+                    preview, criteria, token, item, account_id
+                )
+                meta = guarded.get("meta") or {}
+                if guarded.get("skip_reason"):
+                    account_results.append(dict(
+                        base, status="skipped", reason=guarded.get("skip_reason"), meta=meta
+                    ))
+                    continue
+                graph_response = guarded.get("payload_result") or {}
                 warnings = []
                 try:
                     ad_control_save_object_state(action_id, {
@@ -499,7 +802,7 @@ def execute_ad_control_live(payload, session):
                     break
         return account_results
 
-    results = []
+    results = list(pre_results)
     workers = min(max(1, AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS), max(1, len(grouped)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {
@@ -525,7 +828,7 @@ def execute_ad_control_live(payload, session):
                     results.append(error_item)
     results.sort(key=lambda item: order.get(item.get("object_key") or "%s:%s" % (item.get("account_id"), item.get("campaign_id")), 10 ** 9))
     success_count = len([item for item in results if item.get("status") in ("success", "dry_run")])
-    skipped_count = len([item for item in results if item.get("status") == "skipped"])
+    skipped_count = len([item for item in results if item.get("status") in ("skipped", "observed")])
     error_count = len([item for item in results if item.get("status") == "error"])
     summary = ad_control_execution_log_service.execution_summary(
         results,
@@ -550,8 +853,8 @@ def execute_ad_control_live(payload, session):
                     action_id,
                     preview["preview_id"],
                     ad_control_actor(session),
-                    "pause",
-                    "campaign",
+                    "mixed" if has_copy else "pause",
+                    criteria.get("object_level") or "campaign",
                     criteria.get("product", ""),
                     json.dumps(action_criteria, ensure_ascii=False),
                     len(items),
@@ -640,31 +943,57 @@ def patch_app_text(text):
             raise RuntimeError("integration marker count=%s" % text.count(marker))
         text = text.replace(marker, INTEGRATION_BLOCK + "\n\n\n" + marker, 1)
         changed = True
-    preview_old = '''    pause_items.sort(key=lambda item: (\n        ad_control_normalize_account(item.get("account_id")),\n        str(item.get("campaign_id") or item.get("object_id") or ""),\n    ))\n    pause_count = len(pause_items)\n    execution_items = pause_items[:AD_CONTROL_MAX_LIVE_EXECUTE]\n'''
-    preview_new = '''    pause_items.sort(key=lambda item: (\n        ad_control_normalize_account(item.get("account_id")),\n        str(item.get("campaign_id") or item.get("object_id") or ""),\n    ))\n    pause_count = len(pause_items)\n    execution_items = ad_control_execution_log_service.balanced_execution_items(\n        pause_items,\n        max_total=AD_CONTROL_MAX_LIVE_EXECUTE,\n        max_per_account=AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,\n    )\n'''
-    text, block_changed = replace_once(text, preview_old, preview_new, "balanced preview batch")
-    changed = changed or block_changed
-    criteria_old = '''        "execution_truncated": pause_count > len(execution_items),\n'''
-    criteria_new = criteria_old + '''        "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),\n        "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),\n        "preview_error_count": len(errors),\n        "max_per_account": AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,\n'''
-    text, block_changed = replace_once(text, criteria_old, criteria_new, "preview flow metadata")
-    changed = changed or block_changed
+    if "ad_control_execution_log_service.balanced_execution_items(" not in text:
+        preview_variants = [
+            (
+                '''    pause_items.sort(key=lambda item: (\n        ad_control_normalize_account(item.get("account_id")),\n        str(item.get("campaign_id") or item.get("object_id") or ""),\n    ))\n    pause_count = len(pause_items)\n    execution_items = pause_items[:AD_CONTROL_MAX_LIVE_EXECUTE]\n''',
+                '''    pause_items.sort(key=lambda item: (\n        ad_control_normalize_account(item.get("account_id")),\n        str(item.get("campaign_id") or item.get("object_id") or ""),\n    ))\n    pause_count = len(pause_items)\n    execution_items = ad_control_execution_log_service.balanced_execution_items(\n        pause_items,\n        max_total=AD_CONTROL_MAX_LIVE_EXECUTE,\n        max_per_account=AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,\n    )\n''',
+            ),
+            (
+                "    execution_items = action_items[:AD_CONTROL_MAX_LIVE_EXECUTE]\n",
+                '''    execution_items = ad_control_execution_log_service.balanced_execution_items(\n        action_items,\n        max_total=AD_CONTROL_MAX_LIVE_EXECUTE,\n        max_per_account=AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,\n    )\n''',
+            ),
+        ]
+        matches = [(old, new) for old, new in preview_variants if text.count(old) == 1]
+        if len(matches) != 1:
+            raise RuntimeError("balanced preview batch source block count=%s" % len(matches))
+        text = text.replace(matches[0][0], matches[0][1], 1)
+        changed = True
+    if '"preview_error_count": len(errors),' not in text:
+        criteria_variants = [
+            '''        "execution_truncated": pause_count > len(execution_items),\n''',
+            '''        "execution_truncated": pause_count + copy_count > len(execution_items),\n''',
+        ]
+        matches = [value for value in criteria_variants if text.count(value) == 1]
+        if len(matches) != 1:
+            raise RuntimeError("preview flow metadata source block count=%s" % len(matches))
+        criteria_old = matches[0]
+        criteria_new = criteria_old + '''        "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),\n        "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),\n        "preview_error_count": len(errors),\n        "max_per_account": AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,\n'''
+        text = text.replace(criteria_old, criteria_new, 1)
+        changed = True
     preview_response_old = '''        "total": total,\n        "pause_count": pause_count,\n'''
     preview_response_new = '''        "total": total,\n        "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),\n        "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),\n        "pause_count": pause_count,\n'''
     text, block_changed = replace_once(
         text, preview_response_old, preview_response_new, "preview response flow metadata"
     )
     changed = changed or block_changed
-    text, block_changed = replace_function(text, "ad_control_action_status", ACTION_STATUS_FUNCTION)
+    text, block_changed = replace_optional_function(
+        text, "ad_control_action_status", ACTION_STATUS_FUNCTION
+    )
     changed = changed or block_changed
     text, block_changed = replace_function(text, "list_ad_control_actions", LIST_ACTIONS_FUNCTION)
     changed = changed or block_changed
-    text, block_changed = replace_function(text, "fetch_ad_control_action", FETCH_ACTION_FUNCTION)
+    text, block_changed = replace_optional_function(
+        text, "fetch_ad_control_action", FETCH_ACTION_FUNCTION
+    )
     changed = changed or block_changed
     text, block_changed = replace_function(text, "execute_ad_control_live", EXECUTE_LIVE_FUNCTION)
     changed = changed or block_changed
     audit_old = '''        "counts": {\n            "requested": int(item.get("requested_count") or 0),\n            "success": int(item.get("success_count") or 0),\n            "skipped": int(item.get("skipped_count") or 0),\n            "error": int(item.get("error_count") or 0),\n        },\n        "reason_summary": reason_summary,\n'''
     audit_new = '''        "counts": {\n            "requested": int(item.get("requested_count") or 0),\n            "success": int(item.get("success_count") or 0),\n            "skipped": int(item.get("skipped_count") or 0),\n            "error": int(item.get("error_count") or 0),\n        },\n        "flow": {\n            "scanned": int(item.get("scanned_count") or criteria.get("scan_count") or 0),\n            "candidate": int(item.get("candidate_count") or criteria.get("candidate_count") or 0),\n            "matched": int(item.get("matched_count") or criteria.get("execution_target_count") or 0),\n            "batch_planned": int(item.get("batch_planned_count") or criteria.get("execution_batch_count") or item.get("requested_count") or 0),\n            "deferred": int(item.get("deferred_count") or 0),\n            "remaining": int(item.get("remaining_count") or 0),\n            "retryable": int(item.get("retryable_error_count") or 0),\n            "blocked": int(item.get("blocked_count") or 0),\n        },\n        "log_store": item.get("log_store") or "sqlite_fallback",\n        "reason_summary": reason_summary,\n'''
-    text, block_changed = replace_once(text, audit_old, audit_new, "audit flow fields")
+    text, block_changed = replace_optional_once(
+        text, audit_old, audit_new, "audit flow fields"
+    )
     changed = changed or block_changed
     return text, changed
 
@@ -673,15 +1002,28 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default="/root/drama_material_service")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--backup-dir", default="")
     args = parser.parse_args()
     path = Path(args.root) / "app.py"
-    original = path.read_text(encoding="utf-8")
+    original_bytes = path.read_bytes()
+    original = original_bytes.decode("utf-8").replace("\r\n", "\n")
     updated, changed = patch_app_text(original)
     if changed and not args.check:
+        digest = hashlib.sha256(original_bytes).hexdigest()
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        backup_root = Path(args.backup_dir) if args.backup_dir else path.parent / "deploy_backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(backup_root), 0o700)
+        backup_path = backup_root / ("app.py.before-execution-log-%s-%s" % (stamp, digest[:12]))
+        shutil.copy2(str(path), str(backup_path))
+        os.chmod(str(backup_path), 0o600)
+        if hashlib.sha256(backup_path.read_bytes()).hexdigest() != digest:
+            raise RuntimeError("backup checksum mismatch: %s" % backup_path)
         temp_path = path.with_name(path.name + ".execution-log.tmp")
-        temp_path.write_text(updated, encoding="utf-8")
+        temp_path.write_bytes(updated.encode("utf-8"))
         os.chmod(str(temp_path), path.stat().st_mode)
         os.replace(str(temp_path), str(path))
+        print("backup: %s sha256=%s" % (backup_path, digest))
     print("%s: %s" % (path, "would change" if args.check and changed else "changed" if changed else "unchanged"))
     return 0
 
