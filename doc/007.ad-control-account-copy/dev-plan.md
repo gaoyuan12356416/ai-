@@ -13,10 +13,10 @@
 | 复制结果 ads_ai schema/事务写入 | 后续需求 | 用户后续明确授权并指定写法 | 本期取消（DDL 环境已修复，仍不在本轮执行） |
 | 规则模型、旧聚合迁移和 Campaign 观察链路 | created_data_write_patterns | `app.py`、runner、copy engine | 已完成（本地） |
 | 规则组页面升级、`partial_enabled` 与 legacy action 兼容 | rule_dimension_review | `static/ad-control-*` | 已完成（本地） |
-| 集成、回归、代码评审 | Codex | 全部变更 | 已完成（最终 fresh-cache 174/174） |
+| 集成、回归、代码评审 | Codex | 全部变更 | 已完成（最终 fresh-cache 180/180） |
 | 生产 overlay 合并与生产 Python 环境完整验证 | Codex | 线上共享 monolith 副本/发布包 | 已完成 |
 | GitHub-first 暗发布 | Codex | 精确 commit/发布包/线上检查点 | 已完成 |
-| Campaign 观察验收 | Codex + 业务方 | 已批准测试账号 | 待批准 |
+| Campaign 观察验收 | Codex + 业务方 | 已批准测试账号 | 已完成（20:15–20:30 四轮自然 tick 通过） |
 
 ## 编译 / 构建命令
 
@@ -38,6 +38,7 @@ python -m unittest tests.test_ad_control_account_copy_deploy -v
 - API/runner 启动会触发 schema ensure，因此真实 SQLite 的 ensure 与三条已核实 group ID 的精确 owner 迁移必须在 API/runner 均停止后、重启前完成；失败即恢复 C1 SQLite，不允许带 `owner_user_id='codex'` 的中间态启动服务。
 - PAUSED/ACTIVE Canary 延后到用户确认落表方式后的下一需求。
 - 当前 stale-preview 安全门禁在单个 Campaign pause 期间持有全局 `JOB_DB_LOCK` 跨 Graph GET/POST；最坏约 60 秒的同进程 SQLite 写阻塞作为 P2 运行风险进入暗发布监控，不得在本地测试通过后宣称生产无影响。
+- Campaign start schema 读取必须通过关键 MySQL 查询重试，并严格区分 `insight_start_schema_unavailable` 与真实缺列 `invalid_insight_start_schema`；runner 仅在实际 campaign-start 查询时 lazy singleflight。`no_accounts_due`、无 active 交集和 Redis 已命中路径不得额外探测 schema。
 
 ## 完成记录
 
@@ -47,3 +48,5 @@ python -m unittest tests.test_ad_control_account_copy_deploy -v
 - 2026-07-15：正式发布前发现 18:22 playable preview 并发发布，旧基线和首次检查点作废。恢复服务后将 `8c559a78475a7972542746f1f8de1fcab4e7be3f` 合入 V2，形成原 V2 运行提交 `b3c3e6a2d6556d7dad4c79082a324235ad0f8379`；从新 live 基线重建 staging、重跑该阶段171/171与playable回归并建立原V2 C2。
 - 2026-07-15：生产 exact-source overlay、owner 迁移（check 零写、apply 3、幂等 0）及 API/worker/Nginx/浏览器 smoke 完成。首次恢复 cron 后的 18:50 自然 tick 安全阻断为 `live_preview_blocked`：requested/success=0/0、Meta 写入为 0；定位为 BUG-007（空 Campaign 白名单误报且无到期账号仍写 action 审计），立即在下一 tick 前仅暂停 ad-control cron。
 - 2026-07-15：以 `7f65cf9bf6799fb0a086238d41f569c2b206e820` 修复空白名单，以 `4527303100a38db26f0f2ac0825ed6616c16247a` 增加 `scheduled_due_count` 和 `no_accounts_due` 零 action 跳过；生产 staging fresh-cache 174/174，建立 C3 `/root/backups/drama_material_service/20260715T111700Z-ad-control-v2-hotfix-c3-4527303` 并完成 exact overlay。19:25 自然 tick 返回 `skipped/no_accounts_due`，requested/success/error=0/0/0，SQLite action 保持 17，原 cron 最终保持启用。复制持久化和真实 Meta/Ad 执行仍按范围后置。
+- 2026-07-15：连续监控在 19:40 发现 BUG-008：`SHOW COLUMNS` 瞬时失败被旧 best-effort helper 误判为真实缺列；该 tick 无 preview/action、requested/success/error=0/0/0、action 保持17、对象状态未变化且零 Meta 写。19:41 只读回查确认54列及必需字段完整，19:45 与后续旧版本自然 tick 恢复，排除 schema 漂移。
+- 2026-07-15：以 `375185d5c7ad8dbdf39eae8e5c8b8ddf7a45b9a5` 修复 BUG-008，完成 critical retry、读取失败/真实缺列语义分离、no-due 零 schema I/O、每次规则组事件lazy singleflight 与各 worker 独立异常；fresh-cache 180/180。当前生产 `app.py` SHA-256 为 `7ed60179abc83880d41f2547ed19e3591136dca693c776df5d5ecfe6a2546b49`，runner SHA-256 为 `a3fa7b2bbe597e52dec44347de750fe34d313302baefba585f66d521dd5c25e7`，C4 为 `/root/backups/drama_material_service/20260715T120738Z-ad-control-v2-schema-hotfix-c4-375185d`。20:11:18 恢复 cron 时基线 action=17、preview=52、最新对象状态=04:22:58；API/worker/crond active，auth=200、playable unauth=403、public page=200。20:15至20:30四轮自然 tick 全部返回 `skipped/no_accounts_due`，preview 52→56、action保持17、对象状态不变且部署后无 schema probe/Traceback，生产验收已闭环。

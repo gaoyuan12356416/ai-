@@ -70,10 +70,14 @@
 | TC-053 | 生产静态双路径 | 项目 static 与 Nginx 实际 `/usr/share/nginx/html` | 原子 overlay、hash 与 HTTP 页面核验 | 两处目标均与发布包一致，页面 200 且加载 `20260715copylog3` | P0 | 通过（生产） |
 | TC-054 | 原 V2 首次自然 runner tick | 恢复 C2 exact crontab | 等待一个 5 分钟自然 tick | 任何预览错误均安全阻断，requested/success/Meta 写保持0；异常时下一 tick 前可只暂停 ad-control cron | P0 | 发现 BUG-007：`live_preview_blocked`、error=108、requested/success=0/0、零 Meta 写；安全门禁通过，业务语义失败 |
 | TC-055 | BUG-007 热修自然 tick | 部署 `4527303` 并恢复 C2 exact crontab | 等待19:25自然 tick，对账日志、preview、action和对象状态 | `skipped/no_accounts_due`；requested/success/error=0；`scheduled_due_count=0`；action数量不增长；无 Token/Graph/Meta 写 | P0 | 通过（action 17→17，preview 44→45，最新对象状态未变化） |
+| TC-056 | BUG-008 旧版本自然 tick 安全失败 | `4527303` 连续自然运行，MySQL `SHOW COLUMNS` 瞬时失败 | 对账19:40 tick、SQLite和Meta调用 | tick 失败关闭；无 preview/action、requested/success/error=0、对象状态不变、Meta写0；只读回查能区分瞬时读取失败与schema漂移 | P0 | 通过安全门禁但发现语义缺陷（action保持17；19:41确认54列和必需字段完整；19:45与后续旧版本自然恢复） |
+| TC-057 | Schema读取失败与真实缺列语义分离 | validator分别遇到单次/连续 `CalledProcessError` 和成功读取但缺 `dt` | 调用campaign-start schema校验 | 单次失败重试后成功；持续失败为 `insight_start_schema_unavailable` 且不带missing；真实缺列为 `invalid_insight_start_schema` | P0 | 通过（自动化） |
+| TC-058 | Runner schema lazy singleflight | no-due tick及同一规则组事件8个并发worker | spy底层validator和每个worker异常对象 | `no_accounts_due` schema I/O=0；同一规则组事件内并发成功/失败均仅调用底层一次；失败时8个独立异常实例；`finally`恢复原函数 | P0 | 通过（large-pool 13/13、runner-state 14/14、全量180/180） |
+| TC-059 | BUG-008 热修生产自然 tick | 部署 `375185d`，20:11:18恢复exact cron；基线action=17、preview=52、最新对象状态=04:22:58 | 对账20:15、20:20、20:25、20:30四轮自然tick、action/preview/对象状态和日志 | `no_accounts_due` 时零schema I/O、零action/Meta写；其他路径按修复后语义执行；服务保持健康 | P0 | 通过：四轮均为`skipped/no_accounts_due`，requested/success/error=0/0/0；preview 52→56、action=17、对象状态不变，日志零schema probe/Traceback |
 
 ## 执行结果说明
 
-2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 ad-control 全量测试，最终结果 `Ran 174 tests`、`OK`；exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过。原 V2 以并发 playable 提交 `8c559a7` 为 source 形成 `b3c3e6a`；首次自然 tick 安全发现 BUG-007 后，再以 `7f65cf9`、`4527303` 修复并重建 staging/C3。当前生产 runtime 为 `4527303`；owner 迁移 3/0、静态双路径、真实浏览器、API/worker/Nginx、playable 回归及19:25自然 tick通过。全过程未调用真实 Meta copy、未建写 copied created_data/lineage/intent，也未开放 Ad 执行。
+2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 ad-control 全量测试，最终结果 `Ran 180 tests`、`OK`；exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过。原 V2 以并发 playable 提交 `8c559a7` 为 source 形成 `b3c3e6a`；首次自然 tick 安全发现 BUG-007 后，以 `7f65cf9`、`4527303` 修复并重建 staging/C3，19:25自然 tick通过。19:40旧版本又安全发现 BUG-008，零 action/Meta 写，19:45与后续旧版本自然恢复。当前精确生产 runtime 为 `375185d5c7ad8dbdf39eae8e5c8b8ddf7a45b9a5`，`app.py` SHA-256=`7ed60179abc83880d41f2547ed19e3591136dca693c776df5d5ecfe6a2546b49`、runner SHA-256=`a3fa7b2bbe597e52dec44347de750fe34d313302baefba585f66d521dd5c25e7`，C4=`/root/backups/drama_material_service/20260715T120738Z-ad-control-v2-schema-hotfix-c4-375185d`。20:11:18恢复cron时API/worker/crond active、auth200、playable unauth403、public page200；随后四轮自然tick全部通过，最终生产验收闭环。全过程未调用真实 Meta copy、未建写 copied created_data/lineage/intent，也未开放 Ad 执行。
 
 ## 回归范围
 

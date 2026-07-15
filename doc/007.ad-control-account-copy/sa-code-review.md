@@ -2,7 +2,7 @@
 
 ## 结论
 
-2026-07-15 完成最终冻结代码评审与生产发布验收。阻断项均已修复，Python/JavaScript 静态检查、174 条 ad-control fresh-cache 自动化测试、exact-source staging/overlay、SQLite owner 迁移、真实浏览器与热修后自然 runner tick 均通过；生产运行代码为 `4527303100a38db26f0f2ac0825ed6616c16247a`。
+2026-07-15 最终冻结代码评审与生产验收通过，BUG-008 修复已完成 Python/JavaScript 静态检查、180 条 ad-control fresh-cache 自动化测试、exact-source staging/overlay、SQLite owner 迁移、生产 smoke及四轮自然 runner tick。当前生产运行代码为 `375185d5c7ad8dbdf39eae8e5c8b8ddf7a45b9a5`，`app.py` SHA-256 为 `7ed60179abc83880d41f2547ed19e3591136dca693c776df5d5ecfe6a2546b49`，runner SHA-256 为 `a3fa7b2bbe597e52dec44347de750fe34d313302baefba585f66d521dd5c25e7`。
 
 该结论只覆盖本期实际开放边界：Campaign 规则配置、观察/试算、runner 观察链路及既有 Campaign pause 回归。真实 Meta Campaign copy 因复制结果持久化未配置而在任何 Token/Graph 访问前失败关闭；Ad 仅允许保存配置，启用、候选、试算、runner 和正式执行均未开放。本次没有执行真实 Meta copy Canary。
 
@@ -10,10 +10,10 @@
 
 - `app.py`：账号级规则组 API、本人数据隔离、旧聚合组原子迁移、preview/enable 并发重检、Campaign 观察/试算、正式 copy 前置熔断、Ad 顶层阶段熔断。
 - `features/ad_control_copy_engine/`：规则归一化、冲突消解、计划/额度/冷却和隔离的 Meta copy 编排契约。
-- `scripts/ad_control_rule_runner.py`：规则组观察执行、`would_pause`/`would_copy` 汇总及既有 runner 状态回归。
+- `scripts/ad_control_rule_runner.py`：规则组观察执行、`would_pause`/`would_copy` 汇总、campaign-start schema lazy singleflight、no-due 零 schema I/O 及既有 runner 状态回归。
 - `static/ad-control-pages.js`、`static/ad-control-rules.html`、`static/ad-control-pages.css`：去产品维度、对象层级/运行模式拆分、复制参数、旧规则组兼容及页面缓存版本。
 - `features/ad_control_execution_log/`、`deploy/apply_ad_control_execution_log_fix.py`：既有 `ads_ai.ad_control_action_log` 审计兼容与权限回归，包含线上新版 writer/reader 分离、超时/并发上限及无立即 upsert 重试的保护。
-- `tests/test_ad_control*.py` 及同域发布安全测试：共 174 条规则模型、API、UI、runner、245 账号池、跨 owner 缓存隔离、daily/raw 执行日志、空白名单/无到期账号回归、部署补丁兼容、exact-source 发布器、SQLite owner 迁移器和隔离编排测试。
+- `tests/test_ad_control*.py` 及同域发布安全测试：共 180 条规则模型、API、UI、runner、245 账号池、跨 owner 缓存隔离、daily/raw 执行日志、空白名单/无到期账号、schema critical retry/singleflight 回归、部署补丁兼容、exact-source 发布器、SQLite owner 迁移器和隔离编排测试。
 - `deploy/apply_ad_control_account_copy_v2.py`：生产共享 monolith 的 exact-source Git diff、target blob、唯一备份与原子替换门禁。
 - `tests/validate_ad_control_deploy_patch.py`：将部署补丁真实应用到当前 merged app 的临时副本；若已对齐则首次即 `unchanged` 且零备份，若需变更则校验一份字节一致写前备份；两种情况的二次 apply 均须 `unchanged` 且不新增备份，并对临时 app 重跑同一全量测试。当前线上旧基线的真实 changed+backup 路径由下一项 current-live validator 独立证明。
 - `tests/validate_ad_control_live_action_log_compat.py`：对当前线上 `app.py` 只读 fixture 执行 check，只在临时副本 apply，验证写前备份、二次幂等以及 7 个线上 action-log 安全函数 hash 不变。
@@ -57,6 +57,7 @@
 | CR-031 / BUG-006 | P0 | legacy 产品账号列表 owner 贯穿/缓存 | owner 隔离后 saved pool 读取漏传 actor，冷缓存直接 `missing_owner`；若只放宽校验，按 product 共用缓存会污染不同用户的 saved-only 账号 | route→列表→legacy loader→saved pool 显式传 owner，缓存键改为 `(owner, product)`；新增 245 账号、fallback、并发和双 owner 隔离回归 | 已修复 |
 | CR-032 | P2 | legacy 产品账号列表缓存失效 | 保存/删除账户池后不会主动清理 300 秒 TTL 缓存，同一 owner 可能短暂看到本人旧账号列表 | 保持旧接口 TTL 兼容；缓存已按 owner 隔离，不构成越权；V2 无产品列表不使用该缓存，后续单独优化主动失效 | 已接受 |
 | CR-033 / BUG-007 | P0 | 空 Campaign 白名单与账号时区自然 tick | V2 在排期前把空白名单改为错误；无账号到期时仍形成 `live_preview_blocked` 并写 action 审计 | 空白名单在排期/Token/Graph 前作为零候选返回；preview 汇总 `scheduled_due_count`；无到期、无错误、无目标时返回 `skipped/no_accounts_due` 且不写 action；错误总数不受100条明细截断 | 已修复；174/174、隔离生产数据演练及19:25自然 tick通过 |
+| CR-034 / BUG-008 | P1 | campaign-start schema 校验与 runner tick | `SHOW COLUMNS` 瞬时读取失败被 best-effort helper 转为空集合并误报真实缺列；runner 在无到期账号时也无条件探测 schema | schema 校验改用 critical retry；持续读取失败报 `insight_start_schema_unavailable`，读取成功后真实缺列才报 `invalid_insight_start_schema`；每次规则组事件lazy singleflight、各 worker 独立异常、`no_accounts_due` 零 schema I/O | 已修复；180/180及四轮生产自然tick通过 |
 
 ## 编译 / 验证结果
 
@@ -64,13 +65,13 @@
 | --- | --- | --- |
 | Python 编译 | `python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py deploy/apply_ad_control_account_copy_v2.py deploy/migrate_ad_control_account_copy_v2_sqlite.py` | 通过，7/7，退出码 0 |
 | JavaScript 语法 | `node --check static/ad-control-pages.js` | 通过，退出码 0 |
-| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 174/174 通过，0 失败，0 阻塞 |
+| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 180/180 通过，0 失败，0 阻塞 |
 | Exact-source app 合并器 | `python -m unittest tests.test_ad_control_account_copy_deploy -v` | 12/12 通过；共享锁、未知源/漂移阻断、持久化唯一备份、安装失败恢复、二次幂等 |
 | SQLite owner 迁移器 | `python -m unittest tests.test_ad_control_account_copy_sqlite_migration -v` | 8/8 通过；常量门禁、dry-run零写、首跑3/幂等0、pool/rule-set/状态不变量、TOCTOU/触发器事务回滚、真实 target app 路由与 owner 可见性 |
 | 真实部署补丁链 | `python tests/validate_ad_control_deploy_patch.py` | 当前 merged app 首次 apply `unchanged`、零备份且字节不变；二次 apply 仍 `unchanged`、不新增备份；临时 app 全量通过 |
 | Current-live action-log 兼容 | `python tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` | 原 fixture 只读；临时 apply 首次备份 hash 匹配；二次 check/apply `unchanged`；writer 63353、reader 63350、3/5 秒超时、live worker=4 及 7 个安全函数 hash 保留 |
 | 差异格式检查 | `git diff --check` | 通过，退出码 0 |
 
-新增安全回归覆盖 stale/损坏 preview、执行前及每次 Meta POST 前重检、enable TOCTOU 与急停竞态、V2/legacy save-enabled 绕过阻断、ownerless legacy fail-close、V2 不误迁移、legacy 配置资源及账户池 owner 隔离、action target owner 传递、账号规则日志可见性、统一 cache buster、Ad execute 顶层门禁、observe pause 零 Token、mixed copy/pause 隔离、空 Campaign 白名单在排期/Token/Graph 前零调用返回、无到期账号零 action 审计、preview 错误总数不随明细截断，以及部署补丁后 observe 审计语义、旧基线、先前泛化 action-log 补丁输出和 current-live writer/reader 安全契约的兼容/幂等校验。
+新增安全回归覆盖 stale/损坏 preview、执行前及每次 Meta POST 前重检、enable TOCTOU 与急停竞态、V2/legacy save-enabled 绕过阻断、ownerless legacy fail-close、V2 不误迁移、legacy 配置资源及账户池 owner 隔离、action target owner 传递、账号规则日志可见性、统一 cache buster、Ad execute 顶层门禁、observe pause 零 Token、mixed copy/pause 隔离、空 Campaign 白名单在排期/Token/Graph 前零调用返回、无到期账号零 action 审计、schema 查询瞬时/持续失败和真实缺列语义、同一规则组事件并发singleflight与独立异常实例、preview 错误总数不随明细截断，以及部署补丁后 observe 审计语义、旧基线、先前泛化 action-log 补丁输出和 current-live writer/reader 安全契约的兼容/幂等校验。
 
-本地和 staging 验证使用临时 SQLite、fake/stub、静态契约或当前线上文件只读副本；生产发布仅执行 exact-source overlay、精确 owner 迁移与只读/smoke 验收。18:50 首次自然 tick 只生成既有 action 审计且 requested/success=0/0；19:25 热修 tick 返回 `skipped/no_accounts_due` 且 action 数量前后保持17。全程没有调用 Meta copy，没有建或写 copied created_data/lineage/intent。`ads_ai.ad_control_action_log` 属于既有审计链路，不代表复制结果落表已实现。
+本地和 staging 验证使用临时 SQLite、fake/stub、静态契约或当前线上文件只读副本；生产发布仅执行 exact-source overlay、精确 owner 迁移与只读/smoke 验收。18:50 首次自然 tick 只生成既有 action 审计且 requested/success=0/0；19:25 BUG-007 热修 tick 返回 `skipped/no_accounts_due` 且 action 数量前后保持17。19:40 BUG-008 tick 因 `SHOW COLUMNS` 瞬时失败安全结束，无 preview/action、零 Meta 写；19:45 与后续旧版本自然恢复。当前 `375185d` 在 20:11:18 恢复 cron 前基线 action=17、preview=52、最新对象状态=04:22:58，API/worker/crond active、auth=200、playable unauth=403、public page=200；20:15至20:30四轮自然tick均为 `skipped/no_accounts_due`，preview 52→56、action=17、对象状态不变且日志零schema probe/Traceback。全程没有调用 Meta copy，没有建或写 copied created_data/lineage/intent。`ads_ai.ad_control_action_log` 属于既有审计链路，不代表复制结果落表已实现。

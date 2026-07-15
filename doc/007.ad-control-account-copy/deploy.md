@@ -4,6 +4,7 @@
 
 - 规则组模型增加账号归属、对象层级和运行模式。
 - runner 支持 Campaign 长期观察、既有 Campaign pause 和 Campaign copy 的生产前置熔断；Ad 规则组本期不能启用。
+- Campaign start schema 校验改为关键 MySQL 查询重试，并区分“读取不可用”和“读取成功但真实缺列”；runner 仅在实际需要 campaign-start 查询时按规则组事件做线程安全singleflight，无到期账号不产生 schema I/O。
 - 规则组页面移除产品选择，增加复制参数、剧目范围、计划/额度和正式模式确认。
 - 本期不新增、不迁移、不写 copied created_data/lineage/intent；DDL 环境问题虽已修复，但只待后续用户明确授权后再尝试。既有 `ads_ai.ad_control_action_log` 是执行审计链路，不是复制结果落表。
 - 部署补丁保留当前线上 action-log writer/reader 分离、固定库表、3/5 秒超时、live worker=4 和 runner 更新不立即 upsert 重试的安全契约。
@@ -80,7 +81,7 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 
 ## 部署步骤
 
-1. 本地完成 Python/JavaScript 语法检查、174/174 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
+1. 本地完成 Python/JavaScript 语法检查、180/180 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
 2. 刷新 current-live `app.py` 和 SHA-256，通过上述 action-log 兼容门禁；这一步必须在最终发布文件冻结前重跑。
 3. 精确 commit/push 到 GitHub，记录 commit 和文件 hash。
 4. 建立排他发布窗口并确认其他生产 `app.py` 写入者均停用或使用统一锁。备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 rule-group owner 基线及 legacy standalone total/enabled 集合。
@@ -101,6 +102,7 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 - 普通 save payload 即使含 `enabled=true` 也不能开启规则组；损坏 preview `expires_at` 返回 `preview_invalid`。
 - Token 校验期间触发同组或当前用户全局急停时，启用返回 `emergency_stop_changed` 且保持禁用；若请求开始前已急停且期间无新急停，只有完成 preview/Token 校验的显式恢复可清除旧急停。
 - Campaign observe runner 日志有 `would_pause/would_copy`，Meta 写调用为 0；Ad 启用和试算返回 `phase_not_enabled`。
+- `no_accounts_due` tick 对 campaign-start schema 探测为 0；实际需要读取 schema 时使用 critical retry，读取持续失败返回 `insight_start_schema_unavailable`，读取成功但缺 `campaign_id/dt` 才返回 `invalid_insight_start_schema`。
 - 无新增复制结果表、无 copied created_data/lineage/intent DDL/DML；既有 `ads_ai.ad_control_action_log` 审计链路保持不变，且不将该审计表计为复制结果落表。
 - 最终部署前刷新后的 current-live fixture 通过 action-log 兼容验证，writer/reader、3/5 秒超时、live worker=4、无立即 upsert 重试和 7 个函数 hash 契约均不回退。
 - 即使测试进程中临时设置 `AD_CONTROL_COPY_ENABLED=1`，正式 copy 仍返回 `copy_persistence_not_configured` 且 Meta POST 为 0。
@@ -130,15 +132,23 @@ python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_s
 
 ## 当前发布状态
 
-2026-07-15 已完成生产部署与自然 runner 复验。发布窗口内发现 18:22 并发上线的 playable preview hardening 后，立即停止原发布、恢复服务，并以其精确提交 `8c559a78475a7972542746f1f8de1fcab4e7be3f` 和线上 `app.py` SHA-256 `8779e156...` 作为新 source。合并并保留 playable generator、vendor、Nginx 和 9 个 `PLAYABLE_PREVIEW_*` 环境配置后，原 V2 运行提交为 `b3c3e6a2d6556d7dad4c79082a324235ad0f8379`。
+2026-07-15 已完成原 V2、BUG-007/BUG-008 热修、服务/API smoke及最终四轮自然 runner 复验，发布验收闭环。发布窗口内发现 18:22 并发上线的 playable preview hardening 后，立即停止原发布、恢复服务，并以其精确提交 `8c559a78475a7972542746f1f8de1fcab4e7be3f` 和线上 `app.py` SHA-256 `8779e156...` 作为新 source。合并并保留 playable generator、vendor、Nginx 和 9 个 `PLAYABLE_PREVIEW_*` 环境配置后，原 V2 运行提交为 `b3c3e6a2d6556d7dad4c79082a324235ad0f8379`。
 
 原 V2 staging `/root/releases/ad-control-v2-20260715-183100-b3c3e6a` 和 C2 回滚点 `/root/backups/drama_material_service/20260715T103332Z-ad-control-v2-c2-b3c3e6a` 均完整保留。首次恢复 cron 的 18:50 自然 tick 暴露 BUG-007：空 Campaign 白名单被误计为 108 个 preview 错误，runner 安全阻断为 `live_preview_blocked`；requested/success 均为 0，未读取 Token、未调用 Graph、未发生 Meta 写入。下一 tick 前仅暂停 ad-control cron，API/worker 未受影响。
 
-热修提交为 `7f65cf9bf6799fb0a086238d41f569c2b206e820` 和 `4527303100a38db26f0f2ac0825ed6616c16247a`，staging 为 `/root/releases/ad-control-v2-hotfix-20260715-190000-7f65cf9`，生产 Python 环境 fresh-cache 174/174 通过。当前生产运行提交为 `4527303100a38db26f0f2ac0825ed6616c16247a`，`app.py` SHA-256 为 `39b81d10cab7bf28a60132fb5445d0a2bedbc817bad3160dc6b39d495667764e`，runner SHA-256 为 `2e285a46f5054f7e8dbfa7ae66bbe7145ca9d28a701cfdd94efe46f3ee990347`。热修 C3 回滚点为 `/root/backups/drama_material_service/20260715T111700Z-ad-control-v2-hotfix-c3-4527303`，C2/C3 权限均为 `700`。
+BUG-007 热修提交为 `7f65cf9bf6799fb0a086238d41f569c2b206e820` 和 `4527303100a38db26f0f2ac0825ed6616c16247a`，staging 为 `/root/releases/ad-control-v2-hotfix-20260715-190000-7f65cf9`，该阶段生产 Python 环境 fresh-cache 174/174 通过。该阶段 `app.py` SHA-256 为 `39b81d10cab7bf28a60132fb5445d0a2bedbc817bad3160dc6b39d495667764e`，runner SHA-256 为 `2e285a46f5054f7e8dbfa7ae66bbe7145ca9d28a701cfdd94efe46f3ee990347`。热修 C3 回滚点为 `/root/backups/drama_material_service/20260715T111700Z-ad-control-v2-hotfix-c3-4527303`，C2/C3 权限均为 `700`。
 
 生产 SQLite 迁移默认 check 零写，首次 apply 精确更新 3 个已核实规则组 owner，二次 apply 更新 0 行；`integrity_check=ok`，当前用户 owner 为 `892fd2e8`，active Dramawave 规则组解析 245 个账号，legacy standalone total/enabled 保持 0/0，未创建 copy intent/lineage/quota 表。API、worker、Nginx、认证页面、playable 未授权 403、真实浏览器规则组页面和静态版本 `20260715copylog3` 均通过；浏览器未保存任何编辑。
 
 原 crontab 已与 C2 备份逐字节恢复，SHA-256 为 `9f89d934...`，唯一 runner 条目为 1。19:25 自然 tick 返回 `skipped/no_accounts_due`，requested/success/error 均为 0、action_id 为空；SQLite action 数量前后保持 17，最新 preview 的 `scheduled_due_count=0`、`preview_error_count=0`、candidate/pause/copy target 均为 0。API/worker/crond 均 active，应用日志无 Traceback/SyntaxError/ImportError。
+
+连续监控在 19:40 发现 BUG-008：旧代码执行 `SHOW COLUMNS FROM kunlunads_dev.ads_facebook_hours_insights` 时遇到一次 MySQL client exit 1，best-effort helper 将读取失败返回为空集合，进而误报 `insight start table missing required fields`。该 tick 没有 preview_id/action_id，requested/success/error 均为 0，action 保持 17、对象状态未变化，且未调用 Meta 写接口。19:41 人工只读回查确认表有 54 列且 `campaign_id/dt/ad_account_id` 均存在；19:45 及后续旧版本自然 tick 自行恢复，证明不是 schema 漂移。
+
+BUG-008 修复提交和当前生产运行版本为 `375185d5c7ad8dbdf39eae8e5c8b8ddf7a45b9a5`，staging 为 `/root/releases/ad-control-v2-schema-hotfix-20260715-195900-375185d`，生产 Python 环境 fresh-cache 180/180 通过。当前生产 `app.py` SHA-256 为 `7ed60179abc83880d41f2547ed19e3591136dca693c776df5d5ecfe6a2546b49`，runner SHA-256 为 `a3fa7b2bbe597e52dec44347de750fe34d313302baefba585f66d521dd5c25e7`；C4 回滚点为 `/root/backups/drama_material_service/20260715T120738Z-ad-control-v2-schema-hotfix-c4-375185d`。修复将 schema 读取纳入 critical retry，并分离持续读取失败与真实缺列语义；runner 在每次规则组事件内lazy singleflight，失败时为各 worker 构造独立异常，无到期账号不触发 schema I/O。
+
+20:11:18 已恢复 exact ad-control cron。恢复前基线为 SQLite action 17、preview 52，最新对象状态时间仍为 04:22:58；`drama-material-api.service`、`drama-material-job-worker.service`、crond 均为 active，认证接口 200、playable 未授权 403、公开页面 200。20:15、20:20、20:25、20:30 四轮自然 tick 均返回 `skipped/no_accounts_due`，requested/success/error 均为0；preview 52→56，action保持17，对象状态保持不变，六项preview指标均为0，部署后日志无schema probe、`SHOW COLUMNS`或`Traceback`。MySQL只读回读为`read_only=1`、既有action_log保持21条，复制熔断变量仍未设置，copied created_data/lineage/intent表仍不存在。
+
+20:11恢复后，另一外部任务将 `tt_minis_multi_dim_dashboard` cron 从事故暂停改为启用，导致root crontab整体SHA从C4基线变化；该差异不属于本发布且未被覆盖。ad-control runner行仍与C4逐字一致且仅1条，最终审计保留了该外部diff和当前SHA。
 
 最终安全审计期间曾有一次只读审计误触 exact deployer 的默认 apply，将磁盘 `app.py` 从 `b3c3e6a` 反向应用到 `8c559a7`；运行中的 API 进程未重启，检测到哈希漂移后于 18:49:29 使用相同 exact-source 链恢复到 `b3c3e6a`，早于 18:50 cron tick，未有请求在错误磁盘版本上执行。后续 staging、174/174、热修 overlay 和自然 tick 均基于重新读取的精确哈希完成。只读审计今后禁止运行 deployer；如确需验证只能显式使用 `--check`。
 
