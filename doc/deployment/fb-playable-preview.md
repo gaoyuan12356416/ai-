@@ -1,0 +1,59 @@
+# Meta playable preview packaging
+
+Public API document source: `doc/deployment/playable-preview-api.md`
+
+Published document:
+
+`https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md`
+
+Canonical endpoint:
+
+- `POST https://ai.yingliangads.com/api/fb-playable/preview`
+
+The canonical `/api/fb-playable/preview` route also requires the tracked nginx include `deploy/nginx/fb-playable-preview.conf`, installed as `/etc/nginx/default.d/fb-playable-preview.conf`. Validate with `nginx -t` before reloading nginx.
+
+Production authentication uses `PLAYABLE_PREVIEW_AUTH_MODE=enforce` with a strong server-only `PLAYABLE_PREVIEW_API_TOKEN`; `FB_PLAYABLE_API_TOKEN` is a migration alias. Send the token as a bearer token or `X-API-Token`. Missing or invalid credentials return `403`; enforce mode without a configured server token fails closed with `503`.
+
+Accepted sources are an HTML file or ZIP uploaded as multipart field `static_page` (legacy field names remain supported), or JSON fields `static_html`, `static_html_base64`, or `static_zip_base64` (legacy `html`, `html_base64`, and `zip_base64` aliases remain accepted).
+
+Only process controlled, trusted source bundles. The scanner, runtime guards, opaque-origin sandbox, and CSP are layered defenses; this endpoint is not a general-purpose isolation service for arbitrary hostile JavaScript.
+
+The service converts the source into a Meta-oriented single-file package:
+
+- the ZIP contains only top-level `index.html`;
+- local scripts, styles, images, WASM, JSON, and archive files are embedded;
+- inner `window.fetch` and `window.XMLHttpRequest` are rebound to the embedded resource map before game scripts run, so source loaders are handled without rewriting unrelated object methods or keys;
+- executable `location` references are rewritten to a frozen facade, `window.open` is locked, and dynamic anchor navigation is captured, while Defold `sys.open_url` is bridged to the parent CTA;
+- timer globals are locked to function-only wrappers, while eval/Function aliases and constructor recovery are rejected;
+- the install button only calls `FbPlayableAd.onCTAClick()` and never opens the store URL directly;
+- large runtime resources are compacted as LZMA plus script-safe Base94 and decoded before original game scripts execute;
+- original scripts are resumed with CSP-safe script-node injection; generated playables never require `unsafe-eval`;
+- the game iframe has an opaque-origin sandbox, while both outer and inner documents embed CSP that blocks connect, worker, object, and form-action capabilities;
+- ZIP extraction rejects traversal, absolute paths, duplicate destinations, encrypted entries, symbolic/special entries, file/directory ancestor conflicts, more than `PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES`, or more than `PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES`;
+- multipart requests reject duplicate scalar fields and multiple upload files, and JSON Base64 uses strict validation;
+- production limits playable generation with `PLAYABLE_PREVIEW_MAX_CONCURRENCY=1` by default and returns `429` when all slots are busy;
+- both final UTF-8 `index.html` and the ZIP must be at or below `PLAYABLE_PREVIEW_MAX_ASSET_BYTES` (default `4,800,000` decimal bytes);
+- `PLAYABLE_PREVIEW_MAX_ZIP_BYTES` remains as a backwards-compatible stricter ZIP cap, but can never raise the overall asset limit.
+
+Validation:
+
+```powershell
+python -m py_compile app.py fb_playable_generator.py scripts\test_fb_playable_generator.py
+python scripts\test_fb_playable_generator.py
+python scripts\test_fb_playable_generator.py --source-zip <game.zip> --output-html <preview.html>
+python scripts\publish_playable_preview_docs.py --check-only
+```
+
+For browser acceptance, serve the generated HTML over HTTP and test it with a CSP that allows inline scripts and WebAssembly but omits `unsafe-eval`. The game must reach its interactive scene with no CSP console errors.
+
+After deploying the exact Git commit to the CPU server, publish the tracked API document with the server-only COS environment:
+
+```bash
+python scripts/publish_playable_preview_docs.py
+```
+
+The publisher atomically refreshes the nginx copy and force-overwrites the fixed COS object with `text/markdown; charset=utf-8` and `Cache-Control: no-cache`. Verify the public document body, SHA-256, `Content-Type`, `Last-Modified`, and `ETag` after publishing.
+
+The response includes `meta_compatible`, `compatibility`, `html_size`, `zip_size`, `meta_size_limit_bytes`, `size_headroom_bytes`, `manifest_url`, `documentation_url`, the original `source_entry`, and final `entry=index.html`.
+
+When COS publishing is enabled, a successful request removes its local output directory only after all three remote objects are uploaded, preventing repeated ~9.5 MB previews from filling the server disk. Failed requests best-effort delete partial COS objects and always remove local partial output.
