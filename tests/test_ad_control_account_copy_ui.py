@@ -290,6 +290,22 @@ class AccountCopyRuleUiTests(unittest.TestCase):
         html = (ROOT / "static" / "ad-control-rules.html").read_text(encoding="utf-8")
         self.assertIn("feature=account-copy1", html)
 
+    def test_log_page_defaults_to_all_products_and_lists_v2_actions(self):
+        log_block = JS[JS.index("async function renderLogs()") : JS.index("function logStatusBadge")]
+        self.assertIn("await loadProducts({ includeAll: true });", log_block)
+        self.assertIn("全部产品（含账号规则）", JS)
+        self.assertIn('<option value="copy">复制 copy</option>', log_block)
+        self.assertIn('<option value="mixed">混合 mixed</option>', log_block)
+        self.assertIn('optionHtml(state.bindings, "binding_id", "name", "全部规则组")', log_block)
+        self.assertIn("binding_id=${encodeURIComponent(id)}", JS)
+
+    def test_non_log_product_pages_keep_strict_product_default(self):
+        load_block = JS[JS.index("async function loadProducts") : JS.index("async function loadAccounts")]
+        self.assertIn("const includeAll = !!options.includeAll;", load_block)
+        self.assertIn("const items = includeAll", load_block)
+        self.assertIn('? [{ product: "", label:', load_block)
+        self.assertIn("else if (previous && ALLOWED_PRODUCTS.includes(previous))", load_block)
+
 
 if __name__ == "__main__":
     unittest.main()
