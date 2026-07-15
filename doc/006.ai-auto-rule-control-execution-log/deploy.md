@@ -27,7 +27,7 @@
 
 ## 数据库变更
 
-由部署人员在维护窗口通过 `63353` 手工执行一次 `001_create_ad_control_action_log.sql`。运行时代码不包含建表入口，不允许自动 `CREATE/ALTER/DROP`。2026-07-15 已从 `43.166.187.96` 实测 `63353` 为 `@@read_only=0`，随机探针表的 CREATE/单行 DML/DROP 全部成功且无残留。
+由部署人员在维护窗口通过 `63353` 手工执行一次 `001_create_ad_control_action_log.sql`。运行时代码不包含建表入口，不允许自动 `CREATE/ALTER/DROP`。2026-07-15 已从 `43.166.187.96` 实测 `63353` 为 `@@read_only=0`，并完成正式表创建与回读：`ads_ai.ad_control_action_log` 共31列、5个索引、InnoDB；先前随机探针表及上线写探针均已清理，无残留。
 
 运行时写保护固定如下：只允许 `ads_ai.ad_control_action_log`；单条 INSERT...ON DUPLICATE KEY UPDATE 或按主键 `LIMIT 1` UPDATE；主机级文件锁并发1；令牌桶突发2、平均1次/秒；JSON合计最多512KiB；数据库失败零重试并保留SQLite outbox。写端不得承担列表、详情、统计、扫描或迁移源查询。
 
@@ -42,13 +42,13 @@
 7. `py_compile` app/runner/feature/migration；`node --check` JS。
 8. 运行 migration 回填，每次最多20条、每条至少间隔1秒；使用 `--offset` 分段推进。立即二次运行同一段，确认 existing_skipped 等于已存在数量且行数不变。
 9. 重启且只重启 `drama-material-api.service`；cron配置不改。
-10. 执行 health、日志 GET、详情 lazy GET、preview/dry-run 和 runner只读状态回归。
+10. 确认服务 active 且 journal 无错误；通过公网 nginx 检查两个静态页，通过API检查鉴权，再使用登录态验证日志列表与详情 lazy GET。正式Meta写操作只允许在另行批准后执行。
 
 ## 验证步骤
 
 ```bash
 systemctl is-active drama-material-api.service
-python3 -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_execution_log/service.py
+python3 -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_execution_log/service.py scripts/migrate_ad_control_action_logs.py
 mysql ... -e "SELECT COUNT(*),MIN(created_at),MAX(created_at) FROM ads_ai.ad_control_action_log"
 python3 scripts/migrate_ad_control_action_logs.py --limit 20 --offset 0
 python3 scripts/migrate_ad_control_action_logs.py --limit 20 --offset 0
@@ -57,12 +57,22 @@ tail -n 100 /var/log/ad_control_rule_runner.log
 
 上线后不得手工触发正式 pause 作为验证；先使用已有登录态读取日志，再做 live preview/dry-run。
 
+## 生产部署记录（2026-07-15）
+
+- 生产源码版本：`82fdab6a5c88565a45d1e7d2ac2a9dddf9bb3dce`；服务器 checkout 与 GitHub 精确一致且 clean。
+- 上线前完整备份：`/root/drama_material_service/backups/ad-control-execution-log-20260715-130314`；清单 SHA256 为 `3a825eaa1b98f3e931661da9d1719e847d410aee22ad3ecfc8a4af03c7a01aaf`。
+- 仅重启 `drama-material-api.service`；服务为 active，部署后 journal error 为0，cron未变，验证时主机负载保持低位。
+- 公网页面 `/ad-control.html` 与 `/ad-control-logs.html` 均返回200；未登录访问日志API返回401，符合鉴权预期。
+- SQLite源与MySQL目标均为16个 action_id，集合完全相同；同一批次二次迁移后仍为16行，证明幂等跳过生效。
+- 使用真实Chrome登录态验证：列表显示16张日志卡；首条日志的目标明细懒加载成功，展示186/186条，原始结果也是186条。
+- 首次上线演练因把后端直连 `/ad-control.html` 当作静态健康检查而得到404，自动回滚已完整恢复并经SHA比对确认。最终部署改用正确的API与公网静态页检查后通过。
+
 ## 回滚方案
 
-- 代码：恢复本次带时间戳备份的 `app.py`、runner、feature和静态资源，重新 `py_compile` 后只重启 API 服务。
+- 代码：从 `/root/drama_material_service/backups/ad-control-execution-log-20260715-130314` 恢复 `app.py`、runner、`.env` 和静态资源；删除部署前清单标记为不存在的 `features/ad_control_execution_log/` 与 `scripts/migrate_ad_control_action_logs.py`，重新 `py_compile` 后只重启 API 服务。
 - 数据：日志表为新增独立表，代码回滚时无需删除；若必须回滚DDL，先导出表再 `RENAME TABLE`，不直接 DROP。
 - runner：恢复旧 runner 后，确认 cron仍只有一条且锁文件机制正常。
-- 回滚点：部署时记录备份目录、Git commit和现网原SHA。
+- 回滚点：上述备份目录、生产源码版本 `82fdab6a5c88565a45d1e7d2ac2a9dddf9bb3dce` 及备份内 SHA256 清单。
 
 ## 注意事项
 
