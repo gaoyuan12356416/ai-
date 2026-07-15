@@ -2,9 +2,12 @@ import json
 import unittest
 import concurrent.futures
 import logging
+import os
+import tempfile
 import threading
 import uuid
 from datetime import datetime
+from unittest import mock
 
 from deploy import apply_ad_control_execution_log_fix as deploy_fix
 from deploy.apply_ad_control_execution_log_fix import replace_once
@@ -98,6 +101,30 @@ class SummaryTests(unittest.TestCase):
 
 
 class PersistenceShapeTests(unittest.TestCase):
+    @staticmethod
+    def writer_config(**overrides):
+        config = {
+            "host": service.WRITER_HOST,
+            "port": service.WRITER_PORT,
+            "user": "ads_aius",
+            "password": "secret",
+            "database": service.WRITER_DATABASE,
+            "connect_timeout": 30,
+            "read_timeout": 30,
+            "write_timeout": 30,
+        }
+        config.update(overrides)
+        return config
+
+    @staticmethod
+    def reader_config(**overrides):
+        config = PersistenceShapeTests.writer_config(
+            host=service.READER_HOST,
+            port=service.READER_PORT,
+        )
+        config.update(overrides)
+        return config
+
     def test_sensitive_fields_are_redacted(self):
         value = service.sanitize_json({
             "access_token": "secret",
@@ -117,11 +144,122 @@ class PersistenceShapeTests(unittest.TestCase):
         self.assertIn("已关停", record["results_json"])
         self.assertEqual(1, record["log_version"])
 
-    def test_mysql_ddl_targets_ads_ai_and_has_required_indexes(self):
-        ddl = service.table_ddl("ads_ai", "ad_control_action_log")
+    def test_mysql_ddl_is_deployment_only_and_has_required_indexes(self):
+        self.assertFalse(hasattr(service, "ensure_table"))
+        self.assertFalse(hasattr(service, "table_ddl"))
+        ddl_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "doc",
+            "006.ai-auto-rule-control-execution-log",
+            "001_create_ad_control_action_log.sql",
+        )
+        with open(ddl_path, "r", encoding="utf-8") as handle:
+            ddl = handle.read()
         self.assertIn("`ads_ai`.`ad_control_action_log`", ddl)
-        self.assertIn("PRIMARY KEY (action_id)", ddl)
-        self.assertIn("idx_acl_event_created", ddl)
+        self.assertIn("PRIMARY KEY (`action_id`)", ddl)
+        self.assertIn("`idx_acl_event_created`", ddl)
+
+    def test_writer_and_reader_endpoints_are_fail_closed(self):
+        valid_writer = service.validate_target(self.writer_config(), "writer")
+        self.assertEqual(service.WRITER_PORT, valid_writer["port"])
+        self.assertEqual(3, valid_writer["connect_timeout"])
+        self.assertEqual(5, valid_writer["read_timeout"])
+        service.validate_target(self.reader_config(), "reader")
+        for overrides in (
+            {"host": "127.0.0.1"},
+            {"port": service.READER_PORT},
+            {"database": "kunlunads_dev"},
+        ):
+            with self.assertRaises(service.ActionLogSafetyError):
+                service.validate_target(self.writer_config(**overrides), "writer")
+        with self.assertRaises(service.ActionLogSafetyError):
+            service.validate_target(
+                self.writer_config(), "writer", table="other_table"
+            )
+        with self.assertRaises(service.ActionLogSafetyError):
+            service.validate_target(self.writer_config(), "reader")
+
+    def test_writer_sql_is_single_row_fixed_table_and_no_ddl(self):
+        calls = []
+
+        class Cursor:
+            rowcount = 1
+
+            def execute(self, sql, params):
+                calls.append((sql, params))
+                return 1
+
+        with mock.patch.object(
+            service,
+            "_serialized_write",
+            side_effect=lambda config, table, callback: callback(Cursor()),
+        ):
+            service.upsert_action(
+                self.writer_config(),
+                {"action_id": "a1", "criteria": {}, "results": []},
+            )
+            service.update_runner_status(
+                self.writer_config(), "a1", "event", "partial", "reason", 1
+            )
+        self.assertEqual(2, len(calls))
+        self.assertTrue(calls[0][0].startswith(
+            "INSERT INTO `ads_ai`.`ad_control_action_log`"
+        ))
+        self.assertIn(
+            "UPDATE `ads_ai`.`ad_control_action_log`", calls[1][0]
+        )
+        self.assertIn("WHERE action_id=%s LIMIT 1", calls[1][0])
+        self.assertFalse(any("CREATE " in sql or "DELETE " in sql for sql, _ in calls))
+
+    def test_payload_over_512_kib_fails_before_database_write(self):
+        with mock.patch.object(service, "_serialized_write") as writer:
+            with self.assertRaises(service.ActionLogSafetyError):
+                service.upsert_action(
+                    self.writer_config(),
+                    {
+                        "action_id": "a1",
+                        "criteria": {"oversized": "x" * service.MAX_PAYLOAD_BYTES},
+                        "results": [],
+                    },
+                )
+            writer.assert_not_called()
+
+    def test_host_wide_rate_limit_allows_burst_two_then_rejects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = os.path.join(directory, "writer.lock")
+            with mock.patch.object(service, "WRITER_LOCK_FILE", lock_path), mock.patch.object(
+                service.time, "time", return_value=1000.0
+            ):
+                first = service._acquire_interprocess_write_slot()
+                service._release_interprocess_write_slot(*first)
+                second = service._acquire_interprocess_write_slot()
+                service._release_interprocess_write_slot(*second)
+                with self.assertRaises(service.ActionLogSafetyError):
+                    service._acquire_interprocess_write_slot()
+
+    def test_deploy_patch_splits_writer_and_reader_configs(self):
+        self.assertIn(
+            "def ad_control_action_log_writer_config():",
+            deploy_fix.INTEGRATION_BLOCK,
+        )
+        self.assertIn(
+            "def ad_control_action_log_reader_config():",
+            deploy_fix.INTEGRATION_BLOCK,
+        )
+        self.assertIn("63353", deploy_fix.INTEGRATION_BLOCK)
+        self.assertIn("63350", deploy_fix.INTEGRATION_BLOCK)
+
+    def test_migration_is_capped_and_has_no_force_overwrite(self):
+        migration_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "scripts",
+            "migrate_ad_control_action_logs.py",
+        )
+        with open(migration_path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("MAX_MIGRATION_ROWS = 20", source)
+        self.assertIn("MIN_WRITE_INTERVAL_SECONDS = 1.0", source)
+        self.assertNotIn('"--force"', source)
 
     def test_replace_once_is_idempotent_when_new_contains_old(self):
         old = "MAX = 200\n"

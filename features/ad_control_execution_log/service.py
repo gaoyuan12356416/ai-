@@ -6,19 +6,42 @@ Callers pass database connection settings and keep SQLite as an outbox/fallback.
 
 import ast
 import json
+import os
 import re
+import stat
+import tempfile
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 
 
+WRITER_HOST = "101.32.56.53"
+WRITER_PORT = 63353
+READER_HOST = "101.32.56.53"
+READER_PORT = 63350
+WRITER_DATABASE = "ads_ai"
 DEFAULT_TABLE = "ad_control_action_log"
+QUALIFIED_TABLE = "`ads_ai`.`ad_control_action_log`"
+MAX_CONNECT_TIMEOUT_SECONDS = 3
+MAX_IO_TIMEOUT_SECONDS = 5
+MAX_PAYLOAD_BYTES = 512 * 1024
+WRITE_RATE_PER_SECOND = 1.0
+WRITE_BURST = 2.0
+WRITER_LOCK_FILE = (
+    "/var/lock/ad_control_action_log_writer.lock"
+    if os.name == "posix"
+    else os.path.join(tempfile.gettempdir(), "ad_control_action_log_writer.lock")
+)
 RETRYABLE_GRAPH_CODES = {1, 2, 4, 17, 32, 613}
 RETRYABLE_GRAPH_SUBCODES = {5044001}
 TERMINAL_SKIP_REASONS = {"not_active", "already_paused", "not_pause_target"}
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
-_TABLE_READY = set()
-_TABLE_LOCK = threading.Lock()
+_WRITE_LOCK = threading.Lock()
+
+
+class ActionLogSafetyError(RuntimeError):
+    """Raised when the dedicated action-log database boundary is violated."""
 
 
 def normalize_account(value):
@@ -211,88 +234,75 @@ def _identifier(value):
     return "`%s`" % text
 
 
-def _connect(config):
+def _bounded_int(value, default, maximum):
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(1, min(parsed, int(maximum)))
+
+
+def validate_target(config, role, table=DEFAULT_TABLE):
+    """Fail closed unless a connection matches the dedicated log boundary."""
+    config = dict(config or {})
+    role = str(role or "").strip().lower()
+    if role not in {"reader", "writer"}:
+        raise ActionLogSafetyError("invalid ad-control action-log connection role")
+    host = str(config.get("host") or "").strip()
+    port = int(config.get("port") or 0)
+    database = str(config.get("database") or "").strip()
+    user = str(config.get("user") or "").strip()
+    expected_host = WRITER_HOST if role == "writer" else READER_HOST
+    expected_port = WRITER_PORT if role == "writer" else READER_PORT
+    if host != expected_host or port != expected_port:
+        raise ActionLogSafetyError(
+            "ad-control action-log %s endpoint must be %s:%s" % (
+                role, expected_host, expected_port,
+            )
+        )
+    if database != WRITER_DATABASE:
+        raise ActionLogSafetyError("ad-control action-log database must be ads_ai")
+    if str(table or "").strip() != DEFAULT_TABLE:
+        raise ActionLogSafetyError(
+            "ad-control action-log table must be ad_control_action_log"
+        )
+    if not user:
+        raise ActionLogSafetyError("ad-control action-log database user is required")
+    config.update({
+        "host": host,
+        "port": port,
+        "database": database,
+        "user": user,
+        "connect_timeout": _bounded_int(
+            config.get("connect_timeout"), 3, MAX_CONNECT_TIMEOUT_SECONDS
+        ),
+        "read_timeout": _bounded_int(
+            config.get("read_timeout"), 5, MAX_IO_TIMEOUT_SECONDS
+        ),
+        "write_timeout": _bounded_int(
+            config.get("write_timeout"), 5, MAX_IO_TIMEOUT_SECONDS
+        ),
+    })
+    return config
+
+
+def _connect(config, role, table=DEFAULT_TABLE):
     import pymysql
 
+    config = validate_target(config, role, table)
     return pymysql.connect(
-        host=str(config.get("host") or "127.0.0.1"),
-        port=int(config.get("port") or 3306),
-        user=str(config.get("user") or ""),
+        host=config["host"],
+        port=config["port"],
+        user=config["user"],
         password=str(config.get("password") or ""),
-        database=str(config.get("database") or "ads_ai"),
+        database=config["database"],
         charset="utf8mb4",
-        connect_timeout=int(config.get("connect_timeout") or 5),
-        read_timeout=int(config.get("read_timeout") or 8),
-        write_timeout=int(config.get("write_timeout") or 8),
+        connect_timeout=config["connect_timeout"],
+        read_timeout=config["read_timeout"],
+        write_timeout=config["write_timeout"],
         autocommit=True,
         cursorclass=pymysql.cursors.DictCursor,
     )
-
-
-def table_ddl(database="ads_ai", table=DEFAULT_TABLE):
-    qualified = "%s.%s" % (_identifier(database), _identifier(table))
-    return """
-CREATE TABLE IF NOT EXISTS {qualified} (
-  action_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  preview_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
-  binding_id VARCHAR(128) NOT NULL DEFAULT '',
-  rule_id VARCHAR(128) NOT NULL DEFAULT '',
-  event_key VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
-  source_type VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'api',
-  actor_user_id VARCHAR(128) NOT NULL DEFAULT '',
-  product VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
-  action VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
-  object_level VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'campaign',
-  run_status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
-  runner_reason VARCHAR(255) NOT NULL DEFAULT '',
-  dry_run TINYINT(1) UNSIGNED NOT NULL DEFAULT 0,
-  scanned_count INT UNSIGNED NOT NULL DEFAULT 0,
-  candidate_count INT UNSIGNED NOT NULL DEFAULT 0,
-  matched_count INT UNSIGNED NOT NULL DEFAULT 0,
-  batch_planned_count INT UNSIGNED NOT NULL DEFAULT 0,
-  deferred_count INT UNSIGNED NOT NULL DEFAULT 0,
-  requested_count INT UNSIGNED NOT NULL DEFAULT 0,
-  success_count INT UNSIGNED NOT NULL DEFAULT 0,
-  skipped_count INT UNSIGNED NOT NULL DEFAULT 0,
-  error_count INT UNSIGNED NOT NULL DEFAULT 0,
-  retryable_error_count INT UNSIGNED NOT NULL DEFAULT 0,
-  blocked_count INT UNSIGNED NOT NULL DEFAULT 0,
-  remaining_count INT UNSIGNED NOT NULL DEFAULT 0,
-  criteria_json MEDIUMTEXT NOT NULL,
-  results_json MEDIUMTEXT NOT NULL,
-  reason_summary_json TEXT NOT NULL,
-  log_version SMALLINT UNSIGNED NOT NULL DEFAULT 1,
-  created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL,
-  PRIMARY KEY (action_id),
-  KEY idx_acl_created (created_at, action_id),
-  KEY idx_acl_product_created (product, created_at, action_id),
-  KEY idx_acl_binding_created (binding_id, created_at, action_id),
-  KEY idx_acl_event_created (event_key, created_at, action_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
-""".format(qualified=qualified)
-
-
-def ensure_table(config, table=DEFAULT_TABLE):
-    key = (
-        str(config.get("host") or ""),
-        int(config.get("port") or 3306),
-        str(config.get("user") or ""),
-        str(config.get("database") or "ads_ai"),
-        str(table),
-    )
-    if key in _TABLE_READY:
-        return
-    with _TABLE_LOCK:
-        if key in _TABLE_READY:
-            return
-        conn = _connect(config)
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(table_ddl(config.get("database") or "ads_ai", table))
-            _TABLE_READY.add(key)
-        finally:
-            conn.close()
 
 
 LOG_COLUMNS = [
@@ -326,9 +336,116 @@ def normalize_record(record):
     return normalized
 
 
+def _enforce_payload_limit(record):
+    payload_bytes = sum(
+        len(str(record.get(key) or "").encode("utf-8"))
+        for key in ("criteria_json", "results_json", "reason_summary_json")
+    )
+    if payload_bytes > MAX_PAYLOAD_BYTES:
+        raise ActionLogSafetyError(
+            "ad-control action-log JSON payload exceeds %s bytes" % MAX_PAYLOAD_BYTES
+        )
+
+
+def _acquire_interprocess_write_slot():
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(WRITER_LOCK_FILE, flags, 0o600)
+    file_stat = os.fstat(fd)
+    if not stat.S_ISREG(file_stat.st_mode):
+        os.close(fd)
+        raise ActionLogSafetyError("ad-control writer lock must be a regular file")
+    if hasattr(os, "geteuid") and file_stat.st_uid != os.geteuid():
+        os.close(fd)
+        raise ActionLogSafetyError("ad-control writer lock has an unexpected owner")
+    handle = os.fdopen(fd, "r+", encoding="ascii")
+    fcntl = None
+    try:
+        try:
+            import fcntl as fcntl_module
+
+            fcntl = fcntl_module
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:
+            # Production is Linux; the in-process lock remains active on Windows tests.
+            pass
+        except (BlockingIOError, OSError):
+            raise ActionLogSafetyError("ad-control action-log global writer is busy")
+        handle.seek(0)
+        try:
+            state = json.loads(handle.read() or "{}")
+            last_refill = float(state.get("last_refill") or 0.0)
+            tokens = float(state.get("tokens") or 0.0)
+        except Exception:
+            last_refill = 0.0
+            tokens = 0.0
+        now = time.time()
+        if last_refill <= 0:
+            tokens = WRITE_BURST
+        else:
+            tokens = min(
+                WRITE_BURST,
+                tokens + max(0.0, now - last_refill) * WRITE_RATE_PER_SECOND,
+            )
+        if tokens < 1.0:
+            raise ActionLogSafetyError(
+                "ad-control action-log writer exceeded burst 2 / average 1 qps"
+            )
+        tokens -= 1.0
+        handle.seek(0)
+        handle.truncate(0)
+        handle.write(json.dumps({"last_refill": now, "tokens": tokens}))
+        handle.flush()
+        os.fsync(handle.fileno())
+        return handle, fcntl
+    except Exception:
+        if fcntl is not None:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+        handle.close()
+        raise
+
+
+def _release_interprocess_write_slot(handle, fcntl):
+    if handle is None:
+        return
+    if fcntl is not None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+    handle.close()
+
+
+def _serialized_write(config, table, callback):
+    """Execute one bounded statement with Linux host-wide concurrency and rate 1."""
+    validate_target(config, "writer", table)
+    if not _WRITE_LOCK.acquire(blocking=False):
+        raise ActionLogSafetyError("ad-control action-log writer is busy")
+    conn = None
+    lock_handle = None
+    fcntl = None
+    try:
+        lock_handle, fcntl = _acquire_interprocess_write_slot()
+        conn = _connect(config, "writer", table)
+        with conn.cursor() as cursor:
+            return callback(cursor)
+    finally:
+        if conn is not None:
+            conn.close()
+        _release_interprocess_write_slot(lock_handle, fcntl)
+        _WRITE_LOCK.release()
+
+
 def upsert_action(config, record, table=DEFAULT_TABLE):
-    ensure_table(config, table)
+    config = validate_target(config, "writer", table)
     record = normalize_record(record)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(record.get("action_id") or "")):
+        raise ActionLogSafetyError("invalid ad-control action_id")
+    _enforce_payload_limit(record)
     column_sql = ",".join(_identifier(key) for key in LOG_COLUMNS)
     placeholders = ",".join(["%s"] * len(LOG_COLUMNS))
     updates = ",".join(
@@ -336,27 +453,35 @@ def upsert_action(config, record, table=DEFAULT_TABLE):
         for key in LOG_COLUMNS if key not in {"action_id", "created_at"}
     )
     sql = "INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s" % (
-        _identifier(table), column_sql, placeholders, updates,
+        QUALIFIED_TABLE, column_sql, placeholders, updates,
     )
-    conn = _connect(config)
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, [record[key] for key in LOG_COLUMNS])
-    finally:
-        conn.close()
+    _serialized_write(
+        config,
+        table,
+        lambda cursor: cursor.execute(sql, [record[key] for key in LOG_COLUMNS]),
+    )
     return record
 
 
 def update_runner_status(config, action_id, event_key, status, reason, remaining_count, table=DEFAULT_TABLE):
-    ensure_table(config, table)
-    sql = "UPDATE %s SET event_key=%%s,run_status=%%s,runner_reason=%%s,remaining_count=%%s,updated_at=UTC_TIMESTAMP() WHERE action_id=%%s" % _identifier(table)
-    conn = _connect(config)
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, (event_key or "", status or "", reason or "", max(0, int(remaining_count or 0)), action_id))
-            return int(cursor.rowcount or 0)
-    finally:
-        conn.close()
+    config = validate_target(config, "writer", table)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(action_id or "")):
+        raise ActionLogSafetyError("invalid ad-control action_id")
+    sql = "UPDATE %s SET event_key=%%s,run_status=%%s,runner_reason=%%s,remaining_count=%%s,updated_at=UTC_TIMESTAMP() WHERE action_id=%%s LIMIT 1" % QUALIFIED_TABLE
+    def execute(cursor):
+        cursor.execute(
+            sql,
+            (
+                event_key or "",
+                status or "",
+                reason or "",
+                max(0, int(remaining_count or 0)),
+                action_id,
+            ),
+        )
+        return int(cursor.rowcount or 0)
+
+    return _serialized_write(config, table, execute)
 
 
 def _decode_row(row, include_results=False):
@@ -391,7 +516,7 @@ def _decode_row(row, include_results=False):
 
 
 def list_actions(config, filters=None, limit=50, table=DEFAULT_TABLE):
-    ensure_table(config, table)
+    config = validate_target(config, "reader", table)
     filters = dict(filters or {})
     where = []
     params = []
@@ -409,11 +534,11 @@ def list_actions(config, filters=None, limit=50, table=DEFAULT_TABLE):
     selected = [key for key in LOG_COLUMNS if key != "results_json"]
     sql = "SELECT %s FROM %s%s ORDER BY created_at DESC LIMIT %%s" % (
         ",".join(_identifier(key) for key in selected),
-        _identifier(table),
+        QUALIFIED_TABLE,
         (" WHERE " + " AND ".join(where)) if where else "",
     )
     params.append(max(1, min(200, int(limit or 50))))
-    conn = _connect(config)
+    conn = _connect(config, "reader", table)
     try:
         with conn.cursor() as cursor:
             cursor.execute(sql, params)
@@ -423,11 +548,11 @@ def list_actions(config, filters=None, limit=50, table=DEFAULT_TABLE):
 
 
 def fetch_action(config, action_id, table=DEFAULT_TABLE):
-    ensure_table(config, table)
+    config = validate_target(config, "reader", table)
     sql = "SELECT %s FROM %s WHERE action_id=%%s LIMIT 1" % (
-        ",".join(_identifier(key) for key in LOG_COLUMNS), _identifier(table),
+        ",".join(_identifier(key) for key in LOG_COLUMNS), QUALIFIED_TABLE,
     )
-    conn = _connect(config)
+    conn = _connect(config, "reader", table)
     try:
         with conn.cursor() as cursor:
             cursor.execute(sql, (str(action_id or ""),))
