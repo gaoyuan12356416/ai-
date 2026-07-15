@@ -619,6 +619,15 @@ def patch_app_text(text):
             "feature import",
         )
         changed = changed or block_changed
+    live_workers_old = 'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))\n'
+    live_workers_new = 'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))\n'
+    text, block_changed = replace_once(
+        text,
+        live_workers_old,
+        live_workers_new,
+        "live preview worker cap",
+    )
+    changed = changed or block_changed
     constants_old = 'AD_CONTROL_MAX_LIVE_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE", "200"))\n'
     constants_new = constants_old + (
         'AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))\n'

@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | `AD_CONTROL_MAX_LIVE_EXECUTE` | 200 | 单批总上限 |
 | `AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT` | 20 | 单账户单批上限 |
+| `AD_CONTROL_LIVE_MAX_WORKERS` | 4 | live preview跨账户并发，API与runner统一上限 |
 | `AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS` | 4 | execute跨账户并发 |
 | `AD_CONTROL_ACTION_LOG_DB_NAME` | ads_ai | 固定日志库，不允许覆盖 |
 | `AD_CONTROL_ACTION_LOG_TABLE` | ad_control_action_log | 固定日志表，不允许覆盖 |

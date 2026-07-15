@@ -12,7 +12,7 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| Python unittest | 28 | 28 | 0 | 0 |
+| Python unittest | 29 | 29 | 0 | 0 |
 | Python compile | 4 | 4 | 0 | 0 |
 | JavaScript syntax | 1 | 1 | 0 | 0 |
 | 生产同源补丁演练 | 3 | 3 | 0 | 0 |
@@ -25,7 +25,7 @@ BUG-001 及评审发现均已修复；未发现未关闭的 P0/P1。
 
 ## 验证证据
 
-- `python -m unittest discover -s tests -p 'test_*.py' -v`：28/28。
+- `python -m unittest discover -s tests -p 'test_*.py' -v`：29/29。
 - 4个Python文件 `py_compile`：通过。
 - `node --check static/ad-control-pages.js`：通过。
 - 生产同源复合app临时快照：第一次patch=changed、第二次=unchanged、编译通过、所需函数齐全。
@@ -35,6 +35,7 @@ BUG-001 及评审发现均已修复；未发现未关闭的 P0/P1。
 - 随机探针表完成 CREATE、单行 INSERT、UPDATE、SELECT、DELETE、DROP；操作全部成功，探针表已确认无残留。
 - 运行时代码负向门禁：错误端点、错误库表、超512KiB、第三个突发写均在连接数据库前失败；读只走63350，写只走63353，运行时无DDL/DELETE。
 - 首次日志写入回退SQLite时，runner不会立即再发状态UPDATE；仅`log_store=ads_ai`时允许第二条受控状态写入。
+- API与runner的live preview跨账户并发均默认4，生产补丁会把旧默认12收紧为4。
 
 ## 遗留风险
 

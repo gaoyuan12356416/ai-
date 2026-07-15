@@ -102,7 +102,7 @@ SQLite `ad_control_action` 保留，作为先落本地的 outbox 和 MySQL 不�
 
 - `results_json` 会持续增长；本次先建立时间索引，建议后续按 180 天归档/清理并监控表容量。
 - 生产 `app.py` 是共享复合版，部署必须先备份、对真实文件运行 `--check` 和 diff，不允许整文件用仓库版本覆盖。
-- `63353` 已实测为 `@@read_only=0` 写端点，`63350` 保持只读。代码必须固定读写端点与 `ads_ai.ad_control_action_log`，运行时禁用DDL，单写并发1、突发2/平均1QPS、JSON上限512KiB、连接3秒/IO5秒，失败零重试并保留SQLite outbox。
+- `63353` 已实测为 `@@read_only=0` 写端点，`63350` 保持只读。代码必须固定读写端点与 `ads_ai.ad_control_action_log`，运行时禁用DDL，单写并发1、突发2/平均1QPS、JSON上限512KiB、连接3秒/IO5秒，失败零重试并保留SQLite outbox；API与runner的live preview跨账户并发统一默认4。
 - 旧 `ad_control_rule` 路径未改造；生产已确认列表为空，若未来重新启用需先接入本日志链路。
 
 ## 变更记录

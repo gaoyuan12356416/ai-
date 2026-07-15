@@ -249,6 +249,24 @@ class PersistenceShapeTests(unittest.TestCase):
         self.assertIn("63353", deploy_fix.INTEGRATION_BLOCK)
         self.assertIn("63350", deploy_fix.INTEGRATION_BLOCK)
 
+    def test_all_live_preview_paths_default_to_four_workers(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "app.py"), "r", encoding="utf-8") as handle:
+            app_source = handle.read()
+        with open(os.path.join(root, ".env.example"), "r", encoding="utf-8") as handle:
+            env_source = handle.read()
+        deploy_source = os.path.join(root, "deploy", "apply_ad_control_execution_log_fix.py")
+        with open(deploy_source, "r", encoding="utf-8") as handle:
+            patch_source = handle.read()
+        expected = 'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))'
+        self.assertIn(expected, app_source)
+        self.assertIn('AD_CONTROL_LIVE_MAX_WORKERS=4', env_source)
+        self.assertIn('"live preview worker cap"', patch_source)
+        self.assertNotIn(
+            'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))',
+            app_source,
+        )
+
     def test_migration_is_capped_and_has_no_force_overwrite(self):
         migration_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
