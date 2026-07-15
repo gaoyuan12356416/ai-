@@ -109,6 +109,34 @@ class RunnerStateTests(unittest.TestCase):
         )
         self.assertIn('"blocked" if status == "error" else status', source)
 
+    def test_no_account_due_skips_without_verification_or_execution(self):
+        preview = {
+            "preview_id": "preview-no-due",
+            "preview_hash": "hash-no-due",
+            "pause_count": 0,
+            "copy_count": 0,
+            "execution_count": 0,
+            "error_count": 0,
+            "scheduled_due_count": 0,
+        }
+        event, updates, warnings = self.run_group_event_case(
+            preview,
+            execute_result={"action_id": "must-not-execute"},
+        )
+        self.assertEqual("skipped", event["status"])
+        self.assertEqual("no_accounts_due", event["reason"])
+        self.assertNotIn("action_id", event["result"])
+        self.assertFalse(event["result"]["verification_only"])
+        self.assertEqual([], updates)
+        self.assertEqual([], warnings)
+
+    def test_preview_failure_keeps_total_error_count_when_details_are_truncated(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn(
+            '"preview_error_count": int(preview.get("error_count") or len(errors))',
+            source,
+        )
+
     def test_runner_status_update_requires_successful_initial_ads_ai_write(self):
         functions = load_pure_runner_functions()
         has_log = functions["has_ads_ai_action_log"]

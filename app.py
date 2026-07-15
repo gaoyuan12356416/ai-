@@ -37719,7 +37719,9 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist, 
             "active_count": 0,
             "candidate_count": 0,
             "missing_start_count": 0,
+            "scheduled_due_count": 0,
         }
+    scheduled_due_count = 0
     if scope.get("scheduled"):
         timezones = {
             str((value or {}).get("account_time_zone") or "").strip()
@@ -37744,12 +37746,19 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist, 
                 "candidate_count": 0,
                 "missing_start_count": 0,
                 "schedule_reason": schedule_reason,
+                "scheduled_due_count": 0,
             }
+        scheduled_due_count = 1
     token_user_id = str((token_config or {}).get("user_id") or "").strip()
     token = ad_control_token_for_user_id(token_user_id)
     if not token:
         reason = "missing_meta_token" if token_user_id else "missing_apps_setting_default_user"
-        return {"account_id": account_id, "items": [], "errors": [{"reason": reason, "token_user_id": token_user_id}]}
+        return {
+            "account_id": account_id,
+            "items": [],
+            "errors": [{"reason": reason, "token_user_id": token_user_id}],
+            "scheduled_due_count": scheduled_due_count,
+        }
     active_campaigns = ad_control_meta_active_campaigns(token, account_id)
     active_by_id = {str(item.get("id") or "").strip(): item for item in active_campaigns}
     campaign_ids = [campaign_id for campaign_id in whitelist.keys() if campaign_id in active_by_id]
@@ -37826,6 +37835,7 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist, 
         "active_count": len(active_campaigns),
         "candidate_count": len(campaign_ids),
         "missing_start_count": len(missing),
+        "scheduled_due_count": scheduled_due_count,
     }
 
 
@@ -38005,6 +38015,10 @@ def create_ad_control_live_preview(payload, session, internal=False):
         "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),
         "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),
         "preview_error_count": len(errors),
+        "scheduled_due_count": sum(
+            int(result.get("scheduled_due_count") or 0)
+            for result in account_results
+        ),
         "max_per_account": AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,
     }
     with JOB_DB_LOCK:
@@ -38060,6 +38074,10 @@ def create_ad_control_live_preview(payload, session, internal=False):
         "run_mode": scope.get("run_mode") or "observe",
         "object_level": scope.get("object_level") or "campaign",
         "error_count": len(errors),
+        "scheduled_due_count": sum(
+            int(result.get("scheduled_due_count") or 0)
+            for result in account_results
+        ),
         "resource": resource,
         "strategy": scope.get("strategy") or {},
         "items": execution_items[:200],

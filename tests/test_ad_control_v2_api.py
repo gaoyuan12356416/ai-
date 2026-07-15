@@ -684,6 +684,10 @@ class AdControlV2ApiTests(unittest.TestCase):
         }
         with mock.patch.object(
             app,
+            "ad_control_account_schedule_due",
+            side_effect=AssertionError("empty whitelist must not evaluate schedule"),
+        ), mock.patch.object(
+            app,
             "ad_control_token_for_user_id",
             side_effect=AssertionError("empty whitelist must not read Token"),
         ), mock.patch.object(
@@ -701,6 +705,7 @@ class AdControlV2ApiTests(unittest.TestCase):
         self.assertEqual(0, result["active_count"])
         self.assertEqual(0, result["candidate_count"])
         self.assertEqual(0, result["missing_start_count"])
+        self.assertEqual(0, result["scheduled_due_count"])
 
     def test_observe_and_formal_copy_gates_make_zero_graph_writes(self):
         self.save_group("u1", "copy")

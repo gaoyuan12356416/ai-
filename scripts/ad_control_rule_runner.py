@@ -209,7 +209,7 @@ def record_rule_group_preview_failure(rule_group, preview, event_key, run_status
         "runner_event_key": event_key,
         "runner_status": run_status,
         "runner_reason": runner_reason,
-        "preview_error_count": len(errors),
+        "preview_error_count": int(preview.get("error_count") or len(errors)),
     }
     with app.JOB_DB_LOCK:
         conn = app.get_job_db_connection()
@@ -387,6 +387,25 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
     pause_count = int(preview.get("pause_count") or 0)
     copy_count = int(preview.get("copy_count") or 0)
     execution_count = int(preview.get("execution_count") or 0)
+    scheduled_due_count = int(preview.get("scheduled_due_count") or 0)
+    if (
+        pause_count + copy_count == 0
+        and preview_error_count == 0
+        and scheduled_due_count <= 0
+    ):
+        return event_payload(rule_group, action, event_key, "skipped", result={
+            "preview_id": preview.get("preview_id"),
+            "requested_count": 0,
+            "success_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "preview_pause_count": 0,
+            "preview_copy_count": 0,
+            "remaining_target_count": 0,
+            "scheduled_due_count": 0,
+            "continuation_attempt": continuation_attempt,
+            "verification_only": False,
+        }, reason="no_accounts_due")
     if str(rule_group.get("run_mode") or "observe").lower() != "live":
         # Persist the bounded object-level would_pause/would_copy results via
         # the normal action-audit path. execute_ad_control_live exits before
