@@ -351,6 +351,11 @@ def continuation_state(previous_event, action, event_key):
     return previous_result, int(previous_result.get("continuation_attempt") or 0) + 1
 
 
+def has_ads_ai_action_log(result):
+    """Only update runner state when the initial ads_ai write succeeded."""
+    return str((result or {}).get("log_store") or "").strip() == "ads_ai"
+
+
 def run_group_event(rule_group, action, event_key, previous_event=None):
     if action != "pause":
         return event_payload(rule_group, action, event_key, "skipped", reason="unsupported_group_action")
@@ -389,7 +394,7 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
         }, reason="")
     if continuation_attempt > MAX_CONTINUATIONS:
         previous_action_id = str(previous_result.get("action_id") or "")
-        if previous_action_id:
+        if previous_action_id and has_ads_ai_action_log(previous_result):
             try:
                 app.ad_control_update_action_log_runner(
                     previous_action_id,
@@ -452,16 +457,22 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
         status = "partial"
         reason = "live_execute_verify_remaining"
         result["verification_required"] = True
-    try:
-        app.ad_control_update_action_log_runner(
+    if has_ads_ai_action_log(result):
+        try:
+            app.ad_control_update_action_log_runner(
+                result.get("action_id"),
+                event_key,
+                "blocked" if status == "error" else status,
+                reason,
+                remaining_count,
+            )
+        except Exception:
+            logging.exception("failed to update ads_ai runner status action_id=%s", result.get("action_id"))
+    else:
+        logging.warning(
+            "skip ads_ai runner status update because initial log write fell back action_id=%s",
             result.get("action_id"),
-            event_key,
-            "blocked" if status == "error" else status,
-            reason,
-            remaining_count,
         )
-    except Exception:
-        logging.exception("failed to update ads_ai runner status action_id=%s", result.get("action_id"))
     return event_payload(rule_group, action, event_key, status, result=result, reason=reason)
 
 

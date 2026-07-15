@@ -9,7 +9,11 @@ RUNNER = ROOT / "scripts" / "ad_control_rule_runner.py"
 
 def load_pure_runner_functions():
     tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
-    wanted = {"continuation_state", "group_event_continuation_key"}
+    wanted = {
+        "continuation_state",
+        "group_event_continuation_key",
+        "has_ads_ai_action_log",
+    }
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(RUNNER), "exec"), namespace)
@@ -52,6 +56,19 @@ class RunnerStateTests(unittest.TestCase):
             source.index("if continuation_attempt > MAX_CONTINUATIONS:"),
         )
         self.assertIn('"blocked" if status == "error" else status', source)
+
+    def test_runner_status_update_requires_successful_initial_ads_ai_write(self):
+        functions = load_pure_runner_functions()
+        has_log = functions["has_ads_ai_action_log"]
+        self.assertTrue(has_log({"log_store": "ads_ai"}))
+        self.assertFalse(has_log({"log_store": "sqlite_fallback"}))
+        self.assertFalse(has_log({}))
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("if has_ads_ai_action_log(result):", source)
+        self.assertIn(
+            "if previous_action_id and has_ads_ai_action_log(previous_result):",
+            source,
+        )
 
 
 if __name__ == "__main__":
