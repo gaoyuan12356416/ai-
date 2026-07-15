@@ -35682,6 +35682,8 @@ def set_ad_control_rule_group_enabled(
             raise StructuredApiError("preview_required", "preview this rule group before enabling it")
 
     group = fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=internal)
+    initial_emergency_stopped = bool(group.get("emergency_stopped"))
+    initial_updated_at = str(group.get("updated_at") or "")
     if enabled:
         validate_target(group)
         scope = ad_control_resolve_live_scope({"rule_group_id": group_id})
@@ -35698,6 +35700,14 @@ def set_ad_control_rule_group_enabled(
                 validate_target(current_group)
                 if current_group.get("current_preview_hash") != group.get("current_preview_hash"):
                     raise StructuredApiError("preview_stale", "rule group changed during enable")
+                if current_group.get("emergency_stopped") and (
+                    not initial_emergency_stopped
+                    or str(current_group.get("updated_at") or "") != initial_updated_at
+                ):
+                    raise StructuredApiError(
+                        "emergency_stop_changed",
+                        "rule group was emergency-stopped during enable",
+                    )
                 cursor = conn.execute(
                     """
                     UPDATE ad_control_rule_group
@@ -35756,6 +35766,7 @@ def ad_control_emergency_stop(payload, owner_user_id=None, internal=False):
     owner_user_id = str(owner_user_id or "").strip()
     if not internal and not owner_user_id:
         raise StructuredApiError("missing_owner", "current user is required")
+    stop_updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
     ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
@@ -35768,9 +35779,9 @@ def ad_control_emergency_stop(payload, owner_user_id=None, internal=False):
                     params.append(owner_user_id)
                 cursor = conn.execute(
                     "UPDATE ad_control_rule_group "
-                    "SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP "
+                    "SET emergency_stopped=1, enabled=0, updated_at=? "
                     "WHERE " + where,
-                    tuple(params),
+                    tuple([stop_updated_at] + params),
                 )
                 if cursor.rowcount < 1:
                     raise StructuredApiError("not_found", "rule group not found")
@@ -35782,9 +35793,9 @@ def ad_control_emergency_stop(payload, owner_user_id=None, internal=False):
                     params.append(owner_user_id)
                 cursor = conn.execute(
                     "UPDATE ad_control_rule_group "
-                    "SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP "
+                    "SET emergency_stopped=1, enabled=0, updated_at=? "
                     "WHERE " + where,
-                    tuple(params),
+                    tuple([stop_updated_at] + params),
                 )
             conn.commit()
         finally:

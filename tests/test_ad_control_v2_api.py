@@ -220,6 +220,50 @@ class AdControlV2ApiTests(unittest.TestCase):
         with self.assertRaisesRegex(app.StructuredApiError, "Ad copy phase"):
             app.set_ad_control_rule_group_enabled("ad-group", True, owner_user_id="u1")
 
+    def test_emergency_stop_wins_enable_race_for_group_and_global_scope(self):
+        for scope in ("rule_group", "global"):
+            with self.subTest(scope=scope):
+                group_id = "race-%s" % scope
+                self.save_group("u1", group_id)
+                self.mark_preview_ready(group_id)
+
+                def stop_during_token_validation(_scope):
+                    payload = {"scope": scope}
+                    if scope == "rule_group":
+                        payload["group_id"] = group_id
+                    app.ad_control_emergency_stop(payload, owner_user_id="u1")
+                    return {"ok": True}
+
+                with mock.patch.object(
+                    app,
+                    "ad_control_validate_scope_token_access",
+                    side_effect=stop_during_token_validation,
+                ):
+                    with self.assertRaises(app.StructuredApiError) as raised:
+                        app.set_ad_control_rule_group_enabled(
+                            group_id, True, owner_user_id="u1"
+                        )
+                self.assertEqual("emergency_stop_changed", raised.exception.code)
+                row = self.group_row(group_id)
+                self.assertEqual(0, row["enabled"])
+                self.assertEqual(1, row["emergency_stopped"])
+
+    def test_existing_emergency_stop_can_only_be_cleared_without_a_new_stop(self):
+        self.save_group("u1", "resume-stopped")
+        self.mark_preview_ready("resume-stopped")
+        app.ad_control_emergency_stop(
+            {"scope": "rule_group", "group_id": "resume-stopped"},
+            owner_user_id="u1",
+        )
+        with mock.patch.object(
+            app, "ad_control_validate_scope_token_access", return_value={"ok": True}
+        ):
+            resumed = app.set_ad_control_rule_group_enabled(
+                "resume-stopped", True, owner_user_id="u1"
+            )
+        self.assertTrue(resumed["enabled"])
+        self.assertFalse(resumed["emergency_stopped"])
+
     def test_legacy_config_resources_are_owner_isolated(self):
         rule_payload = {
             "rule_id": "legacy-rule",
