@@ -670,6 +670,38 @@ class AdControlV2ApiTests(unittest.TestCase):
                 {"rule_group_id": group_id, "scheduled": scheduled}, self.session(owner)
             )
 
+    def test_account_without_campaign_whitelist_is_a_benign_zero_candidate(self):
+        scope = {
+            "product": "dramawave",
+            "scheduled": True,
+            "strategy": {
+                "schedule": {
+                    "type": "fixed_time",
+                    "time": "12:00",
+                    "timezone": "account",
+                }
+            },
+        }
+        with mock.patch.object(
+            app,
+            "ad_control_token_for_user_id",
+            side_effect=AssertionError("empty whitelist must not read Token"),
+        ), mock.patch.object(
+            app,
+            "ad_control_meta_active_campaigns",
+            side_effect=AssertionError("empty whitelist must not call Graph"),
+        ):
+            result = app.ad_control_collect_live_account(
+                scope, "act_1", {}, {}, "dramawave"
+            )
+
+        self.assertEqual("1", result["account_id"])
+        self.assertEqual([], result["items"])
+        self.assertEqual([], result["errors"])
+        self.assertEqual(0, result["active_count"])
+        self.assertEqual(0, result["candidate_count"])
+        self.assertEqual(0, result["missing_start_count"])
+
     def test_observe_and_formal_copy_gates_make_zero_graph_writes(self):
         self.save_group("u1", "copy")
         item = {

@@ -37707,7 +37707,19 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist, 
     account_id = ad_control_normalize_account(account_id)
     source_product = str(source_product if source_product is not None else scope.get("product") or "").strip()
     if not whitelist:
-        return {"account_id": account_id, "items": [], "errors": [{"reason": "no_product_campaign_whitelist"}]}
+        # A configured account may legitimately have no created-data Campaign
+        # for the resolved product yet.  There is nothing to scan or mutate,
+        # so keep the legacy zero-candidate semantics and exit before schedule,
+        # Token or Graph access.  Ambiguous product mappings are still emitted
+        # separately by deduplicate_account_product_campaigns and fail closed.
+        return {
+            "account_id": account_id,
+            "items": [],
+            "errors": [],
+            "active_count": 0,
+            "candidate_count": 0,
+            "missing_start_count": 0,
+        }
     if scope.get("scheduled"):
         timezones = {
             str((value or {}).get("account_time_zone") or "").strip()
@@ -37738,8 +37750,6 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist, 
     if not token:
         reason = "missing_meta_token" if token_user_id else "missing_apps_setting_default_user"
         return {"account_id": account_id, "items": [], "errors": [{"reason": reason, "token_user_id": token_user_id}]}
-    if not whitelist:
-        return {"account_id": account_id, "items": [], "errors": [], "active_count": 0, "candidate_count": 0, "missing_start_count": 0}
     active_campaigns = ad_control_meta_active_campaigns(token, account_id)
     active_by_id = {str(item.get("id") or "").strip(): item for item in active_campaigns}
     campaign_ids = [campaign_id for campaign_id in whitelist.keys() if campaign_id in active_by_id]
