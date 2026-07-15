@@ -72,9 +72,73 @@ class DeployPatchCompatibilityTests(unittest.TestCase):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
         source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
         updated, _ = deploy_fix.patch_app_text(source)
+        self.assertEqual([], deploy_fix.action_log_safety_violations(updated))
         reapplied, changed = deploy_fix.patch_app_text(updated)
         self.assertFalse(changed)
         self.assertEqual(updated, reapplied)
+
+    def test_old_feature_baseline_is_upgraded_to_live_safe_constants(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        self.assertIn(
+            'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))',
+            source,
+        )
+        updated, changed = deploy_fix.patch_app_text(source)
+        self.assertTrue(changed)
+        self.assertEqual([], deploy_fix.action_log_safety_violations(updated))
+        self.assertEqual(1, updated.count('or "63353").strip()'))
+        self.assertEqual(1, updated.count('or "63350").strip()'))
+        self.assertNotIn("def ad_control_action_log_config():", updated)
+
+    def test_prior_generic_patch_output_is_safely_upgraded_and_idempotent(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        safe, _ = deploy_fix.patch_app_text(source)
+        legacy_constants = '''AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))
+AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))
+AD_CONTROL_ACTION_LOG_DB_NAME = os.environ.get("AD_CONTROL_ACTION_LOG_DB_NAME", "ads_ai").strip() or "ads_ai"
+AD_CONTROL_ACTION_LOG_TABLE = os.environ.get("AD_CONTROL_ACTION_LOG_TABLE", "ad_control_action_log").strip() or "ad_control_action_log"
+AD_CONTROL_ACTION_LOG_MYSQL_HOST = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST", MYSQL_HOST).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PORT = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT", MYSQL_PORT).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_USER = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER", MYSQL_USER).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD", MYSQL_PASSWORD)
+AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))
+AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "8"))
+AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))
+AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))'''
+        generic = deploy_fix.INTEGRATION_BLOCK
+        reader = deploy_fix.function_matches(generic, "ad_control_action_log_reader_config")[0]
+        generic = generic[:reader.start()] + generic[reader.end():]
+        generic = generic.replace(
+            "ad_control_action_log_writer_config", "ad_control_action_log_config"
+        ).replace("ad_control_action_log_reader_config", "ad_control_action_log_config")
+        unsafe = safe.replace(deploy_fix.ACTION_LOG_CONSTANT_BLOCK, legacy_constants, 1)
+        unsafe = unsafe.replace(deploy_fix.INTEGRATION_BLOCK, generic, 1)
+        self.assertIn("def ad_control_action_log_config():", unsafe)
+        updated, changed = deploy_fix.patch_app_text(unsafe)
+        self.assertTrue(changed)
+        self.assertEqual([], deploy_fix.action_log_safety_violations(updated))
+        reapplied, changed = deploy_fix.patch_app_text(updated)
+        self.assertFalse(changed)
+        self.assertEqual(updated, reapplied)
+
+    def test_safety_validator_rejects_timeout_or_worker_regression(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        safe, _ = deploy_fix.patch_app_text(source)
+        regressed = safe.replace(
+            'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "3"))',
+            'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))',
+            1,
+        ).replace(
+            'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))',
+            'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))',
+            1,
+        )
+        violations = deploy_fix.action_log_safety_violations(regressed)
+        self.assertTrue(any("CONNECT_TIMEOUT" in item for item in violations))
+        self.assertTrue(any("LIVE_MAX_WORKERS" in item for item in violations))
 
 
 class ExecutionBatchTests(unittest.TestCase):

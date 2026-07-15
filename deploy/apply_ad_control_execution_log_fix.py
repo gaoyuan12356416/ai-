@@ -79,15 +79,90 @@ def replace_optional_function(text, name, new_source):
     return replace_function(text, name, new_source)
 
 
+ACTION_LOG_CONSTANT_BLOCK = r'''
+AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))
+AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))
+AD_CONTROL_ACTION_LOG_DB_NAME = "ads_ai"
+AD_CONTROL_ACTION_LOG_TABLE = "ad_control_action_log"
+AD_CONTROL_ACTION_LOG_MYSQL_HOST = (os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST") or "101.32.56.53").strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PORT = (os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT") or "63353").strip()
+AD_CONTROL_ACTION_LOG_MYSQL_USER = (os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER") or "").strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD") or ""
+AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST = (os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST") or "101.32.56.53").strip()
+AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT = (os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT") or "63350").strip()
+AD_CONTROL_ACTION_LOG_READER_MYSQL_USER = (os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_USER") or AD_CONTROL_ACTION_LOG_MYSQL_USER).strip()
+AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD") or AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD
+AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "3"))
+AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "5"))
+AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))
+AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))
+'''.strip()
+
+ACTION_LOG_MANAGED_CONSTANTS = (
+    "AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT",
+    "AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS",
+    "AD_CONTROL_ACTION_LOG_DB_NAME",
+    "AD_CONTROL_ACTION_LOG_TABLE",
+    "AD_CONTROL_ACTION_LOG_MYSQL_HOST",
+    "AD_CONTROL_ACTION_LOG_MYSQL_PORT",
+    "AD_CONTROL_ACTION_LOG_MYSQL_USER",
+    "AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD",
+    "AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST",
+    "AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT",
+    "AD_CONTROL_ACTION_LOG_READER_MYSQL_USER",
+    "AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD",
+    "AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT",
+    "AD_CONTROL_ACTION_LOG_IO_TIMEOUT",
+    "AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS",
+    "AD_CONTROL_LIVE_MAX_WORKERS",
+)
+
+
+def ensure_action_log_safety_constants(text):
+    """Canonicalize the deployed writer/reader guard constants.
+
+    This deliberately upgrades both the pre-action-log baseline and the older
+    generic-MySQL patch output.  Rebuilding the small managed block also removes
+    duplicate unsafe definitions that would otherwise override the live-safe
+    values at import time.
+    """
+
+    anchor = 'AD_CONTROL_MAX_LIVE_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE", "200"))\n'
+    if text.count(anchor) != 1:
+        raise RuntimeError("action-log constants anchor count=%s" % text.count(anchor))
+    names = "|".join(re.escape(name) for name in ACTION_LOG_MANAGED_CONSTANTS)
+    stripped, _ = re.subn(r"^(?:%s)\s*=.*\n" % names, "", text, flags=re.M)
+    updated = stripped.replace(anchor, anchor + ACTION_LOG_CONSTANT_BLOCK + "\n", 1)
+    if updated == text:
+        print("ad-control safety constants: already applied")
+        return text, False
+    return updated, True
+
+
 INTEGRATION_BLOCK = r'''
-def ad_control_action_log_config():
+def ad_control_action_log_writer_config():
     if not AD_CONTROL_ACTION_LOG_MYSQL_HOST or not AD_CONTROL_ACTION_LOG_MYSQL_USER:
         raise RuntimeError("ad-control ads_ai writer database is not configured")
     return {
         "host": AD_CONTROL_ACTION_LOG_MYSQL_HOST,
-        "port": int(AD_CONTROL_ACTION_LOG_MYSQL_PORT or 3306),
+        "port": int(AD_CONTROL_ACTION_LOG_MYSQL_PORT or 63353),
         "user": AD_CONTROL_ACTION_LOG_MYSQL_USER,
         "password": AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD,
+        "database": AD_CONTROL_ACTION_LOG_DB_NAME,
+        "connect_timeout": AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT,
+        "read_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
+        "write_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
+    }
+
+
+def ad_control_action_log_reader_config():
+    if not AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST or not AD_CONTROL_ACTION_LOG_READER_MYSQL_USER:
+        raise RuntimeError("ad-control ads_ai reader database is not configured")
+    return {
+        "host": AD_CONTROL_ACTION_LOG_READER_MYSQL_HOST,
+        "port": int(AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT or 63350),
+        "user": AD_CONTROL_ACTION_LOG_READER_MYSQL_USER,
+        "password": AD_CONTROL_ACTION_LOG_READER_MYSQL_PASSWORD,
         "database": AD_CONTROL_ACTION_LOG_DB_NAME,
         "connect_timeout": AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT,
         "read_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
@@ -189,7 +264,7 @@ def ad_control_persist_action_log(action_id, overrides=None):
         "log_version": 2 if "scan_count" in criteria else 1,
     }
     return ad_control_execution_log_service.upsert_action(
-        ad_control_action_log_config(), record, AD_CONTROL_ACTION_LOG_TABLE
+        ad_control_action_log_writer_config(), record, AD_CONTROL_ACTION_LOG_TABLE
     )
 
 
@@ -197,29 +272,15 @@ def ad_control_update_action_log_runner(action_id, event_key, status, reason, re
     action_id = str(action_id or "").strip()
     if not action_id:
         return 0
-    config = ad_control_action_log_config()
-    try:
-        updated = ad_control_execution_log_service.update_runner_status(
-            config,
-            action_id,
-            event_key,
-            status,
-            reason,
-            remaining_count,
-            AD_CONTROL_ACTION_LOG_TABLE,
-        )
-        if updated:
-            return updated
-    except Exception:
-        logging.exception("failed to update ads_ai ad-control runner status; retrying upsert")
-    ad_control_persist_action_log(action_id, {
-        "event_key": event_key,
-        "source_type": "scheduled",
-        "run_status": status,
-        "runner_reason": reason,
-        "remaining_count": remaining_count,
-    })
-    return 1
+    return ad_control_execution_log_service.update_runner_status(
+        ad_control_action_log_writer_config(),
+        action_id,
+        event_key,
+        status,
+        reason,
+        remaining_count,
+        AD_CONTROL_ACTION_LOG_TABLE,
+    )
 
 
 def ad_control_action_log_utc_bound(value, end=False):
@@ -238,7 +299,7 @@ def ad_control_mysql_action_items(
 ):
 
     return ad_control_execution_log_service.list_actions(
-        ad_control_action_log_config(),
+        ad_control_action_log_reader_config(),
         {
             "product": product,
             "binding_id": binding_id,
@@ -256,9 +317,130 @@ def ad_control_mysql_action_items(
 
 def ad_control_mysql_action(action_id):
     return ad_control_execution_log_service.fetch_action(
-        ad_control_action_log_config(), action_id, AD_CONTROL_ACTION_LOG_TABLE
+        ad_control_action_log_reader_config(), action_id, AD_CONTROL_ACTION_LOG_TABLE
     )
 '''.strip()
+
+
+ACTION_LOG_INTEGRATION_FUNCTIONS = (
+    "ad_control_action_log_config",  # unsafe generic predecessor; remove on upgrade
+    "ad_control_action_log_writer_config",
+    "ad_control_action_log_reader_config",
+    "ad_control_local_action_log_row",
+    "ad_control_persist_action_log",
+    "ad_control_update_action_log_runner",
+    "ad_control_action_log_utc_bound",
+    "ad_control_mysql_action_items",
+    "ad_control_mysql_action",
+)
+
+
+def ensure_action_log_safety_integration(text):
+    """Replace only the contiguous action-log adapter with the safe V2 form."""
+
+    marker = "def ad_control_resource_snapshot():"
+    if text.count(marker) != 1:
+        raise RuntimeError("integration marker count=%s" % text.count(marker))
+    marker_start = text.index(marker)
+    matches = []
+    for name in ACTION_LOG_INTEGRATION_FUNCTIONS:
+        found = function_matches(text, name)
+        if len(found) > 1:
+            raise RuntimeError("function %s: expected at most one match, found %s" % (name, len(found)))
+        matches.extend(found)
+    if matches:
+        start = min(match.start() for match in matches)
+        if start > marker_start:
+            raise RuntimeError("action-log integration appears after resource marker")
+        intervening = text[start:marker_start]
+        unexpected = [
+            name for name in re.findall(r"^def\s+([A-Za-z0-9_]+)\s*\(", intervening, re.M)
+            if name not in ACTION_LOG_INTEGRATION_FUNCTIONS
+        ]
+        if unexpected:
+            raise RuntimeError("unexpected functions inside action-log integration: %s" % unexpected)
+        updated = text[:start] + INTEGRATION_BLOCK + "\n\n\n" + text[marker_start:]
+    else:
+        updated = text[:marker_start] + INTEGRATION_BLOCK + "\n\n\n" + text[marker_start:]
+    if updated == text:
+        print("ad-control safety integration: already applied")
+        return text, False
+    return updated, True
+
+
+def action_log_safety_violations(text):
+    """Return source-level regressions against the deployed 2026-07-15 guardrail."""
+
+    violations = []
+    required_once = [
+        line for line in ACTION_LOG_CONSTANT_BLOCK.splitlines() if line.strip()
+    ] + [
+        "def ad_control_action_log_writer_config():",
+        "def ad_control_action_log_reader_config():",
+    ]
+    for token in required_once:
+        count = text.count(token)
+        if count != 1:
+            violations.append("required token count %s: %s" % (count, token))
+    forbidden = (
+        'AD_CONTROL_ACTION_LOG_MYSQL_HOST = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST", MYSQL_HOST)',
+        'AD_CONTROL_ACTION_LOG_MYSQL_PORT = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT", MYSQL_PORT)',
+        'AD_CONTROL_ACTION_LOG_MYSQL_USER = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER", MYSQL_USER)',
+        'AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD", MYSQL_PASSWORD)',
+        'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))',
+        'AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "8"))',
+        'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))',
+        "def ad_control_action_log_config():",
+        "retrying upsert",
+    )
+    for token in forbidden:
+        if token in text:
+            violations.append("forbidden token: %s" % token)
+
+    function_contracts = {
+        "ad_control_action_log_writer_config": (
+            "AD_CONTROL_ACTION_LOG_MYSQL_PORT or 63353",
+            "AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT",
+            "AD_CONTROL_ACTION_LOG_IO_TIMEOUT",
+        ),
+        "ad_control_action_log_reader_config": (
+            "AD_CONTROL_ACTION_LOG_READER_MYSQL_PORT or 63350",
+            "AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT",
+            "AD_CONTROL_ACTION_LOG_IO_TIMEOUT",
+        ),
+        "ad_control_persist_action_log": (
+            "ad_control_action_log_writer_config(), record, AD_CONTROL_ACTION_LOG_TABLE",
+        ),
+        "ad_control_update_action_log_runner": (
+            "ad_control_action_log_writer_config()",
+            "ad_control_execution_log_service.update_runner_status(",
+        ),
+        "ad_control_mysql_action_items": (
+            "ad_control_action_log_reader_config()",
+            '"owner_filter": bool(owner_filter)',
+        ),
+        "ad_control_mysql_action": (
+            "ad_control_action_log_reader_config(), action_id, AD_CONTROL_ACTION_LOG_TABLE",
+        ),
+    }
+    for name, tokens in function_contracts.items():
+        matches = function_matches(text, name)
+        if len(matches) != 1:
+            violations.append("function %s count=%s" % (name, len(matches)))
+            continue
+        source = matches[0].group(0)
+        for token in tokens:
+            if token not in source:
+                violations.append("function %s missing: %s" % (name, token))
+        if name == "ad_control_update_action_log_runner" and "ad_control_persist_action_log(" in source:
+            violations.append("runner status update contains immediate upsert retry")
+    return violations
+
+
+def assert_action_log_safety_contract(text):
+    violations = action_log_safety_violations(text)
+    if violations:
+        raise RuntimeError("action-log safety contract failed: %s" % "; ".join(violations))
 
 
 ACTION_STATUS_FUNCTION = r'''
@@ -921,28 +1103,10 @@ def patch_app_text(text):
             "feature import",
         )
         changed = changed or block_changed
-    constants_old = 'AD_CONTROL_MAX_LIVE_EXECUTE = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE", "200"))\n'
-    constants_new = constants_old + (
-        'AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))\n'
-        'AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))\n'
-        'AD_CONTROL_ACTION_LOG_DB_NAME = os.environ.get("AD_CONTROL_ACTION_LOG_DB_NAME", "ads_ai").strip() or "ads_ai"\n'
-        'AD_CONTROL_ACTION_LOG_TABLE = os.environ.get("AD_CONTROL_ACTION_LOG_TABLE", "ad_control_action_log").strip() or "ad_control_action_log"\n'
-        'AD_CONTROL_ACTION_LOG_MYSQL_HOST = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST", MYSQL_HOST).strip()\n'
-        'AD_CONTROL_ACTION_LOG_MYSQL_PORT = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT", MYSQL_PORT).strip()\n'
-        'AD_CONTROL_ACTION_LOG_MYSQL_USER = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER", MYSQL_USER).strip()\n'
-        'AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD", MYSQL_PASSWORD)\n'
-        'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))\n'
-        'AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "8"))\n'
-        'AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))\n'
-    )
-    text, block_changed = replace_once(text, constants_old, constants_new, "ad-control constants")
+    text, block_changed = ensure_action_log_safety_constants(text)
     changed = changed or block_changed
-    if "def ad_control_action_log_config():" not in text:
-        marker = "def ad_control_resource_snapshot():"
-        if text.count(marker) != 1:
-            raise RuntimeError("integration marker count=%s" % text.count(marker))
-        text = text.replace(marker, INTEGRATION_BLOCK + "\n\n\n" + marker, 1)
-        changed = True
+    text, block_changed = ensure_action_log_safety_integration(text)
+    changed = changed or block_changed
     if "ad_control_execution_log_service.balanced_execution_items(" not in text:
         preview_variants = [
             (
@@ -995,6 +1159,7 @@ def patch_app_text(text):
         text, audit_old, audit_new, "audit flow fields"
     )
     changed = changed or block_changed
+    assert_action_log_safety_contract(text)
     return text, changed
 
 
