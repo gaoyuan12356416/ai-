@@ -142,10 +142,10 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
   "store_url": "https://play.google.com/store/apps/details?id=ai.fream.dramawave",
   "entry": "index.html",
   "source_entry": "game/index.html",
-  "html_size": 4782233,
-  "zip_size": 3928739,
+  "html_size": 4782231,
+  "zip_size": 3933763,
   "meta_size_limit_bytes": 4800000,
-  "size_headroom_bytes": 17767,
+  "size_headroom_bytes": 17769,
   "meta_compatible": true,
   "compatibility": {
     "single_file": true,
@@ -160,8 +160,8 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
     "cta_hook": "FbPlayableAd.onCTAClick",
     "resource_encoding": "lzma+base94",
     "embedded_file_count": 18,
-    "html_size": 4782233,
-    "zip_size": 3928739,
+    "html_size": 4782231,
+    "zip_size": 3933763,
     "meta_size_limit_bytes": 4800000
   },
   "languages": ["ar", "de", "en", "es", "fr", "hi", "id", "it", "ja", "ko", "ms", "pt", "ru", "th", "tr", "vi", "zh", "zh-cn", "zh-tw"]
