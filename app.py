@@ -37154,7 +37154,20 @@ def ad_control_delete_cached_campaign_start(product, account_id, campaign_id):
 
 
 def ad_control_validate_insight_start_schema():
-    columns = mysql_table_columns(AD_CONTROL_INSIGHT_START_TABLE, AD_CONTROL_DB_NAME)
+    query = "SHOW COLUMNS FROM `%s`.`%s`" % (
+        AD_CONTROL_DB_NAME.replace("`", "``"),
+        AD_CONTROL_INSIGHT_START_TABLE.replace("`", "``"),
+    )
+    try:
+        rows = ad_control_run_critical_mysql(query, "insight_start_schema")
+    except Exception as exc:
+        raise StructuredApiError(
+            "insight_start_schema_unavailable",
+            "failed to read insight start table schema",
+            table=AD_CONTROL_INSIGHT_START_TABLE,
+            cause=exc.__class__.__name__,
+        )
+    columns = {row[0] for row in rows if row}
     required = [AD_CONTROL_INSIGHT_CAMPAIGN_FIELD, AD_CONTROL_INSIGHT_START_FIELD]
     missing = [item for item in required if item not in columns]
     if missing:

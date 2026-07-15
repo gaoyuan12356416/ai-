@@ -1,6 +1,7 @@
 import json
 import inspect
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -178,6 +179,40 @@ class AdControlLargeAccountPoolTest(unittest.TestCase):
             rows = app.ad_control_run_critical_mysql("SELECT 1", "test")
         self.assertEqual(rows, [["ok"]])
         self.assertEqual(run.call_count, 3)
+
+    def test_insight_schema_retries_transient_read_failure(self):
+        rows = [["campaign_id"], ["dt"], ["ad_account_id"]]
+        with mock.patch.object(
+            app,
+            "run_mysql",
+            side_effect=[subprocess.CalledProcessError(1, ["mysql"]), rows],
+        ) as run, mock.patch.object(app.time, "sleep"):
+            columns = app.ad_control_validate_insight_start_schema()
+        self.assertEqual(columns, {"campaign_id", "dt", "ad_account_id"})
+        self.assertEqual(run.call_count, 2)
+
+    def test_insight_schema_read_failure_is_not_reported_as_missing_columns(self):
+        with mock.patch.object(app, "AD_CONTROL_CRITICAL_DB_RETRIES", 3), \
+             mock.patch.object(
+                 app,
+                 "run_mysql",
+                 side_effect=subprocess.CalledProcessError(1, ["mysql"]),
+             ) as run, \
+             mock.patch.object(app.time, "sleep"):
+            with self.assertRaises(app.StructuredApiError) as raised:
+                app.ad_control_validate_insight_start_schema()
+        self.assertEqual(raised.exception.code, "insight_start_schema_unavailable")
+        self.assertEqual(raised.exception.details.get("cause"), "CalledProcessError")
+        self.assertNotIn("missing", raised.exception.details)
+        self.assertEqual(run.call_count, 3)
+
+    def test_insight_schema_still_fails_closed_for_real_missing_column(self):
+        with mock.patch.object(app, "run_mysql", return_value=[["campaign_id"]]) as run:
+            with self.assertRaises(app.StructuredApiError) as raised:
+                app.ad_control_validate_insight_start_schema()
+        self.assertEqual(raised.exception.code, "invalid_insight_start_schema")
+        self.assertEqual(raised.exception.details.get("missing"), "dt")
+        run.assert_called_once()
 
     def test_default_user_falls_back_to_durable_local_cache(self):
         app.ad_control_store_local_default_user_cache({

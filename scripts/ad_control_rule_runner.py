@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -367,12 +368,39 @@ def run_group_event(rule_group, action, event_key, previous_event=None):
     if action != "pause":
         return event_payload(rule_group, action, event_key, "skipped", reason="unsupported_group_action")
     session = {"user_id": "ad_control_rule_runner"}
-    # Validate the configured insight schema once before the account worker
-    # pool starts. Without this cache every account issues SHOW COLUMNS in
-    # parallel, which can exhaust the remote database connection allowance.
-    insight_columns = app.ad_control_validate_insight_start_schema()
     validate_schema = app.ad_control_validate_insight_start_schema
-    app.ad_control_validate_insight_start_schema = lambda: insight_columns
+    schema_lock = threading.Lock()
+    schema_state = {"loaded": False, "columns": None, "error": None}
+
+    def validate_schema_once():
+        # Schedule/whitelist checks happen before campaign-start lookup. Keep
+        # schema I/O lazy so no-due ticks do not touch the insight database,
+        # while due account workers still share one success or failure.
+        with schema_lock:
+            if not schema_state["loaded"]:
+                try:
+                    schema_state["columns"] = validate_schema()
+                except Exception as exc:
+                    schema_state["error"] = {
+                        "structured": bool(getattr(exc, "code", "")),
+                        "code": str(getattr(exc, "code", "") or ""),
+                        "message": str(
+                            getattr(exc, "message", "")
+                            or str(exc)
+                            or exc.__class__.__name__
+                        ),
+                        "details": dict(getattr(exc, "details", {}) or {}),
+                    }
+                schema_state["loaded"] = True
+            if schema_state["error"] is not None:
+                error = schema_state["error"]
+                error_type = getattr(app, "StructuredApiError", None)
+                if error["structured"] and error_type is not None:
+                    raise error_type(error["code"], error["message"], **error["details"])
+                raise RuntimeError(error["message"])
+            return schema_state["columns"]
+
+    app.ad_control_validate_insight_start_schema = validate_schema_once
     try:
         preview = app.create_ad_control_live_preview({
             "rule_group_id": rule_group.get("group_id"),

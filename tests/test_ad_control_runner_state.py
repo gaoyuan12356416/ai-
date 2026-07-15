@@ -1,6 +1,8 @@
 import ast
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 import unittest
 
 
@@ -33,7 +35,9 @@ class RunnerStateTests(unittest.TestCase):
         updates = []
         warnings = []
         fake_app = SimpleNamespace(
-            ad_control_validate_insight_start_schema=lambda: {"campaign_id"},
+            ad_control_validate_insight_start_schema=lambda: warnings.append(
+                ("schema_probe",)
+            ) or {"campaign_id"},
             create_ad_control_live_preview=lambda payload, session, internal=False: preview,
             execute_ad_control_live=lambda payload, session: dict(execute_result or {}),
             ad_control_update_action_log_runner=lambda *args: updates.append(args),
@@ -56,6 +60,7 @@ class RunnerStateTests(unittest.TestCase):
                 exception=lambda *args: None,
                 warning=lambda *args: warnings.append(args),
             ),
+            "threading": threading,
         }
         exec(compile(ast.Module(body=body, type_ignores=[]), str(RUNNER), "exec"), namespace)
         event = namespace["run_group_event"](
@@ -130,6 +135,150 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual([], updates)
         self.assertEqual([], warnings)
 
+    def test_insight_schema_validation_is_lazy_and_cached_per_tick(self):
+        tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.FunctionDef) and item.name == "run_group_event"
+        )
+        schema_calls = []
+        fake_app = SimpleNamespace()
+
+        def validate_schema():
+            schema_calls.append("called")
+            return {"campaign_id", "dt"}
+
+        def preview(payload, session, internal=False):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(
+                    lambda _: fake_app.ad_control_validate_insight_start_schema(),
+                    range(8),
+                ))
+            self.assertEqual([{"campaign_id", "dt"}] * 8, results)
+            return {
+                "preview_id": "preview-schema-cache",
+                "pause_count": 0,
+                "copy_count": 0,
+                "execution_count": 0,
+                "error_count": 0,
+                "scheduled_due_count": 0,
+            }
+
+        fake_app.ad_control_validate_insight_start_schema = validate_schema
+        fake_app.create_ad_control_live_preview = preview
+        namespace = {
+            "app": fake_app,
+            "threading": threading,
+            "continuation_state": lambda previous, action, key: ({}, 1),
+            "event_payload": lambda rule, action, key, status, result=None, reason="": {
+                "status": status, "reason": reason, "result": result or {},
+            },
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
+        result = namespace["run_group_event"](
+            {"group_id": "g1", "run_mode": "live"}, "pause", "tick-1"
+        )
+        self.assertEqual("no_accounts_due", result["reason"])
+        self.assertEqual(["called"], schema_calls)
+        self.assertIs(fake_app.ad_control_validate_insight_start_schema, validate_schema)
+
+    def test_insight_schema_failure_is_singleflight_per_tick(self):
+        tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.FunctionDef) and item.name == "run_group_event"
+        )
+        schema_calls = []
+        fake_app = SimpleNamespace()
+
+        class FakeStructuredApiError(ValueError):
+            def __init__(self, code, message, **details):
+                super().__init__(message)
+                self.code = code
+                self.message = message
+                self.details = details
+
+        def validate_schema():
+            schema_calls.append("called")
+            raise FakeStructuredApiError(
+                "insight_start_schema_unavailable",
+                "schema unavailable",
+                table="insights",
+            )
+
+        def preview(payload, session, internal=False):
+            def read_schema(_):
+                try:
+                    fake_app.ad_control_validate_insight_start_schema()
+                except FakeStructuredApiError as exc:
+                    return exc
+                return None
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(read_schema, range(8)))
+            self.assertEqual(["schema unavailable"] * 8, [str(item) for item in results])
+            self.assertEqual(8, len({id(item) for item in results}))
+            self.assertEqual(
+                ["insight_start_schema_unavailable"] * 8,
+                [item.code for item in results],
+            )
+            self.assertEqual([{"table": "insights"}] * 8, [item.details for item in results])
+            return {
+                "preview_id": "preview-schema-failure",
+                "pause_count": 0,
+                "copy_count": 0,
+                "execution_count": 0,
+                "error_count": 0,
+                "scheduled_due_count": 0,
+            }
+
+        fake_app.ad_control_validate_insight_start_schema = validate_schema
+        fake_app.create_ad_control_live_preview = preview
+        fake_app.StructuredApiError = FakeStructuredApiError
+        namespace = {
+            "app": fake_app,
+            "threading": threading,
+            "continuation_state": lambda previous, action, key: ({}, 1),
+            "event_payload": lambda rule, action, key, status, result=None, reason="": {
+                "status": status, "reason": reason, "result": result or {},
+            },
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
+        result = namespace["run_group_event"](
+            {"group_id": "g1", "run_mode": "live"}, "pause", "tick-1"
+        )
+        self.assertEqual("no_accounts_due", result["reason"])
+        self.assertEqual(["called"], schema_calls)
+        self.assertIs(fake_app.ad_control_validate_insight_start_schema, validate_schema)
+
+    def test_preview_failure_restores_original_schema_validator(self):
+        tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.FunctionDef) and item.name == "run_group_event"
+        )
+
+        def validate_schema():
+            return {"campaign_id", "dt"}
+
+        def fail_preview(*args, **kwargs):
+            raise RuntimeError("preview failed")
+
+        fake_app = SimpleNamespace(
+            ad_control_validate_insight_start_schema=validate_schema,
+            create_ad_control_live_preview=fail_preview,
+        )
+        namespace = {
+            "app": fake_app,
+            "threading": threading,
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
+        with self.assertRaisesRegex(RuntimeError, "preview failed"):
+            namespace["run_group_event"](
+                {"group_id": "g1", "run_mode": "live"}, "pause", "tick-1"
+            )
+        self.assertIs(fake_app.ad_control_validate_insight_start_schema, validate_schema)
+
     def test_preview_failure_keeps_total_error_count_when_details_are_truncated(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn(
@@ -188,6 +337,7 @@ class RunnerStateTests(unittest.TestCase):
             "event_payload": lambda rule, action, key, status, result=None, reason="": {
                 "status": status, "reason": reason, "result": result or {},
             },
+            "threading": threading,
         }
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
         result = namespace["run_group_event"](
