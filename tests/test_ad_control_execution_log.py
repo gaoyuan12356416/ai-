@@ -1,0 +1,282 @@
+import json
+import unittest
+import concurrent.futures
+import logging
+import threading
+import uuid
+from datetime import datetime
+
+from deploy import apply_ad_control_execution_log_fix as deploy_fix
+from deploy.apply_ad_control_execution_log_fix import replace_once
+from features.ad_control_execution_log import service
+
+
+class ExecutionBatchTests(unittest.TestCase):
+    def test_batch_is_balanced_deterministic_and_capped_per_account(self):
+        items = []
+        for account_id, count in (("3", 30), ("1", 30), ("2", 30)):
+            for index in range(count):
+                items.append({
+                    "account_id": "act_%s" % account_id,
+                    "campaign_id": "%s-%02d" % (account_id, index),
+                })
+        selected = service.balanced_execution_items(items, max_total=200, max_per_account=20)
+        self.assertEqual(60, len(selected))
+        counts = {}
+        for item in selected:
+            account_id = service.normalize_account(item["account_id"])
+            counts[account_id] = counts.get(account_id, 0) + 1
+        self.assertEqual({"1": 20, "2": 20, "3": 20}, counts)
+        self.assertEqual(["1", "2", "3"], [service.normalize_account(item["account_id"]) for item in selected[:3]])
+        self.assertEqual(selected, service.balanced_execution_items(reversed(items), 200, 20))
+
+    def test_global_cap_remains_200(self):
+        items = [
+            {"account_id": str(index), "campaign_id": str(index)}
+            for index in range(250)
+        ]
+        self.assertEqual(200, len(service.balanced_execution_items(items, 200, 20)))
+
+
+class GraphErrorTests(unittest.TestCase):
+    def test_code_4_subcode_is_retryable_even_when_not_transient(self):
+        reason = json.dumps({
+            "message": "Application request limit reached",
+            "type": "OAuthException",
+            "is_transient": False,
+            "code": 4,
+            "error_subcode": 5044001,
+        })
+        details = service.graph_error_details(reason)
+        self.assertTrue(details["retryable"])
+        self.assertTrue(details["rate_limited"])
+        self.assertEqual(4, details["error_code"])
+        self.assertEqual(5044001, details["error_subcode"])
+
+    def test_python_dict_shaped_error_is_parsed(self):
+        details = service.graph_error_details(
+            "{'error': {'message': 'limit', 'code': 4, 'error_subcode': 5044001}}"
+        )
+        self.assertEqual(4, details["error_code"])
+        self.assertEqual(5044001, details["error_subcode"])
+
+
+class SummaryTests(unittest.TestCase):
+    def test_out_of_batch_deferred_and_retryable_are_all_remaining(self):
+        results = [
+            {"status": "success"},
+            {"status": "error", "retryable": True},
+            {"status": "deferred", "reason": "deferred_after_account_rate_limit"},
+            {"status": "deferred", "reason": "deferred_after_account_rate_limit"},
+        ]
+        summary = service.execution_summary(results, matched_count=218, requested_count=200)
+        self.assertEqual("partial", summary["run_status"])
+        self.assertEqual(20, summary["deferred_count"])
+        self.assertEqual(1, summary["retryable_error_count"])
+        self.assertEqual(21, summary["remaining_count"])
+
+    def test_permanent_error_blocks_run(self):
+        summary = service.execution_summary(
+            [{"status": "error", "retryable": False}], matched_count=1, requested_count=1
+        )
+        self.assertEqual("blocked", summary["run_status"])
+        self.assertEqual(1, summary["permanent_error_count"])
+
+    def test_nonterminal_skip_blocks_run(self):
+        summary = service.execution_summary(
+            [{"status": "skipped", "reason": "missing_meta_token"}], 1, 1
+        )
+        self.assertEqual("blocked", summary["run_status"])
+        self.assertEqual(1, summary["blocked_count"])
+
+    def test_not_active_is_terminal_skip(self):
+        summary = service.execution_summary(
+            [{"status": "skipped", "reason": "not_active"}], 1, 1
+        )
+        self.assertEqual("executed", summary["run_status"])
+        self.assertEqual(1, summary["terminal_skip_count"])
+
+
+class PersistenceShapeTests(unittest.TestCase):
+    def test_sensitive_fields_are_redacted(self):
+        value = service.sanitize_json({
+            "access_token": "secret",
+            "nested": {"password": "p", "safe": "ok"},
+        })
+        self.assertEqual("[REDACTED]", value["access_token"])
+        self.assertEqual("[REDACTED]", value["nested"]["password"])
+        self.assertEqual("ok", value["nested"]["safe"])
+
+    def test_normalized_record_preserves_chinese_and_defaults(self):
+        record = service.normalize_record({
+            "action_id": "a1",
+            "criteria": {"产品": "短剧"},
+            "results": [{"status": "skipped", "reason": "已关停"}],
+        })
+        self.assertIn("短剧", record["criteria_json"])
+        self.assertIn("已关停", record["results_json"])
+        self.assertEqual(1, record["log_version"])
+
+    def test_mysql_ddl_targets_ads_ai_and_has_required_indexes(self):
+        ddl = service.table_ddl("ads_ai", "ad_control_action_log")
+        self.assertIn("`ads_ai`.`ad_control_action_log`", ddl)
+        self.assertIn("PRIMARY KEY (action_id)", ddl)
+        self.assertIn("idx_acl_event_created", ddl)
+
+    def test_replace_once_is_idempotent_when_new_contains_old(self):
+        old = "MAX = 200\n"
+        new = old + "PER_ACCOUNT = 20\n"
+        patched, changed = replace_once(old, old, new, "test")
+        self.assertTrue(changed)
+        again, changed_again = replace_once(patched, old, new, "test")
+        self.assertFalse(changed_again)
+        self.assertEqual(patched, again)
+
+    def test_mysql_datetimes_are_json_serializable_strings(self):
+        row = {key: "" for key in service.LOG_COLUMNS}
+        row.update({
+            "action_id": "a1",
+            "criteria_json": "{}",
+            "results_json": "[]",
+            "reason_summary_json": "[]",
+            "created_at": datetime(2026, 7, 15, 1, 2, 3),
+            "updated_at": datetime(2026, 7, 15, 4, 5, 6),
+        })
+        decoded = service._decode_row(row)
+        self.assertEqual("2026-07-15 01:02:03", decoded["created_at"])
+        self.assertEqual("2026-07-15 04:05:06", decoded["updated_at"])
+        json.dumps(decoded, ensure_ascii=False)
+
+
+class LiveExecuteContractTests(unittest.TestCase):
+    class _Connection:
+        def execute(self, *args, **kwargs):
+            return self
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    def namespace(self, items, graph_get, graph_set, workers=1):
+        criteria = {
+            "mode": "live",
+            "product": "dramawave",
+            "accounts": ["1", "2"],
+            "preview_hash": "hash",
+            "execution_target_count": len(items),
+            "execution_batch_count": len(items),
+            "scan_count": len(items),
+            "candidate_count": len(items),
+        }
+        campaign_by_account = {}
+        for item in items:
+            account_id = service.normalize_account(item["account_id"])
+            campaign_by_account.setdefault(account_id, {})[item["campaign_id"]] = {}
+        namespace = {
+            "ensure_ad_control_tables": lambda: None,
+            "fetch_ad_control_preview": lambda preview_id: {
+                "preview_id": preview_id,
+                "criteria_json": json.dumps(criteria),
+                "sample_json": json.dumps(items),
+            },
+            "ad_control_safe_json_dict": lambda value: json.loads(value or "{}"),
+            "ad_control_safe_json_list": lambda value: json.loads(value or "[]"),
+            "StructuredApiError": RuntimeError,
+            "AD_CONTROL_MAX_LIVE_EXECUTE": 200,
+            "AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS": workers,
+            "ad_control_token_config_for_accounts": lambda product, accounts: {
+                account_id: {"user_id": "user-1"} for account_id in accounts
+            },
+            "ad_control_token_for_user_id": lambda user_id: "token",
+            "ad_control_product_campaign_whitelist": lambda product, accounts: campaign_by_account,
+            "ad_control_normalize_account": service.normalize_account,
+            "ad_control_graph_get": graph_get,
+            "ad_control_graph_set_status": graph_set,
+            "ad_control_save_object_state": lambda *args, **kwargs: None,
+            "ad_control_execution_log_service": service,
+            "JOB_DB_LOCK": threading.Lock(),
+            "get_job_db_connection": lambda: self._Connection(),
+            "ad_control_actor": lambda session: session.get("user_id", ""),
+            "ad_control_persist_action_log": lambda *args, **kwargs: {},
+            "concurrent": concurrent,
+            "threading": threading,
+            "logging": logging,
+            "uuid": uuid,
+            "json": json,
+        }
+        exec(deploy_fix.EXECUTE_LIVE_FUNCTION, namespace)
+        return namespace
+
+    @staticmethod
+    def item(account_id, campaign_id):
+        return {
+            "account_id": account_id,
+            "campaign_id": campaign_id,
+            "object_id": campaign_id,
+            "object_key": "%s:%s" % (account_id, campaign_id),
+            "target_action": "pause",
+        }
+
+    def test_application_limit_opens_global_circuit_and_defers_unissued_work(self):
+        items = [
+            self.item("1", "c1"), self.item("1", "c2"),
+            self.item("2", "c3"), self.item("2", "c4"),
+        ]
+        calls = {"get": 0, "set": 0}
+
+        def graph_get(token, campaign_id, fields):
+            calls["get"] += 1
+            account_id = "1" if campaign_id in {"c1", "c2"} else "2"
+            return {"account_id": account_id, "effective_status": "ACTIVE"}
+
+        def graph_set(token, campaign_id, status):
+            calls["set"] += 1
+            raise RuntimeError(json.dumps({
+                "message": "Application request limit reached",
+                "code": 4,
+                "error_subcode": 5044001,
+            }))
+
+        namespace = self.namespace(items, graph_get, graph_set, workers=1)
+        with self.assertLogs(level="ERROR"):
+            result = namespace["execute_ad_control_live"]({
+                "preview_id": "p1",
+                "preview_hash": "hash",
+                "dry_run": False,
+                "confirm": "EXECUTE_LIVE_PAUSE",
+            }, {"user_id": "runner"})
+        self.assertEqual(1, calls["get"])
+        self.assertEqual(1, calls["set"])
+        self.assertEqual(1, result["error_count"])
+        self.assertEqual(3, result["deferred_count"])
+        self.assertEqual(4, result["remaining_count"])
+        self.assertEqual(3, len([item for item in result["results"] if item["status"] == "deferred"]))
+
+    def test_missing_meta_owner_is_fail_closed(self):
+        items = [self.item("1", "c1")]
+        calls = {"set": 0}
+
+        def graph_set(token, campaign_id, status):
+            calls["set"] += 1
+            return {"success": True}
+
+        namespace = self.namespace(
+            items,
+            lambda token, campaign_id, fields: {"effective_status": "ACTIVE"},
+            graph_set,
+        )
+        result = namespace["execute_ad_control_live"]({
+            "preview_id": "p1",
+            "preview_hash": "hash",
+            "dry_run": False,
+            "confirm": "EXECUTE_LIVE_PAUSE",
+        }, {"user_id": "runner"})
+        self.assertEqual(0, calls["set"])
+        self.assertEqual("account_owner_mismatch", result["results"][0]["reason"])
+        self.assertEqual("blocked", result["run_status"])
+
+
+if __name__ == "__main__":
+    unittest.main()

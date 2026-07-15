@@ -5,9 +5,9 @@
     rules: ["规则组管理", "用规则组统一管理产品、账号、规则阈值、绑定策略和执行入口。", "adControlRules"],
     pools: ["账户池", "按产品创建账户池，后续在绑定关系中复用。", "adControlPools"],
     bindings: ["绑定关系", "配置产品、账户池和规则集的绑定，并控制启停。", "adControlBindings"],
-    run: ["运行控制台", "选择绑定关系后执行 live preview、dry-run、确认关闭和急停。", "adControlRun"],
-    tokens: ["Token配置", "配置产品默认 token 和账户级 token override。", "adControlTokens"],
-    logs: ["执行日志", "查看 preview 和 execute 的审计结果、跳过原因和错误原因。", "adControlLogs"],
+    run: ["运行控制台已下线", "规则组现在直接在管理页启停，不再使用 Preview 流程。", "adControlRules"],
+    tokens: ["默认Token来源", "按目标产品读取 apps_setting.default_user。", "adControlTokens"],
+    logs: ["执行日志", "查看调控流程、Meta 执行结果、续跑状态和日志存储状态。", "adControlLogs"],
   };
   const defaultRules = [
     { name: "7小时+无安装关闭", action: "pause", enabled: true, window: { type: "since_start" }, conditions: [
@@ -37,10 +37,10 @@
     pools: [],
     ruleSets: [],
     bindings: [],
-    preview: null,
     ruleGroupAccounts: {},
     frontendRuleGroups: [],
     ruleGroupDraft: null,
+    logLoadSequence: 0,
   };
   const $ = id => document.getElementById(id);
 
@@ -58,7 +58,12 @@
   async function api(url, options) {
     const response = await fetch(url, Object.assign({ credentials: "same-origin" }, options || {}));
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.message || data.error || "请求失败");
+    if (!response.ok) {
+      const error = new Error(data.message || data.error || "请求失败");
+      error.code = data.code || "request_failed";
+      error.details = data;
+      throw error;
+    }
     return data;
   }
   function hasPermission(auth) {
@@ -308,11 +313,13 @@
       if (previous && ALLOWED_PRODUCTS.includes(previous)) select.value = previous;
     }
   }
-  async function loadAccounts() {
+  async function loadAccounts(selected) {
     if (!product()) return;
+    const preserveSelected = Array.isArray(selected) ? selected : selectedAccounts();
     const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(product())}`);
     state.accounts = data.items || [];
-    renderAccounts([]);
+    renderAccounts(preserveSelected);
+    return data;
   }
   function renderAccounts(selected) {
     const list = $("accountList");
@@ -357,14 +364,11 @@
     $("pageRoot").innerHTML = `
       <section class="panel"><div class="panel-head"><h2>状态概览</h2><span class="hint" id="runnerStatus">加载中...</span></div><div class="panel-body">
         <div class="cards"><div class="metric"><span>启用绑定</span><strong id="enabledBindings">0</strong></div><div class="metric"><span>急停绑定</span><strong id="stoppedBindings">0</strong></div><div class="metric"><span>资源阈值</span><strong id="resourceLimit">--</strong></div><div class="metric"><span>最大并发</span><strong id="maxWorkers">--</strong></div></div>
-        <div class="risk">拆页后请按顺序配置：Token配置 -> 账户池 -> 规则集 -> 绑定关系 -> 运行控制台。默认不会启用任何新绑定，也不会自动关闭广告。</div>
+        <div class="risk">默认 token 来源读取目标产品 apps_setting.default_user；规则执行前请先确认账户池、规则组和执行日志。</div>
       </div></section>
       <section class="panel"><div class="panel-head"><h2>快速入口</h2></div><div class="panel-body"><div class="cards">
-        ${quickCard("规则集", "/ad-control-rules.html", "维护可复用规则")}
+        ${quickCard("规则组管理", "/ad-control-rules.html", "维护可复用规则")}
         ${quickCard("账户池", "/ad-control-account-pools.html", "选择产品账户")}
-        ${quickCard("绑定关系", "/ad-control-bindings.html", "绑定账户池与规则集")}
-        ${quickCard("运行控制台", "/ad-control-run.html", "Preview、dry-run、确认关闭")}
-        ${quickCard("Token配置", "/ad-control-tokens.html", "配置产品和账户 token")}
         ${quickCard("执行日志", "/ad-control-logs.html", "查看审计结果")}
       </div></div></section>
       <section class="panel"><div class="panel-head"><h2>最近执行</h2><a class="btn" href="/ad-control-logs.html">查看全部</a></div><div class="panel-body"><div class="list" id="latestActions"></div></div></section>`;
@@ -399,7 +403,7 @@
             <div class="field"><label>状态筛选</label><select id="ruleGroupStatusFilter"><option value="">全部</option><option value="enabled">已启用</option><option value="partial">部分启用</option><option value="disabled">已禁用</option><option value="stopped">已急停</option></select></div>
             <div class="field"><label>&nbsp;</label><button class="btn" id="clearRuleGroupFilterBtn" type="button">清空筛选</button></div>
           </div>
-          <div class="risk">本页不调用 Meta 写接口。保存规则组只写本后台配置；Preview 入口会跳到运行控制台，真实关闭仍需要二次确认。</div>
+          <div class="risk">本页启停只修改后台规则状态；启用时会校验当前账户池及所有账号的 Token 权限，不会立即修改广告状态。</div>
           <div class="table-wrap compact-table"><table><thead><tr><th>规则组</th><th>产品范围</th><th>账号范围</th><th>规则</th><th>策略</th><th>状态</th><th>操作</th></tr></thead><tbody id="ruleGroupRows"></tbody></table></div>
         </div>
       </section>
@@ -409,7 +413,7 @@
           <div class="drawer-body" id="ruleGroupDrawerBody"></div>
           <div class="drawer-foot">
             <span class="hint" id="drawerSaveHint">保存后底层按产品拆分，且默认 disabled。</span>
-            <div class="row"><button class="btn" id="drawerPreviewBtn" type="button">保存后去 Preview</button><button class="btn primary" id="saveRuleGroupBtn" type="button">保存规则组</button></div>
+            <div class="row"><button class="btn primary" id="saveRuleGroupBtn" type="button">保存规则组</button></div>
           </div>
         </div>
       </div>`;
@@ -425,8 +429,7 @@
       renderRuleGroupList();
     };
     $("closeRuleGroupDrawerBtn").onclick = closeRuleGroupDrawer;
-    $("saveRuleGroupBtn").onclick = () => saveFrontendRuleGroup(false);
-    $("drawerPreviewBtn").onclick = () => saveFrontendRuleGroup(true);
+    $("saveRuleGroupBtn").onclick = saveFrontendRuleGroup;
     await refreshRuleGroups();
   }
   async function refreshRuleGroups() {
@@ -473,7 +476,6 @@
         <td><div class="row action-row">
           <button class="btn" data-rule-action="edit" data-group="${escapeHtml(group.id)}" type="button">编辑</button>
           <button class="btn" data-rule-action="copy" data-group="${escapeHtml(group.id)}" type="button">复制</button>
-          <button class="btn" data-rule-action="preview" data-group="${escapeHtml(group.id)}" type="button">Preview</button>
           <button class="btn" data-rule-action="logs" data-group="${escapeHtml(group.id)}" type="button">日志</button>
           <button class="btn" data-rule-action="toggle" data-enabled="${group.enabled ? "0" : "1"}" data-group="${escapeHtml(group.id)}" type="button">${toggleLabel}</button>
           <button class="btn danger" data-rule-action="stop" data-group="${escapeHtml(group.id)}" type="button">急停</button>
@@ -495,7 +497,6 @@
     try {
       if (action === "edit") return await openRuleGroupDrawer(group, false);
       if (action === "copy") return await openRuleGroupDrawer(group, true);
-      if (action === "preview") return openRuleGroupPreview(group);
       if (action === "logs") return openRuleGroupLogs(group);
       if (action === "toggle") return await setFrontendRuleGroupEnabled(group, button.dataset.enabled === "1");
       if (action === "stop") return await emergencyStopFrontendRuleGroup(group);
@@ -600,7 +601,7 @@
         <div class="grid"><div class="field"><label>关闭时间</label><input id="drawerCloseTime" type="time" value="${escapeHtml(draft.close_time)}" /></div><div class="field"><label>执行时区</label><input id="drawerExecuteTimezone" value="${escapeHtml(draft.execute_timezone)}" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerBlockSameDay" type="checkbox" ${draft.block_same_day_reopen ? "checked" : ""} /> 当天禁止重启</label></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="drawerAllowNextDay" type="checkbox" ${draft.allow_next_day_reopen ? "checked" : ""} /> 隔天允许程序重启</label></div></div>
       </section>
       <section class="drawer-section">
-        <div class="section-title"><span>5</span><h3>保存与 Preview</h3></div>
+        <div class="section-title"><span>5</span><h3>保存配置</h3></div>
         <div class="summary-box" id="drawerSummary"></div>
       </section>`;
     $("drawerWindowType").value = draft.default_window.type || "since_start";
@@ -655,8 +656,14 @@
   async function ensureRuleGroupAccountsForProducts(products) {
     await Promise.all((products || []).filter(value => ALLOWED_PRODUCTS.includes(value)).map(async value => {
       if (state.ruleGroupAccounts[value]) return;
-      const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`);
-      state.ruleGroupAccounts[value] = data.items || [];
+      try {
+        const data = await api(`/api/ad-control/accounts?product=${encodeURIComponent(value)}`);
+        state.ruleGroupAccounts[value] = data.items || [];
+        if (data.warning) console.warn(`ad-control accounts ${value}: ${data.warning}`);
+      } catch (error) {
+        state.ruleGroupAccounts[value] = [];
+        console.warn(`ad-control accounts ${value} failed`, error);
+      }
     }));
   }
   function captureDraftSelectedAccounts() {
@@ -836,7 +843,7 @@
     box.innerHTML = `<div class="summary-grid"><div><span>产品</span><strong>${summary.products.map(value => PRODUCT_LABELS[value]).join(" / ")}</strong></div><div><span>账号</span><strong>${accountTotal} 个</strong></div><div><span>规则</span><strong>${summary.rules.length} 条</strong></div><div><span>策略</span><strong>${escapeHtml(strategySummary(summary))}</strong></div></div>
       <div class="hint">保存后写入 ad_control_rule_set、ad_control_account_group、ad_control_rule_group；所有底层 binding 默认 disabled。</div>`;
   }
-  async function saveFrontendRuleGroup(goPreview) {
+  async function saveFrontendRuleGroup() {
     let draft;
     try { draft = readRuleGroupDraftFromDrawer(); } catch (error) { toast(error.message, "error"); return; }
     if (!draft.name) return toast("请填写规则组名称", "error");
@@ -894,9 +901,6 @@
       toast(`规则组已保存：${savedBindings.length} 个产品绑定，默认禁用`);
       closeRuleGroupDrawer();
       await refreshRuleGroups();
-      if (goPreview && savedBindings.length) {
-        openBindingInRun(savedBindings[0]);
-      }
     } catch (error) {
       toast(error.message || String(error), "error");
     }
@@ -904,24 +908,27 @@
   async function setFrontendRuleGroupEnabled(group, enabled) {
     const label = enabled ? "启用" : "禁用";
     const enableMessage = group.emergency_stopped
-      ? "当前规则组已急停。启用会在完成 live preview 和 token 校验后解除急停并重新启用，确认继续？"
-      : "启用前必须完成对应绑定的 live preview 和 token 校验。确认继续？";
+      ? "当前规则组已急停。启用会校验所有账户的 Token 权限，并解除急停后重新启用，确认继续？"
+      : "启用会校验当前账户池及所有账号的 Token 权限，通过后直接启用规则组，确认继续？";
     if (enabled && !confirm(enableMessage)) return;
     const targets = (group.bindings || []).map(binding => ({ binding, id: bindingId(binding) })).filter(item => item.id);
     const results = await Promise.allSettled(targets.map(item => api(`/api/ad-control/bindings/${encodeURIComponent(item.id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) })));
-    const failed = results
-      .map((result, index) => ({ result, id: targets[index].id, product: targets[index].binding.product || "" }))
-      .filter(item => item.result.status === "rejected");
+    const detailed = results.map((result, index) => ({ result, id: targets[index].id, product: targets[index].binding.product || "" }));
+    const failed = detailed.filter(item => item.result.status === "rejected");
     const ok = results.length - failed.length;
     if (failed.length) {
-      toast(`${label}部分完成：成功 ${ok} 个，失败 ${failed.length} 个`);
+      if (enabled && ok) {
+        const succeeded = detailed.filter(item => item.result.status === "fulfilled");
+        await Promise.allSettled(succeeded.map(item => api(`/api/ad-control/bindings/${encodeURIComponent(item.id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false }) })));
+      }
       console.warn("ad-control toggle failed", failed.map(item => ({ id: item.id, product: item.product, error: item.result.reason && item.result.reason.message ? item.result.reason.message : String(item.result.reason) })));
     } else {
       toast(`${label}完成：${ok} 个底层绑定`);
     }
     await refreshRuleGroups();
     if (failed.length) {
-      throw new Error(`${label}失败：${failed.map(item => item.product || item.id).join(", ")}`);
+      const reasons = failed.map(item => `${item.product || item.id}：${item.result.reason?.message || String(item.result.reason)}`);
+      throw new Error(`${label}失败；已保持整组禁用。${reasons.join("；")}`);
     }
   }
   async function emergencyStopFrontendRuleGroup(group) {
@@ -940,14 +947,6 @@
     toast("规则组已删除");
     await refreshRuleGroups();
   }
-  function openBindingInRun(binding) {
-    window.location.assign(`/ad-control-run.html?product=${encodeURIComponent(binding.product || "")}&binding_id=${encodeURIComponent(bindingId(binding))}`);
-  }
-  function openRuleGroupPreview(group) {
-    const binding = group.bindings[0];
-    if (!binding) return toast("规则组没有可预览的绑定", "error");
-    openBindingInRun(binding);
-  }
   function openRuleGroupLogs(group) {
     const binding = group.bindings[0];
     if (!binding) return toast("规则组没有日志绑定", "error");
@@ -961,7 +960,7 @@
       <div class="manual-account-box" style="margin-top:12px;"><div class="field"><label>手动添加账号 ID</label><textarea id="poolManualAccounts" class="short-textarea" placeholder="支持粘贴 act_1146901540906487、1026707669580137；多个账号用换行、逗号或空格分隔"></textarea><span class="hint">手动账号会写入当前产品的账户池；适合账号未出现在接口列表时使用。</span></div><button class="btn" id="poolAddManualAccounts" type="button">加入账户池</button></div>
       </div></section><section class="panel"><div class="panel-head"><h2>账户池列表</h2></div><div class="panel-body"><div class="list" id="poolList"></div></div></section>`;
     await loadProducts(); await refreshPoolPage();
-    $("productSelect").onchange = refreshPoolPage;
+    $("productSelect").onchange = () => { resetPoolForm(); refreshPoolPage(); };
     $("newPoolBtn").onclick = resetPoolForm;
     $("savePoolBtn").onclick = savePool;
     $("selectAllBtn").onclick = () => document.querySelectorAll("#accountList input").forEach(input => input.checked = true);
@@ -975,11 +974,31 @@
     };
   }
   async function refreshPoolPage() {
-    await loadAccounts(); await loadPools(); $("accountHint").textContent = `已加载 ${state.accounts.length} 个账户`; renderPoolList();
+    state.accounts = [];
+    await loadPools();
+    renderPoolList();
+    $("accountHint").textContent = `已显示 ${state.pools.length} 个已保存账户池，正在加载业务库账户...`;
+    const selected = selectedAccounts();
+    try {
+      const data = await loadAccounts(selected);
+      $("accountHint").textContent = data.warning || `已加载 ${state.accounts.length} 个账户`;
+    } catch (error) {
+      state.accounts = [];
+      renderAccounts(selected);
+      $("accountHint").textContent = `业务库账户加载失败：${error.message}；已保存账户池仍可查看和编辑`;
+    }
   }
   async function savePool() {
-    await api("/api/ad-control/account-groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: $("poolId").value, product: product(), name: $("poolName").value.trim(), account_ids: selectedAccounts() }) });
-    toast("账户池已保存"); resetPoolForm(); await refreshPoolPage();
+    const name = $("poolName").value.trim();
+    const accountIds = selectedAccounts();
+    if (!name) return toast("请填写账户池名称", "error");
+    if (!accountIds.length) return toast("请至少选择或手动添加一个账号", "error");
+    try {
+      await api("/api/ad-control/account-groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: $("poolId").value, product: product(), name, account_ids: accountIds }) });
+      toast("账户池已保存"); resetPoolForm(); await refreshPoolPage();
+    } catch (error) {
+      toast(`账户池保存失败：${error.message}`, "error");
+    }
   }
   function resetPoolForm() {
     $("poolId").value = "";
@@ -997,12 +1016,28 @@
     toast(`已加入 ${ids.length} 个账号`);
   }
   function renderPoolList() {
-    $("poolList").innerHTML = state.pools.length ? state.pools.map(item => `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.group_id)} / ${item.account_ids.length} 个账户</span></div><div class="row"><button class="btn" data-edit-pool="${escapeHtml(item.group_id)}">编辑</button><button class="btn danger" data-delete-pool="${escapeHtml(item.group_id)}">删除</button></div></div>`).join("") : `<div class="empty">暂无账户池</div>`;
+    $("poolList").innerHTML = state.pools.length ? state.pools.map(item => {
+      const accountIds = item.account_ids || [];
+      const preview = accountIds.slice(0, 6).map(value => `act_${normalizeAccountId(value)}`).join("、");
+      const more = accountIds.length > 6 ? ` 等 ${accountIds.length} 个` : "";
+      return `<div class="item"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.product || product())} / ${escapeHtml(item.group_id)} / ${accountIds.length} 个账户</span><span class="hint mono">${escapeHtml(preview)}${escapeHtml(more)}</span></div><div class="row"><button class="btn" data-edit-pool="${escapeHtml(item.group_id)}">查看/编辑</button><button class="btn danger" data-delete-pool="${escapeHtml(item.group_id)}">删除</button></div></div>`;
+    }).join("") : `<div class="empty">当前产品暂无账户池</div>`;
     $("poolList").onclick = async event => {
       const edit = event.target.closest("[data-edit-pool]");
       const del = event.target.closest("[data-delete-pool]");
-      if (edit) { const item = state.pools.find(pool => pool.group_id === edit.dataset.editPool); $("poolId").value = item.group_id; $("poolName").value = item.name; renderAccounts(item.account_ids); }
-      if (del && confirm("确认删除账户池？")) { await api(`/api/ad-control/account-groups/${encodeURIComponent(del.dataset.deletePool)}`, { method: "DELETE" }); await refreshPoolPage(); }
+      if (edit) {
+        const item = state.pools.find(pool => pool.group_id === edit.dataset.editPool);
+        if (!item) return toast("账户池不存在，请刷新", "error");
+        $("poolId").value = item.group_id; $("poolName").value = item.name; renderAccounts(item.account_ids);
+      }
+      if (del && confirm("确认删除账户池？")) {
+        try {
+          await api(`/api/ad-control/account-groups/${encodeURIComponent(del.dataset.deletePool)}`, { method: "DELETE" });
+          resetPoolForm(); await refreshPoolPage();
+        } catch (error) {
+          toast(`账户池删除失败：${error.message}`, "error");
+        }
+      }
     };
   }
 
@@ -1016,7 +1051,7 @@
       </div></section>${productFilter()}<section class="panel"><div class="panel-head"><h2>绑定关系</h2><div class="row"><button class="btn" id="newBindingBtn">新建</button><button class="btn primary" id="saveBindingBtn">保存绑定</button></div></div><div class="panel-body">
       <div class="grid"><div class="field"><label>绑定名称</label><input id="bindingName" placeholder="北美账户池 + 7小时规则" /></div><div class="field"><label>绑定 ID</label><input id="bindingId" readonly /></div><div class="field"><label>账户池</label><select id="poolSelect"></select></div><div class="field"><label>规则集</label><select id="ruleSetSelect"></select></div></div>
       <div class="grid"><div class="field"><label>关闭时间</label><input id="bindingStrategyCloseTime" type="time" /></div><div class="field"><label>执行时区</label><input id="bindingStrategyTimezone" placeholder="account / UTC+8" /></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bindingStrategyBlockSameDay" type="checkbox" /> 当天禁止重启</label></div><div class="field"><label>&nbsp;</label><label class="check-inline"><input id="bindingStrategyNextDay" type="checkbox" /> 隔天允许重启</label></div></div>
-      <div class="risk">新绑定默认禁用。启用前必须在运行控制台完成 live preview，且 token 校验通过。</div></div></section><section class="panel"><div class="panel-head"><h2>绑定列表</h2></div><div class="panel-body"><div class="list" id="bindingList"></div></div></section>`;
+      <div class="risk">新绑定默认禁用。启用时会直接校验账户池及所有账号的 Token 权限，不再要求 Preview。</div></div></section><section class="panel"><div class="panel-head"><h2>绑定列表</h2></div><div class="panel-body"><div class="list" id="bindingList"></div></div></section>`;
     await loadProducts(); renderProductChecks("bindingProductMulti", state.products, state.products.slice(0, 2).map(item => item.product)); await refreshBindingPage();
     $("productSelect").onchange = refreshBindingPage;
     $("newBindingBtn").onclick = () => fillBinding(null);
@@ -1103,120 +1138,38 @@
   }
 
   async function renderRun() {
-    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>运行控制台</h2><div class="row"><button class="btn primary" id="previewBtn">Live Preview</button><button class="btn" id="dryRunBtn" disabled>Dry-run执行</button><button class="btn danger" id="executeBtn" disabled>确认关闭</button><button class="btn danger" id="stopBtn">急停</button></div></div><div class="panel-body">
-      <div class="grid three"><div class="field"><label>绑定关系</label><select id="bindingSelect"></select></div><div class="field"><label>指标窗口</label><select id="windowType"><option value="">使用规则集默认</option><option value="since_start">起始至当前</option><option value="today">账户当天</option><option value="recent_hours">最近 N 小时</option></select></div><div class="field"><label>N 小时</label><input id="windowHours" type="number" min="1" max="720" value="24" /></div></div>
-      <span class="hint" id="previewMeta">尚未 preview</span><div class="cards"><div class="metric"><span>命中 campaign</span><strong id="previewTotal">0</strong></div><div class="metric"><span>待关闭</span><strong id="previewPause">0</strong></div><div class="metric"><span>观察</span><strong id="previewObserve">0</strong></div><div class="metric"><span>异常</span><strong id="previewErrors">0</strong></div></div>
-      <div class="table-wrap"><table><thead><tr><th>账户/时区</th><th>Campaign</th><th>国家组</th><th>状态</th><th>起始/运行</th><th>实时指标</th><th>命中规则</th><th>策略</th><th>动作</th></tr></thead><tbody id="previewRows"></tbody></table></div>
-      </div></section><section class="panel"><div class="panel-head"><h2>刷新 campaign 起始时间缓存</h2></div><div class="panel-body"><div class="grid"><div class="field"><label>账户 ID</label><input id="refreshAccount" /></div><div class="field"><label>Campaign ID</label><input id="refreshCampaign" /></div><div class="field"><label>&nbsp;</label><button class="btn" id="refreshStartBtn">刷新缓存</button></div></div><div class="hint" id="refreshStartResult"></div></div></section>`;
-    const params = new URLSearchParams(window.location.search);
-    await loadProducts();
-    if (params.get("product") && $("productSelect")) $("productSelect").value = params.get("product");
-    await refreshRunBindings();
-    $("productSelect").onchange = refreshRunBindings;
-    $("previewBtn").onclick = previewLive;
-    $("dryRunBtn").onclick = () => executeLive(true);
-    $("executeBtn").onclick = () => executeLive(false);
-    $("stopBtn").onclick = emergencyStop;
-    $("refreshStartBtn").onclick = refreshCampaignStart;
-  }
-  async function refreshRunBindings() {
-    await loadBindings();
-    $("bindingSelect").innerHTML = optionHtml(state.bindings, "binding_id", "name", "请选择绑定关系");
-    const requested = new URLSearchParams(window.location.search).get("binding_id");
-    if (requested && state.bindings.some(item => bindingId(item) === requested)) $("bindingSelect").value = requested;
-  }
-  function selectedWindow() {
-    return $("windowType").value ? { type: $("windowType").value, hours: Number($("windowHours").value || 24) } : null;
-  }
-  async function previewLive() {
-    const bindingId = $("bindingSelect").value;
-    if (!bindingId) return toast("请选择绑定关系", "error");
-    const body = {};
-    if (selectedWindow()) body.window = selectedWindow();
-    const data = await api(`/api/ad-control/bindings/${encodeURIComponent(bindingId)}/preview-live`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    state.preview = data; renderPreview(data); toast("live preview 完成");
-  }
-  function renderPreview(data) {
-    const strategy = data.strategy || {};
-    $("previewTotal").textContent = data.total || 0;
-    $("previewPause").textContent = data.pause_count || 0;
-    $("previewObserve").textContent = data.observe_count || 0;
-    $("previewErrors").textContent = data.error_count || 0;
-    $("previewMeta").textContent = `preview ${data.preview_id || "--"} / 过期 ${data.expires_at || "--"} / 剩余未展示 ${data.remaining_count || 0} / 策略 ${strategySummary(strategy)}`;
-    $("dryRunBtn").disabled = !data.preview_id;
-    $("executeBtn").disabled = !data.preview_id || !(data.pause_count > 0);
-    $("previewRows").innerHTML = (data.items || []).map(item => {
-      const m = item.metrics || {};
-      const rules = (item.matched_rules || []).map(rule => rule.name || rule.action).join(", ");
-      const targetCls = item.target_action === "pause" ? "danger" : (item.target_action === "observe" ? "warn" : "");
-      return `<tr><td><div class="mono">${escapeHtml(item.account_id)}</div><div class="hint">时区 ${escapeHtml(item.account_time_zone || "--")} / token ${escapeHtml(item.token_user_id || "--")}</div></td><td><div>${escapeHtml(item.campaign_name || "--")}</div><div class="mono">${escapeHtml(item.campaign_id)}</div></td><td>${escapeHtml(item.country || "--")}<div class="hint">${escapeHtml(item.language || "")}</div></td><td><span class="badge ok">${escapeHtml(item.effective_status || item.status || "--")}</span></td><td>${escapeHtml(item.campaign_start_at || "--")}<div class="hint">${item.age_hours == null ? "缺起始时间" : item.age_hours.toFixed(1) + " 小时"}</div></td><td>Spend ${money(m.spend)} / Install ${m.install || 0}<br>Purchase ${m.purchase || 0} / ROAS% ${money(m.roas_pct)} / CPA ${m.purchase_cpa == null ? "--" : money(m.purchase_cpa)}</td><td>${escapeHtml(rules || item.skip_reason || "--")}</td><td>${escapeHtml(strategySummary(strategy))}</td><td><span class="badge ${targetCls}">${escapeHtml(item.target_action || "none")}</span></td></tr>`;
-    }).join("");
-  }
-  async function executeLive(dryRun) {
-    if (!state.preview || !state.preview.preview_id) return toast("请先 live preview", "error");
-    const body = { preview_id: state.preview.preview_id, preview_hash: state.preview.preview_hash, dry_run: !!dryRun };
-    if (!dryRun) {
-      const confirmText = window.prompt("真实关闭会调用 Meta API。请输入 EXECUTE_LIVE_PAUSE 确认：");
-      if (confirmText !== "EXECUTE_LIVE_PAUSE") return;
-      body.confirm = "EXECUTE_LIVE_PAUSE";
-    }
-    const data = await api(`/api/ad-control/bindings/${encodeURIComponent($("bindingSelect").value)}/execute-live`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    toast(`${dryRun ? "dry-run" : "真实执行"}完成：成功 ${data.success_count}，跳过 ${data.skipped_count}，失败 ${data.error_count}`);
-  }
-  async function emergencyStop() {
-    const bindingId = $("bindingSelect").value;
-    if (!confirm("确认急停？急停只停止绑定/runner，不主动修改广告状态。")) return;
-    await api("/api/ad-control/emergency-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bindingId ? { scope: "rule_group", group_id: bindingId } : { scope: "global" }) });
-    toast("已急停"); await refreshRunBindings();
-  }
-  async function refreshCampaignStart() {
-    const data = await api("/api/ad-control/campaign-start/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), account_id: $("refreshAccount").value, campaign_id: $("refreshCampaign").value }) });
-    $("refreshStartResult").textContent = JSON.stringify(data);
+    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>运行控制台已下线</h2></div><div class="panel-body"><div class="risk">规则组启停已统一收口到规则组管理页，不再要求 Preview，也不再从此页面手动执行。</div><a class="btn primary" href="/ad-control-rules.html">返回规则组管理</a></div></section>`;
   }
 
   async function renderTokens() {
-    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>Token配置</h2><button class="btn" id="reloadBtn">刷新配置</button></div><div class="panel-body"><div class="grid"><div class="field"><label>配置范围</label><select id="tokenScope"><option value="">产品默认 token</option></select><span class="hint">选择账号或在下方手动填 account_id；留空表示产品默认 token。</span></div><div class="field"><label>账户 override account_id</label><input id="tokenAccountId" placeholder="可选，支持 act_1146901540906487" /></div><div class="field"><label>token owner user_id</label><input id="tokenUserId" placeholder="ads_facebook_info.user_id" /></div><div class="field"><label>备注</label><input id="tokenLabel" placeholder="例如 Dramawave 控制 token" /></div><div class="field"><label>&nbsp;</label><div class="row"><button class="btn" id="validateBtn">校验</button><button class="btn primary" id="saveTokenBtn">保存</button></div></div></div><div class="list" id="tokenList"></div></div></section>`;
+    $("pageRoot").innerHTML = `${productFilter()}<section class="panel"><div class="panel-head"><h2>默认Token来源</h2><div class="row"><button class="btn" id="validateBtn">校验当前产品</button><button class="btn" id="reloadBtn">刷新</button></div></div><div class="panel-body"><div class="risk">当前页面只读展示。规则执行会按目标产品读取 apps_setting.default_user，再从 ads_facebook_info 获取对应 Meta token。</div><div class="list" id="tokenList"></div><div class="list" id="tokenValidateResult"></div></div></section>`;
     await loadProducts(); await refreshTokenPage();
     $("productSelect").onchange = refreshTokenPage;
     $("reloadBtn").onclick = refreshTokenPage;
-    $("tokenScope").onchange = () => { $("tokenAccountId").value = $("tokenScope").value || ""; };
     $("validateBtn").onclick = validateToken;
-    $("saveTokenBtn").onclick = saveToken;
   }
   async function refreshTokenPage() {
     await loadAccounts();
-    $("tokenScope").innerHTML = `<option value="">产品默认 token</option>` + state.accounts.map(item => `<option value="${escapeHtml(item.account_id || "")}">${escapeHtml(item.account_name || item.account_id || "")} / ${escapeHtml(item.account_id || "")}</option>`).join("");
     const data = await api(`/api/ad-control/token-config?product=${encodeURIComponent(product())}`);
-    $("tokenList").innerHTML = (data.items || []).length ? data.items.map(item => `<div class="item"><div><strong>${item.scope === "product" ? "产品默认 token" : escapeHtml(item.account_id)}</strong><span class="hint">owner ${escapeHtml(item.user_id)} / ${escapeHtml(item.label || "--")} / 最近校验 ${escapeHtml((item.validation || {}).validated_at || "--")}</span></div><span class="badge ${((item.validation || {}).ok) ? "ok" : "warn"}">${((item.validation || {}).ok) ? "校验通过" : "未校验或失败"}</span></div>`).join("") : `<div class="empty">暂无 token 配置</div>`;
-  }
-  function tokenOverrideAccountId() {
-    return normalizeAccountId($("tokenAccountId")?.value || $("tokenScope")?.value || "");
+    $("tokenValidateResult").innerHTML = "";
+    $("tokenList").innerHTML = (data.items || []).length ? data.items.map(item => `<div class="item"><div><strong>${escapeHtml(item.app_name || item.product || "产品默认")}</strong><span class="hint">default_user ${escapeHtml(item.user_id)} / apps_setting.id ${escapeHtml(item.app_id || "--")} / app_id ${escapeHtml(item.app_key || "--")} / 来源 ${escapeHtml(item.source || "--")}</span></div><span class="badge ${((item.validation || {}).ok) ? "ok" : "warn"}">${((item.validation || {}).ok) ? "可用于校验" : "未校验"}</span></div>`).join("") : `<div class="empty">当前产品未找到 apps_setting.default_user</div>`;
   }
   function tokenValidationAccounts() {
-    const accountId = tokenOverrideAccountId();
-    if (accountId) return [accountId];
     return state.accounts.map(item => item.account_id).filter(Boolean);
   }
   async function validateToken() {
     try {
       const accounts = tokenValidationAccounts();
-      const data = await api("/api/ad-control/token-config/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), user_id: $("tokenUserId").value.trim(), accounts }) });
+      const data = await api("/api/ad-control/token-config/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), accounts }) });
+      $("tokenValidateResult").innerHTML = `<div class="item"><div><strong>校验结果</strong><span class="hint">${escapeHtml(data.app_name || product())} / default_user ${escapeHtml(data.user_id || "--")} / ${escapeHtml(data.ok_count || 0)}/${escapeHtml(data.checked_count || 0)} 个账户可访问</span></div><span class="badge ${data.ok ? "ok" : "warn"}">${data.ok ? "通过" : "部分失败"}</span></div>`;
       toast(`校验完成：${data.ok_count}/${data.checked_count} 通过`);
-    } catch (error) {
-      toast(error.message || String(error), "error");
-    }
-  }
-  async function saveToken() {
-    try {
-      await api("/api/ad-control/token-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: product(), account_id: tokenOverrideAccountId(), user_id: $("tokenUserId").value.trim(), label: $("tokenLabel").value.trim() }) });
-      toast("token 配置已保存"); await refreshTokenPage();
     } catch (error) {
       toast(error.message || String(error), "error");
     }
   }
 
   async function renderLogs() {
-    $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>绑定关系</label><select id="bindingFilter"><option value="">全部绑定</option></select></div>`)}<section class="panel"><div class="panel-head"><h2>执行日志</h2><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部</option><option value="pause">pause</option><option value="preview">preview</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>条数</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
+    $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>绑定关系</label><select id="bindingFilter"><option value="">全部绑定</option></select></div>`)}<section class="panel"><div class="panel-head"><div><h2>执行日志</h2><span class="hint" id="logStorageHint">正在读取 ads_ai 调控日志...</span></div><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部执行动作</option><option value="pause">关停 pause</option><option value="reopen">重启 reopen</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>条数</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
     const params = new URLSearchParams(window.location.search);
     await loadProducts();
     if (params.get("product") && $("productSelect")) $("productSelect").value = params.get("product");
@@ -1233,15 +1186,179 @@
     if (requested && state.bindings.some(item => bindingId(item) === requested)) $("bindingFilter").value = requested;
   }
   async function loadLogs() {
-    const qs = new URLSearchParams({ product: product(), binding_id: $("bindingFilter").value || "", action: $("actionFilter").value || "", date_from: $("dateFrom").value || "", date_to: $("dateTo").value || "", limit: $("limitInput").value || "50" });
-    const data = await api(`/api/ad-control/actions?${qs.toString()}`);
-    renderActionList(data.items || [], $("actionList"));
+    const sequence = ++state.logLoadSequence;
+    const button = $("loadLogsBtn");
+    const storageHint = $("logStorageHint");
+    if (button) button.disabled = true;
+    if (storageHint) storageHint.textContent = "正在读取 ads_ai 调控日志...";
+    $("actionList").innerHTML = `<div class="empty">日志加载中...</div>`;
+    const qs = new URLSearchParams({ product: product(), binding_id: $("bindingFilter").value || "", action: $("actionFilter").value || "", date_from: $("dateFrom").value || "", date_to: $("dateTo").value || "", limit: $("limitInput").value || "50", include_targets: "false" });
+    try {
+      const data = await api(`/api/ad-control/actions?${qs.toString()}`);
+      if (sequence !== state.logLoadSequence) return;
+      if (storageHint) {
+        storageHint.textContent = data.storage === "ads_ai"
+          ? "日志来源：ads_ai.ad_control_action_log"
+          : "日志来源：本地 SQLite 回退（ads_ai 暂不可用）";
+        storageHint.title = data.storage_error || "";
+      }
+      renderActionList(data.items || [], $("actionList"));
+      bindLogLazyDetails($("actionList"));
+    } catch (error) {
+      if (sequence !== state.logLoadSequence) return;
+      if (storageHint) storageHint.textContent = "执行日志加载失败";
+      $("actionList").innerHTML = `<div class="empty">${escapeHtml(error.message || String(error))}</div>`;
+      toast(error.message || String(error), "error");
+    } finally {
+      if (sequence === state.logLoadSequence && button) button.disabled = false;
+    }
+  }
+  function logStatusBadge(audit) {
+    const status = (audit || {}).status || {};
+    return `<span class="badge ${escapeHtml(status.class || "warn")}">${escapeHtml(status.label || "--")}</span>`;
+  }
+  function logCountPill(label, value, type = "") {
+    return `<span class="log-count ${type}"><b>${escapeHtml(value)}</b>${escapeHtml(label)}</span>`;
+  }
+  function logValue(value) {
+    if (value === null || value === undefined || value === "") return "--";
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toLocaleString() : "--";
+  }
+  function firstLogValue(...values) {
+    return values.find(value => value !== null && value !== undefined && value !== "");
+  }
+  function logFlow(item, audit) {
+    const criteria = item.criteria || {};
+    const summary = criteria.execution_summary || {};
+    const flow = audit.flow || {};
+    const legacyMetric = (field, flowValue, criteriaKey) => {
+      const direct = item[field];
+      const hasCriteria = Object.prototype.hasOwnProperty.call(criteria, criteriaKey);
+      if (Number(item.log_version || 1) < 2 && Number(direct || 0) === 0 && !hasCriteria) return null;
+      return firstLogValue(direct, flowValue, criteria[criteriaKey]);
+    };
+    const scanned = legacyMetric("scanned_count", flow.scanned, "scan_count");
+    const candidate = legacyMetric("candidate_count", flow.candidate, "candidate_count");
+    const matched = firstLogValue(item.matched_count, flow.matched, criteria.execution_target_count);
+    const planned = firstLogValue(item.batch_planned_count, flow.batch_planned, criteria.execution_batch_count, item.requested_count);
+    const remaining = firstLogValue(item.remaining_count, flow.remaining, summary.remaining_count);
+    const retryable = firstLogValue(item.retryable_error_count, flow.retryable, summary.retryable_error_count);
+    const stages = [
+      ["本轮扫描", scanned],
+      ["白名单候选", candidate],
+      ["规则命中", matched],
+      ["本批计划", planned],
+      ["待后续处理", remaining],
+    ];
+    return `<div class="log-flow">${stages.map(([label, value], index) => `${index ? '<span class="log-flow-arrow">→</span>' : ""}<div class="log-stage ${label === "待后续处理" && Number(value || 0) > 0 ? "pending" : ""}"><span>${escapeHtml(label)}</span><b>${escapeHtml(logValue(value))}</b></div>`).join("")}</div>${Number(retryable || 0) > 0 ? `<div class="log-retry-note">其中 ${escapeHtml(logValue(retryable))} 个为可重试失败，后续批次会重新处理。</div>` : ""}`;
+  }
+  function logReasonList(items, emptyText) {
+    const list = items || [];
+    if (!list.length) return `<span class="hint">${escapeHtml(emptyText || "无")}</span>`;
+    return `<div class="log-reasons">${list.map(item => `<span title="${escapeHtml(item.reason || "")}">${escapeHtml(item.reason || "")}<b>${escapeHtml(item.count)}</b></span>`).join("")}</div>`;
+  }
+  function logSampleTable(samples) {
+    const rows = samples || [];
+    if (!rows.length) return `<div class="empty compact-empty">暂无目标明细</div>`;
+    return `<div class="table-wrap compact-table log-sample-table"><table><thead><tr><th>结果</th><th>账号</th><th>Campaign</th><th>剧ID / 资源ID</th><th>语言 / 国家</th><th>原因 / 备注</th></tr></thead><tbody>${rows.map(row => {
+      const notes = [row.reason || ""].concat(row.warnings || []).filter(Boolean);
+      const campaignTitle = [row.campaign_name || "", row.campaign_id || ""].filter(Boolean).join(" / ");
+      const campaignText = row.campaign_name ? `<div>${escapeHtml(row.campaign_name)}</div><div class="mono hint">${escapeHtml(row.campaign_short || row.campaign_id || "--")}</div>` : `<span class="mono" title="${escapeHtml(row.campaign_id || "")}">${escapeHtml(row.campaign_short || row.campaign_id || "--")}</span>`;
+      const resourceText = row.resource_display || row.series_code || row.resource_id || row.source_id || "--";
+      const resourceHint = row.resource_name || row.content_id || (row.original_source_id ? `source ${row.original_source_id}` : "");
+      return `<tr><td>${escapeHtml(row.status_label || row.status || "--")}</td><td class="mono">${escapeHtml(row.account_id || "--")}</td><td title="${escapeHtml(campaignTitle)}">${campaignText}</td><td><div class="mono">${escapeHtml(resourceText)}</div>${resourceHint ? `<div class="hint">${escapeHtml(resourceHint)}</div>` : ""}</td><td>${escapeHtml(row.language || "--")}<div class="hint">${escapeHtml(row.country || "")}</div></td><td>${escapeHtml(notes.join("；") || "--")}</td></tr>`;
+    }).join("")}</tbody></table></div>`;
+  }
+  async function loadLogTargets(card) {
+    if (!card || card.dataset.targetsLoaded) return;
+    const actionId = card.dataset.actionId || "";
+    if (!actionId) return;
+    const targetBody = card.querySelector("[data-target-body]");
+    const targetSummary = card.querySelector("[data-target-summary]");
+    const rawBody = card.querySelector("[data-raw-body]");
+    const rawSummary = card.querySelector("[data-raw-summary]");
+    card.dataset.targetsLoaded = "loading";
+    if (targetBody) targetBody.innerHTML = `<div class="empty compact-empty">目标明细加载中...</div>`;
+    try {
+      const data = await api(`/api/ad-control/actions/${encodeURIComponent(actionId)}/targets`);
+      const samples = data.samples || [];
+      const results = data.results || [];
+      const total = data.raw_result_count ?? results.length ?? samples.length;
+      if (targetSummary) targetSummary.textContent = `目标明细（已展示 ${samples.length} / 共 ${total} 条）`;
+      if (targetBody) targetBody.innerHTML = logSampleTable(samples);
+      if (rawSummary) rawSummary.textContent = `原始结果 JSON（${results.length} 条）`;
+      if (rawBody) rawBody.textContent = JSON.stringify(results, null, 2);
+      card.dataset.targetsLoaded = "1";
+    } catch (error) {
+      card.dataset.targetsLoaded = "";
+      const message = escapeHtml(error.message || String(error));
+      if (targetBody) targetBody.innerHTML = `<div class="empty compact-empty">${message}</div>`;
+      if (rawBody) rawBody.textContent = error.message || String(error);
+    }
+  }
+  function bindLogLazyDetails(node) {
+    if (!node || node.dataset.lazyBound === "1") return;
+    node.dataset.lazyBound = "1";
+    node.addEventListener("toggle", event => {
+      const details = event.target.closest("details[data-lazy-targets]");
+      if (!details || !details.open) return;
+      loadLogTargets(details.closest(".log-card"));
+    }, true);
   }
   function renderActionList(items, node) {
     node.innerHTML = items.length ? items.map(item => {
+      const audit = item.audit || {};
+      const counts = audit.counts || {};
       const strategy = (item.criteria || {}).strategy || {};
-      const reasons = Array.from(new Set((item.results || []).map(result => result.reason).filter(Boolean))).slice(0, 6);
-      return `<div class="item"><div><strong>${escapeHtml(item.action_id)}</strong><span class="hint">${escapeHtml(item.created_at)} / ${escapeHtml(item.product)} / 绑定 ${escapeHtml(item.binding_id || "--")} / ${item.dry_run ? "dry-run" : "real"} / 成功 ${item.success_count} 跳过 ${item.skipped_count} 失败 ${item.error_count} / 策略 ${escapeHtml(strategySummary(strategy))}${reasons.length ? " / 原因 " + escapeHtml(reasons.join(",")) : ""}</span><details><summary>结果详情</summary><pre class="mono">${escapeHtml(JSON.stringify(item.results || [], null, 2))}</pre></details></div><span class="badge">${escapeHtml(item.action)}</span></div>`;
+      const rawCount = Math.max(
+        Number(audit.raw_result_count || 0),
+        Number(item.requested_count || 0),
+        Number(item.success_count || 0) + Number(item.skipped_count || 0) + Number(item.error_count || 0),
+      );
+      const storage = audit.log_store || item.log_store || "sqlite_fallback";
+      const eventKey = item.event_key || (item.criteria || {}).runner_event_key || "";
+      return `<div class="log-card" data-action-id="${escapeHtml(item.action_id || "")}">
+        <div class="log-card-head">
+          <div class="log-title">
+            <strong>${escapeHtml(audit.rule_group_name || item.binding_id || "--")}</strong>
+            <span class="hint">${escapeHtml(audit.created_at_local || item.created_at || "--")} / ${escapeHtml(item.product || "--")} / ${escapeHtml(audit.action_label || item.action || "--")} / ${escapeHtml(audit.mode_label || (item.dry_run ? "Dry-run" : "正式执行"))}</span>
+          </div>
+          <div class="log-status">${logStatusBadge(audit)}</div>
+        </div>
+        <div class="log-meta">
+          <span>规则组：<b class="mono">${escapeHtml(audit.rule_group_id || item.binding_id || "--")}</b></span>
+          <span>Action：<b class="mono">${escapeHtml(item.action_id || "--")}</b></span>
+          <span>Preview：<b class="mono">${escapeHtml(item.preview_id || "--")}</b></span>
+          ${eventKey ? `<span>调度事件：<b class="mono">${escapeHtml(eventKey)}</b></span>` : ""}
+        </div>
+        ${logFlow(item, audit)}
+        <div class="log-channel-grid">
+          <div class="log-channel"><span>Meta 执行结果</span><div class="log-counts">
+            ${logCountPill("成功", counts.success ?? item.success_count ?? 0, "ok")}
+            ${logCountPill("跳过", counts.skipped ?? item.skipped_count ?? 0, "warn")}
+            ${logCountPill("失败", counts.error ?? item.error_count ?? 0, "danger")}
+          </div></div>
+          <div class="log-channel"><span>调控日志存储</span><strong class="log-store ${storage === "ads_ai" ? "ok" : "warn"}">${storage === "ads_ai" ? "已写入 ads_ai" : "SQLite 回退"}</strong></div>
+        </div>
+        <div class="log-counts">
+          ${logCountPill("本批计划", counts.requested ?? item.requested_count ?? 0)}
+        </div>
+        <div class="log-section">
+          <span class="log-label">失败/跳过原因</span>
+          ${logReasonList(audit.reason_summary, "无失败或跳过原因")}
+        </div>
+        ${(audit.warning_summary || []).length ? `<div class="log-section"><span class="log-label">执行备注</span>${logReasonList(audit.warning_summary, "无备注")}</div>` : ""}
+        ${strategy && Object.keys(strategy).length ? `<div class="log-section"><span class="log-label">策略</span><span class="hint">${escapeHtml(strategySummary(strategy))}</span></div>` : ""}
+        <details class="log-details" data-lazy-targets="targets">
+          <summary data-target-summary>目标明细（点击加载，共 ${escapeHtml(rawCount)} 条）</summary>
+          <div data-target-body><div class="empty compact-empty">展开后加载目标明细</div></div>
+        </details>
+        <details class="log-details" data-lazy-targets="raw">
+          <summary data-raw-summary>原始结果 JSON（点击加载，共 ${escapeHtml(rawCount)} 条）</summary>
+          <pre class="mono raw-json" data-raw-body>展开后加载原始结果 JSON</pre>
+        </details>
+      </div>`;
     }).join("") : `<div class="empty">暂无执行日志</div>`;
   }
 

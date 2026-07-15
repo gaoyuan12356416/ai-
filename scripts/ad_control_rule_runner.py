@@ -26,12 +26,14 @@ os.environ.setdefault("MYSQL_QUERY_GUARD_BYPASS", "1")
 os.environ.setdefault("AD_CONTROL_LIVE_MAX_WORKERS", "4")
 
 import app  # noqa: E402
+from features.ad_control_execution_log import service as execution_log_service  # noqa: E402
 
 
 LOG_PATH = os.environ.get("AD_CONTROL_RUNNER_LOG", "/var/log/ad_control_rule_runner.log")
 LOCK_PATH = os.environ.get("AD_CONTROL_RUNNER_LOCK", "/tmp/ad_control_rule_runner.lock")
 WINDOW_MINUTES = max(1, int(os.environ.get("AD_CONTROL_RUNNER_WINDOW_MINUTES", "10")))
 MAX_ITEMS = max(1, int(os.environ.get("AD_CONTROL_RUNNER_MAX_ITEMS", str(app.AD_CONTROL_MAX_EXECUTE))))
+MAX_CONTINUATIONS = max(1, int(os.environ.get("AD_CONTROL_RUNNER_MAX_CONTINUATIONS", "24")))
 
 
 def configure_logging():
@@ -164,6 +166,12 @@ def compact_event(payload):
         "success_count": int(result.get("success_count") or 0),
         "skipped_count": int(result.get("skipped_count") or 0),
         "error_count": int(result.get("error_count") or 0),
+        "matched_count": int(result.get("preview_pause_count") or result.get("matched_count") or 0),
+        "remaining_count": int(result.get("remaining_target_count") or result.get("remaining_count") or 0),
+        "retryable_error_count": int(result.get("retryable_error_count") or 0),
+        "blocked_count": int(result.get("blocked_count") or 0),
+        "continuation_attempt": int(result.get("continuation_attempt") or 0),
+        "log_store": result.get("log_store") or "",
         "finished_at": payload.get("finished_at") or "",
     }
 
@@ -171,25 +179,33 @@ def compact_event(payload):
 def log_event_result(payload):
     event = compact_event(payload)
     logging.info(
-        "ad control event result rule_group_id=%s rule_id=%s product=%s action=%s event_key=%s status=%s reason=%s action_id=%s preview_id=%s requested=%s success=%s skipped=%s error=%s dry_run=%s",
+        "ad control event result rule_group_id=%s rule_id=%s product=%s action=%s event_key=%s status=%s reason=%s action_id=%s preview_id=%s requested=%s success=%s skipped=%s error=%s remaining=%s retryable=%s blocked=%s attempt=%s log_store=%s dry_run=%s",
         event["rule_group_id"], event["rule_id"], event["product"], event["action"],
         event["event_key"], event["status"], event["reason"], event["action_id"],
         event["preview_id"], event["requested_count"], event["success_count"],
-        event["skipped_count"], event["error_count"], event["dry_run"],
+        event["skipped_count"], event["error_count"], event["remaining_count"],
+        event["retryable_error_count"], event["blocked_count"],
+        event["continuation_attempt"], event["log_store"], event["dry_run"],
     )
 
 
-def record_rule_group_preview_failure(rule_group, preview, event_key):
+def record_rule_group_preview_failure(rule_group, preview, event_key, run_status, runner_reason):
     action_id = __import__("uuid").uuid4().hex
-    errors = preview.get("errors", [])[:100]
+    errors = []
+    for raw_error in preview.get("errors", [])[:100]:
+        item = dict(raw_error) if isinstance(raw_error, dict) else {"reason": str(raw_error or "")}
+        item["status"] = "error"
+        item.update(execution_log_service.graph_error_details(item.get("reason") or item))
+        errors.append(item)
     criteria = {
         "mode": "live",
         "product": rule_group.get("product") or "",
         "rule_group_id": rule_group.get("group_id") or "",
         "binding_id": rule_group.get("group_id") or "",
         "runner_event_key": event_key,
-        "runner_status": "error",
-        "runner_reason": "live_preview_errors",
+        "runner_status": run_status,
+        "runner_reason": runner_reason,
+        "preview_error_count": len(errors),
     }
     with app.JOB_DB_LOCK:
         conn = app.get_job_db_connection()
@@ -215,6 +231,69 @@ def record_rule_group_preview_failure(rule_group, preview, event_key):
             conn.commit()
         finally:
             conn.close()
+    try:
+        app.ad_control_persist_action_log(action_id, {
+            "event_key": event_key,
+            "source_type": "scheduled",
+            "run_status": run_status,
+            "runner_reason": runner_reason,
+            "remaining_count": 0,
+        })
+    except Exception:
+        logging.exception("failed to persist preview failure to ads_ai action_id=%s", action_id)
+    return action_id
+
+
+def record_rule_group_verification(rule_group, preview, event_key):
+    action_id = __import__("uuid").uuid4().hex
+    criteria = {
+        "mode": "live",
+        "product": rule_group.get("product") or "",
+        "rule_group_id": rule_group.get("group_id") or "",
+        "binding_id": rule_group.get("group_id") or "",
+        "runner_event_key": event_key,
+        "runner_status": "executed",
+        "runner_reason": "",
+        "verification_only": True,
+        "scan_count": int(preview.get("scan_count") or 0),
+        "candidate_count": int(preview.get("candidate_count") or preview.get("total") or 0),
+        "execution_target_count": 0,
+        "execution_batch_count": 0,
+        "preview_error_count": 0,
+    }
+    with app.JOB_DB_LOCK:
+        conn = app.get_job_db_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO ad_control_action (
+                  action_id, preview_id, actor_user_id, action, level, product, criteria_json,
+                  requested_count, success_count, skipped_count, error_count, dry_run,
+                  results_json, created_at
+                ) VALUES (?, ?, ?, 'pause', 'campaign', ?, ?, 0, 0, 0, 0, 0, '[]', CURRENT_TIMESTAMP)
+                """,
+                (
+                    action_id,
+                    preview.get("preview_id") or "",
+                    "ad_control_rule_runner",
+                    rule_group.get("product") or "",
+                    json.dumps(criteria, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    try:
+        app.ad_control_persist_action_log(action_id, {
+            "event_key": event_key,
+            "source_type": "scheduled",
+            "run_status": "executed",
+            "runner_reason": "",
+            "matched_count": 0,
+            "remaining_count": 0,
+        })
+    except Exception:
+        logging.exception("failed to persist verification to ads_ai action_id=%s", action_id)
     return action_id
 
 
@@ -261,7 +340,18 @@ def group_schedule(rule_group):
     }
 
 
-def run_group_event(rule_group, action, event_key):
+def continuation_state(previous_event, action, event_key):
+    previous_event = previous_event or {}
+    same_continuation = (
+        previous_event.get("status") == "partial"
+        and previous_event.get("action") == action
+        and previous_event.get("event_key") == event_key
+    )
+    previous_result = (previous_event.get("result") or {}) if same_continuation else {}
+    return previous_result, int(previous_result.get("continuation_attempt") or 0) + 1
+
+
+def run_group_event(rule_group, action, event_key, previous_event=None):
     if action != "pause":
         return event_payload(rule_group, action, event_key, "skipped", reason="unsupported_group_action")
     if not rule_group.get("product"):
@@ -277,44 +367,113 @@ def run_group_event(rule_group, action, event_key):
         preview = app.create_ad_control_live_preview({"rule_group_id": rule_group.get("group_id")}, session)
     finally:
         app.ad_control_validate_insight_start_schema = validate_schema
-    if int(preview.get("error_count") or 0) > 0:
-        action_id = record_rule_group_preview_failure(rule_group, preview, event_key)
+    previous_result, continuation_attempt = continuation_state(
+        previous_event, action, event_key
+    )
+    preview_error_count = int(preview.get("error_count") or 0)
+    pause_count = int(preview.get("pause_count") or 0)
+    execution_count = int(preview.get("execution_count") or 0)
+    if pause_count == 0 and preview_error_count == 0:
+        verification_action_id = record_rule_group_verification(rule_group, preview, event_key)
+        return event_payload(rule_group, action, event_key, "executed", result={
+            "action_id": verification_action_id,
+            "preview_id": preview.get("preview_id"),
+            "requested_count": 0,
+            "success_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+            "preview_pause_count": 0,
+            "remaining_target_count": 0,
+            "continuation_attempt": continuation_attempt,
+            "verification_only": True,
+        }, reason="")
+    if continuation_attempt > MAX_CONTINUATIONS:
+        previous_action_id = str(previous_result.get("action_id") or "")
+        if previous_action_id:
+            try:
+                app.ad_control_update_action_log_runner(
+                    previous_action_id,
+                    event_key,
+                    "blocked",
+                    "continuation_limit_reached",
+                    pause_count,
+                )
+            except Exception:
+                logging.exception("failed to block ads_ai action log action_id=%s", previous_action_id)
         return event_payload(rule_group, action, event_key, "error", result={
+            "action_id": previous_action_id,
+            "preview_id": preview.get("preview_id"),
+            "error_count": int(preview.get("error_count") or 0),
+            "remaining_target_count": pause_count,
+            "continuation_attempt": continuation_attempt,
+        }, reason="continuation_limit_reached")
+    if preview_error_count > 0 and execution_count <= 0:
+        preview_details = []
+        for item in preview.get("errors", []):
+            reason_value = item.get("reason") if isinstance(item, dict) else item
+            preview_details.append(execution_log_service.graph_error_details(reason_value))
+        retryable_preview = bool(preview_details) and all(item.get("retryable") for item in preview_details)
+        status = "partial" if retryable_preview and continuation_attempt < MAX_CONTINUATIONS else "error"
+        log_status = "partial" if status == "partial" else "blocked"
+        reason = "live_preview_errors" if status == "partial" else "live_preview_blocked"
+        action_id = record_rule_group_preview_failure(
+            rule_group, preview, event_key, log_status, reason
+        )
+        return event_payload(rule_group, action, event_key, status, result={
             "action_id": action_id,
             "preview_id": preview.get("preview_id"),
-            "error_count": preview.get("error_count"),
+            "error_count": preview_error_count,
             "errors": preview.get("errors", [])[:10],
-        }, reason="live_preview_errors")
+            "continuation_attempt": continuation_attempt,
+            "remaining_target_count": 0,
+        }, reason=reason)
     result = app.execute_ad_control_live({
         "preview_id": preview.get("preview_id"),
         "preview_hash": preview.get("preview_hash"),
         "dry_run": False,
         "confirm": "EXECUTE_LIVE_PAUSE",
     }, session)
-    pause_count = int(preview.get("pause_count") or 0)
-    requested_count = int(result.get("requested_count") or 0)
-    remaining_count = max(0, pause_count - requested_count)
+    remaining_count = int(result.get("remaining_count") or 0)
+    if not remaining_count:
+        remaining_count = max(0, pause_count - int(result.get("requested_count") or 0))
+        remaining_count += int(result.get("retryable_error_count") or 0)
     result["preview_pause_count"] = pause_count
     result["remaining_target_count"] = remaining_count
-    if int(result.get("error_count") or 0) > 0:
+    result["continuation_attempt"] = continuation_attempt
+    permanent_errors = int(result.get("permanent_error_count") or 0)
+    blocked_count = int(result.get("blocked_count") or 0)
+    if permanent_errors > 0 or blocked_count > 0:
         status = "error"
-        reason = "live_execute_errors"
-    elif remaining_count > 0:
+        reason = "live_execute_blocked"
+    elif remaining_count > 0 or preview_error_count > 0:
         status = "partial"
-        reason = "live_execute_partial"
+        reason = "live_execute_partial" if remaining_count > 0 else "live_preview_partial"
     else:
-        status = "executed"
-        reason = ""
+        status = "partial"
+        reason = "live_execute_verify_remaining"
+        result["verification_required"] = True
+    try:
+        app.ad_control_update_action_log_runner(
+            result.get("action_id"),
+            event_key,
+            "blocked" if status == "error" else status,
+            reason,
+            remaining_count,
+        )
+    except Exception:
+        logging.exception("failed to update ads_ai runner status action_id=%s", result.get("action_id"))
     return event_payload(rule_group, action, event_key, status, result=result, reason=reason)
 
 
-def group_event_is_continuation(last, action, action_key):
+def group_event_continuation_key(last, action):
     event = last.get("last_event") or {}
-    return (
+    if (
         event.get("status") == "partial"
         and event.get("action") == action
-        and event.get("event_key") == action_key
-    )
+        and event.get("event_key")
+    ):
+        return str(event.get("event_key"))
+    return ""
 
 
 def run_rule_groups():
@@ -326,20 +485,23 @@ def run_rule_groups():
         now, tz_label = now_for_timezone(schedule.get("timezone"))
         last = load_last_result(group)
         last_keys = dict(last.get("last_keys") or {})
-        for action, hhmm in (("pause", schedule.get("close_time")), ("reopen", schedule.get("reopen_time"))):
+        for action, hhmm in (("pause", schedule.get("close_time")),):
             due, event_key = event_due(now, hhmm)
             action_key = "%s:%s:%s" % (action, tz_label, event_key)
-            continuing = group_event_is_continuation(last, action, action_key)
+            continuation_key = group_event_continuation_key(last, action)
+            continuing = bool(continuation_key)
+            if continuing:
+                action_key = continuation_key
             if not due and not continuing:
                 continue
             if last_keys.get(action) == action_key and not continuing:
                 continue
             try:
-                payload = run_group_event(group, action, action_key)
+                payload = run_group_event(group, action, action_key, last.get("last_event") or {})
             except Exception as exc:
                 logging.exception("ad control rule group failed group_id=%s action=%s", group.get("group_id"), action)
                 payload = event_payload(group, action, action_key, "error", reason=str(exc))
-            if payload.get("status") == "executed" and not execution_has_errors(payload):
+            if payload.get("status") in ("executed", "error", "skipped"):
                 last_keys[action] = action_key
             elif payload.get("status") == "partial":
                 last_keys.pop(action, None)
@@ -347,6 +509,7 @@ def run_rule_groups():
             updated["last_keys"] = last_keys
             updated["last_event"] = payload
             update_rule_group_result(group.get("group_id"), updated)
+            last = updated
             log_event_result(payload)
             actions.append(compact_event(payload))
     return {"rule_groups_seen": len(groups), "rule_groups_enabled": len(enabled), "rule_group_actions": actions}
