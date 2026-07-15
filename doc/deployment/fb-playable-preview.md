@@ -2,9 +2,15 @@
 
 Public API document source: `doc/deployment/playable-preview-api.md`
 
-Published document:
+Generated standalone HTML: `doc/deployment/playable-preview-api.html`
+
+Renderer: `scripts/render_playable_preview_docs.py`. Install the pinned local build dependency with `python -m pip install -r requirements-playable-docs.txt`. It requires Python 3.10 or newer. Production Python 3.9 publishes and audits the tracked HTML without importing the renderer.
+
+Published documents:
 
 `https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md`
+
+`https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.html`
 
 Canonical endpoint:
 
@@ -35,13 +41,23 @@ The service converts the source into a Meta-oriented single-file package:
 - both final UTF-8 `index.html` and the ZIP must be at or below `PLAYABLE_PREVIEW_MAX_ASSET_BYTES` (default `4,800,000` decimal bytes);
 - `PLAYABLE_PREVIEW_MAX_ZIP_BYTES` remains as a backwards-compatible stricter ZIP cap, but can never raise the overall asset limit.
 
-Validation:
+Local build validation (Python 3.10+):
 
 ```powershell
-python -m py_compile app.py fb_playable_generator.py scripts\test_fb_playable_generator.py
+python -m py_compile app.py fb_playable_generator.py scripts\test_fb_playable_generator.py scripts\render_playable_preview_docs.py scripts\test_playable_preview_docs.py scripts\publish_playable_preview_docs.py
 python scripts\test_fb_playable_generator.py
 python scripts\test_fb_playable_generator.py --source-zip <game.zip> --output-html <preview.html>
+python scripts\render_playable_preview_docs.py
+python scripts\render_playable_preview_docs.py --check
+python scripts\test_playable_preview_docs.py
 python scripts\publish_playable_preview_docs.py --check-only
+```
+
+Production validation (Python 3.9 compatible) deliberately does not import the local renderer:
+
+```bash
+python3 -m py_compile scripts/publish_playable_preview_docs.py
+python3 scripts/publish_playable_preview_docs.py --check-only
 ```
 
 For browser acceptance, serve the generated HTML over HTTP and test it with a CSP that allows inline scripts and WebAssembly but omits `unsafe-eval`. The game must reach its interactive scene with no CSP console errors.
@@ -52,7 +68,7 @@ After deploying the exact Git commit to the CPU server, publish the tracked API 
 python scripts/publish_playable_preview_docs.py
 ```
 
-The publisher atomically refreshes the nginx copy and force-overwrites the fixed COS object with `text/markdown; charset=utf-8` and `Cache-Control: no-cache`. Verify the public document body, SHA-256, `Content-Type`, `Last-Modified`, and `ETag` after publishing.
+The publisher validates that the tracked HTML carries the normalized Markdown SHA-256 and passes a standard-library HTML safety audit. It pre-stages and reads back both COS payloads, updates Markdown first and HTML as the final commit object, rolls back fixed keys on failure, then atomically refreshes both nginx copies. Content types are `text/markdown; charset=utf-8` and `text/html; charset=utf-8`; both use `Cache-Control: no-cache`. Verify each public body, SHA-256, `Content-Type`, `Last-Modified`, and `ETag` after publishing. The Markdown remains the source of truth; the HTML is its deterministic reading view.
 
 The response includes `meta_compatible`, `compatibility`, `html_size`, `zip_size`, `meta_size_limit_bytes`, `size_headroom_bytes`, `manifest_url`, `documentation_url`, the original `source_entry`, and final `entry=index.html`.
 
