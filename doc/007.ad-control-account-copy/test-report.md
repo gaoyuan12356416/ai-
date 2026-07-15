@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-2026-07-15 第六轮本地验证通过：Python 编译通过，`node --check` 通过，ad-control 使用独立 Python 缓存的全量自动化测试 107/107 通过，真实部署补丁后的临时 app 再次 107/107 通过，current-live action-log writer/reader 兼容与 changed+backup 验证通过，`git diff --check` 通过。当前未发现未关闭的 P0/P1 缺陷。
+2026-07-15 最终本地冻结验证通过：合并 16:01 daily-log 生产组合并收口 mixed 批次、exact deploy 与 owner 迁移门禁后，Python 编译与 `node --check` 通过，ad-control 使用独立 Python 缓存的全量自动化测试 161/161 通过，exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过，`git diff --check` 通过。当前未发现未关闭的 P0/P1 缺陷。
 
 本报告证明的是当前工作树在本期安全边界内通过测试，不是生产部署证明。测试未调用真实 Meta 写接口，未开放真实 Campaign copy 或任何 Ad 执行能力，生产 overlay 完整验证、GitHub-first 暗发布、服务重启、定时任务切换和线上 Canary 均尚未完成。
 
@@ -28,9 +28,11 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| Python 编译文件 | 5 | 5 | 0 | 0 |
+| Python 编译文件 | 7 | 7 | 0 | 0 |
 | JavaScript 语法文件 | 1 | 1 | 0 | 0 |
-| ad-control 自动化用例 | 107 | 107 | 0 | 0 |
+| ad-control 自动化用例 | 161 | 161 | 0 | 0 |
+| Exact-source app 合并器 | 12 | 12 | 0 | 0 |
+| SQLite owner 迁移器 | 8 | 8 | 0 | 0 |
 | 真实部署补丁链 | 1 | 1 | 0 | 0 |
 | Current-live action-log fixture | 1 | 1 | 0 | 0 |
 | 服务器恢复后只读基线 | 1 | 1 | 0 | 0 |
@@ -41,27 +43,35 @@
 - `BUG-001`：旧 fan-out 聚合规则组编辑迁移与部分启用状态兼容问题，已修复并回归通过。
 - `BUG-002`：旧 preview/enable TOCTOU 可能越过最新规则状态的问题，已修复并回归通过。
 - `BUG-003`：部署补丁模板及 target 明细审计会把观察日志误标成正式执行，已修复列表/明细两条路径并在补丁后临时 app 上 107/107 回归通过。
+- `BUG-004`：execution-log 补丁不能生成完整 V2 app，已新增 source/target Git blob、隔离 diff、唯一备份和原子替换门禁；生产 staging 尚待验证。
+- `BUG-005`：deferred copy 会占用同账号 pause 批次额度并可能终止续批，已改为 pause 优先分批，并通过 21 pause + 1 copy 的真实 preview→execute/runner continuation 回归。
 - 当前无未关闭 P0/P1 缺陷。
-- 存在非阻断技术债：`app.py` 的 `datetime.utcnow()` 在测试中产生弃用告警，未影响 107 条测试结果。
+- 存在非阻断技术债：`app.py` 的 `datetime.utcnow()` 在测试中产生弃用告警，未影响 161 条测试结果。
 - 存在已接受的 P2 运行取舍：正式 Campaign pause 的最终一致性检查持有全局 `JOB_DB_LOCK` + SQLite `BEGIN IMMEDIATE` 跨 Graph GET/POST，两次 30 秒超时时可使同进程其他 job SQLite 写阻塞约 60 秒/对象。安全回归已通过，生产性能影响必须在暗发布中观察。
 
 ## 验证证据
 
 ```text
-python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py
+python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py deploy/apply_ad_control_account_copy_v2.py deploy/migrate_ad_control_account_copy_v2_sqlite.py
 结果：退出码 0
 
 node --check static/ad-control-pages.js
 结果：退出码 0
 
 独立 PYTHONPYCACHEPREFIX + python -m unittest discover -s tests -p "test_ad_control*.py" -v
-结果：Ran 107 tests / OK / 退出码 0
+结果：Ran 161 tests / OK / 退出码 0
+
+python -m unittest tests.test_ad_control_account_copy_deploy -v
+结果：Ran 12 tests / OK；check 零写、共享锁、source/备份后漂移阻断、持久化唯一备份、mode-before-fsync、安装失败恢复、未知字节不覆盖、二次幂等 / 退出码 0
+
+python -m unittest tests.test_ad_control_account_copy_sqlite_migration -v
+结果：Ran 8 tests / OK；dry-run 原库零写、逐ID/product/state常量门禁、首跑3/幂等0、mixed owner/坏pool/TOCTOU失败关闭、触发器副作用事务内回滚、真实 target app ensure/owner 可见性集成 / 退出码 0
 
 python tests/validate_ad_control_deploy_patch.py
 结果：当前 merged app 临时副本首次/二次均 app.py unchanged、零备份且字节不变；补丁后全量测试 OK / 退出码 0。需要变更的 current-live 首次 changed+备份路径由下一项验证。
 
 python tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>
-结果：原 fixture check 只读，fixture SHA-256 `83d3cc8013b5e34d1e8cde4d44c4b78712d9a9c6b6cda9da7760c610f38548c1`；首次临时 apply 仅生成 1 份字节一致备份；二次 check/apply 均 unchanged；writer 63353、reader 63350、3/5 秒超时、live worker=4 和 7 个线上安全函数 hash 保留（changed=0）；补丁后 observe 审计仍为 `observe/只观察` / 退出码 0
+结果：上一轮 `83d3cc...` fixture 的 check/apply/幂等和 7 个安全函数验证通过；16:01 daily-log 发布后的当前 live SHA-256 为 `c5f5be0f4342b262fe9adb1513770a779e684b45500efc31c5d12b1501ca072e`，须在 production staging 中重新执行同一验证后才能作为本轮发布证据。
 
 git diff --check
 结果：退出码 0
@@ -79,7 +89,7 @@ git diff --check
 - `JOB_DB_LOCK` 跨 Graph 请求的实际负载影响尚无生产证据；上线后须监控 API/runner 耗时、Graph 超时和 job SQLite 写入排队，异常时先停 ad-control runner/禁用受影响 live 组再回滚。
 - `datetime.utcnow()` 弃用告警应在后续技术债中改为 timezone-aware UTC。
 - legacy standalone `ad_control_rule` 本期按兼容边界保留直接保存/启停，且不受 rule-group 全局急停覆盖。服务器恢复后只读基线 total/enabled=0/0；overlay 与发布后必须继续为 0/0，该边界不属于 V2 规则组能力。
-- 服务器恢复后核验确认 V2 尚未部署，生产关键文件仍与安全快照 `146cb1b50b60ee3fe4c53de6d6d40d980124483c` 一致；但无关 playable 文档出现并发修改，发布 overlay 必须从最新 live 全量副本重建，不能用旧目录覆盖。
+- 服务器恢复后又发现 16:01 daily-log 并发发布；当前生产关键文件精确对应组合提交 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c`（daily-log 源提交 `d4af68af83e55b4df65fc13f273738ba98dfe189`），旧 `146cb1b` 不能再作为直接部署 source。exact-source 发布器必须以重新核验的当前 live blob 为门禁，任何漂移立即停止。
 
 ## 发布建议
 

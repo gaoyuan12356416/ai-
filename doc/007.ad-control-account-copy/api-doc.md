@@ -78,7 +78,7 @@
 - 本期正式 `copy` 固定在任何 Meta POST 前返回 `copy_persistence_not_configured`；即使复制总熔断被误开也不得越过此前置条件。
 - 复制总熔断与 pause 独立；既有正式 pause 继续按原路径执行。
 - `/api/ad-control/actions` 和 target 明细都以当前 session owner 过滤；跨 owner action 返回 not found/forbidden，函数/HTTP 路由不允许缺 owner 外部调用。日志页默认“全部产品（含账号规则）”，空 product 的 V2 action、copy/mixed 筛选及本人 binding 深链均可见。
-- 七个 ad-control HTML 统一加载 `/ad-control-pages.css?v=20260715copy2` 和 `/ad-control-pages.js?v=20260715copy2`，不得残留本次旧版本 `20260715log1`。
+- 七个 ad-control HTML 统一加载 `/ad-control-pages.css?v=20260715copylog3` 和 `/ad-control-pages.js?v=20260715copylog3`，不得残留本次旧版本 `20260715copy2`/`20260715log1`。
 
 执行响应的关键字段：
 

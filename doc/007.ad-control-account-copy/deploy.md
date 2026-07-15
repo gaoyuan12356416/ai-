@@ -34,6 +34,20 @@
 - 精确列出 `owner_user_id=''` 的行及其 `created_by`。有可验证 `created_by` 的行可按原值回填；owner/created_by 双空行由迁移自动收敛为 `enabled=0, emergency_stopped=1`。
 - 若历史 `created_by` 是服务账号（例如 `codex`）而实际归属是当前优化师，不得批量猜测；核对 session 用户、历史操作记录和备份后，只对明确的 group ID 执行事务内 owner 更新，保留 `created_by`。
 - 迁移后重复运行 ensure，确认 `product=''` 的 V2 组未被创建 `legacy_*` rule set，旧 live pause 行为未改变。
+- 只使用审核提交内的 `deploy/migrate_ad_control_account_copy_v2_sqlite.py`。默认命令在 SQLite 临时 backup 上完成完整 ensure+owner 演练且不改原库；正式迁移必须追加 `--apply`。`--app` 必须指向已核对 target hash 的 staging/生产 `app.py`，不能误用旧 checkout。
+
+```bash
+python3 deploy/migrate_ad_control_account_copy_v2_sqlite.py \
+  --db /root/drama_material_service/data/drama_material_jobs.sqlite3 \
+  --app /root/drama_material_service/app.py \
+  --owner 892fd2e8 --expected-created-by codex \
+  --expected-group-state frg_plus8_non_asian_lang_10am_dramawave_binding:dramawave:1:0:0 \
+  --expected-group-state frg_plus8_non_asian_lang_10am_freereels_binding:freereels:0:0:1 \
+  --expected-group-state frg_plus8_non_asian_lang_10am_hotdrama_binding:hotdrama:0:0:1
+
+# 仅在全部 writer 已停止、最终 C1 完成且上述 check 通过后执行同命令并追加：
+# --apply
+```
 
 ## Current-live action-log 兼容门禁
 
@@ -49,18 +63,35 @@
 - 将查询结果与 C1 备份基线一起保存；overlay/迁移演练和发布后复查必须保持 standalone 总数、enabled 集合及上述稳定字段/row hash 不变。若存在未预期 enabled 行、归属不明或前后集合漂移，停止部署并由业务确认。
 - 在备份副本完成 additive schema ensure 后，导出 `ad_control_rule_group -> ad_control_account_group` 关联的 `group_id/account_group_id/product/owner_user_id/created_by`。账户池缺失、非空 product 不一致、以及不满足“同 owner 或双方 `created_by` 相同”兼容谓词的非法跨 owner 数量必须为 0；合规的既有服务 link 需逐条列出。任何未解释引用均停止发布。
 
+## 共享发布锁与排他窗口
+
+- P0 前置：所有受控的生产 `app.py` 写入者必须使用同一个 `/var/lock/drama-material-service.deploy.lock`。本次发布窗口禁止其他部署、热修和人工覆盖；advisory lock 不能阻止绕锁的 `root/cp`，因此仍必须依赖排他窗口及发布前后 SHA-256 门禁。
+- `deploy/apply_ad_control_execution_log_fix.py` 只能对临时 current-live 副本做兼容验证，禁止以 write 模式直接修改生产 `app.py`。
+- 生产 `app.py` 只能由 `deploy/apply_ad_control_account_copy_v2.py --lock-file /var/lock/drama-material-service.deploy.lock` 安装。锁内完成最终 source 重读、持久化唯一备份、原子替换和失败恢复；已有备份复用前也必须重新校验并 `fsync` 文件与目录。
+- C1 备份目录必须在发布前创建并持久化；脚本还会对 backup root 及父目录执行目录 `fsync`。任何锁冲突、source/target/hash/备份不一致或恢复失败都立即停止发布。
+
+```bash
+# 服务仍运行时：只验证 staging 副本，STAGING_ROOT 不能指向生产目录。
+python3 deploy/apply_ad_control_account_copy_v2.py --root "$STAGING_ROOT" --repo "$RELEASE_REPO" --source-commit "$SOURCE_COMMIT" --target-commit "$TARGET_COMMIT" --backup-dir "$RELEASE_ROOT/staging-backup" --lock-file "$RELEASE_ROOT/staging.deploy.lock"
+
+# 仅在 runner/API 已停止且 C1 完成后：生产 root 唯一一次安装。
+python3 deploy/apply_ad_control_account_copy_v2.py --root /root/drama_material_service --repo "$RELEASE_REPO" --source-commit "$SOURCE_COMMIT" --target-commit "$TARGET_COMMIT" --backup-dir "$C1_DIR/app-exact-backup" --lock-file /var/lock/drama-material-service.deploy.lock
+```
+
 ## 部署步骤
 
-1. 本地完成 Python/JavaScript 语法检查、107/107 全量单测、临时 SQLite 和 Stub Meta 隔离测试。
+1. 本地完成 Python/JavaScript 语法检查、161/161 全量单测、exact-source 发布器 12/12、SQLite owner 迁移器 8/8、临时 SQLite 和 Stub Meta 隔离测试。
 2. 刷新 current-live `app.py` 和 SHA-256，通过上述 action-log 兼容门禁；这一步必须在最终发布文件冻结前重跑。
 3. 精确 commit/push 到 GitHub，记录 commit 和文件 hash。
-4. 备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 rule-group owner 基线及 legacy standalone total/enabled 集合。
-5. 从当前线上共享 monolith 副本做窄合并；禁止用仓库整份 `app.py` 覆盖线上文件。
-6. 在备份 SQLite 副本上先演练 schema ensure 和精确 owner 迁移；只有行数、owner、enabled/急停和 V2 幂等校验一致时才能继续。
-7. 保持两个复制熔断为 0，原子替换代码和静态资源；使用已验证的补丁链完成写前备份、应用和幂等检查，语法检查通过后窄重启所需服务。
-8. 执行页面、API、runner smoke test，确认新组默认 disabled/observe，save 携带 `enabled=true` 仍无法开启，既有 pause 可试算/执行，copy 正式执行返回 `copy_persistence_not_configured`。
-9. 只开放已批准账号的 Campaign observe 模式，运行至少一个账号自然日并审计 would_* 结果；Ad 规则组保持 disabled。
-10. 本期到此结束；不得进行 PAUSED/ACTIVE 复制 Canary。持久化方案确认后另走完整评审与发布流程。
+4. 建立排他发布窗口并确认其他生产 `app.py` 写入者均停用或使用统一锁。备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 rule-group owner 基线及 legacy standalone total/enabled 集合。
+5. 从当前线上共享 monolith 的只读副本建立 staging root；此步只能对 staging root 运行 exact 发布器的 check/apply，并核对 staging `app.py` 等于 target blob，绝不写生产 root。禁止用仓库整份 `app.py` 盲目覆盖线上文件。
+6. 在 C1 SQLite 备份副本上先演练 schema ensure 和仅针对已核实 group ID 的精确 owner 迁移；只有行数、owner、enabled/急停和 V2 幂等校验一致时才能继续。
+7. 先用 `systemctl`、cron 清单、`lsof/fuser` 和代码路径枚举所有会打开或写入精确文件 `data/drama_material_jobs.sqlite3` 的进程；安全收敛在途任务后，暂停 ad-control runner cron，并停止 API、`drama-material-job-worker.service` 及任何其他同库 writer。确认无 runner、worker 或同库文件占用后，才建立“停止写入”的最终 SQLite C1。若不能静默全部 writer，本次迁移和上线立即停止，禁止使用可能覆盖新任务状态的整库恢复方案。随后保持两个复制熔断为 0，在排他窗口内只对生产 root 唯一一次运行 `apply_ad_control_account_copy_v2.py --lock-file /var/lock/drama-material-service.deploy.lock`，再原子替换其余审核文件；此时不得启动任何同库服务。
+8. 在全部 writer 已停止并完成最终 C1 后，用 systemd 相同的 `/usr/bin/python3` 和生产依赖对真实 DB 再运行一次 owner 迁移器默认 check；在线旧 check 不能替代此步。check 通过后立即以完全相同参数追加 `--apply`，在同一停止窗口内完成 additive ensure 和三条精确 owner 更新，保留 `created_by='codex'`；断言脚本内锁死的 group ID/product/enabled/急停/deleted、首跑更新3行或幂等0行、账户池/解析账号、rule set、legacy standalone 0/0、事务前后完整非owner快照和二次 ensure 幂等。任何失败时全部同库服务保持停止，并按回滚边界判断是否恢复 C1。
+9. 仅在真实 SQLite 迁移全部断言通过后执行语法检查并启动 API；完成 API/页面 smoke 后恢复 `drama-material-job-worker.service` 并确认任务状态/心跳正常，最后恢复 ad-control runner cron并观察至少一个自然 tick。
+10. 执行规则组 smoke test，确认新组默认 disabled/observe，save 携带 `enabled=true` 仍无法开启，既有 pause 可试算/执行，copy 正式执行返回 `copy_persistence_not_configured`。
+11. 只开放已批准账号的 Campaign observe 模式，运行至少一个账号自然日并审计 would_* 结果；Ad 规则组保持 disabled。
+12. 本期到此结束；不得进行 PAUSED/ACTIVE 复制 Canary。持久化方案确认后另走完整评审与发布流程。
 
 ## 验证步骤
 
@@ -83,10 +114,11 @@
 ## 回滚方案
 
 - 复制相关异常：保持 `AD_CONTROL_COPY_ENABLED=0`；本期没有任何 Meta copy 对象或 copied created_data/lineage/intent 数据需要补偿。既有 action log 审计可能存在，应保留而不是回滚删除。
-- 应用异常：恢复最近检查点的 app、runner、静态文件、cron/systemd/Nginx 和 SQLite，重新语法检查后原子替换。
+- 应用异常：默认只恢复最近检查点的 app、runner、静态文件和 cron/systemd/Nginx，重新语法检查后原子替换；不得因代码或页面异常顺带覆盖共享 SQLite。
+- live SQLite schema/owner 迁移任一断言失败：API、worker、runner 及全部同库 writer 保持停止，恢复停止写入后的 C1 SQLite 与对应文件检查点，复跑 integrity/owner/standalone/任务状态基线后，按 API→worker→ad-control cron 顺序恢复旧服务。
 - 静态页面异常可单独恢复上一检查点的 HTML/CSS/JS，不改后端和 SQLite。
-- runner 异常先停对应 cron，再恢复 runner 和 SQLite online backup；既有 pause 恢复后再启 cron。
-- 若 `JOB_DB_LOCK` 跨 Graph 请求导致 API/runner 耗时或 job 写入排队超出可接受基线，先停 ad-control runner 并禁用受影响 live 规则组，不删审计数据；然后恢复上一检查点 app/runner。只有 owner/schema 迁移也需撤销时才恢复对应 SQLite online backup。
+- runner 异常先停对应 cron，再只恢复 runner 文件；既有 pause 回归通过后再启 cron，不回滚共享 SQLite。
+- 若 `JOB_DB_LOCK` 跨 Graph 请求导致 API/runner 耗时或 job 写入排队超出可接受基线，先停 ad-control runner并禁用受影响 live 规则组，不删审计数据；然后恢复上一检查点 app/runner。只有明确必须撤销 owner/schema、再次静默全部同库 writer，并已比较 C1 后任务/lease/event 增量确认不会丢数据时，才允许按上一条恢复整库；否则保留已迁 SQLite，仅回滚代码。
 - 所有回滚均记录目标 commit、文件 hash、备份目录和 SQLite integrity check。
 
 ## 注意事项
@@ -98,8 +130,8 @@
 
 ## 当前发布状态
 
-2026-07-15 已完成本地 fresh-cache 107/107 回归。`python tests/validate_ad_control_deploy_patch.py` 验证当前 merged app 临时副本首次/二次 apply 均为 `unchanged`、零备份、字节不变且全量通过；验证器对需要变更的输入仍强制唯一写前备份。`validate_ad_control_live_action_log_compat.py` 已对当前线上快照证明首次 changed、写前备份字节一致、二次幂等和 writer/reader 安全契约不回退。
+2026-07-15 合并 16:01 daily-log 生产组合并收口发布安全门禁后已完成本地 fresh-cache 161/161 回归；exact-source app 合并器 12/12、SQLite owner 迁移器 8/8 通过。`apply_ad_control_execution_log_fix.py` 仅保留为 execution-log 兼容验证器，不再被误用为完整 V2 发布器。
 
-服务器异常重启后已再次只读核验：`drama-material-api.service`、crond 和 5 分钟 runner 均正常；SQLite `integrity_check/quick_check=ok`；legacy standalone `ad_control_rule` total/enabled 均为 0；V2 标记、V2 schema 列和 copy intent/lineage/quota 表均不存在。线上 app/runner/action-log service/migration/CSS/JS/rules HTML 仍与安全生产快照 `146cb1b50b60ee3fe4c53de6d6d40d980124483c` 字节一致，确认中断前没有开始 V2 部署。仅存在 C0 备份，C1 尚未建立。
+服务器异常重启后再次只读核验：`drama-material-api.service`、crond 和 5 分钟 runner 均正常；SQLite `integrity_check/quick_check=ok`；legacy standalone `ad_control_rule` total/enabled 均为 0；V2 标记、V2 schema 列和 copy intent/lineage/quota 表均不存在。16:01 的 daily-log overlay 已改变 app/action-log service/全套静态文件，当前生产组合精确对应 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c`；旧 `146cb1b` 基线已过期。仅存在 C0 与 daily-log 回滚点，V2 C1 尚未建立。
 
 只读核验同时发现无关文件 `doc/deployment/playable-preview-api.md` 有并发修改。正式部署前必须重新抓取 live 全量基线并保留该变更，只覆盖本需求精确文件。生产 overlay 在生产 Python/依赖环境的完整测试、GitHub exact-commit 发布、C1 备份、服务重启、暗发布与线上 smoke test 均尚未完成；本文档不得作为“已上线”证据。

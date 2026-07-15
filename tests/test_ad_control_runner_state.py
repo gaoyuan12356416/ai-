@@ -246,6 +246,42 @@ class RunnerStateTests(unittest.TestCase):
         ], ads_ai_updates)
         self.assertEqual([], ads_ai_warnings)
 
+    def test_deferred_copy_keeps_the_pause_event_in_continuation(self):
+        preview = {
+            "preview_id": "preview-mixed", "preview_hash": "hash-mixed",
+            "pause_count": 21, "copy_count": 1,
+            "execution_count": 20, "error_count": 0,
+        }
+        event, updates, warnings = self.run_group_event_case(
+            preview,
+            execute_result={
+                "action_id": "action-mixed",
+                "log_store": "ads_ai",
+                "requested_count": 20,
+                "remaining_count": 2,
+                "retryable_error_count": 0,
+                "blocked_count": 0,
+                "permanent_error_count": 0,
+            },
+        )
+
+        self.assertEqual("partial", event["status"])
+        self.assertEqual("live_execute_partial", event["reason"])
+        self.assertEqual([
+            (
+                "action-mixed", "tick-1", "partial",
+                "live_execute_partial", 2,
+            )
+        ], updates)
+        self.assertEqual([], warnings)
+        continuation = load_pure_runner_functions()["group_event_continuation_key"]({
+            "last_event": {
+                "status": event["status"], "action": "pause",
+                "event_key": "tick-1", "result": event["result"],
+            }
+        }, "pause")
+        self.assertEqual("tick-1", continuation)
+
 
 if __name__ == "__main__":
     unittest.main()

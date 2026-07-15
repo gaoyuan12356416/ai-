@@ -779,8 +779,71 @@ class AdControlV2ApiTests(unittest.TestCase):
                 "confirm": "EXECUTE_LIVE_RULE_GROUP",
             }, self.session("u1"))
         result_by_key = {item["object_key"]: item for item in mixed_result["results"]}
-        self.assertEqual("copy_persistence_not_configured", result_by_key[copy_item["object_key"]]["reason"])
         self.assertEqual("success", result_by_key[pause_item["object_key"]]["status"])
+        self.assertNotIn(copy_item["object_key"], result_by_key)
+        self.assertEqual(0, mixed_result["blocked_count"])
+        self.assertEqual(1, mixed_result["remaining_count"])
+
+    def test_live_mixed_preview_reserves_the_pause_batch_before_copy(self):
+        mixed_rules = [
+            {"rule_id": "pause-rule", "action": "pause"},
+            {"rule_id": "copy-rule", "action": "copy"},
+        ]
+        pause_items = [
+            {
+                "product": "p", "account_id": "1", "campaign_id": "z%02d" % index,
+                "object_id": "z%02d" % index,
+                "object_key": "p:campaign:1:z%02d" % index,
+                "target_action": "pause", "target_rule_id": "pause-rule",
+                "token_user_id": "token-user",
+            }
+            for index in range(1, 22)
+        ]
+        copy_item = {
+            "product": "p", "account_id": "1", "campaign_id": "a00",
+            "object_id": "a00", "object_key": "p:campaign:1:a00",
+            "target_action": "copy", "target_rule_id": "copy-rule",
+        }
+        self.save_group("u1", "mixed-batch", run_mode="live", rules=mixed_rules)
+        self.update_group_row("mixed-batch", run_mode="live", enabled=1)
+
+        preview = self.preview_with_items(
+            "mixed-batch", "u1", pause_items + [copy_item]
+        )
+
+        self.assertEqual(21, preview["pause_count"])
+        self.assertEqual(1, preview["copy_count"])
+        self.assertEqual(20, preview["execution_count"])
+        self.assertEqual(2, preview["execution_remaining_count"])
+        self.assertTrue(preview["items"])
+        self.assertTrue(all(
+            item.get("target_action") == "pause" for item in preview["items"]
+        ))
+        self.assertNotIn(copy_item["object_key"], {
+            item.get("object_key") for item in preview["items"]
+        })
+        graph_posts = []
+        with mock.patch.object(app, "ad_control_token_for_user_id", return_value="token"), \
+             mock.patch.object(app, "ad_control_graph_get", return_value={
+                 "account_id": "1", "effective_status": "ACTIVE", "status": "ACTIVE"
+             }), \
+             mock.patch.object(app, "ad_control_graph_set_status", side_effect=lambda token, campaign_id, status: graph_posts.append(campaign_id) or {"success": True}), \
+             mock.patch.object(app, "ad_control_save_object_state"), \
+             mock.patch.object(app, "ad_control_persist_action_log", return_value={"ok": True}):
+            result = app.execute_ad_control_live({
+                "preview_id": preview["preview_id"],
+                "preview_hash": preview["preview_hash"],
+                "dry_run": False,
+                "confirm": "EXECUTE_LIVE_RULE_GROUP",
+            }, self.session("u1"))
+
+        self.assertEqual(20, len(graph_posts))
+        self.assertEqual(20, result["success_count"])
+        self.assertEqual(0, result["blocked_count"])
+        self.assertEqual(2, result["remaining_count"])
+        self.assertTrue(all(
+            item.get("target_action") != "copy" for item in result["results"]
+        ))
 
     def test_ad_preview_short_circuits_and_top_n_is_applied(self):
         self.save_group("u1", "ad", object_level="ad")

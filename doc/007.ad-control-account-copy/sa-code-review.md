@@ -2,7 +2,7 @@
 
 ## 结论
 
-2026-07-15 完成当前工作树第六轮代码评审。阻断项均已修复，Python/JavaScript 静态检查、107 条 ad-control fresh-cache 全量自动化测试、真实补丁后 107/107 回归及 `git diff --check` 均通过，可进入提交与生产部署前验收。该结论仍不是生产已部署证明。
+2026-07-15 完成当前工作树最终冻结代码评审。合并 16:01 daily-log 生产组合并收口发布安全门禁后，阻断项均已修复，Python/JavaScript 静态检查、161 条 ad-control fresh-cache 全量自动化测试及 `git diff --check` 均通过，可进入 exact-commit staging 与生产部署前验收。该结论仍不是生产已部署证明。
 
 该结论只覆盖本期实际开放边界：Campaign 规则配置、观察/试算、runner 观察链路及既有 Campaign pause 回归。真实 Meta Campaign copy 因复制结果持久化未配置而在任何 Token/Graph 访问前失败关闭；Ad 仅允许保存配置，启用、候选、试算、runner 和正式执行均未开放。本次尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实 Meta copy Canary。
 
@@ -13,7 +13,8 @@
 - `scripts/ad_control_rule_runner.py`：规则组观察执行、`would_pause`/`would_copy` 汇总及既有 runner 状态回归。
 - `static/ad-control-pages.js`、`static/ad-control-rules.html`、`static/ad-control-pages.css`：去产品维度、对象层级/运行模式拆分、复制参数、旧规则组兼容及页面缓存版本。
 - `features/ad_control_execution_log/`、`deploy/apply_ad_control_execution_log_fix.py`：既有 `ads_ai.ad_control_action_log` 审计兼容与权限回归，包含线上新版 writer/reader 分离、超时/并发上限及无立即 upsert 重试的保护。
-- `tests/test_ad_control*.py` 及同域发布安全测试：共 107 条规则模型、API、UI、runner、执行日志、部署补丁兼容和隔离编排测试。
+- `tests/test_ad_control*.py` 及同域发布安全测试：共 161 条规则模型、API、UI、runner、daily/raw 执行日志、部署补丁兼容、exact-source 发布器、SQLite owner 迁移器和隔离编排测试。
+- `deploy/apply_ad_control_account_copy_v2.py`：生产共享 monolith 的 exact-source Git diff、target blob、唯一备份与原子替换门禁。
 - `tests/validate_ad_control_deploy_patch.py`：将部署补丁真实应用到当前 merged app 的临时副本；若已对齐则首次即 `unchanged` 且零备份，若需变更则校验一份字节一致写前备份；两种情况的二次 apply 均须 `unchanged` 且不新增备份，并对临时 app 重跑同一全量测试。当前线上旧基线的真实 changed+backup 路径由下一项 current-live validator 独立证明。
 - `tests/validate_ad_control_live_action_log_compat.py`：对当前线上 `app.py` 只读 fixture 执行 check，只在临时副本 apply，验证写前备份、二次幂等以及 7 个线上 action-log 安全函数 hash 不变。
 
@@ -47,17 +48,22 @@
 | CR-022 | P0 | legacy/product 规则组普通 save | 旧保存入口可读取 payload `enabled=true`，绕过 preview、Token 和专用启用接口 | save 不接受 0→1；仅保留未改行为的既有 enabled 状态，任何行为变化强制禁用并失效 preview | 已修复 |
 | CR-023 | P1 | legacy 账户池关联 | 规则组可引用其他 owner 的账户池，候选解析时可能带入对方账号 | 写前事务校验 owner；历史服务绑定只在同 `created_by` 下兼容，跨 owner 引用 fail-closed | 已修复 |
 | CR-024 | P0 | action target 明细 | HTTP 路由未向目标查询传 current owner，缓存/详情存在越权风险 | 函数与路由强制 owner，并在任何缓存读取前先 fetch action 完成 owner 校验；跨 owner 返回 not found/forbidden | 已修复 |
-| CR-025 | P1 | 日志页与静态缓存 | 默认产品过滤遗漏 `product=''` 账号规则，且页面 cache buster 不一致会继续运行旧 UI | 默认文案/查询包含账号规则；七个 ad-control 页面统一 `v=20260715copy2` | 已修复 |
+| CR-025 | P1 | 日志页与静态缓存 | 默认产品过滤遗漏 `product=''` 账号规则，且页面 cache buster 不一致会继续运行旧 UI | 默认文案/查询包含账号规则；合并 daily/raw UI 后七个 ad-control 页面统一 `v=20260715copylog3` | 已修复 |
 | CR-026 | P2/兼容边界 | legacy standalone `ad_control_rule` | 其保存可直接启用，且不受 rule-group 全局急停覆盖 | 本期 grandfather 保留既有行为；部署前后只读核实 enabled 基线并记录，禁止把 V2 急停表述为全局覆盖 standalone | 已接受；前置生产基线 total/enabled=0/0，overlay/发布后待复核 |
 | CR-027 / BUG-003 | P0 | action-log 列表/目标明细与部署补丁模板 | 列表模板应用后把 `observe/只观察` 回退成 `real/正式执行`，而 target 明细的 `ad_control_action_audit` 本身也缺 observe 分支 | 列表和明细都读取 `criteria.run_mode` 并生成 observed 状态；current-live validator 分别抽取两函数验证；补丁后重跑 107 条 | 已修复 |
+| CR-028 / BUG-004 | P0 | V2 生产 `app.py` 部署链 | execution-log 兼容补丁只覆盖日志函数，不能生成完整 V2 app；误用会形成半发布 | 新增 exact-source Git diff 发布器：临时 apply 后核对 target blob，source 漂移写前失败，唯一字节备份后原子替换 | 已修复，生产 staging 待验证 |
+| CR-029 / BUG-005 | P1 | live mixed 候选批次 | 已知会熔断的 copy 与 pause 一起参与每账号上限，可能占用关闭名额并让 runner 不续批 | live 尚有 pause 时只对 pause 做公平分批，保留 mixed 总数/确认语义；真实 21 pause + 1 copy preview→execute 与 continuation 回归 | 已修复 |
+| CR-030 | P0 | live SQLite owner 迁移 | app 启动即 ensure 会先把历史 owner 回填为 `codex`；手工 SQL/错误DB/部分更新会造成当前用户不可见或错误归属 | 新增默认 dry-run 的 exact-state 迁移器，显式DB/app/三组状态，事务首跑3/幂等0及全不变量断言；全同库 writer 停止后才允许 apply | 已修复，生产 C1 演练待验证 |
 
 ## 编译 / 验证结果
 
 | 验证项 | 命令 | 结果 |
 | --- | --- | --- |
-| Python 编译 | `python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py` | 通过，退出码 0 |
+| Python 编译 | `python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py deploy/apply_ad_control_account_copy_v2.py deploy/migrate_ad_control_account_copy_v2_sqlite.py` | 通过，7/7，退出码 0 |
 | JavaScript 语法 | `node --check static/ad-control-pages.js` | 通过，退出码 0 |
-| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 107/107 通过，0 失败，0 阻塞 |
+| ad-control fresh-cache 全量测试 | 独立 `PYTHONPYCACHEPREFIX` + `python -m unittest discover -s tests -p "test_ad_control*.py" -v` | 161/161 通过，0 失败，0 阻塞 |
+| Exact-source app 合并器 | `python -m unittest tests.test_ad_control_account_copy_deploy -v` | 12/12 通过；共享锁、未知源/漂移阻断、持久化唯一备份、安装失败恢复、二次幂等 |
+| SQLite owner 迁移器 | `python -m unittest tests.test_ad_control_account_copy_sqlite_migration -v` | 8/8 通过；常量门禁、dry-run零写、首跑3/幂等0、pool/rule-set/状态不变量、TOCTOU/触发器事务回滚、真实 target app 路由与 owner 可见性 |
 | 真实部署补丁链 | `python tests/validate_ad_control_deploy_patch.py` | 当前 merged app 首次 apply `unchanged`、零备份且字节不变；二次 apply 仍 `unchanged`、不新增备份；临时 app 全量通过 |
 | Current-live action-log 兼容 | `python tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` | 原 fixture 只读；临时 apply 首次备份 hash 匹配；二次 check/apply `unchanged`；writer 63353、reader 63350、3/5 秒超时、live worker=4 及 7 个安全函数 hash 保留 |
 | 差异格式检查 | `git diff --check` | 通过，退出码 0 |

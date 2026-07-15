@@ -13,6 +13,8 @@
 - Meta 应用级限流触发后立即熔断本批尚未发出的请求，并由后续 runner 续跑。
 - 将调控审计持久化到 `ads_ai.ad_control_action_log`，本地 SQLite 仅作为 outbox/回退。
 - 日志页明确展示“扫描 → 候选 → 命中 → 本批计划 → 待后续处理”，并将 Meta 结果与日志存储状态分开。
+- 日志主视图按业务日汇总同一规则的定时续跑链；底层 action 行保持不变并可逐批追溯。
+- 将“待续跑”“已执行待零目标复核”“历史未完成/执行受阻”拆成不同状态，不再统一显示为“部分完成”。
 
 ## 范围
 
@@ -21,6 +23,7 @@
 - 新规则组 `ad_control_rule_group` 的 live preview、live pause、定时 runner 和执行日志页面。
 - 现有 SQLite 日志一次性回填到 `ads_ai`。
 - 日志列表轻量查询、目标明细按需加载、日期按 Asia/Shanghai 自然日筛选。
+- 按业务日聚合的轻量读模型、批次清单和原始批次切换；列表仍不加载 `results_json`。
 - Meta Graph 限流、瞬时错误、永久配置错误的分类与续跑状态。
 
 ### 不包含
@@ -40,6 +43,12 @@
 6. 当本批执行完成但尚未做零目标复核时，事件保持 `partial`；下一次 fresh preview 确认无目标、无错误后单独记录 verification 日志并完成事件。
 7. 新事件的续跑次数从 1 开始；同一 partial 事件可跨午夜续跑，最多 24 次。
 8. `ads_ai` 写入失败不改变 Meta 成功/失败计数；API 标记 `sqlite_fallback`，后续可安全回填。
+9. 主列表的聚合键固定为业务日期、产品、规则标识、动作、对象层级和 dry-run/正式模式；`event_key` 只用于提取原业务日期和批次追溯，同日同规则即使有多个 event 也只显示一张日卡，跨午夜续跑仍归原业务日。
+10. 缺少 `event_key` 的历史 scheduled 日志，仅在 `actor_user_id=ad_control_rule_runner` 且规则标识完整时按本地业务日回退聚合；人工操作或规则标识缺失时保持单条，避免误合并。
+11. 日汇总先按 `event_key` 分事件链并取各链最终批次，再按“状态异常/受阻/失败 > 历史未完成 > 待续跑 > 待复核 > 完成”保守归并；只有当天所有事件链都满足 `executed + remaining=0` 才显示完成，未闭环事件的最终剩余数相加。
+12. 最新 partial 批次超过 3 小时仍没有完成记录时显示“当日未完成”，不能继续显示成正在续跑；runner 每5分钟续跑、最多24次（理论2小时），3小时窗口额外保留1小时调度/限流缓冲。
+13. `scanned/candidate/matched/remaining` 是快照，不跨批次求和；列表显示首轮命中、批次数、执行尝试次数和最终剩余。成功/跳过/失败的累计必须明确标注为“尝试”，不能称为去重目标。
+14. 批次详情继续按单 action 懒加载，保留 action_id、preview_id、批次状态和原因；不在列表阶段读取或拼接全天大 JSON。
 
 ## 交互与流程
 
@@ -73,7 +82,7 @@ SQLite `ad_control_action` 保留，作为先落本地的 outbox 和 MySQL 不�
 
 ### API / 接口
 
-- `GET /api/ad-control/actions`：列表默认不返回 `results_json`；新增 `storage/storage_error` 和流程字段。
+- `GET /api/ad-control/actions`：列表默认不返回 `results_json`；`view=daily` 返回业务日汇总，`view=raw` 保留原始批次兼容视图。
 - `GET /api/ad-control/actions/{action_id}/targets`：展开时加载目标与原始结果。
 - `POST /api/ad-control/rule-groups/{id}/preview-live`：返回 scan/candidate/matched/batch/remaining。
 - `POST /api/ad-control/rule-groups/{id}/execute-live`：返回 retryable/blocked/deferred/remaining 与 log store。
@@ -84,8 +93,10 @@ SQLite `ad_control_action` 保留，作为先落本地的 outbox 和 MySQL 不�
 - Graph owner 缺失或不一致：不写 Meta，记 `account_owner_mismatch`。
 - 应用级限流：最多保留当时已在途的 4 个请求，后续目标全部 deferred。
 - 旧日志缺少新流程字段：日志版本 1 显示未知为 `--`，不伪装成真实 0。
-- 日期筛选：浏览器提交 Asia/Shanghai 日期，服务端换算为 UTC 边界查询。
+- 日期筛选：浏览器提交 Asia/Shanghai 业务日期；daily 模式将轻量查询窗口前后各扩一天，再按 `business_date` 二次过滤，保证跨午夜续跑不被查询阶段丢掉。
 - 大字段：列表不读取 `results_json`，只在用户展开详情时读取。
+- 聚合窗口：daily 模式最多读取 1000 条轻量 action、按 action_id 去重再聚合；若窗口命中上限，丢弃截断边界业务日及更早的全部日组并返回截断提示，不能展示错误的半条日汇总。raw 模式仍保持最多 200 条。
+- 历史迁移：`log_version=1 + event_key/runner_reason 为空` 的状态仅作兼容推导；末批含错误且无后续完成时标记历史未完成，不伪装成活跃续跑。
 
 ## 验收标准
 
@@ -97,6 +108,9 @@ SQLite `ad_control_action` 保留，作为先落本地的 outbox 和 MySQL 不�
 - 历史 SQLite 日志回填后数量一致；二次回填不覆盖已有 runner 状态。
 - 7 个页面统一引用新 JS/CSS 版本，日志列表无大字段预加载。
 - 单元测试、JS 语法、生产同源补丁演练、线上 dry-run/读接口回归全部通过。
+- 2026-07-15 的两批显示为一张“当日执行完成”卡；2026-07-14 的四批显示为一张“当日未完成”卡，保留限流失败原因和19个最终剩余。
+- daily 模式下 `limit` 在聚合后生效；原始批次仍可展开并逐批加载目标，底层16条历史 action 不更新、不删除。
+- 200+200+186 等多批不得显示为三张主卡；跨午夜同一 event_key 不拆日，不同规则/人工执行不得误合并。
 
 ## 风险与待确认
 
@@ -110,3 +124,4 @@ SQLite `ad_control_action` 保留，作为先落本地的 outbox 和 MySQL 不�
 | 日期 | 内容 |
 | --- | --- |
 | 2026-07-15 | 初版：执行效率、限流续跑、ads_ai 审计表和日志 UI 优化。 |
+| 2026-07-15 | 二次优化：业务日汇总、partial 状态拆分、历史迁移状态兼容与批次审计展开。 |

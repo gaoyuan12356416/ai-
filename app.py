@@ -36064,22 +36064,43 @@ def ad_control_reason_label(reason):
 
 
 def ad_control_action_status(item):
+    display_status = item.get("display_status") or {}
+    if isinstance(display_status, dict) and display_status.get("label"):
+        return display_status
     criteria = item.get("criteria") or {}
     execution_summary = criteria.get("execution_summary") or {}
     run_status = str(item.get("run_status") or criteria.get("runner_status") or execution_summary.get("run_status") or "").strip().lower()
+    remaining_count = int(item.get("remaining_count") or execution_summary.get("remaining_count") or 0)
+    retryable_error_count = int(item.get("retryable_error_count") or execution_summary.get("retryable_error_count") or 0)
+    error_count = int(item.get("error_count") or 0)
+    blocked_count = int(item.get("blocked_count") or execution_summary.get("blocked_count") or 0)
+    runner_reason = str(item.get("runner_reason") or criteria.get("runner_reason") or execution_summary.get("runner_reason") or "").strip()
     if run_status == "partial":
-        return {"key": "partial", "label": "部分完成，待续跑", "class": "warn"}
+        if blocked_count > 0 or error_count > retryable_error_count:
+            return {"key": "blocked", "label": "执行受阻（非重试错误）", "class": "danger"}
+        if remaining_count == 0 and runner_reason == "live_execute_verify_remaining":
+            return {"key": "verifying", "label": "本批已处理，待零目标复核", "class": "warn"}
+        if retryable_error_count > 0:
+            return {"key": "retrying", "label": "限流/临时错误，待续跑", "class": "warn"}
+        if remaining_count > 0:
+            return {"key": "partial", "label": "处理中，待续跑 %s" % remaining_count, "class": "warn"}
+        return {"key": "verifying", "label": "本批已处理，待零目标复核", "class": "warn"}
     if run_status == "blocked":
         return {"key": "blocked", "label": "执行受阻", "class": "danger"}
-    if run_status == "executed":
+    if run_status == "executed" and not (remaining_count or error_count or blocked_count):
         return {"key": "success", "label": "执行完成", "class": "ok"}
+    if run_status == "executed":
+        return {"key": "inconsistent", "label": "状态异常：完成记录仍有未处理项", "class": "danger"}
     if run_status in ("error", "failed"):
         return {"key": "failed", "label": "执行失败", "class": "danger"}
-    error_count = int(item.get("error_count") or 0)
     success_count = int(item.get("success_count") or 0)
     dry_run = bool(item.get("dry_run"))
-    if error_count > 0:
+    if blocked_count > 0 or error_count > retryable_error_count:
         return {"key": "failed", "label": "失败", "class": "danger"}
+    if retryable_error_count > 0:
+        return {"key": "retrying", "label": "限流/临时错误，待续跑", "class": "warn"}
+    if remaining_count > 0:
+        return {"key": "partial", "label": "处理中，待续跑 %s" % remaining_count, "class": "warn"}
     if dry_run and success_count > 0:
         return {"key": "dry_run_ok", "label": "Dry-run 通过", "class": "warn"}
     if success_count > 0:
@@ -36226,7 +36247,7 @@ def ad_control_action_audit(item, rule_map=None, include_samples=True):
 
 def list_ad_control_actions(
     limit=50, product="", binding_id="", action="", date_from="", date_to="",
-    include_targets=False, owner_user_id=None, internal=False,
+    include_targets=False, view="raw", owner_user_id=None, internal=False,
 ):
     ensure_ad_control_tables()
     limit = ad_control_int(limit, 50, 1, 200)
@@ -36255,18 +36276,54 @@ def list_ad_control_actions(
                 conn.close()
         if binding_id and binding_id not in owned_group_ids:
             raise StructuredApiError("not_found", "rule group not found")
-    date_from_utc = ad_control_action_log_utc_bound(date_from)
-    date_to_utc = ad_control_action_log_utc_bound(date_to, end=True)
+
+    def visible(item):
+        if internal:
+            return True
+        criteria = item.get("criteria") or {}
+        group_ref = str(
+            item.get("binding_id")
+            or criteria.get("rule_group_id")
+            or criteria.get("binding_id")
+            or ""
+        ).strip()
+        if group_ref:
+            return group_ref in owned_group_ids
+        return str(item.get("actor_user_id") or "") == owner_user_id
+
+    view = "daily" if str(view or "").strip().lower() == "daily" else "raw"
+    raw_limit = 1000 if view == "daily" else limit
+    fetch_date_from = date_from
+    fetch_date_to = date_to
+    if view == "daily":
+        if date_from:
+            fetch_date_from = (datetime.strptime(date_from[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        if date_to:
+            fetch_date_to = (datetime.strptime(date_to[:10], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    date_from_utc = ad_control_action_log_utc_bound(fetch_date_from)
+    date_to_utc = ad_control_action_log_utc_bound(fetch_date_to, end=True)
     mysql_items = []
+    mysql_has_more = False
     mysql_available = False
     storage_error = ""
     try:
-        mysql_items = ad_control_mysql_action_items(
-            limit, product, binding_id, action, date_from, date_to,
-            owned_binding_ids=owned_group_ids,
-            legacy_actor_user_id=owner_user_id,
-            owner_filter=not internal,
+        mysql_page = ad_control_execution_log_service.list_actions_page(
+            ad_control_action_log_reader_config(),
+            {
+                "product": product,
+                "binding_id": binding_id,
+                "action": action,
+                "date_from": date_from_utc,
+                "date_to": date_to_utc,
+                "owned_binding_ids": sorted(owned_group_ids),
+                "legacy_actor_user_id": owner_user_id,
+                "owner_filter": not internal,
+            },
+            limit=raw_limit,
+            table=AD_CONTROL_ACTION_LOG_TABLE,
         )
+        mysql_items = [item for item in (mysql_page.get("items") or []) if visible(item)]
+        mysql_has_more = bool(mysql_page.get("has_more"))
         mysql_available = True
     except Exception as exc:
         storage_error = str(exc)
@@ -36286,44 +36343,48 @@ def list_ad_control_actions(
         where.append("created_at<=?")
         params.append(date_to_utc)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    query_limit = raw_limit
+    if view == "raw" and (binding_id or not internal):
+        query_limit = 1000
     sqlite_items = []
+    sqlite_has_more = False
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            offset = 0
-            batch_size = max(200, min(1000, limit * 10))
-            while len(sqlite_items) < limit:
-                rows = conn.execute(
-                    """SELECT action_id, preview_id, actor_user_id, action, level, product,
-                              criteria_json, requested_count, success_count, skipped_count,
-                              error_count, dry_run, results_json, created_at
-                         FROM ad_control_action %s
-                     ORDER BY created_at DESC, action_id DESC LIMIT ? OFFSET ?""" % where_sql,
-                    tuple(params + [batch_size, offset]),
-                ).fetchall()
-                if not rows:
-                    break
-                offset += len(rows)
-                for row in rows:
-                    item = dict(row)
-                    item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
-                    item["results"] = ad_control_safe_json_list(item.pop("results_json", "[]"))
-                    item["dry_run"] = bool(item.get("dry_run"))
-                    item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
-                    item["log_store"] = "sqlite_fallback"
-                    if not internal:
-                        if item["binding_id"]:
-                            if item["binding_id"] not in owned_group_ids:
-                                continue
-                        elif str(item.get("actor_user_id") or "") != owner_user_id:
-                            continue
-                    if binding_id and item["binding_id"] != binding_id:
-                        continue
-                    sqlite_items.append(item)
-                    if len(sqlite_items) >= limit:
-                        break
-                if len(rows) < batch_size:
-                    break
+            rows = conn.execute(
+                """SELECT action_id, preview_id, actor_user_id, action, level, product,
+                          criteria_json, requested_count, success_count, skipped_count,
+                          error_count, dry_run, created_at
+                     FROM ad_control_action %s
+                 ORDER BY created_at DESC, action_id DESC LIMIT ?""" % where_sql,
+                tuple(params + [query_limit + 1]),
+            ).fetchall()
+            sqlite_has_more = len(rows) > query_limit
+            for row in rows[:query_limit]:
+                item = dict(row)
+                item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
+                item["results"] = []
+                item["dry_run"] = bool(item.get("dry_run"))
+                item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+                summary = item["criteria"].get("execution_summary") or {}
+                item["event_key"] = item["criteria"].get("runner_event_key") or ""
+                item["source_type"] = item["criteria"].get("source_type") or ""
+                item["run_status"] = item["criteria"].get("runner_status") or summary.get("run_status") or ""
+                item["runner_reason"] = item["criteria"].get("runner_reason") or summary.get("runner_reason") or ""
+                item["scanned_count"] = int(item["criteria"].get("scan_count") or 0)
+                item["candidate_count"] = int(item["criteria"].get("candidate_count") or 0)
+                item["matched_count"] = int(item["criteria"].get("execution_target_count") or 0)
+                item["batch_planned_count"] = int(item["criteria"].get("execution_batch_count") or item.get("requested_count") or 0)
+                for field in ("deferred_count", "retryable_error_count", "blocked_count", "remaining_count"):
+                    item[field] = int(summary.get(field) or 0)
+                item["reason_summary"] = []
+                item["log_version"] = 1
+                item["log_store"] = "sqlite_fallback"
+                if not visible(item):
+                    continue
+                if binding_id and item["binding_id"] != binding_id:
+                    continue
+                sqlite_items.append(item)
         finally:
             conn.close()
     merged = {}
@@ -36331,63 +36392,37 @@ def list_ad_control_actions(
         action_id = str(item.get("action_id") or "")
         if action_id and action_id not in merged:
             merged[action_id] = item
-    items = sorted(
-        merged.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True
-    )[:limit]
-    group_ids = sorted({
-        str(
-            (item.get("criteria") or {}).get("rule_group_id")
-            or (item.get("criteria") or {}).get("binding_id")
-            or item.get("binding_id")
-            or ""
-        ).strip()
-        for item in items
-        if str(
-            (item.get("criteria") or {}).get("rule_group_id")
-            or (item.get("criteria") or {}).get("binding_id")
-            or item.get("binding_id")
-            or ""
-        ).strip()
-    })
-    rule_map = {}
-    if group_ids:
-        with JOB_DB_LOCK:
-            conn = get_job_db_connection()
-            try:
-                placeholders = ",".join(["?"] * len(group_ids))
-                rows = conn.execute(
-                    "SELECT group_id,name,rule_set_id,account_group_id "
-                    "FROM ad_control_rule_group WHERE group_id IN (%s)" % placeholders,
-                    tuple(group_ids),
-                ).fetchall()
-                rule_map = {str(row["group_id"] or ""): dict(row) for row in rows}
-            finally:
-                conn.close()
+    source_truncated = bool(mysql_has_more or sqlite_has_more)
+    daily_meta = {}
+    if view == "daily":
+        daily_candidates = []
+        for item in merged.values():
+            business_date = ad_control_execution_log_service.action_business_date(
+                item, AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS
+            )
+            if date_from and business_date < date_from:
+                continue
+            if date_to and business_date > date_to:
+                continue
+            daily_candidates.append(item)
+        daily_meta = ad_control_execution_log_service.group_actions_daily(
+            daily_candidates,
+            limit=limit,
+            local_offset_hours=AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS,
+            source_truncated=source_truncated,
+        )
+        items = daily_meta.get("items") or []
+    else:
+        items = sorted(
+            merged.values(),
+            key=lambda item: (str(item.get("created_at") or ""), str(item.get("action_id") or "")),
+            reverse=True,
+        )[:limit]
+    rule_map = ad_control_action_rule_map(items)
     include_targets = bool(include_targets)
     for item in items:
         criteria = item.get("criteria") or {}
-        results = item.get("results") or []
         execution_summary = criteria.get("execution_summary") or {}
-        group_id = str(
-            criteria.get("rule_group_id")
-            or criteria.get("binding_id")
-            or item.get("binding_id")
-            or ""
-        ).strip()
-        rule_group = rule_map.get(group_id) or {}
-        warning_counts = {}
-        for result in results:
-            for warning in result.get("warnings") or []:
-                warning_text = str(warning or "").strip()
-                if warning_text:
-                    warning_counts[warning_text] = warning_counts.get(warning_text, 0) + 1
-        warning_summary = [
-            {"reason": reason, "count": count}
-            for reason, count in sorted(
-                warning_counts.items(), key=lambda value: (-value[1], value[0])
-            )[:8]
-        ]
-        reason_summary = item.get("reason_summary") or ad_control_execution_log_service.reason_summary(results)
         run_status = str(
             item.get("run_status")
             or criteria.get("runner_status")
@@ -36395,67 +36430,42 @@ def list_ad_control_actions(
             or ""
         ).strip().lower()
         observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"
-        status = {
-            "partial": {"key": "partial", "label": "部分完成，待续跑", "class": "warn"},
-            "blocked": {"key": "blocked", "label": "执行受阻", "class": "danger"},
-            "executed": {"key": "success", "label": "执行完成", "class": "ok"},
-            "error": {"key": "failed", "label": "执行失败", "class": "danger"},
-            "failed": {"key": "failed", "label": "执行失败", "class": "danger"},
-        }.get(run_status)
-        if not status:
-            if int(item.get("error_count") or 0) > 0:
-                status = {"key": "failed", "label": "失败", "class": "danger"}
-            elif item.get("dry_run") and int(item.get("success_count") or 0) > 0:
-                status = {"key": "dry_run_ok", "label": "Dry-run 通过", "class": "warn"}
-            elif int(item.get("success_count") or 0) > 0:
-                status = {"key": "success", "label": "成功", "class": "ok"}
-            else:
-                status = {"key": "noop", "label": "无执行目标", "class": "warn"}
+        audit = ad_control_action_audit(item, rule_map, include_samples=include_targets)
+        status = audit.get("status") or ad_control_action_status(item)
         if observe_mode and run_status in ("", "executed"):
             status = {"key": "observed", "label": "观察完成", "class": "ok"}
         mode = "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real"
         mode_label = "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行"
-        item["audit"] = {
+        audit.update({
             "status": status,
-            "created_at_local": str(item.get("created_at") or ""),
             "mode": mode,
             "mode_label": mode_label,
             "action_label": {
                 "pause": "关停", "copy": "复制", "mixed": "关闭/复制",
                 "reopen": "重启", "preview": "预览",
             }.get(str(item.get("action") or ""), item.get("action") or ""),
-            "rule_group_id": group_id,
-            "rule_group_name": rule_group.get("name") or group_id or "--",
-            "rule_set_id": rule_group.get("rule_set_id") or criteria.get("rule_set_id") or "",
-            "account_group_id": rule_group.get("account_group_id") or criteria.get("account_group_id") or "",
-            "counts": {
-                "requested": int(item.get("requested_count") or 0),
-                "success": int(item.get("success_count") or 0),
-                "skipped": int(item.get("skipped_count") or 0),
-                "error": int(item.get("error_count") or 0),
-            },
-            "flow": {
-                "scanned": int(item.get("scanned_count") or criteria.get("scan_count") or 0),
-                "candidate": int(item.get("candidate_count") or criteria.get("candidate_count") or 0),
-                "matched": int(item.get("matched_count") or criteria.get("execution_target_count") or 0),
-                "batch_planned": int(item.get("batch_planned_count") or criteria.get("execution_batch_count") or item.get("requested_count") or 0),
-                "deferred": int(item.get("deferred_count") or 0),
-                "remaining": int(item.get("remaining_count") or 0),
-                "retryable": int(item.get("retryable_error_count") or 0),
-                "blocked": int(item.get("blocked_count") or 0),
-            },
-            "reason_summary": reason_summary,
-            "warning_summary": warning_summary,
-            "samples": [],
-            "raw_result_count": len(results),
-            "log_store": item.get("log_store") or "sqlite_fallback",
-        }
+        })
+        item["audit"] = audit
+        if item.get("reason_summary"):
+            item["audit"]["reason_summary"] = item.get("reason_summary")
+        item["audit"]["log_store"] = item.get("log_store") or "sqlite_fallback"
         if not include_targets:
             item["results"] = []
+            item["audit"]["samples"] = []
+        for batch in item.get("batches") or []:
+            batch["status"] = ad_control_action_status(batch)
     return {
         "items": items,
         "storage": "ads_ai" if mysql_available else "sqlite_fallback",
         "storage_error": storage_error,
+        "view": view,
+        "truncated": bool(daily_meta.get("truncated")) if view == "daily" else source_truncated,
+        "source_truncated": bool(daily_meta.get("source_truncated")) if view == "daily" else source_truncated,
+        "has_more_groups": bool(daily_meta.get("has_more_groups")) if view == "daily" else False,
+        "has_more": source_truncated if view == "raw" else False,
+        "discarded_group_count": int(daily_meta.get("discarded_group_count") or 0),
+        "raw_action_count": int(daily_meta.get("raw_action_count") or len(merged)),
+        "group_count": int(daily_meta.get("group_count") or len(items)),
     }
 
 
@@ -37679,8 +37689,16 @@ def create_ad_control_live_preview(payload, session, internal=False):
     ))
     pause_count = len(pause_items)
     copy_count = len(copy_items)
+    execution_candidates = action_items
+    if str(scope.get("run_mode") or "observe").lower() == "live" and pause_items:
+        # Copy persistence is intentionally unavailable in this release.  Do
+        # not let a known-blocked copy consume either the global batch or the
+        # per-account pause allowance.  Once a fresh preview has no pause
+        # targets left, copy-only candidates are selected and fail closed in
+        # execute_ad_control_live before Token/Graph access.
+        execution_candidates = pause_items
     execution_items = ad_control_execution_log_service.balanced_execution_items(
-        action_items,
+        execution_candidates,
         max_total=AD_CONTROL_MAX_LIVE_EXECUTE,
         max_per_account=AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,
     )
@@ -37704,6 +37722,8 @@ def create_ad_control_live_preview(payload, session, internal=False):
         "preview_hash": preview_hash,
         "scheduled": bool(payload.get("scheduled")),
         "execution_target_count": pause_count + copy_count,
+        "pause_target_count": pause_count,
+        "copy_target_count": copy_count,
         "execution_batch_count": len(execution_items),
         "execution_truncated": pause_count + copy_count > len(execution_items),
         "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),
@@ -37851,7 +37871,9 @@ def execute_ad_control_live(payload, session):
         finally:
             conn.close()
     items = ad_control_safe_json_list(preview.get("sample_json"))[:AD_CONTROL_MAX_LIVE_EXECUTE]
-    has_copy = any(str(item.get("target_action") or "").lower() == "copy" for item in items)
+    has_copy = bool(int(criteria.get("copy_target_count") or 0)) or any(
+        str(item.get("target_action") or "").lower() == "copy" for item in items
+    )
     accepted_confirmations = {"EXECUTE_LIVE_PAUSE"}
     if has_copy:
         accepted_confirmations.add("EXECUTE_LIVE_RULE_GROUP")
@@ -91601,6 +91623,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         action=(params.get("action") or [""])[0],
                         date_from=(params.get("date_from") or [""])[0],
                         date_to=(params.get("date_to") or [""])[0],
+                        view=(params.get("view") or ["raw"])[0],
                         include_targets=include_targets,
                         owner_user_id=ad_control_actor(self._session()),
                     ),

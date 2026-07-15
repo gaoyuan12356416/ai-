@@ -1607,7 +1607,7 @@
   }
 
   async function renderLogs() {
-    $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>规则组</label><select id="bindingFilter"><option value="">全部规则组</option></select></div>`)}<section class="panel"><div class="panel-head"><div><h2>执行日志</h2><span class="hint" id="logStorageHint">正在读取 ads_ai 调控日志...</span></div><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部执行动作</option><option value="pause">关闭 pause</option><option value="copy">复制 copy</option><option value="mixed">混合 mixed</option><option value="reopen">重启 reopen</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>条数</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
+    $("pageRoot").innerHTML = `${productFilter(`<div class="field"><label>规则组</label><select id="bindingFilter"><option value="">全部规则组</option></select></div>`)}<section class="panel"><div class="panel-head"><div><h2>执行日志</h2><span class="hint" id="logStorageHint">正在读取 ads_ai 调控日志...</span></div><button class="btn" id="loadLogsBtn">查询</button></div><div class="panel-body"><div class="grid"><div class="field"><label>展示方式</label><select id="viewFilter"><option value="daily">按业务日汇总</option><option value="raw">原始批次</option></select></div><div class="field"><label>动作</label><select id="actionFilter"><option value="">全部执行动作</option><option value="pause">关闭 pause</option><option value="copy">复制 copy</option><option value="mixed">混合 mixed</option><option value="reopen">重启 reopen</option></select></div><div class="field"><label>开始日期</label><input id="dateFrom" type="date" /></div><div class="field"><label>结束日期</label><input id="dateTo" type="date" /></div><div class="field"><label>显示数量</label><input id="limitInput" type="number" min="1" max="200" value="50" /></div></div><div class="list" id="actionList"></div></div></section>`;
     const params = new URLSearchParams(window.location.search);
     await loadProducts({ includeAll: true });
     if (params.get("product") && $("productSelect")) $("productSelect").value = params.get("product");
@@ -1615,6 +1615,7 @@
     if (params.get("binding_id")) $("bindingFilter").value = params.get("binding_id");
     await loadLogs();
     $("productSelect").onchange = async () => { await refreshLogBindings(); await loadLogs(); };
+    $("viewFilter").onchange = loadLogs;
     $("loadLogsBtn").onclick = loadLogs;
   }
   async function refreshLogBindings() {
@@ -1630,7 +1631,9 @@
     if (button) button.disabled = true;
     if (storageHint) storageHint.textContent = "正在读取 ads_ai 调控日志...";
     $("actionList").innerHTML = `<div class="empty">日志加载中...</div>`;
-    const qs = new URLSearchParams({ product: product(), binding_id: $("bindingFilter").value || "", action: $("actionFilter").value || "", date_from: $("dateFrom").value || "", date_to: $("dateTo").value || "", limit: $("limitInput").value || "50", include_targets: "false" });
+    const query = { view: "daily", product: product(), binding_id: $("bindingFilter").value || "", action: $("actionFilter").value || "", date_from: $("dateFrom").value || "", date_to: $("dateTo").value || "", limit: $("limitInput").value || "50", include_targets: "false" };
+    query.view = $("viewFilter").value || query.view;
+    const qs = new URLSearchParams(query);
     try {
       const data = await api(`/api/ad-control/actions?${qs.toString()}`);
       if (sequence !== state.logLoadSequence) return;
@@ -1638,9 +1641,17 @@
         storageHint.textContent = data.storage === "ads_ai"
           ? "日志来源：ads_ai.ad_control_action_log"
           : "日志来源：本地 SQLite 回退（ads_ai 暂不可用）";
+        const responseView = data.view || query.view;
+        if (responseView === "daily") {
+          storageHint.textContent += ` / 已汇总 ${Number(data.group_count || (data.items || []).length)} 个业务日规则组，共读取 ${Number(data.raw_action_count || 0)} 个批次`;
+          if (data.source_truncated) storageHint.textContent += ` / 读取达到1000批上限，已丢弃 ${Number(data.discarded_group_count || 0)} 个边界日不完整分组，请缩小日期范围`;
+          else if (data.has_more_groups) storageHint.textContent += ` / 当前仅展示最近 ${Number((data.items || []).length)} 个完整日组`;
+        } else if (data.has_more) {
+          storageHint.textContent += ` / 当前仅展示最近 ${Number((data.items || []).length)} 条原始批次`;
+        }
         storageHint.title = data.storage_error || "";
       }
-      renderActionList(data.items || [], $("actionList"));
+      renderActionList(data.items || [], $("actionList"), data.view || query.view);
       bindLogLazyDetails($("actionList"));
     } catch (error) {
       if (sequence !== state.logLoadSequence) return;
@@ -1655,6 +1666,10 @@
     const status = (audit || {}).status || {};
     return `<span class="badge ${escapeHtml(status.class || "warn")}">${escapeHtml(status.label || "--")}</span>`;
   }
+  function logStatusValue(status) {
+    status = status || {};
+    return `<span class="badge ${escapeHtml(status.class || "warn")}">${escapeHtml(status.label || "--")}</span>`;
+  }
   function logCountPill(label, value, type = "") {
     return `<span class="log-count ${type}"><b>${escapeHtml(value)}</b>${escapeHtml(label)}</span>`;
   }
@@ -1665,6 +1680,18 @@
   }
   function firstLogValue(...values) {
     return values.find(value => value !== null && value !== undefined && value !== "");
+  }
+  function logLocalTime(value) {
+    const text = String(value || "").trim();
+    if (!text) return "--";
+    const normalized = /^20\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? `${text.replace(" ", "T")}Z` : text;
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return text;
+    try {
+      return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date).replace(/\//g, "-");
+    } catch (error) {
+      return text;
+    }
   }
   function logFlow(item, audit) {
     const criteria = item.criteria || {};
@@ -1694,7 +1721,30 @@
   function logReasonList(items, emptyText) {
     const list = items || [];
     if (!list.length) return `<span class="hint">${escapeHtml(emptyText || "无")}</span>`;
-    return `<div class="log-reasons">${list.map(item => `<span title="${escapeHtml(item.reason || "")}">${escapeHtml(item.reason || "")}<b>${escapeHtml(item.count)}</b></span>`).join("")}</div>`;
+    return `<div class="log-reasons">${list.map(item => `<span title="${escapeHtml(item.reason || "")}">${escapeHtml(logReasonLabel(item.reason))}<b>${escapeHtml(item.count)}</b></span>`).join("")}</div>`;
+  }
+  function logReasonLabel(value) {
+    const text = String(value || "").trim();
+    if (!text) return "--";
+    try {
+      const payload = JSON.parse(text);
+      const error = payload && typeof payload === "object" ? (payload.error || payload) : {};
+      const title = error.error_user_title || error.message || error.type || "Graph API 错误";
+      const codes = [error.code != null ? `code ${error.code}` : "", error.error_subcode != null ? `subcode ${error.error_subcode}` : ""].filter(Boolean).join(" / ");
+      return `${title}${codes ? `（${codes}）` : ""}`;
+    } catch (error) {
+      return text.length > 96 ? `${text.slice(0, 93)}...` : text;
+    }
+  }
+  function logDailyFlow(item) {
+    const stages = [
+      ["首轮扫描", item.scanned_count],
+      ["首轮规则命中", item.matched_count],
+      ["执行批次", item.execution_batch_count],
+      ["执行尝试", item.attempt_count],
+      ["最终待处理", item.remaining_count],
+    ];
+    return `<div class="log-flow">${stages.map(([label, value], index) => `${index ? '<span class="log-flow-arrow">→</span>' : ""}<div class="log-stage ${label === "最终待处理" && Number(value || 0) > 0 ? "pending" : ""}"><span>${escapeHtml(label)}</span><b>${escapeHtml(logValue(value))}</b></div>`).join("")}</div>`;
   }
   function logSampleTable(samples) {
     const rows = samples || [];
@@ -1708,15 +1758,15 @@
       return `<tr><td>${escapeHtml(row.status_label || row.status || "--")}</td><td class="mono">${escapeHtml(row.account_id || "--")}</td><td title="${escapeHtml(campaignTitle)}">${campaignText}</td><td><div class="mono">${escapeHtml(resourceText)}</div>${resourceHint ? `<div class="hint">${escapeHtml(resourceHint)}</div>` : ""}</td><td>${escapeHtml(row.language || "--")}<div class="hint">${escapeHtml(row.country || "")}</div></td><td>${escapeHtml(notes.join("；") || "--")}</td></tr>`;
     }).join("")}</tbody></table></div>`;
   }
-  async function loadLogTargets(card) {
-    if (!card || card.dataset.targetsLoaded) return;
-    const actionId = card.dataset.actionId || "";
+  async function loadLogTargets(details) {
+    if (!details || details.dataset.targetsLoaded) return;
+    const actionId = details.dataset.actionId || "";
     if (!actionId) return;
-    const targetBody = card.querySelector("[data-target-body]");
-    const targetSummary = card.querySelector("[data-target-summary]");
-    const rawBody = card.querySelector("[data-raw-body]");
-    const rawSummary = card.querySelector("[data-raw-summary]");
-    card.dataset.targetsLoaded = "loading";
+    const targetBody = details.querySelector("[data-target-body]");
+    const targetSummary = details.querySelector("[data-target-summary]");
+    const rawBody = details.querySelector("[data-raw-body]");
+    const rawSummary = details.querySelector("[data-raw-summary]");
+    details.dataset.targetsLoaded = "loading";
     if (targetBody) targetBody.innerHTML = `<div class="empty compact-empty">目标明细加载中...</div>`;
     try {
       const data = await api(`/api/ad-control/actions/${encodeURIComponent(actionId)}/targets`);
@@ -1727,9 +1777,9 @@
       if (targetBody) targetBody.innerHTML = logSampleTable(samples);
       if (rawSummary) rawSummary.textContent = `原始结果 JSON（${results.length} 条）`;
       if (rawBody) rawBody.textContent = JSON.stringify(results, null, 2);
-      card.dataset.targetsLoaded = "1";
+      details.dataset.targetsLoaded = "1";
     } catch (error) {
-      card.dataset.targetsLoaded = "";
+      details.dataset.targetsLoaded = "";
       const message = escapeHtml(error.message || String(error));
       if (targetBody) targetBody.innerHTML = `<div class="empty compact-empty">${message}</div>`;
       if (rawBody) rawBody.textContent = error.message || String(error);
@@ -1741,19 +1791,84 @@
     node.addEventListener("toggle", event => {
       const details = event.target.closest("details[data-lazy-targets]");
       if (!details || !details.open) return;
-      loadLogTargets(details.closest(".log-card"));
+      loadLogTargets(details);
     }, true);
   }
-  function renderActionList(items, node) {
-    node.innerHTML = items.length ? items.map(item => {
+  function logRawCount(item, audit) {
+    return Math.max(
+      Number((audit || {}).raw_result_count || 0),
+      Number(item.requested_count || 0),
+      Number(item.success_count || 0) + Number(item.skipped_count || 0) + Number(item.error_count || 0),
+    );
+  }
+  function renderLazyLogDetails(actionId, rawCount, label) {
+    return `<details class="log-details" data-lazy-targets="combined" data-action-id="${escapeHtml(actionId || "")}">
+      <summary data-target-summary>${escapeHtml(label || "目标与原始结果")}（点击加载，共 ${escapeHtml(rawCount)} 条）</summary>
+      <div data-target-body><div class="empty compact-empty">展开后加载目标明细</div></div>
+      <div class="log-raw-head" data-raw-summary>原始结果 JSON（展开后加载）</div>
+      <pre class="mono raw-json" data-raw-body>展开后加载原始结果 JSON</pre>
+    </details>`;
+  }
+  function renderBatchRecord(batch, index) {
+    const rawCount = logRawCount(batch, {});
+    const batchKind = batch.verification_only ? "零目标完成复核" : `执行批次 ${index + 1}`;
+    const batchStatus = Object.assign({}, batch.status || {}, { label: `当时状态：${(batch.status || {}).label || "--"}` });
+    return `<div class="log-batch">
+      <div class="log-batch-head"><div><strong>${escapeHtml(batchKind)}</strong><span class="hint">${escapeHtml(logLocalTime(batch.created_at))}</span></div>${logStatusValue(batchStatus)}</div>
+      <div class="log-meta"><span>Action：<b class="mono">${escapeHtml(batch.action_id || "--")}</b></span><span>Preview：<b class="mono">${escapeHtml(batch.preview_id || "--")}</b></span></div>
+      <div class="log-counts">
+        ${logCountPill("计划", batch.requested_count || 0)}
+        ${logCountPill("成功", batch.success_count || 0, "ok")}
+        ${logCountPill("跳过", batch.skipped_count || 0, "warn")}
+        ${logCountPill("失败", batch.error_count || 0, "danger")}
+        ${logCountPill("剩余", batch.remaining_count || 0, Number(batch.remaining_count || 0) > 0 ? "warn" : "")}
+      </div>
+      ${(batch.reason_summary || []).length ? `<div class="log-section"><span class="log-label">本批原因</span>${logReasonList(batch.reason_summary, "无")}</div>` : ""}
+      ${renderLazyLogDetails(batch.action_id, rawCount, "本批目标与原始结果")}
+    </div>`;
+  }
+  function renderDailyLogCard(item) {
+    const audit = item.audit || {};
+    const counts = audit.counts || {};
+    const strategy = (item.criteria || {}).strategy || {};
+    const storage = audit.log_store || item.log_store || "sqlite_fallback";
+    const batches = item.batches || [];
+    return `<div class="log-card daily-log-card" data-group-id="${escapeHtml(item.group_id || "")}">
+      <div class="log-card-head">
+        <div class="log-title">
+          <strong>${escapeHtml(audit.rule_group_name || item.binding_id || item.rule_identity || "--")}</strong>
+          <span class="hint">业务日 ${escapeHtml(item.business_date || "--")} / ${escapeHtml(item.product || "--")} / ${escapeHtml(audit.action_label || item.action || "--")} / ${escapeHtml(audit.mode_label || (item.dry_run ? "Dry-run" : "正式执行"))}</span>
+        </div>
+        <div class="log-status">${logStatusBadge(audit)}</div>
+      </div>
+      <div class="log-meta">
+        <span>规则组：<b class="mono">${escapeHtml(audit.rule_group_id || item.binding_id || item.rule_identity || "--")}</b></span>
+        <span>批次记录：<b>${escapeHtml(item.batch_count || batches.length)}</b></span>
+        <span>执行批次：<b>${escapeHtml(item.execution_batch_count || 0)}</b></span>
+        <span>完成复核：<b>${escapeHtml(item.verification_batch_count || 0)}</b></span>
+        <span>最后批次时间：<b>${escapeHtml(logLocalTime(item.last_created_at || item.created_at))}</b></span>
+      </div>
+      ${logDailyFlow(item)}
+      <div class="log-channel-grid">
+        <div class="log-channel"><span>执行尝试（含重试）</span><div class="log-counts">
+          ${logCountPill("成功", counts.success ?? item.success_count ?? 0, "ok")}
+          ${logCountPill("跳过", counts.skipped ?? item.skipped_count ?? 0, "warn")}
+          ${logCountPill("失败", counts.error ?? item.error_count ?? 0, "danger")}
+        </div><div class="log-attempt-note">同一目标被续跑或重试时会重复计数，不等于唯一目标数。</div></div>
+        <div class="log-channel"><span>调控日志存储</span><strong class="log-store ${storage === "ads_ai" ? "ok" : "warn"}">${storage === "ads_ai" ? "已写入 ads_ai" : storage === "mixed" ? "ads_ai / SQLite 混合" : "SQLite 回退"}</strong></div>
+      </div>
+      <div class="log-section"><span class="log-label">原因（按尝试计数）</span>${logReasonList(audit.reason_summary || item.reason_summary, "无失败或跳过原因")}</div>
+      ${item.status_inferred ? `<div class="log-status-note">历史日志缺少调度事件和续跑原因，主状态根据最终批次与剩余数保守推断。</div>` : ""}
+      ${(audit.warning_summary || []).length ? `<div class="log-section"><span class="log-label">执行备注</span>${logReasonList(audit.warning_summary, "无备注")}</div>` : ""}
+      ${strategy && Object.keys(strategy).length ? `<div class="log-section"><span class="log-label">最后批次策略</span><span class="hint">${escapeHtml(strategySummary(strategy))}</span></div>` : ""}
+      <details class="log-batch-list"><summary>批次记录（${escapeHtml(batches.length)}）</summary><div class="log-batches">${batches.map(renderBatchRecord).join("") || '<div class="empty compact-empty">暂无批次记录</div>'}</div></details>
+    </div>`;
+  }
+  function renderRawLogCard(item) {
       const audit = item.audit || {};
       const counts = audit.counts || {};
       const strategy = (item.criteria || {}).strategy || {};
-      const rawCount = Math.max(
-        Number(audit.raw_result_count || 0),
-        Number(item.requested_count || 0),
-        Number(item.success_count || 0) + Number(item.skipped_count || 0) + Number(item.error_count || 0),
-      );
+      const rawCount = logRawCount(item, audit);
       const storage = audit.log_store || item.log_store || "sqlite_fallback";
       const eventKey = item.event_key || (item.criteria || {}).runner_event_key || "";
       return `<div class="log-card" data-action-id="${escapeHtml(item.action_id || "")}">
@@ -1788,16 +1903,11 @@
         </div>
         ${(audit.warning_summary || []).length ? `<div class="log-section"><span class="log-label">执行备注</span>${logReasonList(audit.warning_summary, "无备注")}</div>` : ""}
         ${strategy && Object.keys(strategy).length ? `<div class="log-section"><span class="log-label">策略</span><span class="hint">${escapeHtml(strategySummary(strategy))}</span></div>` : ""}
-        <details class="log-details" data-lazy-targets="targets">
-          <summary data-target-summary>目标明细（点击加载，共 ${escapeHtml(rawCount)} 条）</summary>
-          <div data-target-body><div class="empty compact-empty">展开后加载目标明细</div></div>
-        </details>
-        <details class="log-details" data-lazy-targets="raw">
-          <summary data-raw-summary>原始结果 JSON（点击加载，共 ${escapeHtml(rawCount)} 条）</summary>
-          <pre class="mono raw-json" data-raw-body>展开后加载原始结果 JSON</pre>
-        </details>
+        ${renderLazyLogDetails(item.action_id, rawCount, "目标与原始结果")}
       </div>`;
-    }).join("") : `<div class="empty">暂无执行日志</div>`;
+  }
+  function renderActionList(items, node, view) {
+    node.innerHTML = items.length ? items.map(item => (view === "daily" || item.is_daily_group) ? renderDailyLogCard(item) : renderRawLogCard(item)).join("") : `<div class="empty">暂无执行日志</div>`;
   }
 
   async function init() {

@@ -58,13 +58,17 @@
 | TC-041 | Legacy 账户池 owner 隔离 | 两个用户各有账户池，另有历史服务创建的同创建者绑定 | 保存/读取规则组并引用账户池 | 外部用户账户池引用失败；仅同 owner 或同 `created_by` 的现有服务绑定兼容，不泄漏账号 | P0 | 通过（自动化） |
 | TC-042 | 日志目标明细 owner 隔离 | 两个 owner 各有 action/target | 调用 target 函数和 HTTP 明细路由 | 只返回本人目标；跨 owner 返回 not found/forbidden；路由显式传递当前 owner | P0 | 通过（自动化） |
 | TC-043 | 账号规则日志可见 | 存在 `product=''` 的 V2 action log | 打开日志页默认筛选并加载绑定 | 默认显示“全部产品（含账号规则）”，账号规则及其本人绑定可见，不扩大跨 owner 范围 | P1 | 通过（自动化/静态契约） |
-| TC-044 | 静态资源缓存版本一致 | 七个 ad-control HTML 页面 | 检查 CSS/JS URL | 全部使用 `v=20260715copy2`，不存在本次旧 cache buster | P1 | 通过（自动化） |
+| TC-044 | 静态资源缓存版本一致 | 七个 ad-control HTML 页面 | 检查 CSS/JS URL | 全部使用 `v=20260715copylog3`，不存在本次旧 cache buster，且保留 daily/raw 日志 UI | P1 | 通过（自动化） |
 | TC-045 | Legacy standalone 生产基线 | 线上 SQLite `ad_control_rule` | 发布前、overlay 演练后、发布后只读比较 total/enabled 集合 | 三次结果一致；不改变其 grandfather 启停/急停语义，不读取 Token | P0 | 前置基线通过（0/0）；overlay/发布后待验证 |
 | TC-046 | 补丁后观察日志语义 | `criteria.run_mode=observe` 的 action，current-live/旧基线临时副本 | 应用真实部署补丁，分别读取日志列表和 target 明细并重跑日志/API测试 | 两条路径均为 `audit.mode=observe`、`mode_label=只观察`、状态 `observed/观察完成`；不得回退成 real/正式执行 | P0 | 通过（部署补丁全量回归） |
+| TC-047 | Exact-source V2 app 窄合并 | live app 精确等于已审核 source commit | check、apply、二次 apply | check 零写；临时 Git diff 结果等于 target blob；首次唯一字节备份并原子安装；二次 unchanged/零新增备份 | P0 | 通过（自动化），生产 staging 待验证 |
+| TC-048 | 并发 source 漂移阻断 | live app 不等于 source/target blob | 运行 exact-source 发布器 | 在备份和写入前失败，live 字节不变 | P0 | 通过（自动化） |
+| TC-049 | Mixed 超额批次不被 copy 占位 | 同账号命中 21 个 pause 和 1 个 copy，每账号上限 20 | preview 后正式 execute，再进入 runner continuation | 首批恰好 20 个 pause、0 个 copy；copy 不消费 pause 额度，剩余 2 个目标使事件保持 partial 和 continuation key | P0 | 通过（自动化） |
+| TC-050 | SQLite owner 精确迁移 | 三条已核实 legacy 组、关联账户池、standalone 0/0 | 默认 check、首次 apply、二次 apply；另注入 mixed owner、坏 pool 和事务中途失败 | check 只改临时副本；首次只更新3个 owner、二次0行；逐ID状态、非owner字段、账户ID、standalone、integrity保持；异常完整回滚/失败关闭 | P0 | 通过（自动化），生产 C1 演练待验证 |
 
 ## 执行结果说明
 
-2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -v`，结果 `Ran 107 tests`、`OK`。另执行 `python tests/validate_ad_control_deploy_patch.py`，在当前 merged app 临时副本上确认首次/二次 apply 均 `unchanged`、零备份、字节不变并重跑全量通过；若输入需要变更，该验证器仍要求首次产生唯一字节一致备份。再用 `tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` 验证真实 current-live 基线的首次 changed+备份 hash、二次幂等和 action-log writer/reader 安全契约。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
+2026-07-15 合并 16:01 daily-log 生产组合并收口发布安全门禁后，使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 161 tests`、`OK`。exact-source 发布器 12/12、SQLite owner 迁移器 8/8 通过；execution-log 补丁继续单独验证 daily/raw、owner 和 observe 审计兼容。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 exact-commit staging、C1、暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
 
 ## 回归范围
 

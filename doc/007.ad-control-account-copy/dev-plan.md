@@ -13,7 +13,7 @@
 | 复制结果 ads_ai schema/事务写入 | 后续需求 | 用户后续明确授权并指定写法 | 本期取消（DDL 环境已修复，仍不在本轮执行） |
 | 规则模型、旧聚合迁移和 Campaign 观察链路 | created_data_write_patterns | `app.py`、runner、copy engine | 已完成（本地） |
 | 规则组页面升级、`partial_enabled` 与 legacy action 兼容 | rule_dimension_review | `static/ad-control-*` | 已完成（本地） |
-| 集成、回归、代码评审 | Codex | 全部变更 | 已完成（fresh-cache 107/107） |
+| 集成、回归、代码评审 | Codex | 全部变更 | 已完成（合并 16:01 daily-log 生产基线并收口发布安全门禁后 fresh-cache 161/161） |
 | 生产 overlay 合并与生产 Python 环境完整验证 | Codex | 线上共享 monolith 副本/发布包 | 未完成 |
 | GitHub-first 暗发布 | Codex | 精确 commit/发布包/线上检查点 | 未完成 |
 | Campaign 观察验收 | Codex + 业务方 | 已批准测试账号 | 待批准 |
@@ -21,9 +21,10 @@
 ## 编译 / 构建命令
 
 ```powershell
-python -m py_compile app.py scripts/ad_control_rule_runner.py
+python -m py_compile app.py scripts/ad_control_rule_runner.py features/ad_control_copy_engine/service.py features/ad_control_execution_log/service.py deploy/apply_ad_control_execution_log_fix.py deploy/apply_ad_control_account_copy_v2.py deploy/migrate_ad_control_account_copy_v2_sqlite.py
 python -m unittest discover -s tests -p "test_ad_control*.py" -v
 node --check static/ad-control-pages.js
+python -m unittest tests.test_ad_control_account_copy_deploy -v
 ```
 
 ## 风险与依赖
@@ -33,6 +34,8 @@ node --check static/ad-control-pages.js
 - 本期不进行 copied created_data/lineage/intent DDL/DML；正式 copy 必须在 Meta POST 前返回 `copy_persistence_not_configured`。既有 `ad_control_action_log` 审计链路保持原样。
 - DDL 环境问题已修复只作为后续实施条件；未获得用户下一次明确授权前，不建、不写 copied created_data/lineage/intent。`ads_ai.ad_control_action_log` 是现有审计表，不计入复制结果落表。
 - 线上新版 action-log 的 writer/reader 分离、固定库表、超时/并发上限及 runner 更新不立即 upsert 重试必须保持。每次发布前都必须将当前线上副本作为 current-live fixture 执行补丁 check/apply/二次幂等和契约断言，不通过则不得发布。
+- 生产 `app.py` 不得由 checkout 整文件盲目覆盖。实际发布使用 `deploy/apply_ad_control_account_copy_v2.py`：只接受已核实 source commit 的精确 blob，在临时目录应用 source→target Git diff 并核对 target blob，再生成持久化唯一字节备份和原子替换。所有受控 `app.py` 发布必须使用统一 `/var/lock/drama-material-service.deploy.lock`；本次窗口禁止其他发布/热修。锁外人工覆盖不受 advisory lock 约束，必须靠排他窗口和写前/写后 hash 阻断。
+- API/runner 启动会触发 schema ensure，因此真实 SQLite 的 ensure 与三条已核实 group ID 的精确 owner 迁移必须在 API/runner 均停止后、重启前完成；失败即恢复 C1 SQLite，不允许带 `owner_user_id='codex'` 的中间态启动服务。
 - PAUSED/ACTIVE Canary 延后到用户确认落表方式后的下一需求。
 - 当前 stale-preview 安全门禁在单个 Campaign pause 期间持有全局 `JOB_DB_LOCK` 跨 Graph GET/POST；最坏约 60 秒的同进程 SQLite 写阻塞作为 P2 运行风险进入暗发布监控，不得在本地测试通过后宣称生产无影响。
 
@@ -40,4 +43,4 @@ node --check static/ad-control-pages.js
 
 - 2026-07-15：从 commit `352bfb4e96abe6bf50b76cacb3f25e4608774c92` 创建独立工作树 `D:\codex\ai-drama-material-service-ad-control-copy` 和分支 `codex/ad-control-copy-rules`。
 - 2026-07-15：C0 本地 bundle 与线上全量配置/SQLite 备份已完成并校验。
-- 2026-07-15：本地 fresh-cache ad-control 全量回归 107/107 通过；真实补丁 apply 后在临时 app 上全量通过，首次备份 hash 与源 app 匹配、二次应用 unchanged。current-live fixture 验证还确认 writer/reader 端口、3/5 秒超时、`AD_CONTROL_LIVE_MAX_WORKERS=4` 及 7 个线上安全函数 hash 均不被补丁改写；生产 overlay 完整验证、GitHub exact-commit 发布与暗发布均尚未完成，不构成上线证明。
+- 2026-07-15：发现 16:01 已并发上线 daily-log overlay，重新以生产组合提交 `0a4c408eb7d027eb60eb15496c6dae48443a2a1c` 为合并基线；V2、daily/raw 日志读模型和统一缓存版本合并并收口 mixed 批次、exact deploy、owner 迁移后 fresh-cache 161/161 通过。exact-source Git diff 部署器 12/12、SQLite owner 迁移器 8/8（含真实 target app ensure/owner 可见性集成）通过；生产 staging、C1 与线上 smoke 仍待完成。

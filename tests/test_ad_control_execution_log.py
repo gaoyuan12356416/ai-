@@ -7,7 +7,7 @@ import os
 import tempfile
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -244,6 +244,538 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(1, summary["terminal_skip_count"])
 
 
+class DailyGroupingTests(unittest.TestCase):
+    @staticmethod
+    def item(
+        action_id,
+        created_at,
+        run_status="partial",
+        remaining=0,
+        requested=200,
+        success=200,
+        skipped=0,
+        error=0,
+        retryable=0,
+        binding_id="binding-1",
+        event_key="",
+        runner_reason="",
+        actor="ad_control_rule_runner",
+        source_type="scheduled",
+        log_version=2,
+        verification=False,
+    ):
+        return {
+            "action_id": action_id,
+            "preview_id": "preview-" + action_id,
+            "binding_id": binding_id,
+            "rule_id": "",
+            "event_key": event_key,
+            "source_type": source_type,
+            "actor_user_id": actor,
+            "product": "dramawave",
+            "action": "pause",
+            "level": "campaign",
+            "run_status": run_status,
+            "runner_reason": runner_reason,
+            "dry_run": False,
+            "scanned_count": 1000,
+            "candidate_count": 500,
+            "matched_count": 386,
+            "batch_planned_count": requested,
+            "deferred_count": remaining,
+            "requested_count": requested,
+            "success_count": success,
+            "skipped_count": skipped,
+            "error_count": error,
+            "retryable_error_count": retryable,
+            "blocked_count": 0,
+            "remaining_count": remaining,
+            "criteria": {
+                "rule_group_id": binding_id,
+                "verification_only": verification,
+            },
+            "reason_summary": [],
+            "results": [],
+            "log_version": log_version,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "log_store": "ads_ai",
+        }
+
+    def test_same_business_day_batches_reduce_to_final_executed_group(self):
+        items = [
+            self.item("a1", "2026-07-15 04:13:18", remaining=195, success=169, skipped=31),
+            self.item(
+                "a2",
+                "2026-07-15 04:22:58",
+                run_status="executed",
+                remaining=0,
+                requested=186,
+                success=186,
+            ),
+        ]
+        grouped = service.group_actions_daily(
+            items,
+            limit=50,
+            now=datetime(2026, 7, 15, 6, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(1, len(grouped["items"]))
+        item = grouped["items"][0]
+        self.assertEqual("2026-07-15", item["business_date"])
+        self.assertEqual(2, item["batch_count"])
+        self.assertEqual(386, item["attempt_count"])
+        self.assertEqual(355, item["success_count"])
+        self.assertEqual(31, item["skipped_count"])
+        self.assertEqual(0, item["remaining_count"])
+        self.assertEqual("success", item["display_status"]["key"])
+        self.assertEqual("当日执行完成", item["display_status"]["label"])
+
+    def test_real_runner_chain_only_completes_after_zero_target_verification(self):
+        items = [
+            self.item("a1", "2026-07-15 04:13:18", remaining=186, success=200),
+            self.item(
+                "a2",
+                "2026-07-15 04:22:58",
+                remaining=0,
+                requested=186,
+                success=186,
+                runner_reason="live_execute_verify_remaining",
+            ),
+            self.item(
+                "a3",
+                "2026-07-15 04:32:58",
+                run_status="executed",
+                remaining=0,
+                requested=0,
+                success=0,
+                verification=True,
+            ),
+        ]
+        grouped = service.group_actions_daily(
+            items,
+            now=datetime(2026, 7, 15, 5, 0, tzinfo=timezone.utc),
+        )["items"][0]
+        self.assertEqual(3, grouped["batch_count"])
+        self.assertEqual(2, grouped["execution_batch_count"])
+        self.assertEqual(1, grouped["verification_batch_count"])
+        self.assertEqual("success", grouped["display_status"]["key"])
+
+    def test_same_day_different_event_keys_still_merge(self):
+        items = [
+            self.item("a1", "2026-07-15 04:00:00", event_key="b:pause:2026-07-15:12:00"),
+            self.item("a2", "2026-07-15 05:00:00", event_key="b:pause:2026-07-15:13:00"),
+        ]
+        self.assertEqual(1, len(service.group_actions_daily(items)["items"]))
+
+    def test_later_success_event_does_not_hide_earlier_blocked_event(self):
+        items = [
+            self.item(
+                "blocked",
+                "2026-07-15 04:00:00",
+                run_status="blocked",
+                remaining=0,
+                success=0,
+                error=1,
+                event_key="b:pause:2026-07-15:12:00",
+            ),
+            self.item(
+                "success",
+                "2026-07-15 05:00:00",
+                run_status="executed",
+                remaining=0,
+                event_key="b:pause:2026-07-15:13:00",
+            ),
+        ]
+        grouped = service.group_actions_daily(items)["items"][0]
+        self.assertEqual(2, grouped["event_count"])
+        self.assertEqual("blocked", grouped["display_status"]["key"])
+
+    def test_later_success_event_does_not_hide_earlier_open_event(self):
+        items = [
+            self.item(
+                "open",
+                "2026-07-15 04:00:00",
+                remaining=10,
+                event_key="b:pause:2026-07-15:12:00",
+            ),
+            self.item(
+                "success",
+                "2026-07-15 05:00:00",
+                run_status="executed",
+                remaining=0,
+                event_key="b:pause:2026-07-15:13:00",
+            ),
+        ]
+        grouped = service.group_actions_daily(
+            items,
+            now=datetime(2026, 7, 15, 5, 1, tzinfo=timezone.utc),
+        )["items"][0]
+        self.assertEqual(10, grouped["remaining_count"])
+        self.assertEqual("partial", grouped["display_status"]["key"])
+
+    def test_stale_legacy_partial_with_retryable_error_is_incomplete(self):
+        items = [
+            self.item("a1", "2026-07-14 04:09:17", remaining=727),
+            self.item("a2", "2026-07-14 04:22:23", remaining=460),
+            self.item("a3", "2026-07-14 04:33:09", remaining=220),
+            self.item(
+                "a4",
+                "2026-07-14 04:43:04",
+                remaining=19,
+                success=199,
+                error=1,
+                retryable=1,
+                log_version=1,
+            ),
+        ]
+        grouped = service.group_actions_daily(
+            items,
+            now=datetime(2026, 7, 15, 6, 0, tzinfo=timezone.utc),
+        )
+        item = grouped["items"][0]
+        self.assertEqual(4, item["batch_count"])
+        self.assertEqual(800, item["attempt_count"])
+        self.assertEqual(19, item["remaining_count"])
+        self.assertTrue(item["status_inferred"])
+        self.assertEqual("incomplete", item["display_status"]["key"])
+        self.assertIn("限流", item["display_status"]["label"])
+
+    def test_event_key_keeps_cross_midnight_continuation_on_original_day(self):
+        event_key = "binding-1:pause:2026-07-14:12:00"
+        items = [
+            self.item("a1", "2026-07-14 15:55:00", event_key=event_key, remaining=10),
+            self.item(
+                "a2",
+                "2026-07-14 16:05:00",
+                event_key=event_key,
+                run_status="executed",
+                remaining=0,
+            ),
+        ]
+        grouped = service.group_actions_daily(items)
+        self.assertEqual(1, len(grouped["items"]))
+        self.assertEqual("2026-07-14", grouped["items"][0]["business_date"])
+
+    def test_manual_actions_without_event_key_remain_separate(self):
+        items = [
+            self.item("a1", "2026-07-15 04:00:00", actor="admin", source_type="manual"),
+            self.item("a2", "2026-07-15 05:00:00", actor="admin", source_type="manual"),
+        ]
+        grouped = service.group_actions_daily(items)["items"]
+        self.assertEqual(2, len(grouped))
+        self.assertEqual(2, len({item["group_id"] for item in grouped}))
+        self.assertTrue(all(item["group_type"] == "action" for item in grouped))
+
+    def test_manual_actions_with_event_key_still_remain_separate(self):
+        items = [
+            self.item(
+                "a1",
+                "2026-07-15 04:00:00",
+                actor="admin",
+                source_type="manual",
+                event_key="manual:2026-07-15:1",
+            ),
+            self.item(
+                "a2",
+                "2026-07-15 05:00:00",
+                actor="admin",
+                source_type="manual",
+                event_key="manual:2026-07-15:2",
+            ),
+        ]
+        self.assertEqual(2, len(service.group_actions_daily(items)["items"]))
+
+    def test_different_rules_never_merge(self):
+        items = [
+            self.item("a1", "2026-07-15 04:00:00", binding_id="binding-1"),
+            self.item("a2", "2026-07-15 04:01:00", binding_id="binding-2"),
+        ]
+        self.assertEqual(2, len(service.group_actions_daily(items)["items"]))
+
+    def test_product_action_level_and_mode_are_isolated(self):
+        base = self.item("base", "2026-07-15 04:00:00")
+        variants = []
+        for action_id, field, value in (
+            ("product", "product", "hotdrama"),
+            ("action", "action", "reopen"),
+            ("level", "level", "adset"),
+            ("mode", "dry_run", True),
+        ):
+            variant = dict(base)
+            variant["action_id"] = action_id
+            variant[field] = value
+            variants.append(variant)
+        self.assertEqual(5, len(service.group_actions_daily([base] + variants)["items"]))
+
+    def test_scheduled_rows_without_rule_identity_remain_separate(self):
+        first = self.item("a1", "2026-07-15 04:00:00", binding_id="")
+        second = self.item("a2", "2026-07-15 04:01:00", binding_id="")
+        first["criteria"] = {}
+        second["criteria"] = {}
+        self.assertEqual(2, len(service.group_actions_daily([first, second])["items"]))
+
+    def test_same_second_verification_wins_deterministically(self):
+        items = [
+            self.item("z-partial", "2026-07-15 04:00:00", remaining=0),
+            self.item(
+                "a-verify",
+                "2026-07-15 04:00:00",
+                run_status="executed",
+                requested=0,
+                success=0,
+                verification=True,
+            ),
+        ]
+        grouped = service.group_actions_daily(items)
+        self.assertEqual("a-verify", grouped["items"][0]["latest_action_id"])
+        self.assertEqual("success", grouped["items"][0]["display_status"]["key"])
+
+    def test_same_second_blocked_wins_over_non_verification_executed(self):
+        items = [
+            self.item("z-success", "2026-07-15 04:00:00", run_status="executed", remaining=0),
+            self.item("a-blocked", "2026-07-15 04:00:00", run_status="blocked", error=1),
+        ]
+        grouped = service.group_actions_daily(items)["items"][0]
+        self.assertEqual("blocked", grouped["display_status"]["key"])
+
+    def test_executed_with_remaining_is_never_complete(self):
+        item = self.item("a1", "2026-07-15 04:00:00", run_status="executed", remaining=1)
+        grouped = service.group_actions_daily([item])["items"][0]
+        self.assertEqual("inconsistent", grouped["display_status"]["key"])
+
+    def test_non_retryable_partial_error_is_blocked(self):
+        item = self.item("a1", "2026-07-15 04:00:00", error=1, retryable=0)
+        grouped = service.group_actions_daily(
+            [item],
+            now=datetime(2026, 7, 15, 4, 1, tzinfo=timezone.utc),
+        )["items"][0]
+        self.assertEqual("blocked", grouped["display_status"]["key"])
+
+    def test_legacy_empty_status_with_remaining_is_not_complete(self):
+        item = self.item(
+            "a1",
+            "2026-07-15 04:00:00",
+            run_status="",
+            remaining=5,
+            success=1,
+            log_version=1,
+        )
+        grouped = service.group_actions_daily(
+            [item],
+            now=datetime(2026, 7, 15, 4, 1, tzinfo=timezone.utc),
+        )["items"][0]
+        self.assertEqual("partial", grouped["display_status"]["key"])
+
+    def test_partial_zero_remaining_waits_for_verification(self):
+        item = self.item(
+            "a1",
+            "2026-07-15 04:00:00",
+            remaining=0,
+            runner_reason="live_execute_verify_remaining",
+        )
+        grouped = service.group_actions_daily(
+            [item],
+            now=datetime(2026, 7, 15, 4, 1, tzinfo=timezone.utc),
+        )["items"][0]
+        self.assertEqual("verifying", grouped["display_status"]["key"])
+
+    def test_partial_stale_window_is_three_hours(self):
+        item = self.item("a1", "2026-07-15 04:00:00", remaining=1)
+        at_boundary = service.group_actions_daily(
+            [item],
+            now=datetime(2026, 7, 15, 7, 0, tzinfo=timezone.utc),
+        )["items"][0]
+        after_boundary = service.group_actions_daily(
+            [item],
+            now=datetime(2026, 7, 15, 7, 0, 1, tzinfo=timezone.utc),
+        )["items"][0]
+        self.assertEqual("partial", at_boundary["display_status"]["key"])
+        self.assertEqual("incomplete", after_boundary["display_status"]["key"])
+
+    def test_group_id_does_not_change_when_a_new_batch_arrives(self):
+        first = self.item("a1", "2026-07-15 04:00:00")
+        group_id = service.group_actions_daily([first])["items"][0]["group_id"]
+        second = self.item("a2", "2026-07-15 04:05:00", run_status="executed", remaining=0)
+        self.assertEqual(
+            group_id,
+            service.group_actions_daily([first, second])["items"][0]["group_id"],
+        )
+
+    def test_ads_ai_duplicate_wins_even_when_sqlite_is_first(self):
+        fallback = self.item("a1", "2026-07-15 04:00:00", remaining=10)
+        fallback["log_store"] = "sqlite_fallback"
+        mysql = self.item("a1", "2026-07-15 04:00:00", run_status="executed", remaining=0)
+        mysql["log_store"] = "ads_ai"
+        grouped = service.group_actions_daily([fallback, mysql])["items"][0]
+        self.assertEqual("success", grouped["display_status"]["key"])
+        self.assertEqual("ads_ai", grouped["log_store"])
+
+    def test_truncated_source_drops_possibly_incomplete_oldest_group(self):
+        items = [
+            self.item("old", "2026-07-14 04:00:00", binding_id="old-binding"),
+            self.item("new", "2026-07-15 04:00:00", binding_id="new-binding"),
+        ]
+        grouped = service.group_actions_daily(items, source_truncated=True)
+        self.assertTrue(grouped["truncated"])
+        self.assertEqual(1, grouped["discarded_group_count"])
+        self.assertEqual("new-binding", grouped["items"][0]["binding_id"])
+
+    def test_truncated_source_drops_all_groups_on_boundary_business_date(self):
+        items = [
+            self.item("old-a", "2026-07-14 04:00:00", binding_id="old-a"),
+            self.item("old-b", "2026-07-14 04:01:00", binding_id="old-b"),
+            self.item("new", "2026-07-15 04:00:00", binding_id="new"),
+        ]
+        grouped = service.group_actions_daily(items, source_truncated=True)
+        self.assertEqual(2, grouped["discarded_group_count"])
+        self.assertEqual(["new"], [item["binding_id"] for item in grouped["items"]])
+
+    def test_limit_applies_after_grouping(self):
+        items = [
+            self.item("a1", "2026-07-15 04:00:00", binding_id="a"),
+            self.item("a2", "2026-07-15 04:05:00", binding_id="a"),
+            self.item("b1", "2026-07-15 04:10:00", binding_id="b"),
+            self.item("c1", "2026-07-15 04:15:00", binding_id="c"),
+        ]
+        grouped = service.group_actions_daily(items, limit=2)
+        self.assertEqual(2, len(grouped["items"]))
+        self.assertEqual(3, grouped["group_count"])
+        self.assertTrue(grouped["truncated"])
+
+
+class DailyListFunctionTests(unittest.TestCase):
+    class EmptyConnection:
+        def execute(self, *args, **kwargs):
+            return self
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            return None
+
+    def namespace(self, mysql_items, has_more=False):
+        captured = {}
+
+        class ServiceProxy:
+            action_business_date = staticmethod(service.action_business_date)
+            group_actions_daily = staticmethod(service.group_actions_daily)
+
+            @staticmethod
+            def list_actions_page(config, filters, limit, table):
+                captured.update({"filters": filters, "limit": limit, "table": table})
+                values = list(mysql_items)
+                if filters.get("date_from"):
+                    values = [item for item in values if str(item.get("created_at") or "") >= filters["date_from"]]
+                if filters.get("date_to"):
+                    values = [item for item in values if str(item.get("created_at") or "") <= filters["date_to"]]
+                return {"items": values, "has_more": has_more, "limit": limit}
+
+        def utc_bound(value, end=False):
+            value = str(value or "").strip()
+            if not value:
+                return ""
+            local_dt = datetime.strptime(value[:10], "%Y-%m-%d")
+            if end:
+                local_dt += timedelta(days=1, seconds=-1)
+            return (local_dt - timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+
+        namespace = {
+            "ensure_ad_control_tables": lambda: None,
+            "ad_control_int": lambda value, default, minimum, maximum: max(minimum, min(maximum, int(value or default))),
+            "ad_control_action_log_utc_bound": utc_bound,
+            "ad_control_execution_log_service": ServiceProxy,
+            "ad_control_action_log_reader_config": lambda: {},
+            "AD_CONTROL_ACTION_LOG_TABLE": "ad_control_action_log",
+            "AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS": 8,
+            "datetime": datetime,
+            "timedelta": timedelta,
+            "logging": logging,
+            "JOB_DB_LOCK": threading.Lock(),
+            "get_job_db_connection": self.EmptyConnection,
+            "ad_control_safe_json_dict": lambda value: json.loads(value or "{}"),
+            "ad_control_action_rule_map": lambda items: {},
+        }
+        exec(deploy_fix.ACTION_STATUS_FUNCTION, namespace)
+
+        def audit(item, rule_map, include_samples=False):
+            return {
+                "status": namespace["ad_control_action_status"](item),
+                "counts": {
+                    "requested": int(item.get("requested_count") or 0),
+                    "success": int(item.get("success_count") or 0),
+                    "skipped": int(item.get("skipped_count") or 0),
+                    "error": int(item.get("error_count") or 0),
+                },
+                "reason_summary": [],
+                "samples": [],
+                "log_store": item.get("log_store") or "ads_ai",
+            }
+
+        namespace["ad_control_action_audit"] = audit
+        exec(deploy_fix.LIST_ACTIONS_FUNCTION, namespace)
+        return namespace, captured
+
+    def test_daily_date_filter_widens_query_and_filters_by_business_date(self):
+        item = DailyGroupingTests.item(
+            "a1",
+            "2026-07-14 16:05:00",
+            run_status="executed",
+            remaining=0,
+            event_key="binding-1:pause:2026-07-14:23:55",
+        )
+        namespace, captured = self.namespace([item])
+        response = namespace["list_ad_control_actions"](
+            product="dramawave",
+            date_from="2026-07-14",
+            date_to="2026-07-14",
+            view="daily",
+            internal=True,
+        )
+        self.assertEqual("daily", response["view"])
+        self.assertEqual(1, len(response["items"]))
+        self.assertEqual("2026-07-14", response["items"][0]["business_date"])
+        self.assertEqual("2026-07-12 16:00:00", captured["filters"]["date_from"])
+        self.assertEqual("2026-07-15 15:59:59", captured["filters"]["date_to"])
+        self.assertEqual(1000, captured["limit"])
+
+    def test_raw_view_keeps_action_rows_and_caps_reader_at_200(self):
+        item = DailyGroupingTests.item("a1", "2026-07-15 04:00:00")
+        namespace, captured = self.namespace([item])
+        response = namespace["list_ad_control_actions"](
+            limit=999, view="raw", internal=True
+        )
+        self.assertEqual("raw", response["view"])
+        self.assertFalse(response["items"][0].get("is_daily_group"))
+        self.assertEqual(200, captured["limit"])
+
+    def test_raw_legacy_status_does_not_hide_remaining(self):
+        namespace, _ = self.namespace([])
+        status = namespace["ad_control_action_status"]({
+            "run_status": "",
+            "success_count": 1,
+            "remaining_count": 5,
+        })
+        self.assertEqual("partial", status["key"])
+
+    def test_daily_observe_audit_is_not_overwritten_by_group_status(self):
+        item = DailyGroupingTests.item(
+            "observe-a1",
+            "2026-07-15 04:00:00",
+            run_status="executed",
+            remaining=0,
+        )
+        item["criteria"]["run_mode"] = "observe"
+        namespace, _ = self.namespace([item])
+        response = namespace["list_ad_control_actions"](
+            view="daily", internal=True
+        )
+        audit = response["items"][0]["audit"]
+        self.assertEqual("observe", audit["mode"])
+        self.assertEqual("只观察", audit["mode_label"])
+        self.assertEqual("observed", audit["status"]["key"])
+
+
 class PersistenceShapeTests(unittest.TestCase):
     @staticmethod
     def writer_config(**overrides):
@@ -399,6 +931,13 @@ class PersistenceShapeTests(unittest.TestCase):
         self.assertIn('{"key": "observed", "label": "观察完成", "class": "ok"}', deploy_fix.LIST_ACTIONS_FUNCTION)
         self.assertIn('"mode": mode', deploy_fix.LIST_ACTIONS_FUNCTION)
         self.assertIn('"mode_label": mode_label', deploy_fix.LIST_ACTIONS_FUNCTION)
+        self.assertIn('view = "daily"', deploy_fix.LIST_ACTIONS_FUNCTION)
+        self.assertIn(
+            "ad_control_execution_log_service.group_actions_daily(",
+            deploy_fix.LIST_ACTIONS_FUNCTION,
+        )
+        self.assertIn('"owned_binding_ids": sorted(owned_group_ids)', deploy_fix.LIST_ACTIONS_FUNCTION)
+        self.assertIn('"view": view', deploy_fix.LIST_ACTIONS_FUNCTION)
         patch_source = inspect.getsource(deploy_fix.patch_app_text)
         self.assertIn("audit_observe_status_new", patch_source)
         self.assertIn("audit_observe_mode_new", patch_source)
@@ -452,6 +991,17 @@ class PersistenceShapeTests(unittest.TestCase):
         self.assertIn("def target(value):\n    return value + 1", patched)
         self.assertIn("def after():\n    return 2", patched)
 
+    def test_repo_list_function_matches_deployment_template(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, "app.py"), "r", encoding="utf-8") as handle:
+            app_source = handle.read().replace("\r\n", "\n")
+        matches = deploy_fix.function_matches(app_source, "list_ad_control_actions")
+        self.assertEqual(1, len(matches))
+        self.assertEqual(
+            deploy_fix.LIST_ACTIONS_FUNCTION.rstrip(),
+            matches[0].group(0).rstrip(),
+        )
+
     def test_mysql_datetimes_are_json_serializable_strings(self):
         row = {key: "" for key in service.LOG_COLUMNS}
         row.update({
@@ -472,6 +1022,47 @@ class PersistenceShapeTests(unittest.TestCase):
             "except StructuredApiError:\n        raise",
             deploy_fix.FETCH_ACTION_FUNCTION,
         )
+
+    def test_list_page_is_lightweight_bounded_and_reports_more(self):
+        calls = []
+
+        class Cursor:
+            def execute(self, sql, params):
+                calls.append((sql, params))
+
+            def fetchall(self):
+                rows = []
+                for index in range(4):
+                    row = {key: "" for key in service.LOG_COLUMNS if key != "results_json"}
+                    row.update({
+                        "action_id": "a%s" % index,
+                        "criteria_json": "{}",
+                        "reason_summary_json": "[]",
+                        "created_at": "2026-07-15 00:00:0%s" % index,
+                        "updated_at": "2026-07-15 00:00:0%s" % index,
+                    })
+                    rows.append(row)
+                return rows
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class Connection:
+            def cursor(self):
+                return Cursor()
+
+            def close(self):
+                return None
+
+        with mock.patch.object(service, "_connect", return_value=Connection()):
+            page = service.list_actions_page(self.reader_config(), limit=3)
+        self.assertEqual(3, len(page["items"]))
+        self.assertTrue(page["has_more"])
+        self.assertNotIn("results_json", calls[0][0])
+        self.assertEqual(4, calls[0][1][-1])
 
 
 class LiveExecuteContractTests(unittest.TestCase):
