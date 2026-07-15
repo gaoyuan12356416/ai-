@@ -448,8 +448,12 @@ class AdControlV2ApiTests(unittest.TestCase):
         with self.assertRaises(app.StructuredApiError):
             app.fetch_ad_control_rule_group("race-new", owner_user_id="u1")
 
-    def insert_action(self, action_id, actor, group_id="", created_at="2026-07-15 00:00:00"):
+    def insert_action(
+        self, action_id, actor, group_id="", created_at="2026-07-15 00:00:00",
+        criteria_extra=None,
+    ):
         criteria = {"rule_group_id": group_id, "binding_id": group_id} if group_id else {}
+        criteria.update(criteria_extra or {})
         with app.JOB_DB_LOCK:
             conn = app.get_job_db_connection()
             try:
@@ -502,6 +506,104 @@ class AdControlV2ApiTests(unittest.TestCase):
         with self.assertRaises(app.StructuredApiError) as missing:
             app.get_ad_control_action_targets("own-targets")
         self.assertEqual("missing_owner", missing.exception.code)
+
+    def test_observe_log_is_not_labeled_as_dry_run(self):
+        self.save_group("u1", "observe-log")
+        self.insert_action(
+            "observe-action",
+            "ad_control_rule_runner",
+            "observe-log",
+            criteria_extra={"run_mode": "observe"},
+        )
+        item = app.list_ad_control_actions(
+            limit=10, owner_user_id="u1"
+        )["items"][0]
+        self.assertEqual("observe", item["audit"]["mode"])
+        self.assertEqual("只观察", item["audit"]["mode_label"])
+        self.assertEqual("观察完成", item["audit"]["status"]["label"])
+
+    def test_save_cannot_enable_legacy_rule_group(self):
+        payload = {
+            "group_id": "legacy-save-gate",
+            "name": "legacy-save-gate",
+            "product": "dramawave",
+            "account_ids": ["act_1"],
+            "rules": [{"rule_id": "pause-rule", "action": "pause"}],
+            "enabled": True,
+        }
+        created = app.save_ad_control_rule_group(payload, self.session("u1"))
+        self.assertFalse(created["enabled"])
+
+        self.update_group_row("legacy-save-gate", enabled=1)
+        unchanged = app.save_ad_control_rule_group(payload, self.session("u1"))
+        self.assertTrue(unchanged["enabled"])
+
+        changed_payload = dict(payload, account_ids=["act_1", "act_2"])
+        changed = app.save_ad_control_rule_group(
+            changed_payload, self.session("u1")
+        )
+        self.assertFalse(changed["enabled"])
+
+    def test_legacy_account_pool_owner_is_enforced_without_breaking_service_links(self):
+        app.save_ad_control_account_group(
+            {
+                "group_id": "pool-u2",
+                "name": "pool-u2",
+                "product": "dramawave",
+                "account_ids": ["act_200"],
+            },
+            self.session("u2"),
+        )
+        foreign_payload = {
+            "group_id": "foreign-pool-link",
+            "name": "foreign-pool-link",
+            "product": "dramawave",
+            "account_group_id": "pool-u2",
+            "rules": [{"rule_id": "pause-rule", "action": "pause"}],
+        }
+        with self.assertRaises(app.StructuredApiError) as foreign:
+            app.save_ad_control_rule_group(foreign_payload, self.session("u1"))
+        self.assertEqual("account_group_not_found", foreign.exception.code)
+
+        with app.JOB_DB_LOCK:
+            conn = app.get_job_db_connection()
+            try:
+                conn.execute(
+                    "INSERT INTO ad_control_account_group("
+                    "group_id,name,product,account_ids_json,created_by"
+                    ") VALUES(?,?,?,?,?)",
+                    ("pool-service", "pool-service", "dramawave", '["300"]', "codex"),
+                )
+                conn.execute(
+                    "INSERT INTO ad_control_rule_group("
+                    "group_id,name,product,account_group_id,rules_json,created_by,owner_user_id"
+                    ") VALUES(?,?,?,?,?,?,?)",
+                    (
+                        "service-link", "service-link", "dramawave", "pool-service",
+                        "[]", "codex", "u1",
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO ad_control_rule_group("
+                    "group_id,name,product,account_group_id,rules_json,created_by,owner_user_id"
+                    ") VALUES(?,?,?,?,?,?,?)",
+                    (
+                        "malicious-link", "malicious-link", "dramawave", "pool-u2",
+                        "[]", "u1", "u1",
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        service_link = app.fetch_ad_control_rule_group(
+            "service-link", owner_user_id="u1"
+        )
+        self.assertEqual(["300"], service_link["account_ids"])
+        malicious_link = app.fetch_ad_control_rule_group(
+            "malicious-link", owner_user_id="u1"
+        )
+        self.assertEqual([], malicious_link["account_ids"])
 
     def preview_with_items(self, group_id, owner, items, scheduled=False):
         whitelists = {"1": {"p": {

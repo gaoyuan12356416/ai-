@@ -35306,6 +35306,10 @@ def list_ad_control_rule_groups(product=None, owner_user_id=None, internal=False
              LEFT JOIN ad_control_account_group ag
                     ON ag.group_id = g.account_group_id
                    AND ag.deleted = 0
+                   AND (
+                        ag.created_by = g.owner_user_id
+                        OR (g.created_by <> '' AND ag.created_by = g.created_by)
+                   )
              LEFT JOIN ad_control_preview p
                     ON p.preview_id = g.last_preview_id
                   %s
@@ -35342,6 +35346,10 @@ def fetch_ad_control_rule_group(group_id, owner_user_id=None, internal=False):
              LEFT JOIN ad_control_account_group ag
                     ON ag.group_id = g.account_group_id
                    AND ag.deleted = 0
+                   AND (
+                        ag.created_by = g.owner_user_id
+                        OR (g.created_by <> '' AND ag.created_by = g.created_by)
+                   )
              LEFT JOIN ad_control_preview p
                     ON p.preview_id = g.last_preview_id
                  WHERE g.group_id=? AND g.deleted=0
@@ -35376,6 +35384,10 @@ def ad_control_rule_group_snapshot(conn, group_id):
      LEFT JOIN ad_control_account_group ag
             ON ag.group_id = g.account_group_id
            AND ag.deleted = 0
+           AND (
+                ag.created_by = g.owner_user_id
+                OR (g.created_by <> '' AND ag.created_by = g.created_by)
+           )
      LEFT JOIN ad_control_preview p
             ON p.preview_id = g.last_preview_id
          WHERE g.group_id=? AND g.deleted=0
@@ -35476,7 +35488,10 @@ def save_ad_control_rule_group(payload, session):
             session,
         )
     if not is_account_group:
-        enabled = 1 if payload.get("enabled") else 0
+        # Saving configuration is never an enable path. Preserve an already
+        # enabled legacy binding only while its behavior is unchanged; the
+        # dedicated enabled endpoint is the sole 0 -> 1 transition.
+        enabled = 0
     if enabled and not is_account_group:
         validate_account_ids = list(account_ids)
         if not validate_account_ids and account_group_id:
@@ -35504,6 +35519,30 @@ def save_ad_control_rule_group(payload, session):
                 and str(current_target["owner_user_id"] or current_target["created_by"] or "") != actor
             ):
                 raise StructuredApiError("not_found", "rule group not found")
+            if not is_account_group:
+                enabled = 1 if current_target and current_target["enabled"] else 0
+            if account_group_id:
+                account_group = conn.execute(
+                    "SELECT group_id,product,created_by FROM ad_control_account_group "
+                    "WHERE group_id=? AND deleted=0",
+                    (account_group_id,),
+                ).fetchone()
+                if not account_group:
+                    raise StructuredApiError("account_group_not_found", "account group not found")
+                if str(account_group["product"] or "") != product:
+                    raise StructuredApiError(
+                        "account_group_product_mismatch",
+                        "account group product does not match rule group product",
+                    )
+                legacy_same_link = bool(
+                    current_target
+                    and str(current_target["account_group_id"] or "") == account_group_id
+                    and str(current_target["created_by"] or "")
+                    and str(current_target["created_by"] or "")
+                    == str(account_group["created_by"] or "")
+                )
+                if str(account_group["created_by"] or "") != actor and not legacy_same_link:
+                    raise StructuredApiError("account_group_not_found", "account group not found")
             configuration_changed = bool(current_target) and (
                 str(current_target["product"] or "") != product
                 or str(current_target["rule_set_id"] or "") != rule_set_id
@@ -36334,6 +36373,7 @@ def list_ad_control_actions(
             or execution_summary.get("run_status")
             or ""
         ).strip().lower()
+        observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"
         status = {
             "partial": {"key": "partial", "label": "部分完成，待续跑", "class": "warn"},
             "blocked": {"key": "blocked", "label": "执行受阻", "class": "danger"},
@@ -36350,11 +36390,15 @@ def list_ad_control_actions(
                 status = {"key": "success", "label": "成功", "class": "ok"}
             else:
                 status = {"key": "noop", "label": "无执行目标", "class": "warn"}
+        if observe_mode and run_status in ("", "executed"):
+            status = {"key": "observed", "label": "观察完成", "class": "ok"}
+        mode = "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real"
+        mode_label = "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行"
         item["audit"] = {
             "status": status,
             "created_at_local": str(item.get("created_at") or ""),
-            "mode": "dry-run" if item.get("dry_run") else "real",
-            "mode_label": "Dry-run 试跑" if item.get("dry_run") else "正式执行",
+            "mode": mode,
+            "mode_label": mode_label,
             "action_label": {
                 "pause": "关停", "copy": "复制", "mixed": "关闭/复制",
                 "reopen": "重启", "preview": "预览",

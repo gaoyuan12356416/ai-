@@ -19,8 +19,9 @@ class LogUiTests(unittest.TestCase):
     def test_all_pages_use_same_cache_buster(self):
         for name in PAGES:
             html = (STATIC / name).read_text(encoding="utf-8")
-            self.assertIn("/ad-control-pages.css?v=20260715log1", html, name)
-            self.assertIn("/ad-control-pages.js?v=20260715log1", html, name)
+            self.assertIn("/ad-control-pages.css?v=20260715copy2", html, name)
+            self.assertIn("/ad-control-pages.js?v=20260715copy2", html, name)
+            self.assertNotIn("20260715log1", html, name)
 
     def test_log_copy_separates_flow_meta_and_storage(self):
         source = (STATIC / "ad-control-pages.js").read_text(encoding="utf-8")

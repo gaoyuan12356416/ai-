@@ -288,7 +288,8 @@ class AccountCopyRuleUiTests(unittest.TestCase):
 
     def test_rules_page_has_feature_cache_buster(self):
         html = (ROOT / "static" / "ad-control-rules.html").read_text(encoding="utf-8")
-        self.assertIn("feature=account-copy1", html)
+        self.assertIn("ad-control-pages.js?v=20260715copy2", html)
+        self.assertIn("ad-control-pages.css?v=20260715copy2", html)
 
     def test_log_page_defaults_to_all_products_and_lists_v2_actions(self):
         log_block = JS[JS.index("async function renderLogs()") : JS.index("function logStatusBadge")]

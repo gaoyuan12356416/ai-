@@ -1576,7 +1576,7 @@
   }
 
   async function renderRun() {
-    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>运行控制台已下线</h2></div><div class="panel-body"><div class="risk">规则组启停已统一收口到规则组管理页，不再要求 Preview，也不再从此页面手动执行。</div><a class="btn primary" href="/ad-control-rules.html">返回规则组管理</a></div></section>`;
+    $("pageRoot").innerHTML = `<section class="panel"><div class="panel-head"><h2>运行控制台已下线</h2></div><div class="panel-body"><div class="risk">规则组启停已统一收口到规则组管理页；启用前必须先“立即试算”生成有效 Preview，本页不再提供手动执行。</div><a class="btn primary" href="/ad-control-rules.html">返回规则组管理</a></div></section>`;
   }
 
   async function renderTokens() {
