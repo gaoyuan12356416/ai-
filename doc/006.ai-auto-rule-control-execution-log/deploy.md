@@ -5,6 +5,7 @@
 - 新增 `ads_ai.ad_control_action_log` 及历史回填。
 - 生产复合 app 窄补丁：公平选批、账户并发、应用限流熔断、MySQL日志API。
 - 更新 runner、feature module 和日志静态资源。
+- 日志主视图按业务日合并同一规则的续跑批次，并区分待续跑、待零目标复核、历史未完成、受阻与完成状态；保留 raw 批次与逐批懒加载。
 
 ## 配置项
 
@@ -67,8 +68,20 @@ tail -n 100 /var/log/ad_control_rule_runner.log
 - 使用真实Chrome登录态验证：列表显示16张日志卡；首条日志的目标明细懒加载成功，展示186/186条，原始结果也是186条。
 - 首次上线演练因把后端直连 `/ad-control.html` 当作静态健康检查而得到404，自动回滚已完整恢复并经SHA比对确认。最终部署改用正确的API与公网静态页检查后通过。
 
+### 业务日日志二次部署
+
+- 功能提交：`d4af68af83e55b4df65fc13f273738ba98dfe189`，已推送 GitHub；本地与服务器 checkout 均为59/59 unittest，Python compile、`node --check`、`git diff --check` 全部通过。
+- 二次部署备份：`/root/drama_material_service/backups/ad-control-daily-log-20260715-160140`，包含 service、static 与 published_static。
+- 生产文件 SHA256 前缀：app `c5f5be0f...`、service `bfe65db4...`、JS `84c9f35d...`、CSS `1f7265e...`。
+- 仅更新生产 app 的 reviewed 窄补丁、execution-log service 与 `log2` 静态资源；未触碰 runner、未调用 Meta 写接口、未修改 DB 数据。
+- `drama-material-api.service` 为 active，NRestarts=0，主机负载保持低位；公网 HTML 返回200并引用 `20260715log2`，未登录 API 返回预期401。
+- 线上只读结果：2026-07-15 聚合为2批、386次尝试、355成功、31跳过、0错误、remaining=0，状态“当日执行完成”。
+- 线上只读结果：2026-07-14 聚合为4批、800次尝试、746成功、53跳过、1错误、remaining=19，状态“限流后未完成”。
+- 服务重启后 Chrome 与 IAB 的既有登录态均已失效；真实登录 UI 视觉验收待重新登录，当前不得写成已完成。
+
 ## 回滚方案
 
+- 业务日优化：从 `/root/drama_material_service/backups/ad-control-daily-log-20260715-160140` 恢复 app、service、static 与 published_static 对应文件，完成 compile/JS 检查后只重启 `drama-material-api.service`。该回滚不涉及 runner 或 DB 数据。
 - 代码：从 `/root/drama_material_service/backups/ad-control-execution-log-20260715-130314` 恢复 `app.py`、runner、`.env` 和静态资源；删除部署前清单标记为不存在的 `features/ad_control_execution_log/` 与 `scripts/migrate_ad_control_action_logs.py`，重新 `py_compile` 后只重启 API 服务。
 - 数据：日志表为新增独立表，代码回滚时无需删除；若必须回滚DDL，先导出表再 `RENAME TABLE`，不直接 DROP。
 - runner：恢复旧 runner 后，确认 cron仍只有一条且锁文件机制正常。
@@ -77,6 +90,6 @@ tail -n 100 /var/log/ad_control_rule_runner.log
 ## 注意事项
 
 - 生产目录不是 Git 仓库，严禁 `git reset` 或整仓覆盖。
-- 复制静态资源后必须保留 `v=20260715log1`，避免浏览器继续使用旧JS/CSS。
+- 业务日优化静态资源必须保留 `v=20260715log2`，避免浏览器继续使用旧JS/CSS。
 - migration 固定每次最多20条并安全跳过已有action；不存在强制覆盖参数。
 - 建议后续增加180天归档/清理任务，在未评审前不自动删除日志。
