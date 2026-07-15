@@ -12,6 +12,8 @@
 | POST | `/api/ad-control/rule-groups/{id}/preview-live` | 一次性立即试算 | 仅 SQLite 审计 |
 | POST | `/api/ad-control/rule-groups/{id}/execute-live` | 根据已确认预览执行；pause 可写 Meta，copy 本期固定失败关闭 | 视动作决定 |
 | POST | `/api/ad-control/emergency-stop` | 全局或单组停止新动作 | 仅 SQLite |
+| GET | `/api/ad-control/actions` | 按当前用户列出执行日志；默认包含 `product=''` 的账号维度规则 | 否 |
+| GET | `/api/ad-control/actions/{id}/targets` | 延迟加载本人 action 的目标明细 | 否 |
 
 ## 请求/响应
 
@@ -65,13 +67,18 @@
 
 - `owner_user_id` 不属于公开请求契约；若传入且与当前用户不一致则拒绝。
 - 新建时后端强制 `enabled=false`、默认 `run_mode=observe`。
+- 普通 save 永远不能把新组或已 disabled 的 V2/legacy 组改为 enabled；payload `enabled=true` 会被忽略，保存仍成功但状态保持 disabled。原本 enabled 且行为配置完全未变的历史组可保留 enabled；任何规则、账号、对象层级、运行模式或策略行为变化都会强制 disabled 并失效旧 preview。0→1 只允许专用 enabled 接口。
 - 更新仍使用集合路径 `POST /api/ad-control/rule-groups`，以 body 中的 `group_id` 定位；不存在 `POST /api/ad-control/rule-groups/{id}` 更新路由。
 - `migrate_from_group_ids` 仅用于把旧前端聚合组收敛为新账号级组，只提交旧底层组 ID，不包含新的 `group_id`。后端校验这些旧组均属于当前用户和同一 `frontend_rule_group_id`，随后在同一 SQLite 事务中保存新组并禁用、软删除旧组。
 - 将已有规则组切换到 `run_mode=live` 时必须额外传 `live_mode_confirm=ENABLE_LIVE_MODE`。
+- 规则组引用 `account_group_id` 时，写前事务校验账户池 owner 和 legacy product 一致性；跨 owner、缺失或产品不匹配的引用 fail-closed。仅已存在且 `created_by` 与服务创建规则组一致的 legacy link 可兼容读取，owner 迁移不得抹掉 `created_by`。
+- 专用 enabled 接口在 Token 校验前后比较急停状态/版本；校验期间发生同组或当前用户全局急停时返回 `emergency_stop_changed` 并保持禁用。仅请求开始前已急停、期间无新急停的显式恢复可以清除旧急停。
 - 本期 `object_level=ad` 只允许保存配置；规则组不能启用，立即试算、runner 和正式执行均返回 `phase_not_enabled`，不会复用 Campaign 候选。
 - `preview-live` 永远不调用 Meta 写接口或复制结果写入；它会写 SQLite preview/审计元数据，并返回 Campaign 对象的决策、命中规则、shadowed 规则和 skip reason。Ad 不返回候选。
 - 本期正式 `copy` 固定在任何 Meta POST 前返回 `copy_persistence_not_configured`；即使复制总熔断被误开也不得越过此前置条件。
 - 复制总熔断与 pause 独立；既有正式 pause 继续按原路径执行。
+- `/api/ad-control/actions` 和 target 明细都以当前 session owner 过滤；跨 owner action 返回 not found/forbidden，函数/HTTP 路由不允许缺 owner 外部调用。日志页默认“全部产品（含账号规则）”，空 product 的 V2 action、copy/mixed 筛选及本人 binding 深链均可见。
+- 七个 ad-control HTML 统一加载 `/ad-control-pages.css?v=20260715copy2` 和 `/ad-control-pages.js?v=20260715copy2`，不得残留本次旧版本 `20260715log1`。
 
 执行响应的关键字段：
 
@@ -103,6 +110,7 @@
 | `invalid_rule_action` | 规则动作不是 pause/copy |
 | `live_mode_confirm_required` | 切正式模式缺少二次确认 |
 | `preview_required` / `preview_hash_mismatch` | 正式执行前未完成一致的试算确认 |
+| `emergency_stop_changed` | 启用 Token 校验期间发生新的同组或当前用户全局急停；急停优先，规则组保持禁用 |
 | `copy_persistence_not_configured` | 本期未接入复制结果持久化，正式复制在 Meta 写入前失败关闭 |
 | `phase_not_enabled` | Ad 候选、启用、试算、runner 和正式执行均未开放；本期仅可保存配置 |
 | `quota_exceeded` | 规则、用户或部署日额度已满 |
@@ -118,5 +126,6 @@
 - 前端旧聚合组列表根据底层组真实 enabled 状态计算并保留 `partial_enabled`；编辑时由 UI 提交 `migrate_from_group_ids`，成功后旧底层组才会在同一事务中禁用和软删除。
 - 旧 `action=observe` 编辑时显式迁移为 `run_mode=observe` + `action=pause`；其他未知 action 返回 `invalid_rule_action`，不得静默转成 pause。
 - Token 和账号池管理页仍可保留产品维度作为凭据/元数据管理，不再决定规则组筛选范围。
+- 历史 standalone `ad_control_rule` 仍使用旧 save/enable/runner 语义，且不受 `ad_control_rule_group` 全局急停覆盖；这是本期 grandfather 兼容边界，部署前后必须只读核实 enabled 集合不变。
 - 本期候选只读取现有 FB 原始发布数据；复制数据回流和再次扫描随用户后续明确授权的复制结果 ads_ai 写入方案实现。DDL 环境已修复不会自动开放该能力。
 - 本期不新增、不迁移、不写 copied created_data/lineage/intent 表；既有 `ads_ai.ad_control_action_log` 只是执行审计，不是复制结果落表。

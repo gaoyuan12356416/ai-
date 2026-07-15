@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-2026-07-15 第四轮本地验证通过：Python 编译通过，`node --check` 通过，ad-control 使用独立 Python 缓存的全量自动化测试 90/90 通过，旧基线部署补丁链与 current-live action-log writer/reader 兼容验证通过，`git diff --check` 通过。当前未发现未关闭的 P0/P1 缺陷。
+2026-07-15 第六轮本地验证通过：Python 编译通过，`node --check` 通过，ad-control 使用独立 Python 缓存的全量自动化测试 107/107 通过，真实部署补丁后的临时 app 再次 107/107 通过，current-live action-log writer/reader 兼容与 changed+backup 验证通过，`git diff --check` 通过。当前未发现未关闭的 P0/P1 缺陷。
 
 本报告证明的是当前工作树在本期安全边界内通过测试，不是生产部署证明。测试未调用真实 Meta 写接口，未开放真实 Campaign copy 或任何 Ad 执行能力，生产 overlay 完整验证、GitHub-first 暗发布、服务重启、定时任务切换和线上 Canary 均尚未完成。
 
@@ -30,17 +30,19 @@
 | --- | --- | --- | --- | --- |
 | Python 编译文件 | 5 | 5 | 0 | 0 |
 | JavaScript 语法文件 | 1 | 1 | 0 | 0 |
-| ad-control 自动化用例 | 90 | 90 | 0 | 0 |
+| ad-control 自动化用例 | 107 | 107 | 0 | 0 |
 | 真实部署补丁链 | 1 | 1 | 0 | 0 |
 | Current-live action-log fixture | 1 | 1 | 0 | 0 |
+| 服务器恢复后只读基线 | 1 | 1 | 0 | 0 |
 | Git 差异格式检查 | 1 | 1 | 0 | 0 |
 
 ## 缺陷情况
 
 - `BUG-001`：旧 fan-out 聚合规则组编辑迁移与部分启用状态兼容问题，已修复并回归通过。
 - `BUG-002`：旧 preview/enable TOCTOU 可能越过最新规则状态的问题，已修复并回归通过。
+- `BUG-003`：部署补丁模板及 target 明细审计会把观察日志误标成正式执行，已修复列表/明细两条路径并在补丁后临时 app 上 107/107 回归通过。
 - 当前无未关闭 P0/P1 缺陷。
-- 存在非阻断技术债：`app.py` 的 `datetime.utcnow()` 在测试中产生弃用告警，未影响 90 条测试结果。
+- 存在非阻断技术债：`app.py` 的 `datetime.utcnow()` 在测试中产生弃用告警，未影响 107 条测试结果。
 - 存在已接受的 P2 运行取舍：正式 Campaign pause 的最终一致性检查持有全局 `JOB_DB_LOCK` + SQLite `BEGIN IMMEDIATE` 跨 Graph GET/POST，两次 30 秒超时时可使同进程其他 job SQLite 写阻塞约 60 秒/对象。安全回归已通过，生产性能影响必须在暗发布中观察。
 
 ## 验证证据
@@ -53,19 +55,19 @@ node --check static/ad-control-pages.js
 结果：退出码 0
 
 独立 PYTHONPYCACHEPREFIX + python -m unittest discover -s tests -p "test_ad_control*.py" -v
-结果：Ran 90 tests / OK / 退出码 0
+结果：Ran 107 tests / OK / 退出码 0
 
 python tests/validate_ad_control_deploy_patch.py
-结果：首次 app.py changed 并生成 hash 匹配的写前备份；二次 app.py unchanged；补丁后 Ran 90 tests / OK / 退出码 0
+结果：当前 merged app 临时副本首次/二次均 app.py unchanged、零备份且字节不变；补丁后全量测试 OK / 退出码 0。需要变更的 current-live 首次 changed+备份路径由下一项验证。
 
 python tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>
-结果：原 fixture check 只读，fixture SHA-256 `83d3cc8013b5e34d1e8cde4d44c4b78712d9a9c6b6cda9da7760c610f38548c1`；首次临时 apply 仅生成 1 份字节一致备份；二次 check/apply 均 unchanged；writer 63353、reader 63350、3/5 秒超时、live worker=4 和 7 个线上安全函数 hash 保留（changed=0） / 退出码 0
+结果：原 fixture check 只读，fixture SHA-256 `83d3cc8013b5e34d1e8cde4d44c4b78712d9a9c6b6cda9da7760c610f38548c1`；首次临时 apply 仅生成 1 份字节一致备份；二次 check/apply 均 unchanged；writer 63353、reader 63350、3/5 秒超时、live worker=4 和 7 个线上安全函数 hash 保留（changed=0）；补丁后 observe 审计仍为 `observe/只观察` / 退出码 0
 
 git diff --check
 结果：退出码 0
 ```
 
-关键安全断言已覆盖：观察模式 pause/copy 零 Token/Graph 访问；Campaign copy 在 Token/Graph 前失败关闭；mixed 中 copy 提前隔离且 pause 可继续成功，账号维度 mixed 不回查旧 product/account 白名单；Ad execute 顶层短路；stale/损坏 preview 失败关闭，执行前及每次 Meta POST 前重检；enable TOCTOU 与 save-enabled 绕过均被阻断；ownerless legacy 自动收敛；V2 不误迁移；legacy rule/account-group/rule-set owner 隔离；旧聚合组迁移失败时完整回滚；未知 action 不会静默转成 pause；部署补丁自包含 audit，对旧基线、泛化 action-log 旧补丁输出和 current-live writer/reader 安全契约均能安全升级且重复应用幂等。
+关键安全断言已覆盖：观察模式 pause/copy 零 Token/Graph 访问；Campaign copy 在 Token/Graph 前失败关闭；mixed 中 copy 提前隔离且 pause 可继续成功，账号维度 mixed 不回查旧 product/account 白名单；Ad execute 顶层短路；stale/损坏 preview 失败关闭，执行前及每次 Meta POST 前重检；enable TOCTOU、同组/全局急停竞态与 V2/legacy save-enabled 绕过均被阻断；ownerless legacy 自动收敛；V2 不误迁移；legacy rule/account-group/rule-set/账户池 owner 隔离；action target 明细 owner 传递；账号规则日志可见和七页 cache buster 一致；旧聚合组迁移失败时完整回滚；未知 action 不会静默转成 pause；部署补丁自包含 audit，对旧基线、泛化 action-log 旧补丁输出和 current-live writer/reader 安全契约均能安全升级且重复应用幂等。
 
 ## 遗留风险
 
@@ -76,6 +78,8 @@ git diff --check
 - C0 备份已完成，但生产 overlay 的生产 Python/依赖环境完整测试、GitHub exact-commit 拉取、C1 发布前备份、服务重启、环境变量读回、日志观察、暗发布和线上 smoke test 均尚未完成。
 - `JOB_DB_LOCK` 跨 Graph 请求的实际负载影响尚无生产证据；上线后须监控 API/runner 耗时、Graph 超时和 job SQLite 写入排队，异常时先停 ad-control runner/禁用受影响 live 组再回滚。
 - `datetime.utcnow()` 弃用告警应在后续技术债中改为 timezone-aware UTC。
+- legacy standalone `ad_control_rule` 本期按兼容边界保留直接保存/启停，且不受 rule-group 全局急停覆盖。服务器恢复后只读基线 total/enabled=0/0；overlay 与发布后必须继续为 0/0，该边界不属于 V2 规则组能力。
+- 服务器恢复后核验确认 V2 尚未部署，生产关键文件仍与安全快照 `146cb1b50b60ee3fe4c53de6d6d40d980124483c` 一致；但无关 playable 文档出现并发修改，发布 overlay 必须从最新 live 全量副本重建，不能用旧目录覆盖。
 
 ## 发布建议
 

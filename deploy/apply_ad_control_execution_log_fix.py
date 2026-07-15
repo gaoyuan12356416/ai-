@@ -640,6 +640,7 @@ def list_ad_control_actions(
             or execution_summary.get("run_status")
             or ""
         ).strip().lower()
+        observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"
         status = {
             "partial": {"key": "partial", "label": "部分完成，待续跑", "class": "warn"},
             "blocked": {"key": "blocked", "label": "执行受阻", "class": "danger"},
@@ -656,11 +657,15 @@ def list_ad_control_actions(
                 status = {"key": "success", "label": "成功", "class": "ok"}
             else:
                 status = {"key": "noop", "label": "无执行目标", "class": "warn"}
+        if observe_mode and run_status in ("", "executed"):
+            status = {"key": "observed", "label": "观察完成", "class": "ok"}
+        mode = "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real"
+        mode_label = "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行"
         item["audit"] = {
             "status": status,
             "created_at_local": str(item.get("created_at") or ""),
-            "mode": "dry-run" if item.get("dry_run") else "real",
-            "mode_label": "Dry-run 试跑" if item.get("dry_run") else "正式执行",
+            "mode": mode,
+            "mode_label": mode_label,
             "action_label": {
                 "pause": "关停", "copy": "复制", "mixed": "关闭/复制",
                 "reopen": "重启", "preview": "预览",
@@ -1157,6 +1162,20 @@ def patch_app_text(text):
     audit_new = '''        "counts": {\n            "requested": int(item.get("requested_count") or 0),\n            "success": int(item.get("success_count") or 0),\n            "skipped": int(item.get("skipped_count") or 0),\n            "error": int(item.get("error_count") or 0),\n        },\n        "flow": {\n            "scanned": int(item.get("scanned_count") or criteria.get("scan_count") or 0),\n            "candidate": int(item.get("candidate_count") or criteria.get("candidate_count") or 0),\n            "matched": int(item.get("matched_count") or criteria.get("execution_target_count") or 0),\n            "batch_planned": int(item.get("batch_planned_count") or criteria.get("execution_batch_count") or item.get("requested_count") or 0),\n            "deferred": int(item.get("deferred_count") or 0),\n            "remaining": int(item.get("remaining_count") or 0),\n            "retryable": int(item.get("retryable_error_count") or 0),\n            "blocked": int(item.get("blocked_count") or 0),\n        },\n        "log_store": item.get("log_store") or "sqlite_fallback",\n        "reason_summary": reason_summary,\n'''
     text, block_changed = replace_optional_once(
         text, audit_old, audit_new, "audit flow fields"
+    )
+    changed = changed or block_changed
+    audit_observe_status_old = '''    status = ad_control_action_status(item)\n    reason_counts = {}\n'''
+    audit_observe_status_new = '''    status = ad_control_action_status(item)\n    execution_summary = criteria.get("execution_summary") or {}\n    run_status = str(\n        item.get("run_status")\n        or criteria.get("runner_status")\n        or execution_summary.get("run_status")\n        or ""\n    ).strip().lower()\n    observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"\n    if observe_mode and run_status in ("", "executed"):\n        status = {"key": "observed", "label": "观察完成", "class": "ok"}\n    reason_counts = {}\n'''
+    text, block_changed = replace_optional_once(
+        text, audit_observe_status_old, audit_observe_status_new,
+        "audit observe status",
+    )
+    changed = changed or block_changed
+    audit_observe_mode_old = '''        "mode": "dry-run" if item.get("dry_run") else "real",\n        "mode_label": "Dry-run 试跑" if item.get("dry_run") else "正式执行",\n        "action_label": {"pause": "关停", "reopen": "重启", "preview": "预览"}.get(str(item.get("action") or ""), item.get("action") or ""),\n'''
+    audit_observe_mode_new = '''        "mode": "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real",\n        "mode_label": "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行",\n        "action_label": {"pause": "关停", "copy": "复制", "mixed": "关闭/复制", "reopen": "重启", "preview": "预览"}.get(str(item.get("action") or ""), item.get("action") or ""),\n'''
+    text, block_changed = replace_optional_once(
+        text, audit_observe_mode_old, audit_observe_mode_new,
+        "audit observe labels",
     )
     changed = changed or block_changed
     assert_action_log_safety_contract(text)

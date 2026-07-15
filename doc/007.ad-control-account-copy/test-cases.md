@@ -48,14 +48,23 @@
 | TC-031 | V2 不误迁移 | 已存在 `product=''` 的账号维度 V2 组 | 重复执行 schema ensure | 不被分类为 legacy，`run_mode`/owner/状态不被重写 | P0 | 通过（自动化） |
 | TC-032 | Save 不可绕过 enabled | 新组或已禁用组 | 调用保存 API 并携带 `enabled=true` | 保存成功但仍 disabled；只有专用 enabled API 在 preview/确认均有效时才能开启 | P0 | 通过（自动化） |
 | TC-033 | 损坏 preview 过期时间 fail-close | preview 记录存在，`expires_at` 为非法格式 | 读取/执行该 preview | 返回 `preview_invalid`，不得将其视为永不过期，Meta 写 0 次 | P0 | 通过（自动化） |
-| TC-034 | 部署补丁旧基线兼容 | 当前合并 app 及可缺少旧函数/源码块的基线 | 执行 `--check`、apply、再次 apply | 可选目标缺失时安全跳过；首次写前备份，第二次幂等，不产生半成品 | P0 | 通过（自动化/本地补丁链验证） |
+| TC-034 | 部署补丁兼容/幂等 | 当前 merged app 及可缺少旧函数/源码块的测试基线 | 执行 `--check`、apply、再次 apply | 已对齐 merged app 首次即 unchanged/零备份；需变更基线首次生成字节一致备份；可选目标缺失时安全跳过；第二次均幂等且不产生半成品 | P0 | 通过（自动化/本地补丁链验证） |
 | TC-035 | 最终 pause 锁边界 | 正式 pause 已通过 preview | Graph GET/POST 慢响应或超时 | 锁内每次 POST 前仍能阻断 stale preview；同时记录全局 `JOB_DB_LOCK` 最坏约 60 秒 SQLite 写阻塞的 P2 生产监控项 | P2 | 通过（安全回归），生产性能待暗发布 |
 | TC-036 | 账号维度 mixed 执行不回退产品白名单 | `product=''` 的 V2 组同时有 copy/pause 候选 | 执行 mixed 组并 spy 候选/白名单查询 | copy 在 Token 前隔离，pause 仅按 preview 账号归属重检，不再查 product/account 白名单、不把账号组退化成旧产品维度 | P0 | 通过（自动化） |
 | TC-037 | Current-live action-log 兼容门禁 | 当前线上 `app.py` 的只读 fixture | 先执行 `--check`，再复制到临时目录 apply 两次并比较函数 hash | 原 fixture 字节不变；首次临时 apply 仅产生一份字节一致备份；二次 check/apply 均 `unchanged`；writer 63353、reader 63350、3/5 秒超时、`AD_CONTROL_LIVE_MAX_WORKERS=4`、无立即 upsert 重试和 7 个线上安全函数 hash 全部保留 | P0 | 通过（自动化/本地 fixture 验证） |
+| TC-038 | 急停赢过并发启用 | live 组已有有效 preview，启用在锁外校验 Token | Token 校验期间分别触发同组和当前用户全局急停 | 最终启用返回 `emergency_stop_changed`，组保持 disabled+急停；不得清除并发急停 | P0 | 通过（自动化） |
+| TC-039 | 旧急停显式恢复 | 启用请求开始前组已急停且 preview/Token 有效 | 无新急停时启用；另在校验期间再次急停 | 前者允许显式恢复，后者仍返回 `emergency_stop_changed` | P0 | 通过（自动化） |
+| TC-040 | Legacy save 不可启用 | 已禁用 product/legacy 规则组 | 普通保存携带 `enabled=true`；另编辑已启用组行为 | 前者仍 disabled；后者行为变化强制 disabled 并失效 preview，均需专用启用接口 | P0 | 通过（自动化） |
+| TC-041 | Legacy 账户池 owner 隔离 | 两个用户各有账户池，另有历史服务创建的同创建者绑定 | 保存/读取规则组并引用账户池 | 外部用户账户池引用失败；仅同 owner 或同 `created_by` 的现有服务绑定兼容，不泄漏账号 | P0 | 通过（自动化） |
+| TC-042 | 日志目标明细 owner 隔离 | 两个 owner 各有 action/target | 调用 target 函数和 HTTP 明细路由 | 只返回本人目标；跨 owner 返回 not found/forbidden；路由显式传递当前 owner | P0 | 通过（自动化） |
+| TC-043 | 账号规则日志可见 | 存在 `product=''` 的 V2 action log | 打开日志页默认筛选并加载绑定 | 默认显示“全部产品（含账号规则）”，账号规则及其本人绑定可见，不扩大跨 owner 范围 | P1 | 通过（自动化/静态契约） |
+| TC-044 | 静态资源缓存版本一致 | 七个 ad-control HTML 页面 | 检查 CSS/JS URL | 全部使用 `v=20260715copy2`，不存在本次旧 cache buster | P1 | 通过（自动化） |
+| TC-045 | Legacy standalone 生产基线 | 线上 SQLite `ad_control_rule` | 发布前、overlay 演练后、发布后只读比较 total/enabled 集合 | 三次结果一致；不改变其 grandfather 启停/急停语义，不读取 Token | P0 | 前置基线通过（0/0）；overlay/发布后待验证 |
+| TC-046 | 补丁后观察日志语义 | `criteria.run_mode=observe` 的 action，current-live/旧基线临时副本 | 应用真实部署补丁，分别读取日志列表和 target 明细并重跑日志/API测试 | 两条路径均为 `audit.mode=observe`、`mode_label=只观察`、状态 `observed/观察完成`；不得回退成 real/正式执行 | P0 | 通过（部署补丁全量回归） |
 
 ## 执行结果说明
 
-2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -p "test_ad_control*.py" -v`，结果 `Ran 90 tests`、`OK`。另执行 `python tests/validate_ad_control_deploy_patch.py`，在旧基线临时 app 上真实 apply 后再跑全量 90/90，确认首次备份 SHA-256 与源 app 一致，二次 apply 报 `unchanged` 且未新增备份。另用 `tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` 完成 current-live fixture 只读 check、临时 apply、备份 hash、二次幂等和 action-log writer/reader 安全契约验证。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
+2026-07-15 使用独立 `PYTHONPYCACHEPREFIX` 执行 `python -m unittest discover -s tests -v`，结果 `Ran 107 tests`、`OK`。另执行 `python tests/validate_ad_control_deploy_patch.py`，在当前 merged app 临时副本上确认首次/二次 apply 均 `unchanged`、零备份、字节不变并重跑全量通过；若输入需要变更，该验证器仍要求首次产生唯一字节一致备份。再用 `tests/validate_ad_control_live_action_log_compat.py --live-app <current-live-app.py>` 验证真实 current-live 基线的首次 changed+备份 hash、二次幂等和 action-log writer/reader 安全契约。所有“通过”均为本地自动化、隔离测试、本地 fixture/补丁链验证或静态审查结果；尚未完成生产 overlay 全量验证、GitHub-first 暗发布或真实线上 smoke test，未调用真实 Meta copy，也未开放 Ad 执行。
 
 ## 回归范围
 

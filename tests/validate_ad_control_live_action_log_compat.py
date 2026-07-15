@@ -83,6 +83,31 @@ def assert_live_fixture_guard(text):
             raise AssertionError("live fixture contains regressed guard token: %s" % token)
 
 
+def assert_observe_audit_contract(text):
+    list_source = function_source(text, "list_ad_control_actions")
+    for token in (
+        'observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"',
+        '{"key": "observed", "label": "观察完成", "class": "ok"}',
+        'mode = "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real"',
+        'mode_label = "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行"',
+        '"mode": mode',
+        '"mode_label": mode_label',
+    ):
+        if token not in list_source:
+            raise AssertionError("patched live list action lost observe audit token: %s" % token)
+    detail_source = function_source(text, "ad_control_action_audit")
+    for token in (
+        'observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"',
+        '{"key": "observed", "label": "观察完成", "class": "ok"}',
+        '"mode": "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real"',
+        '"mode_label": "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行"',
+        '"copy": "复制"',
+        '"mixed": "关闭/复制"',
+    ):
+        if token not in detail_source:
+            raise AssertionError("patched live target audit lost observe token: %s" % token)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--live-app", required=True)
@@ -117,6 +142,7 @@ def main():
         patched_text = patched_bytes.decode("utf-8").replace("\r\n", "\n")
         deploy_fix.assert_action_log_safety_contract(patched_text)
         assert_live_fixture_guard(patched_text)
+        assert_observe_audit_contract(patched_text)
 
         preserved_after = {
             name: sha256_bytes(function_source(patched_text, name).encode("utf-8"))
@@ -166,6 +192,7 @@ def main():
         print("changed_safety_functions=0")
         print("backup_count=1")
         print("idempotent_second_apply=true")
+        print("observe_audit_contract=true")
 
 
 if __name__ == "__main__":

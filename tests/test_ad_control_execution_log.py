@@ -1,4 +1,5 @@
 import json
+import inspect
 import unittest
 import concurrent.futures
 import logging
@@ -391,6 +392,17 @@ class PersistenceShapeTests(unittest.TestCase):
         )
         self.assertIn("63353", deploy_fix.INTEGRATION_BLOCK)
         self.assertIn("63350", deploy_fix.INTEGRATION_BLOCK)
+        self.assertIn(
+            'observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"',
+            deploy_fix.LIST_ACTIONS_FUNCTION,
+        )
+        self.assertIn('{"key": "observed", "label": "观察完成", "class": "ok"}', deploy_fix.LIST_ACTIONS_FUNCTION)
+        self.assertIn('"mode": mode', deploy_fix.LIST_ACTIONS_FUNCTION)
+        self.assertIn('"mode_label": mode_label', deploy_fix.LIST_ACTIONS_FUNCTION)
+        patch_source = inspect.getsource(deploy_fix.patch_app_text)
+        self.assertIn("audit_observe_status_new", patch_source)
+        self.assertIn("audit_observe_mode_new", patch_source)
+        self.assertIn('"mode": "observe" if observe_mode', patch_source)
 
     def test_all_live_preview_paths_default_to_four_workers(self):
         root = os.path.dirname(os.path.dirname(__file__))

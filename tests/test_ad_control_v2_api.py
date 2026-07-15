@@ -565,6 +565,12 @@ class AdControlV2ApiTests(unittest.TestCase):
         self.assertEqual("observe", item["audit"]["mode"])
         self.assertEqual("只观察", item["audit"]["mode_label"])
         self.assertEqual("观察完成", item["audit"]["status"]["label"])
+        target_payload = app.get_ad_control_action_targets(
+            "observe-action", owner_user_id="u1"
+        )
+        self.assertEqual("observe", target_payload["audit"]["mode"])
+        self.assertEqual("只观察", target_payload["audit"]["mode_label"])
+        self.assertEqual("观察完成", target_payload["audit"]["status"]["label"])
 
     def test_save_cannot_enable_legacy_rule_group(self):
         payload = {

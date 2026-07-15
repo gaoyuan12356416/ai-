@@ -36123,6 +36123,16 @@ def ad_control_action_audit(item, rule_map=None, include_samples=True):
     rule_group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
     rule_group = (rule_map or {}).get(rule_group_id) or {}
     status = ad_control_action_status(item)
+    execution_summary = criteria.get("execution_summary") or {}
+    run_status = str(
+        item.get("run_status")
+        or criteria.get("runner_status")
+        or execution_summary.get("run_status")
+        or ""
+    ).strip().lower()
+    observe_mode = str(criteria.get("run_mode") or "").strip().lower() == "observe"
+    if observe_mode and run_status in ("", "executed"):
+        status = {"key": "observed", "label": "观察完成", "class": "ok"}
     reason_counts = {}
     warning_counts = {}
     detail_samples = []
@@ -36183,9 +36193,9 @@ def ad_control_action_audit(item, rule_map=None, include_samples=True):
     return {
         "status": status,
         "created_at_local": ad_control_local_time_text(item.get("created_at")),
-        "mode": "dry-run" if item.get("dry_run") else "real",
-        "mode_label": "Dry-run 试跑" if item.get("dry_run") else "正式执行",
-        "action_label": {"pause": "关停", "reopen": "重启", "preview": "预览"}.get(str(item.get("action") or ""), item.get("action") or ""),
+        "mode": "observe" if observe_mode else "dry-run" if item.get("dry_run") else "real",
+        "mode_label": "只观察" if observe_mode else "Dry-run 试跑" if item.get("dry_run") else "正式执行",
+        "action_label": {"pause": "关停", "copy": "复制", "mixed": "关闭/复制", "reopen": "重启", "preview": "预览"}.get(str(item.get("action") or ""), item.get("action") or ""),
         "rule_group_id": rule_group_id,
         "rule_group_name": rule_group.get("name") or rule_group_id or "--",
         "rule_set_id": rule_group.get("rule_set_id") or criteria.get("rule_set_id") or "",

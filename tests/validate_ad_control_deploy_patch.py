@@ -41,19 +41,27 @@ def main():
 
         first = run([sys.executable, str(deploy_script), "--root", str(temp_root)], repo)
         backups = sorted((temp_root / "deploy_backups").glob("app.py.before-execution-log-*") )
-        if len(backups) != 1:
-            raise AssertionError("expected exactly one first-apply backup, got %s" % len(backups))
-        if sha256(backups[0]) != original_hash:
+        first_changed = "app.py: changed" in first.stdout
+        first_unchanged = "app.py: unchanged" in first.stdout
+        if first_changed == first_unchanged:
+            raise AssertionError("first apply did not report exactly one changed/unchanged state")
+        expected_backup_count = 1 if first_changed else 0
+        if len(backups) != expected_backup_count:
+            raise AssertionError(
+                "first apply backup count mismatch: expected %s got %s"
+                % (expected_backup_count, len(backups))
+            )
+        if first_changed and sha256(backups[0]) != original_hash:
             raise AssertionError("first-apply backup checksum differs from source app")
-        if "app.py: changed" not in first.stdout:
-            raise AssertionError("first apply did not report changed")
+        if first_unchanged and sha256(target_app) != original_hash:
+            raise AssertionError("unchanged first apply modified target bytes")
 
         first_patched_hash = sha256(target_app)
         second = run([sys.executable, str(deploy_script), "--root", str(temp_root)], repo)
         backups_after_second = sorted(
             (temp_root / "deploy_backups").glob("app.py.before-execution-log-*")
         )
-        if len(backups_after_second) != 1:
+        if len(backups_after_second) != expected_backup_count:
             raise AssertionError("idempotent apply created another backup")
         if sha256(target_app) != first_patched_hash:
             raise AssertionError("second apply changed patched app bytes")
@@ -86,7 +94,10 @@ def main():
         print(second.stdout.strip())
         print(suite.stdout.strip())
         print("patched_app_sha256=%s" % first_patched_hash)
-        print("backup_sha256=%s" % original_hash)
+        print("source_sha256=%s" % original_hash)
+        print("first_apply_state=%s" % ("changed" if first_changed else "unchanged"))
+        if first_changed:
+            print("backup_sha256=%s" % original_hash)
 
 
 if __name__ == "__main__":

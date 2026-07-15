@@ -49,6 +49,9 @@
 11. 既无 `owner_user_id` 也无 `created_by` 的 legacy 规则组无法安全归属，兼容迁移必须将其 `enabled=0` 并设置急停，等运营人员基于备份核实后显式分配 owner。
 12. 新 V2 账号维度规则组的 `product` 为空，只有 `product` 非空的历史绑定才能进入 legacy fan-out 兼容迁移，防止重复启动时误分类。
 13. preview 的过期时间为必须可验证的安全字段；缺失、格式损坏或已过期均 fail-closed，不允许继续执行 Meta 写操作。
+14. 规则组引用的账户池必须归属当前用户；历史服务创建的绑定仅在 `created_by` 与当前规则组一致时兼容读取，不能借此引用其他用户的账号。
+15. 专用启用在锁外校验 Token 时若发生同组或当前用户全局急停，急停必须优先，最终事务返回 `emergency_stop_changed` 并保持禁用。只有启用请求开始前已经处于急停、且校验期间没有新急停的显式恢复，才允许清除旧急停状态。
+16. 执行日志列表、目标明细与规则组绑定均按当前 owner 隔离；默认“全部产品”查询必须同时显示 `product=''` 的账号维度规则，所有 ad-control 页面使用同一静态资源缓存版本。
 
 ## 交互与流程
 
@@ -84,7 +87,7 @@
 ### API / 接口
 
 - `GET /api/ad-control/rule-groups`：仅返回当前用户拥有的规则组。
-- `POST /api/ad-control/rule-groups`：新建或按 `group_id` 更新（upsert）规则组；拒绝 owner 伪造和非法动作；旧聚合组迁移可携带 `migrate_from_group_ids`。该接口忽略并拒绝任何通过保存开启 `enabled` 的绕过，行为变更会清空旧 preview 并强制禁用。
+- `POST /api/ad-control/rule-groups`：新建或按 `group_id` 更新（upsert）规则组；拒绝 owner 伪造和非法动作；旧聚合组迁移可携带 `migrate_from_group_ids`。该接口忽略 payload 的启用请求并保存为安全状态：新组/原 disabled 组仍 disabled，原 enabled 且行为未变时保留现状，行为变更会清空旧 preview 并强制禁用。
 - `DELETE /api/ad-control/rule-groups/{id}`：软删除本人规则组并禁用后续执行。
 - `POST /api/ad-control/rule-groups/{id}/enabled`：启停；正式模式必须已有有效试算。
 - `POST /api/ad-control/rule-groups/{id}/preview-live`：立即试算，永不调用 Meta 写接口或复制结果写入；仍会写 SQLite preview/审计元数据。
@@ -97,6 +100,7 @@
 - 复制额度按广告账号时区自然日计算；无时区时 fail-closed，不按服务器时区猜测。
 - 剧目范围依赖明确的 created_data/发布队列映射；映射缺失或歧义时必须跳过，不能从 Campaign 名称猜测。
 - 正式 Campaign pause 为防止 preview 在 Graph GET/POST 之间失效，当前实现持有全局 `JOB_DB_LOCK` 和 SQLite `BEGIN IMMEDIATE` 跨越对象状态回读及写入。按两次 30 秒 Graph 超时计算，单 Campaign 最坏可阻塞同进程其他 job SQLite 写入约 60 秒；这是当前为正确性接受的 P2 取舍，上线必须监控 API/runner 耗时、job 写入排队和 Graph 超时，异常时可先停 ad-control runner/禁用 live 组再回滚应用。
+- 历史 standalone `ad_control_rule` 仍沿用旧保存/启停接口，且不属于 rule-group 全局急停的作用范围。本期为避免改变既有关闭规则而 grandfather 保留该行为；部署前必须只读核实其 enabled 基线并记录，若基线与预期不符立即停止发布，不得将 V2 急停能力表述为覆盖 standalone 规则。
 
 ## 验收标准
 
@@ -106,12 +110,15 @@
 - Ad 对象层级可保存配置，但启用、试算、runner 和正式执行均返回 `phase_not_enabled`，不得把 Campaign 候选伪装成 Ad，Meta 写调用数为 0。
 - 复制熔断可独立关闭 copy，现有 pause 规则不受影响。
 - 所有自动化测试通过；线上观察要求 0 次 Meta copy、0 次复制结果表写入。既有 `ads_ai.ad_control_action_log` 可继续记录执行审计；PAUSED Canary 延后到落表方式确认后的下一需求。
+- 同组/全局急停与启用并发时急停获胜；旧产品规则组和 V2 账号规则组的普通保存均不能从 disabled 变为 enabled。
+- 跨 owner 账户池引用、日志目标明细读取和规则组关联均失败关闭；账号维度规则日志在默认“全部产品”视图可见。
 
 ## 风险与待确认
 
 - 复制结果 `ads_ai` 写入规则、表结构和 lineage 契约以用户后续说明与明确授权为准；本期即使 DDL 环境已可用，也不预先建表或固化写入实现。既有 `ads_ai.ad_control_action_log` 不是复制结果落表，不在该后置范围内。
 - Meta `/copies` 在不同 Campaign 结构和 Graph 版本下返回映射字段可能不同，后续 Canary 前必须以真实 PAUSED 对象核验。
 - 共享 monolith 线上没有 Git 元数据，部署必须从当前线上副本做窄合并和原子替换，不能整份覆盖 `app.py`。
+- legacy standalone `ad_control_rule` 的启用和全局急停语义本期不重构；2026-07-15 服务器恢复后只读核验其生产 total/enabled 均为 0，overlay 演练和发布后仍须保持集合不变。
 
 ## 变更记录
 
@@ -119,3 +126,4 @@
 - 2026-07-15：用户调整范围，本期跳过复制结果 ads_ai 写入；正式 copy 在 Meta POST 前 fail-closed，Campaign 规则组与观察能力继续实施，Ad 仅保存配置。
 - 2026-07-15：安全评审补充 ownerless legacy fail-close、V2/legacy 迁移边界、保存不可绕过启用、损坏 preview fail-close 以及 `JOB_DB_LOCK` 跨 Graph 请求的 P2 运行取舍。
 - 2026-07-15：用户确认 DDL 问题已修复，可在后续做到该范围时再尝试；本轮仍不建、不写 copied created_data/lineage/intent，等待下一次明确授权。同步将 current-live action-log writer/reader 兼容验证列为部署前 P0 门禁。
+- 2026-07-15：最终安全评审补充启用/急停并发 CAS、legacy save 启用绕过、账户池与日志目标 owner 隔离、账号规则日志可见性、统一缓存版本，以及 standalone `ad_control_rule` grandfather 发布边界。

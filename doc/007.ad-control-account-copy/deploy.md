@@ -42,12 +42,19 @@
 - 必须同时满足：首次写前备份与 fixture 字节一致；二次 check/apply 均 `unchanged`；writer 使用 63353、reader 使用 63350；connect/io timeout 为 3/5 秒；`AD_CONTROL_LIVE_MAX_WORKERS=4`；runner 状态更新无立即 upsert 重试；7 个既有线上 action-log 安全函数 hash 不变。
 - 任一契约失败、fixture 发生未解释漂移或补丁无法幂等时，本次发布立即停止。
 
+## Legacy standalone 发布边界
+
+- `ad_control_rule` 是早于规则组 V2 的 standalone 规则表。本期不改它的保存/启停入口，rule-group 全局急停也不覆盖该表；这是兼容既有关闭规则的 grandfather 边界，不得误报为 V2 急停已覆盖全部旧规则。
+- 发布前在 SQLite 只读执行 `SELECT COUNT(*) AS total_count, COALESCE(SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END),0) AS enabled_count FROM ad_control_rule;`，并单独导出 enabled 行的 `rule_id,name,product,action,created_by,criteria_json,schedule_json,thresholds_json` 或为这些稳定字段生成 row hash。不得查询或输出任何 Token/secret。
+- 将查询结果与 C1 备份基线一起保存；overlay/迁移演练和发布后复查必须保持 standalone 总数、enabled 集合及上述稳定字段/row hash 不变。若存在未预期 enabled 行、归属不明或前后集合漂移，停止部署并由业务确认。
+- 在备份副本完成 additive schema ensure 后，导出 `ad_control_rule_group -> ad_control_account_group` 关联的 `group_id/account_group_id/product/owner_user_id/created_by`。账户池缺失、非空 product 不一致、以及不满足“同 owner 或双方 `created_by` 相同”兼容谓词的非法跨 owner 数量必须为 0；合规的既有服务 link 需逐条列出。任何未解释引用均停止发布。
+
 ## 部署步骤
 
-1. 本地完成 Python/JavaScript 语法检查、90/90 全量单测、临时 SQLite 和 Stub Meta 隔离测试。
+1. 本地完成 Python/JavaScript 语法检查、107/107 全量单测、临时 SQLite 和 Stub Meta 隔离测试。
 2. 刷新 current-live `app.py` 和 SHA-256，通过上述 action-log 兼容门禁；这一步必须在最终发布文件冻结前重跑。
 3. 精确 commit/push 到 GitHub，记录 commit 和文件 hash。
-4. 备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 owner 基线查询结果。
+4. 备份线上 `app.py`、runner、静态文件、cron、systemd、Nginx、`.env` 和 SQLite，执行 SQLite online backup 与 integrity check；保存 rule-group owner 基线及 legacy standalone total/enabled 集合。
 5. 从当前线上共享 monolith 副本做窄合并；禁止用仓库整份 `app.py` 覆盖线上文件。
 6. 在备份 SQLite 副本上先演练 schema ensure 和精确 owner 迁移；只有行数、owner、enabled/急停和 V2 幂等校验一致时才能继续。
 7. 保持两个复制熔断为 0，原子替换代码和静态资源；使用已验证的补丁链完成写前备份、应用和幂等检查，语法检查通过后窄重启所需服务。
@@ -61,12 +68,16 @@
 - `/api/health`、规则组列表和规则组页面返回正常。
 - 新建规则默认 disabled/observe；切 live 或正式启用缺少 `ENABLE_LIVE_MODE` 时被拒绝。
 - 普通 save payload 即使含 `enabled=true` 也不能开启规则组；损坏 preview `expires_at` 返回 `preview_invalid`。
+- Token 校验期间触发同组或当前用户全局急停时，启用返回 `emergency_stop_changed` 且保持禁用；若请求开始前已急停且期间无新急停，只有完成 preview/Token 校验的显式恢复可清除旧急停。
 - Campaign observe runner 日志有 `would_pause/would_copy`，Meta 写调用为 0；Ad 启用和试算返回 `phase_not_enabled`。
 - 无新增复制结果表、无 copied created_data/lineage/intent DDL/DML；既有 `ads_ai.ad_control_action_log` 审计链路保持不变，且不将该审计表计为复制结果落表。
 - 最终部署前刷新后的 current-live fixture 通过 action-log 兼容验证，writer/reader、3/5 秒超时、live worker=4、无立即 upsert 重试和 7 个函数 hash 契约均不回退。
 - 即使测试进程中临时设置 `AD_CONTROL_COPY_ENABLED=1`，正式 copy 仍返回 `copy_persistence_not_configured` 且 Meta POST 为 0。
 - copy 熔断不影响既有 Campaign pause 回归。
 - ownerless legacy 组为 disabled+急停，已核实 owner 的历史组在当前用户下可见；重复 ensure 不改变账号维度 V2 组。
+- 规则组不能引用其他 owner 的账户池；日志列表/目标明细只能读取本人记录，默认“全部产品（含账号规则）”能显示 `product=''` 的 V2 日志；所有 ad-control HTML 的 CSS/JS cache buster 一致。
+- 账户池关联审计中缺失引用、非空 product 不一致及不满足兼容谓词的非法跨 owner 均为 0；若存在同 `created_by` 的合规服务 link，其 group/pool ID 与 C1 清单一致。
+- legacy standalone `ad_control_rule` 的总数、enabled 集合和业务字段与 C1 基线一致，且明确记录其不受 rule-group 全局急停覆盖。
 - 监控正式 pause 的 Graph GET/POST 耗时、ad-control runner tick 耗时、同进程 job SQLite 写入排队/超时。当前 P2 上界是单 Campaign 两次 Graph 30 秒超时导致约 60 秒写阻塞；生产实际基线只能由暗发布观察证明。
 
 ## 回滚方案
@@ -87,4 +98,8 @@
 
 ## 当前发布状态
 
-2026-07-15 已完成本地 fresh-cache 90/90 回归。`python tests/validate_ad_control_deploy_patch.py` 另验证旧基线临时 app 首次真实 apply 后全量 90/90 通过，写前备份 SHA-256 与源 app 一致，二次 apply 为 `unchanged` 且不产生额外备份。`validate_ad_control_live_action_log_compat.py` 已对一份当前线上快照完成只读 fixture/临时 apply/二次幂等和 writer/reader 安全契约验证。生产 overlay 在生产 Python/依赖环境的完整测试、GitHub exact-commit 发布、服务重启、暗发布与线上 smoke test 均尚未完成；正式部署前仍必须重新抓取 live 文件并重跑兼容验证。本文档不得作为“已上线”证据。
+2026-07-15 已完成本地 fresh-cache 107/107 回归。`python tests/validate_ad_control_deploy_patch.py` 验证当前 merged app 临时副本首次/二次 apply 均为 `unchanged`、零备份、字节不变且全量通过；验证器对需要变更的输入仍强制唯一写前备份。`validate_ad_control_live_action_log_compat.py` 已对当前线上快照证明首次 changed、写前备份字节一致、二次幂等和 writer/reader 安全契约不回退。
+
+服务器异常重启后已再次只读核验：`drama-material-api.service`、crond 和 5 分钟 runner 均正常；SQLite `integrity_check/quick_check=ok`；legacy standalone `ad_control_rule` total/enabled 均为 0；V2 标记、V2 schema 列和 copy intent/lineage/quota 表均不存在。线上 app/runner/action-log service/migration/CSS/JS/rules HTML 仍与安全生产快照 `146cb1b50b60ee3fe4c53de6d6d40d980124483c` 字节一致，确认中断前没有开始 V2 部署。仅存在 C0 备份，C1 尚未建立。
+
+只读核验同时发现无关文件 `doc/deployment/playable-preview-api.md` 有并发修改。正式部署前必须重新抓取 live 全量基线并保留该变更，只覆盖本需求精确文件。生产 overlay 在生产 Python/依赖环境的完整测试、GitHub exact-commit 发布、C1 备份、服务重启、暗发布与线上 smoke test 均尚未完成；本文档不得作为“已上线”证据。
