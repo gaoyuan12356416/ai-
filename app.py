@@ -35562,22 +35562,43 @@ def ad_control_reason_label(reason):
 
 
 def ad_control_action_status(item):
+    display_status = item.get("display_status") or {}
+    if isinstance(display_status, dict) and display_status.get("label"):
+        return display_status
     criteria = item.get("criteria") or {}
     execution_summary = criteria.get("execution_summary") or {}
     run_status = str(item.get("run_status") or criteria.get("runner_status") or execution_summary.get("run_status") or "").strip().lower()
+    remaining_count = int(item.get("remaining_count") or execution_summary.get("remaining_count") or 0)
+    retryable_error_count = int(item.get("retryable_error_count") or execution_summary.get("retryable_error_count") or 0)
+    error_count = int(item.get("error_count") or 0)
+    blocked_count = int(item.get("blocked_count") or execution_summary.get("blocked_count") or 0)
+    runner_reason = str(item.get("runner_reason") or criteria.get("runner_reason") or execution_summary.get("runner_reason") or "").strip()
     if run_status == "partial":
-        return {"key": "partial", "label": "部分完成，待续跑", "class": "warn"}
+        if blocked_count > 0 or error_count > retryable_error_count:
+            return {"key": "blocked", "label": "执行受阻（非重试错误）", "class": "danger"}
+        if remaining_count == 0 and runner_reason == "live_execute_verify_remaining":
+            return {"key": "verifying", "label": "本批已处理，待零目标复核", "class": "warn"}
+        if retryable_error_count > 0:
+            return {"key": "retrying", "label": "限流/临时错误，待续跑", "class": "warn"}
+        if remaining_count > 0:
+            return {"key": "partial", "label": "处理中，待续跑 %s" % remaining_count, "class": "warn"}
+        return {"key": "verifying", "label": "本批已处理，待零目标复核", "class": "warn"}
     if run_status == "blocked":
         return {"key": "blocked", "label": "执行受阻", "class": "danger"}
-    if run_status == "executed":
+    if run_status == "executed" and not (remaining_count or error_count or blocked_count):
         return {"key": "success", "label": "执行完成", "class": "ok"}
+    if run_status == "executed":
+        return {"key": "inconsistent", "label": "状态异常：完成记录仍有未处理项", "class": "danger"}
     if run_status in ("error", "failed"):
         return {"key": "failed", "label": "执行失败", "class": "danger"}
-    error_count = int(item.get("error_count") or 0)
     success_count = int(item.get("success_count") or 0)
     dry_run = bool(item.get("dry_run"))
-    if error_count > 0:
+    if blocked_count > 0 or error_count > retryable_error_count:
         return {"key": "failed", "label": "失败", "class": "danger"}
+    if retryable_error_count > 0:
+        return {"key": "retrying", "label": "限流/临时错误，待续跑", "class": "warn"}
+    if remaining_count > 0:
+        return {"key": "partial", "label": "处理中，待续跑 %s" % remaining_count, "class": "warn"}
     if dry_run and success_count > 0:
         return {"key": "dry_run_ok", "label": "Dry-run 通过", "class": "warn"}
     if success_count > 0:
@@ -35712,7 +35733,7 @@ def ad_control_action_audit(item, rule_map=None, include_samples=True):
     }
 
 
-def list_ad_control_actions(limit=50, product="", binding_id="", action="", date_from="", date_to="", include_targets=False):
+def list_ad_control_actions(limit=50, product="", binding_id="", action="", date_from="", date_to="", include_targets=False, view="raw"):
     ensure_ad_control_tables()
     limit = ad_control_int(limit, 50, 1, 200)
     product = str(product or "").strip()
@@ -35720,15 +35741,36 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     action = str(action or "").strip()
     date_from = str(date_from or "").strip()
     date_to = str(date_to or "").strip()
-    date_from_utc = ad_control_action_log_utc_bound(date_from)
-    date_to_utc = ad_control_action_log_utc_bound(date_to, end=True)
+    view = "daily" if str(view or "").strip().lower() == "daily" else "raw"
+    raw_limit = 1000 if view == "daily" else limit
+    fetch_date_from = date_from
+    fetch_date_to = date_to
+    if view == "daily":
+        if date_from:
+            fetch_date_from = (datetime.strptime(date_from[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        if date_to:
+            fetch_date_to = (datetime.strptime(date_to[:10], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    date_from_utc = ad_control_action_log_utc_bound(fetch_date_from)
+    date_to_utc = ad_control_action_log_utc_bound(fetch_date_to, end=True)
     mysql_items = []
+    mysql_has_more = False
     mysql_available = False
     storage_error = ""
     try:
-        mysql_items = ad_control_mysql_action_items(
-            limit, product, binding_id, action, date_from, date_to
+        mysql_page = ad_control_execution_log_service.list_actions_page(
+            ad_control_action_log_reader_config(),
+            {
+                "product": product,
+                "binding_id": binding_id,
+                "action": action,
+                "date_from": date_from_utc,
+                "date_to": date_to_utc,
+            },
+            limit=raw_limit,
+            table=AD_CONTROL_ACTION_LOG_TABLE,
         )
+        mysql_items = mysql_page.get("items") or []
+        mysql_has_more = bool(mysql_page.get("has_more"))
         mysql_available = True
     except Exception as exc:
         storage_error = str(exc)
@@ -35748,8 +35790,11 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
         where.append("created_at<=?")
         params.append(date_to_utc)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    query_limit = min(1000, max(limit * 5, 200))
+    query_limit = raw_limit
+    if binding_id and view == "raw":
+        query_limit = min(1000, max(limit * 5, 200))
     sqlite_items = []
+    sqlite_has_more = False
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -35758,15 +35803,29 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
                           criteria_json, requested_count, success_count, skipped_count,
                           error_count, dry_run, created_at
                      FROM ad_control_action %s
-                 ORDER BY created_at DESC LIMIT ?""" % where_sql,
-                tuple(params + [query_limit]),
+                 ORDER BY created_at DESC, action_id DESC LIMIT ?""" % where_sql,
+                tuple(params + [query_limit + 1]),
             ).fetchall()
-            for row in rows:
+            sqlite_has_more = len(rows) > query_limit
+            for row in rows[:query_limit]:
                 item = dict(row)
                 item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
                 item["results"] = []
                 item["dry_run"] = bool(item.get("dry_run"))
                 item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+                summary = item["criteria"].get("execution_summary") or {}
+                item["event_key"] = item["criteria"].get("runner_event_key") or ""
+                item["source_type"] = item["criteria"].get("source_type") or ""
+                item["run_status"] = item["criteria"].get("runner_status") or summary.get("run_status") or ""
+                item["runner_reason"] = item["criteria"].get("runner_reason") or summary.get("runner_reason") or ""
+                item["scanned_count"] = int(item["criteria"].get("scan_count") or 0)
+                item["candidate_count"] = int(item["criteria"].get("candidate_count") or 0)
+                item["matched_count"] = int(item["criteria"].get("execution_target_count") or 0)
+                item["batch_planned_count"] = int(item["criteria"].get("execution_batch_count") or item.get("requested_count") or 0)
+                for field in ("deferred_count", "retryable_error_count", "blocked_count", "remaining_count"):
+                    item[field] = int(summary.get(field) or 0)
+                item["reason_summary"] = []
+                item["log_version"] = 1
                 item["log_store"] = "sqlite_fallback"
                 if binding_id and item["binding_id"] != binding_id:
                     continue
@@ -35778,23 +35837,57 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
         action_id = str(item.get("action_id") or "")
         if action_id and action_id not in merged:
             merged[action_id] = item
-    items = sorted(
-        merged.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True
-    )[:limit]
+    source_truncated = bool(mysql_has_more or sqlite_has_more)
+    daily_meta = {}
+    if view == "daily":
+        daily_candidates = []
+        for item in merged.values():
+            business_date = ad_control_execution_log_service.action_business_date(
+                item, AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS
+            )
+            if date_from and business_date < date_from:
+                continue
+            if date_to and business_date > date_to:
+                continue
+            daily_candidates.append(item)
+        daily_meta = ad_control_execution_log_service.group_actions_daily(
+            daily_candidates,
+            limit=limit,
+            local_offset_hours=AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS,
+            source_truncated=source_truncated,
+        )
+        items = daily_meta.get("items") or []
+    else:
+        items = sorted(
+            merged.values(),
+            key=lambda item: (str(item.get("created_at") or ""), str(item.get("action_id") or "")),
+            reverse=True,
+        )[:limit]
     rule_map = ad_control_action_rule_map(items)
     include_targets = bool(include_targets)
     for item in items:
         item["audit"] = ad_control_action_audit(item, rule_map, include_samples=include_targets)
+        item["audit"]["status"] = ad_control_action_status(item)
         if item.get("reason_summary"):
             item["audit"]["reason_summary"] = item.get("reason_summary")
         item["audit"]["log_store"] = item.get("log_store") or "sqlite_fallback"
         if not include_targets:
             item["results"] = []
             item["audit"]["samples"] = []
+        for batch in item.get("batches") or []:
+            batch["status"] = ad_control_action_status(batch)
     return {
         "items": items,
         "storage": "ads_ai" if mysql_available else "sqlite_fallback",
         "storage_error": storage_error,
+        "view": view,
+        "truncated": bool(daily_meta.get("truncated")) if view == "daily" else source_truncated,
+        "source_truncated": bool(daily_meta.get("source_truncated")) if view == "daily" else source_truncated,
+        "has_more_groups": bool(daily_meta.get("has_more_groups")) if view == "daily" else False,
+        "has_more": source_truncated if view == "raw" else False,
+        "discarded_group_count": int(daily_meta.get("discarded_group_count") or 0),
+        "raw_action_count": int(daily_meta.get("raw_action_count") or len(merged)),
+        "group_count": int(daily_meta.get("group_count") or len(items)),
     }
 
 
@@ -90479,6 +90572,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         action=(params.get("action") or [""])[0],
                         date_from=(params.get("date_from") or [""])[0],
                         date_to=(params.get("date_to") or [""])[0],
+                        view=(params.get("view") or ["raw"])[0],
                         include_targets=include_targets,
                     ),
                 )

@@ -106,7 +106,7 @@ th { position: sticky; top: 0; z-index: 1; background: #f8fafd; color: #475467; 
 .summary-grid div { border: 1px solid #edf1f7; border-radius: 6px; background: #fff; padding: 10px; min-width: 0; }
 .summary-grid span { display: block; color: #667085; font-size: 12px; margin-bottom: 6px; }
 .summary-grid strong { display: block; font-size: 13px; overflow-wrap: anywhere; }
-.log-card { border: 1px solid #d8e0ec; border-radius: 8px; background: #fff; padding: 14px; display: grid; gap: 12px; }
+.log-card { min-width: 0; max-width: 100%; border: 1px solid #d8e0ec; border-radius: 8px; background: #fff; padding: 14px; display: grid; gap: 12px; }
 .log-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; }
 .log-title { min-width: 0; display: grid; gap: 4px; }
 .log-title strong { font-size: 15px; overflow-wrap: anywhere; }
@@ -138,8 +138,18 @@ th { position: sticky; top: 0; z-index: 1; background: #f8fafd; color: #475467; 
 .log-reasons { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .log-reasons span { max-width: 100%; border: 1px solid #d8e0ec; border-radius: 999px; background: #f8fafd; color: #344054; padding: 4px 8px; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 .log-reasons b { margin-left: 6px; color: #172033; }
-.log-details { border-top: 1px solid #edf1f7; padding-top: 10px; }
+.log-details { min-width: 0; max-width: 100%; border-top: 1px solid #edf1f7; padding-top: 10px; }
 .log-details summary { cursor: pointer; color: #344054; font-size: 13px; font-weight: 800; }
+.log-attempt-note { color: #667085; font-size: 12px; line-height: 1.45; }
+.log-status-note { border: 1px solid #fed7aa; border-radius: 7px; background: #fff7ed; color: #9a3412; padding: 9px 11px; font-size: 12px; line-height: 1.5; }
+.log-batch-list { border-top: 1px solid #d8e0ec; padding-top: 11px; }
+.log-batch-list > summary { cursor: pointer; color: #172033; font-size: 13px; font-weight: 900; }
+.log-batches { min-width: 0; max-width: 100%; display: grid; gap: 10px; margin-top: 10px; }
+.log-batch { min-width: 0; max-width: 100%; border: 1px solid #e4e9f1; border-radius: 8px; background: #fbfcff; padding: 11px; display: grid; gap: 9px; }
+.log-batch-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+.log-batch-head > div { display: grid; gap: 3px; }
+.log-batch-head strong { color: #172033; font-size: 13px; }
+.log-raw-head { color: #344054; font-size: 12px; font-weight: 800; margin-top: 12px; }
 .log-sample-table { margin-top: 8px; }
 .log-sample-table table { min-width: 1180px; }
 .raw-json { max-height: 420px; overflow: auto; margin: 10px 0 0; border: 1px solid #edf1f7; border-radius: 6px; background: #fbfcff; padding: 10px; white-space: pre-wrap; }
@@ -156,7 +166,7 @@ th { position: sticky; top: 0; z-index: 1; background: #f8fafd; color: #475467; 
   .account-option { grid-template-columns: 18px minmax(0, 1fr); }
   .account-meta { grid-column: 2; white-space: normal; }
   .manual-account-box, .selected-account-item { grid-template-columns: 1fr; }
-  .log-card-head, .log-section, .log-channel-grid { grid-template-columns: 1fr; }
+  .log-card-head, .log-section, .log-channel-grid, .log-batch-head { grid-template-columns: 1fr; }
   .log-status { justify-content: flex-start; }
   .manual-account-box .btn { margin-bottom: 0; }
   .drawer-panel { width: 100vw; }

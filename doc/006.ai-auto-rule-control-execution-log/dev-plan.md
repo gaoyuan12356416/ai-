@@ -15,6 +15,10 @@
 | 日志 UI 与缓存版本 | Codex | `static/ad-control-*` | 完成 |
 | 自动化测试与生产同源演练 | Codex | `tests/`、临时复合 app | 完成 |
 | GitHub-first 上线与在线回归 | Codex | server 43.166.187.96 | 待部署 |
+| 业务日分组与状态 reducer | Codex | `features/ad_control_execution_log/service.py` | 完成 |
+| daily/raw API 与生产窄补丁 | Codex | `deploy/apply_ad_control_execution_log_fix.py` | 完成 |
+| 日卡片、批次清单与状态文案 | Codex | `static/ad-control-pages.js|css`、HTML cache buster | 完成 |
+| 日聚合/分页/跨午夜/历史状态回归 | Codex | `tests/` | 完成 |
 
 ## 编译 / 构建命令
 
@@ -35,3 +39,5 @@ python deploy/apply_ad_control_execution_log_fix.py --root <production-snapshot>
 ## 完成记录
 
 - 2026-07-15：本地实现、21 项单元/契约测试和生产同源补丁幂等演练通过。
+- 2026-07-15：现网只读审计确认7月15日最终完成；7月14日末批为Meta限流错误，历史迁移误显示为partial。进入日汇总修复。
+- 2026-07-15：业务日读模型、逐event保守状态归并、daily/raw接口、日卡与批次懒加载完成；59项测试和当前生产同源app补丁幂等编译通过。
