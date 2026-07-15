@@ -102,6 +102,7 @@ SQLite `ad_control_action` 保留，作为先落本地的 outbox 和 MySQL 不�
 
 - `results_json` 会持续增长；本次先建立时间索引，建议后续按 180 天归档/清理并监控表容量。
 - 生产 `app.py` 是共享复合版，部署必须先备份、对真实文件运行 `--check` 和 diff，不允许整文件用仓库版本覆盖。
+- 当前通用 CynosDB 端点实测 `@@read_only=1`；代码支持独立的 `AD_CONTROL_ACTION_LOG_MYSQL_*` 写端点，未取得写端点前不落生产代码。
 - 旧 `ad_control_rule` 路径未改造；生产已确认列表为空，若未来重新启用需先接入本日志链路。
 
 ## 变更记录

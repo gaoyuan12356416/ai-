@@ -40,13 +40,13 @@ def replace_function(text, name, new_source):
 
 INTEGRATION_BLOCK = r'''
 def ad_control_action_log_config():
-    if not MYSQL_HOST or not MYSQL_USER:
-        raise RuntimeError("ad-control ads_ai log database is not configured")
+    if not AD_CONTROL_ACTION_LOG_MYSQL_HOST or not AD_CONTROL_ACTION_LOG_MYSQL_USER:
+        raise RuntimeError("ad-control ads_ai writer database is not configured")
     return {
-        "host": MYSQL_HOST,
-        "port": int(MYSQL_PORT or 3306),
-        "user": MYSQL_USER,
-        "password": MYSQL_PASSWORD,
+        "host": AD_CONTROL_ACTION_LOG_MYSQL_HOST,
+        "port": int(AD_CONTROL_ACTION_LOG_MYSQL_PORT or 3306),
+        "user": AD_CONTROL_ACTION_LOG_MYSQL_USER,
+        "password": AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD,
         "database": AD_CONTROL_ACTION_LOG_DB_NAME,
         "connect_timeout": AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT,
         "read_timeout": AD_CONTROL_ACTION_LOG_IO_TIMEOUT,
@@ -624,6 +624,10 @@ def patch_app_text(text):
         'AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))\n'
         'AD_CONTROL_ACTION_LOG_DB_NAME = os.environ.get("AD_CONTROL_ACTION_LOG_DB_NAME", "ads_ai").strip() or "ads_ai"\n'
         'AD_CONTROL_ACTION_LOG_TABLE = os.environ.get("AD_CONTROL_ACTION_LOG_TABLE", "ad_control_action_log").strip() or "ad_control_action_log"\n'
+        'AD_CONTROL_ACTION_LOG_MYSQL_HOST = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST", MYSQL_HOST).strip()\n'
+        'AD_CONTROL_ACTION_LOG_MYSQL_PORT = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT", MYSQL_PORT).strip()\n'
+        'AD_CONTROL_ACTION_LOG_MYSQL_USER = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER", MYSQL_USER).strip()\n'
+        'AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD", MYSQL_PASSWORD)\n'
         'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))\n'
         'AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "8"))\n'
         'AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))\n'

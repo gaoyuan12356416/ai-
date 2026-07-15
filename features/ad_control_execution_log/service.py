@@ -274,7 +274,13 @@ CREATE TABLE IF NOT EXISTS {qualified} (
 
 
 def ensure_table(config, table=DEFAULT_TABLE):
-    key = (str(config.get("host") or ""), str(config.get("database") or "ads_ai"), str(table))
+    key = (
+        str(config.get("host") or ""),
+        int(config.get("port") or 3306),
+        str(config.get("user") or ""),
+        str(config.get("database") or "ads_ai"),
+        str(table),
+    )
     if key in _TABLE_READY:
         return
     with _TABLE_LOCK:

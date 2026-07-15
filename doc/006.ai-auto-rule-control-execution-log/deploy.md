@@ -15,12 +15,13 @@
 | `AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS` | 4 | execute跨账户并发 |
 | `AD_CONTROL_ACTION_LOG_DB_NAME` | ads_ai | 日志库 |
 | `AD_CONTROL_ACTION_LOG_TABLE` | ad_control_action_log | 日志表 |
+| `AD_CONTROL_ACTION_LOG_MYSQL_HOST/PORT/USER/PASSWORD` | 继承通用MySQL配置 | 可单独指定 `ads_ai` 写端点；生产读端点不可用于建表/写日志 |
 | `AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS` | 8 | 日期筛选本地时区 |
 | `AD_CONTROL_RUNNER_MAX_CONTINUATIONS` | 24 | 同事件最大续跑次数 |
 
 ## 数据库变更
 
-执行 `001_create_ad_control_action_log.sql`。生产 MySQL 5.7、utf8mb4，当前服务账号已验证对 `ads_ai` 有 CREATE/INSERT/UPDATE/DELETE/INDEX/ALTER 权限，对 `kunlunads_dev` 只读。
+执行 `001_create_ad_control_action_log.sql`。生产 MySQL 5.7、utf8mb4。当前通用端点的账号虽对 `ads_ai` 有 CREATE/INSERT/UPDATE/DELETE/INDEX/ALTER grant，但节点 `@@read_only=1`，必须配置同集群写端点或由 DBA 执行 DDL 后再发布。
 
 ## 部署步骤
 
