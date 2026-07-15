@@ -19,7 +19,7 @@
 - 旧 fan-out 聚合规则组原子迁移、`partial_enabled`、旧 observe 动作迁移、未知动作拒绝，以及 legacy rule/account-group/rule-set owner 隔离。
 - owner/created_by 双空 legacy 组禁用+急停，以及 `product=''` 的账号维度 V2 组在重复 ensure 时不误迁移。
 - 既有 Campaign pause、执行日志、全局熔断、批次限制和 runner 状态回归。
-- 部署补丁在当前 merged app 和缺失可选 legacy 目标的旧基线上均能完成 check/apply/幂等判定，且首次写前生成备份。
+- 部署补丁在当前 merged app 和缺失可选 legacy 目标的旧基线上均能完成 check/apply/幂等判定；当前 merged app 已对齐时首次为 `unchanged` 且不生成冗余备份，确需变更的基线会在首次写入前生成唯一、字节一致的备份。
 - 部署模板自包含执行审计依赖；账号维度 mixed copy/pause 不会回退调用旧 product/account 白名单而误过滤 pause。
 - current-live fixture 只读验证：线上既有 writer 63353、reader 63350、3/5 秒超时、`AD_CONTROL_LIVE_MAX_WORKERS=4`、runner 状态更新不立即 upsert 重试和 7 个 action-log 安全函数 hash 均未被补丁回退；临时副本二次 check/apply 均为 `unchanged`。
 - 隔离 copy engine 的 CBO/ABO、轮询、映射、幂等、临时 intent/lineage 契约；这些用例使用 fake/stub 与临时 SQLite，不代表生产复制链路已放开。
