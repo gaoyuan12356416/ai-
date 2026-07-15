@@ -1,6 +1,6 @@
 # Meta/Facebook 试玩广告生成接口
 
-更新时间：2026-07-10
+更新时间：2026-07-15
 
 当前产物格式：Meta 单文件试玩广告（`index.html`）
 
@@ -22,19 +22,11 @@
 
 ## 2. 接口地址
 
-推荐地址：
+唯一对外接口地址：
 
 ```http
 POST https://ai.yingliangads.com/api/fb-playable/preview
 ```
-
-兼容旧地址：
-
-```http
-POST https://ai.yingliangads.com/api/ad-material/playable-preview
-```
-
-两个地址调用同一套生成逻辑。
 
 ## 3. 鉴权
 
