@@ -31,7 +31,9 @@
 
 
 import base64
-import cgi
+import binascii
+from email import policy
+from email.parser import BytesParser
 import json
 
 import concurrent.futures
@@ -163,6 +165,7 @@ import logging
 
 
 import os
+import posixpath
 
 
 
@@ -1245,11 +1248,39 @@ AD_MATERIAL_COMPETITOR_ALERT_RECEIVE_ID = os.environ.get("AD_MATERIAL_COMPETITOR
 AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS = [
     item.strip() for item in os.environ.get("AD_MATERIAL_COMPETITOR_ALERT_OPEN_IDS", "").split(",") if item.strip()
 ]
+
+
+def resolve_playable_preview_auth_mode(raw_mode, expected_token):
+    mode = str(raw_mode or "").strip().lower()
+    if not mode:
+        return "enforce" if str(expected_token or "").strip() else "observe"
+    if mode not in ("off", "observe", "enforce"):
+        raise ValueError("PLAYABLE_PREVIEW_AUTH_MODE must be off, observe or enforce")
+    return mode
+
+
 PLAYABLE_PREVIEW_API_TOKEN = (
     os.environ.get("PLAYABLE_PREVIEW_API_TOKEN", "")
     or os.environ.get("FB_PLAYABLE_API_TOKEN", "")
 ).strip()
+PLAYABLE_PREVIEW_AUTH_MODE = resolve_playable_preview_auth_mode(
+    os.environ.get("PLAYABLE_PREVIEW_AUTH_MODE", ""),
+    PLAYABLE_PREVIEW_API_TOKEN,
+)
 PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
+PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES = int(
+    os.environ.get("PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES", str(PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES))
+)
+PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES = int(
+    os.environ.get("PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES", "4096")
+)
+PLAYABLE_PREVIEW_MAX_CONCURRENCY = max(
+    1,
+    int(os.environ.get("PLAYABLE_PREVIEW_MAX_CONCURRENCY", "1")),
+)
+PLAYABLE_PREVIEW_REQUEST_SLOTS = threading.BoundedSemaphore(
+    PLAYABLE_PREVIEW_MAX_CONCURRENCY
+)
 PLAYABLE_PREVIEW_MAX_ASSET_BYTES = int(os.environ.get("PLAYABLE_PREVIEW_MAX_ASSET_BYTES", "4800000"))
 PLAYABLE_PREVIEW_MAX_ZIP_BYTES = min(
     PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
@@ -22132,30 +22163,161 @@ def playable_preview_doc_url():
     return AD_MATERIAL_PUBLIC_BASE_URL.rstrip("/") + "/docs/playable-preview-api.md"
 
 
+def evaluate_playable_preview_auth(headers, expected_token, mode):
+    auth = str(headers.get("Authorization", "") or "")
+    token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+    token = token or str(headers.get("X-API-Token", "") or "").strip()
+    token_configured = bool(expected_token)
+    token_present = bool(token)
+    token_valid = bool(
+        token_configured
+        and token_present
+        and secrets.compare_digest(
+            token.encode("utf-8"),
+            str(expected_token).encode("utf-8"),
+        )
+    )
+    allowed = mode != "enforce" or token_valid
+    return token_present, token_valid, allowed
+
+
+def log_playable_preview_auth(path, mode, token_present, token_valid, allowed):
+    logging.info(
+        "playable_preview_auth path=%s mode=%s auth_present=%s auth_valid=%s decision=%s",
+        path,
+        mode,
+        token_present,
+        token_valid,
+        "allow" if allowed else "deny",
+    )
+
+
+def require_playable_preview_access(handler):
+    token_present, token_valid, allowed = evaluate_playable_preview_auth(
+        handler.headers,
+        PLAYABLE_PREVIEW_API_TOKEN,
+        PLAYABLE_PREVIEW_AUTH_MODE,
+    )
+    log_playable_preview_auth(
+        urlparse(handler.path).path,
+        PLAYABLE_PREVIEW_AUTH_MODE,
+        token_present,
+        token_valid,
+        allowed,
+    )
+    if allowed:
+        return True
+    if not PLAYABLE_PREVIEW_API_TOKEN:
+        logging.error("playable preview auth is enforced but no API token is configured")
+        json_response(
+            handler,
+            503,
+            {
+                "code": "auth_not_configured",
+                "error": "playable preview authentication is unavailable",
+                "message": "playable preview authentication is unavailable",
+            },
+        )
+        return False
+    json_response(
+        handler,
+        403,
+        {"code": "forbidden", "error": "forbidden", "message": "forbidden"},
+    )
+    return False
+
+
 def sanitize_playable_filename(value, fallback):
     name = os.path.basename(str(value or "").strip())
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
     return name or fallback
 
 
-def safe_extract_zip(zip_path, target_dir):
+def safe_extract_zip(zip_path, target_dir, max_extracted_bytes, max_extracted_files):
     with zipfile.ZipFile(zip_path) as zf:
+        entries = [info for info in zf.infolist() if str(info.filename or "")]
+        if len(entries) > max_extracted_files:
+            raise ValueError(
+                "zip contains too many files: %s > %s"
+                % (len(entries), max_extracted_files)
+            )
+        declared_size = sum(
+            max(0, int(info.file_size or 0))
+            for info in entries
+            if not info.is_dir()
+        )
+        if declared_size > max_extracted_bytes:
+            raise ValueError(
+                "zip extracted size exceeds limit: %s > %s"
+                % (declared_size, max_extracted_bytes)
+            )
+        planned_entries = []
+        destinations = {}
         for info in zf.infolist():
             raw_name = str(info.filename or "")
-            if not raw_name or raw_name.startswith("/") or raw_name.startswith("\\"):
+            if not raw_name:
                 continue
-            normalized = os.path.normpath(raw_name)
-            if normalized.startswith("..") or os.path.isabs(normalized):
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise ValueError(
+                    "unsupported zip compression method: %s"
+                    % info.compress_type
+                )
+            if info.flag_bits & 0x1:
+                raise ValueError("encrypted zip entries are not supported: %s" % raw_name)
+            unix_mode = (int(info.external_attr or 0) >> 16) & 0xFFFF
+            if (unix_mode & 0o170000) == 0o120000:
+                raise ValueError("zip symbolic links are not supported: %s" % raw_name)
+            entry_type = unix_mode & 0o170000
+            is_directory = info.is_dir()
+            if (
+                (is_directory and entry_type not in (0, 0o040000))
+                or (not is_directory and entry_type not in (0, 0o100000))
+            ):
+                raise ValueError("zip special entries are not supported: %s" % raw_name)
+            normalized = posixpath.normpath(raw_name.replace("\\", "/"))
+            if (
+                normalized in ("", ".", "..")
+                or normalized.startswith("../")
+                or normalized.startswith("/")
+                or re.match(r"^[A-Za-z]:", normalized)
+            ):
                 raise ValueError("unsafe zip entry: %s" % raw_name)
-            destination = os.path.abspath(os.path.join(target_dir, normalized))
-            if not destination.startswith(os.path.abspath(target_dir) + os.sep) and destination != os.path.abspath(target_dir):
+            destination = os.path.abspath(
+                os.path.join(target_dir, *normalized.split("/"))
+            )
+            target_root = os.path.abspath(target_dir)
+            if os.path.commonpath((target_root, destination)) != target_root:
                 raise ValueError("unsafe zip entry: %s" % raw_name)
-            if info.is_dir():
+            destination_key = os.path.normcase(destination)
+            if destination_key in destinations:
+                raise ValueError("duplicate zip entry: %s" % raw_name)
+            for existing_key, existing_is_directory in destinations.items():
+                if (
+                    (not existing_is_directory and destination_key.startswith(existing_key + os.sep))
+                    or (not is_directory and existing_key.startswith(destination_key + os.sep))
+                ):
+                    raise ValueError("zip file and directory paths conflict: %s" % raw_name)
+            destinations[destination_key] = is_directory
+            planned_entries.append((info, destination, is_directory))
+
+        extracted_size = 0
+        for info, destination, is_directory in planned_entries:
+            if is_directory:
                 os.makedirs(destination, exist_ok=True)
                 continue
             os.makedirs(os.path.dirname(destination), exist_ok=True)
             with zf.open(info) as src, open(destination, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    extracted_size += len(chunk)
+                    if extracted_size > max_extracted_bytes:
+                        raise ValueError(
+                            "zip extracted size exceeds limit: %s > %s"
+                            % (extracted_size, max_extracted_bytes)
+                        )
+                    dst.write(chunk)
 
 
 def find_playable_entry(game_dir):
@@ -22183,24 +22345,34 @@ def find_playable_entry(game_dir):
 
 
 def parse_playable_preview_multipart(handler, content_length):
-    environ = {
-        "REQUEST_METHOD": "POST",
-        "CONTENT_TYPE": handler.headers.get("Content-Type", ""),
-        "CONTENT_LENGTH": str(content_length),
-    }
-    form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ=environ)
+    content_type = str(handler.headers.get("Content-Type", "") or "")
+    if "\r" in content_type or "\n" in content_type:
+        raise ValueError("invalid multipart Content-Type")
+    body = handler.rfile.read(content_length)
+    if len(body) != content_length:
+        raise ValueError("incomplete multipart request body")
+    message = BytesParser(policy=policy.default).parsebytes(
+        (
+            "Content-Type: %s\r\nMIME-Version: 1.0\r\n\r\n" % content_type
+        ).encode("utf-8")
+        + body
+    )
+    defects = [
+        defect
+        for part in message.walk()
+        for defect in getattr(part, "defects", ())
+    ]
+    if defects:
+        raise ValueError(
+            "invalid multipart request body: %s"
+            % defects[0].__class__.__name__
+        )
+    if not message.is_multipart():
+        raise ValueError("invalid multipart request body")
     payload = {}
     upload = None
-    for key in ("static_page", "file", "static_file", "game_file", "zip", "html"):
-        item = form[key] if key in form else None
-        if item is not None and getattr(item, "file", None) is not None and getattr(item, "filename", ""):
-            data = item.file.read()
-            upload = {
-                "filename": item.filename,
-                "content": data,
-            }
-            break
-    for key in (
+    upload_fields = {"static_page", "file", "static_file", "game_file", "zip", "html"}
+    text_fields = {
         "play_count",
         "trial_seconds",
         "store_url",
@@ -22212,13 +22384,38 @@ def parse_playable_preview_multipart(handler, content_length):
         "install_text",
         "play_label",
         "translations",
-    ):
-        if key in form:
-            item = form[key]
-            if not getattr(item, "filename", ""):
-                payload[key] = item.value
+    }
+    seen_text_fields = set()
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        key = str(part.get_param("name", header="content-disposition") or "")
+        filename = part.get_filename()
+        if key in upload_fields and filename is not None:
+            if upload is not None:
+                raise ValueError("multiple upload files are not supported")
+            upload = {
+                "filename": str(filename or ""),
+                "content": part.get_payload(decode=True) or b"",
+            }
+            continue
+        if key not in text_fields or filename is not None:
+            continue
+        if key in seen_text_fields:
+            raise ValueError("duplicate multipart field: %s" % key)
+        seen_text_fields.add(key)
+        raw_value = part.get_payload(decode=True) or b""
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            payload[key] = raw_value.decode(charset, errors="strict")
+        except (LookupError, UnicodeError) as exc:
+            raise ValueError(
+                "invalid multipart field encoding: %s" % key
+            ) from exc
     if not upload:
         raise ValueError("missing upload file")
+    if not upload.get("filename"):
+        raise ValueError("uploaded file must include a filename")
     payload.update(upload)
     return payload
 
@@ -22233,15 +22430,23 @@ def parse_playable_preview_request(handler):
     if "multipart/form-data" in content_type:
         return parse_playable_preview_multipart(handler, content_length)
     body = handler.rfile.read(content_length)
+    if len(body) != content_length:
+        raise ValueError("incomplete request body")
     payload = json.loads(body.decode("utf-8")) if body else {}
+    if not isinstance(payload, dict):
+        raise ValueError("JSON request body must be an object")
     zip_base64 = payload.get("static_zip_base64") or payload.get("zip_base64")
     html_base64 = payload.get("static_html_base64") or payload.get("html_base64")
     static_html = payload.get("static_html") or payload.get("html")
     if zip_base64:
-        payload["content"] = base64.b64decode(str(zip_base64 or ""))
+        payload["content"] = base64.b64decode(
+            re.sub(r"\s+", "", str(zip_base64 or "")), validate=True
+        )
         payload["filename"] = payload.get("filename") or "game.zip"
     elif html_base64:
-        payload["content"] = base64.b64decode(str(html_base64 or ""))
+        payload["content"] = base64.b64decode(
+            re.sub(r"\s+", "", str(html_base64 or "")), validate=True
+        )
         payload["filename"] = payload.get("filename") or "index.html"
     elif static_html:
         payload["content"] = str(static_html or "").encode("utf-8")
@@ -22278,7 +22483,9 @@ PLAYABLE_PREVIEW_TRANSLATIONS = {
 
 
 def playable_preview_translations(payload):
-    translations = dict(PLAYABLE_PREVIEW_TRANSLATIONS)
+    translations = {
+        lang: dict(values) for lang, values in PLAYABLE_PREVIEW_TRANSLATIONS.items()
+    }
     raw = payload.get("translations")
     if isinstance(raw, str) and raw.strip():
         raw = json.loads(raw)
@@ -22318,7 +22525,7 @@ def playable_preview_translations(payload):
     return translations
 
 
-def create_playable_preview(payload):
+def _create_playable_preview(payload, preview_id):
     store_url = str(payload.get("store_url") or "").strip()
     if not store_url:
         raise ValueError("missing store_url")
@@ -22338,7 +22545,6 @@ def create_playable_preview(payload):
     if len(content) > PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES:
         raise ValueError("upload too large")
 
-    preview_id = uuid.uuid4().hex
     output_dir = os.path.join(playable_preview_root(), preview_id)
     game_dir = os.path.join(output_dir, "game")
     os.makedirs(game_dir, exist_ok=True)
@@ -22347,14 +22553,22 @@ def create_playable_preview(payload):
     with open(source_path, "wb") as fp:
         fp.write(content)
 
-    if filename.lower().endswith(".zip"):
-        safe_extract_zip(source_path, game_dir)
-    else:
-        html_name = "index.html" if not filename.lower().endswith((".html", ".htm")) else filename
-        with open(os.path.join(game_dir, sanitize_playable_filename(html_name, "index.html")), "wb") as fp:
-            fp.write(content)
-
-    game_src = find_playable_entry(game_dir)
+    try:
+        if filename.lower().endswith(".zip"):
+            safe_extract_zip(
+                source_path,
+                game_dir,
+                PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES,
+                PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES,
+            )
+        else:
+            html_name = "index.html" if not filename.lower().endswith((".html", ".htm")) else filename
+            with open(os.path.join(game_dir, sanitize_playable_filename(html_name, "index.html")), "wb") as fp:
+                fp.write(content)
+        game_src = find_playable_entry(game_dir)
+    except Exception:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
     entry_relative = game_src[len("game/"):] if game_src.startswith("game/") else game_src
     title = str(payload.get("title") or "Playable Preview").strip() or "Playable Preview"
     translations = playable_preview_translations(payload)
@@ -22419,7 +22633,9 @@ def create_playable_preview(payload):
         "zip_size": zip_size,
         "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
         "size_headroom_bytes": size_headroom,
+        "meta_compatible": True,
         "compatibility": compatibility,
+        "languages": sorted(translations.keys()),
     }
     with open(manifest_path, "w", encoding="utf-8") as fp:
         json.dump(manifest, fp, ensure_ascii=False, indent=2)
@@ -22434,6 +22650,7 @@ def create_playable_preview(payload):
         preview_url = build_cos_url(build_cos_object_key(index_path))
         zip_url = build_cos_url(build_cos_object_key(zip_path))
         manifest_url = build_cos_url(build_cos_object_key(manifest_path))
+        shutil.rmtree(output_dir, ignore_errors=True)
     else:
         preview_url = build_public_url(index_path)
         zip_url = build_public_url(zip_path)
@@ -22457,6 +22674,45 @@ def create_playable_preview(payload):
         "compatibility": compatibility,
         "languages": sorted(translations.keys()),
     }
+
+
+def cleanup_playable_preview_artifacts(preview_id):
+    output_dir = os.path.join(playable_preview_root(), preview_id)
+    output_exists = os.path.isdir(output_dir)
+    try:
+        if output_exists and cos_enabled():
+            try:
+                client = get_cos_client()
+                for filename in ("index.html", "playable-preview.zip", "manifest.json"):
+                    try:
+                        client.delete_object(
+                            Bucket=COS_BUCKET,
+                            Key=build_cos_object_key(os.path.join(output_dir, filename)),
+                        )
+                    except Exception as exc:
+                        logging.warning(
+                            "playable preview COS cleanup failed: preview_id=%s file=%s error=%s",
+                            preview_id,
+                            filename,
+                            exc.__class__.__name__,
+                        )
+            except Exception as exc:
+                logging.warning(
+                    "playable preview COS cleanup initialization failed: preview_id=%s error=%s",
+                    preview_id,
+                    exc.__class__.__name__,
+                )
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def create_playable_preview(payload):
+    preview_id = uuid.uuid4().hex
+    try:
+        return _create_playable_preview(payload, preview_id)
+    except Exception:
+        cleanup_playable_preview_artifacts(preview_id)
+        raise
 
 
 
@@ -92955,19 +93211,42 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
 
         if parsed.path in ("/api/ad-material/playable-preview", "/api/fb-playable/preview"):
+            if not require_playable_preview_access(self):
+                return
+            if not PLAYABLE_PREVIEW_REQUEST_SLOTS.acquire(blocking=False):
+                json_response(
+                    self,
+                    429,
+                    {
+                        "code": "playable_preview_busy",
+                        "error": "playable preview service is busy",
+                        "message": "playable preview service is busy",
+                    },
+                )
+                return
             try:
-                if PLAYABLE_PREVIEW_API_TOKEN:
-                    auth = self.headers.get("Authorization", "")
-                    token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
-                    token = token or self.headers.get("X-API-Token", "").strip()
-                    if not secrets.compare_digest(token, PLAYABLE_PREVIEW_API_TOKEN):
-                        json_response(self, 403, {"error": "forbidden"})
-                        return
                 payload = create_playable_preview(parse_playable_preview_request(self))
                 json_response(self, 200, payload)
-            except Exception as exc:
-                logging.exception("playable preview generation failed")
+            except (ValueError, UnicodeError, binascii.Error, zipfile.BadZipFile) as exc:
+                logging.warning(
+                    "playable preview request rejected: %s: %s",
+                    exc.__class__.__name__,
+                    exc,
+                )
                 json_response(self, 400, api_error_payload(exc))
+            except Exception:
+                logging.exception("playable preview generation failed")
+                json_response(
+                    self,
+                    500,
+                    {
+                        "code": "internal_error",
+                        "error": "playable preview generation failed",
+                        "message": "playable preview generation failed",
+                    },
+                )
+            finally:
+                PLAYABLE_PREVIEW_REQUEST_SLOTS.release()
             return
 
         if parsed.path == "/api/gpu-video/render":
