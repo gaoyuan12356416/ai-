@@ -15,36 +15,60 @@
 
 ### GET actions
 
-查询参数：`product`、`binding_id`、`action`、`date_from`、`date_to`、`limit(1..200)`、`include_targets`。前端固定传 `include_targets=false`。
+查询参数：`product`、`binding_id`、`action`、`date_from`、`date_to`、`limit(1..200)`、`view(daily|raw)`、`include_targets`。前端默认 `view=daily` 且固定传 `include_targets=false`；省略 `view` 时后端保持 `raw` 兼容行为。
 
 新增/强调响应字段：
+
+`view=daily` 响应示例：
 
 ```json
 {
   "storage": "ads_ai",
   "storage_error": "",
+  "view": "daily",
+  "truncated": false,
+  "raw_action_count": 2,
+  "group_count": 1,
   "items": [{
-    "action_id": "...",
-    "event_key": "pause:account:2026-07-15 12:00",
-    "run_status": "partial",
+    "group_id": "daily:2026-07-15:dramawave:rule-group:pause:campaign:real",
+    "business_date": "2026-07-15",
+    "is_daily_group": true,
+    "batch_count": 2,
+    "execution_batch_count": 2,
+    "verification_batch_count": 0,
+    "attempt_count": 386,
     "scanned_count": 1940,
-    "candidate_count": 927,
-    "matched_count": 927,
-    "batch_planned_count": 200,
-    "deferred_count": 727,
-    "retryable_error_count": 1,
-    "remaining_count": 728,
+    "matched_count": 386,
+    "success_count": 355,
+    "skipped_count": 31,
+    "error_count": 0,
+    "remaining_count": 0,
+    "display_status": {"key": "success", "label": "当日执行完成", "class": "ok"},
     "log_store": "ads_ai",
-    "results": []
+    "results": [],
+    "batches": [{
+      "action_id": "...",
+      "preview_id": "...",
+      "requested_count": 200,
+      "success_count": 169,
+      "skipped_count": 31,
+      "error_count": 0,
+      "remaining_count": 195,
+      "status": {"key": "partial", "label": "处理中，待续跑 195", "class": "warn"}
+    }]
   }]
 }
 ```
 
-日期按 Asia/Shanghai 自然日解释，后端换算 UTC 查询边界。
+日卡累计成功/跳过/失败均为“执行尝试（含重试）”，不是唯一目标数。`scanned/candidate/matched/remaining` 使用首轮或最终快照，不跨批次求和。
+
+`view=raw` 返回 action 级记录，最大 200 条，保留原字段兼容性。两种视图的列表都不读取 `results_json`。
+
+日期按 Asia/Shanghai 业务日解释。daily 模式会前后扩展一天轻量读取，再按 `business_date` 二次过滤，以保留跨午夜续跑；命中 1000 条读取上限时返回 `truncated=true` 并丢弃边界业务日的可能不完整日组。
 
 ### GET action targets
 
-返回 `raw_result_count`、`samples`、`results`、`audit`。只有用户展开日志卡片时调用；同一卡片并发展开只发一次请求。
+返回 `raw_result_count`、`samples`、`results`、`audit`。只有用户展开某个批次时调用；每个批次详情只发一次请求。daily 日卡不会提前拼接全天大 JSON。
 
 ### POST preview-live
 

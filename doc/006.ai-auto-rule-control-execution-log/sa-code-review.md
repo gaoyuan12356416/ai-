@@ -19,11 +19,16 @@
 | CR-07 | P2 | list API | SQLite每次解析results_json | 列表显式轻量字段，详情懒加载 | 已关闭 |
 | CR-08 | P2 | deploy patch | 共享app存在漂移风险 | 线上备份、真实文件check/diff/compile | 发布门禁 |
 | CR-09 | P3 | storage | 大字段长期增长 | 建议180天归档并监控 | 后续优化 |
+| CR-10 | P0 | daily reducer | 同日后一event成功会掩盖前一event未完成 | 各event先取末态，再按受阻/未完成/待续跑/完成保守归并 | 已关闭 |
+| CR-11 | P1 | daily key | manual带event_key会被误判scheduled | scheduled仅认runner source/actor | 已关闭 |
+| CR-12 | P1 | list UI | 读取上限、分组limit和raw limit提示混淆 | 使用独立响应字段与文案 | 已关闭 |
+| CR-13 | P1 | legacy status | 空status且success>0会掩盖remaining | remaining/blocked/error优先于success兜底 | 已关闭 |
 
 ## 编译 / 验证结果
 
 - 4 个 Python 文件 `py_compile` 通过。
 - `node --check static/ad-control-pages.js` 通过。
-- 21 项 unittest 通过。
+- 59 项 unittest 通过。
 - 生产同源复合版 app：首次补丁 changed，二次 unchanged，`py_compile` 通过。
+- 当前生产 `app.py` SHA256 与同源快照 `83d3cc8013b5e34d1e8cde4d44c4b78712d9a9c6b6cda9da7760c610f38548c1` 一致。
 - 生产旧 `ad_control_rule` 数量为 0；唯一启用的是新规则组。
