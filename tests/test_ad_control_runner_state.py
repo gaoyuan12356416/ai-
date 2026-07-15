@@ -10,7 +10,10 @@ RUNNER = ROOT / "scripts" / "ad_control_rule_runner.py"
 
 def load_pure_runner_functions():
     tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
-    wanted = {"continuation_state", "group_event_continuation_key"}
+    wanted = {
+        "continuation_state", "group_event_continuation_key",
+        "has_ads_ai_action_log",
+    }
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(RUNNER), "exec"), namespace)
@@ -18,6 +21,57 @@ def load_pure_runner_functions():
 
 
 class RunnerStateTests(unittest.TestCase):
+    @staticmethod
+    def run_group_event_case(preview, execute_result, previous_result=None, attempt=1):
+        tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+        wanted = {"has_ads_ai_action_log", "run_group_event"}
+        body = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in wanted
+        ]
+        updates = []
+        warnings = []
+        fake_app = SimpleNamespace(
+            ad_control_validate_insight_start_schema=lambda: {"campaign_id"},
+            create_ad_control_live_preview=lambda payload, session, internal=False: preview,
+            execute_ad_control_live=lambda payload, session: dict(execute_result or {}),
+            ad_control_update_action_log_runner=lambda *args: updates.append(args),
+        )
+        namespace = {
+            "app": fake_app,
+            "MAX_CONTINUATIONS": 3,
+            "continuation_state": lambda previous, action, key: (
+                dict(previous_result or {}), attempt
+            ),
+            "record_rule_group_verification": lambda *args: "verification-action",
+            "record_rule_group_preview_failure": lambda *args: "preview-failure-action",
+            "execution_log_service": SimpleNamespace(
+                graph_error_details=lambda reason: {"retryable": False}
+            ),
+            "event_payload": lambda rule, action, key, status, result=None, reason="": {
+                "status": status, "reason": reason, "result": result or {},
+            },
+            "logging": SimpleNamespace(
+                exception=lambda *args: None,
+                warning=lambda *args: warnings.append(args),
+            ),
+        }
+        exec(compile(ast.Module(body=body, type_ignores=[]), str(RUNNER), "exec"), namespace)
+        event = namespace["run_group_event"](
+            {"group_id": "g1", "run_mode": "live"},
+            "pause",
+            "tick-1",
+            previous_event={"status": "partial"},
+        )
+        return event, updates, warnings
+
+    def test_ads_ai_log_guard_is_exact(self):
+        has_log = load_pure_runner_functions()["has_ads_ai_action_log"]
+        self.assertTrue(has_log({"log_store": "ads_ai"}))
+        self.assertFalse(has_log({"log_store": "sqlite_fallback"}))
+        self.assertFalse(has_log({"log_store": ""}))
+        self.assertFalse(has_log(None))
+
     def test_new_event_resets_continuation_attempt(self):
         functions = load_pure_runner_functions()
         previous = {
@@ -105,6 +159,78 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual(1, result["result"]["would_pause_count"])
         self.assertEqual(1, result["result"]["would_copy_count"])
         self.assertTrue(result["result"]["observation_only"])
+
+    def test_continuation_limit_updates_only_initial_ads_ai_log(self):
+        preview = {
+            "preview_id": "preview-1", "preview_hash": "hash-1",
+            "pause_count": 1, "copy_count": 0,
+            "execution_count": 1, "error_count": 0,
+        }
+        fallback_event, fallback_updates, _ = self.run_group_event_case(
+            preview,
+            execute_result={},
+            previous_result={
+                "action_id": "action-fallback",
+                "log_store": "sqlite_fallback",
+                "continuation_attempt": 3,
+            },
+            attempt=4,
+        )
+        self.assertEqual("continuation_limit_reached", fallback_event["reason"])
+        self.assertEqual([], fallback_updates)
+
+        _, ads_ai_updates, _ = self.run_group_event_case(
+            preview,
+            execute_result={},
+            previous_result={
+                "action_id": "action-ads-ai",
+                "log_store": "ads_ai",
+                "continuation_attempt": 3,
+            },
+            attempt=4,
+        )
+        self.assertEqual([
+            (
+                "action-ads-ai", "tick-1", "blocked",
+                "continuation_limit_reached", 1,
+            )
+        ], ads_ai_updates)
+
+    def test_runner_status_updates_only_initial_ads_ai_log(self):
+        preview = {
+            "preview_id": "preview-1", "preview_hash": "hash-1",
+            "pause_count": 1, "copy_count": 0,
+            "execution_count": 1, "error_count": 0,
+        }
+        fallback_event, fallback_updates, fallback_warnings = self.run_group_event_case(
+            preview,
+            execute_result={
+                "action_id": "action-fallback",
+                "log_store": "sqlite_fallback",
+                "requested_count": 1,
+                "remaining_count": 0,
+            },
+        )
+        self.assertEqual("partial", fallback_event["status"])
+        self.assertEqual([], fallback_updates)
+        self.assertEqual(1, len(fallback_warnings))
+
+        _, ads_ai_updates, ads_ai_warnings = self.run_group_event_case(
+            preview,
+            execute_result={
+                "action_id": "action-ads-ai",
+                "log_store": "ads_ai",
+                "requested_count": 1,
+                "remaining_count": 0,
+            },
+        )
+        self.assertEqual([
+            (
+                "action-ads-ai", "tick-1", "partial",
+                "live_execute_verify_remaining", 0,
+            )
+        ], ads_ai_updates)
+        self.assertEqual([], ads_ai_warnings)
 
 
 if __name__ == "__main__":
