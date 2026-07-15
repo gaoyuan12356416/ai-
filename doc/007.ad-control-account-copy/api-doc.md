@@ -118,5 +118,5 @@
 - 前端旧聚合组列表根据底层组真实 enabled 状态计算并保留 `partial_enabled`；编辑时由 UI 提交 `migrate_from_group_ids`，成功后旧底层组才会在同一事务中禁用和软删除。
 - 旧 `action=observe` 编辑时显式迁移为 `run_mode=observe` + `action=pause`；其他未知 action 返回 `invalid_rule_action`，不得静默转成 pause。
 - Token 和账号池管理页仍可保留产品维度作为凭据/元数据管理，不再决定规则组筛选范围。
-- 本期候选只读取现有 FB 原始发布数据；复制数据回流和再次扫描随用户后续指定的复制结果 ads_ai 写入方案实现。
-- 本期不新增、不迁移、不写 copied created_data/lineage/intent 表；既有 action log 审计不变。
+- 本期候选只读取现有 FB 原始发布数据；复制数据回流和再次扫描随用户后续明确授权的复制结果 ads_ai 写入方案实现。DDL 环境已修复不会自动开放该能力。
+- 本期不新增、不迁移、不写 copied created_data/lineage/intent 表；既有 `ads_ai.ad_control_action_log` 只是执行审计，不是复制结果落表。

@@ -10,7 +10,7 @@
 - 删除规则组的产品选择，规则范围只由当前用户和广告账号确定。
 - 将调控对象、命中动作、运行模式拆成独立维度。
 - 第一阶段完成 Campaign 关闭、复制规则配置、候选扫描和安全编排；Ad 仅允许保存配置，候选扫描和正式执行均待第二阶段单独实现。
-- 按 2026-07-15 最新范围，本期跳过 copied created_data/lineage/intent 的 `ads_ai` 写入；既有 action log 审计不受影响。在后续复制结果落表方案确认前，正式复制在任何 Meta POST 之前 fail-closed。
+- 按 2026-07-15 最新范围，本期跳过 copied created_data/lineage/intent 的 `ads_ai` 建表与写入；既有 `ads_ai.ad_control_action_log` 是执行审计链路，不是复制结果落表。即使 DDL 环境问题已修复，也只表示后续获得用户明确授权时可再尝试；本轮范围不因此扩大。在复制结果持久化方案确认前，正式复制在任何 Meta POST 之前 fail-closed。
 - Campaign 观察/立即试算可完整验证“本来会复制哪些对象”；Ad 本期不产生候选。现有 Campaign 正式关闭动作继续可用。
 
 ## 范围
@@ -28,7 +28,7 @@
 ### 不包含
 
 - TikTok 复制和 TT 目标表写入。
-- 任何复制结果 `ads_ai` 建表、迁移、copied created_data/lineage/intent 写入或联合数据源改造；后续由用户确认写法后另立需求。既有 action log 审计链路保持原样。
+- 任何复制结果 `ads_ai` 建表、迁移、copied created_data/lineage/intent 写入或联合数据源改造；DDL 环境虽已修复，但后续仍须由用户明确授权并确认写法后另立需求。既有 `ads_ai.ad_control_action_log` 审计链路保持原样，不得将其当作 copied created_data/lineage/intent 已实现的证据。
 - 本期不开放 Campaign 或 Ad 的正式复制。Campaign copy 固定返回 `copy_persistence_not_configured`；Ad 仅可保存配置，启用、候选扫描、试算、runner 和正式执行均返回 `phase_not_enabled`；二者均零 Meta copy 写。
 - 静默改变来源竞价策略。
 - 删除或覆盖 `kunlunads_dev` 来源行。
@@ -79,6 +79,7 @@
 - 旧 `action=observe` 不再作为动作保存：编辑时显式迁移为 `run_mode=observe` + `action=pause` 并提示用户；其他未知 action 一律拒绝，不能静默改成 pause。
 - 本期不新增或修改任何复制结果 MySQL 表，不写 copied created_data/lineage/intent；既有 action log 链路不属于本次后置范围。
 - 复制 intent/lineage 的生产持久化方式随 `ads_ai` 写入方案一并后置；隔离模块单测使用临时 SQLite，不接入 app/runner。
+- 线上既有 action-log 安全契约必须保持：写节点与读节点分离，固定 `ads_ai.ad_control_action_log`，保留现行连接/读写超时、并发上限和 runner 状态更新不立即 upsert 重试的保护。部署补丁必须同时对旧基线与当前线上副本（current-live fixture）做 check/apply/幂等验证，任一不通过则不得部署。
 
 ### API / 接口
 
@@ -108,7 +109,7 @@
 
 ## 风险与待确认
 
-- 复制结果 `ads_ai` 写入规则、表结构和 lineage 契约以用户后续说明为准；本期不预先建表或固化写入实现。既有 action log 不在该后置范围内。
+- 复制结果 `ads_ai` 写入规则、表结构和 lineage 契约以用户后续说明与明确授权为准；本期即使 DDL 环境已可用，也不预先建表或固化写入实现。既有 `ads_ai.ad_control_action_log` 不是复制结果落表，不在该后置范围内。
 - Meta `/copies` 在不同 Campaign 结构和 Graph 版本下返回映射字段可能不同，后续 Canary 前必须以真实 PAUSED 对象核验。
 - 共享 monolith 线上没有 Git 元数据，部署必须从当前线上副本做窄合并和原子替换，不能整份覆盖 `app.py`。
 
@@ -117,3 +118,4 @@
 - 2026-07-15：初版曾计划账号维度、Campaign 第一阶段和 ads_ai 分渠道落表；该落表计划已被下一条范围调整废止。
 - 2026-07-15：用户调整范围，本期跳过复制结果 ads_ai 写入；正式 copy 在 Meta POST 前 fail-closed，Campaign 规则组与观察能力继续实施，Ad 仅保存配置。
 - 2026-07-15：安全评审补充 ownerless legacy fail-close、V2/legacy 迁移边界、保存不可绕过启用、损坏 preview fail-close 以及 `JOB_DB_LOCK` 跨 Graph 请求的 P2 运行取舍。
+- 2026-07-15：用户确认 DDL 问题已修复，可在后续做到该范围时再尝试；本轮仍不建、不写 copied created_data/lineage/intent，等待下一次明确授权。同步将 current-live action-log writer/reader 兼容验证列为部署前 P0 门禁。
