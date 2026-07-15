@@ -33048,6 +33048,9 @@ def sql_identifier(name):
     return "`%s`" % str(name or "").replace("`", "``")
 
 
+from features.ad_control_copy_engine import service as ad_control_copy_service
+
+
 from features.ad_control_execution_log import service as ad_control_execution_log_service
 
 
@@ -33136,6 +33139,8 @@ try:
     )
 except Exception:
     AD_CONTROL_PRODUCT_ALIASES = AD_CONTROL_PRODUCT_ALIASES_DEFAULT
+AD_CONTROL_DRAMA_SCHEMA_CACHE = {}
+AD_CONTROL_DRAMA_SCHEMA_CACHE_LOCK = threading.Lock()
 
 AD_CONTROL_LEVELS = {
     "campaign": {
@@ -33288,6 +33293,9 @@ CREATE TABLE IF NOT EXISTS ad_control_rule_group (
   last_run_at TEXT NOT NULL DEFAULT '',
   last_result_json TEXT NOT NULL DEFAULT '{}',
   created_by TEXT NOT NULL DEFAULT '',
+  owner_user_id TEXT NOT NULL DEFAULT '',
+  object_level TEXT NOT NULL DEFAULT 'campaign',
+  run_mode TEXT NOT NULL DEFAULT 'observe',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted INTEGER NOT NULL DEFAULT 0
@@ -33312,6 +33320,30 @@ def ensure_ad_control_tables():
                 conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN rule_set_id TEXT NOT NULL DEFAULT ''")
             if "strategy_json" not in columns:
                 conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN strategy_json TEXT NOT NULL DEFAULT '{}'")
+            if "owner_user_id" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''")
+            if "object_level" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN object_level TEXT NOT NULL DEFAULT 'campaign'")
+            if "run_mode" not in columns:
+                conn.execute("ALTER TABLE ad_control_rule_group ADD COLUMN run_mode TEXT NOT NULL DEFAULT 'observe'")
+                # Rows that existed before run_mode were production pause
+                # bindings. Preserve their behavior; only newly created V2
+                # groups default to observe.
+                conn.execute("UPDATE ad_control_rule_group SET run_mode='live'")
+            conn.execute(
+                "UPDATE ad_control_rule_group SET owner_user_id=created_by "
+                "WHERE COALESCE(owner_user_id,'')='' AND COALESCE(created_by,'')<>''"
+            )
+            # An enabled orphan cannot be displayed or emergency-stopped by any
+            # user, while the internal runner would still execute it. Fail
+            # closed until an operator assigns a verified owner from backup.
+            conn.execute(
+                "UPDATE ad_control_rule_group SET enabled=0,emergency_stopped=1 "
+                "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=''"
+            )
+            conn.execute(
+                "UPDATE ad_control_rule SET enabled=0 WHERE COALESCE(created_by,'')=''"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_preview_expires ON ad_control_preview(expires_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_action_created ON ad_control_action(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_object_product ON ad_control_object_state(product, level, status)")
@@ -33319,11 +33351,13 @@ def ensure_ad_control_tables():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_account_group_product ON ad_control_account_group(product, deleted)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_set_product ON ad_control_rule_set(product, deleted)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_group_product ON ad_control_rule_group(product, deleted, enabled)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ad_control_rule_group_owner ON ad_control_rule_group(owner_user_id, deleted, updated_at)")
             legacy_rows = conn.execute(
                 """
                 SELECT group_id, name, product, rules_json, created_by, created_at, updated_at
-                  FROM ad_control_rule_group
+                 FROM ad_control_rule_group
                  WHERE COALESCE(rule_set_id, '') = ''
+                   AND COALESCE(product, '') <> ''
                 """
             ).fetchall()
             for row in legacy_rows:
@@ -33772,7 +33806,7 @@ def ad_control_saved_pool_account_ids(product):
     return ids
 
 
-def list_ad_control_accounts(product):
+def ad_control_list_accounts_by_product_legacy(product):
     product = str(product or "").strip()
     if not product:
         raise StructuredApiError("missing_product", "请选择产品")
@@ -33877,6 +33911,60 @@ def list_ad_control_accounts(product):
                 "source": "saved_pools",
                 "warning": "业务库账户列表暂不可用，已显示账户池中保存的账号。",
             }
+def list_ad_control_accounts(product=None):
+    product = str(product or "").strip()
+    if product:
+        return ad_control_list_accounts_by_product_legacy(product)
+    source_queries = [
+        "SELECT ad_account_id,product,campaign_id,adset_id,ad_id,updated_at "
+        "FROM %s" % ad_control_table("ads_facebook_auto_created_data")
+    ]
+    union_sql = " UNION ALL ".join(source_queries)
+    product_where = "WHERE d.product=%s" % ad_control_quote(product) if product else ""
+    sql = """
+        SELECT
+          d.ad_account_id,
+          COALESCE(MAX(NULLIF(s.name,'')), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.account_status AS CHAR)), ''),
+          COALESCE(MAX(CAST(s.is_inactive AS CHAR)), ''),
+          COUNT(DISTINCT d.campaign_id),
+          COUNT(DISTINCT d.adset_id),
+          COUNT(DISTINCT d.ad_id),
+          MAX(d.updated_at),
+          GROUP_CONCAT(DISTINCT NULLIF(d.product,'') ORDER BY d.product SEPARATOR ',')
+        FROM ({data}) d
+        LEFT JOIN {accounts} s ON s.platform_id=1 AND {account_norm}= {setting_norm}
+        {product_where}
+          {where_prefix} d.ad_account_id IS NOT NULL
+          AND d.ad_account_id<>''
+        GROUP BY d.ad_account_id
+        ORDER BY MAX(d.updated_at) DESC
+        LIMIT 1000
+    """.format(
+        data=union_sql,
+        accounts=ad_control_table("ads_accounts_setting"),
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        product_where=product_where,
+        where_prefix="AND" if product_where else "WHERE",
+    )
+    rows = ad_control_run_mysql(" ".join(sql.split()))
+    items = []
+    for row in rows:
+        items.append({
+            "account_id": row[0],
+            "account_name": row[1],
+            "time_zone": row[2],
+            "account_status": row[3],
+            "is_inactive": row[4],
+            "campaign_count": int(row[5] or 0),
+            "adset_count": int(row[6] or 0),
+            "ad_count": int(row[7] or 0),
+            "updated_at": row[8],
+            "products": ad_control_list(row[9]),
+        })
+    return {"items": items, "source": "business_db_all_products"}
 
 
 def create_ad_control_preview(payload, session):
@@ -33937,12 +34025,14 @@ def fetch_ad_control_preview(preview_id):
     expires_at = str(row["expires_at"] or "")
     if expires_at:
         try:
-            if datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S") < datetime.utcnow():
-                raise StructuredApiError("preview_expired", "试算批次已过期，请重新试算")
-        except StructuredApiError:
-            raise
-        except Exception:
-            pass
+            expires_at_value = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+        except Exception as exc:
+            raise StructuredApiError(
+                "preview_invalid",
+                "试算批次过期时间无效，请重新试算",
+            ) from exc
+        if expires_at_value < datetime.utcnow():
+            raise StructuredApiError("preview_expired", "试算批次已过期，请重新试算")
     return dict(row)
 
 
@@ -34083,6 +34173,8 @@ def ad_control_save_object_state(action_id, row, status):
 def execute_ad_control(payload, session):
     ensure_ad_control_tables()
     preview = fetch_ad_control_preview(payload.get("preview_id"))
+    if str(preview.get("actor_user_id") or "") != ad_control_actor(session):
+        raise StructuredApiError("not_found", "preview not found")
     criteria = json.loads(preview["criteria_json"] or "{}")
     action = ad_control_action(payload.get("action") or criteria.get("action"))
     if action not in ("pause", "reopen"):
@@ -34211,12 +34303,21 @@ def ad_control_rule_payload(row):
     return item
 
 
-def list_ad_control_rules():
+def list_ad_control_rules(owner_user_id=None, internal=False):
     ensure_ad_control_tables()
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            rows = conn.execute("SELECT * FROM ad_control_rule ORDER BY updated_at DESC").fetchall()
+            if internal:
+                rows = conn.execute("SELECT * FROM ad_control_rule ORDER BY updated_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM ad_control_rule WHERE created_by=? ORDER BY updated_at DESC",
+                    (owner_user_id,),
+                ).fetchall()
             return {"items": [ad_control_rule_payload(row) for row in rows]}
         finally:
             conn.close()
@@ -34230,10 +34331,18 @@ def save_ad_control_rule(payload, session):
     schedule = payload.get("schedule") or {}
     thresholds = payload.get("thresholds") or {}
     enabled = 1 if payload.get("enabled") else 0
-    actor_user_id = str((session or {}).get("user_id") or "")
+    actor_user_id = ad_control_actor(session)
+    if not actor_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT created_by FROM ad_control_rule WHERE rule_id=?", (rule_id,)
+            ).fetchone()
+            if previous and str(previous["created_by"] or "") != actor_user_id:
+                raise StructuredApiError("not_found", "rule not found")
             conn.execute(
                 """
                 INSERT INTO ad_control_rule (
@@ -34267,23 +34376,30 @@ def save_ad_control_rule(payload, session):
             conn.commit()
             row = conn.execute("SELECT * FROM ad_control_rule WHERE rule_id = ?", (rule_id,)).fetchone()
             return ad_control_rule_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
 
-def set_ad_control_rule_enabled(rule_id, enabled):
+def set_ad_control_rule_enabled(rule_id, enabled, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     rule_id = str(rule_id or "").strip()
     if not rule_id:
         raise StructuredApiError("missing_rule_id", "缺少规则 ID")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            conn.execute(
-                "UPDATE ad_control_rule SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE rule_id=?",
-                (1 if enabled else 0, rule_id),
+            cursor = conn.execute(
+                "UPDATE ad_control_rule SET enabled=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE rule_id=?%s" % ("" if internal else " AND created_by=?"),
+                ((1 if enabled else 0, rule_id) if internal else (1 if enabled else 0, rule_id, owner_user_id)),
             )
-            if conn.total_changes < 1:
+            if cursor.rowcount != 1:
                 raise StructuredApiError("rule_not_found", "规则不存在")
             conn.commit()
             row = conn.execute("SELECT * FROM ad_control_rule WHERE rule_id = ?", (rule_id,)).fetchone()
@@ -34318,6 +34434,25 @@ def ad_control_actor(session):
 
 def ad_control_rule_hash(payload):
     return hashlib.sha256(ad_control_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def ad_control_live_scope_hash(scope):
+    accounts = sorted({
+        ad_control_normalize_account(item)
+        for item in (scope.get("account_ids") or [])
+        if ad_control_normalize_account(item)
+    })
+    return ad_control_rule_hash({
+        "product": scope.get("product") or "",
+        "accounts": accounts,
+        "rules": scope.get("rules") or [],
+        "window": scope.get("window") or {"type": "since_start"},
+        "strategy": scope.get("strategy") or {},
+        "object_level": scope.get("object_level") or "campaign",
+        "run_mode": scope.get("run_mode") or "observe",
+        "rule_group_id": scope.get("rule_group_id") or "",
+        "binding_id": scope.get("rule_group_id") or "",
+    })
 
 
 def ad_control_account_key(account_id):
@@ -34671,35 +34806,35 @@ def validate_ad_control_token_config(payload):
 
 
 def ad_control_validate_scope_token_access(scope):
-    token_configs = ad_control_token_config_for_accounts(scope["product"], scope["account_ids"])
-    account_ids = list(scope["account_ids"])
-    token_user_ids = {
-        str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
-        for account_id in account_ids
-    }
-    tokens_by_user = {
-        user_id: ad_control_token_for_user_id(user_id)
-        for user_id in token_user_ids
-        if user_id
-    }
-
-    def validate_account(account_id):
-        token_user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
-        if not token_user_id:
-            return {"account_id": account_id, "reason": "missing_apps_setting_default_user"}
-        token = tokens_by_user.get(token_user_id, "")
-        if not token:
-            return {"account_id": account_id, "token_user_id": token_user_id, "reason": "missing_meta_token"}
-        try:
-            ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
-        except Exception as exc:
-            return {"account_id": account_id, "token_user_id": token_user_id, "reason": str(exc)}
-        return None
-
-    workers = min(max(1, AD_CONTROL_LIVE_MAX_WORKERS), max(1, len(account_ids)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        results = list(executor.map(validate_account, account_ids))
-    errors = [item for item in results if item]
+    product = str(scope.get("product") or "").strip()
+    if product:
+        product_accounts = {product: list(scope["account_ids"])}
+    else:
+        whitelists = ad_control_account_campaign_whitelists(scope["account_ids"])
+        product_accounts = {}
+        for account_id in scope["account_ids"]:
+            for source_product in (whitelists.get(account_id) or {}).keys():
+                product_accounts.setdefault(source_product, []).append(account_id)
+    errors = []
+    checked_count = 0
+    if not product_accounts:
+        errors.append({"reason": "no_account_campaign_whitelist"})
+    for source_product, account_ids in product_accounts.items():
+        token_configs = ad_control_token_config_for_accounts(source_product, account_ids)
+        for account_id in account_ids:
+            checked_count += 1
+            token_user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
+            if not token_user_id:
+                errors.append({"account_id": account_id, "product": source_product, "reason": "missing_token_config"})
+                continue
+            token = ad_control_token_for_user_id(token_user_id)
+            if not token:
+                errors.append({"account_id": account_id, "product": source_product, "token_user_id": token_user_id, "reason": "missing_meta_token"})
+                continue
+            try:
+                ad_control_graph_get(token, ad_control_account_key(account_id), "id,account_id,name,account_status")
+            except Exception as exc:
+                errors.append({"account_id": account_id, "product": source_product, "token_user_id": token_user_id, "reason": str(exc)})
     if errors:
         raise StructuredApiError(
             "token_access_failed",
@@ -34707,7 +34842,7 @@ def ad_control_validate_scope_token_access(scope):
             accounts=",".join(str(item.get("account_id") or "") for item in errors[:10]),
             errors=errors[:10],
         )
-    return {"ok": True, "checked_count": len(account_ids)}
+    return {"ok": True, "checked_count": checked_count}
 
 
 def ad_control_account_group_payload(row):
@@ -34717,10 +34852,16 @@ def ad_control_account_group_payload(row):
     return item
 
 
-def list_ad_control_account_groups(product=None):
+def list_ad_control_account_groups(product=None, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     where = "WHERE deleted=0"
     params = []
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal:
+        if not owner_user_id:
+            raise StructuredApiError("missing_owner", "current user is required")
+        where += " AND created_by=?"
+        params.append(owner_user_id)
     if product:
         where += " AND product=?"
         params.append(str(product or "").strip())
@@ -34746,14 +34887,20 @@ def save_ad_control_account_group(payload, session):
     group_id = str(payload.get("group_id") or "").strip() or uuid.uuid4().hex
     account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
     account_ids = [item for item in account_ids if item]
+    actor = ad_control_actor(session)
+    if not actor:
+        raise StructuredApiError("missing_owner", "current user is required")
     ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             previous = conn.execute(
-                "SELECT product, account_ids_json FROM ad_control_account_group WHERE group_id=?",
+                "SELECT created_by,product,account_ids_json FROM ad_control_account_group WHERE group_id=?",
                 (group_id,),
             ).fetchone()
+            if previous and str(previous["created_by"] or "") != actor:
+                raise StructuredApiError("not_found", "account group not found")
             configuration_changed = bool(previous) and (
                 str(previous["product"] or "") != product
                 or sorted(ad_control_safe_json_list(previous["account_ids_json"])) != sorted(account_ids)
@@ -34770,7 +34917,7 @@ def save_ad_control_account_group(payload, session):
                   updated_at=CURRENT_TIMESTAMP,
                   deleted=0
                 """,
-                (group_id, name, product, json.dumps(account_ids, ensure_ascii=False), ad_control_actor(session)),
+                (group_id, name, product, json.dumps(account_ids, ensure_ascii=False), actor),
             )
             if configuration_changed:
                 conn.execute(
@@ -34787,18 +34934,32 @@ def save_ad_control_account_group(payload, session):
             conn.commit()
             row = conn.execute("SELECT * FROM ad_control_account_group WHERE group_id=?", (group_id,)).fetchone()
             return ad_control_account_group_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
 
-def delete_ad_control_account_group(group_id):
+def delete_ad_control_account_group(group_id, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     group_id = str(group_id or "").strip()
     if not group_id:
         raise StructuredApiError("missing_group_id", "missing account group id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            owned = conn.execute(
+                "SELECT 1 FROM ad_control_account_group WHERE group_id=? AND deleted=0%s"
+                % ("" if internal else " AND created_by=?"),
+                ((group_id,) if internal else (group_id, owner_user_id)),
+            ).fetchone()
+            if not owned:
+                raise StructuredApiError("not_found", "account group not found")
             active_bindings = conn.execute(
                 """
                 SELECT COUNT(*)
@@ -34809,11 +34970,12 @@ def delete_ad_control_account_group(group_id):
             ).fetchone()[0]
             if active_bindings:
                 raise StructuredApiError("account_group_in_use", "账户池仍被规则组使用，不能删除", binding_count=active_bindings)
-            conn.execute(
-                "UPDATE ad_control_account_group SET deleted=1, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
-                (group_id,),
+            cursor = conn.execute(
+                "UPDATE ad_control_account_group SET deleted=1, updated_at=CURRENT_TIMESTAMP "
+                "WHERE group_id=?%s" % ("" if internal else " AND created_by=?"),
+                ((group_id,) if internal else (group_id, owner_user_id)),
             )
-            if conn.total_changes < 1:
+            if cursor.rowcount != 1:
                 raise StructuredApiError("not_found", "account group not found")
             conn.commit()
             return {"message": "deleted", "group_id": group_id}
@@ -34829,10 +34991,16 @@ def ad_control_rule_set_payload(row):
     return item
 
 
-def list_ad_control_rule_sets(product=None):
+def list_ad_control_rule_sets(product=None, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     where = "WHERE deleted=0"
     params = []
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal:
+        if not owner_user_id:
+            raise StructuredApiError("missing_owner", "current user is required")
+        where += " AND created_by=?"
+        params.append(owner_user_id)
     if product:
         where += " AND product=?"
         params.append(str(product or "").strip())
@@ -34848,17 +35016,21 @@ def list_ad_control_rule_sets(product=None):
             conn.close()
 
 
-def fetch_ad_control_rule_set(rule_set_id):
+def fetch_ad_control_rule_set(rule_set_id, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     rule_set_id = str(rule_set_id or "").strip()
     if not rule_set_id:
         raise StructuredApiError("missing_rule_set_id", "missing rule set id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
             row = conn.execute(
-                "SELECT * FROM ad_control_rule_set WHERE rule_set_id=? AND deleted=0",
-                (rule_set_id,),
+                "SELECT * FROM ad_control_rule_set WHERE rule_set_id=? AND deleted=0%s"
+                % ("" if internal else " AND created_by=?"),
+                ((rule_set_id,) if internal else (rule_set_id, owner_user_id)),
             ).fetchone()
             if not row:
                 raise StructuredApiError("not_found", "rule set not found")
@@ -34879,14 +35051,21 @@ def save_ad_control_rule_set(payload, session):
     default_window = payload.get("default_window") if isinstance(payload.get("default_window"), dict) else {}
     if not default_window:
         default_window = payload.get("window") if isinstance(payload.get("window"), dict) else {"type": "since_start"}
+    actor = ad_control_actor(session)
+    if not actor:
+        raise StructuredApiError("missing_owner", "current user is required")
     ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             previous = conn.execute(
-                "SELECT product, rules_json, default_window_json FROM ad_control_rule_set WHERE rule_set_id=?",
+                "SELECT created_by,product,rules_json,default_window_json "
+                "FROM ad_control_rule_set WHERE rule_set_id=?",
                 (rule_set_id,),
             ).fetchone()
+            if previous and str(previous["created_by"] or "") != actor:
+                raise StructuredApiError("not_found", "rule set not found")
             configuration_changed = bool(previous) and (
                 str(previous["product"] or "") != product
                 or ad_control_safe_json_list(previous["rules_json"]) != rules
@@ -34912,7 +35091,7 @@ def save_ad_control_rule_set(payload, session):
                     product,
                     json.dumps(rules, ensure_ascii=False),
                     json.dumps(default_window, ensure_ascii=False),
-                    ad_control_actor(session),
+                    actor,
                 ),
             )
             if configuration_changed:
@@ -34930,18 +35109,31 @@ def save_ad_control_rule_set(payload, session):
             conn.commit()
             row = conn.execute("SELECT * FROM ad_control_rule_set WHERE rule_set_id=?", (rule_set_id,)).fetchone()
             return ad_control_rule_set_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
 
-def delete_ad_control_rule_set(rule_set_id):
+def delete_ad_control_rule_set(rule_set_id, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     rule_set_id = str(rule_set_id or "").strip()
     if not rule_set_id:
         raise StructuredApiError("missing_rule_set_id", "missing rule set id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
+            owned = conn.execute(
+                "SELECT 1 FROM ad_control_rule_set WHERE rule_set_id=? AND deleted=0%s"
+                % ("" if internal else " AND created_by=?"),
+                ((rule_set_id,) if internal else (rule_set_id, owner_user_id)),
+            ).fetchone()
+            if not owned:
+                raise StructuredApiError("not_found", "rule set not found")
             active_bindings = conn.execute(
                 """
                 SELECT COUNT(*)
@@ -34952,11 +35144,12 @@ def delete_ad_control_rule_set(rule_set_id):
             ).fetchone()[0]
             if active_bindings:
                 raise StructuredApiError("rule_set_in_use", "rule set is used by bindings", binding_count=active_bindings)
-            conn.execute(
-                "UPDATE ad_control_rule_set SET deleted=1, updated_at=CURRENT_TIMESTAMP WHERE rule_set_id=?",
-                (rule_set_id,),
+            cursor = conn.execute(
+                "UPDATE ad_control_rule_set SET deleted=1, updated_at=CURRENT_TIMESTAMP "
+                "WHERE rule_set_id=?%s" % ("" if internal else " AND created_by=?"),
+                ((rule_set_id,) if internal else (rule_set_id, owner_user_id)),
             )
-            if conn.total_changes < 1:
+            if cursor.rowcount != 1:
                 raise StructuredApiError("not_found", "rule set not found")
             conn.commit()
             return {"message": "deleted", "rule_set_id": rule_set_id}
@@ -35005,6 +35198,8 @@ def ad_control_rule_group_payload(row):
         "rules": item.get("rules"),
         "window": item.get("rule_set_default_window") or {"type": "since_start"},
         "strategy": item.get("strategy"),
+        "object_level": item.get("object_level") or "campaign",
+        "run_mode": item.get("run_mode") or "observe",
         "rule_group_id": item.get("group_id"),
     })
     expires_at = str(item.pop("last_preview_expires_at", "") or "")
@@ -35024,10 +35219,72 @@ def ad_control_rule_group_payload(row):
     return item
 
 
-def list_ad_control_rule_groups(product=None):
+def ad_control_fanout_migration_signature(row):
+    """Return only behavior-affecting fields for legacy fan-out migration."""
+    rules = ad_control_safe_json_list(row["rules_json"])
+    strategy = ad_control_safe_json_dict(row["strategy_json"])
+    # Legacy fan-out bindings may differ only by product/account aggregation
+    # metadata.  Every behavior-affecting strategy value must remain equal.
+    for key in (
+        "frontend_rule_group_id",
+        "product",
+        "products",
+        "selected_products",
+        "account_ids",
+        "selected_account_ids",
+        "account_count",
+        "product_count",
+    ):
+        strategy.pop(key, None)
+    return (
+        ad_control_json_dumps(rules),
+        ad_control_json_dumps(strategy),
+        str(row["object_level"] or "campaign").lower(),
+        str(row["run_mode"] or "live").lower(),
+    )
+
+
+def ad_control_validate_group_migration_rows(conn, migrate_from_group_ids, actor, group_id):
+    if not migrate_from_group_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(migrate_from_group_ids))
+    migration_rows = conn.execute(
+        "SELECT * FROM ad_control_rule_group WHERE deleted=0 AND group_id IN (%s)" % placeholders,
+        tuple(migrate_from_group_ids),
+    ).fetchall()
+    rows_by_id = {str(row["group_id"] or ""): row for row in migration_rows}
+    if set(rows_by_id) != set(migrate_from_group_ids):
+        raise StructuredApiError("owner_forbidden", "rule group owner forbidden")
+    for migrate_id in migrate_from_group_ids:
+        row = rows_by_id[migrate_id]
+        row_owner = str(row["owner_user_id"] or row["created_by"] or "")
+        row_strategy = ad_control_safe_json_dict(row["strategy_json"])
+        frontend_id = str(row_strategy.get("frontend_rule_group_id") or "")
+        if row_owner != actor or (migrate_id != group_id and frontend_id != group_id):
+            raise StructuredApiError("owner_forbidden", "rule group owner forbidden")
+    if len(migrate_from_group_ids) > 1:
+        signatures = {
+            ad_control_fanout_migration_signature(rows_by_id[migrate_id])
+            for migrate_id in migrate_from_group_ids
+        }
+        if len(signatures) != 1:
+            raise StructuredApiError(
+                "fanout_source_config_mismatch",
+                "fan-out source bindings have divergent rule configuration; migrate them separately",
+            )
+    return rows_by_id
+
+
+def list_ad_control_rule_groups(product=None, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     where = "WHERE g.deleted=0"
     params = []
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal:
+        if not owner_user_id:
+            raise StructuredApiError("missing_owner", "current user is required")
+        where += " AND g.owner_user_id=?"
+        params.append(owner_user_id)
     if product:
         where += " AND g.product=?"
         params.append(str(product or "").strip())
@@ -35061,11 +35318,11 @@ def list_ad_control_rule_groups(product=None):
             conn.close()
 
 
-def list_ad_control_bindings(product=None):
-    return list_ad_control_rule_groups(product)
+def list_ad_control_bindings(product=None, owner_user_id=None, internal=False):
+    return list_ad_control_rule_groups(product, owner_user_id=owner_user_id, internal=internal)
 
 
-def fetch_ad_control_rule_group(group_id):
+def fetch_ad_control_rule_group(group_id, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
@@ -35093,31 +35350,115 @@ def fetch_ad_control_rule_group(group_id):
             ).fetchone()
             if not row:
                 raise StructuredApiError("not_found", "rule group not found")
+            if not internal:
+                owner_user_id = str(owner_user_id or "").strip()
+                if not owner_user_id or str(row["owner_user_id"] or row["created_by"] or "") != owner_user_id:
+                    raise StructuredApiError("not_found", "rule group not found")
             return ad_control_rule_group_payload(row)
         finally:
             conn.close()
 
 
-def fetch_ad_control_binding(binding_id):
-    return fetch_ad_control_rule_group(binding_id)
+def ad_control_rule_group_snapshot(conn, group_id):
+    """Read a rule group and its preview dependencies on an existing transaction."""
+    row = conn.execute(
+        """
+        SELECT g.*,
+               rs.name AS rule_set_name,
+               rs.rules_json AS rule_set_rules_json,
+               rs.default_window_json AS rule_set_default_window_json,
+               ag.account_ids_json AS account_group_ids_json,
+               p.expires_at AS last_preview_expires_at
+          FROM ad_control_rule_group g
+     LEFT JOIN ad_control_rule_set rs
+            ON rs.rule_set_id = g.rule_set_id
+           AND rs.deleted = 0
+     LEFT JOIN ad_control_account_group ag
+            ON ag.group_id = g.account_group_id
+           AND ag.deleted = 0
+     LEFT JOIN ad_control_preview p
+            ON p.preview_id = g.last_preview_id
+         WHERE g.group_id=? AND g.deleted=0
+        """,
+        (str(group_id or "").strip(),),
+    ).fetchone()
+    if not row:
+        raise StructuredApiError("not_found", "rule group not found")
+    return ad_control_rule_group_payload(row)
+
+
+def fetch_ad_control_binding(binding_id, owner_user_id=None, internal=False):
+    return fetch_ad_control_rule_group(binding_id, owner_user_id=owner_user_id, internal=internal)
 
 
 def save_ad_control_rule_group(payload, session):
+    payload = dict(payload or {})
+    actor = ad_control_actor(session)
+    if not actor:
+        raise StructuredApiError("missing_owner", "current user is required")
     product = str(payload.get("product") or "").strip()
     name = str(payload.get("name") or "").strip()
-    if not product:
-        raise StructuredApiError("missing_product", "missing product")
     if not name:
         raise StructuredApiError("missing_name", "missing rule group name")
     group_id = str(payload.get("group_id") or "").strip() or uuid.uuid4().hex
+    migrate_from_group_ids = [
+        str(item or "").strip()
+        for item in ad_control_list(payload.get("migrate_from_group_ids"))
+        if str(item or "").strip()
+    ]
+    ensure_ad_control_tables()
+    existing = None
+    stored_group = None
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            row = conn.execute("SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)).fetchone()
+            stored_group = ad_control_rule_group_payload(row) if row else None
+            existing = stored_group if stored_group and not stored_group.get("deleted") else None
+            if migrate_from_group_ids:
+                ad_control_validate_group_migration_rows(
+                    conn, migrate_from_group_ids, actor, group_id
+                )
+        finally:
+            conn.close()
+    if stored_group and str(stored_group.get("owner_user_id") or stored_group.get("created_by") or "") != actor:
+        raise StructuredApiError("not_found", "rule group not found")
+    if migrate_from_group_ids:
+        payload_strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
+        if str(payload_strategy.get("frontend_rule_group_id") or "") != group_id:
+            raise StructuredApiError("invalid_group_migration", "invalid legacy group migration")
+
     account_group_id = str(payload.get("account_group_id") or "").strip()
     account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
     account_ids = [item for item in account_ids if item]
     rule_set_id = str(payload.get("rule_set_id") or "").strip()
     rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
     strategy = payload.get("strategy") if isinstance(payload.get("strategy"), dict) else {}
-    if rule_set_id:
-        rule_set = fetch_ad_control_rule_set(rule_set_id)
+    is_account_group = (
+        not product
+        or "object_level" in payload
+        or "run_mode" in payload
+        or any(str(rule.get("action") or "").lower() == "copy" for rule in rules if isinstance(rule, dict))
+        or (existing and not existing.get("product"))
+    )
+    object_level = str((existing or {}).get("object_level") or "campaign")
+    run_mode = str((existing or {}).get("run_mode") or "observe")
+    if is_account_group:
+        try:
+            normalized = ad_control_copy_service.normalize_rule_group(payload, actor, existing=existing)
+        except ValueError as exc:
+            raise StructuredApiError(str(exc), str(exc))
+        product = ""
+        account_group_id = ""
+        rule_set_id = ""
+        account_ids = normalized["account_ids"]
+        rules = normalized["rules"]
+        strategy = normalized["strategy"]
+        object_level = normalized["object_level"]
+        run_mode = normalized["run_mode"]
+        enabled = 1 if normalized["enabled"] else 0
+    elif rule_set_id:
+        rule_set = fetch_ad_control_rule_set(rule_set_id, owner_user_id=actor)
         if rule_set.get("product") != product:
             raise StructuredApiError("rule_set_product_mismatch", "rule set product does not match binding product")
         if not rules:
@@ -35134,11 +35475,12 @@ def save_ad_control_rule_group(payload, session):
             },
             session,
         )
-    enabled = 1 if payload.get("enabled") else 0
-    if enabled:
+    if not is_account_group:
+        enabled = 1 if payload.get("enabled") else 0
+    if enabled and not is_account_group:
         validate_account_ids = list(account_ids)
         if not validate_account_ids and account_group_id:
-            groups = list_ad_control_account_groups(product).get("items", [])
+            groups = list_ad_control_account_groups(product, owner_user_id=actor).get("items", [])
             for account_group in groups:
                 if account_group.get("group_id") == account_group_id:
                     validate_account_ids = [ad_control_normalize_account(item) for item in account_group.get("account_ids", [])]
@@ -35150,33 +35492,41 @@ def save_ad_control_rule_group(payload, session):
             "product": product,
             "account_ids": validate_account_ids,
         })
-    ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            previous = conn.execute(
-                """
-                SELECT product, rule_set_id, account_group_id,
-                       account_ids_json, rules_json, strategy_json
-                  FROM ad_control_rule_group
-                 WHERE group_id=?
-                """,
-                (group_id,),
+            conn.execute("BEGIN IMMEDIATE")
+            current_target = conn.execute(
+                "SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)
             ).fetchone()
-            configuration_changed = bool(previous) and (
-                str(previous["product"] or "") != product
-                or str(previous["rule_set_id"] or "") != rule_set_id
-                or str(previous["account_group_id"] or "") != account_group_id
-                or sorted(ad_control_safe_json_list(previous["account_ids_json"])) != sorted(account_ids)
-                or ad_control_safe_json_list(previous["rules_json"]) != rules
-                or ad_control_safe_json_dict(previous["strategy_json"]) != strategy
+            if (
+                current_target
+                and str(current_target["owner_user_id"] or current_target["created_by"] or "") != actor
+            ):
+                raise StructuredApiError("not_found", "rule group not found")
+            configuration_changed = bool(current_target) and (
+                str(current_target["product"] or "") != product
+                or str(current_target["rule_set_id"] or "") != rule_set_id
+                or str(current_target["account_group_id"] or "") != account_group_id
+                or sorted(ad_control_safe_json_list(current_target["account_ids_json"])) != sorted(account_ids)
+                or ad_control_safe_json_list(current_target["rules_json"]) != rules
+                or ad_control_safe_json_dict(current_target["strategy_json"]) != strategy
+                or str(current_target["object_level"] or "campaign").lower() != object_level
+                or str(current_target["run_mode"] or "observe").lower() != run_mode
+            )
+            # This is the authoritative migration validation. BEGIN IMMEDIATE
+            # prevents a concurrent writer from changing a source binding
+            # between this re-read and the upsert/soft-delete below.
+            ad_control_validate_group_migration_rows(
+                conn, migrate_from_group_ids, actor, group_id
             )
             conn.execute(
                 """
                 INSERT INTO ad_control_rule_group (
                   group_id, name, product, rule_set_id, account_group_id, account_ids_json, rules_json, strategy_json,
-                  enabled, emergency_stopped, created_by, created_at, updated_at, deleted
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                  enabled, emergency_stopped, created_by, owner_user_id, object_level, run_mode,
+                  created_at, updated_at, deleted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
                 ON CONFLICT(group_id) DO UPDATE SET
                   name=excluded.name,
                   product=excluded.product,
@@ -35186,6 +35536,9 @@ def save_ad_control_rule_group(payload, session):
                   rules_json=excluded.rules_json,
                   strategy_json=excluded.strategy_json,
                   enabled=excluded.enabled,
+                  owner_user_id=ad_control_rule_group.owner_user_id,
+                  object_level=excluded.object_level,
+                  run_mode=excluded.run_mode,
                   updated_at=CURRENT_TIMESTAMP,
                   deleted=0
                 """,
@@ -35199,24 +35552,36 @@ def save_ad_control_rule_group(payload, session):
                     json.dumps(rules, ensure_ascii=False),
                     json.dumps(strategy, ensure_ascii=False),
                     enabled,
-                    ad_control_actor(session),
+                    actor,
+                    actor,
+                    object_level,
+                    run_mode,
                 ),
             )
+            obsolete_ids = [item for item in migrate_from_group_ids if item != group_id]
+            if obsolete_ids:
+                placeholders = ",".join(["?"] * len(obsolete_ids))
+                cursor = conn.execute(
+                    "UPDATE ad_control_rule_group "
+                    "SET enabled=0,deleted=1,updated_at=CURRENT_TIMESTAMP "
+                    "WHERE group_id IN (%s) "
+                    "AND COALESCE(NULLIF(owner_user_id,''),created_by)=?" % placeholders,
+                    tuple(obsolete_ids) + (actor,),
+                )
+                if cursor.rowcount != len(obsolete_ids):
+                    raise StructuredApiError("owner_forbidden", "rule group owner forbidden")
             if configuration_changed:
                 conn.execute(
-                    """
-                    UPDATE ad_control_rule_group
-                       SET enabled=0,
-                           last_preview_id='',
-                           last_preview_hash='',
-                           updated_at=CURRENT_TIMESTAMP
-                     WHERE group_id=?
-                    """,
+                    "UPDATE ad_control_rule_group SET enabled=0,last_preview_id='',"
+                    "last_preview_hash='',updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
                     (group_id,),
                 )
             conn.commit()
             row = conn.execute("SELECT * FROM ad_control_rule_group WHERE group_id=?", (group_id,)).fetchone()
             return ad_control_rule_group_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -35225,11 +35590,13 @@ def save_ad_control_binding(payload, session):
     return save_ad_control_rule_group(payload, session)
 
 
-def delete_ad_control_rule_group(group_id):
+def delete_ad_control_rule_group(group_id, owner_user_id=None, internal=False):
     ensure_ad_control_tables()
     group_id = str(group_id or "").strip()
     if not group_id:
         raise StructuredApiError("missing_group_id", "missing rule group id")
+    if not internal:
+        fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=False)
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
@@ -35245,80 +35612,165 @@ def delete_ad_control_rule_group(group_id):
             conn.close()
 
 
-def delete_ad_control_binding(binding_id):
-    return delete_ad_control_rule_group(binding_id)
+def delete_ad_control_binding(binding_id, owner_user_id=None, internal=False):
+    return delete_ad_control_rule_group(binding_id, owner_user_id=owner_user_id, internal=internal)
 
 
-def set_ad_control_rule_group_enabled(group_id, enabled):
+def set_ad_control_rule_group_enabled(
+    group_id, enabled, owner_user_id=None, internal=False, live_mode_confirm=""
+):
     ensure_ad_control_tables()
+    group_id = str(group_id or "").strip()
+    owner_user_id = str(owner_user_id or "").strip()
+
+    def validate_target(group):
+        if not internal:
+            group_owner = str(group.get("owner_user_id") or group.get("created_by") or "")
+            if not owner_user_id or group_owner != owner_user_id:
+                raise StructuredApiError("not_found", "rule group not found")
+        if str(group.get("object_level") or "campaign").lower() == "ad":
+            raise StructuredApiError("phase_not_enabled", "Ad copy phase is not enabled")
+        if (
+            not internal
+            and str(group.get("run_mode") or "observe").lower() == "live"
+            and str(live_mode_confirm or "") != ad_control_copy_service.LIVE_CONFIRMATION
+        ):
+            raise StructuredApiError(
+                "live_mode_confirm_required",
+                "live mode confirmation is required",
+            )
+        if not group.get("preview_ready"):
+            raise StructuredApiError("preview_required", "preview this rule group before enabling it")
+
+    group = fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=internal)
     if enabled:
+        validate_target(group)
         scope = ad_control_resolve_live_scope({"rule_group_id": group_id})
         ad_control_validate_scope_token_access(scope)
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            current_group = ad_control_rule_group_snapshot(conn, group_id)
             if enabled:
-                conn.execute(
+                # Token validation happens outside the SQLite write lock. Re-read
+                # every behavior-affecting field before enabling so a concurrent
+                # save cannot enable a different or stale configuration.
+                validate_target(current_group)
+                if current_group.get("current_preview_hash") != group.get("current_preview_hash"):
+                    raise StructuredApiError("preview_stale", "rule group changed during enable")
+                cursor = conn.execute(
                     """
                     UPDATE ad_control_rule_group
                        SET enabled=1,
                            emergency_stopped=0,
                            updated_at=CURRENT_TIMESTAMP
-                     WHERE group_id=?
+                     WHERE group_id=? AND deleted=0
                     """,
                     (group_id,),
                 )
             else:
-                conn.execute(
+                if not internal:
+                    group_owner = str(current_group.get("owner_user_id") or current_group.get("created_by") or "")
+                    if not owner_user_id or group_owner != owner_user_id:
+                        raise StructuredApiError("not_found", "rule group not found")
+                cursor = conn.execute(
                     """
                     UPDATE ad_control_rule_group
                        SET enabled=0,
                            updated_at=CURRENT_TIMESTAMP
-                     WHERE group_id=?
+                     WHERE group_id=? AND deleted=0
                     """,
                     (group_id,),
                 )
+            if cursor.rowcount != 1:
+                raise StructuredApiError("not_found", "rule group not found")
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
-    return fetch_ad_control_rule_group(group_id)
+    return fetch_ad_control_rule_group(group_id, owner_user_id=owner_user_id, internal=internal)
 
 
-def set_ad_control_binding_enabled(binding_id, enabled):
-    return set_ad_control_rule_group_enabled(binding_id, enabled)
+def set_ad_control_binding_enabled(
+    binding_id, enabled, owner_user_id=None, internal=False, live_mode_confirm=""
+):
+    return set_ad_control_rule_group_enabled(
+        binding_id,
+        enabled,
+        owner_user_id=owner_user_id,
+        internal=internal,
+        live_mode_confirm=live_mode_confirm,
+    )
 
 
-def ad_control_emergency_stop(payload):
-    scope = str(payload.get("scope") or "global").strip()
+def ad_control_emergency_stop(payload, owner_user_id=None, internal=False):
+    payload = dict(payload or {})
+    scope = str(payload.get("scope") or "").strip()
     group_id = str(payload.get("group_id") or "").strip()
+    if scope not in ("rule_group", "global"):
+        raise StructuredApiError("invalid_scope", "invalid emergency stop scope")
+    if scope == "rule_group" and not group_id:
+        raise StructuredApiError("missing_group_id", "missing rule group id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
     ensure_ad_control_tables()
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            if scope == "rule_group" and group_id:
-                conn.execute(
-                    "UPDATE ad_control_rule_group SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
-                    (group_id,),
+            if scope == "rule_group":
+                where = "group_id=? AND deleted=0"
+                params = [group_id]
+                if not internal:
+                    where += " AND COALESCE(NULLIF(owner_user_id,''),created_by)=?"
+                    params.append(owner_user_id)
+                cursor = conn.execute(
+                    "UPDATE ad_control_rule_group "
+                    "SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP "
+                    "WHERE " + where,
+                    tuple(params),
                 )
+                if cursor.rowcount < 1:
+                    raise StructuredApiError("not_found", "rule group not found")
             else:
-                conn.execute(
-                    "UPDATE ad_control_rule_group SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP WHERE deleted=0"
+                where = "deleted=0"
+                params = []
+                if not internal:
+                    where += " AND COALESCE(NULLIF(owner_user_id,''),created_by)=?"
+                    params.append(owner_user_id)
+                cursor = conn.execute(
+                    "UPDATE ad_control_rule_group "
+                    "SET emergency_stopped=1, enabled=0, updated_at=CURRENT_TIMESTAMP "
+                    "WHERE " + where,
+                    tuple(params),
                 )
             conn.commit()
         finally:
             conn.close()
-    return {"message": "stopped", "scope": scope, "group_id": group_id}
+    return {
+        "message": "stopped",
+        "scope": scope,
+        "group_id": group_id,
+        "affected_count": max(0, int(cursor.rowcount or 0)),
+    }
 
 
-def ad_control_runner_status():
+def ad_control_runner_status(owner_user_id=None, internal=False):
     resource = ad_control_resource_snapshot()
-    groups = list_ad_control_rule_groups().get("items", [])
+    groups = list_ad_control_rule_groups(owner_user_id=owner_user_id, internal=internal).get("items", [])
     return {
         "resource": resource,
         "enabled_rule_groups": len([item for item in groups if item.get("enabled")]),
         "emergency_stopped_groups": len([item for item in groups if item.get("emergency_stopped")]),
         "max_workers": AD_CONTROL_LIVE_MAX_WORKERS,
         "resource_limit_percent": AD_CONTROL_RESOURCE_LIMIT_PERCENT,
+        # Copy execution is intentionally not connected in this release.
+        "copy_campaign_enabled": False,
+        "copy_persistence_ready": False,
+        "ad_copy_enabled": False,
     }
 
 
@@ -35712,7 +36164,10 @@ def ad_control_action_audit(item, rule_map=None, include_samples=True):
     }
 
 
-def list_ad_control_actions(limit=50, product="", binding_id="", action="", date_from="", date_to="", include_targets=False):
+def list_ad_control_actions(
+    limit=50, product="", binding_id="", action="", date_from="", date_to="",
+    include_targets=False, owner_user_id=None, internal=False,
+):
     ensure_ad_control_tables()
     limit = ad_control_int(limit, 50, 1, 200)
     product = str(product or "").strip()
@@ -35720,6 +36175,26 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     action = str(action or "").strip()
     date_from = str(date_from or "").strip()
     date_to = str(date_to or "").strip()
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    owned_group_ids = set()
+    if not internal:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                owned_group_ids = {
+                    str(row[0] or "")
+                    for row in conn.execute(
+                        "SELECT group_id FROM ad_control_rule_group "
+                        "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=?",
+                        (owner_user_id,),
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+        if binding_id and binding_id not in owned_group_ids:
+            raise StructuredApiError("not_found", "rule group not found")
     date_from_utc = ad_control_action_log_utc_bound(date_from)
     date_to_utc = ad_control_action_log_utc_bound(date_to, end=True)
     mysql_items = []
@@ -35727,7 +36202,10 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     storage_error = ""
     try:
         mysql_items = ad_control_mysql_action_items(
-            limit, product, binding_id, action, date_from, date_to
+            limit, product, binding_id, action, date_from, date_to,
+            owned_binding_ids=owned_group_ids,
+            legacy_actor_user_id=owner_user_id,
+            owner_filter=not internal,
         )
         mysql_available = True
     except Exception as exc:
@@ -35748,29 +36226,44 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
         where.append("created_at<=?")
         params.append(date_to_utc)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    query_limit = min(1000, max(limit * 5, 200))
     sqlite_items = []
     with JOB_DB_LOCK:
         conn = get_job_db_connection()
         try:
-            rows = conn.execute(
-                """SELECT action_id, preview_id, actor_user_id, action, level, product,
-                          criteria_json, requested_count, success_count, skipped_count,
-                          error_count, dry_run, created_at
-                     FROM ad_control_action %s
-                 ORDER BY created_at DESC LIMIT ?""" % where_sql,
-                tuple(params + [query_limit]),
-            ).fetchall()
-            for row in rows:
-                item = dict(row)
-                item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
-                item["results"] = []
-                item["dry_run"] = bool(item.get("dry_run"))
-                item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
-                item["log_store"] = "sqlite_fallback"
-                if binding_id and item["binding_id"] != binding_id:
-                    continue
-                sqlite_items.append(item)
+            offset = 0
+            batch_size = max(200, min(1000, limit * 10))
+            while len(sqlite_items) < limit:
+                rows = conn.execute(
+                    """SELECT action_id, preview_id, actor_user_id, action, level, product,
+                              criteria_json, requested_count, success_count, skipped_count,
+                              error_count, dry_run, results_json, created_at
+                         FROM ad_control_action %s
+                     ORDER BY created_at DESC, action_id DESC LIMIT ? OFFSET ?""" % where_sql,
+                    tuple(params + [batch_size, offset]),
+                ).fetchall()
+                if not rows:
+                    break
+                offset += len(rows)
+                for row in rows:
+                    item = dict(row)
+                    item["criteria"] = ad_control_safe_json_dict(item.pop("criteria_json", "{}"))
+                    item["results"] = ad_control_safe_json_list(item.pop("results_json", "[]"))
+                    item["dry_run"] = bool(item.get("dry_run"))
+                    item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
+                    item["log_store"] = "sqlite_fallback"
+                    if not internal:
+                        if item["binding_id"]:
+                            if item["binding_id"] not in owned_group_ids:
+                                continue
+                        elif str(item.get("actor_user_id") or "") != owner_user_id:
+                            continue
+                    if binding_id and item["binding_id"] != binding_id:
+                        continue
+                    sqlite_items.append(item)
+                    if len(sqlite_items) >= limit:
+                        break
+                if len(rows) < batch_size:
+                    break
         finally:
             conn.close()
     merged = {}
@@ -35781,16 +36274,119 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     items = sorted(
         merged.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True
     )[:limit]
-    rule_map = ad_control_action_rule_map(items)
+    group_ids = sorted({
+        str(
+            (item.get("criteria") or {}).get("rule_group_id")
+            or (item.get("criteria") or {}).get("binding_id")
+            or item.get("binding_id")
+            or ""
+        ).strip()
+        for item in items
+        if str(
+            (item.get("criteria") or {}).get("rule_group_id")
+            or (item.get("criteria") or {}).get("binding_id")
+            or item.get("binding_id")
+            or ""
+        ).strip()
+    })
+    rule_map = {}
+    if group_ids:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                placeholders = ",".join(["?"] * len(group_ids))
+                rows = conn.execute(
+                    "SELECT group_id,name,rule_set_id,account_group_id "
+                    "FROM ad_control_rule_group WHERE group_id IN (%s)" % placeholders,
+                    tuple(group_ids),
+                ).fetchall()
+                rule_map = {str(row["group_id"] or ""): dict(row) for row in rows}
+            finally:
+                conn.close()
     include_targets = bool(include_targets)
     for item in items:
-        item["audit"] = ad_control_action_audit(item, rule_map, include_samples=include_targets)
-        if item.get("reason_summary"):
-            item["audit"]["reason_summary"] = item.get("reason_summary")
-        item["audit"]["log_store"] = item.get("log_store") or "sqlite_fallback"
+        criteria = item.get("criteria") or {}
+        results = item.get("results") or []
+        execution_summary = criteria.get("execution_summary") or {}
+        group_id = str(
+            criteria.get("rule_group_id")
+            or criteria.get("binding_id")
+            or item.get("binding_id")
+            or ""
+        ).strip()
+        rule_group = rule_map.get(group_id) or {}
+        warning_counts = {}
+        for result in results:
+            for warning in result.get("warnings") or []:
+                warning_text = str(warning or "").strip()
+                if warning_text:
+                    warning_counts[warning_text] = warning_counts.get(warning_text, 0) + 1
+        warning_summary = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                warning_counts.items(), key=lambda value: (-value[1], value[0])
+            )[:8]
+        ]
+        reason_summary = item.get("reason_summary") or ad_control_execution_log_service.reason_summary(results)
+        run_status = str(
+            item.get("run_status")
+            or criteria.get("runner_status")
+            or execution_summary.get("run_status")
+            or ""
+        ).strip().lower()
+        status = {
+            "partial": {"key": "partial", "label": "部分完成，待续跑", "class": "warn"},
+            "blocked": {"key": "blocked", "label": "执行受阻", "class": "danger"},
+            "executed": {"key": "success", "label": "执行完成", "class": "ok"},
+            "error": {"key": "failed", "label": "执行失败", "class": "danger"},
+            "failed": {"key": "failed", "label": "执行失败", "class": "danger"},
+        }.get(run_status)
+        if not status:
+            if int(item.get("error_count") or 0) > 0:
+                status = {"key": "failed", "label": "失败", "class": "danger"}
+            elif item.get("dry_run") and int(item.get("success_count") or 0) > 0:
+                status = {"key": "dry_run_ok", "label": "Dry-run 通过", "class": "warn"}
+            elif int(item.get("success_count") or 0) > 0:
+                status = {"key": "success", "label": "成功", "class": "ok"}
+            else:
+                status = {"key": "noop", "label": "无执行目标", "class": "warn"}
+        item["audit"] = {
+            "status": status,
+            "created_at_local": str(item.get("created_at") or ""),
+            "mode": "dry-run" if item.get("dry_run") else "real",
+            "mode_label": "Dry-run 试跑" if item.get("dry_run") else "正式执行",
+            "action_label": {
+                "pause": "关停", "copy": "复制", "mixed": "关闭/复制",
+                "reopen": "重启", "preview": "预览",
+            }.get(str(item.get("action") or ""), item.get("action") or ""),
+            "rule_group_id": group_id,
+            "rule_group_name": rule_group.get("name") or group_id or "--",
+            "rule_set_id": rule_group.get("rule_set_id") or criteria.get("rule_set_id") or "",
+            "account_group_id": rule_group.get("account_group_id") or criteria.get("account_group_id") or "",
+            "counts": {
+                "requested": int(item.get("requested_count") or 0),
+                "success": int(item.get("success_count") or 0),
+                "skipped": int(item.get("skipped_count") or 0),
+                "error": int(item.get("error_count") or 0),
+            },
+            "flow": {
+                "scanned": int(item.get("scanned_count") or criteria.get("scan_count") or 0),
+                "candidate": int(item.get("candidate_count") or criteria.get("candidate_count") or 0),
+                "matched": int(item.get("matched_count") or criteria.get("execution_target_count") or 0),
+                "batch_planned": int(item.get("batch_planned_count") or criteria.get("execution_batch_count") or item.get("requested_count") or 0),
+                "deferred": int(item.get("deferred_count") or 0),
+                "remaining": int(item.get("remaining_count") or 0),
+                "retryable": int(item.get("retryable_error_count") or 0),
+                "blocked": int(item.get("blocked_count") or 0),
+            },
+            "reason_summary": reason_summary,
+            "warning_summary": warning_summary,
+            "samples": [],
+            "raw_result_count": len(results),
+            "log_store": item.get("log_store") or "sqlite_fallback",
+        }
         if not include_targets:
             item["results"] = []
-            item["audit"]["samples"] = []
     return {
         "items": items,
         "storage": "ads_ai" if mysql_available else "sqlite_fallback",
@@ -35798,14 +36394,45 @@ def list_ad_control_actions(limit=50, product="", binding_id="", action="", date
     }
 
 
-def fetch_ad_control_action(action_id):
+def fetch_ad_control_action(action_id, owner_user_id=None, internal=False):
     action_id = str(action_id or "").strip()
     if not action_id:
         raise StructuredApiError("missing_action_id", "缺少 action_id")
+    owner_user_id = str(owner_user_id or "").strip()
+    if not internal and not owner_user_id:
+        raise StructuredApiError("missing_owner", "current user is required")
+    owned_group_ids = set()
+    if not internal:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                owned_group_ids = {
+                    str(row[0] or "")
+                    for row in conn.execute(
+                        "SELECT group_id FROM ad_control_rule_group "
+                        "WHERE COALESCE(NULLIF(owner_user_id,''),created_by)=?",
+                        (owner_user_id,),
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+
+    def visible(item):
+        if internal:
+            return True
+        group_ref = str(item.get("binding_id") or (item.get("criteria") or {}).get("rule_group_id") or "")
+        if group_ref:
+            return group_ref in owned_group_ids
+        return str(item.get("actor_user_id") or "") == owner_user_id
+
     try:
         item = ad_control_mysql_action(action_id)
         if item:
-            return item
+            if visible(item):
+                return item
+            raise StructuredApiError("action_not_found", "执行日志不存在")
+    except StructuredApiError:
+        raise
     except Exception:
         logging.exception("failed to fetch ads_ai ad-control action log action_id=%s", action_id)
     with JOB_DB_LOCK:
@@ -35822,11 +36449,15 @@ def fetch_ad_control_action(action_id):
     item["dry_run"] = bool(item.get("dry_run"))
     item["binding_id"] = item["criteria"].get("binding_id") or item["criteria"].get("rule_group_id") or ""
     item["log_store"] = "sqlite_fallback"
+    if not visible(item):
+        raise StructuredApiError("action_not_found", "执行日志不存在")
     return item
 
 
-def get_ad_control_action_targets(action_id):
-    item = fetch_ad_control_action(action_id)
+def get_ad_control_action_targets(action_id, owner_user_id=None, internal=False):
+    item = fetch_ad_control_action(
+        action_id, owner_user_id=owner_user_id, internal=internal
+    )
     cache_key = "%s:%s:%s" % (
         item.get("action_id") or "",
         item.get("updated_at") or item.get("created_at") or "",
@@ -36004,7 +36635,10 @@ def ad_control_action_log_utc_bound(value, end=False):
     return (local_dt - timedelta(hours=AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def ad_control_mysql_action_items(limit, product="", binding_id="", action="", date_from="", date_to=""):
+def ad_control_mysql_action_items(
+    limit, product="", binding_id="", action="", date_from="", date_to="",
+    owned_binding_ids=None, legacy_actor_user_id="", owner_filter=False,
+):
 
     return ad_control_execution_log_service.list_actions(
         ad_control_action_log_reader_config(),
@@ -36014,6 +36648,9 @@ def ad_control_mysql_action_items(limit, product="", binding_id="", action="", d
             "action": action,
             "date_from": ad_control_action_log_utc_bound(date_from),
             "date_to": ad_control_action_log_utc_bound(date_to, end=True),
+            "owned_binding_ids": list(owned_binding_ids or []),
+            "legacy_actor_user_id": legacy_actor_user_id,
+            "owner_filter": bool(owner_filter),
         },
         limit=limit,
         table=AD_CONTROL_ACTION_LOG_TABLE,
@@ -36310,6 +36947,122 @@ def ad_control_product_campaign_whitelist(product, account_ids):
     return out
 
 
+def ad_control_account_campaign_whitelists(account_ids):
+    """Return account -> source product -> Campaign for account-only groups."""
+    accounts = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
+    if not accounts:
+        return {}
+    columns = (
+        "id,ad_account_id,product,campaign_id,campaign_name,country,language,updated_at"
+    )
+    sources = [
+        "SELECT 'kunlunads_dev' AS source_schema,%s FROM %s" % (
+            columns, ad_control_table("ads_facebook_auto_created_data")
+        )
+    ]
+    sql = """
+        SELECT
+          {account_norm}, COALESCE(CAST(d.product AS CHAR),''), CAST(d.campaign_id AS CHAR),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.campaign_name,'') ORDER BY d.updated_at DESC SEPARATOR '\n'), '\n', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.country,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(d.language,'') ORDER BY d.updated_at DESC SEPARATOR ','), ',', 1), ''),
+          COALESCE(MAX(CAST(s.time_zone AS CHAR)), ''),
+          GROUP_CONCAT(CONCAT(d.source_schema, ':', d.id) ORDER BY d.updated_at DESC SEPARATOR ',')
+        FROM ({sources}) d
+        LEFT JOIN {accounts_table} s
+          ON s.platform_id=1 AND {account_norm}= {setting_norm}
+        WHERE d.campaign_id IS NOT NULL AND d.campaign_id<>''
+          AND {account_norm} IN {accounts}
+        GROUP BY {account_norm}, COALESCE(CAST(d.product AS CHAR),''), CAST(d.campaign_id AS CHAR)
+    """.format(
+        account_norm=ad_control_norm_account_sql("d.ad_account_id"),
+        setting_norm=ad_control_norm_account_sql("s.account_id"),
+        sources=" UNION ALL ".join(sources),
+        accounts_table=ad_control_table("ads_accounts_setting"),
+        accounts=ad_control_sql_in(accounts),
+    )
+    rows = run_mysql(" ".join(sql.split()))
+    out = {}
+    for row in rows:
+        account_id = ad_control_normalize_account(row[0])
+        product = str(row[1] or "").strip()
+        campaign_id = str(row[2] or "").strip()
+        if not account_id or not product or not campaign_id:
+            continue
+        out.setdefault(account_id, {}).setdefault(product, {})[campaign_id] = {
+            "campaign_name": str(row[3] or ""),
+            "country": str(row[4] or ""),
+            "language": str(row[5] or ""),
+            "account_time_zone": str(row[6] or ""),
+            "created_data_refs": ad_control_list(row[7]),
+        }
+    return out
+
+
+def ad_control_drama_schema_snapshot():
+    """Cache the two stable schema probes shared by preview worker threads."""
+    with AD_CONTROL_DRAMA_SCHEMA_CACHE_LOCK:
+        if AD_CONTROL_DRAMA_SCHEMA_CACHE:
+            return {
+                "insight_columns": set(AD_CONTROL_DRAMA_SCHEMA_CACHE.get("insight_columns") or []),
+                "drama_columns": set(AD_CONTROL_DRAMA_SCHEMA_CACHE.get("drama_columns") or []),
+            }
+        snapshot = {
+            "insight_columns": set(mysql_table_columns("ads_custom_source_hours_insights", AD_CONTROL_DB_NAME)),
+            "drama_columns": set(mysql_table_columns("ads_drama_info", AD_CONTROL_DB_NAME)),
+        }
+        AD_CONTROL_DRAMA_SCHEMA_CACHE.update(snapshot)
+        return snapshot
+
+
+def ad_control_campaign_drama_context(created_data_refs, schema_snapshot=None):
+    """Resolve drama identity without guessing from Campaign names."""
+    source_ids = []
+    for ref in created_data_refs or []:
+        schema, separator, row_id = str(ref or "").partition(":")
+        if separator and schema == "kunlunads_dev" and row_id.isdigit():
+            source_ids.append(row_id)
+    if not source_ids:
+        return {"drama_mapping_reason": "missing_drama_mapping"}
+    schema_snapshot = schema_snapshot or ad_control_drama_schema_snapshot()
+    insight_columns = set(schema_snapshot.get("insight_columns") or [])
+    drama_columns = set(schema_snapshot.get("drama_columns") or [])
+    if not {"created_data_id", "series_code"}.issubset(insight_columns) or "series_code" not in drama_columns:
+        return {"drama_mapping_reason": "missing_drama_mapping_schema"}
+    select_content = "CAST(di.content_id AS CHAR)" if "content_id" in drama_columns else "''"
+    select_published = "CAST(di.published_at AS CHAR)" if "published_at" in drama_columns else "''"
+    select_deploy = "CAST(di.deploy_time AS CHAR)" if "deploy_time" in drama_columns else "''"
+    rows = run_mysql(" ".join("""
+        SELECT CAST(h.series_code AS CHAR), {content}, {published}, {deploy}
+          FROM {hours} h
+     LEFT JOIN {drama} di ON CAST(di.series_code AS CHAR)=CAST(h.series_code AS CHAR)
+         WHERE CAST(h.created_data_id AS CHAR) IN {ids}
+           AND COALESCE(CAST(h.series_code AS CHAR),'')<>''
+         ORDER BY h.created_data_id DESC
+         LIMIT 20
+    """.format(
+        content=select_content,
+        published=select_published,
+        deploy=select_deploy,
+        hours=ad_control_table("ads_custom_source_hours_insights"),
+        drama=ad_control_table("ads_drama_info"),
+        ids=ad_control_sql_in(source_ids),
+    ).split()))
+    identities = {(str(row[0] or ""), str(row[1] or "")) for row in rows if row and str(row[0] or "")}
+    if not identities:
+        return {"drama_mapping_reason": "missing_drama_mapping"}
+    if len(identities) != 1:
+        return {"drama_mapping_reason": "ambiguous_drama_mapping"}
+    series_code, content_id = next(iter(identities))
+    latest = rows[0]
+    return {
+        "series_code": series_code,
+        "content_id": content_id,
+        "published_at": str(latest[2] or ""),
+        "deploy_time": str(latest[3] or ""),
+    }
+
+
 def ad_control_graph_paged_get(token, object_id, edge, params):
     url = "https://graph.facebook.com/%s/%s/%s" % (AD_CONTROL_GRAPH_VERSION, object_id, edge)
     params = dict(params or {})
@@ -36495,6 +37248,10 @@ def ad_control_match_condition(item, condition):
     field = condition.get("field")
     field_key = str(field or "").strip()
     op = str(condition.get("op") or condition.get("operator") or "eq").lower()
+    op = {
+        ">=": "gte", "<=": "lte", ">": "gt", "<": "lt",
+        "=": "eq", "==": "eq", "!=": "ne",
+    }.get(op, op)
     actual = ad_control_condition_value(item, field)
     expected = condition.get("value")
     if op in ("exists", "present"):
@@ -36553,35 +37310,23 @@ def ad_control_match_condition(item, condition):
 
 
 def ad_control_evaluate_rules(item, rules):
-    matched = []
-    target_action = "observe"
-    for rule in rules or []:
-        if not isinstance(rule, dict) or rule.get("enabled") is False:
-            continue
-        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), list) else []
-        if conditions and not all(ad_control_match_condition(item, condition) for condition in conditions):
-            continue
-        action = str(rule.get("action") or "observe").lower()
-        if action in ("pause", "close", "stop"):
-            action = "pause"
-            target_action = "pause"
-        else:
-            action = "observe"
-        matched.append({"name": rule.get("name") or "", "action": action})
-    return {"matched_rules": matched, "target_action": target_action if matched else "none"}
+    return ad_control_copy_service.evaluate_rule_actions(item, rules or [], ad_control_match_condition)
 
 
 def ad_control_resolve_live_scope(payload):
     group = None
     if payload.get("rule_group_id"):
-        group = fetch_ad_control_rule_group(payload.get("rule_group_id"))
-        product = group["product"]
+        group = fetch_ad_control_rule_group(payload.get("rule_group_id"), internal=True)
+        product = group.get("product") or ""
         rules = group.get("rules") or []
         default_window = group.get("rule_set_default_window") or {"type": "since_start"}
         account_group_id = group.get("account_group_id") or ""
         account_ids = list(group.get("account_ids") or [])
         if account_group_id:
-            account_group = list_ad_control_account_groups(product).get("items", [])
+            group_owner = str(group.get("owner_user_id") or group.get("created_by") or "")
+            account_group = list_ad_control_account_groups(
+                product, owner_user_id=group_owner
+            ).get("items", [])
             match = [item for item in account_group if item.get("group_id") == account_group_id]
             if match:
                 account_ids = list(match[0].get("account_ids") or [])
@@ -36590,7 +37335,7 @@ def ad_control_resolve_live_scope(payload):
         rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
         default_window = {"type": "since_start"}
         account_ids = [ad_control_normalize_account(item) for item in ad_control_list(payload.get("account_ids") or payload.get("accounts"))]
-    if not product:
+    if not product and not group:
         raise StructuredApiError("missing_product", "missing product")
     account_ids = [ad_control_normalize_account(item) for item in account_ids if ad_control_normalize_account(item)]
     if not account_ids:
@@ -36610,11 +37355,43 @@ def ad_control_resolve_live_scope(payload):
         "rule_group_id": (group or {}).get("group_id") or str(payload.get("rule_group_id") or ""),
         "strategy": strategy,
         "window": payload.get("window") if isinstance(payload.get("window"), dict) else default_window,
+        "object_level": (group or {}).get("object_level") or "campaign",
+        "run_mode": (group or {}).get("run_mode") or "observe",
+        "owner_user_id": (group or {}).get("owner_user_id") or (group or {}).get("created_by") or "",
+        "scheduled": bool(payload.get("scheduled")),
     }
 
 
-def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
+def ad_control_collect_live_account(scope, account_id, token_config, whitelist, source_product=None):
     account_id = ad_control_normalize_account(account_id)
+    source_product = str(source_product if source_product is not None else scope.get("product") or "").strip()
+    if not whitelist:
+        return {"account_id": account_id, "items": [], "errors": [{"reason": "no_product_campaign_whitelist"}]}
+    if scope.get("scheduled"):
+        timezones = {
+            str((value or {}).get("account_time_zone") or "").strip()
+            for value in whitelist.values()
+            if str((value or {}).get("account_time_zone") or "").strip()
+        }
+        account_time_zone = next(iter(timezones)) if len(timezones) == 1 else ""
+        due, schedule_reason = ad_control_account_schedule_due(
+            scope.get("strategy") or {}, account_time_zone
+        )
+        if not due:
+            errors = []
+            if schedule_reason in (
+                "unknown_account_timezone", "missing_execute_time",
+            ):
+                errors.append({"reason": schedule_reason})
+            return {
+                "account_id": account_id,
+                "items": [],
+                "errors": errors,
+                "active_count": 0,
+                "candidate_count": 0,
+                "missing_start_count": 0,
+                "schedule_reason": schedule_reason,
+            }
     token_user_id = str((token_config or {}).get("user_id") or "").strip()
     token = ad_control_token_for_user_id(token_user_id)
     if not token:
@@ -36630,17 +37407,19 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
     missing = []
     cached_missing = []
     for campaign_id in campaign_ids:
-        start = ad_control_get_cached_campaign_start(scope["product"], account_id, campaign_id)
+        start = ad_control_get_cached_campaign_start(source_product, account_id, campaign_id)
         if start.get("campaign_start_at"):
             starts[campaign_id] = start
         else:
             cached_missing.append(campaign_id)
     if cached_missing:
-        bulk_starts = ad_control_query_campaign_starts(scope["product"], account_id, cached_missing)
+        bulk_starts = ad_control_query_campaign_starts(source_product, account_id, cached_missing)
         for campaign_id in cached_missing:
             start = bulk_starts.get(str(campaign_id)) or {}
             if start.get("campaign_start_at"):
-                starts[campaign_id] = ad_control_set_cached_campaign_start(scope["product"], account_id, campaign_id, start)
+                starts[campaign_id] = ad_control_set_cached_campaign_start(
+                    source_product, account_id, campaign_id, start
+                )
             else:
                 missing.append(campaign_id)
     metrics_by_campaign = {}
@@ -36658,12 +37437,12 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
         age_hours = ad_control_age_hours(start.get("campaign_start_at"))
         metrics = metrics_by_campaign.get(campaign_id) or {}
         item = {
-            "product": scope["product"],
+            "product": source_product,
             "level": "campaign",
             "account_id": account_id,
             "campaign_id": campaign_id,
             "object_id": campaign_id,
-            "object_key": "%s:campaign:%s:%s" % (scope["product"], account_id, campaign_id),
+            "object_key": "%s:campaign:%s:%s" % (source_product, account_id, campaign_id),
             "campaign_name": campaign.get("name") or whitelist_item.get("campaign_name", ""),
             "country": whitelist_item.get("country", ""),
             "language": whitelist_item.get("language", ""),
@@ -36675,9 +37454,18 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
             "age_hours": age_hours,
             "metrics": metrics,
             "token_user_id": token_user_id,
-            "skip_reason": "",
+            "created_data_refs": list(whitelist_item.get("created_data_refs") or []),
+            "skip_reason": "" if age_hours is not None else "missing_campaign_start_at",
         }
-        decision = ad_control_evaluate_rules(item, scope.get("rules") or [])
+        needs_drama_context = any(
+            isinstance(rule, dict)
+            and str(rule.get("action") or "").lower() == "copy"
+            and str((rule.get("drama_scope") or {}).get("type") if isinstance(rule.get("drama_scope"), dict) else rule.get("drama_scope") or "all").lower() != "all"
+            for rule in scope.get("rules") or []
+        )
+        if needs_drama_context and not item.get("skip_reason"):
+            item.update(ad_control_campaign_drama_context(item.get("created_data_refs") or []))
+        decision = ad_control_evaluate_rules(item, scope.get("rules") or []) if age_hours is not None and not item.get("skip_reason") else {"matched_rules": [], "target_action": "none"}
         item.update(decision)
         items.append(item)
     return {
@@ -36690,54 +37478,149 @@ def ad_control_collect_live_account(scope, account_id, token_config, whitelist):
     }
 
 
-def create_ad_control_live_preview(payload, session):
+def ad_control_account_schedule_due(strategy, account_time_zone, now_utc=None):
+    return ad_control_copy_service.schedule_due(
+        strategy or {}, account_time_zone, now_utc=now_utc
+    )
+
+
+def create_ad_control_live_preview(payload, session, internal=False):
     ensure_ad_control_tables()
+    actor = ad_control_actor(session)
+    if payload.get("rule_group_id") and not internal:
+        fetch_ad_control_rule_group(payload.get("rule_group_id"), owner_user_id=actor, internal=False)
     scope = ad_control_resolve_live_scope(payload or {})
+    if scope.get("object_level") == "ad":
+        preview_id = uuid.uuid4().hex
+        preview_hash = ad_control_rule_hash({
+            "product": scope.get("product") or "",
+            "accounts": scope["account_ids"],
+            "rules": scope["rules"],
+            "object_level": "ad",
+            "run_mode": scope.get("run_mode") or "observe",
+            "rule_group_id": scope.get("rule_group_id"),
+        })
+        expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+        criteria = {
+            "mode": "live", "product": scope.get("product") or "", "accounts": scope["account_ids"],
+            "rules": scope["rules"], "object_level": "ad", "run_mode": scope.get("run_mode") or "observe",
+            "rule_group_id": scope.get("rule_group_id"), "binding_id": scope.get("rule_group_id"),
+            "owner_user_id": scope.get("owner_user_id") or actor,
+            "preview_hash": preview_hash, "execution_target_count": 0, "execution_batch_count": 0,
+            "scheduled": bool(payload.get("scheduled")),
+            "phase_not_enabled": True,
+        }
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO ad_control_preview (
+                      preview_id, actor_user_id, action, level, product, criteria_json,
+                      sample_json, total_count, created_at, expires_at
+                    ) VALUES (?, ?, 'mixed', 'ad', ?, ?, '[]', 0, CURRENT_TIMESTAMP, ?)
+                    """,
+                    (preview_id, actor, scope.get("product") or "", json.dumps(criteria, ensure_ascii=False), expires_at),
+                )
+                if scope.get("rule_group_id"):
+                    conn.execute(
+                        "UPDATE ad_control_rule_group SET last_preview_id=?,last_preview_hash=?,updated_at=CURRENT_TIMESTAMP WHERE group_id=?",
+                        (preview_id, preview_hash, scope.get("rule_group_id")),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        return {
+            "preview_id": preview_id, "preview_hash": preview_hash, "expires_at": expires_at,
+            "product": scope.get("product") or "", "account_count": len(scope["account_ids"]),
+            "total": 0, "pause_count": 0, "copy_count": 0, "execution_count": 0,
+            "execution_remaining_count": 0, "observe_count": 0, "shadowed_count": 0,
+            "error_count": 1, "errors": [{"reason": "phase_not_enabled", "object_level": "ad"}],
+            "items": [], "remaining_count": 0, "run_mode": scope.get("run_mode") or "observe",
+            "object_level": "ad", "phase_not_enabled": True,
+        }
     resource = ad_control_resource_snapshot()
-    whitelist_by_account = ad_control_product_campaign_whitelist(scope["product"], scope["account_ids"])
-    token_configs = ad_control_token_config_for_accounts(scope["product"], scope["account_ids"])
-    workers = min(max(1, AD_CONTROL_LIVE_MAX_WORKERS), len(scope["account_ids"]))
+    jobs = []
+    pre_errors = []
+    if scope.get("product"):
+        whitelist_by_account = ad_control_product_campaign_whitelist(scope["product"], scope["account_ids"])
+        token_configs = ad_control_token_config_for_accounts(scope["product"], scope["account_ids"])
+        for account_id in scope["account_ids"]:
+            jobs.append((
+                account_id, scope["product"], token_configs.get(account_id) or {},
+                whitelist_by_account.get(account_id) or {},
+            ))
+    else:
+        whitelists = ad_control_account_campaign_whitelists(scope["account_ids"])
+        whitelists, pre_errors = ad_control_copy_service.deduplicate_account_product_campaigns(whitelists)
+        products = sorted({product for account in whitelists.values() for product in account.keys()})
+        configs_by_product = {
+            product: ad_control_token_config_for_accounts(product, scope["account_ids"])
+            for product in products
+        }
+        for account_id in scope["account_ids"]:
+            for product, whitelist in sorted((whitelists.get(account_id) or {}).items()):
+                jobs.append((
+                    account_id, product,
+                    (configs_by_product.get(product) or {}).get(account_id) or {},
+                    whitelist,
+                ))
+    workers = min(max(1, AD_CONTROL_LIVE_MAX_WORKERS), max(1, len(jobs)))
     if resource.get("over_limit"):
         workers = 1
     account_results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {}
-        for account_id in scope["account_ids"]:
+        for account_id, source_product, token_config, whitelist in jobs:
             future = executor.submit(
                 ad_control_collect_live_account,
                 scope,
                 account_id,
-                token_configs.get(account_id) or {},
-                whitelist_by_account.get(account_id) or {},
+                token_config,
+                whitelist,
+                source_product,
             )
-            future_map[future] = account_id
+            future_map[future] = (account_id, source_product)
         for future in concurrent.futures.as_completed(future_map):
-            account_id = future_map[future]
+            account_id, source_product = future_map[future]
             try:
                 account_results.append(future.result())
             except Exception as exc:
-                logging.exception("ad control live preview account failed: %s", account_id)
-                account_results.append({"account_id": account_id, "items": [], "errors": [{"reason": str(exc)}]})
+                logging.exception("ad control live preview account failed: %s product=%s", account_id, source_product)
+                account_results.append({"account_id": account_id, "items": [], "errors": [{"reason": str(exc), "product": source_product}]})
     items = []
-    errors = []
+    errors = list(pre_errors)
     for result in account_results:
         items.extend(result.get("items") or [])
         for err in result.get("errors") or []:
             err["account_id"] = result.get("account_id")
             errors.append(err)
+    selection_group = dict(scope.get("rule_group") or {})
+    selection_group["rules"] = scope.get("rules") or []
+    selection_group["strategy"] = scope.get("strategy") or {}
+    items = ad_control_copy_service.apply_copy_candidate_selection(selection_group, items)
+    outside_top_n_items = [
+        item for item in items
+        if item.get("candidate_selection_reason") == "outside_top_n"
+    ]
     total = len(items)
     pause_items = [item for item in items if item.get("target_action") == "pause"]
-    pause_items.sort(key=lambda item: (
+    copy_items = [item for item in items if item.get("target_action") == "copy"]
+    action_items = pause_items + copy_items
+    action_items.sort(key=lambda item: (
+        0 if item.get("target_action") == "pause" else 1,
         ad_control_normalize_account(item.get("account_id")),
         str(item.get("campaign_id") or item.get("object_id") or ""),
     ))
     pause_count = len(pause_items)
+    copy_count = len(copy_items)
     execution_items = ad_control_execution_log_service.balanced_execution_items(
-        pause_items,
+        action_items,
         max_total=AD_CONTROL_MAX_LIVE_EXECUTE,
         max_per_account=AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT,
     )
     observe_count = len([item for item in items if item.get("target_action") == "observe"])
+    shadowed_count = sum(int(item.get("shadowed_count") or 0) for item in items)
     preview_id = uuid.uuid4().hex
     preview_hash = ad_control_live_scope_hash(scope)
     expires_at = (datetime.utcnow() + timedelta(seconds=AD_CONTROL_PREVIEW_TTL_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
@@ -36748,12 +37631,16 @@ def create_ad_control_live_preview(payload, session):
         "rules": scope["rules"],
         "window": scope.get("window"),
         "strategy": scope.get("strategy") or {},
+        "object_level": scope.get("object_level") or "campaign",
+        "run_mode": scope.get("run_mode") or "observe",
         "rule_group_id": scope.get("rule_group_id"),
         "binding_id": scope.get("rule_group_id"),
+        "owner_user_id": scope.get("owner_user_id") or ad_control_actor(session),
         "preview_hash": preview_hash,
-        "execution_target_count": pause_count,
+        "scheduled": bool(payload.get("scheduled")),
+        "execution_target_count": pause_count + copy_count,
         "execution_batch_count": len(execution_items),
-        "execution_truncated": pause_count > len(execution_items),
+        "execution_truncated": pause_count + copy_count > len(execution_items),
         "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),
         "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),
         "preview_error_count": len(errors),
@@ -36772,8 +37659,8 @@ def create_ad_control_live_preview(payload, session):
                 (
                     preview_id,
                     ad_control_actor(session),
-                    "pause",
-                    "campaign",
+                    "mixed" if copy_count else "pause",
+                    scope.get("object_level") or "campaign",
                     scope["product"],
                     json.dumps(criteria, ensure_ascii=False),
                     json.dumps(execution_items, ensure_ascii=False),
@@ -36803,21 +37690,80 @@ def create_ad_control_live_preview(payload, session):
         "scan_count": sum(int(result.get("active_count") or 0) for result in account_results),
         "candidate_count": sum(int(result.get("candidate_count") or 0) for result in account_results),
         "pause_count": pause_count,
+        "copy_count": copy_count,
         "execution_count": len(execution_items),
-        "execution_remaining_count": max(0, pause_count - len(execution_items)),
+        "execution_remaining_count": max(0, pause_count + copy_count - len(execution_items)),
         "observe_count": observe_count,
+        "shadowed_count": shadowed_count,
+        "outside_top_n_count": len(outside_top_n_items),
+        "run_mode": scope.get("run_mode") or "observe",
+        "object_level": scope.get("object_level") or "campaign",
         "error_count": len(errors),
         "resource": resource,
         "strategy": scope.get("strategy") or {},
         "items": execution_items[:200],
+        "observations": outside_top_n_items[:200],
         "errors": errors[:100],
         "remaining_count": max(0, total - min(total, 200)),
     }
 
 
+def ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=False):
+    """Fail closed when a saved group no longer matches the executable preview."""
+    group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+    if not group_id:
+        if require_enabled:
+            raise StructuredApiError("rule_group_required", "formal execution requires a saved rule group")
+        return None
+    group = ad_control_rule_group_snapshot(conn, group_id)
+    expected_owner = str(criteria.get("owner_user_id") or "").strip()
+    group_owner = str(group.get("owner_user_id") or group.get("created_by") or "").strip()
+    expected_hash = str(criteria.get("preview_hash") or "").strip()
+    if expected_owner and group_owner != expected_owner:
+        raise StructuredApiError("preview_stale", "rule group owner changed after preview")
+    if (
+        str(group.get("last_preview_id") or "") != str(preview.get("preview_id") or "")
+        or str(group.get("last_preview_hash") or "") != expected_hash
+        or str(group.get("current_preview_hash") or "") != expected_hash
+    ):
+        raise StructuredApiError("preview_stale", "rule group changed after preview")
+    if require_enabled and (not group.get("enabled") or group.get("emergency_stopped")):
+        raise StructuredApiError("rule_group_not_active", "rule group is disabled or emergency stopped")
+    return group
+
+
+def ad_control_guarded_campaign_pause(preview, criteria, token, item, account_id):
+    """Revalidate freshness under a cross-process SQLite write lock before Meta POST."""
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=True)
+            meta = ad_control_graph_get(
+                token, item.get("campaign_id"), "account_id,status,effective_status,name"
+            )
+            meta_account = ad_control_normalize_account(meta.get("account_id"))
+            if meta_account and meta_account != account_id:
+                conn.commit()
+                return {"meta": meta, "skip_reason": "account_owner_mismatch"}
+            if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                conn.commit()
+                return {"meta": meta, "skip_reason": "not_active"}
+            payload_result = ad_control_graph_set_status(token, item.get("campaign_id"), "PAUSED")
+            conn.commit()
+            return {"meta": meta, "payload_result": payload_result}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 def execute_ad_control_live(payload, session):
     ensure_ad_control_tables()
     preview = fetch_ad_control_preview(payload.get("preview_id"))
+    if str(preview.get("actor_user_id") or "") != ad_control_actor(session):
+        raise StructuredApiError("not_found", "preview not found")
     criteria = ad_control_safe_json_dict(preview.get("criteria_json"))
     if criteria.get("mode") != "live":
         raise StructuredApiError("invalid_preview", "preview is not a live preview")
@@ -36825,28 +37771,99 @@ def execute_ad_control_live(payload, session):
     confirmed_hash = str(payload.get("preview_hash") or "").strip()
     if not expected_hash or confirmed_hash != expected_hash:
         raise StructuredApiError("preview_hash_mismatch", "preview hash confirmation is required")
+    requested_group_id = str(payload.get("rule_group_id") or "").strip()
+    preview_group_id = str(criteria.get("rule_group_id") or criteria.get("binding_id") or "").strip()
+    if requested_group_id and requested_group_id != preview_group_id:
+        raise StructuredApiError("preview_group_mismatch", "preview does not belong to this rule group")
     dry_run = bool(payload.get("dry_run", True))
-    if not dry_run and str(payload.get("confirm") or "") != "EXECUTE_LIVE_PAUSE":
-        raise StructuredApiError("confirm_required", "explicit confirmation required")
+    run_mode = str(criteria.get("run_mode") or "live").lower()
+    if str(criteria.get("object_level") or "campaign").lower() == "ad":
+        raise StructuredApiError("phase_not_enabled", "Ad copy phase is not enabled")
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=False)
+        finally:
+            conn.close()
     items = ad_control_safe_json_list(preview.get("sample_json"))[:AD_CONTROL_MAX_LIVE_EXECUTE]
+    has_copy = any(str(item.get("target_action") or "").lower() == "copy" for item in items)
+    accepted_confirmations = {"EXECUTE_LIVE_PAUSE"}
+    if has_copy:
+        accepted_confirmations.add("EXECUTE_LIVE_RULE_GROUP")
+    if run_mode == "live" and not dry_run and str(payload.get("confirm") or "") not in accepted_confirmations:
+        raise StructuredApiError("confirm_required", "explicit confirmation required")
+    if run_mode == "live" and not dry_run:
+        with JOB_DB_LOCK:
+            conn = get_job_db_connection()
+            try:
+                ad_control_validate_live_preview_group(conn, preview, criteria, require_enabled=True)
+            finally:
+                conn.close()
     action_id = uuid.uuid4().hex
-    token_configs = ad_control_token_config_for_accounts(criteria.get("product"), criteria.get("accounts") or [])
+    pre_results = []
+    pause_items = []
+    for item in items:
+        target_action = str(item.get("target_action") or "").lower()
+        base = {
+            "object_key": item.get("object_key") or "",
+            "object_id": item.get("object_id") or item.get("campaign_id") or item.get("ad_id") or "",
+            "account_id": ad_control_normalize_account(item.get("account_id")),
+            "campaign_id": str(item.get("campaign_id") or item.get("object_id") or ""),
+            "campaign_name": item.get("campaign_name") or "",
+            "target_action": target_action,
+            "target_rule_id": item.get("target_rule_id") or "",
+        }
+        if run_mode != "live":
+            pre_results.append(dict(
+                base,
+                status="observed",
+                reason="would_%s" % target_action if target_action in ("pause", "copy") else "observe_mode",
+            ))
+        elif target_action == "copy":
+            pre_results.append(dict(
+                base,
+                status="skipped",
+                reason="phase_not_enabled" if criteria.get("object_level") == "ad" else "copy_persistence_not_configured",
+            ))
+        elif target_action == "pause":
+            pause_items.append(item)
+        else:
+            pre_results.append(dict(base, status="skipped", reason="not_write_target"))
+
+    token_configs = (
+        ad_control_token_config_for_accounts(criteria.get("product"), criteria.get("accounts") or [])
+        if pause_items and criteria.get("product") else {}
+    )
     token_by_user = {}
     token_by_account = {}
     selected_accounts = []
-    for item in items:
+    for item in pause_items:
         account_id = ad_control_normalize_account(item.get("account_id"))
         if account_id and account_id not in selected_accounts:
             selected_accounts.append(account_id)
     for account_id in selected_accounts:
-        user_id = str((token_configs.get(account_id) or {}).get("user_id") or "").strip()
+        account_item = next(
+            (item for item in pause_items if ad_control_normalize_account(item.get("account_id")) == account_id),
+            {},
+        )
+        user_id = str(
+            account_item.get("token_user_id")
+            or (token_configs.get(account_id) or {}).get("user_id")
+            or ""
+        ).strip()
         if user_id and user_id not in token_by_user:
             token_by_user[user_id] = ad_control_token_for_user_id(user_id)
         token_by_account[account_id] = token_by_user.get(user_id, "")
-    whitelist_by_account = ad_control_product_campaign_whitelist(criteria.get("product"), selected_accounts)
+    enforce_product_whitelist = bool(selected_accounts and criteria.get("product"))
+    if enforce_product_whitelist:
+        whitelist_by_account = ad_control_product_campaign_whitelist(
+            criteria.get("product"), selected_accounts
+        )
+    else:
+        whitelist_by_account = {}
     grouped = {}
     order = {}
-    for index, item in enumerate(items):
+    for index, item in enumerate(pause_items):
         account_id = ad_control_normalize_account(item.get("account_id"))
         grouped.setdefault(account_id, []).append(item)
         order[item.get("object_key") or "%s:%s" % (account_id, item.get("campaign_id"))] = index
@@ -36886,31 +37903,37 @@ def execute_ad_control_live(payload, session):
                 "campaign_id": campaign_id,
                 "campaign_name": item.get("campaign_name") or "",
             }
-            if item.get("target_action") != "pause":
-                account_results.append(dict(base, status="skipped", reason="not_pause_target"))
-                continue
             if item.get("skip_reason"):
                 account_results.append(dict(base, status="skipped", reason=item.get("skip_reason")))
                 continue
-            if campaign_id not in whitelist:
+            if enforce_product_whitelist and campaign_id not in whitelist:
                 account_results.append(dict(base, status="skipped", reason="outside_product_whitelist"))
                 continue
             if not token:
                 account_results.append(dict(base, status="skipped", reason="missing_meta_token"))
                 continue
             try:
-                meta = ad_control_graph_get(token, campaign_id, "account_id,status,effective_status,name")
-                meta_account = ad_control_normalize_account(meta.get("account_id"))
-                if not meta_account or meta_account != account_id:
-                    account_results.append(dict(base, status="skipped", reason="account_owner_mismatch", meta=meta))
-                    continue
-                if str(meta.get("effective_status") or "").upper() != "ACTIVE":
-                    account_results.append(dict(base, status="skipped", reason="not_active", meta=meta))
-                    continue
                 if dry_run:
+                    meta = ad_control_graph_get(token, campaign_id, "account_id,status,effective_status,name")
+                    meta_account = ad_control_normalize_account(meta.get("account_id"))
+                    if not meta_account or meta_account != account_id:
+                        account_results.append(dict(base, status="skipped", reason="account_owner_mismatch", meta=meta))
+                        continue
+                    if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                        account_results.append(dict(base, status="skipped", reason="not_active", meta=meta))
+                        continue
                     account_results.append(dict(base, status="dry_run", meta=meta))
                     continue
-                graph_response = ad_control_graph_set_status(token, campaign_id, "PAUSED")
+                guarded = ad_control_guarded_campaign_pause(
+                    preview, criteria, token, item, account_id
+                )
+                meta = guarded.get("meta") or {}
+                if guarded.get("skip_reason"):
+                    account_results.append(dict(
+                        base, status="skipped", reason=guarded.get("skip_reason"), meta=meta
+                    ))
+                    continue
+                graph_response = guarded.get("payload_result") or {}
                 warnings = []
                 try:
                     ad_control_save_object_state(action_id, {
@@ -36956,7 +37979,7 @@ def execute_ad_control_live(payload, session):
                     break
         return account_results
 
-    results = []
+    results = list(pre_results)
     workers = min(max(1, AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS), max(1, len(grouped)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {
@@ -36982,7 +38005,7 @@ def execute_ad_control_live(payload, session):
                     results.append(error_item)
     results.sort(key=lambda item: order.get(item.get("object_key") or "%s:%s" % (item.get("account_id"), item.get("campaign_id")), 10 ** 9))
     success_count = len([item for item in results if item.get("status") in ("success", "dry_run")])
-    skipped_count = len([item for item in results if item.get("status") == "skipped"])
+    skipped_count = len([item for item in results if item.get("status") in ("skipped", "observed")])
     error_count = len([item for item in results if item.get("status") == "error"])
     summary = ad_control_execution_log_service.execution_summary(
         results,
@@ -37007,8 +38030,8 @@ def execute_ad_control_live(payload, session):
                     action_id,
                     preview["preview_id"],
                     ad_control_actor(session),
-                    "pause",
-                    "campaign",
+                    "mixed" if has_copy else "pause",
+                    criteria.get("object_level") or "campaign",
                     criteria.get("product", ""),
                     json.dumps(action_criteria, ensure_ascii=False),
                     len(items),
@@ -90369,7 +91392,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                json_response(self, 200, list_ad_control_rules())
+                json_response(
+                    self, 200,
+                    list_ad_control_rules(owner_user_id=ad_control_actor(self._session())),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90389,7 +91415,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(parsed.query)
-                json_response(self, 200, list_ad_control_account_groups((params.get("product") or [""])[0]))
+                json_response(
+                    self, 200,
+                    list_ad_control_account_groups(
+                        (params.get("product") or [""])[0],
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90399,7 +91431,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(parsed.query)
-                json_response(self, 200, list_ad_control_rule_sets((params.get("product") or [""])[0]))
+                json_response(
+                    self, 200,
+                    list_ad_control_rule_sets(
+                        (params.get("product") or [""])[0],
+                        owner_user_id=ad_control_actor(self._session()),
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90409,7 +91447,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                json_response(self, 200, fetch_ad_control_rule_set(rule_set_id))
+                json_response(
+                    self, 200,
+                    fetch_ad_control_rule_set(
+                        rule_set_id, owner_user_id=ad_control_actor(self._session())
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90419,7 +91462,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(parsed.query)
-                json_response(self, 200, list_ad_control_bindings((params.get("product") or [""])[0]))
+                json_response(self, 200, list_ad_control_bindings(
+                    (params.get("product") or [""])[0], owner_user_id=ad_control_actor(self._session())
+                ))
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90429,7 +91474,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                json_response(self, 200, fetch_ad_control_binding(binding_id))
+                json_response(self, 200, fetch_ad_control_binding(
+                    binding_id, owner_user_id=ad_control_actor(self._session())
+                ))
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90439,7 +91486,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(parsed.query)
-                json_response(self, 200, list_ad_control_rule_groups((params.get("product") or [""])[0]))
+                json_response(self, 200, list_ad_control_rule_groups(
+                    (params.get("product") or [""])[0], owner_user_id=ad_control_actor(self._session())
+                ))
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90448,7 +91497,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                json_response(self, 200, ad_control_runner_status())
+                json_response(self, 200, ad_control_runner_status(
+                    owner_user_id=ad_control_actor(self._session())
+                ))
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90458,7 +91509,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 return
             try:
                 action_id = unquote(parsed.path[len("/api/ad-control/actions/"):-len("/targets")].strip("/"))
-                json_response(self, 200, get_ad_control_action_targets(action_id))
+                json_response(
+                    self,
+                    200,
+                    get_ad_control_action_targets(
+                        action_id, owner_user_id=ad_control_actor(self._session())
+                    ),
+                )
             except Exception as exc:
                 json_response(self, 400, api_error_payload(exc))
             return
@@ -90475,11 +91532,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     list_ad_control_actions(
                         limit=(params.get("limit") or ["50"])[0],
                         product=(params.get("product") or [""])[0],
-                        binding_id=(params.get("binding_id") or [""])[0],
+                        binding_id=(params.get("binding_id") or params.get("group_id") or [""])[0],
                         action=(params.get("action") or [""])[0],
                         date_from=(params.get("date_from") or [""])[0],
                         date_to=(params.get("date_to") or [""])[0],
                         include_targets=include_targets,
+                        owner_user_id=ad_control_actor(self._session()),
                     ),
                 )
             except Exception as exc:
@@ -93234,7 +94292,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             try:
                 rule_id = parsed.path[len("/api/ad-control/rules/"):-len("/enabled")].strip("/")
                 body = self._read_json()
-                payload = set_ad_control_rule_enabled(rule_id, bool(body.get("enabled")))
+                payload = set_ad_control_rule_enabled(
+                    rule_id,
+                    bool(body.get("enabled")),
+                    owner_user_id=ad_control_actor(self._session()),
+                )
                 append_audit_log(
                     self._session(),
                     "set_ad_control_rule_enabled",
@@ -93320,7 +94382,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             try:
                 binding_id = ad_control_parse_binding_path(parsed.path, "/enabled")
                 body = self._read_json()
-                payload = set_ad_control_binding_enabled(binding_id, bool(body.get("enabled")))
+                payload = set_ad_control_binding_enabled(
+                    binding_id,
+                    bool(body.get("enabled")),
+                    owner_user_id=ad_control_actor(self._session()),
+                    live_mode_confirm=body.get("live_mode_confirm") or body.get("confirm") or "",
+                )
                 append_audit_log(self._session(), "set_ad_control_binding_enabled", "ad_control_binding", payload.get("binding_id", ""), {"enabled": payload.get("enabled", False)})
                 json_response(self, 200, payload)
             except Exception as exc:
@@ -93383,7 +94450,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             try:
                 rule_group_id = ad_control_parse_rule_group_path(parsed.path, "/enabled")
                 body = self._read_json()
-                payload = set_ad_control_rule_group_enabled(rule_group_id, bool(body.get("enabled")))
+                payload = set_ad_control_rule_group_enabled(
+                    rule_group_id,
+                    bool(body.get("enabled")),
+                    owner_user_id=ad_control_actor(self._session()),
+                    live_mode_confirm=body.get("live_mode_confirm") or body.get("confirm") or "",
+                )
                 append_audit_log(self._session(), "set_ad_control_rule_group_enabled", "ad_control_rule_group", payload.get("group_id", ""), {"enabled": payload.get("enabled", False)})
                 json_response(self, 200, payload)
             except Exception as exc:
@@ -93428,7 +94500,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                payload = ad_control_emergency_stop(self._read_json())
+                payload = ad_control_emergency_stop(
+                    self._read_json(), owner_user_id=ad_control_actor(self._session())
+                )
                 append_audit_log(self._session(), "ad_control_emergency_stop", "ad_control", payload.get("group_id", ""), payload)
                 json_response(self, 200, payload)
             except Exception as exc:
@@ -93737,7 +94811,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                payload = delete_ad_control_account_group(account_group_id)
+                payload = delete_ad_control_account_group(
+                    account_group_id,
+                    owner_user_id=ad_control_actor(self._session()),
+                )
                 append_audit_log(self._session(), "delete_ad_control_account_group", "ad_control_account_group", account_group_id, {})
                 json_response(self, 200, payload)
             except Exception as exc:
@@ -93749,7 +94826,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                payload = delete_ad_control_rule_set(rule_set_id)
+                payload = delete_ad_control_rule_set(
+                    rule_set_id,
+                    owner_user_id=ad_control_actor(self._session()),
+                )
                 append_audit_log(self._session(), "delete_ad_control_rule_set", "ad_control_rule_set", rule_set_id, {})
                 json_response(self, 200, payload)
             except Exception as exc:
@@ -93761,7 +94841,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                payload = delete_ad_control_binding(binding_id)
+                payload = delete_ad_control_binding(
+                    binding_id, owner_user_id=ad_control_actor(self._session())
+                )
                 append_audit_log(self._session(), "delete_ad_control_binding", "ad_control_binding", binding_id, {})
                 json_response(self, 200, payload)
             except Exception as exc:
@@ -93773,7 +94855,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             if not self._require_module("ad_control_center"):
                 return
             try:
-                payload = delete_ad_control_rule_group(rule_group_id)
+                payload = delete_ad_control_rule_group(
+                    rule_group_id, owner_user_id=ad_control_actor(self._session())
+                )
                 append_audit_log(self._session(), "delete_ad_control_rule_group", "ad_control_rule_group", rule_group_id, {})
                 json_response(self, 200, payload)
             except Exception as exc:

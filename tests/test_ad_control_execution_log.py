@@ -8,10 +8,153 @@ import threading
 import uuid
 from datetime import datetime
 from unittest import mock
+from pathlib import Path
 
 from deploy import apply_ad_control_execution_log_fix as deploy_fix
 from deploy.apply_ad_control_execution_log_fix import replace_once
+from features.ad_control_copy_engine import service as copy_service
 from features.ad_control_execution_log import service
+
+
+class DeployPatchCompatibilityTests(unittest.TestCase):
+    def test_optional_legacy_functions_are_replaced_or_safely_absent(self):
+        absent = "def another_function():\n    return True\n"
+        for name, replacement in (
+            ("ad_control_action_status", deploy_fix.ACTION_STATUS_FUNCTION),
+            ("fetch_ad_control_action", deploy_fix.FETCH_ACTION_FUNCTION),
+        ):
+            with self.subTest(name=name):
+                unchanged, changed = deploy_fix.replace_optional_function(
+                    absent, name, replacement
+                )
+                self.assertFalse(changed)
+                self.assertEqual(absent, unchanged)
+
+                legacy = (
+                    "def %s(item):\n" % name
+                    + "    return 'legacy'\n\n\n"
+                    + "def another_function():\n"
+                    + "    return True\n"
+                )
+                updated, changed = deploy_fix.replace_optional_function(
+                    legacy, name, replacement
+                )
+                self.assertTrue(changed)
+                self.assertIn(replacement, updated)
+                reapplied, changed = deploy_fix.replace_optional_function(
+                    updated, name, replacement
+                )
+                self.assertFalse(changed)
+                self.assertEqual(updated, reapplied)
+
+    def test_optional_legacy_source_block_is_idempotent(self):
+        absent = "current merged target\n"
+        unchanged, changed = deploy_fix.replace_optional_once(
+            absent, "legacy block", "replacement block", "legacy compatibility"
+        )
+        self.assertFalse(changed)
+        self.assertEqual(absent, unchanged)
+
+        updated, changed = deploy_fix.replace_optional_once(
+            "before\nlegacy block\nafter\n",
+            "legacy block",
+            "replacement block",
+            "legacy compatibility",
+        )
+        self.assertTrue(changed)
+        reapplied, changed = deploy_fix.replace_optional_once(
+            updated,
+            "legacy block",
+            "replacement block",
+            "legacy compatibility",
+        )
+        self.assertFalse(changed)
+        self.assertEqual(updated, reapplied)
+
+    def test_current_merged_app_patch_is_idempotent(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        updated, _ = deploy_fix.patch_app_text(source)
+        self.assertEqual([], deploy_fix.action_log_safety_violations(updated))
+        reapplied, changed = deploy_fix.patch_app_text(updated)
+        self.assertFalse(changed)
+        self.assertEqual(updated, reapplied)
+
+    def test_old_feature_baseline_is_upgraded_to_live_safe_constants(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        safe, _ = deploy_fix.patch_app_text(source)
+        old_feature_constants = '''AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))
+AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))
+AD_CONTROL_ACTION_LOG_DB_NAME = os.environ.get("AD_CONTROL_ACTION_LOG_DB_NAME", "ads_ai").strip() or "ads_ai"
+AD_CONTROL_ACTION_LOG_TABLE = os.environ.get("AD_CONTROL_ACTION_LOG_TABLE", "ad_control_action_log").strip() or "ad_control_action_log"
+AD_CONTROL_ACTION_LOG_MYSQL_HOST = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST", MYSQL_HOST).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PORT = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT", MYSQL_PORT).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_USER = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER", MYSQL_USER).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD", MYSQL_PASSWORD)
+AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))
+AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "8"))
+AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))
+AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))'''
+        old_feature_source = safe.replace(
+            deploy_fix.ACTION_LOG_CONSTANT_BLOCK, old_feature_constants, 1
+        )
+        self.assertNotEqual(safe, old_feature_source)
+        updated, changed = deploy_fix.patch_app_text(old_feature_source)
+        self.assertTrue(changed)
+        self.assertEqual([], deploy_fix.action_log_safety_violations(updated))
+        self.assertEqual(1, updated.count('or "63353").strip()'))
+        self.assertEqual(1, updated.count('or "63350").strip()'))
+        self.assertNotIn("def ad_control_action_log_config():", updated)
+
+    def test_prior_generic_patch_output_is_safely_upgraded_and_idempotent(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        safe, _ = deploy_fix.patch_app_text(source)
+        legacy_constants = '''AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT = int(os.environ.get("AD_CONTROL_MAX_LIVE_EXECUTE_PER_ACCOUNT", "20"))
+AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_EXECUTE_MAX_WORKERS", "4"))
+AD_CONTROL_ACTION_LOG_DB_NAME = os.environ.get("AD_CONTROL_ACTION_LOG_DB_NAME", "ads_ai").strip() or "ads_ai"
+AD_CONTROL_ACTION_LOG_TABLE = os.environ.get("AD_CONTROL_ACTION_LOG_TABLE", "ad_control_action_log").strip() or "ad_control_action_log"
+AD_CONTROL_ACTION_LOG_MYSQL_HOST = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_HOST", MYSQL_HOST).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PORT = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PORT", MYSQL_PORT).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_USER = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_USER", MYSQL_USER).strip()
+AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD = os.environ.get("AD_CONTROL_ACTION_LOG_MYSQL_PASSWORD", MYSQL_PASSWORD)
+AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))
+AD_CONTROL_ACTION_LOG_IO_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_IO_TIMEOUT", "8"))
+AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS = int(os.environ.get("AD_CONTROL_ACTION_LOG_LOCAL_OFFSET_HOURS", "8"))
+AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))'''
+        generic = deploy_fix.INTEGRATION_BLOCK
+        reader = deploy_fix.function_matches(generic, "ad_control_action_log_reader_config")[0]
+        generic = generic[:reader.start()] + generic[reader.end():]
+        generic = generic.replace(
+            "ad_control_action_log_writer_config", "ad_control_action_log_config"
+        ).replace("ad_control_action_log_reader_config", "ad_control_action_log_config")
+        unsafe = safe.replace(deploy_fix.ACTION_LOG_CONSTANT_BLOCK, legacy_constants, 1)
+        unsafe = unsafe.replace(deploy_fix.INTEGRATION_BLOCK, generic, 1)
+        self.assertIn("def ad_control_action_log_config():", unsafe)
+        updated, changed = deploy_fix.patch_app_text(unsafe)
+        self.assertTrue(changed)
+        self.assertEqual([], deploy_fix.action_log_safety_violations(updated))
+        reapplied, changed = deploy_fix.patch_app_text(updated)
+        self.assertFalse(changed)
+        self.assertEqual(updated, reapplied)
+
+    def test_safety_validator_rejects_timeout_or_worker_regression(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        source = app_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        safe, _ = deploy_fix.patch_app_text(source)
+        regressed = safe.replace(
+            'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "3"))',
+            'AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT = int(os.environ.get("AD_CONTROL_ACTION_LOG_CONNECT_TIMEOUT", "5"))',
+            1,
+        ).replace(
+            'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))',
+            'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))',
+            1,
+        )
+        violations = deploy_fix.action_log_safety_violations(regressed)
+        self.assertTrue(any("CONNECT_TIMEOUT" in item for item in violations))
+        self.assertTrue(any("LIVE_MAX_WORKERS" in item for item in violations))
 
 
 class ExecutionBatchTests(unittest.TestCase):
@@ -261,7 +404,8 @@ class PersistenceShapeTests(unittest.TestCase):
         expected = 'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "4"))'
         self.assertIn(expected, app_source)
         self.assertIn('AD_CONTROL_LIVE_MAX_WORKERS=4', env_source)
-        self.assertIn('"live preview worker cap"', patch_source)
+        self.assertIn(expected, deploy_fix.ACTION_LOG_CONSTANT_BLOCK)
+        self.assertIn("ensure_action_log_safety_constants(text)", patch_source)
         self.assertNotIn(
             'AD_CONTROL_LIVE_MAX_WORKERS = int(os.environ.get("AD_CONTROL_LIVE_MAX_WORKERS", "12"))',
             app_source,
@@ -288,6 +432,14 @@ class PersistenceShapeTests(unittest.TestCase):
         self.assertFalse(changed_again)
         self.assertEqual(patched, again)
 
+    def test_replace_function_supports_multiline_signature(self):
+        source = "def target(\n    first,\n    second=None,\n):\n    return first\n\n\ndef after():\n    return 2\n"
+        replacement = "def target(value):\n    return value + 1"
+        patched, changed = deploy_fix.replace_function(source, "target", replacement)
+        self.assertTrue(changed)
+        self.assertIn("def target(value):\n    return value + 1", patched)
+        self.assertIn("def after():\n    return 2", patched)
+
     def test_mysql_datetimes_are_json_serializable_strings(self):
         row = {key: "" for key in service.LOG_COLUMNS}
         row.update({
@@ -303,6 +455,12 @@ class PersistenceShapeTests(unittest.TestCase):
         self.assertEqual("2026-07-15 04:05:06", decoded["updated_at"])
         json.dumps(decoded, ensure_ascii=False)
 
+    def test_foreign_mysql_action_error_is_not_swallowed_by_sqlite_fallback(self):
+        self.assertIn(
+            "except StructuredApiError:\n        raise",
+            deploy_fix.FETCH_ACTION_FUNCTION,
+        )
+
 
 class LiveExecuteContractTests(unittest.TestCase):
     class _Connection:
@@ -315,25 +473,45 @@ class LiveExecuteContractTests(unittest.TestCase):
         def close(self):
             return None
 
-    def namespace(self, items, graph_get, graph_set, workers=1):
+    def namespace(
+        self, items, graph_get, graph_set, workers=1,
+        run_mode="live", object_level="campaign", token_for_user=None,
+        product="dramawave", product_whitelist=None, account_whitelists=None,
+    ):
         criteria = {
             "mode": "live",
-            "product": "dramawave",
+            "product": product,
             "accounts": ["1", "2"],
             "preview_hash": "hash",
             "execution_target_count": len(items),
             "execution_batch_count": len(items),
             "scan_count": len(items),
             "candidate_count": len(items),
+            "run_mode": run_mode,
+            "object_level": object_level,
         }
         campaign_by_account = {}
         for item in items:
             account_id = service.normalize_account(item["account_id"])
             campaign_by_account.setdefault(account_id, {})[item["campaign_id"]] = {}
+
+        def guarded_pause(preview, criteria, token, item, account_id):
+            meta = graph_get(token, item["campaign_id"], "account_id,status,effective_status,name")
+            meta_account = service.normalize_account(meta.get("account_id"))
+            if not meta_account or meta_account != account_id:
+                return {"meta": meta, "skip_reason": "account_owner_mismatch"}
+            if str(meta.get("effective_status") or "").upper() != "ACTIVE":
+                return {"meta": meta, "skip_reason": "not_active"}
+            return {
+                "meta": meta,
+                "payload_result": graph_set(token, item["campaign_id"], "PAUSED"),
+            }
+
         namespace = {
             "ensure_ad_control_tables": lambda: None,
             "fetch_ad_control_preview": lambda preview_id: {
                 "preview_id": preview_id,
+                "actor_user_id": "runner",
                 "criteria_json": json.dumps(criteria),
                 "sample_json": json.dumps(items),
             },
@@ -345,11 +523,19 @@ class LiveExecuteContractTests(unittest.TestCase):
             "ad_control_token_config_for_accounts": lambda product, accounts: {
                 account_id: {"user_id": "user-1"} for account_id in accounts
             },
-            "ad_control_token_for_user_id": lambda user_id: "token",
-            "ad_control_product_campaign_whitelist": lambda product, accounts: campaign_by_account,
+            "ad_control_token_for_user_id": token_for_user or (lambda user_id: "token"),
+            "ad_control_product_campaign_whitelist": product_whitelist or (
+                lambda product, accounts: campaign_by_account
+            ),
+            "ad_control_account_campaign_whitelists": account_whitelists or (
+                lambda accounts: {}
+            ),
+            "ad_control_copy_service": copy_service,
             "ad_control_normalize_account": service.normalize_account,
             "ad_control_graph_get": graph_get,
             "ad_control_graph_set_status": graph_set,
+            "ad_control_validate_live_preview_group": lambda *args, **kwargs: {},
+            "ad_control_guarded_campaign_pause": guarded_pause,
             "ad_control_save_object_state": lambda *args, **kwargs: None,
             "ad_control_execution_log_service": service,
             "JOB_DB_LOCK": threading.Lock(),
@@ -432,6 +618,80 @@ class LiveExecuteContractTests(unittest.TestCase):
         self.assertEqual(0, calls["set"])
         self.assertEqual("account_owner_mismatch", result["results"][0]["reason"])
         self.assertEqual("blocked", result["run_status"])
+
+    def test_observe_mode_records_objects_without_token_or_graph_access(self):
+        items = [self.item("1", "c1")]
+        namespace = self.namespace(
+            items,
+            lambda *args: (_ for _ in ()).throw(AssertionError("Graph GET")),
+            lambda *args: (_ for _ in ()).throw(AssertionError("Graph POST")),
+            run_mode="observe",
+            token_for_user=lambda user_id: (_ for _ in ()).throw(AssertionError("token read")),
+        )
+        result = namespace["execute_ad_control_live"]({
+            "preview_id": "p1", "preview_hash": "hash", "dry_run": False,
+        }, {"user_id": "runner"})
+        self.assertEqual(0, result["success_count"])
+        self.assertEqual(1, result["skipped_count"])
+        self.assertEqual("observed", result["results"][0]["status"])
+        self.assertEqual("would_pause", result["results"][0]["reason"])
+        self.assertEqual("c1", result["results"][0]["object_id"])
+
+    def test_campaign_copy_is_blocked_before_token_or_graph_access(self):
+        item = self.item("1", "c1")
+        item["target_action"] = "copy"
+        namespace = self.namespace(
+            [item],
+            lambda *args: (_ for _ in ()).throw(AssertionError("Graph GET")),
+            lambda *args: (_ for _ in ()).throw(AssertionError("Graph POST")),
+            token_for_user=lambda user_id: (_ for _ in ()).throw(AssertionError("token read")),
+        )
+        result = namespace["execute_ad_control_live"]({
+            "preview_id": "p1", "preview_hash": "hash", "dry_run": False,
+            "confirm": "EXECUTE_LIVE_RULE_GROUP",
+        }, {"user_id": "runner"})
+        self.assertEqual("copy_persistence_not_configured", result["results"][0]["reason"])
+        self.assertEqual(1, result["blocked_count"])
+        self.assertEqual("blocked", result["run_status"])
+
+    def test_account_only_mixed_group_never_requeries_product_whitelists(self):
+        pause_item = self.item("1", "pause-1")
+        pause_item["token_user_id"] = "user-1"
+        copy_item = self.item("1", "copy-1")
+        copy_item["target_action"] = "copy"
+        copy_item["token_user_id"] = "user-1"
+        calls = {"set": 0}
+
+        def graph_set(token, campaign_id, status):
+            calls["set"] += 1
+            return {"success": True}
+
+        forbidden = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("account-only execute must not query product whitelists")
+        )
+        namespace = self.namespace(
+            [pause_item, copy_item],
+            lambda token, campaign_id, fields: {
+                "account_id": "1", "effective_status": "ACTIVE",
+            },
+            graph_set,
+            product="",
+            product_whitelist=forbidden,
+            account_whitelists=forbidden,
+        )
+        result = namespace["execute_ad_control_live"]({
+            "preview_id": "p1",
+            "preview_hash": "hash",
+            "dry_run": False,
+            "confirm": "EXECUTE_LIVE_RULE_GROUP",
+        }, {"user_id": "runner"})
+        by_key = {item["object_key"]: item for item in result["results"]}
+        self.assertEqual("success", by_key[pause_item["object_key"]]["status"])
+        self.assertEqual(
+            "copy_persistence_not_configured",
+            by_key[copy_item["object_key"]]["reason"],
+        )
+        self.assertEqual(1, calls["set"])
 
 
 if __name__ == "__main__":
