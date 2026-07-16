@@ -41,6 +41,7 @@ from fb_playable_generator import (
     _rewrite_css,
     _safe_json_for_script,
     _strip_source_csp,
+    build_browser_preview_html,
     build_meta_playable_html,
     validate_meta_playable_html,
 )
@@ -54,6 +55,67 @@ TRANSLATIONS = {
         "plays": "Plays",
     }
 }
+
+
+def assert_browser_preview_contract():
+    store_url = "https://play.google.com/store/apps/details?id=fixture"
+    document = build_browser_preview_html(
+        store_url,
+        "Fixture Browser Preview",
+        "index.html",
+    )
+    assertions = {
+        "browser_preview_iframes_meta_html": 'src="index.html"' in document,
+        "browser_preview_injects_meta_bridge": (
+            "FbPlayableAd" in document and "onCTAClick" in document
+        ),
+        "browser_preview_navigates_store": (
+            "window.location.assign(cfg.storeUrl)" in document
+            and store_url in document
+        ),
+        "browser_preview_has_no_popup": "window.open" not in document,
+        "browser_preview_blocks_network": "connect-src 'none'" in document,
+    }
+    hostile_document = build_browser_preview_html(
+        "https://example.test/store?q=</script><script>alert(1)</script>"
+    )
+    assertions["browser_preview_escapes_script_data"] = (
+        "</script><script>alert(1)</script>" not in hostile_document
+        and "\\u003c/script\\u003e" in hostile_document
+    )
+    for invalid_url in ("javascript:alert(1)", "market://details?id=fixture", ""):
+        try:
+            build_browser_preview_html(invalid_url)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe browser-preview store URL was accepted")
+    for invalid_path in ("../index.html", "/index.html", "https://example.test/index.html"):
+        try:
+            build_browser_preview_html(store_url, playable_path=invalid_path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe browser-preview playable path was accepted")
+    with open(os.path.join(ROOT, "app.py"), "r", encoding="utf-8") as handle:
+        app_source = handle.read()
+    assertions["api_returns_split_preview_urls"] = all(
+        token in app_source
+        for token in (
+            '"preview_html_url": preview_url',
+            '"meta_html_url": meta_html_url',
+            '"preview_entry": "preview.html"',
+            '"preview_html_size": preview_html_size',
+        )
+    )
+    assertions["cleanup_includes_browser_preview"] = (
+        '"index.html", "preview.html", "playable-preview.zip", "manifest.json"'
+        in app_source
+    )
+    failed = [name for name, passed in assertions.items() if not passed]
+    if failed:
+        raise AssertionError("browser preview assertions failed: %s" % ", ".join(failed))
+    return True
 
 
 def assert_multipart_trial_seconds_contract():
@@ -944,6 +1006,7 @@ def main():
             result["assertions"]["zip_extraction_limits"] = assert_zip_extraction_limits_contract()
             result["assertions"]["lexical_validation"] = assert_lexical_validation_contract()
             result["assertions"]["base94_raw_text"] = assert_base94_raw_text_contract()
+            result["assertions"]["browser_preview"] = assert_browser_preview_contract()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

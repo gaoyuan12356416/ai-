@@ -1151,6 +1151,60 @@ def _safe_json_for_script(value, ensure_ascii=False):
     )
 
 
+def build_browser_preview_html(store_url, title="Playable Preview", playable_path="index.html"):
+    store_url = str(store_url or "").strip()
+    if not re.match(r"^https?://", store_url, re.I):
+        raise ValueError("store_url must start with http:// or https://")
+    playable_path = str(playable_path or "index.html").strip().replace("\\", "/")
+    if (
+        not playable_path
+        or playable_path.startswith("/")
+        or ".." in playable_path.split("/")
+        or not re.match(r"^[A-Za-z0-9._/-]+$", playable_path)
+    ):
+        raise ValueError("playable_path must be a safe relative path")
+    safe_title = html_lib.escape(str(title or "Playable Preview"))
+    config_json = _safe_json_for_script(
+        {"storeUrl": store_url, "playablePath": playable_path}
+    )
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; connect-src 'none'; img-src data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>%s</title>
+  <style>
+    html,body{margin:0;width:100%%;height:100%%;overflow:hidden;background:#05070a}
+    #playable-preview{display:block;width:100%%;height:100%%;border:0;background:#05070a}
+  </style>
+</head>
+<body>
+  <iframe id="playable-preview" title="Playable preview" src="%s" allow="autoplay; fullscreen; gamepad; accelerometer; gyroscope"></iframe>
+  <script>
+  (function(){
+    var cfg=%s,frame=document.getElementById('playable-preview');
+    function navigateToStore(){window.location.assign(cfg.storeUrl);}
+    function installBridge(){
+      try{
+        Object.defineProperty(frame.contentWindow,'FbPlayableAd',{configurable:true,value:{onCTAClick:navigateToStore}});
+      }catch(error){
+        try{frame.contentWindow.FbPlayableAd={onCTAClick:navigateToStore};}catch(ignored){console.error('Playable preview CTA bridge failed');}
+      }
+    }
+    frame.addEventListener('load',installBridge);
+    installBridge();
+  })();
+  </script>
+</body>
+</html>
+""" % (
+        safe_title,
+        html_lib.escape(playable_path, quote=True),
+        config_json,
+    )
+
+
 def _loader_shim(resources):
     package = _pack_resources(resources)
     metadata_json = _safe_json_for_script(

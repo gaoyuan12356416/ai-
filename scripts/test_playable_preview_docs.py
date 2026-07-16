@@ -217,7 +217,7 @@ def main():
     assert_true(audit.counts.get("h1") == 1, "HTML must contain one page title")
     assert_true(audit.counts.get("h2") == 11, "all 11 level-two sections must render")
     assert_true(audit.counts.get("h3") == 2, "both level-three sections must render")
-    assert_true(audit.counts.get("pre") == 14, "all 14 fenced code blocks must render")
+    assert_true(audit.counts.get("pre") == 15, "all 15 fenced code blocks must render")
     assert_true(audit.counts.get("table") == 5, "all 5 Markdown tables must render")
     assert_true(not audit.forbidden_tags, "rendered document must not contain active embedded tags")
     assert_true(not audit.event_attributes, "rendered document must not contain event-handler attributes")

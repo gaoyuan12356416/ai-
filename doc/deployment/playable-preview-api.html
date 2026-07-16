@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; object-src 'none'; form-action 'none'">
-  <meta name="playable-doc-source-sha256" content="3c1a6fe6ac8432d778f788be542e9c067539308e120d089317dbdfd63f1842c2">
+  <meta name="playable-doc-source-sha256" content="400d9cf14f19f816677667900de8b1792452b13fb2c3515978b0115cfa57ab24">
   <title>Meta/Facebook 试玩广告生成接口</title>
   <style>
     :root {
@@ -304,10 +304,10 @@
       </ul>
     </nav>
     <article>
-<p>更新时间：2026-07-15</p>
-<p>当前产物格式：Meta 单文件试玩广告（<code>index.html</code>）</p>
+<p>更新时间：2026-07-16</p>
+<p>当前产物格式：普通浏览器试玩页（<code>preview.html</code>）+ Meta 单文件试玩广告（<code>index.html</code>）</p>
 <h2 id="section-1">1. 接口说明</h2>
-<p>该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。</p>
+<p>该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成可直接测试商店跳转的浏览器试玩页，以及符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。</p>
 <p>新版生成逻辑会：</p>
 <ul>
 <li>把游戏入口及本地脚本、样式、图片、音频、WASM、JSON 和归档资源嵌入一个 <code>index.html</code>；</li>
@@ -318,6 +318,7 @@
 <li>将 <code>setTimeout</code> / <code>setInterval</code> 锁定为只接受函数回调的安全包装，拒绝 <code>eval</code>、<code>Function</code> 及其常见别名/构造器绕过；</li>
 <li>使用不含 <code>allow-same-origin</code> 的 iframe 沙箱，并在外层与游戏内层同时嵌入禁止网络、Worker、Object 和表单提交的 CSP；</li>
 <li>拦截 Defold <code>_dmSysOpenURL</code>、包装层安装按钮等安装动作，并只调用 <code>FbPlayableAd.onCTAClick()</code>；</li>
+<li>额外生成 <code>preview.html</code>，在普通浏览器中模拟 Meta CTA 宿主并把安装点击跳转到 <code>store_url</code>；</li>
 <li>拒绝残留的外部资源、外网能力、路径穿越和直接页面跳转；</li>
 <li>同时校验最终 HTML 与 ZIP 的实际字节数。</li>
 </ul>
@@ -396,7 +397,7 @@
 <td><code>store_url</code></td>
 <td>string</td>
 <td>是</td>
-<td><code>http://</code> 或 <code>https://</code> 商店链接；仅保留给后续投放配置，不会写成 HTML 跳转</td>
+<td><code>http://</code> 或 <code>https://</code> 商店链接；只写入普通浏览器 <code>preview.html</code>，不会写入 Meta <code>index.html</code></td>
 </tr>
 <tr>
 <td><code>play_count</code></td>
@@ -527,7 +528,8 @@
 <p>HTTP 状态码为 <code>200</code>。以下地址中的 <code>&lt;preview_id&gt;</code> 由每次成功请求动态生成，示例数值仅用于说明字段格式：</p>
 <pre><code class="language-json">{
   &quot;preview_id&quot;: &quot;&lt;preview_id&gt;&quot;,
-  &quot;preview_html_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/index.html&quot;,
+  &quot;preview_html_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/preview.html&quot;,
+  &quot;meta_html_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/index.html&quot;,
   &quot;zip_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/playable-preview.zip&quot;,
   &quot;manifest_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/manifest.json&quot;,
   &quot;documentation_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md&quot;,
@@ -535,11 +537,13 @@
   &quot;play_count&quot;: 1,
   &quot;store_url&quot;: &quot;https://play.google.com/store/apps/details?id=ai.fream.dramawave&quot;,
   &quot;entry&quot;: &quot;index.html&quot;,
+  &quot;preview_entry&quot;: &quot;preview.html&quot;,
   &quot;source_entry&quot;: &quot;game/index.html&quot;,
-  &quot;html_size&quot;: 4782231,
-  &quot;zip_size&quot;: 3933763,
+  &quot;html_size&quot;: 4782233,
+  &quot;preview_html_size&quot;: 1437,
+  &quot;zip_size&quot;: 3928739,
   &quot;meta_size_limit_bytes&quot;: 4800000,
-  &quot;size_headroom_bytes&quot;: 17769,
+  &quot;size_headroom_bytes&quot;: 17767,
   &quot;meta_compatible&quot;: true,
   &quot;compatibility&quot;: {
     &quot;single_file&quot;: true,
@@ -554,8 +558,8 @@
     &quot;cta_hook&quot;: &quot;FbPlayableAd.onCTAClick&quot;,
     &quot;resource_encoding&quot;: &quot;lzma+base94&quot;,
     &quot;embedded_file_count&quot;: 18,
-    &quot;html_size&quot;: 4782231,
-    &quot;zip_size&quot;: 3933763,
+    &quot;html_size&quot;: 4782233,
+    &quot;zip_size&quot;: 3928739,
     &quot;meta_size_limit_bytes&quot;: 4800000
   },
   &quot;languages&quot;: [&quot;ar&quot;, &quot;de&quot;, &quot;en&quot;, &quot;es&quot;, &quot;fr&quot;, &quot;hi&quot;, &quot;id&quot;, &quot;it&quot;, &quot;ja&quot;, &quot;ko&quot;, &quot;ms&quot;, &quot;pt&quot;, &quot;ru&quot;, &quot;th&quot;, &quot;tr&quot;, &quot;vi&quot;, &quot;zh&quot;, &quot;zh-cn&quot;, &quot;zh-tw&quot;]
@@ -573,7 +577,11 @@
 <tbody>
 <tr>
 <td><code>preview_html_url</code></td>
-<td>公网 HTML 预览地址</td>
+<td>普通浏览器试玩地址；CTA 会跳转 <code>store_url</code></td>
+</tr>
+<tr>
+<td><code>meta_html_url</code></td>
+<td>严格遵循 Meta CTA Hook 规则的单文件 HTML 地址</td>
 </tr>
 <tr>
 <td><code>zip_url</code></td>
@@ -592,12 +600,20 @@
 <td>最终产物入口，固定为 <code>index.html</code></td>
 </tr>
 <tr>
+<td><code>preview_entry</code></td>
+<td>普通浏览器试玩入口，固定为 <code>preview.html</code></td>
+</tr>
+<tr>
 <td><code>source_entry</code></td>
 <td>上传包中识别到的原始入口</td>
 </tr>
 <tr>
 <td><code>html_size</code></td>
-<td>最终 UTF-8 HTML 的实际字节数</td>
+<td>Meta 单文件 <code>index.html</code> 的实际 UTF-8 字节数</td>
+</tr>
+<tr>
+<td><code>preview_html_size</code></td>
+<td>普通浏览器试玩页 <code>preview.html</code> 的实际 UTF-8 字节数</td>
 </tr>
 <tr>
 <td><code>zip_size</code></td>
@@ -621,10 +637,14 @@
 </tr>
 </tbody>
 </table>
-<p><code>manifest_url</code> 对应的 JSON 与接口成功返回使用同一套审计口径。manifest 顶层固定包含：<code>preview_id</code>、<code>title</code>、<code>trial_seconds</code>、<code>play_count</code>、<code>store_url</code>、<code>documentation_url</code>、<code>source_entry</code>、<code>entry</code>、<code>html_size</code>、<code>zip_size</code>、<code>meta_size_limit_bytes</code>、<code>size_headroom_bytes</code>、<code>meta_compatible</code>、<code>compatibility</code> 和 <code>languages</code>。</p>
+<p><code>manifest_url</code> 对应的 JSON 与接口成功返回使用同一套审计口径。manifest 顶层固定包含：<code>preview_id</code>、<code>title</code>、<code>trial_seconds</code>、<code>play_count</code>、<code>store_url</code>、<code>documentation_url</code>、<code>source_entry</code>、<code>entry</code>、<code>preview_entry</code>、<code>html_size</code>、<code>preview_html_size</code>、<code>zip_size</code>、<code>meta_size_limit_bytes</code>、<code>size_headroom_bytes</code>、<code>meta_compatible</code>、<code>compatibility</code> 和 <code>languages</code>。</p>
 <h2 id="section-6">6. 产物结构</h2>
 <p>下载 <code>zip_url</code> 后，ZIP 中必须且只允许存在一个顶层文件：</p>
 <pre><code class="language-text">index.html
+</code></pre>
+<p>公网目录同时发布两个 HTML：</p>
+<pre><code class="language-text">preview.html  # 普通浏览器试玩和商店跳转
+index.html    # 严格 Meta 单文件，不直接跳商店
 </code></pre>
 <p>以下旧版结构已经废弃，不会再生成：</p>
 <pre><code class="language-text">index.html
@@ -649,11 +669,11 @@ game/assets/...
 </ul>
 <p>因此，即使 ZIP 小于 5 MB，只要解压后的 HTML 超过安全上限，接口仍会拒绝生成。</p>
 <h2 id="section-8">8. CTA 与商店链接</h2>
-<p><code>store_url</code> 是必填业务字段，会返回给下游投放流程并写入 manifest，但不会成为最终 HTML 的 <code>href</code>、<code>window.open</code> 或 location 跳转。</p>
+<p><code>store_url</code> 是必填业务字段，会返回给下游投放流程并写入 manifest。它只写入普通浏览器试玩页 <code>preview.html</code>，不会写入 Meta 产物 <code>index.html</code> 或 ZIP 中的 <code>index.html</code>。</p>
 <p>试玩内所有安装动作都统一调用：</p>
 <pre><code class="language-javascript">FbPlayableAd.onCTAClick()
 </code></pre>
-<p>Meta Ads Manager 会结合广告层配置处理实际安装跳转。在普通浏览器中单独打开预览页时，如果没有注入 <code>FbPlayableAd</code>，点击 CTA 不会直接打开商店，这是预期行为。</p>
+<p>Meta Ads Manager 会结合广告层配置处理 <code>index.html</code> 的实际安装跳转。<code>preview_html_url</code> 指向的 <code>preview.html</code> 会在同源 iframe 中加载该 Meta 文件、注入仅供网页预览的 <code>FbPlayableAd.onCTAClick</code> 测试桥，并在点击后跳转 <code>store_url</code>。上传 Meta 时仍应使用 <code>zip_url</code>，不要上传 <code>preview.html</code>。</p>
 <h2 id="section-9">9. 多语言文案</h2>
 <p>默认支持：</p>
 <pre><code class="language-text">ar, de, en, es, fr, hi, id, it, ja, ko, ms, pt, ru, th, tr, vi, zh, zh-cn, zh-tw
@@ -832,16 +852,17 @@ game/assets/...
 <h2 id="section-11">11. 调用方验收建议</h2>
 <p>生成成功后，调用方仍应在上传 Meta 前完成以下检查：</p>
 <ol>
-<li>下载 <code>preview_html_url</code> 和 <code>zip_url</code>，按实际下载字节重新测量体积；</li>
+<li>打开 <code>preview_html_url</code>，试玩结束后点击 CTA，确认浏览器跳转到返回的 <code>store_url</code>；</li>
+<li>下载 <code>meta_html_url</code> 和 <code>zip_url</code>，按实际下载字节重新测量体积；</li>
 <li>解压 ZIP，确认文件列表严格为 <code>index.html</code>；</li>
-<li>扫描 HTML，确认没有直接商店跳转和外部资源；</li>
+<li>扫描 Meta HTML，确认没有直接商店跳转和外部资源；</li>
 <li>在禁止 <code>unsafe-eval</code> 的 CSP 浏览器沙箱中注入 <code>FbPlayableAd.onCTAClick</code> 测试桩，确认无 CSP 报错且游戏进入可交互场景；</li>
 <li>最后在 Meta Ads Manager 预览环境中完成平台侧验证。</li>
 </ol>
 
       <footer class="doc-footer">
         <p>该页面由 Git 跟踪的 Markdown 自动生成。<a href="https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md">查看 Markdown 源文档</a></p>
-        <p>源文档 SHA-256：<code>3c1a6fe6ac8432d778f788be542e9c067539308e120d089317dbdfd63f1842c2</code></p>
+        <p>源文档 SHA-256：<code>400d9cf14f19f816677667900de8b1792452b13fb2c3515978b0115cfa57ab24</code></p>
       </footer>
     </article>
   </main>
