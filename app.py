@@ -748,7 +748,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import requests
 
-from fb_playable_generator import build_meta_playable_html
+from fb_playable_generator import build_browser_preview_html, build_meta_playable_html
 
 try:
 
@@ -22591,6 +22591,12 @@ def _create_playable_preview(payload, preview_id):
     html_size = len(document_bytes)
     with open(index_path, "wb") as fp:
         fp.write(document_bytes)
+    preview_path = os.path.join(output_dir, "preview.html")
+    preview_document = build_browser_preview_html(store_url, title, "index.html")
+    preview_document_bytes = preview_document.encode("utf-8")
+    preview_html_size = len(preview_document_bytes)
+    with open(preview_path, "wb") as fp:
+        fp.write(preview_document_bytes)
 
     shutil.rmtree(game_dir, ignore_errors=True)
     if source_path != index_path and os.path.exists(source_path):
@@ -22629,7 +22635,9 @@ def _create_playable_preview(payload, preview_id):
         "documentation_url": documentation_url,
         "source_entry": game_src,
         "entry": "index.html",
+        "preview_entry": "preview.html",
         "html_size": html_size,
+        "preview_html_size": preview_html_size,
         "zip_size": zip_size,
         "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
         "size_headroom_bytes": size_headroom,
@@ -22647,17 +22655,20 @@ def _create_playable_preview(payload, preview_id):
                 if path == source_path and source_path != index_path:
                     continue
                 upload_file_to_cos(path)
-        preview_url = build_cos_url(build_cos_object_key(index_path))
+        preview_url = build_cos_url(build_cos_object_key(preview_path))
+        meta_html_url = build_cos_url(build_cos_object_key(index_path))
         zip_url = build_cos_url(build_cos_object_key(zip_path))
         manifest_url = build_cos_url(build_cos_object_key(manifest_path))
         shutil.rmtree(output_dir, ignore_errors=True)
     else:
-        preview_url = build_public_url(index_path)
+        preview_url = build_public_url(preview_path)
+        meta_html_url = build_public_url(index_path)
         zip_url = build_public_url(zip_path)
         manifest_url = build_public_url(manifest_path)
     return {
         "preview_id": preview_id,
         "preview_html_url": preview_url,
+        "meta_html_url": meta_html_url,
         "zip_url": zip_url,
         "manifest_url": manifest_url,
         "trial_seconds": trial_seconds,
@@ -22665,8 +22676,10 @@ def _create_playable_preview(payload, preview_id):
         "store_url": store_url,
         "documentation_url": documentation_url,
         "entry": "index.html",
+        "preview_entry": "preview.html",
         "source_entry": game_src,
         "html_size": html_size,
+        "preview_html_size": preview_html_size,
         "zip_size": zip_size,
         "meta_size_limit_bytes": PLAYABLE_PREVIEW_MAX_ASSET_BYTES,
         "size_headroom_bytes": size_headroom,
@@ -22683,7 +22696,7 @@ def cleanup_playable_preview_artifacts(preview_id):
         if output_exists and cos_enabled():
             try:
                 client = get_cos_client()
-                for filename in ("index.html", "playable-preview.zip", "manifest.json"):
+                for filename in ("index.html", "preview.html", "playable-preview.zip", "manifest.json"):
                     try:
                         client.delete_object(
                             Bucket=COS_BUCKET,

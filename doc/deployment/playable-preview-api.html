@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; object-src 'none'; form-action 'none'">
+  <meta name="playable-doc-source-sha256" content="400d9cf14f19f816677667900de8b1792452b13fb2c3515978b0115cfa57ab24">
+  <title>Meta/Facebook 试玩广告生成接口</title>
+  <style>
+    :root {
+      --page: #f4f7fb;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --ink: #172033;
+      --muted: #64748b;
+      --line: #dbe3ee;
+      --brand: #2563eb;
+      --brand-dark: #1d4ed8;
+      --brand-soft: #eaf1ff;
+      --success: #047857;
+      --code: #0f172a;
+      --code-ink: #e2e8f0;
+      --shadow: 0 16px 45px rgba(15, 23, 42, 0.08);
+      --radius: 16px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--page);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.72;
+      text-rendering: optimizeLegibility;
+    }
+
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { color: var(--brand-dark); text-decoration: underline; }
+    .skip-link {
+      position: fixed;
+      left: 16px;
+      top: -60px;
+      z-index: 100;
+      padding: 10px 14px;
+      color: #fff;
+      background: var(--brand-dark);
+      border-radius: 8px;
+      transition: top 0.2s ease;
+    }
+    .skip-link:focus { top: 16px; }
+
+    .hero {
+      color: #fff;
+      background:
+        radial-gradient(circle at 88% 15%, rgba(96, 165, 250, 0.55), transparent 32%),
+        linear-gradient(135deg, #0f2d69 0%, #1d4ed8 55%, #2563eb 100%);
+      border-bottom: 1px solid rgba(255,255,255,0.18);
+    }
+    .hero-inner {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 48px 0 42px;
+    }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: #bfdbfe;
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      margin: 0 0 20px;
+      max-width: 850px;
+      font-size: clamp(30px, 4.4vw, 48px);
+      line-height: 1.18;
+      letter-spacing: -0.02em;
+    }
+    .endpoint {
+      display: inline-flex;
+      max-width: 100%;
+      align-items: center;
+      gap: 11px;
+      padding: 10px 14px;
+      background: rgba(15, 23, 42, 0.42);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 12px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    .method {
+      flex: 0 0 auto;
+      padding: 3px 8px;
+      color: #d1fae5;
+      background: rgba(5, 150, 105, 0.42);
+      border: 1px solid rgba(167, 243, 208, 0.35);
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+    }
+    .endpoint code {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      color: #fff;
+      background: transparent;
+      font-size: 14px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr);
+      gap: 26px;
+      width: min(1180px, calc(100% - 40px));
+      margin: 28px auto 60px;
+      align-items: start;
+    }
+    .toc {
+      position: sticky;
+      top: 20px;
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      padding: 18px 16px;
+      background: rgba(255,255,255,0.94);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+    }
+    .toc-title {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .toc ul { margin: 0; padding: 0; list-style: none; }
+    .toc li { margin: 2px 0; }
+    .toc a {
+      display: block;
+      padding: 7px 9px;
+      color: #334155;
+      border-radius: 7px;
+      font-size: 13px;
+      line-height: 1.42;
+    }
+    .toc a:hover { color: var(--brand-dark); background: var(--brand-soft); text-decoration: none; }
+    .toc-subitem a { padding-left: 22px; color: var(--muted); }
+
+    article {
+      min-width: 0;
+      padding: clamp(24px, 4vw, 50px);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow-wrap: anywhere;
+    }
+    article > h1:first-child { margin-top: 0; }
+    article h1 {
+      margin: 0 0 24px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+      font-size: clamp(27px, 3.6vw, 38px);
+      line-height: 1.25;
+      letter-spacing: -0.02em;
+    }
+    article h2 {
+      margin: 48px 0 18px;
+      padding-top: 6px;
+      font-size: clamp(23px, 2.6vw, 30px);
+      line-height: 1.3;
+      letter-spacing: -0.01em;
+    }
+    article h3 {
+      margin: 32px 0 13px;
+      font-size: 20px;
+      line-height: 1.4;
+    }
+    article p { margin: 12px 0 18px; }
+    article ul, article ol { margin: 12px 0 20px; padding-left: 1.55em; }
+    article li { margin: 6px 0; }
+    article li::marker { color: var(--brand); font-weight: 700; }
+    article strong { color: #0f172a; }
+
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+    :not(pre) > code {
+      padding: 0.16em 0.38em;
+      color: #1e40af;
+      background: #eff6ff;
+      border: 1px solid #dbeafe;
+      border-radius: 5px;
+      font-size: 0.9em;
+    }
+    pre {
+      position: relative;
+      max-width: 100%;
+      margin: 16px 0 24px;
+      padding: 18px 20px;
+      overflow: auto;
+      color: var(--code-ink);
+      background: var(--code);
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+      line-height: 1.6;
+      tab-size: 2;
+    }
+    pre code { color: inherit; background: transparent; border: 0; font-size: 13px; }
+
+    table {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      margin: 16px 0 26px;
+      overflow-x: auto;
+      border-collapse: collapse;
+      border-spacing: 0;
+      font-size: 14px;
+    }
+    thead { background: #eef4ff; }
+    th, td {
+      min-width: 110px;
+      padding: 11px 13px;
+      text-align: left;
+      vertical-align: top;
+      border: 1px solid var(--line);
+    }
+    th { color: #1e3a8a; font-weight: 750; white-space: nowrap; }
+    tbody tr:nth-child(even) { background: var(--surface-soft); }
+
+    .doc-footer {
+      margin-top: 52px;
+      padding-top: 20px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      font-size: 13px;
+    }
+    .doc-footer code { font-size: 11px; }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; width: min(100% - 24px, 820px); }
+      .toc { position: static; max-height: none; }
+      .toc ul { columns: 2; column-gap: 18px; }
+      .toc li { break-inside: avoid; }
+      .hero-inner { width: min(100% - 28px, 820px); padding: 36px 0 32px; }
+    }
+    @media (max-width: 580px) {
+      body { font-size: 15px; }
+      .endpoint { align-items: flex-start; }
+      .layout { margin-top: 14px; }
+      .toc ul { columns: 1; }
+      article { padding: 22px 18px 32px; border-radius: 12px; }
+      article h2 { margin-top: 38px; }
+      pre { padding: 15px; }
+      th, td { padding: 9px 10px; }
+    }
+    @media print {
+      body { background: #fff; }
+      .hero { color: #111827; background: #fff; border-bottom: 1px solid #cbd5e1; }
+      .eyebrow { color: #475569; }
+      .endpoint { color: #111827; background: #f8fafc; border-color: #cbd5e1; }
+      .endpoint code { color: #111827; }
+      .method { color: #065f46; background: #d1fae5; }
+      .layout { display: block; width: 100%; margin: 0; }
+      .toc { display: none; }
+      article { padding: 24px 0; border: 0; box-shadow: none; }
+      pre { white-space: pre-wrap; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#document">跳转到接口文档正文</a>
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">API Reference · Meta Playable Preview</p>
+      <h1>Meta/Facebook 试玩广告生成接口</h1>
+      <div class="endpoint" aria-label="唯一接口地址">
+        <span class="method">POST</span>
+        <code>https://ai.yingliangads.com/api/fb-playable/preview</code>
+      </div>
+    </div>
+  </header>
+  <main class="layout" id="document">
+    <nav class="toc" aria-label="文档目录">
+      <p class="toc-title">文档目录</p>
+      <ul>
+<li class="toc-item"><a href="#section-1">1. 接口说明</a></li>
+<li class="toc-item"><a href="#section-2">2. 接口地址</a></li>
+<li class="toc-item"><a href="#section-3">3. 鉴权</a></li>
+<li class="toc-item"><a href="#section-4">4. 请求格式</a></li>
+<li class="toc-subitem"><a href="#section-4-1">4.1 multipart/form-data 上传</a></li>
+<li class="toc-subitem"><a href="#section-4-2">4.2 application/json 上传</a></li>
+<li class="toc-item"><a href="#section-5">5. 成功返回</a></li>
+<li class="toc-item"><a href="#section-6">6. 产物结构</a></li>
+<li class="toc-item"><a href="#section-7">7. Meta 兼容和体积规则</a></li>
+<li class="toc-item"><a href="#section-8">8. CTA 与商店链接</a></li>
+<li class="toc-item"><a href="#section-9">9. 多语言文案</a></li>
+<li class="toc-item"><a href="#section-10">10. 错误返回</a></li>
+<li class="toc-item"><a href="#section-11">11. 调用方验收建议</a></li>
+      </ul>
+    </nav>
+    <article>
+<p>更新时间：2026-07-16</p>
+<p>当前产物格式：普通浏览器试玩页（<code>preview.html</code>）+ Meta 单文件试玩广告（<code>index.html</code>）</p>
+<h2 id="section-1">1. 接口说明</h2>
+<p>该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成可直接测试商店跳转的浏览器试玩页，以及符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。</p>
+<p>新版生成逻辑会：</p>
+<ul>
+<li>把游戏入口及本地脚本、样式、图片、音频、WASM、JSON 和归档资源嵌入一个 <code>index.html</code>；</li>
+<li>使用 <code>LZMA + script-safe Base94</code> 压缩大型运行时资源；</li>
+<li>在执行原游戏脚本前完成内存资源包初始化；</li>
+<li>在游戏脚本启动前把 iframe 内的原生 <code>fetch</code> / <code>XMLHttpRequest</code> 运行时绑定到内存资源层，由该层接管资源加载；</li>
+<li>把可执行脚本中的直接 <code>location</code> 引用改写到只读导航门面，锁定 <code>window.open</code>，并在捕获阶段阻止动态 <code>&lt;a&gt;</code> / <code>&lt;area&gt;</code> 外链导航；</li>
+<li>将 <code>setTimeout</code> / <code>setInterval</code> 锁定为只接受函数回调的安全包装，拒绝 <code>eval</code>、<code>Function</code> 及其常见别名/构造器绕过；</li>
+<li>使用不含 <code>allow-same-origin</code> 的 iframe 沙箱，并在外层与游戏内层同时嵌入禁止网络、Worker、Object 和表单提交的 CSP；</li>
+<li>拦截 Defold <code>_dmSysOpenURL</code>、包装层安装按钮等安装动作，并只调用 <code>FbPlayableAd.onCTAClick()</code>；</li>
+<li>额外生成 <code>preview.html</code>，在普通浏览器中模拟 Meta CTA 宿主并把安装点击跳转到 <code>store_url</code>；</li>
+<li>拒绝残留的外部资源、外网能力、路径穿越和直接页面跳转；</li>
+<li>同时校验最终 HTML 与 ZIP 的实际字节数。</li>
+</ul>
+<p>接口只负责生成试玩广告资产，不会自动上传 Meta 或创建广告。</p>
+<p>该接口用于处理团队可控、来源可信的游戏包。静态扫描、运行时门面、sandbox 与 CSP 是多层防护，但不应把它当成可安全执行任意敌对 JavaScript 的通用隔离服务。</p>
+<h2 id="section-2">2. 接口地址</h2>
+<p>唯一对外接口地址：</p>
+<pre><code class="language-http">POST https://ai.yingliangads.com/api/fb-playable/preview
+</code></pre>
+<h2 id="section-3">3. 鉴权</h2>
+<p>生产环境强制鉴权。每次请求都必须携带服务端分配的 <code>PLAYABLE_PREVIEW_API_TOKEN</code>，请任选一种方式传递令牌：</p>
+<pre><code class="language-http">Authorization: Bearer &lt;token&gt;
+</code></pre>
+<p>或：</p>
+<pre><code class="language-http">X-API-Token: &lt;token&gt;
+</code></pre>
+<p>不要把令牌写入游戏 HTML、公开日志或浏览器客户端代码。服务端支持 <code>off</code>、<code>observe</code>、<code>enforce</code> 三种迁移模式，但生产配置固定使用 <code>enforce</code>；兼容环境变量 <code>FB_PLAYABLE_API_TOKEN</code> 仅用于旧部署迁移。</p>
+<h2 id="section-4">4. 请求格式</h2>
+<h3 id="section-4-1">4.1 multipart/form-data 上传</h3>
+<p>推荐用于上传本地 <code>.html</code> 或 <code>.zip</code> 文件。</p>
+<p>文件字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>static_page</code></td>
+<td>六选一</td>
+<td>推荐字段，上传 HTML 或完整 ZIP 静态包</td>
+</tr>
+<tr>
+<td><code>file</code></td>
+<td>六选一</td>
+<td>兼容旧字段</td>
+</tr>
+<tr>
+<td><code>static_file</code></td>
+<td>六选一</td>
+<td>兼容旧字段</td>
+</tr>
+<tr>
+<td><code>game_file</code></td>
+<td>六选一</td>
+<td>兼容旧字段</td>
+</tr>
+<tr>
+<td><code>zip</code></td>
+<td>六选一</td>
+<td>兼容旧字段</td>
+</tr>
+<tr>
+<td><code>html</code></td>
+<td>六选一</td>
+<td>兼容旧字段</td>
+</tr>
+</tbody>
+</table>
+<p>文件字段只能传一个，优先使用 <code>static_page</code>；重复文本字段或同时上传多个文件会被拒绝。</p>
+<p>文本字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>store_url</code></td>
+<td>string</td>
+<td>是</td>
+<td><code>http://</code> 或 <code>https://</code> 商店链接；只写入普通浏览器 <code>preview.html</code>，不会写入 Meta <code>index.html</code></td>
+</tr>
+<tr>
+<td><code>play_count</code></td>
+<td>int</td>
+<td>否</td>
+<td>最大试玩次数，默认及有效最小值为 <code>1</code></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+<td>否</td>
+<td>生成 HTML 的标题</td>
+</tr>
+<tr>
+<td><code>trial_seconds</code></td>
+<td>int</td>
+<td>否</td>
+<td>每次试玩时长，默认 <code>20</code> 秒，限制为 <code>1..120</code></td>
+</tr>
+<tr>
+<td><code>headline_text</code></td>
+<td>string</td>
+<td>否</td>
+<td>覆盖英文结束标题</td>
+</tr>
+<tr>
+<td><code>subtitle_text</code></td>
+<td>string</td>
+<td>否</td>
+<td>覆盖英文结束说明</td>
+</tr>
+<tr>
+<td><code>cta_text</code></td>
+<td>string</td>
+<td>否</td>
+<td>覆盖英文 CTA 文案</td>
+</tr>
+<tr>
+<td><code>install_text</code></td>
+<td>string</td>
+<td>否</td>
+<td>兼容旧字段，等同于 <code>cta_text</code></td>
+</tr>
+<tr>
+<td><code>play_label</code></td>
+<td>string</td>
+<td>否</td>
+<td>覆盖英文试玩次数标签</td>
+</tr>
+<tr>
+<td><code>translations</code></td>
+<td>JSON string</td>
+<td>否</td>
+<td>覆盖或新增多语言文案</td>
+</tr>
+</tbody>
+</table>
+<p>示例：</p>
+<pre><code class="language-bash">curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
+  -H 'Authorization: Bearer &lt;token&gt;' \
+  -F 'static_page=@game.zip;filename=game.zip' \
+  -F 'store_url=https://play.google.com/store/apps/details?id=ai.fream.dramawave' \
+  -F 'play_count=1' \
+  -F 'trial_seconds=20' \
+  -F 'title=Boxrob'
+</code></pre>
+<h3 id="section-4-2">4.2 application/json 上传</h3>
+<p>适合服务间调用。内容字段任选一个：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>static_html</code></td>
+<td>string</td>
+<td>直接传 HTML 文本</td>
+</tr>
+<tr>
+<td><code>static_html_base64</code></td>
+<td>string</td>
+<td>传 HTML 文件的 Base64</td>
+</tr>
+<tr>
+<td><code>static_zip_base64</code></td>
+<td>string</td>
+<td>传 ZIP 文件的 Base64</td>
+</tr>
+<tr>
+<td><code>html</code></td>
+<td>string</td>
+<td><code>static_html</code> 的兼容旧字段</td>
+</tr>
+<tr>
+<td><code>html_base64</code></td>
+<td>string</td>
+<td><code>static_html_base64</code> 的兼容旧字段</td>
+</tr>
+<tr>
+<td><code>zip_base64</code></td>
+<td>string</td>
+<td><code>static_zip_base64</code> 的兼容旧字段</td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td>可选；用于识别上传内容是 <code>.html</code> 还是 <code>.zip</code>，未提供时按所选内容字段自动补齐</td>
+</tr>
+</tbody>
+</table>
+<p>其他可用字段与 multipart 文本字段一致；<code>play_times</code>、<code>plays</code> 也可作为 <code>play_count</code> 的兼容别名。</p>
+<p>示例：</p>
+<pre><code class="language-json">{
+  &quot;static_html&quot;: &quot;&lt;!doctype html&gt;&lt;html&gt;&lt;body&gt;...&lt;/body&gt;&lt;/html&gt;&quot;,
+  &quot;filename&quot;: &quot;index.html&quot;,
+  &quot;store_url&quot;: &quot;https://play.google.com/store/apps/details?id=ai.fream.dramawave&quot;,
+  &quot;play_count&quot;: 1,
+  &quot;trial_seconds&quot;: 20,
+  &quot;title&quot;: &quot;Playable Preview&quot;
+}
+</code></pre>
+<p>接口不接受 <code>static_page_url</code> 或 <code>game_url</code>。调用方必须先下载完整静态包，再上传文件内容；仅提供一个远程入口 URL 无法保证依赖资源完整，也不符合 Meta 单文件要求。</p>
+<h2 id="section-5">5. 成功返回</h2>
+<p>HTTP 状态码为 <code>200</code>。以下地址中的 <code>&lt;preview_id&gt;</code> 由每次成功请求动态生成，示例数值仅用于说明字段格式：</p>
+<pre><code class="language-json">{
+  &quot;preview_id&quot;: &quot;&lt;preview_id&gt;&quot;,
+  &quot;preview_html_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/preview.html&quot;,
+  &quot;meta_html_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/index.html&quot;,
+  &quot;zip_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/playable-preview.zip&quot;,
+  &quot;manifest_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/&lt;preview_id&gt;/manifest.json&quot;,
+  &quot;documentation_url&quot;: &quot;https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md&quot;,
+  &quot;trial_seconds&quot;: 20,
+  &quot;play_count&quot;: 1,
+  &quot;store_url&quot;: &quot;https://play.google.com/store/apps/details?id=ai.fream.dramawave&quot;,
+  &quot;entry&quot;: &quot;index.html&quot;,
+  &quot;preview_entry&quot;: &quot;preview.html&quot;,
+  &quot;source_entry&quot;: &quot;game/index.html&quot;,
+  &quot;html_size&quot;: 4782233,
+  &quot;preview_html_size&quot;: 1437,
+  &quot;zip_size&quot;: 3928739,
+  &quot;meta_size_limit_bytes&quot;: 4800000,
+  &quot;size_headroom_bytes&quot;: 17767,
+  &quot;meta_compatible&quot;: true,
+  &quot;compatibility&quot;: {
+    &quot;single_file&quot;: true,
+    &quot;native_network_requests&quot;: 0,
+    &quot;direct_redirects&quot;: 0,
+    &quot;unsafe_eval_calls&quot;: 0,
+    &quot;csp_safe_script_bootstrap&quot;: true,
+    &quot;navigation_guard&quot;: true,
+    &quot;safe_timer_wrappers&quot;: true,
+    &quot;embedded_csp&quot;: true,
+    &quot;opaque_origin_sandbox&quot;: true,
+    &quot;cta_hook&quot;: &quot;FbPlayableAd.onCTAClick&quot;,
+    &quot;resource_encoding&quot;: &quot;lzma+base94&quot;,
+    &quot;embedded_file_count&quot;: 18,
+    &quot;html_size&quot;: 4782233,
+    &quot;zip_size&quot;: 3928739,
+    &quot;meta_size_limit_bytes&quot;: 4800000
+  },
+  &quot;languages&quot;: [&quot;ar&quot;, &quot;de&quot;, &quot;en&quot;, &quot;es&quot;, &quot;fr&quot;, &quot;hi&quot;, &quot;id&quot;, &quot;it&quot;, &quot;ja&quot;, &quot;ko&quot;, &quot;ms&quot;, &quot;pt&quot;, &quot;ru&quot;, &quot;th&quot;, &quot;tr&quot;, &quot;vi&quot;, &quot;zh&quot;, &quot;zh-cn&quot;, &quot;zh-tw&quot;]
+}
+</code></pre>
+<p>上例中的 <code>compatibility</code> 仅展示常用字段。实际对象还会返回压缩包文件数、原始/压缩/编码字节数、内联文件数、原始入口、HTML 余量和最终双产物余量等审计字段。</p>
+<p>关键字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>preview_html_url</code></td>
+<td>普通浏览器试玩地址；CTA 会跳转 <code>store_url</code></td>
+</tr>
+<tr>
+<td><code>meta_html_url</code></td>
+<td>严格遵循 Meta CTA Hook 规则的单文件 HTML 地址</td>
+</tr>
+<tr>
+<td><code>zip_url</code></td>
+<td>可上传 Meta Ads Manager 的 ZIP 地址</td>
+</tr>
+<tr>
+<td><code>manifest_url</code></td>
+<td>本次生成的审计与兼容信息</td>
+</tr>
+<tr>
+<td><code>documentation_url</code></td>
+<td>当前接口文档地址</td>
+</tr>
+<tr>
+<td><code>entry</code></td>
+<td>最终产物入口，固定为 <code>index.html</code></td>
+</tr>
+<tr>
+<td><code>preview_entry</code></td>
+<td>普通浏览器试玩入口，固定为 <code>preview.html</code></td>
+</tr>
+<tr>
+<td><code>source_entry</code></td>
+<td>上传包中识别到的原始入口</td>
+</tr>
+<tr>
+<td><code>html_size</code></td>
+<td>Meta 单文件 <code>index.html</code> 的实际 UTF-8 字节数</td>
+</tr>
+<tr>
+<td><code>preview_html_size</code></td>
+<td>普通浏览器试玩页 <code>preview.html</code> 的实际 UTF-8 字节数</td>
+</tr>
+<tr>
+<td><code>zip_size</code></td>
+<td>最终 ZIP 的实际字节数</td>
+</tr>
+<tr>
+<td><code>meta_size_limit_bytes</code></td>
+<td>当前服务采用的安全上限</td>
+</tr>
+<tr>
+<td><code>size_headroom_bytes</code></td>
+<td>HTML 与 ZIP 两项中较小的剩余空间</td>
+</tr>
+<tr>
+<td><code>meta_compatible</code></td>
+<td>只有最终 HTML 与 ZIP 均通过校验时才为 <code>true</code></td>
+</tr>
+<tr>
+<td><code>compatibility</code></td>
+<td>单文件、网络请求、跳转、CSP 安全启动、CTA 和资源压缩等校验结果</td>
+</tr>
+</tbody>
+</table>
+<p><code>manifest_url</code> 对应的 JSON 与接口成功返回使用同一套审计口径。manifest 顶层固定包含：<code>preview_id</code>、<code>title</code>、<code>trial_seconds</code>、<code>play_count</code>、<code>store_url</code>、<code>documentation_url</code>、<code>source_entry</code>、<code>entry</code>、<code>preview_entry</code>、<code>html_size</code>、<code>preview_html_size</code>、<code>zip_size</code>、<code>meta_size_limit_bytes</code>、<code>size_headroom_bytes</code>、<code>meta_compatible</code>、<code>compatibility</code> 和 <code>languages</code>。</p>
+<h2 id="section-6">6. 产物结构</h2>
+<p>下载 <code>zip_url</code> 后，ZIP 中必须且只允许存在一个顶层文件：</p>
+<pre><code class="language-text">index.html
+</code></pre>
+<p>公网目录同时发布两个 HTML：</p>
+<pre><code class="language-text">preview.html  # 普通浏览器试玩和商店跳转
+index.html    # 严格 Meta 单文件，不直接跳商店
+</code></pre>
+<p>以下旧版结构已经废弃，不会再生成：</p>
+<pre><code class="language-text">index.html
+game/index.html
+game/assets/...
+</code></pre>
+<p>原始文件和解压后的 <code>game/</code> 目录不会保留在发布产物中；<code>manifest.json</code> 用于审计，但不放进 Meta ZIP。</p>
+<h2 id="section-7">7. Meta 兼容和体积规则</h2>
+<p>Meta 上传页面提示的“最大 5 MB”不能按 <code>5 MiB</code> 或只检查压缩 ZIP 来处理。当前接口采用更保守的十进制安全上限：</p>
+<pre><code class="language-text">4,800,000 bytes
+</code></pre>
+<p>必须同时满足：</p>
+<ul>
+<li>最终 UTF-8 <code>index.html &lt;= 4,800,000 bytes</code>；</li>
+<li>最终 <code>playable-preview.zip &lt;= 4,800,000 bytes</code>；</li>
+<li>ZIP 只包含顶层 <code>index.html</code>；</li>
+<li>HTML 中没有可直连外网的资源 URL、<code>window.open</code> 或 location 直接跳转；原游戏代码里的 <code>XMLHttpRequest</code>/<code>fetch</code> 会在运行时被绑定到内存资源层；</li>
+<li>直接 <code>location</code> 引用会改写到不可导航的门面，动态链接点击和 popup 会被 CTA 桥接层接管；</li>
+<li>游戏脚本通过真实 <code>&lt;script&gt;</code> 节点顺序启动，不使用 Meta 沙箱禁止的 <code>eval</code> / <code>unsafe-eval</code>；</li>
+<li>iframe 使用 opaque-origin sandbox，内外 CSP 都设置 <code>connect-src 'none'</code>、<code>worker-src 'none'</code>、<code>object-src 'none'</code> 和 <code>form-action 'none'</code>；</li>
+<li>CTA 只调用 <code>FbPlayableAd.onCTAClick()</code>。</li>
+</ul>
+<p>因此，即使 ZIP 小于 5 MB，只要解压后的 HTML 超过安全上限，接口仍会拒绝生成。</p>
+<h2 id="section-8">8. CTA 与商店链接</h2>
+<p><code>store_url</code> 是必填业务字段，会返回给下游投放流程并写入 manifest。它只写入普通浏览器试玩页 <code>preview.html</code>，不会写入 Meta 产物 <code>index.html</code> 或 ZIP 中的 <code>index.html</code>。</p>
+<p>试玩内所有安装动作都统一调用：</p>
+<pre><code class="language-javascript">FbPlayableAd.onCTAClick()
+</code></pre>
+<p>Meta Ads Manager 会结合广告层配置处理 <code>index.html</code> 的实际安装跳转。<code>preview_html_url</code> 指向的 <code>preview.html</code> 会在同源 iframe 中加载该 Meta 文件、注入仅供网页预览的 <code>FbPlayableAd.onCTAClick</code> 测试桥，并在点击后跳转 <code>store_url</code>。上传 Meta 时仍应使用 <code>zip_url</code>，不要上传 <code>preview.html</code>。</p>
+<h2 id="section-9">9. 多语言文案</h2>
+<p>默认支持：</p>
+<pre><code class="language-text">ar, de, en, es, fr, hi, id, it, ja, ko, ms, pt, ru, th, tr, vi, zh, zh-cn, zh-tw
+</code></pre>
+<p>匹配顺序：</p>
+<ol>
+<li>完整浏览器语言标签，例如 <code>zh-tw</code>；</li>
+<li>基础语言，例如 <code>pt-br</code> 回退到 <code>pt</code>；</li>
+<li>英文 <code>en</code>。</li>
+</ol>
+<p>覆盖示例：</p>
+<pre><code class="language-bash">curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
+  -H 'Authorization: Bearer &lt;token&gt;' \
+  -F 'static_page=@game.zip;filename=game.zip' \
+  -F 'store_url=https://play.google.com/store/apps/details?id=ai.fream.dramawave' \
+  -F 'translations={&quot;en&quot;:{&quot;headline&quot;:&quot;Demo Finished&quot;,&quot;subtitle&quot;:&quot;Install to continue.&quot;,&quot;cta&quot;:&quot;Install to Play More&quot;,&quot;plays&quot;:&quot;Plays&quot;},&quot;zh-cn&quot;:{&quot;headline&quot;:&quot;试玩结束&quot;,&quot;subtitle&quot;:&quot;安装后继续游戏&quot;,&quot;cta&quot;:&quot;安装后继续玩&quot;,&quot;plays&quot;:&quot;试玩次数&quot;}}'
+</code></pre>
+<p>每个语言对象支持 <code>headline</code>、<code>subtitle</code>、<code>cta</code>、<code>plays</code>；兼容旧键 <code>title</code>、<code>description</code>、<code>button</code>、<code>install</code>。</p>
+<h2 id="section-10">10. 错误返回</h2>
+<p>失败时通常返回 HTTP <code>400</code>：</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: &quot;bad_request&quot;,
+  &quot;error&quot;: &quot;missing store_url&quot;,
+  &quot;message&quot;: &quot;missing store_url&quot;
+}
+</code></pre>
+<p>常见错误：</p>
+<table>
+<thead>
+<tr>
+<th>错误内容</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>empty request body</code></td>
+<td>请求体为空</td>
+</tr>
+<tr>
+<td><code>upload too large</code></td>
+<td>原始上传内容超过服务端上传限制，默认 80 MiB</td>
+</tr>
+<tr>
+<td><code>duplicate multipart field</code></td>
+<td>multipart 中同一个文本字段出现多次</td>
+</tr>
+<tr>
+<td><code>multiple upload files are not supported</code></td>
+<td>同时传入多个文件或多个文件别名</td>
+</tr>
+<tr>
+<td><code>missing upload file</code></td>
+<td>multipart 请求没有文件字段</td>
+</tr>
+<tr>
+<td><code>missing static_html...</code></td>
+<td>JSON 未提供 HTML 或 ZIP 内容字段</td>
+</tr>
+<tr>
+<td><code>Only base64 data is allowed</code></td>
+<td>JSON Base64 内容包含非法字符或格式不完整</td>
+</tr>
+<tr>
+<td><code>missing store_url</code></td>
+<td>未提供商店链接</td>
+</tr>
+<tr>
+<td><code>store_url must start with http:// or https://</code></td>
+<td>商店链接格式不合法</td>
+</tr>
+<tr>
+<td><code>uploaded static page must include an html entry</code></td>
+<td>ZIP 中未找到 HTML 入口</td>
+</tr>
+<tr>
+<td><code>unsafe zip entry</code></td>
+<td>ZIP 存在绝对路径、盘符路径或父目录穿越</td>
+</tr>
+<tr>
+<td><code>zip extracted size exceeds limit</code></td>
+<td>ZIP 声明或实际解压体积超过限制，默认 80 MiB</td>
+</tr>
+<tr>
+<td><code>zip contains too many files</code></td>
+<td>ZIP 目录项总数（文件和目录）超过限制，默认 4096</td>
+</tr>
+<tr>
+<td><code>duplicate zip entry</code></td>
+<td>ZIP 中存在重复目标路径</td>
+</tr>
+<tr>
+<td><code>encrypted zip entries are not supported</code></td>
+<td>ZIP 含加密文件</td>
+</tr>
+<tr>
+<td><code>zip symbolic links are not supported</code></td>
+<td>ZIP 含符号链接</td>
+</tr>
+<tr>
+<td><code>zip special entries are not supported</code></td>
+<td>ZIP 含设备、FIFO、socket 等普通文件/目录以外的特殊条目</td>
+</tr>
+<tr>
+<td><code>zip file and directory paths conflict</code></td>
+<td>ZIP 把同一路径同时作为文件和目录祖先使用</td>
+</tr>
+<tr>
+<td><code>unsupported zip compression method</code></td>
+<td>ZIP 不是 Stored 或 Deflate 压缩方法</td>
+</tr>
+<tr>
+<td><code>generated Meta playable HTML exceeds safety limit</code></td>
+<td>最终 HTML 超过安全上限</td>
+</tr>
+<tr>
+<td><code>generated Meta playable zip exceeds limit</code></td>
+<td>最终 ZIP 超过安全上限</td>
+</tr>
+<tr>
+<td><code>external markup URL remains</code></td>
+<td>HTML 仍引用外部资源</td>
+</tr>
+<tr>
+<td><code>Meta compatibility validation failed</code></td>
+<td>仍有外部资源、直接跳转、unsafe-eval 启动器、受禁浏览器能力或缺少 CTA Hook</td>
+</tr>
+<tr>
+<td><code>invalid multipart request body</code></td>
+<td>multipart Content-Type、边界或正文不完整</td>
+</tr>
+<tr>
+<td><code>invalid multipart field encoding</code></td>
+<td>multipart 文本字段声明了未知或不可解码字符集</td>
+</tr>
+<tr>
+<td><code>JSON request body must be an object</code></td>
+<td>JSON 顶层不是对象</td>
+</tr>
+<tr>
+<td><code>uploaded content is empty</code></td>
+<td>文件或 Base64 解码后的内容为空</td>
+</tr>
+<tr>
+<td><code>play_count must be &gt;= 0</code></td>
+<td>试玩次数传入负数</td>
+</tr>
+<tr>
+<td><code>File is not a zip file</code></td>
+<td>上传内容不是有效 ZIP</td>
+</tr>
+<tr>
+<td><code>CSS @import is not supported</code></td>
+<td>CSS 仍依赖无法安全打包的导入样式</td>
+</tr>
+<tr>
+<td><code>CSS image-set is not supported</code></td>
+<td>CSS 使用无法可靠逐项内联校验的 <code>image-set</code></td>
+</tr>
+<tr>
+<td><code>Base94 package round-trip failed</code></td>
+<td>内嵌压缩资源包自校验失败</td>
+</tr>
+</tbody>
+</table>
+<p>鉴权失败返回 HTTP <code>403</code>：</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: &quot;forbidden&quot;,
+  &quot;error&quot;: &quot;forbidden&quot;,
+  &quot;message&quot;: &quot;forbidden&quot;
+}
+</code></pre>
+<p>如果生产配置为 <code>enforce</code> 但服务端令牌缺失，接口会返回 HTTP <code>503</code> 和 <code>auth_not_configured</code>，避免意外降级为匿名访问。服务端只记录鉴权模式、是否携带令牌、校验结果和放行/拒绝决定，不记录令牌原文。</p>
+<p>非预期服务端故障返回 HTTP <code>500</code> 和通用 <code>internal_error</code>，详细异常只保留在服务端日志中。</p>
+<p>为限制大文件解析与压缩的内存峰值，生产默认同一时间只处理一个生成请求。并发超出 <code>PLAYABLE_PREVIEW_MAX_CONCURRENCY</code> 时返回 HTTP <code>429</code> 和 <code>playable_preview_busy</code>，调用方应稍后重试。</p>
+<h2 id="section-11">11. 调用方验收建议</h2>
+<p>生成成功后，调用方仍应在上传 Meta 前完成以下检查：</p>
+<ol>
+<li>打开 <code>preview_html_url</code>，试玩结束后点击 CTA，确认浏览器跳转到返回的 <code>store_url</code>；</li>
+<li>下载 <code>meta_html_url</code> 和 <code>zip_url</code>，按实际下载字节重新测量体积；</li>
+<li>解压 ZIP，确认文件列表严格为 <code>index.html</code>；</li>
+<li>扫描 Meta HTML，确认没有直接商店跳转和外部资源；</li>
+<li>在禁止 <code>unsafe-eval</code> 的 CSP 浏览器沙箱中注入 <code>FbPlayableAd.onCTAClick</code> 测试桩，确认无 CSP 报错且游戏进入可交互场景；</li>
+<li>最后在 Meta Ads Manager 预览环境中完成平台侧验证。</li>
+</ol>
+
+      <footer class="doc-footer">
+        <p>该页面由 Git 跟踪的 Markdown 自动生成。<a href="https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md">查看 Markdown 源文档</a></p>
+        <p>源文档 SHA-256：<code>400d9cf14f19f816677667900de8b1792452b13fb2c3515978b0115cfa57ab24</code></p>
+      </footer>
+    </article>
+  </main>
+</body>
+</html>
