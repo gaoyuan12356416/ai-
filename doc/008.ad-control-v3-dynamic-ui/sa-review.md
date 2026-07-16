@@ -34,7 +34,7 @@
 | SA-001 | P0 | 新 V3 不能污染 V2 路由/SQLite/runner | `app.py` 只添加命中 V3 前缀后的 lazy dispatcher；其余 V3 文件独立 | 本地评审通过，生产差异待验 |
 | SA-002 | P0 | 产品/优化师只在 UI 过滤会越权 | service、schema、repository 与 Facebook query 均强制范围；账户字段递归拒绝 | 本地自动化通过 |
 | SA-003 | P0 | session user 与 optimizer 身份域不同 | active user-group 分层精确解析，结果必须唯一；admin 枚举独立 | 本地自动化通过，生产真实身份待验 |
-| SA-004 | P0 | 大表无界查询与 product collation | 每个产品独立查询，强制 platform/product/dt/optimizer、4s hint；保留索引等值并加 BINARY exact，schema/index 漂移失败关闭 | SQL/DDL 单测通过，生产 EXPLAIN 待验 |
+| SA-004 | P0 | 大表无界查询与 product collation | 每个产品独立查询，强制 data_source 0/6、platform/product/dt/optimizer 和 dpdo；scope 身份投影、Preview 规则字段投影；8s session/hint、9～10s socket、15s 总扫描 soft deadline；保留索引等值并加 BINARY exact，schema/index 漂移失败关闭 | SQL/投影/超时单测通过，生产 EXPLAIN 待验 |
 | SA-005 | P0 | 动态页面权限与 XSS | cookie/module、same-origin JSON、2 MiB、CSP、bootstrap JSON 转义、asset allowlist | 本地自动化/Playwright 通过，生产认证待验 |
 | SA-006 | P0 | MySQL 读写角色混用 | reader 63350、writer 63353、固定 host/database/table allowlist、显式事务 | 自动化边界通过，真实账号/复制延迟待验 |
 | SA-007 | P0 | Preview/Execution 部分提交 | Preview、两类 targets、observe execution 与规则组 pointer 在同一 writer 事务提交 | repository 自动化通过 |
@@ -48,7 +48,7 @@
 
 ## 生产前强制门禁
 
-- 119/119 本地 V3 测试必须在最终 commit 再跑一次并保存输出。
+- 132/132 本地 V3 测试必须在最终 commit 再跑一次并保存输出。
 - GitHub push 后服务器只 fetch 精确 commit；exact-source deployer `--check` 必须为 `would_change` 或 `unchanged`。
 - DDL/seed 只允许落 `ads_ai` 八表，先保存 schema 基线并在 63350 回读校验。
 - V3 配置文件、快照、cache 和备份必须位于 `/mnt/data-disk/ai-ad-control-v3`。

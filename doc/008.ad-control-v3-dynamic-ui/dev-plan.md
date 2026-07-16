@@ -62,7 +62,7 @@ tests/test_ad_control_v3_{core,repository,routes,ui,deploy}.py
 | 数据盘原子快照、校验和、权限和大小门禁 | 已完成（代码） | storage tests；生产 mount 待执行 |
 | 手动 Preview、observe execution 和执行日志 | 已完成（本地） | core/repository/UI tests |
 | exact-source check/apply/rollback | 已完成（本地） | deploy tests |
-| 119 条 V3 自动化 | 已完成 | 119/119；含 product 精确匹配与 navigation 发布链 |
+| 132 条 V3 自动化 | 已完成 | 132/132；含 product 精确匹配、字段投影/查询熔断与 navigation 发布链 |
 | 本地 Playwright 1440/390 视觉验收 | 已完成 | 5 张截图；console 0/0 |
 | Git commit/push/服务器精确 fetch | 待主发布流程执行 | 未在本文伪造 commit |
 | 生产八表 DDL/15 产品 seed/schema 回读 | 待执行 | 需 63353 写、63350 回读 |
@@ -85,7 +85,7 @@ tests/test_ad_control_v3_{core,repository,routes,ui,deploy}.py
 ### 手动 observe
 
 1. 明确 `metric_window_days` 或 `date_from/date_to`。
-2. adapter 对每个产品执行 bounded FB query：`MAX_EXECUTION_TIME(4000)`、可索引 `s.product=%s` 前置条件加 `BINARY` exact 复核，按对象身份聚合并复核歧义/时区。
+2. adapter 对每个产品执行 bounded FB query：强制 `dpdo`、`data_source IN (0,6)`、platform/product/dt/optimizer，源 session 与 hint 均为 8 秒、source socket 9～10 秒、总扫描 soft deadline 15 秒；scope 只投影身份/父级，Preview 只投影规则条件、Top N 和 Copy CPI 依赖；可索引 `s.product=%s` 前置条件加 `BINARY` exact 复核。时区留空完全不联设置表。
 3. rule engine 匹配条件，pause 优先，应用 Top N 和稳定排序。
 4. 先将不可变 gzip 快照原子写入数据盘。
 5. 在同一 MySQL 事务写 Preview、两类 targets、observe execution，并 CAS 更新规则组 Preview 指针。
@@ -104,7 +104,7 @@ tests/test_ad_control_v3_{core,repository,routes,ui,deploy}.py
 
 ## 7. 本地验证命令
 
-已由主流程执行并记录 119/119：
+已由主流程执行并记录 132/132：
 
 ```powershell
 python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
@@ -157,7 +157,7 @@ git diff --check
 
 ## 11. 遗留风险
 
-- 生产大表 EXPLAIN、4 秒 hint 行为、读压和复制延迟尚未验证。
+- 生产大表 `dpdo` EXPLAIN、8 秒 session/hint 行为、规则字段组合读压和复制延迟尚未完成发布前验证。
 - 生产 optimizer 身份和 active 产品 seed 尚未验证。
 - 快照与 MySQL 跨存储不是原子事务；DB 失败会留下未引用快照。
 - scheduler/额度/账户本地时间语义尚无实现，计划字段仅配置。
@@ -166,5 +166,5 @@ git diff --check
 
 ## 12. 完成记录
 
-- 2026-07-16：完成 V3 本地实现、119/119 自动化和 1440/390 Playwright 视觉证据。
+- 2026-07-16：完成 V3 本地实现、132/132 自动化和 1440/390 Playwright 视觉证据。
 - 2026-07-16：标准流程文档按最终边界收口；生产/MySQL/V2 回归仍待主发布流程执行。

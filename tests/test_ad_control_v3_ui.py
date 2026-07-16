@@ -348,6 +348,8 @@ def test_lists_are_server_paginated_and_have_loading_empty_error_states():
 
 def test_scope_estimate_requires_and_sends_explicit_metric_window():
     source = JS.read_text(encoding="utf-8")
+    assert "这里只读取对象身份并返回结构数量，不判断规则指标" in source
+    assert "最终可命中数以保存后的手动试算为准" in source
     assert 'id="scopeMetricWindow"' in source
     assert 'placeholder="输入最近天数"' in source
     assert '请填写大于 0 的指标窗口天数' in source

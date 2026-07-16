@@ -4,7 +4,7 @@
 
 - 本地自动化使用 MemoryRepository/Fake MySQL、Stub insight、Memory/SafeDataRoot 和 route handler，不访问生产、不调用 Meta。
 - 本地 Playwright 使用 UTF-8 mock API，验证冻结前端；不等同于生产登录或真实 MySQL。
-- “本地通过”表示存在于本次 119/119 自动化证据；“部分通过”表示本地合同已证实但生产部分尚未执行。
+- “本地通过”表示存在于本次 132/132 自动化证据；“部分通过”表示本地合同已证实但生产部分尚未执行。
 - scheduler、enable 成功、live pause、live copy、TT 执行、copied created_data 和快照清理器属于未发布能力，测试目标是门禁，不是成功执行。
 - 生产/MySQL/V2 项只有真实证据后才能改为通过。
 
@@ -47,7 +47,7 @@
 | TC-012 | 产品多选保存/回显 | 精确值写 relation 表，hash 稳定，无账户字段 | P0 | 本地自动化通过 |
 | TC-013 | 非法/别名产品 | 源查询保留索引等值并用 BINARY 精确复核；大小写别名不混入候选，非法目录值零写入 | P0 | 本地自动化通过；生产 EXPLAIN 待验 |
 | TC-014 | 停用产品历史规则 | 历史可读；重新保存/试算/启用时不得绕过 active catalog | P1 | 待执行（真实 MySQL 联调） |
-| TC-015 | 大表查询边界 | 单产品 query 强制 platform/product/dt/optimizer、`MAX_EXECUTION_TIME(4000)`、索引等值 + BINARY exact 与 `pss`，无无界扫描 | P0 | 部分通过；生产 EXPLAIN 待验 |
+| TC-015 | 大表查询边界 | 单产品 query 强制 data_source 0/6、platform/product/dt/optimizer、`dpdo`、8s session/hint、9～10s source socket 和 15s 总扫描 soft deadline；索引等值 + BINARY exact，无无界扫描 | P0 | 本地自动化通过；生产 EXPLAIN 待验 |
 | TC-016 | 普通用户锁定本人 | UI 锁定，伪造其他 optimizer 返回 `optimizer_forbidden` | P0 | 本地自动化通过 |
 | TC-017 | admin 代建 | 目标 optimizer 必须 active，creator/optimizer 分开审计 | P0 | 本地自动化通过；生产身份待验 |
 | TC-018 | optimizer 无映射 | fail closed，不创建规则 | P0 | 本地自动化通过 |
@@ -57,7 +57,7 @@
 | TC-022 | 页面无账号控件 | DOM/可访问树/payload 无账户和账户池 | P0 | 本地自动化和 Playwright 通过 |
 | TC-023 | API 递归拒绝账号字段 | 任意嵌套 account key 返回 `account_scope_forbidden` | P0 | 本地自动化通过 |
 | TC-024 | 范围估算不可选账号 | 只返回账户/对象/阻断计数，不形成账户配置 | P1 | 本地自动化通过 |
-| TC-025 | 时区留空不限制 | 不加时区过滤，重复同值设置不误阻断 | P0 | 本地自动化通过 |
+| TC-025 | 时区留空不限制 | SQL 完全不 JOIN/聚合账户设置表，重复/冲突设置不参与阻断 | P0 | 本地自动化通过 |
 | TC-026 | 时区精确多选 | 只匹配用户选择的 server enum；不静默猜同义值 | P1 | 本地自动化通过；生产枚举待验 |
 | TC-027 | 缺失/冲突时区 | 设置时区后缺失或冲突对象在规则前阻断并记录原因 | P0 | 本地自动化通过 |
 
@@ -149,7 +149,7 @@
 
 ## 4. 已取得证据
 
-- `python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v`：119/119；其中 product/安全相关子集 54/54、navigation 发布链 13/13。
+- `python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v`：132/132；其中 core/查询性能专项 52/52、product/安全相关子集 56/56、navigation 发布链 13/13。
 - Playwright 冻结代码：1440/390 规则页和日志页；`scrollWidth == viewport`；console 0 Errors / 0 Warnings；页面明确“调度器未发布/仅草稿+手动试算/启用锁定”。
 - 截图目录：`D:\codex\tmp\ad-control-v3-ui-final`。
 

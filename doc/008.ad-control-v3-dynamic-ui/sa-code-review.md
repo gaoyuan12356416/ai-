@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-冻结 R1 独立评审未发现仍开放的 P0 越权、Meta 写入或 V2 破坏路径。最终 V3 119/119，其中 product/安全相关子集 54/54、navigation 发布链 13/13。
+冻结 R1 独立评审未发现仍开放的 P0 越权、Meta 写入或 V2 破坏路径。最终 V3 132/132，其中 core/查询性能专项 52/52、product/安全相关子集 56/56、navigation 发布链 13/13。
 
 当前结论为**通过本地代码评审、生产有条件**：可进入 Git 提交；源 product collation 的代码/DDL修复已闭环，但真实 MySQL query plan/DDL/read-after-write、生产部署和 V2 回归完成前，不允许给出生产通过结论。
 
@@ -42,7 +42,7 @@
 | CR-006 | P0 | Preview persistence | Preview、targets、execution、pointer 分步可能部分提交 | 合并 `save_preview_execution_bundle` 单事务和 target chunk/上限 | 已关闭 |
 | CR-007 | P0 | Facebook aggregation | 多值上下文被 MAX 任取、group_concat 截断可能误归属 | 聚合集合、单值/歧义/截断检测，跨产品对象阻断 | 已关闭 |
 | CR-008 | P0 | production env | 读写 host/port 可错配、root 可能落系统盘 | 固定生产 host，reader 63350/writer 63353、ads_ai，data root 强门禁 | 已关闭 |
-| CR-009 | P1 | product SQL/DDL | 源列为 `utf8mb4_unicode_ci`，普通等值大小写不敏感；强行 BINARY 前置又可能失去索引 | 加 `MAX_EXECUTION_TIME(4000)`；保留可索引 `s.product=%s` 并追加 `BINARY` exact；四处 V3 product 列为 `utf8mb4_bin` | 已关闭；生产 EXPLAIN/DDL 待验 |
+| CR-009 | P1 | product SQL/DDL | 源列为 `utf8mb4_unicode_ci`，普通等值大小写不敏感；全字段聚合在 optimizer 热点超时 | 强制 dpdo/data_source 0/6；scope/Preview 服务端字段投影；8s session/hint 与 9～10s socket；保留可索引 `s.product=%s` 并追加 `BINARY` exact；四处 V3 product 列为 `utf8mb4_bin` | 已关闭；生产 EXPLAIN/DDL 待验 |
 | CR-010 | P1 | navigation | 直接随 overlay 覆盖 navigation 会丢现场组 | 新增独立键级合并 deployer，13/13 | 已关闭，生产待执行 |
 | CR-011 | P1 | API/UI | 调度/enable/live 的配置控件易使用户误认为已发布 | 页面固定提示、启用锁定、meta `can_enable=false`，runner/service fail-close | 已关闭 |
 | CR-012 | P2 | snapshot/DB | 快照先写、DB 后写，DB 失败留孤儿 | 无引用/无执行；清理器延期，保留审计 | 接受延期 |
@@ -55,8 +55,9 @@
 已取得：
 
 ```text
-V3 unittest: 119/119 passed
-Product/safety related subset: 54/54 passed
+V3 unittest: 132/132 passed
+Core/query performance: 52/52 passed
+Product/safety related subset: 56/56 passed
 Navigation deployer subset: 13/13 passed
 Playwright: 1440/390, console 0 errors / 0 warnings
 ```
@@ -67,7 +68,7 @@ V2 冻结 worktree 146 条中 143 通过，3 条因缺少 `features.x_accounts` 
 
 ## 6. 生产前复核项
 
-- 在精确 target commit 上重跑全部 119 条与 `git diff --check`。
+- 在精确 target commit 上重跑全部 132 条与 `git diff --check`。
 - 对真实 MySQL 5.7.18 执行 product query `EXPLAIN`，确认索引等值前置和 binary 精确语义同时成立。
 - 63353 建八表/seed，63350 schema/15 产品/read-after-write 回读。
 - 最终 live app hash 与 source commit blob 一致后才能 apply overlay。

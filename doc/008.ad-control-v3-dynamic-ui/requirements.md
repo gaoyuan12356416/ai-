@@ -48,7 +48,7 @@ V3 只有两个动态页面：
 - 产品 `value` 与 `kunlunads_dev.ads_custom_source_insight.product` 精确一致，不做大小写、别名或模糊替换。
 - UI 支持多选；可用值来自 `ads_ai.ad_control_v3_product_catalog` 中 `channel=facebook`、`product_type=short_drama`、启用的记录。
 - 本期审核 seed 为 15 个短剧产品枚举；生产执行 seed 前仍需核对 SQL 和当前业务枚举。
-- 大表候选查询必须先锁定单个产品、`dt` 窗口、`optimizer` 和 `platform=0`，按产品拆分并使用 `MAX_EXECUTION_TIME(4000)`。源 product 为 `utf8mb4_unicode_ci`：SQL 保留可索引的 `s.product=%s` 前置谓词，同时追加 `BINARY s.product=BINARY %s` 实现精确大小写语义；禁止无界 `DISTINCT`/聚合。
+- 大表候选查询必须先锁定 `data_source IN (0,6)`、单个产品、`dt` 窗口、`optimizer` 和 `platform=0`，按产品拆分并强制使用 `dpdo(data_source,product,dt,optimizer)`；每次源连接先设置 `SET SESSION max_execution_time=8000`，SQL 同时保留 8 秒 hint，source read timeout 为 9～10 秒，总扫描 soft deadline 为 15 秒。源 product 为 `utf8mb4_unicode_ci`：SQL 保留可索引的 `s.product=%s` 前置谓词，同时追加 `BINARY s.product=BINARY %s` 实现精确大小写语义；禁止无界 `DISTINCT`/聚合。
 
 ### 4.3 优化师
 
@@ -63,7 +63,7 @@ V3 只有两个动态页面：
 - 页面不存在账户、账户池、手工账号控件。
 - API 任意嵌套层级出现 account/account-pool 范围字段均返回 `account_scope_forbidden`。
 - 账户 ID 仅是候选对象身份的一部分，由源表发现，不能由用户配置。
-- `account_timezones=[]` 表示不限制；设置时按 `ads_accounts_setting(platform_id=1).time_zone` 精确过滤。
+- `account_timezones=[]` 表示不限制且候选 SQL 不联 `ads_accounts_setting`；仅设置范围时才联表并按 `platform_id=1` 的 `time_zone` 精确过滤。
 - 账户号只移除一次前导 `act_`；冲突时区或设置了范围但时区缺失的对象以原因码阻断。
 - 本期没有计划调度器，因此时区仅用于范围过滤；账户本地时间的定时执行属于后续发布。
 
@@ -89,6 +89,8 @@ V3 只有两个动态页面：
 - 发布/素材：最近自动发布日、最近资源创建时间、最近消耗时间；Ad 层资源 ID/名称、source ID、W2A page、素材/任务分类等；
 - 效果：spend、impressions、clicks、installs、purchase、revenue、retention、events、ATC、delivery、AF 和广告变现指标；
 - 计算指标：CTR、CPM、CPC、CPI、Purchase CPA、ROAS、AF ROAS、广告变现 ROAS。
+
+范围估算固定使用 `identity_only` 投影，只查询对象身份、父级唯一性和用户明确设置时的时区；手动 Preview 才由已保存规则条件、Top N 排序字段以及 Copy 的实际 CPI 预算依赖推导 `rule_fields`，只聚合所需原始指标/上下文字段。客户端不能提交 SQL 投影字段，未知字段失败关闭。
 
 `content_id` 不存在于当前源表，目录中必须显示为不可筛。指定剧使用 `series_code`；最近 X 天使用发布/资源时间字段的相对天数操作符。
 
@@ -162,7 +164,7 @@ V3 只有两个动态页面：
 
 ## 11. 验收标准
 
-- V3 本地单元/集成测试 119/119 通过，Python 3.9、JavaScript 语法、动态路由、权限、repository、规则引擎、数据盘、product 精确匹配、主/导航 exact-source 部署器均有自动化证据。
+- V3 本地单元/集成测试 132/132 通过，Python 3.9、JavaScript 语法、动态路由、权限、repository、规则引擎、字段投影/查询熔断、数据盘、product 精确匹配、主/导航 exact-source 部署器均有自动化证据。
 - 本地 Playwright 在 1440 和 390 视口验证两页：中文无乱码、无页面级横向溢出、控制台 0 error/0 warning，并明确展示“仅草稿 + 手动试算/启用锁定”。
 - 生产部署、八表 DDL/seed、真实 reader/writer、真实登录、真实三层 observe 和 V2 前后回归必须另行取证；未完成前不得标记上线完成。
 - 生产 observe 必须证明 Token lookup、Graph GET/POST/copy 和 Meta 写均为 0。

@@ -20,16 +20,17 @@
 
 | 类型 | 总数 | 通过 | 失败 | 阻塞/待执行 |
 | --- | ---: | ---: | ---: | ---: |
-| V3 unittest（含主/导航 deployer） | 119 | 119 | 0 | 0 |
-| Product/安全相关子集（包含于 119） | 54 | 54 | 0 | 0 |
-| Navigation deployer 子集（包含于 119） | 13 | 13 | 0 | 0 |
+| V3 unittest（含主/导航 deployer） | 132 | 132 | 0 | 0 |
+| Core/查询性能专项（包含于 132） | 52 | 52 | 0 | 0 |
+| Product/安全相关子集（包含于 132） | 56 | 56 | 0 | 0 |
+| Navigation deployer 子集（包含于 132） | 13 | 13 | 0 | 0 |
 | V2 冻结 worktree 基线 | 146 | 143 | 0 | 3 环境阻塞 |
 | Playwright 冻结 UI 视口 | 4 页面/视口组合 + 1 移动数据截图 | 5 | 0 | 0 |
 | 生产 MySQL/DDL/read-after-write | 1 组 | 0 | 0 | 1 待执行 |
 | 生产 route/auth/browser/manual observe | 1 组 | 0 | 0 | 1 待执行 |
 | 生产 V2 发布前后回归/自然 tick | 1 组 | 0 | 0 | 1 待执行 |
 
-V3 最终测试实际结果：119/119；其中 product/安全相关子集 54/54、Navigation 发布链 13/13。
+V3 最终测试实际结果：132/132；其中 core/查询性能专项 52/52、product/安全相关子集 56/56、Navigation 发布链 13/13。
 
 V2 的 3 个阻塞并非测试断言失败：冻结 Git worktree 缺少生产/用户工作树中未纳入该 commit 的 `features.x_accounts`，导致 import-time `ImportError`。这不能被记为通过；最终 target commit 与生产完整模块上必须重跑。
 
@@ -89,7 +90,7 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 | CR-001 | P0 | 初版 production service 未接线，API 会 503；已改为认证后 lazy environment build | 已关闭 |
 | CR-002 | P0 | 初版 UI group ID/version、scope window 和 meta actor 合同不一致 | 已关闭并有回归 |
 | CR-003 | P0 | enable 检查存在 TOCTOU 风险 | repository 使用单条 CAS/Preview guard；当前 enable 仍失败关闭 | 已关闭 |
-| CR-004 | P1 | 源 product 为大小写不敏感 collation，必须同时保持索引等值和 binary 精确语义 | 已加 4s hint、索引等值 + BINARY exact；四处 V3 product 列 `utf8mb4_bin`，生产 EXPLAIN/DDL 待验 |
+| CR-004 | P1 | 源 product 大小写不敏感且 optimizer 热点全字段聚合超时 | 已切 dpdo/data_source 0/6、服务端字段投影、8s session/hint、9～10s socket，并保留索引等值 + BINARY exact；四处 V3 product 列 `utf8mb4_bin`，生产 EXPLAIN/DDL 待验 |
 | CR-005 | P1 | navigation 不应由主 overlay 整份覆盖 | 独立键级合并 deployer + 13/13 | 已关闭（生产待执行） |
 | CR-006 | P2 | 快照写入早于 MySQL 事务，失败会留孤儿文件 | 延期；无引用、无执行，当前无清理器 |
 | CR-007 | P2 | 列表/详情存在可优化的 N+1 查询 | 延期；服务端分页和上限降低风险 |
@@ -124,7 +125,7 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 当前建议：
 
 - 可以进入最终代码评审、commit/push 和受控 staging；
-- 在精确 target commit 重跑 119 条后，才可执行八表 DDL/seed；
+- 在精确 target commit 重跑 132 条后，才可执行八表 DDL/seed；
 - 完成 `deploy.md` 的生产 P0 门禁后，才可 route dark 和单范围手动 observe；
 - 在生产 V2 回归、三层零外部写证据和线上浏览器完成前，不得标记发布完成；
 - 本期任何情况下都不得启用 scheduler、规则 enable 或 Meta 写能力。

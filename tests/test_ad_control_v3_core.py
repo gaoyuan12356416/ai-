@@ -22,7 +22,16 @@ from features.ad_control_v3.errors import AdControlV3Error
 from features.ad_control_v3.repository import MemoryRepository
 from features.ad_control_v3.rule_engine import evaluate_candidates
 from features.ad_control_v3.schemas import Actor
-from features.ad_control_v3.service import COMPUTED_INSIGHT_FIELDS, SOURCE_INSIGHT_REQUIRED_COLUMNS, Service
+from features.ad_control_v3.service import (
+    COMPUTED_INSIGHT_FIELDS,
+    SOURCE_MYSQL_READ_TIMEOUT_MAX_SECONDS,
+    SOURCE_MYSQL_READ_TIMEOUT_MIN_SECONDS,
+    SOURCE_INSIGHT_REQUIRED_COLUMNS,
+    Service,
+    _bounded_environment_int,
+    _execute_bounded_source_query,
+    _validate_source_schema_rows,
+)
 from features.ad_control_v3.storage import MemorySnapshotStore, SafeDataRoot
 
 
@@ -208,6 +217,23 @@ class SchemaAndPermissionTests(unittest.TestCase):
         }
         self.assertTrue(production_component_fixture.issubset(SOURCE_INSIGHT_REQUIRED_COLUMNS))
         self.assertTrue(COMPUTED_INSIGHT_FIELDS.isdisjoint(SOURCE_INSIGHT_REQUIRED_COLUMNS))
+        self.assertIn("data_source", SOURCE_INSIGHT_REQUIRED_COLUMNS)
+
+    def test_source_schema_requires_reviewed_dpdo_prefix(self):
+        insight_rows = [{"Field": field} for field in SOURCE_INSIGHT_REQUIRED_COLUMNS]
+        account_rows = [{"Field": field} for field in ("account_id", "platform_id", "time_zone")]
+        dpdo_rows = [
+            {"Key_name": "dpdo", "Seq_in_index": index, "Column_name": field}
+            for index, field in enumerate(("data_source", "product", "dt", "optimizer"), 1)
+        ]
+        _validate_source_schema_rows(insight_rows, account_rows, dpdo_rows)
+        pss_only = [
+            {"Key_name": "pss", "Seq_in_index": index, "Column_name": field}
+            for index, field in enumerate(("product", "dt", "series_code"), 1)
+        ]
+        with self.assertRaises(AdControlV3Error) as raised:
+            _validate_source_schema_rows(insight_rows, account_rows, pss_only)
+        self.assertEqual("source_schema_mismatch", raised.exception.code)
 
     def test_actor_role_admin_is_recognized(self):
         self.assertTrue(Actor.from_value(ADMIN).is_admin)
@@ -329,19 +355,221 @@ class AdapterAndPreviewTests(unittest.TestCase):
         for sql, params in query.calls:
             for fragment in (
                 "s.platform = %s", "s.product = %s", "BINARY s.product = BINARY %s",
-                "s.dt BETWEEN %s AND %s", "s.optimizer = %s", "FORCE INDEX (pss)",
+                "s.dt BETWEEN %s AND %s", "s.optimizer = %s", "FORCE INDEX (dpdo)",
+                "s.data_source IN (0, 6)",
             ):
                 self.assertIn(fragment, sql)
             self.assertEqual(1, sql.count("MAX_EXECUTION_TIME(%s)" % SOURCE_QUERY_MAX_EXECUTION_TIME_MS))
-            self.assertLess(SOURCE_QUERY_MAX_EXECUTION_TIME_MS, 5000)
+            self.assertLessEqual(SOURCE_QUERY_MAX_EXECUTION_TIME_MS, 8000)
+            self.assertLess(
+                SOURCE_QUERY_MAX_EXECUTION_TIME_MS,
+                SOURCE_MYSQL_READ_TIMEOUT_MIN_SECONDS * 1000,
+            )
+            self.assertEqual(10, SOURCE_MYSQL_READ_TIMEOUT_MAX_SECONDS)
             self.assertIn("CASE WHEN LEFT", sql)
-            self.assertIn("COUNT(*) AS settings_row_count", sql)
-            self.assertIn("GROUP BY CASE WHEN LEFT(LOWER(CAST(x.account_id", sql)
+            self.assertNotIn("ads_accounts_setting", sql)
+            self.assertIn("0 AS settings_row_count", sql)
             self.assertNotIn("REPLACE(LOWER(CAST(s.ad_account_id", sql)
             self.assertEqual(
                 ("Dramawave", 248, 0, "Dramawave", "Dramawave", "2026-07-14", "2026-07-16", 248),
                 params[:-1],
             )
+
+    def test_timezone_join_is_only_present_for_an_explicit_timezone_filter(self):
+        query = QueryStub()
+        adapter = FacebookAdapter(query)
+        base_scope = {
+            "object_level": "campaign", "products": ["Dramawave"], "optimizer_id": 248,
+            "date_from": "2026-07-16", "date_to": "2026-07-16", "required_fields": [],
+        }
+        adapter.discover(dict(base_scope, account_timezones=[]))
+        without_timezone = query.calls[-1][0]
+        adapter.discover(dict(base_scope, account_timezones=["America/Los_Angeles"]))
+        with_timezone = query.calls[-1][0]
+        self.assertNotIn("ads_accounts_setting", without_timezone)
+        self.assertNotIn("COUNT(*) AS settings_row_count", without_timezone)
+        self.assertIn("ads_accounts_setting", with_timezone)
+        self.assertIn("COUNT(*) AS settings_row_count", with_timezone)
+
+    def test_scope_estimate_uses_identity_only_projection(self):
+        service, _, query = make_service()
+        estimate = service.scope_estimate(NORMAL, {
+            "channel": "facebook", "object_level": "campaign", "products": ["Dramawave"],
+            "optimizer_id": 248, "account_timezones": [], "metric_window_days": 1,
+        })
+        sql = query.calls[-1][0]
+        self.assertNotIn("GROUP_CONCAT", sql)
+        self.assertNotIn("SUM(s.", sql)
+        self.assertNotIn("ads_accounts_setting", sql)
+        self.assertIn("campaign_parent_count", sql)
+        self.assertEqual("identity_only", estimate["projection_mode"])
+        self.assertEqual([], estimate["required_fields"])
+
+    def test_preview_projection_uses_conditions_and_top_n_computed_dependencies(self):
+        service, _, query = make_service()
+        payload = base_payload()
+        payload["rules"][0]["conditions"] = [{"field": "cpi", "operator": "gte", "value": 0}]
+        payload["selection"] = {
+            "mode": "global_top_n", "metric_window_days": 1, "top_n": 1,
+            "sort_field": "roas", "sort_direction": "desc",
+        }
+        group = service.create_rule_group(NORMAL, payload)
+        preview = service.preview(NORMAL, group["group_id"], {})
+        self.assertEqual(1, preview["summary"]["planned_count"])
+        sql = query.calls[-1][0]
+        for field in ("spend", "installs", "revenue"):
+            self.assertIn("SUM(s.%s)" % field, sql)
+        for field in ("impressions", "clicks", "purchase", "af_revenue"):
+            self.assertNotIn("SUM(s.%s)" % field, sql)
+        self.assertNotIn("GROUP_CONCAT", sql)
+        self.assertEqual("rule_fields", preview["summary"]["projection_mode"])
+        self.assertEqual(["cpi", "roas"], preview["summary"]["required_fields"])
+
+    def test_actual_cpi_copy_budget_adds_cpi_projection_dependencies(self):
+        service, _, query = make_service()
+        group = service.create_rule_group(NORMAL, base_payload(action="copy"))
+        preview = service.preview(NORMAL, group["group_id"], {})
+        sql = query.calls[-1][0]
+        self.assertIn("SUM(s.spend)", sql)
+        self.assertIn("SUM(s.installs)", sql)
+        self.assertIn("cpi", preview["summary"]["required_fields"])
+        target = preview["targets"][0]
+        self.assertFalse(target["copy_live_ready"])
+        self.assertEqual(
+            ["copy_persistence_not_configured", "roas_bid_unavailable"],
+            target["copy_readiness_reasons"],
+        )
+
+        # Zero CPI cannot produce a valid positive Meta budget in a future live
+        # copy path, even though zero is otherwise a present numeric metric.
+        zero_cpi_candidate = candidate_row()
+        zero_cpi_candidate["installs"] = 1
+        zero_cpi_candidate["cpi"] = 0
+        zero_result = evaluate_candidates(
+            [zero_cpi_candidate],
+            group["rules"],
+            facebook_field_catalog("campaign"),
+            {"mode": "all"},
+        )
+        self.assertIn(
+            "actual_cpi_unavailable",
+            zero_result["targets"][0]["copy_readiness_reasons"],
+        )
+
+    def test_context_projection_selects_only_the_requested_context(self):
+        sql, columns = FacebookAdapter(QueryStub())._query_for_level(
+            "campaign", ["series_code"]
+        )
+        self.assertIn("s.series_code", sql)
+        self.assertNotIn("s.app_id", sql)
+        self.assertNotIn("SUM(s.", sql)
+        self.assertIn("series_code", columns)
+        self.assertNotIn("app_id", columns)
+
+    def test_unknown_required_projection_field_fails_closed(self):
+        with self.assertRaises(AdControlV3Error) as raised:
+            FacebookAdapter(QueryStub()).discover({
+                "object_level": "campaign", "products": ["Dramawave"], "optimizer_id": 248,
+                "date_from": "2026-07-16", "date_to": "2026-07-16",
+                "account_timezones": [], "required_fields": ["drop_table"],
+            })
+        self.assertEqual("required_field_not_supported", raised.exception.code)
+
+    def test_source_query_sets_session_timeout_before_every_statement(self):
+        class Cursor:
+            def __init__(self):
+                self.calls = []
+                self.closed = False
+
+            def execute(self, sql, params):
+                self.calls.append((sql, tuple(params)))
+
+            def fetchall(self):
+                return [{"ok": 1}]
+
+            def close(self):
+                self.closed = True
+
+        class Connection:
+            def __init__(self):
+                self.cursor_value = Cursor()
+                self.closed = False
+
+            def cursor(self):
+                return self.cursor_value
+
+            def close(self):
+                self.closed = True
+
+        connection = Connection()
+        rows = _execute_bounded_source_query(lambda: connection, "SHOW COLUMNS FROM t", ())
+        self.assertEqual([{"ok": 1}], rows)
+        self.assertEqual(
+            ("SET SESSION max_execution_time = %s", (SOURCE_QUERY_MAX_EXECUTION_TIME_MS,)),
+            connection.cursor_value.calls[0],
+        )
+        self.assertEqual(("SHOW COLUMNS FROM t", ()), connection.cursor_value.calls[1])
+        self.assertTrue(connection.cursor_value.closed)
+        self.assertTrue(connection.closed)
+
+    def test_source_query_failure_is_retryable_503_and_closes_connection(self):
+        class Cursor:
+            def execute(self, sql, params):
+                raise RuntimeError("driver detail must not escape")
+
+            def close(self):
+                self.closed = True
+
+        class Connection:
+            def __init__(self):
+                self.cursor_value = Cursor()
+                self.closed = False
+
+            def cursor(self):
+                return self.cursor_value
+
+            def close(self):
+                self.closed = True
+
+        connection = Connection()
+        with self.assertLogs(level="WARNING") as captured:
+            with self.assertRaises(AdControlV3Error) as raised:
+                _execute_bounded_source_query(lambda: connection, "SELECT 1", ())
+        self.assertEqual("source_query_unavailable", raised.exception.code)
+        self.assertEqual(503, raised.exception.status)
+        self.assertNotIn("driver detail", raised.exception.message)
+        self.assertIn("ad-control V3 source query failed", "\n".join(captured.output))
+        self.assertTrue(connection.cursor_value.closed)
+        self.assertTrue(connection.closed)
+
+    def test_invalid_source_timeout_environment_is_service_503(self):
+        with mock.patch.dict(
+            os.environ,
+            {"AD_CONTROL_V3_SOURCE_MYSQL_READ_TIMEOUT_SECONDS": "not-an-int"},
+        ):
+            with self.assertRaises(AdControlV3Error) as raised:
+                _bounded_environment_int(
+                    "AD_CONTROL_V3_SOURCE_MYSQL_READ_TIMEOUT_SECONDS",
+                    10,
+                    SOURCE_MYSQL_READ_TIMEOUT_MIN_SECONDS,
+                    SOURCE_MYSQL_READ_TIMEOUT_MAX_SECONDS,
+                )
+        self.assertEqual("service_not_configured", raised.exception.code)
+        self.assertEqual(503, raised.exception.status)
+
+    def test_multi_product_scan_exceeding_total_deadline_fails_closed(self):
+        adapter = FacebookAdapter(QueryStub(), query_deadline_seconds=15)
+        with mock.patch(
+            "features.ad_control_v3.channels.facebook.time.monotonic",
+            side_effect=[0, 0, 1, 16],
+        ):
+            with self.assertRaises(AdControlV3Error) as raised:
+                adapter.discover({
+                    "object_level": "campaign", "products": ["Dramawave", "FreeReels"],
+                    "optimizer_id": 248, "date_from": "2026-07-16", "date_to": "2026-07-16",
+                    "account_timezones": [], "required_fields": [],
+                })
+        self.assertEqual("scope_query_deadline_exceeded", raised.exception.code)
 
     def test_high_value_source_fields_are_level_scoped_aggregated_and_computed(self):
         campaign_catalog = {item["key"] for item in facebook_field_catalog("campaign") if item["filterable"]}
@@ -522,6 +750,21 @@ class AdapterAndPreviewTests(unittest.TestCase):
         self.assertEqual(1, preview["summary"]["blocked_count"])
         self.assertEqual("ambiguous_object_scope", preview["targets"][0]["reason"])
 
+    def test_missing_required_parent_identity_is_blocked_for_adset_and_ad(self):
+        for level, object_id, missing_field in (
+            ("adset", "set-1", "campaign_parent_count"),
+            ("ad", "ad-1", "campaign_parent_count"),
+            ("ad", "ad-1", "adset_parent_count"),
+        ):
+            query = QueryStub()
+            row = candidate_row(object_id=object_id)
+            row[missing_field] = 0
+            query.rows_by_product["Dramawave"] = [row]
+            service, _, _ = make_service(query)
+            group = service.create_rule_group(NORMAL, base_payload(level))
+            preview = service.preview(NORMAL, group["group_id"], {})
+            self.assertEqual("ambiguous_object_scope", preview["targets"][0]["reason"])
+
     def test_timezone_missing_is_audited_not_silently_included(self):
         query = QueryStub()
         row = candidate_row()
@@ -546,7 +789,7 @@ class AdapterAndPreviewTests(unittest.TestCase):
         self.assertEqual(1, preview["summary"]["planned_count"])
         self.assertEqual("matched", preview["targets"][0]["reason"])
 
-    def test_conflicting_account_timezone_settings_are_blocked_before_rules(self):
+    def test_conflicting_timezone_rows_are_ignored_when_filter_is_empty(self):
         query = QueryStub()
         row = candidate_row(account="123")
         row["settings_row_count"] = 2
@@ -554,6 +797,19 @@ class AdapterAndPreviewTests(unittest.TestCase):
         query.rows_by_product["Dramawave"] = [row]
         service, _, _ = make_service(query)
         group = service.create_rule_group(NORMAL, base_payload())
+        preview = service.preview(NORMAL, group["group_id"], {})
+        self.assertEqual("matched", preview["targets"][0]["reason"])
+
+    def test_conflicting_timezone_rows_are_blocked_when_filter_is_configured(self):
+        query = QueryStub()
+        row = candidate_row(account="123")
+        row["settings_row_count"] = 2
+        row["settings_timezone_count"] = 2
+        query.rows_by_product["Dramawave"] = [row]
+        service, _, _ = make_service(query)
+        payload = base_payload()
+        payload["account_timezones"] = ["America/Los_Angeles"]
+        group = service.create_rule_group(NORMAL, payload)
         preview = service.preview(NORMAL, group["group_id"], {})
         self.assertEqual("ambiguous_account_timezone", preview["targets"][0]["reason"])
 
@@ -696,7 +952,13 @@ class RuleEngineTests(unittest.TestCase):
         self.assertEqual({"country": "US", "spend": 20}, target["condition_evidence"])
         self.assertFalse(target["condition_evidence_truncated"])
         copy_only = evaluate_candidates([candidate], rules[:1], facebook_field_catalog("campaign"), {"mode": "all"})
-        self.assertEqual(50, copy_only["targets"][0]["copy_parameters"]["source_budget_ratio"])
+        copy_target = copy_only["targets"][0]
+        self.assertEqual(50, copy_target["copy_parameters"]["source_budget_ratio"])
+        self.assertFalse(copy_target["copy_live_ready"])
+        self.assertEqual(
+            ["copy_persistence_not_configured", "source_budget_unavailable"],
+            copy_target["copy_readiness_reasons"],
+        )
 
     def test_top_n_is_stable_and_blocked_does_not_consume_quota(self):
         candidates = []

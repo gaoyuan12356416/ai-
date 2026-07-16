@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-本文是待执行发布 Runbook。截止文档收口时：本地 V3 119/119 和本地 Playwright 已通过；GitHub 提交/推送、生产 DDL、代码 overlay、服务重启、线上浏览器、真实手动 observe 和 V2 发布后回归均未完成。
+本文是待执行发布 Runbook。截止文档收口时：本地 V3 132/132 和本地 Playwright 已通过；GitHub 提交/推送、生产 DDL、代码 overlay、服务重启、线上浏览器、真实手动 observe 和 V2 发布后回归均未完成。
 
 本轮生产目标只到：**FB 动态两页 + 配置 + 手动 observe**。不得创建/启用 V3 timer，不得 enable 规则，不得调用 Meta 写接口。
 
@@ -181,7 +181,7 @@ node --check features/ad_control_v3/assets/app.js
 nginx -t
 ```
 
-在 staging 精确 commit 上运行 119 条 V3 测试。只重启 `drama-material-api.service`；记录重启前后 PID、启动时间和 journal 游标，不重启无关 worker。
+在 staging 精确 commit 上运行 132 条 V3 测试。只重启 `drama-material-api.service`；记录重启前后 PID、启动时间和 journal 游标，不重启无关 worker。
 
 ## 10. Route dark 与线上验收
 
@@ -241,7 +241,7 @@ python3 "$REPO/deploy/apply_ad_control_v3_navigation.py" \
 - ad-control cron 唯一行、日志、锁和至少一轮自然 tick；
 - V3 路径外不 import `features.ad_control_v3`，无 V3 DB/数据盘 I/O。
 
-任何不一致先停止 V3 入口，不能用“119 条 V3 测试通过”代替 V2 生产证据。
+任何不一致先停止 V3 入口，不能用“132 条 V3 测试通过”代替 V2 生产证据。
 
 ## 12. 回滚
 

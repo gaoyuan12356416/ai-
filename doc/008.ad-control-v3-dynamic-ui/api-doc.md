@@ -179,6 +179,7 @@ V3 payload 禁止以下任意嵌套范围字段：`account_id(s)`、`accounts`�
 - 产品 1～20 个精确枚举；源查询同时使用可索引等值和 BINARY exact，V3 product 列为 binary collation；普通用户 optimizer 必须为本人，admin 目标必须为 active optimizer。
 - `selection.metric_window_days` 必填，1～31。
 - `selection.mode`：`all | account_top_n | product_top_n | global_top_n`；Top N 模式须提供 `top_n/sort_field/sort_direction`。
+- `scope-estimate` 固定返回 `projection_mode=identity_only, required_fields=[]`；Preview 的 `summary` 返回服务端推导的 `projection_mode=rule_fields/required_fields`。客户端无权提交 `required_fields`。
 - Copy carrier：Campaign=`deep_copy_campaign`；Ad Set=`same_campaign|new_campaign`；Ad=`same_adset|isolated_adset|isolated_campaign`。
 - Copy budget mode：`actual_cpi_multiplier | fixed_target_cpi_multiplier | source_budget_ratio`。
 - 更新必须提供 `If-Match: "{config_version}"` 或 body 正整数 `version`；冲突返回 `version_conflict`。`version` 不进入持久化配置。
@@ -281,7 +282,7 @@ Preview 会写数据盘快照及 `ads_ai` Preview/Execution/Target 行；不会 
 | 409 | `snapshot_missing/hash_mismatch/invalid` | 快照验证失败 |
 | 413 | `snapshot_too_large` | 快照超过限制 |
 | 500 | `internal_error` | 未知内部错误 |
-| 503 | `service_not_configured` / `unsafe_mysql_endpoint` / `unsafe_data_root` | 生产依赖未安全配置 |
+| 503 | `service_not_configured` / `unsafe_mysql_endpoint` / `unsafe_data_root` / `source_query_unavailable` | 生产依赖未安全配置，或源洞察查询超时/暂时不可用，可稍后重试 |
 | 507 | `data_disk_low_space` | 数据盘余量不足 |
 
 ## 9. 兼容性

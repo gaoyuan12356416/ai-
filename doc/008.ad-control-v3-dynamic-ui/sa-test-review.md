@@ -4,7 +4,7 @@
 
 通过本地测试设计评审；允许作为 GitHub 提交门禁。生产发布结论仍为待验。
 
-`test-cases.md` 已按冻结实现重新标注 88 条用例，清楚区分：本地自动化、本地 mock Playwright、真实 MySQL、生产浏览器、V2 回归和未发布能力。未将 119/119 本地结果扩张为生产证据。
+`test-cases.md` 已按冻结实现重新标注 88 条用例，清楚区分：本地自动化、本地 mock Playwright、真实 MySQL、生产浏览器、V2 回归和未发布能力。未将 132/132 本地结果扩张为生产证据。
 
 ## 评审范围
 
@@ -24,7 +24,7 @@
 | STR-002 | P0 | 原用例将 live pause/copy 当作待 Canary 的当前代码 | 改为门禁与零 external mutator；真实 Meta Canary 移出本期 | 已修订 |
 | STR-003 | P0 | `content_id` 源列不存在 | TC-049 固定指定剧使用 `series_code`，content_id 不可筛 | 已修订 |
 | STR-004 | P0 | 预算/Meta 状态字段被写成当前可筛 | TC-037 明确 roadmap 字段 UI/服务端双禁 | 已修订 |
-| STR-005 | P0 | 119 条单测可能被误写为生产通过 | 所有真实 MySQL、生产权限、V2、自然 tick 单独标待执行 | 已修订 |
+| STR-005 | P0 | 132 条单测可能被误写为生产通过 | 所有真实 MySQL、生产权限、V2、自然 tick 单独标待执行 | 已修订 |
 | STR-006 | P0 | 快照清理用例假定已有实现 | TC-073 改为阻塞/未发布，禁止批删 | 已修订 |
 | STR-007 | P1 | 原日志用例要求业务日聚合，超出冻结实现 | TC-074 改为 V3 event list，不承诺业务日合并 | 已修订 |
 | STR-008 | P1 | 原浏览器验收范围大于已有证据 | 仅 1440/390、无溢出、中文、console 标通过；200%/键盘/对比度继续待验 | 已修订 |
@@ -38,7 +38,7 @@
 - `test_ad_control_v3_ui.py`：两动态页、无默认值、三层/Copy UI、server pagination、XSS、responsive CSS、navigation contract。
 - `test_ad_control_v3_deploy.py`：精确 source/target、drift、锁、backup、幂等 apply、自动 rollback 和显式 release rollback。
 
-总计 119/119；其中 product/安全相关子集 54/54、navigation 发布链 13/13。该数字来自主流程实际执行，不包含生产数据库或线上浏览器。
+总计 132/132；其中 core/查询性能专项 52/52、product/安全相关子集 56/56、navigation 发布链 13/13。该数字来自主流程实际执行，不包含生产数据库或线上浏览器。
 
 ## Playwright 评审
 
@@ -55,7 +55,7 @@
 
 ## 生产 QA 门禁
 
-1. 精确 commit staging 重跑 119 条测试和 Python 3.9/JS 检查。
+1. 精确 commit staging 重跑 132 条测试和 Python 3.9/JS 检查。
 2. 八表 DDL、15 产品 seed、reader/writer 和 replication readback。
 3. admin/普通用户/无权限三种真实身份。
 4. Campaign/Ad Set/Ad 分别手动 observe，Token/Graph/Meta 写 0。

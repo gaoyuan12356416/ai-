@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import threading
 import uuid
@@ -15,6 +16,7 @@ from .catalog import (
     validate_rules_against_catalog,
 )
 from .channels import ChannelAdapter, FacebookAdapter, TikTokAdapter
+from .channels.facebook import SOURCE_QUERY_MAX_EXECUTION_TIME_MS
 from .errors import AdControlV3Error
 from .repository import MySQLRepository
 from .rule_engine import evaluate_candidates
@@ -64,7 +66,7 @@ SERVER_MANAGED_FIELDS = {
     "behavior_hash",
 }
 SOURCE_INSIGHT_REQUIRED_COLUMNS = frozenset({
-    "ad_account_id", "campaign_id", "adset_id", "ad_id", "platform", "product", "dt", "optimizer",
+    "ad_account_id", "campaign_id", "adset_id", "ad_id", "data_source", "platform", "product", "dt", "optimizer",
     "series_code", "app", "app_id", "os_type", "country", "language", "country_group", "drama_language",
     "auto_publish_dt", "resource_created_at", "spend_at", "resource_id", "resource_name", "source_id",
     "w2a_page_id", "ad_type", "category", "resource_tag", "source_type", "resource_type",
@@ -73,7 +75,120 @@ SOURCE_INSIGHT_REQUIRED_COLUMNS = frozenset({
     "retain_install", "events", "atc", "delivery_cnt", "af_installs", "af_revenue",
     "ad_impression", "ad_impression_revenue",
 })
-COMPUTED_INSIGHT_FIELDS = frozenset({"retention_rate", "af_roas", "ad_impression_roas"})
+COMPUTED_INSIGHT_FIELDS = frozenset({
+    "ctr", "cpm", "cpc", "cpi", "purchase_cpa", "roas",
+    "retention_rate", "af_roas", "ad_impression_roas",
+})
+SOURCE_MYSQL_READ_TIMEOUT_MIN_SECONDS = 9
+SOURCE_MYSQL_READ_TIMEOUT_MAX_SECONDS = 10
+
+
+def _bounded_environment_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = str(os.environ.get(name, str(default))).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise AdControlV3Error(
+            "service_not_configured",
+            "V3 integer environment setting is invalid",
+            status=503,
+            details={"name": name},
+        ) from exc
+    return max(minimum, min(maximum, value))
+
+
+def _required_preview_fields(
+    rules: Sequence[Mapping[str, Any]],
+    selection: Mapping[str, Any],
+) -> List[str]:
+    """Derive source projection only from validated persisted server state."""
+
+    required = {
+        str(condition.get("field") or "").strip()
+        for rule in rules
+        for condition in (rule.get("conditions") or [])
+        if str(condition.get("field") or "").strip()
+    }
+    for rule in rules:
+        if str(rule.get("action") or "") != "copy":
+            continue
+        copy_parameters = rule.get("copy_parameters") or {}
+        if str(copy_parameters.get("budget_mode") or "") == "actual_cpi_multiplier":
+            required.add("cpi")
+    if str(selection.get("mode") or "") != "all":
+        sort_field = str(selection.get("sort_field") or "").strip()
+        if sort_field:
+            required.add(sort_field)
+    return sorted(required)
+
+
+def _execute_bounded_source_query(
+    connection_factory: Callable[[], Any],
+    sql: str,
+    params: Sequence[Any],
+) -> List[Dict[str, Any]]:
+    """Execute every production source statement under a session hard limit."""
+
+    conn = None
+    cursor = None
+    try:
+        conn = connection_factory()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SET SESSION max_execution_time = %s",
+            (SOURCE_QUERY_MAX_EXECUTION_TIME_MS,),
+        )
+        cursor.execute(sql, tuple(params))
+        return [dict(row) for row in (cursor.fetchall() or [])]
+    except AdControlV3Error:
+        raise
+    except Exception as exc:
+        # Source reads are an external dependency. Return a stable retryable
+        # contract instead of exposing driver details or reporting an internal
+        # application defect. Preview persistence happens only after discovery,
+        # so this path cannot save a partial preview/execution bundle.
+        logging.warning("ad-control V3 source query failed", exc_info=True)
+        raise AdControlV3Error(
+            "source_query_unavailable",
+            "source insight query is temporarily unavailable",
+            status=503,
+        ) from exc
+    finally:
+        if cursor is not None:
+            close = getattr(cursor, "close", None)
+            if callable(close):
+                close()
+        if conn is not None:
+            conn.close()
+
+
+def _validate_source_schema_rows(
+    insight_rows: Sequence[Mapping[str, Any]],
+    account_rows: Sequence[Mapping[str, Any]],
+    index_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    insight_columns = {str(row.get("Field") or row.get("field") or "") for row in insight_rows}
+    missing = sorted(set(SOURCE_INSIGHT_REQUIRED_COLUMNS) - insight_columns)
+    account_columns = {str(row.get("Field") or row.get("field") or "") for row in account_rows}
+    missing_accounts = sorted({"account_id", "platform_id", "time_zone"} - account_columns)
+    dpdo = sorted(
+        [
+            (
+                int(row.get("Seq_in_index") or row.get("seq_in_index") or 0),
+                str(row.get("Column_name") or row.get("column_name") or ""),
+            )
+            for row in index_rows
+            if str(row.get("Key_name") or row.get("key_name") or "") == "dpdo"
+        ]
+    )
+    expected_dpdo = ["data_source", "product", "dt", "optimizer"]
+    if missing or missing_accounts or [column for _, column in dpdo[:4]] != expected_dpdo:
+        raise AdControlV3Error(
+            "source_schema_mismatch",
+            "source insight/account schema or dpdo index drifted",
+            status=503,
+            details={"missing_insight": missing, "missing_accounts": missing_accounts, "dpdo": dpdo[:4]},
+        )
 
 
 def _utc_now() -> datetime:
@@ -503,6 +618,7 @@ class Service:
         optimizer_id: int,
         account_timezones: Sequence[str],
         payload: Mapping[str, Any],
+        required_fields: Sequence[str] = (),
     ) -> Dict[str, Any]:
         raw_date_from = payload.get("date_from")
         raw_date_to = payload.get("date_to")
@@ -524,6 +640,8 @@ class Service:
             "account_timezones": list(account_timezones),
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
+            # Internal-only. API payload allowlists never accept this key.
+            "required_fields": list(required_fields),
         }
 
     def scope_estimate(self, actor: Any, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -553,11 +671,14 @@ class Service:
             optimizer_id=optimizer_id,
             account_timezones=timezones,
             payload=body,
+            required_fields=(),
         )
         candidates = self._scan_discover(adapter, scope)
         blocked = [item for item in candidates if item.get("blocked_reason")]
         return {
             "scope": scope,
+            "projection_mode": "identity_only",
+            "required_fields": [],
             "account_count": len({str(item.get("ad_account_id") or "") for item in candidates}),
             "object_count": len(candidates),
             "eligible_object_count": len(candidates) - len(blocked),
@@ -593,6 +714,10 @@ class Service:
             optimizer_id=int(group["optimizer_id"]),
             account_timezones=group.get("account_timezones") or [],
             payload=discovery_payload,
+            required_fields=_required_preview_fields(
+                group["rules"],
+                group.get("selection") or {},
+            ),
         )
         candidates = self._scan_discover(self._adapter(group["channel"]), scope)
         now = self._now()
@@ -603,6 +728,8 @@ class Service:
             selection=group.get("selection") or {},
             evaluation_time=now,
         )
+        result["summary"]["projection_mode"] = "rule_fields"
+        result["summary"]["required_fields"] = list(scope.get("required_fields") or [])
         # Observe is the only execution mode connected in this release. Persist
         # an explicit counter; consumers must never infer zero from a missing
         # field once live execution exists.
@@ -948,8 +1075,26 @@ def build_service_from_environment() -> Service:
     source_config = _mysql_environment("AD_CONTROL_V3_SOURCE_READER_MYSQL", 63350, "kunlunads_dev")
     store_reader_config = _mysql_environment("AD_CONTROL_V3_STORE_READER_MYSQL", 63350, "ads_ai")
     store_writer_config = _mysql_environment("AD_CONTROL_V3_STORE_WRITER_MYSQL", 63353, "ads_ai")
-    connect_timeout = max(1, min(3, int(os.environ.get("AD_CONTROL_V3_MYSQL_CONNECT_TIMEOUT_SECONDS", "3"))))
-    io_timeout = max(1, min(5, int(os.environ.get("AD_CONTROL_V3_MYSQL_IO_TIMEOUT_SECONDS", "5"))))
+    connect_timeout = _bounded_environment_int(
+        "AD_CONTROL_V3_MYSQL_CONNECT_TIMEOUT_SECONDS", 3, 1, 3
+    )
+    store_io_timeout = _bounded_environment_int(
+        "AD_CONTROL_V3_MYSQL_IO_TIMEOUT_SECONDS", 5, 1, 5
+    )
+    # Source aggregates have an 8s server circuit breaker. Keep their socket
+    # timeout above that limit while preserving a strict 10s client ceiling.
+    source_read_timeout = _bounded_environment_int(
+        "AD_CONTROL_V3_SOURCE_MYSQL_READ_TIMEOUT_SECONDS",
+        10,
+        SOURCE_MYSQL_READ_TIMEOUT_MIN_SECONDS,
+        SOURCE_MYSQL_READ_TIMEOUT_MAX_SECONDS,
+    )
+    if SOURCE_QUERY_MAX_EXECUTION_TIME_MS >= source_read_timeout * 1000:
+        raise AdControlV3Error(
+            "service_not_configured",
+            "source server timeout must be below source socket timeout",
+            status=503,
+        )
     raw_scan_concurrency = str(os.environ.get("AD_CONTROL_V3_SCAN_CONCURRENCY", "1")).strip()
     try:
         scan_concurrency = int(raw_scan_concurrency)
@@ -962,7 +1107,12 @@ def build_service_from_environment() -> Service:
             status=503,
         )
 
-    def connection(config: Mapping[str, Any], autocommit: bool):
+    def connection(
+        config: Mapping[str, Any],
+        autocommit: bool,
+        *,
+        read_timeout: int,
+    ):
         return pymysql.connect(
             host=config["host"],
             port=int(config["port"]),
@@ -971,29 +1121,23 @@ def build_service_from_environment() -> Service:
             database=config["database"],
             charset="utf8mb4",
             connect_timeout=connect_timeout,
-            read_timeout=io_timeout,
-            write_timeout=io_timeout,
+            read_timeout=read_timeout,
+            write_timeout=store_io_timeout,
             autocommit=autocommit,
             cursorclass=pymysql.cursors.DictCursor,
         )
 
     def source_reader():
-        return connection(source_config, True)
+        return connection(source_config, True, read_timeout=source_read_timeout)
 
     def store_reader():
-        return connection(store_reader_config, True)
+        return connection(store_reader_config, True, read_timeout=store_io_timeout)
 
     def store_writer():
-        return connection(store_writer_config, False)
+        return connection(store_writer_config, False, read_timeout=store_io_timeout)
 
     def source_query(sql: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
-        conn = source_reader()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql, tuple(params))
-            return [dict(row) for row in (cursor.fetchall() or [])]
-        finally:
-            conn.close()
+        return _execute_bounded_source_query(source_reader, sql, params)
 
     def optimizer_candidates(actor: Actor) -> List[Dict[str, Any]]:
         base = (
@@ -1036,27 +1180,9 @@ def build_service_from_environment() -> Service:
 
     def validate_source_schema() -> None:
         insight_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_custom_source_insight", ())
-        insight_columns = {str(row.get("Field") or row.get("field") or "") for row in insight_rows}
-        required_insight = set(SOURCE_INSIGHT_REQUIRED_COLUMNS)
-        missing = sorted(required_insight - insight_columns)
         account_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_accounts_setting", ())
-        account_columns = {str(row.get("Field") or row.get("field") or "") for row in account_rows}
-        missing_accounts = sorted({"account_id", "platform_id", "time_zone"} - account_columns)
         index_rows = source_query("SHOW INDEX FROM `kunlunads_dev`.ads_custom_source_insight", ())
-        pss = sorted(
-            [
-                (int(row.get("Seq_in_index") or row.get("seq_in_index") or 0), str(row.get("Column_name") or row.get("column_name") or ""))
-                for row in index_rows
-                if str(row.get("Key_name") or row.get("key_name") or "") == "pss"
-            ]
-        )
-        if missing or missing_accounts or [column for _, column in pss[:3]] != ["product", "dt", "series_code"]:
-            raise AdControlV3Error(
-                "source_schema_mismatch",
-                "source insight/account schema or pss index drifted",
-                status=503,
-                details={"missing_insight": missing, "missing_accounts": missing_accounts, "pss": pss[:3]},
-            )
+        _validate_source_schema_rows(insight_rows, account_rows, index_rows)
 
     data_root = SafeDataRoot(
         _required_environment("AD_CONTROL_V3_DATA_ROOT"),
