@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-冻结 R1 独立评审未发现仍开放的 P0 越权、Meta 写入或 V2 破坏路径。最终 V3 137/137，其中 core/查询性能专项 57/57、navigation 发布链 13/13。
+冻结 R1 独立评审未发现仍开放的 P0 越权、Meta 写入或 V2 破坏路径。最终 V3 139/139，其中 core/查询性能专项 59/59、navigation 发布链 13/13。
 
 当前结论为**通过本地代码评审、生产有条件**：可进入 Git 提交；源 product collation 的代码/DDL修复已闭环，但真实 MySQL query plan/DDL/read-after-write、生产部署和 V2 回归完成前，不允许给出生产通过结论。
 
@@ -49,15 +49,15 @@
 | CR-013 | P2 | repository list/detail | optimizer/group enrichment 可能产生 N+1 | 当前服务端分页/上限缓解，后续批量 join | 接受延期 |
 | CR-014 | P2 | manual Preview | 无通用 idempotency key，直接重放会生成新审计 | UI mutation single-flight；后端幂等留后续 | 接受延期 |
 | CR-015 | P2 | disabled product | 产品在规则保存后被停用时的历史展示与全链路复核需真实库联调 | 保留生产联调用例 TC-014 | 待验证 |
-| CR-016 | P0 | Facebook account timezone | settings 全表派生 JOIN 与三层聚合组合后生产只读查询超时 | 主聚合固定无 JOIN；候选账户 bare/act_ 变体通过绑定参数和 `FORCE INDEX(paa)` 分块补查；请求内缓存、raw/账户/分块行上限和共享 deadline；缺失/多 distinct/查询失败均阻断且无部分 Preview | 本地关闭；生产三层实查待验 |
+| CR-016 | P0 | Facebook account timezone | settings 全表派生 JOIN 与三层聚合组合后生产只读查询超时 | 主聚合固定无 JOIN；候选账户 bare/act_ 变体通过绑定参数和 `FORCE INDEX(paa)` 分块补查；请求内缓存、raw/账户/分块行硬限和共享 deadline；空时区跳过 settings schema probe；缺失/多 distinct/任一分块查询失败均阻断且无部分 Preview | 本地关闭；生产三层实查待验 |
 
 ## 5. 编译与自动化结果
 
 已取得：
 
 ```text
-V3 unittest: 137/137 passed
-Core/query performance: 57/57 passed
+V3 unittest: 139/139 passed
+Core/query performance: 59/59 passed
 Navigation deployer subset: 13/13 passed
 Playwright: 1440/390, console 0 errors / 0 warnings
 ```
@@ -68,7 +68,7 @@ V2 冻结 worktree 146 条中 143 通过，3 条因缺少 `features.x_accounts` 
 
 ## 6. 生产前复核项
 
-- 在精确 target commit 上重跑全部 137 条与 `git diff --check`。
+- 在精确 target commit 上重跑全部 139 条与 `git diff --check`。
 - 对真实 MySQL 5.7.18 执行 product query `EXPLAIN`，确认索引等值前置和 binary 精确语义同时成立。
 - 63353 建八表/seed，63350 schema/15 产品/read-after-write 回读。
 - 最终 live app hash 与 source commit blob 一致后才能 apply overlay。

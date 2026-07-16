@@ -162,16 +162,12 @@ def _execute_bounded_source_query(
             conn.close()
 
 
-def _validate_source_schema_rows(
+def _validate_insight_schema_rows(
     insight_rows: Sequence[Mapping[str, Any]],
-    account_rows: Sequence[Mapping[str, Any]],
     insight_index_rows: Sequence[Mapping[str, Any]],
-    account_index_rows: Sequence[Mapping[str, Any]],
 ) -> None:
     insight_columns = {str(row.get("Field") or row.get("field") or "") for row in insight_rows}
     missing = sorted(set(SOURCE_INSIGHT_REQUIRED_COLUMNS) - insight_columns)
-    account_columns = {str(row.get("Field") or row.get("field") or "") for row in account_rows}
-    missing_accounts = sorted({"account_id", "platform_id", "time_zone"} - account_columns)
     dpdo = sorted(
         [
             (
@@ -182,6 +178,22 @@ def _validate_source_schema_rows(
             if str(row.get("Key_name") or row.get("key_name") or "") == "dpdo"
         ]
     )
+    expected_dpdo = ["data_source", "product", "dt", "optimizer"]
+    if missing or [column for _, column in dpdo[:4]] != expected_dpdo:
+        raise AdControlV3Error(
+            "source_schema_mismatch",
+            "source insight schema or reviewed index drifted",
+            status=503,
+            details={"missing_insight": missing, "dpdo": dpdo[:4]},
+        )
+
+
+def _validate_timezone_schema_rows(
+    account_rows: Sequence[Mapping[str, Any]],
+    account_index_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    account_columns = {str(row.get("Field") or row.get("field") or "") for row in account_rows}
+    missing_accounts = sorted({"account_id", "platform_id", "time_zone"} - account_columns)
     paa = sorted(
         [
             (
@@ -192,25 +204,26 @@ def _validate_source_schema_rows(
             if str(row.get("Key_name") or row.get("key_name") or "") == "paa"
         ]
     )
-    expected_dpdo = ["data_source", "product", "dt", "optimizer"]
     expected_paa = ["platform_id", "account_id", "account_type"]
-    if (
-        missing
-        or missing_accounts
-        or [column for _, column in dpdo[:4]] != expected_dpdo
-        or [column for _, column in paa[:3]] != expected_paa
-    ):
+    if missing_accounts or [column for _, column in paa[:3]] != expected_paa:
         raise AdControlV3Error(
             "source_schema_mismatch",
-            "source insight/account schema or reviewed index drifted",
+            "account timezone schema or reviewed index drifted",
             status=503,
-            details={
-                "missing_insight": missing,
-                "missing_accounts": missing_accounts,
-                "dpdo": dpdo[:4],
-                "paa": paa[:3],
-            },
+            details={"missing_accounts": missing_accounts, "paa": paa[:3]},
         )
+
+
+def _validate_source_schema_rows(
+    insight_rows: Sequence[Mapping[str, Any]],
+    account_rows: Sequence[Mapping[str, Any]],
+    insight_index_rows: Sequence[Mapping[str, Any]],
+    account_index_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Compatibility helper used by tests and offline release validation."""
+
+    _validate_insight_schema_rows(insight_rows, insight_index_rows)
+    _validate_timezone_schema_rows(account_rows, account_index_rows)
 
 
 def _utc_now() -> datetime:
@@ -1202,15 +1215,13 @@ def build_service_from_environment() -> Service:
 
     def validate_source_schema() -> None:
         insight_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_custom_source_insight", ())
-        account_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_accounts_setting", ())
         insight_index_rows = source_query("SHOW INDEX FROM `kunlunads_dev`.ads_custom_source_insight", ())
+        _validate_insight_schema_rows(insight_rows, insight_index_rows)
+
+    def validate_timezone_schema() -> None:
+        account_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_accounts_setting", ())
         account_index_rows = source_query("SHOW INDEX FROM `kunlunads_dev`.ads_accounts_setting", ())
-        _validate_source_schema_rows(
-            insight_rows,
-            account_rows,
-            insight_index_rows,
-            account_index_rows,
-        )
+        _validate_timezone_schema_rows(account_rows, account_index_rows)
 
     data_root = SafeDataRoot(
         _required_environment("AD_CONTROL_V3_DATA_ROOT"),
@@ -1224,7 +1235,11 @@ def build_service_from_environment() -> Service:
     identity_resolver = OptimizerIdentityResolver(optimizer_candidates, active_optimizers)
     return build_service(
         repository=repository,
-        facebook_adapter=FacebookAdapter(source_query, schema_validator=validate_source_schema),
+        facebook_adapter=FacebookAdapter(
+            source_query,
+            schema_validator=validate_source_schema,
+            timezone_schema_validator=validate_timezone_schema,
+        ),
         identity_resolver=identity_resolver,
         snapshot_store=data_root,
         timezone_loader=timezones,

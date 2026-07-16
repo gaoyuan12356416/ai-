@@ -177,6 +177,7 @@ class FacebookAdapter(ChannelAdapter):
         max_window_days: int = 31,
         max_rows_per_product: int = 10000,
         schema_validator: Any = None,
+        timezone_schema_validator: Any = None,
         max_products: int = 20,
         max_total_candidates: int = 20000,
         query_deadline_seconds: float = 15.0,
@@ -191,22 +192,37 @@ class FacebookAdapter(ChannelAdapter):
         self.max_window_days = int(max_window_days)
         self.max_rows_per_product = int(max_rows_per_product)
         self._schema_validator = schema_validator
+        self._timezone_schema_validator = timezone_schema_validator
         self._schema_validated = False
+        self._timezone_schema_validated = False
         self._schema_lock = threading.Lock()
         self.max_products = max(1, min(20, int(max_products)))
         self.max_total_candidates = max(1, min(20000, int(max_total_candidates)))
         self.query_deadline_seconds = max(1.0, min(30.0, float(query_deadline_seconds)))
-        self.max_timezone_accounts = max(1, min(20000, int(max_timezone_accounts)))
-        self.timezone_query_chunk_size = max(1, min(500, int(timezone_query_chunk_size)))
-        self.max_timezone_rows_per_chunk = max(1, min(10000, int(max_timezone_rows_per_chunk)))
+        self.max_timezone_accounts = max(1, min(5000, int(max_timezone_accounts)))
+        self.timezone_query_chunk_size = max(1, min(200, int(timezone_query_chunk_size)))
+        self.max_timezone_rows_per_chunk = max(1, min(5000, int(max_timezone_rows_per_chunk)))
 
-    def _ensure_schema(self) -> None:
-        if self._schema_validated or self._schema_validator is None:
+    def _ensure_schema(self, *, include_timezone: bool) -> None:
+        source_ready = self._schema_validated or self._schema_validator is None
+        timezone_ready = (
+            not include_timezone
+            or self._timezone_schema_validated
+            or self._timezone_schema_validator is None
+        )
+        if source_ready and timezone_ready:
             return
         with self._schema_lock:
-            if not self._schema_validated:
+            if not self._schema_validated and self._schema_validator is not None:
                 self._schema_validator()
                 self._schema_validated = True
+            if (
+                include_timezone
+                and not self._timezone_schema_validated
+                and self._timezone_schema_validator is not None
+            ):
+                self._timezone_schema_validator()
+                self._timezone_schema_validated = True
 
     def capabilities(self) -> Dict[str, Any]:
         return {
@@ -434,7 +450,6 @@ class FacebookAdapter(ChannelAdapter):
         return cache
 
     def discover(self, scope: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        self._ensure_schema()
         object_level = str(scope.get("object_level") or "").strip().lower()
         products = [self._validate_product(value) for value in (scope.get("products") or [])]
         if not products:
@@ -467,6 +482,10 @@ class FacebookAdapter(ChannelAdapter):
             object_level,
             scope.get("required_fields") if "required_fields" in scope else None,
         )
+        # Validate only the source structures this request will actually read.
+        # An unrestricted timezone scope must never touch the account settings
+        # table, including through a startup/schema probe.
+        self._ensure_schema(include_timezone=bool(requested_timezones))
         sql, columns = self._query_for_level(
             object_level,
             scope.get("required_fields") if "required_fields" in scope else None,

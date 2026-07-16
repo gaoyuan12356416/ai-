@@ -189,7 +189,7 @@ def candidate_row(product="Dramawave", object_id="c-1", spend=20, account="123")
     }
 
 
-def make_service(query=None, scheduler_enabled=False, scan_concurrency=1):
+def make_service(query=None, scheduler_enabled=False, scan_concurrency=1, adapter_kwargs=None):
     query = query or QueryStub()
     repository = MemoryRepository(PRODUCTS)
     resolver = StaticOptimizerIdentityResolver(
@@ -203,7 +203,7 @@ def make_service(query=None, scheduler_enabled=False, scan_concurrency=1):
     return (
         Service(
             repository,
-            {"facebook": FacebookAdapter(query), "tiktok": __import__("features.ad_control_v3.channels.tiktok", fromlist=["TikTokAdapter"]).TikTokAdapter()},
+            {"facebook": FacebookAdapter(query, **(adapter_kwargs or {})), "tiktok": __import__("features.ad_control_v3.channels.tiktok", fromlist=["TikTokAdapter"]).TikTokAdapter()},
             resolver,
             MemorySnapshotStore(),
             timezone_loader=lambda: ["UTC", "America/Los_Angeles"],
@@ -832,6 +832,25 @@ class AdapterAndPreviewTests(unittest.TestCase):
         self.assertEqual("matched", preview["targets"][0]["reason"])
         self.assertFalse(any("ads_accounts_setting" in sql for sql, _ in query.calls))
 
+    def test_empty_timezone_scope_skips_timezone_schema_validation(self):
+        query = QueryStub()
+        schema_calls = []
+        adapter = FacebookAdapter(
+            query,
+            schema_validator=lambda: schema_calls.append("insight"),
+            timezone_schema_validator=lambda: schema_calls.append("timezone"),
+        )
+        base_scope = {
+            "object_level": "campaign", "products": ["Dramawave"],
+            "optimizer_id": 248, "date_from": "2026-07-16", "date_to": "2026-07-16",
+            "required_fields": [],
+        }
+        adapter.discover(dict(base_scope, account_timezones=[]))
+        self.assertEqual(["insight"], schema_calls)
+        self.assertFalse(any("ads_accounts_setting" in sql for sql, _ in query.calls))
+        adapter.discover(dict(base_scope, account_timezones=["America/Los_Angeles"]))
+        self.assertEqual(["insight", "timezone"], schema_calls)
+
     def test_conflicting_timezone_rows_are_blocked_when_filter_is_configured(self):
         query = QueryStub()
         query.timezone_rows = [
@@ -873,6 +892,16 @@ class AdapterAndPreviewTests(unittest.TestCase):
         )
 
     def test_timezone_lookup_has_account_and_row_hard_limits(self):
+        hard_cap_adapter = FacebookAdapter(
+            QueryStub(),
+            max_timezone_accounts=50000,
+            timezone_query_chunk_size=50000,
+            max_timezone_rows_per_chunk=50000,
+        )
+        self.assertEqual(5000, hard_cap_adapter.max_timezone_accounts)
+        self.assertEqual(200, hard_cap_adapter.timezone_query_chunk_size)
+        self.assertEqual(5000, hard_cap_adapter.max_timezone_rows_per_chunk)
+
         query = QueryStub()
         query.rows_by_product["Dramawave"] = [
             candidate_row(object_id="c-1", account="1"),
@@ -937,6 +966,48 @@ class AdapterAndPreviewTests(unittest.TestCase):
         with self.assertRaises(AdControlV3Error) as raised:
             service.preview(NORMAL, group["group_id"], {})
         self.assertEqual("source_query_unavailable", raised.exception.code)
+        self.assertEqual({}, repository.previews)
+        self.assertEqual({}, repository.executions)
+        self.assertEqual({}, service.snapshot_store.items)
+
+    def test_later_timezone_chunk_failure_also_has_zero_partial_persistence(self):
+        class FailingSecondTimezoneChunk(QueryStub):
+            def __init__(self):
+                super().__init__()
+                self.timezone_call_count = 0
+
+            def __call__(self, sql, params):
+                if "ads_accounts_setting" not in sql:
+                    return super().__call__(sql, params)
+                self.calls.append((sql, tuple(params)))
+                self.timezone_call_count += 1
+                if self.timezone_call_count == 2:
+                    raise AdControlV3Error(
+                        "source_query_unavailable",
+                        "source insight query is temporarily unavailable",
+                        status=503,
+                    )
+                return [
+                    {"account_id": account_id, "time_zone": "UTC"}
+                    for account_id in params[1:-1]
+                ]
+
+        query = FailingSecondTimezoneChunk()
+        query.rows_by_product["Dramawave"] = [
+            candidate_row(object_id="c-1", account="1"),
+            candidate_row(object_id="c-2", account="2"),
+        ]
+        service, repository, _ = make_service(
+            query,
+            adapter_kwargs={"timezone_query_chunk_size": 2},
+        )
+        payload = base_payload()
+        payload["account_timezones"] = ["UTC"]
+        group = service.create_rule_group(NORMAL, payload)
+        with self.assertRaises(AdControlV3Error) as raised:
+            service.preview(NORMAL, group["group_id"], {})
+        self.assertEqual("source_query_unavailable", raised.exception.code)
+        self.assertEqual(2, query.timezone_call_count)
         self.assertEqual({}, repository.previews)
         self.assertEqual({}, repository.executions)
         self.assertEqual({}, service.snapshot_store.items)

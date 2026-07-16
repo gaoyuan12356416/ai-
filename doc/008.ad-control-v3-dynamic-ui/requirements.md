@@ -63,7 +63,7 @@ V3 只有两个动态页面：
 - 页面不存在账户、账户池、手工账号控件。
 - API 任意嵌套层级出现 account/account-pool 范围字段均返回 `account_scope_forbidden`。
 - 账户 ID 仅是候选对象身份的一部分，由源表发现，不能由用户配置。
-- 主候选聚合 SQL 无论是否设置时区都不得 JOIN/派生聚合 `ads_accounts_setting`；`account_timezones=[]` 表示不限制并且完全不查询账户设置表。
+- 主候选聚合 SQL 无论是否设置时区都不得 JOIN/派生聚合 `ads_accounts_setting`；`account_timezones=[]` 表示不限制，并且 discover 连账户设置表的列/索引 schema probe 都不得执行。
 - 仅设置时区范围时，先收齐主查询候选账户，再由 normalized account 生成 bare/`act_` 两种 raw 变体，通过固定 `platform_id=%s AND account_id IN (...)` 绑定参数、`FORCE INDEX(paa)` 分块补查 `account_id,time_zone`。单次 discover 内对跨产品重复账户去重缓存；候选账户最多 5000、每块 raw 变体最多 200、每块返回最多 5000 行，并共用 15 秒 soft deadline。
 - 账户号只移除一次前导 `act_`；重复且相同的非空时区合并，多个 distinct 时区返回 `ambiguous_account_timezone`，无有效时区返回 `missing_account_timezone`。任一分块查询失败或截断时整个 discover 失败，不能返回或持久化部分 Preview。
 - 本期没有计划调度器，因此时区仅用于范围过滤；账户本地时间的定时执行属于后续发布。
@@ -165,7 +165,7 @@ V3 只有两个动态页面：
 
 ## 11. 验收标准
 
-- V3 本地单元/集成测试 137/137 通过，Python 3.9、JavaScript 语法、动态路由、权限、repository、规则引擎、字段投影/查询熔断、两段式时区补查、数据盘、product 精确匹配、主/导航 exact-source 部署器均有自动化证据。
+- V3 本地单元/集成测试 139/139 通过，Python 3.9、JavaScript 语法、动态路由、权限、repository、规则引擎、字段投影/查询熔断、两段式时区补查、数据盘、product 精确匹配、主/导航 exact-source 部署器均有自动化证据。
 - 本地 Playwright 在 1440 和 390 视口验证两页：中文无乱码、无页面级横向溢出、控制台 0 error/0 warning，并明确展示“仅草稿 + 手动试算/启用锁定”。
 - 生产部署、八表 DDL/seed、真实 reader/writer、真实登录、真实三层 observe 和 V2 前后回归必须另行取证；未完成前不得标记上线完成。
 - 生产 observe 必须证明 Token lookup、Graph GET/POST/copy 和 Meta 写均为 0。

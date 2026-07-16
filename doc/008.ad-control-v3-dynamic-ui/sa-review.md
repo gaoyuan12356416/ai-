@@ -45,11 +45,11 @@
 | SA-012 | P1 | 快照写成功而 DB 事务失败会留下孤儿 | 不引用、不执行；本期不发布清理器，保留为后续受审补偿/清理任务 | 接受的遗留风险 |
 | SA-013 | P1 | 产品停用后历史规则的 Preview/enable 复核 | 当前保存时校验 active product；生产停用后的全链路复核尚需联调 | 生产联调待验 |
 | SA-014 | P1 | 计划/额度配置易被误认为已执行 | UI 和文档明确“仅保存 + 手动试算”，启用锁定，runner 未连接 | 已收口 |
-| SA-015 | P0 | settings 派生表 JOIN 使三层候选聚合超时 | 主聚合永不 JOIN settings；仅非空时区筛选对候选账户生成 bare/act_ 变体，以绑定参数、`platform_id=0` 和 `FORCE INDEX(paa)` 分块补查；请求内去重缓存，5000 账户/200 变体每块/5000 行每块硬限，共用 15s soft deadline；缺失/冲突/查询失败均失败关闭且不写部分 Preview | 57/57 core 与 137/137 V3 通过；生产三层 EXPLAIN/实查待验 |
+| SA-015 | P0 | settings 派生表 JOIN 使三层候选聚合超时 | 主聚合永不 JOIN settings；仅非空时区筛选对候选账户生成 bare/act_ 变体，以绑定参数、`platform_id=0` 和 `FORCE INDEX(paa)` 分块补查；请求内去重缓存，5000 账户/200 变体每块/5000 行每块为不可放大的硬限，共用 15s soft deadline；空时区连 settings schema probe 都跳过；缺失/冲突/任一分块查询失败均失败关闭且不写部分 Preview | 59/59 core 与 139/139 V3 通过；生产三层 EXPLAIN/实查待验 |
 
 ## 生产前强制门禁
 
-- 137/137 本地 V3 测试必须在最终 commit 再跑一次并保存输出。
+- 139/139 本地 V3 测试必须在最终 commit 再跑一次并保存输出。
 - GitHub push 后服务器只 fetch 精确 commit；exact-source deployer `--check` 必须为 `would_change` 或 `unchanged`。
 - DDL/seed 只允许落 `ads_ai` 八表，先保存 schema 基线并在 63350 回读校验。
 - V3 配置文件、快照、cache 和备份必须位于 `/mnt/data-disk/ai-ad-control-v3`。
