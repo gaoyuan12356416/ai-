@@ -4,7 +4,7 @@
 
 - 本地自动化使用 MemoryRepository/Fake MySQL、Stub insight、Memory/SafeDataRoot 和 route handler，不访问生产、不调用 Meta。
 - 本地 Playwright 使用 UTF-8 mock API，验证冻结前端；不等同于生产登录或真实 MySQL。
-- “本地通过”表示存在于本次 139/139 自动化证据；“部分通过”表示本地合同已证实但生产部分尚未执行。
+- “本地通过”表示存在于本次最新 143/143 自动化证据；“部分通过”表示本地合同已证实但生产部分尚未执行。
 - scheduler、enable 成功、live pause、live copy、TT 执行、copied created_data 和快照清理器属于未发布能力，测试目标是门禁，不是成功执行。
 - 生产/MySQL/V2 项只有真实证据后才能改为通过。
 
@@ -73,7 +73,7 @@
 | TC-030 | 枚举显式选择 | 产品、层级、动作、窗口/选择模式不静默取第一项 | P0 | 本地自动化通过 |
 | TC-031 | 服务端安全状态 | create 强制 disabled/observe，UI 明示而非伪装填充值 | P0 | 本地自动化通过 |
 | TC-032 | 编辑精确回显 | `0` 与空值不混淆，使用 group_id/config_version | P1 | 本地自动化通过 |
-| TC-033 | 未保存离开提示 | 切页/刷新有明确丢弃确认与焦点恢复 | P1 | 待执行（人工浏览器） |
+| TC-033 | 未保存离开提示 | 切页/刷新有明确丢弃确认与焦点恢复 | P1 | 部分通过；本地浏览器已验 QuickNav/登出取消后不离页、不登出，刷新与焦点恢复仍待补 |
 | TC-034 | 隐藏字段清理 | level/action 切换不提交不兼容 Copy 参数 | P0 | 本地自动化通过 |
 
 ### D. 三层、字段目录与规则引擎
@@ -146,14 +146,17 @@
 | TC-083 | 非颜色唯一/对比度 | 状态带文字；WCAG AA 需实测 | P1 | 部分通过；对比度待验 |
 | TC-084 | 确认焦点 | 删除/急停确认的 Tab/Escape/焦点恢复 | P1 | 待执行（人工浏览器） |
 | TC-085 | reduced motion/触控 | CSS motion guard 存在；主要触控目标不依赖 hover | P2 | 本地自动化通过；真机待验 |
-| TC-086 | XSS/长文本/UTF-8 | bootstrap 与运行时转义；中文无乱码；console 0 error/0 warning | P0 | 本地自动化和 Playwright 通过 |
+| TC-086 | XSS/长文本/UTF-8 | bootstrap 与运行时转义；中文无乱码；console 0 error/0 warning | P0 | 本地自动化、Playwright 和生产 Chrome 通过 |
 | TC-087 | 请求竞态 | 写操作 single-flight；旧 list/estimate 响应不覆盖新状态 | P1 | 本地自动化通过；生产延迟待验 |
 | TC-088 | 网络/会话变化 | loading/empty/error 可见，不误报成功；生产会话过期/权限回收待验 | P1 | 部分通过；自动化 loading/empty/error 和生产 loading/成功态通过，会话过期/权限回收待补 |
 
 ## 4. 已取得证据
 
-- `python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v`：139/139；其中 core/查询性能专项 59/59、navigation 发布链 13/13。
+- `python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v`：143/143；其中 core/查询性能专项 59/59、navigation 发布链 13/13、runtime-only deployer 专项 15/15。
+- target composite `d000141...` 在数据盘 staging 使用生产 Python 3.9.6 再跑 143/143，耗时 5.330 秒；playable generator 兼容脚本同机返回 `ok=true`。playable 文档渲染脚本要求 Python 3.10+，因此只以本地 Python 验收通过作为证据，不把服务器环境阻塞误报为失败或通过。
 - Playwright 冻结代码：1440/390 规则页和日志页；`scrollWidth == viewport`；console 0 Errors / 0 Warnings；页面明确“调度器未发布/仅草稿+手动试算/启用锁定”。
+- 本地 1280×720 公共壳浏览器：两页标准侧栏/顶栏、活动态、脏编辑 QuickNav/登出确认均通过；console 0 error/0 warning。
+- 生产 Chrome：规则页、日志页和旧 V2 页均由共享 QuickNav 正常到达；8 个分组完整、V3 活动态唯一、260px 侧栏、标准顶栏、双层 CSP hash 和 console 0 error/0 warning 均通过。
 - 截图目录：`D:\codex\tmp\ad-control-v3-ui-final`。
 
 ## 5. 发布通过准则
@@ -167,10 +170,10 @@
 
 | 编号 | 场景 | 预期 | 优先级 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| TC-089 | 公共壳加载合同 | 两页按 `/ui-topbar.css`、V3 CSS、bootstrap、`/ui-topbar.js`、`/quick-nav.js`、V3 JS 顺序加载，不存在自建 feature-nav/renderUser | P0 | 本地自动化通过 |
-| TC-090 | 标准动态渲染 | `QuickNav.render` 使用两页对应 active key，`UiTopbar.render` 使用 `/api/ui/topbar`，登出走根路径 `/api/auth/logout` | P0 | 本地自动化与浏览器通过 |
-| TC-091 | CSP 双层门禁 | 运行时注入样式 hash 与提交基线一致，Meta CSP 和 HTTP Header CSP 均精确允许，仍无 unsafe-inline/eval | P0 | 本地自动化与浏览器 console 通过 |
+| TC-089 | 公共壳加载合同 | 两页按 `/ui-topbar.css`、V3 CSS、bootstrap、`/ui-topbar.js`、`/quick-nav.js`、V3 JS 顺序加载，不存在自建 feature-nav/renderUser | P0 | 本地自动化通过；生产两页公共壳加载正常 |
+| TC-090 | 标准动态渲染 | `QuickNav.render` 使用两页对应 active key，`UiTopbar.render` 使用 `/api/ui/topbar`，登出走根路径 `/api/auth/logout` | P0 | 本地自动化/浏览器与生产 Chrome 通过 |
+| TC-091 | CSP 双层门禁 | 运行时注入样式 hash 与提交基线一致，Meta CSP 和 HTTP Header CSP 均精确允许，仍无 unsafe-inline/eval | P0 | 本地自动化与生产 Chrome 通过；console 0 error/0 warning |
 | TC-092 | 未保存导航/登出 | QuickNav 跳转和登出均在写请求前阻断保存中状态；脏编辑先确认，取消后 URL、内容和登录状态不变 | P0 | 本地自动化与浏览器通过 |
-| TC-093 | 两页视觉与活动态 | 260px 公共侧栏、标准顶栏用户/刷新/退出控件，两页活动项唯一且正确，console 0 error/0 warning | P1 | 本地 1280×720 浏览器通过；生产待验 |
-| TC-094 | 旧版零影响 | 本次不修改共享资源、navigation JSON、V2 静态页、runner、cron、SQLite；生产发布前后 hash/页面/自然 tick 可解释 | P0 | 生产待验 |
-| TC-095 | runtime-only exact overlay | app source/target 相同时仅允许已安装 V3 dispatcher；check/apply/repeat/rollback 精确，旧 app、runtime/app 漂移、坏备份均失败关闭 | P0 | 部署专项 15/15、完整回归 143/143 通过；生产待验 |
+| TC-093 | 两页视觉与活动态 | 260px 公共侧栏、标准顶栏用户/刷新/退出控件，两页活动项唯一且正确，console 0 error/0 warning | P1 | 通过；本地 1280×720 与生产 Chrome 均已验 |
+| TC-094 | 旧版零影响 | 本次不修改共享资源、navigation JSON、V2 静态页、runner、cron、SQLite；生产发布前后 hash/页面/自然 tick 可解释 | P0 | 通过；生产旧 V2 页正常，共享资源/navigation 未改，SQLite 仅自然 tick 可解释增量，本次发布脚本无 DB/Meta 写 |
+| TC-095 | runtime-only exact overlay | app source/target 相同时仅允许已安装 V3 dispatcher；check/apply/repeat/rollback 精确，旧 app、runtime/app 漂移、坏备份均失败关闭 | P0 | 通过；专项 15/15、本地与服务器完整回归 143/143、生产 `79fce9e... -> 156b98b...` check/apply/repeat 均通过；并发后的 `21e11e... -> d000141...` 完整 checkpoint 已校验，精确 check=`unchanged`、rollback check=`would_rollback` |

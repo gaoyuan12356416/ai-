@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-本文同时记录已执行的 R1 发布和后续可复用 Runbook。2026-07-16 已从 source commit `2b52bc8d06b8a36a473dad8916012570ee28c15b` 向 target commit `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` 完成 GitHub-first 精确发布、八表迁移、route dark、三层手动 observe、导航合并和 V2 回归。
+本文同时记录已执行的 R1 发布和后续可复用 Runbook。2026-07-16 已从 source commit `2b52bc8d06b8a36a473dad8916012570ee28c15b` 向 target commit `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` 完成 GitHub-first 精确发布、八表迁移、route dark、三层手动 observe、导航合并和 V2 回归；同日又完成 V3 两个动态页的公共快捷导航/顶栏标准化，以共享 `QuickNav`、`UiTopbar` 和标准 260px 应用壳替换 V3 自建壳。
 
 本轮生产目标只到：**FB 动态两页 + 配置 + 手动 observe**。不得创建/启用 V3 timer，不得 enable 规则，不得调用 Meta 写接口。
 
@@ -33,6 +33,17 @@
 - navigation service checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/navigation-service/ad-control-v3-navigation-20260716T080604.983577Z-84c217e3/manifest.json`。
 - navigation Nginx checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/navigation-nginx/ad-control-v3-navigation-20260716T080605.036215Z-d4fa8b6e/manifest.json`。
 - 两份 navigation 最终 SHA-256 均为 `889d340ff9d849ec5ef67e04bb4be5505de51d3ac2a0ee80aff32cb3d24f394b`；现场原有 7 个分组逐键保持，只新增 V3 的 2 个动态链接。
+
+### 2.2 公共快捷导航/顶栏标准化发布实录
+
+- 首次 runtime-only 精确 overlay 为 source `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` -> target `156b98bb09132e97b75b277b29dbf1d42f4409ab`。部署只变更 V3 的 routes、CSS、JS 和两个模板，生产 `app.py` 在该次 overlay 中不重写。
+- 发布前 checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-shell-20260716T092424Z-156b98bb0`；manifest SHA-256 `87d77aa062b4f04818c533bb30da197bc5482966c7c9147a8855adb3b2472024`，SQLite online backup SHA-256 `761b61793552d3d80a168be05495353d8f7a0a868445f39bfb4768489fc73417`，integrity 为 `ok`。
+- runtime-only overlay checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-79fce9e56ba7-to-156b98bb0913`；apply 后重复精确检查为 `unchanged`。稳定验收证据目录：`/mnt/data-disk/ai-ad-control-v3/releases/156b98bb0/shell-verify-20260716T092759Z`。
+- API 在 `2026-07-16 17:26:40 CST` 重启后，首次探活发生过一次启动就绪窗口内的短暂 502；随后本机和公网认证接口均稳定 200，service `NRestarts=0`，journal 无 traceback/error。该 502 不是最终验收结果，后续脚本必须等待端口/HTTP ready，不能只依据 `systemctl is-active`。
+- 生产 Chrome 以 admin 登录实际验证规则组页、执行日志页和旧 V2 规则页：公共侧栏宽 260px、顶栏正常、V3 两个 active key 唯一正确、8 个共享导航分组完整、规则组 1 条、执行日志 3 条、console 0 error/0 warning。HTTP Header CSP 与 HTML Meta CSP 都精确包含 QuickNav 运行时样式 hash `sha256-hwxbDTADufampcgI9oc75ltbbfB38tCWOve6LIq/j68=`。
+- 本次未修改 `/ui-topbar.*`、`/quick-nav.js`、两份 `navigation.json`、V2 静态页、V2 runner 或 cron。发布前后 V3 group/preview/execution/runner-event 分别保持 1/3/3/0，旧 action log 保持 22；SQLite 只有既有 runner 自然 tick 的可解释 Preview 增量，无配置/动作变化；Meta 写为 0。
+- 发布过程中另一个已审核任务并发上线 playable preview。现场最终 `app.py` Git blob 为 `1760c42467d05ae8a9e3745d8fc34a096301a845`；它是两条已审核变更的无冲突合成，而不是未知漂移。Git 侧已收敛为 rollback source composite `21e11e8959b3c7385deaf3e8eee0cfdf9de7316e` 和 release target composite `d000141b158079cba028049bca2914d2102a1309`，二者 `app.py` blob 都与现场一致，target 另外包含本次 V3 runtime 标准化。
+- composite 精确检查已返回 `unchanged`，19 个 V3 runtime 文件全部等于 `d000141...`。完整 source checkpoint 已在持部署锁、逐字节校验后原子发布到 `/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-21e11e8959b3-to-d000141b1580`，包含 `app.py + 19` 个 source runtime 文件；`--rollback --check` 已返回 `would_rollback`。未执行真实 rollback。
 
 ## 3. 发布边界
 
@@ -199,7 +210,7 @@ node --check features/ad_control_v3/assets/app.js
 nginx -t
 ```
 
-在 staging 精确 commit 上运行 139 条 V3 测试。只重启 `drama-material-api.service`；记录重启前后 PID、启动时间和 journal 游标，不重启无关 worker。
+在 staging 精确 commit 上运行当前 143 条 V3 测试。只重启 `drama-material-api.service`；记录重启前后 PID、启动时间和 journal 游标，不重启无关 worker。重启后必须等待监听端口和 HTTP 探活成功，再执行公网验收；不能将 `active (running)` 直接视为应用 ready。
 
 ## 10. Route dark 与线上验收
 
@@ -292,6 +303,8 @@ python3 "$REPO/deploy/apply_ad_control_v3.py" \
 ```
 
 目标有任何外部漂移时 rollback 必须拒绝覆盖。回滚 navigation/systemd drop-in 分别使用其独立 checkpoint。
+
+公共壳修正若处于 playable 并发发布后的合成现场，不得再使用 `79fce9e... -> 156b98b...` 强行回滚 `app.py`。必须以 source composite `21e11e8959b3c7385deaf3e8eee0cfdf9de7316e`、target composite `d000141b158079cba028049bca2914d2102a1309` 运行 exact-source `--rollback --check`；只有 source checkpoint 完整、当前 V3 runtime 等于 target、当前 `app.py` 仍等于共同 composite blob 时才允许执行。这样回滚只撤销 V3 公共壳 runtime，保留同期 playable 能力。
 
 ### 12.3 数据与快照
 
