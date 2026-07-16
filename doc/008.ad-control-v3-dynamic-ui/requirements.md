@@ -63,7 +63,7 @@ V3 只有两个动态页面：
 - 页面不存在账户、账户池、手工账号控件。
 - API 任意嵌套层级出现 account/account-pool 范围字段均返回 `account_scope_forbidden`。
 - 账户 ID 仅是候选对象身份的一部分，由源表发现，不能由用户配置。
-- `account_timezones=[]` 表示不限制且候选 SQL 不联 `ads_accounts_setting`；仅设置范围时才联表并按 `platform_id=1` 的 `time_zone` 精确过滤。
+- `account_timezones=[]` 表示不限制且候选 SQL 不联 `ads_accounts_setting`；仅设置范围时才联表并按已核实的 Facebook `platform_id=0` 的 `time_zone` 精确过滤。
 - 账户号只移除一次前导 `act_`；冲突时区或设置了范围但时区缺失的对象以原因码阻断。
 - 本期没有计划调度器，因此时区仅用于范围过滤；账户本地时间的定时执行属于后续发布。
 
@@ -126,7 +126,7 @@ V3 只有两个动态页面：
 ## 8. 数据源与唯一性
 
 - 候选源：`kunlunads_dev.ads_custom_source_insight`，Facebook 为 `platform=0`。
-- 时区源：`kunlunads_dev.ads_accounts_setting(platform_id=1)`。
+- 时区源：`kunlunads_dev.ads_accounts_setting(platform_id=0)`；生产数据已核实 `platform_id=1` 是 Google 账号格式，不得混用。
 - 优化师源：active `admin_user_group` 联 `admin_users`。
 - 对象身份：`(channel, normalized_ad_account_id, object_level, object_id)`。
 - 同一对象在所选窗口跨产品或跨优化师时返回/记录 `ambiguous_object_scope`，不能猜归属。

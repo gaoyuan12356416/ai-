@@ -26,6 +26,7 @@ LEVEL_COLUMNS = {
     "adset": "adset_id",
     "ad": "ad_id",
 }
+FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID = 0
 
 # Reviewed source columns only; no user value is interpolated into SQL.
 COMMON_CONTEXT_FIELDS = (
@@ -302,10 +303,14 @@ class FacebookAdapter(ChannelAdapter):
                          COUNT(*) AS settings_row_count,
                          COUNT(DISTINCT NULLIF(CAST(x.time_zone AS CHAR), '')) AS timezone_count
                   FROM `kunlunads_dev`.ads_accounts_setting x
-                  WHERE x.platform_id = 1
+                  WHERE x.platform_id = {settings_platform_id}
                   GROUP BY {setting_source_expr}
                 ) a ON a.normalized_account = {account_expr}
-            """.format(setting_source_expr=setting_source_expr, account_expr=account_expr)
+            """.format(
+                setting_source_expr=setting_source_expr,
+                account_expr=account_expr,
+                settings_platform_id=FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID,
+            )
             select_columns.extend((
                 "COALESCE(MAX(CAST(a.time_zone AS CHAR)), '') AS account_timezone",
                 "COALESCE(MAX(a.settings_row_count), 0) AS settings_row_count",
@@ -344,6 +349,7 @@ class FacebookAdapter(ChannelAdapter):
             select_columns=", ".join(select_columns),
             timezone_join=timezone_join,
             max_execution_time_ms=SOURCE_QUERY_MAX_EXECUTION_TIME_MS,
+            settings_platform_id=FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID,
         )
         return " ".join(sql.split()), tuple(columns)
 

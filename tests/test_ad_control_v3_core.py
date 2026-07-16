@@ -17,7 +17,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from features.ad_control_v3.catalog import StaticOptimizerIdentityResolver, facebook_field_catalog
-from features.ad_control_v3.channels.facebook import FacebookAdapter, SOURCE_QUERY_MAX_EXECUTION_TIME_MS
+from features.ad_control_v3.channels.facebook import (
+    FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID,
+    FacebookAdapter,
+    SOURCE_QUERY_MAX_EXECUTION_TIME_MS,
+)
 from features.ad_control_v3.errors import AdControlV3Error
 from features.ad_control_v3.repository import MemoryRepository
 from features.ad_control_v3.rule_engine import evaluate_candidates
@@ -376,6 +380,7 @@ class AdapterAndPreviewTests(unittest.TestCase):
             )
 
     def test_timezone_join_is_only_present_for_an_explicit_timezone_filter(self):
+        self.assertEqual(0, FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID)
         query = QueryStub()
         adapter = FacebookAdapter(query)
         base_scope = {
@@ -390,6 +395,8 @@ class AdapterAndPreviewTests(unittest.TestCase):
         self.assertNotIn("COUNT(*) AS settings_row_count", without_timezone)
         self.assertIn("ads_accounts_setting", with_timezone)
         self.assertIn("COUNT(*) AS settings_row_count", with_timezone)
+        self.assertIn("x.platform_id = 0", with_timezone)
+        self.assertNotIn("x.platform_id = 1", with_timezone)
 
     def test_scope_estimate_uses_identity_only_projection(self):
         service, _, query = make_service()

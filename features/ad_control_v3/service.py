@@ -16,7 +16,7 @@ from .catalog import (
     validate_rules_against_catalog,
 )
 from .channels import ChannelAdapter, FacebookAdapter, TikTokAdapter
-from .channels.facebook import SOURCE_QUERY_MAX_EXECUTION_TIME_MS
+from .channels.facebook import FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID, SOURCE_QUERY_MAX_EXECUTION_TIME_MS
 from .errors import AdControlV3Error
 from .repository import MySQLRepository
 from .rule_engine import evaluate_candidates
@@ -1174,7 +1174,7 @@ def build_service_from_environment() -> Service:
             "FROM `kunlunads_dev`.ads_accounts_setting "
             "WHERE platform_id=%s AND time_zone IS NOT NULL AND CAST(time_zone AS CHAR)<>'' "
             "ORDER BY time_zone LIMIT 500",
-            (1,),
+            (FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID,),
         )
         return [str(row.get("time_zone") or "") for row in rows]
 
