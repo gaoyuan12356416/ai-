@@ -181,3 +181,5 @@ git diff --check
 7. 生产真实登录验证规则页、日志页、公共导航活动态和 CSP；回归 V2 页面、runner/cron/hash，不触发任何 V3 Preview 或 Meta 写。
 
 回滚只恢复本次 V3 runtime 文件；共享 `quick-nav.js/ui-topbar.*` 和 navigation JSON 不在本次写入范围。若生产共享脚本 hash 与提交基线不一致，部署前停止，不更新 CSP 猜测值。
+
+本轮 `app.py` 已在 R1 安装 V3 dispatcher 且 source/target blob 相同。部署器的 runtime-only 分支只能在两份 app blob 完全一致、均包含全部 V3 dispatcher marker、app 现场字节精确一致时启用；仍需逐个 runtime blob 校验、锁内数据盘 checkpoint、原子安装、重复发布幂等和 target 无漂移回滚。旧 app 或任何 app 差异不得走该分支。

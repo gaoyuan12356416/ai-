@@ -198,7 +198,14 @@ def verified_runtime_manifest(repo, source_commit, target_commit):
 
 def validate_v3_only_patch(source_bytes, target_bytes, patch_bytes):
     if source_bytes == target_bytes:
-        raise RuntimeError("reviewed app overlay is empty")
+        if patch_bytes:
+            raise RuntimeError("identical reviewed app blobs produced a non-empty patch")
+        for marker in REQUIRED_TARGET_MARKERS:
+            if marker not in target_bytes:
+                raise RuntimeError("reviewed runtime-only target is missing V3 dispatcher marker")
+        if V3_PREFIX not in target_bytes:
+            raise RuntimeError("reviewed runtime-only target is missing V3 route prefix")
+        return
     for marker in REQUIRED_TARGET_MARKERS:
         if marker in source_bytes:
             raise RuntimeError("reviewed source already contains V3 dispatcher marker")
@@ -288,7 +295,11 @@ def verified_overlay(repo, source_revision, target_revision):
     target_bytes = git_blob(repo, target_commit)
     patch_bytes = git_patch(repo, source_commit, target_commit)
     validate_v3_only_patch(source_bytes, target_bytes, patch_bytes)
-    merged_bytes = apply_patch_in_isolation(source_bytes, patch_bytes)
+    merged_bytes = (
+        source_bytes
+        if source_bytes == target_bytes
+        else apply_patch_in_isolation(source_bytes, patch_bytes)
+    )
     if merged_bytes != target_bytes:
         raise RuntimeError(
             "isolated overlay target mismatch: expected=%s actual=%s"
@@ -454,7 +465,12 @@ def live_file_state(root, entry):
 def inspect_release_state(root, overlay, runtime_manifest):
     app_path = root / APP_PATH
     current_app = app_path.read_bytes()
-    if current_app == overlay["source_bytes"]:
+    if (
+        overlay["source_bytes"] == overlay["target_bytes"]
+        and current_app == overlay["target_bytes"]
+    ):
+        app_state = "target"
+    elif current_app == overlay["source_bytes"]:
         app_state = "source"
     elif current_app == overlay["target_bytes"]:
         app_state = "target"
@@ -719,7 +735,7 @@ def rollback_release(root, repo, source_revision, target_revision, backup_dir, c
     lock_path = Path(lock_file).resolve() if lock_file else root / ".deployment.lock"
     with exclusive_deploy_lock(lock_path):
         state = inspect_release_state(root, overlay, runtime_manifest)
-        all_source = state["app_state"] == "source" and all(
+        all_source = state["app_bytes"] == overlay["source_bytes"] and all(
             live["state"] == "source" or entry["source_bytes"] == entry["target_bytes"]
             for entry, live in zip(runtime_manifest, state["runtime"])
         )
@@ -759,7 +775,7 @@ def rollback_release(root, repo, source_revision, target_revision, backup_dir, c
         )
         rollback_changes(changes)
         restored = inspect_release_state(root, overlay, runtime_manifest)
-        if restored["app_state"] != "source" or not all(
+        if restored["app_bytes"] != overlay["source_bytes"] or not all(
             live["state"] == "source" or entry["source_bytes"] == entry["target_bytes"]
             for entry, live in zip(runtime_manifest, restored["runtime"])
         ):

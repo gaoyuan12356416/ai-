@@ -173,3 +173,4 @@
 | TC-092 | 未保存导航/登出 | QuickNav 跳转和登出均在写请求前阻断保存中状态；脏编辑先确认，取消后 URL、内容和登录状态不变 | P0 | 本地自动化与浏览器通过 |
 | TC-093 | 两页视觉与活动态 | 260px 公共侧栏、标准顶栏用户/刷新/退出控件，两页活动项唯一且正确，console 0 error/0 warning | P1 | 本地 1280×720 浏览器通过；生产待验 |
 | TC-094 | 旧版零影响 | 本次不修改共享资源、navigation JSON、V2 静态页、runner、cron、SQLite；生产发布前后 hash/页面/自然 tick 可解释 | P0 | 生产待验 |
+| TC-095 | runtime-only exact overlay | app source/target 相同时仅允许已安装 V3 dispatcher；check/apply/repeat/rollback 精确，旧 app、runtime/app 漂移、坏备份均失败关闭 | P0 | 部署专项 15/15、完整回归 143/143 通过；生产待验 |

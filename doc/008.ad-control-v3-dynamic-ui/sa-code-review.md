@@ -54,6 +54,7 @@
 | CR-018 | P2 | `service.py` adapter 异常 | 通用 `Exception` 统一包装成可重试 503，可能掩盖代码缺陷 | 后续缩小捕获范围并记录 `exc_info`；不影响当前失败关闭 | 接受延期 |
 | CR-019 | P1 | V3 动态页 CSP | 仅在 Meta CSP 允许 QuickNav 样式 hash 时，HTTP Header CSP 与其取交集后仍会阻断动态样式 | Header 与 Meta 共享同一精确 runtime hash，并新增 route + runtime hash 自动化 | 已关闭 |
 | CR-020 | P1 | 公共顶栏登出 | 脏编辑状态直接调用标准登出会先注销，随后 beforeunload 若取消会停留在已注销页面 | 登出 POST 前复用 save-in-flight/dirty 门禁；取消不调用认证接口 | 已关闭 |
+| CR-021 | P1 | exact-source 增量发布 | 原部署器只接受首次向 app 新增 V3 dispatcher，已安装后的纯 runtime 修正会在只读 check 被拒绝 | 增加受限 runtime-only 分支：app 两 blob 必须完全相同且已有完整 dispatcher；app 不写，runtime 仍精确校验/备份/原子替换/回滚；新增正反向测试 | 已关闭 |
 
 ## 5. 编译与自动化结果
 
@@ -91,3 +92,4 @@ V2 冻结 worktree 146 条中 143 通过，3 条因缺少 `features.x_accounts` 
 - 2026-07-16：冻结 R1 独立复审确认无 P0 越权/Meta/V2 破坏；P1 product collation 和生产证据仍为门禁。
 - 2026-07-16：完成生产门禁和二次独立复审，无 P0/P1 阻塞；记录 CR-017/018 为正式 copy/live 前 P2 backlog。
 - 2026-07-16：公共壳修正独立复审发现并关闭 CR-019/020；最终 `git diff --check`、JS 语法、UI+route 41/41 通过，无新增 P0/P1。
+- 2026-07-16：生产只读预检安全发现原部署器不支持 app 不变的 runtime-only 发布；关闭 CR-021，部署专项 15/15、完整 143/143 通过后才允许再次预检。

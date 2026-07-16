@@ -149,6 +149,73 @@ class AdControlV3ExactOverlayTests(unittest.TestCase):
         )
         self.assertEqual("unchanged", repeated["status"])
 
+    def test_runtime_only_release_keeps_app_and_rolls_back_exactly(self):
+        self.assertEqual("changed", self.apply()["status"])
+        runtime_source = self.target_commit
+        old_app = (self.live / "app.py").read_bytes()
+        old_asset = (self.live / "features" / "ad_control_v3" / "assets" / "app.js").read_bytes()
+        new_asset = b"window.V3 = 'runtime-only';\n"
+        (self.repo / "features" / "ad_control_v3" / "assets" / "app.js").write_bytes(new_asset)
+        self._git("add", "features/ad_control_v3/assets/app.js")
+        self._git("commit", "-m", "runtime only target")
+        runtime_target = self._git("rev-parse", "HEAD").strip()
+
+        checked = deploy_v3.apply_release(
+            self.live, self.repo, runtime_source, runtime_target, self.backup, check=True,
+        )
+        self.assertEqual("would_change", checked["status"])
+        self.assertEqual(b"", checked["patch_bytes"])
+        self.assertEqual(old_app, (self.live / "app.py").read_bytes())
+
+        applied = deploy_v3.apply_release(
+            self.live, self.repo, runtime_source, runtime_target, self.backup,
+        )
+        self.assertEqual("changed", applied["status"])
+        self.assertEqual(old_app, (self.live / "app.py").read_bytes())
+        self.assertEqual(new_asset, (self.live / "features" / "ad_control_v3" / "assets" / "app.js").read_bytes())
+        self.assertEqual(
+            old_asset,
+            (
+                Path(applied["backup"])
+                / "runtime"
+                / "features"
+                / "ad_control_v3"
+                / "assets"
+                / "app.js"
+            ).read_bytes(),
+        )
+        self.assertEqual(
+            "unchanged",
+            deploy_v3.apply_release(
+                self.live, self.repo, runtime_source, runtime_target, self.backup,
+            )["status"],
+        )
+
+        self.assertEqual(
+            "would_rollback",
+            deploy_v3.rollback_release(
+                self.live, self.repo, runtime_source, runtime_target, self.backup, check=True,
+            )["status"],
+        )
+        self.assertEqual(
+            "rolled_back",
+            deploy_v3.rollback_release(
+                self.live, self.repo, runtime_source, runtime_target, self.backup,
+            )["status"],
+        )
+        self.assertEqual(old_app, (self.live / "app.py").read_bytes())
+        self.assertEqual(old_asset, (self.live / "features" / "ad_control_v3" / "assets" / "app.js").read_bytes())
+        self.assertEqual(
+            "unchanged",
+            deploy_v3.rollback_release(
+                self.live, self.repo, runtime_source, runtime_target, self.backup,
+            )["status"],
+        )
+
+    def test_runtime_only_release_still_requires_existing_v3_dispatcher(self):
+        with self.assertRaisesRegex(RuntimeError, "runtime-only target is missing"):
+            deploy_v3.verified_overlay(self.repo, self.source_commit, self.source_commit)
+
     def test_successful_release_rollback_refuses_target_drift(self):
         self.apply()
         (self.live / "features" / "ad_control_v3" / "service.py").write_bytes(b"drift\n")
