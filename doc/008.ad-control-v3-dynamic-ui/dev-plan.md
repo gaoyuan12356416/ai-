@@ -56,18 +56,18 @@ tests/test_ad_control_v3_{core,repository,routes,ui,deploy}.py
 | 生产源表、身份、Nginx、数据盘只读核实 | 已完成 | `ads_custom_source_insight`、optimizer、`/mnt/data-disk`、现网 app hash |
 | 需求、SA、API、SQL、测试与部署文档 | 已完成 | 本目录 |
 | 动态路由、认证、CSP、两页和 asset allowlist | 已完成 | routes/UI tests |
-| 产品 + optimizer + 时区范围和三层 adapter | 已完成（本地） | bounded-query/core tests；生产 EXPLAIN 待执行 |
+| 产品 + optimizer + 时区范围和三层 adapter | 已完成 | bounded-query/core tests；生产三层空/非空时区实查通过 |
 | 规则 schema、字段目录、规则引擎和 Copy 参数 | 已完成 | core/UI tests |
-| ads_ai repository、八表 DDL/seed、事务与 CAS | 已完成（代码/SQL） | repository tests；生产 DDL 待执行 |
-| 数据盘原子快照、校验和、权限和大小门禁 | 已完成（代码） | storage tests；生产 mount 待执行 |
-| 手动 Preview、observe execution 和执行日志 | 已完成（本地） | core/repository/UI tests |
-| exact-source check/apply/rollback | 已完成（本地） | deploy tests |
-| 132 条 V3 自动化 | 已完成 | 132/132；含 product 精确匹配、字段投影/查询熔断与 navigation 发布链 |
+| ads_ai repository、八表 DDL/seed、事务与 CAS | 已完成 | repository tests；生产 8 表/15 产品/schema 回读通过 |
+| 数据盘原子快照、校验和、权限和大小门禁 | 已完成 | storage tests；生产 runtime mount 与 3 份快照回读通过 |
+| 手动 Preview、observe execution 和执行日志 | 已完成 | core/repository/UI tests；生产三层 4995 targets |
+| exact-source check/apply/rollback | 已完成 | deploy tests；生产 apply 后重复检查 `unchanged` |
+| 139 条 V3 自动化 | 已完成 | 本地和服务器均 139/139；含 product 精确匹配、字段投影/查询熔断与 navigation 发布链 |
 | 本地 Playwright 1440/390 视觉验收 | 已完成 | 5 张截图；console 0/0 |
-| Git commit/push/服务器精确 fetch | 待主发布流程执行 | 未在本文伪造 commit |
-| 生产八表 DDL/15 产品 seed/schema 回读 | 待执行 | 需 63353 写、63350 回读 |
-| 生产动态页面、真实登录、手动 observe | 待执行 | 仅允许 Meta 写 0 |
-| V2 全量回归与自然 tick 前后比对 | 待执行 | 生产发布门禁 |
+| Git commit/push/服务器精确 fetch | 已完成 | `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` |
+| 生产八表 DDL/15 产品 seed/schema 回读 | 已完成 | 63353 写、63350 回读；118 列/28 索引/6 外键 |
+| 生产动态页面、真实登录、手动 observe | 已完成 | Campaign/Ad Set/Ad 均 observed，Meta 写 0 |
+| V2 发布后回归 | 已完成 | 旧页面/API/SQLite integrity/runner hash/cron/导航通过；发布后连续 8 个自然 tick 为零动作 `no_accounts_due` |
 | scheduler/timer、规则 enable | 后续版本 | runner 固定失败关闭 |
 | live pause/copy、TikTok、created_data 写入 | 后续版本 | 当前无外部 mutator |
 | 快照补偿/清理器 | 后续版本 | 当前不自动删除孤儿快照 |
@@ -104,13 +104,13 @@ tests/test_ad_control_v3_{core,repository,routes,ui,deploy}.py
 
 ## 7. 本地验证命令
 
-已由主流程执行并记录 132/132：
+已由主流程在本地和服务器精确 commit 执行并记录 139/139：
 
 ```powershell
 python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 ```
 
-最终 commit 前仍需重跑：
+后续代码变更或新阶段发布前仍需重跑：
 
 ```powershell
 python -m py_compile app.py scripts/ad_control_v3_runner.py
@@ -120,18 +120,20 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 git diff --check
 ```
 
-生产 staging 必须使用 Python 3.9 再执行相同语法和 V3 suite；真实 MySQL/页面/V2 回归见 `deploy.md`。
+生产 staging 已使用 Python 3.9 执行相同语法和 V3 suite；真实 MySQL/页面/V2 回归见 `deploy.md` 和 `test-report.md`。
 
 ## 8. 发布阶段
+
+以下 9 步已按顺序执行，并保留为后续 Runbook：
 
 1. 本地冻结：重跑测试、代码评审、只 stage 本需求文件。
 2. GitHub：commit/push 精确 `codex/` 分支。
 3. 服务器 staging：fetch 精确 source/target commit，运行 deployer `--check` 与测试。
 4. 数据盘：创建配置、cache、快照和 backup 根，校验 mount、权限和空间。
-5. 数据库：独立执行八表 DDL、schema 回读、15 产品 seed；失败先停，不部署 route。
+5. 数据库：独立执行八表 DDL、schema 回读、15 产品 seed。
 6. Route dark：导航先隐藏，exact-source overlay，重启唯一必要 API service。
 7. 线上只读：认证/权限/旧 V2/页面/asset/API 健康。
-8. 手动 observe：单 optimizer、单产品、单层；三层逐个扩大，持续证明外部写为 0。
+8. 手动 observe：单 optimizer、单产品，Campaign -> Ad Set -> Ad 逐层验证，外部写为 0。
 9. 导航：从现场 JSON 键级合并 V3 两链接。
 
 本期到第 9 步即结束；不得继续创建 timer、enable 规则或做 Meta Canary。
@@ -140,7 +142,7 @@ git diff --check
 
 - 旧静态页、旧 feature、旧 runner 文件 hash 前后一致。
 - `/api/ad-control/*` 旧契约和 owner 隔离回归通过。
-- V2 SQLite online backup/integrity/schema/row hash 前后一致。
+- V2 SQLite online backup/integrity/schema/配置和 enabled/emergency 状态无异常；Preview 等活跃表允许由既有 runner 产生可解释增量，不要求全库逐字节相同。
 - ad-control cron 行、锁、日志和自然 tick 前后一致。
 - V3 路径以外请求不导入 V3、不访问 V3 DB/数据盘。
 - `ads_ai.ad_control_action_log` schema/行数不因 V3 迁移变化。
@@ -157,14 +159,13 @@ git diff --check
 
 ## 11. 遗留风险
 
-- 生产大表 `dpdo` EXPLAIN、8 秒 session/hint 行为、规则字段组合读压和复制延迟尚未完成发布前验证。
-- 生产 optimizer 身份和 active 产品 seed 尚未验证。
 - 快照与 MySQL 跨存储不是原子事务；DB 失败会留下未引用快照。
 - scheduler/额度/账户本地时间语义尚无实现，计划字段仅配置。
 - Copy 的 Meta 结构、created_data 和绩效关联合同尚未实现。
 - 三层 live pause 均没有 Canary 结论。
+- 停用产品后的历史规则再保存/试算全链路仍需专门生产联调。
 
 ## 12. 完成记录
 
-- 2026-07-16：完成 V3 本地实现、132/132 自动化和 1440/390 Playwright 视觉证据。
-- 2026-07-16：标准流程文档按最终边界收口；生产/MySQL/V2 回归仍待主发布流程执行。
+- 2026-07-16：完成 V3 本地实现、139/139 自动化和 1440/390 Playwright 视觉证据。
+- 2026-07-16：完成生产八表/15 产品迁移、精确 overlay、三层手动 observe、动态 UI/导航和 V2 回归；R1 到“手动 observe”结束。

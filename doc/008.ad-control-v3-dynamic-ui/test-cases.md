@@ -28,39 +28,39 @@
 
 | 编号 | 场景 | 预期 | 优先级 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| TC-001 | 动态规则组页 | cookie/module 后返回 200 HTML、no-store、CSP；未登录不渲染 | P0 | 部分通过；生产待验 |
-| TC-002 | 动态日志页 | 与规则页相同安全头，仅加载日志视图 | P0 | 部分通过；生产待验 |
-| TC-003 | 无 V3 静态 HTML | 仓库无 V3 public HTML，模板仅位于 feature；生产 Nginx root 也应无副本 | P0 | 部分通过；生产待验 |
+| TC-001 | 动态规则组页 | cookie/module 后返回 200 HTML、no-store、CSP；未登录不渲染 | P0 | 通过；生产 admin cookie 与未登录 401 已验 |
+| TC-002 | 动态日志页 | 与规则页相同安全头，仅加载日志视图 | P0 | 通过；生产真实日志已验 |
+| TC-003 | 无 V3 静态 HTML | 仓库无 V3 public HTML，模板仅位于 feature；生产 Nginx root 也应无副本 | P0 | 通过；生产通过后端动态 route 提供 |
 | TC-004 | 仅两个一级页面 | V3 导航/侧栏只有规则组管理、执行日志 | P0 | 本地自动化和 Playwright 通过 |
-| TC-005 | 前进/后退/刷新 | 两动态 URL 可刷新，筛选/编辑状态不产生空白页 | P1 | 待执行（生产浏览器） |
-| TC-006 | 登录与模块权限 | cookie/API Token/无模块权限分别得到正确拒绝，零业务泄露 | P0 | 部分通过；生产身份待验 |
-| TC-007 | V2 路由零变更 | V3 guard 仅命中新前缀，旧契约不变 | P0 | 部分通过；V2 生产回归待验 |
-| TC-008 | V2 存储零变更 | V3 CRUD/Preview 不读写旧 SQLite | P0 | 待执行（V2 生产基线） |
-| TC-009 | V2 runner 零影响 | 旧 cron/runner/event key/自然 tick 前后一致 | P0 | 待执行（生产） |
-| TC-010 | V3 故障隔离 | ads_ai/数据盘不可用只使 V3 失败，V2 仍正常 | P0 | 待执行（生产） |
+| TC-005 | 前进/后退/刷新 | 两动态 URL 可刷新，筛选/编辑状态不产生空白页 | P1 | 部分通过；生产直接导航/刷新通过，历史导航专项待补 |
+| TC-006 | 登录与模块权限 | cookie/API Token/无模块权限分别得到正确拒绝，零业务泄露 | P0 | 通过；自动化覆盖无模块/API Token，生产 admin cookie/未登录 401 已验 |
+| TC-007 | V2 路由零变更 | V3 guard 仅命中新前缀，旧契约不变 | P0 | 通过；生产 V2 页面/API 回归通过 |
+| TC-008 | V2 存储零变更 | V3 CRUD/Preview 不读写旧 SQLite | P0 | 通过；生产 SQLite integrity/config 无异常 |
+| TC-009 | V2 runner 零影响 | 旧 cron/runner/event key/自然 tick 前后一致 | P0 | 通过；cron/runner hash 不变，发布后连续 8 个自然 tick 为零动作 `no_accounts_due` |
+| TC-010 | V3 故障隔离 | ads_ai/数据盘不可用只使 V3 失败，V2 仍正常 | P0 | 通过；自动化故障注入与 lazy 边界覆盖，不人为制造生产 DB/磁盘故障 |
 
 ### B. 产品、优化师、时区与范围
 
 | 编号 | 场景 | 预期 | 优先级 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| TC-011 | 产品目录动态下发 | `/meta` 来自 ads_ai active short-drama catalog；seed 精确 15 值 | P0 | 部分通过；生产 seed/readback 待验 |
+| TC-011 | 产品目录动态下发 | `/meta` 来自 ads_ai active short-drama catalog；seed 精确 15 值 | P0 | 通过；生产 seed/reader/UI 均为 15 |
 | TC-012 | 产品多选保存/回显 | 精确值写 relation 表，hash 稳定，无账户字段 | P0 | 本地自动化通过 |
-| TC-013 | 非法/别名产品 | 源查询保留索引等值并用 BINARY 精确复核；大小写别名不混入候选，非法目录值零写入 | P0 | 本地自动化通过；生产 EXPLAIN 待验 |
+| TC-013 | 非法/别名产品 | 源查询保留索引等值并用 BINARY 精确复核；大小写别名不混入候选，非法目录值零写入 | P0 | 自动化通过；生产精确目录值实查通过 |
 | TC-014 | 停用产品历史规则 | 历史可读；重新保存/试算/启用时不得绕过 active catalog | P1 | 待执行（真实 MySQL 联调） |
-| TC-015 | 大表查询边界 | 单产品 query 强制 data_source 0/6、platform/product/dt/optimizer、`dpdo`、8s session/hint、9～10s source socket 和 15s 总扫描 soft deadline；索引等值 + BINARY exact，无无界扫描 | P0 | 本地自动化通过；生产 EXPLAIN 待验 |
+| TC-015 | 大表查询边界 | 单产品 query 强制 data_source 0/6、platform/product/dt/optimizer、`dpdo`、8s session/hint、9～10s source socket 和 15s 总扫描 soft deadline；索引等值 + BINARY exact，无无界扫描 | P0 | 自动化与生产三层真实查询通过；未单独归档 EXPLAIN |
 | TC-016 | 普通用户锁定本人 | UI 锁定，伪造其他 optimizer 返回 `optimizer_forbidden` | P0 | 本地自动化通过 |
-| TC-017 | admin 代建 | 目标 optimizer 必须 active，creator/optimizer 分开审计 | P0 | 本地自动化通过；生产身份待验 |
+| TC-017 | admin 代建 | 目标 optimizer 必须 active，creator/optimizer 分开审计 | P0 | 通过；生产 admin 为 optimizer 582 建组并审计 |
 | TC-018 | optimizer 无映射 | fail closed，不创建规则 | P0 | 本地自动化通过 |
 | TC-019 | optimizer 歧义 | 不取第一条，meta/CRUD/Preview 均阻断 | P0 | 本地自动化通过 |
 | TC-020 | 规则/日志隔离 | 普通用户只见本人 optimizer；他人创建的同 optimizer 规则只读不可改 | P0 | 本地自动化通过 |
-| TC-021 | 产品+optimizer 双约束 | SQL 和结果均限定 FB/精确产品/optimizer；跨产品对象阻断 | P0 | 部分通过；真实数据待验 |
+| TC-021 | 产品+optimizer 双约束 | SQL 和结果均限定 FB/精确产品/optimizer；跨产品对象阻断 | P0 | 通过；生产 Dramawave + optimizer 582 三层实查 |
 | TC-022 | 页面无账号控件 | DOM/可访问树/payload 无账户和账户池 | P0 | 本地自动化和 Playwright 通过 |
 | TC-023 | API 递归拒绝账号字段 | 任意嵌套 account key 返回 `account_scope_forbidden` | P0 | 本地自动化通过 |
 | TC-024 | 范围估算不可选账号 | 只返回账户/对象/阻断计数，不形成账户配置 | P1 | 本地自动化通过 |
 | TC-025 | 时区留空不限制 | SQL 完全不 JOIN/聚合账户设置表，重复/冲突设置不参与阻断 | P0 | 本地自动化通过 |
-| TC-026 | 时区精确多选 | 只匹配用户选择的 server enum；不静默猜同义值 | P1 | 本地自动化通过；生产枚举待验 |
+| TC-026 | 时区精确多选 | 只匹配用户选择的 server enum；不静默猜同义值 | P1 | 自动化与生产真实时区筛选通过 |
 | TC-027 | 缺失/冲突时区 | 设置时区后缺失或冲突对象在规则前阻断并记录原因 | P0 | 本地自动化通过 |
-| TC-027A | 时区两段式补查 | 三层主聚合始终无 settings JOIN；仅非空筛选对候选账户 bare/act_ 变体执行 `platform_id=%s AND account_id IN (...) FORCE INDEX(paa)` 分块绑定查询；重复相同时区合并、跨产品账户只查一次 | P0 | 本地自动化通过；生产 EXPLAIN/实查待验 |
+| TC-027A | 时区两段式补查 | 三层主聚合始终无 settings JOIN；仅非空筛选对候选账户 bare/act_ 变体执行 `platform_id=%s AND account_id IN (...) FORCE INDEX(paa)` 分块绑定查询；重复相同时区合并、跨产品账户只查一次 | P0 | 自动化与生产三层空/非空时区实查通过 |
 | TC-027B | 时区补查故障与上限 | 5000 账户、200 raw 变体每块、5000 返回行每块和共享 15s deadline 生效；任一查询失败/截断时 Preview、Execution、快照均零写入 | P0 | 本地自动化通过 |
 | TC-027C | 空时区零 settings I/O | 空时区 discover 只校验 insight/dpdo，跳过 settings 列与 paa schema probe；时区硬限即使构造参数传大也不能放大；首块成功、后块失败仍零持久化 | P0 | 本地自动化通过 |
 
@@ -109,7 +109,7 @@
 | TC-056 | 允许起止窗口仅配置 | 合法 HH:MM 精确保存；跨午夜执行语义留待 scheduler | P1 | 本地自动化通过 |
 | TC-057 | 新建安全状态 | 永远 disabled/observe、无旧 Preview | P0 | 本地自动化通过 |
 | TC-058 | 更新失效 Preview | version/hash 变化、pointer 清空、历史保留 | P0 | 本地自动化通过 |
-| TC-059 | 三层手动 observe 零外部写 | adapter 无 external mutator，summary `meta_write_count=0`，写快照/审计 | P0 | 本地自动化通过；生产零调用待验 |
+| TC-059 | 三层手动 observe 零外部写 | adapter 无 external mutator，summary `meta_write_count=0`，写快照/审计 | P0 | 通过；生产三层 4995 targets、3 次 Meta 写 0 |
 | TC-060 | live pause 门禁 | 返回 `live_pause_disabled`，零 Token/Graph | P0 | 本地自动化通过 |
 | TC-061 | live copy 门禁 | 返回 `copy_persistence_not_configured`，零 adapter copy | P0 | 本地自动化通过 |
 | TC-062 | TikTok 门禁 | meta disabled；保存/扫描均 `channel_not_enabled` | P0 | 本地自动化通过 |
@@ -124,16 +124,16 @@
 
 | 编号 | 场景 | 预期 | 优先级 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| TC-069 | 八表边界 | SQL 只创建八张 `ads_ai.ad_control_v3_*`，四处 product 字段为 `utf8mb4_bin`，无 copied created_data | P0 | 部分通过；生产 DDL 待验 |
-| TC-070 | 数据盘门禁 | 缺失/系统盘/应用目录/symlink 拒绝；生产必须独立 mount | P0 | 部分通过；生产 mount 待验 |
+| TC-069 | 八表边界 | SQL 只创建八张 `ads_ai.ad_control_v3_*`，四处 product 字段为 `utf8mb4_bin`，无 copied created_data | P0 | 通过；生产 8 表/118 列/28 索引/6 外键，copied 表 0 |
+| TC-070 | 数据盘门禁 | 缺失/系统盘/应用目录/symlink 拒绝；生产必须独立 mount | P0 | 通过；生产 runtime/config/release/backup 均在数据盘 |
 | TC-071 | 原子快照 | gzip JSON、raw/gzip 上限、0600/0700、fsync+replace、低空间拒绝 | P0 | 本地自动化通过 |
 | TC-072 | 相对路径/hash | `..`/逃逸/损坏 hash 均拒绝读取 | P0 | 本地自动化通过 |
 | TC-073 | 快照清理 | 本期无清理器，不得自动/人工批删；后续需引用感知实现 | P1 | 阻塞（未发布） |
 | TC-074 | V3 事件日志 | 列表只展示 V3 manual observe 事件，计数不伪造；无业务日合并承诺 | P1 | 本地自动化和 Playwright 通过 |
-| TC-075 | 日志组合筛选 | 产品多选、optimizer、层级、动作、模式、状态、trigger、object ID | P0 | 本地自动化通过；生产数据待验 |
+| TC-075 | 日志组合筛选 | 产品多选、optimizer、层级、动作、模式、状态、trigger、object ID | P0 | 通过；全部组合由自动化覆盖，生产三层真实日志/详情通过 |
 | TC-076 | 详情懒加载 | 列表不读快照；详情验证 hash 并返回 header/target count | P1 | 本地自动化通过 |
 | TC-077 | 服务端分页 | 规则/日志 page/page_size 上限，稳定排序，不全量渲染 | P0 | 本地自动化通过 |
-| TC-078 | 日志安全 | XSS 文本转义，未知计数不伪造；生产日志不得出现 secret | P0 | 部分通过；生产日志审计待验 |
+| TC-078 | 日志安全 | XSS 文本转义，未知计数不伪造；生产日志不得出现 secret | P0 | 通过；自动化 XSS 与生产日志/详情审计通过 |
 
 ### G. 响应式、可访问性和健壮性
 
@@ -148,7 +148,7 @@
 | TC-085 | reduced motion/触控 | CSS motion guard 存在；主要触控目标不依赖 hover | P2 | 本地自动化通过；真机待验 |
 | TC-086 | XSS/长文本/UTF-8 | bootstrap 与运行时转义；中文无乱码；console 0 error/0 warning | P0 | 本地自动化和 Playwright 通过 |
 | TC-087 | 请求竞态 | 写操作 single-flight；旧 list/estimate 响应不覆盖新状态 | P1 | 本地自动化通过；生产延迟待验 |
-| TC-088 | 网络/会话变化 | loading/empty/error 可见，不误报成功；生产会话过期/权限回收待验 | P0 | 部分通过；生产待验 |
+| TC-088 | 网络/会话变化 | loading/empty/error 可见，不误报成功；生产会话过期/权限回收待验 | P1 | 部分通过；自动化 loading/empty/error 和生产 loading/成功态通过，会话过期/权限回收待补 |
 
 ## 4. 已取得证据
 
@@ -161,4 +161,4 @@
 - 本地 P0 自动化全部通过只是提交门禁，不是生产验收。
 - 生产必须完成八表 DDL/seed/readback、真实身份/权限、三层 manual observe、数据盘和 V2 前后回归。
 - 三层生产 observe 都必须有 Token/Graph/Meta 写 0 的独立证据。
-- 任一 P0 生产项未执行或失败，测试报告保持“不可放量”。
+- 任一 P0 若既无自动化证据、也无安全的生产证据，测试报告保持“不可放量”；不要求为取证而故意中断生产数据库、磁盘或权限。

@@ -150,7 +150,7 @@ V3 只有两个动态页面：
 
 本期不创建、不写 copied `created_data`、lineage 或 intent，也不修改源 `created_data`。
 
-生产数据根固定 `/mnt/data-disk/ai-ad-control-v3`。`SafeDataRoot` 要求独立设备、绝对路径、无符号链接、至少 1 GiB 余量；创建 `snapshots/logs/run/spool/backups/tmp/exports/cache` 子目录。快照为确定性 gzip JSON，原子替换，目录 `0700`、文件 `0600`，数据库只保存相对路径、SHA-256 和大小。读取前复核路径与 hash。
+生产项目根固定 `/mnt/data-disk/ai-ad-control-v3`，`AD_CONTROL_V3_DATA_ROOT` 固定为其 `runtime` 子目录；`config/runtime.env`、`releases`、`staging` 和 `backups` 与 runtime 分开但仍位于同一数据盘。`SafeDataRoot` 要求独立设备、绝对路径、无符号链接、至少 1 GiB 余量；在 runtime 内创建 `snapshots/logs/run/spool/tmp/exports/cache` 子目录。快照为确定性 gzip JSON，原子替换，目录 `0700`、文件 `0600`，数据库只保存相对路径、SHA-256 和大小。读取前复核路径与 hash。
 
 快照清理器本期未实现。数据库写失败可能留下未引用快照，必须保留审计并由后续受审清理器处理，不能人工批量删除。
 
@@ -167,7 +167,7 @@ V3 只有两个动态页面：
 
 - V3 本地单元/集成测试 139/139 通过，Python 3.9、JavaScript 语法、动态路由、权限、repository、规则引擎、字段投影/查询熔断、两段式时区补查、数据盘、product 精确匹配、主/导航 exact-source 部署器均有自动化证据。
 - 本地 Playwright 在 1440 和 390 视口验证两页：中文无乱码、无页面级横向溢出、控制台 0 error/0 warning，并明确展示“仅草稿 + 手动试算/启用锁定”。
-- 生产部署、八表 DDL/seed、真实 reader/writer、真实登录、真实三层 observe 和 V2 前后回归必须另行取证；未完成前不得标记上线完成。
+- 生产部署、八表 DDL/seed、真实 reader/writer、真实登录、真实三层 observe 和 V2 前后回归已于 2026-07-16 另行取证并写入 `test-report.md`；上线结论仍仅覆盖手动 observe R1。
 - 生产 observe 必须证明 Token lookup、Graph GET/POST/copy 和 Meta 写均为 0。
 - 系统盘不产生 V3 快照、运行日志、配置或备份。
 - scheduler/enable/live pause/live copy/TT/created_data 写入/清理器保持未发布并失败关闭。
@@ -184,3 +184,4 @@ V3 只有两个动态页面：
 
 - 2026-07-16：创建 V3 并行需求，完成生产只读数据源、身份、Nginx 和数据盘核实。
 - 2026-07-16：按冻结实现收口为“FB 动态两页 + 产品多选/优化师/三层 + 手动 observe”；明确 scheduler、enable、live、TT、created_data 和清理器未发布。
+- 2026-07-16：完成 commit `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` 的生产暗发布、八表/15 产品迁移、三层手动 observe、导航键级合并和 V2 回归；未发布边界保持不变。

@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-本文是待执行发布 Runbook。截止文档收口时：本地 V3 132/132 和本地 Playwright 已通过；GitHub 提交/推送、生产 DDL、代码 overlay、服务重启、线上浏览器、真实手动 observe 和 V2 发布后回归均未完成。
+本文同时记录已执行的 R1 发布和后续可复用 Runbook。2026-07-16 已从 source commit `2b52bc8d06b8a36a473dad8916012570ee28c15b` 向 target commit `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` 完成 GitHub-first 精确发布、八表迁移、route dark、三层手动 observe、导航合并和 V2 回归。
 
 本轮生产目标只到：**FB 动态两页 + 配置 + 手动 observe**。不得创建/启用 V3 timer，不得 enable 规则，不得调用 Meta 写接口。
 
@@ -17,6 +17,22 @@
 - 本地源 bundle 备份：`D:\codex\backups\ad-control-v3-prechange-20260716-101213-2b52bc8\source.bundle`，SHA-256 `e0f361ba2a0c062019bf51eff89964188338bcfd0694f48c543e17d31852cdc7`。
 
 以上是历史只读证据，不替代发布瞬间复核。
+
+### 2.1 本次生产发布实录
+
+- 分支：`codex/ad-control-v3-dynamic-ui`；部署代码 commit：`79fce9e56ba70b13f09b574ba3fa20c88f522d0a`。
+- staging：`/mnt/data-disk/ai-ad-control-v3/staging/repo-6b4abd979389`，detached HEAD 精确指向 target commit，worktree clean。
+- 最终全量 checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-final-20260716T073925Z-79fce9e56`；`checkpoint.sha256` 26 项全部通过，SQLite backup integrity 为 `ok`。
+- checkpoint manifest SHA-256：`ac0b78b577870a1241e710795deb06ea23e3c35c4bbd1cc6440c4474d4010b04`；SQLite backup SHA-256：`a715751ac8c13345ec4100195382f7a263cf49d7f6cb6810298ea8d88d0575fa`。
+- exact-source overlay checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-2b52bc8d06b8-to-79fce9e56ba7`；重复 `--check` 为 `unchanged`。
+- 生产 `app.py` 最终 SHA-256：`44e09f9c10b3784791fca7c946a520d82ef71f5eaac870bae3fece6eb1fc61fc`；旧 V2 runner `scripts/ad_control_rule_runner.py` 仍为 `a3fa7b2bbe597e52dec44347de750fe34d313302baefba585f66d521dd5c25e7`。
+- runtime env：`/mnt/data-disk/ai-ad-control-v3/config/runtime.env`，mode 0600，SHA-256 `7e18bb2430ef420806a054d53d43259caffae53bdfacdeb76a14afa095a64b73`；两个 V3 runner flag 均为 0。
+- 服务仅重启 `drama-material-api.service`；启动时间 `2026-07-16 15:47:12 CST`，PID `599011`，`NRestarts=0`，发布后 journal 无 traceback/error/exception。
+- migration 证据：`/mnt/data-disk/ai-ad-control-v3/releases/79fce9e56/migration-20260716T074440Z.json`，SHA-256 `d6a80a179b5e1bc1d38157afa284899670d3e49630d18192bcce227589d87829`。
+- canary 证据：`/mnt/data-disk/ai-ad-control-v3/releases/79fce9e56/canary-20260716T080533Z.json`，SHA-256 `71ecb436dc50e18cf29cf67355c18ab5d9b3923a4f0264298dd5fca2ce2fc12b`。
+- navigation service checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/navigation-service/ad-control-v3-navigation-20260716T080604.983577Z-84c217e3/manifest.json`。
+- navigation Nginx checkpoint：`/mnt/data-disk/ai-ad-control-v3/backups/navigation-nginx/ad-control-v3-navigation-20260716T080605.036215Z-d4fa8b6e/manifest.json`。
+- 两份 navigation 最终 SHA-256 均为 `889d340ff9d849ec5ef67e04bb4be5505de51d3ac2a0ee80aff32cb3d24f394b`；现场原有 7 个分组逐键保持，只新增 V3 的 2 个动态链接。
 
 ## 3. 发布边界
 
@@ -33,24 +49,26 @@
 ```text
 /mnt/data-disk/ai-ad-control-v3/
 ├─ config/
-├─ snapshots/
-├─ logs/
-├─ run/
-├─ spool/
-├─ tmp/
-├─ exports/
-├─ cache/
+├─ releases/
 ├─ staging/
-└─ backups/
+├─ backups/
+└─ runtime/
+   ├─ snapshots/
+   ├─ logs/
+   ├─ run/
+   ├─ spool/
+   ├─ tmp/
+   ├─ exports/
+   └─ cache/
 ```
 
 发布前只读验证：
 
 ```bash
-realpath /mnt/data-disk/ai-ad-control-v3
-findmnt -T /mnt/data-disk/ai-ad-control-v3
-df -hT /mnt/data-disk/ai-ad-control-v3
-stat -c '%d %U %G %a %n' / /mnt/data-disk /mnt/data-disk/ai-ad-control-v3
+realpath /mnt/data-disk/ai-ad-control-v3/runtime
+findmnt -T /mnt/data-disk/ai-ad-control-v3/runtime
+df -hT /mnt/data-disk/ai-ad-control-v3/runtime
+stat -c '%d %U %G %a %n' / /mnt/data-disk /mnt/data-disk/ai-ad-control-v3/runtime
 ```
 
 根目录/子目录 mode `0700`，配置与快照 `0600`。路径位于根分区、`/root`、应用 checkout 或经过 symlink 时，V3 必须返回 `unsafe_data_root`，不能回退到系统盘。
@@ -62,7 +80,7 @@ stat -c '%d %U %G %a %n' / /mnt/data-disk /mnt/data-disk/ai-ad-control-v3
 必填：
 
 ```text
-AD_CONTROL_V3_DATA_ROOT=/mnt/data-disk/ai-ad-control-v3
+AD_CONTROL_V3_DATA_ROOT=/mnt/data-disk/ai-ad-control-v3/runtime
 AD_CONTROL_V3_SOURCE_READER_MYSQL_HOST=101.32.56.53
 AD_CONTROL_V3_SOURCE_READER_MYSQL_PORT=63350
 AD_CONTROL_V3_SOURCE_READER_MYSQL_USER=...
@@ -120,8 +138,8 @@ AD_CONTROL_V3_RUNNER_OBSERVE_RELEASED=0
 
 ```bash
 export SOURCE_COMMIT='2b52bc8d06b8a36a473dad8916012570ee28c15b'
-export TARGET_COMMIT='<最终已评审并 push 的精确 commit>'
-export REPO='/mnt/data-disk/ai-ad-control-v3/staging/ai-drama-material-service'
+export TARGET_COMMIT='79fce9e56ba70b13f09b574ba3fa20c88f522d0a'
+export REPO='/mnt/data-disk/ai-ad-control-v3/staging/repo-6b4abd979389'
 export LIVE_ROOT='/root/drama_material_service'
 export BACKUP_ROOT='/mnt/data-disk/ai-ad-control-v3/backups'
 ```
@@ -173,15 +191,15 @@ python3 "$REPO/deploy/apply_ad_control_v3.py" \
 
 ```bash
 cd "$LIVE_ROOT"
-PYTHONPYCACHEPREFIX=/mnt/data-disk/ai-ad-control-v3/cache/pycache \
+PYTHONPYCACHEPREFIX=/mnt/data-disk/ai-ad-control-v3/runtime/cache/pycache \
   python3 -m py_compile app.py scripts/ad_control_v3_runner.py
-PYTHONPYCACHEPREFIX=/mnt/data-disk/ai-ad-control-v3/cache/pycache \
+PYTHONPYCACHEPREFIX=/mnt/data-disk/ai-ad-control-v3/runtime/cache/pycache \
   python3 -m compileall -q features/ad_control_v3
 node --check features/ad_control_v3/assets/app.js
 nginx -t
 ```
 
-在 staging 精确 commit 上运行 132 条 V3 测试。只重启 `drama-material-api.service`；记录重启前后 PID、启动时间和 journal 游标，不重启无关 worker。
+在 staging 精确 commit 上运行 139 条 V3 测试。只重启 `drama-material-api.service`；记录重启前后 PID、启动时间和 journal 游标，不重启无关 worker。
 
 ## 10. Route dark 与线上验收
 
@@ -237,11 +255,11 @@ python3 "$REPO/deploy/apply_ad_control_v3_navigation.py" \
 
 - 发布前后旧静态页、feature、runner hash；
 - `/api/ad-control/*` 契约、owner 隔离、旧 action log；
-- V2 SQLite online backup/integrity/schema/row hash/enabled/emergency；
-- ad-control cron 唯一行、日志、锁和至少一轮自然 tick；
+- V2 SQLite online backup/integrity/schema/config/enabled/emergency；Preview 等活跃表按可解释增量核对，不要求全库 row hash 不变；
+- ad-control cron 唯一行、runner hash、日志和锁；不人为触发，观察发布后自然 tick；本次 15:50～16:25 连续 8 个 tick 均为零动作 `no_accounts_due`；
 - V3 路径外不 import `features.ad_control_v3`，无 V3 DB/数据盘 I/O。
 
-任何不一致先停止 V3 入口，不能用“132 条 V3 测试通过”代替 V2 生产证据。
+任何不一致先停止 V3 入口，不能用“139 条 V3 测试通过”代替 V2 生产证据。
 
 ## 12. 回滚
 
@@ -277,8 +295,8 @@ python3 "$REPO/deploy/apply_ad_control_v3.py" \
 
 ### 12.3 数据与快照
 
-真实记录存在后不 DROP 表。代码回滚不删除快照；当前没有清理器，孤儿快照保留待审计。本期 V3 无 Meta 写，因此无需恢复 Meta 状态。
+真实记录存在后不 DROP 表。当前已有 1 个规则组、3 个 Preview、3 个 execution 和 4995 个目标，因此空表 rollback SQL 已不再适用；只能关闭 V3 入口/写入并保留审计。代码回滚不删除快照；当前没有清理器，孤儿快照保留待审计。本期 V3 无 Meta 写，因此无需恢复 Meta 状态。
 
 ## 13. 发布证据清单
 
-最终报告必须包含：source/target commit、live app/runtime hash、数据盘 checkpoint、DDL/seed hash 与 schema 回读、service/journal 时间点、线上 HTTP/浏览器结果、三层 observe 零外部写、V2 前后对比、navigation before/after/rollback 信息。缺任一 P0 证据，发布建议保持“不可放量”。
+本次上述证据已归档于 2.1、迁移 JSON、Canary JSON 和 `test-report.md`。后续任何代码或数据库变更仍必须重新生成同一清单；“手动 observe 通过”不能扩张解释为 scheduler/live/copy 可放量。
