@@ -43,14 +43,21 @@ def test_dynamic_pages_render_complete_accessible_documents():
         assert 'aria-live="polite"' in html
         assert 'id="adControlV3Bootstrap" type="application/json"' in html
         assert "__AD_CONTROL_V3_BOOTSTRAP__" not in html
-        assert "/api/ad-control/v3/ui/rule-groups" in html
-        assert "/api/ad-control/v3/ui/execution-logs" in html
-        assert html.count('class="feature-nav-link') == 2
+        assert html.count('id="quickNav"') == 1
+        assert 'class="topbar page-header"' in html
+        assert 'id="userCard"' in html
+        assert 'id="refreshBtn"' in html
+        assert 'id="authBtn"' in html
+        assert "feature-nav-link" not in html
+        assert "sidebar-foot" not in html
 
 
-def test_templates_reference_only_dynamic_v3_business_assets():
+def test_templates_reference_standard_shell_and_dynamic_v3_business_assets():
     expected = {
+        ("link", "/ui-topbar.css"),
         ("link", "/api/ad-control/v3/assets/app.css"),
+        ("script", "/ui-topbar.js"),
+        ("script", "/quick-nav.js?v=20260707nav2"),
         ("script", "/api/ad-control/v3/assets/app.js"),
     }
     for path in TEMPLATES.glob("*.html"):
@@ -67,6 +74,57 @@ def test_templates_reference_only_dynamic_v3_business_assets():
         assert "Content-Security-Policy" in html
         assert "unsafe-inline" not in html
         assert "unsafe-eval" not in html
+        assert html.index("/ui-topbar.css") < html.index("/api/ad-control/v3/assets/app.css")
+        assert html.index('id="adControlV3Bootstrap"') < html.index("/ui-topbar.js")
+        assert html.index("/ui-topbar.js") < html.index("/quick-nav.js?v=20260707nav2")
+        assert html.index("/quick-nav.js?v=20260707nav2") < html.index("/api/ad-control/v3/assets/app.js")
+
+
+def test_shared_quick_nav_and_topbar_use_the_standard_javascript_contract():
+    source = JS.read_text(encoding="utf-8")
+    assert 'throw new Error("公共顶吸脚本 /ui-topbar.js 未加载")' in source
+    assert 'throw new Error("公共快速导航脚本 /quick-nav.js 未加载")' in source
+    assert 'state.auth = await rootApi("/api/ui/topbar")' in source
+    assert "window.UiTopbar.render({" in source
+    assert "window.QuickNav.render(quickNavOptions(state.auth))" in source
+    assert 'page === "execution-logs" ? "adControlV3Logs" : "adControlV3Rules"' in source
+    assert "requestGuardedNavigation(item.href)" in source
+    assert "window.UiTopbar.handleAuthAction({" in source
+    assert "api: rootApi" in source
+    assert 'afterLogout: () => window.location.assign("/")' in source
+    assert 'authButton.addEventListener("click", async () =>' in source
+    assert "if (!(await allowShellNavigation())) return;" in source
+    assert "function renderUser()" not in source
+
+
+def test_quick_nav_runtime_style_hash_is_explicitly_allowed_by_csp():
+    quick_nav = ROOT / "static" / "quick-nav.js"
+    script = r"""
+const fs = require("fs");
+const crypto = require("crypto");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const quote = String.fromCharCode(96);
+const prefix = "style.textContent = " + quote;
+const start = source.indexOf(prefix);
+const end = source.indexOf(quote + ";", start + prefix.length);
+if (start < 0 || end < 0) process.exit(2);
+const raw = source.slice(start + prefix.length, end);
+const runtimeStyle = vm.runInNewContext(quote + raw + quote);
+process.stdout.write("sha256-" + crypto.createHash("sha256").update(runtimeStyle, "utf8").digest("base64"));
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(quick_nav)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    expected_hash = "sha256-hwxbDTADufampcgI9oc75ltbbfB38tCWOve6LIq/j68="
+    assert result.stdout == expected_hash
+    for page_name in ["rule-groups", "execution-logs"]:
+        assert f"style-src 'self' '{expected_hash}'" in page_renderer.render_page(page_name)
 
 
 def test_bootstrap_json_cannot_terminate_script_or_inject_html():
@@ -438,7 +496,7 @@ if (ui.canToggleGroup(false, available.permissions) !== true) process.exit(7);
 
     rendered = page_renderer.render_rule_groups_page()
     assert "仅支持保存草稿与手动试算" in rendered
-    assert "配置、保存与试算" in rendered
+    assert "用产品与优化师圈定广告范围" in rendered
 
 
 def test_execution_logs_preserve_unknown_counts_and_nested_summary_truth():
@@ -569,7 +627,8 @@ if (firstScope !== sameScope || firstScope === changedScope) process.exit(12);
     assert 'window.addEventListener("beforeunload"' in source
     assert 'target.closest("a[data-guard-editor-exit]")' in source
     assert 'isInFlight("editor-save")' in source
-    assert page_renderer.render_rule_groups_page().count("data-guard-editor-exit") == 4
+    assert "requestGuardedNavigation(item.href)" in source
+    assert page_renderer.render_rule_groups_page().count('id="quickNav"') == 1
 
 
 def test_relative_day_operators_are_metadata_driven_numeric_day_inputs():
@@ -656,7 +715,9 @@ class TestAdControlV3Ui(unittest.TestCase):
 
 for _test_function in [
     test_dynamic_pages_render_complete_accessible_documents,
-    test_templates_reference_only_dynamic_v3_business_assets,
+    test_templates_reference_standard_shell_and_dynamic_v3_business_assets,
+    test_shared_quick_nav_and_topbar_use_the_standard_javascript_contract,
+    test_quick_nav_runtime_style_hash_is_explicitly_allowed_by_csp,
     test_bootstrap_json_cannot_terminate_script_or_inject_html,
     test_renderer_and_asset_loader_are_allowlisted,
     test_python_ui_renderer_is_python_39_compatible,

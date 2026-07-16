@@ -185,3 +185,12 @@ V3 只有两个动态页面：
 - 2026-07-16：创建 V3 并行需求，完成生产只读数据源、身份、Nginx 和数据盘核实。
 - 2026-07-16：按冻结实现收口为“FB 动态两页 + 产品多选/优化师/三层 + 手动 observe”；明确 scheduler、enable、live、TT、created_data 和清理器未发布。
 - 2026-07-16：完成 commit `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` 的生产暗发布、八表/15 产品迁移、三层手动 observe、导航键级合并和 V2 回归；未发布边界保持不变。
+- 2026-07-16：V3 两个动态页的自建侧栏和用户卡不符合后台公共壳规范，冻结修正要求如下：页面必须加载根路径 `/ui-topbar.css`、`/ui-topbar.js` 与 `/quick-nav.js`，分别通过 `QuickNav.render` 和 `UiTopbar.render/handleAuthAction` 渲染；认证只读接口固定 `/api/ui/topbar`，登出固定 `/api/auth/logout`，不得拼接 V3 API 前缀。
+
+## 14. 公共快捷导航与顶栏规范补充
+
+- V3 仍只保留规则组管理、执行日志两个业务页，但左侧必须展示当前用户有权访问的完整后台公共导航；活动键分别为 `adControlV3Rules`、`adControlV3Logs`。
+- 公共壳由标准 JavaScript 动态渲染，不在 V3 模板中复制导航项、用户信息或登录/登出实现；共享 CSS 先加载，V3 业务 CSS 后加载。
+- QuickNav 的全部跳转继续经过 V3 未保存编辑保护；保存/试算进行中阻断跳转。登出在调用认证写接口前也必须经过同一门禁，避免页面留在“已退出但仍有脏编辑”的状态。
+- 动态页 HTTP CSP Header 与页面 Meta CSP 必须同时允许生产 `quick-nav.js` 注入样式的精确 SHA-256；禁止 `unsafe-inline`。共享脚本样式发生变化时，hash 不一致必须在上线前失败。
+- V3 页面、业务 CSS/JS 继续由 cookie/module 保护的动态路由提供并保持 `no-store`；公共壳修正不得改变 R1 手动 observe、零 Meta 写和旧 V2 独立运行边界。

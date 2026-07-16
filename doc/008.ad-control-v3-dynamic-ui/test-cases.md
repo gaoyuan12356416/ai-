@@ -162,3 +162,14 @@
 - 生产必须完成八表 DDL/seed/readback、真实身份/权限、三层 manual observe、数据盘和 V2 前后回归。
 - 三层生产 observe 都必须有 Token/Graph/Meta 写 0 的独立证据。
 - 任一 P0 若既无自动化证据、也无安全的生产证据，测试报告保持“不可放量”；不要求为取证而故意中断生产数据库、磁盘或权限。
+
+### H. 公共快捷导航与顶栏规范修正
+
+| 编号 | 场景 | 预期 | 优先级 | 当前状态 |
+| --- | --- | --- | --- | --- |
+| TC-089 | 公共壳加载合同 | 两页按 `/ui-topbar.css`、V3 CSS、bootstrap、`/ui-topbar.js`、`/quick-nav.js`、V3 JS 顺序加载，不存在自建 feature-nav/renderUser | P0 | 本地自动化通过 |
+| TC-090 | 标准动态渲染 | `QuickNav.render` 使用两页对应 active key，`UiTopbar.render` 使用 `/api/ui/topbar`，登出走根路径 `/api/auth/logout` | P0 | 本地自动化与浏览器通过 |
+| TC-091 | CSP 双层门禁 | 运行时注入样式 hash 与提交基线一致，Meta CSP 和 HTTP Header CSP 均精确允许，仍无 unsafe-inline/eval | P0 | 本地自动化与浏览器 console 通过 |
+| TC-092 | 未保存导航/登出 | QuickNav 跳转和登出均在写请求前阻断保存中状态；脏编辑先确认，取消后 URL、内容和登录状态不变 | P0 | 本地自动化与浏览器通过 |
+| TC-093 | 两页视觉与活动态 | 260px 公共侧栏、标准顶栏用户/刷新/退出控件，两页活动项唯一且正确，console 0 error/0 warning | P1 | 本地 1280×720 浏览器通过；生产待验 |
+| TC-094 | 旧版零影响 | 本次不修改共享资源、navigation JSON、V2 静态页、runner、cron、SQLite；生产发布前后 hash/页面/自然 tick 可解释 | P0 | 生产待验 |

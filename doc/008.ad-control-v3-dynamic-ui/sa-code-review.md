@@ -52,6 +52,8 @@
 | CR-016 | P0 | Facebook account timezone | settings 全表派生 JOIN 与三层聚合组合后生产只读查询超时 | 主聚合固定无 JOIN；候选账户 bare/act_ 变体通过绑定参数和 `FORCE INDEX(paa)` 分块补查；请求内缓存、raw/账户/分块行硬限和共享 deadline；空时区跳过 settings schema probe；缺失/多 distinct 只阻断对应候选并写原因，分块查询失败/截断/超限/deadline 才整体中止且零持久化 | 自动化和生产三层空/非空时区实查通过 |
 | CR-017 | P2 | `rule_engine.py` Copy 实际 CPI | `actual_cpi=0` 目前会被视为可用并形成零预算参数 | 正式 copy 仍失败关闭；开放前要求改为有限正数并补回归 | 接受延期 |
 | CR-018 | P2 | `service.py` adapter 异常 | 通用 `Exception` 统一包装成可重试 503，可能掩盖代码缺陷 | 后续缩小捕获范围并记录 `exc_info`；不影响当前失败关闭 | 接受延期 |
+| CR-019 | P1 | V3 动态页 CSP | 仅在 Meta CSP 允许 QuickNav 样式 hash 时，HTTP Header CSP 与其取交集后仍会阻断动态样式 | Header 与 Meta 共享同一精确 runtime hash，并新增 route + runtime hash 自动化 | 已关闭 |
+| CR-020 | P1 | 公共顶栏登出 | 脏编辑状态直接调用标准登出会先注销，随后 beforeunload 若取消会停留在已注销页面 | 登出 POST 前复用 save-in-flight/dirty 门禁；取消不调用认证接口 | 已关闭 |
 
 ## 5. 编译与自动化结果
 
@@ -88,3 +90,4 @@ V2 冻结 worktree 146 条中 143 通过，3 条因缺少 `features.x_accounts` 
 - 2026-07-16：完成初版 P0/P1 审查并推动 service、scope、storage、CAS 与 aggregation 修复。
 - 2026-07-16：冻结 R1 独立复审确认无 P0 越权/Meta/V2 破坏；P1 product collation 和生产证据仍为门禁。
 - 2026-07-16：完成生产门禁和二次独立复审，无 P0/P1 阻塞；记录 CR-017/018 为正式 copy/live 前 P2 backlog。
+- 2026-07-16：公共壳修正独立复审发现并关闭 CR-019/020；最终 `git diff --check`、JS 语法、UI+route 41/41 通过，无新增 P0/P1。

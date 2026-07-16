@@ -25,6 +25,13 @@ ASSET_TYPES = {
     "app.js": "application/javascript; charset=utf-8",
 }
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+QUICK_NAV_STYLE_CSP_HASH = "sha256-hwxbDTADufampcgI9oc75ltbbfB38tCWOve6LIq/j68="
+UI_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; "
+    f"style-src 'self' '{QUICK_NAV_STYLE_CSP_HASH}'; "
+    "img-src 'self' data: https:; connect-src 'self'; object-src 'none'; "
+    "base-uri 'none'; frame-ancestors 'self'; form-action 'self'"
+)
 
 
 def get_service():
@@ -209,11 +216,7 @@ def _render_ui(handler: Any, method: str, segments: Tuple[str, ...]) -> None:
         html,
         "text/html; charset=utf-8",
         extra_headers={
-            "Content-Security-Policy": (
-                "default-src 'self'; script-src 'self'; style-src 'self'; "
-                "img-src 'self' data: https:; connect-src 'self'; object-src 'none'; "
-                "base-uri 'none'; frame-ancestors 'self'; form-action 'self'"
-            ),
+            "Content-Security-Policy": UI_CONTENT_SECURITY_POLICY,
             "Referrer-Policy": "same-origin",
         },
     )

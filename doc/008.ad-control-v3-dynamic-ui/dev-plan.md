@@ -169,3 +169,15 @@ git diff --check
 
 - 2026-07-16：完成 V3 本地实现、139/139 自动化和 1440/390 Playwright 视觉证据。
 - 2026-07-16：完成生产八表/15 产品迁移、精确 overlay、三层手动 observe、动态 UI/导航和 V2 回归；R1 到“手动 observe”结束。
+
+## 13. 公共壳规范修正计划（2026-07-16）
+
+1. 从 `79fce9e56ba70b13f09b574ba3fa20c88f522d0a` 创建独立 `codex/` worktree，不修改用户现有工作树。
+2. 两个动态模板删除自建 feature-nav/user card，改用公共 `QuickNav` 和 `UiTopbar`；保留 V3 动态业务资产及权限边界。
+3. 将 QuickNav 跳转接入既有未保存编辑门禁，并在调用标准登出前复用同一门禁。
+4. 以实际执行 `quick-nav.js` 的注入样式计算 SHA-256，同时写入 Meta CSP 与 HTTP Header CSP。
+5. 扩展 UI/route 自动化，执行完整 V3 回归和本地真实浏览器 1280 视口检查；控制台 error/warning 必须为 0。
+6. GitHub 精确提交后，在数据盘创建线上检查点，服务器 staging 重跑同一测试，再使用 exact-source overlay 原子发布。
+7. 生产真实登录验证规则页、日志页、公共导航活动态和 CSP；回归 V2 页面、runner/cron/hash，不触发任何 V3 Preview 或 Meta 写。
+
+回滚只恢复本次 V3 runtime 文件；共享 `quick-nav.js/ui-topbar.*` 和 navigation JSON 不在本次写入范围。若生产共享脚本 hash 与提交基线不一致，部署前停止，不更新 CSP 猜测值。

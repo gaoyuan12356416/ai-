@@ -135,6 +135,10 @@ class AdControlV3RouteTests(unittest.TestCase):
         self.assertEqual([], page.module_checks)
         self.assertEqual("no-store", page.response_headers["Cache-Control"])
         self.assertIn("text/html", page.response_headers["Content-Type"])
+        self.assertIn(
+            "'sha256-hwxbDTADufampcgI9oc75ltbbfB38tCWOve6LIq/j68='",
+            page.response_headers["Content-Security-Policy"],
+        )
         self.assertIn(b"ruleGroupsApp", page.wfile.getvalue())
 
         asset = self.dispatch("/api/ad-control/v3/assets/app.css")

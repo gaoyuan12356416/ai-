@@ -4,42 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'sha256-hwxbDTADufampcgI9oc75ltbbfB38tCWOve6LIq/j68='; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <title>执行日志 · 自动调控 V3</title>
+  <link rel="stylesheet" href="/ui-topbar.css">
   <link rel="stylesheet" href="/api/ad-control/v3/assets/app.css">
 </head>
 <body data-v3-page="execution-logs">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="自动调控导航">
-      <a class="brand" href="/" aria-label="返回 AI 自动后台首页">
-        <span class="brand-mark" aria-hidden="true">控</span>
-        <span><strong>自动调控</strong><small>新规则中心 · V3</small></span>
-      </a>
-      <nav class="feature-nav" aria-label="功能页面">
-        <a class="feature-nav-link" href="/api/ad-control/v3/ui/rule-groups">
-          <span class="nav-icon" aria-hidden="true">规</span><span><strong>规则组管理</strong><small>配置、保存与试算</small></span>
-        </a>
-        <a class="feature-nav-link is-active" href="/api/ad-control/v3/ui/execution-logs" aria-current="page">
-          <span class="nav-icon" aria-hidden="true">志</span><span><strong>执行日志</strong><small>结果、原因与审计</small></span>
-        </a>
-      </nav>
-      <div class="sidebar-foot">
-        <span class="channel-dot" aria-hidden="true"></span>
-        <div><strong>Facebook 已开放</strong><small>TikTok 已预留，暂不可用</small></div>
-      </div>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">剧</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div>
+      <nav id="quickNav" class="nav" aria-label="快捷导航"></nav>
     </aside>
 
     <main class="main" id="main-content" tabindex="-1">
-      <header class="page-header">
-        <div>
+      <header class="topbar page-header">
+        <div class="title">
           <p class="eyebrow">AUTOMATED CONTROL / V3</p>
-          <h1>执行日志</h1>
-          <p class="page-lead">从业务日到对象明细，查看每次试算、调度和执行的完整原因链。</p>
+          <h1 id="pageTitle">执行日志</h1>
+          <p class="page-lead" id="pageSubtitle">从业务日到对象明细，查看每次试算、调度和执行的完整原因链。</p>
         </div>
-        <div class="header-actions">
-          <div class="user-card" id="userCard" aria-label="当前用户"><span class="avatar" aria-hidden="true">—</span><span><strong>正在读取身份</strong><small>请稍候</small></span></div>
-          <a class="button button-quiet" href="/">返回后台</a>
+        <div class="top-actions" id="topActions">
+          <div class="user-card" id="userCard" aria-label="当前用户"><div class="user-avatar">—</div><div class="user-meta"><strong>正在读取身份</strong><span>请稍候</span></div></div>
+          <button class="button" id="refreshBtn" type="button">刷新</button>
+          <button class="button button-primary" id="authBtn" type="button">退出登录</button>
         </div>
       </header>
 
@@ -58,6 +46,8 @@
   <div id="toastRegion" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="dialogRoot"></div>
   <script id="adControlV3Bootstrap" type="application/json">__AD_CONTROL_V3_BOOTSTRAP__</script>
-  <script src="/api/ad-control/v3/assets/app.js" defer></script>
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js?v=20260707nav2"></script>
+  <script src="/api/ad-control/v3/assets/app.js"></script>
 </body>
 </html>

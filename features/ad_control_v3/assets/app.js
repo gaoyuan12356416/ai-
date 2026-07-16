@@ -20,6 +20,7 @@
   };
 
   const state = {
+    auth: null,
     meta: null,
     actor: null,
     list: { page: 1, pageSize: 20, total: 0, items: [], loading: false },
@@ -156,14 +157,92 @@
     return payload == null ? {} : payload;
   }
 
+  async function rootApi(path, options) {
+    const settings = Object.assign({ method: "GET" }, options || {});
+    const headers = new Headers(settings.headers || {});
+    if (settings.body != null && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const response = await fetch(path, {
+      method: settings.method,
+      headers,
+      body: settings.body,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    let payload = null;
+    try { payload = await response.json(); } catch (_error) { payload = null; }
+    if (!response.ok || (payload && payload.ok === false)) {
+      const error = new Error(text(payload && (payload.message || payload.error), `请求失败（${response.status}）`));
+      error.code = text(payload && payload.error, "request_failed");
+      error.details = payload && payload.details;
+      error.status = response.status;
+      throw error;
+    }
+    return payload == null ? {} : payload;
+  }
+
+  function requireSharedUi() {
+    if (!window.UiTopbar) throw new Error("公共顶吸脚本 /ui-topbar.js 未加载");
+    if (!window.QuickNav) throw new Error("公共快速导航脚本 /quick-nav.js 未加载");
+  }
+
+  function activeNavKey() {
+    return page === "execution-logs" ? "adControlV3Logs" : "adControlV3Rules";
+  }
+
+  function quickNavOptions(auth) {
+    return {
+      container: document.getElementById("quickNav"),
+      auth,
+      activeKey: activeNavKey(),
+      onNavigate: item => {
+        if (item && item.href) void requestGuardedNavigation(item.href);
+      },
+    };
+  }
+
+  function renderWarmQuickNav() {
+    const container = document.getElementById("quickNav");
+    if (!window.QuickNav || !container) return;
+    window.QuickNav.render(quickNavOptions(null)).catch(error => console.warn("预渲染快速导航失败", error));
+  }
+
+  async function loadSharedShell() {
+    requireSharedUi();
+    state.auth = await rootApi("/api/ui/topbar");
+    window.UiTopbar.render({
+      auth: state.auth,
+      userCard: document.getElementById("userCard"),
+      authButton: document.getElementById("authBtn"),
+      refreshButton: document.getElementById("refreshBtn"),
+      loginText: "登录",
+      logoutText: "退出登录",
+    });
+    await window.QuickNav.render(quickNavOptions(state.auth));
+    const authButton = document.getElementById("authBtn");
+    if (authButton && !authButton.dataset.v3AuthBound) {
+      authButton.dataset.v3AuthBound = "1";
+      authButton.addEventListener("click", async () => {
+        requireSharedUi();
+        if (!(await allowShellNavigation())) return;
+        return window.UiTopbar.handleAuthAction({
+          auth: state.auth || {},
+          api: rootApi,
+          afterLogout: () => window.location.assign("/"),
+        });
+      });
+    }
+  }
+
   async function init() {
     bindGlobalEvents();
     setPageStatus("loading", page === "execution-logs" ? "正在加载执行日志" : "正在加载规则能力", "正在读取权限、产品和筛选字段。", "");
     try {
+      requireSharedUi();
+      renderWarmQuickNav();
+      await loadSharedShell();
       const payload = await api("/meta");
       state.meta = normalizeMeta(payload);
       state.actor = state.meta.actor;
-      renderUser();
       if (page === "rule-groups") {
         const root = document.getElementById("ruleGroupsApp");
         if (root) root.hidden = false;
@@ -251,16 +330,6 @@
         enableUnavailableReason: text(permissions.enable_unavailable_reason || runner.unavailable_reason, "计划调度器尚未发布"),
       },
     };
-  }
-
-  function renderUser() {
-    const card = document.getElementById("userCard");
-    if (!card || !state.actor) return;
-    const actor = state.actor;
-    const avatar = actor.avatar
-      ? `<img src="${h(actor.avatar)}" alt="" loading="lazy" decoding="async">`
-      : h((actor.name || "用").slice(0, 1));
-    card.innerHTML = `<span class="avatar" aria-hidden="true">${avatar}</span><span><strong>${h(actor.name)}</strong><small>${h(actor.isAdmin ? "管理员 · 可代选优化师" : "优化师 · 仅本人范围")}</small></span>`;
   }
 
   function errorMessage(error) {
@@ -1438,13 +1507,18 @@
     if (action === "dialog-confirm") { closeDialog(true); }
   }
 
-  async function requestGuardedNavigation(url) {
+  async function allowShellNavigation() {
     if (isInFlight("editor-save")) { toast("规则正在保存或试算，请等待完成后再离开。", "error"); return; }
     if (state.editorDirty) {
       const confirmed = await confirmDialog({ title: "离开并放弃未保存的更改？", message: "当前规则配置尚未保存。离开本页后，本次更改不会保留。", confirmLabel: "放弃更改并离开", danger: true });
-      if (!confirmed) return;
+      if (!confirmed) return false;
     }
     state.editorDirty = false;
+    return true;
+  }
+
+  async function requestGuardedNavigation(url) {
+    if (!(await allowShellNavigation())) return;
     window.location.assign(url);
   }
 
