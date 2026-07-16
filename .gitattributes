@@ -1,0 +1,8 @@
+/.gitattributes text eol=lf
+doc/deployment/playable-preview-api.md text eol=lf
+doc/deployment/playable-preview-api.html text eol=lf
+doc/deployment/fb-playable-preview.md text eol=lf
+scripts/render_playable_preview_docs.py text eol=lf
+scripts/test_playable_preview_docs.py text eol=lf
+scripts/publish_playable_preview_docs.py text eol=lf
+requirements-playable-docs.txt text eol=lf

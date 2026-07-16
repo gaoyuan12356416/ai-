@@ -1,12 +1,12 @@
 # Meta/Facebook 试玩广告生成接口
 
-更新时间：2026-07-15
+更新时间：2026-07-16
 
-当前产物格式：Meta 单文件试玩广告（`index.html`）
+当前产物格式：普通浏览器试玩页（`preview.html`）+ Meta 单文件试玩广告（`index.html`）
 
 ## 1. 接口说明
 
-该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。
+该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成可直接测试商店跳转的浏览器试玩页，以及符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。
 
 新版生成逻辑会：
 
@@ -18,6 +18,7 @@
 - 将 `setTimeout` / `setInterval` 锁定为只接受函数回调的安全包装，拒绝 `eval`、`Function` 及其常见别名/构造器绕过；
 - 使用不含 `allow-same-origin` 的 iframe 沙箱，并在外层与游戏内层同时嵌入禁止网络、Worker、Object 和表单提交的 CSP；
 - 拦截 Defold `_dmSysOpenURL`、包装层安装按钮等安装动作，并只调用 `FbPlayableAd.onCTAClick()`；
+- 额外生成 `preview.html`，在普通浏览器中模拟 Meta CTA 宿主并把安装点击跳转到 `store_url`；
 - 拒绝残留的外部资源、外网能力、路径穿越和直接页面跳转；
 - 同时校验最终 HTML 与 ZIP 的实际字节数。
 
@@ -72,7 +73,7 @@ X-API-Token: <token>
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `store_url` | string | 是 | `http://` 或 `https://` 商店链接；仅保留给后续投放配置，不会写成 HTML 跳转 |
+| `store_url` | string | 是 | `http://` 或 `https://` 商店链接；只写入普通浏览器 `preview.html`，不会写入 Meta `index.html` |
 | `play_count` | int | 否 | 最大试玩次数，默认及有效最小值为 `1` |
 | `title` | string | 否 | 生成 HTML 的标题 |
 | `trial_seconds` | int | 否 | 每次试玩时长，默认 `20` 秒，限制为 `1..120` |
@@ -133,7 +134,8 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
 ```json
 {
   "preview_id": "<preview_id>",
-  "preview_html_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/<preview_id>/index.html",
+  "preview_html_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/<preview_id>/preview.html",
+  "meta_html_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/<preview_id>/index.html",
   "zip_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/<preview_id>/playable-preview.zip",
   "manifest_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/playable-preview/<preview_id>/manifest.json",
   "documentation_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md",
@@ -141,8 +143,10 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
   "play_count": 1,
   "store_url": "https://play.google.com/store/apps/details?id=ai.fream.dramawave",
   "entry": "index.html",
+  "preview_entry": "preview.html",
   "source_entry": "game/index.html",
   "html_size": 4782233,
+  "preview_html_size": 1437,
   "zip_size": 3928739,
   "meta_size_limit_bytes": 4800000,
   "size_headroom_bytes": 17767,
@@ -174,20 +178,23 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
 
 | 字段 | 说明 |
 | --- | --- |
-| `preview_html_url` | 公网 HTML 预览地址 |
+| `preview_html_url` | 普通浏览器试玩地址；CTA 会跳转 `store_url` |
+| `meta_html_url` | 严格遵循 Meta CTA Hook 规则的单文件 HTML 地址 |
 | `zip_url` | 可上传 Meta Ads Manager 的 ZIP 地址 |
 | `manifest_url` | 本次生成的审计与兼容信息 |
 | `documentation_url` | 当前接口文档地址 |
 | `entry` | 最终产物入口，固定为 `index.html` |
+| `preview_entry` | 普通浏览器试玩入口，固定为 `preview.html` |
 | `source_entry` | 上传包中识别到的原始入口 |
-| `html_size` | 最终 UTF-8 HTML 的实际字节数 |
+| `html_size` | Meta 单文件 `index.html` 的实际 UTF-8 字节数 |
+| `preview_html_size` | 普通浏览器试玩页 `preview.html` 的实际 UTF-8 字节数 |
 | `zip_size` | 最终 ZIP 的实际字节数 |
 | `meta_size_limit_bytes` | 当前服务采用的安全上限 |
 | `size_headroom_bytes` | HTML 与 ZIP 两项中较小的剩余空间 |
 | `meta_compatible` | 只有最终 HTML 与 ZIP 均通过校验时才为 `true` |
 | `compatibility` | 单文件、网络请求、跳转、CSP 安全启动、CTA 和资源压缩等校验结果 |
 
-`manifest_url` 对应的 JSON 与接口成功返回使用同一套审计口径。manifest 顶层固定包含：`preview_id`、`title`、`trial_seconds`、`play_count`、`store_url`、`documentation_url`、`source_entry`、`entry`、`html_size`、`zip_size`、`meta_size_limit_bytes`、`size_headroom_bytes`、`meta_compatible`、`compatibility` 和 `languages`。
+`manifest_url` 对应的 JSON 与接口成功返回使用同一套审计口径。manifest 顶层固定包含：`preview_id`、`title`、`trial_seconds`、`play_count`、`store_url`、`documentation_url`、`source_entry`、`entry`、`preview_entry`、`html_size`、`preview_html_size`、`zip_size`、`meta_size_limit_bytes`、`size_headroom_bytes`、`meta_compatible`、`compatibility` 和 `languages`。
 
 ## 6. 产物结构
 
@@ -195,6 +202,13 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
 
 ```text
 index.html
+```
+
+公网目录同时发布两个 HTML：
+
+```text
+preview.html  # 普通浏览器试玩和商店跳转
+index.html    # 严格 Meta 单文件，不直接跳商店
 ```
 
 以下旧版结构已经废弃，不会再生成：
@@ -230,7 +244,7 @@ Meta 上传页面提示的“最大 5 MB”不能按 `5 MiB` 或只检查压缩 
 
 ## 8. CTA 与商店链接
 
-`store_url` 是必填业务字段，会返回给下游投放流程并写入 manifest，但不会成为最终 HTML 的 `href`、`window.open` 或 location 跳转。
+`store_url` 是必填业务字段，会返回给下游投放流程并写入 manifest。它只写入普通浏览器试玩页 `preview.html`，不会写入 Meta 产物 `index.html` 或 ZIP 中的 `index.html`。
 
 试玩内所有安装动作都统一调用：
 
@@ -238,7 +252,7 @@ Meta 上传页面提示的“最大 5 MB”不能按 `5 MiB` 或只检查压缩 
 FbPlayableAd.onCTAClick()
 ```
 
-Meta Ads Manager 会结合广告层配置处理实际安装跳转。在普通浏览器中单独打开预览页时，如果没有注入 `FbPlayableAd`，点击 CTA 不会直接打开商店，这是预期行为。
+Meta Ads Manager 会结合广告层配置处理 `index.html` 的实际安装跳转。`preview_html_url` 指向的 `preview.html` 会在同源 iframe 中加载该 Meta 文件、注入仅供网页预览的 `FbPlayableAd.onCTAClick` 测试桥，并在点击后跳转 `store_url`。上传 Meta 时仍应使用 `zip_url`，不要上传 `preview.html`。
 
 ## 9. 多语言文案
 
@@ -335,8 +349,9 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 
 生成成功后，调用方仍应在上传 Meta 前完成以下检查：
 
-1. 下载 `preview_html_url` 和 `zip_url`，按实际下载字节重新测量体积；
-2. 解压 ZIP，确认文件列表严格为 `index.html`；
-3. 扫描 HTML，确认没有直接商店跳转和外部资源；
-4. 在禁止 `unsafe-eval` 的 CSP 浏览器沙箱中注入 `FbPlayableAd.onCTAClick` 测试桩，确认无 CSP 报错且游戏进入可交互场景；
-5. 最后在 Meta Ads Manager 预览环境中完成平台侧验证。
+1. 打开 `preview_html_url`，试玩结束后点击 CTA，确认浏览器跳转到返回的 `store_url`；
+2. 下载 `meta_html_url` 和 `zip_url`，按实际下载字节重新测量体积；
+3. 解压 ZIP，确认文件列表严格为 `index.html`；
+4. 扫描 Meta HTML，确认没有直接商店跳转和外部资源；
+5. 在禁止 `unsafe-eval` 的 CSP 浏览器沙箱中注入 `FbPlayableAd.onCTAClick` 测试桩，确认无 CSP 报错且游戏进入可交互场景；
+6. 最后在 Meta Ads Manager 预览环境中完成平台侧验证。
