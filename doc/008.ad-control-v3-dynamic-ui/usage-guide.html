@@ -1,0 +1,1759 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="AI 自动规则调控 V3 Facebook 规则组管理详细使用手册，基于 2026-07-16 生产环境安全演示。">
+  <title>AI 自动规则调控 V3｜详细使用手册</title>
+  <style>
+    :root {
+      --ink: #10233f;
+      --ink-soft: #304765;
+      --muted: #687a93;
+      --line: #dbe5f1;
+      --line-strong: #c4d2e3;
+      --paper: #ffffff;
+      --canvas: #f3f7fc;
+      --brand: #2563eb;
+      --brand-deep: #143e7d;
+      --brand-soft: #eaf2ff;
+      --safe: #087f5b;
+      --safe-soft: #eaf8f2;
+      --warn: #9a5b05;
+      --warn-soft: #fff6df;
+      --danger: #b42318;
+      --danger-soft: #fff0ee;
+      --planned: #667085;
+      --planned-soft: #f2f4f7;
+      --shadow: 0 18px 48px rgba(18, 49, 91, .10);
+      --radius: 16px;
+      --sidebar: 286px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 22px; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 92% 4%, rgba(75, 139, 244, .12), transparent 24rem),
+        var(--canvas);
+      font: 15px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      text-rendering: optimizeLegibility;
+    }
+    a { color: var(--brand); text-underline-offset: 3px; }
+    img { display: block; max-width: 100%; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    code {
+      padding: .12em .38em;
+      border: 1px solid #d6e1ef;
+      border-radius: 6px;
+      color: #174c91;
+      background: #f4f8fd;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: .91em;
+      overflow-wrap: anywhere;
+    }
+    kbd {
+      padding: 2px 7px;
+      border: 1px solid #cbd5e1;
+      border-bottom-width: 2px;
+      border-radius: 6px;
+      color: #344054;
+      background: #fff;
+      font: 12px/1.4 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .progress {
+      position: fixed;
+      z-index: 100;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #31a6f5, #2563eb, #6d5dfc);
+      box-shadow: 0 0 12px rgba(37, 99, 235, .5);
+    }
+    .doc-shell {
+      display: grid;
+      grid-template-columns: var(--sidebar) minmax(0, 980px);
+      gap: 34px;
+      width: min(100%, 1360px);
+      margin: 0 auto;
+      padding: 28px 24px 84px;
+    }
+    .toc {
+      position: sticky;
+      top: 20px;
+      align-self: start;
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      overscroll-behavior: contain;
+      padding: 18px 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, .94);
+      box-shadow: 0 12px 32px rgba(18, 49, 91, .08);
+      backdrop-filter: blur(12px);
+    }
+    .toc-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 2px 8px 13px;
+      border-bottom: 1px solid var(--line);
+    }
+    .toc-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      color: #fff;
+      border-radius: 10px;
+      background: linear-gradient(145deg, #3baef8, #2563eb);
+      box-shadow: 0 6px 15px rgba(37, 99, 235, .22);
+      font-size: 14px;
+      font-weight: 800;
+    }
+    .toc-title { font-weight: 800; line-height: 1.3; }
+    .toc-version { color: var(--muted); font-size: 11px; }
+    .toc-links { padding: 10px 0 6px; }
+    .toc a {
+      display: block;
+      margin: 2px 0;
+      padding: 7px 10px;
+      color: var(--muted);
+      border-radius: 9px;
+      text-decoration: none;
+      font-size: 13px;
+      line-height: 1.38;
+      transition: color .18s ease, background .18s ease, transform .18s ease;
+    }
+    .toc a:hover {
+      color: var(--brand);
+      background: #f2f6ff;
+      transform: translateX(2px);
+    }
+    .toc a.is-active {
+      color: #174fa5;
+      background: var(--brand-soft);
+      font-weight: 700;
+    }
+    .toc-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 12px 8px 0;
+      border-top: 1px solid var(--line);
+    }
+    .quiet-button,
+    .back-top {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 7px 10px;
+      border: 1px solid #cbd8e8;
+      border-radius: 9px;
+      color: #234568;
+      background: #fff;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .quiet-button:hover,
+    .back-top:hover { border-color: #91b7ea; background: #f5f9ff; }
+
+    .document {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+    .cover {
+      min-height: 650px;
+      padding: 76px 68px 58px;
+      color: #fff;
+      background:
+        radial-gradient(circle at 86% 13%, rgba(89, 199, 255, .46), transparent 30%),
+        radial-gradient(circle at 70% 82%, rgba(93, 91, 246, .34), transparent 35%),
+        linear-gradient(145deg, #0b2346, #174a91 58%, #1768c9);
+    }
+    .cover-kicker {
+      margin: 0 0 16px;
+      color: #9ed0ff;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .17em;
+      text-transform: uppercase;
+    }
+    .cover h1 {
+      max-width: 740px;
+      margin: 0 0 22px;
+      font-size: clamp(40px, 5vw, 58px);
+      line-height: 1.13;
+      letter-spacing: -.035em;
+    }
+    .cover-lead {
+      max-width: 740px;
+      margin: 0;
+      color: #d7e8ff;
+      font-size: 18px;
+      line-height: 1.75;
+    }
+    .cover-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      margin: 28px 0 42px;
+    }
+    .cover-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 12px;
+      border: 1px solid rgba(255,255,255,.21);
+      border-radius: 999px;
+      color: #ecf5ff;
+      background: rgba(255,255,255,.09);
+      font-size: 12px;
+      font-weight: 700;
+      backdrop-filter: blur(9px);
+    }
+    .cover-alert {
+      max-width: 760px;
+      padding: 18px 20px;
+      border: 1px solid rgba(159, 211, 255, .35);
+      border-radius: 14px;
+      color: #e9f5ff;
+      background: rgba(4, 28, 60, .38);
+    }
+    .cover-alert strong { display: block; margin-bottom: 4px; color: #fff; }
+    .cover-meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 38px;
+    }
+    .cover-meta div {
+      padding: 15px 16px;
+      border: 1px solid rgba(255,255,255,.15);
+      border-radius: 12px;
+      background: rgba(255,255,255,.07);
+    }
+    .cover-meta span { display: block; color: #a9c9ec; font-size: 11px; }
+    .cover-meta strong { display: block; margin-top: 3px; font-size: 14px; }
+
+    .doc-section {
+      padding: 52px 62px;
+      border-bottom: 1px solid var(--line);
+      scroll-margin-top: 18px;
+    }
+    .doc-section:last-child { border-bottom: 0; }
+    .section-label {
+      margin: 0 0 4px;
+      color: var(--brand);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .doc-section h2 {
+      margin: 0 0 12px;
+      color: #102846;
+      font-size: 31px;
+      line-height: 1.25;
+      letter-spacing: -.02em;
+    }
+    .doc-section h3 {
+      margin: 34px 0 12px;
+      color: #173452;
+      font-size: 21px;
+      line-height: 1.35;
+    }
+    .doc-section h4 {
+      margin: 24px 0 9px;
+      color: #244361;
+      font-size: 16px;
+    }
+    .section-intro {
+      max-width: 760px;
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+    p { margin: 9px 0 15px; }
+    ul, ol { margin: 10px 0 18px; padding-left: 1.35rem; }
+    li + li { margin-top: 7px; }
+    strong { color: #153858; }
+    .cover strong, .status-card strong, .flow-step strong { color: inherit; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      white-space: nowrap;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .badge.available { color: var(--safe); background: var(--safe-soft); }
+    .badge.observe { color: var(--warn); background: var(--warn-soft); }
+    .badge.planned { color: var(--planned); background: var(--planned-soft); }
+    .badge.danger { color: var(--danger); background: var(--danger-soft); }
+
+    .notice {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 12px;
+      margin: 22px 0;
+      padding: 17px 18px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+    }
+    .notice-icon {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 900;
+    }
+    .notice p { margin: 3px 0; }
+    .notice.info { border-color: #bfd3ff; background: var(--brand-soft); }
+    .notice.info .notice-icon { color: #fff; background: var(--brand); }
+    .notice.safe { border-color: #bde7d5; background: var(--safe-soft); }
+    .notice.safe .notice-icon { color: #fff; background: var(--safe); }
+    .notice.warn { border-color: #efd390; background: var(--warn-soft); }
+    .notice.warn .notice-icon { color: #fff; background: #c57a0b; }
+    .notice.danger { border-color: #f1bcb7; background: var(--danger-soft); }
+    .notice.danger .notice-icon { color: #fff; background: var(--danger); }
+
+    .status-grid,
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 22px 0;
+    }
+    .status-card,
+    .info-card {
+      min-width: 0;
+      padding: 19px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+    .status-card h3,
+    .info-card h3 { margin: 10px 0 8px; font-size: 17px; }
+    .status-card p,
+    .info-card p { margin: 0; color: var(--muted); font-size: 13px; }
+    .status-card.available { border-color: #bde7d5; background: #f8fefb; }
+    .status-card.observe { border-color: #efd390; background: #fffcf3; }
+    .status-card.planned { border-color: #d9dee7; background: #fbfcfd; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin: 26px 0;
+    }
+    .flow-step {
+      position: relative;
+      min-height: 126px;
+      padding: 15px 14px;
+      border: 1px solid #cddaf0;
+      border-radius: 13px;
+      background: linear-gradient(180deg, #f8fbff, #f1f6ff);
+    }
+    .flow-step:not(:last-child)::after {
+      content: "›";
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -9px;
+      width: 18px;
+      color: #6f91bf;
+      transform: translateY(-50%);
+      background: var(--paper);
+      text-align: center;
+      font-size: 26px;
+      font-weight: 300;
+    }
+    .flow-number {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      margin-bottom: 9px;
+      color: #fff;
+      border-radius: 50%;
+      background: var(--brand);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .flow-step strong { display: block; color: #163f74; font-size: 14px; }
+    .flow-step span { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+    .step {
+      margin: 24px 0;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      break-inside: avoid;
+    }
+    .step-head {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 15px;
+    }
+    .step-number {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      flex: 0 0 auto;
+      color: white;
+      border-radius: 50%;
+      background: linear-gradient(145deg, #3da8f7, #2563eb);
+      box-shadow: 0 7px 16px rgba(37, 99, 235, .2);
+      font-weight: 800;
+    }
+    .step-head h3 { margin: 0; }
+    .step-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+    .shot {
+      margin: 27px 0 38px;
+      break-inside: avoid;
+    }
+    .shot-frame {
+      overflow: hidden;
+      border: 1px solid #b9c9dc;
+      border-radius: 13px;
+      background: #edf3fa;
+      box-shadow: 0 15px 35px rgba(20, 53, 92, .12);
+    }
+    .shot-frame a {
+      display: block;
+      cursor: zoom-in;
+    }
+    .shot-frame img {
+      width: 100%;
+      height: auto;
+      transition: transform .2s ease;
+    }
+    .shot-frame a:hover img { transform: scale(1.006); }
+    figcaption {
+      padding: 13px 4px 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    figcaption strong { display: block; margin-bottom: 4px; color: #294762; font-size: 14px; }
+    .shot-tip {
+      display: inline-block;
+      margin-top: 7px;
+      color: #3f5f7c;
+      font-size: 12px;
+    }
+
+    .table-wrap {
+      width: 100%;
+      margin: 18px 0 26px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 11px 12px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
+    th {
+      color: #2c4967;
+      background: #f5f8fc;
+      font-weight: 760;
+    }
+    tbody tr:nth-child(even) { background: #fbfdff; }
+    tbody tr:hover { background: #f4f8fe; }
+    .nowrap { white-space: nowrap; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .value {
+      color: #174e90;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: .92em;
+      overflow-wrap: anywhere;
+    }
+
+    .definition-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 18px 0;
+    }
+    .definition {
+      padding: 16px 17px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fbfdff;
+    }
+    .definition dt { color: #173d68; font-weight: 780; }
+    .definition dd { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+
+    .scenario {
+      margin: 23px 0;
+      padding: 23px;
+      border: 1px solid #cbdaf0;
+      border-left: 5px solid var(--brand);
+      border-radius: 13px;
+      background: linear-gradient(105deg, #f6f9ff, #fff);
+    }
+    .scenario h3 { margin: 0 0 7px; }
+    .scenario p { color: var(--muted); }
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 0;
+      margin-top: 15px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      font-size: 13px;
+    }
+    .scenario-grid div { padding: 9px 11px; border-bottom: 1px solid var(--line); }
+    .scenario-grid div:nth-last-child(-n+2) { border-bottom: 0; }
+    .scenario-grid .key { color: #385570; background: #f3f7fc; font-weight: 700; }
+
+    .checklist {
+      display: grid;
+      gap: 10px;
+      padding: 0;
+      list-style: none;
+    }
+    .checklist li {
+      position: relative;
+      margin: 0;
+      padding: 12px 14px 12px 48px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fbfdff;
+    }
+    .checklist li::before {
+      content: "□";
+      position: absolute;
+      top: 8px;
+      left: 15px;
+      color: var(--brand);
+      font-size: 23px;
+      line-height: 1;
+    }
+
+    details {
+      margin: 11px 0;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+    }
+    summary {
+      padding: 14px 16px;
+      color: #1c4168;
+      cursor: pointer;
+      font-weight: 750;
+    }
+    details > div { padding: 0 16px 16px; color: var(--muted); }
+
+    .evidence {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 19px 0;
+    }
+    .evidence div {
+      padding: 15px 13px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #f8fbff;
+      text-align: center;
+    }
+    .evidence strong {
+      display: block;
+      color: #154e94;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+    .evidence span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+
+    .footer {
+      padding: 32px 62px 40px;
+      color: var(--muted);
+      background: #f6f9fd;
+      font-size: 12px;
+    }
+    .footer strong { color: #35506c; }
+    .mobile-toc { display: none; }
+
+    @media (max-width: 1100px) {
+      .doc-shell { grid-template-columns: 250px minmax(0, 1fr); gap: 20px; padding-inline: 16px; }
+      .doc-section { padding-inline: 44px; }
+      .cover { padding-inline: 50px; }
+      .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .flow-step:not(:last-child)::after { display: none; }
+    }
+    @media (max-width: 820px) {
+      .doc-shell { display: block; padding: 0; }
+      .toc { display: none; }
+      .document { border: 0; border-radius: 0; }
+      .mobile-toc {
+        display: block;
+        position: sticky;
+        z-index: 40;
+        top: 0;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255,255,255,.96);
+        backdrop-filter: blur(12px);
+      }
+      .mobile-toc summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 13px 18px;
+        list-style: none;
+      }
+      .mobile-toc summary::-webkit-details-marker { display: none; }
+      .mobile-toc nav {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        max-height: 60vh;
+        overflow: auto;
+        padding: 0 14px 14px;
+      }
+      .mobile-toc a {
+        padding: 8px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 12px;
+      }
+      .cover { min-height: auto; padding: 54px 24px 42px; }
+      .cover-meta { grid-template-columns: 1fr; }
+      .doc-section { padding: 38px 22px; }
+      .doc-section h2 { font-size: 27px; }
+      .status-grid, .card-grid { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-step { min-height: 0; }
+      .definition-grid { grid-template-columns: 1fr; }
+      .evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .scenario-grid { grid-template-columns: 108px minmax(0, 1fr); }
+      .footer { padding-inline: 22px; }
+    }
+    @media (max-width: 480px) {
+      body { font-size: 14px; }
+      .cover h1 { font-size: 35px; }
+      .cover-lead { font-size: 16px; }
+      .mobile-toc nav { grid-template-columns: 1fr; }
+      .step { padding: 18px; }
+      .evidence { grid-template-columns: 1fr 1fr; }
+      th, td { min-width: 118px; }
+    }
+
+    @page { size: A4; margin: 13mm; }
+    @media print {
+      body { background: #fff; font-size: 10pt; }
+      .progress, .toc, .mobile-toc, .screen-only { display: none !important; }
+      .doc-shell { display: block; width: auto; max-width: none; padding: 0; }
+      .document { border: 0; border-radius: 0; box-shadow: none; }
+      .cover {
+        min-height: 255mm;
+        padding: 28mm 18mm;
+        break-after: page;
+        print-color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+      }
+      .cover h1 { font-size: 34pt; }
+      .doc-section { padding: 9mm 0; }
+      .doc-section h2, .doc-section h3 { break-after: avoid; }
+      .shot, .step, .notice, .scenario, .table-wrap, details { break-inside: avoid; }
+      .shot-frame { box-shadow: none; }
+      .table-wrap { overflow: visible; }
+      table { font-size: 8.6pt; }
+      a { color: inherit; text-decoration: none; }
+      details > div,
+      details:not([open]) > div { display: block !important; }
+      .footer { padding-inline: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="progress" id="reading-progress" aria-hidden="true"></div>
+
+  <details class="mobile-toc screen-only">
+    <summary><strong>目录与快捷导航</strong><span>展开 ▾</span></summary>
+    <nav aria-label="移动端目录">
+      <a href="#boundary">当前能力边界</a>
+      <a href="#quick-start">快速上手</a>
+      <a href="#permissions">权限与范围</a>
+      <a href="#step-1">① 范围与归属</a>
+      <a href="#step-2">② 对象与模式</a>
+      <a href="#step-3">③ 筛选与动作</a>
+      <a href="#copy-settings">复制参数</a>
+      <a href="#step-4">④ 计划与额度</a>
+      <a href="#step-5">⑤ 检查与试算</a>
+      <a href="#logs">执行日志</a>
+      <a href="#fields">筛选字段字典</a>
+      <a href="#operators">运算符与校验</a>
+      <a href="#scenarios">典型场景</a>
+      <a href="#troubleshooting">错误排查</a>
+      <a href="#faq">常见问题</a>
+      <a href="#checklist">安全清单</a>
+    </nav>
+  </details>
+
+  <div class="doc-shell">
+    <aside class="toc screen-only" aria-label="文档目录">
+      <div class="toc-head">
+        <span class="toc-mark">控</span>
+        <div>
+          <div class="toc-title">V3 使用手册</div>
+          <div class="toc-version">Facebook · 生产实测版</div>
+        </div>
+      </div>
+      <nav class="toc-links">
+        <a href="#boundary">01 当前能力边界</a>
+        <a href="#quick-start">02 五分钟快速上手</a>
+        <a href="#permissions">03 权限、产品与范围</a>
+        <a href="#entry">04 页面入口与列表</a>
+        <a href="#step-1">05 第一步：范围与归属</a>
+        <a href="#step-2">06 第二步：对象与模式</a>
+        <a href="#step-3">07 第三步：筛选与动作</a>
+        <a href="#copy-settings">08 复制参数详解</a>
+        <a href="#step-4">09 第四步：计划与额度</a>
+        <a href="#step-5">10 第五步：检查与试算</a>
+        <a href="#logs">11 执行日志怎么看</a>
+        <a href="#fields">12 筛选字段字典</a>
+        <a href="#operators">13 运算符与校验</a>
+        <a href="#levels">14 层级与承载策略</a>
+        <a href="#scenarios">15 三个典型场景</a>
+        <a href="#troubleshooting">16 常见错误与处理</a>
+        <a href="#faq">17 FAQ</a>
+        <a href="#checklist">18 上线前安全清单</a>
+        <a href="#appendix">19 演示配置与术语</a>
+      </nav>
+      <div class="toc-actions">
+        <button class="quiet-button" id="print-guide" type="button">打印 / PDF</button>
+        <a class="back-top" href="#top">回到顶部</a>
+      </div>
+    </aside>
+
+    <main class="document" id="top">
+      <header class="cover">
+        <p class="cover-kicker">Automated Control / V3 / Facebook</p>
+        <h1>AI 自动规则调控 V3<br>详细使用手册</h1>
+        <p class="cover-lead">从选择产品和优化师、设置 Campaign / Ad Set / Ad 筛选条件，到安全试算与执行日志核对，一步一步完成一条可审计的调控规则。</p>
+        <div class="cover-badges">
+          <span class="cover-badge">✓ 真实生产页面走查</span>
+          <span class="cover-badge">✓ 9 张操作截图</span>
+          <span class="cover-badge">✓ 演示全程只观察</span>
+          <span class="cover-badge">✓ Meta 写入 0 次</span>
+          <span class="cover-badge">内部使用</span>
+        </div>
+        <div class="cover-alert">
+          <strong>先记住一句话</strong>
+          当前 R1 版本用于“保存草稿 + 手动试算 + 查看日志”。页面可以配置关闭、复制、计划和额度，但自动调度与真实 Meta 写操作尚未开放。
+        </div>
+        <div class="cover-meta">
+          <div><span>适用版本</span><strong>V3 R1 · Facebook</strong></div>
+          <div><span>生产走查日期</span><strong>2026-07-16</strong></div>
+          <div><span>适用角色</span><strong>优化师 / 管理员</strong></div>
+        </div>
+      </header>
+
+      <section class="doc-section" id="boundary">
+        <p class="section-label">Read this first</p>
+        <h2>当前能力边界：哪些已经能用，哪些还不会执行</h2>
+        <p class="section-intro">这是使用这套页面最重要的一节。界面里能选到“复制”和“正式执行”，不等于当前已经会创建或修改 Meta 对象。</p>
+
+        <div class="status-grid">
+          <article class="status-card available">
+            <span class="badge available">现在可用</span>
+            <h3>配置、保存、试算、审计</h3>
+            <p>新建/编辑规则组、选择对象层级、产品与优化师、筛选条件、复制参数、计划与额度、范围估算、手动试算、执行日志。</p>
+          </article>
+          <article class="status-card observe">
+            <span class="badge observe">可配置但不执行</span>
+            <h3>关闭、复制、计划调度</h3>
+            <p>参数会保存进规则草稿，也会在试算日志中显示“本来会关闭/复制什么”，但不会调用 Meta 写接口。</p>
+          </article>
+          <article class="status-card planned">
+            <span class="badge planned">后续开放</span>
+            <h3>自动扫描与真实写入</h3>
+            <p>定时/间隔 Runner、真实暂停、真实复制 Campaign / Ad Set / Ad、复制结果数据落表，以及 TikTok 调控。</p>
+          </article>
+        </div>
+
+        <div class="notice danger">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>当前版本的安全锁</strong>
+            <p>新规则组保存后固定为<strong>停用 + 只观察</strong>；“启用”和正式写入链路处于关闭状态。手动试算会新增一条 V3 执行日志，但不应产生任何 Meta 写操作。</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>你做的操作</th><th>系统实际做什么</th><th>会不会改 Meta</th><th>会不会自动运行</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>估算当前范围</td><td>按 insight 日期窗口、优化师、产品、时区和对象层级统计去重候选</td><td><span class="badge available">不会</span></td><td>不会</td></tr>
+              <tr><td>保存草稿</td><td>保存配置，规则组保持停用与只观察</td><td><span class="badge available">不会</span></td><td>不会</td></tr>
+              <tr><td>保存并立即试算</td><td>读取指标、判断规则、记录 would_pause / would_copy 等结果</td><td><span class="badge available">不会</span></td><td>只运行这一次</td></tr>
+              <tr><td>填写每天固定时间/间隔</td><td>保存计划配置，为后续 Runner 准备</td><td><span class="badge available">不会</span></td><td><span class="badge planned">当前不会</span></td></tr>
+              <tr><td>选择正式执行</td><td>配置会被安全策略收敛，不能绕过总开关</td><td><span class="badge available">不会</span></td><td>不会</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>旧版规则不受影响</strong>
+            <p>V3 是单独搭建的动态页面与数据模型。本手册只讲 V3 的“规则组管理”和“执行日志”，不改变旧版规则当前的运行方式。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="quick-start">
+        <p class="section-label">Quick start</p>
+        <h2>五分钟快速上手</h2>
+        <p class="section-intro">第一次使用建议完全照着下面的顺序走：先缩小范围，再配置对象与条件，最后只做手动试算。</p>
+
+        <div class="flow" aria-label="五步设置流程">
+          <div class="flow-step"><span class="flow-number">1</span><strong>范围与归属</strong><span>选择优化师、产品、可选时区和指标窗口。</span></div>
+          <div class="flow-step"><span class="flow-number">2</span><strong>对象与模式</strong><span>选择 Campaign / Ad Set / Ad；保持只观察。</span></div>
+          <div class="flow-step"><span class="flow-number">3</span><strong>筛选与动作</strong><span>设置指标条件，选择关闭或复制。</span></div>
+          <div class="flow-step"><span class="flow-number">4</span><strong>计划与额度</strong><span>设置时间、Top N、每日上限与冷却。</span></div>
+          <div class="flow-step"><span class="flow-number">5</span><strong>检查与试算</strong><span>保存并立即试算，到日志确认 Meta 写入为 0。</span></div>
+        </div>
+
+        <h3>本手册已经替你跑过一次真实生产演示</h3>
+        <p>为了让截图、配置和日志前后一致，本次在生产环境创建了一条安全演示规则，始终保持停用和只观察：</p>
+        <div class="evidence">
+          <div><strong>52</strong><span>3 天窗口内出现的候选账户</span></div>
+          <div><strong>6,569</strong><span>3 天窗口内去重 Campaign 候选</span></div>
+          <div><strong>15</strong><span>日志目标记录（含 Top N 延后）</span></div>
+          <div><strong>0</strong><span>Meta 写入次数</span></div>
+        </div>
+        <div class="notice safe">
+          <span class="notice-icon">✓</span>
+          <div>
+            <strong>生产实测结论</strong>
+            <p>试算执行 ID 为 <code>34d829306a47473e8b4489da8afe706c</code>。日志列表显示目标记录 15 个（界面列名为“命中”，口径包含最终计划、Top N 延后和阻断记录，并非 15 次最终复制），状态“已观察”，快照完整性通过，外部写约束为“观察模式 Meta 写入 0 次”。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="permissions">
+        <p class="section-label">Before configuration</p>
+        <h2>权限、产品与筛选范围</h2>
+        <p class="section-intro">V3 不再要求先选广告账户或账户池。候选广告由“优化师 + 产品”共同圈定，账户只作为最终结构归属存在。</p>
+
+        <div class="definition-grid">
+          <dl class="definition"><dt>普通优化师</dt><dd>创建规则时优化师固定为当前登录人，不能代其他人配置；可查看同一优化师范围的规则，但只能修改自己创建的规则。</dd></dl>
+          <dl class="definition"><dt>管理员</dt><dd>可以选择任一有效优化师。本次演示由管理员选择“熊鑫”。</dd></dl>
+          <dl class="definition"><dt>产品</dt><dd>支持多选；当前只提供短剧类型、有效状态的产品枚举，并与业务产品目录对齐。</dd></dl>
+          <dl class="definition"><dt>产品与优化师关系</dt><dd>是 AND 关系：只处理既属于所选产品、又归属于所选优化师的广告。</dd></dl>
+          <dl class="definition"><dt>账户时区</dt><dd>可选。留空表示不限制；选择后会补查候选账户时区。不匹配、缺失或冲突的对象仍保留为 blocked 审计记录，只有 eligible 口径才排除。</dd></dl>
+          <dl class="definition"><dt>广告账户/账户池</dt><dd>V3 页面不再作为筛选入口，不需要逐个勾选账户。</dd></dl>
+        </div>
+
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>多选产品是“任一产品”，再与优化师取交集</strong>
+            <p>例如选择 Dramawave 和另一个短剧产品，含义是“产品属于这两个中的任意一个，并且优化师为所选人”，不是要求一条广告同时属于两个产品。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="entry">
+        <p class="section-label">Navigation</p>
+        <h2>页面入口与规则组列表</h2>
+        <p class="section-intro">进入 V3 后只有两个功能页：规则组管理和执行日志。左侧导航固定展示，页面内部使用统一的动态壳层。</p>
+
+        <ol>
+          <li>打开 <a href="https://ai.yingliangads.com/api/ad-control/v3/ui/rule-groups" target="_blank" rel="noopener">V3 规则组管理</a>。</li>
+          <li>列表顶部可以按名称/ID、产品、优化师、调控对象、运行模式和状态筛选。</li>
+          <li>点击右上角<strong>新建规则组</strong>进入五步配置流程。</li>
+          <li>规则 owner 或管理员可以编辑、试算、复制为新草稿或删除；普通用户看到同一优化师下他人创建的规则时只能读取，不能 Preview 或修改。当前启用入口受安全锁限制。</li>
+        </ol>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/01-rule-group-list.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/01-rule-group-list.jpg" alt="V3 规则组管理列表，显示演示规则为停用和只观察" width="3160" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 1　规则组管理首页</strong>
+            演示规则“使用手册演示｜Campaign 高 ROAS 复制（只观察）”已保存，状态为停用，运行模式为只观察。页面右上角进入新建流程。
+            <span class="shot-tip">提示：点击图片可打开原始大图查看细节。</span>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="step-1">
+        <p class="section-label">Step 1 of 5</p>
+        <h2>第一步：范围与归属</h2>
+        <p class="section-intro">先回答“谁的、哪些产品、哪个时区、看几天数据”。范围越准确，后面的规则条件越容易解释。</p>
+
+        <div class="step">
+          <div class="step-head">
+            <span class="step-number">1</span>
+            <div><h3>填写基础信息</h3><p>填空项不带默认值；页面里的浅色文字只是提示，不会自动保存成配置。</p></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>字段</th><th>怎么填</th><th>注意事项</th></tr></thead>
+              <tbody>
+                <tr><td class="nowrap">规则组名称</td><td>建议包含对象、核心条件和模式，例如“Campaign 高 ROAS 复制（只观察）”</td><td>用于列表和日志识别，避免只写“测试规则”。</td></tr>
+                <tr><td>说明</td><td>写明数据窗口、核心条件、候选方式和安全边界</td><td>便于其他人理解，不参与筛选。</td></tr>
+                <tr><td>渠道</td><td>选择 Facebook</td><td>TikTok 已预留渠道模型，但本期不可用。</td></tr>
+                <tr><td>优化师</td><td>普通用户固定本人；管理员选择目标优化师</td><td>必须与产品一起匹配。</td></tr>
+                <tr><td>短剧产品</td><td>至少选择 1 个，最多 20 个</td><td>支持多选；只显示有效短剧产品。</td></tr>
+                <tr><td>账户时区</td><td>只有需要限制候选账户时区时选择；否则留空</td><td>选择后会补查时区；不匹配、缺失或冲突对象记为 blocked，不会从总候选计数中消失。为了计划而选择时区不会让 R1 计划生效。</td></tr>
+                <tr><td>指标窗口</td><td>输入 1–31 天</td><td>这是效果指标的回看范围，不是规则有效期。</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <h3>使用“估算当前范围”做第一道检查</h3>
+        <p>范围估算读取 <code>kunlunads_dev.ads_custom_source_insight</code>，按 Facebook <code>platform=0</code>、<code>data_source IN (0,6)</code>、所选产品、优化师和日期窗口查询并去重，只投影对象身份与父级。它<strong>不是 Meta 账户资产全量，也不是实时 Graph 数据</strong>；不会查 Token、不会调用 Graph、不会读取 ROAS/CPI 条件字段。</p>
+        <ul>
+          <li>如果候选账户数为 0：优先检查优化师映射、产品选择和所选日期窗口内是否有 insight 数据。</li>
+          <li>如果候选对象数异常大：检查是否多选了不需要的产品、指标窗口是否过长、是否漏选时区。</li>
+          <li>如果结构对象数合理：进入第二步配置对象层级。</li>
+        </ul>
+        <p class="small muted">设置时区后，页面展示的 <code>account_count/object_count</code> 仍包含时区不匹配、缺失或冲突的 blocked 候选；服务端另有 eligible 与 blocked 口径，但当前估算卡片不全部展示。</p>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/02-scope-and-estimate.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/02-scope-and-estimate.jpg" alt="范围与归属步骤，选择优化师熊鑫、产品 Dramawave 并估算为 52 个账户和 6569 个 Campaign" width="3160" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 2　范围与归属 + 生产范围估算</strong>
+            本次演示选择 Facebook、优化师“熊鑫”、产品“Dramawave”，不限制账户时区，指标窗口 3 天。估算结果为 1 个产品、3 天窗口内出现的 52 个候选账户、6,569 个去重 Campaign 候选；这不是该优化师名下的 Meta 全量资产。
+          </figcaption>
+        </figure>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>范围估算 ≠ 手动试算，也都不是 Meta 实时扫描</strong>
+            <p>范围估算按 insight 日期窗口做身份/结构候选计数；手动试算在同一受限数据源上读取规则所需指标，执行条件、优先级、冲突处理和 Top N，并写 Preview、observe execution、targets 与数据盘 gzip 快照。两者均不查 Token、不调用 Graph、不执行 Meta 写入。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="step-2">
+        <p class="section-label">Step 2 of 5</p>
+        <h2>第二步：调控对象与运行模式</h2>
+        <p class="section-intro">对象层级决定可筛选字段以及关闭/复制的目标语义；运行模式在未来决定是否允许外部写入。R1 的两种模式配置都不能写 Meta，手动 Preview 始终以 observe 记录。两者不是同一层级的配置。</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>调控对象</th><th>指标粒度</th><th>关闭配置目标</th><th>复制配置目标</th><th>适合场景</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Campaign</strong></td><td>广告系列汇总</td><td>暂停整个 Campaign，下属 Ad Set / Ad 都停止</td><td>深度复制 Campaign 及其下级结构</td><td>整套放量、隔日复制最佳系列</td></tr>
+              <tr><td><strong>Ad Set</strong></td><td>广告组汇总</td><td>只暂停命中的 Ad Set</td><td>复制到来源 Campaign 或新 Campaign</td><td>国家/受众/出价层的精细调控</td></tr>
+              <tr><td><strong>Ad</strong></td><td>单条广告</td><td>只暂停命中的 Ad</td><td>复制到原 Ad Set 或独立承载结构</td><td>优秀素材单独放量、差素材止损</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>运行模式怎么选</h3>
+        <ul>
+          <li><strong>只观察：</strong>当前 R1 仅支持手动试算，记录“本来会关闭/复制哪些对象”，不调用 Meta 写接口；持续扫描要等 Runner 发布。</li>
+          <li><strong>正式执行：</strong>为未来真实写入准备。当前 R1 受安全总开关保护，不会因为选中它就直接操作 Meta。</li>
+        </ul>
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>第一次配置必须保持“只观察”</strong>
+            <p>至少完成一次手动试算并核对对象 ID、结果、原因、Top N 和 Meta 写入次数。当前日志界面不展示具体指标值；指标单位应按本手册的数据口径确认，必要时由管理员核对后端快照。</p>
+          </div>
+        </div>
+        <div class="notice danger">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>候选不保证 Meta 对象当前仍为 ACTIVE</strong>
+            <p>配置状态、有效状态、当前预算等 Meta 字段在 R1 都不可筛，且 Preview 不调用 Graph 回读。正式写入开放前必须增加实时状态复核，不能直接把当前候选当成可执行对象。</p>
+          </div>
+        </div>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/03-object-observe.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/03-object-observe.jpg" alt="调控对象选择 Campaign，运行模式选择只观察" width="3141" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 3　选择 Campaign 层级并保持只观察</strong>
+            本次演示要验证“高 ROAS Campaign 复制候选”，所以对象选择 Campaign；运行模式固定只观察。
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="step-3">
+        <p class="section-label">Step 3 of 5</p>
+        <h2>第三步：筛选条件与命中动作</h2>
+        <p class="section-intro">一条规则由名称、优先级、条件关系、若干条件和一个命中动作组成。一个规则组最多 50 条规则，每条最多 30 个条件。</p>
+
+        <h3>规则配置顺序</h3>
+        <ol>
+          <li>填写规则名称，描述“什么对象达到什么条件”。</li>
+          <li>设置优先级：数字越小越先判断。</li>
+          <li>选择条件关系：AND 表示全部满足；OR 表示任一满足。</li>
+          <li>逐条选择字段、运算符和值。</li>
+          <li>选择命中动作：关闭或复制。</li>
+          <li>如果选择复制，继续填写复制参数。</li>
+        </ol>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>命中动作只有两个：关闭 / 复制</strong>
+            <p>“观察”不再是动作，而是规则组级运行模式。也就是说，可以在“只观察”模式下预演关闭动作，也可以预演复制动作。</p>
+          </div>
+        </div>
+
+        <h3>同一对象命中多条规则怎么办</h3>
+        <ul>
+          <li>关闭优先于复制，避免同一轮里先复制又关闭。</li>
+          <li>被更高优先级或关闭规则遮蔽的结果会记录为 <code>shadowed_by_rule</code>，方便审计。</li>
+          <li>候选 Top N 未被选中的命中对象会记录为延后状态 <code>deferred_by_selection / top_n_not_selected</code>，不计入 skipped_count，也不会丢失审计记录。</li>
+        </ul>
+
+        <h3>本次演示条件</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>条件</th><th>运算符</th><th>值</th><th>目的</th></tr></thead>
+            <tbody>
+              <tr><td>消耗 <code>spend</code></td><td>大于等于</td><td>50</td><td>避免低消耗样本直接进入复制候选</td></tr>
+              <tr><td>安装 <code>installs</code></td><td>大于等于</td><td>5</td><td>保证 CPI 有基本样本量</td></tr>
+              <tr><td>ROAS <code>roas</code></td><td>大于等于</td><td>1.2</td><td>筛选回收达到 120% 的 Campaign</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small muted">以上数字是手册演示值，不是统一的业务推荐阈值。请根据产品、国家、归因口径和投放阶段调整。</p>
+
+        <div class="notice warn">
+          <span class="notice-icon">%</span>
+          <div>
+            <strong>比例字段单位不是同一种写法</strong>
+            <p>ROAS、AF ROAS、广告变现 ROAS 使用比值，<code>1.2</code> 表示 120%；CTR 和次日留存率使用百分数，<code>20</code> 表示 20%。当前对象明细不展示指标值，不能靠日志明细反推单位。</p>
+          </div>
+        </div>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/04-rule-conditions.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/04-rule-conditions.jpg" alt="规则条件页面，配置消耗、安装、ROAS 条件和复制动作参数" width="3141" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 4　配置 AND 条件和复制动作</strong>
+            演示规则名称为“消耗充分且 ROAS 达标”，优先级 10，三个条件全部满足后记录为复制候选。
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="copy-settings">
+        <p class="section-label">Copy action</p>
+        <h2>复制参数详解</h2>
+        <p class="section-intro">只有命中动作选择“复制”时才会显示。当前这些参数参与保存和试算解释，但不会在 R1 里创建真实 Meta 对象。</p>
+
+        <h3>预算设置</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>预算方式</th><th>需要填写</th><th>计算说明</th><th>适用情况</th></tr></thead>
+            <tbody>
+              <tr><td><strong>X × 实际 CPI</strong></td><td>倍数 X，必须大于 0</td><td>以来源对象实际 CPI 乘以倍数得到目标预算</td><td>样本稳定，希望预算随实际获客成本变化</td></tr>
+              <tr><td><strong>X × 固定目标 CPI</strong></td><td>目标 CPI 和倍数 X，均大于 0</td><td>不使用来源实际 CPI，按固定目标成本计算</td><td>产品有明确目标成本线</td></tr>
+              <tr><td><strong>来源预算 × 比例</strong></td><td>比例百分数，必须大于 0</td><td>例如填写 50 表示来源预算的 50%</td><td>隔日复制最佳 Campaign 并降低预算</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>ROAS 出价调整</h3>
+        <ul>
+          <li>选择提高或降低，再输入百分比；方向和百分比必须成对填写。</li>
+          <li>百分比必须大于 0 且不超过 100。</li>
+          <li>未来正式实现应在来源不是兼容的 ROAS 出价模式时跳过，不能静默切换竞价策略；R1 尚未实现这项 Meta 校验。</li>
+          <li>不需要调整时两个字段都留空。</li>
+        </ul>
+
+        <h3>来源冷却与单规则额度</h3>
+        <ul>
+          <li><strong>来源冷却天数：</strong>可选；为未来正式复制定义同一来源的重复间隔；范围 1–3650 天。</li>
+          <li><strong>单规则每日复制上限：</strong>可选；为未来正式复制定义单条规则的日额度；范围 1–3650。</li>
+        </ul>
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>R1 手动试算不判断冷却，也不扣减额度</strong>
+            <p>这些参数目前只保存、回显并进入不可变配置快照。不要因为填了“1 天 / 每日 1 次”就认为本次 Preview 已受保护。</p>
+          </div>
+        </div>
+
+        <div class="notice safe">
+          <span class="notice-icon">✓</span>
+          <div>
+            <strong>演示配置</strong>
+            <p>预算方式选择“X × 实际 CPI”，倍数 10；不调整 ROAS 出价；Campaign 承载方式为深度复制；来源冷却 1 天；单规则每日最多 1 次。</p>
+          </div>
+        </div>
+
+        <div class="notice danger">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>所有复制目标在 R1 都是 <code>copy_live_ready=false</code></strong>
+            <p>所有复制候选都会带有 <code>copy_persistence_not_configured</code>；来源预算比例还会带 <code>source_budget_unavailable</code>，实际 CPI 缺失或非正数会带 <code>actual_cpi_unavailable</code>，设置 ROAS 出价调整还会带 <code>roas_bid_unavailable</code>。手动试算只能验证候选和参数快照，不能证明 Meta 复制结构、预算或出价已经可执行。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="step-4">
+        <p class="section-label">Step 4 of 5</p>
+        <h2>第四步：执行计划、候选选择与额度</h2>
+        <p class="section-intro">这一页同时包含当前会参与手动试算的 Top N，以及只为后续版本保存的计划、额度和冷却参数。R1 没有自动调度、额度扣减或冷却判断。</p>
+
+        <h3>执行计划</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>方式</th><th>配置</th><th>解释</th><th>校验</th></tr></thead>
+            <tbody>
+              <tr><td>不设置计划</td><td>执行方式、开始和截止时间全部留空</td><td>只保留手动试算配置</td><td>不要只填时间窗口而漏选执行方式</td></tr>
+              <tr><td>每天固定时间</td><td>执行时间；可选允许开始/截止时间</td><td>未来按广告账户本地时区解释；时区未限制时需特别谨慎</td><td>时间必须完整，窗口逻辑要合理</td></tr>
+              <tr><td>每隔 N 分钟</td><td>间隔分钟数；可选允许窗口</td><td>未来在窗口内按间隔扫描</td><td>N 为 1–1440</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>允许开始/截止时间可以留空。R1 只校验 <code>HH:MM</code> 并保存，不解释截止早于开始是否跨日；跨日语义要等正式 Runner 发布时再冻结，当前不要依赖。本次演示选择每天 08:00，允许窗口为 08:00–10:00，只用于展示配置。</p>
+
+        <h3>候选选择</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>方式</th><th>选择逻辑</th><th>典型用途</th></tr></thead>
+            <tbody>
+              <tr><td>全部符合条件</td><td>保留所有通过条件和冲突处理的对象</td><td>关闭明确不合格对象</td></tr>
+              <tr><td>每账户 Top N</td><td>在每个广告账户内单独排序，取前 N 个</td><td>每账户复制一个最佳 Campaign</td></tr>
+              <tr><td>每产品 Top N</td><td>在每个产品内排序取前 N 个</td><td>多产品统一筛选但控制各产品名额</td></tr>
+              <tr><td>全范围 Top N</td><td>在整个规则范围内统一排序</td><td>只保留全局最强候选</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Top N 的 N 取值范围为 1–10000。当前只能选择<strong>一个数值排序字段</strong>和升/降序；同值时由对象 ID 做最终稳定决胜。例如选择 ROAS 降序，就不会再按消耗做第二排序。</p>
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>从 Top N 切回“全部符合条件”时</strong>
+            <p>请手动清空 Top N、排序字段和方向。后端要求“全部符合条件”不能携带 Top N 字段，残留值会导致保存被拒绝，不会自动替你收敛。</p>
+          </div>
+        </div>
+
+        <h3>三层额度与冷却</h3>
+        <ul>
+          <li><strong>规则组每日上限：</strong>可选；为未来正式复制定义该规则组的总日额度；范围 1–10000。</li>
+          <li><strong>当前用户每日总上限：</strong>可选；为未来正式复制定义该用户的总日额度；范围 1–10000。</li>
+          <li><strong>同一对象冷却天数：</strong>可选；为未来执行定义对象重复处理间隔；范围 1–3650。</li>
+          <li>复制动作还有单规则每日上限和来源冷却；未来正式执行时，多层限制共同约束并取更严格结果。</li>
+        </ul>
+        <p class="small muted">R1 仅保存和回显这些未来保护参数，不会运行额度扣减或冷却判断，也不能把当前日志当成额度已生效的证据。</p>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/05-schedule-quota.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/05-schedule-quota.jpg" alt="计划与额度页面，配置每日 8 点、每账户 Top 1、ROAS 降序和每日额度" width="3160" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 5　计划、每账户 Top 1 与额度</strong>
+            演示配置为每天 08:00、窗口 08:00–10:00、每账户 Top 1、ROAS 降序；规则组每日 10、用户每日 10、对象冷却 1 天。当前只有 Top 1 参与手动试算，其余参数仅保存。
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="step-5">
+        <p class="section-label">Step 5 of 5</p>
+        <h2>第五步：检查、安全确认与手动试算</h2>
+        <p class="section-intro">最后一页不是形式检查。要逐项确认范围、对象、动作、指标单位、Top N、额度和运行模式是否符合预期。</p>
+
+        <h3>保存前检查顺序</h3>
+        <ol>
+          <li>确认配置总览里的优化师、产品、对象层级和规则数量。</li>
+          <li>确认运行模式是<strong>只观察</strong>。</li>
+          <li>检查页面是否提示待完善项或非法值。</li>
+          <li>再次核对预算倍数/百分比、ROAS 和留存率单位。</li>
+          <li>第一次建议点击<strong>保存并立即试算</strong>，不要只保存后离开。</li>
+        </ol>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>按钮</th><th>结果</th><th>何时用</th></tr></thead>
+            <tbody>
+              <tr><td>保存草稿</td><td>保存为停用、只观察；不执行试算</td><td>配置还未准备好，稍后继续编辑</td></tr>
+              <tr><td>保存并立即试算</td><td>保存最新版本后立刻创建一次手动预览执行</td><td>第一次配置或每次重要修改后</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>修改配置会使旧试算失效</strong>
+            <p>保存采用版本校验。试算结果与当时的规则快照绑定；规则发生变化后必须重新试算，不能把旧结果当成新配置的证据。</p>
+          </div>
+        </div>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/06-review-safety.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/06-review-safety.jpg" alt="第五步配置总览和安全确认，显示保存并立即试算" width="3141" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 6　最终检查与安全确认</strong>
+            核对无误后选择“保存并立即试算”。新规则组仍然是停用、只观察；试算会写 Preview/targets、observe execution/targets 和数据盘 gzip 快照，但 Token 查询、Graph 调用、Meta 写入与 copied created_data 均为 0。
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="doc-section" id="logs">
+        <p class="section-label">Execution audit</p>
+        <h2>执行日志怎么看</h2>
+        <p class="section-intro">试算不是看一个“成功”提示就结束。必须进入执行日志，确认目标记录、对象级结果、快照和 Meta 写入次数，并理解 R1 各计数字段的真实口径。</p>
+
+        <p>打开 <a href="https://ai.yingliangads.com/api/ad-control/v3/ui/execution-logs" target="_blank" rel="noopener">V3 执行日志</a>，可以按日期、产品、优化师、对象层级、动作、模式、状态、触发方式、规则组和对象 ID 筛选。</p>
+
+        <h3>列表里的核心指标</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>指标</th><th>含义</th><th>观察模式的正常表现</th></tr></thead>
+            <tbody>
+              <tr><td>事件总数</td><td>当前列表筛选条件下的<strong>执行记录条数</strong></td><td>不是对象判断次数</td></tr>
+              <tr><td>命中对象</td><td>列表每行的 <code>target_count</code>，等于计划 + Top N 延后 + 阻断目标</td><td>列名为“命中”，但不等于最终 would_action 数</td></tr>
+              <tr><td>成功</td><td>为后续执行结果预留的汇总字段</td><td>R1 手动观察可能显示“—”，不能据此证明写入成功</td></tr>
+              <tr><td>跳过</td><td>为后续终态跳过预留的汇总字段</td><td>R1 的 Top N 延后应在对象明细里看</td></tr>
+              <tr><td>异常/阻断</td><td>数据范围歧义等导致的 blocked 目标或未来执行异常</td><td>优先看对象明细与快照；有阻断先处理</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/08-execution-log-list.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/08-execution-log-list.jpg" alt="V3 执行日志列表，显示演示规则的手动观察执行" width="3160" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 7　执行日志列表</strong>
+            本次执行时间为 2026-07-16 10:31，触发方式为手动试算，状态“已观察”。列表显示“命中 15”，准确口径是 15 条目标记录，包含 Top N 延后对象。
+          </figcaption>
+        </figure>
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>试算完成 Toast 与日志列表的“命中”数字可能不同</strong>
+            <p>即时提示使用 Top N 之后的 <code>matched_count</code>；日志列表每行使用 <code>planned + deferred + blocked</code> 的目标记录总数。两者口径不同，不是数据丢失。</p>
+          </div>
+        </div>
+
+        <h3>详情里重点看四处</h3>
+        <ol>
+          <li><strong>阶段时间线：</strong>当前 R1 通常只由创建、开始、结束时间构造粗粒度生命周期，不能证明范围解析、指标读取、条件计算和 Top N 各内部阶段分别成功。</li>
+          <li><strong>原因汇总：</strong>当前 R1 可能没有把 <code>matched</code> / <code>top_n_not_selected</code> 聚合到这里；空白不代表没有延后对象。</li>
+          <li><strong>对象明细：</strong>抽查对象 ID、产品、动作、结果和原因。当前表格不展示账户、指标值或 condition evidence。</li>
+          <li><strong>外部写约束：</strong>观察模式必须明确显示 Meta 写入 0 次。</li>
+        </ol>
+        <p class="small muted">详情页面最多展示 100 条目标样本；完整目标与 condition evidence 保存在受控快照中。需要核对指标或超过 100 条的完整对象时，应由管理员按执行 ID 做后端审计，不能把页面样本当成全量。</p>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/09-log-detail-zero-meta.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/09-log-detail-zero-meta.jpg" alt="执行日志详情，显示 would_copy、matched 和 top_n_not_selected" width="3160" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 8　对象结果与候选选择原因</strong>
+            被每账户 Top 1 选中的对象记录为 <code>would_copy / matched</code>；命中条件但未进入 Top 1 的对象记录为 <code>deferred_by_selection / top_n_not_selected</code>。判断 Top N 应以这张对象表为准。
+          </figcaption>
+        </figure>
+
+        <figure class="shot">
+          <div class="shot-frame">
+            <a href="usage-guide-assets/10-log-integrity-zero-meta.jpg" target="_blank" rel="noopener">
+              <img src="usage-guide-assets/10-log-integrity-zero-meta.jpg" alt="执行日志底部，快照完整性通过并显示观察模式 Meta 写入 0 次" width="3160" height="1569" loading="lazy">
+            </a>
+          </div>
+          <figcaption>
+            <strong>图 9　快照完整性与外部写约束</strong>
+            这是一次观察试算最关键的安全证据：规则快照完整性通过，并明确显示“观察模式 Meta 写入 0 次”。
+          </figcaption>
+        </figure>
+
+        <div class="notice safe">
+          <span class="notice-icon">✓</span>
+          <div>
+            <strong>观察试算通过标准</strong>
+            <p>R1 手动 Preview 的状态应为“已观察（observed）”；对象结果可解释；快照完整；阻断为 0；Meta 写入次数必须为 0。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="fields">
+        <p class="section-label">Field dictionary</p>
+        <h2>筛选字段字典</h2>
+        <p class="section-intro">页面会按调控对象动态提供字段。Campaign 可使用系列汇总字段；Ad Set 增加广告组字段；Ad 再增加素材和发布数据字段。</p>
+
+        <h3>通用身份、业务与投放字段</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>分类</th><th>页面字段</th><th>技术键</th><th>层级</th><th>用途</th></tr></thead>
+            <tbody>
+              <tr><td>对象</td><td>对象 ID</td><td class="value">object_id</td><td>全部</td><td>精确定位当前层级对象</td></tr>
+              <tr><td>对象</td><td>Campaign ID</td><td class="value">campaign_id</td><td>全部</td><td>限定来源 Campaign</td></tr>
+              <tr><td>对象</td><td>Ad Set ID</td><td class="value">adset_id</td><td>Ad Set / Ad</td><td>限定广告组</td></tr>
+              <tr><td>对象</td><td>Ad ID</td><td class="value">ad_id</td><td>Ad</td><td>精确限定单广告</td></tr>
+              <tr><td>业务</td><td>产品</td><td class="value">product</td><td>全部</td><td>通常已由规则组产品范围限制，也可再细分</td></tr>
+              <tr><td>业务</td><td>剧目编码</td><td class="value">series_code</td><td>全部</td><td>指定剧或排除某剧；本期优先使用此字段</td></tr>
+              <tr><td>业务</td><td>APP / APP ID</td><td class="value">app / app_id</td><td>全部</td><td>区分应用与具体应用标识</td></tr>
+              <tr><td>业务</td><td>系统类型</td><td class="value">os_type</td><td>全部</td><td>如 Android / iOS</td></tr>
+              <tr><td>业务</td><td>剧目语言</td><td class="value">drama_language</td><td>全部</td><td>按剧目语言筛选</td></tr>
+              <tr><td>投放</td><td>出价类型</td><td class="value">bid_type</td><td>全部</td><td>筛选兼容的竞价方式</td></tr>
+              <tr><td>投放</td><td>主页 ID</td><td class="value">page_id</td><td>全部</td><td>按 Facebook Page 限定</td></tr>
+              <tr><td>投放</td><td>投放任务类型</td><td class="value">task_type</td><td>全部</td><td>区分发布任务类型</td></tr>
+              <tr><td>地区</td><td>国家 / 国家组</td><td class="value">country / country_group</td><td>全部</td><td>按单国或业务国家组筛选</td></tr>
+              <tr><td>地区</td><td>语言</td><td class="value">language</td><td>全部</td><td>按广告语言筛选</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>当前不要依赖 <code>content_id</code></strong>
+            <p>本期稳定可选的剧目字段是 <code>series_code</code>。<code>content_id</code> 当前固定为不可筛、不可试算；必须由后续版本同时发布源数据、字段目录与代码能力后才能使用，不能靠回填数据临时启用。</p>
+          </div>
+        </div>
+
+        <h3>时间与效果指标字段</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>分类</th><th>页面字段</th><th>技术键</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>时间</td><td>最近自动发布日期</td><td class="value">latest_auto_publish_dt</td><td>筛选最近 X 天发布的对象</td></tr>
+              <tr><td>时间</td><td>最近资源创建时间</td><td class="value">latest_resource_created_at</td><td>按素材/资源新鲜度筛选</td></tr>
+              <tr><td>时间</td><td>最近消耗时间</td><td class="value">latest_spend_at</td><td>排除长期无消耗对象</td></tr>
+              <tr><td>基础</td><td>消耗 / 展示 / 点击</td><td class="value">spend / impressions / clicks</td><td>样本门槛与流量规模</td></tr>
+              <tr><td>转化</td><td>安装 / 购买 / 收入</td><td class="value">installs / purchase / revenue</td><td>获客与回收</td></tr>
+              <tr><td>留存</td><td>次日留存 / 留存安装基数</td><td class="value">day1_retain / retain_install</td><td>留存人数和计算基数</td></tr>
+              <tr><td>行为</td><td>事件数 / 加购 / 交付数</td><td class="value">events / atc / delivery_cnt</td><td>业务事件、漏斗和投放交付</td></tr>
+              <tr><td>AF</td><td>AF 安装 / AF 收入 / AF ROAS</td><td class="value">af_installs / af_revenue / af_roas</td><td>AppsFlyer 口径指标</td></tr>
+              <tr><td>变现</td><td>广告变现展示 / 收入 / ROAS</td><td class="value">ad_impression / ad_impression_revenue / ad_impression_roas</td><td>广告变现口径</td></tr>
+              <tr><td>计算</td><td>次日留存率</td><td class="value">retention_rate</td><td>比例值，先试算确认单位</td></tr>
+              <tr><td>计算</td><td>CTR / CPM / CPC / CPI</td><td class="value">ctr / cpm / cpc / cpi</td><td>点击率、千次展示成本、点击成本、安装成本</td></tr>
+              <tr><td>计算</td><td>Purchase CPA / ROAS</td><td class="value">purchase_cpa / roas</td><td>购买成本与广告回收</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Ad 层级素材与发布字段</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>页面字段</th><th>技术键</th><th>用途</th></tr></thead>
+            <tbody>
+              <tr><td>资源 ID / 资源名称</td><td class="value">resource_id / resource_name</td><td>按素材资源精确筛选</td></tr>
+              <tr><td>来源素材 ID</td><td class="value">source_id</td><td>追踪复用素材来源</td></tr>
+              <tr><td>W2A 页面 ID</td><td class="value">w2a_page_id</td><td>按 W2A 落地页筛选</td></tr>
+              <tr><td>广告类型</td><td class="value">ad_type</td><td>区分广告形态</td></tr>
+              <tr><td>素材分类 / 资源标签</td><td class="value">category / resource_tag</td><td>按业务分类和标签筛选</td></tr>
+              <tr><td>来源类型 / 资源类型</td><td class="value">source_type / resource_type</td><td>区分素材来源和资源形态</td></tr>
+              <tr><td>发布数据 ID / 任务 ID</td><td class="value">created_data_id / task_id</td><td>定位发布链路和任务归属</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>当前可见但不能作为筛选条件的 Roadmap 字段</h3>
+        <p>下列字段会出现在能力目录或后续设计中，但本期 <code>filterable=false</code>、<code>previewable=false</code>。页面不能选择，绕过页面提交也会被服务端以 <code>field_not_supported</code> 拒绝。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>层级</th><th>字段</th><th>暂不可用原因</th></tr></thead>
+            <tbody>
+              <tr><td>全部</td><td>对象名称、Meta 有效状态、配置状态、当前预算、Bid Control</td><td>当前 bounded insight 数据源不稳定提供，尚未接入可靠 Meta 回读</td></tr>
+              <tr><td>Campaign</td><td>Campaign Objective、CBO</td><td>属于后续 Meta 配置元数据</td></tr>
+              <tr><td>Ad Set</td><td>Optimization Goal、Billing Event</td><td>属于后续 Meta 配置元数据</td></tr>
+              <tr><td>Ad</td><td>Creative ID</td><td>属于后续 Meta 创意元数据</td></tr>
+              <tr><td>全部</td><td>内容 ID <code>content_id</code></td><td>当前源表不存在；指定剧使用 <code>series_code</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="operators">
+        <p class="section-label">Validation</p>
+        <h2>运算符、数值范围与填写规则</h2>
+        <p class="section-intro">页面会根据字段类型动态切换运算符和值输入控件。不要把提示词当成默认值；必填项应显式填写。</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>字段类型</th><th>可用运算符</th><th>填写说明</th></tr></thead>
+            <tbody>
+              <tr><td>数值</td><td>大于、大于等于、小于、小于等于、等于、不等于、介于、存在、不存在</td><td>“介于”要填写上下界；存在/不存在不填值</td></tr>
+              <tr><td>文本</td><td>等于、不等于、包含、不包含、开头为、存在、不存在</td><td>区分精确匹配与模糊包含</td></tr>
+              <tr><td>枚举</td><td>等于、不等于、属于任一、不属于、存在、不存在</td><td>多选枚举使用“属于任一”</td></tr>
+              <tr><td>时间</td><td>早于、晚于、介于、最近 X 天内、早于 X 天前、存在、不存在</td><td>相对天数必须是 1–3650 的整数</td></tr>
+              <tr><td>布尔</td><td>等于、不等于、存在、不存在</td><td>显式选择是/否</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>主要数量限制</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>配置</th><th>范围</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>产品数量</td><td>1–20</td><td>至少选择一个有效短剧产品</td></tr>
+              <tr><td>账户时区数量</td><td>0–100</td><td>留空表示不限制</td></tr>
+              <tr><td>规则数量</td><td>1–50</td><td>一个规则组内</td></tr>
+              <tr><td>每条规则条件数</td><td>1–30</td><td>关闭和复制都至少要有可解释条件</td></tr>
+              <tr><td>规则优先级</td><td>0–100000</td><td>数值越小越先判断；同优先级按规则 ID 稳定排序</td></tr>
+              <tr><td>in / not_in 枚举值</td><td>1–100 个</td><td>不能为空，也不能超过 100 个</td></tr>
+              <tr><td>指标窗口</td><td>1–31 天</td><td>回看效果数据的范围</td></tr>
+              <tr><td>间隔计划</td><td>1–1440 分钟</td><td>未来间隔调度使用</td></tr>
+              <tr><td>Top N</td><td>1–10000</td><td>仅 Top N 候选方式需要</td></tr>
+              <tr><td>规则组/用户每日额度</td><td>1–10000</td><td>未来复制意图的总量保护；R1 不扣减</td></tr>
+              <tr><td>对象/来源冷却</td><td>1–3650 天</td><td>未来避免短期重复处理；R1 不判断</td></tr>
+              <tr><td>ROAS 出价调整</td><td>&gt; 0 且 ≤ 100%</td><td>方向和百分比必须同时填写</td></tr>
+              <tr><td>预算倍数/目标 CPI/比例</td><td>&gt; 0</td><td>不能为 0 或负数</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="levels">
+        <p class="section-label">Object hierarchy</p>
+        <h2>Campaign / Ad Set / Ad 与复制承载策略</h2>
+        <p class="section-intro">复制“什么”和复制后“放在哪里”是两个概念。对象层级确定来源，承载策略描述未来新对象的目标位置；R1 只校验枚举并保存快照，下面的 Meta 结构尚未实现和验收。</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>来源层级</th><th>可选承载方式</th><th>目标结构语义（待实现）</th><th>目标预算/出价位置（待实现）</th></tr></thead>
+            <tbody>
+              <tr><td>Campaign</td><td>深度复制整个 Campaign</td><td>复制 Campaign 以及全部 Ad Set、Ad</td><td>CBO 在新 Campaign；ABO 按来源 Ad Set 结构处理</td></tr>
+              <tr><td>Ad Set</td><td>来源 Campaign</td><td>在原 Campaign 下复制 Ad Set 与其广告</td><td>新 Ad Set 承载预算/出价</td></tr>
+              <tr><td>Ad Set</td><td>新 Campaign</td><td>创建新 Campaign，再复制 Ad Set 与广告</td><td>按新结构的 CBO/ABO 方式设置</td></tr>
+              <tr><td>Ad</td><td>来源 Ad Set</td><td>把 Ad 复制到原 Ad Set，共享原预算和出价</td><td>Ad 本身没有独立预算</td></tr>
+              <tr><td>Ad</td><td>新独立 Ad Set</td><td>在来源 Campaign 下新建 Ad Set，再放入复制 Ad</td><td>可获得独立 Ad Set 预算/出价</td></tr>
+              <tr><td>Ad</td><td>新 Campaign + Ad Set</td><td>新建完整承载结构，只放入选中的 Ad</td><td>适合 CBO 来源又要求独立预算</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>为什么 Ad 复制要有独立承载选项</strong>
+            <p>Ad 自身没有预算和 ROAS 出价。如果只复制回原 Ad Set，它仍然共享原预算；要独立拉量，就需要新建 Ad Set，CBO 情况下可能还要新建 Campaign。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="scenarios">
+        <p class="section-label">Examples</p>
+        <h2>三个典型配置场景</h2>
+        <p class="section-intro">下面是配置思路，不是统一阈值。第一次都应使用只观察并手动试算。</p>
+
+        <article class="scenario">
+          <span class="badge observe">场景 A · 本次生产演示</span>
+          <h3>爆款 Campaign 测出后，筛选复制候选</h3>
+          <p>目标是在消耗和安装有基本样本后，找到高 ROAS Campaign，并在每个账户只保留表现最好的一个。</p>
+          <div class="scenario-grid">
+            <div class="key">对象 / 模式</div><div>Campaign / 只观察</div>
+            <div class="key">范围</div><div>Dramawave + 指定优化师，指标窗口 3 天</div>
+            <div class="key">条件</div><div>消耗 ≥ 50 AND 安装 ≥ 5 AND ROAS ≥ 1.2</div>
+            <div class="key">动作</div><div>复制；预算 = 实际 CPI × 10；深度复制 Campaign</div>
+            <div class="key">候选</div><div>每账户 Top 1；ROAS 降序</div>
+            <div class="key">未来保护参数</div><div>单规则每日 1；来源冷却 1 天；对象冷却 1 天（R1 仅保存，不参与试算）</div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <span class="badge danger">场景 B · R1 不能精确实现完整昨日</span>
+          <h3>“隔天复制昨日最佳 Campaign”的当前限制</h3>
+          <p>业务目标是回看完整前一自然日；但当前页面的“指标窗口 1 天”固定为<strong>今天到今天</strong>，不是昨天，且 UI 没有单独指定昨日日期范围。因此下面只能作为“当天最佳候选”模板，不能声称已经实现隔日优选。</p>
+          <div class="scenario-grid">
+            <div class="key">对象 / 模式</div><div>Campaign / 只观察</div>
+            <div class="key">指标窗口</div><div>1 天 = 当天；不等于完整昨日</div>
+            <div class="key">条件</div><div>有充分消耗、安装/购买达到样本门槛、ROAS 达标</div>
+            <div class="key">动作</div><div>复制；预算 = 来源预算 × 50%（仅为示例）</div>
+            <div class="key">候选</div><div>每账户 Top 1；ROAS 降序；同值按对象 ID 决胜</div>
+            <div class="key">待补能力</div><div>昨日专属日期窗口 + 已发布的账户时区 Runner；两者当前均不可执行</div>
+          </div>
+        </article>
+
+        <article class="scenario">
+          <span class="badge observe">场景 C · Ad 止损预演</span>
+          <h3>暂停高消耗、低回收的单条 Ad</h3>
+          <p>目标是只影响差广告，不暂停整个 Campaign。正式开启前应特别检查低样本、归因延迟和跨时区问题。</p>
+          <div class="scenario-grid">
+            <div class="key">对象 / 模式</div><div>Ad / 只观察</div>
+            <div class="key">条件</div><div>消耗达到门槛 AND CPI 高于阈值 AND ROAS 低于阈值</div>
+            <div class="key">动作</div><div>关闭</div>
+            <div class="key">候选</div><div>全部符合条件，或按消耗倒序限制 Top N</div>
+            <div class="key">当前有效保护</div><div>最低安装/购买样本条件、指标窗口、Top N</div>
+            <div class="key">未来保护参数</div><div>对象冷却与执行时间窗口在 R1 只保存，不参与手动试算</div>
+            <div class="key">检查</div><div>抽查 would_pause 对象，确认不会误伤同 Campaign 里的优质 Ad</div>
+          </div>
+        </article>
+
+        <p class="small muted">所有金额、比例、倍数和时间都是说明用示例。请以各产品、国家和优化师实际策略为准。</p>
+      </section>
+
+      <section class="doc-section" id="troubleshooting">
+        <p class="section-label">Troubleshooting</p>
+        <h2>常见错误与处理</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>现象 / 提示</th><th>常见原因</th><th>处理方式</th></tr></thead>
+            <tbody>
+              <tr><td>当前账号尚未映射到有效优化师</td><td>登录用户没有唯一有效的优化师映射</td><td>联系管理员补齐映射后刷新页面</td></tr>
+              <tr><td>当前账号映射到多个优化师</td><td>身份数据重复</td><td>清理重复映射，不要随便任选一个</td></tr>
+              <tr><td>找不到某个产品</td><td>产品停用、不是短剧类型或枚举尚未同步</td><td>确认产品目录状态与类型</td></tr>
+              <tr><td>范围估算为 0</td><td>所选日期窗口内没有符合产品 + 优化师 + FB 数据源约束的 insight 候选</td><td>核对产品、优化师、指标窗口和源数据；时区 blocked 不会从总候选计数中直接删除</td></tr>
+              <tr><td>时区设置后 blocked 很多</td><td>账户时区不匹配、缺失或存在冲突记录</td><td>在对象明细查看 blocked reason，修正账户时区数据或调整时区范围</td></tr>
+              <tr><td>范围估算很多，试算命中为 0</td><td>效果条件过严、单位错误、窗口内无指标</td><td>逐步放宽一个条件，核对 ROAS/留存率口径与时间窗口</td></tr>
+              <tr><td>当前层级不支持这个字段</td><td>对象层级与字段目录不匹配</td><td>返回第二步切换层级，或更换字段</td></tr>
+              <tr><td>规则已变化或试算已过期</td><td>保存后又修改了配置</td><td>保存最新版本并重新试算</td></tr>
+              <tr><td>无法启用规则</td><td>当前 R1 自动调度与正式开关未开放</td><td>继续使用停用 + 只观察 + 手动试算</td></tr>
+              <tr><td>选择正式执行仍没有复制</td><td>全局安全锁和复制执行链路未发布</td><td>这是当前预期行为，不要反复点击</td></tr>
+              <tr><td>日志里大量 top_n_not_selected</td><td>符合条件但未进入对应范围的 Top N</td><td>检查 Top N 数量、分组方式和排序方向</td></tr>
+              <tr><td>日志出现异常/阻断</td><td>快照、字段、数据或安全校验失败</td><td>查看详情原因，修复后重新保存并试算</td></tr>
+              <tr><td>观察日志显示 Meta 写入不为 0</td><td>严重安全异常</td><td>立即停止继续操作并联系管理员排查，保留执行 ID</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="faq">
+        <p class="section-label">FAQ</p>
+        <h2>常见问题</h2>
+
+        <details open>
+          <summary>保存草稿会不会直接关闭或复制广告？</summary>
+          <div>不会。新规则组强制保存为停用、只观察。保存本身不会调用 Meta 写接口，也不会自动调度。</div>
+        </details>
+        <details>
+          <summary>“范围估算”和“立即试算”有什么区别？</summary>
+          <div>范围估算在 insight 日期窗口内只投影身份/父级并统计去重候选；立即试算在同一受限数据源读取规则所需指标，执行条件、优先级、冲突处理和 Top N，并写 Preview、execution、targets 与快照。两者都不是 Meta 实时 Graph 扫描。</div>
+        </details>
+        <details>
+          <summary>为什么启用按钮不可用？</summary>
+          <div>当前 R1 只开放配置、草稿和手动观察试算，自动 Runner 与正式写入总开关尚未发布。这是安全设计，不是页面故障。</div>
+        </details>
+        <details>
+          <summary>为什么页面可以选“正式执行”，却没有真的复制？</summary>
+          <div>运行模式字段为后续阶段预留，但后端仍有强制安全收敛和总熔断。当前不能依靠前端选项绕过正式写入边界。</div>
+        </details>
+        <details>
+          <summary>多选产品之间是什么关系？</summary>
+          <div>产品之间是“属于任一所选产品”；再与优化师、可选时区取交集。</div>
+        </details>
+        <details>
+          <summary>AND 和 OR 应该怎么选？</summary>
+          <div>AND 要求本条规则所有条件都满足，适合“消耗充分且 ROAS 达标”；OR 只要任一条件满足，适合多个独立风险信号，但更容易扩大命中范围。</div>
+        </details>
+        <details>
+          <summary>同一对象同时命中关闭和复制会怎样？</summary>
+          <div>关闭优先。其他规则结果会记录为被遮蔽，避免同一轮对一个对象产生矛盾动作。</div>
+        </details>
+        <details>
+          <summary>不选择账户时区有什么影响？</summary>
+          <div>表示不补查和限制时区。设置时区后，不匹配/缺失/冲突对象会保留为 blocked 供审计；未来配置固定时间自动运行时，还要明确账户本地时间语义。</div>
+        </details>
+        <details>
+          <summary>每账户 Top 1 是在所有账户里只选一个吗？</summary>
+          <div>不是。它会在每个广告账户内部各自排序，每个账户最多选 1 个。全范围 Top 1 才是整个规则范围只选一个。</div>
+        </details>
+        <details>
+          <summary>如何确认观察模式真的没有修改 Meta？</summary>
+          <div>打开日志详情，核对外部写约束明确显示“观察模式 Meta 写入 0 次”，同时确认快照完整、执行模式为观察，并保留执行 ID。</div>
+        </details>
+        <details>
+          <summary>复制结果现在会写入 ads_ai 吗？</summary>
+          <div>不会。当前 R1 没有执行真实复制，自然也不会写复制后的 created_data。后续落表合同与正式复制链路发布后，才会按实际实现补充说明。</div>
+        </details>
+        <details>
+          <summary>目前支持 TikTok 吗？</summary>
+          <div>不支持。数据模型和页面结构预留了渠道扩展空间，本期只支持 Facebook / Meta。</div>
+        </details>
+      </section>
+
+      <section class="doc-section" id="checklist">
+        <p class="section-label">Safety checklist</p>
+        <h2>保存与正式开放前安全清单</h2>
+        <p class="section-intro">可以打印本页逐项勾选。任何一项不确定，都先停留在只观察并重新试算。</p>
+        <ul class="checklist">
+          <li>当前选择的是正确优化师；普通优化师没有代他人配置。</li>
+          <li>产品范围正确，没有误选无关短剧产品。</li>
+          <li>账户时区的“留空不限制”符合本次意图。</li>
+          <li>调控对象是正确的 Campaign / Ad Set / Ad 层级。</li>
+          <li>当前运行模式为只观察，规则组状态为停用。</li>
+          <li>指标窗口与业务归因/数据延迟相匹配。</li>
+          <li>消耗、预算、CPI、ROAS、留存率的单位已按适配器口径确认；已知当前试算明细不展示指标值，不能用它核对单位。</li>
+          <li>AND / OR、优先级以及关闭优先逻辑符合预期。</li>
+          <li>Top N 的分组范围、数量、排序字段和升降序正确。</li>
+          <li>需要额度/冷却时已显式填写；不需要时保持为空；并已知这些参数在 R1 只保存、不参与手动试算。</li>
+          <li>没有把输入框提示词误认为已经填写的默认值。</li>
+          <li>每次重要修改后都重新保存并立即试算。</li>
+          <li>执行日志快照完整、异常/阻断为 0。</li>
+          <li>观察日志明确显示 Meta 写入次数为 0。</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="appendix">
+        <p class="section-label">Appendix</p>
+        <h2>演示规则完整配置与术语</h2>
+
+        <h3>生产演示规则</h3>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr><th>规则组名称</th><td>使用手册演示｜Campaign 高 ROAS 复制（只观察）</td></tr>
+              <tr><th>规则组 ID</th><td><code>50416a35bf844684a5988db39ff5d82d</code></td></tr>
+              <tr><th>状态 / 模式</th><td>停用 / 只观察</td></tr>
+              <tr><th>范围</th><td>Facebook；优化师熊鑫；产品 Dramawave；不限账户时区；指标窗口 3 天</td></tr>
+              <tr><th>对象</th><td>Campaign</td></tr>
+              <tr><th>规则</th><td>消耗 ≥ 50 AND 安装 ≥ 5 AND ROAS ≥ 1.2；动作复制；优先级 10</td></tr>
+              <tr><th>复制参数</th><td>实际 CPI × 10；不调整 ROAS 出价；深度复制 Campaign；来源冷却 1 天；单规则每日 1 次</td></tr>
+              <tr><th>计划</th><td>每天 08:00；允许窗口 08:00–10:00</td></tr>
+              <tr><th>候选</th><td>每账户 Top 1；ROAS 降序</td></tr>
+              <tr><th>未来保护参数</th><td>规则组每日 10；用户每日 10；同一对象冷却 1 天（R1 未判断、未扣减）</td></tr>
+              <tr><th>执行 ID</th><td><code>34d829306a47473e8b4489da8afe706c</code></td></tr>
+              <tr><th>试算结果</th><td>目标记录 15（含 Top N 延后）；已观察；快照完整；Meta 写入 0 次</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="notice safe">
+          <span class="notice-icon">✓</span>
+          <div>
+            <strong>演示规则保留方式</strong>
+            <p>该规则目前保留在生产规则组列表中，方便按本手册对照查看；它保持停用、只观察，不会自动运行。没有明确授权时不要将其启用或改成正式执行。</p>
+          </div>
+        </div>
+
+        <h3>术语速查</h3>
+        <div class="definition-grid">
+          <dl class="definition"><dt>Campaign</dt><dd>广告系列，Meta 结构的上层对象，可承载 CBO 预算。</dd></dl>
+          <dl class="definition"><dt>Ad Set</dt><dd>广告组，位于 Campaign 下，承载受众、排期、出价及 ABO 预算。</dd></dl>
+          <dl class="definition"><dt>Ad</dt><dd>广告，位于 Ad Set 下，关联创意与素材，本身没有独立预算。</dd></dl>
+          <dl class="definition"><dt>只观察</dt><dd>计算并记录“本来会做什么”，但不调用 Meta 写接口。</dd></dl>
+          <dl class="definition"><dt>立即试算</dt><dd>一次性手动运行最新规则快照，与未来持续调度不同。</dd></dl>
+          <dl class="definition"><dt>范围估算</dt><dd>在 insight 日期窗口和身份范围内统计去重候选，不是 Meta 实时资产全量，也不进行效果条件判断。</dd></dl>
+          <dl class="definition"><dt>Top N</dt><dd>对已命中对象按指定范围和排序保留前 N 个。</dd></dl>
+          <dl class="definition"><dt>冷却期</dt><dd>为未来版本定义同一对象或来源的重复处理间隔；R1 仅保存。</dd></dl>
+          <dl class="definition"><dt>would_copy</dt><dd>观察模式中，该对象在正式链路下本来会进入复制动作。</dd></dl>
+          <dl class="definition"><dt>top_n_not_selected</dt><dd>对象通过了规则条件，但没有进入对应范围的 Top N。</dd></dl>
+        </div>
+
+        <h3>快捷入口</h3>
+        <ul>
+          <li><a href="https://ai.yingliangads.com/api/ad-control/v3/ui/rule-groups" target="_blank" rel="noopener">打开 V3 规则组管理</a></li>
+          <li><a href="https://ai.yingliangads.com/api/ad-control/v3/ui/execution-logs" target="_blank" rel="noopener">打开 V3 执行日志</a></li>
+          <li>本手册离线打开不依赖在线字体、CDN 或第三方脚本。</li>
+        </ul>
+      </section>
+
+      <footer class="footer">
+        <strong>文档版本：</strong>2026-07-16 · V3 R1 Facebook 生产实测版。<br>
+        <strong>安全声明：</strong>本次演示只创建停用、只观察的规则草稿并执行手动试算；没有启用自动任务，没有执行真实关闭/复制，没有产生 Meta 写入，也没有写入复制后的 created_data。截图含生产对象标识与内部用户信息，仅限内部使用，不应直接对外公开。
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var progress = document.getElementById("reading-progress");
+      var printButton = document.getElementById("print-guide");
+      var tocLinks = Array.prototype.slice.call(document.querySelectorAll(".toc-links a"));
+      var sections = tocLinks.map(function (link) {
+        return document.querySelector(link.getAttribute("href"));
+      }).filter(Boolean);
+
+      function updateProgress() {
+        var root = document.documentElement;
+        var max = Math.max(1, root.scrollHeight - root.clientHeight);
+        var percent = Math.min(100, Math.max(0, root.scrollTop / max * 100));
+        progress.style.width = percent + "%";
+      }
+
+      if (printButton) {
+        printButton.addEventListener("click", function () {
+          window.print();
+        });
+      }
+
+      document.addEventListener("click", function (event) {
+        var link = event.target.closest('a[href^="#"]');
+        if (!link) return;
+        var target = document.querySelector(link.getAttribute("href"));
+        if (!target) return;
+        event.preventDefault();
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (history.replaceState) history.replaceState(null, "", link.getAttribute("href"));
+        var mobileToc = link.closest(".mobile-toc");
+        if (mobileToc) mobileToc.removeAttribute("open");
+      });
+
+      if ("IntersectionObserver" in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          var visible = entries.filter(function (entry) { return entry.isIntersecting; });
+          if (!visible.length) return;
+          visible.sort(function (a, b) { return b.intersectionRatio - a.intersectionRatio; });
+          var activeId = "#" + visible[0].target.id;
+          tocLinks.forEach(function (link) {
+            link.classList.toggle("is-active", link.getAttribute("href") === activeId);
+          });
+        }, { rootMargin: "-12% 0px -70%", threshold: [0, .15, .4] });
+        sections.forEach(function (section) { observer.observe(section); });
+      }
+
+      updateProgress();
+      window.addEventListener("scroll", updateProgress, { passive: true });
+      window.addEventListener("resize", updateProgress);
+    }());
+  </script>
+</body>
+</html>
