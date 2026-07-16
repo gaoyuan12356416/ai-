@@ -78,6 +78,34 @@
     ]
   },
   {
+    "key": "ad_control_v3",
+    "label": "AI自动调控 V3",
+    "order": 6,
+    "module": "ad_control_center",
+    "items": [
+      {
+        "key": "adControlV3Rules",
+        "label": "规则组管理",
+        "description": "按产品和优化师配置新版调控规则并手动试算",
+        "kind": "page",
+        "href": "/api/ad-control/v3/ui/rule-groups",
+        "enabled": true,
+        "order": 10,
+        "module": "ad_control_center"
+      },
+      {
+        "key": "adControlV3Logs",
+        "label": "执行日志",
+        "description": "查看新版试算结果、命中原因和审计明细",
+        "kind": "page",
+        "href": "/api/ad-control/v3/ui/execution-logs",
+        "enabled": true,
+        "order": 20,
+        "module": "ad_control_center"
+      }
+    ]
+  },
+  {
     "key": "drama",
     "label": "短剧任务列表",
     "order": 10,

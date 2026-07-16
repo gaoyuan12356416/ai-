@@ -90840,6 +90840,26 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _dispatch_ad_control_v3(self, parsed):
+        """Lazily dispatch the isolated V3 surface after its prefix matched."""
+        try:
+            from features.ad_control_v3 import routes as ad_control_v3_routes
+
+            ad_control_v3_routes.dispatch(self, self.command, parsed)
+        except Exception:
+            logging.exception("ad-control V3 route dispatcher failed")
+            json_response(
+                self,
+                500,
+                {
+                    "code": "internal_error",
+                    "error": "internal server error",
+                    "message": "internal server error",
+                },
+                no_store=True,
+            )
+        return True
+
     def _require_any_module(self, module_keys):
         if not self._require_auth():
             return False
@@ -91185,6 +91205,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
+            self._dispatch_ad_control_v3(parsed)
+            return
 
 
 
@@ -94320,6 +94344,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
+            self._dispatch_ad_control_v3(parsed)
+            return
+
         if parsed.path in ("/api/ad-material/playable-preview", "/api/fb-playable/preview"):
             if not require_playable_preview_access(self):
                 return
@@ -95230,6 +95258,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
+            self._dispatch_ad_control_v3(parsed)
+            return
 
         account_group_id = ad_control_parse_account_group_path(parsed.path)
         if account_group_id:

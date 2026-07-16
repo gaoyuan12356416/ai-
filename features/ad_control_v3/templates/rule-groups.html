@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>规则组管理 · 自动调控 V3</title>
+  <link rel="stylesheet" href="/api/ad-control/v3/assets/app.css">
+</head>
+<body data-v3-page="rule-groups">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="自动调控导航">
+      <a class="brand" href="/" aria-label="返回 AI 自动后台首页" data-guard-editor-exit>
+        <span class="brand-mark" aria-hidden="true">控</span>
+        <span><strong>自动调控</strong><small>新规则中心 · V3</small></span>
+      </a>
+      <nav class="feature-nav" aria-label="功能页面">
+        <a class="feature-nav-link is-active" href="/api/ad-control/v3/ui/rule-groups" aria-current="page" data-guard-editor-exit>
+          <span class="nav-icon" aria-hidden="true">规</span><span><strong>规则组管理</strong><small>配置、保存与试算</small></span>
+        </a>
+        <a class="feature-nav-link" href="/api/ad-control/v3/ui/execution-logs" data-guard-editor-exit>
+          <span class="nav-icon" aria-hidden="true">志</span><span><strong>执行日志</strong><small>结果、原因与审计</small></span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="channel-dot" aria-hidden="true"></span>
+        <div><strong>Facebook 已开放</strong><small>TikTok 已预留，暂不可用</small></div>
+      </div>
+    </aside>
+
+    <main class="main" id="main-content" tabindex="-1">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">AUTOMATED CONTROL / V3</p>
+          <h1>规则组管理</h1>
+          <p class="page-lead">用产品与优化师圈定广告范围，在一个流程里完成筛选、动作、计划和试算。</p>
+        </div>
+        <div class="header-actions">
+          <div class="user-card" id="userCard" aria-label="当前用户"><span class="avatar" aria-hidden="true">—</span><span><strong>正在读取身份</strong><small>请稍候</small></span></div>
+          <a class="button button-quiet" href="/" data-guard-editor-exit>返回后台</a>
+        </div>
+      </header>
+
+      <section class="safety-banner" aria-label="系统隔离说明">
+        <span class="safety-icon" aria-hidden="true">✓</span>
+        <div><strong>新版独立运行，旧版规则不受影响</strong><p>本期计划调度器尚未发布，仅支持保存草稿与手动试算，不能启用持续自动扫描。</p></div>
+        <span class="pill pill-safe">手动试算</span>
+      </section>
+
+      <section id="pageStatus" class="state-panel" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span><div><strong>正在加载规则能力</strong><p>正在读取产品、优化师权限和筛选字段。</p></div>
+      </section>
+      <div id="ruleGroupsApp" hidden></div>
+    </main>
+  </div>
+  <div id="toastRegion" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="dialogRoot"></div>
+  <script id="adControlV3Bootstrap" type="application/json">__AD_CONTROL_V3_BOOTSTRAP__</script>
+  <script src="/api/ad-control/v3/assets/app.js" defer></script>
+</body>
+</html>
