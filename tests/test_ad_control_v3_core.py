@@ -87,9 +87,17 @@ class QueryStub:
     def __init__(self):
         self.calls = []
         self.rows_by_product = {}
+        self.timezone_rows = None
 
     def __call__(self, sql, params):
         self.calls.append((sql, tuple(params)))
+        if "ads_accounts_setting" in sql:
+            if self.timezone_rows is not None:
+                return copy.deepcopy(self.timezone_rows)
+            return [
+                {"account_id": account_id, "time_zone": "America/Los_Angeles"}
+                for account_id in params[1:-1]
+            ]
         product = params[0]
         rows = self.rows_by_product.get(product)
         if rows is not None:
@@ -102,7 +110,7 @@ class QueryStub:
         return [candidate_row(product, object_id)]
 
 
-def candidate_row(product="Dramawave", object_id="c-1", spend=20, account="act_123"):
+def candidate_row(product="Dramawave", object_id="c-1", spend=20, account="123"):
     return {
         "ad_account_id": account,
         "object_id": object_id,
@@ -223,20 +231,27 @@ class SchemaAndPermissionTests(unittest.TestCase):
         self.assertTrue(COMPUTED_INSIGHT_FIELDS.isdisjoint(SOURCE_INSIGHT_REQUIRED_COLUMNS))
         self.assertIn("data_source", SOURCE_INSIGHT_REQUIRED_COLUMNS)
 
-    def test_source_schema_requires_reviewed_dpdo_prefix(self):
+    def test_source_schema_requires_reviewed_dpdo_and_paa_prefixes(self):
         insight_rows = [{"Field": field} for field in SOURCE_INSIGHT_REQUIRED_COLUMNS]
         account_rows = [{"Field": field} for field in ("account_id", "platform_id", "time_zone")]
         dpdo_rows = [
             {"Key_name": "dpdo", "Seq_in_index": index, "Column_name": field}
             for index, field in enumerate(("data_source", "product", "dt", "optimizer"), 1)
         ]
-        _validate_source_schema_rows(insight_rows, account_rows, dpdo_rows)
+        paa_rows = [
+            {"Key_name": "paa", "Seq_in_index": index, "Column_name": field}
+            for index, field in enumerate(("platform_id", "account_id", "account_type"), 1)
+        ]
+        _validate_source_schema_rows(insight_rows, account_rows, dpdo_rows, paa_rows)
         pss_only = [
             {"Key_name": "pss", "Seq_in_index": index, "Column_name": field}
             for index, field in enumerate(("product", "dt", "series_code"), 1)
         ]
         with self.assertRaises(AdControlV3Error) as raised:
-            _validate_source_schema_rows(insight_rows, account_rows, pss_only)
+            _validate_source_schema_rows(insight_rows, account_rows, pss_only, paa_rows)
+        self.assertEqual("source_schema_mismatch", raised.exception.code)
+        with self.assertRaises(AdControlV3Error) as raised:
+            _validate_source_schema_rows(insight_rows, account_rows, dpdo_rows, [])
         self.assertEqual("source_schema_mismatch", raised.exception.code)
 
     def test_actor_role_admin_is_recognized(self):
@@ -379,7 +394,7 @@ class AdapterAndPreviewTests(unittest.TestCase):
                 params[:-1],
             )
 
-    def test_timezone_join_is_only_present_for_an_explicit_timezone_filter(self):
+    def test_timezone_filter_uses_indexed_bound_second_phase_without_main_join(self):
         self.assertEqual(0, FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID)
         query = QueryStub()
         adapter = FacebookAdapter(query)
@@ -388,15 +403,22 @@ class AdapterAndPreviewTests(unittest.TestCase):
             "date_from": "2026-07-16", "date_to": "2026-07-16", "required_fields": [],
         }
         adapter.discover(dict(base_scope, account_timezones=[]))
-        without_timezone = query.calls[-1][0]
-        adapter.discover(dict(base_scope, account_timezones=["America/Los_Angeles"]))
-        with_timezone = query.calls[-1][0]
+        self.assertEqual(1, len(query.calls))
+        without_timezone = query.calls[0][0]
         self.assertNotIn("ads_accounts_setting", without_timezone)
-        self.assertNotIn("COUNT(*) AS settings_row_count", without_timezone)
-        self.assertIn("ads_accounts_setting", with_timezone)
-        self.assertIn("COUNT(*) AS settings_row_count", with_timezone)
-        self.assertIn("x.platform_id = 0", with_timezone)
-        self.assertNotIn("x.platform_id = 1", with_timezone)
+        query.calls = []
+        adapter.discover(dict(base_scope, account_timezones=["America/Los_Angeles"]))
+        self.assertEqual(2, len(query.calls))
+        candidate_sql, _ = query.calls[0]
+        timezone_sql, timezone_params = query.calls[1]
+        self.assertNotIn("ads_accounts_setting", candidate_sql)
+        self.assertNotIn("JOIN", candidate_sql)
+        self.assertIn("ads_accounts_setting", timezone_sql)
+        self.assertIn("FORCE INDEX (paa)", timezone_sql)
+        self.assertIn("x.platform_id = %s", timezone_sql)
+        self.assertIn("x.account_id IN (%s,%s)", timezone_sql)
+        self.assertNotIn("act_123", timezone_sql)
+        self.assertEqual((0, "123", "act_123", 5001), timezone_params)
 
     def test_scope_estimate_uses_identity_only_projection(self):
         service, _, query = make_service()
@@ -774,9 +796,7 @@ class AdapterAndPreviewTests(unittest.TestCase):
 
     def test_timezone_missing_is_audited_not_silently_included(self):
         query = QueryStub()
-        row = candidate_row()
-        row["account_timezone"] = ""
-        query.rows_by_product["Dramawave"] = [row]
+        query.timezone_rows = []
         service, _, _ = make_service(query)
         payload = base_payload()
         payload["account_timezones"] = ["UTC"]
@@ -784,41 +804,156 @@ class AdapterAndPreviewTests(unittest.TestCase):
         preview = service.preview(NORMAL, group["group_id"], {})
         self.assertEqual("missing_account_timezone", preview["targets"][0]["reason"])
 
-    def test_duplicate_identical_account_timezone_settings_do_not_restrict_empty_filter(self):
+    def test_duplicate_identical_account_timezone_settings_are_merged(self):
         query = QueryStub()
-        row = candidate_row(account="123")
-        row["settings_row_count"] = 2
-        row["settings_timezone_count"] = 1
-        query.rows_by_product["Dramawave"] = [row]
+        query.timezone_rows = [
+            {"account_id": "123", "time_zone": "America/Los_Angeles"},
+            {"account_id": "act_123", "time_zone": "America/Los_Angeles"},
+        ]
         service, _, _ = make_service(query)
-        group = service.create_rule_group(NORMAL, base_payload())
+        payload = base_payload()
+        payload["account_timezones"] = ["America/Los_Angeles"]
+        group = service.create_rule_group(NORMAL, payload)
         preview = service.preview(NORMAL, group["group_id"], {})
         self.assertEqual(1, preview["summary"]["planned_count"])
         self.assertEqual("matched", preview["targets"][0]["reason"])
+        timezone_calls = [call for call in query.calls if "ads_accounts_setting" in call[0]]
+        self.assertEqual(1, len(timezone_calls))
 
-    def test_conflicting_timezone_rows_are_ignored_when_filter_is_empty(self):
+    def test_conflicting_timezone_rows_are_not_read_when_filter_is_empty(self):
         query = QueryStub()
-        row = candidate_row(account="123")
-        row["settings_row_count"] = 2
-        row["settings_timezone_count"] = 2
-        query.rows_by_product["Dramawave"] = [row]
+        query.timezone_rows = [
+            {"account_id": "123", "time_zone": "UTC"},
+            {"account_id": "act_123", "time_zone": "America/Los_Angeles"},
+        ]
         service, _, _ = make_service(query)
         group = service.create_rule_group(NORMAL, base_payload())
         preview = service.preview(NORMAL, group["group_id"], {})
         self.assertEqual("matched", preview["targets"][0]["reason"])
+        self.assertFalse(any("ads_accounts_setting" in sql for sql, _ in query.calls))
 
     def test_conflicting_timezone_rows_are_blocked_when_filter_is_configured(self):
         query = QueryStub()
-        row = candidate_row(account="123")
-        row["settings_row_count"] = 2
-        row["settings_timezone_count"] = 2
-        query.rows_by_product["Dramawave"] = [row]
+        query.timezone_rows = [
+            {"account_id": "123", "time_zone": "America/Los_Angeles"},
+            {"account_id": "act_123", "time_zone": "UTC"},
+        ]
         service, _, _ = make_service(query)
         payload = base_payload()
         payload["account_timezones"] = ["America/Los_Angeles"]
         group = service.create_rule_group(NORMAL, payload)
         preview = service.preview(NORMAL, group["group_id"], {})
         self.assertEqual("ambiguous_account_timezone", preview["targets"][0]["reason"])
+
+    def test_timezone_lookup_is_chunked_and_candidate_accounts_stay_bound(self):
+        query = QueryStub()
+        query.rows_by_product["Dramawave"] = [
+            candidate_row(object_id="c-%d" % index, account="acct-%d" % index)
+            for index in range(3)
+        ]
+        adapter = FacebookAdapter(query, timezone_query_chunk_size=2)
+        rows = adapter.discover({
+            "object_level": "campaign", "products": ["Dramawave"], "optimizer_id": 248,
+            "date_from": "2026-07-16", "date_to": "2026-07-16",
+            "account_timezones": ["America/Los_Angeles"], "required_fields": [],
+        })
+        self.assertEqual(3, len(rows))
+        timezone_calls = [call for call in query.calls if "ads_accounts_setting" in call[0]]
+        self.assertEqual(3, len(timezone_calls))
+        bound_accounts = []
+        for sql, params in timezone_calls:
+            self.assertLessEqual(len(params[1:-1]), 2)
+            self.assertEqual(0, params[0])
+            for value in params[1:-1]:
+                self.assertNotIn(value, sql)
+                bound_accounts.append(value)
+        self.assertEqual(
+            ["acct-0", "acct-1", "acct-2", "act_acct-0", "act_acct-1", "act_acct-2"],
+            sorted(bound_accounts),
+        )
+
+    def test_timezone_lookup_has_account_and_row_hard_limits(self):
+        query = QueryStub()
+        query.rows_by_product["Dramawave"] = [
+            candidate_row(object_id="c-1", account="1"),
+            candidate_row(object_id="c-2", account="2"),
+        ]
+        with self.assertRaises(AdControlV3Error) as raised:
+            FacebookAdapter(query, max_timezone_accounts=1).discover({
+                "object_level": "campaign", "products": ["Dramawave"], "optimizer_id": 248,
+                "date_from": "2026-07-16", "date_to": "2026-07-16",
+                "account_timezones": ["UTC"], "required_fields": [],
+            })
+        self.assertEqual("timezone_account_limit_exceeded", raised.exception.code)
+        self.assertFalse(any("ads_accounts_setting" in sql for sql, _ in query.calls))
+
+        query = QueryStub()
+        query.timezone_rows = [
+            {"account_id": "123", "time_zone": "UTC"},
+            {"account_id": "act_123", "time_zone": "UTC"},
+        ]
+        with self.assertRaises(AdControlV3Error) as raised:
+            FacebookAdapter(query, max_timezone_rows_per_chunk=1).discover({
+                "object_level": "campaign", "products": ["Dramawave"], "optimizer_id": 248,
+                "date_from": "2026-07-16", "date_to": "2026-07-16",
+                "account_timezones": ["UTC"], "required_fields": [],
+            })
+        self.assertEqual("timezone_lookup_truncated", raised.exception.code)
+
+    def test_multi_product_timezone_lookup_uses_one_request_local_account_cache(self):
+        query = QueryStub()
+        query.rows_by_product = {
+            "Dramawave": [candidate_row("Dramawave", "c-1", account="123")],
+            "FreeReels": [candidate_row("FreeReels", "c-1", account="123")],
+        }
+        rows = FacebookAdapter(query).discover({
+            "object_level": "campaign", "products": ["Dramawave", "FreeReels"],
+            "optimizer_id": 248, "date_from": "2026-07-16", "date_to": "2026-07-16",
+            "account_timezones": ["America/Los_Angeles"], "required_fields": [],
+        })
+        self.assertEqual(1, len(rows))
+        self.assertEqual("ambiguous_object_scope", rows[0]["blocked_reason"])
+        timezone_calls = [call for call in query.calls if "ads_accounts_setting" in call[0]]
+        self.assertEqual(1, len(timezone_calls))
+        self.assertEqual((0, "123", "act_123", 5001), timezone_calls[0][1])
+
+    def test_timezone_query_failure_aborts_preview_before_any_partial_persistence(self):
+        class FailingTimezoneQuery(QueryStub):
+            def __call__(self, sql, params):
+                if "ads_accounts_setting" in sql:
+                    self.calls.append((sql, tuple(params)))
+                    raise AdControlV3Error(
+                        "source_query_unavailable",
+                        "source insight query is temporarily unavailable",
+                        status=503,
+                    )
+                return super().__call__(sql, params)
+
+        query = FailingTimezoneQuery()
+        service, repository, _ = make_service(query)
+        payload = base_payload()
+        payload["account_timezones"] = ["UTC"]
+        group = service.create_rule_group(NORMAL, payload)
+        with self.assertRaises(AdControlV3Error) as raised:
+            service.preview(NORMAL, group["group_id"], {})
+        self.assertEqual("source_query_unavailable", raised.exception.code)
+        self.assertEqual({}, repository.previews)
+        self.assertEqual({}, repository.executions)
+        self.assertEqual({}, service.snapshot_store.items)
+
+    def test_timezone_second_phase_obeys_the_shared_soft_deadline(self):
+        adapter = FacebookAdapter(QueryStub(), query_deadline_seconds=15)
+        with mock.patch(
+            "features.ad_control_v3.channels.facebook.time.monotonic",
+            side_effect=[0, 0, 1, 2, 16],
+        ):
+            with self.assertRaises(AdControlV3Error) as raised:
+                adapter.discover({
+                    "object_level": "campaign", "products": ["Dramawave"],
+                    "optimizer_id": 248, "date_from": "2026-07-16", "date_to": "2026-07-16",
+                    "account_timezones": ["UTC"], "required_fields": [],
+                })
+        self.assertEqual("scope_query_deadline_exceeded", raised.exception.code)
 
     def test_update_invalidates_preview_and_enable_needs_current_preview(self):
         service, _, _ = make_service(scheduler_enabled=True)

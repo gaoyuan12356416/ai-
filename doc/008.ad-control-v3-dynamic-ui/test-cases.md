@@ -4,7 +4,7 @@
 
 - 本地自动化使用 MemoryRepository/Fake MySQL、Stub insight、Memory/SafeDataRoot 和 route handler，不访问生产、不调用 Meta。
 - 本地 Playwright 使用 UTF-8 mock API，验证冻结前端；不等同于生产登录或真实 MySQL。
-- “本地通过”表示存在于本次 132/132 自动化证据；“部分通过”表示本地合同已证实但生产部分尚未执行。
+- “本地通过”表示存在于本次 137/137 自动化证据；“部分通过”表示本地合同已证实但生产部分尚未执行。
 - scheduler、enable 成功、live pause、live copy、TT 执行、copied created_data 和快照清理器属于未发布能力，测试目标是门禁，不是成功执行。
 - 生产/MySQL/V2 项只有真实证据后才能改为通过。
 
@@ -60,6 +60,8 @@
 | TC-025 | 时区留空不限制 | SQL 完全不 JOIN/聚合账户设置表，重复/冲突设置不参与阻断 | P0 | 本地自动化通过 |
 | TC-026 | 时区精确多选 | 只匹配用户选择的 server enum；不静默猜同义值 | P1 | 本地自动化通过；生产枚举待验 |
 | TC-027 | 缺失/冲突时区 | 设置时区后缺失或冲突对象在规则前阻断并记录原因 | P0 | 本地自动化通过 |
+| TC-027A | 时区两段式补查 | 三层主聚合始终无 settings JOIN；仅非空筛选对候选账户 bare/act_ 变体执行 `platform_id=%s AND account_id IN (...) FORCE INDEX(paa)` 分块绑定查询；重复相同时区合并、跨产品账户只查一次 | P0 | 本地自动化通过；生产 EXPLAIN/实查待验 |
+| TC-027B | 时区补查故障与上限 | 5000 账户、200 raw 变体每块、5000 返回行每块和共享 15s deadline 生效；任一查询失败/截断时 Preview、Execution、快照均零写入 | P0 | 本地自动化通过 |
 
 ### C. 无默认值与表单
 
@@ -149,7 +151,7 @@
 
 ## 4. 已取得证据
 
-- `python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v`：132/132；其中 core/查询性能专项 52/52、product/安全相关子集 56/56、navigation 发布链 13/13。
+- `python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v`：137/137；其中 core/查询性能专项 57/57、navigation 发布链 13/13。
 - Playwright 冻结代码：1440/390 规则页和日志页；`scrollWidth == viewport`；console 0 Errors / 0 Warnings；页面明确“调度器未发布/仅草稿+手动试算/启用锁定”。
 - 截图目录：`D:\codex\tmp\ad-control-v3-ui-final`。
 

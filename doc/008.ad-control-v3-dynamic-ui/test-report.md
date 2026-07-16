@@ -9,7 +9,7 @@
 ## 2. 测试范围
 
 - V3 routes/app lazy wiring、权限、same-origin JSON、方法/body 上限和动态 HTML/asset。
-- 产品/optimizer/时区范围、Campaign/Ad Set/Ad adapter、字段能力、规则引擎和 Copy 参数。
+- 产品/optimizer/时区范围、Campaign/Ad Set/Ad adapter、候选账户两段式 `paa` 时区补查、字段能力、规则引擎和 Copy 参数。
 - ads_ai repository 的八表 allowlist、读写分离、事务、CAS、DDL/seed/空表 rollback 合同。
 - 数据盘路径、原子 gzip、权限、大小、余量、相对路径和 SHA-256。
 - 两个动态页面、空默认值、服务端分页、XSS、响应式和锁定状态。
@@ -20,17 +20,16 @@
 
 | 类型 | 总数 | 通过 | 失败 | 阻塞/待执行 |
 | --- | ---: | ---: | ---: | ---: |
-| V3 unittest（含主/导航 deployer） | 132 | 132 | 0 | 0 |
-| Core/查询性能专项（包含于 132） | 52 | 52 | 0 | 0 |
-| Product/安全相关子集（包含于 132） | 56 | 56 | 0 | 0 |
-| Navigation deployer 子集（包含于 132） | 13 | 13 | 0 | 0 |
+| V3 unittest（含主/导航 deployer） | 137 | 137 | 0 | 0 |
+| Core/查询性能专项（包含于 137） | 57 | 57 | 0 | 0 |
+| Navigation deployer 子集（包含于 137） | 13 | 13 | 0 | 0 |
 | V2 冻结 worktree 基线 | 146 | 143 | 0 | 3 环境阻塞 |
 | Playwright 冻结 UI 视口 | 4 页面/视口组合 + 1 移动数据截图 | 5 | 0 | 0 |
 | 生产 MySQL/DDL/read-after-write | 1 组 | 0 | 0 | 1 待执行 |
 | 生产 route/auth/browser/manual observe | 1 组 | 0 | 0 | 1 待执行 |
 | 生产 V2 发布前后回归/自然 tick | 1 组 | 0 | 0 | 1 待执行 |
 
-V3 最终测试实际结果：132/132；其中 core/查询性能专项 52/52、product/安全相关子集 56/56、Navigation 发布链 13/13。
+V3 最终测试实际结果：137/137；其中 core/查询性能专项 57/57、Navigation 发布链 13/13。
 
 V2 的 3 个阻塞并非测试断言失败：冻结 Git worktree 缺少生产/用户工作树中未纳入该 commit 的 `features.x_accounts`，导致 import-time `ImportError`。这不能被记为通过；最终 target commit 与生产完整模块上必须重跑。
 
@@ -78,6 +77,7 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 - 63353 当前数据库 `ads_ai`、`read_only=0`；
 - `ads_ai.ad_control_v3_*` 当前表数为 0；
 - 源 `product` 字段真实 collation 为 `utf8mb4_unicode_ci`，需用可索引等值前置条件并额外做 binary 精确复核；V3 product 列采用 binary collation；
+- `ads_accounts_setting` 的 Facebook 行为 `platform_id=0`，审核索引为 `paa(platform_id,account_id,account_type)`；旧全表派生 JOIN 与三层主聚合组合会超时，现已改为仅候选账户的两段式索引补查，生产三层实查仍是发布门禁；
 - query plan、DDL/schema hash、seed 和 read-after-write 复制可见性仍是发布门禁。
 
 以上只读事实不代表数据库迁移通过。
@@ -95,6 +95,7 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 | CR-006 | P2 | 快照写入早于 MySQL 事务，失败会留孤儿文件 | 延期；无引用、无执行，当前无清理器 |
 | CR-007 | P2 | 列表/详情存在可优化的 N+1 查询 | 延期；服务端分页和上限降低风险 |
 | CR-008 | P2 | Preview 无通用 idempotency key | 延期；UI mutation single-flight，重复手动请求仍会生成新审计 |
+| CR-009 | P0 | 三层主聚合 JOIN settings 派生表在生产只读验证中 8 秒超时 | 主聚合永久无 JOIN；非空时区筛选才对候选账户 bare/act_ 变体执行绑定、分块、`FORCE INDEX(paa)` 补查；重复相同值合并，多 distinct/缺失/失败/截断均阻断，失败前不写 Preview/Execution/快照 | 本地 57/57 core、137/137 全量通过；生产实查待验 |
 
 ## 8. 未发布能力验证
 
@@ -112,7 +113,7 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 
 ## 9. 遗留风险
 
-- 生产 query plan、候选规模、超时和只读库压力未知。
+- 生产主聚合与两段式时区补查的三层 query plan、候选规模和只读库压力仍需验证；15 秒为查询间检查的 soft deadline，单条查询仍由 8 秒服务端超时和 9～10 秒 socket 约束。
 - 63353 写后到 63350 可见延迟尚未测量。
 - optimizer 真实身份与 15 产品 seed 尚未在线验证。
 - 快照/MySQL 跨存储非原子且无清理器。
@@ -125,7 +126,7 @@ python -m unittest discover -s tests -p "test_ad_control_v3*.py" -v
 当前建议：
 
 - 可以进入最终代码评审、commit/push 和受控 staging；
-- 在精确 target commit 重跑 132 条后，才可执行八表 DDL/seed；
+- 在精确 target commit 重跑 137 条后，才可执行八表 DDL/seed；
 - 完成 `deploy.md` 的生产 P0 门禁后，才可 route dark 和单范围手动 observe；
 - 在生产 V2 回归、三层零外部写证据和线上浏览器完成前，不得标记发布完成；
 - 本期任何情况下都不得启用 scheduler、规则 enable 或 Meta 写能力。

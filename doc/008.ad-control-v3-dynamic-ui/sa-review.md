@@ -34,7 +34,7 @@
 | SA-001 | P0 | 新 V3 不能污染 V2 路由/SQLite/runner | `app.py` 只添加命中 V3 前缀后的 lazy dispatcher；其余 V3 文件独立 | 本地评审通过，生产差异待验 |
 | SA-002 | P0 | 产品/优化师只在 UI 过滤会越权 | service、schema、repository 与 Facebook query 均强制范围；账户字段递归拒绝 | 本地自动化通过 |
 | SA-003 | P0 | session user 与 optimizer 身份域不同 | active user-group 分层精确解析，结果必须唯一；admin 枚举独立 | 本地自动化通过，生产真实身份待验 |
-| SA-004 | P0 | 大表无界查询与 product collation | 每个产品独立查询，强制 data_source 0/6、platform/product/dt/optimizer 和 dpdo；scope 身份投影、Preview 规则字段投影；8s session/hint、9～10s socket、15s 总扫描 soft deadline；保留索引等值并加 BINARY exact，schema/index 漂移失败关闭 | SQL/投影/超时单测通过，生产 EXPLAIN 待验 |
+| SA-004 | P0 | 大表无界查询与 product collation | 每个产品独立查询，强制 data_source 0/6、platform/product/dt/optimizer 和 dpdo；scope 身份投影、Preview 规则字段投影；raw 候选累计硬限 20000；8s session/hint、9～10s socket、15s 总扫描 soft deadline；保留索引等值并加 BINARY exact，schema/index 漂移失败关闭 | SQL/投影/超时单测通过，生产 EXPLAIN 待验 |
 | SA-005 | P0 | 动态页面权限与 XSS | cookie/module、same-origin JSON、2 MiB、CSP、bootstrap JSON 转义、asset allowlist | 本地自动化/Playwright 通过，生产认证待验 |
 | SA-006 | P0 | MySQL 读写角色混用 | reader 63350、writer 63353、固定 host/database/table allowlist、显式事务 | 自动化边界通过，真实账号/复制延迟待验 |
 | SA-007 | P0 | Preview/Execution 部分提交 | Preview、两类 targets、observe execution 与规则组 pointer 在同一 writer 事务提交 | repository 自动化通过 |
@@ -45,10 +45,11 @@
 | SA-012 | P1 | 快照写成功而 DB 事务失败会留下孤儿 | 不引用、不执行；本期不发布清理器，保留为后续受审补偿/清理任务 | 接受的遗留风险 |
 | SA-013 | P1 | 产品停用后历史规则的 Preview/enable 复核 | 当前保存时校验 active product；生产停用后的全链路复核尚需联调 | 生产联调待验 |
 | SA-014 | P1 | 计划/额度配置易被误认为已执行 | UI 和文档明确“仅保存 + 手动试算”，启用锁定，runner 未连接 | 已收口 |
+| SA-015 | P0 | settings 派生表 JOIN 使三层候选聚合超时 | 主聚合永不 JOIN settings；仅非空时区筛选对候选账户生成 bare/act_ 变体，以绑定参数、`platform_id=0` 和 `FORCE INDEX(paa)` 分块补查；请求内去重缓存，5000 账户/200 变体每块/5000 行每块硬限，共用 15s soft deadline；缺失/冲突/查询失败均失败关闭且不写部分 Preview | 57/57 core 与 137/137 V3 通过；生产三层 EXPLAIN/实查待验 |
 
 ## 生产前强制门禁
 
-- 132/132 本地 V3 测试必须在最终 commit 再跑一次并保存输出。
+- 137/137 本地 V3 测试必须在最终 commit 再跑一次并保存输出。
 - GitHub push 后服务器只 fetch 精确 commit；exact-source deployer `--check` 必须为 `would_change` 或 `unchanged`。
 - DDL/seed 只允许落 `ads_ai` 八表，先保存 schema 基线并在 63350 回读校验。
 - V3 配置文件、快照、cache 和备份必须位于 `/mnt/data-disk/ai-ad-control-v3`。
@@ -65,3 +66,4 @@
 
 - 2026-07-16：完成初次有条件评审，要求规范化存储、身份唯一映射和数据盘隔离。
 - 2026-07-16：基于冻结实现复审，收窄本期为手动 observe，补充未发布能力和遗留风险。
+- 2026-07-16：settings 全表派生 JOIN 生产只读验证超时后，改为候选账户两段式 `paa` 索引补查并补齐失败关闭/上限回归。

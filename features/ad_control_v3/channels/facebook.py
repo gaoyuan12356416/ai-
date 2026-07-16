@@ -3,8 +3,11 @@
 The query shape is server-owned and bounded. Every source insight query contains
 the mandatory data-source, platform, one exact product, date-range and optimizer
 predicates. Products are queried separately and only fields required by the
-stored rules/selection are projected. This keeps the reviewed ``dpdo`` index
-usable and detects cross-product object ambiguity before rule evaluation.
+stored rules/selection are projected. Account timezone filtering is deliberately
+two phase: candidate aggregation never joins the settings table, then only the
+candidate account ids are looked up through the reviewed ``paa`` index. This
+keeps the ``dpdo`` index usable and detects cross-product object ambiguity before
+rule evaluation.
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ COMPUTED_METRIC_DEPENDENCIES = {
 # narrow dpdo query can legitimately approach four seconds, so keep the server
 # limit at eight seconds and the source socket read timeout strictly above it.
 SOURCE_QUERY_MAX_EXECUTION_TIME_MS = 8000
+TIMEZONE_LOOKUP_COLUMNS = ("account_id", "time_zone")
 
 
 def _context_aggregate(field: str) -> str:
@@ -176,6 +180,9 @@ class FacebookAdapter(ChannelAdapter):
         max_products: int = 20,
         max_total_candidates: int = 20000,
         query_deadline_seconds: float = 15.0,
+        max_timezone_accounts: int = 5000,
+        timezone_query_chunk_size: int = 200,
+        max_timezone_rows_per_chunk: int = 5000,
     ) -> None:
         self._query_executor = query_executor
         if source_database != "kunlunads_dev":
@@ -189,6 +196,9 @@ class FacebookAdapter(ChannelAdapter):
         self.max_products = max(1, min(20, int(max_products)))
         self.max_total_candidates = max(1, min(20000, int(max_total_candidates)))
         self.query_deadline_seconds = max(1.0, min(30.0, float(query_deadline_seconds)))
+        self.max_timezone_accounts = max(1, min(20000, int(max_timezone_accounts)))
+        self.timezone_query_chunk_size = max(1, min(500, int(timezone_query_chunk_size)))
+        self.max_timezone_rows_per_chunk = max(1, min(10000, int(max_timezone_rows_per_chunk)))
 
     def _ensure_schema(self) -> None:
         if self._schema_validated or self._schema_validator is None:
@@ -220,8 +230,6 @@ class FacebookAdapter(ChannelAdapter):
         self,
         object_level: str,
         required_fields: Any = None,
-        *,
-        include_timezone: bool = False,
     ) -> Tuple[str, Sequence[str]]:
         if object_level not in LEVEL_COLUMNS:
             raise AdControlV3Error("validation_error", "unsupported object level")
@@ -289,39 +297,14 @@ class FacebookAdapter(ChannelAdapter):
             select_columns.append("COALESCE(SUM(s.{0}), 0) AS {0}".format(field))
             columns.append(field)
 
-        timezone_join = ""
-        if include_timezone:
-            setting_source_expr = (
-                "CASE WHEN LEFT(LOWER(CAST(x.account_id AS CHAR)), 4) = 'act_' "
-                "THEN SUBSTRING(LOWER(CAST(x.account_id AS CHAR)), 5) "
-                "ELSE LOWER(CAST(x.account_id AS CHAR)) END"
-            )
-            timezone_join = """
-                LEFT JOIN (
-                  SELECT {setting_source_expr} AS normalized_account,
-                         MAX(CAST(x.time_zone AS CHAR)) AS time_zone,
-                         COUNT(*) AS settings_row_count,
-                         COUNT(DISTINCT NULLIF(CAST(x.time_zone AS CHAR), '')) AS timezone_count
-                  FROM `kunlunads_dev`.ads_accounts_setting x
-                  WHERE x.platform_id = {settings_platform_id}
-                  GROUP BY {setting_source_expr}
-                ) a ON a.normalized_account = {account_expr}
-            """.format(
-                setting_source_expr=setting_source_expr,
-                account_expr=account_expr,
-                settings_platform_id=FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID,
-            )
-            select_columns.extend((
-                "COALESCE(MAX(CAST(a.time_zone AS CHAR)), '') AS account_timezone",
-                "COALESCE(MAX(a.settings_row_count), 0) AS settings_row_count",
-                "COALESCE(MAX(a.timezone_count), 0) AS settings_timezone_count",
-            ))
-        else:
-            select_columns.extend((
-                "'' AS account_timezone",
-                "0 AS settings_row_count",
-                "0 AS settings_timezone_count",
-            ))
+        # Timezone values are populated only by the bounded second-phase
+        # account lookup.  Keeping constants here makes the candidate snapshot
+        # shape stable without ever joining settings into the hot aggregation.
+        select_columns.extend((
+            "'' AS account_timezone",
+            "0 AS settings_row_count",
+            "0 AS settings_timezone_count",
+        ))
         columns.extend(("account_timezone", "settings_row_count", "settings_timezone_count"))
 
         # Column names are server-owned constants; all user values are bound.
@@ -330,7 +313,6 @@ class FacebookAdapter(ChannelAdapter):
             SELECT /*+ MAX_EXECUTION_TIME({max_execution_time_ms}) */
               {select_columns}
             FROM `kunlunads_dev`.ads_custom_source_insight s FORCE INDEX (dpdo)
-            {timezone_join}
             WHERE s.data_source IN (0, 6)
               AND s.platform = %s
               AND s.product = %s
@@ -347,11 +329,109 @@ class FacebookAdapter(ChannelAdapter):
             object_id=object_id_column,
             account_expr=account_expr,
             select_columns=", ".join(select_columns),
-            timezone_join=timezone_join,
             max_execution_time_ms=SOURCE_QUERY_MAX_EXECUTION_TIME_MS,
-            settings_platform_id=FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID,
         )
         return " ".join(sql.split()), tuple(columns)
+
+    def _ensure_deadline(self, deadline: float) -> None:
+        if time.monotonic() >= deadline:
+            raise AdControlV3Error(
+                "scope_query_deadline_exceeded",
+                "soft total candidate scan deadline exceeded",
+                status=503,
+                details={"deadline_seconds": self.query_deadline_seconds},
+            )
+
+    def _load_account_timezones(
+        self,
+        account_ids: Iterable[str],
+        deadline: float,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Load settings only for discovered accounts through ``paa``.
+
+        The cache is local to one discovery request so repeated accounts across
+        products are queried once without retaining potentially stale timezone
+        values between previews.  Both bare and ``act_`` raw forms are bound as
+        parameters because the source tables contain both conventions.
+        """
+
+        normalized_accounts = sorted({str(value or "").strip().lower() for value in account_ids if str(value or "").strip()})
+        if len(normalized_accounts) > self.max_timezone_accounts:
+            raise AdControlV3Error(
+                "timezone_account_limit_exceeded",
+                "candidate account count exceeds the timezone lookup limit",
+                status=409,
+                details={"limit": self.max_timezone_accounts},
+            )
+        for account_id in normalized_accounts:
+            if len(account_id) > 128 or "\x00" in account_id:
+                raise AdControlV3Error(
+                    "invalid_candidate_account_id",
+                    "candidate account id is invalid",
+                    status=409,
+                )
+
+        cache: Dict[str, Dict[str, Any]] = {
+            account_id: {
+                "account_timezone": "",
+                "settings_row_count": 0,
+                "settings_timezone_count": 0,
+                "timezone_identity_ambiguous": False,
+            }
+            for account_id in normalized_accounts
+        }
+        if not normalized_accounts:
+            return cache
+
+        # One raw value can theoretically collide when a malformed source id
+        # already starts with act_. Preserve the relation as a set and fail
+        # those candidates closed rather than guessing ownership.
+        variant_owners: Dict[str, set] = {}
+        for account_id in normalized_accounts:
+            for raw_value in (account_id, "act_" + account_id):
+                variant_owners.setdefault(raw_value, set()).add(account_id)
+        raw_variants = sorted(variant_owners)
+        timezone_values: Dict[str, set] = {account_id: set() for account_id in normalized_accounts}
+
+        for offset in range(0, len(raw_variants), self.timezone_query_chunk_size):
+            self._ensure_deadline(deadline)
+            chunk = raw_variants[offset:offset + self.timezone_query_chunk_size]
+            placeholders = ",".join(["%s"] * len(chunk))
+            sql = (
+                "SELECT /*+ MAX_EXECUTION_TIME({timeout}) */ "
+                "CAST(x.account_id AS CHAR) AS account_id,CAST(x.time_zone AS CHAR) AS time_zone "
+                "FROM `kunlunads_dev`.ads_accounts_setting x FORCE INDEX (paa) "
+                "WHERE x.platform_id = %s AND x.account_id IN ({placeholders}) "
+                "ORDER BY x.account_id LIMIT %s"
+            ).format(timeout=SOURCE_QUERY_MAX_EXECUTION_TIME_MS, placeholders=placeholders)
+            params: Tuple[Any, ...] = tuple(
+                [FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID] + chunk + [self.max_timezone_rows_per_chunk + 1]
+            )
+            rows = _dict_rows(self._query_executor(sql, params), TIMEZONE_LOOKUP_COLUMNS)
+            self._ensure_deadline(deadline)
+            if len(rows) > self.max_timezone_rows_per_chunk:
+                raise AdControlV3Error(
+                    "timezone_lookup_truncated",
+                    "account timezone lookup reached the safe row limit",
+                    status=409,
+                    details={"limit": self.max_timezone_rows_per_chunk},
+                )
+            for row in rows:
+                raw_account_id = str(row.get("account_id") or "").strip().lower()
+                owners = variant_owners.get(raw_account_id) or set()
+                timezone_name = str(row.get("time_zone") or "").strip()
+                for account_id in owners:
+                    cache[account_id]["settings_row_count"] += 1
+                    if len(owners) > 1:
+                        cache[account_id]["timezone_identity_ambiguous"] = True
+                    if timezone_name:
+                        timezone_values[account_id].add(timezone_name)
+
+        for account_id, values in timezone_values.items():
+            ordered = sorted(values)
+            cache[account_id]["settings_timezone_count"] = len(ordered)
+            cache[account_id]["account_timezone"] = ordered[0] if len(ordered) == 1 else ""
+        return cache
 
     def discover(self, scope: Mapping[str, Any]) -> List[Dict[str, Any]]:
         self._ensure_schema()
@@ -390,18 +470,14 @@ class FacebookAdapter(ChannelAdapter):
         sql, columns = self._query_for_level(
             object_level,
             scope.get("required_fields") if "required_fields" in scope else None,
-            include_timezone=bool(requested_timezones),
         )
         by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         deadline = time.monotonic() + self.query_deadline_seconds
+        product_rows: List[Tuple[str, List[Dict[str, Any]]]] = []
+        candidate_accounts = set()
+        raw_candidate_count = 0
         for product in products:
-            if time.monotonic() >= deadline:
-                raise AdControlV3Error(
-                    "scope_query_deadline_exceeded",
-                    "soft total candidate scan deadline exceeded",
-                    status=503,
-                    details={"deadline_seconds": self.query_deadline_seconds},
-                )
+            self._ensure_deadline(deadline)
             params = (
                 product,
                 optimizer_id,
@@ -414,13 +490,7 @@ class FacebookAdapter(ChannelAdapter):
                 self.max_rows_per_product,
             )
             rows = _dict_rows(self._query_executor(sql, params), columns)
-            if time.monotonic() >= deadline:
-                raise AdControlV3Error(
-                    "scope_query_deadline_exceeded",
-                    "soft total candidate scan deadline exceeded",
-                    status=503,
-                    details={"deadline_seconds": self.query_deadline_seconds},
-                )
+            self._ensure_deadline(deadline)
             if len(rows) >= self.max_rows_per_product:
                 raise AdControlV3Error(
                     "scope_query_truncated",
@@ -428,6 +498,31 @@ class FacebookAdapter(ChannelAdapter):
                     status=409,
                     details={"product": product, "limit": self.max_rows_per_product},
                 )
+            raw_candidate_count += len(rows)
+            if raw_candidate_count > self.max_total_candidates:
+                raise AdControlV3Error(
+                    "scope_candidate_limit_exceeded",
+                    "total candidate count exceeds the safe limit",
+                    status=409,
+                    details={"limit": self.max_total_candidates},
+                )
+            product_rows.append((product, rows))
+            for row in rows:
+                account_id = str(row.get("ad_account_id") or "").strip().lower()
+                if account_id:
+                    candidate_accounts.add(account_id)
+
+        # This request-local cache is populated once after all product scans,
+        # so one account shared by several products never causes repeated
+        # settings reads. Any lookup error aborts discovery before candidates
+        # are returned to the service and therefore before preview persistence.
+        timezone_cache = (
+            self._load_account_timezones(candidate_accounts, deadline)
+            if requested_timezones
+            else {}
+        )
+
+        for product, rows in product_rows:
             for row in rows:
                 # SQL returns the canonical value after exactly one leading
                 # ``act_`` removal. Do not strip again at the adapter boundary.
@@ -435,7 +530,8 @@ class FacebookAdapter(ChannelAdapter):
                 object_id = str(row.get("object_id") or "").strip()
                 if not account_id or not object_id:
                     continue
-                timezone_name = str(row.get("account_timezone") or "").strip()
+                timezone_record = timezone_cache.get(account_id) or {}
+                timezone_name = str(timezone_record.get("account_timezone") or "").strip()
                 row_product = str(row.get("product") or product).strip()
                 key = (self.channel, account_id, object_id)
                 existing = by_key.get(key)
@@ -459,6 +555,8 @@ class FacebookAdapter(ChannelAdapter):
                         "product": row_product,
                         "scope_products": [row_product],
                         "account_timezone": timezone_name,
+                        "settings_row_count": int(timezone_record.get("settings_row_count") or 0),
+                        "settings_timezone_count": int(timezone_record.get("settings_timezone_count") or 0),
                         "blocked_reason": "",
                         "scope_ambiguity_check": "selected_scope_only",
                     }
@@ -469,11 +567,6 @@ class FacebookAdapter(ChannelAdapter):
                     object_level in {"adset", "ad"} and adset_parent_count != 1
                 ):
                     candidate["blocked_reason"] = "ambiguous_object_scope"
-                # Duplicate settings rows carrying the same timezone do not
-                # make the scope ambiguous.  Only conflicting distinct values
-                # are unsafe; an empty timezone filter must remain unrestricted.
-                if requested_timezones and int(candidate.get("settings_timezone_count") or 0) > 1:
-                    candidate["blocked_reason"] = "ambiguous_account_timezone"
                 context_concat_limit = int(candidate.get("context_concat_limit") or 0)
                 for context_field in context_fields:
                     values = [item for item in str(candidate.get(context_field) or "").split("\n") if item]
@@ -492,11 +585,18 @@ class FacebookAdapter(ChannelAdapter):
                         )
                         if value_count == len(values) and value_count > 1 and not at_concat_limit:
                             candidate["blocked_reason"] = "ambiguous_object_context"
+                timezone_blocked_reason = ""
                 if requested_timezones:
-                    if not timezone_name:
-                        candidate["blocked_reason"] = "missing_account_timezone"
+                    if timezone_record.get("timezone_identity_ambiguous") or int(
+                        candidate.get("settings_timezone_count") or 0
+                    ) > 1:
+                        timezone_blocked_reason = "ambiguous_account_timezone"
+                    elif not timezone_name:
+                        timezone_blocked_reason = "missing_account_timezone"
                     elif timezone_name not in requested_timezones:
-                        candidate["blocked_reason"] = "timezone_out_of_scope"
+                        timezone_blocked_reason = "timezone_out_of_scope"
+                if timezone_blocked_reason and not candidate["blocked_reason"]:
+                    candidate["blocked_reason"] = timezone_blocked_reason
                 for metric_field in raw_metric_fields:
                     candidate[metric_field] = float(_decimal(candidate.get(metric_field)))
                 ratio_specs = {

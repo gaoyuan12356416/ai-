@@ -165,7 +165,8 @@ def _execute_bounded_source_query(
 def _validate_source_schema_rows(
     insight_rows: Sequence[Mapping[str, Any]],
     account_rows: Sequence[Mapping[str, Any]],
-    index_rows: Sequence[Mapping[str, Any]],
+    insight_index_rows: Sequence[Mapping[str, Any]],
+    account_index_rows: Sequence[Mapping[str, Any]],
 ) -> None:
     insight_columns = {str(row.get("Field") or row.get("field") or "") for row in insight_rows}
     missing = sorted(set(SOURCE_INSIGHT_REQUIRED_COLUMNS) - insight_columns)
@@ -177,17 +178,38 @@ def _validate_source_schema_rows(
                 int(row.get("Seq_in_index") or row.get("seq_in_index") or 0),
                 str(row.get("Column_name") or row.get("column_name") or ""),
             )
-            for row in index_rows
+            for row in insight_index_rows
             if str(row.get("Key_name") or row.get("key_name") or "") == "dpdo"
         ]
     )
+    paa = sorted(
+        [
+            (
+                int(row.get("Seq_in_index") or row.get("seq_in_index") or 0),
+                str(row.get("Column_name") or row.get("column_name") or ""),
+            )
+            for row in account_index_rows
+            if str(row.get("Key_name") or row.get("key_name") or "") == "paa"
+        ]
+    )
     expected_dpdo = ["data_source", "product", "dt", "optimizer"]
-    if missing or missing_accounts or [column for _, column in dpdo[:4]] != expected_dpdo:
+    expected_paa = ["platform_id", "account_id", "account_type"]
+    if (
+        missing
+        or missing_accounts
+        or [column for _, column in dpdo[:4]] != expected_dpdo
+        or [column for _, column in paa[:3]] != expected_paa
+    ):
         raise AdControlV3Error(
             "source_schema_mismatch",
-            "source insight/account schema or dpdo index drifted",
+            "source insight/account schema or reviewed index drifted",
             status=503,
-            details={"missing_insight": missing, "missing_accounts": missing_accounts, "dpdo": dpdo[:4]},
+            details={
+                "missing_insight": missing,
+                "missing_accounts": missing_accounts,
+                "dpdo": dpdo[:4],
+                "paa": paa[:3],
+            },
         )
 
 
@@ -1181,8 +1203,14 @@ def build_service_from_environment() -> Service:
     def validate_source_schema() -> None:
         insight_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_custom_source_insight", ())
         account_rows = source_query("SHOW COLUMNS FROM `kunlunads_dev`.ads_accounts_setting", ())
-        index_rows = source_query("SHOW INDEX FROM `kunlunads_dev`.ads_custom_source_insight", ())
-        _validate_source_schema_rows(insight_rows, account_rows, index_rows)
+        insight_index_rows = source_query("SHOW INDEX FROM `kunlunads_dev`.ads_custom_source_insight", ())
+        account_index_rows = source_query("SHOW INDEX FROM `kunlunads_dev`.ads_accounts_setting", ())
+        _validate_source_schema_rows(
+            insight_rows,
+            account_rows,
+            insight_index_rows,
+            account_index_rows,
+        )
 
     data_root = SafeDataRoot(
         _required_environment("AD_CONTROL_V3_DATA_ROOT"),
