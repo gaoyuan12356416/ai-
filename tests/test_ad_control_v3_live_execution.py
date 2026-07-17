@@ -101,6 +101,56 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(runner_event_key("g-1", now), runner_event_key("g-1", now.replace(second=59)))
         self.assertNotEqual(runner_event_key("g-1", now), runner_event_key("g-2", now))
 
+    def test_numeric_account_timezone_offsets_are_supported(self):
+        now = datetime(2026, 7, 17, 7, 30, tzinfo=timezone.utc)
+        for timezone_value, fixed_time, local_time in (
+            ("8", "15:30", "15:30"),
+            ("+8", "15:30", "15:30"),
+            ("UTC+8", "15:30", "15:30"),
+            ("-8", "23:30", "23:30"),
+        ):
+            with self.subTest(timezone_value=timezone_value):
+                due, reason, context = candidate_schedule_due(
+                    {"account_timezone": timezone_value},
+                    {"type": "fixed_time", "fixed_time": fixed_time},
+                    now,
+                )
+                self.assertTrue(due)
+                self.assertEqual("", reason)
+                self.assertEqual(local_time, context["account_local_time"])
+
+        due, reason, context = candidate_schedule_due(
+            {"account_timezone": "15"},
+            {"type": "interval", "interval_minutes": 10},
+            now,
+        )
+        self.assertFalse(due)
+        self.assertEqual("invalid_account_timezone", reason)
+        self.assertEqual({}, context)
+
+    def test_scheduler_pre_scan_accepts_numeric_timezone_catalog(self):
+        service, _, _ = make_service(scheduler_enabled=True)
+        group = {
+            "enabled": True,
+            "emergency_stopped": False,
+            "account_timezones": [],
+            "schedule": {"type": "interval", "interval_minutes": 10},
+        }
+        self.assertTrue(
+            service.scheduled_group_due_now(
+                group,
+                datetime(2026, 7, 17, 7, 30, tzinfo=timezone.utc),
+                [str(value) for value in range(-8, 10)],
+            )
+        )
+        self.assertFalse(
+            service.scheduled_group_due_now(
+                group,
+                datetime(2026, 7, 17, 7, 31, tzinfo=timezone.utc),
+                [str(value) for value in range(-8, 10)],
+            )
+        )
+
 
 class PauseExecutor(FacebookLiveExecutor):
     def __init__(self, client):
