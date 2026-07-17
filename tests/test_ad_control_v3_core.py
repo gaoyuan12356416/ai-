@@ -463,11 +463,8 @@ class AdapterAndPreviewTests(unittest.TestCase):
         self.assertIn("SUM(s.installs)", sql)
         self.assertIn("cpi", preview["summary"]["required_fields"])
         target = preview["targets"][0]
-        self.assertFalse(target["copy_live_ready"])
-        self.assertEqual(
-            ["copy_persistence_not_configured", "roas_bid_unavailable"],
-            target["copy_readiness_reasons"],
-        )
+        self.assertTrue(target["copy_live_ready"])
+        self.assertEqual([], target["copy_readiness_reasons"])
 
         # Zero CPI cannot produce a valid positive Meta budget in a future live
         # copy path, even though zero is otherwise a present numeric metric.
@@ -1028,11 +1025,13 @@ class AdapterAndPreviewTests(unittest.TestCase):
 
     def test_update_invalidates_preview_and_enable_needs_current_preview(self):
         service, _, _ = make_service(scheduler_enabled=True)
-        group = service.create_rule_group(NORMAL, base_payload())
+        payload = base_payload()
+        payload["schedule"] = {"type": "fixed_time", "fixed_time": "02:00"}
+        group = service.create_rule_group(NORMAL, payload)
         service.preview(NORMAL, group["group_id"], {})
         enabled = service.set_enabled(NORMAL, group["group_id"], True)
         self.assertTrue(enabled["enabled"])
-        update = base_payload()
+        update = copy.deepcopy(payload)
         update["name"] = "changed"
         updated = service.update_rule_group(NORMAL, group["group_id"], update, group["config_version"])
         self.assertFalse(updated["enabled"])
@@ -1042,7 +1041,9 @@ class AdapterAndPreviewTests(unittest.TestCase):
 
     def test_emergency_stop_clears_preview_and_requires_a_new_one(self):
         service, repository, _ = make_service(scheduler_enabled=True)
-        group = service.create_rule_group(NORMAL, base_payload())
+        payload = base_payload()
+        payload["schedule"] = {"type": "fixed_time", "fixed_time": "02:00"}
+        group = service.create_rule_group(NORMAL, payload)
         service.preview(NORMAL, group["group_id"], {})
         service.emergency_stop(NORMAL, group["group_id"])
         stopped = repository.groups[group["group_id"]]
@@ -1067,8 +1068,8 @@ class AdapterAndPreviewTests(unittest.TestCase):
         current["last_preview_hash"] = current["behavior_hash"]
         repository.previews[current["last_preview_id"]]["behavior_hash"] = current["behavior_hash"]
         with self.assertRaises(AdControlV3Error) as raised:
-            service.set_enabled(NORMAL, group["group_id"], True)
-        self.assertEqual("copy_persistence_not_configured", raised.exception.code)
+            service.set_enabled(NORMAL, group["group_id"], True, "ENABLE_LIVE_MODE")
+        self.assertEqual("live_copy_disabled", raised.exception.code)
 
     def test_unreleased_scheduler_blocks_enable_without_state_write(self):
         service, repository, _ = make_service()
@@ -1167,11 +1168,8 @@ class RuleEngineTests(unittest.TestCase):
         copy_only = evaluate_candidates([candidate], rules[:1], facebook_field_catalog("campaign"), {"mode": "all"})
         copy_target = copy_only["targets"][0]
         self.assertEqual(50, copy_target["copy_parameters"]["source_budget_ratio"])
-        self.assertFalse(copy_target["copy_live_ready"])
-        self.assertEqual(
-            ["copy_persistence_not_configured", "source_budget_unavailable"],
-            copy_target["copy_readiness_reasons"],
-        )
+        self.assertTrue(copy_target["copy_live_ready"])
+        self.assertEqual([], copy_target["copy_readiness_reasons"])
 
     def test_top_n_is_stable_and_blocked_does_not_consume_quota(self):
         candidates = []

@@ -246,15 +246,15 @@ def _chosen_target(
     }
     if chosen.get("action") == "copy":
         parameters = dict(chosen.get("copy_parameters") or {})
-        readiness_reasons = ["copy_persistence_not_configured"]
+        readiness_reasons = []
         budget_mode = str(parameters.get("budget_mode") or "")
-        if budget_mode == "source_budget_ratio":
-            readiness_reasons.append("source_budget_unavailable")
-        elif budget_mode == "actual_cpi_multiplier" and not _positive_finite_number(candidate.get("cpi")):
+        if budget_mode == "actual_cpi_multiplier" and not _positive_finite_number(candidate.get("cpi")):
             readiness_reasons.append("actual_cpi_unavailable")
-        if str(parameters.get("roas_adjustment_direction") or "") not in {"", "none"}:
-            readiness_reasons.append("roas_bid_unavailable")
-        target["copy_live_ready"] = False
+        # Source budgets, CBO/ABO structure and MIN_ROAS compatibility are
+        # intentionally checked through current Graph readback immediately
+        # before the first copy write; the insight snapshot does not carry a
+        # reliable structural budget contract.
+        target["copy_live_ready"] = not readiness_reasons
         target["copy_readiness_reasons"] = readiness_reasons
     return target
 

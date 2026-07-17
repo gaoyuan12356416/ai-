@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Ad Control V3 scheduler tick
+After=network-online.target drama-material-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=/mnt/data-disk/ai-ad-control-v3/config/runtime.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/ad_control_v3_runner.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=15min
+StandardOutput=append:/mnt/data-disk/ai-ad-control-v3/runtime/runner.log
+StandardError=append:/mnt/data-disk/ai-ad-control-v3/runtime/runner-error.log
+
+[Install]
+WantedBy=multi-user.target

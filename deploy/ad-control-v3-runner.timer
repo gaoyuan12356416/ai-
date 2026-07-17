@@ -1,0 +1,12 @@
+[Unit]
+Description=Run AI Ad Control V3 scheduler every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=false
+RandomizedDelaySec=0
+Unit=ad-control-v3-runner.service
+
+[Install]
+WantedBy=timers.target

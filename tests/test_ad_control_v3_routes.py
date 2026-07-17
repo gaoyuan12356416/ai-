@@ -97,6 +97,9 @@ class FakeService:
     def preview(self, actor, group_id, payload):
         return self._result("preview", actor, group_id, payload)
 
+    def execute(self, actor, group_id, payload):
+        return self._result("execute", actor, group_id, payload)
+
     def set_enabled(self, actor, group_id, enabled, confirm):
         return self._result("set_enabled", actor, group_id, enabled, confirm)
 
@@ -209,6 +212,18 @@ class AdControlV3RouteTests(unittest.TestCase):
         )
         self.assertEqual(200, enabled.status)
         self.assertEqual(("group:1", True, "ENABLE_LIVE_MODE"), self.service.calls[-1][1][1:])
+
+        executed = self.dispatch(
+            "/api/ad-control/v3/rule-groups/group%3A1/execute",
+            "POST",
+            FakeHandler(payload={"confirm": "EXECUTE_LIVE_RULE_GROUP"}),
+        )
+        self.assertEqual(200, executed.status)
+        self.assertEqual("execute", self.service.calls[-1][0])
+        self.assertEqual(
+            ("group:1", {"confirm": "EXECUTE_LIVE_RULE_GROUP"}),
+            self.service.calls[-1][1][1:],
+        )
 
         deleted = self.dispatch(
             "/api/ad-control/v3/rule-groups/group%3A1",

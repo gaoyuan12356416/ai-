@@ -313,6 +313,7 @@
     const supportsRuleGroupSearch = !searchExplicitlyDisabled && (!hasSearchFieldContract || (searchFields.includes("name") && searchFields.includes("group_id")));
     const runner = source.runner || source.scheduler || {};
     const canEnable = permissions.can_enable === true;
+    const canLiveExecute = permissions.can_live_execute === true;
     const schedulerAvailable = permissions.scheduler_available === true || runner.scheduler_available === true || runner.available === true || canEnable;
     return {
       actor: {
@@ -326,6 +327,7 @@
       capabilities: Object.assign({}, capabilities, { supportsRuleGroupSearch }),
       permissions: {
         canEnable,
+        canLiveExecute,
         schedulerAvailable,
         enableUnavailableReason: text(permissions.enable_unavailable_reason || runner.unavailable_reason, "计划调度器尚未发布"),
       },
@@ -343,6 +345,12 @@
       field_not_supported: "当前层级不支持这个筛选字段，请重新选择。",
       stale_preview: "规则已变化或试算已过期，请重新试算。",
       live_pause_disabled: "正式关闭总开关尚未开启。",
+      live_copy_disabled: "正式复制总开关尚未开启。",
+      live_mode_required: "请先把规则组保存为“正式执行”，然后重新试算。",
+      live_execute_confirm_required: "必须输入正式执行确认短语。",
+      copy_schema_mismatch: "复制落表结构与来源表不一致，已在调用 Meta 前熔断。",
+      missing_source_created_data: "命中对象没有可追溯的 created_data 来源记录，已阻止执行。",
+      carrier_budget_not_independent: "所选承载结构无法独立设置预算，请改用独立 Ad Set 或独立 Campaign。",
       copy_persistence_not_configured: "复制落表合同尚未配置，正式复制已安全阻断。",
     };
     return mapping[error && error.code] || text(error && error.message, "请求失败，请稍后重试。");
@@ -415,7 +423,7 @@
         <div class="toolbar-copy"><h2>新版规则组</h2><p>范围由短剧产品与优化师共同确定。</p></div>
         <div class="toolbar-actions"><button class="button button-primary" type="button" data-action="new-group"><span aria-hidden="true">＋</span>新建规则组</button></div>
       </div>
-      ${state.meta.permissions.canEnable ? "" : `<section class="scheduler-banner" role="status" aria-label="调度能力说明"><span class="scheduler-banner-icon" aria-hidden="true">i</span><div><strong>当前仅支持保存草稿 + 手动试算</strong><p>${h(state.meta.permissions.enableUnavailableReason)}，规则不能启用，也不会持续自动扫描。配置与试算结果仍会写入执行日志。</p></div><span class="pill pill-warning">启用已锁定</span></section>`}
+      ${state.meta.permissions.canEnable ? "" : `<section class="scheduler-banner" role="status" aria-label="调度能力说明"><span class="scheduler-banner-icon" aria-hidden="true">i</span><div><strong>${state.meta.permissions.canLiveExecute ? "真实暂停与复制已开放，可先手动执行" : "当前仅支持保存草稿 + 手动试算"}</strong><p>${h(state.meta.permissions.enableUnavailableReason)}。${state.meta.permissions.canLiveExecute ? "把规则保存为正式执行并完成试算后，可从列表点击“执行”。" : "规则不能启用，也不会持续自动扫描。配置与试算结果仍会写入执行日志。"}</p></div><span class="pill pill-warning">${state.meta.permissions.canLiveExecute ? "手动 Canary" : "启用已锁定"}</span></section>`}
       <section class="filter-bar" aria-label="规则组筛选">
         ${state.meta.capabilities.supportsRuleGroupSearch ? `<div class="field"><label for="ruleFilterKeyword">搜索</label><input id="ruleFilterKeyword" type="search" placeholder="搜索规则组名称或 ID" autocomplete="off" data-filter="keyword" value="${h(state.filters.keyword || "")}"></div>` : ""}
         <div class="field"><label for="ruleFilterProduct">产品</label><select id="ruleFilterProduct" data-filter="product">
@@ -458,6 +466,7 @@
       const toggleLabel = enabled ? "停用" : (toggleAvailable ? "启用" : "暂不可启用");
       const mutable = canMutateGroup(group, state.actor);
       const previewBusy = isInFlight(`preview:${id}`);
+      const executeBusy = isInFlight(`execute:${id}`);
       const groupBusy = isInFlight(`group-write:${id}`);
       const readOnlyHint = "该规则组不属于当前用户，仅可查看";
       const latest = group.last_execution_at || group.last_preview_at || group.updated_at;
@@ -472,6 +481,7 @@
         <td><div class="cell-actions">
           <button class="button button-small" type="button" data-action="edit-group" data-id="${h(id)}"${mutable && !groupBusy ? "" : ` disabled aria-disabled="true" title="${h(mutable ? "操作处理中" : readOnlyHint)}"`}>编辑</button>
           <button class="button button-small" type="button" data-action="preview-group" data-id="${h(id)}"${mutable && !previewBusy && !groupBusy ? "" : ` disabled aria-disabled="true" title="${h(mutable ? "试算处理中" : readOnlyHint)}"`}>${previewBusy ? "试算中…" : "试算"}</button>
+          ${group.run_mode === "live" && state.meta.permissions.canLiveExecute ? `<button class="button button-small button-danger" type="button" data-action="execute-group" data-id="${h(id)}"${mutable && !executeBusy && !groupBusy ? "" : ` disabled aria-disabled="true" title="${h(mutable ? "执行处理中" : readOnlyHint)}"`}>${executeBusy ? "执行中…" : "执行"}</button>` : ""}
           <button class="icon-button" type="button" title="${h(mutable ? "复制规则组" : readOnlyHint)}" aria-label="复制规则组 ${h(text(group.name))}" data-action="duplicate-group" data-id="${h(id)}"${mutable && !groupBusy ? "" : ' disabled aria-disabled="true"'}>⧉</button>
           <button class="icon-button" type="button" title="${h(!mutable ? readOnlyHint : (toggleAvailable ? toggleLabel : "计划调度器尚未发布：当前仅支持保存草稿和手动试算"))}" aria-label="${h(toggleLabel)} ${h(text(group.name))}" data-action="toggle-group" data-id="${h(id)}" data-enabled="${enabled ? "true" : "false"}" data-mode="${h(group.run_mode || "observe")}"${mutable && toggleAvailable && !groupBusy ? "" : ` disabled aria-disabled="true"${!toggleAvailable ? ' data-enable-blocked="true"' : ""}`}>${enabled ? "停" : "启"}</button>
           ${enabled ? `<button class="icon-button" type="button" title="${h(mutable ? "紧急停止" : readOnlyHint)}" aria-label="紧急停止 ${h(text(group.name))}" data-action="emergency-group" data-id="${h(id)}"${mutable && !groupBusy ? "" : ' disabled aria-disabled="true"'}>!</button>` : ""}
@@ -694,7 +704,7 @@
       <div class="section-card"><div class="section-head"><div><h3>运行模式</h3><p>运行模式与命中动作分开设置。“观察”不会调用 Meta 写接口。</p></div></div>
         <div class="section-body"><div class="mode-box">
           <label class="mode-option is-safe"><input type="radio" name="runMode" value="observe" data-bind="run_mode"${editor.run_mode === "observe" ? " checked" : ""}><span><strong>只观察</strong><p>${schedulerAvailable ? "持续扫描并记录本来会关闭或复制的对象，不执行外部写操作。" : "当前可保存观察配置并手动试算；计划调度器发布前不会持续自动扫描。"}</p></span></label>
-          <label class="mode-option is-risk"><input type="radio" name="runMode" value="live" data-bind="run_mode"${editor.run_mode === "live" ? " checked" : ""}><span><strong>正式执行</strong><p>仍需有效试算、二次确认和服务端总开关；复制当前会安全阻断。</p></span></label>
+          <label class="mode-option is-risk"><input type="radio" name="runMode" value="live" data-bind="run_mode"${editor.run_mode === "live" ? " checked" : ""}><span><strong>正式执行</strong><p>真实暂停与复制仍需有效试算、逐次确认和服务端总开关；复制会先创建为 PAUSED 并完成落表校验。</p></span></label>
         </div><div class="safe-default"><span aria-hidden="true">✓</span><div><strong>安全默认已生效</strong><p>${schedulerAvailable ? "新规则组由服务端强制保存为“停用 + 只观察”。即使在这里选择正式执行，保存本身也不会启用。" : "新规则组固定停用；本期只能保存草稿和手动试算，启用入口已锁定。"}</p></div></div></div>
       </div>
       <div class="section-card"><div class="section-head"><div><h3>当前层级能力</h3><p>字段能力由后端动态下发；不可可靠试算的字段只展示，不允许选入条件。</p></div></div><div class="section-body">${renderFieldCatalog()}</div></div>
@@ -801,7 +811,7 @@
   function renderCopyParameters(rule, index) {
     const copy = rule.copy_parameters || {};
     const mode = text(copy.budget_mode);
-    return `<div class="copy-options"><div><h4>复制参数</h4><p class="field-hint">当前仅支持配置与观察试算。正式复制会在 Token 和 Meta 请求之前安全阻断。</p></div>
+    return `<div class="copy-options"><div><h4>复制参数</h4><p class="field-hint">正式执行会先做 Token、来源映射、预算出价和落表结构校验；复制对象先保持 PAUSED。</p></div>
       <div class="form-grid three">
         <div class="field"><label for="copyBudgetMode${index}">预算计算方式</label><select id="copyBudgetMode${index}" data-rule-copy="budget_mode" data-index="${index}"><option value="">请选择预算方式</option>${option("actual_cpi_multiplier", "X × 实际 CPI", mode === "actual_cpi_multiplier")}${option("fixed_target_cpi_multiplier", "X × 固定目标 CPI", mode === "fixed_target_cpi_multiplier")}${option("source_budget_ratio", "来源预算 × 比例", mode === "source_budget_ratio")}</select></div>
         ${mode === "actual_cpi_multiplier" ? `<div class="field"><label for="copyBudgetMultiplier${index}">CPI 倍数</label><input id="copyBudgetMultiplier${index}" type="number" step="any" min="0" inputmode="decimal" placeholder="例如 10" value="${h(copy.budget_multiplier || "")}" data-rule-copy="budget_multiplier" data-index="${index}"></div>` : ""}
@@ -1159,6 +1169,40 @@
     }
   }
 
+  async function executeGroup(groupId) {
+    if (!groupId) return;
+    const group = listedGroup(groupId);
+    if (group && !canMutateGroup(group, state.actor)) {
+      toast("该规则组不属于当前用户，只能查看，不能正式执行。", "error");
+      return;
+    }
+    const flightKey = `execute:${groupId}`;
+    if (!beginInFlight(flightKey)) return;
+    renderRuleGroupShell();
+    try {
+      const confirmed = await confirmDialog({
+        title: "确认真实执行这个规则组？",
+        message: "系统会按最新试算结果真实暂停或复制 Meta 对象。复制对象先以 PAUSED 创建，落表和关联校验通过后才按服务端激活开关处理。请先确认试算命中对象无误。",
+        confirmLabel: "确认执行",
+        danger: true,
+        phrase: "EXECUTE_LIVE_RULE_GROUP",
+      });
+      if (!confirmed) return;
+      const result = await api(`/rule-groups/${encodeURIComponent(groupId)}/execute`, {
+        method: "POST",
+        body: JSON.stringify({ confirm: confirmed }),
+      });
+      const summary = result.summary || {};
+      toast(`正式执行完成：成功 ${formatCount(summary.succeeded_count || 0)}，跳过 ${formatCount(summary.skipped_count || 0)}，失败 ${formatCount(summary.failed_count || 0)}。`, summary.failed_count ? "error" : "success");
+      await loadRuleGroups();
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      endInFlight(flightKey);
+      if (!state.editor) renderRuleGroupShell();
+    }
+  }
+
   function setNestedValue(target, key, value) {
     target[key] = value;
     state.editorDirty = true;
@@ -1493,6 +1537,7 @@
     if (action === "rule-page-next") { state.list.page += 1; await loadRuleGroups(); return; }
     if (action === "edit-group") { await editGroup(actionNode.dataset.id); return; }
     if (action === "preview-group") { await previewGroup(actionNode.dataset.id, false); return; }
+    if (action === "execute-group") { await executeGroup(actionNode.dataset.id); return; }
     if (action === "duplicate-group") { await duplicateGroup(actionNode.dataset.id); return; }
     if (action === "toggle-group") { await toggleGroup(actionNode); return; }
     if (action === "emergency-group") { await emergencyGroup(actionNode.dataset.id); return; }

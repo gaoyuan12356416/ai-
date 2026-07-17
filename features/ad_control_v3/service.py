@@ -18,8 +18,16 @@ from .catalog import (
 from .channels import ChannelAdapter, FacebookAdapter, TikTokAdapter
 from .channels.facebook import FACEBOOK_ACCOUNT_SETTINGS_PLATFORM_ID, SOURCE_QUERY_MAX_EXECUTION_TIME_MS
 from .errors import AdControlV3Error
+from .live_execution import (
+    ENABLE_CONFIRMATION,
+    LIVE_CONFIRMATION,
+    MAX_COPY_TARGETS,
+    MAX_LIVE_TARGETS,
+    build_live_executor,
+)
 from .repository import MySQLRepository
 from .rule_engine import evaluate_candidates
+from .scheduler import candidate_schedule_due
 from .schemas import (
     ACTIONS,
     OBJECT_LEVELS,
@@ -258,7 +266,10 @@ class Service:
         clock: Callable[[], datetime] = _utc_now,
         preview_ttl_seconds: int = 1800,
         live_pause_enabled: bool = False,
+        live_copy_enabled: bool = False,
         scheduler_enabled: bool = False,
+        scheduler_live_enabled: bool = False,
+        live_executor: Any = None,
         scan_concurrency: int = 1,
     ) -> None:
         if repository is None or identity_resolver is None or snapshot_store is None:
@@ -271,7 +282,10 @@ class Service:
         self.clock = clock
         self.preview_ttl_seconds = max(60, min(86400, int(preview_ttl_seconds)))
         self.live_pause_enabled = bool(live_pause_enabled)
+        self.live_copy_enabled = bool(live_copy_enabled)
         self.scheduler_enabled = bool(scheduler_enabled)
+        self.scheduler_live_enabled = bool(scheduler_live_enabled)
+        self.live_executor = live_executor
         try:
             parsed_scan_concurrency = int(scan_concurrency)
         except (TypeError, ValueError):
@@ -460,11 +474,16 @@ class Service:
             ],
             "run_modes": [
                 {"value": "observe", "label": "只观察", "enabled": True},
-                {"value": "live", "label": "正式执行", "enabled": False, "reason": "live_pause_disabled"},
+                {
+                    "value": "live",
+                    "label": "正式执行",
+                    "enabled": bool(self.live_pause_enabled or self.live_copy_enabled),
+                    "reason": "" if (self.live_pause_enabled or self.live_copy_enabled) else "live_execution_disabled",
+                },
             ],
             "actions": [
-                {"value": "pause", "label": "关闭", "observe_ready": True, "live_ready": False},
-                {"value": "copy", "label": "复制", "observe_ready": True, "live_ready": False},
+                {"value": "pause", "label": "关闭", "observe_ready": True, "live_ready": self.live_pause_enabled},
+                {"value": "copy", "label": "复制", "observe_ready": True, "live_ready": self.live_copy_enabled},
             ],
             "field_catalog": {level: facebook_field_catalog(level) for level in OBJECT_LEVELS},
             "fields": facebook_field_catalog(),
@@ -475,11 +494,14 @@ class Service:
                 "is_admin": current.is_admin,
                 "can_select_optimizer": current.is_admin,
                 "current_optimizer_id": current_optimizer_id,
-                "live_pause_enabled": False,
-                "live_copy_enabled": False,
+                "live_pause_enabled": self.live_pause_enabled,
+                "live_copy_enabled": self.live_copy_enabled,
+                "can_live_execute": bool(self.live_executor and (self.live_pause_enabled or self.live_copy_enabled)),
                 "tiktok_enabled": False,
-                "can_enable": False,
-                "scheduler_enabled": False,
+                "can_enable": self.scheduler_enabled,
+                "scheduler_enabled": self.scheduler_enabled,
+                "scheduler_live_enabled": self.scheduler_live_enabled,
+                "enable_unavailable_reason": "" if self.scheduler_enabled else "计划调度器尚未发布；可先使用手动正式执行",
             },
             "capabilities": {
                 "rule_group_search": True,
@@ -719,7 +741,7 @@ class Service:
             "eligible_object_count": len(candidates) - len(blocked),
             "blocked_count": len(blocked),
             "blocked_reasons": _reason_counts(blocked),
-            "live_ready": False,
+            "live_ready": bool(self.live_pause_enabled or self.live_copy_enabled),
         }
 
     def preview(
@@ -727,6 +749,9 @@ class Service:
         actor: Any,
         group_id: str,
         payload: Optional[Mapping[str, Any]] = None,
+        *,
+        _candidate_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        _load_account_timezones: bool = False,
     ) -> Dict[str, Any]:
         current = Actor.from_value(actor)
         group = self._authorize_mutation(current, self.repository.get_rule_group(group_id))
@@ -754,7 +779,13 @@ class Service:
                 group.get("selection") or {},
             ),
         )
+        if _load_account_timezones:
+            # Internal runner-only switch. It cannot be submitted through the
+            # HTTP payload allowlist above.
+            scope["load_account_timezones"] = True
         candidates = self._scan_discover(self._adapter(group["channel"]), scope)
+        if _candidate_filter is not None:
+            candidates = [candidate for candidate in candidates if _candidate_filter(candidate)]
         now = self._now()
         result = evaluate_candidates(
             candidates,
@@ -839,7 +870,255 @@ class Service:
             "targets": result["targets"][:200],
             "target_count": len(result["targets"]),
             "truncated": len(result["targets"]) > 200,
-            "live_ready": False,
+            "live_ready": bool(self.live_pause_enabled or self.live_copy_enabled),
+        }
+
+    def execute(
+        self,
+        actor: Any,
+        group_id: str,
+        payload: Optional[Mapping[str, Any]] = None,
+        *,
+        trigger_source: str = "manual_execute",
+        require_enabled: bool = False,
+    ) -> Dict[str, Any]:
+        """Execute the latest immutable preview through the live boundary.
+
+        Manual execution intentionally does not require the scheduled-runner
+        ``enabled`` flag.  It still requires a live group, an unexpired exact
+        preview, ownership, a confirmation phrase and every server-side kill
+        switch.  This lets an optimizer run a controlled Canary before the
+        independent scheduler is released.
+        """
+
+        current = Actor.from_value(actor)
+        group = self._authorize_mutation(current, self.repository.get_rule_group(group_id))
+        body = dict(payload or {})
+        ensure_no_account_scope(body)
+        unknown = sorted(set(body) - {"confirm", "preview_id"})
+        if unknown:
+            raise AdControlV3Error("validation_error", "execute contains unsupported fields", details={"fields": unknown})
+        if group.get("run_mode") != "live":
+            raise AdControlV3Error("live_mode_required", "rule group must be saved in live mode", status=409)
+        if group.get("emergency_stopped"):
+            raise AdControlV3Error("rule_group_emergency_stopped", "rule group is emergency stopped", status=409)
+        if require_enabled and not group.get("enabled"):
+            raise AdControlV3Error("rule_group_not_enabled", "rule group is not enabled", status=409)
+        if str(body.get("confirm") or "") != LIVE_CONFIRMATION:
+            raise AdControlV3Error(
+                "live_execute_confirm_required",
+                "explicit live execution confirmation is required",
+                status=409,
+                details={"confirmation": LIVE_CONFIRMATION},
+            )
+        if not self.live_executor:
+            raise AdControlV3Error("live_execution_disabled", "live execution service is disabled", status=409)
+        preview_id = str(group.get("last_preview_id") or "")
+        requested_preview_id = str(body.get("preview_id") or "")
+        if requested_preview_id and requested_preview_id != preview_id:
+            raise AdControlV3Error("stale_preview", "preview does not match the latest rule configuration", status=409)
+        preview = self.repository.get_preview(preview_id, include_targets=True) if preview_id else None
+        if not preview or str(preview.get("behavior_hash") or "") != str(group.get("behavior_hash") or ""):
+            raise AdControlV3Error("stale_preview", "a current preview is required", status=409)
+        try:
+            if _parse_time_text(preview.get("expires_at")) <= self._now():
+                raise AdControlV3Error("stale_preview", "preview has expired", status=409)
+        except (TypeError, ValueError):
+            raise AdControlV3Error("stale_preview", "preview has expired", status=409)
+        preview_summary = preview.get("summary") if isinstance(preview.get("summary"), Mapping) else {}
+        planned_total = int(preview_summary.get("planned_count") or 0)
+        if planned_total > MAX_LIVE_TARGETS:
+            raise AdControlV3Error(
+                "live_target_limit_exceeded",
+                "preview contains too many live targets",
+                status=409,
+                details={"target_count": planned_total, "limit": MAX_LIVE_TARGETS},
+            )
+        targets = [
+            copy.deepcopy(dict(item))
+            for item in (preview.get("targets") or [])
+            if str(item.get("status") or "").startswith("would_")
+        ]
+        if len(targets) > MAX_LIVE_TARGETS:
+            raise AdControlV3Error(
+                "live_target_limit_exceeded",
+                "preview contains too many live targets",
+                status=409,
+                details={"target_count": len(targets), "limit": MAX_LIVE_TARGETS},
+            )
+        copy_count = len([item for item in targets if item.get("action") == "copy"])
+        if copy_count > MAX_COPY_TARGETS:
+            raise AdControlV3Error(
+                "copy_target_limit_exceeded",
+                "preview contains too many copy targets",
+                status=409,
+                details={"copy_count": copy_count, "limit": MAX_COPY_TARGETS},
+            )
+        for item in targets:
+            action = str(item.get("action") or "")
+            if action == "pause" and not self.live_pause_enabled:
+                raise AdControlV3Error("live_pause_disabled", "Facebook live pause is disabled", status=409)
+            if action == "copy" and not self.live_copy_enabled:
+                raise AdControlV3Error("live_copy_disabled", "Facebook live copy is disabled", status=409)
+
+        results: List[Dict[str, Any]] = []
+        meta_write_count = 0
+        for target in targets:
+            # Re-read the kill switch before each new target. An emergency
+            # stop or behavior edit never starts another external mutation.
+            latest = self.repository.get_rule_group(group["group_id"])
+            if (
+                not latest
+                or latest.get("emergency_stopped")
+                or (require_enabled and not latest.get("enabled"))
+                or str(latest.get("behavior_hash") or "") != str(group.get("behavior_hash") or "")
+            ):
+                remaining = copy.deepcopy(target)
+                remaining.update({"status": "skipped", "reason": "rule_group_stopped", "meta_write_count": 0})
+                results.append(remaining)
+                continue
+            result = self.live_executor.execute(group, target)
+            meta_write_count += int(result.get("meta_write_count") or 0)
+            results.append(result)
+
+        now = self._now()
+        now_text = _time_text(now)
+        execution_id = uuid.uuid4().hex
+        summary = {
+            "planned_count": len(targets),
+            "pause_count": len([item for item in targets if item.get("action") == "pause"]),
+            "copy_count": copy_count,
+            "succeeded_count": len([item for item in results if item.get("status") == "succeeded"]),
+            "skipped_count": len([item for item in results if item.get("status") == "skipped"]),
+            "failed_count": len([item for item in results if item.get("status") == "failed"]),
+            "meta_write_count": meta_write_count,
+        }
+        immutable_snapshot = {
+            "snapshot_version": 1,
+            "kind": "execution",
+            "execution_id": execution_id,
+            "preview_id": preview_id,
+            "rule_group": {key: copy.deepcopy(group.get(key)) for key in (
+                "group_id", "channel", "object_level", "run_mode", "optimizer_id", "products",
+                "account_timezones", "rules", "schedule", "quotas", "selection",
+                "config_version", "behavior_hash",
+            )},
+            "summary": summary,
+            "targets": results,
+            "created_at": now_text,
+            "finished_at": now_text,
+        }
+        snapshot = self.snapshot_store.write_snapshot("execution", execution_id, immutable_snapshot)
+        status = "failed" if results and summary["failed_count"] == len(results) else (
+            "partial_failed" if summary["failed_count"] else "completed"
+        )
+        execution_record = {
+            "execution_id": execution_id,
+            "rule_group_id": group["group_id"],
+            "preview_id": preview_id,
+            "config_version": group["config_version"],
+            "behavior_hash": group["behavior_hash"],
+            "optimizer_id": group["optimizer_id"],
+            "channel": group["channel"],
+            "object_level": group["object_level"],
+            "run_mode": "live",
+            "trigger_source": clean_text(trigger_source, "trigger_source", required=True, max_length=32),
+            "status": status,
+            "summary": summary,
+            "snapshot_relative_path": snapshot["relative_path"],
+            "snapshot_sha256": snapshot["sha256"],
+            "snapshot_byte_size": snapshot["byte_size"],
+            "created_by_user_id": current.user_id,
+            "created_at": now_text,
+            "finished_at": now_text,
+        }
+        self.repository.save_execution(execution_record, results)
+        return dict(execution_record, targets=results)
+
+    def scheduled_group_due_now(
+        self,
+        group: Mapping[str, Any],
+        now: Optional[datetime] = None,
+        timezone_values: Optional[Sequence[str]] = None,
+    ) -> bool:
+        """Cheap pre-scan gate based on reviewed account timezone values."""
+
+        if not self.scheduler_enabled or not group.get("enabled") or group.get("emergency_stopped"):
+            return False
+        schedule = group.get("schedule") or {}
+        if not schedule:
+            return False
+        timezones = list(group.get("account_timezones") or []) or list(
+            timezone_values if timezone_values is not None else (self.timezone_loader() or [])
+        )
+        current = now or self._now()
+        for timezone_name in timezones:
+            due, _, _ = candidate_schedule_due(
+                {"account_timezone": str(timezone_name or "")}, schedule, current
+            )
+            if due:
+                return True
+        return False
+
+    def run_scheduled_group(self, group_id: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Run one already-claimed scheduler event using account-local time."""
+
+        group = self.repository.get_rule_group(group_id)
+        if not group or not group.get("enabled") or group.get("emergency_stopped"):
+            return {"status": "stopped", "execution_id": "", "meta_write_count": 0}
+        current = now or self._now()
+        schedule = group.get("schedule") or {}
+        if not schedule:
+            raise AdControlV3Error("schedule_required", "enabled rule group has no schedule", status=409)
+
+        due_count = 0
+
+        def due_candidate(candidate: Dict[str, Any]) -> bool:
+            nonlocal due_count
+            due, reason, context = candidate_schedule_due(candidate, schedule, current)
+            candidate.update(context)
+            if due:
+                due_count += 1
+                return True
+            if reason in {"missing_account_timezone", "invalid_account_timezone"}:
+                candidate["blocked_reason"] = candidate.get("blocked_reason") or reason
+                return True
+            return False
+
+        actor = {
+            "user_id": str(group.get("owner_user_id") or "v3-runner"),
+            "name": "V3 runner",
+            "is_admin": True,
+            "optimizer_id": group.get("optimizer_id"),
+        }
+        preview = self.preview(
+            actor,
+            group["group_id"],
+            {"trigger_source": "schedule"},
+            _candidate_filter=due_candidate,
+            _load_account_timezones=True,
+        )
+        if group.get("run_mode") != "live" or due_count == 0:
+            return {
+                "status": "observed" if due_count else "not_due",
+                "execution_id": str(preview.get("execution_id") or ""),
+                "preview_id": str(preview.get("preview_id") or ""),
+                "meta_write_count": 0,
+            }
+        if not self.scheduler_live_enabled:
+            raise AdControlV3Error("runner_live_not_released", "scheduled live execution is not released", status=409)
+        executed = self.execute(
+            actor,
+            group["group_id"],
+            {"confirm": LIVE_CONFIRMATION, "preview_id": preview["preview_id"]},
+            trigger_source="schedule",
+            require_enabled=True,
+        )
+        return {
+            "status": executed.get("status") or "completed",
+            "execution_id": str(executed.get("execution_id") or ""),
+            "preview_id": str(preview.get("preview_id") or ""),
+            "meta_write_count": int((executed.get("summary") or {}).get("meta_write_count") or 0),
         }
 
     def set_enabled(
@@ -867,17 +1146,30 @@ class Service:
             if expired:
                 raise AdControlV3Error("stale_preview", "preview has expired", status=409)
             if group.get("run_mode") == "live":
-                if any(rule.get("action") == "copy" for rule in group.get("rules") or []):
+                if str(confirm or "") != ENABLE_CONFIRMATION:
                     raise AdControlV3Error(
-                        "copy_persistence_not_configured",
-                        "copy persistence contract is not configured",
+                        "live_enable_confirm_required",
+                        "explicit live enable confirmation is required",
                         status=409,
+                        details={"confirmation": ENABLE_CONFIRMATION},
                     )
-                raise AdControlV3Error("live_pause_disabled", "live mutation is disabled", status=409)
+                actions = {str(rule.get("action") or "") for rule in group.get("rules") or []}
+                if "pause" in actions and not self.live_pause_enabled:
+                    raise AdControlV3Error("live_pause_disabled", "live pause is disabled", status=409)
+                if "copy" in actions and not self.live_copy_enabled:
+                    raise AdControlV3Error("live_copy_disabled", "live copy is disabled", status=409)
             if not self.scheduler_enabled:
                 raise AdControlV3Error(
                     "runner_scheduler_not_configured",
                     "scheduled observe runner has not been released; use manual preview",
+                    status=409,
+                )
+            if not group.get("schedule"):
+                raise AdControlV3Error("schedule_required", "a schedule is required before enabling", status=409)
+            if group.get("run_mode") == "live" and not self.scheduler_live_enabled:
+                raise AdControlV3Error(
+                    "runner_live_not_released",
+                    "scheduled live execution has not been released; use manual execution",
                     status=409,
                 )
         return self.repository.set_group_state(
@@ -1022,6 +1314,11 @@ def build_service(
     timezone_loader: Optional[Callable[[], Sequence[str]]] = None,
     clock: Callable[[], datetime] = _utc_now,
     preview_ttl_seconds: int = 1800,
+    live_pause_enabled: bool = False,
+    live_copy_enabled: bool = False,
+    scheduler_enabled: bool = False,
+    scheduler_live_enabled: bool = False,
+    live_executor: Any = None,
     scan_concurrency: int = 1,
 ) -> Service:
     return Service(
@@ -1035,8 +1332,11 @@ def build_service(
         timezone_loader=timezone_loader,
         clock=clock,
         preview_ttl_seconds=preview_ttl_seconds,
-        live_pause_enabled=False,
-        scheduler_enabled=False,
+        live_pause_enabled=live_pause_enabled,
+        live_copy_enabled=live_copy_enabled,
+        scheduler_enabled=scheduler_enabled,
+        scheduler_live_enabled=scheduler_live_enabled,
+        live_executor=live_executor,
         scan_concurrency=scan_concurrency,
     )
 
@@ -1233,6 +1533,17 @@ def build_service_from_environment() -> Service:
     )
     repository = MySQLRepository(store_reader, store_writer)
     identity_resolver = OptimizerIdentityResolver(optimizer_candidates, active_optimizers)
+    live_executor = build_live_executor(
+        source_reader,
+        store_reader,
+        store_writer,
+        environment=os.environ,
+    )
+    live_capabilities = live_executor.capabilities()
+    runner_enabled = str(os.environ.get("AD_CONTROL_V3_RUNNER_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}
+    observe_released = str(os.environ.get("AD_CONTROL_V3_RUNNER_OBSERVE_RELEASED") or "").strip().lower() in {"1", "true", "yes", "on"}
+    scheduler_enabled = runner_enabled and observe_released
+    scheduler_live_enabled = scheduler_enabled and str(os.environ.get("AD_CONTROL_V3_RUNNER_LIVE_RELEASED") or "").strip().lower() in {"1", "true", "yes", "on"}
     return build_service(
         repository=repository,
         facebook_adapter=FacebookAdapter(
@@ -1244,6 +1555,11 @@ def build_service_from_environment() -> Service:
         snapshot_store=data_root,
         timezone_loader=timezones,
         preview_ttl_seconds=int(os.environ.get("AD_CONTROL_V3_PREVIEW_TTL_SECONDS", "1800")),
+        live_pause_enabled=live_capabilities["live_pause_enabled"],
+        live_copy_enabled=live_capabilities["live_copy_enabled"],
+        scheduler_enabled=scheduler_enabled,
+        scheduler_live_enabled=scheduler_live_enabled,
+        live_executor=live_executor,
         scan_concurrency=scan_concurrency,
     )
 

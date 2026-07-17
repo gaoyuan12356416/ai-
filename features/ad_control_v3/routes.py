@@ -312,6 +312,9 @@ def _dispatch_api(handler: Any, method: str, segments: Tuple[str, ...], parsed: 
         if action == "preview":
             _send_json(handler, 200, service().preview(actor, group_id, payload))
             return
+        if action == "execute":
+            _send_json(handler, 200, service().execute(actor, group_id, payload))
+            return
         if action == "enabled":
             enabled = payload.get("enabled")
             if not isinstance(enabled, bool):

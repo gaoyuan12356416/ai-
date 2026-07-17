@@ -478,6 +478,7 @@ class FacebookAdapter(ChannelAdapter):
             for value in (scope.get("account_timezones") or [])
             if str(value or "").strip()
         }
+        load_account_timezones = bool(requested_timezones) or scope.get("load_account_timezones") is True
         context_fields, _, raw_metric_fields, computed_fields = _projection_for_level(
             object_level,
             scope.get("required_fields") if "required_fields" in scope else None,
@@ -485,7 +486,7 @@ class FacebookAdapter(ChannelAdapter):
         # Validate only the source structures this request will actually read.
         # An unrestricted timezone scope must never touch the account settings
         # table, including through a startup/schema probe.
-        self._ensure_schema(include_timezone=bool(requested_timezones))
+        self._ensure_schema(include_timezone=load_account_timezones)
         sql, columns = self._query_for_level(
             object_level,
             scope.get("required_fields") if "required_fields" in scope else None,
@@ -537,7 +538,7 @@ class FacebookAdapter(ChannelAdapter):
         # are returned to the service and therefore before preview persistence.
         timezone_cache = (
             self._load_account_timezones(candidate_accounts, deadline)
-            if requested_timezones
+            if load_account_timezones
             else {}
         )
 
