@@ -132,6 +132,8 @@ CREATE TABLE IF NOT EXISTS `ads_ai`.`ad_control_v3_execution` (
   `created_at` DATETIME(6) NOT NULL,
   `finished_at` DATETIME(6) NULL,
   PRIMARY KEY (`execution_id`),
+  KEY `idx_v3_execution_created` (`created_at`,`execution_id`),
+  KEY `idx_v3_execution_preview_mode` (`preview_id`,`run_mode`,`trigger_source`),
   KEY `idx_v3_execution_optimizer_created` (`optimizer_id`,`created_at`),
   KEY `idx_v3_execution_group_created` (`rule_group_id`,`created_at`),
   KEY `idx_v3_execution_filter` (`channel`,`object_level`,`run_mode`,`status`,`created_at`),
@@ -162,6 +164,9 @@ CREATE TABLE IF NOT EXISTS `ads_ai`.`ad_control_v3_execution_target` (
   UNIQUE KEY `uk_v3_execution_target_no` (`execution_id`,`target_no`),
   UNIQUE KEY `uk_v3_execution_object` (`execution_id`,`ad_account_id`,`object_level`,`object_id`),
   KEY `idx_v3_execution_target_result` (`execution_id`,`status`,`action`),
+  KEY `idx_v3_execution_target_action_lookup` (`execution_id`,`action`),
+  KEY `idx_v3_execution_target_object_lookup` (`execution_id`,`object_id`),
+  KEY `idx_v3_execution_target_product_lookup` (`execution_id`,`product_value`),
   KEY `idx_v3_execution_target_product` (`product_value`,`optimizer_id`,`created_at`),
   CONSTRAINT `fk_v3_execution_target_execution`
     FOREIGN KEY (`execution_id`) REFERENCES `ads_ai`.`ad_control_v3_execution` (`execution_id`)

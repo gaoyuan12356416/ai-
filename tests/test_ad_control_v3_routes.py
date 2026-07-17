@@ -246,6 +246,10 @@ class AdControlV3RouteTests(unittest.TestCase):
         self.assertEqual(400, page.status)
         self.assertEqual("validation_error", page.json()["error"])
 
+        deep_page = self.dispatch("/api/ad-control/v3/executions?page=1001")
+        self.assertEqual(400, deep_page.status)
+        self.assertEqual("validation_error", deep_page.json()["error"])
+
     def test_oversized_json_is_rejected_before_service_construction(self):
         handler = FakeHandler(payload={})
         handler.headers["Content-Length"] = str(routes.MAX_JSON_BODY_BYTES + 1)

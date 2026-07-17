@@ -85,6 +85,38 @@ class MemoryRepositoryTests(unittest.TestCase):
             self.repository.save_preview({}, [{}] * (MAX_PERSISTED_TARGETS + 1))
         self.assertEqual("target_persist_limit_exceeded", raised.exception.code)
 
+    def test_scheduled_live_preview_is_collapsed_before_filter_and_pagination(self):
+        self.repository.executions = {
+            "scheduled-observe": {
+                "execution_id": "scheduled-observe", "preview_id": "p1", "run_mode": "observe",
+                "trigger_source": "schedule", "optimizer_id": 248, "created_at": "2026-07-17 01:00:00", "targets": [],
+            },
+            "scheduled-live": {
+                "execution_id": "scheduled-live", "preview_id": "p1", "run_mode": "live",
+                "trigger_source": "schedule", "optimizer_id": 248, "created_at": "2026-07-17 01:01:00", "targets": [],
+            },
+            "manual-observe": {
+                "execution_id": "manual-observe", "preview_id": "p2", "run_mode": "observe",
+                "trigger_source": "manual_preview", "optimizer_id": 248, "created_at": "2026-07-17 01:02:00", "targets": [],
+            },
+            "orphan-observe": {
+                "execution_id": "orphan-observe", "preview_id": "p3", "run_mode": "observe",
+                "trigger_source": "schedule", "optimizer_id": 248, "created_at": "2026-07-17 01:03:00", "targets": [],
+            },
+        }
+
+        page = self.repository.list_executions(page=1, page_size=20)
+        self.assertEqual(3, page["total"])
+        self.assertNotIn("scheduled-observe", {item["execution_id"] for item in page["items"]})
+        observed = self.repository.list_executions({"run_mode": "observe"})
+        self.assertEqual(
+            {"manual-observe", "orphan-observe"},
+            {item["execution_id"] for item in observed["items"]},
+        )
+        detail = self.repository.get_execution("scheduled-live")
+        self.assertEqual("scheduled-observe", detail["precheck_execution_id"])
+        self.assertEqual("2026-07-17 01:00:00", detail["precheck_created_at"])
+
 
 class FakeCursor:
     def __init__(self, connection):
@@ -203,6 +235,30 @@ class MySQLBoundaryTests(unittest.TestCase):
         self.assertIn("e.created_at>=%s", count_sql)
         self.assertIn("e.created_at<%s", count_sql)
         self.assertEqual(("2026-07-16 16:00:00", "2026-07-17 16:00:00"), count_params)
+
+    def test_execution_query_collapses_paired_scheduled_preview_in_count_and_page(self):
+        readers = []
+
+        def reader_factory():
+            conn = FakeConnection("reader")
+            readers.append(conn)
+            return conn
+
+        repository = MySQLRepository(reader_factory, lambda: FakeConnection("writer"))
+        repository.list_executions()
+        count_sql = readers[0].calls[0][0]
+        page_sql = readers[0].calls[1][0]
+        for sql in (count_sql, page_sql):
+            self.assertIn("paired.preview_id=e.preview_id", sql)
+            self.assertIn("paired.run_mode='live'", sql)
+            self.assertIn("e.run_mode='observe'", sql)
+
+    def test_execution_query_rejects_more_than_93_days(self):
+        repository = MySQLRepository(lambda: FakeConnection("reader"), lambda: FakeConnection("writer"))
+        with self.assertRaises(AdControlV3Error) as raised:
+            repository.list_executions({"date_from": "2026-01-01", "date_to": "2026-04-04"})
+        self.assertEqual("validation_error", raised.exception.code)
+        self.assertEqual(93, raised.exception.details["maximum_days"])
 
     def test_enable_update_contains_atomic_preview_guard(self):
         source = (ROOT / "features" / "ad_control_v3" / "repository.py").read_text(encoding="utf-8")

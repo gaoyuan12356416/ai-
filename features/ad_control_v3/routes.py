@@ -154,9 +154,13 @@ def _positive_integer(value: Any, field: str, default: int, maximum: int) -> int
     return parsed
 
 
-def _pagination(query: Dict[str, Any]) -> Tuple[int, int, Dict[str, Any]]:
+def _pagination(
+    query: Dict[str, Any],
+    *,
+    maximum_page: int = 1_000_000,
+) -> Tuple[int, int, Dict[str, Any]]:
     filters = dict(query)
-    page = _positive_integer(filters.pop("page", None), "page", 1, 1_000_000)
+    page = _positive_integer(filters.pop("page", None), "page", 1, maximum_page)
     page_size = _positive_integer(filters.pop("page_size", None), "page_size", 20, 100)
     return page, page_size, filters
 
@@ -355,7 +359,7 @@ def _dispatch_api(handler: Any, method: str, segments: Tuple[str, ...], parsed: 
         if method != "GET":
             _method_not_allowed(handler, ("GET",))
             return
-        page, page_size, filters = _pagination(query)
+        page, page_size, filters = _pagination(query, maximum_page=1_000)
         _send_json(handler, 200, service().list_executions(actor, filters, page, page_size))
         return
 

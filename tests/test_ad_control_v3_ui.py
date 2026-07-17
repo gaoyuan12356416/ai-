@@ -435,6 +435,16 @@ def test_lists_are_server_paginated_and_have_loading_empty_error_states():
     assert 'setPageStatus("error"' in source
     assert "/rule-groups?" in source
     assert "/executions?" in source
+    assert "20 条/页 · 服务端分页" in source
+    assert "logRequestController.abort()" in source
+    assert "signal: controller.signal" in source
+
+
+def test_scheduled_live_log_marks_precheck_as_merged():
+    source = JS.read_text(encoding="utf-8")
+    assert "预检已合并" in source
+    assert "预检并锁定候选" in source
+    assert 'item.run_mode === "live" && item.trigger_source === "schedule"' in source
 
 
 def test_scope_estimate_requires_and_sends_explicit_metric_window():
@@ -774,6 +784,7 @@ for _test_function in [
     test_visual_rule_builder_has_no_raw_json_editor,
     test_copy_carrier_strategy_is_object_level_specific,
     test_lists_are_server_paginated_and_have_loading_empty_error_states,
+    test_scheduled_live_log_marks_precheck_as_merged,
     test_scope_estimate_requires_and_sends_explicit_metric_window,
     test_candidate_selection_is_validated_before_save_and_routes_to_step_four,
     test_scheduler_unavailable_disables_enable_but_keeps_stop_available,

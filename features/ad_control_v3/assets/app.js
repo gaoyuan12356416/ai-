@@ -42,6 +42,7 @@
   };
   const inFlight = new Set();
   let menuLayoutFrame = 0;
+  let logRequestController = null;
 
   document.addEventListener("DOMContentLoaded", init);
 
@@ -157,6 +158,7 @@
       method: settings.method,
       headers,
       body: settings.body,
+      signal: settings.signal,
       credentials: "same-origin",
       cache: "no-store",
     });
@@ -1365,7 +1367,7 @@
         <div class="field"><label for="logObjectId">对象 ID</label><input id="logObjectId" type="search" autocomplete="off" placeholder="输入 Campaign、Ad Set 或 Ad ID" value="${h(state.logFilters.object_id || "")}" data-log-filter="object_id"></div>
         <div class="filter-actions"><button class="button button-small" type="button" data-action="reset-log-filters">清空</button><button class="button button-small" type="button" data-action="apply-log-filters">查询</button></div>
       </section>
-      <section class="panel table-panel" aria-labelledby="logListTitle"><div class="panel-header"><div><h2 id="logListTitle">事件与批次</h2><p>${state.logs.loading ? "正在读取…" : `共 ${formatCount(state.logs.total)} 条记录`}</p></div><span class="pill">服务端分页</span></div><div aria-live="polite">${renderLogTable()}</div></section>
+      <section class="panel table-panel" aria-labelledby="logListTitle"><div class="panel-header"><div><h2 id="logListTitle">事件与批次</h2><p>${state.logs.loading ? "正在读取…" : `共 ${formatCount(state.logs.total)} 条记录`}</p></div><span class="pill">20 条/页 · 服务端分页</span></div><div aria-live="polite">${renderLogTable()}</div></section>
       ${state.detail || state.detailLoading ? renderExecutionDetail() : ""}`;
     scheduleOpenMenuLayout();
   }
@@ -1394,9 +1396,11 @@
       const success = executionValue(item, ["success_count", "completed_count"]);
       const skipped = executionValue(item, ["skipped_count"]);
       const failed = executionValue(item, ["error_count", "failed_count"]);
+      const trigger = triggerLabel(item.trigger_source || item.trigger);
+      const mergedPrecheck = item.run_mode === "live" && item.trigger_source === "schedule";
       return `<tr>
         <td><div class="cell-title"><strong>${h(prettyDate(item.started_at || item.created_at || item.business_date))}</strong><small class="log-id">${h(id)}</small></div></td>
-        <td><div class="cell-title"><strong>${h(text(item.rule_group_name, "未命名规则组"))}</strong><small>${h(text(item.rule_group_id))} · ${h(triggerLabel(item.trigger_source || item.trigger))}</small></div></td>
+        <td><div class="cell-title"><strong>${h(text(item.rule_group_name, "未命名规则组"))}</strong><small>${h(text(item.rule_group_id))} · ${h(trigger)}${mergedPrecheck ? " · 预检已合并" : ""}</small></div></td>
         <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 2).map(product => `<span class="chip" title="${h(product)}">${h(productLabel(product))}</span>`).join("")}${products.length > 2 ? `<span class="chip">+${products.length - 2}</span>` : ""}</div><small class="cell-muted">${h(optimizerLabel(item.optimizer_id, item.optimizer_name))}</small></div></td>
         <td><div class="cell-stack"><span class="pill pill-info">${h(LEVEL_LABELS[item.object_level] || item.object_level || "—")}</span><small class="cell-muted">${h(actions.map(value => ACTION_LABELS[value] || value).join(" / ") || "—")} · ${h(MODE_LABELS[item.run_mode] || item.run_mode || "—")}</small></div></td>
         <td><div class="cell-stack"><span>命中 ${h(displayCount(targetCount))}</span><small class="cell-muted">成功 ${h(displayCount(success))} · 跳过 ${h(displayCount(skipped))} · 异常 ${h(displayCount(failed))}</small></div></td>
@@ -1429,19 +1433,24 @@
   }
 
   async function loadExecutions() {
+    if (logRequestController) logRequestController.abort();
+    const controller = new AbortController();
+    logRequestController = controller;
     const serial = ++state.requestSerial;
     state.logs.loading = true;
     renderLogShell();
     try {
-      const payload = await api(`/executions?${queryString(state.logFilters, state.logs.page, state.logs.pageSize)}`);
+      const payload = await api(`/executions?${queryString(state.logFilters, state.logs.page, state.logs.pageSize)}`, { signal: controller.signal });
       if (serial !== state.requestSerial) return;
       const normalized = normalizeList(payload, ["items", "executions", "rows"]);
       Object.assign(state.logs, normalized, { loading: false });
     } catch (error) {
       if (serial !== state.requestSerial) return;
+      if (error && error.name === "AbortError") return;
       state.logs.loading = false;
       toast(errorMessage(error), "error");
     }
+    if (logRequestController === controller) logRequestController = null;
     renderLogShell();
   }
 
@@ -1484,7 +1493,12 @@
   function normalizeStages(item) {
     const explicit = array(item.stages || item.timeline).map(stage => ({ label: text(stage.label || stage.name || stage.stage), at: stage.at || stage.created_at || stage.timestamp, status: text(stage.status) })).filter(stage => stage.label);
     if (explicit.length) return explicit;
-    return [["事件创建", item.created_at, "pending"], ["开始扫描", item.started_at, "running"], ["完成", item.completed_at || item.finished_at, item.status]].filter(stage => stage[1]).map(stage => ({ label: stage[0], at: stage[1], status: stage[2] }));
+    const mergedPrecheck = item.run_mode === "live" && item.trigger_source === "schedule" && item.precheck_created_at;
+    return [
+      [mergedPrecheck ? "预检并锁定候选" : "事件创建", mergedPrecheck ? item.precheck_created_at : item.created_at, mergedPrecheck ? item.precheck_status : "pending"],
+      ["开始正式执行", item.started_at, "running"],
+      ["完成", item.completed_at || item.finished_at, item.status],
+    ].filter(stage => stage[1]).map(stage => ({ label: stage[0], at: stage[1], status: stage[2] }));
   }
 
   function normalizeReasons(item) {

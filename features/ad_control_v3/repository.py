@@ -106,6 +106,7 @@ EXECUTION_FILTERS = {
     "optimizer_id", "product", "products", "action", "object_id", "keyword", "date_from", "date_to",
 }
 GROUP_FILTERS = {"channel", "object_level", "run_mode", "optimizer_id", "enabled", "product", "products", "keyword", "query"}
+MAX_EXECUTION_QUERY_DAYS = 93
 
 
 def _validated_group_filters(filters: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -132,6 +133,15 @@ def _validated_execution_filters(filters: Optional[Mapping[str, Any]]) -> Dict[s
                 raise AdControlV3Error("validation_error", "%s must use YYYY-MM-DD" % key)
     if result.get("date_from") and result.get("date_to") and str(result["date_from"]) > str(result["date_to"]):
         raise AdControlV3Error("validation_error", "date_from must not exceed date_to")
+    if result.get("date_from") and result.get("date_to"):
+        date_from = datetime.strptime(str(result["date_from"]), "%Y-%m-%d").date()
+        date_to = datetime.strptime(str(result["date_to"]), "%Y-%m-%d").date()
+        if (date_to - date_from).days + 1 > MAX_EXECUTION_QUERY_DAYS:
+            raise AdControlV3Error(
+                "validation_error",
+                "execution date range exceeds the safe query limit",
+                details={"maximum_days": MAX_EXECUTION_QUERY_DAYS},
+            )
     if result.get("action") and result["action"] not in {"pause", "copy"}:
         raise AdControlV3Error("validation_error", "unsupported action filter")
     for key, maximum in (("object_id", 64), ("keyword", 128), ("rule_group_id", 64)):
@@ -395,6 +405,22 @@ class MemoryRepository:
         filters = _validated_execution_filters(filters)
         with self._lock:
             rows = [copy.deepcopy(item) for item in self.executions.values()]
+        paired_live_preview_ids = {
+            str(item.get("preview_id") or "")
+            for item in rows
+            if item.get("run_mode") == "live"
+            and item.get("trigger_source") == "schedule"
+            and str(item.get("preview_id") or "")
+        }
+        rows = [
+            item
+            for item in rows
+            if not (
+                item.get("run_mode") == "observe"
+                and item.get("trigger_source") == "schedule"
+                and str(item.get("preview_id") or "") in paired_live_preview_ids
+            )
+        ]
         if optimizer_scope is not None:
             rows = [item for item in rows if int(item.get("optimizer_id") or 0) == int(optimizer_scope)]
         for key in ("rule_group_id", "channel", "object_level", "run_mode", "status", "trigger_source"):
@@ -449,6 +475,22 @@ class MemoryRepository:
             if not item:
                 return None
             result = copy.deepcopy(item)
+            if result.get("run_mode") == "live" and result.get("trigger_source") == "schedule":
+                preview_id = str(result.get("preview_id") or "")
+                paired = next(
+                    (
+                        candidate
+                        for candidate in self.executions.values()
+                        if candidate.get("run_mode") == "observe"
+                        and candidate.get("trigger_source") == "schedule"
+                        and str(candidate.get("preview_id") or "") == preview_id
+                    ),
+                    None,
+                ) if preview_id else None
+                if paired:
+                    result["precheck_execution_id"] = str(paired.get("execution_id") or "")
+                    result["precheck_created_at"] = paired.get("created_at")
+                    result["precheck_status"] = paired.get("status")
             targets = list(result.get("targets") or [])
             limit = max(1, min(200, int(target_limit)))
             result["target_total"] = len(targets)
@@ -936,7 +978,12 @@ class MySQLRepository:
     ) -> Dict[str, Any]:
         page, page_size = _page(page, page_size)
         filters = _validated_execution_filters(filters)
-        where = ["1=1"]
+        where = [
+            "NOT (e.run_mode='observe' AND e.trigger_source='schedule' "
+            "AND e.preview_id<>'' AND EXISTS (SELECT 1 FROM %s paired "
+            "WHERE paired.preview_id=e.preview_id AND paired.run_mode='live' "
+            "AND paired.trigger_source='schedule'))" % qualified_table("execution")
+        ]
         params: List[Any] = []
         if optimizer_scope is not None:
             where.append("optimizer_id=%s")
@@ -986,7 +1033,7 @@ class MySQLRepository:
             cursor.execute("SELECT COUNT(*) AS total FROM %s e WHERE %s" % (qualified_table("execution"), where_sql), tuple(params))
             total = int(self._rows(cursor)[0]["total"])
             cursor.execute(
-                "SELECT e.* FROM %s e WHERE %s ORDER BY created_at DESC,execution_id DESC LIMIT %%s OFFSET %%s"
+                "SELECT e.* FROM %s e WHERE %s ORDER BY e.created_at DESC,e.execution_id DESC LIMIT %%s OFFSET %%s"
                 % (qualified_table("execution"), where_sql),
                 tuple(params + [page_size, (page - 1) * page_size]),
             )
@@ -1007,6 +1054,18 @@ class MySQLRepository:
                 return None
             item = rows[0]
             item["summary"] = deserialize_json(item.pop("summary_json", None), {})
+            if item.get("run_mode") == "live" and item.get("trigger_source") == "schedule" and item.get("preview_id"):
+                cursor.execute(
+                    "SELECT execution_id,created_at,status FROM %s "
+                    "WHERE preview_id=%%s AND run_mode='observe' AND trigger_source='schedule' "
+                    "ORDER BY created_at DESC,execution_id DESC LIMIT 1" % qualified_table("execution"),
+                    (item["preview_id"],),
+                )
+                paired_rows = self._rows(cursor)
+                if paired_rows:
+                    item["precheck_execution_id"] = paired_rows[0].get("execution_id")
+                    item["precheck_created_at"] = paired_rows[0].get("created_at")
+                    item["precheck_status"] = paired_rows[0].get("status")
             cursor.execute("SELECT COUNT(*) AS total FROM %s WHERE execution_id=%%s" % qualified_table("execution_target"), (execution_id,))
             item["target_total"] = int(self._rows(cursor)[0]["total"])
             limit = max(1, min(200, int(target_limit)))
