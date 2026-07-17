@@ -70,3 +70,13 @@ python3 scripts/sync_ad_control_v3_delivery_products.py \
 - 产品目录：计划哈希 `01d1c0519aa2f5009256a678cac9d08241149e4241da99fd248a4ac419463eae`，新增/更新 129 条；最终 FB active 144 条。
 - 发布后 overlay=`unchanged`、API service=`active`、V2 页面 HTTP 200；live pause/copy 开关未修改且均为 `1`。
 - 验收 observe 规则已软删除，执行审计保留且 `meta_write_count=0`。
+
+## 2026-07-17 下拉裁切热修发布记录
+
+- runtime 提交：`3b2e2ca02b161de16c4aa6cdf6bf5f5893ee79a4`。
+- 完整发布前备份：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-dropdown-20260717T070021Z-3b2e2ca`，43 个文件，manifest 校验通过。
+- exact overlay 检查点：`/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-774785c07d37-to-3b2e2ca02b16`。
+- 服务器精确提交 163/163 通过；发布后重复 overlay=`unchanged`，代码资源与 release 逐文件一致。
+- 仅重启 `drama-material-api.service`；runner/timer 未重启，live pause/copy 开关保持 `1`。
+- 生产浏览器默认视口与 1582×430 矮视口均通过，后者自动向上展开并保留内部滚动；验证未保存规则、未触发 Meta 或数据库业务写入。
+- 回滚时恢复上述 exact overlay 检查点并仅重启 API；无需回滚数据库或 Meta 对象，因为本热修没有 DDL/DML 和业务动作。
