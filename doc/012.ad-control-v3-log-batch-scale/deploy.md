@@ -14,3 +14,10 @@
 - 代码：使用 deployer 从目标 commit 回退到发布前 commit。
 - DDL：索引通常可保留；如必须回退，执行 `sql/904_drop_execution_log_query_indexes.sql`。
 - 数据：不删除、不恢复任何执行日志；代码和索引回滚均不改变审计数据。
+
+## 2026-07-17 实际发布记录
+
+- Runtime commit：`a4dad6d2ff708b04a434945b5c18e9f6caf2fdef`。
+- 完整检查点：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-log-scale-20260717T174639+0800-a4dad6d`。
+- Exact overlay 检查点：`/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-f55be78cf536-to-a4dad6d2ff70`。
+- 调度器仅在DDL和overlay窗口暂停，发布后恢复；未启用规则组，未产生Meta写入。

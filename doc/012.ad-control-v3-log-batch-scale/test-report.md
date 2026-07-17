@@ -18,9 +18,11 @@
 - 现有成对计划记录应用合并查询后：逻辑批次 25，第一页返回 20。
 - 发布前执行计划显示管理员默认列表为全表扫描、Preview 配对子查询无可用索引，证明本次索引迁移有必要。
 
-## 待发布验证
+## 生产验证
 
-- 精确 commit staging/deployer。
-- DDL 回读与发布后 `EXPLAIN`。
-- 动态页面真实浏览器验证。
-- 数据行数前后不变校验。
+- 真实线上基线：`f55be78cf5366913528116f5f63ad104fb5b9572`；部署 runtime：`a4dad6d2ff708b04a434945b5c18e9f6caf2fdef`。
+- 生产 staging 使用数据盘 `TMPDIR`，191 tests、Python 编译、JS 语法和 deployer `--check` 全部通过。
+- 5 个二级索引均由 reader 回读列顺序；Preview 配对子查询由全表扫描变为 `ref + Using index`。
+- DDL 和代码发布前后均为 execution 32 行、execution_target 5462 行，未修改或删除审计数据。
+- 已登录生产浏览器：逻辑总数 25，第一页 20；计划正式执行行显示“预检已合并”，详情时间线显示“预检并锁定候选 → 完成”；手动试算仍单独显示。
+- `drama-material-api.service` 与 `ad-control-v3-runner.timer` 均为 active；恢复后连续自然 tick 为 `groups=0, meta_writes=0, failed=0`。
