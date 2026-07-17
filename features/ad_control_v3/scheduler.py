@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Tuple
 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None
+
+
+_FIXED_OFFSET_PATTERN = re.compile(
+    r"^(?:(?:UTC|GMT)\s*)?([+-]?)(\d{1,2})(?::?([0-5]\d))?$",
+    re.IGNORECASE,
+)
 
 
 def _minutes(value: Any) -> int:
@@ -42,17 +49,47 @@ def _inside_window(now_minute: int, schedule: Mapping[str, Any]) -> bool:
     return now_minute >= start or now_minute <= end
 
 
+def _account_timezone(value: Any) -> Any:
+    """Resolve IANA names and the numeric UTC offsets stored by the account table."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(text)
+        except Exception:
+            pass
+    if text.upper() in {"UTC", "GMT"}:
+        return timezone.utc
+    matched = _FIXED_OFFSET_PATTERN.fullmatch(text)
+    if not matched:
+        return None
+    sign_text, hour_text, minute_text = matched.groups()
+    hours = int(hour_text)
+    minutes = int(minute_text or 0)
+    if hours > 14 or (hours == 14 and minutes):
+        return None
+    offset_minutes = hours * 60 + minutes
+    if sign_text == "-":
+        offset_minutes = -offset_minutes
+    return timezone(timedelta(minutes=offset_minutes))
+
+
 def candidate_schedule_due(
     candidate: Mapping[str, Any],
     schedule: Mapping[str, Any],
     now_utc: datetime,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     timezone_name = str(candidate.get("account_timezone") or "").strip()
-    if not timezone_name or ZoneInfo is None:
+    if not timezone_name:
         return False, "missing_account_timezone", {}
     try:
         current = now_utc if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
-        local = current.astimezone(ZoneInfo(timezone_name))
+        timezone_value = _account_timezone(timezone_name)
+        if timezone_value is None:
+            raise ValueError("invalid account timezone")
+        local = current.astimezone(timezone_value)
     except Exception:
         return False, "invalid_account_timezone", {}
     now_minute = local.hour * 60 + local.minute
