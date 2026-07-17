@@ -134,7 +134,7 @@ class AdControlV3RouteTests(unittest.TestCase):
     def test_dynamic_pages_and_assets_require_cookie_module_and_are_no_store(self):
         page = self.dispatch("/api/ad-control/v3/ui/rule-groups")
         self.assertEqual(200, page.status)
-        self.assertEqual(["ad_control_center"], page.cookie_checks)
+        self.assertEqual(["ad_control_v3"], page.cookie_checks)
         self.assertEqual([], page.module_checks)
         self.assertEqual("no-store", page.response_headers["Cache-Control"])
         self.assertIn("text/html", page.response_headers["Content-Type"])
@@ -146,7 +146,7 @@ class AdControlV3RouteTests(unittest.TestCase):
 
         asset = self.dispatch("/api/ad-control/v3/assets/app.css")
         self.assertEqual(200, asset.status)
-        self.assertEqual(["ad_control_center"], asset.cookie_checks)
+        self.assertEqual(["ad_control_v3"], asset.cookie_checks)
         self.assertEqual("nosniff", asset.response_headers["X-Content-Type-Options"])
         self.assertIn("text/css", asset.response_headers["Content-Type"])
 
@@ -161,7 +161,7 @@ class AdControlV3RouteTests(unittest.TestCase):
         handler = FakeHandler(session={"user_id": "admin-1", "role": "admin"})
         result = self.dispatch("/api/ad-control/v3/meta", handler=handler)
         self.assertEqual(200, result.status)
-        self.assertEqual(["ad_control_center"], result.module_checks)
+        self.assertEqual(["ad_control_v3"], result.module_checks)
         call = self.service.calls[0]
         self.assertEqual("meta", call[0])
         self.assertTrue(call[1][0]["is_admin"])

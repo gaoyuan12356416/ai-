@@ -13,7 +13,7 @@ V3_GROUP = {
     "key": "ad_control_v3",
     "label": "AI自动调控 V3",
     "order": 6,
-    "module": "ad_control_center",
+    "module": "ad_control_v3",
     "items": [
         {
             "key": "adControlV3Rules",
@@ -22,6 +22,7 @@ V3_GROUP = {
             "href": "/api/ad-control/v3/ui/rule-groups",
             "enabled": True,
             "order": 10,
+            "module": "ad_control_v3",
         },
         {
             "key": "adControlV3Logs",
@@ -30,6 +31,7 @@ V3_GROUP = {
             "href": "/api/ad-control/v3/ui/execution-logs",
             "enabled": True,
             "order": 20,
+            "module": "ad_control_v3",
         },
     ],
 }

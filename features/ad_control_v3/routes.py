@@ -19,7 +19,7 @@ from .time_utils import DISPLAY_TIMEZONE_LABEL, convert_audit_times
 
 
 PREFIX = "/api/ad-control/v3"
-MODULE_KEY = "ad_control_center"
+MODULE_KEY = "ad_control_v3"
 PAGE_NAMES = frozenset({"rule-groups", "execution-logs"})
 ASSET_TYPES = {
     "app.css": "text/css; charset=utf-8",
