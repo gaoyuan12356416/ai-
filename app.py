@@ -263,6 +263,7 @@ import secrets
 
 import shutil
 import socket
+import ipaddress
 
 
 
@@ -682,7 +683,7 @@ from socketserver import ThreadingMixIn
 
 
 
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 
 
 
@@ -748,7 +749,11 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import requests
 
-from fb_playable_generator import build_browser_preview_html, build_meta_playable_html
+from fb_playable_generator import (
+    build_browser_preview_html,
+    build_meta_playable_html,
+    discover_playable_resource_references,
+)
 
 try:
 
@@ -1273,6 +1278,15 @@ PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES = int(
 )
 PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES = int(
     os.environ.get("PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES", "4096")
+)
+PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT = max(
+    1, int(os.environ.get("PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT", "5"))
+)
+PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT = max(
+    1, int(os.environ.get("PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT", "20"))
+)
+PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS = max(
+    0, min(5, int(os.environ.get("PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS", "3")))
 )
 PLAYABLE_PREVIEW_MAX_CONCURRENCY = max(
     1,
@@ -22344,6 +22358,215 @@ def find_playable_entry(game_dir):
     raise ValueError("uploaded static page must include an html entry")
 
 
+def _playable_remote_origin(parsed):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid static page URL port") from exc
+    if port is None:
+        port = 443 if parsed.scheme.lower() == "https" else 80
+    return parsed.scheme.lower(), str(parsed.hostname or "").lower().rstrip("."), port
+
+
+def _validate_playable_remote_url(url, expected_origin=None, required_path_prefix=""):
+    text = str(url or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("static page URL must start with http:// or https://")
+    if parsed.username or parsed.password:
+        raise ValueError("static page URL must not include credentials")
+    origin = _playable_remote_origin(parsed)
+    if expected_origin and origin != expected_origin:
+        raise ValueError("remote playable resources must stay on the entry origin")
+    decoded_path = unquote(parsed.path or "/").replace("\\", "/")
+    normalized_path = posixpath.normpath(decoded_path)
+    if not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+    if required_path_prefix:
+        prefix = posixpath.normpath(required_path_prefix).rstrip("/") + "/"
+        if not normalized_path.startswith(prefix):
+            raise ValueError("remote playable resource escapes the entry directory")
+    try:
+        addresses = {
+            item[4][0].split("%", 1)[0]
+            for item in socket.getaddrinfo(
+                parsed.hostname,
+                origin[2],
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except (OSError, socket.gaierror) as exc:
+        raise ValueError("unable to resolve static page host") from exc
+    if not addresses:
+        raise ValueError("unable to resolve static page host")
+    for address in addresses:
+        try:
+            remote_ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError("invalid static page host address") from exc
+        if not remote_ip.is_global:
+            raise ValueError("static page URL resolves to a non-public address")
+    return parsed
+
+
+def _fetch_playable_remote_bytes(
+    session,
+    url,
+    expected_origin,
+    required_path_prefix,
+    max_bytes,
+):
+    current_url = str(url or "").strip()
+    redirects = 0
+    while True:
+        _validate_playable_remote_url(
+            current_url,
+            expected_origin=expected_origin,
+            required_path_prefix=required_path_prefix,
+        )
+        try:
+            response = session.get(
+                current_url,
+                allow_redirects=False,
+                stream=True,
+                timeout=(
+                    PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT,
+                    PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT,
+                ),
+                headers={"User-Agent": "YingliangPlayablePreview/1.0"},
+            )
+        except requests.RequestException as exc:
+            raise ValueError("unable to download remote playable resource") from exc
+        try:
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = str(response.headers.get("Location") or "").strip()
+                if not location or redirects >= PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS:
+                    raise ValueError("remote playable redirect limit exceeded")
+                current_url = urljoin(current_url, location)
+                redirects += 1
+                continue
+            if response.status_code != 200:
+                raise ValueError(
+                    "remote playable resource returned HTTP %s"
+                    % response.status_code
+                )
+            declared_length = int(response.headers.get("Content-Length") or 0)
+            if declared_length > max_bytes:
+                raise ValueError("remote playable resource exceeds download limit")
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise ValueError("remote playable resource exceeds download limit")
+            return current_url, bytes(body), str(
+                response.headers.get("Content-Type") or ""
+            ).lower()
+        finally:
+            response.close()
+
+
+def _decode_playable_remote_text(content):
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def download_playable_static_site(source_url, game_dir):
+    initial = _validate_playable_remote_url(source_url)
+    expected_origin = _playable_remote_origin(initial)
+    required_path_prefix = posixpath.dirname(initial.path or "/") or "/"
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        final_url, entry_content, content_type = _fetch_playable_remote_bytes(
+            session,
+            source_url,
+            expected_origin,
+            required_path_prefix,
+            PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES,
+        )
+        final_parsed = _validate_playable_remote_url(
+            final_url,
+            expected_origin=expected_origin,
+            required_path_prefix=required_path_prefix,
+        )
+        entry_name = sanitize_playable_filename(
+            posixpath.basename(final_parsed.path),
+            "index.html",
+        )
+        if not entry_name.lower().endswith((".html", ".htm")):
+            if "text/html" not in content_type:
+                raise ValueError("remote static page is not HTML")
+            entry_name = "index.html"
+        if not entry_content:
+            raise ValueError("remote static page is empty")
+        os.makedirs(game_dir, exist_ok=True)
+        with open(os.path.join(game_dir, entry_name), "wb") as handle:
+            handle.write(entry_content)
+
+        entry_base_url = urljoin(final_url, "./")
+        entry_base_path = posixpath.dirname(final_parsed.path or "/") or "/"
+        queued = list(
+            discover_playable_resource_references(
+                _decode_playable_remote_text(entry_content),
+                "",
+            )
+        )
+        downloaded = {entry_name}
+        total_bytes = len(entry_content)
+        while queued:
+            key = queued.pop(0)
+            if key in downloaded or key == entry_name:
+                continue
+            if len(downloaded) >= PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES:
+                raise ValueError("remote playable contains too many files")
+            remaining = PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES - total_bytes
+            if remaining <= 0:
+                raise ValueError("remote playable exceeds extracted size limit")
+            resource_url = urljoin(entry_base_url, key)
+            _, content, resource_type = _fetch_playable_remote_bytes(
+                session,
+                resource_url,
+                expected_origin,
+                entry_base_path,
+                remaining,
+            )
+            target_path = os.path.abspath(
+                os.path.join(game_dir, *key.replace("\\", "/").split("/"))
+            )
+            game_root = os.path.abspath(game_dir)
+            if os.path.commonpath((game_root, target_path)) != game_root:
+                raise ValueError("remote playable resource escapes output directory")
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, "wb") as handle:
+                handle.write(content)
+            downloaded.add(key)
+            total_bytes += len(content)
+            extension = os.path.splitext(key.lower())[1]
+            if extension in (".html", ".htm", ".json", ".js", ".mjs", ".css") or any(
+                marker in resource_type
+                for marker in ("text/", "javascript", "json")
+            ):
+                for discovered in discover_playable_resource_references(
+                    _decode_playable_remote_text(content),
+                    posixpath.dirname(key),
+                ):
+                    if discovered not in downloaded and discovered not in queued:
+                        queued.append(discovered)
+        return {
+            "entry": entry_name,
+            "file_count": len(downloaded),
+            "total_bytes": total_bytes,
+        }
+    finally:
+        session.close()
+
+
 def parse_playable_preview_multipart(handler, content_length):
     content_type = str(handler.headers.get("Content-Type", "") or "")
     if "\r" in content_type or "\n" in content_type:
@@ -22373,6 +22596,9 @@ def parse_playable_preview_multipart(handler, content_length):
     upload = None
     upload_fields = {"static_page", "file", "static_file", "game_file", "zip", "html"}
     text_fields = {
+        "static_page",
+        "static_page_url",
+        "game_url",
         "play_count",
         "trial_seconds",
         "store_url",
@@ -22412,11 +22638,23 @@ def parse_playable_preview_multipart(handler, content_length):
             raise ValueError(
                 "invalid multipart field encoding: %s" % key
             ) from exc
-    if not upload:
-        raise ValueError("missing upload file")
-    if not upload.get("filename"):
-        raise ValueError("uploaded file must include a filename")
-    payload.update(upload)
+    source_values = [
+        str(payload.get(key) or "").strip()
+        for key in ("static_page", "static_page_url", "game_url")
+        if str(payload.get(key) or "").strip()
+    ]
+    if len(source_values) > 1:
+        raise ValueError("multiple static page URL fields are not supported")
+    if upload and source_values:
+        raise ValueError("provide either an upload file or a static page URL, not both")
+    if upload:
+        if not upload.get("filename"):
+            raise ValueError("uploaded file must include a filename")
+        payload.update(upload)
+    elif source_values:
+        payload["source_url"] = source_values[0]
+    else:
+        raise ValueError("missing upload file or static page URL")
     return payload
 
 
@@ -22438,7 +22676,20 @@ def parse_playable_preview_request(handler):
     zip_base64 = payload.get("static_zip_base64") or payload.get("zip_base64")
     html_base64 = payload.get("static_html_base64") or payload.get("html_base64")
     static_html = payload.get("static_html") or payload.get("html")
-    if zip_base64:
+    source_values = [
+        str(payload.get(key) or "").strip()
+        for key in ("static_page", "static_page_url", "game_url")
+        if str(payload.get(key) or "").strip()
+    ]
+    if len(source_values) > 1:
+        raise ValueError("multiple static page URL fields are not supported")
+    provided_sources = sum(bool(value) for value in (zip_base64, html_base64, static_html))
+    provided_sources += 1 if source_values else 0
+    if provided_sources > 1:
+        raise ValueError("provide exactly one static page source")
+    if source_values:
+        payload["source_url"] = source_values[0]
+    elif zip_base64:
         payload["content"] = base64.b64decode(
             re.sub(r"\s+", "", str(zip_base64 or "")), validate=True
         )
@@ -22453,8 +22704,9 @@ def parse_playable_preview_request(handler):
         payload["filename"] = payload.get("filename") or "index.html"
     else:
         raise ValueError(
-            "missing static_html, static_html_base64 or static_zip_base64 "
-            "(legacy html, html_base64 and zip_base64 are also accepted)"
+            "missing static_page URL, static_html, static_html_base64 or "
+            "static_zip_base64 (legacy game_url, html, html_base64 and "
+            "zip_base64 are also accepted)"
         )
     return payload
 
@@ -22537,11 +22789,14 @@ def _create_playable_preview(payload, preview_id):
     trial_seconds = int(payload.get("trial_seconds") or PLAYABLE_PREVIEW_TRIAL_SECONDS)
     trial_seconds = max(1, min(120, trial_seconds))
     filename = sanitize_playable_filename(payload.get("filename"), "game.zip")
+    source_url = str(payload.get("source_url") or "").strip()
     content = payload.get("content") or b""
     if isinstance(content, str):
         content = content.encode("utf-8")
-    if not content:
-        raise ValueError("uploaded content is empty")
+    if source_url and content:
+        raise ValueError("provide either uploaded content or a static page URL, not both")
+    if not source_url and not content:
+        raise ValueError("static page source is empty")
     if len(content) > PLAYABLE_PREVIEW_MAX_UPLOAD_BYTES:
         raise ValueError("upload too large")
 
@@ -22549,23 +22804,28 @@ def _create_playable_preview(payload, preview_id):
     game_dir = os.path.join(output_dir, "game")
     os.makedirs(game_dir, exist_ok=True)
 
-    source_path = os.path.join(output_dir, filename)
-    with open(source_path, "wb") as fp:
-        fp.write(content)
+    source_path = None
 
     try:
-        if filename.lower().endswith(".zip"):
-            safe_extract_zip(
-                source_path,
-                game_dir,
-                PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES,
-                PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES,
-            )
+        if source_url:
+            remote_source = download_playable_static_site(source_url, game_dir)
+            game_src = "game/" + remote_source["entry"]
         else:
-            html_name = "index.html" if not filename.lower().endswith((".html", ".htm")) else filename
-            with open(os.path.join(game_dir, sanitize_playable_filename(html_name, "index.html")), "wb") as fp:
+            source_path = os.path.join(output_dir, filename)
+            with open(source_path, "wb") as fp:
                 fp.write(content)
-        game_src = find_playable_entry(game_dir)
+            if filename.lower().endswith(".zip"):
+                safe_extract_zip(
+                    source_path,
+                    game_dir,
+                    PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES,
+                    PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES,
+                )
+            else:
+                html_name = "index.html" if not filename.lower().endswith((".html", ".htm")) else filename
+                with open(os.path.join(game_dir, sanitize_playable_filename(html_name, "index.html")), "wb") as fp:
+                    fp.write(content)
+            game_src = find_playable_entry(game_dir)
     except Exception:
         shutil.rmtree(output_dir, ignore_errors=True)
         raise
@@ -22599,7 +22859,7 @@ def _create_playable_preview(payload, preview_id):
         fp.write(preview_document_bytes)
 
     shutil.rmtree(game_dir, ignore_errors=True)
-    if source_path != index_path and os.path.exists(source_path):
+    if source_path and source_path != index_path and os.path.exists(source_path):
         os.remove(source_path)
 
     zip_path = os.path.join(output_dir, "playable-preview.zip")

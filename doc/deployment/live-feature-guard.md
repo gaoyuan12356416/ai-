@@ -4,6 +4,8 @@
 
 Before deploying any branch, the candidate must still include all active live feature tokens listed in `deploy/live_feature_guard.json`.
 
+The `app.py` rules must follow the dispatcher that production actually executes. For features dispatched directly by the monolith, guard the permission key, canonical route, and route parser; reserve `try_handle_*` tokens for branches that really import and call those modular handlers. A stale handler name is a failed guard definition, not evidence that the live route exists.
+
 ## Required Checks
 
 Run locally before upload:

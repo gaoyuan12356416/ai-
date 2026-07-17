@@ -20,7 +20,7 @@ The canonical `/api/fb-playable/preview` route also requires the tracked nginx i
 
 Production authentication uses `PLAYABLE_PREVIEW_AUTH_MODE=enforce` with a strong server-only `PLAYABLE_PREVIEW_API_TOKEN`; `FB_PLAYABLE_API_TOKEN` is a migration alias. Send the token as a bearer token or `X-API-Token`. Missing or invalid credentials return `403`; enforce mode without a configured server token fails closed with `503`.
 
-Accepted sources are an HTML file or ZIP uploaded as multipart field `static_page` (legacy field names remain supported), or JSON fields `static_html`, `static_html_base64`, or `static_zip_base64` (legacy `html`, `html_base64`, and `zip_base64` aliases remain accepted).
+Accepted sources are a public remote entry URL passed as multipart/JSON `static_page` (legacy `static_page_url` and `game_url` remain supported), an HTML file or ZIP uploaded as multipart `static_page` (legacy upload field names remain supported), or JSON fields `static_html`, `static_html_base64`, or `static_zip_base64` (legacy `html`, `html_base64`, and `zip_base64` aliases remain accepted). Each request must provide exactly one source.
 
 Only process controlled, trusted source bundles. The scanner, runtime guards, opaque-origin sandbox, and CSP are layered defenses; this endpoint is not a general-purpose isolation service for arbitrary hostile JavaScript.
 
@@ -28,6 +28,8 @@ The service converts the source into a Meta-oriented single-file package:
 
 - the ZIP contains only top-level `index.html`;
 - local scripts, styles, images, WASM, JSON, and archive files are embedded;
+- remote URL mode recursively fetches statically discoverable relative HTML/CSS/JS/JSON dependencies, requires public HTTP(S), and keeps redirects/resources on the same origin and under the entry directory;
+- missing runtime resources fail generation instead of returning `meta_compatible: true` for a page that cannot start; dynamically constructed dependencies must be supplied in a complete ZIP;
 - inner `window.fetch` and `window.XMLHttpRequest` are rebound to the embedded resource map before game scripts run, so source loaders are handled without rewriting unrelated object methods or keys;
 - executable `location` references are rewritten to a frozen facade, `window.open` is locked, and dynamic anchor navigation is captured, while Defold `sys.open_url` is bridged to the parent CTA;
 - timer globals are locked to function-only wrappers, while eval/Function aliases and constructor recovery are rejected;

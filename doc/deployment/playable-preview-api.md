@@ -6,11 +6,12 @@
 
 ## 1. 接口说明
 
-该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成可直接测试商店跳转的浏览器试玩页，以及符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。
+该接口接收可运行的远程静态页 URL、本地 HTML 或 ZIP 游戏包，生成可直接测试商店跳转的浏览器试玩页，以及符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。
 
 新版生成逻辑会：
 
 - 把游戏入口及本地脚本、样式、图片、音频、WASM、JSON 和归档资源嵌入一个 `index.html`；
+- 当来源是远程静态页 URL 时，先抓取入口页及同源、同目录下可静态识别的依赖资源，再进入单文件封装；
 - 使用 `LZMA + script-safe Base94` 压缩大型运行时资源；
 - 在执行原游戏脚本前完成内存资源包初始化；
 - 在游戏脚本启动前把 iframe 内的原生 `fetch` / `XMLHttpRequest` 运行时绑定到内存资源层，由该层接管资源加载；
@@ -56,25 +57,28 @@ X-API-Token: <token>
 
 ### 4.1 multipart/form-data 上传
 
-推荐用于上传本地 `.html` 或 `.zip` 文件。
+可用于传远程静态页 URL，或上传本地 `.html` / `.zip` 文件。两种来源只能选择一种。
 
 文件字段：
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `static_page` | 六选一 | 推荐字段，上传 HTML 或完整 ZIP 静态包 |
+| `static_page` | 六选一 | 推荐字段，上传 HTML 或完整 ZIP 静态包；带 `filename` 时按文件处理 |
 | `file` | 六选一 | 兼容旧字段 |
 | `static_file` | 六选一 | 兼容旧字段 |
 | `game_file` | 六选一 | 兼容旧字段 |
 | `zip` | 六选一 | 兼容旧字段 |
 | `html` | 六选一 | 兼容旧字段 |
 
-文件字段只能传一个，优先使用 `static_page`；重复文本字段或同时上传多个文件会被拒绝。
+文件字段只能传一个，优先使用 `static_page`；重复文本字段、同时上传多个文件，或同时提供文件与 URL 都会被拒绝。
 
 文本字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `static_page` | string | 与文件来源二选一 | 推荐的远程入口 URL 字段；不带 `filename` 时按文本 URL 处理 |
+| `static_page_url` | string | 与文件来源二选一 | 远程入口 URL 的兼容字段 |
+| `game_url` | string | 与文件来源二选一 | 远程入口 URL 的旧字段别名 |
 | `store_url` | string | 是 | `http://` 或 `https://` 商店链接；只写入普通浏览器 `preview.html`，不会写入 Meta `index.html` |
 | `play_count` | int | 否 | 最大试玩次数，默认及有效最小值为 `1` |
 | `title` | string | 否 | 生成 HTML 的标题 |
@@ -98,12 +102,27 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
   -F 'title=Boxrob'
 ```
 
+直接传远程静态页 URL：
+
+```bash
+curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
+  -H 'Authorization: Bearer <token>' \
+  -F 'static_page=https://static-oss.neon-arcade.ai/playwave/prod/sites/yvw8y3mxfp5f/index.html' \
+  -F 'store_url=https://play.google.com/store/apps/details?id=ai.fungen.android' \
+  -F 'play_count=1' \
+  -F 'trial_seconds=20' \
+  -F 'title=Toy Box Sorting Chaos'
+```
+
 ### 4.2 application/json 上传
 
 适合服务间调用。内容字段任选一个：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
+| `static_page` | string | 推荐字段，直接传远程静态页 URL |
+| `static_page_url` | string | `static_page` URL 的兼容字段 |
+| `game_url` | string | `static_page` URL 的旧字段别名 |
 | `static_html` | string | 直接传 HTML 文本 |
 | `static_html_base64` | string | 传 HTML 文件的 Base64 |
 | `static_zip_base64` | string | 传 ZIP 文件的 Base64 |
@@ -127,7 +146,7 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 }
 ```
 
-接口不接受 `static_page_url` 或 `game_url`。调用方必须先下载完整静态包，再上传文件内容；仅提供一个远程入口 URL 无法保证依赖资源完整，也不符合 Meta 单文件要求。
+远程 URL、HTML 文本、HTML Base64、ZIP Base64 或 multipart 文件必须且只能提供一种。URL 模式只允许公网 `http(s)` 地址，拒绝凭据 URL、内网/回环/链路本地地址；重定向最多 3 次，依赖资源必须保持与入口相同的 origin 和目录前缀。服务会递归抓取 HTML、CSS、JavaScript 和 JSON 中可静态识别的相对资源；缺少任何运行时资源时返回 `400`，不会生成一个 `meta_compatible: true` 但无法启动的试玩页。动态拼接且无法静态识别的资源仍应改用完整 ZIP 上传。
 
 ## 5. 成功返回
 
@@ -239,6 +258,7 @@ Meta 上传页面提示的“最大 5 MB”不能按 `5 MiB` 或只检查压缩 
 - 最终 `playable-preview.zip <= 4,800,000 bytes`；
 - ZIP 只包含顶层 `index.html`；
 - HTML 中没有可直连外网的资源 URL、`window.open` 或 location 直接跳转；原游戏代码里的 `XMLHttpRequest`/`fetch` 会在运行时被绑定到内存资源层；
+- HTML、CSS、JavaScript 和 JSON 中可静态识别的运行时相对资源必须全部存在，否则生成阶段直接拒绝；
 - 运行时图片/媒体相对路径会被动态资源桥转换为内嵌 `blob:` URL，空 favicon 声明 `data:,` 会被安全剔除；
 - `localStorage` / `sessionStorage` 使用 iframe 生命周期内的内存实现，不需要加入 `allow-same-origin`；
 - 直接 `location` 引用会改写到不可导航的门面，动态链接点击和 popup 会被 CTA 桥接层接管；
@@ -306,8 +326,15 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 | `upload too large` | 原始上传内容超过服务端上传限制，默认 80 MiB |
 | `duplicate multipart field` | multipart 中同一个文本字段出现多次 |
 | `multiple upload files are not supported` | 同时传入多个文件或多个文件别名 |
-| `missing upload file` | multipart 请求没有文件字段 |
-| `missing static_html...` | JSON 未提供 HTML 或 ZIP 内容字段 |
+| `missing upload file or static page URL` | multipart 请求既没有文件字段，也没有远程 URL |
+| `missing static_page URL...` | JSON 未提供 URL、HTML 或 ZIP 内容字段 |
+| `provide either an upload file or a static page URL, not both` | multipart 同时提供了上传文件和远程 URL |
+| `provide exactly one static page source` | JSON 同时提供了多种静态页来源 |
+| `static page URL resolves to a non-public address` | URL 指向内网、回环或其他非公网地址 |
+| `remote playable resources must stay on the entry origin` | URL 依赖或重定向离开入口域名、协议或端口 |
+| `remote playable resource escapes the entry directory` | URL 依赖或重定向离开入口页面所在目录 |
+| `remote playable resource returned HTTP ...` | 入口或依赖资源下载失败 |
+| `missing runtime resource...` | HTML/JS/JSON/CSS 引用了未上传或未成功抓取的本地资源 |
 | `Only base64 data is allowed` | JSON Base64 内容包含非法字符或格式不完整 |
 | `missing store_url` | 未提供商店链接 |
 | `store_url must start with http:// or https://` | 商店链接格式不合法 |
@@ -328,7 +355,7 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 | `invalid multipart request body` | multipart Content-Type、边界或正文不完整 |
 | `invalid multipart field encoding` | multipart 文本字段声明了未知或不可解码字符集 |
 | `JSON request body must be an object` | JSON 顶层不是对象 |
-| `uploaded content is empty` | 文件或 Base64 解码后的内容为空 |
+| `static page source is empty` | 文件或 Base64 解码后的内容为空 |
 | `play_count must be >= 0` | 试玩次数传入负数 |
 | `File is not a zip file` | 上传内容不是有效 ZIP |
 | `CSS @import is not supported` | CSS 仍依赖无法安全打包的导入样式 |

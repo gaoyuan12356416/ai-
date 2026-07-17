@@ -10,9 +10,8 @@
           "path": "app.py",
           "contains": [
             "drama_synthesis",
-            "try_handle_drama_synthesis_get",
-            "try_handle_drama_synthesis_post",
-            "try_handle_drama_synthesis_delete"
+            "/api/drama-material/jobs",
+            "parse_job_route"
           ]
         },
         {
@@ -51,9 +50,8 @@
           "path": "app.py",
           "contains": [
             "cover_synthesis",
-            "try_handle_cover_synthesis_get",
-            "try_handle_cover_synthesis_post",
-            "try_handle_cover_synthesis_delete",
+            "/api/drama-screenshot-material/jobs",
+            "parse_screenshot_job_route",
             "is_screenshot_generation_no_output_error"
           ]
         },
@@ -93,9 +91,8 @@
           "path": "app.py",
           "contains": [
             "ad_material_tasks",
-            "try_handle_ad_material_get",
-            "try_handle_ad_material_post",
-            "try_handle_ad_material_delete",
+            "/api/ad-material/tasks",
+            "parse_ad_material_task_route",
             "recover_inflight_ad_material_tasks"
           ]
         },

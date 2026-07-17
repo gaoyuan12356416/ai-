@@ -36,6 +36,36 @@ CSS_URL_PATTERN = re.compile(
     r"url\(\s*(?:\"(?P<double>(?:\\.|[^\"\\])*)\"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>(?:\\.|[^)\s\\])+))\s*\)",
     re.I | re.S,
 )
+STATIC_RESOURCE_EXTENSION_PATTERN = re.compile(
+    r"\.(?:html?|json|js|mjs|css|png|jpe?g|webp|gif|svg|ico|wasm|bin|data|"
+    r"atlas|pack|mp3|ogg|wav|m4a|aac|mp4|webm|woff2?|ttf|otf)$",
+    re.I,
+)
+RESOURCE_LITERAL_VALUE = (
+    r'(?:"(?P<double>[^"\r\n]+)"|\'(?P<single>[^\'\r\n]+)\'|'
+    r'`(?P<template>[^`$\r\n]+)`|(?P<bare>[^\s,;)>]+))'
+)
+RUNTIME_RESOURCE_PATTERNS = (
+    re.compile(
+        r"\b(?:fetch|importScripts)\s*\(\s*" + RESOURCE_LITERAL_VALUE,
+        re.I | re.S,
+    ),
+    re.compile(
+        r"\.\s*open\s*\(\s*[^,]+,\s*" + RESOURCE_LITERAL_VALUE,
+        re.I | re.S,
+    ),
+    re.compile(
+        r"(?:[\"'](?:url|src|href|poster|path|file)[\"']|"
+        r"\b(?:url|src|href|poster|path|file)\b)\s*[:=]\s*"
+        + RESOURCE_LITERAL_VALUE,
+        re.I | re.S,
+    ),
+)
+QUOTED_STATIC_RESOURCE_PATTERN = re.compile(
+    r'(?:"(?P<double>[^"\r\n]+)"|\'(?P<single>[^\'\r\n]+)\'|'
+    r'`(?P<template>[^`$\r\n]+)`)',
+    re.S,
+)
 
 if BASE94_RADIX != 94:
     raise RuntimeError("invalid Base94 alphabet")
@@ -91,6 +121,79 @@ def _resource_key(value, base_dir=""):
     if text == ".." or text.startswith("../"):
         raise PlayableCompatibilityError("resource escapes playable root: %s" % value)
     return text
+
+
+def _resource_literal_from_match(match):
+    for name in ("double", "single", "template", "bare"):
+        value = match.groupdict().get(name)
+        if value is not None:
+            return value.replace("\\/", "/")
+    return ""
+
+
+def discover_playable_resource_references(source, base_dir=""):
+    """Return static runtime asset keys referenced by HTML/CSS/JS/JSON text."""
+    source = str(source or "")
+    candidates = []
+    for pattern in RUNTIME_RESOURCE_PATTERNS:
+        candidates.extend(
+            _resource_literal_from_match(match)
+            for match in pattern.finditer(source)
+        )
+    candidates.extend(
+        _resource_literal_from_match(match)
+        for match in QUOTED_STATIC_RESOURCE_PATTERN.finditer(source)
+    )
+    candidates.extend(
+        next(
+            (
+                match.group(name)
+                for name in ("double", "single", "bare")
+                if match.group(name) is not None
+            ),
+            "",
+        )
+        for match in CSS_URL_PATTERN.finditer(source)
+    )
+    resources = set()
+    for candidate in candidates:
+        clean = html_lib.unescape(str(candidate or "").strip())
+        path_part = clean.split("#", 1)[0].split("?", 1)[0]
+        if not STATIC_RESOURCE_EXTENSION_PATTERN.search(path_part):
+            continue
+        key = _resource_key(clean, base_dir)
+        if key:
+            resources.add(key)
+    return sorted(resources)
+
+
+def _validate_runtime_resource_references(document, resources):
+    referenced_by = {}
+    sources = [("index.html", "", document)]
+    for key, resource in resources.items():
+        extension = os.path.splitext(key.lower())[1]
+        if extension not in (".html", ".htm", ".json", ".js", ".mjs", ".css"):
+            continue
+        try:
+            source = resource["content"].decode("utf-8-sig")
+        except UnicodeDecodeError:
+            source = resource["content"].decode("utf-8", errors="replace")
+        sources.append((key, posixpath.dirname(key), source))
+    for source_name, base_dir, source in sources:
+        for key in discover_playable_resource_references(source, base_dir):
+            referenced_by.setdefault(key, source_name)
+    missing = sorted(key for key in referenced_by if key not in resources)
+    if missing:
+        details = ", ".join(
+            "%s (from %s)" % (key, referenced_by[key])
+            for key in missing[:8]
+        )
+        if len(missing) > 8:
+            details += ", ..."
+        raise PlayableCompatibilityError(
+            "missing runtime resource%s: %s"
+            % ("s" if len(missing) != 1 else "", details)
+        )
 
 
 def _collect_resources(game_dir, entry_path):
@@ -1507,6 +1610,7 @@ def _inner_document(game_dir, entry_relative):
     resources = _collect_resources(game_dir, entry_path)
     consumed = set()
     document = _strip_source_csp(_read_text(entry_path))
+    _validate_runtime_resource_references(document, resources)
     document = _inline_links(document, resources, consumed)
     document = _inline_style_blocks(document, resources, consumed)
     document = _inline_style_attributes(document, resources, consumed)

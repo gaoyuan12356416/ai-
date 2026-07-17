@@ -4,16 +4,19 @@ import ast
 from email import policy
 from email.parser import BytesParser
 import html as html_lib
+import ipaddress
 import io
 import json
 import lzma
 import os
+import posixpath
 import re
 import secrets
 import shutil
 import sys
 import tempfile
 import zipfile
+from urllib.parse import unquote, urljoin, urlparse
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -43,6 +46,7 @@ from fb_playable_generator import (
     _strip_source_csp,
     build_browser_preview_html,
     build_meta_playable_html,
+    discover_playable_resource_references,
     validate_meta_playable_html,
 )
 
@@ -176,6 +180,18 @@ def assert_multipart_trial_seconds_contract():
     )
     if payload.get("trial_seconds") != "7":
         raise AssertionError("multipart trial_seconds was not preserved")
+    url_body = multipart_body(
+        [
+            ("store_url", "https://play.google.com/store/apps/details?id=fixture"),
+            ("static_page", "https://cdn.example.test/game/index.html"),
+        ],
+        [],
+    )
+    url_payload = namespace["parse_playable_preview_multipart"](
+        FakeHandler(url_body), len(url_body)
+    )
+    if url_payload.get("source_url") != "https://cdn.example.test/game/index.html":
+        raise AssertionError("multipart static_page URL was not preserved")
     closing = ("--%s--\r\n" % boundary).encode("ascii")
     truncated_body = body[:-len(closing)]
     try:
@@ -348,6 +364,225 @@ def assert_json_request_contract():
                 raise
         else:
             raise AssertionError("non-object JSON request body was accepted")
+    url_body = json.dumps({
+        "static_page": "https://cdn.example.test/game/index.html",
+        "store_url": "https://example.test/store",
+    }).encode("utf-8")
+    url_payload = parse_request(FakeHandler(url_body))
+    if url_payload.get("source_url") != "https://cdn.example.test/game/index.html":
+        raise AssertionError("JSON static_page URL was not preserved")
+    ambiguous_body = json.dumps({
+        "static_page_url": "https://cdn.example.test/game/index.html",
+        "static_html": "<!doctype html>",
+    }).encode("utf-8")
+    try:
+        parse_request(FakeHandler(ambiguous_body))
+    except ValueError as error:
+        if "exactly one static page source" not in str(error):
+            raise
+    else:
+        raise AssertionError("JSON URL plus HTML source was accepted")
+    return True
+
+
+def assert_runtime_resource_inventory_contract():
+    source = """<!doctype html><html><body><canvas></canvas><script>
+var assets={assets:[{url:'icon.png'}]};
+fetch('asset_map.json').then(function(response){return response.json()});
+</script></body></html>"""
+    discovered = discover_playable_resource_references(source)
+    if discovered != ["asset_map.json", "icon.png"]:
+        raise AssertionError("runtime resource discovery mismatch: %s" % discovered)
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "index.html"), "w", encoding="utf-8") as handle:
+            handle.write(source)
+        try:
+            build_meta_playable_html(
+                root,
+                "index.html",
+                "Missing Resource Fixture",
+                1,
+                20,
+                TRANSLATIONS,
+            )
+        except PlayableCompatibilityError as error:
+            if "missing runtime resources" not in str(error):
+                raise
+        else:
+            raise AssertionError("missing dynamic resources were accepted")
+        with open(os.path.join(root, "icon.png"), "wb") as handle:
+            handle.write(b"fixture-icon")
+        with open(os.path.join(root, "asset_map.json"), "w", encoding="utf-8") as handle:
+            json.dump({"assets": [{"url": "cover/poster.jpg"}]}, handle)
+        try:
+            build_meta_playable_html(
+                root,
+                "index.html",
+                "Nested Missing Resource Fixture",
+                1,
+                20,
+                TRANSLATIONS,
+            )
+        except PlayableCompatibilityError as error:
+            if "cover/poster.jpg" not in str(error):
+                raise
+        else:
+            raise AssertionError("nested missing dynamic resource was accepted")
+        os.makedirs(os.path.join(root, "cover"))
+        with open(os.path.join(root, "cover", "poster.jpg"), "wb") as handle:
+            handle.write(b"fixture-poster")
+        _, compatibility = build_meta_playable_html(
+            root,
+            "index.html",
+            "Complete Runtime Resource Fixture",
+            1,
+            20,
+            TRANSLATIONS,
+        )
+        if compatibility.get("embedded_file_count") != 3:
+            raise AssertionError("complete runtime resources were not embedded")
+    return True
+
+
+def assert_remote_source_download_contract():
+    names = (
+        "sanitize_playable_filename",
+        "_playable_remote_origin",
+        "_validate_playable_remote_url",
+        "_fetch_playable_remote_bytes",
+        "_decode_playable_remote_text",
+        "download_playable_static_site",
+    )
+    app_path, nodes = app_ast_nodes(*names)
+
+    class FakeSocket:
+        SOCK_STREAM = 1
+        address = "93.184.216.34"
+
+        @classmethod
+        def getaddrinfo(cls, _host, port, type=None):
+            return [(2, type, 6, "", (cls.address, port))]
+
+    class FakeResponse:
+        def __init__(self, content, content_type):
+            self.status_code = 200
+            self.headers = {
+                "Content-Length": str(len(content)),
+                "Content-Type": content_type,
+            }
+            self._content = content
+
+        def iter_content(self, chunk_size):
+            for index in range(0, len(self._content), chunk_size):
+                yield self._content[index:index + chunk_size]
+
+        def close(self):
+            return None
+
+    base = "https://cdn.example.test/game/"
+    fixtures = {
+        base + "index.html": (
+            b"<script>j('asset_map.json');j('game_config.json');"
+            b"var a={url:'icon.png'},b={url:'cover/poster.jpg'};</script>",
+            "text/html",
+        ),
+        base + "asset_map.json": (
+            b'{"assets":[{"url":"icon.png"},{"url":"cover/poster.jpg"}]}',
+            "application/json",
+        ),
+        base + "game_config.json": (b'{"ok":true}', "application/json"),
+        base + "icon.png": (b"icon", "image/png"),
+        base + "cover/poster.jpg": (b"poster", "image/jpeg"),
+    }
+
+    class FakeSession:
+        trust_env = True
+
+        def get(self, url, **_kwargs):
+            if url not in fixtures:
+                response = FakeResponse(b"", "text/plain")
+                response.status_code = 404
+                return response
+            content, content_type = fixtures[url]
+            return FakeResponse(content, content_type)
+
+        def close(self):
+            return None
+
+    class FakeRequests:
+        class RequestException(Exception):
+            pass
+
+        @staticmethod
+        def Session():
+            return FakeSession()
+
+    namespace = {
+        "ipaddress": ipaddress,
+        "os": os,
+        "posixpath": posixpath,
+        "re": re,
+        "requests": FakeRequests,
+        "socket": FakeSocket,
+        "unquote": unquote,
+        "urljoin": urljoin,
+        "urlparse": urlparse,
+        "discover_playable_resource_references": discover_playable_resource_references,
+        "PLAYABLE_PREVIEW_REMOTE_CONNECT_TIMEOUT": 5,
+        "PLAYABLE_PREVIEW_REMOTE_READ_TIMEOUT": 20,
+        "PLAYABLE_PREVIEW_REMOTE_MAX_REDIRECTS": 3,
+        "PLAYABLE_PREVIEW_MAX_EXTRACTED_BYTES": 1024 * 1024,
+        "PLAYABLE_PREVIEW_MAX_EXTRACTED_FILES": 20,
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), app_path, "exec"), namespace)
+    validate = namespace["_validate_playable_remote_url"]
+    with tempfile.TemporaryDirectory() as root:
+        result = namespace["download_playable_static_site"](
+            base + "index.html", root
+        )
+        files = sorted(
+            os.path.relpath(os.path.join(current, filename), root).replace(os.sep, "/")
+            for current, _, filenames in os.walk(root)
+            for filename in filenames
+        )
+        expected_files = [
+            "asset_map.json",
+            "cover/poster.jpg",
+            "game_config.json",
+            "icon.png",
+            "index.html",
+        ]
+        if files != expected_files or result.get("file_count") != len(expected_files):
+            raise AssertionError("remote static bundle discovery mismatch: %s" % files)
+    FakeSocket.address = "127.0.0.1"
+    try:
+        validate(base + "index.html")
+    except ValueError as error:
+        if "non-public" not in str(error):
+            raise
+    else:
+        raise AssertionError("loopback remote source URL was accepted")
+    FakeSocket.address = "93.184.216.34"
+    for unsafe_url, expected in (
+        ("https://user:secret@cdn.example.test/game/index.html", "credentials"),
+        ("https://other.example.test/game/icon.png", "entry origin"),
+        ("https://cdn.example.test/other/icon.png", "entry directory"),
+    ):
+        kwargs = {}
+        if "other.example" in unsafe_url:
+            kwargs["expected_origin"] = ("https", "cdn.example.test", 443)
+        if "/other/" in unsafe_url:
+            kwargs.update({
+                "expected_origin": ("https", "cdn.example.test", 443),
+                "required_path_prefix": "/game",
+            })
+        try:
+            validate(unsafe_url, **kwargs)
+        except ValueError as error:
+            if expected not in str(error):
+                raise
+        else:
+            raise AssertionError("unsafe remote source URL was accepted: %s" % unsafe_url)
     return True
 
 
@@ -1013,6 +1248,8 @@ def main():
             result["assertions"]["translation_isolation"] = assert_translation_isolation_contract()
             result["assertions"]["auth_modes"] = assert_auth_mode_contract()
             result["assertions"]["json_request_shape"] = assert_json_request_contract()
+            result["assertions"]["runtime_resource_inventory"] = assert_runtime_resource_inventory_contract()
+            result["assertions"]["remote_source_download"] = assert_remote_source_download_contract()
             result["assertions"]["failure_cleanup"] = assert_cleanup_wrapper_contract()
             result["assertions"]["zip_extraction_limits"] = assert_zip_extraction_limits_contract()
             result["assertions"]["lexical_validation"] = assert_lexical_validation_contract()
