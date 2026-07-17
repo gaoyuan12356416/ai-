@@ -238,6 +238,7 @@ class MetaCacheTests(unittest.TestCase):
 class UiContractTests(unittest.TestCase):
     def test_search_estimate_and_save_preview_contract(self):
         source = (ROOT / "features" / "ad_control_v3" / "assets" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "features" / "ad_control_v3" / "assets" / "app.css").read_text(encoding="utf-8")
         scope_block = source[source.index("function renderScopeStep"):source.index("function renderMultiSelect")]
         object_block = source[source.index("function renderObjectStep"):source.index("function levelChoice")]
         preview_block = source[source.index("async function previewGroup"):source.index("async function executeGroup")]
@@ -252,6 +253,14 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("Promise.all([loadSharedShell(), api(\"/meta\")])", source)
         self.assertIn('renderSearchableSingle("rule-optimizer"', source)
         self.assertIn('renderSearchableSingle("log-optimizer"', source)
+        self.assertIn("function layoutOpenMenus()", source)
+        self.assertIn('window.addEventListener("scroll", scheduleOpenMenuLayout, true)', source)
+        self.assertIn('card.classList.add("has-open-menu")', source)
+        self.assertIn('menu.classList.toggle("is-upward", openUpward)', source)
+        self.assertIn('menu.style.setProperty("--menu-available-height"', source)
+        self.assertIn(".section-card.has-open-menu", styles)
+        self.assertIn(".multi-menu.is-upward", styles)
+        self.assertIn("max-height: var(--menu-available-height, 300px)", styles)
 
 
 if __name__ == "__main__":

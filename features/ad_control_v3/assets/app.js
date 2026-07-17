@@ -40,6 +40,7 @@
     requestSerial: 0,
   };
   const inFlight = new Set();
+  let menuLayoutFrame = 0;
 
   document.addEventListener("DOMContentLoaded", init);
 
@@ -418,6 +419,8 @@
     document.addEventListener("click", handleClick);
     document.addEventListener("change", handleChange);
     document.addEventListener("input", handleInput);
+    window.addEventListener("resize", scheduleOpenMenuLayout);
+    window.addEventListener("scroll", scheduleOpenMenuLayout, true);
     window.addEventListener("beforeunload", event => {
       if (!state.editorDirty && !isInFlight("editor-save")) return;
       event.preventDefault();
@@ -437,6 +440,37 @@
     if (page === "rule-groups") {
       if (state.editor) renderEditor(); else renderRuleGroupShell();
     } else if (page === "execution-logs") renderLogShell();
+  }
+
+  function scheduleOpenMenuLayout() {
+    if (menuLayoutFrame) return;
+    menuLayoutFrame = window.requestAnimationFrame(() => {
+      menuLayoutFrame = 0;
+      layoutOpenMenus();
+    });
+  }
+
+  function layoutOpenMenus() {
+    const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+    const viewportInset = 12;
+    const menuGap = 5;
+    const preferredHeight = 300;
+    const minimumUsableHeight = 96;
+    document.querySelectorAll(".section-card.has-open-menu").forEach(card => card.classList.remove("has-open-menu"));
+    document.querySelectorAll(".multi-menu").forEach(menu => {
+      const root = menu.closest(".multi-select");
+      const trigger = root && root.querySelector(".multi-trigger");
+      if (!trigger) return;
+      const card = root.closest(".section-card");
+      if (card) card.classList.add("has-open-menu");
+      const triggerRect = trigger.getBoundingClientRect();
+      const below = Math.max(0, viewportHeight - triggerRect.bottom - viewportInset - menuGap);
+      const above = Math.max(0, triggerRect.top - viewportInset - menuGap);
+      const openUpward = below < 160 && above > below;
+      const available = openUpward ? above : below;
+      menu.classList.toggle("is-upward", openUpward);
+      menu.style.setProperty("--menu-available-height", `${Math.max(minimumUsableHeight, Math.min(preferredHeight, Math.floor(available)))}px`);
+    });
   }
 
   function queryString(filters, pageNumber, pageSize) {
@@ -500,6 +534,7 @@
         <div class="panel-header"><div><h2 id="ruleListTitle">规则组列表</h2><p id="ruleListCount">${state.list.loading ? "正在读取…" : `共 ${formatCount(state.list.total)} 个规则组`}</p></div><button class="button button-small" type="button" data-action="reload-groups"${state.list.loading ? " disabled" : ""}>刷新</button></div>
         <div id="ruleTableRegion" aria-live="polite">${renderRuleTable()}</div>
       </section>`;
+    scheduleOpenMenuLayout();
   }
 
   function renderRuleTable() {
@@ -680,6 +715,7 @@
         </footer>
       </div>
     </div>`;
+    scheduleOpenMenuLayout();
   }
 
   function renderEditorStep() {
@@ -1317,6 +1353,7 @@
       </section>
       <section class="panel table-panel" aria-labelledby="logListTitle"><div class="panel-header"><div><h2 id="logListTitle">事件与批次</h2><p>${state.logs.loading ? "正在读取…" : `共 ${formatCount(state.logs.total)} 条记录`}</p></div><span class="pill">服务端分页</span></div><div aria-live="polite">${renderLogTable()}</div></section>
       ${state.detail || state.detailLoading ? renderExecutionDetail() : ""}`;
+    scheduleOpenMenuLayout();
   }
 
   function renderLogMetrics() {
