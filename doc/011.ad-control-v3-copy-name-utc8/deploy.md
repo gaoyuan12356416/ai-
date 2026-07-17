@@ -14,7 +14,7 @@ V3 三层复制名称后缀、UTC+8 API/UI/日期筛选/runner 日志。
 
 ## 部署步骤
 
-1. 从精确复现线上组合态的 GitHub 合并基线 `7f9cdf0` 开发；其 app 来自 `4ecaa75`，V3 runtime 来自 `63f1d1c`。
+1. 初始合并基线为 `7f9cdf0`；发布前线上新增数值型账户时区修复，因此最终发布 source 使用精确复现当前线上组合态的 `3bcf083`。
 2. 本地精确测试、commit、push；服务器只从 GitHub 获取目标提交。
 3. 发布窗口暂停 V3 runner timer，记录发布前状态；紧急停止新复制时关闭 `AD_CONTROL_V3_LIVE_COPY_ENABLED` 与 `AD_CONTROL_V3_RUNNER_LIVE_RELEASED`，不影响 pause/observe。
 4. 在数据盘备份 app、V3 runtime、runner、unit/env、SQLite 和状态/hash。
