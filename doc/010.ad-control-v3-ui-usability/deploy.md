@@ -58,3 +58,15 @@ python3 scripts/sync_ad_control_v3_delivery_products.py \
 - 同步脚本默认只读；禁止省略 expected-count/hash 直接写。
 - 目录写入必须使用 63353，回读使用 63350；源库只读 63350。
 - 不重放 runner，不扩大 live 操作目标。
+
+## 2026-07-17 实际发布记录
+
+- 源提交：`bd4005a072abf92b9f74d62d4e14057a500a4d1b`。
+- 主功能提交：`5fb82f29be619e67a94363d3889d817acd02246a`。
+- 收尾 runtime 提交：`774785c07d37be4aea784015ce2609dd52982bad`。
+- 完整发布前备份：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-v3-ui-20260717T042316Z-5fb82f2`，53 个文件，SQLite `integrity_check=ok`。
+- 第一个 exact overlay 检查点：`/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-bd4005a072ab-to-5fb82f29be61`。
+- 第二个 exact overlay 检查点：`/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-5fb82f29be61-to-774785c07d37`。
+- 产品目录：计划哈希 `01d1c0519aa2f5009256a678cac9d08241149e4241da99fd248a4ac419463eae`，新增/更新 129 条；最终 FB active 144 条。
+- 发布后 overlay=`unchanged`、API service=`active`、V2 页面 HTTP 200；live pause/copy 开关未修改且均为 `1`。
+- 验收 observe 规则已软删除，执行审计保留且 `meta_write_count=0`。

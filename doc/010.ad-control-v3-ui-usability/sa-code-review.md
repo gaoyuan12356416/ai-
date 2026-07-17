@@ -22,5 +22,6 @@ UI JS/CSS、Service cache/目录解析、FB adapter、同步脚本、测试和�
 ## 编译 / 验证结果
 
 - `py_compile`、`node --check`、`git diff --check`：通过。
-- 自动化共 189 项：UI/可用性 63、核心/路由/Repository/Live 98、部署与导航 28，全部通过。
+- 自动化共 190 项：UI/可用性 64、核心/路由/Repository/Live 98、部署与导航 28，全部通过。
 - 真实浏览器完成优化师搜索、具体产品选择、Campaign 估算、能力卡删除和保存试算返回列表全链路。
+- 生产收尾发现并修复 in-flight 标签残留，专项 36/36；再次试算后按钮无需刷新即可恢复。

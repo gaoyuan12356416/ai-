@@ -154,6 +154,27 @@ class DeliveryProductDiscoveryTests(unittest.TestCase):
         self.assertEqual("product_catalog_invalid", caught.exception.code)
         self.assertEqual(503, caught.exception.status)
 
+    def test_broad_and_specific_product_overlap_is_rejected_before_query(self):
+        calls = []
+        adapter = FacebookAdapter(lambda sql, params: calls.append((sql, params)) or [])
+        with self.assertRaises(AdControlV3Error) as caught:
+            adapter.discover({
+                "object_level": "campaign",
+                "products": ["Dramawave", "w2a:1723"],
+                "delivery_product_scopes": [{
+                    "product_value": "w2a:1723",
+                    "insight_products": ["Dramawave"],
+                    "insight_app_ids": ["[w2a]drama-double"],
+                    "w2a_page_ids": [1723],
+                }],
+                "optimizer_id": 248,
+                "date_from": "2026-07-17",
+                "date_to": "2026-07-17",
+                "account_timezones": [],
+            })
+        self.assertEqual("overlapping_product_scope", caught.exception.code)
+        self.assertEqual([], calls)
+
     def test_service_catalog_validation_never_blames_user_input(self):
         products = [
             {"channel": "facebook", "product_value": "Dramawave", "product_type": "short_drama", "enabled": True, "evidence": {}},
