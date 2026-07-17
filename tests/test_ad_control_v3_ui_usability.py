@@ -227,6 +227,7 @@ class UiContractTests(unittest.TestCase):
         self.assertNotIn("当前层级能力", object_block)
         self.assertIn("state.editor = null", preview_block)
         self.assertIn("await loadRuleGroups()", preview_block)
+        self.assertIn("if (state.editor == null) renderRuleGroupShell()", preview_block)
         self.assertIn("Promise.all([loadSharedShell(), api(\"/meta\")])", source)
         self.assertIn('renderSearchableSingle("rule-optimizer"', source)
         self.assertIn('renderSearchableSingle("log-optimizer"', source)

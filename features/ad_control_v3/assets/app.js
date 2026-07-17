@@ -1251,7 +1251,7 @@
     } catch (error) { toast(errorMessage(error), "error"); }
     finally {
       endInFlight(flightKey);
-      if (!fromEditor && state.editor == null) renderRuleGroupShell();
+      if (state.editor == null) renderRuleGroupShell();
     }
   }
 
