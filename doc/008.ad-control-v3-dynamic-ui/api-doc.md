@@ -4,7 +4,7 @@
 
 - 根前缀：`/api/ad-control/v3`。
 - V3 复用已有 Nginx `/api/ad-control/` 反向代理，不新增 location。
-- UI/asset 仅接受 cookie 登录；所有端点要求 `ad_control_center` 模块权限。
+- UI/asset 仅接受 cookie 登录；所有 V3 端点要求独立的 `ad_control_v3` 模块权限，旧版 `ad_control_center` 权限不再隐式控制新授权。
 - `POST/PUT/DELETE` 要求同源、`Content-Type: application/json`，请求体上限 2 MiB。
 - JSON 使用 UTF-8、`Cache-Control: no-store`。动态 HTML 额外包含 CSP、`Referrer-Policy: same-origin` 和 `nosniff`。
 - 成功响应直接返回业务对象；创建返回 201，其余 200。

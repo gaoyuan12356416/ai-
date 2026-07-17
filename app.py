@@ -3350,7 +3350,8 @@ MODULE_PERMISSIONS = {
 
     "ad_material_tasks": "投放素材任务",
 
-    "ad_control_center": "产品广告调控中心",
+    "ad_control_center": "AI自动规则调控（旧版）",
+    "ad_control_v3": "AI自动调控 V3",
     "voiceover_drama_tasks": "配音剧语种任务",
     "x_accounts": "X账号授权管理",
 
@@ -3405,6 +3406,7 @@ DEFAULT_USER_PERMISSIONS = {
     "cover_synthesis": False,
     "ad_material_tasks": False,
     "ad_control_center": False,
+    "ad_control_v3": False,
     "voiceover_drama_tasks": False,
     "x_accounts": False,
     "settings": False,
@@ -8514,6 +8516,10 @@ def normalize_user_permissions(value, role="user"):
 
     if isinstance(value, dict):
 
+        inherit_v3_from_legacy = (
+            "ad_control_v3" not in value and "ad_control_center" in value
+        )
+
 
 
 
@@ -8609,6 +8615,12 @@ def normalize_user_permissions(value, role="user"):
 
 
                 permissions[key] = bool(value.get(key))
+
+        # V3 originally shared the legacy ad_control_center permission. Preserve
+        # access for existing users until an administrator explicitly saves the
+        # new independent V3 permission.
+        if inherit_v3_from_legacy:
+            permissions["ad_control_v3"] = bool(value.get("ad_control_center"))
 
 
 

@@ -81,7 +81,7 @@
     "key": "ad_control_v3",
     "label": "AI自动调控 V3",
     "order": 6,
-    "module": "ad_control_center",
+    "module": "ad_control_v3",
     "items": [
       {
         "key": "adControlV3Rules",
@@ -91,7 +91,7 @@
         "href": "/api/ad-control/v3/ui/rule-groups",
         "enabled": true,
         "order": 10,
-        "module": "ad_control_center"
+        "module": "ad_control_v3"
       },
       {
         "key": "adControlV3Logs",
@@ -101,7 +101,7 @@
         "href": "/api/ad-control/v3/ui/execution-logs",
         "enabled": true,
         "order": 20,
-        "module": "ad_control_center"
+        "module": "ad_control_v3"
       }
     ]
   },
