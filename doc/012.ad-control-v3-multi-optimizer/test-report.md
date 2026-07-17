@@ -14,7 +14,7 @@ V3 身份、规则服务、存储、权限、路由、动态 UI、暂停/复制�
 | --- | --- | --- | --- | --- |
 | Python unittest | 169 | 169 | 0 | 0 |
 | 动态 UI 函数契约 | 31 | 31 | 0 | 0 |
-| 语法/差异检查 | 3 | 3 | 0 | 0 |
+| 语法/差异检查 | 5 | 5 | 0 | 0 |
 | 生产冒烟 | 2 | 0 | 0 | 2 |
 
 ## 缺陷情况
@@ -30,6 +30,7 @@ V3 身份、规则服务、存储、权限、路由、动态 UI、暂停/复制�
 - `tests.test_ad_control_v3_live_execution`：14/14。
 - `tests.test_ad_control_v3_ui` 零参数契约：31/31。
 - `python -m py_compile`、`node --check`、`git diff --check`：通过。
+- checkpoint 脚本 `bash -n` 通过；越界备份目录在任何写入前被拒绝。
 
 ## 遗留风险
 

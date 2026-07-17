@@ -15,7 +15,7 @@ V3 普通用户支持多个强身份优化师别名；规则组按关系表保�
 ## 部署步骤
 
 1. 核对线上 commit/hash 仍为发布基线，停止 V3 runner timer。
-2. 在数据盘备份 app、V3 文件、runner、systemd、SQLite、环境配置和数据库结构/计数。
+2. 从目标 commit 执行 `deploy/checkpoint_ad_control_v3_multi_optimizer.sh`，在数据盘备份 app、V3 文件、共用静态资源、runner、systemd、Nginx、cron、SQLite、环境配置和数据库结构/计数。
 3. 从 GitHub 拉取精确目标 commit 到新的 staging 目录并在服务端跑测试。
 4. 执行 SQL 004；校验关联组数等于规则组数。
 5. 用精确 overlay 工具合并到共享 monolith，原子替换并重启 `drama-material-api.service`。

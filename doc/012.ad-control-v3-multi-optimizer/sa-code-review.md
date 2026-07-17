@@ -17,10 +17,12 @@
 | CR-03 | 中 | live_execution | intent 可能只记主优化师 | 改为优先 target.optimizer_id | 已修复 |
 | CR-04 | 中 | rollback SQL | 新鲜安装回滚遗漏新表 | 计数并按外键顺序删除 | 已修复 |
 | CR-05 | 低 | 普通用户显示名 | 仅整数测试映射会显示 ID | 缺名称时回退登录姓名 | 已修复 |
+| CR-06 | 中 | 生产备份 | 超长 SSH 内联命令容易被跨 shell 转义破坏 | 使用已提交、可审查且限制数据盘路径的 checkpoint 脚本 | 已修复 |
 
 ## 编译 / 验证结果
 
 - Python py_compile：通过。
 - Node `--check app.js`：通过。
 - `git diff --check`：通过。
+- checkpoint shell `bash -n` 与越界路径拒绝：通过。
 - 全部 V3 unittest 169/169、动态 UI 契约 31/31：通过；最终统计见测试报告。
