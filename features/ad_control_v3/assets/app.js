@@ -327,7 +327,11 @@
     fields = Array.from(uniqueFields.values());
     const currentOptimizerRaw = source.current_optimizer || actorSource.optimizer || {};
     const currentOptimizerId = text(source.current_optimizer_id || permissions.current_optimizer_id || actorSource.optimizer_id || currentOptimizerRaw.optimizer_id || currentOptimizerRaw.id);
-    let currentOptimizer = optimizers.find(item => item.id === currentOptimizerId) || null;
+    const currentOptimizerIds = array(source.current_optimizer_ids || permissions.current_optimizer_ids || actorSource.optimizer_ids)
+      .map(value => text(value)).filter(Boolean);
+    if (!currentOptimizerIds.length && currentOptimizerId) currentOptimizerIds.push(currentOptimizerId);
+    const currentOptimizers = currentOptimizerIds.map(id => optimizers.find(item => item.id === id) || { id, name: id, email: "" });
+    let currentOptimizer = currentOptimizers[0] || optimizers.find(item => item.id === currentOptimizerId) || null;
     if (!currentOptimizer && currentOptimizerId) currentOptimizer = { id: currentOptimizerId, name: text(currentOptimizerRaw.name, currentOptimizerId), email: text(currentOptimizerRaw.email) };
     const actorName = text(actorSource.name || actorSource.username || actorSource.display_name, !isAdmin && currentOptimizer ? currentOptimizer.name : (isAdmin ? "管理员" : "当前优化师"));
     const capabilities = source.capabilities || {};
@@ -346,7 +350,7 @@
         email: text(actorSource.email), role: text(actorSource.role, isAdmin ? "admin" : "optimizer"),
         avatar: text(actorSource.avatar_url), isAdmin,
       },
-      products, optimizers, timezones: timezoneValues, fields, currentOptimizer,
+      products, optimizers, timezones: timezoneValues, fields, currentOptimizer, currentOptimizers,
       channels: array(source.channels), objectLevels: array(source.object_levels),
       timeStandard: Object.assign({ storage_timezone: "UTC", display_timezone: "UTC+8", iana_timezone: DISPLAY_TIME_ZONE }, source.time_standard || {}),
       capabilities: Object.assign({}, capabilities, { supportsRuleGroupSearch }),
@@ -563,7 +567,7 @@
     const rows = state.list.items.map(group => {
       const id = idOf(group);
       const products = array(group.products || group.product_values);
-      const optimizer = optimizerLabel(group.optimizer_id, group.optimizer_name);
+      const optimizer = optimizerScopeLabel(group.optimizer_ids, group.optimizer_names, group.optimizer_id, group.optimizer_name);
       const enabled = group.enabled === true || group.enabled === 1;
       const stopped = group.emergency_stopped === true || group.emergency_stopped === 1;
       const toggleAvailable = canToggleGroup(enabled, state.meta.permissions);
@@ -606,6 +610,13 @@
     return text(optimizerName || (found && found.name), id ? `优化师 ${id}` : "未解析优化师");
   }
 
+  function optimizerScopeLabel(optimizerIds, optimizerNames, fallbackId, fallbackName) {
+    const ids = array(optimizerIds).map(value => text(value)).filter(Boolean);
+    const names = array(optimizerNames).map(value => text(value)).filter(Boolean);
+    if (!ids.length) return optimizerLabel(fallbackId, fallbackName);
+    return ids.map((id, index) => names[index] || optimizerLabel(id)).join(" / ");
+  }
+
   function productLabel(productValue) {
     const value = text(productValue);
     const found = state.meta && state.meta.products.find(item => item.value === value);
@@ -640,6 +651,7 @@
     const selection = source.selection || {};
     return JSON.stringify({
       channel: text(source.channel), optimizer_id: text(source.optimizer_id), object_level: text(source.object_level),
+      optimizer_ids: array(source.optimizer_ids).map(value => text(value)).filter(Boolean).sort(),
       products: array(source.products).map(String).sort(), account_timezones: array(source.account_timezones).map(String).sort(),
       metric_window_days: text(selection.metric_window_days),
     });
@@ -672,7 +684,9 @@
     const current = state.meta.currentOptimizer;
     return {
       id: "", version: "", name: "", description: "", channel: "", object_level: "", run_mode: "observe",
-      optimizer_id: state.actor.isAdmin ? "" : text(current && current.id), products: [], account_timezones: [],
+      optimizer_id: state.actor.isAdmin ? "" : text(current && current.id),
+      optimizer_ids: state.actor.isAdmin ? [] : array(state.meta.currentOptimizers).map(item => text(item.id)).filter(Boolean),
+      products: [], account_timezones: [],
       rules: [], schedule: {}, quotas: {}, selection: {}, enabled: false, emergency_stopped: false, owner_user_id: text(state.actor.id), can_mutate: true,
     };
   }
@@ -682,7 +696,8 @@
     return {
       id: idOf(group), version: text(group.config_version || group.version), name: text(group.name), description: text(group.description),
       channel: text(group.channel), object_level: text(group.object_level), run_mode: text(group.run_mode, "observe"),
-      optimizer_id: text(group.optimizer_id), products: array(group.products || group.product_values).map(String),
+      optimizer_id: text(group.optimizer_id), optimizer_ids: array(group.optimizer_ids || [group.optimizer_id]).map(value => text(value)).filter(Boolean),
+      products: array(group.products || group.product_values).map(String),
       account_timezones: array(group.account_timezones).map(String), rules: array(group.rules).map((rule, index) => normalizeRuleForEditor(rule, index)),
       schedule: Object.assign({}, group.schedule || {}), quotas: Object.assign({}, group.quotas || {}), selection: Object.assign({}, group.selection || {}),
       enabled: group.enabled === true || group.enabled === 1, emergency_stopped: group.emergency_stopped === true || group.emergency_stopped === 1,
@@ -746,6 +761,9 @@
     const editor = state.editor;
     const isAdmin = state.actor.isAdmin;
     const optimizer = state.meta.optimizers.find(item => item.id === String(editor.optimizer_id)) || state.meta.currentOptimizer;
+    const ownOptimizers = array(state.meta.currentOptimizers).length ? state.meta.currentOptimizers : (optimizer ? [optimizer] : []);
+    const ownOptimizerNames = ownOptimizers.map(item => text(item.name, item.id)).join(" / ");
+    const ownOptimizerIds = ownOptimizers.map(item => text(item.id)).filter(Boolean);
     return `<section class="step-pane" aria-labelledby="scopeStepTitle">
       <div class="section-card"><div class="section-head"><div><h3 id="scopeStepTitle">基本信息</h3><p>名称和说明只用于识别规则组，不参与广告筛选。</p></div><span class="pill pill-safe">新建后停用</span></div>
         <div class="section-body"><div class="form-grid">
@@ -762,7 +780,7 @@
       <div class="section-card"><div class="section-head"><div><h3>业务范围</h3><p>产品与优化师会同时进入服务端查询条件；广告账号不是配置项。</p></div></div>
         <div class="section-body"><div class="form-grid">
           <div class="field"><span class="field-label">优化师 <span class="required" aria-hidden="true">*</span></span>
-            ${isAdmin ? `${renderSearchableSingle("editor-optimizer", "请选择优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(editor.optimizer_id || ""))}<p class="field-hint">支持按姓名、邮箱或优化师 ID 搜索；选择会记录在审计信息中。</p>` : `<div class="locked-value"><span><strong>${h(text(optimizer && optimizer.name, "正在解析本人优化师"))}</strong><small>${h(text(optimizer && optimizer.email, editor.optimizer_id ? `优化师 ID ${editor.optimizer_id}` : "由服务端身份唯一映射"))}</small></span><span class="pill pill-safe">仅本人</span></div><p class="field-hint">普通优化师无法在客户端更改此范围，服务端会再次校验。</p>`}
+            ${isAdmin ? `${renderSearchableSingle("editor-optimizer", "请选择优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(editor.optimizer_id || ""))}<p class="field-hint">支持按姓名、邮箱或优化师 ID 搜索；选择会记录在审计信息中。</p>` : `<div class="locked-value"><span><strong>${h(text(ownOptimizerNames, "正在解析本人优化师"))}</strong><small>${h(ownOptimizerIds.length ? `优化师 ID ${ownOptimizerIds.join("、")} · 将同时生效` : "由服务端身份映射")}</small></span><span class="pill pill-safe">仅本人${ownOptimizerIds.length > 1 ? ` · ${ownOptimizerIds.length} 个账号` : ""}</span></div><p class="field-hint">同一登录身份关联多个优化师账号时，规则会对全部关联账号生效；普通优化师无法在客户端增删范围。</p>`}
           </div>
           <div class="field"><span class="field-label">短剧产品 <span class="required" aria-hidden="true">*</span></span>${renderMultiSelect("products", "选择一个或多个短剧产品", state.meta.products.map(item => ({ value: item.value, label: item.label, description: item.description, disabled: !item.enabled })), editor.products)}</div>
           <div class="field field-span-2"><span class="field-label">账户时区（可选）</span>${renderMultiSelect("account_timezones", "不选择则不限制账户时区", state.meta.timezones, editor.account_timezones)}<p class="field-hint">留空时不生成时区筛选。设置后，时区缺失的广告会被跳过并记录原因；计划仍按各账户本地时间判断。</p></div>
@@ -1067,7 +1085,7 @@
   function renderReviewStep() {
     const editor = state.editor;
     const errors = validateEditor();
-    const optimizer = optimizerLabel(editor.optimizer_id);
+    const optimizer = optimizerScopeLabel(editor.optimizer_ids, [], editor.optimizer_id);
     const actionLabels = editor.rules.map(rule => ACTION_LABELS[rule.action] || "未选择");
     return `<section class="step-pane" aria-labelledby="reviewStepTitle">
       <div class="section-card"><div class="section-head"><div><h3 id="reviewStepTitle">配置总览</h3><p>保存前检查所有显式选择；placeholder 从不进入请求数据。</p></div><span class="pill ${errors.length ? "pill-warning" : "pill-success"}">${errors.length ? `${errors.length} 项待完善` : "配置完整"}</span></div>
@@ -1401,7 +1419,7 @@
       return `<tr>
         <td><div class="cell-title"><strong>${h(prettyDate(item.started_at || item.created_at || item.business_date))}</strong><small class="log-id">${h(id)}</small></div></td>
         <td><div class="cell-title"><strong>${h(text(item.rule_group_name, "未命名规则组"))}</strong><small>${h(text(item.rule_group_id))} · ${h(trigger)}${mergedPrecheck ? " · 预检已合并" : ""}</small></div></td>
-        <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 2).map(product => `<span class="chip" title="${h(product)}">${h(productLabel(product))}</span>`).join("")}${products.length > 2 ? `<span class="chip">+${products.length - 2}</span>` : ""}</div><small class="cell-muted">${h(optimizerLabel(item.optimizer_id, item.optimizer_name))}</small></div></td>
+        <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 2).map(product => `<span class="chip" title="${h(product)}">${h(productLabel(product))}</span>`).join("")}${products.length > 2 ? `<span class="chip">+${products.length - 2}</span>` : ""}</div><small class="cell-muted">${h(optimizerScopeLabel(item.optimizer_ids, item.optimizer_names, item.optimizer_id, item.optimizer_name))}</small></div></td>
         <td><div class="cell-stack"><span class="pill pill-info">${h(LEVEL_LABELS[item.object_level] || item.object_level || "—")}</span><small class="cell-muted">${h(actions.map(value => ACTION_LABELS[value] || value).join(" / ") || "—")} · ${h(MODE_LABELS[item.run_mode] || item.run_mode || "—")}</small></div></td>
         <td><div class="cell-stack"><span>命中 ${h(displayCount(targetCount))}</span><small class="cell-muted">成功 ${h(displayCount(success))} · 跳过 ${h(displayCount(skipped))} · 异常 ${h(displayCount(failed))}</small></div></td>
         <td><span class="status-line"><span class="status-dot ${statusClass(status)}" aria-hidden="true"></span><strong>${h(STATUS_LABELS[status] || status)}</strong></span></td>
@@ -1481,7 +1499,7 @@
     return `<div class="detail-overlay" data-action="close-detail"><aside class="detail-drawer" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
       <div class="detail-head"><div><h2 id="detailTitle">${h(text(item.rule_group_name, "执行详情"))}</h2><p class="log-id">${h(id)}</p></div><button class="icon-button" type="button" data-action="close-detail" aria-label="关闭详情">×</button></div>
       <div class="detail-body">
-        <section class="detail-section"><h3>概要</h3><div class="review-card"><div class="review-list">${reviewRow("状态", STATUS_LABELS[item.status] || item.status || "—")}${reviewRow("触发来源", triggerLabel(item.trigger_source || item.trigger))}${reviewRow("产品", array(item.products).join("、") || "—")}${reviewRow("优化师", optimizerLabel(item.optimizer_id, item.optimizer_name))}${reviewRow("调控对象", LEVEL_LABELS[item.object_level] || item.object_level || "—")}${reviewRow("运行模式", MODE_LABELS[item.run_mode] || item.run_mode || "—")}${reviewRow("配置版本", text(item.config_version || item.rule_group_version, "—"))}${reviewRow("行为校验", text(item.behavior_hash || item.config_hash, "—"))}</div></div></section>
+        <section class="detail-section"><h3>概要</h3><div class="review-card"><div class="review-list">${reviewRow("状态", STATUS_LABELS[item.status] || item.status || "—")}${reviewRow("触发来源", triggerLabel(item.trigger_source || item.trigger))}${reviewRow("产品", array(item.products).join("、") || "—")}${reviewRow("优化师", optimizerScopeLabel(item.optimizer_ids, item.optimizer_names, item.optimizer_id, item.optimizer_name))}${reviewRow("调控对象", LEVEL_LABELS[item.object_level] || item.object_level || "—")}${reviewRow("运行模式", MODE_LABELS[item.run_mode] || item.run_mode || "—")}${reviewRow("配置版本", text(item.config_version || item.rule_group_version, "—"))}${reviewRow("行为校验", text(item.behavior_hash || item.config_hash, "—"))}</div></div></section>
         <section class="detail-section"><h3>阶段时间线</h3>${stages.length ? `<div class="timeline">${stages.map(stage => `<div class="timeline-item"><span class="timeline-dot" aria-hidden="true"></span><div class="timeline-copy"><strong>${h(stage.label)}</strong><span>${h(prettyDate(stage.at))}${stage.status ? ` · ${h(STATUS_LABELS[stage.status] || stage.status)}` : ""}</span></div></div>`).join("")}</div>` : '<div class="condition-empty">暂无阶段时间线。</div>'}</section>
         <section class="detail-section"><h3>原因汇总</h3>${reasons.length ? `<div class="reason-list">${reasons.map(reason => `<div class="reason-item"><span>${h(reason.reason)}</span><strong>${h(formatCount(reason.count))}</strong></div>`).join("")}</div>` : '<div class="condition-empty">没有跳过、阻断或失败原因。</div>'}</section>
         <section class="detail-section"><h3>对象明细${targets.length ? `（最多展示 ${targets.length} 条）` : ""}</h3>${renderTargetTable(targets)}</section>

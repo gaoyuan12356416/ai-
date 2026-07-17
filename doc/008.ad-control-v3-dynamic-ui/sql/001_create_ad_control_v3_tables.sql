@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS `ads_ai`.`ad_control_v3_rule_group` (
   KEY `idx_v3_group_owner` (`owner_user_id`,`deleted`,`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `ads_ai`.`ad_control_v3_rule_group_optimizer` (
+  `rule_group_id` VARCHAR(64) NOT NULL,
+  `optimizer_id` BIGINT UNSIGNED NOT NULL,
+  `is_primary` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` DATETIME(6) NOT NULL,
+  PRIMARY KEY (`rule_group_id`,`optimizer_id`),
+  KEY `idx_v3_group_optimizer_reverse` (`optimizer_id`,`rule_group_id`),
+  CONSTRAINT `fk_v3_group_optimizer_group`
+    FOREIGN KEY (`rule_group_id`) REFERENCES `ads_ai`.`ad_control_v3_rule_group` (`group_id`)
+    ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `ads_ai`.`ad_control_v3_rule_group_product` (
   `rule_group_id` VARCHAR(64) NOT NULL,
   `product_value` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,

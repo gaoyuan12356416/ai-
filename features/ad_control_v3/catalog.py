@@ -215,12 +215,16 @@ def validate_rules_against_catalog(rules: Sequence[Mapping[str, Any]], object_le
 
 
 class OptimizerIdentityResolver:
-    """Resolve the current non-admin user to exactly one active optimizer.
+    """Resolve the current non-admin user to one or more active optimizers.
 
     ``candidate_loader`` is supplied by the integration layer and must query
-    the authoritative admin user/group tables. Returning the first fuzzy email
-    match is intentionally impossible here.
+    the authoritative admin user/group tables. Multiple optimizer aliases are
+    accepted only when the loader proves they came from an exact strong
+    identity layer (``user_id`` or ``email``). A name-only collision remains
+    fail-closed.
     """
+
+    TRUSTED_MULTI_IDENTITY_LAYERS = frozenset({"user_id", "email"})
 
     def __init__(
         self,
@@ -246,20 +250,67 @@ class OptimizerIdentityResolver:
                 values.add(parsed)
         return sorted(values)
 
-    def resolve_for_actor(self, actor: Actor) -> int:
-        candidates = self._ids(self._candidate_loader(actor))
+    @classmethod
+    def _items(cls, rows: Iterable[Any]) -> List[Dict[str, Any]]:
+        values: Dict[int, Dict[str, Any]] = {}
+        for row in rows or []:
+            if isinstance(row, Mapping):
+                raw = row.get("optimizer_id", row.get("id"))
+                source = dict(row)
+            else:
+                raw = row
+                source = {}
+            try:
+                optimizer_id = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if optimizer_id <= 0:
+                continue
+            identity_layer = str(source.get("identity_layer") or "").strip().lower()
+            item = {
+                "optimizer_id": optimizer_id,
+                "name": str(source.get("name") or source.get("username") or optimizer_id),
+                "email": str(source.get("email") or ""),
+                "identity_layer": identity_layer,
+            }
+            current = values.get(optimizer_id)
+            if current is None or (
+                identity_layer in cls.TRUSTED_MULTI_IDENTITY_LAYERS
+                and current.get("identity_layer") not in cls.TRUSTED_MULTI_IDENTITY_LAYERS
+            ):
+                values[optimizer_id] = item
+        return [values[key] for key in sorted(values)]
+
+    def resolve_items_for_actor(self, actor: Actor) -> List[Dict[str, Any]]:
+        items = self._items(self._candidate_loader(actor))
         if actor.optimizer_id is not None:
-            candidates = [item for item in candidates if item == actor.optimizer_id]
-        if not candidates:
+            items = [item for item in items if item["optimizer_id"] == actor.optimizer_id]
+        if not items:
             raise AdControlV3Error(
                 "optimizer_identity_unresolved",
-                "current user is not uniquely mapped to an active optimizer",
+                "current user is not mapped to an active optimizer",
                 status=403,
             )
+        if len(items) > 1:
+            layers = {str(item.get("identity_layer") or "") for item in items}
+            if not layers or not layers.issubset(self.TRUSTED_MULTI_IDENTITY_LAYERS):
+                raise AdControlV3Error(
+                    "optimizer_identity_ambiguous",
+                    "current user maps to multiple untrusted optimizer identities",
+                    status=409,
+                    details={"candidate_count": len(items), "identity_layers": sorted(layers)},
+                )
+        return items
+
+    def resolve_ids_for_actor(self, actor: Actor) -> List[int]:
+        return [item["optimizer_id"] for item in self.resolve_items_for_actor(actor)]
+
+    def resolve_for_actor(self, actor: Actor) -> int:
+        candidates = self.resolve_ids_for_actor(actor)
         if len(candidates) != 1:
             raise AdControlV3Error(
                 "optimizer_identity_ambiguous",
-                "current user maps to multiple active optimizers",
+                "current user maps to multiple active optimizer aliases",
                 status=409,
                 details={"candidate_count": len(candidates)},
             )
@@ -287,7 +338,7 @@ class StaticOptimizerIdentityResolver(OptimizerIdentityResolver):
 
     def __init__(
         self,
-        mapping: Optional[Mapping[str, Sequence[int]]] = None,
+        mapping: Optional[Mapping[str, Sequence[Any]]] = None,
         optimizers: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
         self.mapping = {str(key): list(value) for key, value in (mapping or {}).items()}

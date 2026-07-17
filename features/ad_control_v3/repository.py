@@ -1,6 +1,6 @@
 """Persistence boundary for the isolated V3 control service.
 
-Only the eight reviewed ``ads_ai.ad_control_v3_*`` tables may be written. The
+Only the nine reviewed ``ads_ai.ad_control_v3_*`` tables may be written. The
 repository exposes no generic table or SQL arguments to callers.
 """
 
@@ -22,6 +22,7 @@ ADS_AI_DATABASE = "ads_ai"
 TABLES = {
     "product_catalog": "ad_control_v3_product_catalog",
     "rule_group": "ad_control_v3_rule_group",
+    "rule_group_optimizer": "ad_control_v3_rule_group_optimizer",
     "rule_group_product": "ad_control_v3_rule_group_product",
     "preview": "ad_control_v3_preview",
     "preview_target": "ad_control_v3_preview_target",
@@ -31,6 +32,7 @@ TABLES = {
 }
 TARGET_INSERT_CHUNK_SIZE = 500
 MAX_PERSISTED_TARGETS = 20000
+MAX_RULE_GROUP_OPTIMIZERS = 20
 
 
 def _validate_target_count(targets: Sequence[Mapping[str, Any]]) -> None:
@@ -61,6 +63,32 @@ def _page(page: Any, page_size: Any) -> Tuple[int, int]:
     except (TypeError, ValueError):
         raise AdControlV3Error("validation_error", "invalid pagination")
     return parsed_page, parsed_size
+
+
+def _optimizer_scope_values(value: Any) -> List[int]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    if len(raw_values) > MAX_RULE_GROUP_OPTIMIZERS:
+        raise AdControlV3Error("validation_error", "optimizer scope is too large")
+    result: List[int] = []
+    for raw in raw_values:
+        try:
+            optimizer_id = int(raw)
+        except (TypeError, ValueError):
+            raise AdControlV3Error("validation_error", "optimizer scope contains an invalid id")
+        if optimizer_id <= 0:
+            raise AdControlV3Error("validation_error", "optimizer scope contains an invalid id")
+        if optimizer_id not in result:
+            result.append(optimizer_id)
+    return sorted(result)
+
+
+def _group_optimizer_ids(group: Mapping[str, Any]) -> List[int]:
+    values = _optimizer_scope_values(group.get("optimizer_ids"))
+    if not values and group.get("optimizer_id") not in (None, ""):
+        values = _optimizer_scope_values(group.get("optimizer_id"))
+    return values
 
 
 def _filter_bool(value: Any, field: str = "enabled") -> bool:
@@ -181,6 +209,7 @@ class MemoryRepository:
 
     def create_rule_group(self, record: Mapping[str, Any]) -> Dict[str, Any]:
         group = copy.deepcopy(dict(record))
+        group["optimizer_ids"] = _group_optimizer_ids(group)
         group_id = str(group.get("group_id") or "")
         with self._lock:
             if not group_id or group_id in self.groups:
@@ -201,19 +230,21 @@ class MemoryRepository:
         *,
         page: int = 1,
         page_size: int = 20,
-        optimizer_scope: Optional[int] = None,
+        optimizer_scope: Any = None,
     ) -> Dict[str, Any]:
         page, page_size = _page(page, page_size)
         filters = _validated_group_filters(filters)
         with self._lock:
             rows = [copy.deepcopy(item) for item in self.groups.values() if not item.get("deleted")]
-        if optimizer_scope is not None:
-            rows = [item for item in rows if int(item.get("optimizer_id") or 0) == int(optimizer_scope)]
+        optimizer_ids = set(_optimizer_scope_values(optimizer_scope))
+        if optimizer_ids:
+            rows = [item for item in rows if optimizer_ids.intersection(_group_optimizer_ids(item))]
         for key in ("channel", "object_level", "run_mode"):
             if filters.get(key):
                 rows = [item for item in rows if str(item.get(key) or "") == str(filters[key])]
         if filters.get("optimizer_id") not in (None, ""):
-            rows = [item for item in rows if int(item.get("optimizer_id") or 0) == int(filters["optimizer_id"])]
+            selected_optimizer = int(filters["optimizer_id"])
+            rows = [item for item in rows if selected_optimizer in _group_optimizer_ids(item)]
         if filters.get("enabled") not in (None, ""):
             enabled = _filter_bool(filters["enabled"])
             rows = [item for item in rows if bool(item.get("enabled")) is enabled]
@@ -248,6 +279,7 @@ class MemoryRepository:
             if int(current.get("config_version") or 0) != int(expected_version):
                 raise AdControlV3Error("version_conflict", "rule group was changed", status=409)
             updated = copy.deepcopy(dict(record))
+            updated["optimizer_ids"] = _group_optimizer_ids(updated)
             self.groups[str(group_id)] = updated
             return copy.deepcopy(updated)
 
@@ -305,13 +337,14 @@ class MemoryRepository:
             group["updated_at"] = updated_at
             return copy.deepcopy(group)
 
-    def emergency_stop_all(self, *, optimizer_scope: Optional[int], updated_by: str, updated_at: str) -> int:
+    def emergency_stop_all(self, *, optimizer_scope: Any, updated_by: str, updated_at: str) -> int:
         count = 0
+        optimizer_ids = set(_optimizer_scope_values(optimizer_scope))
         with self._lock:
             for group in self.groups.values():
                 if group.get("deleted"):
                     continue
-                if optimizer_scope is not None and int(group.get("optimizer_id") or 0) != int(optimizer_scope):
+                if optimizer_ids and not optimizer_ids.intersection(_group_optimizer_ids(group)):
                     continue
                 group.update(
                     {
@@ -399,7 +432,7 @@ class MemoryRepository:
         *,
         page: int = 1,
         page_size: int = 20,
-        optimizer_scope: Optional[int] = None,
+        optimizer_scope: Any = None,
     ) -> Dict[str, Any]:
         page, page_size = _page(page, page_size)
         filters = _validated_execution_filters(filters)
@@ -421,13 +454,21 @@ class MemoryRepository:
                 and str(item.get("preview_id") or "") in paired_live_preview_ids
             )
         ]
-        if optimizer_scope is not None:
-            rows = [item for item in rows if int(item.get("optimizer_id") or 0) == int(optimizer_scope)]
+        optimizer_ids = set(_optimizer_scope_values(optimizer_scope))
+        if optimizer_ids:
+            rows = [
+                item for item in rows
+                if optimizer_ids.intersection(_optimizer_scope_values(item.get("optimizer_ids") or item.get("optimizer_id")))
+            ]
         for key in ("rule_group_id", "channel", "object_level", "run_mode", "status", "trigger_source"):
             if filters.get(key):
                 rows = [item for item in rows if str(item.get(key) or "") == str(filters[key])]
         if filters.get("optimizer_id") not in (None, ""):
-            rows = [item for item in rows if int(item.get("optimizer_id") or 0) == int(filters["optimizer_id"])]
+            selected_optimizer = int(filters["optimizer_id"])
+            rows = [
+                item for item in rows
+                if selected_optimizer in _optimizer_scope_values(item.get("optimizer_ids") or item.get("optimizer_id"))
+            ]
         selected_products = set(_filter_products(filters))
         if selected_products:
             rows = [
@@ -558,9 +599,14 @@ class MySQLRepository:
         return [{name: row[index] for index, name in enumerate(names)} for row in rows]
 
     @staticmethod
-    def _inflate_group(row: Mapping[str, Any], products: Sequence[str]) -> Dict[str, Any]:
+    def _inflate_group(
+        row: Mapping[str, Any],
+        products: Sequence[str],
+        optimizer_ids: Sequence[int],
+    ) -> Dict[str, Any]:
         item = dict(row)
         item["products"] = list(products)
+        item["optimizer_ids"] = _optimizer_scope_values(optimizer_ids or item.get("optimizer_id"))
         for column, target, fallback in (
             ("account_timezones_json", "account_timezones", []),
             ("rules_json", "rules", []),
@@ -616,12 +662,40 @@ class MySQLRepository:
             result.setdefault(str(row["rule_group_id"]), []).append(str(row["product_value"]))
         return result
 
+    def _optimizer_values(self, connection: Any, group_ids: Sequence[str]) -> Dict[str, List[int]]:
+        if not group_ids:
+            return {}
+        placeholders = ",".join(["%s"] * len(group_ids))
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT rule_group_id,optimizer_id FROM %s WHERE rule_group_id IN (%s) ORDER BY is_primary DESC,optimizer_id"
+            % (qualified_table("rule_group_optimizer"), placeholders),
+            tuple(group_ids),
+        )
+        result: Dict[str, List[int]] = {}
+        for row in self._rows(cursor):
+            result.setdefault(str(row["rule_group_id"]), []).append(int(row["optimizer_id"]))
+        return result
+
     def _insert_products(self, connection: Any, group_id: str, products: Sequence[str]) -> None:
         cursor = connection.cursor()
         cursor.execute("DELETE FROM %s WHERE rule_group_id=%%s" % qualified_table("rule_group_product"), (group_id,))
         sql = "INSERT INTO %s (rule_group_id,product_value,created_at) VALUES (%%s,%%s,UTC_TIMESTAMP(6))" % qualified_table("rule_group_product")
         for product in products:
             cursor.execute(sql, (group_id, product))
+
+    def _insert_optimizers(self, connection: Any, group_id: str, optimizer_ids: Sequence[int]) -> None:
+        values = _optimizer_scope_values(optimizer_ids)
+        if not values:
+            raise AdControlV3Error("validation_error", "rule group optimizer scope cannot be empty")
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM %s WHERE rule_group_id=%%s" % qualified_table("rule_group_optimizer"), (group_id,))
+        sql = (
+            "INSERT INTO %s (rule_group_id,optimizer_id,is_primary,created_at) "
+            "VALUES (%%s,%%s,%%s,UTC_TIMESTAMP(6))" % qualified_table("rule_group_optimizer")
+        )
+        for index, optimizer_id in enumerate(values):
+            cursor.execute(sql, (group_id, optimizer_id, 1 if index == 0 else 0))
 
     def create_rule_group(self, record: Mapping[str, Any]) -> Dict[str, Any]:
         sql = """INSERT INTO {table} (
@@ -641,6 +715,7 @@ class MySQLRepository:
         with self._transaction() as connection:
             connection.cursor().execute(sql, params)
             self._insert_products(connection, record["group_id"], record["products"])
+            self._insert_optimizers(connection, record["group_id"], _group_optimizer_ids(record))
         return copy.deepcopy(dict(record))
 
     def get_rule_group(self, group_id: str, *, include_deleted: bool = False) -> Optional[Dict[str, Any]]:
@@ -655,7 +730,8 @@ class MySQLRepository:
             if not rows:
                 return None
             products = self._product_values(connection, [group_id]).get(group_id, [])
-            return self._inflate_group(rows[0], products)
+            optimizer_ids = self._optimizer_values(connection, [group_id]).get(group_id, [])
+            return self._inflate_group(rows[0], products, optimizer_ids)
         finally:
             connection.close()
 
@@ -665,17 +741,25 @@ class MySQLRepository:
         *,
         page: int = 1,
         page_size: int = 20,
-        optimizer_scope: Optional[int] = None,
+        optimizer_scope: Any = None,
     ) -> Dict[str, Any]:
         page, page_size = _page(page, page_size)
         filters = _validated_group_filters(filters)
         where = ["deleted=0"]
         params: List[Any] = []
-        if optimizer_scope is not None:
-            where.append("optimizer_id=%s")
-            params.append(optimizer_scope)
+        optimizer_ids = _optimizer_scope_values(optimizer_scope)
+        if optimizer_ids:
+            placeholders = ",".join(["%s"] * len(optimizer_ids))
+            where.append(
+                "EXISTS (SELECT 1 FROM %s go WHERE go.rule_group_id=g.group_id AND go.optimizer_id IN (%s))"
+                % (qualified_table("rule_group_optimizer"), placeholders)
+            )
+            params.extend(optimizer_ids)
         elif filters.get("optimizer_id") not in (None, ""):
-            where.append("optimizer_id=%s")
+            where.append(
+                "EXISTS (SELECT 1 FROM %s go WHERE go.rule_group_id=g.group_id AND go.optimizer_id=%%s)"
+                % qualified_table("rule_group_optimizer")
+            )
             params.append(int(filters["optimizer_id"]))
         for key in ("channel", "object_level", "run_mode"):
             if filters.get(key):
@@ -708,8 +792,17 @@ class MySQLRepository:
             )
             cursor.execute(sql, tuple(params + [page_size, (page - 1) * page_size]))
             rows = self._rows(cursor)
-            products = self._product_values(connection, [str(row["group_id"]) for row in rows])
-            items = [self._inflate_group(row, products.get(str(row["group_id"]), [])) for row in rows]
+            group_ids = [str(row["group_id"]) for row in rows]
+            products = self._product_values(connection, group_ids)
+            optimizers = self._optimizer_values(connection, group_ids)
+            items = [
+                self._inflate_group(
+                    row,
+                    products.get(str(row["group_id"]), []),
+                    optimizers.get(str(row["group_id"]), []),
+                )
+                for row in rows
+            ]
             return {"items": items, "page": page, "page_size": page_size, "total": total}
         finally:
             connection.close()
@@ -733,6 +826,7 @@ class MySQLRepository:
             if int(cursor.rowcount or 0) != 1:
                 raise AdControlV3Error("version_conflict", "rule group was changed or deleted", status=409)
             self._insert_products(connection, group_id, record["products"])
+            self._insert_optimizers(connection, group_id, _group_optimizer_ids(record))
         return copy.deepcopy(dict(record))
 
     def soft_delete_rule_group(self, group_id: str, *, updated_by: str, updated_at: str) -> bool:
@@ -817,12 +911,17 @@ class MySQLRepository:
             current["last_preview_hash"] = ""
         return current
 
-    def emergency_stop_all(self, *, optimizer_scope: Optional[int], updated_by: str, updated_at: str) -> int:
-        sql = "UPDATE %s SET enabled=0,emergency_stopped=1,last_preview_id='',last_preview_hash='',updated_by_user_id=%%s,updated_at=%%s WHERE deleted=0" % qualified_table("rule_group")
+    def emergency_stop_all(self, *, optimizer_scope: Any, updated_by: str, updated_at: str) -> int:
+        sql = "UPDATE %s g SET enabled=0,emergency_stopped=1,last_preview_id='',last_preview_hash='',updated_by_user_id=%%s,updated_at=%%s WHERE deleted=0" % qualified_table("rule_group")
         params: List[Any] = [updated_by, updated_at]
-        if optimizer_scope is not None:
-            sql += " AND optimizer_id=%s"
-            params.append(optimizer_scope)
+        optimizer_ids = _optimizer_scope_values(optimizer_scope)
+        if optimizer_ids:
+            placeholders = ",".join(["%s"] * len(optimizer_ids))
+            sql += (
+                " AND EXISTS (SELECT 1 FROM %s go WHERE go.rule_group_id=g.group_id AND go.optimizer_id IN (%s))"
+                % (qualified_table("rule_group_optimizer"), placeholders)
+            )
+            params.extend(optimizer_ids)
         with self._transaction() as connection:
             cursor = connection.cursor()
             cursor.execute(sql, tuple(params))
@@ -974,7 +1073,7 @@ class MySQLRepository:
         *,
         page: int = 1,
         page_size: int = 20,
-        optimizer_scope: Optional[int] = None,
+        optimizer_scope: Any = None,
     ) -> Dict[str, Any]:
         page, page_size = _page(page, page_size)
         filters = _validated_execution_filters(filters)
@@ -985,11 +1084,19 @@ class MySQLRepository:
             "AND paired.trigger_source='schedule'))" % qualified_table("execution")
         ]
         params: List[Any] = []
-        if optimizer_scope is not None:
-            where.append("optimizer_id=%s")
-            params.append(optimizer_scope)
-        elif filters.get("optimizer_id") not in (None, ""):
-            where.append("optimizer_id=%s")
+        optimizer_ids = _optimizer_scope_values(optimizer_scope)
+        if optimizer_ids:
+            placeholders = ",".join(["%s"] * len(optimizer_ids))
+            where.append(
+                "EXISTS (SELECT 1 FROM %s go WHERE go.rule_group_id=e.rule_group_id AND go.optimizer_id IN (%s))"
+                % (qualified_table("rule_group_optimizer"), placeholders)
+            )
+            params.extend(optimizer_ids)
+        if filters.get("optimizer_id") not in (None, ""):
+            where.append(
+                "EXISTS (SELECT 1 FROM %s go WHERE go.rule_group_id=e.rule_group_id AND go.optimizer_id=%%s)"
+                % qualified_table("rule_group_optimizer")
+            )
             params.append(int(filters["optimizer_id"]))
         for key in ("rule_group_id", "channel", "object_level", "run_mode", "status", "trigger_source"):
             if filters.get(key):

@@ -7,7 +7,7 @@ from features.ad_control_v3.errors import AdControlV3Error
 from features.ad_control_v3.live_execution import FacebookLiveExecutor, _mysql_datetime_value
 from features.ad_control_v3.scheduler import candidate_schedule_due, runner_event_key
 from features.ad_control_v3.schemas import behavior_hash
-from tests.test_ad_control_v3_core import NORMAL, base_payload, make_service
+from tests.test_ad_control_v3_core import NORMAL, base_payload, make_alias_service, make_service
 
 
 class FakeLiveExecutor:
@@ -70,6 +70,28 @@ class ServiceLiveExecutionTests(unittest.TestCase):
             )
         self.assertEqual("rule_group_emergency_stopped", raised.exception.code)
         self.assertEqual([], fake.calls)
+
+    def test_multi_optimizer_live_targets_keep_the_actual_alias_for_audit(self):
+        service, repository, _, actor = make_alias_service()
+        fake = FakeLiveExecutor()
+        service.live_executor = fake
+        service.live_pause_enabled = True
+        payload = base_payload()
+        payload["optimizer_id"] = 387
+        group = service.create_rule_group(actor, payload)
+        current = repository.groups[group["group_id"]]
+        current["run_mode"] = "live"
+        current["behavior_hash"] = behavior_hash(current)
+        service.preview(actor, group["group_id"], {})
+
+        result = service.execute(
+            actor,
+            group["group_id"],
+            {"confirm": "EXECUTE_LIVE_RULE_GROUP"},
+        )
+
+        self.assertEqual("completed", result["status"])
+        self.assertEqual({387, 686}, {target["optimizer_id"] for _, target in fake.calls})
 
 
 class SchedulerTests(unittest.TestCase):

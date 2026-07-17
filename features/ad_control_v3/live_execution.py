@@ -848,7 +848,7 @@ class FacebookLiveExecutor:
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reserved','{}','','',%s,%s)",
                 (
                     intent_id, idempotency_key, owner, str(group.get("group_id") or ""), str(target.get("control_rule_id") or ""),
-                    int(group.get("optimizer_id") or 0), _account_id(target.get("ad_account_id")), str(target.get("object_level") or ""),
+                    int(target.get("optimizer_id") or group.get("optimizer_id") or 0), _account_id(target.get("ad_account_id")), str(target.get("object_level") or ""),
                     str(target.get("object_id") or ""), account_date, str(group.get("behavior_hash") or ""), now_text, now_text,
                 ),
             )
@@ -1293,7 +1293,7 @@ class FacebookLiveExecutor:
                         int(source_row.get("id") or 0), str(source_campaign.get("id") or ""), source_adset_id, source_ad_id,
                         new_created_id, copied_campaign_id, str(new_adset.get("id") or ""), str(new_ad.get("id") or ""),
                         str(new_ad.get("creative_id") or ""), str(group.get("group_id") or ""), str(target.get("control_rule_id") or ""),
-                        str(group.get("owner_user_id") or ""), int(group.get("optimizer_id") or 0), now_text, now_text,
+                        str(group.get("owner_user_id") or ""), int(target.get("optimizer_id") or group.get("optimizer_id") or 0), now_text, now_text,
                     ),
                 )
             if len(inserted_ids) != len(copied.get("ads") or {}):

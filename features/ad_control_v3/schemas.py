@@ -484,6 +484,7 @@ BEHAVIOR_FIELDS = (
     "object_level",
     "run_mode",
     "optimizer_id",
+    "optimizer_ids",
     "products",
     "account_timezones",
     "rules",

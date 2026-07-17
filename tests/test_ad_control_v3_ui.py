@@ -345,6 +345,49 @@ if (meta.products[0].value !== "Dramawave") process.exit(5);
     assert result.returncode == 0, result.stderr
 
 
+def test_meta_and_group_normalization_preserve_multi_optimizer_identity():
+    script = r"""
+global.window = { setTimeout, clearTimeout, location: { reload() {} } };
+global.document = {
+  body: { dataset: { v3Page: "test" } },
+  addEventListener() {},
+  getElementById() { return null; },
+};
+global.HTMLElement = function HTMLElement() {};
+global.Element = function Element() {};
+global.Headers = class Headers { has() { return false; } set() {} };
+require(process.argv[1]);
+const ui = window.AdControlV3Ui;
+const meta = ui.normalizeMeta({
+  actor: { user_id: "22fa4aa4", name: "王鹏", optimizer_id: 387, optimizer_ids: [387, 686] },
+  permissions: { current_optimizer_id: 387, current_optimizer_ids: [387, 686] },
+  optimizers: [
+    { optimizer_id: 387, name: "王鹏" },
+    { optimizer_id: 686, name: "Lucas" },
+  ],
+});
+if (meta.currentOptimizer.id !== "387") process.exit(2);
+if (meta.currentOptimizers.map(item => item.id).join(",") !== "387,686") process.exit(3);
+const group = ui.normalizeGroup({
+  group_id: "multi", config_version: 1, optimizer_id: 387, optimizer_ids: [387, 686],
+  products: ["Dramawave"], rules: [], selection: {},
+});
+if (group.optimizer_ids.join(",") !== "387,686") process.exit(4);
+const first = ui.scopeFingerprint({ optimizer_id: 387, optimizer_ids: [686, 387], selection: {} });
+const same = ui.scopeFingerprint({ optimizer_id: 387, optimizer_ids: [387, 686], selection: {} });
+if (first !== same) process.exit(5);
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(JS)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "将同时生效" in JS.read_text(encoding="utf-8")
+
+
 def test_save_flow_does_not_reference_out_of_scope_is_update():
     source = JS.read_text(encoding="utf-8")
     save_block = re.search(r"async function saveEditor\(options\) \{(.*?)\n  function saveRequestForEditor", source, re.DOTALL)

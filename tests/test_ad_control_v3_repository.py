@@ -51,6 +51,13 @@ class MemoryRepositoryTests(unittest.TestCase):
         self.assertEqual(1, self.repository.list_rule_groups({"products": "Dramawave"})["total"])
         self.assertEqual(0, self.repository.list_rule_groups({"products": "D"})["total"])
 
+    def test_multi_optimizer_scope_matches_any_associated_optimizer(self):
+        self.repository.groups["g1"]["optimizer_ids"] = [387, 686]
+        self.repository.groups["g1"]["optimizer_id"] = 387
+        self.assertEqual(1, self.repository.list_rule_groups(optimizer_scope=[686])["total"])
+        self.assertEqual(1, self.repository.list_rule_groups({"optimizer_id": 686})["total"])
+        self.assertEqual(0, self.repository.list_rule_groups(optimizer_scope=[999])["total"])
+
     def test_optimistic_version_and_enable_guard(self):
         record = self.repository.get_rule_group("g1")
         record["config_version"] = 2
@@ -175,8 +182,8 @@ class FakeConnection:
 
 
 class MySQLBoundaryTests(unittest.TestCase):
-    def test_only_eight_ads_ai_tables_are_allowlisted(self):
-        self.assertEqual(8, len(TABLES))
+    def test_only_nine_ads_ai_tables_are_allowlisted(self):
+        self.assertEqual(9, len(TABLES))
         for key in TABLES:
             self.assertTrue(qualified_table(key).startswith("`ads_ai`."))
         with self.assertRaises(AdControlV3Error):
@@ -220,6 +227,21 @@ class MySQLBoundaryTests(unittest.TestCase):
         self.assertIn("ad_control_v3_rule_group_product", count_sql)
         self.assertIn("EXISTS", count_sql)
         self.assertEqual(("Dramawave",), count_params)
+
+    def test_optimizer_scope_uses_bound_many_to_many_bridge(self):
+        readers = []
+
+        def reader_factory():
+            conn = FakeConnection("reader")
+            readers.append(conn)
+            return conn
+
+        repository = MySQLRepository(reader_factory, lambda: FakeConnection("writer"))
+        repository.list_rule_groups(optimizer_scope=[387, 686])
+        count_sql, count_params = readers[0].calls[0]
+        self.assertIn("ad_control_v3_rule_group_optimizer", count_sql)
+        self.assertIn("go.optimizer_id IN (%s,%s)", count_sql)
+        self.assertEqual((387, 686), count_params)
 
     def test_execution_date_filter_binds_utc8_day_as_utc_storage_bounds(self):
         readers = []
@@ -329,9 +351,9 @@ class MySQLBoundaryTests(unittest.TestCase):
 
 
 class MigrationContractTests(unittest.TestCase):
-    def test_ddl_has_exactly_eight_v3_tables_and_ads_ai_only(self):
+    def test_ddl_has_exactly_nine_v3_tables_and_ads_ai_only(self):
         ddl = (ROOT / "doc" / "008.ad-control-v3-dynamic-ui" / "sql" / "001_create_ad_control_v3_tables.sql").read_text(encoding="utf-8")
-        self.assertEqual(8, ddl.count("CREATE TABLE IF NOT EXISTS"))
+        self.assertEqual(9, ddl.count("CREATE TABLE IF NOT EXISTS"))
         self.assertNotIn("kunlunads_dev`.`ad_control_v3", ddl)
         self.assertNotIn("ad_control_action_log", ddl)
         for table in TABLES.values():
@@ -357,8 +379,19 @@ class MigrationContractTests(unittest.TestCase):
         rollback = (ROOT / "doc" / "008.ad-control-v3-dynamic-ui" / "sql" / "900_rollback_empty_v3_tables.sql").read_text(encoding="utf-8")
         self.assertIn("CREATE PROCEDURE", rollback)
         self.assertIn("SIGNAL SQLSTATE '45000'", rollback)
+        self.assertIn("ad_control_v3_rule_group_optimizer", rollback)
         self.assertLess(rollback.index("IF business_rows <> 0"), rollback.index("DROP TABLE `ads_ai`.`ad_control_v3_runner_event`"))
         self.assertNotIn("DROP TABLE IF EXISTS", rollback)
+
+    def test_multi_optimizer_upgrade_is_additive_backfilled_and_ads_ai_only(self):
+        migration = (ROOT / "doc" / "012.ad-control-v3-multi-optimizer" / "sql" / "004_add_rule_group_optimizer_scope.sql").read_text(encoding="utf-8")
+        upper = migration.upper()
+        self.assertEqual(1, upper.count("CREATE TABLE IF NOT EXISTS"))
+        self.assertIn("INSERT IGNORE INTO `ads_ai`.`ad_control_v3_rule_group_optimizer`", migration)
+        self.assertIn("FROM `ads_ai`.`ad_control_v3_rule_group`", migration)
+        self.assertNotIn("DROP TABLE", upper)
+        self.assertNotIn("TRUNCATE", upper)
+        self.assertNotIn("`kunlunads_dev`", migration)
 
 
 if __name__ == "__main__":

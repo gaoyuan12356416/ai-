@@ -12,6 +12,7 @@ BEGIN
 
   SELECT
       (SELECT COUNT(*) FROM `ads_ai`.`ad_control_v3_rule_group`)
+    + (SELECT COUNT(*) FROM `ads_ai`.`ad_control_v3_rule_group_optimizer`)
     + (SELECT COUNT(*) FROM `ads_ai`.`ad_control_v3_rule_group_product`)
     + (SELECT COUNT(*) FROM `ads_ai`.`ad_control_v3_preview`)
     + (SELECT COUNT(*) FROM `ads_ai`.`ad_control_v3_preview_target`)
@@ -38,6 +39,7 @@ BEGIN
     DROP TABLE `ads_ai`.`ad_control_v3_execution`;
     DROP TABLE `ads_ai`.`ad_control_v3_preview_target`;
     DROP TABLE `ads_ai`.`ad_control_v3_preview`;
+    DROP TABLE `ads_ai`.`ad_control_v3_rule_group_optimizer`;
     DROP TABLE `ads_ai`.`ad_control_v3_rule_group_product`;
     DROP TABLE `ads_ai`.`ad_control_v3_rule_group`;
     DROP TABLE `ads_ai`.`ad_control_v3_product_catalog`;

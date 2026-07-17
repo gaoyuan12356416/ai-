@@ -65,6 +65,7 @@ GROUP_INPUT_FIELDS = {
 }
 SERVER_MANAGED_FIELDS = {
     "group_id",
+    "optimizer_ids",
     "owner_user_id",
     "created_by_user_id",
     "updated_by_user_id",
@@ -92,6 +93,8 @@ COMPUTED_INSIGHT_FIELDS = frozenset({
 })
 SOURCE_MYSQL_READ_TIMEOUT_MIN_SECONDS = 9
 SOURCE_MYSQL_READ_TIMEOUT_MAX_SECONDS = 10
+MAX_ACTOR_OPTIMIZERS = 20
+MAX_MULTI_OPTIMIZER_CANDIDATES = 20000
 
 
 def _bounded_environment_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -359,8 +362,42 @@ class Service:
             code = "server_managed_field" if set(unknown).intersection(SERVER_MANAGED_FIELDS) else "validation_error"
             raise AdControlV3Error(code, "payload contains unsupported fields", details={"fields": unknown})
 
+    def _normal_optimizer_items(self, actor: Actor) -> List[Dict[str, Any]]:
+        items = [dict(item) for item in self.identity_resolver.resolve_items_for_actor(actor)]
+        if len(items) > MAX_ACTOR_OPTIMIZERS:
+            raise AdControlV3Error(
+                "optimizer_identity_too_large",
+                "current user has too many optimizer aliases",
+                status=409,
+                details={"maximum": MAX_ACTOR_OPTIMIZERS},
+            )
+        for item in items:
+            optimizer_id = int(item["optimizer_id"])
+            candidate_name = str(item.get("name") or "").strip()
+            if not candidate_name or candidate_name == str(optimizer_id):
+                item["name"] = actor.name or str(optimizer_id)
+        return items
+
+    def _normal_optimizer_ids(self, actor: Actor) -> List[int]:
+        return [int(item["optimizer_id"]) for item in self._normal_optimizer_items(actor)]
+
     def _normal_optimizer(self, actor: Actor) -> int:
-        return self.identity_resolver.resolve_for_actor(actor)
+        return self._normal_optimizer_ids(actor)[0]
+
+    @staticmethod
+    def _group_optimizer_ids(group: Mapping[str, Any]) -> List[int]:
+        raw = group.get("optimizer_ids")
+        if not isinstance(raw, (list, tuple)) or not raw:
+            raw = [group.get("optimizer_id")]
+        result: List[int] = []
+        for value in raw:
+            try:
+                optimizer_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if optimizer_id > 0 and optimizer_id not in result:
+                result.append(optimizer_id)
+        return sorted(result)
 
     def _optimizer_for_payload(self, actor: Actor, value: Any) -> int:
         if actor.is_admin:
@@ -383,22 +420,36 @@ class Service:
                     details={"optimizer_id": selected},
                 )
             return selected
-        own_optimizer = self._normal_optimizer(actor)
-        if value not in (None, "") and int(value) != own_optimizer:
+        own_optimizers = self._normal_optimizer_ids(actor)
+        if value not in (None, "") and int(value) not in own_optimizers:
             raise AdControlV3Error(
                 "optimizer_forbidden",
                 "non-admin users can only create rules for themselves",
                 status=403,
             )
-        return own_optimizer
+        return own_optimizers[0]
 
-    def _optimizer_scope(self, actor: Actor) -> Optional[int]:
-        return None if actor.is_admin else self._normal_optimizer(actor)
+    def _optimizer_ids_for_payload(self, actor: Actor, value: Any) -> List[int]:
+        if actor.is_admin:
+            return [self._optimizer_for_payload(actor, value)]
+        own_optimizers = self._normal_optimizer_ids(actor)
+        if value not in (None, "") and int(value) not in own_optimizers:
+            raise AdControlV3Error(
+                "optimizer_forbidden",
+                "non-admin users can only create rules for themselves",
+                status=403,
+            )
+        return own_optimizers
+
+    def _optimizer_scope(self, actor: Actor) -> Optional[List[int]]:
+        return None if actor.is_admin else self._normal_optimizer_ids(actor)
 
     def _authorize_group(self, actor: Actor, group: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         if not group:
             raise AdControlV3Error("rule_group_not_found", "rule group not found", status=404)
-        if not actor.is_admin and int(group.get("optimizer_id") or 0) != self._normal_optimizer(actor):
+        if not actor.is_admin and not set(self._group_optimizer_ids(group)).intersection(
+            self._normal_optimizer_ids(actor)
+        ):
             # Hide existence across optimizer boundaries.
             raise AdControlV3Error("rule_group_not_found", "rule group not found", status=404)
         return copy.deepcopy(dict(group))
@@ -446,7 +497,53 @@ class Service:
                 details={"max_concurrency": self.scan_concurrency},
             )
         try:
-            return list(adapter.discover(scope))
+            raw_ids = scope.get("optimizer_ids")
+            optimizer_ids = []
+            for value in raw_ids if isinstance(raw_ids, (list, tuple)) else [scope.get("optimizer_id")]:
+                try:
+                    optimizer_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if optimizer_id > 0 and optimizer_id not in optimizer_ids:
+                    optimizer_ids.append(optimizer_id)
+            optimizer_ids.sort()
+            if not optimizer_ids:
+                raise AdControlV3Error("optimizer_required", "optimizer scope is empty")
+            by_object: Dict[Any, Dict[str, Any]] = {}
+            for optimizer_id in optimizer_ids:
+                optimizer_scope = dict(scope)
+                optimizer_scope["optimizer_id"] = optimizer_id
+                optimizer_scope.pop("optimizer_ids", None)
+                for raw_candidate in adapter.discover(optimizer_scope):
+                    candidate = dict(raw_candidate)
+                    candidate["optimizer_id"] = optimizer_id
+                    candidate["scope_optimizer_ids"] = [optimizer_id]
+                    key = (
+                        str(candidate.get("channel") or adapter.channel),
+                        str(candidate.get("ad_account_id") or ""),
+                        str(candidate.get("object_level") or scope.get("object_level") or ""),
+                        str(candidate.get("object_id") or ""),
+                    )
+                    existing = by_object.get(key)
+                    if existing is None:
+                        by_object[key] = candidate
+                    else:
+                        existing_ids = {
+                            int(value)
+                            for value in existing.get("scope_optimizer_ids") or [existing.get("optimizer_id")]
+                            if str(value or "").isdigit()
+                        }
+                        existing_ids.add(optimizer_id)
+                        existing["scope_optimizer_ids"] = sorted(existing_ids)
+                        existing["blocked_reason"] = "ambiguous_optimizer_scope"
+                    if len(by_object) > MAX_MULTI_OPTIMIZER_CANDIDATES:
+                        raise AdControlV3Error(
+                            "scope_candidate_limit_exceeded",
+                            "multi-optimizer candidate count exceeds the safe limit",
+                            status=409,
+                            details={"limit": MAX_MULTI_OPTIMIZER_CANDIDATES},
+                        )
+            return [by_object[key] for key in sorted(by_object)]
         finally:
             self._scan_semaphore.release()
 
@@ -553,15 +650,19 @@ class Service:
         if current.is_admin:
             optimizers = shared["optimizers"]
             current_optimizer_id = None
+            current_optimizer_ids: List[int] = []
         else:
-            current_optimizer_id = self._normal_optimizer(current)
+            current_items = self._normal_optimizer_items(current)
+            current_optimizer_ids = [int(item["optimizer_id"]) for item in current_items]
+            current_optimizer_id = current_optimizer_ids[0]
             optimizers = [
                 {
-                    "optimizer_id": current_optimizer_id,
-                    "name": current.name or str(current_optimizer_id),
-                    "email": current.email,
+                    "optimizer_id": int(item["optimizer_id"]),
+                    "name": str(item.get("name") or current.name or item["optimizer_id"]),
+                    "email": str(item.get("email") or ""),
                     "locked": True,
                 }
+                for item in current_items
             ]
         channel_items = []
         for channel in ("facebook", "tiktok"):
@@ -580,6 +681,7 @@ class Service:
                 "role": "admin" if current.is_admin else "optimizer",
                 "is_admin": current.is_admin,
                 "optimizer_id": current_optimizer_id,
+                "optimizer_ids": current_optimizer_ids,
             },
             "channels": channel_items,
             "object_levels": [
@@ -609,6 +711,7 @@ class Service:
                 "is_admin": current.is_admin,
                 "can_select_optimizer": current.is_admin,
                 "current_optimizer_id": current_optimizer_id,
+                "current_optimizer_ids": current_optimizer_ids,
                 "live_pause_enabled": self.live_pause_enabled,
                 "live_copy_enabled": self.live_copy_enabled,
                 "can_live_execute": bool(self.live_executor and (self.live_pause_enabled or self.live_copy_enabled)),
@@ -621,6 +724,7 @@ class Service:
             "capabilities": {
                 "rule_group_search": True,
                 "rule_group_search_fields": ["name", "group_id"],
+                "multi_optimizer_identity": True,
             },
             "time_standard": {
                 "storage_timezone": "UTC",
@@ -640,8 +744,8 @@ class Service:
         current = Actor.from_value(actor)
         filters = dict(filters or {})
         if not current.is_admin and filters.get("optimizer_id") not in (None, ""):
-            own = self._normal_optimizer(current)
-            if int(filters["optimizer_id"]) != own:
+            own = self._normal_optimizer_ids(current)
+            if int(filters["optimizer_id"]) not in own:
                 raise AdControlV3Error("optimizer_forbidden", "optimizer filter is forbidden", status=403)
         page_result = self.repository.list_rule_groups(
             filters,
@@ -662,7 +766,9 @@ class Service:
         normalized = normalize_rule_group_payload(body, creating=True)
         if normalized["channel"] != "facebook":
             raise AdControlV3Error("channel_not_enabled", "TikTok is not enabled", status=409)
-        normalized["optimizer_id"] = self._optimizer_for_payload(current, normalized.get("optimizer_id"))
+        optimizer_ids = self._optimizer_ids_for_payload(current, normalized.get("optimizer_id"))
+        normalized["optimizer_id"] = optimizer_ids[0]
+        normalized["optimizer_ids"] = optimizer_ids
         self._validate_products(normalized["channel"], normalized["products"])
         validate_rules_against_catalog(normalized["rules"], normalized["object_level"])
         self._validate_selection_for_level(normalized["selection"], normalized["object_level"])
@@ -726,7 +832,9 @@ class Service:
         normalized = normalize_rule_group_payload(body, creating=False, current=current)
         if normalized["channel"] != "facebook":
             raise AdControlV3Error("channel_not_enabled", "TikTok is not enabled", status=409)
-        normalized["optimizer_id"] = self._optimizer_for_payload(current_actor, normalized.get("optimizer_id"))
+        optimizer_ids = self._optimizer_ids_for_payload(current_actor, normalized.get("optimizer_id"))
+        normalized["optimizer_id"] = optimizer_ids[0]
+        normalized["optimizer_ids"] = optimizer_ids
         self._validate_products(normalized["channel"], normalized["products"])
         validate_rules_against_catalog(normalized["rules"], normalized["object_level"])
         self._validate_selection_for_level(normalized["selection"], normalized["object_level"])
@@ -783,8 +891,8 @@ class Service:
         body["run_mode"] = "observe"
         return self.create_rule_group(current_actor, body)
 
-    def _scope_identity(self, actor: Actor, payload: Mapping[str, Any]) -> int:
-        return self._optimizer_for_payload(actor, payload.get("optimizer_id"))
+    def _scope_identity(self, actor: Actor, payload: Mapping[str, Any]) -> List[int]:
+        return self._optimizer_ids_for_payload(actor, payload.get("optimizer_id"))
 
     def _discovery_scope(
         self,
@@ -792,7 +900,7 @@ class Service:
         channel: str,
         object_level: str,
         products: Sequence[str],
-        optimizer_id: int,
+        optimizer_ids: Sequence[int],
         account_timezones: Sequence[str],
         payload: Mapping[str, Any],
         required_fields: Sequence[str] = (),
@@ -809,11 +917,15 @@ class Service:
             days = positive_int(metric_window_days, "metric_window_days", maximum=31)
             date_to = self._now().date()
             date_from = date_to - timedelta(days=days - 1)
+        normalized_optimizer_ids = sorted({positive_int(value, "optimizer_id") for value in optimizer_ids})
+        if not normalized_optimizer_ids or len(normalized_optimizer_ids) > MAX_ACTOR_OPTIMIZERS:
+            raise AdControlV3Error("optimizer_required", "optimizer scope is invalid")
         result = {
             "channel": channel,
             "object_level": object_level,
             "products": list(products),
-            "optimizer_id": optimizer_id,
+            "optimizer_id": normalized_optimizer_ids[0],
+            "optimizer_ids": normalized_optimizer_ids,
             "account_timezones": list(account_timezones),
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
@@ -841,7 +953,7 @@ class Service:
         if object_level not in OBJECT_LEVELS:
             raise AdControlV3Error("validation_error", "unsupported object level")
         products = normalize_string_list(body.get("products"), "products", required=True, max_items=20, max_length=128)
-        optimizer_id = self._scope_identity(current, body)
+        optimizer_ids = self._scope_identity(current, body)
         timezones = normalize_string_list(body.get("account_timezones") or [], "account_timezones", max_items=100, max_length=64)
         adapter = self._adapter(channel)
         self._validate_products(channel, products)
@@ -849,7 +961,7 @@ class Service:
             channel=channel,
             object_level=object_level,
             products=products,
-            optimizer_id=optimizer_id,
+            optimizer_ids=optimizer_ids,
             account_timezones=timezones,
             payload=body,
             required_fields=(),
@@ -895,7 +1007,7 @@ class Service:
             channel=group["channel"],
             object_level=group["object_level"],
             products=group["products"],
-            optimizer_id=int(group["optimizer_id"]),
+            optimizer_ids=self._group_optimizer_ids(group),
             account_timezones=group.get("account_timezones") or [],
             payload=discovery_payload,
             required_fields=_required_preview_fields(
@@ -931,7 +1043,7 @@ class Service:
             "kind": "preview",
             "preview_id": preview_id,
             "rule_group": {key: copy.deepcopy(group.get(key)) for key in (
-                "group_id", "channel", "object_level", "run_mode", "optimizer_id", "products",
+                "group_id", "channel", "object_level", "run_mode", "optimizer_id", "optimizer_ids", "products",
                 "account_timezones", "rules", "schedule", "quotas", "selection",
                 "config_version", "behavior_hash",
             )},
@@ -948,6 +1060,7 @@ class Service:
             "config_version": group["config_version"],
             "behavior_hash": group["behavior_hash"],
             "optimizer_id": group["optimizer_id"],
+            "optimizer_ids": self._group_optimizer_ids(group),
             "channel": group["channel"],
             "object_level": group["object_level"],
             "status": "ready",
@@ -967,6 +1080,7 @@ class Service:
             "config_version": group["config_version"],
             "behavior_hash": group["behavior_hash"],
             "optimizer_id": group["optimizer_id"],
+            "optimizer_ids": self._group_optimizer_ids(group),
             "channel": group["channel"],
             "object_level": group["object_level"],
             "run_mode": "observe",
@@ -1123,7 +1237,7 @@ class Service:
             "execution_id": execution_id,
             "preview_id": preview_id,
             "rule_group": {key: copy.deepcopy(group.get(key)) for key in (
-                "group_id", "channel", "object_level", "run_mode", "optimizer_id", "products",
+                "group_id", "channel", "object_level", "run_mode", "optimizer_id", "optimizer_ids", "products",
                 "account_timezones", "rules", "schedule", "quotas", "selection",
                 "config_version", "behavior_hash",
             )},
@@ -1143,6 +1257,7 @@ class Service:
             "config_version": group["config_version"],
             "behavior_hash": group["behavior_hash"],
             "optimizer_id": group["optimizer_id"],
+            "optimizer_ids": self._group_optimizer_ids(group),
             "channel": group["channel"],
             "object_level": group["object_level"],
             "run_mode": "live",
@@ -1339,8 +1454,8 @@ class Service:
         current = Actor.from_value(actor)
         filters = dict(filters or {})
         if not current.is_admin and filters.get("optimizer_id") not in (None, ""):
-            own = self._normal_optimizer(current)
-            if int(filters["optimizer_id"]) != own:
+            own = self._normal_optimizer_ids(current)
+            if int(filters["optimizer_id"]) not in own:
                 raise AdControlV3Error("optimizer_forbidden", "optimizer filter is forbidden", status=403)
         page_result = self.repository.list_executions(
             filters,
@@ -1351,7 +1466,10 @@ class Service:
         optimizer_names = {
             int(item.get("optimizer_id") or 0): str(item.get("name") or "")
             for item in self.identity_resolver.list_for_admin()
-        } if current.is_admin else {self._normal_optimizer(current): current.name}
+        } if current.is_admin else {
+            int(item["optimizer_id"]): str(item.get("name") or current.name or item["optimizer_id"])
+            for item in self._normal_optimizer_items(current)
+        }
         group_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         for item in page_result.get("items") or []:
             self._enrich_execution(item, optimizer_names=optimizer_names, group_cache=group_cache)
@@ -1376,7 +1494,12 @@ class Service:
             action for action, count_key in (("pause", "pause_count"), ("copy", "copy_count"))
             if int(summary.get(count_key) or 0) > 0
         ]
-        item["optimizer_name"] = optimizer_names.get(int(item.get("optimizer_id") or 0), "")
+        optimizer_ids = self._group_optimizer_ids(group or item)
+        item["optimizer_ids"] = optimizer_ids
+        item["optimizer_names"] = [
+            optimizer_names.get(optimizer_id, str(optimizer_id)) for optimizer_id in optimizer_ids
+        ]
+        item["optimizer_name"] = " / ".join(item["optimizer_names"])
         item["target_count"] = (
             int(summary.get("planned_count") or 0)
             + int(summary.get("deferred_count") or 0)
@@ -1390,12 +1513,18 @@ class Service:
         item = self.repository.get_execution(clean_text(execution_id, "execution_id", required=True))
         if not item:
             raise AdControlV3Error("execution_not_found", "execution not found", status=404)
-        if not current.is_admin and int(item.get("optimizer_id") or 0) != self._normal_optimizer(current):
-            raise AdControlV3Error("execution_not_found", "execution not found", status=404)
+        if not current.is_admin:
+            group = self.repository.get_rule_group(str(item.get("rule_group_id") or ""), include_deleted=True)
+            execution_scope = self._group_optimizer_ids(group or item)
+            if not set(execution_scope).intersection(self._normal_optimizer_ids(current)):
+                raise AdControlV3Error("execution_not_found", "execution not found", status=404)
         optimizer_names = {
             int(optimizer.get("optimizer_id") or 0): str(optimizer.get("name") or "")
             for optimizer in self.identity_resolver.list_for_admin()
-        } if current.is_admin else {self._normal_optimizer(current): current.name}
+        } if current.is_admin else {
+            int(optimizer["optimizer_id"]): str(optimizer.get("name") or current.name or optimizer["optimizer_id"])
+            for optimizer in self._normal_optimizer_items(current)
+        }
         self._enrich_execution(item, optimizer_names=optimizer_names)
         snapshot_metadata = {
             "relative_path": item.get("snapshot_relative_path"),
@@ -1602,22 +1731,22 @@ def build_service_from_environment() -> Service:
 
     def optimizer_candidates(actor: Actor) -> List[Dict[str, Any]]:
         base = (
-            "SELECT DISTINCT au.id AS optimizer_id,COALESCE(NULLIF(au.name,''),au.username) AS name,COALESCE(aug.email,'') AS email "
+            "SELECT DISTINCT au.id AS optimizer_id,COALESCE(NULLIF(aug.name,''),NULLIF(au.name,''),au.username) AS name,COALESCE(aug.email,'') AS email "
             "FROM `kunlunads_dev`.admin_user_group aug "
             "JOIN `kunlunads_dev`.admin_users au ON au.id=aug.sub_user_id "
-            "WHERE aug.status=0 AND {predicate} ORDER BY au.id LIMIT 10"
+            "WHERE aug.status=0 AND {predicate} ORDER BY au.id LIMIT 21"
         )
-        identity_layers = [("CAST(aug.user_id AS CHAR)=%s", (actor.user_id,))]
+        identity_layers = [("user_id", "CAST(aug.user_id AS CHAR)=%s", (actor.user_id,))]
         if actor.user_id.isdigit():
-            identity_layers.append(("aug.sub_user_id=%s", (int(actor.user_id),)))
+            identity_layers.append(("user_id", "aug.sub_user_id=%s", (int(actor.user_id),)))
         if actor.email:
-            identity_layers.append(("LOWER(TRIM(aug.email))=LOWER(TRIM(%s))", (actor.email,)))
+            identity_layers.append(("email", "LOWER(TRIM(aug.email))=LOWER(TRIM(%s))", (actor.email,)))
         if actor.name:
-            identity_layers.append(("TRIM(aug.name)=TRIM(%s)", (actor.name,)))
-        for predicate, params in identity_layers:
+            identity_layers.append(("name", "TRIM(aug.name)=TRIM(%s)", (actor.name,)))
+        for identity_layer, predicate, params in identity_layers:
             rows = source_query(base.format(predicate=predicate), params)
             if rows:
-                return rows
+                return [dict(row, identity_layer=identity_layer) for row in rows]
         return []
 
     def active_optimizers() -> List[Dict[str, Any]]:

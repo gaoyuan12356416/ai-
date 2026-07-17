@@ -221,6 +221,131 @@ SAME_OPTIMIZER_OTHER_USER = {"user_id": "user-2", "email": "other@example.com", 
 ADMIN = {"user_id": "admin-1", "email": "admin@example.com", "name": "Admin", "role": "admin"}
 
 
+class AliasAdapter:
+    channel = "facebook"
+    enabled = True
+
+    def __init__(self, overlap=False):
+        self.overlap = overlap
+        self.optimizer_calls = []
+
+    def capabilities(self):
+        return {"channel": self.channel, "enabled": True}
+
+    def discover(self, scope):
+        optimizer_id = int(scope["optimizer_id"])
+        self.optimizer_calls.append(optimizer_id)
+        suffix = "shared" if self.overlap else str(optimizer_id)
+        return [{
+            "channel": "facebook",
+            "object_level": "campaign",
+            "ad_account_id": "account-%s" % suffix,
+            "object_id": "campaign-%s" % suffix,
+            "campaign_id": "campaign-%s" % suffix,
+            "product": "Dramawave",
+            "spend": 20,
+            "blocked_reason": "",
+        }]
+
+
+def make_alias_service(*, overlap=False, identity_layer="email"):
+    repository = MemoryRepository(PRODUCTS)
+    resolver = StaticOptimizerIdentityResolver(
+        {
+            "wang": [
+                {"optimizer_id": 387, "name": "王鹏", "email": "peng.wangg@yingliangads.com", "identity_layer": identity_layer},
+                {"optimizer_id": 686, "name": "Lucas", "email": "peng.wangg@yingliangads.com", "identity_layer": identity_layer},
+            ]
+        },
+        [
+            {"optimizer_id": 387, "name": "王鹏", "email": "peng.wangg@yingliangads.com"},
+            {"optimizer_id": 686, "name": "Lucas", "email": "peng.wangg@yingliangads.com"},
+        ],
+    )
+    adapter = AliasAdapter(overlap=overlap)
+    service = Service(
+        repository,
+        {"facebook": adapter},
+        resolver,
+        MemorySnapshotStore(),
+        clock=lambda: datetime(2026, 7, 17, 10, 0, tzinfo=timezone.utc),
+    )
+    actor = {
+        "user_id": "wang",
+        "email": "peng.wangg@yingliangads.com",
+        "name": "王鹏",
+        "role": "optimizer",
+    }
+    return service, repository, adapter, actor
+
+
+class MultiOptimizerIdentityTests(unittest.TestCase):
+    def test_exact_email_aliases_are_all_applied_to_meta_group_and_preview(self):
+        service, _, adapter, actor = make_alias_service()
+        meta = service.meta(actor)
+        self.assertEqual([387, 686], meta["actor"]["optimizer_ids"])
+        self.assertEqual([387, 686], meta["permissions"]["current_optimizer_ids"])
+        self.assertEqual([387, 686], [item["optimizer_id"] for item in meta["optimizers"]])
+
+        payload = base_payload()
+        payload["optimizer_id"] = 387
+        group = service.create_rule_group(actor, payload)
+        self.assertEqual(387, group["optimizer_id"])
+        self.assertEqual([387, 686], group["optimizer_ids"])
+
+        preview = service.preview(actor, group["group_id"])
+        self.assertEqual([387, 686], adapter.optimizer_calls)
+        self.assertEqual(2, preview["target_count"])
+        self.assertEqual({387, 686}, {item["optimizer_id"] for item in preview["targets"]})
+
+    def test_name_only_collision_remains_fail_closed(self):
+        service, _, _, actor = make_alias_service(identity_layer="name")
+        with self.assertRaises(AdControlV3Error) as raised:
+            service.meta(actor)
+        self.assertEqual("optimizer_identity_ambiguous", raised.exception.code)
+
+    def test_forged_optimizer_outside_alias_set_is_rejected(self):
+        service, _, _, actor = make_alias_service()
+        payload = base_payload()
+        payload["optimizer_id"] = 999
+        with self.assertRaises(AdControlV3Error) as raised:
+            service.create_rule_group(actor, payload)
+        self.assertEqual("optimizer_forbidden", raised.exception.code)
+
+    def test_more_than_twenty_strong_aliases_fail_closed(self):
+        repository = MemoryRepository(PRODUCTS)
+        resolver = StaticOptimizerIdentityResolver({
+            "wang": [
+                {"optimizer_id": value, "name": "alias-%s" % value, "identity_layer": "email"}
+                for value in range(1, 22)
+            ]
+        })
+        service = Service(
+            repository,
+            {"facebook": AliasAdapter()},
+            resolver,
+            MemorySnapshotStore(),
+        )
+        with self.assertRaises(AdControlV3Error) as raised:
+            service.meta({"user_id": "wang", "email": "peng.wangg@yingliangads.com", "name": "王鹏"})
+        self.assertEqual("optimizer_identity_too_large", raised.exception.code)
+
+    def test_cross_alias_duplicate_object_is_deduplicated_and_blocked(self):
+        service, _, adapter, actor = make_alias_service(overlap=True)
+        result = service.scope_estimate(actor, {
+            "channel": "facebook",
+            "object_level": "campaign",
+            "products": ["Dramawave"],
+            "optimizer_id": 387,
+            "account_timezones": [],
+            "metric_window_days": 1,
+        })
+        self.assertEqual([387, 686], adapter.optimizer_calls)
+        self.assertEqual(1, result["object_count"])
+        self.assertEqual(1, result["blocked_count"])
+        self.assertEqual({"ambiguous_optimizer_scope": 1}, result["blocked_reasons"])
+
+
 class SchemaAndPermissionTests(unittest.TestCase):
     def test_source_schema_fixture_requires_raw_components_not_computed_ratios(self):
         production_component_fixture = {
