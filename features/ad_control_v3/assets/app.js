@@ -32,6 +32,7 @@
     estimateLoading: false,
     estimateRequestSerial: 0,
     openMulti: "",
+    openSingle: "",
     logs: { page: 1, pageSize: 20, total: 0, items: [], summary: {}, loading: false },
     logFilters: {},
     detail: null,
@@ -239,8 +240,7 @@
     try {
       requireSharedUi();
       renderWarmQuickNav();
-      await loadSharedShell();
-      const payload = await api("/meta");
+      const [, payload] = await Promise.all([loadSharedShell(), api("/meta")]);
       state.meta = normalizeMeta(payload);
       state.actor = state.meta.actor;
       renderSystemCapabilityBanner();
@@ -273,7 +273,14 @@
     const products = array(source.products || source.product_catalog).map(item => {
       const object = typeof item === "string" ? { value: item } : (item || {});
       const value = text(object.product_value || object.value || object.product || object.id);
-      return { value, label: text(object.label || object.display_name || object.name, value), enabled: object.enabled !== false, description: text(object.description || object.canonical_product) };
+      const evidence = object.evidence && typeof object.evidence === "object" ? object.evidence : {};
+      return {
+        value,
+        label: text(object.label || object.display_name || object.name || evidence.display_name, value),
+        enabled: object.enabled !== false,
+        description: text(object.description || evidence.description || object.canonical_product),
+        catalogKind: text(evidence.catalog_kind, "reporting_product"),
+      };
     }).filter(item => item.value);
     const optimizers = array(source.optimizers || source.optimizer_options).map(item => {
       const object = item || {};
@@ -466,10 +473,7 @@
     const root = document.getElementById("ruleGroupsApp");
     if (!root || state.editor) return;
     const optimizerFilter = state.actor && state.actor.isAdmin ? `
-      <div class="field"><label for="ruleFilterOptimizer">优化师</label><select id="ruleFilterOptimizer" data-filter="optimizer_id">
-        ${option("", "全部优化师", !state.filters.optimizer_id)}
-        ${state.meta.optimizers.map(item => option(item.id, `${item.name}${item.email ? ` · ${item.email}` : ""}`, String(state.filters.optimizer_id || "") === item.id)).join("")}
-      </select></div>` : "";
+      <div class="field"><span class="field-label">优化师</span>${renderSearchableSingle("rule-optimizer", "全部优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(state.filters.optimizer_id || ""), true)}</div>` : "";
     root.innerHTML = `
       <div class="toolbar">
         <div class="toolbar-copy"><h2>新版规则组</h2><p>范围由短剧产品与优化师共同确定。</p></div>
@@ -478,10 +482,7 @@
       ${state.meta.permissions.canEnable ? "" : `<section class="scheduler-banner" role="status" aria-label="调度能力说明"><span class="scheduler-banner-icon" aria-hidden="true">i</span><div><strong>${state.meta.permissions.canLiveExecute ? "真实暂停与复制已开放，可先手动执行" : "当前仅支持保存草稿 + 手动试算"}</strong><p>${h(state.meta.permissions.enableUnavailableReason)}。${state.meta.permissions.canLiveExecute ? "把规则保存为正式执行并完成试算后，可从列表点击“执行”。" : "规则不能启用，也不会持续自动扫描。配置与试算结果仍会写入执行日志。"}</p></div><span class="pill pill-warning">${state.meta.permissions.canLiveExecute ? "手动 Canary" : "启用已锁定"}</span></section>`}
       <section class="filter-bar" aria-label="规则组筛选">
         ${state.meta.capabilities.supportsRuleGroupSearch ? `<div class="field"><label for="ruleFilterKeyword">搜索</label><input id="ruleFilterKeyword" type="search" placeholder="搜索规则组名称或 ID" autocomplete="off" data-filter="keyword" value="${h(state.filters.keyword || "")}"></div>` : ""}
-        <div class="field"><label for="ruleFilterProduct">产品</label><select id="ruleFilterProduct" data-filter="product">
-          ${option("", "全部短剧产品", !state.filters.product)}
-          ${state.meta.products.map(item => option(item.value, item.label, state.filters.product === item.value, !item.enabled)).join("")}
-        </select></div>
+        <div class="field"><span class="field-label">产品</span>${renderSearchableSingle("rule-product", "全部短剧产品", state.meta.products.map(item => ({ value: item.value, label: item.label, description: item.description, disabled: !item.enabled })), String(state.filters.product || ""), true)}</div>
         ${optimizerFilter}
         <div class="field"><label for="ruleFilterLevel">调控对象</label><select id="ruleFilterLevel" data-filter="object_level">
           ${option("", "全部层级", !state.filters.object_level)}
@@ -525,7 +526,7 @@
       const ruleCount = array(group.rules).length || asNumber(group.rule_count, 0);
       return `<tr>
         <td><div class="cell-title"><strong>${h(text(group.name, "未命名规则组"))}</strong><small>${h(id)} · ${ruleCount} 条规则${mutable ? "" : " · 只读"}</small></div></td>
-        <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 3).map(item => `<span class="chip" title="${h(item)}">${h(item)}</span>`).join("")}${products.length > 3 ? `<span class="chip">+${products.length - 3}</span>` : ""}</div><small class="cell-muted">${h(optimizer)}</small></div></td>
+        <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 3).map(item => `<span class="chip" title="${h(item)}">${h(productLabel(item))}</span>`).join("")}${products.length > 3 ? `<span class="chip">+${products.length - 3}</span>` : ""}</div><small class="cell-muted">${h(optimizer)}</small></div></td>
         <td><span class="pill pill-info">${h(LEVEL_LABELS[group.object_level] || group.object_level || "—")}</span></td>
         <td><span class="pill ${group.run_mode === "live" ? "pill-warning" : "pill-safe"}">${h(MODE_LABELS[group.run_mode] || group.run_mode || "—")}</span></td>
         <td><div class="cell-stack">${stopped ? '<span class="pill pill-danger">已急停</span>' : `<span class="pill ${enabled ? "pill-success" : "pill-muted"}">${enabled ? "已启用" : "已停用"}</span>`}${group.preview_valid === false ? '<small class="cell-muted">需重新试算</small>' : ""}</div></td>
@@ -552,6 +553,12 @@
     const id = text(optimizerId);
     const found = state.meta && state.meta.optimizers.find(item => item.id === id);
     return text(optimizerName || (found && found.name), id ? `优化师 ${id}` : "未解析优化师");
+  }
+
+  function productLabel(productValue) {
+    const value = text(productValue);
+    const found = state.meta && state.meta.products.find(item => item.value === value);
+    return text(found && found.label, value || "未解析产品");
   }
 
   function canToggleGroup(enabled, permissions) {
@@ -703,12 +710,11 @@
       <div class="section-card"><div class="section-head"><div><h3>业务范围</h3><p>产品与优化师会同时进入服务端查询条件；广告账号不是配置项。</p></div></div>
         <div class="section-body"><div class="form-grid">
           <div class="field"><span class="field-label">优化师 <span class="required" aria-hidden="true">*</span></span>
-            ${isAdmin ? `<select aria-label="优化师" data-bind="optimizer_id"><option value="">请选择优化师</option>${state.meta.optimizers.map(item => option(item.id, `${item.name}${item.email ? ` · ${item.email}` : ""}`, String(editor.optimizer_id) === item.id)).join("")}</select><p class="field-hint">管理员可以为任一有效优化师创建规则，选择会记录在审计信息中。</p>` : `<div class="locked-value"><span><strong>${h(text(optimizer && optimizer.name, "正在解析本人优化师"))}</strong><small>${h(text(optimizer && optimizer.email, editor.optimizer_id ? `优化师 ID ${editor.optimizer_id}` : "由服务端身份唯一映射"))}</small></span><span class="pill pill-safe">仅本人</span></div><p class="field-hint">普通优化师无法在客户端更改此范围，服务端会再次校验。</p>`}
+            ${isAdmin ? `${renderSearchableSingle("editor-optimizer", "请选择优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(editor.optimizer_id || ""))}<p class="field-hint">支持按姓名、邮箱或优化师 ID 搜索；选择会记录在审计信息中。</p>` : `<div class="locked-value"><span><strong>${h(text(optimizer && optimizer.name, "正在解析本人优化师"))}</strong><small>${h(text(optimizer && optimizer.email, editor.optimizer_id ? `优化师 ID ${editor.optimizer_id}` : "由服务端身份唯一映射"))}</small></span><span class="pill pill-safe">仅本人</span></div><p class="field-hint">普通优化师无法在客户端更改此范围，服务端会再次校验。</p>`}
           </div>
           <div class="field"><span class="field-label">短剧产品 <span class="required" aria-hidden="true">*</span></span>${renderMultiSelect("products", "选择一个或多个短剧产品", state.meta.products.map(item => ({ value: item.value, label: item.label, description: item.description, disabled: !item.enabled })), editor.products)}</div>
           <div class="field field-span-2"><span class="field-label">账户时区（可选）</span>${renderMultiSelect("account_timezones", "不选择则不限制账户时区", state.meta.timezones, editor.account_timezones)}<p class="field-hint">留空时不生成时区筛选。设置后，时区缺失的广告会被跳过并记录原因；计划仍按各账户本地时间判断。</p></div>
         </div>
-        <div class="estimate-card"><div><h4>结构范围估算</h4><p>这里只读取对象身份并返回结构数量，不判断规则指标；最终可命中数以保存后的手动试算为准。选择产品、优化师、对象层级并显式填写指标窗口后可估算。</p><div class="field estimate-window"><label for="scopeMetricWindow">指标窗口 <span class="required" aria-hidden="true">*</span></label><div class="input-with-unit"><input id="scopeMetricWindow" type="number" min="1" inputmode="numeric" placeholder="输入最近天数" value="${h(editor.selection.metric_window_days || "")}" data-selection="metric_window_days"><span>天</span></div></div>${renderEstimateMetrics()}</div><button class="button" type="button" data-action="estimate-scope"${state.estimateLoading ? " disabled" : ""}>${state.estimateLoading ? "估算中…" : "估算当前范围"}</button></div>
         </div>
       </div>
     </section>`;
@@ -728,6 +734,26 @@
       ${open ? `<div class="multi-menu"><div class="multi-search"><input type="search" placeholder="搜索选项" autocomplete="off" data-multi-search="${h(name)}" aria-label="搜索${h(placeholder)}"></div><div class="multi-options" role="listbox" aria-multiselectable="true">${array(options).length ? array(options).map(item => {
         const value = String(item.value); const chosen = values.includes(value); return `<button class="tag-option${chosen ? " is-selected" : ""}" type="button" role="option" aria-selected="${chosen ? "true" : "false"}" data-action="multi-option" data-name="${h(name)}" data-value="${h(value)}" data-search-text="${h(`${item.label || value} ${item.description || ""}`.toLowerCase())}"${item.disabled ? " disabled" : ""}><span class="tag-check" aria-hidden="true">✓</span><span>${h(item.label || value)}${item.description ? `<small>${h(item.description)}</small>` : ""}</span></button>`;
       }).join("") : '<div class="condition-empty">暂无可用选项</div>'}</div></div>` : ""}
+    </div>`;
+  }
+
+  function renderSearchableSingle(name, placeholder, options, selected, allowClear) {
+    const value = String(selected || "");
+    const found = array(options).find(item => String(item.value) === value);
+    const open = state.openSingle === name;
+    const visibleLabel = found ? (found.label || found.value) : "";
+    const availableOptions = array(options);
+    return `<div class="multi-select single-select" data-single-root="${h(name)}">
+      <button class="multi-trigger" type="button" data-action="toggle-single" data-name="${h(name)}" aria-label="${h(placeholder)}" aria-haspopup="listbox" aria-expanded="${open ? "true" : "false"}">
+        <span class="multi-value">${visibleLabel ? `<span class="single-value"><strong>${h(visibleLabel)}</strong>${found.description ? `<small>${h(found.description)}</small>` : ""}</span>` : `<span class="multi-trigger-placeholder">${h(placeholder)}</span>`}</span><span aria-hidden="true">⌄</span>
+      </button>
+      ${open ? `<div class="multi-menu single-menu"><div class="multi-search"><input type="search" placeholder="输入姓名、邮箱、ID 或产品名" autocomplete="off" data-single-search="${h(name)}" aria-label="搜索${h(placeholder)}"></div><div class="multi-options" role="listbox">
+        ${allowClear ? `<button class="tag-option${value ? "" : " is-selected"}" type="button" role="option" aria-selected="${value ? "false" : "true"}" data-action="single-option" data-name="${h(name)}" data-value="" data-search-text="全部 清空"><span class="tag-check" aria-hidden="true">✓</span><span>${h(placeholder)}</span></button>` : ""}
+        ${availableOptions.length ? availableOptions.map(item => {
+          const itemValue = String(item.value); const chosen = itemValue === value;
+          return `<button class="tag-option${chosen ? " is-selected" : ""}" type="button" role="option" aria-selected="${chosen ? "true" : "false"}" data-action="single-option" data-name="${h(name)}" data-value="${h(itemValue)}" data-search-text="${h(`${item.label || itemValue} ${item.description || ""} ${itemValue}`.toLowerCase())}"${item.disabled ? " disabled" : ""}><span class="tag-check" aria-hidden="true">✓</span><span>${h(item.label || itemValue)}${item.description ? `<small>${h(item.description)}</small>` : ""}</span></button>`;
+        }).join("") : '<div class="condition-empty">暂无可用选项</div>'}
+      </div></div>` : ""}
     </div>`;
   }
 
@@ -759,7 +785,9 @@
           <label class="mode-option is-risk"><input type="radio" name="runMode" value="live" data-bind="run_mode"${editor.run_mode === "live" ? " checked" : ""}><span><strong>正式执行</strong><p>真实暂停与复制仍需有效试算、逐次确认和服务端总开关；复制会先创建为 PAUSED 并完成落表校验。</p></span></label>
         </div><div class="safe-default"><span aria-hidden="true">✓</span><div><strong>安全默认已生效</strong><p>${schedulerAvailable ? "新规则组由服务端强制保存为“停用 + 只观察”。即使在这里选择正式执行，保存本身也不会启用。" : "新规则组固定停用；本期只能保存草稿和手动试算，启用入口已锁定。"}</p></div></div></div>
       </div>
-      <div class="section-card"><div class="section-head"><div><h3>当前层级能力</h3><p>字段能力由后端动态下发；不可可靠试算的字段只展示，不允许选入条件。</p></div></div><div class="section-body">${renderFieldCatalog()}</div></div>
+      <div class="section-card"><div class="section-head"><div><h3>结构范围估算</h3><p>这里只读取对象身份并返回结构数量，不判断规则指标，也不会写入 Meta。</p></div></div><div class="section-body">
+        <div class="estimate-card"><div><h4>${editor.object_level ? `${h(LEVEL_LABELS[editor.object_level])} 范围` : "请先选择调控对象"}</h4><p>最终可命中数以保存后的手动试算为准。请填写指标窗口后再估算。</p><div class="field estimate-window"><label for="scopeMetricWindow">指标窗口 <span class="required" aria-hidden="true">*</span></label><div class="input-with-unit"><input id="scopeMetricWindow" type="number" min="1" inputmode="numeric" placeholder="输入最近天数" value="${h(editor.selection.metric_window_days || "")}" data-selection="metric_window_days"><span>天</span></div></div>${renderEstimateMetrics()}</div><button class="button" type="button" data-action="estimate-scope"${state.estimateLoading || !editor.object_level ? " disabled" : ""}>${state.estimateLoading ? "估算中…" : "估算当前范围"}</button></div>
+      </div></div>
     </section>`;
   }
 
@@ -993,7 +1021,7 @@
       <div class="section-card"><div class="section-head"><div><h3 id="reviewStepTitle">配置总览</h3><p>保存前检查所有显式选择；placeholder 从不进入请求数据。</p></div><span class="pill ${errors.length ? "pill-warning" : "pill-success"}">${errors.length ? `${errors.length} 项待完善` : "配置完整"}</span></div>
         <div class="section-body"><div class="review-grid">
           <div class="review-card"><h4>范围</h4><div class="review-list">
-            ${reviewRow("渠道", editor.channel === "facebook" ? "Facebook" : "未选择")}${reviewRow("优化师", optimizer)}${reviewRow("产品", editor.products.length ? editor.products.join("、") : "未选择")}${reviewRow("账户时区", editor.account_timezones.length ? editor.account_timezones.join("、") : "不限制")}
+            ${reviewRow("渠道", editor.channel === "facebook" ? "Facebook" : "未选择")}${reviewRow("优化师", optimizer)}${reviewRow("产品", editor.products.length ? editor.products.map(productLabel).join("、") : "未选择")}${reviewRow("账户时区", editor.account_timezones.length ? editor.account_timezones.join("、") : "不限制")}
           </div></div>
           <div class="review-card"><h4>策略</h4><div class="review-list">
             ${reviewRow("调控对象", LEVEL_LABELS[editor.object_level] || "未选择")}${reviewRow("运行模式", MODE_LABELS[editor.run_mode] || "未选择")}${reviewRow("规则数量", String(editor.rules.length))}${reviewRow("命中动作", actionLabels.length ? actionLabels.join("、") : "未配置")}
@@ -1001,7 +1029,7 @@
           <div class="review-card"><h4>计划与选择</h4><div class="review-list">
             ${reviewRow("执行方式", scheduleLabel(editor.schedule))}${reviewRow("允许窗口", windowLabel(editor.schedule))}${reviewRow("指标窗口", editor.selection.metric_window_days ? `最近 ${editor.selection.metric_window_days} 天` : "未设置")}${reviewRow("候选选择", selectionLabel(editor.selection))}
           </div></div>
-          <div class="review-card"><h4>范围估算</h4>${state.estimate ? renderEstimateMetrics() : '<p class="field-hint">尚未估算。你可以返回第一步估算，也可以保存后直接试算。</p>'}</div>
+          <div class="review-card"><h4>范围估算</h4>${state.estimate ? renderEstimateMetrics() : '<p class="field-hint">尚未估算。你可以返回“对象与模式”步骤估算，也可以保存后直接试算。</p>'}</div>
         </div></div>
       </div>
       <div class="section-card"><div class="section-head"><div><h3>安全检查</h3><p>服务端仍会执行同样的权限、能力和版本校验。</p></div></div><div class="section-body"><div class="checklist">
@@ -1211,8 +1239,14 @@
       const targetCount = summary.target_count != null ? summary.target_count : summary.matched_count;
       toast(targetCount == null ? "试算已完成，可在执行日志查看详情。" : `试算完成，命中 ${formatCount(targetCount)} 个对象。`, "success");
       if (fromEditor) {
-        state.editorStep = 5;
-        renderEditor();
+        invalidateEstimate();
+        state.editor = null;
+        state.editorStep = 1;
+        state.editorDirty = false;
+        state.openMulti = "";
+        state.openSingle = "";
+        renderRuleGroupShell();
+        await loadRuleGroups();
       } else await loadRuleGroups();
     } catch (error) { toast(errorMessage(error), "error"); }
     finally {
@@ -1263,14 +1297,14 @@
   function renderLogShell() {
     const root = document.getElementById("executionLogsApp");
     if (!root) return;
-    const optimizerFilter = state.actor && state.actor.isAdmin ? `<div class="field"><label for="logOptimizer">优化师</label><select id="logOptimizer" data-log-filter="optimizer_id"><option value="">全部优化师</option>${state.meta.optimizers.map(item => option(item.id, `${item.name}${item.email ? ` · ${item.email}` : ""}`, String(state.logFilters.optimizer_id || "") === item.id)).join("")}</select></div>` : "";
+    const optimizerFilter = state.actor && state.actor.isAdmin ? `<div class="field"><span class="field-label">优化师</span>${renderSearchableSingle("log-optimizer", "全部优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(state.logFilters.optimizer_id || ""), true)}</div>` : "";
     root.innerHTML = `
       <div class="toolbar"><div class="toolbar-copy"><h2>V3 事件审计</h2><p>列表使用服务端分页；对象详情在需要时单独读取。</p></div><div class="toolbar-actions"><button class="button" type="button" data-action="reload-logs"${state.logs.loading ? " disabled" : ""}>刷新日志</button></div></div>
       ${renderLogMetrics()}
       <section class="filter-bar logs" aria-label="执行日志筛选">
         <div class="field"><label for="logDateFrom">开始日期</label><input id="logDateFrom" type="date" data-log-filter="date_from" value="${h(state.logFilters.date_from || "")}"></div>
         <div class="field"><label for="logDateTo">结束日期</label><input id="logDateTo" type="date" data-log-filter="date_to" value="${h(state.logFilters.date_to || "")}"></div>
-        <div class="field"><label for="logProduct">产品</label><select id="logProduct" data-log-filter="product"><option value="">全部短剧产品</option>${state.meta.products.map(item => option(item.value, item.label, state.logFilters.product === item.value, !item.enabled)).join("")}</select></div>
+        <div class="field"><span class="field-label">产品</span>${renderSearchableSingle("log-product", "全部短剧产品", state.meta.products.map(item => ({ value: item.value, label: item.label, description: item.description, disabled: !item.enabled })), String(state.logFilters.product || ""), true)}</div>
         ${optimizerFilter}
         <div class="field"><label for="logLevel">调控对象</label><select id="logLevel" data-log-filter="object_level"><option value="">全部层级</option>${Object.entries(LEVEL_LABELS).map(([value, label]) => option(value, label, state.logFilters.object_level === value)).join("")}</select></div>
         <div class="field"><label for="logAction">命中动作</label><select id="logAction" data-log-filter="action"><option value="">全部动作</option>${option("pause", "关闭", state.logFilters.action === "pause")}${option("copy", "复制", state.logFilters.action === "copy")}</select></div>
@@ -1312,7 +1346,7 @@
       return `<tr>
         <td><div class="cell-title"><strong>${h(prettyDate(item.started_at || item.created_at || item.business_date))}</strong><small class="log-id">${h(id)}</small></div></td>
         <td><div class="cell-title"><strong>${h(text(item.rule_group_name, "未命名规则组"))}</strong><small>${h(text(item.rule_group_id))} · ${h(triggerLabel(item.trigger_source || item.trigger))}</small></div></td>
-        <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 2).map(product => `<span class="chip">${h(product)}</span>`).join("")}${products.length > 2 ? `<span class="chip">+${products.length - 2}</span>` : ""}</div><small class="cell-muted">${h(optimizerLabel(item.optimizer_id, item.optimizer_name))}</small></div></td>
+        <td><div class="cell-stack"><div class="chip-row">${products.slice(0, 2).map(product => `<span class="chip" title="${h(product)}">${h(productLabel(product))}</span>`).join("")}${products.length > 2 ? `<span class="chip">+${products.length - 2}</span>` : ""}</div><small class="cell-muted">${h(optimizerLabel(item.optimizer_id, item.optimizer_name))}</small></div></td>
         <td><div class="cell-stack"><span class="pill pill-info">${h(LEVEL_LABELS[item.object_level] || item.object_level || "—")}</span><small class="cell-muted">${h(actions.map(value => ACTION_LABELS[value] || value).join(" / ") || "—")} · ${h(MODE_LABELS[item.run_mode] || item.run_mode || "—")}</small></div></td>
         <td><div class="cell-stack"><span>命中 ${h(displayCount(targetCount))}</span><small class="cell-muted">成功 ${h(displayCount(success))} · 跳过 ${h(displayCount(skipped))} · 异常 ${h(displayCount(failed))}</small></div></td>
         <td><span class="status-line"><span class="status-dot ${statusClass(status)}" aria-hidden="true"></span><strong>${h(STATUS_LABELS[status] || status)}</strong></span></td>
@@ -1411,7 +1445,7 @@
 
   function renderTargetTable(targets) {
     if (!targets.length) return '<div class="condition-empty">当前详情没有可展示的对象样本。</div>';
-    return `<div class="table-scroll"><table aria-label="执行对象明细"><thead><tr><th>对象 ID</th><th>产品</th><th>动作</th><th>结果</th><th>原因</th></tr></thead><tbody>${targets.map(target => `<tr><td class="log-id">${h(text(target.object_id || target.target_id))}</td><td>${h(text(target.product, "—"))}</td><td>${h(ACTION_LABELS[target.action] || target.action || "—")}</td><td>${h(STATUS_LABELS[target.status] || target.status || target.result || "—")}</td><td>${h(text(target.reason || target.error_code || target.skip_reason, "—"))}</td></tr>`).join("")}</tbody></table></div>`;
+    return `<div class="table-scroll"><table aria-label="执行对象明细"><thead><tr><th>对象 ID</th><th>产品</th><th>动作</th><th>结果</th><th>原因</th></tr></thead><tbody>${targets.map(target => `<tr><td class="log-id">${h(text(target.object_id || target.target_id))}</td><td title="${h(text(target.product))}">${h(productLabel(target.product))}</td><td>${h(ACTION_LABELS[target.action] || target.action || "—")}</td><td>${h(STATUS_LABELS[target.status] || target.status || target.result || "—")}</td><td>${h(text(target.reason || target.error_code || target.skip_reason, "—"))}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   let filterTimer = 0;
@@ -1420,7 +1454,7 @@
   function handleInput(event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    if (target.matches("[data-multi-search]")) {
+    if (target.matches("[data-multi-search], [data-single-search]")) {
       const query = String(target.value || "").trim().toLowerCase();
       target.closest(".multi-menu")?.querySelectorAll("[data-search-text]").forEach(optionNode => {
         optionNode.hidden = query && !String(optionNode.dataset.searchText || "").includes(query);
@@ -1561,6 +1595,10 @@
       state.openMulti = "";
       if (!actionNode) { renderCurrentPage(); return; }
     }
+    if (state.openSingle && !target.closest("[data-single-root]") && (!actionNode || !["single-option", "toggle-single"].includes(actionNode.dataset.action))) {
+      state.openSingle = "";
+      if (!actionNode) { renderCurrentPage(); return; }
+    }
     if (!actionNode) return;
     const action = actionNode.dataset.action;
     if (action === "close-detail" && actionNode.classList.contains("detail-overlay") && target !== actionNode) return;
@@ -1574,8 +1612,17 @@
     if (action === "next-step") { state.editorStep = Math.min(5, state.editorStep + 1); renderEditor(); return; }
     if (action === "select-channel") { state.editor.channel = actionNode.dataset.value; state.editorDirty = true; invalidateEstimate(); renderEditor(); return; }
     if (action === "select-level") { selectObjectLevel(actionNode.dataset.value); return; }
-    if (action === "toggle-multi") { state.openMulti = state.openMulti === actionNode.dataset.name ? "" : actionNode.dataset.name; renderEditor(); return; }
+    if (action === "toggle-multi") { state.openSingle = ""; state.openMulti = state.openMulti === actionNode.dataset.name ? "" : actionNode.dataset.name; renderEditor(); return; }
     if (action === "multi-option") { toggleMultiOption(actionNode.dataset.name, actionNode.dataset.value); return; }
+    if (action === "toggle-single") {
+      const singleName = actionNode.dataset.name;
+      state.openMulti = "";
+      state.openSingle = state.openSingle === singleName ? "" : singleName;
+      renderCurrentPage();
+      if (state.openSingle) window.requestAnimationFrame(() => document.querySelector(`[data-single-search="${singleName}"]`)?.focus());
+      return;
+    }
+    if (action === "single-option") { await selectSingleOption(actionNode.dataset.name, actionNode.dataset.value); return; }
     if (action === "estimate-scope") { await estimateScope(); return; }
     if (action === "add-rule") { addRule(); return; }
     if (action === "remove-rule") { state.editor.rules.splice(Number(actionNode.dataset.index), 1); state.editorDirty = true; renderEditor(); return; }
@@ -1644,6 +1691,31 @@
     renderEditor();
   }
 
+  async function selectSingleOption(name, value) {
+    const selected = String(value || "");
+    state.openSingle = "";
+    if (name === "editor-optimizer") {
+      state.editor.optimizer_id = selected;
+      state.editorDirty = true;
+      invalidateEstimate();
+      renderEditor();
+      return;
+    }
+    if (name === "rule-product" || name === "rule-optimizer") {
+      state.filters[name === "rule-product" ? "product" : "optimizer_id"] = selected;
+      state.list.page = 1;
+      renderRuleGroupShell();
+      await loadRuleGroups();
+      return;
+    }
+    if (name === "log-product" || name === "log-optimizer") {
+      state.logFilters[name === "log-product" ? "product" : "optimizer_id"] = selected;
+      state.logs.page = 1;
+      renderLogShell();
+      await loadExecutions();
+    }
+  }
+
   function addRule() {
     if (!state.editor.object_level) { toast("请先选择调控对象层级。", "error"); return; }
     state.editor.rules.push(newRuleDraft(state.editor.rules.length));
@@ -1655,7 +1727,7 @@
       const confirmed = await confirmDialog({ title: "放弃未保存的更改？", message: "返回列表后，本次未保存的规则配置不会保留。", confirmLabel: "放弃更改", danger: true });
       if (!confirmed) return;
     }
-    invalidateEstimate(); state.editor = null; state.editorDirty = false; state.openMulti = ""; renderRuleGroupShell(); await loadRuleGroups();
+    invalidateEstimate(); state.editor = null; state.editorDirty = false; state.openMulti = ""; state.openSingle = ""; renderRuleGroupShell(); await loadRuleGroups();
   }
 
   async function editGroup(id) {

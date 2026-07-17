@@ -83,6 +83,17 @@ def _context_aggregate(field: str) -> str:
     ).format(aggregate, field)
 
 
+def _scope_identity_aggregate(field: str, alias: str) -> str:
+    aggregate = (
+        "GROUP_CONCAT(DISTINCT NULLIF(CAST(s.{0} AS CHAR), '') "
+        "ORDER BY CAST(s.{0} AS CHAR) SEPARATOR '\\n')"
+    ).format(field)
+    return (
+        "{0} AS {1}, COUNT(DISTINCT NULLIF(CAST(s.{2} AS CHAR), '')) AS {1}_count, "
+        "OCTET_LENGTH({0}) AS {1}_concat_bytes"
+    ).format(aggregate, alias, field)
+
+
 def _decimal(value: Any) -> Decimal:
     try:
         return Decimal(str(value or 0))
@@ -246,6 +257,10 @@ class FacebookAdapter(ChannelAdapter):
         self,
         object_level: str,
         required_fields: Any = None,
+        *,
+        delivery_product_count: int = 0,
+        delivery_page_count: int = 0,
+        delivery_app_count: int = 0,
     ) -> Tuple[str, Sequence[str]]:
         if object_level not in LEVEL_COLUMNS:
             raise AdControlV3Error("validation_error", "unsupported object level")
@@ -299,7 +314,14 @@ class FacebookAdapter(ChannelAdapter):
         for field in context_fields:
             select_columns.append(_context_aggregate(field))
             columns.extend((field, field + "_count", field + "_concat_bytes"))
-        if context_fields:
+        if delivery_product_count:
+            select_columns.append(_scope_identity_aggregate("app_id", "_scope_app_id"))
+            select_columns.append(_scope_identity_aggregate("w2a_page_id", "_scope_w2a_page_id"))
+            columns.extend((
+                "_scope_app_id", "_scope_app_id_count", "_scope_app_id_concat_bytes",
+                "_scope_w2a_page_id", "_scope_w2a_page_id_count", "_scope_w2a_page_id_concat_bytes",
+            ))
+        if context_fields or delivery_product_count:
             select_columns.append("@@session.group_concat_max_len AS context_concat_limit")
         else:
             select_columns.append("0 AS context_concat_limit")
@@ -325,16 +347,38 @@ class FacebookAdapter(ChannelAdapter):
 
         # Column names are server-owned constants; all user values are bound.
         # Do not add optional WHERE fragments that could omit a mandatory bound.
+        if delivery_product_count:
+            if delivery_product_count < 1 or delivery_product_count > self.max_products:
+                raise AdControlV3Error("product_catalog_invalid", "delivery query product count is invalid", status=503)
+            product_placeholders = ",".join(["%s"] * delivery_product_count)
+            product_predicate = (
+                "s.product IN ({0}) AND CAST(s.product AS BINARY) IN ({0})"
+            ).format(product_placeholders)
+            identity_clauses = []
+            if delivery_page_count:
+                identity_clauses.append("s.w2a_page_id IN (%s)" % ",".join(["%s"] * delivery_page_count))
+            if delivery_app_count:
+                identity_clauses.append(
+                    "(COALESCE(s.w2a_page_id,0)=0 AND CAST(s.app_id AS BINARY) IN (%s))"
+                    % ",".join(["%s"] * delivery_app_count)
+                )
+            if not identity_clauses:
+                raise AdControlV3Error("product_catalog_invalid", "delivery query has no source identity", status=503)
+            delivery_predicate = "AND (" + " OR ".join(identity_clauses) + ")"
+        else:
+            product_predicate = "s.product = %s AND BINARY s.product = BINARY %s"
+            delivery_predicate = ""
+
         sql = """
             SELECT /*+ MAX_EXECUTION_TIME({max_execution_time_ms}) */
               {select_columns}
             FROM `kunlunads_dev`.ads_custom_source_insight s FORCE INDEX (dpdo)
             WHERE s.data_source IN (0, 6)
               AND s.platform = %s
-              AND s.product = %s
-              AND BINARY s.product = BINARY %s
+              AND {product_predicate}
               AND s.dt BETWEEN %s AND %s
               AND s.optimizer = %s
+              {delivery_predicate}
               AND s.{object_id} IS NOT NULL
               AND CAST(s.{object_id} AS CHAR) <> ''
             GROUP BY {account_expr},
@@ -345,6 +389,8 @@ class FacebookAdapter(ChannelAdapter):
             object_id=object_id_column,
             account_expr=account_expr,
             select_columns=", ".join(select_columns),
+            product_predicate=product_predicate,
+            delivery_predicate=delivery_predicate,
             max_execution_time_ms=SOURCE_QUERY_MAX_EXECUTION_TIME_MS,
         )
         return " ".join(sql.split()), tuple(columns)
@@ -462,6 +508,66 @@ class FacebookAdapter(ChannelAdapter):
             )
         if len(set(products)) != len(products):
             products = list(dict.fromkeys(products))
+        raw_delivery_scopes = scope.get("delivery_product_scopes") or []
+        if not isinstance(raw_delivery_scopes, list) or len(raw_delivery_scopes) > self.max_products:
+            raise AdControlV3Error("product_catalog_invalid", "delivery product scopes are invalid", status=503)
+        delivery_scopes: List[Dict[str, Any]] = []
+        delivery_values = set()
+        for raw_scope in raw_delivery_scopes:
+            if not isinstance(raw_scope, Mapping):
+                raise AdControlV3Error("product_catalog_invalid", "delivery product scope is invalid", status=503)
+            selector = self._validate_product(raw_scope.get("product_value"))
+            if selector not in products or selector in delivery_values:
+                raise AdControlV3Error("product_catalog_invalid", "delivery product selector is inconsistent", status=503)
+            delivery_values.add(selector)
+            raw_insight_products = raw_scope.get("insight_products") or []
+            raw_insight_app_ids = raw_scope.get("insight_app_ids") or []
+            raw_page_ids = raw_scope.get("w2a_page_ids") or []
+            if not all(isinstance(value, list) for value in (
+                raw_insight_products, raw_insight_app_ids, raw_page_ids
+            )):
+                raise AdControlV3Error(
+                    "product_catalog_invalid",
+                    "delivery product scope collections are invalid",
+                    status=503,
+                )
+            insight_products = [self._validate_product(value) for value in raw_insight_products]
+            insight_products = list(dict.fromkeys(insight_products))
+            insight_app_ids = sorted({
+                str(value or "").strip() for value in raw_insight_app_ids
+                if str(value or "").strip()
+            })
+            if any(len(value) > 255 or "\x00" in value for value in insight_app_ids):
+                raise AdControlV3Error("product_catalog_invalid", "delivery app identity is invalid", status=503)
+            try:
+                page_ids = sorted({positive_int(value, "w2a_page_id") for value in raw_page_ids})
+            except AdControlV3Error as exc:
+                raise AdControlV3Error(
+                    "product_catalog_invalid",
+                    "delivery product page identity is invalid",
+                    status=503,
+                ) from exc
+            if not insight_products or (not insight_app_ids and not page_ids):
+                raise AdControlV3Error("product_catalog_invalid", "delivery product scope is incomplete", status=503)
+            delivery_scopes.append({
+                "product_value": selector,
+                "insight_products": insight_products,
+                "insight_app_ids": insight_app_ids,
+                "w2a_page_ids": page_ids,
+            })
+        delivery_query_products = sorted({
+            value for item in delivery_scopes for value in item["insight_products"]
+        })
+        if len(delivery_query_products) > self.max_products:
+            raise AdControlV3Error("product_catalog_invalid", "delivery query product count exceeds the safe limit", status=503)
+        legacy_products = [value for value in products if value not in delivery_values]
+        overlap = sorted(set(legacy_products).intersection(delivery_query_products))
+        if overlap:
+            raise AdControlV3Error(
+                "overlapping_product_scope",
+                "broad and delivery product scopes cannot overlap in one rule group",
+                details={"products": overlap},
+            )
         optimizer_id = positive_int(scope.get("optimizer_id"), "optimizer_id")
         date_from = parse_iso_date(scope.get("date_from"), "date_from")
         date_to = parse_iso_date(scope.get("date_to"), "date_to")
@@ -487,28 +593,58 @@ class FacebookAdapter(ChannelAdapter):
         # An unrestricted timezone scope must never touch the account settings
         # table, including through a startup/schema probe.
         self._ensure_schema(include_timezone=load_account_timezones)
-        sql, columns = self._query_for_level(
-            object_level,
-            scope.get("required_fields") if "required_fields" in scope else None,
-        )
         by_key: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         deadline = time.monotonic() + self.query_deadline_seconds
-        product_rows: List[Tuple[str, List[Dict[str, Any]]]] = []
+        product_rows: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
         candidate_accounts = set()
         raw_candidate_count = 0
-        for product in products:
+        query_jobs: List[Dict[str, Any]] = [
+            {"kind": "legacy", "product": product, "query_products": [product]}
+            for product in legacy_products
+        ]
+        if delivery_scopes:
+            query_jobs.append({
+                "kind": "delivery",
+                "product": "",
+                "query_products": delivery_query_products,
+                "page_ids": sorted({value for item in delivery_scopes for value in item["w2a_page_ids"]}),
+                "app_ids": sorted({value for item in delivery_scopes for value in item["insight_app_ids"]}),
+                "scopes": delivery_scopes,
+            })
+        for job in query_jobs:
             self._ensure_deadline(deadline)
-            params = (
-                product,
-                optimizer_id,
-                0,
-                product,
-                product,
-                date_from.isoformat(),
-                date_to.isoformat(),
-                optimizer_id,
-                self.max_rows_per_product,
-            )
+            if job["kind"] == "delivery":
+                sql, columns = self._query_for_level(
+                    object_level,
+                    scope.get("required_fields") if "required_fields" in scope else None,
+                    delivery_product_count=len(job["query_products"]),
+                    delivery_page_count=len(job["page_ids"]),
+                    delivery_app_count=len(job["app_ids"]),
+                )
+                params = tuple(
+                    ["", optimizer_id, 0]
+                    + job["query_products"] + job["query_products"]
+                    + [date_from.isoformat(), date_to.isoformat(), optimizer_id]
+                    + job["page_ids"] + job["app_ids"]
+                    + [self.max_rows_per_product]
+                )
+            else:
+                product = job["product"]
+                sql, columns = self._query_for_level(
+                    object_level,
+                    scope.get("required_fields") if "required_fields" in scope else None,
+                )
+                params = (
+                    product,
+                    optimizer_id,
+                    0,
+                    product,
+                    product,
+                    date_from.isoformat(),
+                    date_to.isoformat(),
+                    optimizer_id,
+                    self.max_rows_per_product,
+                )
             rows = _dict_rows(self._query_executor(sql, params), columns)
             self._ensure_deadline(deadline)
             if len(rows) >= self.max_rows_per_product:
@@ -516,7 +652,7 @@ class FacebookAdapter(ChannelAdapter):
                     "scope_query_truncated",
                     "candidate query reached the safe row limit",
                     status=409,
-                    details={"product": product, "limit": self.max_rows_per_product},
+                    details={"product": job.get("product") or "delivery_product", "limit": self.max_rows_per_product},
                 )
             raw_candidate_count += len(rows)
             if raw_candidate_count > self.max_total_candidates:
@@ -526,7 +662,7 @@ class FacebookAdapter(ChannelAdapter):
                     status=409,
                     details={"limit": self.max_total_candidates},
                 )
-            product_rows.append((product, rows))
+            product_rows.append((job, rows))
             for row in rows:
                 account_id = str(row.get("ad_account_id") or "").strip().lower()
                 if account_id:
@@ -542,7 +678,7 @@ class FacebookAdapter(ChannelAdapter):
             else {}
         )
 
-        for product, rows in product_rows:
+        for job, rows in product_rows:
             for row in rows:
                 # SQL returns the canonical value after exactly one leading
                 # ``act_`` removal. Do not strip again at the adapter boundary.
@@ -552,7 +688,36 @@ class FacebookAdapter(ChannelAdapter):
                     continue
                 timezone_record = timezone_cache.get(account_id) or {}
                 timezone_name = str(timezone_record.get("account_timezone") or "").strip()
-                row_product = str(row.get("product") or product).strip()
+                delivery_blocked_reason = ""
+                if job["kind"] == "delivery":
+                    context_concat_limit = int(row.get("context_concat_limit") or 0)
+                    app_values = [item for item in str(row.get("_scope_app_id") or "").split("\n") if item]
+                    page_values = [item for item in str(row.get("_scope_w2a_page_id") or "").split("\n") if item]
+                    for alias, values in (("_scope_app_id", app_values), ("_scope_w2a_page_id", page_values)):
+                        at_limit = (
+                            context_concat_limit > 0
+                            and int(row.get(alias + "_concat_bytes") or 0) >= context_concat_limit
+                        )
+                        if int(row.get(alias + "_count") or 0) != len(values) or at_limit:
+                            delivery_blocked_reason = "context_aggregation_truncated"
+                    page_id = int(page_values[0]) if len(page_values) == 1 and page_values[0].isdigit() else 0
+                    app_id = app_values[0] if len(app_values) == 1 else ""
+                    if len(page_values) > 1 or (page_id == 0 and len(app_values) != 1):
+                        delivery_blocked_reason = delivery_blocked_reason or "ambiguous_product_scope"
+                    matches = [
+                        item["product_value"] for item in job["scopes"]
+                        if (page_id > 0 and page_id in item["w2a_page_ids"])
+                        or (page_id == 0 and app_id and app_id in item["insight_app_ids"])
+                    ]
+                    row_product = matches[0] if len(matches) == 1 else "delivery_product"
+                    if len(matches) != 1:
+                        delivery_blocked_reason = delivery_blocked_reason or "ambiguous_product_scope"
+                    for alias in ("_scope_app_id", "_scope_w2a_page_id"):
+                        row.pop(alias, None)
+                        row.pop(alias + "_count", None)
+                        row.pop(alias + "_concat_bytes", None)
+                else:
+                    row_product = str(row.get("product") or job["product"]).strip()
                 key = (self.channel, account_id, object_id)
                 existing = by_key.get(key)
                 if existing and row_product not in existing["scope_products"]:
@@ -577,7 +742,7 @@ class FacebookAdapter(ChannelAdapter):
                         "account_timezone": timezone_name,
                         "settings_row_count": int(timezone_record.get("settings_row_count") or 0),
                         "settings_timezone_count": int(timezone_record.get("settings_timezone_count") or 0),
-                        "blocked_reason": "",
+                        "blocked_reason": delivery_blocked_reason,
                         "scope_ambiguity_check": "selected_scope_only",
                     }
                 )

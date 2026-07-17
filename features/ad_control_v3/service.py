@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -271,6 +273,7 @@ class Service:
         scheduler_live_enabled: bool = False,
         live_executor: Any = None,
         scan_concurrency: int = 1,
+        meta_cache_ttl_seconds: int = 60,
     ) -> None:
         if repository is None or identity_resolver is None or snapshot_store is None:
             raise AdControlV3Error("service_not_configured", "V3 service dependencies are required", status=503)
@@ -286,6 +289,9 @@ class Service:
         self.scheduler_enabled = bool(scheduler_enabled)
         self.scheduler_live_enabled = bool(scheduler_live_enabled)
         self.live_executor = live_executor
+        self.meta_cache_ttl_seconds = max(15, min(300, int(meta_cache_ttl_seconds)))
+        self._meta_cache_lock = threading.RLock()
+        self._meta_cache: Dict[str, Any] = {}
         try:
             parsed_scan_concurrency = int(scan_concurrency)
         except (TypeError, ValueError):
@@ -298,6 +304,45 @@ class Service:
             )
         self.scan_concurrency = parsed_scan_concurrency
         self._scan_semaphore = threading.BoundedSemaphore(parsed_scan_concurrency)
+
+    def _cached_meta_value(self, key: str, loader: Callable[[], Any]) -> Any:
+        now = time.monotonic()
+        with self._meta_cache_lock:
+            cached = self._meta_cache.get(key)
+            if cached and float(cached[0]) > now:
+                return copy.deepcopy(cached[1])
+        value = loader()
+        with self._meta_cache_lock:
+            self._meta_cache[key] = (now + self.meta_cache_ttl_seconds, copy.deepcopy(value))
+        return copy.deepcopy(value)
+
+    def _load_meta_values(self, *, include_optimizers: bool) -> Dict[str, Any]:
+        loaders: Dict[str, Callable[[], Any]] = {
+            "products": lambda: self.repository.list_products("facebook", include_disabled=False),
+            "timezones": lambda: sorted({
+                str(item).strip() for item in self.timezone_loader() or [] if str(item).strip()
+            }),
+        }
+        if include_optimizers:
+            loaders["optimizers"] = self.identity_resolver.list_for_admin
+        values: Dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=len(loaders), thread_name_prefix="ad-control-v3-meta") as pool:
+            futures = {
+                key: pool.submit(self._cached_meta_value, "meta:" + key, loader)
+                for key, loader in loaders.items()
+            }
+            for key, future in futures.items():
+                values[key] = future.result()
+        return values
+
+    def _active_product_catalog(self, channel: str) -> List[Dict[str, Any]]:
+        normalized = str(channel or "").strip().lower()
+        if normalized == "facebook":
+            return self._cached_meta_value(
+                "meta:products",
+                lambda: self.repository.list_products("facebook", include_disabled=False),
+            )
+        return self.repository.list_products(normalized, include_disabled=False)
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -405,7 +450,7 @@ class Service:
             self._scan_semaphore.release()
 
     def _validate_products(self, channel: str, products: Sequence[str]) -> None:
-        catalog_items = self.repository.list_products(channel, include_disabled=False)
+        catalog_items = self._active_product_catalog(channel)
         available = {
             str(item.get("product_value") or "")
             for item in catalog_items
@@ -415,9 +460,77 @@ class Service:
         if invalid:
             raise AdControlV3Error(
                 "invalid_product_scope",
-                "one or more products are not active short-drama enum values",
+                "one or more products are not active short-drama catalog values",
                 details={"products": invalid},
             )
+
+    def _delivery_product_scopes(
+        self,
+        channel: str,
+        products: Sequence[str],
+    ) -> List[Dict[str, Any]]:
+        catalog = self._active_product_catalog(channel)
+        by_value = {str(item.get("product_value") or ""): item for item in catalog}
+        reporting_values = {
+            value for value, item in by_value.items()
+            if str((item.get("evidence") or {}).get("catalog_kind") or "reporting_product") != "delivery_product"
+        }
+        result: List[Dict[str, Any]] = []
+        for selected in products:
+            item = by_value.get(str(selected))
+            evidence = item.get("evidence") if isinstance(item, Mapping) else {}
+            if not isinstance(evidence, Mapping) or str(evidence.get("catalog_kind") or "") != "delivery_product":
+                continue
+            raw_scope = evidence.get("scope")
+            if not isinstance(raw_scope, Mapping):
+                raise AdControlV3Error("product_catalog_invalid", "delivery product scope is missing", status=503)
+            try:
+                insight_products = normalize_string_list(
+                    raw_scope.get("insight_products"),
+                    "insight_products",
+                    required=True,
+                    max_items=20,
+                    max_length=128,
+                )
+                insight_app_ids = normalize_string_list(
+                    raw_scope.get("insight_app_ids") or [],
+                    "insight_app_ids",
+                    max_items=20,
+                    max_length=255,
+                )
+            except AdControlV3Error as exc:
+                raise AdControlV3Error(
+                    "product_catalog_invalid",
+                    "delivery product scope values are invalid",
+                    status=503,
+                    details={"field": exc.details.get("field") or "scope"},
+                ) from exc
+            if any(value not in reporting_values for value in insight_products):
+                raise AdControlV3Error(
+                    "product_catalog_invalid",
+                    "delivery product references an inactive reporting product",
+                    status=503,
+                )
+            raw_page_ids = raw_scope.get("w2a_page_ids") or []
+            if not isinstance(raw_page_ids, list) or len(raw_page_ids) > 20:
+                raise AdControlV3Error("product_catalog_invalid", "delivery product page ids are invalid", status=503)
+            try:
+                page_ids = sorted({positive_int(value, "w2a_page_id") for value in raw_page_ids})
+            except AdControlV3Error as exc:
+                raise AdControlV3Error(
+                    "product_catalog_invalid",
+                    "delivery product page ids are invalid",
+                    status=503,
+                ) from exc
+            if not insight_app_ids and not page_ids:
+                raise AdControlV3Error("product_catalog_invalid", "delivery product has no source identity", status=503)
+            result.append({
+                "product_value": str(selected),
+                "insight_products": insight_products,
+                "insight_app_ids": insight_app_ids,
+                "w2a_page_ids": page_ids,
+            })
+        return result
 
     @staticmethod
     def _validate_selection_for_level(selection: Mapping[str, Any], object_level: str) -> None:
@@ -435,8 +548,9 @@ class Service:
 
     def meta(self, actor: Any) -> Dict[str, Any]:
         current = Actor.from_value(actor)
+        shared = self._load_meta_values(include_optimizers=current.is_admin)
         if current.is_admin:
-            optimizers = self.identity_resolver.list_for_admin()
+            optimizers = shared["optimizers"]
             current_optimizer_id = None
         else:
             current_optimizer_id = self._normal_optimizer(current)
@@ -455,8 +569,8 @@ class Service:
                 channel_items.append(adapter.capabilities())
             else:
                 channel_items.append({"channel": channel, "enabled": False, "reason": "channel_not_enabled"})
-        products = self.repository.list_products("facebook", include_disabled=False)
-        timezones = sorted({str(item).strip() for item in self.timezone_loader() or [] if str(item).strip()})
+        products = shared["products"]
+        timezones = shared["timezones"]
         return {
             "actor": {
                 "user_id": current.user_id,
@@ -689,7 +803,7 @@ class Service:
             days = positive_int(metric_window_days, "metric_window_days", maximum=31)
             date_to = self._now().date()
             date_from = date_to - timedelta(days=days - 1)
-        return {
+        result = {
             "channel": channel,
             "object_level": object_level,
             "products": list(products),
@@ -700,6 +814,10 @@ class Service:
             # Internal-only. API payload allowlists never accept this key.
             "required_fields": list(required_fields),
         }
+        delivery_scopes = self._delivery_product_scopes(channel, products)
+        if delivery_scopes:
+            result["delivery_product_scopes"] = delivery_scopes
+        return result
 
     def scope_estimate(self, actor: Any, payload: Mapping[str, Any]) -> Dict[str, Any]:
         current = Actor.from_value(actor)
@@ -733,7 +851,7 @@ class Service:
         candidates = self._scan_discover(adapter, scope)
         blocked = [item for item in candidates if item.get("blocked_reason")]
         return {
-            "scope": scope,
+            "scope": {key: value for key, value in scope.items() if key != "delivery_product_scopes"},
             "projection_mode": "identity_only",
             "required_fields": [],
             "account_count": len({str(item.get("ad_account_id") or "") for item in candidates}),
@@ -1320,6 +1438,7 @@ def build_service(
     scheduler_live_enabled: bool = False,
     live_executor: Any = None,
     scan_concurrency: int = 1,
+    meta_cache_ttl_seconds: int = 60,
 ) -> Service:
     return Service(
         repository,
@@ -1338,6 +1457,7 @@ def build_service(
         scheduler_live_enabled=scheduler_live_enabled,
         live_executor=live_executor,
         scan_concurrency=scan_concurrency,
+        meta_cache_ttl_seconds=meta_cache_ttl_seconds,
     )
 
 
@@ -1561,6 +1681,9 @@ def build_service_from_environment() -> Service:
         scheduler_live_enabled=scheduler_live_enabled,
         live_executor=live_executor,
         scan_concurrency=scan_concurrency,
+        meta_cache_ttl_seconds=_bounded_environment_int(
+            "AD_CONTROL_V3_META_CACHE_TTL_SECONDS", 60, 15, 300
+        ),
     )
 
 
