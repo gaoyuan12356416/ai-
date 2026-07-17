@@ -7,6 +7,7 @@
 - live execution：13 tests，OK。
 - deploy + navigation deploy：28 tests，OK，耗时约 252 秒。
 - UI + usability：39 tests，OK。
+- 合并真实线上基线 `f55be78` 后，完整 `test_ad_control_v3*.py`：191 tests，OK，耗时 226.055 秒。
 - Python 3.9 兼容编译、`node --check`、`git diff --check`：通过。
 
 ## 生产只读基线
