@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - Python 3.8 production fallback
     ZoneInfo = None
 
 from .errors import AdControlV3Error
+from .time_utils import copied_object_name, utc8_copy_suffix
 
 
 GRAPH_VERSION = "v25.0"
@@ -893,19 +894,74 @@ class FacebookLiveExecutor:
             raise AdControlV3Error("meta_copy_response_invalid", "Meta copy response did not contain a copied object id", status=502)
         return value
 
-    def _copy_campaign(self, client: MetaGraphClient, source_campaign_id: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    @staticmethod
+    def _rename_copied_object(
+        client: MetaGraphClient,
+        object_id: str,
+        source_name: str,
+        copy_suffix: str,
+        fields: str,
+    ) -> Dict[str, Any]:
+        desired_name = copied_object_name(source_name, copy_suffix)
+        try:
+            client.post(object_id, {"name": desired_name})
+        except Exception as exc:
+            raise AdControlV3Error(
+                "copy_name_update_failed",
+                "copied Meta object name could not be updated",
+                status=502,
+                details={"object_id": object_id, "desired_name": desired_name},
+            ) from exc
+        meta = client.get(object_id, fields)
+        if str(meta.get("name") or "") != desired_name or _configured_status(meta) != "PAUSED":
+            raise AdControlV3Error(
+                "copy_name_readback_failed",
+                "copied Meta object name/status readback mismatched",
+                status=502,
+                details={
+                    "object_id": object_id,
+                    "desired_name": desired_name,
+                    "actual_name": str(meta.get("name") or ""),
+                    "actual_status": _configured_status(meta),
+                },
+            )
+        return meta
+
+    def _copy_campaign(
+        self,
+        client: MetaGraphClient,
+        source_campaign_id: str,
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        source_name: str = "",
+        copy_suffix: str = "",
+    ) -> Dict[str, Any]:
         response = client.post(source_campaign_id + "/copies", {"deep_copy": False, "status_option": "PAUSED"})
         new_id = self._copied_id(response, "copied_campaign_id")
         if state is not None:
             state["campaign"] = {"id": new_id}
-        meta = client.get(new_id, "id,name,account_id,status,configured_status,effective_status,source_campaign_id,daily_budget,lifetime_budget,bid_strategy")
+        fields = "id,name,account_id,status,configured_status,effective_status,source_campaign_id,daily_budget,lifetime_budget,bid_strategy"
+        meta = (
+            self._rename_copied_object(client, new_id, source_name, copy_suffix, fields)
+            if copy_suffix
+            else client.get(new_id, fields)
+        )
         if _configured_status(meta) != "PAUSED" or str(meta.get("source_campaign_id") or "") != source_campaign_id:
             raise AdControlV3Error("copy_mapping_incomplete", "copied Campaign mapping/status could not be verified", status=502)
         if state is not None:
             state["campaign"] = meta
         return meta
 
-    def _copy_adset(self, client: MetaGraphClient, source_adset_id: str, target_campaign_id: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _copy_adset(
+        self,
+        client: MetaGraphClient,
+        source_adset_id: str,
+        target_campaign_id: str,
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        source_name: str = "",
+        copy_suffix: str = "",
+    ) -> Dict[str, Any]:
         response = client.post(
             source_adset_id + "/copies",
             {"campaign_id": target_campaign_id, "deep_copy": False, "status_option": "PAUSED"},
@@ -913,14 +969,27 @@ class FacebookLiveExecutor:
         new_id = self._copied_id(response, "copied_adset_id")
         if state is not None:
             state.setdefault("adsets", {})[source_adset_id] = {"id": new_id}
-        meta = client.get(new_id, "id,name,account_id,campaign_id,status,configured_status,effective_status,source_adset_id,daily_budget,lifetime_budget,bid_strategy,bid_constraints,start_time")
+        fields = "id,name,account_id,campaign_id,status,configured_status,effective_status,source_adset_id,daily_budget,lifetime_budget,bid_strategy,bid_constraints,start_time"
+        meta = (
+            self._rename_copied_object(client, new_id, source_name, copy_suffix, fields)
+            if copy_suffix
+            else client.get(new_id, fields)
+        )
         if _configured_status(meta) != "PAUSED" or str(meta.get("source_adset_id") or "") != source_adset_id or str(meta.get("campaign_id") or "") != target_campaign_id:
             raise AdControlV3Error("copy_mapping_incomplete", "copied Ad Set mapping/status could not be verified", status=502)
         if state is not None:
             state.setdefault("adsets", {})[source_adset_id] = meta
         return meta
 
-    def _copy_ad(self, client: MetaGraphClient, source_ad: Mapping[str, Any], target_adset_id: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _copy_ad(
+        self,
+        client: MetaGraphClient,
+        source_ad: Mapping[str, Any],
+        target_adset_id: str,
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        copy_suffix: str = "",
+    ) -> Dict[str, Any]:
         values: Dict[str, Any] = {"adset_id": target_adset_id, "status_option": "PAUSED"}
         if source_ad.get("creative_parameters"):
             values["creative_parameters"] = source_ad["creative_parameters"]
@@ -929,7 +998,12 @@ class FacebookLiveExecutor:
         source_ad_id = str(source_ad.get("id") or "")
         if state is not None:
             state.setdefault("ads", {})[source_ad_id] = {"id": new_id}
-        meta = client.get(new_id, "id,name,account_id,campaign_id,adset_id,status,configured_status,effective_status,source_ad_id,creative{id}")
+        fields = "id,name,account_id,campaign_id,adset_id,status,configured_status,effective_status,source_ad_id,creative{id}"
+        meta = (
+            self._rename_copied_object(client, new_id, str(source_ad.get("name") or ""), copy_suffix, fields)
+            if copy_suffix
+            else client.get(new_id, fields)
+        )
         if _configured_status(meta) != "PAUSED" or str(meta.get("source_ad_id") or "") != str(source_ad.get("id") or "") or str(meta.get("adset_id") or "") != target_adset_id:
             raise AdControlV3Error("copy_mapping_incomplete", "copied Ad mapping/status could not be verified", status=502)
         creative = meta.get("creative") if isinstance(meta.get("creative"), Mapping) else {}
@@ -1005,6 +1079,8 @@ class FacebookLiveExecutor:
         output.setdefault("campaign", None)
         output.setdefault("adsets", {})
         output.setdefault("ads", {})
+        copy_suffix = str(output.get("copy_name_suffix") or utc8_copy_suffix(self.clock()))
+        output["copy_name_suffix"] = copy_suffix
         output["budget"] = dict(budget)
         output["roas"] = dict(roas)
         copied_campaign: Optional[Dict[str, Any]] = output.get("campaign")
@@ -1013,18 +1089,43 @@ class FacebookLiveExecutor:
         if level == "campaign":
             if carrier != "deep_copy_campaign":
                 raise AdControlV3Error("invalid_carrier_strategy", "Campaign copy carrier is invalid", status=409)
-            copied_campaign = self._copy_campaign(client, source_campaign_id, output)
+            copied_campaign = self._copy_campaign(
+                client,
+                source_campaign_id,
+                output,
+                source_name=str(graph["campaign"].get("name") or ""),
+                copy_suffix=copy_suffix,
+            )
             for source_adset in graph["adsets"]:
                 source_id = str(source_adset.get("id") or "")
-                copied_adsets[source_id] = self._copy_adset(client, source_id, str(copied_campaign.get("id") or ""), output)
+                copied_adsets[source_id] = self._copy_adset(
+                    client,
+                    source_id,
+                    str(copied_campaign.get("id") or ""),
+                    output,
+                    source_name=str(source_adset.get("name") or ""),
+                    copy_suffix=copy_suffix,
+                )
             for source_ad in graph["ads"]:
                 source_id = str(source_ad.get("id") or "")
-                copied_ads[source_id] = self._copy_ad(client, source_ad, str(copied_adsets[str(source_ad.get("adset_id") or "")].get("id") or ""), output)
+                copied_ads[source_id] = self._copy_ad(
+                    client,
+                    source_ad,
+                    str(copied_adsets[str(source_ad.get("adset_id") or "")].get("id") or ""),
+                    output,
+                    copy_suffix=copy_suffix,
+                )
         elif level == "adset":
             source_adset = graph["adsets"][0]
             source_adset_id = str(source_adset.get("id") or "")
             if carrier == "new_campaign":
-                copied_campaign = self._copy_campaign(client, source_campaign_id, output)
+                copied_campaign = self._copy_campaign(
+                    client,
+                    source_campaign_id,
+                    output,
+                    source_name=str(graph["campaign"].get("name") or ""),
+                    copy_suffix=copy_suffix,
+                )
                 target_campaign_id = str(copied_campaign.get("id") or "")
             elif carrier == "same_campaign":
                 if budget["budget_level"] == "campaign":
@@ -1032,10 +1133,23 @@ class FacebookLiveExecutor:
                 target_campaign_id = source_campaign_id
             else:
                 raise AdControlV3Error("invalid_carrier_strategy", "Ad Set copy carrier is invalid", status=409)
-            copied_adsets[source_adset_id] = self._copy_adset(client, source_adset_id, target_campaign_id, output)
+            copied_adsets[source_adset_id] = self._copy_adset(
+                client,
+                source_adset_id,
+                target_campaign_id,
+                output,
+                source_name=str(source_adset.get("name") or ""),
+                copy_suffix=copy_suffix,
+            )
             for source_ad in graph["ads"]:
                 source_id = str(source_ad.get("id") or "")
-                copied_ads[source_id] = self._copy_ad(client, source_ad, str(copied_adsets[source_adset_id].get("id") or ""), output)
+                copied_ads[source_id] = self._copy_ad(
+                    client,
+                    source_ad,
+                    str(copied_adsets[source_adset_id].get("id") or ""),
+                    output,
+                    copy_suffix=copy_suffix,
+                )
         elif level == "ad":
             source_ad = graph["ads"][0]
             source_adset = graph["adsets"][0]
@@ -1043,7 +1157,13 @@ class FacebookLiveExecutor:
             if carrier == "same_adset":
                 raise AdControlV3Error("carrier_budget_not_independent", "same Ad Set carrier cannot apply an independent budget", status=409)
             if carrier == "isolated_campaign":
-                copied_campaign = self._copy_campaign(client, source_campaign_id, output)
+                copied_campaign = self._copy_campaign(
+                    client,
+                    source_campaign_id,
+                    output,
+                    source_name=str(graph["campaign"].get("name") or ""),
+                    copy_suffix=copy_suffix,
+                )
                 target_campaign_id = str(copied_campaign.get("id") or "")
             elif carrier == "isolated_adset":
                 if budget["budget_level"] == "campaign":
@@ -1051,8 +1171,21 @@ class FacebookLiveExecutor:
                 target_campaign_id = source_campaign_id
             else:
                 raise AdControlV3Error("invalid_carrier_strategy", "Ad copy carrier is invalid", status=409)
-            copied_adsets[source_adset_id] = self._copy_adset(client, source_adset_id, target_campaign_id, output)
-            copied_ads[str(source_ad.get("id") or "")] = self._copy_ad(client, source_ad, str(copied_adsets[source_adset_id].get("id") or ""), output)
+            copied_adsets[source_adset_id] = self._copy_adset(
+                client,
+                source_adset_id,
+                target_campaign_id,
+                output,
+                source_name=str(source_adset.get("name") or ""),
+                copy_suffix=copy_suffix,
+            )
+            copied_ads[str(source_ad.get("id") or "")] = self._copy_ad(
+                client,
+                source_ad,
+                str(copied_adsets[source_adset_id].get("id") or ""),
+                output,
+                copy_suffix=copy_suffix,
+            )
         else:
             raise AdControlV3Error("unsupported_object_level", "unsupported Facebook object level")
         adjusted = self._apply_adjustments(client, graph, copied_campaign, copied_adsets, budget, roas)
@@ -1191,14 +1324,21 @@ class FacebookLiveExecutor:
         campaign = copied.get("campaign") if isinstance(copied.get("campaign"), Mapping) else {}
         return {
             "campaign_id": str(campaign.get("id") or ""),
+            "campaign_name": str(campaign.get("name") or ""),
+            "copy_name_suffix": str(copied.get("copy_name_suffix") or ""),
             "adsets": [
-                {"source_adset_id": source_id, "new_adset_id": str(value.get("id") or "")}
+                {
+                    "source_adset_id": source_id,
+                    "new_adset_id": str(value.get("id") or ""),
+                    "new_adset_name": str(value.get("name") or ""),
+                }
                 for source_id, value in sorted((copied.get("adsets") or {}).items())
             ],
             "ads": [
                 {
                     "source_ad_id": source_id,
                     "new_ad_id": str(value.get("id") or ""),
+                    "new_ad_name": str(value.get("name") or ""),
                     "new_creative_id": str(value.get("creative_id") or ""),
                 }
                 for source_id, value in sorted((copied.get("ads") or {}).items())
@@ -1271,6 +1411,7 @@ class FacebookLiveExecutor:
             "campaign": None,
             "adsets": {},
             "ads": {},
+            "copy_name_suffix": utc8_copy_suffix(self.clock()),
             "budget": dict(budget),
             "roas": dict(roas),
         }

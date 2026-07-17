@@ -1,5 +1,6 @@
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -202,6 +203,38 @@ if (escaped !== "&lt;img src=x onerror=&quot;boom&quot;&gt;&#39;&amp;") {
 """
     result = subprocess.run(
         ["node", "-e", script, str(JS)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_javascript_audit_dates_are_fixed_to_utc8_even_in_another_browser_timezone():
+    script = r"""
+global.window = { setTimeout, clearTimeout, location: { reload() {} } };
+global.document = {
+  body: { dataset: { v3Page: "test" } },
+  addEventListener() {},
+  getElementById() { return null; },
+};
+global.HTMLElement = function HTMLElement() {};
+global.Element = function Element() {};
+global.Headers = class Headers { has() { return false; } set() {} };
+require(process.argv[1]);
+const ui = window.AdControlV3Ui;
+if (ui.prettyDate("2026-07-17 06:55:00") !== "2026-07-17 14:55") process.exit(2);
+if (ui.prettyDate("2026-07-17T14:55:00+08:00") !== "2026-07-17 14:55") process.exit(3);
+if (ui.prettyDate("2026-07-17") !== "2026-07-17") process.exit(4);
+if (ui.parseAuditDate("2026-07-17 06:55:00").date.toISOString() !== "2026-07-17T06:55:00.000Z") process.exit(5);
+if (ui.prettyDate("2026-07-17T14:55:00.000000+08:00") !== "2026-07-17 14:55") process.exit(6);
+"""
+    env = dict(os.environ)
+    env["TZ"] = "America/Los_Angeles"
+    result = subprocess.run(
+        ["node", "-e", script, str(JS)],
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -731,6 +764,7 @@ for _test_function in [
     test_python_ui_renderer_is_python_39_compatible,
     test_javascript_has_no_syntax_errors,
     test_javascript_escape_helper_is_functionally_xss_safe,
+    test_javascript_audit_dates_are_fixed_to_utc8_even_in_another_browser_timezone,
     test_group_id_and_config_version_drive_preview_and_if_match,
     test_meta_normalization_matches_service_permissions_and_level_catalog,
     test_save_flow_does_not_reference_out_of_scope_is_update,

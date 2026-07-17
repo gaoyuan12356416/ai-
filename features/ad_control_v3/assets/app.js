@@ -4,6 +4,7 @@
   const page = document.body.dataset.v3Page || "";
   const bootstrap = readBootstrap();
   const apiBase = String(bootstrap.apiBase || "/api/ad-control/v3").replace(/\/$/, "");
+  const DISPLAY_TIME_ZONE = "Asia/Shanghai";
   const OPERATOR_LABELS = {
     gt: "大于", gte: "大于等于", lt: "小于", lte: "小于等于", eq: "等于", ne: "不等于",
     between: "介于", in: "属于任一", not_in: "不属于", exists: "存在", not_exists: "不存在",
@@ -86,13 +87,25 @@
     return text(value.execution_id || value.preview_id || value.event_id || value.id);
   }
 
+  function parseAuditDate(value) {
+    const raw = String(value == null ? "" : value).trim();
+    if (!raw || /^\d{4}-\d{2}-\d{2}$/.test(raw)) return { raw, date: null, dateOnly: Boolean(raw) };
+    const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(raw)
+      ? `${raw.replace(" ", "T")}Z`
+      : raw;
+    const date = new Date(normalized);
+    return { raw, date: Number.isNaN(date.getTime()) ? null : date, dateOnly: false };
+  }
+
   function prettyDate(value) {
-    if (!value) return "—";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return text(value, "—");
+    const parsed = parseAuditDate(value);
+    if (!parsed.raw) return "—";
+    if (parsed.dateOnly) return parsed.raw;
+    if (!parsed.date) return text(value, "—");
     return new Intl.DateTimeFormat("zh-CN", {
-      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
-    }).format(date).replace(/\//g, "-");
+      timeZone: DISPLAY_TIME_ZONE,
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).format(parsed.date).replace(/\//g, "-");
   }
 
   function formatCount(value) {
@@ -333,6 +346,7 @@
       },
       products, optimizers, timezones: timezoneValues, fields, currentOptimizer,
       channels: array(source.channels), objectLevels: array(source.object_levels),
+      timeStandard: Object.assign({ storage_timezone: "UTC", display_timezone: "UTC+8", iana_timezone: DISPLAY_TIME_ZONE }, source.time_standard || {}),
       capabilities: Object.assign({}, capabilities, { supportsRuleGroupSearch }),
       permissions: {
         canEnable,
@@ -1335,7 +1349,7 @@
     if (!root) return;
     const optimizerFilter = state.actor && state.actor.isAdmin ? `<div class="field"><span class="field-label">优化师</span>${renderSearchableSingle("log-optimizer", "全部优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(state.logFilters.optimizer_id || ""), true)}</div>` : "";
     root.innerHTML = `
-      <div class="toolbar"><div class="toolbar-copy"><h2>V3 事件审计</h2><p>列表使用服务端分页；对象详情在需要时单独读取。</p></div><div class="toolbar-actions"><button class="button" type="button" data-action="reload-logs"${state.logs.loading ? " disabled" : ""}>刷新日志</button></div></div>
+      <div class="toolbar"><div class="toolbar-copy"><h2>V3 事件审计</h2><p>列表、详情和日期筛选统一按 UTC+8 统计展示；对象详情在需要时单独读取。</p></div><div class="toolbar-actions"><span class="pill pill-info">UTC+8</span><button class="button" type="button" data-action="reload-logs"${state.logs.loading ? " disabled" : ""}>刷新日志</button></div></div>
       ${renderLogMetrics()}
       <section class="filter-bar logs" aria-label="执行日志筛选">
         <div class="field"><label for="logDateFrom">开始日期</label><input id="logDateFrom" type="date" data-log-filter="date_from" value="${h(state.logFilters.date_from || "")}"></div>
@@ -1890,6 +1904,8 @@
     requestGuardedNavigation,
     executionValue,
     displayCount,
+    parseAuditDate,
+    prettyDate,
     conditionValueSpec,
     selectionValidationErrors,
     firstInvalidStep,

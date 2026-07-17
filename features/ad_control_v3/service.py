@@ -44,6 +44,7 @@ from .schemas import (
     positive_int,
 )
 from .storage import SafeDataRoot
+from .time_utils import DISPLAY_IANA_TIMEZONE, DISPLAY_TIMEZONE_LABEL
 
 
 GROUP_INPUT_FIELDS = {
@@ -620,6 +621,11 @@ class Service:
             "capabilities": {
                 "rule_group_search": True,
                 "rule_group_search_fields": ["name", "group_id"],
+            },
+            "time_standard": {
+                "storage_timezone": "UTC",
+                "display_timezone": DISPLAY_TIMEZONE_LABEL,
+                "iana_timezone": DISPLAY_IANA_TIMEZONE,
             },
             "defaults": {"enabled": False, "run_mode": "observe"},
         }

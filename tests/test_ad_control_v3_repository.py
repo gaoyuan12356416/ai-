@@ -189,6 +189,21 @@ class MySQLBoundaryTests(unittest.TestCase):
         self.assertIn("EXISTS", count_sql)
         self.assertEqual(("Dramawave",), count_params)
 
+    def test_execution_date_filter_binds_utc8_day_as_utc_storage_bounds(self):
+        readers = []
+
+        def reader_factory():
+            conn = FakeConnection("reader")
+            readers.append(conn)
+            return conn
+
+        repository = MySQLRepository(reader_factory, lambda: FakeConnection("writer"))
+        repository.list_executions({"date_from": "2026-07-17", "date_to": "2026-07-17"})
+        count_sql, count_params = readers[0].calls[0]
+        self.assertIn("e.created_at>=%s", count_sql)
+        self.assertIn("e.created_at<%s", count_sql)
+        self.assertEqual(("2026-07-16 16:00:00", "2026-07-17 16:00:00"), count_params)
+
     def test_enable_update_contains_atomic_preview_guard(self):
         source = (ROOT / "features" / "ad_control_v3" / "repository.py").read_text(encoding="utf-8")
         self.assertIn("p.expires_at>UTC_TIMESTAMP(6)", source)

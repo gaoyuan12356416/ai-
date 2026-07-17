@@ -9,12 +9,13 @@ from __future__ import annotations
 import copy
 import json
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import AdControlV3Error
 from .schemas import deserialize_json, serialize_for_store
+from .time_utils import utc8_business_date, utc8_date_bounds
 
 
 ADS_AI_DATABASE = "ads_ai"
@@ -415,10 +416,18 @@ class MemoryRepository:
         if filters.get("object_id"):
             object_id = str(filters["object_id"])
             rows = [item for item in rows if any(str(target.get("object_id") or "") == object_id for target in item.get("targets") or [])]
-        if filters.get("date_from"):
-            rows = [item for item in rows if str(item.get("created_at") or "")[:10] >= str(filters["date_from"])]
-        if filters.get("date_to"):
-            rows = [item for item in rows if str(item.get("created_at") or "")[:10] <= str(filters["date_to"])]
+        if filters.get("date_from") or filters.get("date_to"):
+            date_from = str(filters.get("date_from") or "")
+            date_to = str(filters.get("date_to") or "")
+            rows = [
+                item
+                for item in rows
+                if (
+                    (business_date := utc8_business_date(item.get("created_at"))) is not None
+                    and (not date_from or business_date >= date_from)
+                    and (not date_to or business_date <= date_to)
+                )
+            ]
         if filters.get("keyword"):
             keyword = str(filters["keyword"]).lower()
             rows = [
@@ -939,13 +948,13 @@ class MySQLRepository:
             if filters.get(key):
                 where.append("%s=%%s" % key)
                 params.append(filters[key])
-        if filters.get("date_from"):
+        start_utc, end_utc = utc8_date_bounds(filters.get("date_from"), filters.get("date_to"))
+        if start_utc:
             where.append("e.created_at>=%s")
-            params.append(str(filters["date_from"]) + " 00:00:00")
-        if filters.get("date_to"):
-            end_date = datetime.strptime(str(filters["date_to"]), "%Y-%m-%d") + timedelta(days=1)
+            params.append(start_utc)
+        if end_utc:
             where.append("e.created_at<%s")
-            params.append(end_date.strftime("%Y-%m-%d 00:00:00"))
+            params.append(end_utc)
         if filters.get("action"):
             where.append(
                 "EXISTS (SELECT 1 FROM %s ea WHERE ea.execution_id=e.execution_id AND ea.action=%%s)"

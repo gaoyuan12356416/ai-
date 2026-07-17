@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote
 
 from .errors import AdControlV3Error
 from .page_renderer import load_asset, render_page
+from .time_utils import DISPLAY_TIMEZONE_LABEL, convert_audit_times
 
 
 PREFIX = "/api/ad-control/v3"
@@ -68,12 +69,14 @@ def _send_json(handler: Any, status: int, payload: Any, *, allow: str = "") -> N
     if payload is None:
         payload = {"ok": True}
     body = json.dumps(
-        payload,
+        convert_audit_times(payload),
         ensure_ascii=False,
         separators=(",", ":"),
         default=str,
     ).encode("utf-8")
-    headers = {"Allow": allow} if allow else None
+    headers = {"X-Ad-Control-Timezone": DISPLAY_TIMEZONE_LABEL}
+    if allow:
+        headers["Allow"] = allow
     _send_bytes(
         handler,
         status,

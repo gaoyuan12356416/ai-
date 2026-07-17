@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from features.ad_control_v3 import AdControlV3Error, get_service  # noqa: E402
 from features.ad_control_v3.scheduler import runner_event_key  # noqa: E402
+from features.ad_control_v3.time_utils import DISPLAY_TIMEZONE_LABEL, utc8_iso_text  # noqa: E402
 
 
 def _enabled(name: str) -> bool:
@@ -27,12 +28,19 @@ def _time_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+def _print_result(payload: dict) -> None:
+    result = dict(payload)
+    result.setdefault("ran_at", utc8_iso_text(datetime.now(timezone.utc)))
+    result.setdefault("display_timezone", DISPLAY_TIMEZONE_LABEL)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def main() -> int:
     if not _enabled("AD_CONTROL_V3_RUNNER_ENABLED"):
-        print(json.dumps({"ok": True, "status": "disabled", "meta_writes": 0}, ensure_ascii=False))
+        _print_result({"ok": True, "status": "disabled", "meta_writes": 0})
         return 0
     if not _enabled("AD_CONTROL_V3_RUNNER_OBSERVE_RELEASED"):
-        print(json.dumps({"ok": False, "status": "blocked", "error": "runner_observe_not_released", "meta_writes": 0}, ensure_ascii=False))
+        _print_result({"ok": False, "status": "blocked", "error": "runner_observe_not_released", "meta_writes": 0})
         return 3
     try:
         service = get_service()
@@ -90,13 +98,13 @@ def main() -> int:
                     },
                 )
                 results.append({"group_id": group["group_id"], "status": "failed", "error": exc.code})
-        print(json.dumps({"ok": totals["failed"] == 0, "status": "completed", **totals, "results": results[:50]}, ensure_ascii=False))
+        _print_result({"ok": totals["failed"] == 0, "status": "completed", **totals, "results": results[:50]})
         return 0 if totals["failed"] == 0 else 2
     except AdControlV3Error as exc:
-        print(json.dumps(exc.to_dict(), ensure_ascii=False))
+        _print_result(exc.to_dict())
         return 2
     except Exception as exc:
-        print(json.dumps({"ok": False, "status": "failed", "error": "runner_failed", "message": str(exc)[:500]}, ensure_ascii=False))
+        _print_result({"ok": False, "status": "failed", "error": "runner_failed", "message": str(exc)[:500]})
         return 2
 
 
