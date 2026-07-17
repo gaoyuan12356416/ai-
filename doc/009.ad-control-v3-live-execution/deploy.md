@@ -10,14 +10,14 @@ V3 FB live pause/copy、手动 execute API、账号时区 runner、三张 ads_ai
 AD_CONTROL_V3_LIVE_PAUSE_ENABLED=1
 AD_CONTROL_V3_LIVE_COPY_ENABLED=1
 AD_CONTROL_V3_COPY_PERSISTENCE_ENABLED=1
-AD_CONTROL_V3_COPY_ACTIVATE_ENABLED=0
+AD_CONTROL_V3_COPY_ACTIVATE_ENABLED=1
 AD_CONTROL_V3_RUNNER_ENABLED=1
 AD_CONTROL_V3_RUNNER_OBSERVE_RELEASED=1
-AD_CONTROL_V3_RUNNER_LIVE_RELEASED=0
+AD_CONTROL_V3_RUNNER_LIVE_RELEASED=1
 AD_CONTROL_V3_META_TIMEOUT_SECONDS=20
 ```
 
-先以 PAUSED Canary 发布；确认 created_data/lineage 后才能将两个 live/activation release 开关打开。开关文件位于数据盘 `/mnt/data-disk/ai-ad-control-v3/config/runtime.env`。
+PAUSED Canary、created_data/lineage 校验和幂等恢复均已通过，上述为 2026-07-17 生产最终值。开关文件位于数据盘 `/mnt/data-disk/ai-ad-control-v3/config/runtime.env`。新规则默认禁用且只观察，开关开启不等于自动操作已有规则。
 
 ## 数据库变更
 
@@ -35,6 +35,18 @@ AD_CONTROL_V3_META_TIMEOUT_SECONDS=20
 8. 执行一个 PAUSED copy Canary，核对 Meta/created_data/lineage。
 9. 打开 activation/live runner，启用 timer；监控首个 tick。
 
+## 本次生产发布记录
+
+- 最终代码：`3a70e8346f5e77e47af3bb3cd943855386304460`。
+- 生产 staging：`/mnt/data-disk/ai-ad-control-v3/staging/repo-6b4abd979389`，运行文件与目标 commit 精确比对结果为 `unchanged`。
+- 发布前总检查点：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-live-pause-copy-20260717T025049Z-f5cfe61`，SHA256 清单校验通过，SQLite integrity 为 OK。
+- 精确回滚包：
+  - `/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-ba5858ef661d-to-f5cfe61c382f`
+  - `/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-f5cfe61c382f-to-c4f5dcc77bfe`
+  - `/mnt/data-disk/ai-ad-control-v3/backups/ad-control-v3-c4f5dcc77bfe-to-3a70e8346f5e`
+- DDL 文件 SHA256：`6d6f8a458551932c0b1112d0e1d7be7e4e01d3575ba1504d9ae4e40530c825ae`。
+- 实际审计数据：created_data 1 行、copy intent 1 行、lineage 1 行；因此不得通过删表回滚。
+
 ## 验证步骤
 
 - `systemctl is-active drama-material-api.service`
@@ -47,10 +59,10 @@ AD_CONTROL_V3_META_TIMEOUT_SECONDS=20
 
 ## 回滚方案
 
-1. 60 秒熔断：将 `AD_CONTROL_V3_LIVE_COPY_ENABLED=0`、`RUNNER_LIVE_RELEASED=0`，停用 timer；不影响 V2 pause。
+1. 60 秒熔断：将 `AD_CONTROL_V3_LIVE_COPY_ENABLED=0`、`AD_CONTROL_V3_RUNNER_LIVE_RELEASED=0`，必要时停用 timer；不影响 V2 pause。
 2. 代码：使用 deployer 的精确 source/target 与数据盘 checkpoint 反向恢复。
 3. unit/env/cron/SQLite：从本次 checkpoint 原子恢复并 daemon-reload。
-4. DDL：无真实行时可删新表；有真实行后不删表，只停止写入并保留审计。
+4. DDL：本次已经产生真实审计行，禁止删表；只停止写入并保留审计。
 5. Meta：根据 lineage 精确 PAUSE/隔离，不自动删除。
 
 ## 注意事项
