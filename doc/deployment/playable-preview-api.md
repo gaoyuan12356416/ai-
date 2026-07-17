@@ -1,6 +1,6 @@
 # Meta/Facebook 试玩广告生成接口
 
-更新时间：2026-07-16
+更新时间：2026-07-17
 
 当前产物格式：普通浏览器试玩页（`preview.html`）+ Meta 单文件试玩广告（`index.html`）
 
@@ -14,6 +14,8 @@
 - 使用 `LZMA + script-safe Base94` 压缩大型运行时资源；
 - 在执行原游戏脚本前完成内存资源包初始化；
 - 在游戏脚本启动前把 iframe 内的原生 `fetch` / `XMLHttpRequest` 运行时绑定到内存资源层，由该层接管资源加载；
+- 把运行时设置到图片、音视频和相关 DOM 属性的本地相对资源转换为内嵌 `blob:` URL，避免动态资源绕过内存资源层；
+- 在不含 `allow-same-origin` 的 iframe 内提供会话内存型 `localStorage` / `sessionStorage`，兼容依赖 Web Storage 的游戏且不放宽沙箱隔离；
 - 把可执行脚本中的直接 `location` 引用改写到只读导航门面，锁定 `window.open`，并在捕获阶段阻止动态 `<a>` / `<area>` 外链导航；
 - 将 `setTimeout` / `setInterval` 锁定为只接受函数回调的安全包装，拒绝 `eval`、`Function` 及其常见别名/构造器绕过；
 - 使用不含 `allow-same-origin` 的 iframe 沙箱，并在外层与游戏内层同时嵌入禁止网络、Worker、Object 和表单提交的 CSP；
@@ -159,6 +161,8 @@ HTTP 状态码为 `200`。以下地址中的 `<preview_id>` 由每次成功请�
     "csp_safe_script_bootstrap": true,
     "navigation_guard": true,
     "safe_timer_wrappers": true,
+    "storage_shim": true,
+    "dynamic_resource_bridge": true,
     "embedded_csp": true,
     "opaque_origin_sandbox": true,
     "cta_hook": "FbPlayableAd.onCTAClick",
@@ -235,6 +239,8 @@ Meta 上传页面提示的“最大 5 MB”不能按 `5 MiB` 或只检查压缩 
 - 最终 `playable-preview.zip <= 4,800,000 bytes`；
 - ZIP 只包含顶层 `index.html`；
 - HTML 中没有可直连外网的资源 URL、`window.open` 或 location 直接跳转；原游戏代码里的 `XMLHttpRequest`/`fetch` 会在运行时被绑定到内存资源层；
+- 运行时图片/媒体相对路径会被动态资源桥转换为内嵌 `blob:` URL，空 favicon 声明 `data:,` 会被安全剔除；
+- `localStorage` / `sessionStorage` 使用 iframe 生命周期内的内存实现，不需要加入 `allow-same-origin`；
 - 直接 `location` 引用会改写到不可导航的门面，动态链接点击和 popup 会被 CTA 桥接层接管；
 - 游戏脚本通过真实 `<script>` 节点顺序启动，不使用 Meta 沙箱禁止的 `eval` / `unsafe-eval`；
 - iframe 使用 opaque-origin sandbox，内外 CSP 都设置 `connect-src 'none'`、`worker-src 'none'`、`object-src 'none'` 和 `form-action 'none'`；
@@ -353,5 +359,5 @@ curl -X POST 'https://ai.yingliangads.com/api/fb-playable/preview' \
 2. 下载 `meta_html_url` 和 `zip_url`，按实际下载字节重新测量体积；
 3. 解压 ZIP，确认文件列表严格为 `index.html`；
 4. 扫描 Meta HTML，确认没有直接商店跳转和外部资源；
-5. 在禁止 `unsafe-eval` 的 CSP 浏览器沙箱中注入 `FbPlayableAd.onCTAClick` 测试桩，确认无 CSP 报错且游戏进入可交互场景；
+5. 在禁止 `unsafe-eval` 的 CSP 浏览器沙箱中注入 `FbPlayableAd.onCTAClick` 测试桩，确认无 CSP 报错、无外部资源请求、Web Storage 可用且游戏进入可交互场景；
 6. 最后在 Meta Ads Manager 预览环境中完成平台侧验证。

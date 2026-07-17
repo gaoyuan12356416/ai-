@@ -848,6 +848,8 @@ def _inline_links(document, resources, consumed):
         if not href:
             return match.group(0)
         if _is_passthrough_url(href):
+            if "icon" in rel.split() and href.strip().lower() == "data:,":
+                return ""
             return match.group(0)
         key = _resource_key(href)
         resource = resources.get(key)
@@ -1247,6 +1249,8 @@ def _loader_shim(resources):
     __playablePackageBytes=bytes;
     window.__playableFiles=__playablePackageMeta;
     window.__playableCompression='lzma+base94';
+    __playableInstallStorageShims();
+    __playableInstallDomResourceHooks();
     return true;
   }
   function __playableKey(value){
@@ -1275,6 +1279,68 @@ def _loader_shim(resources):
     var binary='';
     for(var i=0;i<bytes.length;i+=1){binary+=String.fromCharCode(bytes[i]);}
     try{return decodeURIComponent(escape(binary));}catch(err){return binary;}
+  }
+  var __playableObjectUrls={};
+  function __playableEmbeddedUrl(value){
+    var text=String(value==null?'':value);
+    if(!text||/^(?:data:|blob:|about:|#)/i.test(text)){return text;}
+    var file=__playableFile(text),cached=__playableObjectUrls[file.key];
+    if(cached){return cached;}
+    if(!window.URL||typeof window.URL.createObjectURL!=='function'){throw new Error('embedded object URLs are unavailable');}
+    cached=window.URL.createObjectURL(new Blob([file.bytes],{type:file.mime}));
+    __playableObjectUrls[file.key]=cached;
+    return cached;
+  }
+  function __playableCreateStorage(){
+    var values=Object.create(null),keys=[];
+    function has(key){return Object.prototype.hasOwnProperty.call(values,key);}
+    return {
+      get length(){return keys.length;},
+      key:function(index){index=Number(index)||0;return index>=0&&index<keys.length?keys[index]:null;},
+      getItem:function(key){key=String(key);return has(key)?values[key]:null;},
+      setItem:function(key,value){key=String(key);if(!has(key)){keys.push(key);}values[key]=String(value);},
+      removeItem:function(key){key=String(key);if(!has(key)){return;}delete values[key];keys=keys.filter(function(item){return item!==key;});},
+      clear:function(){values=Object.create(null);keys=[];}
+    };
+  }
+  function __playableInstallStorageShims(){
+    if(!__playableLock(window,'localStorage',{configurable:false,enumerable:true,value:__playableCreateStorage()})||!__playableLock(window,'sessionStorage',{configurable:false,enumerable:true,value:__playableCreateStorage()})){
+      throw new Error('playable storage shim is unavailable');
+    }
+    window.__playableStorageShim=true;
+  }
+  function __playablePatchUrlProperty(constructor,name){
+    if(!constructor||!constructor.prototype){return false;}
+    var descriptor=Object.getOwnPropertyDescriptor(constructor.prototype,name);
+    if(!descriptor||typeof descriptor.set!=='function'||descriptor.configurable===false){return false;}
+    Object.defineProperty(constructor.prototype,name,{
+      configurable:descriptor.configurable,
+      enumerable:descriptor.enumerable,
+      get:descriptor.get,
+      set:function(value){return descriptor.set.call(this,__playableEmbeddedUrl(value));}
+    });
+    return true;
+  }
+  function __playableShouldBridgeAttribute(node,name){
+    var tag=String(node&&node.tagName||'').toLowerCase(),attr=String(name||'').toLowerCase();
+    if(attr==='src'){return /^(?:img|audio|video|source|track|input)$/.test(tag);}
+    return attr==='poster'&&tag==='video';
+  }
+  function __playableInstallDomResourceHooks(){
+    __playablePatchUrlProperty(window.HTMLImageElement,'src');
+    __playablePatchUrlProperty(window.HTMLMediaElement,'src');
+    __playablePatchUrlProperty(window.HTMLSourceElement,'src');
+    __playablePatchUrlProperty(window.HTMLTrackElement,'src');
+    __playablePatchUrlProperty(window.HTMLVideoElement,'poster');
+    __playablePatchUrlProperty(window.HTMLInputElement,'src');
+    if(window.Element&&Element.prototype&&typeof Element.prototype.setAttribute==='function'){
+      var nativeSetAttribute=Element.prototype.setAttribute;
+      Object.defineProperty(Element.prototype,'setAttribute',{configurable:true,writable:true,value:function(name,value){
+        if(__playableShouldBridgeAttribute(this,name)){value=__playableEmbeddedUrl(value);}
+        return nativeSetAttribute.call(this,name,value);
+      }});
+    }
+    window.__playableDynamicResourceBridge=true;
   }
   function __PlayableXHR(){
     this.method='GET';this.url='';this.async=true;this.readyState=0;this.status=0;
@@ -1710,6 +1776,14 @@ def validate_meta_playable_html(document):
         "safe_timer_wrappers": (
             "__playableSafeTimeout" in inner_document
             and "__playableSafeInterval" in inner_document
+        ),
+        "storage_shim": (
+            "window.__playableStorageShim=true" in inner_document
+            and "__playableCreateStorage" in inner_document
+        ),
+        "dynamic_resource_bridge": (
+            "window.__playableDynamicResourceBridge=true" in inner_document
+            and "__playableEmbeddedUrl" in inner_document
         ),
         "embedded_csp": (
             "Content-Security-Policy" in outer_document

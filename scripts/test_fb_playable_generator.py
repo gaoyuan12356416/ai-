@@ -783,9 +783,9 @@ def write_fixture(root):
         handle.write(
             """<!doctype html><html><head>
 <meta http-equiv="Content-Security-Policy" content="script-src 'none'">
-<link rel="icon" href="icon&amp;v.png"><style>.hero{background:url('icon.png')}</style>
-</head><body><img src="icon&amp;v.png"><canvas id="game"></canvas><script src=loader.js></script>
-<script>fetch('config.json').then(function(r){return r.json();}).then(function(v){window.fixture=v;});</script>
+<link rel="icon" href="data:,"><link rel="icon" href="icon&amp;v.png"><style>.hero{background:url('icon.png')}</style>
+</head><body><img id="dynamic-icon"><img src="icon&amp;v.png"><canvas id="game"></canvas><script src=loader.js></script>
+<script>localStorage.setItem('fixture','ok');document.getElementById('dynamic-icon').src='icon.png';fetch('config.json').then(function(r){return r.json();}).then(function(v){window.fixture=v;});</script>
 </body></html>"""
         )
     with open(os.path.join(root, "loader.js"), "w", encoding="utf-8") as handle:
@@ -888,6 +888,17 @@ def run_fixture(
             and "__playableLocationFacade" in inner
         ),
         "safe_timer_wrappers": compatibility.get("safe_timer_wrappers") is True,
+        "storage_shim": (
+            compatibility.get("storage_shim") is True
+            and "__playableCreateStorage" in inner
+            and "window.__playableStorageShim=true" in inner
+        ),
+        "dynamic_resource_bridge": (
+            compatibility.get("dynamic_resource_bridge") is True
+            and "__playableEmbeddedUrl" in inner
+            and "window.__playableDynamicResourceBridge=true" in inner
+        ),
+        "empty_favicon_removed": '<link rel="icon" href="data:,">' not in inner,
         "source_csp_replaced": (
             document.count('http-equiv="Content-Security-Policy"') == 2
             and "script-src 'none'" not in document

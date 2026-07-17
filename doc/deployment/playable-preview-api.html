@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; object-src 'none'; form-action 'none'">
-  <meta name="playable-doc-source-sha256" content="400d9cf14f19f816677667900de8b1792452b13fb2c3515978b0115cfa57ab24">
+  <meta name="playable-doc-source-sha256" content="8ce3e6f10f8d662e74053729f5dd6ae01504496342ed170049165ad41a3e9708">
   <title>Meta/Facebook 试玩广告生成接口</title>
   <style>
     :root {
@@ -304,7 +304,7 @@
       </ul>
     </nav>
     <article>
-<p>更新时间：2026-07-16</p>
+<p>更新时间：2026-07-17</p>
 <p>当前产物格式：普通浏览器试玩页（<code>preview.html</code>）+ Meta 单文件试玩广告（<code>index.html</code>）</p>
 <h2 id="section-1">1. 接口说明</h2>
 <p>该接口接收可运行的静态 HTML 或 ZIP 游戏包，生成可直接测试商店跳转的浏览器试玩页，以及符合 Meta/Facebook 试玩广告要求的单文件 HTML 和 ZIP。</p>
@@ -314,6 +314,8 @@
 <li>使用 <code>LZMA + script-safe Base94</code> 压缩大型运行时资源；</li>
 <li>在执行原游戏脚本前完成内存资源包初始化；</li>
 <li>在游戏脚本启动前把 iframe 内的原生 <code>fetch</code> / <code>XMLHttpRequest</code> 运行时绑定到内存资源层，由该层接管资源加载；</li>
+<li>把运行时设置到图片、音视频和相关 DOM 属性的本地相对资源转换为内嵌 <code>blob:</code> URL，避免动态资源绕过内存资源层；</li>
+<li>在不含 <code>allow-same-origin</code> 的 iframe 内提供会话内存型 <code>localStorage</code> / <code>sessionStorage</code>，兼容依赖 Web Storage 的游戏且不放宽沙箱隔离；</li>
 <li>把可执行脚本中的直接 <code>location</code> 引用改写到只读导航门面，锁定 <code>window.open</code>，并在捕获阶段阻止动态 <code>&lt;a&gt;</code> / <code>&lt;area&gt;</code> 外链导航；</li>
 <li>将 <code>setTimeout</code> / <code>setInterval</code> 锁定为只接受函数回调的安全包装，拒绝 <code>eval</code>、<code>Function</code> 及其常见别名/构造器绕过；</li>
 <li>使用不含 <code>allow-same-origin</code> 的 iframe 沙箱，并在外层与游戏内层同时嵌入禁止网络、Worker、Object 和表单提交的 CSP；</li>
@@ -553,6 +555,8 @@
     &quot;csp_safe_script_bootstrap&quot;: true,
     &quot;navigation_guard&quot;: true,
     &quot;safe_timer_wrappers&quot;: true,
+    &quot;storage_shim&quot;: true,
+    &quot;dynamic_resource_bridge&quot;: true,
     &quot;embedded_csp&quot;: true,
     &quot;opaque_origin_sandbox&quot;: true,
     &quot;cta_hook&quot;: &quot;FbPlayableAd.onCTAClick&quot;,
@@ -662,6 +666,8 @@ game/assets/...
 <li>最终 <code>playable-preview.zip &lt;= 4,800,000 bytes</code>；</li>
 <li>ZIP 只包含顶层 <code>index.html</code>；</li>
 <li>HTML 中没有可直连外网的资源 URL、<code>window.open</code> 或 location 直接跳转；原游戏代码里的 <code>XMLHttpRequest</code>/<code>fetch</code> 会在运行时被绑定到内存资源层；</li>
+<li>运行时图片/媒体相对路径会被动态资源桥转换为内嵌 <code>blob:</code> URL，空 favicon 声明 <code>data:,</code> 会被安全剔除；</li>
+<li><code>localStorage</code> / <code>sessionStorage</code> 使用 iframe 生命周期内的内存实现，不需要加入 <code>allow-same-origin</code>；</li>
 <li>直接 <code>location</code> 引用会改写到不可导航的门面，动态链接点击和 popup 会被 CTA 桥接层接管；</li>
 <li>游戏脚本通过真实 <code>&lt;script&gt;</code> 节点顺序启动，不使用 Meta 沙箱禁止的 <code>eval</code> / <code>unsafe-eval</code>；</li>
 <li>iframe 使用 opaque-origin sandbox，内外 CSP 都设置 <code>connect-src 'none'</code>、<code>worker-src 'none'</code>、<code>object-src 'none'</code> 和 <code>form-action 'none'</code>；</li>
@@ -856,13 +862,13 @@ game/assets/...
 <li>下载 <code>meta_html_url</code> 和 <code>zip_url</code>，按实际下载字节重新测量体积；</li>
 <li>解压 ZIP，确认文件列表严格为 <code>index.html</code>；</li>
 <li>扫描 Meta HTML，确认没有直接商店跳转和外部资源；</li>
-<li>在禁止 <code>unsafe-eval</code> 的 CSP 浏览器沙箱中注入 <code>FbPlayableAd.onCTAClick</code> 测试桩，确认无 CSP 报错且游戏进入可交互场景；</li>
+<li>在禁止 <code>unsafe-eval</code> 的 CSP 浏览器沙箱中注入 <code>FbPlayableAd.onCTAClick</code> 测试桩，确认无 CSP 报错、无外部资源请求、Web Storage 可用且游戏进入可交互场景；</li>
 <li>最后在 Meta Ads Manager 预览环境中完成平台侧验证。</li>
 </ol>
 
       <footer class="doc-footer">
         <p>该页面由 Git 跟踪的 Markdown 自动生成。<a href="https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/ad-materials/docs/playable-preview-api.md">查看 Markdown 源文档</a></p>
-        <p>源文档 SHA-256：<code>400d9cf14f19f816677667900de8b1792452b13fb2c3515978b0115cfa57ab24</code></p>
+        <p>源文档 SHA-256：<code>8ce3e6f10f8d662e74053729f5dd6ae01504496342ed170049165ad41a3e9708</code></p>
       </footer>
     </article>
   </main>
