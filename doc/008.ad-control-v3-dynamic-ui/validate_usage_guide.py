@@ -182,8 +182,8 @@ def validate_source(text: str, parser: GuideParser, errors: list[str]) -> None:
         fail(errors, f"usage-guide.html: asset set mismatch; missing={missing}, extra={extra}")
     if "Meta 写入 0 次" not in text:
         fail(errors, "usage-guide.html: required zero-Meta-write safety statement missing")
-    if "当前 R1" not in text:
-        fail(errors, "usage-guide.html: R1 capability boundary statement missing")
+    if "当前 R2 已接通" not in text:
+        fail(errors, "usage-guide.html: R2 live capability statement missing")
 
 
 def jpeg_dimensions(payload: bytes) -> tuple[int, int]:
