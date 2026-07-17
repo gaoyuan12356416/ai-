@@ -15,6 +15,11 @@ ASSETS = FEATURE / "assets"
 RENDERER = FEATURE / "page_renderer.py"
 JS = ASSETS / "app.js"
 CSS = ASSETS / "app.css"
+USAGE_GUIDE_URL = (
+    "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/"
+    "codex-artifacts/html/20260717/"
+    "ai-ad-control-v3-usage-guide-current-20260717_170557/index.html"
+)
 
 sys.path.insert(0, str(ROOT))
 from features.ad_control_v3 import page_renderer  # noqa: E402
@@ -51,6 +56,22 @@ def test_dynamic_pages_render_complete_accessible_documents():
         assert 'id="authBtn"' in html
         assert "feature-nav-link" not in html
         assert "sidebar-foot" not in html
+
+
+def test_rule_groups_exposes_usage_guide_as_safe_new_tab_link():
+    html = page_renderer.render_page("rule-groups", {"apiBase": "/api/ad-control/v3"})
+    parsed = ParsedHtml()
+    parsed.feed(html)
+    links = [attrs for tag, attrs in parsed.attributes if tag == "a"]
+    guide_link = next(attrs for attrs in links if attrs.get("id") == "usageGuideLink")
+
+    assert guide_link["href"] == USAGE_GUIDE_URL
+    assert guide_link["target"] == "_blank"
+    assert set(guide_link["rel"].split()) == {"noopener", "noreferrer"}
+    assert guide_link["referrerpolicy"] == "no-referrer"
+    assert guide_link["aria-label"] == "打开 V3 使用手册（新标签页）"
+    assert "使用手册" in html
+    assert 'id="usageGuideLink"' not in page_renderer.render_page("execution-logs")
 
 
 def test_templates_reference_standard_shell_and_dynamic_v3_business_assets():
@@ -756,6 +777,7 @@ class TestAdControlV3Ui(unittest.TestCase):
 
 for _test_function in [
     test_dynamic_pages_render_complete_accessible_documents,
+    test_rule_groups_exposes_usage_guide_as_safe_new_tab_link,
     test_templates_reference_standard_shell_and_dynamic_v3_business_assets,
     test_shared_quick_nav_and_topbar_use_the_standard_javascript_contract,
     test_quick_nav_runtime_style_hash_is_explicitly_allowed_by_csp,
