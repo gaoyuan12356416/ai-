@@ -92,6 +92,37 @@ def _utc_text(value: Optional[datetime] = None) -> str:
     return current.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+def _mysql_datetime_value(value: Any) -> Optional[str]:
+    """Convert a Meta ISO-8601 wall time into a MySQL ``DATETIME`` value.
+
+    Meta returns account-local values such as ``2026-07-17T10:55:39+0800``.
+    ``created_data.start_time`` is a timezone-less ``DATETIME`` column, so the
+    account-local wall clock must be preserved while the offset suffix is
+    removed.  Unknown formats fail closed instead of reaching MySQL after the
+    Meta copy has already been created.
+    """
+
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+        normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise AdControlV3Error(
+                "copy_datetime_invalid",
+                "Meta start time is not a supported ISO-8601 value",
+                status=502,
+            ) from exc
+    return parsed.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -404,6 +435,8 @@ class FacebookLiveExecutor:
                     "meta_write_count": int(exc.details.get("meta_write_count") or result.get("meta_write_count") or 0),
                 }
             )
+            if exc.details.get("copy_intent_id"):
+                result["copy_intent_id"] = str(exc.details["copy_intent_id"])
             return result
         except Exception:
             logging.exception("ad-control V3 live target failed")
@@ -1097,7 +1130,9 @@ class FacebookLiveExecutor:
                         "bid_type": str(new_adset.get("bid_strategy") or source_row.get("bid_type") or ""),
                         "bid_control": "MIN_ROAS" if constraints.get("roas_average_floor") is not None else source_row.get("bid_control"),
                         "bid_amount": constraints.get("roas_average_floor") if constraints.get("roas_average_floor") is not None else source_row.get("bid_amount"),
-                        "start_time": new_adset.get("start_time") or source_row.get("start_time"),
+                        "start_time": _mysql_datetime_value(
+                            new_adset.get("start_time") or source_row.get("start_time")
+                        ),
                         "local_status": 0,
                         "campaign_action_at": 0,
                         "adset_action_at": 0,
@@ -1289,6 +1324,8 @@ class FacebookLiveExecutor:
                 self._update_intent(intent_id, "quarantined", {"copied": self._public_copy_result(copied) if copied else {}}, error=wrapped)
             except Exception:
                 logging.exception("failed to quarantine copy intent %s", intent_id)
+            wrapped.details["copy_intent_id"] = intent_id
+            wrapped.details["meta_write_count"] = client.write_count
             raise wrapped from exc
 
 

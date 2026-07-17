@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from features.ad_control_v3.errors import AdControlV3Error
-from features.ad_control_v3.live_execution import FacebookLiveExecutor
+from features.ad_control_v3.live_execution import FacebookLiveExecutor, _mysql_datetime_value
 from features.ad_control_v3.scheduler import candidate_schedule_due, runner_event_key
 from features.ad_control_v3.schemas import behavior_hash
 from tests.test_ad_control_v3_core import NORMAL, base_payload, make_service
@@ -144,6 +144,21 @@ class FakePauseClient:
 
 
 class LiveExecutorPrimitiveTests(unittest.TestCase):
+    def test_meta_iso_start_time_is_normalized_for_mysql_without_changing_wall_clock(self):
+        self.assertEqual(
+            "2026-07-17 10:55:39",
+            _mysql_datetime_value("2026-07-17T10:55:39+0800"),
+        )
+        self.assertEqual(
+            "2026-07-17 02:55:39",
+            _mysql_datetime_value("2026-07-17T02:55:39Z"),
+        )
+
+    def test_unknown_meta_start_time_fails_closed_before_mysql(self):
+        with self.assertRaises(AdControlV3Error) as raised:
+            _mysql_datetime_value("17/07/2026 10:55")
+        self.assertEqual("copy_datetime_invalid", raised.exception.code)
+
     def test_pause_verifies_account_and_readback_then_updates_only_ads_ai_copy_rows(self):
         client = FakePauseClient()
         executor = PauseExecutor(client)
@@ -200,6 +215,69 @@ class LiveExecutorPrimitiveTests(unittest.TestCase):
             executor._copy_campaign(Client(), "source", state)
         self.assertEqual("copy_mapping_incomplete", raised.exception.code)
         self.assertEqual("new-campaign", state["campaign"]["id"])
+
+    def test_unexpected_copy_failure_returns_intent_and_actual_meta_write_count(self):
+        class Client:
+            write_count = 3
+
+        class Executor(FacebookLiveExecutor):
+            def __init__(self):
+                super().__init__(
+                    lambda: None,
+                    lambda: None,
+                    lambda: None,
+                    copy_enabled=True,
+                    persistence_enabled=True,
+                )
+                self.client = Client()
+
+            def _verify_created_data_schema(self):
+                return None
+
+            def _source_rows(self, target):
+                return [{"id": 1, "app_id": "app-1", "ad_id": target["object_id"]}]
+
+            def _token(self, product, source_rows):
+                return "secret"
+
+            def _client(self, token):
+                return self.client
+
+            def _source_graph(self, client, target, source_rows):
+                return {"account": {}, "campaign": {}, "adsets": [], "ads": [], "source_rows": {}}
+
+            def _budget_plan(self, target, graph):
+                return {"budget_level": "campaign", "budget_type": "daily_budget", "campaign_budget": 100, "adset_budgets": {}}
+
+            def _roas_plan(self, target, graph):
+                return {}
+
+            def _reserve_intent(self, group, target, graph):
+                return {"reserved": True, "intent": {"intent_id": "intent-1"}}
+
+            def _copy_tree(self, client, target, graph, budget, roas, state=None):
+                raise RuntimeError("database failed")
+
+            def _pause_created(self, client, copied):
+                return None
+
+            def _update_intent(self, intent_id, status, result, error=None):
+                return None
+
+        result = Executor().execute(
+            {},
+            {
+                "action": "copy",
+                "object_level": "ad",
+                "object_id": "ad-1",
+                "product": "Dramawave",
+                "copy_parameters": {},
+            },
+        )
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("copy_execution_failed", result["reason"])
+        self.assertEqual("intent-1", result["copy_intent_id"])
+        self.assertEqual(3, result["meta_write_count"])
 
 
 if __name__ == "__main__":
