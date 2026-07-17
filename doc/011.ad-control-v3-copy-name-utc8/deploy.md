@@ -36,8 +36,30 @@ V3 三层复制名称后缀、UTC+8 API/UI/日期筛选/runner 日志。
 3. 仅重启 API；若 runner 脚本变化则等待/触发一次只读健康检查。
 4. 不删除 intent、lineage、created_data 或历史执行日志；已创建对象按 lineage 精确 PAUSE。
 
+精确代码回滚命令（执行前先停止 `ad-control-v3-runner.timer`，执行后重启 API 并恢复 timer 原状态）：
+
+```bash
+python3 deploy/apply_ad_control_v3.py \
+  --root /root/drama_material_service \
+  --repo /mnt/data-disk/ai-ad-control-v3/staging/repo-copyname-6c71b42 \
+  --source-commit 3bcf0839de78f481ea299abf9acf64db2cb8d61c \
+  --target-commit 9e6c5c899f1c849e62e22f5c01496a4fb983f256 \
+  --backup-dir /mnt/data-disk/ai-ad-control-v3/backups/predeploy-copy-name-utc8-20260717T160635+0800-3bcf083/exact-overlay \
+  --lock-file /mnt/data-disk/ai-ad-control-v3/run/deploy.lock \
+  --rollback
+```
+
 ## 注意事项
 
 - 线上是共享 monolith，source commit 必须与当前线上 app 完全一致；发现漂移立即中止。
 - 名称更新增加 Meta 写次数，生产配额和熔断不得绕过。
 - 不把账号本地计划改成 UTC+8；仅后台统计展示固定 UTC+8。
+
+## 实际发布记录
+
+- 时间：`2026-07-17 16:08 UTC+8`。
+- GitHub target：`9e6c5c899f1c849e62e22f5c01496a4fb983f256`；生产 source：`3bcf0839de78f481ea299abf9acf64db2cb8d61c`。
+- 完整数据盘备份：`/mnt/data-disk/ai-ad-control-v3/backups/predeploy-copy-name-utc8-20260717T160635+0800-3bcf083`。
+- 服务器目标提交回归：181/181；overlay 发布后精确检查：`unchanged`。
+- `drama-material-api.service` 与 `ad-control-v3-runner.timer` 均恢复 active；`app.py`、env、unit 未改变。
+- 生产浏览器日志页显示 UTC+8，加载 21 条记录且无控制台错误；未主动执行真实 Meta 复制 Canary。

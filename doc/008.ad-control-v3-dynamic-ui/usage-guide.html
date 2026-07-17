@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="description" content="AI 自动规则调控 V3 Facebook 规则组管理详细使用手册，基于 2026-07-16 生产环境安全演示。">
+  <meta name="description" content="AI 自动规则调控 V3 Facebook 现行生产使用手册，覆盖三层暂停复制、UTC+8 审计、调度与复制落表。">
   <title>AI 自动规则调控 V3｜详细使用手册</title>
   <style>
     :root {
@@ -776,10 +776,10 @@
         </div>
         <div class="cover-alert">
           <strong>先记住一句话</strong>
-          当前 R2 已接通 Facebook 真实暂停、复制、落表和自动调度。新规则仍默认“停用 + 只观察”；只有主动切换正式执行、完成二次确认并手动执行或启用后，才会调用 Meta 写接口。
+          当前生产已接通 Facebook 真实暂停、组合复制、复制落表和自动调度。新规则仍默认“停用 + 只观察”；只有主动切换正式执行、完成最新试算与二次确认并手动执行或启用后，才会调用 Meta 写接口。
         </div>
         <div class="cover-meta">
-          <div><span>适用版本</span><strong>V3 R2 · Facebook</strong></div>
+          <div><span>适用版本</span><strong>V3 Facebook · 现行生产版</strong></div>
           <div><span>生产走查日期</span><strong>2026-07-17</strong></div>
           <div><span>适用角色</span><strong>优化师 / 管理员</strong></div>
         </div>
@@ -825,7 +825,7 @@
               <tr><td>估算当前范围</td><td>按 insight 日期窗口、优化师、产品、时区和对象层级统计去重候选</td><td><span class="badge available">不会</span></td><td>不会</td></tr>
               <tr><td>保存草稿</td><td>保存配置，规则组保持停用与只观察</td><td><span class="badge available">不会</span></td><td>不会</td></tr>
               <tr><td>保存并立即试算</td><td>读取指标、判断规则、记录 would_pause / would_copy 等结果</td><td><span class="badge available">不会</span></td><td>只运行这一次</td></tr>
-              <tr><td>填写每天固定时间/间隔</td><td>保存计划；只有正式模式且规则已启用时，Runner 才按计划执行</td><td>保存时不会</td><td><span class="badge observe">启用后会</span></td></tr>
+              <tr><td>填写每天固定时间/间隔</td><td>保存计划；只观察启用后持续扫描但零写入，正式模式启用后按账号时区执行</td><td>保存时不会</td><td><span class="badge observe">启用后会</span></td></tr>
               <tr><td>正式执行并二次确认</td><td>按最新试算真实暂停或复制；复制先 PAUSED、落表校验后再激活</td><td><span class="badge danger">会</span></td><td>手动一次；启用后可自动</td></tr>
             </tbody>
           </table>
@@ -835,7 +835,7 @@
           <span class="notice-icon">i</span>
           <div>
             <strong>关于本手册中的截图</strong>
-            <p>9 张截图采集于 2026-07-16 的 R1 只观察走查，用于说明字段位置和配置流程；截图里的“尚未开放”提示已过期。当前线上页面应显示“真实暂停、复制与自动调度已开放 / 正式执行可用”。</p>
+            <p>9 张截图已于 2026-07-17 按现网重新采集。演示表单没有保存，也没有点击真实执行；只调用只读范围估算和执行日志查询，因此未新建规则、未修改广告、Meta 写入 0 次。</p>
           </div>
         </div>
 
@@ -861,19 +861,27 @@
           <div class="flow-step"><span class="flow-number">5</span><strong>检查与试算</strong><span>保存并立即试算，到日志确认 Meta 写入为 0。</span></div>
         </div>
 
-        <h3>本手册已经替你跑过一次真实生产演示</h3>
-        <p>为了让截图、配置和日志前后一致，本次在生产环境创建了一条安全演示规则，始终保持停用和只观察：</p>
+        <h3>本手册已按现网重新走查完整配置流程</h3>
+        <p>本次使用未保存的安全演示表单走完五步配置，并读取现有只观察日志；没有新建规则，也没有触发 Meta 写操作：</p>
         <div class="evidence">
           <div><strong>52</strong><span>3 天窗口内出现的候选账户</span></div>
-          <div><strong>6,569</strong><span>3 天窗口内去重 Campaign 候选</span></div>
-          <div><strong>15</strong><span>日志目标记录（含 Top N 延后）</span></div>
+          <div><strong>5,701</strong><span>3 天窗口内去重 Campaign 候选</span></div>
+          <div><strong>5</strong><span>示例只观察日志命中对象</span></div>
           <div><strong>0</strong><span>Meta 写入次数</span></div>
         </div>
         <div class="notice safe">
           <span class="notice-icon">✓</span>
           <div>
             <strong>生产实测结论</strong>
-            <p>试算执行 ID 为 <code>34d829306a47473e8b4489da8afe706c</code>。日志列表显示目标记录 15 个（界面列名为“命中”，口径包含最终计划、Top N 延后和阻断记录，并非 15 次最终复制），状态“已观察”，快照完整性通过，外部写约束为“观察模式 Meta 写入 0 次”。</p>
+            <p>本次读取的只观察调度执行 ID 为 <code>d0a02cc391d546719d9e5f924bace3a6</code>：命中 5 个 Campaign，状态“已观察”，快照完整性通过，外部写约束为“观察模式 Meta 写入 0 次”。</p>
+          </div>
+        </div>
+
+        <div class="notice danger">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>今天做真实测试时再多走两步</strong>
+            <p>试算对象确认无误后，将规则改为正式执行并完成二次确认；保持规则停用，先从列表点击“执行”完成单次 Canary。核对 Meta 与 ads_ai 后，才启用账号时区自动调度。</p>
           </div>
         </div>
       </section>
@@ -884,12 +892,20 @@
         <p class="section-intro">V3 不再要求先选广告账户或账户池。候选广告由“优化师 + 产品”共同圈定，账户只作为最终结构归属存在。</p>
 
         <div class="definition-grid">
-          <dl class="definition"><dt>普通优化师</dt><dd>创建规则时优化师固定为当前登录人，不能代其他人配置；可查看同一优化师范围的规则，但只能修改自己创建的规则。</dd></dl>
-          <dl class="definition"><dt>管理员</dt><dd>可以选择任一有效优化师。本次演示由管理员选择“熊鑫”。</dd></dl>
-          <dl class="definition"><dt>产品</dt><dd>支持多选；当前只提供短剧类型、有效状态的产品枚举，并与业务产品目录对齐。</dd></dl>
+          <dl class="definition"><dt>普通优化师</dt><dd>创建规则时优化师由服务端固定为当前登录人，不能代其他人配置；接口会再次校验身份范围。</dd></dl>
+          <dl class="definition"><dt>管理员</dt><dd>可以按姓名、邮箱或优化师 ID 搜索并选择任一有效优化师。本次走查选择“熊鑫”。</dd></dl>
+          <dl class="definition"><dt>产品</dt><dd>支持搜索和多选；只提供有效短剧产品，并与 <code>custom_source_insight</code> 及产品库映射对齐。Dramawave 同 App ID <code>1031273318485141</code> 的具体投放产品会批量进入目录。</dd></dl>
           <dl class="definition"><dt>产品与优化师关系</dt><dd>是 AND 关系：只处理既属于所选产品、又归属于所选优化师的广告。</dd></dl>
-          <dl class="definition"><dt>账户时区</dt><dd>可选。留空表示不限制；选择后会补查候选账户时区。不匹配、缺失或冲突的对象仍保留为 blocked 审计记录，只有 eligible 口径才排除。</dd></dl>
+          <dl class="definition"><dt>账户时区</dt><dd>可选。留空表示不限制；选择后会补查候选账户时区。不匹配、缺失或冲突对象保留为 blocked。计划按账号本地时间判断，后台日志固定按 UTC+8 展示。</dd></dl>
           <dl class="definition"><dt>广告账户/账户池</dt><dd>V3 页面不再作为筛选入口，不需要逐个勾选账户。</dd></dl>
+        </div>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>真实执行优先选具体投放产品</strong>
+            <p>宽口径产品如 <code>Dramawave</code> 适合整体观察；具体 App 项显示为“产品名 · App 数字”，底层值形如 <code>app:&lt;ads_apps_setting.id&gt;</code>；具体 W2A 项显示为“产品名 · W2A 数字”，底层值形如 <code>w2a:&lt;landing_id&gt;</code>，例如 <code>drama-double · W2A 2229</code>。</p>
+          </div>
         </div>
 
         <div class="notice warn">
@@ -910,18 +926,18 @@
           <li>打开 <a href="https://ai.yingliangads.com/api/ad-control/v3/ui/rule-groups" target="_blank" rel="noopener">V3 规则组管理</a>。</li>
           <li>列表顶部可以按名称/ID、产品、优化师、调控对象、运行模式和状态筛选。</li>
           <li>点击右上角<strong>新建规则组</strong>进入五步配置流程。</li>
-          <li>规则 owner 或管理员可以编辑、试算、复制为新草稿或删除；普通用户看到同一优化师下他人创建的规则时只能读取，不能 Preview 或修改。当前启用入口受安全锁限制。</li>
+          <li>规则 owner 或管理员可以编辑、试算、复制为新草稿或删除；正式执行和启用均要求最新有效试算、权限校验和二次确认。</li>
         </ol>
 
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/01-rule-group-list.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/01-rule-group-list.jpg" alt="V3 规则组管理列表，显示演示规则为停用和只观察" width="3160" height="1569" loading="lazy">
+              <img src="usage-guide-assets/01-rule-group-list.jpg" alt="2026年7月17日现网 V3 规则组管理列表，页首显示真实暂停复制和自动调度已开放" width="2560" height="1215" loading="lazy">
             </a>
           </div>
           <figcaption>
             <strong>图 1　规则组管理首页</strong>
-            演示规则“使用手册演示｜Campaign 高 ROAS 复制（只观察）”已保存，状态为停用，运行模式为只观察。页面右上角进入新建流程。
+            列表同时展示正式执行和只观察规则。测试前先确认页首显示“真实暂停、复制与自动调度已开放 / 正式执行可用”，再从右上角进入新建流程。
             <span class="shot-tip">提示：点击图片可打开原始大图查看细节。</span>
           </figcaption>
         </figure>
@@ -944,9 +960,9 @@
                 <tr><td class="nowrap">规则组名称</td><td>建议包含对象、核心条件和模式，例如“Campaign 高 ROAS 复制（只观察）”</td><td>用于列表和日志识别，避免只写“测试规则”。</td></tr>
                 <tr><td>说明</td><td>写明数据窗口、核心条件、候选方式和安全边界</td><td>便于其他人理解，不参与筛选。</td></tr>
                 <tr><td>渠道</td><td>选择 Facebook</td><td>TikTok 已预留渠道模型，但本期不可用。</td></tr>
-                <tr><td>优化师</td><td>普通用户固定本人；管理员选择目标优化师</td><td>必须与产品一起匹配。</td></tr>
-                <tr><td>短剧产品</td><td>至少选择 1 个，最多 20 个</td><td>支持多选；只显示有效短剧产品。</td></tr>
-                <tr><td>账户时区</td><td>只有需要限制候选账户时区时选择；否则留空</td><td>选择后会补查时区；不匹配、缺失或冲突对象记为 blocked，不会从总候选计数中消失。为了计划而选择时区不会让 R1 计划生效。</td></tr>
+                <tr><td>优化师</td><td>普通用户锁定本人；管理员可按姓名、邮箱或 ID 搜索</td><td>必须与产品一起匹配，选择进入审计。</td></tr>
+                <tr><td>短剧产品</td><td>至少选择 1 个，最多 20 个</td><td>支持搜索与多选；真实执行优先具体 App / W2A 项。</td></tr>
+                <tr><td>账户时区</td><td>只有需要限制候选账户时区时选择；否则留空</td><td>选择后会补查时区；不匹配、缺失或冲突对象记为 blocked。调度按各账户本地时间判断，日志固定按 UTC+8 展示。</td></tr>
                 <tr><td>指标窗口</td><td>输入 1–31 天</td><td>这是效果指标的回看范围，不是规则有效期。</td></tr>
               </tbody>
             </table>
@@ -965,12 +981,12 @@
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/02-scope-and-estimate.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/02-scope-and-estimate.jpg" alt="范围与归属步骤，选择优化师熊鑫、产品 Dramawave 并估算为 52 个账户和 6569 个 Campaign" width="3160" height="1569" loading="lazy">
+              <img src="usage-guide-assets/02-scope-and-estimate.jpg" alt="范围与归属步骤，优化师支持搜索，短剧产品支持多选，账户时区可留空" width="2560" height="1215" loading="lazy">
             </a>
           </div>
           <figcaption>
-            <strong>图 2　范围与归属 + 生产范围估算</strong>
-            本次演示选择 Facebook、优化师“熊鑫”、产品“Dramawave”，不限制账户时区，指标窗口 3 天。估算结果为 1 个产品、3 天窗口内出现的 52 个候选账户、6,569 个去重 Campaign 候选；这不是该优化师名下的 Meta 全量资产。
+            <strong>图 2　范围与归属</strong>
+            本次未保存演示选择 Facebook、优化师“熊鑫”、产品“Dramawave”，不限制账户时区，指标窗口 3 天；下一步的范围估算结果为 1 个产品、52 个候选账户、5,701 个去重 Campaign。该结果属于 insight 结构范围，不是 Meta 全量资产或最终命中数。
           </figcaption>
         </figure>
 
@@ -986,13 +1002,13 @@
       <section class="doc-section" id="step-2">
         <p class="section-label">Step 2 of 5</p>
         <h2>第二步：调控对象与运行模式</h2>
-        <p class="section-intro">对象层级决定可筛选字段以及关闭/复制的目标语义；运行模式在未来决定是否允许外部写入。R1 的两种模式配置都不能写 Meta，手动 Preview 始终以 observe 记录。两者不是同一层级的配置。</p>
+        <p class="section-intro">对象层级决定可筛选字段以及关闭/复制的目标语义；运行模式决定只记录还是允许外部写入。手动 Preview 始终以 observe 记录，和长期运行模式不是同一层级的配置。</p>
 
         <div class="table-wrap">
           <table>
             <thead><tr><th>调控对象</th><th>指标粒度</th><th>关闭配置目标</th><th>复制配置目标</th><th>适合场景</th></tr></thead>
             <tbody>
-              <tr><td><strong>Campaign</strong></td><td>广告系列汇总</td><td>暂停整个 Campaign，下属 Ad Set / Ad 都停止</td><td>深度复制 Campaign 及其下级结构</td><td>整套放量、隔日复制最佳系列</td></tr>
+              <tr><td><strong>Campaign</strong></td><td>广告系列汇总</td><td>暂停整个 Campaign，下属 Ad Set / Ad 都停止</td><td>逐层组合复制 Campaign 及其下级结构</td><td>整套放量、隔日复制最佳系列</td></tr>
               <tr><td><strong>Ad Set</strong></td><td>广告组汇总</td><td>只暂停命中的 Ad Set</td><td>复制到来源 Campaign 或新 Campaign</td><td>国家/受众/出价层的精细调控</td></tr>
               <tr><td><strong>Ad</strong></td><td>单条广告</td><td>只暂停命中的 Ad</td><td>复制到原 Ad Set 或独立承载结构</td><td>优秀素材单独放量、差素材止损</td></tr>
             </tbody>
@@ -1001,8 +1017,8 @@
 
         <h3>运行模式怎么选</h3>
         <ul>
-          <li><strong>只观察：</strong>当前 R1 仅支持手动试算，记录“本来会关闭/复制哪些对象”，不调用 Meta 写接口；持续扫描要等 Runner 发布。</li>
-          <li><strong>正式执行：</strong>为未来真实写入准备。当前 R1 受安全总开关保护，不会因为选中它就直接操作 Meta。</li>
+          <li><strong>只观察：</strong>可以手动试算，也可以启用计划调度持续扫描；记录“本来会关闭/复制哪些对象”，Meta 写入始终为 0。</li>
+          <li><strong>正式执行：</strong>已经支持真实暂停与复制，但仅选中模式不会立即操作；还要保存、完成最新试算、二次确认，并手动执行或启用调度。</li>
         </ul>
         <div class="notice warn">
           <span class="notice-icon">!</span>
@@ -1015,14 +1031,14 @@
           <span class="notice-icon">!</span>
           <div>
             <strong>候选不保证 Meta 对象当前仍为 ACTIVE</strong>
-            <p>配置状态、有效状态、当前预算等 Meta 字段在 R1 都不可筛，且 Preview 不调用 Graph 回读。正式写入开放前必须增加实时状态复核，不能直接把当前候选当成可执行对象。</p>
+            <p>Preview 不调用 Meta 写接口，也不把结构估算当作实时可执行结论。正式执行会在每个动作前复核对象账户、父级、状态、Token、预算/出价兼容性和 created_data 映射；不通过就跳过或阻断。</p>
           </div>
         </div>
 
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/03-object-observe.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/03-object-observe.jpg" alt="调控对象选择 Campaign，运行模式选择只观察" width="3141" height="1569" loading="lazy">
+              <img src="usage-guide-assets/03-object-observe.jpg" alt="对象与模式步骤，选择 Campaign 和只观察，并显示三天范围估算结果" width="2545" height="1208" loading="lazy">
             </a>
           </div>
           <figcaption>
@@ -1068,7 +1084,7 @@
             <thead><tr><th>条件</th><th>运算符</th><th>值</th><th>目的</th></tr></thead>
             <tbody>
               <tr><td>消耗 <code>spend</code></td><td>大于等于</td><td>50</td><td>避免低消耗样本直接进入复制候选</td></tr>
-              <tr><td>安装 <code>installs</code></td><td>大于等于</td><td>5</td><td>保证 CPI 有基本样本量</td></tr>
+
               <tr><td>ROAS <code>roas</code></td><td>大于等于</td><td>1.2</td><td>筛选回收达到 120% 的 Campaign</td></tr>
             </tbody>
           </table>
@@ -1086,20 +1102,20 @@
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/04-rule-conditions.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/04-rule-conditions.jpg" alt="规则条件页面，配置消耗、安装、ROAS 条件和复制动作参数" width="3141" height="1569" loading="lazy">
+              <img src="usage-guide-assets/04-rule-conditions.jpg" alt="规则条件步骤，配置消耗大于等于50、ROAS大于等于1.2并选择复制动作" width="2545" height="1208" loading="lazy">
             </a>
           </div>
           <figcaption>
             <strong>图 4　配置 AND 条件和复制动作</strong>
-            演示规则名称为“消耗充分且 ROAS 达标”，优先级 10，三个条件全部满足后记录为复制候选。
+            演示规则名称为“消耗充分且 ROAS 达标”，优先级 10，消耗与 ROAS 两个条件都满足后记录为复制候选。
           </figcaption>
         </figure>
       </section>
 
       <section class="doc-section" id="copy-settings">
         <p class="section-label">Copy action</p>
-        <h2>复制参数详解</h2>
-        <p class="section-intro">只有命中动作选择“复制”时才会显示。当前这些参数参与保存和试算解释，但不会在 R1 里创建真实 Meta 对象。</p>
+        <h2>复制参数、命名、落表与失败隔离</h2>
+        <p class="section-intro">只有命中动作选择“复制”时显示。只观察和立即试算只解释这些参数；正式执行会按参数组合创建 PAUSED 对象，完成映射、落表和校验后才允许激活。</p>
 
         <h3>预算设置</h3>
         <div class="table-wrap">
@@ -1117,20 +1133,20 @@
         <ul>
           <li>选择提高或降低，再输入百分比；方向和百分比必须成对填写。</li>
           <li>百分比必须大于 0 且不超过 100。</li>
-          <li>未来正式实现应在来源不是兼容的 ROAS 出价模式时跳过，不能静默切换竞价策略；R1 尚未实现这项 Meta 校验。</li>
+          <li>来源不是兼容的 MIN_ROAS 出价模式时会在写入前阻断，不能静默切换竞价策略。</li>
           <li>不需要调整时两个字段都留空。</li>
         </ul>
 
         <h3>来源冷却与单规则额度</h3>
         <ul>
-          <li><strong>来源冷却天数：</strong>可选；为未来正式复制定义同一来源的重复间隔；范围 1–3650 天。</li>
-          <li><strong>单规则每日复制上限：</strong>可选；为未来正式复制定义单条规则的日额度；范围 1–3650。</li>
+          <li><strong>来源冷却天数：</strong>可选；正式复制时限制同一来源的重复间隔；范围 1–3650 天。</li>
+          <li><strong>单规则每日复制上限：</strong>可选；正式复制时限制单条规则的日 intent 数；范围 1–3650。</li>
         </ul>
         <div class="notice warn">
           <span class="notice-icon">!</span>
           <div>
-            <strong>R1 手动试算不判断冷却，也不扣减额度</strong>
-            <p>这些参数目前只保存、回显并进入不可变配置快照。不要因为填了“1 天 / 每日 1 次”就认为本次 Preview 已受保护。</p>
+            <strong>只观察不扣减正式额度；正式执行会预占额度并判断冷却</strong>
+            <p>Preview 只保存和解释配置，不创建复制 intent。正式执行会在 Meta POST 前以 MySQL 事务预占 intent，并共同执行单规则、规则组、用户、部署硬上限与来源/对象冷却。</p>
           </div>
         </div>
 
@@ -1145,8 +1161,34 @@
         <div class="notice danger">
           <span class="notice-icon">!</span>
           <div>
-            <strong>所有复制目标在 R1 都是 <code>copy_live_ready=false</code></strong>
-            <p>所有复制候选都会带有 <code>copy_persistence_not_configured</code>；来源预算比例还会带 <code>source_budget_unavailable</code>，实际 CPI 缺失或非正数会带 <code>actual_cpi_unavailable</code>，设置 ROAS 出价调整还会带 <code>roas_bid_unavailable</code>。手动试算只能验证候选和参数快照，不能证明 Meta 复制结构、预算或出价已经可执行。</p>
+            <strong>正式复制已接通，但每个目标仍要通过写前安全校验</strong>
+            <p>实际 CPI 缺失、来源预算不可读、ROAS 模式不兼容、created_data 映射不唯一或承载结构与 CBO 不兼容时，正式写入前会明确跳过或阻断。手动试算证明候选与参数快照正确，但不替代真实写前复核。</p>
+          </div>
+        </div>
+
+        <h3>复制后的统一命名</h3>
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>所有新建层级追加 <code>[*copybyAI*MMDDHHmm]</code></strong>
+            <p>分钟标记固定按 UTC+8 生成。例如 <code>[*copybyAI*07171455]</code> 表示 7 月 17 日 14:55。一次复制树里的新 Campaign、Ad Set、Ad 使用同一个后缀；复用的来源 Campaign 或 Ad Set 不改名。</p>
+          </div>
+        </div>
+
+        <h3>复制结果如何落表</h3>
+        <ol>
+          <li>事务预占 <code>ads_ai.ad_control_v3_copy_intent</code>，校验幂等、额度、冷却和重复来源。</li>
+          <li>Meta 新对象全部以 PAUSED 创建，并建立 Campaign / Ad Set / Ad / Creative 一一映射。</li>
+          <li>每个新 Ad 在 <code>ads_ai.ads_facebook_auto_created_data</code> 写一行；复制一个含 8 个 Ad 的 Campaign，就新增 8 行。</li>
+          <li><code>ads_ai.ad_control_copy_lineage</code> 保存来源库/行、原新三级对象 ID、规则、用户、落表和激活状态；不会修改 <code>kunlunads_dev</code> 的来源行。</li>
+          <li>回读校验对象数、名称、素材、剧目、预算和出价；全部通过后才允许激活。</li>
+        </ol>
+
+        <div class="notice danger">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>复制失败后不要重复点击</strong>
+            <p>名称回读、映射或落表失败时，新对象保持 PAUSED，intent 进入隔离。恢复必须复用同一个 intent，禁止重新调用复制接口，避免生成重复广告。</p>
           </div>
         </div>
       </section>
@@ -1154,7 +1196,7 @@
       <section class="doc-section" id="step-4">
         <p class="section-label">Step 4 of 5</p>
         <h2>第四步：执行计划、候选选择与额度</h2>
-        <p class="section-intro">这一页同时包含当前会参与手动试算的 Top N，以及只为后续版本保存的计划、额度和冷却参数。R1 没有自动调度、额度扣减或冷却判断。</p>
+        <p class="section-intro">这一页同时配置账号本地时间计划、Top N、每日额度和冷却。只观察启用后可持续扫描但零写入；正式模式启用后按这些保护参数执行。</p>
 
         <h3>执行计划</h3>
         <div class="table-wrap">
@@ -1162,12 +1204,12 @@
             <thead><tr><th>方式</th><th>配置</th><th>解释</th><th>校验</th></tr></thead>
             <tbody>
               <tr><td>不设置计划</td><td>执行方式、开始和截止时间全部留空</td><td>只保留手动试算配置</td><td>不要只填时间窗口而漏选执行方式</td></tr>
-              <tr><td>每天固定时间</td><td>执行时间；可选允许开始/截止时间</td><td>未来按广告账户本地时区解释；时区未限制时需特别谨慎</td><td>时间必须完整，窗口逻辑要合理</td></tr>
-              <tr><td>每隔 N 分钟</td><td>间隔分钟数；可选允许窗口</td><td>未来在窗口内按间隔扫描</td><td>N 为 1–1440</td></tr>
+              <tr><td>每天固定时间</td><td>执行时间；可选允许开始/截止时间</td><td>按每个广告账户本地时区解释；后台审计固定 UTC+8</td><td>时间必须完整，窗口逻辑要合理</td></tr>
+              <tr><td>每隔 N 分钟</td><td>间隔分钟数；可选允许窗口</td><td>在每个账户本地允许窗口内按间隔扫描</td><td>N 为 1–1440</td></tr>
             </tbody>
           </table>
         </div>
-        <p>允许开始/截止时间可以留空。R1 只校验 <code>HH:MM</code> 并保存，不解释截止早于开始是否跨日；跨日语义要等正式 Runner 发布时再冻结，当前不要依赖。本次演示选择每天 08:00，允许窗口为 08:00–10:00，只用于展示配置。</p>
+        <p>允许开始/截止时间可以留空；截止早于开始时按跨日窗口处理。调度按各广告账户本地时区判断，V3 后台日志统一按 UTC+8 展示。本次演示选择每天 08:00，允许窗口 08:00–10:00。</p>
 
         <h3>候选选择</h3>
         <div class="table-wrap">
@@ -1192,22 +1234,22 @@
 
         <h3>三层额度与冷却</h3>
         <ul>
-          <li><strong>规则组每日上限：</strong>可选；为未来正式复制定义该规则组的总日额度；范围 1–10000。</li>
-          <li><strong>当前用户每日总上限：</strong>可选；为未来正式复制定义该用户的总日额度；范围 1–10000。</li>
-          <li><strong>同一对象冷却天数：</strong>可选；为未来执行定义对象重复处理间隔；范围 1–3650。</li>
-          <li>复制动作还有单规则每日上限和来源冷却；未来正式执行时，多层限制共同约束并取更严格结果。</li>
+          <li><strong>规则组每日上限：</strong>可选；正式执行时限制该规则组的总日动作量；范围 1–10000。</li>
+          <li><strong>当前用户每日总上限：</strong>可选；正式执行时限制该用户跨规则组的总日动作量；范围 1–10000。</li>
+          <li><strong>同一对象冷却天数：</strong>可选；正式执行时限制对象重复处理间隔；范围 1–3650。</li>
+          <li>复制动作还有单规则每日上限和来源冷却；正式执行时，多层限制共同约束并取更严格结果。</li>
         </ul>
-        <p class="small muted">R1 仅保存和回显这些未来保护参数，不会运行额度扣减或冷却判断，也不能把当前日志当成额度已生效的证据。</p>
+        <p class="small muted">只观察只保存、回显并审计这些保护参数，不扣减正式额度；正式执行会预占 intent 并执行额度、冷却和部署硬上限。</p>
 
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/05-schedule-quota.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/05-schedule-quota.jpg" alt="计划与额度页面，配置每日 8 点、每账户 Top 1、ROAS 降序和每日额度" width="3160" height="1569" loading="lazy">
+              <img src="usage-guide-assets/05-schedule-quota.jpg" alt="计划与额度步骤，设置每天八点、允许窗口、每账户 Top1、每日额度和冷却" width="2560" height="1215" loading="lazy">
             </a>
           </div>
           <figcaption>
             <strong>图 5　计划、每账户 Top 1 与额度</strong>
-            演示配置为每天 08:00、窗口 08:00–10:00、每账户 Top 1、ROAS 降序；规则组每日 10、用户每日 10、对象冷却 1 天。当前只有 Top 1 参与手动试算，其余参数仅保存。
+            演示配置为每天 08:00、窗口 08:00–10:00、每账户 Top 1、ROAS 降序；规则组每日 10、用户每日 10、对象冷却 1 天。Top N 参与试算；正式执行还会校验计划、额度和冷却，只观察不扣减。
           </figcaption>
         </figure>
       </section>
@@ -1231,7 +1273,7 @@
             <thead><tr><th>按钮</th><th>结果</th><th>何时用</th></tr></thead>
             <tbody>
               <tr><td>保存草稿</td><td>保存为停用、只观察；不执行试算</td><td>配置还未准备好，稍后继续编辑</td></tr>
-              <tr><td>保存并立即试算</td><td>保存最新版本后立刻创建一次手动预览执行</td><td>第一次配置或每次重要修改后</td></tr>
+              <tr><td>保存并立即试算</td><td>保存最新版本，创建一次手动预览；成功后返回规则组列表并清理编辑临时状态</td><td>第一次配置或每次重要修改后</td></tr>
             </tbody>
           </table>
         </div>
@@ -1247,7 +1289,7 @@
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/06-review-safety.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/06-review-safety.jpg" alt="第五步配置总览和安全确认，显示保存并立即试算" width="3141" height="1569" loading="lazy">
+              <img src="usage-guide-assets/06-review-safety.jpg" alt="第五步配置汇总和安全检查，展示 Facebook、熊鑫、Dramawave、Campaign、只观察与范围估算" width="2545" height="1208" loading="lazy">
             </a>
           </div>
           <figcaption>
@@ -1255,12 +1297,28 @@
             核对无误后选择“保存并立即试算”。新规则组仍然是停用、只观察；试算会写 Preview/targets、observe execution/targets 和数据盘 gzip 快照，但 Token 查询、Graph 调用、Meta 写入与 copied created_data 均为 0。
           </figcaption>
         </figure>
+
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>第五步个别旧版提示仍可能残留</strong>
+            <p>截图中安全检查区域可能出现旧版“正式复制未开放”类文字。它不参与后端执行门禁；当前能力以页首“正式执行可用”、执行按钮确认流程和执行日志为准。</p>
+          </div>
+        </div>
       </section>
 
       <section class="doc-section" id="logs">
         <p class="section-label">Execution audit</p>
         <h2>执行日志怎么看</h2>
-        <p class="section-intro">试算不是看一个“成功”提示就结束。必须进入执行日志，确认目标记录、对象级结果、快照和 Meta 写入次数，并理解 R1 各计数字段的真实口径。</p>
+        <p class="section-intro">试算或正式执行都不能只看一个“成功”提示。必须进入执行日志，核对目标、对象级结果、快照、Meta 写次数；正式复制还要核对 intent、created_data 和 lineage。</p>
+
+        <div class="notice info">
+          <span class="notice-icon">i</span>
+          <div>
+            <strong>V3 后台日期统一按 UTC+8</strong>
+            <p>规则列表、执行日志、详情时间线、接口时间字段和日期筛选固定按 <code>Asia/Shanghai</code> / UTC+8 展示统计，不受浏览器本地时区影响。数据库审计时间仍以 UTC 保存；调度到期仍按每个广告账户本地时区判断。</p>
+          </div>
+        </div>
 
         <p>打开 <a href="https://ai.yingliangads.com/api/ad-control/v3/ui/execution-logs" target="_blank" rel="noopener">V3 执行日志</a>，可以按日期、产品、优化师、对象层级、动作、模式、状态、触发方式、规则组和对象 ID 筛选。</p>
 
@@ -1271,9 +1329,9 @@
             <tbody>
               <tr><td>事件总数</td><td>当前列表筛选条件下的<strong>执行记录条数</strong></td><td>不是对象判断次数</td></tr>
               <tr><td>命中对象</td><td>列表每行的 <code>target_count</code>，等于计划 + Top N 延后 + 阻断目标</td><td>列名为“命中”，但不等于最终 would_action 数</td></tr>
-              <tr><td>成功</td><td>为后续执行结果预留的汇总字段</td><td>R1 手动观察可能显示“—”，不能据此证明写入成功</td></tr>
-              <tr><td>跳过</td><td>为后续终态跳过预留的汇总字段</td><td>R1 的 Top N 延后应在对象明细里看</td></tr>
-              <tr><td>异常/阻断</td><td>数据范围歧义等导致的 blocked 目标或未来执行异常</td><td>优先看对象明细与快照；有阻断先处理</td></tr>
+              <tr><td>成功</td><td>真实动作完成数量</td><td>只观察通常显示“—”；正式执行需与 Meta 状态和写次数交叉核对</td></tr>
+              <tr><td>跳过</td><td>额度、冷却、幂等、状态或安全校验导致的终态跳过</td><td>Top N 延后与稳定 reason 均在对象明细查看</td></tr>
+              <tr><td>异常/阻断</td><td>范围歧义、映射、预算、出价、Meta 或落表校验失败</td><td>优先看对象明细、intent 与快照；有阻断先处理</td></tr>
             </tbody>
           </table>
         </div>
@@ -1281,12 +1339,12 @@
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/08-execution-log-list.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/08-execution-log-list.jpg" alt="V3 执行日志列表，显示演示规则的手动观察执行" width="3160" height="1569" loading="lazy">
+              <img src="usage-guide-assets/08-execution-log-list.jpg" alt="2026年7月17日现网 V3 执行日志列表，时间、日期筛选和详情固定按 UTC加8展示" width="2545" height="1208" loading="lazy">
             </a>
           </div>
           <figcaption>
             <strong>图 7　执行日志列表</strong>
-            本次执行时间为 2026-07-16 10:31，触发方式为手动试算，状态“已观察”。列表显示“命中 15”，准确口径是 15 条目标记录，包含 Top N 延后对象。
+            截图采集于 2026-07-17，列表同时包含计划调度、手动试算和手动执行；时间、日期筛选与详情统一按 UTC+8 展示。
           </figcaption>
         </figure>
         <div class="notice info">
@@ -1299,8 +1357,8 @@
 
         <h3>详情里重点看四处</h3>
         <ol>
-          <li><strong>阶段时间线：</strong>当前 R1 通常只由创建、开始、结束时间构造粗粒度生命周期，不能证明范围解析、指标读取、条件计算和 Top N 各内部阶段分别成功。</li>
-          <li><strong>原因汇总：</strong>当前 R1 可能没有把 <code>matched</code> / <code>top_n_not_selected</code> 聚合到这里；空白不代表没有延后对象。</li>
+          <li><strong>阶段时间线：</strong>统一按 UTC+8 展示事件创建、开始扫描、完成等阶段；调度到期仍按广告账户本地时区判断。</li>
+          <li><strong>原因汇总：</strong>聚合跳过、阻断和失败 reason；仍要结合对象明细确认 <code>matched</code>、<code>top_n_not_selected</code> 和 <code>shadowed_by_rule</code>。</li>
           <li><strong>对象明细：</strong>抽查对象 ID、产品、动作、结果和原因。当前表格不展示账户、指标值或 condition evidence。</li>
           <li><strong>外部写约束：</strong>观察模式必须明确显示 Meta 写入 0 次。</li>
         </ol>
@@ -1309,19 +1367,19 @@
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/09-log-detail-zero-meta.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/09-log-detail-zero-meta.jpg" alt="执行日志详情，显示 would_copy、matched 和 top_n_not_selected" width="3160" height="1569" loading="lazy">
+              <img src="usage-guide-assets/09-log-detail-zero-meta.jpg" alt="只观察计划调度详情，展示概要、UTC加8时间线、对象明细和数据完整性" width="2545" height="1208" loading="lazy">
             </a>
           </div>
           <figcaption>
-            <strong>图 8　对象结果与候选选择原因</strong>
-            被每账户 Top 1 选中的对象记录为 <code>would_copy / matched</code>；命中条件但未进入 Top 1 的对象记录为 <code>deferred_by_selection / top_n_not_selected</code>。判断 Top N 应以这张对象表为准。
+            <strong>图 8　只观察计划调度详情</strong>
+            示例执行 ID <code>d0a02cc391d546719d9e5f924bace3a6</code> 为 Campaign、只观察、计划调度，命中 5 个对象；明细同时展示 <code>would_copy</code> 和 <code>would_pause</code>，时间按 UTC+8。
           </figcaption>
         </figure>
 
         <figure class="shot">
           <div class="shot-frame">
             <a href="usage-guide-assets/10-log-integrity-zero-meta.jpg" target="_blank" rel="noopener">
-              <img src="usage-guide-assets/10-log-integrity-zero-meta.jpg" alt="执行日志底部，快照完整性通过并显示观察模式 Meta 写入 0 次" width="3160" height="1569" loading="lazy">
+              <img src="usage-guide-assets/10-log-integrity-zero-meta.jpg" alt="只观察日志数据完整性卡片，快照校验通过并显示观察模式 Meta 写入零次" width="705" height="180" loading="lazy">
             </a>
           </div>
           <figcaption>
@@ -1334,7 +1392,7 @@
           <span class="notice-icon">✓</span>
           <div>
             <strong>观察试算通过标准</strong>
-            <p>R1 手动 Preview 的状态应为“已观察（observed）”；对象结果可解释；快照完整；阻断为 0；Meta 写入次数必须为 0。</p>
+            <p>手动 Preview 或只观察调度的状态应为“已观察（observed）”；对象结果可解释；快照完整；Meta 写入次数必须为 0。正式复制还要核对 copy intent、新对象 ID、created_data 行数和 lineage。</p>
           </div>
         </div>
       </section>
@@ -1418,7 +1476,7 @@
           <table>
             <thead><tr><th>层级</th><th>字段</th><th>暂不可用原因</th></tr></thead>
             <tbody>
-              <tr><td>全部</td><td>对象名称、Meta 有效状态、配置状态、当前预算、Bid Control</td><td>当前 bounded insight 数据源不稳定提供，尚未接入可靠 Meta 回读</td></tr>
+              <tr><td>全部</td><td>对象名称、Meta 有效状态、配置状态、当前预算、Bid Control</td><td>不作为 insight 条件字段；正式执行在写前单独回读并校验</td></tr>
               <tr><td>Campaign</td><td>Campaign Objective、CBO</td><td>属于后续 Meta 配置元数据</td></tr>
               <tr><td>Ad Set</td><td>Optimization Goal、Billing Event</td><td>属于后续 Meta 配置元数据</td></tr>
               <tr><td>Ad</td><td>Creative ID</td><td>属于后续 Meta 创意元数据</td></tr>
@@ -1458,10 +1516,10 @@
               <tr><td>规则优先级</td><td>0–100000</td><td>数值越小越先判断；同优先级按规则 ID 稳定排序</td></tr>
               <tr><td>in / not_in 枚举值</td><td>1–100 个</td><td>不能为空，也不能超过 100 个</td></tr>
               <tr><td>指标窗口</td><td>1–31 天</td><td>回看效果数据的范围</td></tr>
-              <tr><td>间隔计划</td><td>1–1440 分钟</td><td>未来间隔调度使用</td></tr>
+              <tr><td>间隔计划</td><td>1–1440 分钟</td><td>按广告账户本地时区在允许窗口内调度</td></tr>
               <tr><td>Top N</td><td>1–10000</td><td>仅 Top N 候选方式需要</td></tr>
-              <tr><td>规则组/用户每日额度</td><td>1–10000</td><td>未来复制意图的总量保护；R1 不扣减</td></tr>
-              <tr><td>对象/来源冷却</td><td>1–3650 天</td><td>未来避免短期重复处理；R1 不判断</td></tr>
+              <tr><td>规则组/用户每日额度</td><td>1–10000</td><td>正式执行预占 intent 时共同校验；只观察不扣减</td></tr>
+              <tr><td>对象/来源冷却</td><td>1–3650 天</td><td>正式执行避免短期重复处理；只观察只记录配置</td></tr>
               <tr><td>ROAS 出价调整</td><td>&gt; 0 且 ≤ 100%</td><td>方向和百分比必须同时填写</td></tr>
               <tr><td>预算倍数/目标 CPI/比例</td><td>&gt; 0</td><td>不能为 0 或负数</td></tr>
             </tbody>
@@ -1472,18 +1530,18 @@
       <section class="doc-section" id="levels">
         <p class="section-label">Object hierarchy</p>
         <h2>Campaign / Ad Set / Ad 与复制承载策略</h2>
-        <p class="section-intro">复制“什么”和复制后“放在哪里”是两个概念。对象层级确定来源，承载策略描述未来新对象的目标位置；R1 只校验枚举并保存快照，下面的 Meta 结构尚未实现和验收。</p>
+        <p class="section-intro">复制“什么”和复制后“放在哪里”是两个概念。对象层级确定来源，承载策略决定组合创建哪些新对象；正式执行已按下列结构接通，仍会在写前检查 CBO/ABO、预算和出价兼容性。</p>
 
         <div class="table-wrap">
           <table>
-            <thead><tr><th>来源层级</th><th>可选承载方式</th><th>目标结构语义（待实现）</th><th>目标预算/出价位置（待实现）</th></tr></thead>
+            <thead><tr><th>来源层级</th><th>可选承载方式</th><th>目标结构语义</th><th>预算/出价位置与限制</th></tr></thead>
             <tbody>
-              <tr><td>Campaign</td><td>深度复制整个 Campaign</td><td>复制 Campaign 以及全部 Ad Set、Ad</td><td>CBO 在新 Campaign；ABO 按来源 Ad Set 结构处理</td></tr>
-              <tr><td>Ad Set</td><td>来源 Campaign</td><td>在原 Campaign 下复制 Ad Set 与其广告</td><td>新 Ad Set 承载预算/出价</td></tr>
-              <tr><td>Ad Set</td><td>新 Campaign</td><td>创建新 Campaign，再复制 Ad Set 与广告</td><td>按新结构的 CBO/ABO 方式设置</td></tr>
-              <tr><td>Ad</td><td>来源 Ad Set</td><td>把 Ad 复制到原 Ad Set，共享原预算和出价</td><td>Ad 本身没有独立预算</td></tr>
-              <tr><td>Ad</td><td>新独立 Ad Set</td><td>在来源 Campaign 下新建 Ad Set，再放入复制 Ad</td><td>可获得独立 Ad Set 预算/出价</td></tr>
-              <tr><td>Ad</td><td>新 Campaign + Ad Set</td><td>新建完整承载结构，只放入选中的 Ad</td><td>适合 CBO 来源又要求独立预算</td></tr>
+              <tr><td>Campaign</td><td>复制整个 Campaign</td><td>逐层创建 Campaign、全部 Ad Set 和 Ad</td><td>CBO 在新 Campaign；ABO 按来源 Ad Set 结构处理</td></tr>
+              <tr><td>Ad Set</td><td>来源 Campaign</td><td>在原 Campaign 下复制 Ad Set 与广告</td><td>新 Ad Set 承载预算/出价；来源为 CBO 时写前阻断</td></tr>
+              <tr><td>Ad Set</td><td>新 Campaign</td><td>创建新 Campaign，再复制 Ad Set 与广告</td><td>适合需要独立承载的 CBO/ABO 来源</td></tr>
+              <tr><td>Ad</td><td>来源 Ad Set</td><td>配置兼容项；共享原预算和出价</td><td>因无法设置独立预算，正式写入前明确阻断</td></tr>
+              <tr><td>Ad</td><td>新独立 Ad Set</td><td>在来源 Campaign 下新建 Ad Set，再放入复制 Ad</td><td>来源 Campaign 为 CBO 时写前阻断</td></tr>
+              <tr><td>Ad</td><td>新 Campaign + Ad Set</td><td>新建完整承载结构，只放入选中的 Ad</td><td>适合 CBO 来源且要求独立预算</td></tr>
             </tbody>
           </table>
         </div>
@@ -1493,6 +1551,14 @@
           <div>
             <strong>为什么 Ad 复制要有独立承载选项</strong>
             <p>Ad 自身没有预算和 ROAS 出价。如果只复制回原 Ad Set，它仍然共享原预算；要独立拉量，就需要新建 Ad Set，CBO 情况下可能还要新建 Campaign。</p>
+          </div>
+        </div>
+
+        <div class="notice warn">
+          <span class="notice-icon">!</span>
+          <div>
+            <strong>Campaign 复制采用组合浅复制</strong>
+            <p>生产测试证明直接 deep copy 在对象较多时可能失败。当前按 Campaign → Ad Set → Ad / Creative 逐层创建和回读，才能逐 Ad 映射、落表，并在失败时精确保持新对象 PAUSED。</p>
           </div>
         </div>
       </section>
@@ -1512,12 +1578,12 @@
             <div class="key">条件</div><div>消耗 ≥ 50 AND 安装 ≥ 5 AND ROAS ≥ 1.2</div>
             <div class="key">动作</div><div>复制；预算 = 实际 CPI × 10；深度复制 Campaign</div>
             <div class="key">候选</div><div>每账户 Top 1；ROAS 降序</div>
-            <div class="key">未来保护参数</div><div>单规则每日 1；来源冷却 1 天；对象冷却 1 天（R1 仅保存，不参与试算）</div>
+            <div class="key">正式保护参数</div><div>单规则每日 1；来源冷却 1 天；对象冷却 1 天；正式执行时生效</div>
           </div>
         </article>
 
         <article class="scenario">
-          <span class="badge danger">场景 B · R1 不能精确实现完整昨日</span>
+          <span class="badge danger">场景 B · 先确认“昨日”口径</span>
           <h3>“隔天复制昨日最佳 Campaign”的当前限制</h3>
           <p>业务目标是回看完整前一自然日；但当前页面的“指标窗口 1 天”固定为<strong>今天到今天</strong>，不是昨天，且 UI 没有单独指定昨日日期范围。因此下面只能作为“当天最佳候选”模板，不能声称已经实现隔日优选。</p>
           <div class="scenario-grid">
@@ -1526,7 +1592,7 @@
             <div class="key">条件</div><div>有充分消耗、安装/购买达到样本门槛、ROAS 达标</div>
             <div class="key">动作</div><div>复制；预算 = 来源预算 × 50%（仅为示例）</div>
             <div class="key">候选</div><div>每账户 Top 1；ROAS 降序；同值按对象 ID 决胜</div>
-            <div class="key">待补能力</div><div>昨日专属日期窗口 + 已发布的账户时区 Runner；两者当前均不可执行</div>
+            <div class="key">当前限制</div><div>页面没有单独的“完整昨日”选择；最近 1 天的日期口径与数据刷新必须先确认。账号时区 Runner 已发布。</div>
           </div>
         </article>
 
@@ -1540,7 +1606,7 @@
             <div class="key">动作</div><div>关闭</div>
             <div class="key">候选</div><div>全部符合条件，或按消耗倒序限制 Top N</div>
             <div class="key">当前有效保护</div><div>最低安装/购买样本条件、指标窗口、Top N</div>
-            <div class="key">未来保护参数</div><div>对象冷却与执行时间窗口在 R1 只保存，不参与手动试算</div>
+            <div class="key">正式保护参数</div><div>对象冷却与执行时间窗口在正式执行时生效；只观察不扣减</div>
             <div class="key">检查</div><div>抽查 would_pause 对象，确认不会误伤同 Campaign 里的优质 Ad</div>
           </div>
         </article>
@@ -1607,7 +1673,7 @@
         </details>
         <details>
           <summary>不选择账户时区有什么影响？</summary>
-          <div>表示不补查和限制时区。设置时区后，不匹配/缺失/冲突对象会保留为 blocked 供审计；未来配置固定时间自动运行时，还要明确账户本地时间语义。</div>
+          <div>表示不补查和限制候选时区。设置后，不匹配/缺失/冲突对象会保留为 blocked；固定时间和间隔计划始终按每个广告账户本地时区判断。</div>
         </details>
         <details>
           <summary>每账户 Top 1 是在所有账户里只选一个吗？</summary>
@@ -1641,7 +1707,7 @@
           <li>消耗、预算、CPI、ROAS、留存率的单位已按适配器口径确认；已知当前试算明细不展示指标值，不能用它核对单位。</li>
           <li>AND / OR、优先级以及关闭优先逻辑符合预期。</li>
           <li>Top N 的分组范围、数量、排序字段和升降序正确。</li>
-          <li>需要额度/冷却时已显式填写；不需要时保持为空；并已知这些参数在 R1 只保存、不参与手动试算。</li>
+          <li>需要额度/冷却时已显式填写；只观察不扣减，正式执行会预占 intent 并执行这些保护。</li>
           <li>没有把输入框提示词误认为已经填写的默认值。</li>
           <li>每次重要修改后都重新保存并立即试算。</li>
           <li>执行日志快照完整、异常/阻断为 0。</li>
@@ -1651,32 +1717,32 @@
 
       <section class="doc-section" id="appendix">
         <p class="section-label">Appendix</p>
-        <h2>演示规则完整配置与术语</h2>
+        <h2>本次走查配置、日志证据与术语</h2>
 
-        <h3>生产演示规则</h3>
+        <h3>未保存的安全演示配置</h3>
         <div class="table-wrap">
           <table>
             <tbody>
-              <tr><th>规则组名称</th><td>使用手册演示｜Campaign 高 ROAS 复制（只观察）</td></tr>
-              <tr><th>规则组 ID</th><td><code>50416a35bf844684a5988db39ff5d82d</code></td></tr>
+              <tr><th>规则组名称</th><td>使用手册示例｜Campaign 高 ROAS 复制（未保存）</td></tr>
+              <tr><th>保存状态</th><td>未保存；未新增生产规则</td></tr>
               <tr><th>状态 / 模式</th><td>停用 / 只观察</td></tr>
               <tr><th>范围</th><td>Facebook；优化师熊鑫；产品 Dramawave；不限账户时区；指标窗口 3 天</td></tr>
               <tr><th>对象</th><td>Campaign</td></tr>
-              <tr><th>规则</th><td>消耗 ≥ 50 AND 安装 ≥ 5 AND ROAS ≥ 1.2；动作复制；优先级 10</td></tr>
+              <tr><th>规则</th><td>消耗 ≥ 50 AND ROAS ≥ 1.2；动作复制；优先级 10</td></tr>
               <tr><th>复制参数</th><td>实际 CPI × 10；不调整 ROAS 出价；深度复制 Campaign；来源冷却 1 天；单规则每日 1 次</td></tr>
               <tr><th>计划</th><td>每天 08:00；允许窗口 08:00–10:00</td></tr>
               <tr><th>候选</th><td>每账户 Top 1；ROAS 降序</td></tr>
-              <tr><th>未来保护参数</th><td>规则组每日 10；用户每日 10；同一对象冷却 1 天（R1 未判断、未扣减）</td></tr>
-              <tr><th>执行 ID</th><td><code>34d829306a47473e8b4489da8afe706c</code></td></tr>
-              <tr><th>试算结果</th><td>目标记录 15（含 Top N 延后）；已观察；快照完整；Meta 写入 0 次</td></tr>
+              <tr><th>正式保护参数</th><td>规则组每日 10；用户每日 10；同一对象冷却 1 天；只观察不扣减，正式执行生效</td></tr>
+              <tr><th>日志示例 ID</th><td><code>d0a02cc391d546719d9e5f924bace3a6</code>（现有只观察计划调度）</td></tr>
+              <tr><th>走查结果</th><td>结构估算 52 个候选账户、5,701 个 Campaign；表单未保存；日志示例命中 5 个对象；Meta 写入 0 次</td></tr>
             </tbody>
           </table>
         </div>
         <div class="notice safe">
           <span class="notice-icon">✓</span>
           <div>
-            <strong>演示规则保留方式</strong>
-            <p>该规则目前保留在生产规则组列表中，方便按本手册对照查看；它保持停用、只观察，不会自动运行。没有明确授权时不要将其启用或改成正式执行。</p>
+            <strong>本次走查没有产生新规则</strong>
+            <p>五步表单只用于截图和只读范围估算，没有点击保存或执行。列表中的既有规则均保持原状态，本手册走查未改变任何生产配置。</p>
           </div>
         </div>
 
@@ -1686,10 +1752,10 @@
           <dl class="definition"><dt>Ad Set</dt><dd>广告组，位于 Campaign 下，承载受众、排期、出价及 ABO 预算。</dd></dl>
           <dl class="definition"><dt>Ad</dt><dd>广告，位于 Ad Set 下，关联创意与素材，本身没有独立预算。</dd></dl>
           <dl class="definition"><dt>只观察</dt><dd>计算并记录“本来会做什么”，但不调用 Meta 写接口。</dd></dl>
-          <dl class="definition"><dt>立即试算</dt><dd>一次性手动运行最新规则快照，与未来持续调度不同。</dd></dl>
+          <dl class="definition"><dt>立即试算</dt><dd>一次性手动运行最新规则快照，与启用后的持续调度不同。</dd></dl>
           <dl class="definition"><dt>范围估算</dt><dd>在 insight 日期窗口和身份范围内统计去重候选，不是 Meta 实时资产全量，也不进行效果条件判断。</dd></dl>
           <dl class="definition"><dt>Top N</dt><dd>对已命中对象按指定范围和排序保留前 N 个。</dd></dl>
-          <dl class="definition"><dt>冷却期</dt><dd>为未来版本定义同一对象或来源的重复处理间隔；R1 仅保存。</dd></dl>
+          <dl class="definition"><dt>冷却期</dt><dd>正式执行时限制同一对象或来源的重复处理间隔；只观察不扣减。</dd></dl>
           <dl class="definition"><dt>would_copy</dt><dd>观察模式中，该对象在正式链路下本来会进入复制动作。</dd></dl>
           <dl class="definition"><dt>top_n_not_selected</dt><dd>对象通过了规则条件，但没有进入对应范围的 Top N。</dd></dl>
         </div>
@@ -1703,8 +1769,8 @@
       </section>
 
       <footer class="footer">
-        <strong>文档版本：</strong>2026-07-17 · V3 R2 Facebook 正式执行补充版。<br>
-        <strong>安全声明：</strong>截图演示本身仍是停用、只观察，Meta 写入 0 次；当前生产 R2 已开放真实暂停、复制、落表和自动调度。正式测试必须先试算、限制 Top N/额度、完成二次确认并核对执行日志。截图含生产对象标识与内部用户信息，仅限内部使用，不应直接对外公开。
+        <strong>文档版本：</strong>2026-07-17 · V3 Facebook 现行生产重修版。<br>
+        <strong>安全声明：</strong>截图走查未保存规则、未触发 Meta 写入；现网已开放真实暂停、组合复制、复制落表和账号时区调度。正式测试必须先试算、限制 Top N/额度、完成二次确认并核对 Meta、created_data、lineage 与执行日志。截图含生产对象标识与内部用户信息，仅限内部使用。
       </footer>
     </main>
   </div>

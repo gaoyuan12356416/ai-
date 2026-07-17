@@ -182,8 +182,32 @@ def validate_source(text: str, parser: GuideParser, errors: list[str]) -> None:
         fail(errors, f"usage-guide.html: asset set mismatch; missing={missing}, extra={extra}")
     if "Meta 写入 0 次" not in text:
         fail(errors, "usage-guide.html: required zero-Meta-write safety statement missing")
-    if "当前 R2 已接通" not in text:
-        fail(errors, "usage-guide.html: R2 live capability statement missing")
+    required_current_statements = {
+        "当前生产已接通": "current live capability statement",
+        "[*copybyAI*MMDDHHmm]": "copy-name suffix contract",
+        "UTC+8": "fixed business display timezone",
+        "ads_ai.ads_facebook_auto_created_data": "FB created_data ledger",
+        "ads_ai.ad_control_v3_copy_intent": "copy intent ledger",
+        "ads_ai.ad_control_copy_lineage": "copy lineage ledger",
+        "1031273318485141": "Dramawave App ID catalog rule",
+        "成功后返回规则组列表": "save-and-preview navigation behavior",
+        "TikTok": "future-channel boundary",
+    }
+    for marker, label in required_current_statements.items():
+        if marker not in text:
+            fail(errors, f"usage-guide.html: missing {label}: {marker}")
+    stale_statements = (
+        "当前 R1",
+        "当前 R2",
+        "copy_live_ready=false",
+        "copy_persistence_not_configured",
+        "R1 仅保存",
+        "R1 不判断",
+        "等 Runner 发布",
+    )
+    for marker in stale_statements:
+        if marker in text:
+            fail(errors, f"usage-guide.html: stale release statement remains: {marker}")
 
 
 def jpeg_dimensions(payload: bytes) -> tuple[int, int]:
