@@ -384,6 +384,36 @@ class Service:
     def _normal_optimizer(self, actor: Actor) -> int:
         return self._normal_optimizer_ids(actor)[0]
 
+    def _admin_self_optimizer_items(self, actor: Actor) -> List[Dict[str, Any]]:
+        """Best-effort aliases for an administrator's own optimizer identity.
+
+        Administrators must retain access to every optimizer even when their
+        own identity is missing or ambiguous.  When a strong identity mapping
+        is available, however, selecting any one of those aliases should use
+        the complete alias set just like it does after the temporary admin role
+        is removed.
+        """
+
+        if not actor.is_admin:
+            return []
+        unpinned_actor = Actor(
+            user_id=actor.user_id,
+            is_admin=False,
+            email=actor.email,
+            name=actor.name,
+            optimizer_id=None,
+        )
+        try:
+            return self._normal_optimizer_items(unpinned_actor)
+        except AdControlV3Error as exc:
+            if exc.code in {
+                "optimizer_identity_unresolved",
+                "optimizer_identity_ambiguous",
+                "optimizer_identity_too_large",
+            }:
+                return []
+            raise
+
     @staticmethod
     def _group_optimizer_ids(group: Mapping[str, Any]) -> List[int]:
         raw = group.get("optimizer_ids")
@@ -431,7 +461,14 @@ class Service:
 
     def _optimizer_ids_for_payload(self, actor: Actor, value: Any) -> List[int]:
         if actor.is_admin:
-            return [self._optimizer_for_payload(actor, value)]
+            selected = self._optimizer_for_payload(actor, value)
+            self_alias_ids = [
+                int(item["optimizer_id"])
+                for item in self._admin_self_optimizer_items(actor)
+            ]
+            if selected in self_alias_ids:
+                return self_alias_ids
+            return [selected]
         own_optimizers = self._normal_optimizer_ids(actor)
         if value not in (None, "") and int(value) not in own_optimizers:
             raise AdControlV3Error(
@@ -650,7 +687,16 @@ class Service:
         if current.is_admin:
             optimizers = shared["optimizers"]
             current_optimizer_id = None
-            current_optimizer_ids: List[int] = []
+            active_optimizer_ids = {
+                int(item["optimizer_id"])
+                for item in optimizers
+                if int(item.get("optimizer_id") or 0) > 0
+            }
+            current_optimizer_ids = [
+                int(item["optimizer_id"])
+                for item in self._admin_self_optimizer_items(current)
+                if int(item["optimizer_id"]) in active_optimizer_ids
+            ]
         else:
             current_items = self._normal_optimizer_items(current)
             current_optimizer_ids = [int(item["optimizer_id"]) for item in current_items]

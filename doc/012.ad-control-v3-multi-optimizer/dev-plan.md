@@ -9,6 +9,7 @@
 | 任务 | 负责人 | 文件/模块 | 状态 |
 | --- | --- | --- | --- |
 | 生产只读诊断 | Codex | 日志、SQLite、源 MySQL | 完成 |
+| 临时 admin 本人别名兼容 | Codex | service、动态 UI、token-safe verifier | 完成（待生产增量验证） |
 | 身份与服务层 | Codex | catalog.py / service.py | 完成 |
 | 多对多存储 | Codex | repository.py / SQL 004 | 完成 |
 | 执行审计 | Codex | live_execution.py | 完成 |

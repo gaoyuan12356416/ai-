@@ -260,6 +260,7 @@ def make_alias_service(*, overlap=False, identity_layer="email"):
         [
             {"optimizer_id": 387, "name": "王鹏", "email": "peng.wangg@yingliangads.com"},
             {"optimizer_id": 686, "name": "Lucas", "email": "peng.wangg@yingliangads.com"},
+            {"optimizer_id": 404, "name": "凌云柯", "email": "ling@example.com"},
         ],
     )
     adapter = AliasAdapter(overlap=overlap)
@@ -344,6 +345,67 @@ class MultiOptimizerIdentityTests(unittest.TestCase):
         self.assertEqual(1, result["object_count"])
         self.assertEqual(1, result["blocked_count"])
         self.assertEqual({"ambiguous_optimizer_scope": 1}, result["blocked_reasons"])
+
+    def test_admin_self_aliases_are_exposed_and_expand_when_either_alias_is_selected(self):
+        service, repository, adapter, actor = make_alias_service()
+        actor["role"] = "admin"
+
+        meta = service.meta(actor)
+        self.assertTrue(meta["actor"]["is_admin"])
+        self.assertIsNone(meta["actor"]["optimizer_id"])
+        self.assertEqual([387, 686], meta["actor"]["optimizer_ids"])
+        self.assertEqual([387, 686], meta["permissions"]["current_optimizer_ids"])
+        self.assertEqual({387, 404, 686}, {item["optimizer_id"] for item in meta["optimizers"]})
+
+        payload = base_payload()
+        payload["optimizer_id"] = 686
+        group = service.create_rule_group(actor, payload)
+        self.assertEqual(387, group["optimizer_id"])
+        self.assertEqual([387, 686], group["optimizer_ids"])
+        self.assertEqual([387, 686], repository.get_rule_group(group["group_id"])["optimizer_ids"])
+
+        result = service.scope_estimate(actor, {
+            "channel": "facebook",
+            "object_level": "campaign",
+            "products": ["Dramawave"],
+            "optimizer_id": 686,
+            "account_timezones": [],
+            "metric_window_days": 1,
+        })
+        self.assertEqual([387, 686], adapter.optimizer_calls)
+        self.assertEqual(2, result["object_count"])
+
+    def test_admin_selecting_another_optimizer_keeps_single_scope(self):
+        service, _, adapter, actor = make_alias_service()
+        actor["role"] = "admin"
+        payload = base_payload()
+        payload["optimizer_id"] = 404
+
+        group = service.create_rule_group(actor, payload)
+        self.assertEqual(404, group["optimizer_id"])
+        self.assertEqual([404], group["optimizer_ids"])
+
+        result = service.scope_estimate(actor, {
+            "channel": "facebook",
+            "object_level": "campaign",
+            "products": ["Dramawave"],
+            "optimizer_id": 404,
+            "account_timezones": [],
+            "metric_window_days": 1,
+        })
+        self.assertEqual([404], adapter.optimizer_calls)
+        self.assertEqual(1, result["object_count"])
+
+    def test_admin_identity_failure_does_not_block_admin_selection(self):
+        service, _, _, actor = make_alias_service(identity_layer="name")
+        actor["role"] = "admin"
+        meta = service.meta(actor)
+        self.assertEqual([], meta["actor"]["optimizer_ids"])
+
+        payload = base_payload()
+        payload["optimizer_id"] = 404
+        group = service.create_rule_group(actor, payload)
+        self.assertEqual([404], group["optimizer_ids"])
 
 
 class SchemaAndPermissionTests(unittest.TestCase):

@@ -657,6 +657,13 @@
     });
   }
 
+  function optimizerIdsForSelection(meta, selected) {
+    const selectedId = text(selected);
+    if (!selectedId) return [];
+    const selfIds = Array.from(new Set(array(meta && meta.currentOptimizers).map(item => text(item && item.id)).filter(Boolean)));
+    return selfIds.includes(selectedId) ? selfIds : [selectedId];
+  }
+
   function invalidateEstimate() {
     state.estimateRequestSerial += 1;
     state.estimate = null;
@@ -764,6 +771,10 @@
     const ownOptimizers = array(state.meta.currentOptimizers).length ? state.meta.currentOptimizers : (optimizer ? [optimizer] : []);
     const ownOptimizerNames = ownOptimizers.map(item => text(item.name, item.id)).join(" / ");
     const ownOptimizerIds = ownOptimizers.map(item => text(item.id)).filter(Boolean);
+    const selectedOwnAlias = isAdmin && ownOptimizerIds.includes(String(editor.optimizer_id || ""));
+    const adminOptimizerHint = selectedOwnAlias && ownOptimizerIds.length > 1
+      ? `当前选择属于本人关联身份，将同时对 ${ownOptimizerNames}（ID ${ownOptimizerIds.join("、")}）生效。`
+      : "支持按姓名、邮箱或优化师 ID 搜索；选择其他优化师时仅对该优化师生效。";
     return `<section class="step-pane" aria-labelledby="scopeStepTitle">
       <div class="section-card"><div class="section-head"><div><h3 id="scopeStepTitle">基本信息</h3><p>名称和说明只用于识别规则组，不参与广告筛选。</p></div><span class="pill pill-safe">新建后停用</span></div>
         <div class="section-body"><div class="form-grid">
@@ -780,7 +791,7 @@
       <div class="section-card"><div class="section-head"><div><h3>业务范围</h3><p>产品与优化师会同时进入服务端查询条件；广告账号不是配置项。</p></div></div>
         <div class="section-body"><div class="form-grid">
           <div class="field"><span class="field-label">优化师 <span class="required" aria-hidden="true">*</span></span>
-            ${isAdmin ? `${renderSearchableSingle("editor-optimizer", "请选择优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(editor.optimizer_id || ""))}<p class="field-hint">支持按姓名、邮箱或优化师 ID 搜索；选择会记录在审计信息中。</p>` : `<div class="locked-value"><span><strong>${h(text(ownOptimizerNames, "正在解析本人优化师"))}</strong><small>${h(ownOptimizerIds.length ? `优化师 ID ${ownOptimizerIds.join("、")} · 将同时生效` : "由服务端身份映射")}</small></span><span class="pill pill-safe">仅本人${ownOptimizerIds.length > 1 ? ` · ${ownOptimizerIds.length} 个账号` : ""}</span></div><p class="field-hint">同一登录身份关联多个优化师账号时，规则会对全部关联账号生效；普通优化师无法在客户端增删范围。</p>`}
+            ${isAdmin ? `${renderSearchableSingle("editor-optimizer", "请选择优化师", state.meta.optimizers.map(item => ({ value: item.id, label: item.name, description: item.email })), String(editor.optimizer_id || ""))}<p class="field-hint">${h(adminOptimizerHint)}</p>` : `<div class="locked-value"><span><strong>${h(text(ownOptimizerNames, "正在解析本人优化师"))}</strong><small>${h(ownOptimizerIds.length ? `优化师 ID ${ownOptimizerIds.join("、")} · 将同时生效` : "由服务端身份映射")}</small></span><span class="pill pill-safe">仅本人${ownOptimizerIds.length > 1 ? ` · ${ownOptimizerIds.length} 个账号` : ""}</span></div><p class="field-hint">同一登录身份关联多个优化师账号时，规则会对全部关联账号生效；普通优化师无法在客户端增删范围。</p>`}
           </div>
           <div class="field"><span class="field-label">短剧产品 <span class="required" aria-hidden="true">*</span></span>${renderMultiSelect("products", "选择一个或多个短剧产品", state.meta.products.map(item => ({ value: item.value, label: item.label, description: item.description, disabled: !item.enabled })), editor.products)}</div>
           <div class="field field-span-2"><span class="field-label">账户时区（可选）</span>${renderMultiSelect("account_timezones", "不选择则不限制账户时区", state.meta.timezones, editor.account_timezones)}<p class="field-hint">留空时不生成时区筛选。设置后，时区缺失的广告会被跳过并记录原因；计划仍按各账户本地时间判断。</p></div>
@@ -1779,6 +1790,7 @@
     state.openSingle = "";
     if (name === "editor-optimizer") {
       state.editor.optimizer_id = selected;
+      state.editor.optimizer_ids = optimizerIdsForSelection(state.meta, selected);
       state.editorDirty = true;
       invalidateEstimate();
       renderEditor();
@@ -1933,6 +1945,7 @@
     endInFlight,
     isInFlight,
     scopeFingerprint,
+    optimizerIdsForSelection,
     requestGuardedNavigation,
     executionValue,
     displayCount,

@@ -359,8 +359,8 @@ global.Headers = class Headers { has() { return false; } set() {} };
 require(process.argv[1]);
 const ui = window.AdControlV3Ui;
 const meta = ui.normalizeMeta({
-  actor: { user_id: "22fa4aa4", name: "王鹏", optimizer_id: 387, optimizer_ids: [387, 686] },
-  permissions: { current_optimizer_id: 387, current_optimizer_ids: [387, 686] },
+  actor: { user_id: "22fa4aa4", name: "王鹏", role: "admin", is_admin: true, optimizer_id: null, optimizer_ids: [387, 686] },
+  permissions: { current_optimizer_id: null, current_optimizer_ids: [387, 686] },
   optimizers: [
     { optimizer_id: 387, name: "王鹏" },
     { optimizer_id: 686, name: "Lucas" },
@@ -368,6 +368,8 @@ const meta = ui.normalizeMeta({
 });
 if (meta.currentOptimizer.id !== "387") process.exit(2);
 if (meta.currentOptimizers.map(item => item.id).join(",") !== "387,686") process.exit(3);
+if (ui.optimizerIdsForSelection(meta, "686").join(",") !== "387,686") process.exit(6);
+if (ui.optimizerIdsForSelection(meta, "404").join(",") !== "404") process.exit(7);
 const group = ui.normalizeGroup({
   group_id: "multi", config_version: 1, optimizer_id: 387, optimizer_ids: [387, 686],
   products: ["Dramawave"], rules: [], selection: {},
@@ -842,6 +844,7 @@ for _test_function in [
     test_javascript_audit_dates_are_fixed_to_utc8_even_in_another_browser_timezone,
     test_group_id_and_config_version_drive_preview_and_if_match,
     test_meta_normalization_matches_service_permissions_and_level_catalog,
+    test_meta_and_group_normalization_preserve_multi_optimizer_identity,
     test_save_flow_does_not_reference_out_of_scope_is_update,
     test_ui_contract_has_three_levels_fb_only_and_tiktok_disabled,
     test_scope_ui_is_product_optimizer_timezone_without_account_picker,

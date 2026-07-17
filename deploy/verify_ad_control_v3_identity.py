@@ -95,7 +95,9 @@ def main() -> int:
         for item in optimizer_items
         if isinstance(item, dict)
     ])
-    expected_present = set(expected).issubset(selectable_ids if is_admin else actor_ids)
+    expected_in_actor_scope = set(expected).issubset(actor_ids)
+    expected_selectable = set(expected).issubset(selectable_ids) if is_admin else True
+    expected_present = expected_in_actor_scope and expected_selectable
     resolved = [
         {
             "optimizer_id": int(item.get("optimizer_id")),
@@ -113,9 +115,11 @@ def main() -> int:
         "meta_status": meta_status,
         "rule_groups_status": groups_status,
         "is_admin": is_admin,
-        "identity_check": "admin_selectable" if is_admin else "actor_scope",
+        "identity_check": "admin_self_alias_scope" if is_admin else "actor_scope",
         "actor_optimizer_ids": actor_ids,
         "expected_optimizer_ids": expected,
+        "expected_optimizer_ids_in_actor_scope": expected_in_actor_scope,
+        "expected_optimizer_ids_selectable": expected_selectable,
         "expected_optimizer_ids_present": expected_present,
         "resolved_expected_optimizers": resolved,
         "rule_group_total": int(groups.get("total") or 0) if groups_status == 200 else None,
