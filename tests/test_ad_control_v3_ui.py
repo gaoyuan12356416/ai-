@@ -476,6 +476,12 @@ if (ui.canToggleGroup(true, unavailable.permissions) !== true) process.exit(5);
 const available = ui.normalizeMeta({ permissions: { can_enable: true } });
 if (available.permissions.canEnable !== true) process.exit(6);
 if (ui.canToggleGroup(false, available.permissions) !== true) process.exit(7);
+const live = ui.normalizeMeta({ permissions: {
+  can_enable: true, can_live_execute: true, scheduler_live_enabled: true,
+  live_pause_enabled: true, live_copy_enabled: true,
+} });
+const liveBanner = ui.capabilityBannerCopy(live.permissions);
+if (liveBanner.state !== "live" || !liveBanner.title.includes("自动调度已开放")) process.exit(8);
 """
     result = subprocess.run(
         ["node", "-e", script, str(JS)],
@@ -495,8 +501,10 @@ if (ui.canToggleGroup(false, available.permissions) !== true) process.exit(7);
     assert 'data-enable-blocked="true"' in source
 
     rendered = page_renderer.render_rule_groups_page()
-    assert "仅支持保存草稿与手动试算" in rendered
+    assert 'id="systemCapabilityBanner"' in rendered
+    assert "正在读取调控能力" in rendered
     assert "用产品与优化师圈定广告范围" in rendered
+    assert "真实暂停、复制与自动调度已开放" in source
 
 
 def test_execution_logs_preserve_unknown_counts_and_nested_summary_truth():

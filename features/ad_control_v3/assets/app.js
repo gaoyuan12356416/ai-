@@ -243,6 +243,7 @@
       const payload = await api("/meta");
       state.meta = normalizeMeta(payload);
       state.actor = state.meta.actor;
+      renderSystemCapabilityBanner();
       if (page === "rule-groups") {
         const root = document.getElementById("ruleGroupsApp");
         if (root) root.hidden = false;
@@ -329,9 +330,59 @@
         canEnable,
         canLiveExecute,
         schedulerAvailable,
+        schedulerLiveEnabled: permissions.scheduler_live_enabled === true,
+        livePauseEnabled: permissions.live_pause_enabled === true,
+        liveCopyEnabled: permissions.live_copy_enabled === true,
         enableUnavailableReason: text(permissions.enable_unavailable_reason || runner.unavailable_reason, "计划调度器尚未发布"),
       },
     };
+  }
+
+  function capabilityBannerCopy(permissions) {
+    const value = permissions || {};
+    if (value.canEnable && value.schedulerLiveEnabled && value.canLiveExecute) {
+      return {
+        state: "live",
+        title: "真实暂停、复制与自动调度已开放",
+        description: "正式规则可调用 Meta 写接口；复制对象始终先以 PAUSED 创建并完成落表校验，再按发布开关激活。新规则仍默认停用 + 只观察。",
+        badge: "正式执行可用",
+      };
+    }
+    if (value.canEnable) {
+      return {
+        state: "observe",
+        title: "持续观察调度已开放",
+        description: value.canLiveExecute ? "观察规则可持续扫描；正式暂停与复制可先手动执行，自动写入仍受发布开关保护。" : "观察规则可持续扫描并记录命中对象，不调用 Meta 写接口。",
+        badge: "观察调度可用",
+      };
+    }
+    if (value.canLiveExecute) {
+      return {
+        state: "manual-live",
+        title: "真实暂停与复制已开放，可先手动执行",
+        description: `${text(value.enableUnavailableReason, "自动调度尚未开放")}。把规则保存为正式执行并完成试算后，可从列表点击“执行”。`,
+        badge: "手动执行可用",
+      };
+    }
+    return {
+      state: "preview",
+      title: "当前仅支持保存草稿 + 手动试算",
+      description: `${text(value.enableUnavailableReason, "计划调度器尚未发布")}。规则不能启用，也不会持续自动扫描。`,
+      badge: "手动试算",
+    };
+  }
+
+  function renderSystemCapabilityBanner() {
+    const banner = document.getElementById("systemCapabilityBanner");
+    const title = document.getElementById("systemCapabilityTitle");
+    const description = document.getElementById("systemCapabilityDescription");
+    const badge = document.getElementById("systemCapabilityBadge");
+    if (!banner || !title || !description || !badge || !state.meta) return;
+    const copy = capabilityBannerCopy(state.meta.permissions);
+    banner.dataset.releaseState = copy.state;
+    title.textContent = copy.title;
+    description.textContent = copy.description;
+    badge.textContent = copy.badge;
   }
 
   function errorMessage(error) {
@@ -375,6 +426,7 @@
   }
 
   function renderCurrentPage() {
+    renderSystemCapabilityBanner();
     if (page === "rule-groups") {
       if (state.editor) renderEditor(); else renderRuleGroupShell();
     } else if (page === "execution-logs") renderLogShell();
@@ -1716,6 +1768,7 @@
   window.AdControlV3Ui = Object.freeze({
     escapeHtml: h,
     normalizeMeta,
+    capabilityBannerCopy,
     normalizeGroup: normalizeGroupForEditor,
     executionIdOf,
     newRuleDraft,

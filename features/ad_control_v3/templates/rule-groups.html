@@ -31,10 +31,10 @@
         </div>
       </header>
 
-      <section class="safety-banner" aria-label="系统隔离说明">
+      <section class="safety-banner" id="systemCapabilityBanner" aria-label="系统隔离说明" data-release-state="loading">
         <span class="safety-icon" aria-hidden="true">✓</span>
-        <div><strong>新版独立运行，旧版规则不受影响</strong><p>本期计划调度器尚未发布，仅支持保存草稿与手动试算，不能启用持续自动扫描。</p></div>
-        <span class="pill pill-safe">手动试算</span>
+        <div><strong id="systemCapabilityTitle">正在读取调控能力</strong><p id="systemCapabilityDescription">将根据服务端发布开关显示可用的执行方式，旧版规则不受影响。</p></div>
+        <span class="pill pill-safe" id="systemCapabilityBadge">读取中</span>
       </section>
 
       <section id="pageStatus" class="state-panel" aria-live="polite">
