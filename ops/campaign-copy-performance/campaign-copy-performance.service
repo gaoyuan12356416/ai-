@@ -1,0 +1,24 @@
+[Unit]
+Description=Campaign Copy Performance Dynamic Report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/campaign-copy-performance/current
+EnvironmentFile=/root/drama_material_service/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=CAMPAIGN_COPY_REPORT_HOST=127.0.0.1
+Environment=CAMPAIGN_COPY_REPORT_PORT=8831
+Environment=CAMPAIGN_COPY_REPORT_CACHE_TTL_SECONDS=900
+Environment=CAMPAIGN_COPY_REPORT_STALE_IF_ERROR_SECONDS=86400
+ExecStart=/usr/bin/python3 /opt/campaign-copy-performance/current/service.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
