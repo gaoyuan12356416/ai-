@@ -10,8 +10,9 @@ This directory is the GitHub-maintained source for the standalone report at:
 ## Browser cache contract
 
 - `index.html` and `latest.json` stay `private, no-store`. Every page open reads the current manifest and therefore sees the newest `generated_at` version.
-- Daily detail files under `data/` are private-browser cached for 15 minutes (`max-age=900`).
+- Daily detail files under `data/` are private-browser cached for 15 minutes (`max-age=900`). The page also stores the authenticated, versioned JSON in same-origin Cache Storage for 15 minutes, so reopening still avoids the server when browser network caching is disabled.
 - Detail URLs include `?v=<generated_at>`. A successful scheduled publish changes the version immediately, so a fresh manifest does not reuse detail files from the previous publish.
+- Cache Storage entries carry a local timestamp and are deleted after the 15-minute TTL. Network and Cache Storage keys both include `generated_at`.
 - The cache is browser-private. Shared proxies and CDNs must not store authenticated report data.
 
 ## Validation

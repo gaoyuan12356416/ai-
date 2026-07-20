@@ -16,8 +16,18 @@ require(
     "latest.json must remain a fresh, no-store manifest request",
 )
 require(
-    "file+'?v='+version,{cache:'default',credentials:'same-origin'}" in GENERATOR,
-    "versioned daily detail requests must allow the private browser cache",
+    "DETAIL_CACHE_TTL_MS=15*60*1000" in GENERATOR,
+    "application-managed daily detail cache must expire after 15 minutes",
+)
+require(
+    "caches.open(DETAIL_CACHE_NAME)" in GENERATOR
+    and "cache.match(url)" in GENERATOR
+    and "cache.put(url" in GENERATOR,
+    "daily detail requests must use same-origin Cache Storage",
+)
+require(
+    "part:await fetchDailyJson(url)" in GENERATOR,
+    "daily detail loading must pass through the TTL cache helper",
 )
 require(
     "let version=encodeURIComponent((DATA.meta&&DATA.meta.generated_at)||'')" in GENERATOR,
