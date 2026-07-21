@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%23172033%22/><path d=%22M18 44V31h8v13zm11 0V21h8v23zm11 0V12h8v32z%22 fill=%22%23fff%22/></svg>">
 <title>广告规则复制 Campaign 效果报表</title>
+<script>window.__campaignCopyDataPromise=fetch('./api/data',{cache:'default',credentials:'same-origin'});</script>
 <style>
 :root{--bg:#f5f7fb;--panel:#fff;--line:#dce3ec;--text:#1d2430;--muted:#667085;--blue:#2357a5;--teal:#0f766e;--green:#07823f;--orange:#b75d00;--red:#c62828;--purple:#6d45a8;--shadow:0 1px 2px rgba(16,24,40,.06)}
 *{box-sizing:border-box}
@@ -16,10 +17,12 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
 .head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:0 0 auto}
 .btn{height:34px;border:1px solid #cbd5e1;background:#fff;color:#172033;border-radius:7px;padding:0 11px;cursor:pointer;font-weight:600}
 .btn.primary{background:#2f6bc0;color:#fff;border-color:#2f6bc0}
+.btn:disabled{cursor:wait;opacity:.55}
 .btn:focus-visible,.field input:focus-visible,.field select:focus-visible,.table-tools input:focus-visible,.chip:focus-within{outline:2px solid #7db0f2;outline-offset:1px}
 .wrap{max-width:1680px;margin:0 auto;padding:16px 18px 28px;min-width:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)}
 .level-bar{margin-bottom:12px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.loading-panel{margin-bottom:12px;padding:14px 16px;display:flex;align-items:center;gap:11px;color:#344054}.loading-panel[hidden]{display:none}.spinner{width:18px;height:18px;border:2px solid #cbd5e1;border-top-color:var(--blue);border-radius:50%;animation:spin .75s linear infinite;flex:0 0 auto}@keyframes spin{to{transform:rotate(360deg)}}
 .seg{display:flex;gap:6px;flex-wrap:wrap}.seg button{height:32px;border:1px solid #cbd5e1;background:#fff;border-radius:7px;padding:0 12px;cursor:pointer;font-weight:700;color:#253044}.seg button.active{background:#2f6bc0;border-color:#2f6bc0;color:#fff}
 .controls{padding:13px;display:grid;grid-template-columns:repeat(6,minmax(150px,1fr));gap:10px;align-items:end}
 .field{min-width:0}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.field input,.field select{width:100%;height:34px;border:1px solid #c8d1de;border-radius:7px;background:#fff;padding:0 9px;color:var(--text);min-width:0}.field input[type=number]{text-align:right}
@@ -41,8 +44,8 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
       <div id="metaLine">加载中...</div>
     </div>
     <div class="head-actions">
-      <button class="btn" id="resetBtn" type="button">重置筛选</button>
-      <button class="btn primary" id="exportBtn" type="button">导出CSV</button>
+      <button class="btn" id="resetBtn" type="button" disabled>重置筛选</button>
+      <button class="btn primary" id="exportBtn" type="button" disabled>导出CSV</button>
     </div>
   </div>
 </header>
@@ -50,6 +53,11 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   <section class="panel level-bar">
     <div class="seg"><button class="active" type="button">复制成功 Campaign</button></div>
     <div class="muted" id="scopeHint"></div>
+  </section>
+
+  <section class="panel loading-panel" id="loadingPanel" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <div><strong id="loadingTitle">正在读取最近一次 15 分钟缓存...</strong><div class="muted" id="loadingDetail">数据下载后会自动渲染，无需重复刷新。</div></div>
   </section>
 
   <section class="panel controls" aria-label="筛选条件">
@@ -100,9 +108,15 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
 <script>
 (async () => {
   'use strict';
-  const response = await fetch('./api/data', {cache:'no-store', credentials:'same-origin'});
+  const response = await window.__campaignCopyDataPromise;
   if(!response.ok)throw new Error('report data request failed: HTTP '+response.status);
-  const DATA = await response.json();
+  document.getElementById('loadingTitle').textContent='缓存已到达，正在整理报表...';
+  let DATA = await response.json();
+  if(DATA.v===2){
+    const inflate=(fields,rows)=>rows.map(values=>Object.fromEntries(fields.map((field,index)=>[field,values[index]])));
+    DATA={meta:DATA.m||{},copy_pipeline:DATA.p||{},campaigns:inflate(DATA.cf||[],DATA.c||[]),daily:inflate(DATA.df||[],DATA.d||[])};
+  }
+  performance.mark('campaign-copy-data-ready');
   const campaigns = DATA.campaigns || [];
   const dailyRows = DATA.daily || [];
   const meta = DATA.meta || {};
@@ -126,7 +140,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const bandOrder = ['无统计行','有统计无消耗','ROAS < 0.20','0.20–0.35','0.35–0.50','ROAS ≥ 0.50'];
   const defaultDims = ['rule_label'];
   const defaultMetrics = ['campaign_count','spend','af_revenue0','af_d0_roas','af_installs','cpi','purchase','cpa'];
-  const state = {dims:[...defaultDims], metrics:[...defaultMetrics], sortKey:'spend', sortDir:-1, currentExportRows:[]};
+  const state = {dims:[...defaultDims], metrics:[...defaultMetrics], sortKey:'spend', sortDir:-1, currentExportRows:[], renderTimer:0};
   const dimensions = [
     ['copy_date','复制日期'],['dt','统计日期'],['maturity_label','观察时长'],['rule_label','复制规则'],['product','投放产品'],['user_label','操作人'],
     ['account_id','广告账户'],['campaign_id','新 Campaign'],['origin_campaign_id','源 Campaign'],
@@ -257,6 +271,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   }
 
   function render(){const rows=filteredRows(),total=finalize(rows.reduce((agg,row)=>addAgg(agg,row),emptyAgg()));renderKpis(total,rows);renderTrend(rows);renderRankings(rows);renderTable(rows);renderStatus(total,rows)}
+  function scheduleRender(){clearTimeout(state.renderTimer);state.renderTimer=setTimeout(()=>requestAnimationFrame(render),160)}
 
   function resetFilters(){
     setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);['ruleFilter','productFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>get(id).value='');get('presets').querySelectorAll('button').forEach(item=>item.classList.toggle('active',item.dataset.kind==='all'));render();
@@ -273,16 +288,21 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
     const generated=meta.generated_at||'',copyStart=meta.copy_start||allCopyStart,copyEnd=meta.copy_end||allCopyEnd,statStart=meta.stat_start||allStatStart,statEnd=meta.stat_end||allStatEnd;
     get('metaLine').textContent='复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
-    get('scopeHint').textContent='status=1 · platform=0 · level=0 · data_source=1｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
+    get('scopeHint').textContent='每15分钟后台自动刷新｜status=1 · platform=0 · level=0 · data_source=1｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
     campaigns.forEach(row=>{row.maturity_label=num(row.age_hours)>=24?'≥24h':num(row.age_hours)>=6?'6–24h':'<6h'});
-    ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>get(id).addEventListener(id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change',render));
+    ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>requestAnimationFrame(render))});
     get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);render();
+    get('resetBtn').disabled=false;get('exportBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
   }
   init();
 })().catch(error=>{
   console.error(error);
   const metaLine=document.getElementById('metaLine');
   if(metaLine)metaLine.textContent='数据加载失败，请稍后刷新页面重试。';
+  const loadingTitle=document.getElementById('loadingTitle');
+  const loadingDetail=document.getElementById('loadingDetail');
+  if(loadingTitle)loadingTitle.textContent='数据加载失败';
+  if(loadingDetail)loadingDetail.textContent='系统会保留最近成功缓存，请稍后再刷新一次。';
 });
 </script>
 </body>

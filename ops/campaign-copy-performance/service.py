@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
+import gzip
 import hashlib
 import json
 import os
@@ -23,10 +24,16 @@ INDEX_PATH = ROOT / "index.html"
 HOST = os.environ.get("CAMPAIGN_COPY_REPORT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CAMPAIGN_COPY_REPORT_PORT", "8831"))
 CACHE_TTL_SECONDS = max(60, int(os.environ.get("CAMPAIGN_COPY_REPORT_CACHE_TTL_SECONDS", "900")))
+CACHE_REFRESH_RETRY_SECONDS = max(
+    30,
+    int(os.environ.get("CAMPAIGN_COPY_REPORT_REFRESH_RETRY_SECONDS", "120")),
+)
 STALE_IF_ERROR_SECONDS = max(
     CACHE_TTL_SECONDS,
     int(os.environ.get("CAMPAIGN_COPY_REPORT_STALE_IF_ERROR_SECONDS", "86400")),
 )
+CACHE_PATH_TEXT = os.environ.get("CAMPAIGN_COPY_REPORT_CACHE_PATH", "").strip()
+CACHE_PATH = Path(CACHE_PATH_TEXT) if CACHE_PATH_TEXT else None
 METRIC_FIELDS = (
     "impressions",
     "clicks",
@@ -38,6 +45,42 @@ METRIC_FIELDS = (
     "af_revenue0",
     "af_revenue",
     "iaa_revenue",
+    "source_rows",
+)
+CAMPAIGN_FIELDS = (
+    "campaign_id",
+    "campaign_name",
+    "origin_campaign_id",
+    "account_id",
+    "content_id",
+    "queue_id",
+    "rule_name",
+    "rule_label",
+    "product",
+    "user_id",
+    "user_name",
+    "user_label",
+    "copy_at",
+    "copy_date",
+    "mapped",
+    "ad_count",
+    "age_hours",
+    "countries",
+    "languages",
+)
+DAILY_FIELDS = (
+    "campaign_id",
+    "dt",
+    "spend",
+    "af_revenue0",
+    "af_revenue",
+    "af_installs",
+    "installs",
+    "purchase",
+    "revenue",
+    "iaa_revenue",
+    "impressions",
+    "clicks",
     "source_rows",
 )
 
@@ -371,39 +414,163 @@ def json_default(value: object):
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
+def encode_wire_payload(payload: dict) -> dict:
+    """Remove repeated JSON object keys while keeping the frontend contract explicit."""
+    return {
+        "v": 2,
+        "m": payload["meta"],
+        "p": payload["copy_pipeline"],
+        "cf": list(CAMPAIGN_FIELDS),
+        "c": [[row.get(field) for field in CAMPAIGN_FIELDS] for row in payload["campaigns"]],
+        "df": list(DAILY_FIELDS),
+        "d": [[row.get(field) for field in DAILY_FIELDS] for row in payload["daily"]],
+    }
+
+
+def serialize_wire_payload(payload: dict) -> bytes:
+    return json.dumps(
+        encode_wire_payload(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=json_default,
+    ).encode("utf-8")
+
+
+def validate_or_convert_cache_body(body: bytes) -> bytes:
+    data = json.loads(body)
+    if data.get("v") == 2:
+        if not data.get("m", {}).get("read_only_verified"):
+            raise ValueError("disk cache is not marked read-only verified")
+        if not isinstance(data.get("c"), list) or not isinstance(data.get("d"), list):
+            raise ValueError("disk cache wire rows are invalid")
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if not data.get("meta", {}).get("read_only_verified"):
+        raise ValueError("legacy disk cache is not marked read-only verified")
+    if not isinstance(data.get("campaigns"), list) or not isinstance(data.get("daily"), list):
+        raise ValueError("legacy disk cache rows are invalid")
+    return serialize_wire_payload(data)
+
+
+def etag_matches(header_value: str, etag: str) -> bool:
+    def normalize(value: str) -> str:
+        value = value.strip()
+        return value[2:] if value.startswith("W/") else value
+
+    wanted = normalize(etag)
+    return any(token.strip() == "*" or normalize(token) == wanted for token in header_value.split(","))
+
+
 class ReportCache:
-    def __init__(self):
-        self.lock = threading.Lock()
+    def __init__(self, cache_path: Path | None = CACHE_PATH):
+        self.cache_path = cache_path
+        self.state_lock = threading.Lock()
+        self.refresh_lock = threading.Lock()
+        self.ready_event = threading.Event()
+        self.stop_event = threading.Event()
         self.body: bytes | None = None
+        self.gzip_body: bytes | None = None
         self.loaded_at = 0.0
         self.etag = ""
+        self.refresh_in_progress = False
+        self.last_refresh_duration: float | None = None
+        self.last_error = ""
+        self.scheduler_thread: threading.Thread | None = None
 
-    def get(self) -> tuple[bytes, str, str, int]:
-        now = time.monotonic()
-        if self.body is not None and now - self.loaded_at < CACHE_TTL_SECONDS:
-            return self.body, self.etag, "hit", int(now - self.loaded_at)
-        with self.lock:
-            now = time.monotonic()
-            if self.body is not None and now - self.loaded_at < CACHE_TTL_SECONDS:
-                return self.body, self.etag, "hit", int(now - self.loaded_at)
-            try:
-                started = time.monotonic()
-                payload = build_payload(query_raw())
-                body = json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=json_default,
-                ).encode("utf-8")
-                self.body = body
-                self.loaded_at = time.monotonic()
-                self.etag = '"' + hashlib.sha256(body).hexdigest() + '"'
+    def snapshot(self) -> dict:
+        with self.state_lock:
+            age = int(time.monotonic() - self.loaded_at) if self.body is not None else None
+            return {
+                "body": self.body,
+                "gzip_body": self.gzip_body,
+                "etag": self.etag,
+                "age": age,
+                "refresh_in_progress": self.refresh_in_progress,
+                "last_refresh_duration": self.last_refresh_duration,
+                "last_error": self.last_error,
+            }
+
+    def _install_body(self, body: bytes, age_seconds: float = 0) -> None:
+        compressed = gzip.compress(body, compresslevel=6, mtime=0)
+        with self.state_lock:
+            self.body = body
+            self.gzip_body = compressed
+            self.loaded_at = time.monotonic() - max(0, age_seconds)
+            self.etag = 'W/"' + hashlib.sha256(body).hexdigest() + '"'
+        self.ready_event.set()
+
+    def _persist(self, body: bytes) -> None:
+        if self.cache_path is None:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_path.with_name(self.cache_path.name + ".tmp")
+        with temporary.open("wb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.cache_path)
+
+    def load_disk(self) -> bool:
+        if self.cache_path is None or not self.cache_path.is_file():
+            return False
+        age = max(0, time.time() - self.cache_path.stat().st_mtime)
+        if age > STALE_IF_ERROR_SECONDS:
+            print(
+                json.dumps({"event": "campaign_copy_report_disk_cache_ignored", "age_seconds": int(age)}),
+                flush=True,
+            )
+            return False
+        try:
+            original = self.cache_path.read_bytes()
+            body = validate_or_convert_cache_body(original)
+            self._install_body(body, age)
+            if body != original:
+                self._persist(body)
+            print(
+                json.dumps(
+                    {
+                        "event": "campaign_copy_report_disk_cache_loaded",
+                        "age_seconds": int(age),
+                        "bytes": len(body),
+                        "gzip_bytes": len(self.gzip_body or b""),
+                    }
+                ),
+                flush=True,
+            )
+            return True
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {"event": "campaign_copy_report_disk_cache_failed", "error_type": type(exc).__name__}
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+
+    def refresh(self, wait_for_lock: bool = True) -> bool:
+        acquired = self.refresh_lock.acquire(blocking=wait_for_lock)
+        if not acquired:
+            return False
+        started = time.monotonic()
+        with self.state_lock:
+            self.refresh_in_progress = True
+            self.last_error = ""
+        try:
+            payload = build_payload(query_raw())
+            body = serialize_wire_payload(payload)
+            self._persist(body)
+            self._install_body(body)
+            duration = time.monotonic() - started
+            with self.state_lock:
+                self.last_refresh_duration = duration
                 print(
                     json.dumps(
                         {
                             "event": "campaign_copy_report_refresh",
-                            "seconds": round(self.loaded_at - started, 3),
+                            "seconds": round(duration, 3),
                             "bytes": len(body),
+                            "gzip_bytes": len(self.gzip_body or b""),
                             "campaigns": len(payload["campaigns"]),
                             "daily_rows": len(payload["daily"]),
                             "generated_at": payload["meta"]["generated_at"],
@@ -412,30 +579,80 @@ class ReportCache:
                     ),
                     flush=True,
                 )
-                return body, self.etag, "miss", 0
-            except Exception as exc:
-                age = int(now - self.loaded_at) if self.body is not None else -1
-                print(
-                    json.dumps(
-                        {
-                            "event": "campaign_copy_report_refresh_failed",
-                            "error_type": type(exc).__name__,
-                            "cache_age_seconds": age,
-                        }
-                    ),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                if self.body is not None and age <= STALE_IF_ERROR_SECONDS:
-                    return self.body, self.etag, "stale", age
-                raise
+            return True
+        except Exception as exc:
+            snapshot = self.snapshot()
+            with self.state_lock:
+                self.last_error = type(exc).__name__
+            print(
+                json.dumps(
+                    {
+                        "event": "campaign_copy_report_refresh_failed",
+                        "error_type": type(exc).__name__,
+                        "cache_age_seconds": snapshot["age"] if snapshot["body"] is not None else -1,
+                    }
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        finally:
+            with self.state_lock:
+                self.refresh_in_progress = False
+            self.ready_event.set()
+            self.refresh_lock.release()
+
+    def _scheduler_loop(self) -> None:
+        delay = 0
+        while not self.stop_event.wait(delay):
+            ok = self.refresh(wait_for_lock=True)
+            delay = CACHE_TTL_SECONDS if ok else CACHE_REFRESH_RETRY_SECONDS
+
+    def start(self) -> None:
+        self.load_disk()
+        self.scheduler_thread = threading.Thread(
+            target=self._scheduler_loop,
+            name="campaign-copy-report-refresh",
+            daemon=True,
+        )
+        self.scheduler_thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.scheduler_thread is not None:
+            self.scheduler_thread.join(timeout=1)
+
+    def trigger_refresh(self) -> None:
+        threading.Thread(
+            target=lambda: self.refresh(wait_for_lock=False),
+            name="campaign-copy-report-refresh-trigger",
+            daemon=True,
+        ).start()
+
+    def get(self) -> tuple[bytes, bytes, str, str, int]:
+        snapshot = self.snapshot()
+        if snapshot["body"] is not None:
+            if snapshot["age"] >= CACHE_TTL_SECONDS:
+                self.trigger_refresh()
+            state = "stale" if snapshot["age"] >= CACHE_TTL_SECONDS else "hit"
+            return snapshot["body"], snapshot["gzip_body"], snapshot["etag"], state, snapshot["age"]
+        self.ready_event.clear()
+        snapshot = self.snapshot()
+        if snapshot["body"] is not None:
+            return snapshot["body"], snapshot["gzip_body"], snapshot["etag"], "hit", snapshot["age"]
+        self.trigger_refresh()
+        self.ready_event.wait(timeout=180)
+        snapshot = self.snapshot()
+        if snapshot["body"] is None:
+            raise RuntimeError("report cache unavailable")
+        return snapshot["body"], snapshot["gzip_body"], snapshot["etag"], "miss", snapshot["age"]
 
 
 CACHE = ReportCache()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CampaignCopyReport/1.0"
+    server_version = "CampaignCopyReport/2.0"
 
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -443,11 +660,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
 
-    def _send(self, status: int, content_type: str, body: bytes, send_body: bool = True, headers=None):
+    def _send(
+        self,
+        status: int,
+        content_type: str,
+        body: bytes = b"",
+        send_body: bool = True,
+        headers=None,
+        cache_control: str = "private, no-store",
+    ):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("Cache-Control", cache_control)
         self._security_headers()
         for key, value in headers or []:
             self.send_header(key, value)
@@ -458,22 +683,60 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, send_body: bool):
         path = urlsplit(self.path).path
         if path in ("/", "/index.html"):
-            self._send(HTTPStatus.OK, "text/html; charset=utf-8", INDEX_PATH.read_bytes(), send_body)
+            self._send(
+                HTTPStatus.OK,
+                "text/html; charset=utf-8",
+                INDEX_PATH.read_bytes(),
+                send_body,
+                cache_control="private, max-age=300",
+            )
             return
         if path == "/healthz":
-            age = int(time.monotonic() - CACHE.loaded_at) if CACHE.body is not None else None
-            body = json.dumps({"ok": True, "cache_ready": CACHE.body is not None, "cache_age_seconds": age}).encode()
+            snapshot = CACHE.snapshot()
+            body = json.dumps(
+                {
+                    "ok": True,
+                    "cache_ready": snapshot["body"] is not None,
+                    "cache_age_seconds": snapshot["age"],
+                    "refresh_in_progress": snapshot["refresh_in_progress"],
+                    "last_refresh_duration_seconds": snapshot["last_refresh_duration"],
+                    "last_error": snapshot["last_error"] or None,
+                    "refresh_interval_seconds": CACHE_TTL_SECONDS,
+                    "persistent_cache": str(CACHE.cache_path) if CACHE.cache_path else None,
+                },
+                separators=(",", ":"),
+            ).encode()
             self._send(HTTPStatus.OK, "application/json; charset=utf-8", body, send_body)
             return
         if path == "/api/data":
             try:
-                body, etag, cache_state, cache_age = CACHE.get()
+                body, compressed, etag, cache_state, cache_age = CACHE.get()
+                common_headers = [
+                    ("ETag", etag),
+                    ("Vary", "Accept-Encoding"),
+                    ("X-Report-Cache", cache_state),
+                    ("X-Report-Cache-Age", str(cache_age)),
+                ]
+                cache_control = "private, max-age=60, stale-while-revalidate=840"
+                if etag_matches(self.headers.get("If-None-Match", ""), etag):
+                    self._send(
+                        HTTPStatus.NOT_MODIFIED,
+                        "application/json; charset=utf-8",
+                        send_body=False,
+                        headers=common_headers,
+                        cache_control=cache_control,
+                    )
+                    return
+                if "gzip" in self.headers.get("Accept-Encoding", "").lower():
+                    body = compressed
+                    common_headers.append(("Content-Encoding", "gzip"))
                 self._send(
                     HTTPStatus.OK,
                     "application/json; charset=utf-8",
                     body,
                     send_body,
-                    [("ETag", etag), ("X-Report-Cache", cache_state), ("X-Report-Cache-Age", str(cache_age))],
+                    common_headers,
+                    cache_control,
                 )
             except Exception:
                 body = json.dumps({"error": "report_data_unavailable"}).encode()
@@ -542,7 +805,11 @@ def self_test() -> int:
     assert payload["campaigns"][0]["user_label"] == "测试用户（ID 42）"
     assert payload["daily"][0]["spend"] == 10
     assert payload["copy_pipeline"]["terminal_success_rate"] == 1.0
-    print(json.dumps({"ok": True, "campaigns": 1, "daily_rows": 1}))
+    wire = encode_wire_payload(payload)
+    assert wire["v"] == 2
+    assert wire["c"][0][CAMPAIGN_FIELDS.index("user_label")] == "测试用户（ID 42）"
+    assert wire["d"][0][DAILY_FIELDS.index("spend")] == 10
+    print(json.dumps({"ok": True, "wire_version": 2, "campaigns": 1, "daily_rows": 1}))
     return 0
 
 
@@ -551,14 +818,28 @@ def main() -> int:
         return self_test()
     if not INDEX_PATH.is_file():
         raise RuntimeError(f"missing frontend: {INDEX_PATH}")
+    CACHE.start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(json.dumps({"event": "server_start", "host": HOST, "port": PORT, "cache_ttl_seconds": CACHE_TTL_SECONDS}), flush=True)
+    print(
+        json.dumps(
+            {
+                "event": "server_start",
+                "host": HOST,
+                "port": PORT,
+                "cache_ttl_seconds": CACHE_TTL_SECONDS,
+                "persistent_cache": str(CACHE.cache_path) if CACHE.cache_path else None,
+                "background_refresh": True,
+            }
+        ),
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        CACHE.stop()
     return 0
 
 

@@ -12,13 +12,17 @@ Environment=PYTHONUNBUFFERED=1
 Environment=CAMPAIGN_COPY_REPORT_HOST=127.0.0.1
 Environment=CAMPAIGN_COPY_REPORT_PORT=8831
 Environment=CAMPAIGN_COPY_REPORT_CACHE_TTL_SECONDS=900
+Environment=CAMPAIGN_COPY_REPORT_REFRESH_RETRY_SECONDS=120
 Environment=CAMPAIGN_COPY_REPORT_STALE_IF_ERROR_SECONDS=86400
+Environment=CAMPAIGN_COPY_REPORT_CACHE_PATH=/mnt/data-disk/campaign-copy-performance/cache/report.json
 ExecStart=/usr/bin/python3 /opt/campaign-copy-performance/current/service.py
 Restart=on-failure
 RestartSec=3
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
+ReadWritePaths=/mnt/data-disk/campaign-copy-performance/cache
 
 [Install]
 WantedBy=multi-user.target
