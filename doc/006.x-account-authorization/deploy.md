@@ -1,5 +1,12 @@
 # 部署文档
 
+## Sidecar 自恢复策略（2026-07-21）
+
+- `x-post-automation.service` 使用 `Restart=always`。这样进程被外部 `SIGTERM` 结束或正常意外退出后，systemd 会在 3 秒后自动恢复服务。
+- 运维主动执行 `systemctl stop x-post-automation.service` 时，systemd 仍会保持停止状态，不会被该策略立即拉起。
+- 修改 unit 后必须先运行 `systemd-analyze verify`，再执行 `systemctl daemon-reload` 和 `systemctl restart x-post-automation.service`；随后验证本机 `/health`、公网 `/x-oauth/health`、主后台 owner/admin 查询链路及 journal。
+- 该变更不修改 `/etc/x-post-automation.env`、SQLite、Token 文件或账号状态。回滚只需恢复旧 unit、执行 `systemctl daemon-reload`，再重启 sidecar。
+
 ## V3 本地软停用部署增量（2026-07-14）
 
 > 本节是当前有效部署规范。下文 V2 的远端 revoke、`revoke_pending` 重试和成功后删除 Token 内容仅保留为历史记录，不得在 V3 部署或验收中执行。
