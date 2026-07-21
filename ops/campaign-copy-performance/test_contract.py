@@ -18,7 +18,12 @@ class ContractTest(unittest.TestCase):
         source = (ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn("fetch('./api/data'", source)
         self.assertIn("cache:'default'", source)
-        self.assertIn("if(DATA.v===2)", source)
+        self.assertIn("RAW.v===2", source)
+        self.assertIn('data-level="0">Campaign', source)
+        self.assertIn('data-level="1">Ad Set', source)
+        self.assertIn('data-level="2">Ad', source)
+        self.assertIn("new_id = adset_id", source)
+        self.assertIn("new_id = ad_id", source)
         self.assertIn('id="loadingPanel"', source)
         self.assertIn("每15分钟后台自动刷新", source)
         self.assertNotIn("cache:'no-store'", source)
@@ -30,6 +35,13 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("['yesterday','前一天']", source)
         self.assertIn("else if(kind==='7'){start=addDays(currentDate,-6);end=currentDate;}", source)
         self.assertNotIn("campaign-copy-report-data", source)
+
+    def test_level_query_contract(self):
+        source = (ROOT / "service.py").read_text(encoding="utf-8")
+        self.assertIn("l.level IN (0,1,2)", source)
+        self.assertIn('for level, id_field in ((1, "adset_id"), (2, "ad_id"))', source)
+        self.assertIn('"copy_pipelines": copy_pipelines', source)
+        self.assertIn('"extra_entities": extra_entities', source)
 
     def test_payload_contract(self):
         self.assertEqual(service.self_test(), 0)

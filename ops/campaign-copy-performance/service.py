@@ -83,6 +83,42 @@ DAILY_FIELDS = (
     "clicks",
     "source_rows",
 )
+EXTRA_ENTITY_FIELDS = (
+    "level",
+    "entity_key",
+    "entity_id",
+    "entity_name",
+    "origin_entity_id",
+    "campaign_id",
+    "campaign_name",
+    "adset_id",
+    "adset_name",
+    "ad_id",
+    "ad_name",
+    "account_id",
+    "content_id",
+    "queue_id",
+    "rule_name",
+    "rule_label",
+    "product",
+    "user_id",
+    "user_name",
+    "user_label",
+    "copy_at",
+    "copy_date",
+    "mapped",
+    "ad_count",
+    "age_hours",
+    "countries",
+    "languages",
+)
+EXTRA_DAILY_FIELDS = (
+    "level",
+    "entity_key",
+    "entity_id",
+    "dt",
+    *METRIC_FIELDS,
+)
 
 
 def chunks(values: list[str], size: int):
@@ -168,18 +204,18 @@ def query_raw() -> dict:
 
             cur.execute(
                 """
-                SELECT status, COUNT(*) AS n
+                SELECT level, status, COUNT(*) AS n
                 FROM ads_business.ads_campaign_rule_logs
-                WHERE platform=0 AND level=0 AND data_source=1
-                GROUP BY status
-                ORDER BY status
+                WHERE platform=0 AND level IN (0,1,2) AND data_source=1
+                GROUP BY level, status
+                ORDER BY level, status
                 """
             )
             payload["copy_status_counts"] = cur.fetchall()
 
             cur.execute(
                 """
-                SELECT l.id, l.account_id, l.origin_id, l.new_id, l.queue_id,
+                SELECT l.id, l.level, l.account_id, l.origin_id, l.new_id, l.queue_id,
                        l.user_id, l.app_id, l.content_id, l.created_at,
                        r.name AS rule_name, a.name AS app_name,
                        aug.name AS user_name
@@ -195,16 +231,19 @@ def query_raw() -> dict:
                     FROM kunlunads_dev.admin_user_group
                     GROUP BY sub_user_id
                 ) aug ON aug.sub_user_id=l.user_id
-                WHERE l.platform=0 AND l.level=0 AND l.data_source=1 AND l.status=1
+                WHERE l.platform=0 AND l.level IN (0,1,2) AND l.data_source=1 AND l.status=1
                 ORDER BY l.created_at, l.id
                 """
             )
-            logs = [
+            successful_logs = [
                 row
                 for row in cur.fetchall()
                 if str(row.get("new_id") or "").isdigit() and int(row["new_id"]) > 0
             ]
+            logs = [row for row in successful_logs if int(row.get("level") or 0) == 0]
+            extra_logs = [row for row in successful_logs if int(row.get("level") or 0) in (1, 2)]
             payload["logs"] = logs
+            payload["extra_logs"] = extra_logs
 
             campaign_ids = sorted({str(row["new_id"]) for row in logs})
             mapping: list[dict] = []
@@ -236,6 +275,39 @@ def query_raw() -> dict:
                 )
                 mapping.extend(cur.fetchall())
             payload["mapping"] = mapping
+
+            extra_mapping: list[dict] = []
+            for level, id_field in ((1, "adset_id"), (2, "ad_id")):
+                entity_ids = sorted(
+                    {str(row["new_id"]) for row in extra_logs if int(row.get("level") or 0) == level}
+                )
+                found: set[str] = set()
+                for source_table in (
+                    "kunlunads_dev.ads_facebook_auto_created_data",
+                    "ads_ai.ads_facebook_auto_created_data",
+                ):
+                    remaining = sorted(set(entity_ids) - found)
+                    for part in chunks(remaining, 300):
+                        placeholders = ",".join(["%s"] * len(part))
+                        cur.execute(
+                            f"""
+                            SELECT campaign_id, adset_id, ad_id, campaign_name,
+                                   adset_name, ad_name, product, ad_account_id,
+                                   status, country, language, budget
+                            FROM {source_table}
+                            WHERE {id_field} IN ({placeholders})
+                            """,
+                            part,
+                        )
+                        for source_row in cur.fetchall():
+                            entity_id = str(source_row.get(id_field) or "")
+                            if not entity_id:
+                                continue
+                            source_row["level"] = level
+                            source_row["entity_id"] = entity_id
+                            extra_mapping.append(source_row)
+                            found.add(entity_id)
+            payload["extra_mapping"] = extra_mapping
 
             cur.execute(
                 "SELECT dt FROM kunlunads_dev.ads_custom_source_insight "
@@ -284,6 +356,46 @@ def query_raw() -> dict:
                         daily.append(row)
                 current += dt.timedelta(days=1)
             payload["daily"] = daily
+
+            extra_ad_ids = sorted(
+                {
+                    str(row["ad_id"])
+                    for row in extra_mapping
+                    if str(row.get("ad_id") or "").isdigit() and int(row["ad_id"]) > 0
+                }
+            )
+            extra_log_dates = [parse_datetime(row.get("created_at")) for row in extra_logs]
+            extra_min_dt = min((value.date() for value in extra_log_dates if value), default=max_dt)
+            extra_daily: list[dict] = []
+            current = extra_min_dt
+            while current and max_dt and current <= max_dt:
+                for part in chunks(extra_ad_ids, 500):
+                    placeholders = ",".join(["%s"] * len(part))
+                    cur.execute(
+                        f"""
+                        SELECT ad_id,
+                               SUM(impressions) AS impressions,
+                               SUM(clicks) AS clicks,
+                               SUM(installs) AS installs,
+                               SUM(spend) AS spend,
+                               SUM(purchase) AS purchase,
+                               SUM(revenue) AS revenue,
+                               SUM(af_installs) AS af_installs,
+                               SUM(af_revenue0) AS af_revenue0,
+                               SUM(af_revenue) AS af_revenue,
+                               SUM(ad_impression_revenue) AS iaa_revenue,
+                               COUNT(*) AS source_rows
+                        FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
+                        WHERE dt=%s AND platform=0 AND ad_id IN ({placeholders})
+                        GROUP BY ad_id
+                        """,
+                        [current] + part,
+                    )
+                    for row in cur.fetchall():
+                        row["dt"] = current
+                        extra_daily.append(row)
+                current += dt.timedelta(days=1)
+            payload["extra_daily"] = extra_daily
             return payload
     finally:
         conn.close()
@@ -378,10 +490,130 @@ def build_payload(raw: dict) -> dict:
             }
         )
 
-    status_counts = {int(row["status"]): int(row["n"]) for row in raw.get("copy_status_counts", [])}
-    terminal = status_counts.get(1, 0) + status_counts.get(2, 0)
-    copy_times = [row["copy_at"] for row in campaigns if row["copy_at"]]
-    stat_dates = [row["dt"] for row in campaign_daily if row["dt"]]
+    extra_logs_by_entity: dict[tuple[int, str], list[dict]] = collections.defaultdict(list)
+    for row in raw.get("extra_logs", []):
+        level = int(row.get("level") or 0)
+        if level in (1, 2):
+            extra_logs_by_entity[(level, str(row["new_id"]))].append(row)
+
+    extra_mapping_by_entity: dict[tuple[int, str], list[dict]] = collections.defaultdict(list)
+    ad_to_entities: dict[str, set[tuple[int, str]]] = collections.defaultdict(set)
+    for row in raw.get("extra_mapping", []):
+        key = (int(row.get("level") or 0), str(row.get("entity_id") or ""))
+        if key[0] not in (1, 2) or not key[1]:
+            continue
+        extra_mapping_by_entity[key].append(row)
+        ad_id = str(row.get("ad_id") or "")
+        if ad_id:
+            ad_to_entities[ad_id].add(key)
+
+    extra_daily_by_key: dict[tuple[int, str, str], dict] = {}
+    for row in raw.get("extra_daily", []):
+        stat_date = str(row.get("dt") or "")
+        for level, entity_id in ad_to_entities.get(str(row.get("ad_id") or ""), set()):
+            key = (level, entity_id, stat_date)
+            aggregate = extra_daily_by_key.setdefault(
+                key,
+                {"level": level, "entity_id": entity_id, "dt": stat_date, **{field: 0.0 for field in METRIC_FIELDS}},
+            )
+            for field in METRIC_FIELDS:
+                aggregate[field] += number(row.get(field))
+
+    extra_entities: list[dict] = []
+    copy_date_by_entity: dict[tuple[int, str], str] = {}
+    for (level, entity_id), logs in extra_logs_by_entity.items():
+        log = sorted(logs, key=lambda row: (str(row.get("created_at")), int(row.get("id") or 0)))[0]
+        mapping = extra_mapping_by_entity.get((level, entity_id), [])
+        copy_at = parse_datetime(log.get("created_at"))
+        copy_date = copy_at.date().isoformat() if copy_at else ""
+        copy_date_by_entity[(level, entity_id)] = copy_date
+        queue_id = int(log.get("queue_id") or 0)
+        rule_name = str(log.get("rule_name") or "").strip()
+        rule_label = (
+            f"规则 #{queue_id} · {rule_name or '名称缺失'}"
+            if queue_id
+            else "复制触发来源未归因（queue_id=0）"
+        )
+        user_id = int(log.get("user_id") or 0)
+        user_name = str(log.get("user_name") or "").strip()
+        user_label = f"{user_name}（ID {user_id}）" if user_name else f"未配置姓名（ID {user_id}）"
+        product = str(log.get("app_name") or "").strip() or dominant(
+            [row.get("product") for row in mapping],
+            f"App #{log.get('app_id')}",
+        )
+        campaign_id = dominant([row.get("campaign_id") for row in mapping])
+        adset_id = entity_id if level == 1 else dominant([row.get("adset_id") for row in mapping])
+        ad_id = entity_id if level == 2 else ""
+        entity_name = dominant(
+            [row.get("adset_name" if level == 1 else "ad_name") for row in mapping]
+        )
+        extra_entities.append(
+            {
+                "level": level,
+                "entity_key": f"{level}:{entity_id}",
+                "entity_id": entity_id,
+                "entity_name": entity_name,
+                "origin_entity_id": str(log.get("origin_id") or ""),
+                "campaign_id": campaign_id,
+                "campaign_name": dominant([row.get("campaign_name") for row in mapping]),
+                "adset_id": adset_id,
+                "adset_name": dominant([row.get("adset_name") for row in mapping]),
+                "ad_id": ad_id,
+                "ad_name": dominant([row.get("ad_name") for row in mapping]) if level == 2 else "",
+                "account_id": str(log.get("account_id") or ""),
+                "content_id": str(log.get("content_id") or ""),
+                "queue_id": queue_id,
+                "rule_name": rule_name,
+                "rule_label": rule_label,
+                "product": product,
+                "user_id": user_id,
+                "user_name": user_name,
+                "user_label": user_label,
+                "copy_at": str(log.get("created_at") or ""),
+                "copy_date": copy_date,
+                "mapped": bool(mapping),
+                "ad_count": len({str(row.get("ad_id")) for row in mapping if row.get("ad_id")}),
+                "age_hours": round(max(0.0, (report_time - copy_at).total_seconds() / 3600), 2)
+                if copy_at
+                else None,
+                "countries": joined_distinct([row.get("country") for row in mapping]),
+                "languages": joined_distinct([row.get("language") for row in mapping]),
+            }
+        )
+    extra_entities.sort(key=lambda row: (row["copy_at"], row["level"], row["entity_id"]), reverse=True)
+
+    extra_entity_daily: list[dict] = []
+    for (level, entity_id, stat_date), row in sorted(extra_daily_by_key.items()):
+        copy_date = copy_date_by_entity.get((level, entity_id), "")
+        if copy_date and stat_date < copy_date:
+            continue
+        extra_entity_daily.append(
+            {
+                "level": level,
+                "entity_key": f"{level}:{entity_id}",
+                "entity_id": entity_id,
+                "dt": stat_date,
+                **{field: round(number(row.get(field)), 4) for field in METRIC_FIELDS},
+            }
+        )
+
+    status_by_level: dict[int, dict[int, int]] = collections.defaultdict(dict)
+    for row in raw.get("copy_status_counts", []):
+        status_by_level[int(row.get("level") or 0)][int(row["status"])] = int(row["n"])
+
+    def level_pipeline(level: int) -> dict:
+        counts = status_by_level.get(level, {})
+        terminal = counts.get(1, 0) + counts.get(2, 0)
+        return {
+            "running": counts.get(0, 0),
+            "success": counts.get(1, 0),
+            "failed": counts.get(2, 0),
+            "terminal_success_rate": ratio(counts.get(1, 0), terminal),
+        }
+
+    copy_pipelines = {str(level): level_pipeline(level) for level in (0, 1, 2)}
+    copy_times = [row["copy_at"] for row in campaigns + extra_entities if row["copy_at"]]
+    stat_dates = [row["dt"] for row in campaign_daily + extra_entity_daily if row["dt"]]
     return {
         "meta": {
             "generated_at": str(safety.get("server_time") or ""),
@@ -395,14 +627,12 @@ def build_payload(raw: dict) -> dict:
             "stat_start": min(stat_dates, default=""),
             "stat_end": max(stat_dates, default=""),
         },
-        "copy_pipeline": {
-            "running": status_counts.get(0, 0),
-            "success": status_counts.get(1, 0),
-            "failed": status_counts.get(2, 0),
-            "terminal_success_rate": ratio(status_counts.get(1, 0), terminal),
-        },
+        "copy_pipeline": copy_pipelines["0"],
+        "copy_pipelines": copy_pipelines,
         "campaigns": campaigns,
         "daily": campaign_daily,
+        "extra_entities": extra_entities,
+        "extra_daily": extra_entity_daily,
     }
 
 
@@ -420,10 +650,21 @@ def encode_wire_payload(payload: dict) -> dict:
         "v": 2,
         "m": payload["meta"],
         "p": payload["copy_pipeline"],
+        "lp": payload.get("copy_pipelines", {"0": payload["copy_pipeline"]}),
         "cf": list(CAMPAIGN_FIELDS),
         "c": [[row.get(field) for field in CAMPAIGN_FIELDS] for row in payload["campaigns"]],
         "df": list(DAILY_FIELDS),
         "d": [[row.get(field) for field in DAILY_FIELDS] for row in payload["daily"]],
+        "xf": list(EXTRA_ENTITY_FIELDS),
+        "x": [
+            [row.get(field) for field in EXTRA_ENTITY_FIELDS]
+            for row in payload.get("extra_entities", [])
+        ],
+        "xdf": list(EXTRA_DAILY_FIELDS),
+        "xd": [
+            [row.get(field) for field in EXTRA_DAILY_FIELDS]
+            for row in payload.get("extra_daily", [])
+        ],
     }
 
 
@@ -572,7 +813,9 @@ class ReportCache:
                             "bytes": len(body),
                             "gzip_bytes": len(self.gzip_body or b""),
                             "campaigns": len(payload["campaigns"]),
-                            "daily_rows": len(payload["daily"]),
+                            "extra_entities": len(payload.get("extra_entities", [])),
+                            "daily_rows": len(payload["daily"]) + len(payload.get("extra_daily", [])),
+                            "copy_pipelines": payload.get("copy_pipelines", {}),
                             "generated_at": payload["meta"]["generated_at"],
                         },
                         ensure_ascii=False,
@@ -759,7 +1002,11 @@ class Handler(BaseHTTPRequestHandler):
 def self_test() -> int:
     raw = {
         "safety": {"is_read_only": 1, "server_time": "2026-07-20 12:00:00", "session_time_zone": "+08:00"},
-        "copy_status_counts": [{"status": 1, "n": 1}],
+        "copy_status_counts": [
+            {"level": 0, "status": 1, "n": 1},
+            {"level": 1, "status": 1, "n": 1},
+            {"level": 2, "status": 2, "n": 2},
+        ],
         "insight_max_dt": "2026-07-20",
         "logs": [
             {
@@ -799,17 +1046,67 @@ def self_test() -> int:
                 "source_rows": 1,
             }
         ],
+        "extra_logs": [
+            {
+                "id": 2,
+                "level": 1,
+                "new_id": "3001",
+                "origin_id": "2901",
+                "account_id": "act_2",
+                "queue_id": 8,
+                "user_id": 43,
+                "user_name": "测试操作人",
+                "app_id": 10,
+                "app_name": "测试产品二",
+                "content_id": "99",
+                "created_at": "2026-07-20 09:00:00",
+                "rule_name": "Ad Set 规则",
+            }
+        ],
+        "extra_mapping": [
+            {
+                "level": 1,
+                "entity_id": "3001",
+                "campaign_id": "1002",
+                "campaign_name": "父 Campaign",
+                "adset_id": "3001",
+                "adset_name": "测试 Ad Set",
+                "ad_id": "4001",
+                "ad_name": "测试 Ad",
+                "product": "测试产品二",
+                "country": "JP",
+                "language": "ja",
+            }
+        ],
+        "extra_daily": [
+            {
+                "ad_id": "4001",
+                "dt": "2026-07-20",
+                "spend": 4,
+                "af_revenue0": 1,
+                "af_installs": 3,
+                "impressions": 50,
+                "clicks": 5,
+                "source_rows": 1,
+            }
+        ],
     }
     payload = build_payload(raw)
     assert payload["meta"]["today"] == "2026-07-20"
     assert payload["campaigns"][0]["user_label"] == "测试用户（ID 42）"
     assert payload["daily"][0]["spend"] == 10
     assert payload["copy_pipeline"]["terminal_success_rate"] == 1.0
+    assert payload["copy_pipelines"]["1"]["success"] == 1
+    assert payload["copy_pipelines"]["2"]["failed"] == 2
+    assert payload["extra_entities"][0]["entity_name"] == "测试 Ad Set"
+    assert payload["extra_daily"][0]["spend"] == 4
     wire = encode_wire_payload(payload)
     assert wire["v"] == 2
     assert wire["c"][0][CAMPAIGN_FIELDS.index("user_label")] == "测试用户（ID 42）"
     assert wire["d"][0][DAILY_FIELDS.index("spend")] == 10
-    print(json.dumps({"ok": True, "wire_version": 2, "campaigns": 1, "daily_rows": 1}))
+    assert wire["x"][0][EXTRA_ENTITY_FIELDS.index("entity_id")] == "3001"
+    assert wire["xd"][0][EXTRA_DAILY_FIELDS.index("spend")] == 4
+    print(json.dumps({"ok": True, "wire_version": 2, "campaigns": 1, "extra_entities": 1, "daily_rows": 2}))
     return 0
 
 

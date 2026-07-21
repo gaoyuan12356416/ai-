@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%23172033%22/><path d=%22M18 44V31h8v13zm11 0V21h8v23zm11 0V12h8v32z%22 fill=%22%23fff%22/></svg>">
-<title>广告规则复制 Campaign 效果报表</title>
+<title>广告规则复制效果报表</title>
 <script>window.__campaignCopyDataPromise=fetch('./api/data',{cache:'default',credentials:'same-origin'});</script>
 <style>
 :root{--bg:#f5f7fb;--panel:#fff;--line:#dce3ec;--text:#1d2430;--muted:#667085;--blue:#2357a5;--teal:#0f766e;--green:#07823f;--orange:#b75d00;--red:#c62828;--purple:#6d45a8;--shadow:0 1px 2px rgba(16,24,40,.06)}
@@ -23,7 +23,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)}
 .level-bar{margin-bottom:12px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .loading-panel{margin-bottom:12px;padding:14px 16px;display:flex;align-items:center;gap:11px;color:#344054}.loading-panel[hidden]{display:none}.spinner{width:18px;height:18px;border:2px solid #cbd5e1;border-top-color:var(--blue);border-radius:50%;animation:spin .75s linear infinite;flex:0 0 auto}@keyframes spin{to{transform:rotate(360deg)}}
-.seg{display:flex;gap:6px;flex-wrap:wrap}.seg button{height:32px;border:1px solid #cbd5e1;background:#fff;border-radius:7px;padding:0 12px;cursor:pointer;font-weight:700;color:#253044}.seg button.active{background:#2f6bc0;border-color:#2f6bc0;color:#fff}
+.seg{display:flex;gap:8px;flex-wrap:wrap}.seg button{min-height:36px;border:1px solid #cbd5e1;background:#fff;border-radius:7px;padding:5px 12px;cursor:pointer;font-weight:700;color:#253044}.seg button.active{background:#2f6bc0;border-color:#2f6bc0;color:#fff}.seg .level-count{display:block;font-size:10px;font-weight:500;opacity:.8;margin-top:2px}
 .controls{padding:13px;display:grid;grid-template-columns:repeat(6,minmax(150px,1fr));gap:10px;align-items:end}
 .field{min-width:0}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.field input,.field select{width:100%;height:34px;border:1px solid #c8d1de;border-radius:7px;background:#fff;padding:0 9px;color:var(--text);min-width:0}.field input[type=number]{text-align:right}
 .preset{display:flex;gap:6px;flex-wrap:wrap}.preset button{height:28px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:999px;padding:0 9px;cursor:pointer;color:#253044}.preset button.active{background:#dbeafe;border-color:#7db0f2;color:#174a8b}
@@ -40,7 +40,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
 <header>
   <div class="head">
     <div class="title">
-      <h1>广告规则复制 Campaign 效果报表</h1>
+      <h1>广告规则复制效果报表</h1>
       <div id="metaLine">加载中...</div>
     </div>
     <div class="head-actions">
@@ -51,7 +51,11 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
 </header>
 <main class="wrap">
   <section class="panel level-bar">
-    <div class="seg"><button class="active" type="button">复制成功 Campaign</button></div>
+    <div class="seg" id="levelTabs" aria-label="复制层级">
+      <button class="active" type="button" data-level="0">Campaign<span class="level-count">读取中</span></button>
+      <button type="button" data-level="1">Ad Set<span class="level-count">读取中</span></button>
+      <button type="button" data-level="2">Ad<span class="level-count">读取中</span></button>
+    </div>
     <div class="muted" id="scopeHint"></div>
   </section>
 
@@ -111,16 +115,24 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const response = await window.__campaignCopyDataPromise;
   if(!response.ok)throw new Error('report data request failed: HTTP '+response.status);
   document.getElementById('loadingTitle').textContent='缓存已到达，正在整理报表...';
-  let DATA = await response.json();
-  if(DATA.v===2){
-    const inflate=(fields,rows)=>rows.map(values=>Object.fromEntries(fields.map((field,index)=>[field,values[index]])));
-    DATA={meta:DATA.m||{},copy_pipeline:DATA.p||{},campaigns:inflate(DATA.cf||[],DATA.c||[]),daily:inflate(DATA.df||[],DATA.d||[])};
-  }
+  const inflate=(fields,rows)=>rows.map(values=>Object.fromEntries(fields.map((field,index)=>[field,values[index]])));
+  const RAW = await response.json();
+  const meta = RAW.v===2 ? RAW.m||{} : RAW.meta||{};
+  const baseCampaigns = RAW.v===2 ? inflate(RAW.cf||[],RAW.c||[]) : RAW.campaigns||[];
+  const baseDaily = RAW.v===2 ? inflate(RAW.df||[],RAW.d||[]) : RAW.daily||[];
+  const extraEntities = RAW.v===2 ? inflate(RAW.xf||[],RAW.x||[]) : RAW.extra_entities||[];
+  const extraDaily = RAW.v===2 ? inflate(RAW.xdf||[],RAW.xd||[]) : RAW.extra_daily||[];
+  const pipelines = RAW.v===2 ? RAW.lp||{'0':RAW.p||{}} : RAW.copy_pipelines||{'0':RAW.copy_pipeline||{}};
+  const allEntities = baseCampaigns.map(row=>({...row,level:0,entity_key:'0:'+row.campaign_id,entity_id:row.campaign_id,entity_name:row.campaign_name,origin_entity_id:row.origin_campaign_id,adset_id:'',adset_name:'',ad_id:'',ad_name:''})).concat(extraEntities);
+  const allDaily = baseDaily.map(row=>({...row,level:0,entity_key:'0:'+row.campaign_id,entity_id:row.campaign_id})).concat(extraDaily);
   performance.mark('campaign-copy-data-ready');
-  const campaigns = DATA.campaigns || [];
-  const dailyRows = DATA.daily || [];
-  const meta = DATA.meta || {};
-  const pipeline = DATA.copy_pipeline || {};
+  let campaigns = [];
+  let dailyRows = [];
+  let pipeline = {};
+  let allCopyStart = '';
+  let allCopyEnd = '';
+  let allStatStart = '';
+  let allStatEnd = '';
   const get = id => document.getElementById(id);
   const num = value => Number(value || 0);
   const text = value => String(value == null ? '' : value);
@@ -131,31 +143,37 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const ratio = value => value == null || !Number.isFinite(Number(value)) ? '—' : num(value).toFixed(3);
   const percent = value => value == null || !Number.isFinite(Number(value)) ? '—' : (num(value) * 100).toFixed(1) + '%';
   const roasClass = value => value == null ? '' : num(value) >= .5 ? 'good' : num(value) >= .35 ? 'mid' : 'bad';
-  const allCopyStart = campaigns.map(row => row.copy_date).filter(Boolean).sort()[0] || '';
-  const allCopyEnd = campaigns.map(row => row.copy_date).filter(Boolean).sort().slice(-1)[0] || '';
-  const allStatStart = dailyRows.map(row => row.dt).filter(Boolean).sort()[0] || '';
-  const allStatEnd = dailyRows.map(row => row.dt).filter(Boolean).sort().slice(-1)[0] || '';
-  const currentDate = meta.today || allStatEnd;
+  const currentDate = meta.today || '';
+  const levelInfo = {
+    '0':{name:'Campaign',newLabel:'新 Campaign',originLabel:'源 Campaign'},
+    '1':{name:'Ad Set',newLabel:'新 Ad Set',originLabel:'源 Ad Set'},
+    '2':{name:'Ad',newLabel:'新 Ad',originLabel:'源 Ad'}
+  };
   const additiveMetrics = ['impressions','clicks','installs','spend','purchase','revenue','af_installs','af_revenue0','af_revenue','iaa_revenue','source_rows'];
   const bandOrder = ['无统计行','有统计无消耗','ROAS < 0.20','0.20–0.35','0.35–0.50','ROAS ≥ 0.50'];
   const defaultDims = ['rule_label'];
   const defaultMetrics = ['campaign_count','spend','af_revenue0','af_d0_roas','af_installs','cpi','purchase','cpa'];
-  const state = {dims:[...defaultDims], metrics:[...defaultMetrics], sortKey:'spend', sortDir:-1, currentExportRows:[], renderTimer:0};
-  const dimensions = [
-    ['copy_date','复制日期'],['dt','统计日期'],['maturity_label','观察时长'],['rule_label','复制规则'],['product','投放产品'],['user_label','操作人'],
-    ['account_id','广告账户'],['campaign_id','新 Campaign'],['origin_campaign_id','源 Campaign'],
-    ['content_id','短剧 ID'],['performance_band','效果区间']
-  ];
+  const state = {level:'0',dims:[...defaultDims], metrics:[...defaultMetrics], sortKey:'spend', sortDir:-1, currentExportRows:[], renderTimer:0};
+  let dimensions = [];
   const metrics = [
-    ['campaign_count','Campaign数','int'],['insight_campaigns','进入统计','int'],['spending_campaigns','有消耗','int'],
+    ['campaign_count','复制数','int'],['insight_campaigns','进入统计','int'],['spending_campaigns','有消耗','int'],
     ['spend','消耗','money'],['af_revenue0','AF D0收入','money'],['af_d0_roas','AF D0 ROAS','ratio'],
     ['af_installs','AF安装','int'],['cpi','CPI','money'],['purchase','付费','int'],['cpa','CPA','money'],
     ['impressions','曝光','int'],['clicks','点击','int'],['ctr','CTR','percent']
   ];
-  const dimLabels = Object.fromEntries(dimensions);
+  let dimLabels = {};
   const metricLabels = Object.fromEntries(metrics.map(item => [item[0], item[1]]));
   const metricFormats = Object.fromEntries(metrics.map(item => [item[0], item[2]]));
 
+  function currentLevel(){return levelInfo[state.level]||levelInfo['0']}
+  function buildDimensions(){
+    const info=currentLevel();
+    dimensions=[['copy_date','复制日期'],['dt','统计日期'],['maturity_label','观察时长'],['rule_label','复制规则'],['product','投放产品'],['user_label','操作人'],['account_id','广告账户'],['entity_id',info.newLabel],['origin_entity_id',info.originLabel]];
+    if(state.level!=='0')dimensions.push(['campaign_id','所属 Campaign']);
+    if(state.level==='2')dimensions.push(['adset_id','所属 Ad Set']);
+    dimensions.push(['content_id','短剧 ID'],['performance_band','效果区间']);
+    dimLabels=Object.fromEntries(dimensions);metricLabels.campaign_count=info.name+'数';
+  }
   function unique(field){return [...new Set(campaigns.map(row => text(row[field])).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'zh-Hans-CN'))}
   function fillSelect(id,label,values){get(id).innerHTML='<option value="">'+label+'</option>'+values.map(value=>'<option value="'+safe(value)+'">'+safe(value)+'</option>').join('')}
   function addDays(dateText,delta){const parts=dateText.split('-').map(Number),date=new Date(Date.UTC(parts[0],parts[1]-1,parts[2]+delta));return date.toISOString().slice(0,10)}
@@ -181,13 +199,13 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     get('dimensionChips').querySelectorAll('input').forEach(input=>input.onchange=()=>{
       state.dims=[...get('dimensionChips').querySelectorAll('input:checked')].map(item=>item.value);if(!state.dims.length)state.dims=['rule_label'];buildChips();renderTable(filteredRows());
     });
-    get('metricToggles').innerHTML=metrics.map(item=>'<label class="chip '+(state.metrics.includes(item[0])?'active':'')+'"><input type="checkbox" value="'+item[0]+'" '+(state.metrics.includes(item[0])?'checked':'')+'>'+item[1]+'</label>').join('');
+    get('metricToggles').innerHTML=metrics.map(item=>'<label class="chip '+(state.metrics.includes(item[0])?'active':'')+'"><input type="checkbox" value="'+item[0]+'" '+(state.metrics.includes(item[0])?'checked':'')+'>'+(metricLabels[item[0]]||item[1])+'</label>').join('');
     get('metricToggles').querySelectorAll('input').forEach(input=>input.onchange=()=>{
       state.metrics=[...get('metricToggles').querySelectorAll('input:checked')].map(item=>item.value);if(!state.metrics.length)state.metrics=['campaign_count','spend','af_revenue0','af_d0_roas'];buildChips();renderTable(filteredRows());
     });
   }
 
-  function searchable(row){return [row.dt,row.copy_date,row.age_bucket,row.performance_band,row.campaign_id,row.campaign_name,row.origin_campaign_id,row.account_id,row.content_id,row.rule_label,row.product,row.user_id,row.user_name,row.user_label,row.countries,row.languages].map(normalized).join(' ')}
+  function searchable(row){return [row.dt,row.copy_date,row.age_bucket,row.performance_band,row.entity_id,row.entity_name,row.origin_entity_id,row.campaign_id,row.campaign_name,row.adset_id,row.adset_name,row.ad_id,row.ad_name,row.account_id,row.content_id,row.rule_label,row.product,row.user_id,row.user_name,row.user_label,row.countries,row.languages].map(normalized).join(' ')}
   function copyFilteredCampaigns(){
     const start=get('copyStartDate').value,end=get('copyEndDate').value,rule=get('ruleFilter').value,product=get('productFilter').value,user=get('userFilter').value,account=get('accountFilter').value,attribution=get('attributionFilter').value,maturity=get('maturityFilter').value;
     return campaigns.filter(row=>{
@@ -203,9 +221,9 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   function effectFromDailyFact(fact){const effect=emptyEffect();effect.fact_rows=1;effect.stat_days=1;additiveMetrics.forEach(metric=>effect[metric]=num(fact[metric]));return finalizeEffect(effect)}
   function performanceBand(row){if(!row.has_insight)return '无统计行';if(num(row.spend)<=0)return '有统计无消耗';const value=num(row.af_d0_roas);if(value<.2)return 'ROAS < 0.20';if(value<.35)return '0.20–0.35';if(value<.5)return '0.35–0.50';return 'ROAS ≥ 0.50'}
   function filteredRows(){
-    const metadata=copyFilteredCampaigns(),ids=new Set(metadata.map(row=>text(row.campaign_id))),start=get('statStartDate').value,end=get('statEndDate').value,byCampaign=new Map();
-    dailyRows.forEach(fact=>{const id=text(fact.campaign_id),day=text(fact.dt);if(!ids.has(id)||start&&day<start||end&&day>end)return;if(!byCampaign.has(id))byCampaign.set(id,{...emptyEffect(),_dates:new Set()});const agg=byCampaign.get(id);agg.fact_rows+=1;agg._dates.add(day);additiveMetrics.forEach(metric=>agg[metric]+=num(fact[metric]));});
-    const rows=metadata.map(campaign=>{const effect=byCampaign.get(text(campaign.campaign_id))||{...emptyEffect(),_dates:new Set()};effect.stat_days=effect._dates.size;delete effect._dates;const row={...campaign,...finalizeEffect(effect)};row.has_insight=row.fact_rows>0;row.performance_band=performanceBand(row);return row});
+    const metadata=copyFilteredCampaigns(),ids=new Set(metadata.map(row=>text(row.entity_key))),start=get('statStartDate').value,end=get('statEndDate').value,byEntity=new Map();
+    dailyRows.forEach(fact=>{const id=text(fact.entity_key),day=text(fact.dt);if(!ids.has(id)||start&&day<start||end&&day>end)return;if(!byEntity.has(id))byEntity.set(id,{...emptyEffect(),_dates:new Set()});const agg=byEntity.get(id);agg.fact_rows+=1;agg._dates.add(day);additiveMetrics.forEach(metric=>agg[metric]+=num(fact[metric]));});
+    const rows=metadata.map(entity=>{const effect=byEntity.get(text(entity.entity_key))||{...emptyEffect(),_dates:new Set()};effect.stat_days=effect._dates.size;delete effect._dates;const row={...entity,...finalizeEffect(effect)};row.has_insight=row.fact_rows>0;row.performance_band=performanceBand(row);return row});
     const band=get('bandFilter').value,maturity=get('maturityFilter').value,minSpend=num(get('minSpend').value),minRoas=get('minRoas').value===''?null:num(get('minRoas').value),maxCpi=get('maxCpi').value===''?null:num(get('maxCpi').value);
     return rows.filter(row=>{if(band&&row.performance_band!==band)return false;if(maturity==='insight'&&!row.has_insight)return false;if(maturity==='spending'&&num(row.spend)<=0)return false;if(num(row.spend)<minSpend)return false;if(minRoas!==null&&(row.af_d0_roas==null||num(row.af_d0_roas)<minRoas))return false;if(maxCpi!==null&&(row.cpi==null||num(row.cpi)>maxCpi))return false;return true});
   }
@@ -213,14 +231,14 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   function emptyAgg(){return {campaign_count:0,insight_campaigns:0,spending_campaigns:0,spend:0,af_revenue0:0,af_revenue:0,af_installs:0,installs:0,purchase:0,revenue:0,iaa_revenue:0,impressions:0,clicks:0,source_rows:0,mapped_campaigns:0,attributed_campaigns:0}}
   function addAgg(agg,row){agg.campaign_count+=1;agg.insight_campaigns+=row.has_insight?1:0;agg.spending_campaigns+=num(row.spend)>0?1:0;additiveMetrics.forEach(metric=>agg[metric]+=num(row[metric]));agg.mapped_campaigns+=row.mapped?1:0;agg.attributed_campaigns+=num(row.queue_id)>0?1:0;return agg}
   function finalize(agg){agg.af_d0_roas=agg.spend?agg.af_revenue0/agg.spend:null;agg.af_total_roas=agg.spend?agg.af_revenue/agg.spend:null;agg.platform_roas=agg.spend?agg.revenue/agg.spend:null;agg.cpi=agg.af_installs?agg.spend/agg.af_installs:null;agg.cpa=agg.purchase?agg.spend/agg.purchase:null;agg.ctr=agg.impressions?agg.clicks/agg.impressions:null;return agg}
-  function aggregate(rows,dims){const map=new Map();rows.forEach(row=>{const key=dims.map(dim=>text(row[dim])||'未填').join('\u001f');if(!map.has(key)){const agg=emptyAgg();agg._campaignIds=new Set();dims.forEach(dim=>agg[dim]=text(row[dim])||'未填');map.set(key,agg)}const agg=map.get(key),campaignId=text(row.campaign_id);if(!agg._campaignIds.has(campaignId)){agg._campaignIds.add(campaignId);agg.campaign_count+=1;agg.insight_campaigns+=row.has_insight?1:0;agg.spending_campaigns+=num(row.spend)>0?1:0;agg.mapped_campaigns+=row.mapped?1:0;agg.attributed_campaigns+=num(row.queue_id)>0?1:0}additiveMetrics.forEach(metric=>agg[metric]+=num(row[metric]))});return [...map.values()].map(agg=>{delete agg._campaignIds;return finalize(agg)})}
+  function aggregate(rows,dims){const map=new Map();rows.forEach(row=>{const key=dims.map(dim=>text(row[dim])||'未填').join('\u001f');if(!map.has(key)){const agg=emptyAgg();agg._entityIds=new Set();dims.forEach(dim=>agg[dim]=text(row[dim])||'未填');map.set(key,agg)}const agg=map.get(key),entityKey=text(row.entity_key);if(!agg._entityIds.has(entityKey)){agg._entityIds.add(entityKey);agg.campaign_count+=1;agg.insight_campaigns+=row.has_insight?1:0;agg.spending_campaigns+=num(row.spend)>0?1:0;agg.mapped_campaigns+=row.mapped?1:0;agg.attributed_campaigns+=num(row.queue_id)>0?1:0}additiveMetrics.forEach(metric=>agg[metric]+=num(row[metric]))});return [...map.values()].map(agg=>{delete agg._entityIds;return finalize(agg)})}
   function fmt(metric,value){const format=metricFormats[metric]||'int';if(format==='money')return value==null?'—':money(value);if(format==='ratio')return ratio(value);if(format==='percent')return percent(value);return integer(value)}
 
   function pivotSourceRows(rows){
     if(!state.dims.includes('dt'))return rows;
-    const selectedById=new Map(rows.map(row=>[text(row.campaign_id),row])),start=get('statStartDate').value,end=get('statEndDate').value,detail=[],emittedIds=new Set();
-    dailyRows.forEach(fact=>{const id=text(fact.campaign_id),day=text(fact.dt),campaign=selectedById.get(id);if(!campaign||start&&day<start||end&&day>end)return;detail.push({...campaign,...effectFromDailyFact(fact),dt:day,has_insight:true});emittedIds.add(id)});
-    rows.forEach(campaign=>{const id=text(campaign.campaign_id);if(!emittedIds.has(id))detail.push({...campaign,...finalizeEffect(emptyEffect()),dt:'无统计日期（无统计行）',has_insight:false})});
+    const selectedById=new Map(rows.map(row=>[text(row.entity_key),row])),start=get('statStartDate').value,end=get('statEndDate').value,detail=[],emittedIds=new Set();
+    dailyRows.forEach(fact=>{const id=text(fact.entity_key),day=text(fact.dt),entity=selectedById.get(id);if(!entity||start&&day<start||end&&day>end)return;detail.push({...entity,...effectFromDailyFact(fact),dt:day,has_insight:true});emittedIds.add(id)});
+    rows.forEach(entity=>{const id=text(entity.entity_key);if(!emittedIds.has(id))detail.push({...entity,...finalizeEffect(emptyEffect()),dt:'无统计日期（无统计行）',has_insight:false})});
     return detail;
   }
 
@@ -229,7 +247,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     const items=[
       ['复制成功',integer(total.campaign_count),'规则归因 '+integer(attributed)+'｜业务映射 '+integer(mapped),''],
       ['进入效果统计',integer(total.insight_campaigns),'覆盖率 '+percent(coverage),''],
-      ['统计期消耗',money(total.spend),'有消耗 Campaign '+integer(total.spending_campaigns),''],
+      ['统计期消耗',money(total.spend),'有消耗 '+currentLevel().name+' '+integer(total.spending_campaigns),''],
       ['统计期 AF D0收入',money(total.af_revenue0),'按数据统计日期 dt 汇总',''],
       ['AF D0 ROAS',ratio(total.af_d0_roas),'收入 / 消耗',roasClass(total.af_d0_roas)],
       ['AF安装',integer(total.af_installs),'统计日期窗口',''],
@@ -240,34 +258,35 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   }
 
   function renderTrend(rows){
-    const ids=new Set(rows.map(row=>text(row.campaign_id))),map=new Map(),start=get('statStartDate').value,end=get('statEndDate').value;
-    dailyRows.forEach(row=>{const day=text(row.dt);if(!ids.has(text(row.campaign_id))||start&&day<start||end&&day>end)return;if(!map.has(day))map.set(day,{dt:day,spend:0,revenue:0,installs:0,purchase:0});const agg=map.get(day);agg.spend+=num(row.spend);agg.revenue+=num(row.af_revenue0);agg.installs+=num(row.af_installs);agg.purchase+=num(row.purchase)});
+    const ids=new Set(rows.map(row=>text(row.entity_key))),map=new Map(),start=get('statStartDate').value,end=get('statEndDate').value;
+    dailyRows.forEach(row=>{const day=text(row.dt);if(!ids.has(text(row.entity_key))||start&&day<start||end&&day>end)return;if(!map.has(day))map.set(day,{dt:day,spend:0,revenue:0,installs:0,purchase:0});const agg=map.get(day);agg.spend+=num(row.spend);agg.revenue+=num(row.af_revenue0);agg.installs+=num(row.af_installs);agg.purchase+=num(row.purchase)});
     const daily=[...map.values()].sort((a,b)=>a.dt.localeCompare(b.dt));if(!daily.length){get('trendChart').innerHTML='<div class="empty">当前筛选无按日效果数据</div>';return}
     const width=980,height=220,pad=34,step=(width-pad*2)/Math.max(daily.length,1),maxValue=Math.max(...daily.flatMap(item=>[item.spend,item.revenue]),1);
     const bars=daily.map((item,index)=>{const center=pad+index*step+step/2,barWidth=Math.max(12,Math.min(54,step*.25)),spendHeight=(height-pad*2)*item.spend/maxValue,revenueHeight=(height-pad*2)*item.revenue/maxValue,spendY=height-pad-spendHeight,revenueY=height-pad-revenueHeight,roas=item.spend?item.revenue/item.spend:null,labelY=Math.max(14,Math.min(spendY,revenueY)-6),labelColor=roas==null?'#667085':roas>=.5?'#07823f':roas>=.35?'#b75d00':'#c62828';return '<rect x="'+(center-barWidth-2)+'" y="'+spendY+'" width="'+barWidth+'" height="'+spendHeight+'" fill="#2357a5"><title>'+item.dt+' 消耗 '+money(item.spend)+'</title></rect><rect x="'+(center+2)+'" y="'+revenueY+'" width="'+barWidth+'" height="'+revenueHeight+'" fill="#0f766e"><title>'+item.dt+' AF D0收入 '+money(item.revenue)+'</title></rect><text x="'+center+'" y="'+(height-10)+'" text-anchor="middle" font-size="11" fill="#667085">'+item.dt.slice(5)+'</text><text x="'+center+'" y="'+labelY+'" text-anchor="middle" font-size="11" fill="'+labelColor+'">'+ratio(roas)+'</text>'}).join('');
-    get('trendChart').innerHTML='<svg viewBox="0 0 '+width+' '+height+'" width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label="复制 Campaign 按日消耗、AF D0收入与ROAS趋势"><line x1="'+pad+'" y1="'+(height-pad)+'" x2="'+(width-pad)+'" y2="'+(height-pad)+'" stroke="#cfd8e5"/>'+bars+'</svg><div class="muted chart-note">蓝色=消耗，绿色=AF D0收入，柱顶数字=AF D0 ROAS</div>';
+    get('trendChart').innerHTML='<svg viewBox="0 0 '+width+' '+height+'" width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label="复制 '+currentLevel().name+' 按日消耗、AF D0收入与ROAS趋势"><line x1="'+pad+'" y1="'+(height-pad)+'" x2="'+(width-pad)+'" y2="'+(height-pad)+'" stroke="#cfd8e5"/>'+bars+'</svg><div class="muted chart-note">蓝色=消耗，绿色=AF D0收入，柱顶数字=AF D0 ROAS</div>';
   }
 
   function rankBlock(rows,dim,title,attributedOnly=false){
     const source=attributedOnly?rows.filter(row=>num(row.queue_id)>0):rows,data=aggregate(source,[dim]).sort((a,b)=>b.spend-a.spend||b.campaign_count-a.campaign_count).slice(0,8),max=Math.max(...data.map(item=>item.spend),1);
-    const body=data.map(item=>'<div class="rank-row"><div><div class="rank-name" title="'+safe(item[dim])+'">'+safe(item[dim])+'</div><div class="muted">'+integer(item.campaign_count)+' Campaign｜'+integer(item.spending_campaigns)+' 有消耗</div><div class="bar"><div class="fill" style="width:'+Math.max(3,item.spend/max*100)+'%"></div></div></div><div class="nowrap rank-value '+roasClass(item.af_d0_roas)+'">'+money(item.spend)+'<br>ROAS '+ratio(item.af_d0_roas)+'</div></div>').join('')||'<div class="empty">无数据</div>';
+    const body=data.map(item=>'<div class="rank-row"><div><div class="rank-name" title="'+safe(item[dim])+'">'+safe(item[dim])+'</div><div class="muted">'+integer(item.campaign_count)+' '+currentLevel().name+'｜'+integer(item.spending_campaigns)+' 有消耗</div><div class="bar"><div class="fill" style="width:'+Math.max(3,item.spend/max*100)+'%"></div></div></div><div class="nowrap rank-value '+roasClass(item.af_d0_roas)+'">'+money(item.spend)+'<br>ROAS '+ratio(item.af_d0_roas)+'</div></div>').join('')||'<div class="empty">无数据</div>';
     return '<div class="panel rank"><h3>'+title+'</h3>'+body+'</div>';
   }
-  function renderRankings(rows){get('rankings').innerHTML=rankBlock(rows,'rule_label','已归因规则排行',true)+rankBlock(rows,'product','投放产品排行')+rankBlock(rows,'user_label','操作人排行')+rankBlock(rows,'account_id','账户排行')+rankBlock(rows,'campaign_id','Campaign排行')}
+  function renderRankings(rows){get('rankings').innerHTML=rankBlock(rows,'rule_label','已归因规则排行',true)+rankBlock(rows,'product','投放产品排行')+rankBlock(rows,'user_label','操作人排行')+rankBlock(rows,'account_id','账户排行')+rankBlock(rows,'entity_id',currentLevel().name+'排行')}
 
   function renderTable(rows){
     const sourceRows=pivotSourceRows(rows),keyword=normalized(get('keyword').value),hasDimensionMatch=keyword&&state.dims.some(dim=>sourceRows.some(row=>normalized(row[dim]).includes(keyword))),searchedRows=keyword?sourceRows.filter(row=>hasDimensionMatch?state.dims.some(dim=>normalized(row[dim]).includes(keyword)):searchable(row).includes(keyword)):sourceRows,allowedSortKeys=new Set([...state.dims,...state.metrics]);if(!allowedSortKeys.has(state.sortKey)){state.sortKey=state.metrics.includes('spend')?'spend':state.dims[0];state.sortDir=state.dims.includes(state.sortKey)?1:-1}const data=aggregate(searchedRows,state.dims);data.sort((a,b)=>{const av=a[state.sortKey],bv=b[state.sortKey];if(typeof av==='string'||typeof bv==='string')return text(av).localeCompare(text(bv),'zh-Hans-CN')*state.sortDir;return (num(av)-num(bv))*state.sortDir});
     const shown=data.slice(0,1200),headers=state.dims.map(dim=>'<th class="dim" data-key="'+dim+'">'+safe(dimLabels[dim]||dim)+'</th>').join('')+state.metrics.map(metric=>'<th data-key="'+metric+'">'+safe(metricLabels[metric]||metric)+'</th>').join('');
     const body=shown.map(row=>'<tr>'+state.dims.map(dim=>'<td class="dim">'+safe(row[dim])+'</td>').join('')+state.metrics.map(metric=>'<td class="'+(metric==='af_d0_roas'?roasClass(row[metric]):'')+'">'+fmt(metric,row[metric])+'</td>').join('')+'</tr>').join('');
-    const noStatRows=state.dims.includes('dt')?sourceRows.filter(row=>row.dt==='无统计日期（无统计行）').length:0,searchHint=keyword?'，表内搜索命中 '+integer(searchedRows.length)+' 条'+(state.dims.includes('dt')?' Campaign-日':' Campaign'):'';
-    get('tableHint').textContent='筛选后 '+integer(rows.length)+' 条 Campaign'+(state.dims.includes('dt')?'，统计明细 '+integer(sourceRows.length)+' 条 Campaign-日（含 '+integer(noStatRows)+' 条无统计日期；每日 Campaign 数不可跨日相加）':'')+searchHint+'，聚合 '+integer(data.length)+' 行，当前展示 '+integer(shown.length)+' 行';
+    const unit=currentLevel().name,noStatRows=state.dims.includes('dt')?sourceRows.filter(row=>row.dt==='无统计日期（无统计行）').length:0,searchHint=keyword?'，表内搜索命中 '+integer(searchedRows.length)+' 条'+(state.dims.includes('dt')?' '+unit+'-日':' '+unit):'';
+    get('tableHint').textContent='筛选后 '+integer(rows.length)+' 条 '+unit+(state.dims.includes('dt')?'，统计明细 '+integer(sourceRows.length)+' 条 '+unit+'-日（含 '+integer(noStatRows)+' 条无统计日期；每日 '+unit+' 数不可跨日相加）':'')+searchHint+'，聚合 '+integer(data.length)+' 行，当前展示 '+integer(shown.length)+' 行';
     get('pivotTable').innerHTML='<table><thead><tr>'+headers+'</tr></thead><tbody>'+(body||'<tr><td class="empty" colspan="30">无数据</td></tr>')+'</tbody></table>';
     get('pivotTable').querySelectorAll('th').forEach(header=>header.onclick=()=>{const key=header.dataset.key;if(state.sortKey===key)state.sortDir*=-1;else{state.sortKey=key;state.sortDir=state.dims.includes(key)?1:-1}renderTable(filteredRows())});state.currentExportRows=data;
   }
 
   function renderStatus(total,rows){
     const unattributed=total.campaign_count-total.attributed_campaigns,noInsight=total.campaign_count-total.insight_campaigns,namedOperators=rows.filter(row=>text(row.user_name)).length,mature24=rows.filter(row=>num(row.age_hours)>=24).length,young6=rows.filter(row=>num(row.age_hours)<6).length,copyWindow=(get('copyStartDate').value||'最早')+' 至 '+(get('copyEndDate').value||'最新'),statWindow=(get('statStartDate').value||'最早')+' 至 '+(get('statEndDate').value||'最新');
-    get('validationLine').innerHTML='<strong>数据状态：</strong>已关联自动复制规则 '+integer(total.attributed_campaigns)+'/'+integer(total.campaign_count)+'，复制触发来源未归因 '+integer(unattributed)+'；业务映射 '+integer(total.mapped_campaigns)+'/'+integer(total.campaign_count)+'；操作人姓名 '+integer(namedOperators)+'/'+integer(total.campaign_count)+'（未配置 '+integer(total.campaign_count-namedOperators)+'）；统计期无效果数据 '+integer(noInsight)+'；观察 ≥24h '+integer(mature24)+'，不足6h '+integer(young6)+'。<br><strong>日期口径：</strong>复制日期 '+safe(copyWindow)+' 仅筛选复制批次；所有消耗、收入、安装、付费及效率指标按数据统计日期 dt '+safe(statWindow)+' 汇总。AF D0 ROAS = SUM(AF D0收入) / SUM(消耗)。<br><strong>归因说明：</strong><code>queue_id=0</code> 仅表示日志未绑定 ads_campaign_auto_rules，不能据此判定为非自动复制。来源：'+safe(meta.source||'')+'。';
+    const unit=currentLevel().name,relation=state.level==='0'?'new_id = campaign_id，并按该 Campaign 下的 Ad 汇总':state.level==='1'?'new_id = adset_id，并按该 Ad Set 下的 Ad 汇总':'new_id = ad_id，按该 Ad 精确汇总';
+    get('validationLine').innerHTML='<strong>'+unit+' 复制状态：</strong>成功 '+integer(pipeline.success)+'，失败 '+integer(pipeline.failed)+'，运行中 '+integer(pipeline.running)+'；已关联自动复制规则 '+integer(total.attributed_campaigns)+'/'+integer(total.campaign_count)+'，复制触发来源未归因 '+integer(unattributed)+'；业务映射 '+integer(total.mapped_campaigns)+'/'+integer(total.campaign_count)+'；操作人姓名 '+integer(namedOperators)+'/'+integer(total.campaign_count)+'（未配置 '+integer(total.campaign_count-namedOperators)+'）；统计期无效果数据 '+integer(noInsight)+'；观察 ≥24h '+integer(mature24)+'，不足6h '+integer(young6)+'。<br><strong>效果关联：</strong>'+safe(relation)+'。复制日期 '+safe(copyWindow)+' 仅筛选复制批次；所有消耗、收入、安装、付费及效率指标按数据统计日期 dt '+safe(statWindow)+' 汇总。AF D0 ROAS = SUM(AF D0收入) / SUM(消耗)。<br><strong>归因说明：</strong><code>queue_id=0</code> 仅表示日志未绑定 ads_campaign_auto_rules，不能据此判定为非自动复制。来源：'+safe(meta.source||'')+'。';
   }
 
   function render(){const rows=filteredRows(),total=finalize(rows.reduce((agg,row)=>addAgg(agg,row),emptyAgg()));renderKpis(total,rows);renderTrend(rows);renderRankings(rows);renderTable(rows);renderStatus(total,rows)}
@@ -280,18 +299,28 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   function exportCsv(){
     const dims=state.dims,selectedMetrics=state.metrics,headers=[...dims.map(dim=>dimLabels[dim]||dim),...selectedMetrics.map(metric=>metricLabels[metric]||metric)],cell=value=>'"'+text(value).replace(/"/g,'""')+'"',lines=[headers.map(cell).join(',')];
     state.currentExportRows.forEach(row=>lines.push([...dims.map(dim=>row[dim]),...selectedMetrics.map(metric=>row[metric])].map(cell).join(',')));
-    const csv=String.fromCharCode(65279)+lines.join(String.fromCharCode(13,10)),blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='campaign-copy-performance-'+(meta.generated_at||'report').replace(/[-: ]/g,'')+'.csv';document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);
+    const csv=String.fromCharCode(65279)+lines.join(String.fromCharCode(13,10)),blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='campaign-copy-'+currentLevel().name.toLowerCase().replace(' ','-')+'-performance-'+(meta.generated_at||'report').replace(/[-: ]/g,'')+'.csv';document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);
+  }
+
+  function updateLevelTabs(){
+    get('levelTabs').querySelectorAll('button').forEach(button=>{const level=button.dataset.level,p=pipelines[level]||{};button.classList.toggle('active',level===state.level);button.querySelector('.level-count').textContent='成功 '+integer(p.success)+' · 失败 '+integer(p.failed)+(num(p.running)?' · 运行 '+integer(p.running):'')});
+  }
+
+  function applyLevel(level){
+    state.level=String(level);campaigns=allEntities.filter(row=>String(row.level)===state.level);dailyRows=allDaily.filter(row=>String(row.level)===state.level);pipeline=pipelines[state.level]||{};
+    allCopyStart=campaigns.map(row=>row.copy_date).filter(Boolean).sort()[0]||'';allCopyEnd=campaigns.map(row=>row.copy_date).filter(Boolean).sort().slice(-1)[0]||'';allStatStart=dailyRows.map(row=>row.dt).filter(Boolean).sort()[0]||'';allStatEnd=dailyRows.map(row=>row.dt).filter(Boolean).sort().slice(-1)[0]||'';
+    campaigns.forEach(row=>{row.maturity_label=num(row.age_hours)>=24?'≥24h':num(row.age_hours)>=6?'6–24h':'<6h'});state.dims=[...defaultDims];state.sortKey='spend';state.sortDir=-1;buildDimensions();updateLevelTabs();
+    fillSelect('ruleFilter','全部规则',unique('rule_label'));fillSelect('productFilter','全部产品',unique('product'));fillSelect('userFilter','全部操作人',unique('user_label'));fillSelect('accountFilter','全部账户',unique('account_id'));fillSelect('bandFilter','全部效果区间',bandOrder);
+    setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
+    const generated=meta.generated_at||'',copyStart=allCopyStart||'无成功样本',copyEnd=allCopyEnd||'无成功样本',statStart=allStatStart||'无效果数据',statEnd=allStatEnd||'无效果数据';
+    get('metaLine').textContent=currentLevel().name+'｜复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
+    get('scopeHint').textContent='每15分钟后台自动刷新｜platform=0 · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
+    get('keyword').placeholder='搜索统计日期、规则、'+currentLevel().name+'、账户、短剧、产品、操作人...';render();
   }
 
   function init(){
-    fillSelect('ruleFilter','全部规则',unique('rule_label'));fillSelect('productFilter','全部产品',unique('product'));fillSelect('userFilter','全部操作人',unique('user_label'));fillSelect('accountFilter','全部账户',unique('account_id'));fillSelect('bandFilter','全部效果区间',bandOrder);
-    setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
-    const generated=meta.generated_at||'',copyStart=meta.copy_start||allCopyStart,copyEnd=meta.copy_end||allCopyEnd,statStart=meta.stat_start||allStatStart,statEnd=meta.stat_end||allStatEnd;
-    get('metaLine').textContent='复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
-    get('scopeHint').textContent='每15分钟后台自动刷新｜status=1 · platform=0 · level=0 · data_source=1｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
-    campaigns.forEach(row=>{row.maturity_label=num(row.age_hours)>=24?'≥24h':num(row.age_hours)>=6?'6–24h':'<6h'});
     ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>requestAnimationFrame(render))});
-    get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);render();
+    get('levelTabs').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>applyLevel(button.dataset.level)));get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);applyLevel('0');
     get('resetBtn').disabled=false;get('exportBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
   }
   init();
