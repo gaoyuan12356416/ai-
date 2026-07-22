@@ -1,0 +1,26 @@
+[Unit]
+Description=Hourly SocialKit TikTok account snapshot sync to ads_ai
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=HOME=/nonexistent
+Environment=MYSQL_HISTFILE=/dev/null
+EnvironmentFile=/etc/socialkit-tiktok-account-sync.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/socialkit-tiktok-account-sync-current/scripts/sync_socialkit_tiktok_accounts.py
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/lock
