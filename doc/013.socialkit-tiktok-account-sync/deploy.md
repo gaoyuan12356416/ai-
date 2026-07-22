@@ -65,4 +65,20 @@ systemctl list-timers socialkit-tiktok-account-sync.timer --no-pager
 
 ## 生产部署记录
 
-待部署后补充 commit、release、备份目录、DDL 回读、首次/二次同步和 timer 证据。
+生产发布已于 2026-07-22 完成：
+
+- 分支：`codex/socialkit-tiktok-account-sync-20260722`。
+- 发布 commit：`c57b8759be5147b27de231338d467f59624bbf24`。
+- 不可变 release：`/mnt/data-disk/ai-drama-material-service/releases/socialkit-tiktok-account-sync-c57b8759be51`，工作区无未提交修改。
+- stable symlink：`/root/drama_material_service/socialkit-tiktok-account-sync-current` 指向上述 release。
+- 部署前备份：`/mnt/data-disk/ai-drama-material-service/backups/socialkit-tiktok-account-sync-20260722T170814`。
+- `/etc/socialkit-tiktok-account-sync.env`：`root:root 0600`；真实凭据未进入 Git、release 或 journal。
+- DDL：写端确认 `DATABASE()='ads_ai'`、`@@read_only=0` 后建表；读端 63350 回读为 InnoDB、28 列、5 个索引。第一次 DDL 命令的只读前置检查因把 `CURRENT_USER()` 别名写成保留字而报语法错误，DDL 尚未执行；修正别名后一次成功。
+- source dry-run：24 个活动 TikTok 个号、23 个指标快照、1 个缺指标账号、24 个非空 Token；未输出账号名或 Token。
+- 首次同步：24 次 upsert、0 次停用，成功；源/目标逐字段内存对账 `missing=0`、`extra=0`、`field_mismatches={}`，对账包含 Token 但不输出原文。
+- 第二次同步：总行数仍为 24，24 次 upsert、0 次停用，幂等验证通过。
+- 63350 最终回读：24 个活动账号、23 个指标快照、24 个非空 Token、23 个正常 Token、1 个过期 Token、0 个重复账号、0 个 inactive Token 泄漏；缺指标账号为源账号 ID `122`。
+- 指标汇总快照：帖子 4、粉丝 16,371,601、播放/点赞/评论/收藏/分享当前均为 0；与源表逐字段一致。
+- timer：`enabled/active/waiting`，每小时第 5 分钟运行；启用后的首个计划时间为 `2026-07-22 18:05:00 CST`。
+- 回归：`drama-material-api.service` 保持 `active`，未重启；crontab SHA-256 仍为 `76320420da5fa8ffeb3ae4a28d14cf86c994ecbb8bb5560d73c274808ec6742e`。
+- 容量：release 位于数据盘（使用率 6%，剩余 177G）；根盘保持 86%，本次未向根盘复制仓库。

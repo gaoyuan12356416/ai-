@@ -12,8 +12,8 @@
 | 同步脚本与安全保护 | Codex | `scripts/sync_socialkit_tiktok_accounts.py` | 完成 |
 | 单元测试 | Codex | `scripts/test_sync_socialkit_tiktok_accounts.py` | 13/13 通过 |
 | DDL 与配置模板 | Codex | `doc/013.../*.sql`, `deploy/*.env.example` | 完成 |
-| systemd 小时任务 | Codex | `deploy/*.service|timer` | 完成，待部署 |
-| GitHub-first 生产部署 | Codex | commit/release/systemd/DDL | 待执行 |
+| systemd 小时任务 | Codex | `deploy/*.service|timer` | 完成并启用 |
+| GitHub-first 生产部署 | Codex | commit/release/systemd/DDL | 完成 |
 
 ## 编译 / 构建命令
 
@@ -31,4 +31,4 @@ git diff --check
 
 ## 完成记录
 
-2026-07-22 本地 Python 编译、13 个单元测试、diff check 和数据库密码扫描通过。待补充 GitHub commit、生产备份点和线上验证。
+2026-07-22 本地 Python 编译、13 个单元测试、diff check 和数据库密码扫描通过。代码 commit `c57b8759be5147b27de231338d467f59624bbf24` 已 push，并以精确 commit release 发布到数据盘；DDL、两次同步、逐字段对账、timer、密钥权限及主服务/crontab 回归均通过。生产证据和回滚点见 `deploy.md`。

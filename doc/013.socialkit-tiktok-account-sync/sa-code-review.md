@@ -2,7 +2,7 @@
 
 ## 结论
 
-通过本地代码评审，可以进入生产 dry-run 与受控部署。生产 DDL、首次同步和 timer 状态仍需按部署文档验证。
+通过代码评审与生产验收，已完成受控部署。运行时固定写入 63353/ads_ai，常规验收从 63350 只读回查；主 API 无需重启。
 
 ## 评审范围
 
@@ -26,3 +26,6 @@
 - `python scripts\test_sync_socialkit_tiktok_accounts.py`：13/13 通过。
 - `git diff --cached --check`：通过。
 - 变更集数据库密码扫描：未发现真实密码。
+- 精确 commit release 上复验编译、13 个单元测试、unit verify：通过。
+- 两次生产同步、源目标逐字段对账、timer 状态、日志/发布目录敏感值扫描：通过。
+- 生产 env 为 root:root 0600；inactive Token 泄漏计数为 0。
