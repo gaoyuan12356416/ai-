@@ -13,8 +13,8 @@
 | X 媒体上传与 Create Post 客户端 | Codex | `features/x_posts/` | 已完成 |
 | 账号锁内刷新与 canary 内部接口 | Codex | `features/x_accounts/oauth_service.py` | 已完成 |
 | 自动化测试与回归 | Codex | `scripts/test_x_posts.py`, `scripts/test_x_accounts.py` | 55/55 通过 |
-| GitHub 提交、生产副本演练与部署 | Codex | release / systemd / 数据盘 | 待执行 |
-| 一条真实 Post 与日志核验 | Codex | X API / SQLite / 公网链接 | 待执行 |
+| GitHub 提交、生产副本演练与部署 | Codex | release / systemd / 数据盘 | 已完成 |
+| 一条真实 Post 与日志核验 | Codex | X API / SQLite / 公网链接 | 已完成：log 1 / post 2080128600917905497 |
 
 ## 编译 / 构建命令
 
@@ -32,4 +32,4 @@ python scripts/test_x_accounts.py
 
 ## 完成记录
 
-候选审计和本地开发/回归已完成；待补全 commit、部署 release、日志 ID 和 post ID。
+候选审计、本地开发/回归、GitHub-first 部署和一条真实灰度均已完成。部署代码为 `cd119e248334be427507a8242a2e3c55dbb5269d`，release 为 `/root/releases/ai-x-post-canary-cd119e248334`，queue/log 均为 `1`，post ID 为 `2080128600917905497`。未启用任何 timer/cron，等待用户确认预览效果。

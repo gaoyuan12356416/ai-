@@ -51,4 +51,15 @@
 
 - 本次不安装 timer/cron。
 - Create Post 结果不确定时不得重试，也不得换账号继续发同一素材。
-- 最终部署记录需补充 commit、backup 路径、release 路径、重启时间、验证输出和日志 ID。
+- 真实发布已产生日志，后续回滚必须保留 queue/log 和 `/s2l/1.html`，不得盲目恢复部署前数据库或 Token 目录。
+
+## 最终部署记录
+
+- 部署代码 commit：`cd119e248334be427507a8242a2e3c55dbb5269d`。
+- 精确 release：`/root/releases/ai-x-post-canary-cd119e248334`；稳定链接 `/root/releases/ai-x-post-current` 已指向该目录。
+- 备份：`/mnt/data-disk/x-post-automation/backups/20260723T105948+0800-d778bcf`；部署前 SQLite SHA-256 为 `ab538bc129f3a4def3034f5c97fbdfe96426467f2faede240a5384c795593757`。
+- sidecar 于 `2026-07-23 11:08:22 CST` 启动；最终检查为 active/running、PID `40408`、`NRestarts=0`、`Restart=always`。
+- 仅重载 Nginx 并重启 `x-post-automation.service`；主 AI 后台未重启。
+- Queue `1` / log `1` / post `2080128600917905497` 于 `2026-07-23 11:11:20 CST` 发布成功，一次尝试、无错误、非 unknown。
+- 最终公网检查：短链、W2A 和 X 预览均为 200；本地/公网 health 为 200；公网 internal route 为 404。
+- 最终安全检查：DB/journal 敏感字段命中 0；媒体临时目录为空；短链文件 mode `0644`；本功能 timer/cron 命中 0。
