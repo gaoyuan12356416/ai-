@@ -97,6 +97,33 @@ TOKENS_DIR = Path(os.environ.get("X_TOKENS_DIR", str(DATA_DIR / "tokens")))
 SCOPES = tuple(dict.fromkeys(os.environ.get("X_OAUTH_SCOPES", EXPECTED_SCOPE_DEFAULT).split()))
 STATE_TTL_SECONDS = env_int("X_STATE_TTL_SECONDS", 600, 60, 1800)
 HTTP_TIMEOUT_SECONDS = env_int("X_HTTP_TIMEOUT_SECONDS", 30, 5, 120)
+POST_DB_PATH = Path(os.environ.get("X_POST_DB_PATH", "").strip() or str(DB_PATH))
+POST_PUBLIC_ROOT = Path(
+    os.environ.get("X_POST_PUBLIC_ROOT", "").strip()
+    or "/mnt/data-disk/x-post-automation/s2l"
+)
+POST_SHORT_BASE_URL = os.environ.get(
+    "X_POST_SHORT_BASE_URL", "https://ai.yingliangads.com/s2l"
+).strip().rstrip("/")
+POST_MEDIA_ALLOWED_HOSTS = tuple(
+    dict.fromkeys(
+        value.strip().lower()
+        for value in os.environ.get("X_POST_MEDIA_ALLOWED_HOSTS", "").replace(",", " ").split()
+        if value.strip()
+    )
+)
+POST_HTTP_TIMEOUT_SECONDS = env_int("X_POST_HTTP_TIMEOUT_SECONDS", 30, 5, 120)
+POST_MAX_MEDIA_BYTES = env_int(
+    "X_POST_MAX_MEDIA_BYTES", 512 * 1024 * 1024, 1024, 512 * 1024 * 1024
+)
+
+CANARY_ACTOR = {
+    "tenant_key": "internal",
+    "user_id": "x-post-canary",
+    "name": "X Post Canary",
+    "email": "",
+    "role": "admin",
+}
 
 _DB_LOCK = threading.RLock()
 _ACCOUNT_LOCKS = {}
@@ -986,6 +1013,114 @@ def publish_credentials(account_id, actor, scope="mine"):
         yield item, access_token
 
 
+def _x_posts_api():
+    """Load the sibling feature when the sidecar is executed as a script."""
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from features.x_posts import XPostError, XPostStore, publish_canary
+    except (ImportError, ModuleNotFoundError):
+        raise ServiceError("x_posts_unavailable", "X发布服务暂不可用", 503) from None
+    return XPostError, XPostStore, publish_canary
+
+
+def _raise_x_post_error(exc, secrets_to_redact=()):
+    code = str(getattr(exc, "code", "x_posts_unavailable") or "x_posts_unavailable")
+    status = int(getattr(exc, "status", 503) or 503)
+    if bool(getattr(exc, "unknown_outcome", False)):
+        code, status = "x_publish_unknown", 503
+    message = clean_text(str(exc))
+    for secret in secrets_to_redact:
+        secret = str(secret or "")
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    raise ServiceError(clean_text(code, 64), message, status) from None
+
+
+def _safe_canary_result(result):
+    if not isinstance(result, dict):
+        raise ServiceError("x_posts_unavailable", "X发布服务返回无效", 503)
+    allowed = ("status", "log_id", "short_url", "post_id", "preview_url")
+    return {key: result[key] for key in allowed if key in result}
+
+
+def ensure_x_posts_storage():
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        XPostStore(POST_DB_PATH)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def publish_canary_request(payload):
+    """Verify one account, enqueue once, then publish while its lock is held."""
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    raw_account_id = payload.get("account_id")
+    if isinstance(raw_account_id, bool):
+        raise ServiceError("invalid_request", "account_id无效", 400)
+    try:
+        account_id = int(raw_account_id)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "account_id无效", 400) from None
+    if account_id <= 0:
+        raise ServiceError("invalid_request", "account_id无效", 400)
+
+    actor = dict(CANARY_ACTOR)
+    verify_account(account_id, actor, "all")
+    candidate = {
+        field: payload.get(field)
+        for field in (
+            "source_date",
+            "material_id",
+            "content_id",
+            "material_url",
+            "material_name",
+            "material_language",
+            "drama_name",
+            "tag",
+            "description",
+        )
+    }
+    XPostError, XPostStore, publish_canary = _x_posts_api()
+    with publish_credentials(account_id, actor, "all") as (account, access_token):
+        candidate.update(
+            {
+                "account_id": int(account["id"]),
+                "account_username": str(account.get("username", "") or ""),
+                "page_name": str(
+                    account.get("display_name", "") or account.get("username", "") or ""
+                ),
+                "page_id": str(account.get("x_user_id", "") or ""),
+            }
+        )
+        try:
+            queued = XPostStore(POST_DB_PATH).enqueue(candidate)
+            if isinstance(queued, dict):
+                queue_id = queued.get("id")
+            else:
+                queue_id = getattr(queued, "id", queued)
+            try:
+                queue_id = int(queue_id)
+            except (TypeError, ValueError, OverflowError):
+                raise ServiceError("x_posts_unavailable", "X发布队列返回无效", 503) from None
+            result = publish_canary(
+                db_path=POST_DB_PATH,
+                queue_id=queue_id,
+                account=account,
+                access_token=access_token,
+                public_root=POST_PUBLIC_ROOT,
+                short_base_url=POST_SHORT_BASE_URL,
+                allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
+                timeout=POST_HTTP_TIMEOUT_SECONDS,
+                max_media_bytes=POST_MAX_MEDIA_BYTES,
+            )
+        except XPostError as exc:
+            _raise_x_post_error(exc, (access_token,))
+    return _safe_canary_result(result)
+
+
 def delete_token_artifacts(x_user_id):
     """Delete the live token and any legacy disconnect tombstones for one X user."""
     token_file = token_path(x_user_id)
@@ -1223,6 +1358,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             payload = self.read_json()
+            if parsed.path == "/internal/posts/canary":
+                self.send_json(200, {"item": publish_canary_request(payload)})
+                return
             if parsed.path == "/internal/authorize":
                 self.send_json(200, create_authorization(payload.get("actor", {})))
                 return
@@ -1262,6 +1400,7 @@ def serve():
     require_oauth_config()
     os.umask(0o077)
     ensure_storage()
+    ensure_x_posts_storage()
     cleanup_disconnected_token_artifacts()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True

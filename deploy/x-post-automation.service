@@ -16,7 +16,7 @@ PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/x-post-automation
+ReadWritePaths=/var/lib/x-post-automation /mnt/data-disk/x-post-automation
 UMask=0077
 
 [Install]

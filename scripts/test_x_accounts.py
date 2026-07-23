@@ -33,6 +33,7 @@ class XAccountsTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
+        self.root = root
         service.DATA_DIR = root
         service.DB_PATH = root / "accounts.sqlite3"
         service.TOKENS_DIR = root / "tokens"
@@ -43,6 +44,12 @@ class XAccountsTestCase(unittest.TestCase):
         service.ADMIN_RETURN_URL = "https://ai.yingliangads.com/x-accounts.html"
         service.SCOPES = ("tweet.read", "tweet.write", "users.read", "offline.access", "media.write")
         service.STATE_TTL_SECONDS = 600
+        service.POST_DB_PATH = service.DB_PATH
+        service.POST_PUBLIC_ROOT = root / "s2l"
+        service.POST_SHORT_BASE_URL = "https://ai.yingliangads.com/s2l"
+        service.POST_MEDIA_ALLOWED_HOSTS = ("media.example.com",)
+        service.POST_HTTP_TIMEOUT_SECONDS = 30
+        service.POST_MAX_MEDIA_BYTES = 512 * 1024 * 1024
         service._ACCOUNT_LOCKS.clear()
         service.ensure_storage()
         self.owner = {
@@ -85,6 +92,63 @@ class XAccountsTestCase(unittest.TestCase):
         with mock.patch.object(service, "token_request", return_value=token), mock.patch.object(service, "user_request", return_value=account):
             item = service.complete_authorization("one-time-code", state)
         return item
+
+    def canary_payload(self, item):
+        return {
+            "account_id": item["id"],
+            "source_date": "2026-07-22",
+            "material_id": "123",
+            "content_id": "456",
+            "material_url": "https://media.example.com/video.mp4",
+            "material_name": "material-name",
+            "material_language": "English",
+            "drama_name": "Drama name",
+            "tag": "Drama",
+            "description": "Drama description",
+            "account_username": "untrusted-client-value",
+            "page_name": "untrusted-client-value",
+            "page_id": "untrusted-client-value",
+            "queue_id": "untrusted-client-value",
+            "source_queue_id": "untrusted-client-value",
+            "idempotency_key": "untrusted-client-value",
+        }
+
+    def fake_x_posts_api(self, captured, publish_result=None, publish_error=None):
+        class FakeXPostError(RuntimeError):
+            def __init__(self, code, message, status=400, unknown_outcome=False):
+                super().__init__(message)
+                self.code = code
+                self.status = status
+                self.unknown_outcome = unknown_outcome
+
+        class FakeStore:
+            def __init__(_self, db_path):
+                captured["db_path"] = db_path
+
+            def enqueue(_self, payload):
+                captured["enqueued"] = dict(payload)
+                return {"id": 17}
+
+        def fake_publish(**kwargs):
+            captured["publish_calls"] = captured.get("publish_calls", 0) + 1
+            captured["publish_kwargs"] = dict(kwargs)
+            if publish_error is not None:
+                if isinstance(publish_error, tuple):
+                    raise FakeXPostError(*publish_error)
+                raise publish_error
+            return dict(
+                publish_result
+                or {
+                    "status": "published",
+                    "log_id": 18,
+                    "short_url": "https://ai.yingliangads.com/s2l/18.html",
+                    "post_id": "1900000000000000000",
+                    "preview_url": "https://x.com/canary_user/status/1900000000000000000",
+                    "access_token": "must-not-escape",
+                }
+            )
+
+        return FakeXPostError, FakeStore, fake_publish
 
     def test_authorization_url_uses_pkce_and_hashed_one_time_state(self):
         result, raw_state = self.new_state()
@@ -441,6 +505,90 @@ class XAccountsTestCase(unittest.TestCase):
                 self.fail("account without access token must not publish")
         self.assertEqual(token_missing.exception.code, "x_token_missing")
 
+    def test_canary_refreshes_expired_token_and_publishes_under_account_lock(self):
+        item = self.complete(username="old_username")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET access_expires_at=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", item["id"]),
+            )
+            conn.commit()
+        refreshed = {
+            "access_token": "new-access-secret",
+            "refresh_token": "new-refresh-secret",
+            "token_type": "bearer",
+            "expires_in": 7200,
+            "scope": " ".join(service.SCOPES),
+        }
+        profile = {
+            "data": {
+                "id": item["x_user_id"],
+                "username": "canary_user",
+                "name": "Canary User",
+            }
+        }
+        captured = {}
+        fake_api = self.fake_x_posts_api(captured)
+        with mock.patch.object(service, "token_request", return_value=refreshed) as refresh_mock, \
+                mock.patch.object(service, "user_request", return_value=profile), \
+                mock.patch.object(service, "_x_posts_api", return_value=fake_api):
+            result = service.publish_canary_request(self.canary_payload(item))
+
+        refresh_mock.assert_called_once_with(
+            {"grant_type": "refresh_token", "refresh_token": "refresh-secret"}
+        )
+        self.assertEqual(captured["publish_calls"], 1)
+        self.assertEqual(captured["publish_kwargs"]["access_token"], "new-access-secret")
+        self.assertEqual(captured["enqueued"]["account_id"], item["id"])
+        self.assertEqual(captured["enqueued"]["account_username"], "canary_user")
+        self.assertNotIn("queue_id", captured["enqueued"])
+        self.assertNotIn("source_queue_id", captured["enqueued"])
+        self.assertNotIn("idempotency_key", captured["enqueued"])
+        self.assertEqual(captured["enqueued"]["page_name"], "Canary User")
+        self.assertEqual(captured["enqueued"]["page_id"], item["x_user_id"])
+        self.assertEqual(captured["publish_kwargs"]["account"]["username"], "canary_user")
+        self.assertEqual(result["status"], "published")
+        self.assertNotIn("access_token", result)
+        saved = json.loads(service.token_path(item["x_user_id"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved["refresh_token"], "new-refresh-secret")
+
+    def test_canary_disabled_account_fails_before_queue_or_upstream(self):
+        item = self.complete(username="disabled_canary")
+        service.logout_account(item["id"], self.owner)
+        with mock.patch.object(service, "token_request") as refresh_mock, \
+                mock.patch.object(service, "user_request") as user_mock, \
+                mock.patch.object(service, "_x_posts_api") as posts_api_mock:
+            with self.assertRaises(service.ServiceError) as denied:
+                service.publish_canary_request(self.canary_payload(item))
+        self.assertEqual(denied.exception.code, "x_account_disabled")
+        refresh_mock.assert_not_called()
+        user_mock.assert_not_called()
+        posts_api_mock.assert_not_called()
+
+    def test_canary_unknown_create_post_outcome_is_not_retried(self):
+        item = self.complete(username="unknown_canary")
+        profile = {
+            "data": {
+                "id": item["x_user_id"],
+                "username": "unknown_canary",
+                "name": "Unknown Canary",
+            }
+        }
+        captured = {}
+
+        fake_api = self.fake_x_posts_api(
+            captured,
+            publish_error=("x_upstream_error", "Create Post结果不确定 access-secret", 502, True),
+        )
+        with mock.patch.object(service, "user_request", return_value=profile), \
+                mock.patch.object(service, "_x_posts_api", return_value=fake_api):
+            with self.assertRaises(service.ServiceError) as failed:
+                service.publish_canary_request(self.canary_payload(item))
+        self.assertEqual(failed.exception.code, "x_publish_unknown")
+        self.assertEqual(failed.exception.status, 503)
+        self.assertEqual(captured["publish_calls"], 1)
+        self.assertNotIn("access-secret", str(failed.exception))
+
     def test_legacy_disconnected_logout_still_cleans_residual_token_artifacts(self):
         item = self.complete(username="legacy_disconnected")
         token_file = service.token_path(item["x_user_id"])
@@ -737,6 +885,69 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertIn("GET /callback", logged)
         self.assertNotIn("secret-code", logged)
         self.assertNotIn("secret-state", logged)
+
+    def test_canary_internal_route_auth_payload_limit_and_success_contract(self):
+        non_loopback = object.__new__(service.Handler)
+        non_loopback.client_address = ("203.0.113.10", 12345)
+        non_loopback.headers = {"Authorization": "Bearer " + service.INTERNAL_TOKEN}
+        self.assertFalse(non_loopback.is_internal_authorized())
+
+        server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = "http://127.0.0.1:%s/internal/posts/canary" % server.server_address[1]
+
+        def request(body, token=None):
+            headers = {"Content-Type": "application/json"}
+            if token is not None:
+                headers["Authorization"] = "Bearer " + token
+            return urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+
+        expected = {
+            "status": "published",
+            "log_id": 18,
+            "short_url": "https://ai.yingliangads.com/s2l/18.html",
+            "post_id": "1900000000000000000",
+            "preview_url": "https://x.com/canary_user/status/1900000000000000000",
+        }
+        try:
+            with mock.patch.object(service, "publish_canary_request", return_value=expected) as publish_mock:
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    urllib.request.urlopen(request({"account_id": 2}), timeout=5)
+                self.assertEqual(denied.exception.code, 403)
+                denied.exception.close()
+                publish_mock.assert_not_called()
+
+                with self.assertRaises(urllib.error.HTTPError) as too_large:
+                    urllib.request.urlopen(
+                        request(
+                            {"account_id": 2, "description": "x" * service.MAX_BODY_BYTES},
+                            service.INTERNAL_TOKEN,
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(too_large.exception.code, 413)
+                too_large.exception.close()
+                publish_mock.assert_not_called()
+
+                with urllib.request.urlopen(
+                    request({"account_id": 2}, service.INTERNAL_TOKEN), timeout=5
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload, {"item": expected})
+                self.assertNotIn("token", json.dumps(payload).lower())
+                publish_mock.assert_called_once_with({"account_id": 2})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_internal_api_requires_token_and_client_contract_matches(self):
         with self.assertRaises(ValueError):
