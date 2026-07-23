@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-代码测试 GO，生产部署待门禁。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口和检查回写分批修订后，最终工作树离线专项与全部 X 回归 139/139 通过。未执行生产 MySQL/SQLite、服务或真实 X 验收。
+代码与生产部署 GO，首轮自然 timer 发布验收待 2026-07-24 10:00 CST。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口和检查回写分批修订后，最终工作树与服务器精确 release 的全部 X 回归均为 139/139。生产只读 MySQL、SQLite 副本/正式迁移、服务/API、权限和登录态页面均已验收；本轮未调用真实 X。
 
 ## 测试范围
 
@@ -23,6 +23,20 @@
 | `python -m py_compile`（实际目标） | — | 通过 | oauth/client/service/selector/runner |
 | `node --check static/quick-nav.js` | — | 通过 | 无输出、exit 0 |
 
+## 生产验收结果
+
+| 项目 | 结果 | 证据 |
+| --- | --- | --- |
+| 精确 release | 通过 | `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`，服务器工作树 clean |
+| 生产 MySQL | 通过 | product 字段存在，Dramawave 样本命中，只读会话 |
+| SQLite 副本/正式迁移 | 通过 | `integrity_check=ok`；账号/run/queue/log/pool=`10/0/1/1/0`；8 个跨表保护 trigger |
+| Sidecar/主后台/timer | 通过 | active/active/active，daily service inactive |
+| 内部接口 | 通过 | 管理员 query 200、daily available 200，均返回 0 条 |
+| 公网接口/页面 | 通过 | 匿名管理 API 401 + no-store；素材池页、日志页、OAuth health 200 |
+| 管理员浏览器 | 通过 | 素材池 0 条、导航正常、console warning/error 0 |
+| 原有证据保护 | 通过 | 原 canary queue/log 各 1 条，部署未新增 queue/log/Post |
+| 配置与秘密 | 通过 | 敏感值未变化，env/DB 权限保持 0400/0600 |
+
 ## 评审发现
 
 - pool-first 后非池 queue 的跨表占用反例推动了服务层和 SQLite 触发器双重修复；新增 legacy/canary 防御查询与删除回归通过。
@@ -33,12 +47,9 @@
 
 ## 未执行
 
-- 未连接生产 MySQL 验证真实 product 字段/数据。
-- 未迁移生产 SQLite 或生产副本。
-- 未启动/重启生产服务或 timer。
-- 未使用真实 OAuth Token、未上传媒体、未创建真实 X Post。
+- 未调用 X 媒体上传/发帖接口，未创建新的真实 X Post。
 - 未做首轮自然 timer 验收。
 
 ## 发布建议
 
-代码可进入 GitHub-first 发布准备，但本轮不部署。生产只读 product/schema 抽样、SQLite 副本迁移、live composite 基线和精确 commit/release 全部通过后，方可启用 timer；首轮真实发布由自然调度验收。
+生产已按 GitHub-first 精确 commit 发布，timer 已恢复。素材池初始为空；管理员应在下一次自然触发前录入至少三条可校验的 Dramawave 素材，否则任务会按设计整批不发。首轮真实发布仍由自然调度验收，不手工触发 daily service。

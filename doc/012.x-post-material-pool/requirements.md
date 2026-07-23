@@ -30,7 +30,7 @@
 - 不改变三个固定 X 账号、每日调度时间、账号 Token/OAuth、发布文案和 W2A/短链格式。
 - 不允许管理员直接修改池主状态，也不提供失败后自动释放或自动重发。
 - 不按账号维护独立素材池，不提供素材优先级插队。
-- 本需求文档阶段不部署生产、不启用 timer、不调用真实 X 发帖。
+- 本次上线允许部署生产与恢复既有 timer，但不手工触发 daily service、不手工创建计划、不额外调用真实 X 发帖。
 
 ## 用户故事 / 业务规则
 
@@ -152,19 +152,22 @@
 - [x] 已发布或任意 queue 占用素材不可删除；未占用未发布素材可删除。
 - [x] 管理页状态、筛选、分页、预览 URL allowlist 和 no-store 契约通过。
 - [x] 全部 X 回归与新增素材池测试 139/139 通过。
-- [ ] 生产副本迁移、live composite 和自然 timer 首轮验收通过后方可部署/启用。
+- [x] 生产副本迁移、live composite、精确 release 部署与 timer 恢复通过。
+- [ ] 首轮自然 timer 发布验收待 2026-07-24 10:00 CST；素材池不足三条时应整批不发。
 
 ## 风险与部署待验证
 
-- `ads_custom_source.product = 'Dramawave'` 已同时在 SQL 与行级校验中 fail closed，并有其他产品负例；生产只读 schema/数据仍需部署前抽样确认。
+- `ads_custom_source.product = 'Dramawave'` 已同时在 SQL 与行级校验中 fail closed，并有其他产品负例；生产只读 schema/数据抽样已确认。
 - `summary.available` 已排除 `last_error_code`，专项测试验证不再把 `validation_failed` 计为可用。
 - 单次安全扫描明确限制为最老 1000 条，而非无界遍历全池；如果这 1000 条长期不足三条合格素材，整批不发并由管理员修复元数据或删除仍未占用的无效池记录。
 - 检查回写已按 100 条分批；205 条 100/100/5 回归通过。Sidecar 整体不可用时仍保持 best effort，不影响发布排重和主状态。
-- 生产 SQLite 可能含 legacy canary/queue；上线前必须用副本验证新增触发器和历史数据兼容。
-- 生产主后台为 composite，部署前必须核对 live blob/hash，避免覆盖其他并行功能。
+- 生产 SQLite 的 legacy canary/queue 已在副本与正式迁移中验证兼容，原 queue/log 各 1 条均保留。
+- 生产主后台 composite 已核对并保留公网 `quick-nav.js`；只结构化修改 `navigation.json` 的 X 模块。
+- 素材池上线后初始为 0 条。下一次自然触发前若未录入至少三条合格素材，三个账号均不会发帖。
 
 ## 变更记录
 
 | 日期 | 变更 |
 | --- | --- |
 | 2026-07-23 | 按人工全局素材池、FIFO、永久排重和成功后发布态建立需求与技术设计 |
+| 2026-07-23 | 精确 commit `75f46e7` 部署生产；素材池初始为空，恢复次日 10:00 自然调度 |

@@ -2,7 +2,18 @@
 
 ## 当前状态
 
-本轮只完成设计/实现审查与离线验证，未部署生产、未重启服务、未启用 timer、未调用真实 X。以下步骤仅在 SA 代码评审门禁全部关闭后执行。
+已于 2026-07-23 部署生产，运行版本为 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`。Sidecar、主后台与 `x-post-daily.timer` 均为 active，下一次自然触发为 2026-07-24 10:00 CST；本次部署未启动 daily service、未创建 queue、未上传媒体、未调用真实 X。
+
+## 生产执行记录
+
+- 生产只读 MySQL 会话确认 `ads_custom_source.product` 字段存在，既有 canary 素材 `5221348` 满足 Dramawave/type/delete 门禁；会话 `transaction_read_only=1`。
+- 部署前备份位于 `/mnt/data-disk/x-post-automation/backups/20260723T082250Z-material-pool-75f46e7`，包含 SQLite、env、unit、主后台/公网静态基线与 release 证据；未输出秘密内容。
+- SQLite 副本迁移与生产迁移均通过；迁移后账号/run/queue/log/pool 计数为 `10/0/1/1/0`，`PRAGMA integrity_check=ok`，原 canary queue/log 保留。
+- 第一次维护窗在部署脚本写错预期索引名称时 fail closed 并自动回滚，服务、timer、旧 release 与原数据库全部恢复；修正校验名为 `ux_x_post_queue_pool_item_id` 后第二次部署成功。
+- `/usr/share/nginx/html/quick-nav.js` 保持部署前 hash `64aa18e75b6f421cbb37f68150526bc576352d3c15c434fd06e526a3e0a6dccf`，只结构化更新公网 `navigation.json` 并部署素材池/日志页面。
+- 内部管理员查询与 daily available 均返回 200、池内 0 条；公网匿名管理 API 返回 401 且 `Cache-Control: no-store`，素材池页、日志页与 OAuth health 均返回 200。
+- Chrome 管理员登录态验收显示“池内素材/未发布/可供发布/已发布”均为 0，导航入口和筛选表格正常，浏览器 warning/error 为 0。
+- 生产敏感配置值与部署前一致；daily env 权限为 0400、Sidecar env/SQLite 为 0600。
 
 ## 变更内容
 
