@@ -25,9 +25,9 @@
 
 1. 验证 `/mnt/data-disk` 挂载 UUID 与可用空间。
 2. 用 SQLite backup API 备份账号库，复制 Token 目录并记录 SHA-256/mode；备份当前 unit 和 sidecar 源码。
-3. 从 GitHub 拉取已推送的精确 commit 到 `/root/releases/ai-x-post-canary-<sha12>`。
+3. 从 GitHub 拉取已推送的精确 commit 到 `/root/releases/ai-x-post-canary-<sha12>`，校验后原子切换 `/root/releases/ai-x-post-current` 符号链接。
 4. 在备份副本运行迁移和自动化测试，确认旧数据不变。
-5. 创建数据盘目录、权限和静态短链映射；修改 sidecar unit 指向精确 release，并增加所需 `ReadWritePaths`。
+5. 创建数据盘目录、权限和静态短链映射；部署跟踪的 unit，使其通过稳定链接指向精确 release，并增加所需 `ReadWritePaths`。
 6. `systemctl daemon-reload`，只重启 `x-post-automation.service`。
 7. 先完成 health/账号动态校验/短链 canary，再由 loopback internal API 发布一次。
 
@@ -42,7 +42,7 @@
 
 ## 回滚方案
 
-1. 停止 sidecar，恢复上一个精确 release 的 unit/ExecStart。
+1. 停止 sidecar，把 `/root/releases/ai-x-post-current` 原子切回上一个精确 release；必要时恢复备份 unit。
 2. 若新表未产生真实发布记录，可恢复部署前 SQLite 备份；若已成功发布，保留发布日志并只回滚代码，避免丢失审计事实。
 3. 恢复短链映射前先保留已发布日志 ID 对应 HTML，防止已发 Post 中的链接失效。
 4. Token 如发生正常刷新，不能用旧 Token 备份盲目覆盖；以当前轮换后的 Token 为准，仅在确认未轮换时才做整目录恢复。
