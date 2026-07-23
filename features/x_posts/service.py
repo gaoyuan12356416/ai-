@@ -37,6 +37,7 @@ DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
 DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+SQLITE_QUERY_BATCH_SIZE = 900
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1199,15 +1200,19 @@ class XPostStore:
             if material_key not in seen:
                 seen.add(material_key)
                 normalized.append(material_key)
-        placeholders = ",".join("?" for _item in normalized)
+        occupied = set()
         with contextlib.closing(_connect(self.db_path)) as conn:
-            occupied = {
-                str(row["material_key"])
-                for row in conn.execute(
-                    "SELECT material_key FROM x_post_queue WHERE material_key IN (%s)" % placeholders,
-                    tuple(normalized),
-                ).fetchall()
-            }
+            for offset in range(0, len(normalized), SQLITE_QUERY_BATCH_SIZE):
+                batch = normalized[offset : offset + SQLITE_QUERY_BATCH_SIZE]
+                placeholders = ",".join("?" for _item in batch)
+                occupied.update(
+                    str(row["material_key"])
+                    for row in conn.execute(
+                        "SELECT material_key FROM x_post_queue WHERE material_key IN (%s)"
+                        % placeholders,
+                        tuple(batch),
+                    ).fetchall()
+                )
         return [material_key for material_key in normalized if material_key in occupied]
 
     @staticmethod

@@ -404,6 +404,10 @@ class XPostLedgerTests(unittest.TestCase):
             store.query_material_keys(["01001", "9999", "1003", "1001"]),
             ["1001", "1003"],
         )
+        self.assertEqual(
+            store.query_material_keys([str(value) for value in range(1001, 2001)]),
+            ["1001", "1002", "1003"],
+        )
         log = store.reserve_log(plan["queues"][0]["id"])
         store.mark_failed(log["id"], "x_post_rate_limited", "Too many requests", False)
         self.assertEqual(store.get_run(plan["id"])["status"], "stopped")
