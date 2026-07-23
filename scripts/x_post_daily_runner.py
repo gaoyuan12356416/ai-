@@ -45,6 +45,9 @@ from features.x_posts.service import (  # noqa: E402
 DEFAULT_INTERNAL_URL = "http://127.0.0.1:8810"
 MAX_ERROR_BODY_BYTES = 64 * 1024
 _SAFE_INTERNAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
+FIXED_DAILY_WORK_DIR = Path("/mnt/data-disk/x-post-automation/daily-work")
+
+
 class DailyRunError(RuntimeError):
     def __init__(self, message, code="x_post_daily_preflight_failed"):
         self.code = str(code or "x_post_daily_preflight_failed")
@@ -214,9 +217,7 @@ class DailyConfig:
         work_dir = Path(self.work_dir)
         if not work_dir.is_absolute():
             raise DailyRunError("X_POST_DAILY_WORK_DIR must be absolute")
-        if os.name != "nt" and work_dir != Path(
-            "/mnt/data-disk/x-post-automation/daily-work"
-        ):
+        if os.name != "nt" and work_dir != FIXED_DAILY_WORK_DIR:
             raise DailyRunError(
                 "X_POST_DAILY_WORK_DIR must use the fixed data-disk work directory"
             )

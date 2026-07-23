@@ -374,6 +374,16 @@ class FakeSidecar:
 
 
 class RunnerTests(unittest.TestCase):
+    def setUp(self):
+        # Keep unit-test media under the OS temp root while preserving the
+        # production invariant that work_dir must equal its fixed root.
+        patcher = mock.patch(
+            "scripts.x_post_daily_runner.FIXED_DAILY_WORK_DIR",
+            Path(tempfile.gettempdir()).resolve(),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_loopback_daily_and_health_clients_disable_environment_proxies(self):
         with mock.patch.dict(
             os.environ,
