@@ -1,3 +1,10 @@
+## 2026-07-23 X Post canary
+
+- Added an internal-only, one-shot X Post canary flow with account-lock token refresh, current X v2 chunked media upload, Create Post, and fail-closed unknown-outcome handling.
+- Added additive SQLite queue/publish logs, strict Dramawave W2A attribution URLs, and public static short redirects backed by the persistent data disk.
+- Added HTTPS media allowlisting and ffprobe validation for conservative `tweet_video` compatibility; no recurring schedule is enabled.
+- Added 14 focused X Post tests while preserving the 32 X account, 5 app-contract, and 4 owner-backfill regressions.
+
 ## 2026-05-09 screenshot raw aspect guard
 
 - Tightened screenshot AI prompts to require raw generated images to match the requested target ratio before any final size normalization.
