@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-上一版已于 2026-07-23 部署生产：Sidecar/daily 运行版本为 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`；主后台 `app.py` 与素材池页面来自 `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4`。本次“入池即时 X 校验 + `ads_custom_source.url` 直链预览”增量已在本地 143/143 通过，尚待按 GitHub-first 精确 commit 部署；部署过程不得启动 daily service 或调用真实 X。
+“入池即时 X 校验 + `ads_custom_source.url` 直链预览”已于 2026-07-23 按 GitHub-first 部署生产，精确运行 commit 为 `00b5b088af76dce4a02866beaf0186713daa46fb`。服务器 release clean，主后台、Sidecar 和素材池公网页面均与该 release 的目标文件哈希一致；Sidecar、主后台、`x-post-daily.timer` 为 active，daily service 为 inactive，下一次自然触发为 2026-07-24 10:00 CST。本次未启动 daily、未创建 queue/日志/短链、未上传媒体、未调用真实 X。
 
 ## 生产执行记录
 
@@ -18,6 +18,13 @@
 - 精确 commit 在服务器 141/141 通过；主后台/Sidecar/timer 最终均 active，daily inactive，SQLite `integrity_check=ok`，pool/queue/log 保持 `2/1/1`。
 - 公网匿名素材预览返回 401 + no-store；管理员浏览器显示独立“素材预览 / Post 预览”列。`5503209` 成功 302 到实际 HTTPS MP4，`11761405635` 因素材源记录或 URL 不可解析返回 404。
 - 首次错误补全的 commit SHA 在 checkout 阶段即被 Git 拒绝，未进入备份/覆盖/重启；后续两次门禁分别因服务尚未监听的瞬时 502、以及本机直连 401 无 Nginx no-store 的过严断言自动恢复旧文件。修正为本机就绪 + 公网 no-store 分层验证后部署成功。
+- 本次运行 commit 的 GitHub 长 SHA 首次被错误补全，远端分支等值门禁在创建 release/备份/覆盖前停止；从本地 `rev-parse` 与 GitHub `ls-remote` 双重取得正确 SHA 后重跑。
+- 本次上线前备份为 `/mnt/data-disk/x-post-automation/backups/20260723T093550Z-pool-entry-validation-00b5b08`，包含 SQLite 在线备份、主后台/公网文件、env、旧 release、运行文件 hash/mode；manifest 全部通过，数据盘 UUID 为 `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`。
+- 精确 release 在服务器完整回归 143/143；主后台因首次使用 selector，同步部署 `features/x_posts` 包，所有目标文件与 release 哈希一致。
+- 上线后只对现有两个未占用池记录回填 selector 检查字段：池 ID 3 / 素材 `5503209`、池 ID 4 / 素材 `11761405635` 均为 `material_not_found_or_ineligible`，页面派生状态“不可用”。pool/queue/log 仍为 `2/1/1`，SQLite `integrity_check=ok`。
+- 只读列表验证：`5503209` 虽不合规但成功附加 `ads_custom_source.url`，域名为 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`；`11761405635` 无源记录，`material_preview_url` 为空并显示“无法预览”。
+- 最终主后台/Sidecar/timer 为 active，daily inactive，Sidecar health `ok`，公网素材池页 200，匿名管理 API 401 + no-store，部署后两个服务无 warning 级日志。
+- Chrome 中原管理员标签页登录态已过期，只显示登录按钮，因此未代替用户重新登录做表格视觉验收；同一生产环境下的管理员内部接口、源 URL 查询和公网页面哈希均已验证。
 
 ## 变更内容
 
@@ -75,7 +82,7 @@
 
 - Sidecar health 200；公网 internal 路由不可访问。
 - 管理员素材池页面/API 200，普通用户/API Token/cross-origin 写请求拒绝。
-- 素材预览只允许 Cookie 管理员和池内素材；有效 HTTPS URL 302 跳转，缺失/非法 URL 安全拒绝，且不会修改池、queue 或日志。
+- 管理员列表为池内素材附加安全 HTTPS `material_preview_url`，页面直接打开；不存在/非法 URL 显示“无法预览”，且不会修改池、queue 或日志。旧 302 接口仅做兼容。
 - 批量添加重复或历史 queue 素材整批回滚。
 - 临时未占用素材可删除；已占用/已发布素材返回 409。
 - daily bearer 可访问 available/check，不能访问 query/add/delete。

@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-入池即时 X 校验与素材源 URL 直链增量的本地代码 GO，完整 X 回归为 143/143。生产仍运行上一版素材预览实现，待精确 commit 部署并回填服务器/浏览器证据；本轮测试未调用真实 X。
+入池即时 X 校验与素材源 URL 直链增量已部署生产，代码与生产 GO。精确 commit `00b5b088af76dce4a02866beaf0186713daa46fb` 在本地和服务器均完成 143/143 X 回归；现有两条池记录已按 selector 回填为“不可用”，预览 URL 与缺失态符合要求。本轮未调用真实 X。
 
 ## 测试范围
 
@@ -27,19 +27,17 @@
 
 ## 生产验收结果
 
-下表为上一版生产基线；本次 143 项增量尚未部署，部署后覆盖更新。
-
 | 项目 | 结果 | 证据 |
 | --- | --- | --- |
-| 精确 release | 通过 | Sidecar/daily 保持 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`；主后台接口与素材池静态页精确来自 `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4`，服务器 release clean、部署 hash 一致 |
-| 生产 MySQL | 通过 | product 字段存在，Dramawave 样本命中，只读会话 |
-| SQLite 副本/正式迁移 | 通过 | 初始迁移账号/run/queue/log/pool=`10/0/1/1/0`；预览增量部署后 pool/queue/log=`2/1/1`，`integrity_check=ok`，8 个跨表保护 trigger 不变 |
+| 精确 release | 通过 | `00b5b088af76dce4a02866beaf0186713daa46fb`；服务器 release clean，主后台 app/client/x_posts、服务静态页和公网页面哈希与 release 一致 |
+| 生产 MySQL | 通过 | 只读 selector：`5503209` 因 1352 秒超过 X 140 秒上限不合格；`11761405635` 在当前源库无记录 |
+| SQLite | 通过 | 本次无 schema 迁移；回填前后 pool/queue/log 均为 `2/1/1`，两条仅更新检查字段，`integrity_check=ok` |
 | Sidecar/主后台/timer | 通过 | active/active/active，daily service inactive |
-| 内部接口 | 通过 | 初始上线时管理员 query、daily available 均 200 且池为 0；当前登录态列表正常返回 2 条 |
-| 公网接口/页面 | 通过 | 匿名素材预览 API 401 + no-store；公网素材池页与精确 release hash 一致 |
-| 管理员浏览器 | 通过 | 明细显示独立“素材预览 / Post 预览”列；`5503209` 302 到实际 MP4，`11761405635` 因源记录/URL 不可解析返回安全 404 |
+| 内部接口 | 通过 | 两条均返回 `validation_failed`；`5503209` 的 `material_preview_url` 为安全 MyQcloud HTTPS，`11761405635` 为空 |
+| 公网接口/页面 | 通过 | 匿名管理 API 401 + no-store；公网页面 200，与精确 release hash 一致，页面不再引用旧 preview 跳转端点 |
+| 管理员浏览器 | 受限 | Chrome 原标签页登录态已过期，仅显示“登录”；未代替用户登录，接口/页面代码与服务端数据已分别验收 |
 | 原有证据保护 | 通过 | 原 canary queue/log 各 1 条，部署未新增 queue/log/Post |
-| 配置与秘密 | 通过 | 敏感值未变化，env/DB 权限保持 0400/0600 |
+| 配置与秘密 | 通过 | 敏感值未变化，daily env 0400、Sidecar env/SQLite 0600；部署后无 warning 级服务日志 |
 
 ## 评审发现
 
@@ -58,4 +56,4 @@
 
 ## 发布建议
 
-待按 GitHub-first 部署本次精确 commit 后，对生产现有池记录做一次只更新校验字段的回填，并确认 timer 仍为 active、daily service inactive、queue/log/Post 计数不变。首轮真实发布仍由自然调度验收，不手工触发 daily service。
+生产已按 GitHub-first 部署本次精确 commit，现有两条记录均不可用且池内不足三条，2026-07-24 10:00 CST 的自然任务会按设计整批不发。应删除或修复无效 ID，并录入至少三条可校验的 Dramawave 素材；首轮真实发布仍由自然调度验收，不手工触发 daily service。
