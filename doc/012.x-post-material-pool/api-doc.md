@@ -72,6 +72,23 @@
 
 `summary.available` 必须与 `availability=available` 相同口径，不包含 `validation_failed`。
 
+## GET /api/admin/x-posts/material-pool/preview
+
+仅接受 Feishu Cookie 管理员。查询参数必须且只能包含：
+
+| 参数 | 规则 |
+| --- | --- |
+| `material_id` | 1 至 19 位正整数，且该 ID 当前必须存在于 X Post 素材池 |
+
+处理流程：
+
+1. 通过 Sidecar 管理查询确认素材 ID 属于当前全局素材池。
+2. 主后台按精确 ID 只读查询 `ads_custom_source.url`，必须唯一命中。
+3. URL 必须是无用户名/密码、无控制字符、带 hostname 的 HTTPS 地址。
+4. 成功返回 `302`，`Location` 为素材源 URL，并设置 `Cache-Control: no-store`、`Pragma: no-cache`、`Referrer-Policy: no-referrer` 和 `X-Content-Type-Options: nosniff`。
+
+非法参数返回 400；素材不在池中、源记录缺失/重复或 URL 不安全返回 404 `x_post_material_preview_unavailable`；只读数据源异常返回 503。接口不返回 MySQL 凭据，不修改素材池状态、queue 或发布日志。页面中的 X Post 预览继续使用列表 DTO 的 `preview_url`，与本接口分列展示。
+
 ## POST /api/admin/x-posts/material-pool
 
 请求：

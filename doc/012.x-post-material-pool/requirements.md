@@ -18,7 +18,7 @@
 ### 包含
 
 - 新增 `x_post_material_pool` SQLite 表及 queue 关联字段、索引、触发器。
-- 素材池管理页面、管理员查询/添加/删除 API、后台审计日志。
+- 素材池管理页面、管理员查询/添加/删除 API、素材源文件预览和后台审计日志。
 - daily runner 从素材池读取候选并回写素材校验结果。
 - 从 `ads_custom_source` 直接按 ID 加载素材，不再用前一天消耗作为排序或入选条件。
 - 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射、违规记录、色情/暴力标签和媒体文件预检。
@@ -51,10 +51,11 @@
 15. 只有未发布且不存在任何同池 ID/同素材 key queue 的记录可以删除；已发布和已占用记录必须保留审计。
 16. runner 按 `X_POST_DAILY_SCAN_LIMIT` 读取最老的池记录，默认和当前生产建议均为 1000、允许 3 至 1000；selector 再按 FIFO 保留最多 `X_POST_DAILY_CANDIDATE_POOL_LIMIT=50` 条合规候选供媒体预检补位。最老 1000 条内不足三条合格素材时整批不发布。
 17. selector/媒体拒绝结果按 Sidecar 单次上限 100 条分批回写；例如 205 条必须按 100/100/5 三批提交，避免整批审计丢失。
+18. 素材池明细将“素材预览”和“Post 预览”分列展示。管理员点击素材预览时，主后台先确认素材仍在池中，再按素材 ID 只读解析 `ads_custom_source.url`；仅允许无凭据、无控制字符的 HTTPS URL，并以 no-store 的 302 跳转打开。不存在、重复、非法或非 HTTPS 的源 URL 一律显示为不可预览，且该操作不修改池、queue 或发布日志。
 
 ## 交互与流程
 
-1. 管理员进入“X 平台 > Post 素材池”，粘贴素材 ID 并提交。
+1. 管理员进入“X 平台 > Post 素材池”，粘贴素材 ID 并提交；可在明细点击“预览素材”核对自定义素材库源文件。
 2. 主后台验证 Cookie 管理员和同源 JSON，将 actor 与素材 ID 转发给 loopback Sidecar。
 3. Sidecar 在一个事务中完成规范化、池内排重、历史 queue 排重和入池。
 4. daily runner 先验证存储和三个固定账号，再取得最老的未发布且未占用素材。
@@ -74,8 +75,8 @@
 | `scripts/x_post_daily_runner.py` | 读取池、回写检查、三条成组预检与计划 |
 | `features/x_accounts/oauth_service.py` | backend/daily 两种 bearer 的素材池内部路由 |
 | `features/x_accounts/client.py` | 主后台到 Sidecar 的管理客户端 |
-| `app.py` | Cookie 管理员 API、同源写校验、审计日志 |
-| `static/x-post-material-pool.html` | 批量添加、筛选、分页、状态、预览和受限删除 |
+| `app.py` | Cookie 管理员 API、同源写校验、素材池范围内的安全源 URL 跳转、审计日志 |
+| `static/x-post-material-pool.html` | 批量添加、筛选、分页、状态、素材/Post 双预览和受限删除 |
 | `static/navigation.json` / `static/quick-nav.js` | 管理员导航入口 |
 | `.env.example` / `deploy/x-post-daily.env.example` | daily 素材池可用项与检查回写路径 |
 
@@ -117,6 +118,7 @@
 ### API / 接口
 
 - `GET /api/admin/x-posts/material-pool`
+- `GET /api/admin/x-posts/material-pool/preview?material_id=...`
 - `POST /api/admin/x-posts/material-pool`
 - `DELETE /api/admin/x-posts/material-pool/{pool_item_id}`
 - `POST /internal/posts/material-pool/query`
@@ -136,6 +138,7 @@
 - 校验失败记录仍可在后续运行重新检查，但只要已有任何 queue，就永不回到可选择集合。
 - 失败/unknown 不能靠删除池记录或重新入池绕过。
 - 查询返回脱敏错误，不返回 OAuth Token、内部 bearer 或数据库凭据；响应使用 `Cache-Control: no-store`。
+- 素材预览只接受池内 1 至 19 位正整数 ID，源地址只允许安全 HTTPS；跳转响应不缓存、不发送来源页，预览失败不回退到任意外部 URL。
 
 ## 验收标准
 
@@ -151,7 +154,8 @@
 - [x] 只有确认成功的三方结果才把对应池记录改为 `published`。
 - [x] 已发布或任意 queue 占用素材不可删除；未占用未发布素材可删除。
 - [x] 管理页状态、筛选、分页、预览 URL allowlist 和 no-store 契约通过。
-- [x] 全部 X 回归与新增素材池测试 139/139 通过。
+- [x] 素材预览仅对管理员开放、仅解析池内素材的安全 HTTPS URL，并与 Post 预览分列。
+- [x] 全部 X 回归与新增素材池测试 141/141 通过。
 - [x] 生产副本迁移、live composite、精确 release 部署与 timer 恢复通过。
 - [ ] 首轮自然 timer 发布验收待 2026-07-24 10:00 CST；素材池不足三条时应整批不发。
 
@@ -171,3 +175,4 @@
 | --- | --- |
 | 2026-07-23 | 按人工全局素材池、FIFO、永久排重和成功后发布态建立需求与技术设计 |
 | 2026-07-23 | 精确 commit `75f46e7` 部署生产；素材池初始为空，恢复次日 10:00 自然调度 |
+| 2026-07-23 | 素材池明细新增独立“素材预览”列，通过管理员池范围校验后安全跳转自定义素材库 HTTPS URL |

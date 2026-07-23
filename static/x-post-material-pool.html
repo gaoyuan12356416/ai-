@@ -258,12 +258,13 @@
                   <th>可用状态</th>
                   <th>关联队列</th>
                   <th>X 账号</th>
-                  <th>预览</th>
+                  <th>素材预览</th>
+                  <th>Post 预览</th>
                   <th>校验/发布错误</th>
                   <th>操作</th>
                 </tr>
               </thead>
-              <tbody id="poolRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+              <tbody id="poolRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
           <div class="pager">
@@ -412,13 +413,27 @@
         body.replaceChildren();
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 9;
+        cell.colSpan = 10;
         cell.className = "empty";
         setText(cell, message);
         row.appendChild(cell);
         body.appendChild(row);
       }
-      function appendPreview(cell, item) {
+      function appendMaterialPreview(cell, item) {
+        const materialId = String(item.material_id || item.material_key || "").trim();
+        if (!/^[1-9][0-9]{0,18}$/.test(materialId)) {
+          setText(cell, "—");
+          return;
+        }
+        cell.className = "links";
+        const link = document.createElement("a");
+        link.href = `/api/admin/x-posts/material-pool/preview?material_id=${encodeURIComponent(materialId)}`;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        setText(link, "预览素材");
+        cell.appendChild(link);
+      }
+      function appendPostPreview(cell, item) {
         const href = safePostUrl(item.x_post_url || item.preview_url);
         if (!href) {
           setText(cell, "—");
@@ -470,8 +485,12 @@
             : (item.account_id ? `账号 ${item.account_id}` : "—");
           appendCell(row, accountName, item.account_display_name || item.page_name || "");
 
+          const materialPreviewCell = document.createElement("td");
+          appendMaterialPreview(materialPreviewCell, item);
+          row.appendChild(materialPreviewCell);
+
           const previewCell = document.createElement("td");
-          appendPreview(previewCell, item);
+          appendPostPreview(previewCell, item);
           row.appendChild(previewCell);
 
           const errorCode =

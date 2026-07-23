@@ -20,6 +20,7 @@
 - 增量部署 X Post 全局人工素材池、管理员 API/页面和导航。
 - daily selector 从前日 spend 排名切换为素材池 FIFO。
 - 增量迁移 queue 的 pool 关联、唯一索引和跨表触发器。
+- 素材池明细新增独立素材预览列；管理员点击后由主后台安全跳转到池内素材对应的 HTTPS 源 URL。
 - 保留现有 X 日批次、W2A/短链、日志、账号、timer 和失败语义。
 
 ## 配置项
@@ -68,6 +69,7 @@
 
 - Sidecar health 200；公网 internal 路由不可访问。
 - 管理员素材池页面/API 200，普通用户/API Token/cross-origin 写请求拒绝。
+- 素材预览只允许 Cookie 管理员和池内素材；有效 HTTPS URL 302 跳转，缺失/非法 URL 安全拒绝，且不会修改池、queue 或日志。
 - 批量添加重复或历史 queue 素材整批回滚。
 - 临时未占用素材可删除；已占用/已发布素材返回 409。
 - daily bearer 可访问 available/check，不能访问 query/add/delete。

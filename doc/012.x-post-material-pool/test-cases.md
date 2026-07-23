@@ -43,11 +43,12 @@
 | TC-026 | 管理 API 鉴权 | 管理员/普通用户/API Token/跨源请求 | 仅 Cookie 管理员同源读写成功 |
 | TC-027 | daily bearer 范围 | 调用 available/check 与 add/query/delete | 前者允许，管理路由 403 |
 | TC-028 | 查询参数与脱敏 | 非法枚举、未知参数、错误文本、敏感词 | 400 或脱敏安全 DTO，no-store |
-| TC-029 | 页面 DOM 安全 | 恶意素材名/错误/URL | 使用 textContent/replaceChildren；仅 x.com 预览 allowlist |
+| TC-029 | 页面 DOM 安全 | 恶意素材名/错误/URL | 使用 textContent/replaceChildren；素材预览固定同源管理端点，Post 预览仅 x.com allowlist |
 | TC-030 | legacy 迁移 | 旧库副本执行 ensure_storage 两次 | 幂等新增表/列/索引/触发器；冲突 fail closed |
 | TC-031 | 两级扫描窗口 | 前 50 条不合规、51 至 1000 内有安全素材 | 原始池读取 scan limit，不能被候选上限 50 提前截断；最老 1000 条内仍不足三条则整批不发 |
 | TC-032 | 既有发布回归 | X service/account/owner/daily 全套测试 | 旧 canary、OAuth、短链、unknown、限流语义不变 |
 | TC-033 | 检查回写分批 | 生成 205 条互异 pool check | 调用 Sidecar 三次，批量严格为 100/100/5，无记录因超限整批丢失 |
+| TC-034 | 素材源文件预览 | 管理员预览池内有效 HTTPS 素材；再测试非池 ID、缺失、HTTP、凭据和 CRLF URL | 有效项 302 到精确源 URL 且 no-store/no-referrer；其他请求 400/404/503，数据库与发布状态 0 写入 |
 
 ## 自动化映射
 
@@ -56,7 +57,7 @@
 - `scripts/test_x_post_daily.py`：TC-016 至 TC-019、TC-027、runner 失败语义。
 - `scripts/test_x_post_ledger.py`：TC-019、TC-020、TC-024、TC-030。
 - `scripts/test_x_accounts.py`：Sidecar 路由、daily bearer 和发布状态回归。
-- `scripts/test_x_accounts_app_contract.py`：TC-026、TC-028、TC-029。
+- `scripts/test_x_accounts_app_contract.py`：TC-026、TC-028、TC-029、TC-034。
 - `scripts/test_x_posts.py` / `scripts/test_x_account_owner_backfill.py`：TC-032。
 
 ## 生产验收边界

@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-代码与生产部署 GO，首轮自然 timer 发布验收待 2026-07-24 10:00 CST。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口和检查回写分批修订后，最终工作树与服务器精确 release 的全部 X 回归均为 139/139。生产只读 MySQL、SQLite 副本/正式迁移、服务/API、权限和登录态页面均已验收；本轮未调用真实 X。
+代码与生产部署 GO，首轮自然 timer 发布验收待 2026-07-24 10:00 CST。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口、检查回写分批和素材源文件预览修订后，最终工作树的全部 X 回归为 141/141。原素材池版本的服务器精确 release 已完成 139/139；素材预览增量待精确 commit 部署后补充生产证据。本轮未调用真实 X。
 
 ## 测试范围
 
@@ -11,15 +11,16 @@
 - daily runner 的三账号、存储/媒体预检、三条成组、known/unknown 和停止语义。
 - SQLite migration、全局 material/account-day/pool 唯一约束和成功态联动。
 - Sidecar backend/daily 鉴权、管理员 API、DOM/URL allowlist 和 no-store。
+- 素材预览的池归属、精确 ID 只读查询、安全 HTTPS 跳转、浏览器双预览列和失败关闭。
 - 既有 X publish、OAuth、账号 owner/admin、短链和 canary 回归。
 
 ## 已执行结果
 
 | 命令组 | 数量 | 结果 | 说明 |
 | --- | ---: | --- | --- |
-| pool + pool selector + daily + ledger + app contract | 65 | 65 通过 | 最终关键修订后执行 |
+| pool + pool selector + daily + ledger + app contract | 67 | 67 通过 | 含素材预览接口、URL 安全与页面契约 |
 | X Post service + X accounts + owner backfill | 74 | 74 通过 | 最终关键修订后执行 |
-| 合计 | 139 | 139 通过 | 0 失败、0 阻塞 |
+| 合计 | 141 | 141 通过 | 0 失败、0 阻塞 |
 | `python -m py_compile`（实际目标） | — | 通过 | oauth/client/service/selector/runner |
 | `node --check static/quick-nav.js` | — | 通过 | 无输出、exit 0 |
 
@@ -44,6 +45,7 @@
 - `query_pool.summary.available` 已排除 `validation_failed`，专项断言通过。
 - runner 已按 scan limit 读取最老 1000 条，再保留最多 50 条合规候选供媒体补位，避免前 50 条不合规直接遮挡。
 - 超过 100 条的检查结果已按 API 上限分批；205 条 100/100/5 回归通过。
+- 素材预览使用管理员同源入口，先验证素材仍属于素材池，再精确只读解析源 URL；HTTP、凭据、控制字符、重复/缺失记录全部失败关闭，不改变发布状态。
 
 ## 未执行
 

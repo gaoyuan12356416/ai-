@@ -41452,6 +41452,47 @@ def x_post_pool_query_params(raw_query):
     return result
 
 
+def x_post_material_preview_location(material_id, row_loader=None):
+    material_id = str(material_id or "").strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
+        raise ValueError("material_id must be a positive integer")
+    database = str(DB_NAME or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", database):
+        raise RuntimeError("material source database is unavailable")
+    query = (
+        "SELECT CAST(id AS CHAR),url "
+        "FROM `%s`.ads_custom_source WHERE id=%d LIMIT 2"
+        % (database, int(material_id))
+    )
+    loader = row_loader or (
+        lambda sql: ad_control_run_mysql(sql, timeout_seconds=10)
+    )
+    rows = loader(query)
+    if (
+        not isinstance(rows, (list, tuple))
+        or len(rows) != 1
+        or len(rows[0]) < 2
+        or str(rows[0][0] or "").strip() != material_id
+    ):
+        raise LookupError("素材不存在或没有可用的素材 URL")
+    location = str(rows[0][1] or "").strip()
+    if (
+        not location
+        or len(location) > 4096
+        or any(ord(char) < 32 or ord(char) == 127 for char in location)
+    ):
+        raise LookupError("素材不存在或没有可用的素材 URL")
+    parsed = urlparse(location)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise LookupError("素材 URL 不是可预览的 HTTPS 地址")
+    return location
+
+
 def parse_ad_material_task_route(path):
     match = re.match(r"^/api/ad-material/tasks/([0-9a-f]{32})(?:/([a-z-]+))?$", path)
     if match:
@@ -91755,6 +91796,83 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/preview":
+            if not self._require_cookie_admin():
+                return
+            try:
+                raw_preview_query = parse_qs(
+                    str(parsed.query or ""), keep_blank_values=False
+                )
+                if set(raw_preview_query) != {"material_id"}:
+                    raise ValueError("material_id is required")
+                material_values = raw_preview_query.get("material_id") or []
+                if len(material_values) != 1:
+                    raise ValueError("material_id must be unique")
+                material_id = str(material_values[0] or "").strip()
+                if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
+                    raise ValueError("material_id must be a positive integer")
+                pool_result = query_x_post_material_pool(
+                    {
+                        "page": 1,
+                        "page_size": 1,
+                        "material_id": material_id,
+                        "actor": x_accounts_actor(self._session()),
+                        "scope": "all",
+                    }
+                )
+                pool_items = (
+                    pool_result.get("items", [])
+                    if isinstance(pool_result, dict)
+                    else []
+                )
+                if (
+                    len(pool_items) != 1
+                    or str(pool_items[0].get("material_id") or "") != material_id
+                ):
+                    raise LookupError("素材池记录不存在")
+                location = x_post_material_preview_location(material_id)
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except LookupError as exc:
+                json_response(
+                    self,
+                    404,
+                    {"error": "x_post_material_preview_unavailable", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            except (
+                OSError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ):
+                json_response(
+                    self,
+                    503,
+                    {
+                        "error": "x_post_material_preview_unavailable",
+                        "message": "素材预览暂不可用，请稍后重试",
+                    },
+                    no_store=True,
+                )
             return
 
         if parsed.path == "/api/admin/x-posts/material-pool":

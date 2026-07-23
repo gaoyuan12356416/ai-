@@ -12,7 +12,7 @@ import ast
 import re
 import unittest
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,13 +110,91 @@ class XAccountsAppContractTest(unittest.TestCase):
             'if parsed.path == "/api/admin/x-posts/logs":',
             'if parsed.path == "/api/drama-material/products":',
         )
-        self.assertEqual(routes.count("_require_cookie_admin()"), 3)
-        self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 3)
-        self.assertEqual(routes.count('"scope": "all"'), 3)
+        self.assertEqual(routes.count("_require_cookie_admin()"), 4)
+        self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 4)
+        self.assertEqual(routes.count('"scope": "all"'), 4)
         self.assertIn("query_x_post_logs(params)", routes)
         self.assertIn("query_x_post_runs(params)", routes)
         self.assertIn("query_x_post_material_pool(params)", routes)
         self.assertGreaterEqual(routes.count("no_store=True"), 6)
+
+    def test_x_post_material_preview_is_admin_only_pool_scoped_and_no_store(self):
+        route = source_between(
+            'if parsed.path == "/api/admin/x-posts/material-pool/preview":',
+            'if parsed.path == "/api/admin/x-posts/material-pool":',
+        )
+        self.assertIn("_require_cookie_admin()", route)
+        self.assertIn("query_x_post_material_pool(", route)
+        self.assertIn('"material_id": material_id', route)
+        self.assertIn('"actor": x_accounts_actor(self._session())', route)
+        self.assertIn('"scope": "all"', route)
+        self.assertIn("x_post_material_preview_location(material_id)", route)
+        self.assertIn('self.send_header("Cache-Control", "no-store")', route)
+        self.assertIn('self.send_header("Referrer-Policy", "no-referrer")', route)
+        self.assertIn("no_store=True", route)
+        self.assertNotIn("append_audit_log(", route)
+
+    def test_x_post_material_preview_location_is_https_and_injection_safe(self):
+        tree = ast.parse(APP_SOURCE)
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "x_post_material_preview_location"
+        )
+        namespace = {
+            "DB_NAME": "kunlunads_dev",
+            "re": re,
+            "urlparse": urlparse,
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[function], type_ignores=[])
+                ),
+                str(APP_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        preview_location = namespace["x_post_material_preview_location"]
+        queries = []
+
+        def valid_loader(query):
+            queries.append(query)
+            return [["5503209", "https://media.example.test/material.mp4"]]
+
+        self.assertEqual(
+            preview_location("5503209", valid_loader),
+            "https://media.example.test/material.mp4",
+        )
+        self.assertEqual(
+            queries,
+            [
+                "SELECT CAST(id AS CHAR),url FROM "
+                "`kunlunads_dev`.ads_custom_source WHERE id=5503209 LIMIT 2"
+            ],
+        )
+        for invalid in ("", "0", "-1", "1 OR 1=1", "1%20OR%201=1"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                preview_location(invalid, valid_loader)
+        with self.assertRaises(LookupError):
+            preview_location("5503209", lambda _query: [])
+        with self.assertRaises(LookupError):
+            preview_location(
+                "5503209",
+                lambda _query: [["5503209", "http://media.example.test/a.mp4"]],
+            )
+        with self.assertRaises(LookupError):
+            preview_location(
+                "5503209",
+                lambda _query: [["5503209", "https://user:pass@example.test/a.mp4"]],
+            )
+        with self.assertRaises(LookupError):
+            preview_location(
+                "5503209",
+                lambda _query: [["5503209", "https://example.test/a.mp4\r\nX-Test: 1"]],
+            )
 
     def test_x_post_query_parameter_validation(self):
         tree = ast.parse(APP_SOURCE)
@@ -208,6 +286,14 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn('url.hostname === "x.com"', X_POST_LOGS_SOURCE)
         self.assertIn('url.hostname === "ai.yingliangads.com"', X_POST_LOGS_SOURCE)
         self.assertIn('url.hostname === "x.com"', X_POST_POOL_SOURCE)
+        self.assertIn("<th>素材预览</th>", X_POST_POOL_SOURCE)
+        self.assertIn("<th>Post 预览</th>", X_POST_POOL_SOURCE)
+        self.assertIn(
+            "/api/admin/x-posts/material-pool/preview?material_id=",
+            X_POST_POOL_SOURCE,
+        )
+        self.assertIn('link.rel = "noopener noreferrer"', X_POST_POOL_SOURCE)
+        self.assertIn("cell.colSpan = 10", X_POST_POOL_SOURCE)
         self.assertIn("replaceChildren()", X_POST_LOGS_SOURCE)
         self.assertIn("replaceChildren()", X_POST_POOL_SOURCE)
         self.assertNotIn("access_token", X_POST_LOGS_SOURCE.lower())
