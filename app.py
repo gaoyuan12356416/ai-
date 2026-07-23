@@ -92107,7 +92107,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         "material_id": material_id,
                         "actor": x_accounts_actor(self._session()),
                         "scope": "all",
-                    }
+                    },
+                    navigation_item="xPostMaterialPool",
                 )
                 pool_items = (
                     pool_result.get("items", [])
@@ -92170,7 +92171,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 params.update(
                     {"actor": x_accounts_actor(self._session()), "scope": "all"}
                 )
-                result = query_x_post_material_pool(params)
+                result = query_x_post_material_pool(
+                    params,
+                    navigation_item="xPostMaterialPool",
+                )
                 json_response(
                     self,
                     200,
@@ -95370,6 +95374,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     material_ids,
                     x_accounts_actor(session),
                     validation_checks=validation_checks,
+                    navigation_item="xPostMaterialPool",
                 )
                 append_audit_log(
                     session,
@@ -96175,6 +96180,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 result = delete_x_post_material_pool(
                     pool_item_id,
                     x_accounts_actor(session),
+                    navigation_item="xPostMaterialPool",
                 )
                 append_audit_log(
                     session,

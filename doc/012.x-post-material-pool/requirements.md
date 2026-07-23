@@ -135,6 +135,7 @@
 
 - 管理页面和四个素材池 API 只接受 Feishu Cookie，并实时读取快速导航栏 `xPostMaterialPool` 配置：分组或菜单禁用/缺失时拒绝；任一级 `adminOnly=true` 时只允许管理员；分组和菜单配置的每个 `module` 都必须具备。API Token 和跨源写请求始终拒绝。
 - 页面权限判断直接以 `cache: no-store` 读取 `/navigation.json`；读取失败时 fail closed。后端每次请求独立读取同一生产配置并作为最终授权边界，不依赖浏览器缓存或 DOM 隐藏。
+- 主后台通过导航门禁后，才向 loopback Sidecar 的素材池 query/add/delete 请求附加精确 `navigation_item=xPostMaterialPool`；Sidecar 对非管理员缺失/错误标记继续返回 403。该标记不用于账号全量列表、发布日志、运行记录或 daily 路由。
 - daily bearer 只能读取可用项、回写检查、创建固定三账号计划和发布正式 queue，不能管理池或查询后台列表。
 - 添加、计划和成功态联动均使用 `BEGIN IMMEDIATE`，冲突全部回滚。
 - 校验失败记录仍可在后续运行重新检查，但只要已有任何 queue，就永不回到可选择集合。

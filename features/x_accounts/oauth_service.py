@@ -1424,18 +1424,38 @@ def query_post_runs_request(payload):
     return _admin_post_query(payload, "query_runs")
 
 
+POST_MATERIAL_POOL_NAVIGATION_ITEM = "xPostMaterialPool"
+
+
+def _material_pool_actor(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    actor = require_actor_subject(payload.get("actor", {}))
+    scope = str(payload.get("scope", "all") or "all").strip().lower()
+    if scope != "all":
+        raise ServiceError("x_admin_required", "仅授权用户可维护X素材池", 403)
+    navigation_item = clean_text(payload.get("navigation_item", ""), 64)
+    if (
+        actor.get("role") != "admin"
+        and navigation_item != POST_MATERIAL_POOL_NAVIGATION_ITEM
+    ):
+        raise ServiceError("x_admin_required", "仅授权用户可维护X素材池", 403)
+    return actor
+
+
 def query_post_material_pool_request(payload):
-    return _admin_post_query(payload, "query_pool")
+    _material_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        query = dict(payload)
+        query.pop("navigation_item", None)
+        return XPostStore(POST_DB_PATH).query_pool(query)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
 
 
 def add_post_material_pool_request(payload):
-    if not isinstance(payload, dict):
-        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
-    actor, scope = normalize_account_scope(
-        payload.get("actor", {}), payload.get("scope", "all")
-    )
-    if scope != "all":
-        raise ServiceError("x_admin_required", "仅管理员可维护X素材池", 403)
+    actor = _material_pool_actor(payload)
     material_ids = payload.get("material_ids")
     if material_ids is None and payload.get("material_id") not in (None, ""):
         material_ids = [payload.get("material_id")]
@@ -1451,13 +1471,7 @@ def add_post_material_pool_request(payload):
 
 
 def delete_post_material_pool_request(payload, pool_item_id):
-    if not isinstance(payload, dict):
-        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
-    _actor, scope = normalize_account_scope(
-        payload.get("actor", {}), payload.get("scope", "all")
-    )
-    if scope != "all":
-        raise ServiceError("x_admin_required", "仅管理员可维护X素材池", 403)
+    _material_pool_actor(payload)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
         return XPostStore(POST_DB_PATH).delete_pool_material(pool_item_id)

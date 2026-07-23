@@ -227,7 +227,7 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertEqual(routes.count('"scope": "all"'), 4)
         self.assertIn("query_x_post_logs(params)", routes)
         self.assertIn("query_x_post_runs(params)", routes)
-        self.assertIn("query_x_post_material_pool(params)", routes)
+        self.assertIn("query_x_post_material_pool(", routes)
         self.assertIn("x_post_enrich_material_pool_preview_urls(result)", routes)
         self.assertGreaterEqual(routes.count("no_store=True"), 6)
 
@@ -241,6 +241,7 @@ class XAccountsAppContractTest(unittest.TestCase):
             route,
         )
         self.assertIn("query_x_post_material_pool(", route)
+        self.assertIn('navigation_item="xPostMaterialPool"', route)
         self.assertIn('"material_id": material_id', route)
         self.assertIn('"actor": x_accounts_actor(self._session())', route)
         self.assertIn('"scope": "all"', route)
@@ -509,6 +510,7 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("_require_same_origin_json()", post_route)
         self.assertIn("x_post_initial_material_checks(material_ids)", post_route)
         self.assertIn("add_x_post_material_pool(", post_route)
+        self.assertIn('navigation_item="xPostMaterialPool"', post_route)
         self.assertIn("validation_checks=validation_checks", post_route)
         self.assertIn("append_audit_log(", post_route)
         self.assertIn("no_store=True", post_route)
@@ -523,6 +525,7 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         self.assertIn("_require_same_origin_json()", delete_route)
         self.assertIn("delete_x_post_material_pool(", delete_route)
+        self.assertIn('navigation_item="xPostMaterialPool"', delete_route)
         self.assertIn("append_audit_log(", delete_route)
         self.assertIn("no_store=True", delete_route)
 

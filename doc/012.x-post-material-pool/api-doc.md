@@ -145,7 +145,7 @@
 
 ## POST /internal/posts/material-pool/query
 
-仅 backend bearer。请求包含服务端生成的 `actor`、`scope=all` 和与管理员 GET 相同的分页/筛选字段，返回素材池列表。
+仅 backend bearer。请求包含服务端生成的 `actor`、`scope=all`、与管理员 GET 相同的分页/筛选字段；当 actor 不是管理员时，主后台必须在完成导航配置授权后增加精确 `navigation_item="xPostMaterialPool"`。Sidecar 只在素材池 query/add/delete 三个 backend 路由识别该标记，返回素材池列表；daily bearer 不能调用这些路由。
 
 ## POST /internal/posts/material-pool/add
 
@@ -155,10 +155,11 @@
 {
   "actor": {
     "user_id": "ou_xxx",
-    "name": "Admin",
-    "role": "admin"
+    "name": "Operator",
+    "role": "user"
   },
   "scope": "all",
+  "navigation_item": "xPostMaterialPool",
   "material_ids": ["5221348"],
   "validation_checks": [
     {
@@ -170,11 +171,11 @@
 }
 ```
 
-`scope` 非 `all` 返回 403。`validation_checks` 必须与本批规范化后的素材 ID 一一对应；缺失时 Sidecar 不信任调用方，统一以 `material_validation_pending` 入池并显示不可用。提供了不完整、重复或越界的检查集合时整批 400 且不写入。
+`scope` 非 `all` 返回 403。非管理员缺失或伪造其他 `navigation_item` 返回 403；管理员为兼容现有内部管理调用可以省略该字段。`validation_checks` 必须与本批规范化后的素材 ID 一一对应；缺失时 Sidecar 不信任调用方，统一以 `material_validation_pending` 入池并显示不可用。提供了不完整、重复或越界的检查集合时整批 400 且不写入。
 
 ## POST /internal/posts/material-pool/{pool_item_id}/delete
 
-仅 backend bearer。请求携带服务端 actor 和 `scope=all`，响应为 `{"item": {...}}`。
+仅 backend bearer。请求携带服务端 actor、`scope=all`，非管理员还必须携带主后台签发的精确 `navigation_item="xPostMaterialPool"`，响应为 `{"item": {...}}`。
 
 ## POST /internal/posts/material-pool/available
 

@@ -1467,6 +1467,13 @@ class XAccountsTestCase(unittest.TestCase):
             with self.assertRaises(client.XAccountsClientError) as pool_denied:
                 client.add_x_post_material_pool(["8003"], self.owner)
             self.assertEqual(pool_denied.exception.code, "x_admin_required")
+            with self.assertRaises(client.XAccountsClientError) as wrong_grant:
+                client.add_x_post_material_pool(
+                    ["8003"],
+                    self.owner,
+                    navigation_item="xPostLogs",
+                )
+            self.assertEqual(wrong_grant.exception.code, "x_admin_required")
             deleted_pool = client.delete_x_post_material_pool(
                 added_pool["items"][0]["id"],
                 self.admin,
@@ -1483,6 +1490,35 @@ class XAccountsTestCase(unittest.TestCase):
                 )["pagination"]["total"],
                 1,
             )
+            owner_added = client.add_x_post_material_pool(
+                ["8003"],
+                self.owner,
+                validation_checks=[
+                    {
+                        "material_id": "8003",
+                        "error_code": "",
+                        "error_message": "",
+                    }
+                ],
+                navigation_item="xPostMaterialPool",
+            )
+            self.assertEqual(owner_added["created_count"], 1)
+            owner_pool = client.query_x_post_material_pool(
+                {
+                    "actor": self.owner,
+                    "scope": "all",
+                    "page": 1,
+                    "page_size": 10,
+                },
+                navigation_item="xPostMaterialPool",
+            )
+            self.assertEqual(owner_pool["pagination"]["total"], 2)
+            owner_deleted = client.delete_x_post_material_pool(
+                owner_added["items"][0]["id"],
+                self.owner,
+                navigation_item="xPostMaterialPool",
+            )
+            self.assertTrue(owner_deleted["item"]["deleted"])
             not_overwritten = client.record_x_post_run_failure(
                 {
                     "run_date": "2026-07-23",

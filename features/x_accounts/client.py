@@ -217,11 +217,13 @@ def query_x_post_runs(params):
     )
 
 
-def query_x_post_material_pool(params):
+def query_x_post_material_pool(params, navigation_item=""):
     params = params if isinstance(params, dict) else {}
     payload = _post_query_payload(params)
     if "availability" in params and params["availability"] not in (None, ""):
         payload["availability"] = params["availability"]
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
     return _request(
         "/internal/posts/material-pool/query",
         method="POST",
@@ -229,7 +231,12 @@ def query_x_post_material_pool(params):
     )
 
 
-def add_x_post_material_pool(material_ids, actor, validation_checks=None):
+def add_x_post_material_pool(
+    material_ids,
+    actor,
+    validation_checks=None,
+    navigation_item="",
+):
     if not isinstance(material_ids, (list, tuple)):
         raise XAccountsClientError("invalid_request", "素材ID列表必须是数组", 400)
     payload = {
@@ -243,6 +250,8 @@ def add_x_post_material_pool(material_ids, actor, validation_checks=None):
                 "invalid_request", "素材校验结果必须是数组", 400
             )
         payload["validation_checks"] = list(validation_checks)
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
     return _request(
         "/internal/posts/material-pool/add",
         method="POST",
@@ -250,14 +259,17 @@ def add_x_post_material_pool(material_ids, actor, validation_checks=None):
     )
 
 
-def delete_x_post_material_pool(pool_item_id, actor):
+def delete_x_post_material_pool(pool_item_id, actor, navigation_item=""):
     pool_item_id = str(pool_item_id or "")
     if not pool_item_id.isdigit() or int(pool_item_id) <= 0:
         raise XAccountsClientError("invalid_request", "素材池记录ID无效", 400)
+    payload = {"actor": normalize_actor(actor), "scope": "all"}
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
     return _request(
         "/internal/posts/material-pool/%s/delete" % pool_item_id,
         method="POST",
-        payload={"actor": normalize_actor(actor), "scope": "all"},
+        payload=payload,
     )
 
 
