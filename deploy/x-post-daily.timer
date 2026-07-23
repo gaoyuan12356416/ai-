@@ -1,0 +1,11 @@
+[Unit]
+Description=Publish three daily Dramawave X posts at 10:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=x-post-daily.service
+
+[Install]
+WantedBy=timers.target

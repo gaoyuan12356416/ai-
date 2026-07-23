@@ -41293,6 +41293,8 @@ from features.x_accounts.client import (
     XAccountsClientError,
     configure_x_accounts_client,
     get_x_accounts_config,
+    query_x_post_logs,
+    query_x_post_runs,
     query_x_accounts as query_x_authorized_accounts,
     logout_x_account,
     start_x_authorization,
@@ -41352,6 +41354,50 @@ def x_accounts_actor(session):
         "role": str(session.get("role", "user") or "user"),
     }
 
+
+
+def x_post_admin_query_params(raw_query, *, runs=False):
+    raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
+    allowed = {"page", "page_size", "run_date", "source_date", "status"}
+    if not runs:
+        allowed.update({"account_id", "material_id", "unknown_outcome"})
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unsupported query parameter: %s" % unknown[0])
+
+    result = {}
+    try:
+        result["page"] = max(1, int((raw.get("page") or ["1"])[0] or "1"))
+        result["page_size"] = max(1, min(100, int((raw.get("page_size") or ["20"])[0] or "20")))
+    except (TypeError, ValueError):
+        raise ValueError("page and page_size must be integers")
+
+    for key in ("run_date", "source_date"):
+        value = str((raw.get(key) or [""])[0] or "").strip()
+        if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("%s must use YYYY-MM-DD" % key)
+        if value:
+            result[key] = value
+
+    status = str((raw.get("status") or [""])[0] or "").strip().lower()
+    if status and not re.fullmatch(r"[a-z_]{1,32}", status):
+        raise ValueError("invalid status")
+    if status:
+        result["status"] = status
+
+    if not runs:
+        for key in ("account_id", "material_id"):
+            value = str((raw.get(key) or [""])[0] or "").strip()
+            if value and not re.fullmatch(r"\d{1,20}", value):
+                raise ValueError("%s must be a positive integer" % key)
+            if value:
+                result[key] = value
+        unknown_outcome = str((raw.get("unknown_outcome") or [""])[0] or "").strip().lower()
+        if unknown_outcome:
+            if unknown_outcome not in ("0", "1", "true", "false"):
+                raise ValueError("unknown_outcome must be 0 or 1")
+            result["unknown_outcome"] = 1 if unknown_outcome in ("1", "true") else 0
+    return result
 
 
 def parse_ad_material_task_route(path):
@@ -91626,6 +91672,34 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             try:
                 session = self._session() or {}
                 json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="all"), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/logs":
+            if not self._require_cookie_admin():
+                return
+            try:
+                params = x_post_admin_query_params(parsed.query)
+                params.update({"actor": x_accounts_actor(self._session()), "scope": "all"})
+                json_response(self, 200, query_x_post_logs(params), no_store=True)
+            except ValueError as exc:
+                json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/runs":
+            if not self._require_cookie_admin():
+                return
+            try:
+                params = x_post_admin_query_params(parsed.query, runs=True)
+                params.update({"actor": x_accounts_actor(self._session()), "scope": "all"})
+                json_response(self, 200, query_x_post_runs(params), no_store=True)
+            except ValueError as exc:
+                json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 json_response(self, status, payload, no_store=True)

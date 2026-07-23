@@ -21,6 +21,19 @@ SAFE_ERROR_CODES = {
     "x_identity_mismatch",
     "x_internal_auth_failed",
     "x_oauth_not_configured",
+    "x_post_account_day_already_reserved",
+    "x_post_daily_candidate_shortage",
+    "x_post_daily_run_exists",
+    "x_post_idempotency_conflict",
+    "x_post_material_already_used",
+    "x_post_queue_not_found",
+    "x_post_rate_limited",
+    "x_post_retry_requires_review",
+    "x_post_run_not_found",
+    "x_post_storage_conflict",
+    "x_post_unknown_outcome",
+    "x_posts_unavailable",
+    "x_publish_unknown",
     "x_token_missing",
     "x_token_revoked",
     "x_upstream_error",
@@ -47,7 +60,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect())
+_NO_REDIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirect(),
+)
 
 
 def configure_x_accounts_client(base_url, internal_token, timeout=30):
@@ -157,4 +173,77 @@ def logout_x_account(account_id, actor):
         "/internal/accounts/%s/logout" % account_id,
         method="POST",
         payload={"actor": normalize_actor(actor)},
+    )
+
+
+def _post_query_payload(params):
+    if not isinstance(params, dict):
+        raise XAccountsClientError("invalid_request", "X发布日志查询参数必须是对象", 400)
+    result = {
+        "actor": normalize_actor(params.get("actor", {})),
+        "scope": normalize_scope(params.get("scope", "all")),
+    }
+    for field in (
+        "page", "page_size", "run_date", "source_date", "account_id", "status",
+        "material_id", "unknown_outcome",
+    ):
+        if field in params and params[field] not in (None, ""):
+            result[field] = params[field]
+    return result
+
+
+def query_x_post_logs(params):
+    """Return the sidecar's redacted, paginated X Post queue/log view."""
+    return _request(
+        "/internal/posts/logs/query",
+        method="POST",
+        payload=_post_query_payload(params),
+    )
+
+
+def query_x_post_runs(params):
+    """Return the sidecar's redacted, paginated daily-run view."""
+    return _request(
+        "/internal/posts/runs/query",
+        method="POST",
+        payload=_post_query_payload(params),
+    )
+
+
+def create_x_post_daily_plan(payload):
+    if not isinstance(payload, dict):
+        raise XAccountsClientError("invalid_request", "X每日发布计划必须是对象", 400)
+    return _request("/internal/posts/daily-plan", method="POST", payload=payload)
+
+
+def publish_x_post_queue(queue_id):
+    queue_id = str(queue_id or "")
+    if not queue_id.isdigit() or int(queue_id) <= 0:
+        raise XAccountsClientError("invalid_request", "X发布队列ID无效", 400)
+    return _request(
+        "/internal/posts/queue/%s/publish" % queue_id,
+        method="POST",
+        payload={},
+    )
+
+
+def query_x_post_material_keys(material_keys):
+    if not isinstance(material_keys, (list, tuple)):
+        raise XAccountsClientError("invalid_request", "素材ID列表必须是数组", 400)
+    return _request(
+        "/internal/posts/material-keys/query",
+        method="POST",
+        payload={"material_keys": list(material_keys)},
+    )
+
+
+def record_x_post_run_failure(payload):
+    if not isinstance(payload, dict):
+        raise XAccountsClientError("invalid_request", "X每日发布失败记录必须是对象", 400)
+    allowed = {"run_date", "source_date", "error_code", "error_message"}
+    body = {key: payload.get(key) for key in allowed if key in payload}
+    return _request(
+        "/internal/posts/runs/record-failure",
+        method="POST",
+        payload=body,
     )

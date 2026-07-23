@@ -1,20 +1,20 @@
 [Unit]
-Description=X OAuth account authorization sidecar
-After=network-online.target
+Description=Daily Dramawave X post publisher
+After=network-online.target x-post-automation.service
 Wants=network-online.target
+Requires=x-post-automation.service
 RequiresMountsFor=/mnt/data-disk/x-post-automation
 ConditionPathIsMountPoint=/mnt/data-disk
 
 [Service]
-Type=simple
-User=x-post-automation
-Group=x-post-automation
+Type=oneshot
+User=x-post-daily
+Group=x-post-daily
 WorkingDirectory=/opt/x-post-automation/current
-EnvironmentFile=/etc/x-post-automation.env
-ExecStart=/usr/bin/python3 /opt/x-post-automation/current/features/x_accounts/oauth_service.py serve
-ExecStartPost=/usr/bin/python3 /opt/x-post-automation/current/scripts/wait_x_post_sidecar.py --url http://127.0.0.1:8810/health --timeout 30
-Restart=always
-RestartSec=3
+EnvironmentFile=/etc/x-post-daily.env
+ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_post_daily_runner.py
+RuntimeDirectory=x-post-daily
+RuntimeDirectoryMode=0700
 PrivateTmp=true
 PrivateDevices=true
 NoNewPrivileges=true
@@ -31,10 +31,8 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
-InaccessiblePaths=/etc/ssh
+InaccessiblePaths=/var/lib/x-post-automation /etc/ssh
 ReadOnlyPaths=/opt/x-post-automation/current /mnt/data-disk/x-post-automation/bin
-ReadWritePaths=/var/lib/x-post-automation /mnt/data-disk/x-post-automation
+ReadWritePaths=/run/x-post-daily /mnt/data-disk/x-post-automation/daily-work
 UMask=0077
-
-[Install]
-WantedBy=multi-user.target
+TimeoutStartSec=90min

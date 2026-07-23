@@ -47,6 +47,7 @@ USERS_ME_URL = "https://api.x.com/2/users/me?" + urllib.parse.urlencode(
     {"user.fields": ",".join(USER_FIELDS)}
 )
 MAX_BODY_BYTES = 16 * 1024
+MAX_DAILY_PLAN_BODY_BYTES = 256 * 1024
 MAX_ERROR_TEXT = 240
 
 
@@ -54,7 +55,14 @@ def load_env_file(path):
     env_path = Path(path)
     if not env_path.exists():
         return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    try:
+        raw_lines = env_path.read_text(encoding="utf-8").splitlines()
+    except PermissionError:
+        # systemd reads EnvironmentFile as PID 1 before dropping to the
+        # unprivileged service user. The application must not reopen the
+        # root-only secret file after those values are already injected.
+        return
+    for raw_line in raw_lines:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -73,6 +81,20 @@ def env_int(name, default, minimum, maximum):
     return max(minimum, min(value, maximum))
 
 
+def env_positive_int_tuple(name):
+    values = []
+    for raw in os.environ.get(name, "").replace(" ", "").split(","):
+        if not raw:
+            continue
+        if not re.fullmatch(r"[1-9][0-9]*", raw):
+            return ()
+        value = int(raw)
+        if value in values:
+            return ()
+        values.append(value)
+    return tuple(values)
+
+
 load_env_file(os.environ.get("X_POST_ENV_FILE", DEFAULT_ENV_FILE))
 
 CLIENT_ID = os.environ.get("X_CLIENT_ID", "").strip()
@@ -81,6 +103,8 @@ INTERNAL_TOKEN = (
     os.environ.get("X_INTERNAL_TOKEN", "").strip()
     or os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN", "").strip()
 )
+DAILY_INTERNAL_TOKEN = os.environ.get("X_POST_DAILY_INTERNAL_TOKEN", "").strip()
+DAILY_ACCOUNT_IDS = env_positive_int_tuple("X_POST_DAILY_ACCOUNT_IDS")
 PUBLIC_BASE_URL = os.environ.get(
     "X_PUBLIC_BASE_URL", "https://ai.yingliangads.com/x-oauth"
 ).rstrip("/")
@@ -105,6 +129,14 @@ POST_PUBLIC_ROOT = Path(
 POST_SHORT_BASE_URL = os.environ.get(
     "X_POST_SHORT_BASE_URL", "https://ai.yingliangads.com/s2l"
 ).strip().rstrip("/")
+POST_STORAGE_MOUNT_ROOT = Path(
+    os.environ.get("X_POST_STORAGE_MOUNT_ROOT", "/mnt/data-disk").strip()
+)
+POST_STORAGE_ROOT = Path(
+    os.environ.get(
+        "X_POST_STORAGE_ROOT", "/mnt/data-disk/x-post-automation"
+    ).strip()
+)
 POST_MEDIA_ALLOWED_HOSTS = tuple(
     dict.fromkeys(
         value.strip().lower()
@@ -473,6 +505,25 @@ def basic_auth_header():
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
 
+def is_x_rate_limit_payload(payload):
+    if not isinstance(payload, dict):
+        return False
+    candidates = [payload]
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        candidates.extend(item for item in errors if isinstance(item, dict))
+    allowed_types = {
+        "https://api.x.com/2/problems/usage-capped",
+        "https://api.x.com/2/problems/rate-limit-exceeded",
+    }
+    for item in candidates:
+        if str(item.get("type", "") or "").rstrip("/") in allowed_types:
+            return True
+        if str(item.get("code", "") or "") == "88":
+            return True
+    return False
+
+
 def http_json(url, method="GET", headers=None, body=None, allow_revoked=False, allow_non_json=False):
     request = urllib.request.Request(url, data=body, method=method)
     for key, value in (headers or {}).items():
@@ -485,11 +536,14 @@ def http_json(url, method="GET", headers=None, body=None, allow_revoked=False, a
             if not raw:
                 return {}
             try:
-                return json.loads(raw.decode("utf-8"))
+                payload = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
                 if allow_non_json:
                     return {}
                 raise
+            if is_x_rate_limit_payload(payload):
+                raise ServiceError("x_post_rate_limited", "X API触发限流或用量上限", 429)
+            return payload
     except ServiceError:
         raise
     except urllib.error.HTTPError as exc:
@@ -501,6 +555,8 @@ def http_json(url, method="GET", headers=None, body=None, allow_revoked=False, a
         finally:
             exc.close()
         upstream_code = clean_text(payload.get("error") or payload.get("title") or "http_%s" % exc.code, 64)
+        if exc.code == 429 or is_x_rate_limit_payload(payload):
+            raise ServiceError("x_post_rate_limited", "X API触发限流或用量上限", 429) from None
         if allow_revoked and upstream_code.lower() in {"invalid_token", "invalid_grant", "token_revoked"}:
             return {"revoked": True}
         if exc.code in {400, 401, 403} and upstream_code.lower() in {"invalid_grant", "unauthorized", "client forbidden"}:
@@ -1045,6 +1101,42 @@ def _safe_canary_result(result):
     return {key: result[key] for key in allowed if key in result}
 
 
+def _safe_daily_plan_result(result):
+    if not isinstance(result, dict) or not isinstance(result.get("queues"), list):
+        raise ServiceError("x_posts_unavailable", "X每日发布计划返回无效", 503)
+    allowed_run = (
+        "id", "run_date", "source_date", "status", "expected_count", "queued_count",
+        "published_count", "failed_count", "unknown_count", "started_at",
+        "finished_at", "created_at", "updated_at", "created",
+    )
+    allowed_queue = (
+        "id", "run_id", "run_date", "source_date", "account_id", "account_username",
+        "material_id", "material_name", "content_id", "material_language", "drama_name",
+        "tag", "candidate_rank", "spend", "status", "created_at", "updated_at",
+    )
+    safe = {key: result[key] for key in allowed_run if key in result}
+    safe["queues"] = [
+        {key: queue[key] for key in allowed_queue if key in queue}
+        for queue in result["queues"]
+        if isinstance(queue, dict)
+    ]
+    if len(safe["queues"]) != 3:
+        raise ServiceError("x_posts_unavailable", "X每日发布计划队列数量异常", 503)
+    return safe
+
+
+def _safe_run_result(result):
+    if not isinstance(result, dict):
+        raise ServiceError("x_posts_unavailable", "X每日发布批次返回无效", 503)
+    allowed = (
+        "id", "run_date", "source_date", "status", "expected_count", "queued_count",
+        "published_count", "failed_count", "unknown_count", "error_code",
+        "error_message", "started_at", "finished_at", "created_at", "updated_at",
+        "recorded",
+    )
+    return {key: result[key] for key in allowed if key in result}
+
+
 def ensure_x_posts_storage():
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
@@ -1115,10 +1207,247 @@ def publish_canary_request(payload):
                 allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
                 timeout=POST_HTTP_TIMEOUT_SECONDS,
                 max_media_bytes=POST_MAX_MEDIA_BYTES,
+                storage_guard=preflight_post_storage_request,
+                durable_storage={
+                    "mount_root": POST_STORAGE_MOUNT_ROOT,
+                    "storage_root": POST_STORAGE_ROOT,
+                },
             )
         except XPostError as exc:
             _raise_x_post_error(exc, (access_token,))
     return _safe_canary_result(result)
+
+
+def _daily_account_scope(allowed_account_ids):
+    if allowed_account_ids is None:
+        return None
+    try:
+        values = tuple(int(value) for value in allowed_account_ids)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("x_daily_scope_invalid", "X每日发布账号范围配置无效", 503) from None
+    if (
+        len(values) != 3
+        or len(set(values)) != 3
+        or any(value <= 0 for value in values)
+    ):
+        raise ServiceError("x_daily_scope_invalid", "X每日发布账号范围配置无效", 503)
+    return frozenset(values)
+
+
+def create_daily_plan_request(payload, allowed_account_ids=None):
+    """Freeze three trusted account identities and candidates in one transaction."""
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise ServiceError("invalid_request", "candidates必须为数组", 400)
+    allowed_accounts = _daily_account_scope(allowed_account_ids)
+    requested_accounts = []
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            raise ServiceError("invalid_request", "candidate必须为对象", 400)
+        raw_account_id = raw.get("account_id")
+        if isinstance(raw_account_id, bool):
+            raise ServiceError("invalid_request", "account_id无效", 400)
+        try:
+            requested_accounts.append(int(raw_account_id))
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError("invalid_request", "account_id无效", 400) from None
+    if allowed_accounts is not None and (
+        len(requested_accounts) != 3
+        or len(set(requested_accounts)) != 3
+        or frozenset(requested_accounts) != allowed_accounts
+    ):
+        raise ServiceError(
+            "x_daily_account_scope_denied",
+            "X每日发布计划只能使用配置的三个账号",
+            403,
+        )
+    trusted = []
+    for raw, account_id in zip(candidates, requested_accounts):
+        account = find_account(account_id)
+        if account.get("status") != "active" or not account.get("publish_eligible"):
+            raise ServiceError("x_account_not_publishable", "X账号当前状态不可用于发布", 409)
+        candidate = dict(raw)
+        candidate.update(
+            {
+                "account_id": int(account["id"]),
+                "account_username": str(account.get("username", "") or ""),
+                "page_name": str(
+                    account.get("display_name", "") or account.get("username", "") or ""
+                ),
+                "page_id": str(account.get("x_user_id", "") or ""),
+            }
+        )
+        trusted.append(candidate)
+    # This check is intentionally adjacent to the SQLite plan transaction.
+    # A lost mount must never allow a formal daily reservation to be created.
+    preflight_post_storage_request()
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).create_daily_plan(
+            payload.get("run_date"),
+            payload.get("source_date"),
+            trusted,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return _safe_daily_plan_result(result)
+
+
+def preflight_post_storage_request():
+    try:
+        from features.x_posts import preflight_post_storage
+    except (ImportError, ModuleNotFoundError):
+        raise ServiceError("x_posts_unavailable", "X发布服务暂不可用", 503) from None
+    try:
+        return preflight_post_storage(
+            POST_PUBLIC_ROOT,
+            mount_root=POST_STORAGE_MOUNT_ROOT,
+            storage_root=POST_STORAGE_ROOT,
+            minimum_free_bytes=(POST_MAX_MEDIA_BYTES * 3) + (64 * 1024 * 1024),
+        )
+    except Exception as exc:
+        XPostError, _XPostStore, _publish_canary = _x_posts_api()
+        if isinstance(exc, XPostError):
+            _raise_x_post_error(exc)
+        raise
+
+
+def publish_queue_request(queue_id, allowed_account_ids=None):
+    """Publish one frozen queue row; no request field can override its account or copy."""
+    XPostError, XPostStore, publish_canary = _x_posts_api()
+    try:
+        store = XPostStore(POST_DB_PATH)
+        queue = store.get_queue(queue_id)
+        allowed_accounts = _daily_account_scope(allowed_account_ids)
+        if allowed_accounts is not None and (
+            int(queue.get("account_id") or 0) not in allowed_accounts
+            or int(queue.get("run_id") or 0) <= 0
+        ):
+            raise ServiceError(
+                "x_daily_account_scope_denied",
+                "X每日发布只能处理配置账号的正式日更队列",
+                403,
+            )
+        log = store.reserve_log(queue["id"])
+    except ServiceError:
+        raise
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    if log["status"] == "published":
+        return _safe_canary_result(
+            {
+                "status": "published",
+                "log_id": int(log["id"]),
+                "short_url": log["short_url"],
+                "post_id": log["x_post_id"],
+                "preview_url": log["x_post_url"],
+            }
+        )
+    if log["status"] != "reserved":
+        unknown = bool(log["unknown_outcome"]) or log["status"] == "post_creating"
+        code = "x_post_unknown_outcome" if unknown else "x_post_retry_requires_review"
+        _raise_x_post_error(
+            XPostError(
+                code,
+                "发布日志已执行，禁止自动重复发帖",
+                409,
+                unknown,
+            )
+        )
+
+    account_id = int(queue["account_id"])
+    actor = dict(CANARY_ACTOR)
+    try:
+        verify_account(account_id, actor, "all")
+    except ServiceError as exc:
+        try:
+            store.mark_failed_if_reserved(log["id"], exc.code, str(exc))
+        except XPostError as storage_exc:
+            _raise_x_post_error(storage_exc)
+        raise
+
+    try:
+        with publish_credentials(account_id, actor, "all") as (account, access_token):
+            try:
+                result = publish_canary(
+                    db_path=POST_DB_PATH,
+                    queue_id=int(queue["id"]),
+                    account=account,
+                    access_token=access_token,
+                    public_root=POST_PUBLIC_ROOT,
+                    short_base_url=POST_SHORT_BASE_URL,
+                    allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
+                    timeout=POST_HTTP_TIMEOUT_SECONDS,
+                    max_media_bytes=POST_MAX_MEDIA_BYTES,
+                    storage_guard=preflight_post_storage_request,
+                    durable_storage={
+                        "mount_root": POST_STORAGE_MOUNT_ROOT,
+                        "storage_root": POST_STORAGE_ROOT,
+                    },
+                )
+            except XPostError as exc:
+                _raise_x_post_error(exc, (access_token,))
+    except ServiceError as exc:
+        try:
+            store.mark_failed_if_reserved(log["id"], exc.code, str(exc))
+        except XPostError as storage_exc:
+            _raise_x_post_error(storage_exc)
+        raise
+    return _safe_canary_result(result)
+
+
+def _admin_post_query(payload, method_name):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    _actor, scope = normalize_account_scope(payload.get("actor", {}), payload.get("scope", "all"))
+    if scope != "all":
+        raise ServiceError("x_admin_required", "仅管理员可查看X发布日志", 403)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        store = XPostStore(POST_DB_PATH)
+        return getattr(store, method_name)(payload)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def query_post_logs_request(payload):
+    return _admin_post_query(payload, "query_logs")
+
+
+def query_post_runs_request(payload):
+    return _admin_post_query(payload, "query_runs")
+
+
+def record_post_run_failure_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).record_run_failure(
+            payload.get("run_date"),
+            payload.get("source_date"),
+            payload.get("error_code"),
+            payload.get("error_message") or payload.get("message"),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return _safe_run_result(item)
+
+
+def query_post_material_keys_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    values = payload.get("material_keys")
+    if values is None:
+        values = payload.get("material_ids")
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        material_keys = XPostStore(POST_DB_PATH).query_material_keys(values)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"material_keys": material_keys}
 
 
 def delete_token_artifacts(x_user_id):
@@ -1259,30 +1588,40 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def is_internal_authorized(self):
+    def internal_role(self):
         try:
             if not ipaddress.ip_address(self.client_address[0]).is_loopback:
-                return False
+                return ""
         except ValueError:
-            return False
+            return ""
         supplied = str(self.headers.get("Authorization", "") or "")
         prefix = "Bearer "
-        if not INTERNAL_TOKEN or not supplied.startswith(prefix):
-            return False
-        return secrets.compare_digest(supplied[len(prefix):], INTERNAL_TOKEN)
+        if not supplied.startswith(prefix):
+            return ""
+        token = supplied[len(prefix):]
+        if INTERNAL_TOKEN and secrets.compare_digest(token, INTERNAL_TOKEN):
+            return "backend"
+        if DAILY_INTERNAL_TOKEN and secrets.compare_digest(token, DAILY_INTERNAL_TOKEN):
+            return "daily"
+        return ""
 
-    def require_internal(self):
-        if self.is_internal_authorized():
-            return True
+    def is_internal_authorized(self):
+        """Backward-compatible boolean used by older diagnostics."""
+        return bool(self.internal_role())
+
+    def require_internal(self, allow_daily=False):
+        role = self.internal_role()
+        if role == "backend" or (allow_daily and role == "daily"):
+            return role
         self.send_json(403, {"error": "x_internal_auth_failed", "message": "内部鉴权失败"})
-        return False
+        return ""
 
-    def read_json(self):
+    def read_json(self, max_body_bytes=MAX_BODY_BYTES):
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
             raise ServiceError("invalid_request", "Content-Length无效", 400) from None
-        if length < 0 or length > MAX_BODY_BYTES:
+        if length < 0 or length > int(max_body_bytes):
             raise ServiceError("invalid_request", "请求体过大", 413)
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -1293,11 +1632,16 @@ class Handler(BaseHTTPRequestHandler):
             raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
         return payload
 
-    def send_service_error(self, exc):
+    def send_service_error(self, exc, include_write_outcome=False):
         code = exc.code if isinstance(exc, ServiceError) else "x_accounts_unavailable"
         status = exc.status if isinstance(exc, ServiceError) else 503
         message = clean_text(str(exc) if isinstance(exc, ServiceError) else "X账号服务暂不可用")
-        self.send_json(status, {"error": code, "message": message})
+        payload = {"error": code, "message": message}
+        if include_write_outcome:
+            unknown = code == "x_publish_unknown"
+            payload["unknown_outcome"] = unknown
+            payload["outcome_known"] = not unknown
+        self.send_json(status, payload)
 
     def do_GET(self):  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
@@ -1354,12 +1698,98 @@ class Handler(BaseHTTPRequestHandler):
         if not parsed.path.startswith("/internal/"):
             self.send_text(404, "not found\n")
             return
-        if not self.require_internal():
+        daily_verify_match = re.fullmatch(
+            r"/internal/posts/accounts/([0-9]+)/verify", parsed.path
+        )
+        daily_publish_match = re.fullmatch(
+            r"/internal/posts/queue/([0-9]+)/publish", parsed.path
+        )
+        daily_exact_paths = {
+            "/internal/posts/daily-plan",
+            "/internal/posts/storage/preflight",
+            "/internal/posts/runs/record-failure",
+            "/internal/posts/material-keys/query",
+        }
+        allow_daily = bool(
+            parsed.path in daily_exact_paths
+            or daily_verify_match
+            or daily_publish_match
+        )
+        internal_role = self.require_internal(allow_daily=allow_daily)
+        if not internal_role:
             return
         try:
-            payload = self.read_json()
+            payload = self.read_json(
+                MAX_DAILY_PLAN_BODY_BYTES
+                if parsed.path == "/internal/posts/daily-plan"
+                else MAX_BODY_BYTES
+            )
             if parsed.path == "/internal/posts/canary":
                 self.send_json(200, {"item": publish_canary_request(payload)})
+                return
+            if parsed.path == "/internal/posts/daily-plan":
+                if internal_role == "daily":
+                    plan = create_daily_plan_request(payload, DAILY_ACCOUNT_IDS)
+                else:
+                    plan = create_daily_plan_request(payload)
+                self.send_json(
+                    200,
+                    {"item": plan},
+                )
+                return
+            if parsed.path == "/internal/posts/storage/preflight":
+                self.send_json(200, {"item": preflight_post_storage_request()})
+                return
+            if parsed.path == "/internal/posts/logs/query":
+                self.send_json(200, query_post_logs_request(payload))
+                return
+            if parsed.path == "/internal/posts/runs/query":
+                self.send_json(200, query_post_runs_request(payload))
+                return
+            if parsed.path == "/internal/posts/runs/record-failure":
+                self.send_json(200, {"item": record_post_run_failure_request(payload)})
+                return
+            if parsed.path == "/internal/posts/material-keys/query":
+                self.send_json(200, {"item": query_post_material_keys_request(payload)})
+                return
+            if daily_verify_match:
+                account_id = int(daily_verify_match.group(1))
+                allowed_accounts = _daily_account_scope(DAILY_ACCOUNT_IDS)
+                if internal_role == "daily" and account_id not in allowed_accounts:
+                    raise ServiceError(
+                        "x_daily_account_scope_denied",
+                        "X每日发布只能校验配置的三个账号",
+                        403,
+                    )
+                self.send_json(
+                    200,
+                    {
+                        "item": verify_account(
+                            account_id,
+                            {
+                                "tenant_key": "internal",
+                                "user_id": "x-post-daily",
+                                "name": "X Post Daily",
+                                "email": "",
+                                "role": "admin",
+                            },
+                            "all",
+                        )
+                    },
+                )
+                return
+            if daily_publish_match:
+                if internal_role == "daily":
+                    published = publish_queue_request(
+                        daily_publish_match.group(1),
+                        DAILY_ACCOUNT_IDS,
+                    )
+                else:
+                    published = publish_queue_request(daily_publish_match.group(1))
+                self.send_json(
+                    200,
+                    {"item": published},
+                )
                 return
             if parsed.path == "/internal/authorize":
                 self.send_json(200, create_authorization(payload.get("actor", {})))
@@ -1387,7 +1817,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_text(404, "not found\n")
         except ServiceError as exc:
-            self.send_service_error(exc)
+            self.send_service_error(
+                exc,
+                include_write_outcome=bool(
+                    daily_publish_match
+                    or parsed.path == "/internal/posts/daily-plan"
+                ),
+            )
         except Exception:
             self.send_service_error(ServiceError("x_accounts_unavailable", "X账号服务暂不可用", 503))
 
@@ -1397,6 +1833,12 @@ def serve():
         raise RuntimeError("X sidecar must listen on loopback")
     if not INTERNAL_TOKEN:
         raise RuntimeError("X_INTERNAL_TOKEN is required")
+    if not DAILY_INTERNAL_TOKEN:
+        raise RuntimeError("X_POST_DAILY_INTERNAL_TOKEN is required")
+    if secrets.compare_digest(INTERNAL_TOKEN, DAILY_INTERNAL_TOKEN):
+        raise RuntimeError("daily and backend internal tokens must be different")
+    if len(DAILY_ACCOUNT_IDS) != 3:
+        raise RuntimeError("X_POST_DAILY_ACCOUNT_IDS must contain three unique positive IDs")
     require_oauth_config()
     os.umask(0o077)
     ensure_storage()

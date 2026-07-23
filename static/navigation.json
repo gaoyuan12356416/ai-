@@ -213,6 +213,17 @@
         "order": 20,
         "module": "x_accounts",
         "adminOnly": true
+      },
+      {
+        "key": "xPostLogs",
+        "label": "Post发布日志",
+        "description": "查看每日选材、发布结果和预览链接",
+        "kind": "page",
+        "href": "/x-post-logs.html",
+        "enabled": true,
+        "order": 30,
+        "module": "x_accounts",
+        "adminOnly": true
       }
     ]
   },

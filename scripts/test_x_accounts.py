@@ -40,6 +40,8 @@ class XAccountsTestCase(unittest.TestCase):
         service.CLIENT_ID = "test-client-id"
         service.CLIENT_SECRET = "test-client-secret"
         service.INTERNAL_TOKEN = "test-internal-token"
+        service.DAILY_INTERNAL_TOKEN = "test-daily-internal-token"
+        service.DAILY_ACCOUNT_IDS = (101, 102, 103)
         service.PUBLIC_BASE_URL = "https://ai.yingliangads.com/x-oauth"
         service.ADMIN_RETURN_URL = "https://ai.yingliangads.com/x-accounts.html"
         service.SCOPES = ("tweet.read", "tweet.write", "users.read", "offline.access", "media.write")
@@ -71,6 +73,76 @@ class XAccountsTestCase(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_root_only_systemd_environment_file_is_not_reopened_after_privilege_drop(self):
+        env_file = self.root / "root-only.env"
+        env_file.write_text("X_INTERNAL_TOKEN=must-not-be-read\n", encoding="utf-8")
+        with mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=PermissionError("simulated root-only 0600 file"),
+        ), mock.patch.dict(
+            os.environ,
+            {"X_INTERNAL_TOKEN": "already-injected-by-systemd"},
+            clear=False,
+        ):
+            service.load_env_file(env_file)
+            self.assertEqual(
+                os.environ["X_INTERNAL_TOKEN"],
+                "already-injected-by-systemd",
+            )
+
+    def test_x_http_and_application_rate_limits_keep_stable_429_semantics(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode("utf-8")
+
+            def read(self, _limit):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with mock.patch.object(
+            service._NO_REDIRECT_OPENER,
+            "open",
+            return_value=Response(
+                {
+                    "errors": [
+                        {
+                            "code": 88,
+                            "message": "wording is deliberately ignored",
+                        }
+                    ]
+                }
+            ),
+        ):
+            with self.assertRaises(service.ServiceError) as application_limit:
+                service.http_json(service.USERS_ME_URL)
+        self.assertEqual(application_limit.exception.code, "x_post_rate_limited")
+        self.assertEqual(application_limit.exception.status, 429)
+
+        http_error = urllib.error.HTTPError(
+            service.USERS_ME_URL,
+            429,
+            "limited",
+            {},
+            io.BytesIO(
+                b'{"type":"https://api.x.com/2/problems/usage-capped"}'
+            ),
+        )
+        with mock.patch.object(
+            service._NO_REDIRECT_OPENER,
+            "open",
+            side_effect=http_error,
+        ):
+            with self.assertRaises(service.ServiceError) as http_limit:
+                service.http_json(service.USERS_ME_URL)
+        self.assertEqual(http_limit.exception.code, "x_post_rate_limited")
+        self.assertEqual(http_limit.exception.status, 429)
 
     def new_state(self, actor=None):
         result = service.create_authorization(actor or self.owner)
@@ -949,7 +1021,611 @@ class XAccountsTestCase(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_daily_token_is_route_scoped_and_passes_fixed_account_scope(self):
+        accounts = [
+            self.complete("2101", "daily_scope_one", actor=self.owner),
+            self.complete("2102", "daily_scope_two", actor=self.owner),
+            self.complete("2103", "daily_scope_three", actor=self.owner),
+        ]
+        service.DAILY_ACCOUNT_IDS = tuple(item["id"] for item in accounts)
+        server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = "http://127.0.0.1:%s" % server.server_address[1]
+
+        def request(path, body=None):
+            return urllib.request.Request(
+                base_url + path,
+                data=json.dumps(body or {}).encode("utf-8"),
+                headers={
+                    "Authorization": "Bearer " + service.DAILY_INTERNAL_TOKEN,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+
+        forbidden = (
+            "/internal/posts/canary",
+            "/internal/authorize",
+            "/internal/accounts/query",
+            "/internal/accounts/%s/verify" % accounts[0]["id"],
+            "/internal/accounts/%s/logout" % accounts[0]["id"],
+            "/internal/posts/logs/query",
+            "/internal/posts/runs/query",
+        )
+        expected_plan = {
+            "id": 11,
+            "run_date": "2026-07-23",
+            "source_date": "2026-07-22",
+            "queues": [],
+        }
+        expected_publish = {
+            "status": "published",
+            "log_id": 12,
+            "short_url": "https://ai.yingliangads.com/s2l/12.html",
+            "post_id": "1900000000000000012",
+            "preview_url": "https://x.com/daily_scope_one/status/1900000000000000012",
+        }
+        try:
+            for path in forbidden:
+                with self.subTest(path=path):
+                    with self.assertRaises(urllib.error.HTTPError) as denied:
+                        urllib.request.urlopen(request(path), timeout=5)
+                    self.assertEqual(denied.exception.code, 403)
+                    denied.exception.close()
+
+            with mock.patch.object(
+                service, "verify_account", return_value=accounts[0]
+            ) as verify_mock:
+                with urllib.request.urlopen(
+                    request(
+                        "/internal/posts/accounts/%s/verify" % accounts[0]["id"]
+                    ),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                verify_mock.assert_called_once()
+
+                with self.assertRaises(urllib.error.HTTPError) as denied_account:
+                    urllib.request.urlopen(
+                        request("/internal/posts/accounts/999/verify"),
+                        timeout=5,
+                    )
+                self.assertEqual(denied_account.exception.code, 403)
+                denied_account.exception.close()
+
+            plan_payload = {
+                "run_date": "2026-07-23",
+                "source_date": "2026-07-22",
+                "candidates": [
+                    {"account_id": account_id}
+                    for account_id in service.DAILY_ACCOUNT_IDS
+                ],
+            }
+            with mock.patch.object(
+                service, "create_daily_plan_request", return_value=expected_plan
+            ) as plan_mock:
+                with urllib.request.urlopen(
+                    request("/internal/posts/daily-plan", plan_payload),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                plan_mock.assert_called_once_with(
+                    plan_payload,
+                    service.DAILY_ACCOUNT_IDS,
+                )
+
+            with mock.patch.object(
+                service,
+                "create_daily_plan_request",
+                side_effect=service.ServiceError(
+                    "x_post_material_already_used",
+                    "transaction rolled back",
+                    409,
+                ),
+            ):
+                with self.assertRaises(urllib.error.HTTPError) as plan_failed:
+                    urllib.request.urlopen(
+                        request("/internal/posts/daily-plan", plan_payload),
+                        timeout=5,
+                    )
+                plan_error_payload = json.loads(
+                    plan_failed.exception.read().decode("utf-8")
+                )
+                plan_failed.exception.close()
+                self.assertIs(plan_error_payload["outcome_known"], True)
+                self.assertIs(plan_error_payload["unknown_outcome"], False)
+
+            with mock.patch.object(
+                service, "publish_queue_request", return_value=expected_publish
+            ) as publish_mock:
+                with urllib.request.urlopen(
+                    request("/internal/posts/queue/77/publish"),
+                    timeout=5,
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload, {"item": expected_publish})
+                publish_mock.assert_called_once_with(
+                    "77",
+                    service.DAILY_ACCOUNT_IDS,
+                )
+
+            for code, expected_known, expected_unknown in (
+                ("media_download_failed", True, False),
+                ("x_publish_unknown", False, True),
+            ):
+                with self.subTest(code=code), mock.patch.object(
+                    service,
+                    "publish_queue_request",
+                    side_effect=service.ServiceError(code, "publish failed", 503),
+                ):
+                    with self.assertRaises(urllib.error.HTTPError) as failed:
+                        urllib.request.urlopen(
+                            request("/internal/posts/queue/77/publish"),
+                            timeout=5,
+                        )
+                    error_payload = json.loads(
+                        failed.exception.read().decode("utf-8")
+                    )
+                    failed.exception.close()
+                    self.assertIs(
+                        error_payload["outcome_known"],
+                        expected_known,
+                    )
+                    self.assertIs(
+                        error_payload["unknown_outcome"],
+                        expected_unknown,
+                    )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_daily_plan_route_accepts_bounded_non_ascii_descriptions(self):
+        server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = "http://127.0.0.1:%s/internal/posts/daily-plan" % server.server_address[1]
+        payload = {
+            "run_date": "2026-07-23",
+            "source_date": "2026-07-22",
+            "candidates": [{"description": "剧" * 2000} for _index in range(3)],
+        }
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.assertGreater(len(raw), service.MAX_BODY_BYTES)
+        self.assertLess(len(raw), service.MAX_DAILY_PLAN_BODY_BYTES)
+        expected = {
+            "id": 1,
+            "run_date": "2026-07-23",
+            "source_date": "2026-07-22",
+            "status": "queued",
+            "queues": [],
+        }
+        try:
+            with mock.patch.object(
+                service, "create_daily_plan_request", return_value=expected
+            ) as create_mock:
+                request = urllib.request.Request(
+                    url,
+                    data=raw,
+                    headers={
+                        "Authorization": "Bearer " + service.INTERNAL_TOKEN,
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    result = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(result, {"item": expected})
+
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url,
+                            data=b"{}",
+                            headers={
+                                "Authorization": "Bearer " + service.INTERNAL_TOKEN,
+                                "Content-Type": "application/json",
+                                "Content-Length": str(
+                                    service.MAX_DAILY_PLAN_BODY_BYTES + 1
+                                ),
+                            },
+                            method="POST",
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(rejected.exception.code, 413)
+                rejected.exception.close()
+                create_mock.assert_called_once_with(payload)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_daily_plan_log_queries_and_material_key_contract(self):
+        accounts = [
+            self.complete("2001", "daily_one", actor=self.owner),
+            self.complete("2002", "daily_two", actor=self.owner),
+            self.complete("2003", "daily_three", actor=self.owner),
+            self.complete("2004", "daily_out_of_scope", actor=self.owner),
+        ]
+        service.DAILY_ACCOUNT_IDS = tuple(item["id"] for item in accounts[:3])
+        candidates = []
+        for rank, (account, material_id) in enumerate(zip(accounts[:3], ("7001", "7002", "7003")), 1):
+            candidates.append(
+                {
+                    "account_id": account["id"],
+                    "source_date": "2026-07-22",
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "material_url": "https://media.example.com/%s.mp4" % material_id,
+                    "material_name": "material-" + material_id,
+                    "material_language": "English",
+                    "drama_name": "Daily Drama",
+                    "tag": "romance",
+                    "description": "Safe daily description",
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": ("%064x" % int(material_id))[-64:],
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                    "account_username": "untrusted",
+                    "page_id": "untrusted",
+                    "page_name": "untrusted",
+                }
+            )
+        with mock.patch.object(
+            service,
+            "preflight_post_storage_request",
+            return_value={"ready": True, "mounted": True, "atomic_write": True},
+        ) as storage_preflight:
+            out_of_scope = [dict(item) for item in candidates]
+            out_of_scope[-1]["account_id"] = accounts[3]["id"]
+            with self.assertRaises(service.ServiceError) as denied:
+                service.create_daily_plan_request(
+                    {
+                        "run_date": "2026-07-23",
+                        "source_date": "2026-07-22",
+                        "candidates": out_of_scope,
+                    },
+                    service.DAILY_ACCOUNT_IDS,
+                )
+            self.assertEqual(denied.exception.code, "x_daily_account_scope_denied")
+            plan = service.create_daily_plan_request(
+                {
+                    "run_date": "2026-07-23",
+                    "source_date": "2026-07-22",
+                    "candidates": candidates,
+                },
+                service.DAILY_ACCOUNT_IDS,
+            )
+        storage_preflight.assert_called_once_with()
+        self.assertEqual(len(plan["queues"]), 3)
+        self.assertEqual(plan["queues"][0]["account_username"], "daily_one")
+        self.assertNotIn("material_url", plan["queues"][0])
+        occupied = service.query_post_material_keys_request(
+            {"material_ids": ["07001", "9999", "7003"]}
+        )
+        self.assertEqual(occupied, {"material_keys": ["7001", "7003"]})
+
+        logs = service.query_post_logs_request(
+            {"actor": self.admin, "scope": "all", "page": 1, "page_size": 10}
+        )
+        self.assertEqual(logs["pagination"]["total"], 3)
+        self.assertNotIn("material_url", logs["items"][0])
+        with self.assertRaises(service.ServiceError) as denied:
+            service.query_post_logs_request(
+                {"actor": self.owner, "scope": "all", "page": 1, "page_size": 10}
+            )
+        self.assertEqual(denied.exception.code, "x_admin_required")
+
+        server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client.configure_x_accounts_client(
+                "http://127.0.0.1:%s" % server.server_address[1],
+                service.INTERNAL_TOKEN,
+                timeout=5,
+            )
+            self.assertEqual(
+                client.query_x_post_material_keys(["7002", "9999"]),
+                {"item": {"material_keys": ["7002"]}},
+            )
+            self.assertEqual(
+                client.query_x_post_logs(
+                    {"actor": self.admin, "scope": "all", "page": 1, "page_size": 10}
+                )["pagination"]["total"],
+                3,
+            )
+            self.assertEqual(
+                client.query_x_post_runs(
+                    {"actor": self.admin, "scope": "all", "page": 1, "page_size": 10}
+                )["pagination"]["total"],
+                1,
+            )
+            not_overwritten = client.record_x_post_run_failure(
+                {
+                    "run_date": "2026-07-23",
+                    "source_date": "2026-07-22",
+                    "error_code": "late_failure",
+                    "error_message": "must not overwrite",
+                }
+            )
+            self.assertFalse(not_overwritten["item"]["recorded"])
+            self.assertEqual(not_overwritten["item"]["status"], "queued")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_publish_by_queue_uses_frozen_row_and_returns_only_safe_fields(self):
+        account = self.complete("3001", "queue_owner", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "queue_owner",
+                "page_name": "Queue Owner",
+                "page_id": "3001",
+                "run_date": "2026-07-23",
+            }
+        )
+        from features.x_posts import XPostError, XPostStore
+
+        queue = XPostStore(service.POST_DB_PATH).enqueue(payload)
+        captured = {}
+
+        @contextlib.contextmanager
+        def credentials(account_id, actor, scope):
+            captured["credentials"] = (account_id, dict(actor), scope)
+            yield account, "access-secret"
+
+        def fake_publish(**kwargs):
+            captured["publish"] = dict(kwargs)
+            return {
+                "status": "published",
+                "log_id": 8,
+                "short_url": "https://ai.yingliangads.com/s2l/8.html",
+                "post_id": "9001",
+                "preview_url": "https://x.com/queue_owner/status/9001",
+                "access_token": "must-not-escape",
+            }
+
+        with mock.patch.object(service, "verify_account", return_value=account), mock.patch.object(
+            service, "publish_credentials", credentials
+        ), mock.patch.object(
+            service,
+            "_x_posts_api",
+            return_value=(XPostError, XPostStore, fake_publish),
+        ):
+            result = service.publish_queue_request(queue["id"])
+        self.assertEqual(result["post_id"], "9001")
+        self.assertNotIn("access_token", result)
+        self.assertEqual(captured["publish"]["queue_id"], queue["id"])
+        self.assertEqual(captured["publish"]["access_token"], "access-secret")
+
+    def test_daily_publish_scope_rejects_non_daily_queue_before_log_reservation(self):
+        account = self.complete("3000", "not_a_daily_queue", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "not_a_daily_queue",
+                "page_name": "Not A Daily Queue",
+                "page_id": "3000",
+            }
+        )
+        from features.x_posts import XPostStore
+
+        queue = XPostStore(service.POST_DB_PATH).enqueue(payload)
+        service.DAILY_ACCOUNT_IDS = (account["id"], account["id"] + 1, account["id"] + 2)
+        with self.assertRaises(service.ServiceError) as denied:
+            service.publish_queue_request(queue["id"], service.DAILY_ACCOUNT_IDS)
+        self.assertEqual(denied.exception.code, "x_daily_account_scope_denied")
+        with contextlib.closing(sqlite3.connect(service.POST_DB_PATH)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_published_queue_replay_short_circuits_before_token_verification(self):
+        account = self.complete("3002", "published_owner", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "published_owner",
+                "page_name": "Published Owner",
+                "page_id": "3002",
+                "run_date": "2026-07-23",
+            }
+        )
+        from features.x_posts import XPostError, XPostStore, publish_canary
+
+        store = XPostStore(service.POST_DB_PATH)
+        queue = store.enqueue(payload)
+        log = store.reserve_log(queue["id"])
+        store.prepare_log(
+            log["id"],
+            "https://example.invalid/frozen",
+            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
+            "https://ai.yingliangads.com/s2l/%s.html\nFrozen" % log["id"],
+        )
+        store.mark_publishing(log["id"])
+        store.mark_media_uploaded(log["id"], "media3002")
+        store.mark_published(
+            log["id"],
+            "media3002",
+            "9003002",
+            "https://x.com/published_owner/status/9003002",
+        )
+        with mock.patch.object(
+            service,
+            "verify_account",
+            side_effect=AssertionError("published replay must not verify token"),
+        ), mock.patch.object(
+            service,
+            "_x_posts_api",
+            return_value=(XPostError, XPostStore, publish_canary),
+        ):
+            result = service.publish_queue_request(queue["id"])
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["post_id"], "9003002")
+
+    def test_pre_publish_account_failure_is_persisted_as_known_failure(self):
+        account = self.complete("3003", "disabled_after_plan", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "disabled_after_plan",
+                "page_name": "Disabled After Plan",
+                "page_id": "3003",
+                "run_date": "2026-07-23",
+            }
+        )
+        from features.x_posts import XPostError, XPostStore, publish_canary
+
+        store = XPostStore(service.POST_DB_PATH)
+        queue = store.enqueue(payload)
+        with mock.patch.object(
+            service,
+            "verify_account",
+            side_effect=service.ServiceError(
+                "x_account_disabled", "disabled after plan", 409
+            ),
+        ), mock.patch.object(
+            service,
+            "_x_posts_api",
+            return_value=(XPostError, XPostStore, publish_canary),
+        ):
+            with self.assertRaises(service.ServiceError) as caught:
+                service.publish_queue_request(queue["id"])
+        self.assertEqual(caught.exception.code, "x_account_disabled")
+        log = store.query_logs(
+            {"account_id": account["id"], "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["error_code"], "x_account_disabled")
+        self.assertFalse(log["unknown_outcome"])
+
+    def test_publish_verify_rate_limit_marks_daily_run_stopped(self):
+        accounts = [
+            self.complete("3101", "rate_one", actor=self.owner),
+            self.complete("3102", "rate_two", actor=self.owner),
+            self.complete("3103", "rate_three", actor=self.owner),
+        ]
+        from features.x_posts import XPostStore
+
+        candidates = []
+        for rank, account in enumerate(accounts, 1):
+            material_id = str(93100 + rank)
+            candidate = self.canary_payload(account)
+            candidate.update(
+                {
+                    "account_username": account["username"],
+                    "page_name": account["display_name"],
+                    "page_id": account["x_user_id"],
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "material_name": "material-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": ("%064x" % int(material_id))[-64:],
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            candidates.append(candidate)
+        store = XPostStore(service.POST_DB_PATH)
+        plan = store.create_daily_plan(
+            "2026-07-23",
+            "2026-07-22",
+            candidates,
+        )
+        first_queue = plan["queues"][0]
+        with mock.patch.object(
+            service,
+            "verify_account",
+            side_effect=service.ServiceError(
+                "x_post_rate_limited",
+                "X API usage cap",
+                429,
+            ),
+        ):
+            with self.assertRaises(service.ServiceError) as limited:
+                service.publish_queue_request(first_queue["id"])
+        self.assertEqual(limited.exception.code, "x_post_rate_limited")
+        self.assertEqual(limited.exception.status, 429)
+        log = store.query_logs(
+            {"account_id": accounts[0]["id"], "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["error_code"], "x_post_rate_limited")
+        self.assertEqual(store.get_run(plan["id"])["status"], "stopped")
+
+    def test_frozen_username_mismatch_after_reservation_is_known_failure(self):
+        account = self.complete("3004", "renamed_after_plan", actor=self.owner)
+        payload = self.canary_payload(account)
+        payload.update(
+            {
+                "account_username": "frozen_original_name",
+                "page_name": "Frozen Original Name",
+                "page_id": "3004",
+                "material_id": "93004",
+                "run_date": "2026-07-23",
+            }
+        )
+        from features.x_posts import XPostError, XPostStore, publish_canary
+
+        store = XPostStore(service.POST_DB_PATH)
+        queue = store.enqueue(payload)
+
+        @contextlib.contextmanager
+        def credentials(_account_id, _actor, _scope):
+            yield account, "access-secret"
+
+        with mock.patch.object(
+            service, "verify_account", return_value=account
+        ), mock.patch.object(
+            service, "publish_credentials", credentials
+        ), mock.patch.object(
+            service,
+            "_x_posts_api",
+            return_value=(XPostError, XPostStore, publish_canary),
+        ):
+            with self.assertRaises(service.ServiceError) as caught:
+                service.publish_queue_request(queue["id"])
+        self.assertEqual(caught.exception.code, "x_post_account_mismatch")
+        log = store.query_logs(
+            {"account_id": account["id"], "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["error_code"], "x_post_account_mismatch")
+        self.assertFalse(log["unknown_outcome"])
+
     def test_internal_api_requires_token_and_client_contract_matches(self):
+        proxy_handlers = [
+            handler
+            for handler in client._NO_REDIRECT_OPENER.handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        self.assertFalse(any(handler.proxies for handler in proxy_handlers))
         with self.assertRaises(ValueError):
             client.configure_x_accounts_client("https://example.com", "must-not-leak", timeout=5)
         item = self.complete(username="internal_contract")

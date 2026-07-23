@@ -2,6 +2,7 @@
 """Offline unit tests for the X Post canary module."""
 
 import contextlib
+import http.client
 import json
 import os
 import sqlite3
@@ -167,6 +168,20 @@ class XPostsTests(unittest.TestCase):
         with self.assertRaises(service.XPostError):
             service.build_w2a_url({"username": "bad name"})
 
+    def test_short_link_base_is_fixed_to_public_ai_host(self):
+        self.assertEqual(
+            service._build_short_url("https://ai.yingliangads.com/s2l", 7),
+            "https://ai.yingliangads.com/s2l/7.html",
+        )
+        for value in (
+            "https://example.com/s2l",
+            "https://ai.yingliangads.com/other",
+            "https://ai.yingliangads.com:443/s2l",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(service.XPostError):
+                    service._build_short_url(value, 7)
+
     def test_real_candidate_material_name_with_brackets_builds_exact_af_ad(self):
         material_name = "【推荐】2M_TROTLQ_(14_15超爽卡点)_EN_精剪_zhouliwei_3_episode[15].mp4"
         url = service.build_w2a_url(
@@ -188,6 +203,60 @@ class XPostsTests(unittest.TestCase):
         with self.assertRaises(service.XPostError) as caught:
             service.XApiClient(http_client=client).create_post("token", "url\ndesc", "media1")
         self.assertTrue(caught.exception.unknown_outcome)
+
+    def test_malformed_create_post_5xx_is_always_unknown(self):
+        for status in (500, 503):
+            for body in (b"<html>oops</html>", b"{"):
+                with self.subTest(status=status, body=body):
+                    client = ScriptedHttpClient(
+                        [
+                            service.HttpResponse(
+                                status,
+                                {"content-type": "text/html"},
+                                body=body,
+                            )
+                        ]
+                    )
+                    with self.assertRaises(service.XPostError) as caught:
+                        service.XApiClient(http_client=client).create_post(
+                            "token",
+                            "url\ndesc",
+                            "media1",
+                        )
+                    self.assertTrue(caught.exception.unknown_outcome)
+
+    def test_x_rate_limit_has_stable_429_code_and_is_not_retried(self):
+        for upstream in (
+            response(429, {"title": "Too Many Requests"}),
+            service.HttpResponse(429, {"content-type": "text/plain"}, body=b"rate limited"),
+            response(
+                403,
+                {
+                    "type": "https://api.x.com/2/problems/usage-capped",
+                    "title": "wording is deliberately ignored",
+                },
+            ),
+            response(
+                201,
+                {
+                    "errors": [
+                        {
+                            "type": "https://api.x.com/2/problems/rate-limit-exceeded",
+                        }
+                    ]
+                },
+            ),
+            response(201, {"errors": [{"code": 88}]}),
+        ):
+            client = ScriptedHttpClient([upstream])
+            with self.assertRaises(service.XPostError) as caught:
+                service.XApiClient(http_client=client).create_post(
+                    "token", "url\ndesc", "media1"
+                )
+            self.assertEqual(caught.exception.code, "x_post_rate_limited")
+            self.assertEqual(caught.exception.status, 429)
+            self.assertFalse(caught.exception.unknown_outcome)
+            self.assertEqual(len(client.requests), 1)
 
     def test_post_text_preserves_url_and_conservatively_truncates(self):
         short = "https://ai.yingliangads.com/s2l/12.html"
@@ -222,6 +291,87 @@ class XPostsTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o644)
             self.assertEqual(short_root.stat().st_mode & 0o777, 0o755)
 
+    def test_short_redirect_persists_mode_file_and_directory_in_order(self):
+        long_url = service.build_w2a_url(
+            {
+                "username": "ShortsDramhx",
+                "timestamp": 1784736000,
+                "material_language": "en",
+                "drama_name": "Drama",
+                "tag": "safe",
+                "log_id": 21,
+                "page_name": "Page",
+                "page_id": "123",
+                "material_name": "asset",
+                "material_id": "9",
+                "queue_id": 2,
+                "content_id": "3",
+            }
+        )
+        tracker = mock.Mock()
+        with mock.patch.object(
+            service.os, "fchmod", wraps=os.fchmod
+        ) as fchmod_mock, mock.patch.object(
+            service.os, "fsync", wraps=os.fsync
+        ) as fsync_mock, mock.patch.object(
+            service.os, "replace", wraps=os.replace
+        ) as replace_mock, mock.patch.object(
+            service, "_fsync_directory"
+        ) as directory_sync_mock:
+            tracker.attach_mock(fchmod_mock, "fchmod")
+            tracker.attach_mock(fsync_mock, "fsync")
+            tracker.attach_mock(replace_mock, "replace")
+            tracker.attach_mock(directory_sync_mock, "directory_sync")
+            path = service.write_short_redirect(self.root / "durable-s2l", 21, long_url)
+        names = [call[0] for call in tracker.mock_calls]
+        self.assertLess(names.index("fchmod"), names.index("fsync"))
+        self.assertLess(names.index("fsync"), names.index("replace"))
+        self.assertLess(names.index("replace"), names.index("directory_sync"))
+
+        tracker.reset_mock()
+        with mock.patch.object(
+            service.os, "fchmod", wraps=os.fchmod
+        ) as fchmod_mock, mock.patch.object(
+            service.os, "fsync", wraps=os.fsync
+        ) as fsync_mock, mock.patch.object(
+            service, "_fsync_directory"
+        ) as directory_sync_mock:
+            tracker.attach_mock(fchmod_mock, "fchmod")
+            tracker.attach_mock(fsync_mock, "fsync")
+            tracker.attach_mock(directory_sync_mock, "directory_sync")
+            self.assertEqual(
+                service.write_short_redirect(self.root / "durable-s2l", 21, long_url),
+                path,
+            )
+        names = [call[0] for call in tracker.mock_calls]
+        self.assertLess(names.index("fchmod"), names.index("fsync"))
+        self.assertLess(names.index("fsync"), names.index("directory_sync"))
+
+    def test_short_redirect_directory_sync_failure_is_known_before_create_post(self):
+        queue = self.enqueue(material_id="88040")
+        with mock.patch.object(
+            service,
+            "_fsync_directory",
+            side_effect=OSError("simulated directory sync failure"),
+        ):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=queue["id"],
+                    account={"id": 2, "username": "ShortsDramhx"},
+                    access_token="secret-token",
+                    public_root=self.root / "public" / "s2l",
+                    short_base_url="https://ai.yingliangads.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=ScriptedHttpClient([]),
+                    timeout=5,
+                )
+        self.assertEqual(caught.exception.code, "short_link_write_failed")
+        self.assertFalse(caught.exception.unknown_outcome)
+        log = service.XPostStore(self.db_path).get_log(1)
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["error_code"], "short_link_write_failed")
+
     def test_download_requires_https_allowlist_video_and_size_cap(self):
         client = ScriptedHttpClient(
             [service.HttpResponse(200, {"content-type": "video/mp4", "content-length": "5"}, body=b"video")]
@@ -240,6 +390,44 @@ class XPostsTests(unittest.TestCase):
             service.download_media("https://evil.example/a.mp4", target, ["media.example.com"], http_client=client)
         self.assertEqual(caught.exception.code, "media_host_not_allowed")
 
+    def test_truncated_media_stream_is_a_known_download_failure(self):
+        class TruncatedStream:
+            def __init__(self):
+                self.read_count = 0
+
+            def read(self, _size):
+                self.read_count += 1
+                if self.read_count == 1:
+                    return b"partial"
+                raise http.client.IncompleteRead(b"", 100)
+
+            def close(self):
+                return None
+
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4"},
+                    stream=TruncatedStream(),
+                )
+            ]
+        )
+        target = self.root / "media-work" / "truncated.mp4"
+        with self.assertRaises(service.XPostError) as caught:
+            service.download_media(
+                "https://media.example.com/truncated.mp4",
+                target,
+                ["media.example.com"],
+                max_bytes=1024,
+                timeout=5,
+                http_client=client,
+            )
+        self.assertEqual(caught.exception.code, "media_download_failed")
+        self.assertFalse(caught.exception.unknown_outcome)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.glob("*.part")), [])
+
     def test_ffprobe_accepts_720x1280_and_rejects_bad_codec_or_fps(self):
         media = self.root / "video.mp4"
         media.write_bytes(b"video")
@@ -247,16 +435,26 @@ class XPostsTests(unittest.TestCase):
         def runner_for(payload):
             return lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
-        with mock.patch.dict(os.environ, {"X_POST_FFPROBE_BIN": "/safe/bin/ffprobe"}):
+        fake_ffprobe = str((self.root / "ffprobe.exe").resolve())
+        with mock.patch.dict(os.environ, {"X_POST_FFPROBE_BIN": fake_ffprobe}):
             captured = {}
 
             def capturing_runner(command, **_kwargs):
                 captured["command"] = command
+                captured["kwargs"] = dict(_kwargs)
                 return SimpleNamespace(returncode=0, stdout=json.dumps(valid_probe_payload()), stderr="")
 
             result = service.probe_media(media, runner=capturing_runner)
         self.assertEqual((result["width"], result["height"]), (720, 1280))
-        self.assertEqual(captured["command"][0], "/safe/bin/ffprobe")
+        self.assertEqual(captured["command"][0], fake_ffprobe)
+        self.assertIs(captured["kwargs"]["stdin"], service.subprocess.DEVNULL)
+        self.assertTrue(captured["kwargs"]["close_fds"])
+        self.assertEqual(
+            captured["kwargs"]["env"],
+            {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"},
+        )
+        self.assertNotIn("X_CLIENT_SECRET", captured["kwargs"]["env"])
+        self.assertNotIn("X_POST_DAILY_MYSQL_PASSWORD", captured["kwargs"]["env"])
         bad_codec = valid_probe_payload()
         bad_codec["streams"][0]["codec_name"] = "hevc"
         with self.assertRaises(service.XPostError) as caught:
@@ -276,6 +474,79 @@ class XPostsTests(unittest.TestCase):
         with self.assertRaises(service.XPostError) as caught:
             service.probe_media(media, runner=runner_for(non_lc))
         self.assertEqual(caught.exception.code, "invalid_media_codec")
+
+    def test_storage_preflight_requires_mount_and_atomic_write(self):
+        mount = self.root / "mnt"
+        storage = mount / "x-post-automation"
+        public = storage / "s2l"
+        public.mkdir(parents=True)
+        (storage / "media-work").mkdir()
+        with mock.patch.object(service.os.path, "ismount", return_value=True):
+            result = service.preflight_post_storage(
+                public,
+                mount_root=mount,
+                storage_root=storage,
+                minimum_free_bytes=1,
+            )
+        self.assertEqual(
+            result,
+            {"ready": True, "mounted": True, "atomic_write": True},
+        )
+        self.assertEqual(list(public.iterdir()), [])
+        self.assertEqual(list((storage / "media-work").iterdir()), [])
+        (storage / "media-work").rmdir()
+        with mock.patch.object(service.os.path, "ismount", return_value=True):
+            with self.assertRaises(service.XPostError) as missing_media:
+                service.preflight_post_storage(
+                    public,
+                    mount_root=mount,
+                    storage_root=storage,
+                    minimum_free_bytes=1,
+                )
+        self.assertEqual(missing_media.exception.code, "x_post_storage_unavailable")
+        with mock.patch.object(service.os.path, "ismount", return_value=False):
+            with self.assertRaises(service.XPostError) as caught:
+                service.preflight_post_storage(
+                    public,
+                    mount_root=mount,
+                    storage_root=storage,
+                    minimum_free_bytes=1,
+                )
+        self.assertEqual(caught.exception.code, "x_post_storage_unavailable")
+
+    def test_durable_short_link_never_creates_missing_mount_layout(self):
+        mount = self.root / "missing-mount"
+        storage = mount / "x-post-automation"
+        public = storage / "s2l"
+        long_url = service.build_w2a_url(
+            {
+                "username": "ShortsDramhx",
+                "timestamp": 1784736000,
+                "material_language": "en",
+                "drama_name": "Drama",
+                "tag": "safe",
+                "log_id": 1,
+                "page_name": "Page",
+                "page_id": "123",
+                "material_name": "asset",
+                "material_id": "9",
+                "queue_id": 2,
+                "content_id": "3",
+            }
+        )
+        with mock.patch.object(service.os.path, "ismount", return_value=False):
+            with self.assertRaises(service.XPostError) as caught:
+                service.write_short_redirect(
+                    public,
+                    1,
+                    long_url,
+                    durable_storage={
+                        "mount_root": mount,
+                        "storage_root": storage,
+                    },
+                )
+        self.assertEqual(caught.exception.code, "x_post_storage_unavailable")
+        self.assertFalse(mount.exists())
 
     def test_x_v2_chunked_upload_status_and_create_post(self):
         media = self.root / "video.mp4"
@@ -310,6 +581,148 @@ class XPostsTests(unittest.TestCase):
             api.create_post("secret-token", "url\ndesc", "media1")
         self.assertTrue(caught.exception.unknown_outcome)
         self.assertNotIn("do-not-log", str(caught.exception))
+
+    def test_truncated_create_post_response_is_unknown_and_run_needs_review(self):
+        store = service.XPostStore(self.db_path)
+        candidates = []
+        for rank, (account_id, username, material_id) in enumerate(
+            (
+                (2, "ShortsDramhx", "88901"),
+                (3, "NextShortsy1", "88902"),
+                (4, "GrapeShortlzod", "88903"),
+            ),
+            1,
+        ):
+            item = candidate(account_id, username)
+            item.update(
+                {
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": service.hashlib.sha256(b"video").hexdigest(),
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            candidates.append(item)
+        plan = store.create_daily_plan("2026-07-23", "2026-07-22", candidates)
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                ),
+                response(200, {"data": {"id": "media-truncated"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "media-truncated"}}),
+                http.client.IncompleteRead(b'{"data":{"id":"190', 20),
+            ]
+        )
+        with mock.patch.object(service, "probe_media", return_value=valid_probe_payload()):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=plan["queues"][0]["id"],
+                    account={"id": 2, "username": "ShortsDramhx"},
+                    access_token="secret-token",
+                    public_root=self.root / "public" / "s2l",
+                    short_base_url="https://ai.yingliangads.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=client,
+                    timeout=5,
+                )
+        self.assertTrue(caught.exception.unknown_outcome)
+        log = store.query_logs(
+            {"account_id": 2, "run_date": "2026-07-23", "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertTrue(log["unknown_outcome"])
+        self.assertEqual(store.get_run(plan["id"])["status"], "needs_review")
+
+    def test_post_id_is_preserved_as_unknown_when_final_ledger_commit_fails(self):
+        store = service.XPostStore(self.db_path)
+        candidates = []
+        for rank, (account_id, username, material_id) in enumerate(
+            (
+                (2, "ShortsDramhx", "88911"),
+                (3, "NextShortsy1", "88912"),
+                (4, "GrapeShortlzod", "88913"),
+            ),
+            1,
+        ):
+            item = candidate(account_id, username)
+            item.update(
+                {
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": service.hashlib.sha256(b"video").hexdigest(),
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            candidates.append(item)
+        plan = store.create_daily_plan("2026-07-23", "2026-07-22", candidates)
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                ),
+                response(200, {"data": {"id": "media-ledger-failure"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "media-ledger-failure"}}),
+                response(201, {"data": {"id": "19000991", "text": "ok"}}),
+            ]
+        )
+        with mock.patch.object(service, "probe_media", return_value=valid_probe_payload()), mock.patch.object(
+            service.XPostStore,
+            "mark_published",
+            side_effect=service.XPostError(
+                "x_post_state_conflict", "simulated final ledger failure", 409
+            ),
+        ):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=plan["queues"][0]["id"],
+                    account={"id": 2, "username": "ShortsDramhx"},
+                    access_token="secret-token",
+                    public_root=self.root / "public" / "s2l",
+                    short_base_url="https://ai.yingliangads.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=client,
+                    timeout=5,
+                )
+        self.assertTrue(caught.exception.unknown_outcome)
+        log = store.query_logs(
+            {"account_id": 2, "run_date": "2026-07-23", "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["status"], "failed")
+        self.assertTrue(log["unknown_outcome"])
+        raw_log = store.get_log(log["log_id"])
+        self.assertEqual(raw_log["x_post_id"], "19000991")
+        self.assertEqual(
+            raw_log["x_post_url"],
+            "https://x.com/ShortsDramhx/status/19000991",
+        )
+        self.assertEqual(store.get_run(plan["id"])["status"], "needs_review")
 
     def test_publish_canary_records_log_short_link_and_is_idempotent(self):
         queue = self.enqueue()
@@ -361,6 +774,33 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(af_c_id, str(queue["id"]))
         self.assertNotIn("secret-token", dump)
 
+    def test_short_link_preparation_failure_does_not_leave_reserved_log(self):
+        queue = self.enqueue(material_id="88004")
+        with mock.patch.object(
+            service,
+            "write_short_redirect",
+            side_effect=service.XPostError(
+                "short_link_write_failed", "simulated disk failure", 500
+            ),
+        ):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=queue["id"],
+                    account={"id": 2, "username": "ShortsDramhx"},
+                    access_token="secret-token",
+                    public_root=self.root / "public" / "s2l",
+                    short_base_url="https://ai.yingliangads.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=ScriptedHttpClient([]),
+                    timeout=5,
+                )
+        self.assertEqual(caught.exception.code, "short_link_write_failed")
+        log = service.XPostStore(self.db_path).get_log(1)
+        self.assertEqual(log["status"], "failed")
+        self.assertEqual(log["error_code"], "short_link_write_failed")
+        self.assertFalse(log["unknown_outcome"])
+
     def test_unknown_create_outcome_is_logged_redacted_and_never_retried(self):
         queue = self.enqueue(material_id="88002")
         client = ScriptedHttpClient(
@@ -393,6 +833,136 @@ class XPostsTests(unittest.TestCase):
             service.publish_canary(**kwargs)
         self.assertEqual(repeated.exception.code, "x_post_unknown_outcome")
         self.assertEqual(len(client.requests), request_count)
+
+    def test_explicit_create_post_429_is_known_and_stops_daily_run(self):
+        store = service.XPostStore(self.db_path)
+        candidates = []
+        for rank, (account_id, username, material_id) in enumerate(
+            (
+                (2, "ShortsDramhx", "88101"),
+                (3, "NextShortsy1", "88102"),
+                (4, "GrapeShortlzod", "88103"),
+            ),
+            1,
+        ):
+            item = candidate(account_id, username)
+            item.update(
+                {
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": service.hashlib.sha256(b"video").hexdigest(),
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            candidates.append(item)
+        plan = store.create_daily_plan("2026-07-23", "2026-07-22", candidates)
+        queue = plan["queues"][0]
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                ),
+                response(200, {"data": {"id": "media429"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "media429"}}),
+                response(429, {"message": "rate limited"}),
+            ]
+        )
+        with mock.patch.object(service, "probe_media", return_value=valid_probe_payload()):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=queue["id"],
+                    account={"id": 2, "username": "ShortsDramhx"},
+                    access_token="secret-token",
+                    public_root=self.root / "public" / "s2l",
+                    short_base_url="https://ai.yingliangads.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=client,
+                    sleeper=lambda _seconds: None,
+                    timeout=5,
+                )
+        self.assertEqual(caught.exception.code, "x_post_rate_limited")
+        self.assertFalse(caught.exception.unknown_outcome)
+        log = store.query_logs(
+            {"account_id": 2, "run_date": "2026-07-23", "page": 1, "page_size": 10}
+        )["items"][0]
+        self.assertEqual(log["error_code"], "x_post_rate_limited")
+        self.assertFalse(log["unknown_outcome"])
+        self.assertEqual(store.get_run(plan["id"])["status"], "stopped")
+        self.assertEqual(
+            store.query_logs(
+                {"run_date": "2026-07-23", "page": 1, "page_size": 10}
+            )["pagination"]["total"],
+            3,
+        )
+
+    def test_daily_publish_refuses_media_changed_after_preflight(self):
+        store = service.XPostStore(self.db_path)
+        candidates = []
+        for rank, (account_id, username, material_id) in enumerate(
+            (
+                (2, "ShortsDramhx", "88201"),
+                (3, "NextShortsy1", "88202"),
+                (4, "GrapeShortlzod", "88203"),
+            ),
+            1,
+        ):
+            item = candidate(account_id, username)
+            item.update(
+                {
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": "a" * 64,
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            candidates.append(item)
+        plan = store.create_daily_plan("2026-07-23", "2026-07-22", candidates)
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                )
+            ]
+        )
+        with self.assertRaises(service.XPostError) as caught:
+            service.publish_canary(
+                db_path=self.db_path,
+                queue_id=plan["queues"][0]["id"],
+                account={"id": 2, "username": "ShortsDramhx"},
+                access_token="secret-token",
+                public_root=self.root / "public" / "s2l",
+                short_base_url="https://ai.yingliangads.com/s2l",
+                allowed_media_hosts=["media.example.com"],
+                http_client=client,
+                timeout=5,
+            )
+        self.assertEqual(caught.exception.code, "media_preflight_changed")
+        self.assertFalse(caught.exception.unknown_outcome)
+        self.assertEqual(len(client.requests), 1)
 
     def test_account_username_mismatch_fails_before_reserving_or_network(self):
         queue = self.enqueue()

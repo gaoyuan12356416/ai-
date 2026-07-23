@@ -187,6 +187,17 @@
           enabled: true,
           order: 20,
         },
+        {
+          key: "xPostLogs",
+          label: "Post发布日志",
+          description: "查看每日选材、发布结果和预览链接",
+          kind: "page",
+          href: "/x-post-logs.html",
+          module: "x_accounts",
+          adminOnly: true,
+          enabled: true,
+          order: 30,
+        },
       ],
     },
     {
@@ -239,7 +250,7 @@
     },
   ];
 
-  const CONFIG_CACHE_KEY = "quickNavConfigCache:v2";
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v3";
   const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
@@ -365,6 +376,7 @@
     voiceoverTasks: "/voiceover-drama.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
+    xPostLogs: "/x-post-logs.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",

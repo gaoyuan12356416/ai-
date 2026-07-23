@@ -10,7 +10,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import html
+import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -22,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -30,6 +32,8 @@ W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2116/view"
 X_API_BASE_URL = "https://api.x.com"
 DEFAULT_PUBLIC_ROOT = "/mnt/data-disk/x-post-automation/s2l"
 DEFAULT_SHORT_BASE_URL = "https://ai.yingliangads.com/s2l"
+DEFAULT_STORAGE_MOUNT_ROOT = "/mnt/data-disk"
+DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
 DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -49,6 +53,39 @@ QUEUE_FIELDS = (
     "page_name",
     "page_id",
 )
+
+QUEUE_LEDGER_FIELDS = (
+    "run_id",
+    "run_date",
+    "material_key",
+    "candidate_rank",
+    "spend",
+    "preflight_sha256",
+    "preflight_size",
+    "facebook_violation_count",
+    "tiktok_violation_count",
+    "twitter_violation_count",
+    "resource_audit_count",
+    "dangerous_tag_count",
+)
+
+COMPLIANCE_COUNT_FIELDS = (
+    "facebook_violation_count",
+    "tiktok_violation_count",
+    "twitter_violation_count",
+    "resource_audit_count",
+    "dangerous_tag_count",
+)
+
+COMPLIANCE_FIELD_ALIASES = {
+    "facebook_violation_count": ("facebook_violation_count", "facebook_violations"),
+    "tiktok_violation_count": ("tiktok_violation_count", "tiktok_violations"),
+    "twitter_violation_count": ("twitter_violation_count", "twitter_violations"),
+    "resource_audit_count": ("resource_audit_count", "resource_audit_violations"),
+    "dangerous_tag_count": ("dangerous_tag_count", "dangerous_tags"),
+}
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
@@ -182,8 +219,14 @@ def _build_short_url(short_base_url, log_id):
     log_id = _positive_int(log_id, "日志ID")
     parsed = urllib.parse.urlsplit(str(short_base_url or "").rstrip("/"))
     if (
-        parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-        or parsed.password is not None or parsed.query or parsed.fragment
+        parsed.scheme != "https"
+        or parsed.hostname != "ai.yingliangads.com"
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path.rstrip("/") != "/s2l"
+        or parsed.query
+        or parsed.fragment
     ):
         raise XPostError("invalid_short_base_url", "短链基础地址无效", 500)
     base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
@@ -229,15 +272,115 @@ def build_post_text(short_url, description):
     return str(short_url) + "\n" + rendered
 
 
-def write_short_redirect(public_root, log_id, long_url):
+def _validate_post_storage_layout(
+    public_root,
+    *,
+    mount_root=DEFAULT_STORAGE_MOUNT_ROOT,
+    storage_root=DEFAULT_STORAGE_ROOT,
+):
+    """Resolve the fixed production layout and prove it is still on the mount."""
+    mount = Path(mount_root)
+    storage = Path(storage_root)
+    public = Path(public_root)
+    if not all(path.is_absolute() for path in (mount, storage, public)):
+        raise XPostError("x_post_storage_unavailable", "X Post存储路径必须为绝对路径", 503)
+    if not mount.exists() or not mount.is_dir() or mount.is_symlink():
+        raise XPostError("x_post_storage_unavailable", "X Post数据盘挂载点无效", 503)
+    if not os.path.ismount(str(mount)):
+        raise XPostError("x_post_storage_unavailable", "X Post数据盘未挂载", 503)
+    for path in (storage, public):
+        if not path.exists() or not path.is_dir() or path.is_symlink():
+            raise XPostError("x_post_storage_unavailable", "X Post存储目录无效", 503)
+    try:
+        mount_resolved = mount.resolve(strict=True)
+        storage_resolved = storage.resolve(strict=True)
+        public_resolved = public.resolve(strict=True)
+        devices = {
+            mount_resolved.stat().st_dev,
+            storage_resolved.stat().st_dev,
+            public_resolved.stat().st_dev,
+        }
+    except OSError:
+        raise XPostError("x_post_storage_unavailable", "X Post存储目录无法解析", 503) from None
+    expected_public = storage_resolved / "s2l"
+    media_work = storage_resolved / "media-work"
+    if (
+        storage_resolved.parent != mount_resolved
+        or public_resolved != expected_public
+        or public_resolved.parent != storage_resolved
+        or len(devices) != 1
+    ):
+        raise XPostError("x_post_storage_unavailable", "X Post存储目录不符合固定布局", 503)
+    if (
+        not media_work.exists()
+        or not media_work.is_dir()
+        or media_work.is_symlink()
+    ):
+        raise XPostError("x_post_storage_unavailable", "X Post媒体工作目录无效", 503)
+    try:
+        media_work_resolved = media_work.resolve(strict=True)
+        if (
+            media_work_resolved.parent != storage_resolved
+            or media_work_resolved.stat().st_dev != mount_resolved.stat().st_dev
+        ):
+            raise XPostError(
+                "x_post_storage_unavailable", "X Post媒体工作目录不在数据盘", 503
+            )
+    except OSError:
+        raise XPostError("x_post_storage_unavailable", "X Post媒体工作目录无法解析", 503) from None
+    return {
+        "mount": mount_resolved,
+        "storage": storage_resolved,
+        "public": public_resolved,
+        "media_work": media_work_resolved,
+    }
+
+
+def _fsync_directory(path):
+    """Persist directory metadata on POSIX; Windows has no directory fsync."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _sync_existing_short_redirect(path):
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o644)
+        else:
+            os.chmod(path, 0o644)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_directory(path.parent)
+
+
+def write_short_redirect(public_root, log_id, long_url, *, durable_storage=None):
     """Atomically create an immutable ``<log_id>.html`` redirect page."""
     target = _validate_w2a_url(long_url)
     log_id = _positive_int(log_id, "日志ID")
-    configured_root = Path(public_root).expanduser()
-    if configured_root.exists() and configured_root.is_symlink():
-        raise XPostError("short_link_write_failed", "短链目录不能是符号链接", 500)
-    configured_root.mkdir(parents=True, exist_ok=True)
-    root = configured_root.resolve()
+    if durable_storage is not None:
+        if not isinstance(durable_storage, dict):
+            raise XPostError("x_post_storage_unavailable", "X Post持久存储配置无效", 503)
+        layout = _validate_post_storage_layout(
+            public_root,
+            mount_root=durable_storage.get("mount_root", DEFAULT_STORAGE_MOUNT_ROOT),
+            storage_root=durable_storage.get("storage_root", DEFAULT_STORAGE_ROOT),
+        )
+        root = layout["public"]
+    else:
+        configured_root = Path(public_root).expanduser()
+        if configured_root.exists() and configured_root.is_symlink():
+            raise XPostError("short_link_write_failed", "短链目录不能是符号链接", 500)
+        configured_root.mkdir(parents=True, exist_ok=True)
+        root = configured_root.resolve()
     if not root.is_dir():
         raise XPostError("short_link_write_failed", "短链目录无效", 500)
     try:
@@ -262,31 +405,109 @@ def write_short_redirect(public_root, log_id, long_url):
             raise XPostError("short_link_conflict", "短链文件不能是符号链接", 409)
         try:
             if destination.is_file() and destination.read_bytes() == payload:
-                try:
-                    os.chmod(destination, 0o644)
-                except OSError as exc:
-                    raise XPostError("short_link_write_failed", "短链文件权限设置失败: %s" % exc, 500) from None
+                _sync_existing_short_redirect(destination)
                 return destination
-        except OSError:
-            pass
+        except OSError as exc:
+            raise XPostError(
+                "short_link_write_failed",
+                "短链文件持久化失败: %s" % exc,
+                500,
+            ) from None
         raise XPostError("short_link_conflict", "该日志ID的短链已存在且目标不同", 409)
     fd, temporary = tempfile.mkstemp(prefix=".%s." % destination.name, dir=str(root))
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), 0o644)
+            else:
+                os.chmod(temporary, 0o644)
             os.fsync(handle.fileno())
-        try:
-            os.chmod(temporary, 0o644)
-        except OSError:
-            pass
+        if durable_storage is not None:
+            refreshed = _validate_post_storage_layout(
+                public_root,
+                mount_root=durable_storage.get("mount_root", DEFAULT_STORAGE_MOUNT_ROOT),
+                storage_root=durable_storage.get("storage_root", DEFAULT_STORAGE_ROOT),
+            )
+            if refreshed["public"] != root:
+                raise XPostError("x_post_storage_unavailable", "X Post存储挂载身份已变化", 503)
         os.replace(temporary, destination)
+        _fsync_directory(root)
+    except XPostError:
+        raise
     except OSError as exc:
         raise XPostError("short_link_write_failed", "短链页面写入失败: %s" % exc, 500) from None
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
     return destination
+
+
+def preflight_post_storage(
+    public_root,
+    *,
+    mount_root=DEFAULT_STORAGE_MOUNT_ROOT,
+    storage_root=DEFAULT_STORAGE_ROOT,
+    minimum_free_bytes=(DEFAULT_MAX_MEDIA_BYTES * 3) + (64 * 1024 * 1024),
+):
+    """Fail closed before a daily plan if durable redirect storage is unsafe."""
+    layout = _validate_post_storage_layout(
+        public_root,
+        mount_root=mount_root,
+        storage_root=storage_root,
+    )
+    storage_resolved = layout["storage"]
+    public_resolved = layout["public"]
+    try:
+        free_bytes = int(shutil.disk_usage(storage_resolved).free)
+    except OSError:
+        raise XPostError("x_post_storage_unavailable", "X Post存储空间无法读取", 503) from None
+    if free_bytes < _positive_int(minimum_free_bytes, "存储可用空间下限"):
+        raise XPostError("x_post_storage_unavailable", "X Post数据盘可用空间不足", 503)
+
+    for probe_root in (public_resolved, layout["media_work"]):
+        source = probe_root / (".preflight-%s.tmp" % secrets.token_hex(12))
+        destination = probe_root / (".preflight-%s.ok" % secrets.token_hex(12))
+        file_descriptor = None
+        directory_descriptor = None
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
+            file_descriptor = os.open(str(source), flags, 0o600)
+            os.write(file_descriptor, b"x-post-storage-preflight\n")
+            os.fsync(file_descriptor)
+            os.close(file_descriptor)
+            file_descriptor = None
+            os.replace(source, destination)
+            if destination.read_bytes() != b"x-post-storage-preflight\n":
+                raise OSError("storage probe content mismatch")
+            destination.unlink()
+            if os.name != "nt":
+                directory_descriptor = os.open(str(probe_root), os.O_RDONLY)
+                os.fsync(directory_descriptor)
+        except OSError:
+            raise XPostError(
+                "x_post_storage_unavailable",
+                "X Post存储未通过原子写入检查",
+                503,
+            ) from None
+        finally:
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+            if directory_descriptor is not None:
+                os.close(directory_descriptor)
+            for path in (source, destination):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+    return {"ready": True, "mounted": True, "atomic_write": True}
 
 
 def _connect(db_path):
@@ -297,16 +518,142 @@ def _connect(db_path):
     return conn
 
 
+def _date_value(value, label):
+    value = str(value or "").strip()
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise XPostError("invalid_request", "%s必须为YYYY-MM-DD" % label, 400) from None
+    return value
+
+
+def _beijing_today():
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+
+
+def _legacy_run_date(created_at):
+    value = str(created_at or "").strip()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(BEIJING_TZ).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError(
+            "x_post_storage_conflict",
+            "历史X发布队列缺少可解析的创建时间，迁移已中止",
+            500,
+        ) from None
+
+
+def normalize_material_key(value, error_code="invalid_request"):
+    raw = str(value or "").strip()
+    if not re.fullmatch(r"[0-9]+", raw):
+        raise XPostError(error_code, "素材ID必须为正十进制整数", 500 if error_code != "invalid_request" else 400)
+    parsed = int(raw)
+    if parsed <= 0 or parsed > 9223372036854775807:
+        raise XPostError(error_code, "素材ID超出允许范围", 500 if error_code != "invalid_request" else 400)
+    return str(parsed)
+
+
+def _nonnegative_int(value, label, default=0):
+    if value in (None, ""):
+        return int(default)
+    if isinstance(value, bool):
+        raise XPostError("invalid_request", "%s无效" % label, 400)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError("invalid_request", "%s无效" % label, 400) from None
+    if parsed < 0 or parsed > 2147483647:
+        raise XPostError("invalid_request", "%s无效" % label, 400)
+    return parsed
+
+
+def _nonnegative_float(value, label, default=0.0):
+    if value in (None, ""):
+        return float(default)
+    if isinstance(value, bool):
+        raise XPostError("invalid_request", "%s无效" % label, 400)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError("invalid_request", "%s无效" % label, 400) from None
+    if parsed < 0 or not math.isfinite(parsed):
+        raise XPostError("invalid_request", "%s无效" % label, 400)
+    return parsed
+
+
+def _compliance_counts(payload, require_all=False):
+    """Normalize compliance evidence without treating missing values as clean."""
+    if "compliance_counts" in payload:
+        compliance = payload.get("compliance_counts")
+        if not isinstance(compliance, dict):
+            raise XPostError("invalid_request", "compliance_counts必须为对象", 400)
+    else:
+        compliance = {}
+    result = {}
+    for field, aliases in COMPLIANCE_FIELD_ALIASES.items():
+        supplied = []
+        for container in (payload, compliance):
+            for alias in aliases:
+                if alias not in container:
+                    continue
+                raw_value = container.get(alias)
+                if raw_value in (None, ""):
+                    raise XPostError("invalid_request", "%s缺少明确证据" % field, 400)
+                supplied.append(_nonnegative_int(raw_value, field))
+        if not supplied:
+            if require_all:
+                raise XPostError("invalid_request", "%s缺少明确证据" % field, 400)
+            result[field] = 0
+            continue
+        if len(set(supplied)) != 1:
+            raise XPostError("invalid_request", "%s证据冲突" % field, 400)
+        result[field] = supplied[0]
+    return result
+
+
 def ensure_storage(db_path):
-    """Create only additive X Post tables and indexes; safe to call repeatedly."""
+    """Create and migrate the additive X Post ledger.
+
+    The migration deliberately fails closed before unique indexes are created
+    when legacy rows would violate the global material or account/day guards.
+    """
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.closing(_connect(path)) as conn:
-        conn.executescript(
-            """
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_daily_run (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_date TEXT NOT NULL UNIQUE,
+                    source_date TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    expected_count INTEGER NOT NULL DEFAULT 3,
+                    queued_count INTEGER NOT NULL DEFAULT 0,
+                    published_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    unknown_count INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
             CREATE TABLE IF NOT EXISTS x_post_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 idempotency_key TEXT NOT NULL UNIQUE,
+                run_id INTEGER,
+                run_date TEXT NOT NULL DEFAULT '',
+                material_key TEXT NOT NULL DEFAULT '',
                 account_id INTEGER NOT NULL,
                 account_username TEXT NOT NULL,
                 source_date TEXT NOT NULL,
@@ -320,10 +667,24 @@ def ensure_storage(db_path):
                 description TEXT NOT NULL,
                 page_name TEXT NOT NULL,
                 page_id TEXT NOT NULL,
+                candidate_rank INTEGER NOT NULL DEFAULT 0,
+                spend REAL NOT NULL DEFAULT 0,
+                preflight_sha256 TEXT NOT NULL DEFAULT '',
+                preflight_size INTEGER NOT NULL DEFAULT 0,
+                facebook_violation_count INTEGER NOT NULL DEFAULT 0,
+                tiktok_violation_count INTEGER NOT NULL DEFAULT 0,
+                twitter_violation_count INTEGER NOT NULL DEFAULT 0,
+                resource_audit_count INTEGER NOT NULL DEFAULT 0,
+                dangerous_tag_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'queued',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES x_post_daily_run(id)
+            )
+                """
+            )
+            conn.execute(
+                """
             CREATE TABLE IF NOT EXISTS x_post_publish_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 queue_id INTEGER NOT NULL UNIQUE,
@@ -344,16 +705,134 @@ def ensure_storage(db_path):
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(queue_id) REFERENCES x_post_queue(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_x_post_queue_status ON x_post_queue(status,created_at,id);
-            CREATE INDEX IF NOT EXISTS idx_x_post_log_status ON x_post_publish_log(status,created_at,id);
-            CREATE INDEX IF NOT EXISTS idx_x_post_log_account ON x_post_publish_log(account_id,created_at,id);
-            """
-        )
-        queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
-        if "account_username" not in queue_columns:
-            conn.execute("ALTER TABLE x_post_queue ADD COLUMN account_username TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+            )
+                """
+            )
+            queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
+            additive_columns = {
+                "account_username": "TEXT NOT NULL DEFAULT ''",
+                "run_id": "INTEGER",
+                "run_date": "TEXT NOT NULL DEFAULT ''",
+                "material_key": "TEXT NOT NULL DEFAULT ''",
+                "candidate_rank": "INTEGER NOT NULL DEFAULT 0",
+                "spend": "REAL NOT NULL DEFAULT 0",
+                "preflight_sha256": "TEXT NOT NULL DEFAULT ''",
+                "preflight_size": "INTEGER NOT NULL DEFAULT 0",
+                "facebook_violation_count": "INTEGER NOT NULL DEFAULT 0",
+                "tiktok_violation_count": "INTEGER NOT NULL DEFAULT 0",
+                "twitter_violation_count": "INTEGER NOT NULL DEFAULT 0",
+                "resource_audit_count": "INTEGER NOT NULL DEFAULT 0",
+                "dangerous_tag_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, definition in additive_columns.items():
+                if name not in queue_columns:
+                    conn.execute("ALTER TABLE x_post_queue ADD COLUMN %s %s" % (name, definition))
+
+            legacy_rows = conn.execute(
+                "SELECT id,material_id,material_key,run_date,created_at FROM x_post_queue ORDER BY id"
+            ).fetchall()
+            for row in legacy_rows:
+                material_key = normalize_material_key(
+                    row["material_id"],
+                    error_code="x_post_storage_conflict",
+                )
+                existing_material_key = str(row["material_key"] or "").strip()
+                if existing_material_key and normalize_material_key(
+                    existing_material_key,
+                    error_code="x_post_storage_conflict",
+                ) != material_key:
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "历史X发布队列material_key与素材ID不一致，迁移已中止",
+                        500,
+                    )
+                run_date = str(row["run_date"] or "").strip() or _legacy_run_date(row["created_at"])
+                try:
+                    _date_value(run_date, "run_date")
+                except XPostError:
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "历史X发布队列run_date无效，迁移已中止",
+                        500,
+                    ) from None
+                conn.execute(
+                    "UPDATE x_post_queue SET material_key=?,run_date=? WHERE id=?",
+                    (material_key, run_date, row["id"]),
+                )
+
+            duplicate_material = conn.execute(
+                "SELECT material_key,COUNT(*) AS total FROM x_post_queue "
+                "WHERE material_key<>'' GROUP BY material_key HAVING COUNT(*)>1 LIMIT 1"
+            ).fetchone()
+            if duplicate_material:
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "历史X发布队列存在重复素材%s，迁移已中止" % duplicate_material["material_key"],
+                    500,
+                )
+            duplicate_account_day = conn.execute(
+                "SELECT account_id,run_date,COUNT(*) AS total FROM x_post_queue "
+                "WHERE run_date<>'' GROUP BY account_id,run_date HAVING COUNT(*)>1 LIMIT 1"
+            ).fetchone()
+            if duplicate_account_day:
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "历史X发布队列存在同账号同日重复，迁移已中止",
+                    500,
+                )
+
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_material_key "
+                "ON x_post_queue(material_key) WHERE material_key<>''"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_account_run_date "
+                "ON x_post_queue(account_id,run_date) WHERE run_date<>''"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_queue_run ON x_post_queue(run_id,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_queue_status ON x_post_queue(status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_log_status ON x_post_publish_log(status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_log_account ON x_post_publish_log(account_id,created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_run_status ON x_post_daily_run(status,run_date,id)"
+            )
+            # SQLite cannot add a FOREIGN KEY to a legacy table with ALTER
+            # TABLE. These triggers preserve the same run_id integrity for
+            # both newly-created and migrated queue schemas.
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_run_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.run_id IS NOT NULL
+                  AND NOT EXISTS(SELECT 1 FROM x_post_daily_run WHERE id=NEW.run_id)
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue run_id missing');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_run_update
+                BEFORE UPDATE OF run_id ON x_post_queue
+                WHEN NEW.run_id IS NOT NULL
+                  AND NOT EXISTS(SELECT 1 FROM x_post_daily_run WHERE id=NEW.run_id)
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue run_id missing');
+                END
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -369,7 +848,9 @@ class XPostStore:
         self.db_path = Path(db_path)
         ensure_storage(self.db_path)
 
-    def _queue_payload(self, payload):
+    def _queue_payload(
+        self, payload, run_date=None, candidate_rank=None, require_compliance=False
+    ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
         result = {}
@@ -378,19 +859,44 @@ class XPostStore:
         if not re.fullmatch(r"[A-Za-z0-9_]{1,50}", username):
             raise XPostError("invalid_request", "account_username无效", 400)
         result["account_username"] = username
-        source_date = str(payload.get("source_date", "") or "").strip()
-        try:
-            datetime.strptime(source_date, "%Y-%m-%d")
-        except ValueError:
-            raise XPostError("invalid_request", "source_date必须为YYYY-MM-DD", 400) from None
-        result["source_date"] = source_date
+        result["source_date"] = _date_value(payload.get("source_date"), "source_date")
         for field in QUEUE_FIELDS[3:]:
             limit = 4096 if field in {"material_url", "description"} else 500
             result[field] = _clean_text(payload.get(field), field, limit)
         material = urllib.parse.urlsplit(result["material_url"])
         if material.scheme != "https" or not material.hostname or material.username or material.password or material.fragment:
             raise XPostError("invalid_media_url", "素材地址必须是HTTPS URL", 400)
-        default_key = "xpost:%s:%s:%s" % (source_date, result["account_id"], result["material_id"])
+        material_key = normalize_material_key(result["material_id"])
+        supplied_material_key = payload.get("material_key")
+        if supplied_material_key not in (None, ""):
+            supplied_material_key = normalize_material_key(supplied_material_key)
+            if supplied_material_key != material_key:
+                raise XPostError("invalid_request", "material_key与material_id不一致", 400)
+        result["material_key"] = material_key
+        result["run_date"] = _date_value(
+            run_date if run_date is not None else (payload.get("run_date") or _beijing_today()),
+            "run_date",
+        )
+        raw_run_id = payload.get("run_id")
+        result["run_id"] = _positive_int(raw_run_id, "run_id") if raw_run_id not in (None, "") else None
+        rank_value = candidate_rank if candidate_rank is not None else payload.get("candidate_rank")
+        result["candidate_rank"] = _nonnegative_int(rank_value, "candidate_rank", 0)
+        result["spend"] = _nonnegative_float(payload.get("spend"), "spend", 0)
+        preflight_sha256 = str(payload.get("preflight_sha256", "") or "").strip().lower()
+        result["preflight_size"] = _nonnegative_int(
+            payload.get("preflight_size"), "preflight_size", 0
+        )
+        if preflight_sha256 and not re.fullmatch(r"[0-9a-f]{64}", preflight_sha256):
+            raise XPostError("invalid_request", "preflight_sha256无效", 400)
+        if require_compliance and (not preflight_sha256 or result["preflight_size"] <= 0):
+            raise XPostError("invalid_request", "每日计划缺少完整媒体预检指纹", 400)
+        result["preflight_sha256"] = preflight_sha256
+        result.update(_compliance_counts(payload, require_all=require_compliance))
+        default_key = "xpost:%s:%s:%s" % (
+            result["source_date"],
+            result["account_id"],
+            result["material_key"],
+        )
         key = str(payload.get("idempotency_key", "") or default_key).strip()
         if not key or len(key) > 200 or any(ord(char) < 33 for char in key):
             raise XPostError("invalid_request", "idempotency_key无效", 400)
@@ -400,14 +906,36 @@ class XPostStore:
     def enqueue(self, payload):
         values = self._queue_payload(payload)
         timestamp = utc_now()
-        columns = ("idempotency_key",) + QUEUE_FIELDS
+        columns = ("idempotency_key",) + QUEUE_LEDGER_FIELDS + QUEUE_FIELDS
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT * FROM x_post_queue WHERE idempotency_key=?", (values["idempotency_key"],)
             ).fetchone()
             if existing:
-                for field in columns:
+                # Preserve the historical one-off canary contract. Derived
+                # ledger fields are compared only when the caller supplied
+                # them, so a migrated published canary remains replayable on a
+                # later calendar day without another X write.
+                comparison_fields = list(("idempotency_key", "material_key") + QUEUE_FIELDS)
+                for field in (
+                    "run_id",
+                    "run_date",
+                    "candidate_rank",
+                    "spend",
+                    "preflight_sha256",
+                    "preflight_size",
+                ):
+                    if field in payload and payload.get(field) not in (None, ""):
+                        comparison_fields.append(field)
+                compliance_payload = payload.get("compliance_counts")
+                compliance_payload = (
+                    compliance_payload if isinstance(compliance_payload, dict) else {}
+                )
+                for field, aliases in COMPLIANCE_FIELD_ALIASES.items():
+                    if any(alias in payload or alias in compliance_payload for alias in aliases):
+                        comparison_fields.append(field)
+                for field in comparison_fields:
                     if str(existing[field]) != str(values[field]):
                         conn.rollback()
                         raise XPostError("x_post_idempotency_conflict", "幂等键已对应其他发布候选", 409)
@@ -415,16 +943,147 @@ class XPostStore:
                 item = _row_dict(existing)
                 item["created"] = False
                 return item
+            if conn.execute(
+                "SELECT id FROM x_post_queue WHERE material_key=?",
+                (values["material_key"],),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError("x_post_material_already_used", "该素材已被X发布队列占用", 409)
+            if conn.execute(
+                "SELECT id FROM x_post_queue WHERE account_id=? AND run_date=?",
+                (values["account_id"], values["run_date"]),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError("x_post_account_day_already_reserved", "该X账号当日已有发布队列", 409)
             placeholders = ",".join("?" for _field in columns)
-            cursor = conn.execute(
-                "INSERT INTO x_post_queue(%s,status,created_at,updated_at) VALUES(%s,'queued',?,?)"
-                % (",".join(columns), placeholders),
-                tuple(values[field] for field in columns) + (timestamp, timestamp),
-            )
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_queue(%s,status,created_at,updated_at) VALUES(%s,'queued',?,?)"
+                    % (",".join(columns), placeholders),
+                    tuple(values[field] for field in columns) + (timestamp, timestamp),
+                )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError("x_post_storage_conflict", "X发布队列唯一约束冲突", 409) from exc
             conn.commit()
             item = self.get_queue(cursor.lastrowid)
             item["created"] = True
             return item
+
+    def create_daily_plan(self, run_date, source_date, candidates):
+        run_date = _date_value(run_date, "run_date")
+        source_date = _date_value(source_date, "source_date")
+        if (
+            datetime.strptime(run_date, "%Y-%m-%d").date()
+            - datetime.strptime(source_date, "%Y-%m-%d").date()
+        ).days != 1:
+            raise XPostError("invalid_request", "source_date必须是run_date前一天", 400)
+        if not isinstance(candidates, list) or len(candidates) != 3:
+            raise XPostError("x_post_daily_candidate_shortage", "每日计划必须一次提交三个候选", 409)
+        prepared = []
+        account_ids = set()
+        material_keys = set()
+        for index, candidate in enumerate(candidates, 1):
+            payload = dict(candidate) if isinstance(candidate, dict) else candidate
+            if isinstance(payload, dict) and _date_value(payload.get("source_date"), "source_date") != source_date:
+                raise XPostError("invalid_request", "候选source_date与每日批次不一致", 400)
+            values = self._queue_payload(
+                payload,
+                run_date=run_date,
+                candidate_rank=index,
+                require_compliance=True,
+            )
+            values["idempotency_key"] = "xpost:daily:%s:%s" % (run_date, values["account_id"])
+            if values["account_id"] in account_ids:
+                raise XPostError("invalid_request", "每日计划账号必须互不相同", 400)
+            if values["material_key"] in material_keys:
+                raise XPostError("invalid_request", "每日计划素材必须互不相同", 400)
+            if any(values[field] != 0 for field in COMPLIANCE_COUNT_FIELDS):
+                raise XPostError("invalid_request", "每日计划候选存在违规或危险标签计数", 400)
+            account_ids.add(values["account_id"])
+            material_keys.add(values["material_key"])
+            prepared.append(values)
+
+        timestamp = utc_now()
+        columns = ("idempotency_key",) + QUEUE_LEDGER_FIELDS + QUEUE_FIELDS
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_run = conn.execute(
+                "SELECT * FROM x_post_daily_run WHERE run_date=?",
+                (run_date,),
+            ).fetchone()
+            run_id = None
+            if existing_run:
+                if str(existing_run["source_date"]) != source_date or int(existing_run["expected_count"]) != 3:
+                    conn.rollback()
+                    raise XPostError("x_post_daily_run_exists", "该日期已存在不同的X发布批次", 409)
+                existing_queues = conn.execute(
+                    "SELECT * FROM x_post_queue WHERE run_id=? ORDER BY candidate_rank,id",
+                    (existing_run["id"],),
+                ).fetchall()
+                if len(existing_queues) == 3:
+                    conn.commit()
+                    item = _row_dict(existing_run)
+                    item["queues"] = [_row_dict(row) for row in existing_queues]
+                    item["created"] = False
+                    return item
+                if existing_queues or existing_run["status"] != "failed_preflight":
+                    conn.rollback()
+                    raise XPostError("x_post_storage_conflict", "已有每日批次队列数量异常", 500)
+                run_id = int(existing_run["id"])
+
+            for values in prepared:
+                if conn.execute(
+                    "SELECT id FROM x_post_queue WHERE material_key=?",
+                    (values["material_key"],),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError("x_post_material_already_used", "候选素材已被X发布队列占用", 409)
+                if conn.execute(
+                    "SELECT id FROM x_post_queue WHERE account_id=? AND run_date=?",
+                    (values["account_id"], run_date),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_account_day_already_reserved",
+                        "候选X账号当日已有发布队列",
+                        409,
+                    )
+
+            if run_id is None:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_daily_run("
+                    "run_date,source_date,status,expected_count,queued_count,started_at,created_at,updated_at"
+                    ") VALUES(?,?,'queued',3,3,?,?,?)",
+                    (run_date, source_date, timestamp, timestamp, timestamp),
+                )
+                run_id = int(cursor.lastrowid)
+            else:
+                conn.execute(
+                    "UPDATE x_post_daily_run SET status='queued',queued_count=3,published_count=0,"
+                    "failed_count=0,unknown_count=0,error_code='',error_message='',started_at=?,"
+                    "finished_at='',updated_at=? WHERE id=? AND status='failed_preflight'",
+                    (timestamp, timestamp, run_id),
+                )
+            queue_ids = []
+            placeholders = ",".join("?" for _field in columns)
+            try:
+                for values in prepared:
+                    values["run_id"] = run_id
+                    queue_cursor = conn.execute(
+                        "INSERT INTO x_post_queue(%s,status,created_at,updated_at) "
+                        "VALUES(%s,'queued',?,?)" % (",".join(columns), placeholders),
+                        tuple(values[field] for field in columns) + (timestamp, timestamp),
+                    )
+                    queue_ids.append(int(queue_cursor.lastrowid))
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError("x_post_storage_conflict", "每日X发布计划唯一约束冲突", 409) from exc
+            conn.commit()
+        item = self.get_run(run_id)
+        item["queues"] = [self.get_queue(queue_id) for queue_id in queue_ids]
+        item["created"] = True
+        return item
 
     def get_queue(self, queue_id):
         queue_id = _positive_int(queue_id, "queue_id")
@@ -433,6 +1092,327 @@ class XPostStore:
         if not row:
             raise XPostError("x_post_queue_not_found", "发布队列记录不存在", 404)
         return _row_dict(row)
+
+    def get_run(self, run_id):
+        run_id = _positive_int(run_id, "run_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute("SELECT * FROM x_post_daily_run WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise XPostError("x_post_run_not_found", "每日发布批次不存在", 404)
+        return _row_dict(row)
+
+    def get_run_by_date(self, run_date):
+        run_date = _date_value(run_date, "run_date")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute("SELECT * FROM x_post_daily_run WHERE run_date=?", (run_date,)).fetchone()
+        return _row_dict(row)
+
+    def record_run_failure(self, run_date, source_date, error_code, error_message):
+        run_date = _date_value(run_date, "run_date")
+        source_date = _date_value(source_date, "source_date")
+        if (
+            datetime.strptime(run_date, "%Y-%m-%d").date()
+            - datetime.strptime(source_date, "%Y-%m-%d").date()
+        ).days != 1:
+            raise XPostError("invalid_request", "source_date必须是run_date前一天", 400)
+        try:
+            code = _clean_token(error_code or "x_post_daily_preflight_failed", "error code", 64)
+        except ValueError:
+            raise XPostError("invalid_request", "error_code无效", 400) from None
+        message = redact_text(error_message, 500)
+        if not message:
+            message = "X每日发布预检失败"
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM x_post_daily_run WHERE run_date=?",
+                (run_date,),
+            ).fetchone()
+            if existing:
+                if str(existing["source_date"]) != source_date:
+                    conn.rollback()
+                    raise XPostError("x_post_daily_run_exists", "该日期已存在不同来源日期的批次", 409)
+                queue_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM x_post_queue WHERE run_id=?",
+                        (existing["id"],),
+                    ).fetchone()[0]
+                )
+                if queue_count:
+                    conn.commit()
+                    item = _row_dict(existing)
+                    item["recorded"] = False
+                    return item
+                if (
+                    existing["status"] == "failed_preflight"
+                    and existing["error_code"] == code
+                    and existing["error_message"] == message
+                ):
+                    conn.commit()
+                    item = _row_dict(existing)
+                    item["recorded"] = False
+                    return item
+                conn.execute(
+                    "UPDATE x_post_daily_run SET status='failed_preflight',queued_count=0,"
+                    "published_count=0,failed_count=0,unknown_count=0,error_code=?,error_message=?,"
+                    "finished_at=?,updated_at=? WHERE id=?",
+                    (code, message, timestamp, timestamp, existing["id"]),
+                )
+                run_id = int(existing["id"])
+                recorded = True
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_daily_run("
+                    "run_date,source_date,status,expected_count,queued_count,error_code,error_message,"
+                    "started_at,finished_at,created_at,updated_at"
+                    ") VALUES(?,?,'failed_preflight',3,0,?,?,?,?,?,?)",
+                    (
+                        run_date,
+                        source_date,
+                        code,
+                        message,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                run_id = int(cursor.lastrowid)
+                recorded = True
+            conn.commit()
+        item = self.get_run(run_id)
+        item["recorded"] = recorded
+        return item
+
+    def query_material_keys(self, material_keys):
+        if not isinstance(material_keys, list) or not material_keys or len(material_keys) > 1000:
+            raise XPostError(
+                "invalid_request",
+                "material_keys必须是包含1到1000项的数组",
+                400,
+            )
+        normalized = []
+        seen = set()
+        for value in material_keys:
+            material_key = normalize_material_key(value)
+            if material_key not in seen:
+                seen.add(material_key)
+                normalized.append(material_key)
+        placeholders = ",".join("?" for _item in normalized)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            occupied = {
+                str(row["material_key"])
+                for row in conn.execute(
+                    "SELECT material_key FROM x_post_queue WHERE material_key IN (%s)" % placeholders,
+                    tuple(normalized),
+                ).fetchall()
+            }
+        return [material_key for material_key in normalized if material_key in occupied]
+
+    @staticmethod
+    def _pagination(payload):
+        payload = payload if isinstance(payload, dict) else {}
+        page = _positive_int(payload.get("page", 1), "page")
+        page_size = _positive_int(payload.get("page_size", 20), "page_size")
+        if page_size > 100:
+            raise XPostError("invalid_request", "page_size不能超过100", 400)
+        return page, page_size
+
+    def query_logs(self, payload=None):
+        payload = payload if isinstance(payload, dict) else {}
+        page, page_size = self._pagination(payload)
+        clauses = []
+        values = []
+        run_date = str(payload.get("run_date", "") or "").strip()
+        if run_date:
+            clauses.append("q.run_date=?")
+            values.append(_date_value(run_date, "run_date"))
+        source_date = str(payload.get("source_date", "") or "").strip()
+        if source_date:
+            clauses.append("q.source_date=?")
+            values.append(_date_value(source_date, "source_date"))
+        raw_account_id = payload.get("account_id")
+        if raw_account_id not in (None, ""):
+            clauses.append("q.account_id=?")
+            values.append(_positive_int(raw_account_id, "account_id"))
+        status = str(payload.get("status", "") or "").strip()
+        if status:
+            allowed_statuses = {
+                "queued", "reserved", "publishing", "media_uploading",
+                "post_creating", "published", "failed",
+            }
+            if status not in allowed_statuses:
+                raise XPostError("invalid_request", "status筛选值无效", 400)
+            clauses.append("COALESCE(l.status,q.status)=?")
+            values.append(status)
+        material_id = str(payload.get("material_id", "") or "").strip()
+        if material_id:
+            clauses.append("q.material_key=?")
+            values.append(normalize_material_key(material_id))
+        if "unknown_outcome" in payload and payload.get("unknown_outcome") not in (None, ""):
+            raw_unknown = payload.get("unknown_outcome")
+            if isinstance(raw_unknown, bool):
+                unknown_outcome = 1 if raw_unknown else 0
+            elif str(raw_unknown).strip() in {"0", "1"}:
+                unknown_outcome = int(str(raw_unknown).strip())
+            else:
+                raise XPostError("invalid_request", "unknown_outcome必须为0或1", 400)
+            clauses.append(
+                "CASE WHEN l.status='post_creating' OR COALESCE(l.unknown_outcome,0)=1 "
+                "THEN 1 ELSE 0 END=?"
+            )
+            values.append(unknown_outcome)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        select = (
+            "SELECT q.id AS queue_id,q.run_id,q.run_date,q.source_date,q.account_id,"
+            "q.account_username,q.page_name,q.page_id,q.material_id,q.material_name,q.content_id,"
+            "q.material_language,q.drama_name,q.tag,q.candidate_rank,q.spend,"
+            "q.facebook_violation_count,q.tiktok_violation_count,q.twitter_violation_count,"
+            "q.resource_audit_count,q.dangerous_tag_count,q.status AS queue_status,"
+            "l.id AS log_id,COALESCE(l.status,q.status) AS status,COALESCE(l.attempt_count,0) AS attempt_count,"
+            "CASE WHEN l.status='post_creating' OR COALESCE(l.unknown_outcome,0)=1 "
+            "THEN 1 ELSE 0 END AS unknown_outcome,COALESCE(l.short_url,'') AS short_url,"
+            "COALESCE(l.x_post_id,'') AS post_id,COALESCE(l.x_post_url,'') AS preview_url,"
+            "COALESCE(l.error_code,'') AS error_code,COALESCE(l.error_message,'') AS error_message,"
+            "COALESCE(l.started_at,'') AS started_at,COALESCE(l.published_at,'') AS published_at,"
+            "q.created_at,q.updated_at FROM x_post_queue q "
+            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
+        )
+        offset = (page - 1) * page_size
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue q "
+                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id" + where,
+                    tuple(values),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                select + where + " ORDER BY q.id DESC LIMIT ? OFFSET ?",
+                tuple(values) + (page_size, offset),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = _row_dict(row)
+            item["unknown_outcome"] = bool(item["unknown_outcome"])
+            item["error_message"] = redact_text(item["error_message"], 500)
+            items.append(item)
+        return {
+            "items": items,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": (total + page_size - 1) // page_size,
+            },
+        }
+
+    def query_runs(self, payload=None):
+        payload = payload if isinstance(payload, dict) else {}
+        page, page_size = self._pagination(payload)
+        clauses = []
+        values = []
+        for field in ("run_date", "source_date"):
+            raw = str(payload.get(field, "") or "").strip()
+            if raw:
+                clauses.append("%s=?" % field)
+                values.append(_date_value(raw, field))
+        status = str(payload.get("status", "") or "").strip()
+        if status:
+            allowed = {
+                "queued", "running", "stopped", "failed_preflight", "completed",
+                "completed_with_errors", "needs_review",
+            }
+            if status not in allowed:
+                raise XPostError("invalid_request", "status筛选值无效", 400)
+            clauses.append("status=?")
+            values.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        offset = (page - 1) * page_size
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_daily_run" + where,
+                    tuple(values),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                "SELECT * FROM x_post_daily_run" + where + " ORDER BY run_date DESC,id DESC LIMIT ? OFFSET ?",
+                tuple(values) + (page_size, offset),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = _row_dict(row)
+            item["error_message"] = redact_text(item["error_message"], 500)
+            items.append(item)
+        return {
+            "items": items,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": (total + page_size - 1) // page_size,
+            },
+        }
+
+    @staticmethod
+    def _sync_run(conn, queue_id, timestamp):
+        queue = conn.execute("SELECT run_id FROM x_post_queue WHERE id=?", (queue_id,)).fetchone()
+        if not queue or not queue["run_id"]:
+            return
+        run_id = int(queue["run_id"])
+        counts = conn.execute(
+            """
+            SELECT
+                COUNT(q.id) AS queued_count,
+                SUM(CASE WHEN l.status='published' THEN 1 ELSE 0 END) AS published_count,
+                SUM(CASE WHEN l.status='failed' AND COALESCE(l.unknown_outcome,0)=0 THEN 1 ELSE 0 END) AS failed_count,
+                SUM(CASE WHEN COALESCE(l.unknown_outcome,0)=1 OR l.status='post_creating' THEN 1 ELSE 0 END) AS unknown_count,
+                SUM(CASE WHEN COALESCE(l.attempt_count,0)>0 OR q.status='publishing' THEN 1 ELSE 0 END) AS started_count,
+                SUM(CASE WHEN l.error_code='x_post_rate_limited' THEN 1 ELSE 0 END) AS rate_limited_count
+            FROM x_post_queue q
+            LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+            WHERE q.run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        run = conn.execute("SELECT * FROM x_post_daily_run WHERE id=?", (run_id,)).fetchone()
+        if not run:
+            raise XPostError("x_post_storage_conflict", "发布队列关联批次不存在", 500)
+        queued_count = int(counts["queued_count"] or 0)
+        published_count = int(counts["published_count"] or 0)
+        failed_count = int(counts["failed_count"] or 0)
+        unknown_count = int(counts["unknown_count"] or 0)
+        terminal_count = published_count + failed_count + unknown_count
+        expected_count = int(run["expected_count"])
+        if unknown_count:
+            status = "needs_review"
+        elif int(counts["rate_limited_count"] or 0):
+            status = "stopped"
+        elif terminal_count >= expected_count and published_count == expected_count:
+            status = "completed"
+        elif terminal_count >= expected_count:
+            status = "completed_with_errors"
+        elif int(counts["started_count"] or 0):
+            status = "running"
+        else:
+            status = "queued"
+        finished_at = timestamp if status in {"completed", "completed_with_errors", "needs_review", "stopped"} else ""
+        conn.execute(
+            "UPDATE x_post_daily_run SET status=?,queued_count=?,published_count=?,failed_count=?,"
+            "unknown_count=?,finished_at=?,updated_at=? WHERE id=?",
+            (
+                status,
+                queued_count,
+                published_count,
+                failed_count,
+                unknown_count,
+                finished_at,
+                timestamp,
+                run_id,
+            ),
+        )
 
     def get_log(self, log_id):
         log_id = _positive_int(log_id, "log_id")
@@ -513,6 +1493,7 @@ class XPostStore:
                 (timestamp, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='publishing',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
 
@@ -527,6 +1508,8 @@ class XPostStore:
             )
             if cursor.rowcount != 1:
                 raise XPostError("x_post_state_conflict", "发布日志状态冲突", 409)
+            row = conn.execute("SELECT queue_id FROM x_post_publish_log WHERE id=?", (log_id,)).fetchone()
+            self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
 
@@ -556,6 +1539,55 @@ class XPostStore:
                 (media_id, post_id, str(post_url), timestamp, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='published',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            self._sync_run(conn, row["queue_id"], timestamp)
+            conn.commit()
+        return self.get_log(log_id)
+
+    def mark_post_commit_unknown(
+        self, log_id, media_id, post_id, post_url, error_message
+    ):
+        """Persist the known Post identity when the final ledger commit fails."""
+        log_id = _positive_int(log_id, "log_id")
+        media_id = _clean_token(media_id, "media id", 128)
+        post_id = _clean_token(post_id, "post id", 128)
+        post_url = str(post_url or "")
+        message = redact_text(error_message, 500)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE id=?", (log_id,)
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError("x_post_log_not_found", "发布日志不存在", 404)
+            if row["status"] == "published":
+                if row["x_post_id"] != post_id:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_log_conflict", "发布日志已对应其他Post", 409, True
+                    )
+                conn.commit()
+                return _row_dict(row)
+            if row["status"] != "post_creating":
+                conn.rollback()
+                raise XPostError(
+                    "x_post_state_conflict",
+                    "Post已创建但发布日志状态冲突",
+                    409,
+                    True,
+                )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='failed',x_media_id=?,x_post_id=?,"
+                "x_post_url=?,error_code='x_post_outcome_unknown',error_message=?,"
+                "unknown_outcome=1,updated_at=? WHERE id=?",
+                (media_id, post_id, post_url, message, timestamp, log_id),
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
+                (timestamp, row["queue_id"]),
+            )
+            self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
 
@@ -573,11 +1605,48 @@ class XPostStore:
             if row["status"] == "published":
                 conn.commit()
                 return _row_dict(row)
+            # A handled X response (including an explicit 4xx/429 during Post
+            # creation) is a known failure. Only the caller can mark the
+            # outcome unknown. A process crash leaves ``post_creating`` intact,
+            # and _sync_run/replay already treats that residual state as
+            # unknown without rewriting an explicit response.
+            unknown_outcome = bool(unknown_outcome)
             conn.execute(
                 "UPDATE x_post_publish_log SET status='failed',error_code=?,error_message=?,unknown_outcome=?,updated_at=? WHERE id=?",
                 (code, message, 1 if unknown_outcome else 0, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            self._sync_run(conn, row["queue_id"], timestamp)
+            conn.commit()
+        return self.get_log(log_id)
+
+    def mark_failed_if_reserved(self, log_id, error_code, error_message):
+        """Persist a known pre-X failure without overwriting a started attempt."""
+        log_id = _positive_int(log_id, "log_id")
+        code = _clean_token(error_code or "x_post_failed", "error code", 64)
+        message = redact_text(error_message, 500)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE id=?", (log_id,)
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError("x_post_log_not_found", "发布日志不存在", 404)
+            if row["status"] != "reserved":
+                conn.commit()
+                return _row_dict(row)
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='failed',error_code=?,"
+                "error_message=?,unknown_outcome=0,updated_at=? WHERE id=? AND status='reserved'",
+                (code, message, timestamp, log_id),
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
+                (timestamp, row["queue_id"]),
+            )
+            self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
 
@@ -687,7 +1756,12 @@ def download_media(
         )
     except XPostError:
         raise
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        TimeoutError,
+        OSError,
+    ) as exc:
         raise XPostError("media_download_failed", "素材下载网络失败: %s" % exc, 502) from None
     with response:
         if response.status != 200:
@@ -713,14 +1787,28 @@ def download_media(
         digest = hashlib.sha256()
         try:
             with temporary.open("xb") as handle:
-                for chunk in response.iter_bytes():
-                    if not isinstance(chunk, (bytes, bytearray)):
-                        raise XPostError("invalid_media_response", "素材响应分片无效", 502)
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise XPostError("media_too_large", "素材大小超过限制", 413)
-                    handle.write(chunk)
-                    digest.update(chunk)
+                try:
+                    for chunk in response.iter_bytes():
+                        if not isinstance(chunk, (bytes, bytearray)):
+                            raise XPostError("invalid_media_response", "素材响应分片无效", 502)
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise XPostError("media_too_large", "素材大小超过限制", 413)
+                        handle.write(chunk)
+                        digest.update(chunk)
+                except XPostError:
+                    raise
+                except (
+                    urllib.error.URLError,
+                    http.client.HTTPException,
+                    TimeoutError,
+                    OSError,
+                ) as exc:
+                    raise XPostError(
+                        "media_download_failed",
+                        "素材下载响应中断: %s" % exc,
+                        502,
+                    ) from None
                 handle.flush()
                 os.fsync(handle.fileno())
             if size <= 0:
@@ -759,16 +1847,34 @@ def probe_media(path, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, runner=None
     if file_size <= 0 or file_size > _positive_int(max_bytes, "素材大小上限"):
         raise XPostError("media_too_large", "素材为空或超过512MB限制", 413)
     run = runner or subprocess.run
-    ffprobe_bin = str(os.environ.get("X_POST_FFPROBE_BIN", "ffprobe") or "ffprobe").strip()
-    if not ffprobe_bin or "\x00" in ffprobe_bin:
+    ffprobe_bin = str(
+        os.environ.get("X_POST_FFPROBE_BIN", "/usr/bin/ffprobe")
+        or "/usr/bin/ffprobe"
+    ).strip()
+    if (
+        not ffprobe_bin
+        or "\x00" in ffprobe_bin
+        or not (Path(ffprobe_bin).is_absolute() or ffprobe_bin.startswith("/"))
+    ):
         raise XPostError("media_probe_failed", "ffprobe路径配置无效", 500)
     command = [
         ffprobe_bin, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path),
     ]
     try:
         completed = run(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            timeout=max(1, min(int(timeout), 120)), check=False,
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(1, min(int(timeout), 120)),
+            check=False,
+            close_fds=True,
+            env={
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+            },
         )
     except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
         raise XPostError("media_probe_failed", "ffprobe执行失败: %s" % exc, 422) from None
@@ -827,14 +1933,50 @@ def probe_media(path, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, runner=None
     }
 
 
+def _is_x_rate_limit_payload(payload):
+    if not isinstance(payload, dict):
+        return False
+    candidates = [payload]
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        candidates.extend(item for item in errors if isinstance(item, dict))
+    allowed_types = {
+        "https://api.x.com/2/problems/usage-capped",
+        "https://api.x.com/2/problems/rate-limit-exceeded",
+    }
+    for item in candidates:
+        if str(item.get("type", "") or "").rstrip("/") in allowed_types:
+            return True
+        if str(item.get("code", "") or "") == "88":
+            return True
+    return False
+
+
 def _json_response(response, expected_status, operation, unknown_on_success_shape=False):
     raw = response.body or b""
     try:
         payload = json.loads(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-        if response.status == expected_status and unknown_on_success_shape:
+        if response.status == 429:
+            raise XPostError(
+                "x_post_rate_limited",
+                "%s触发X限流" % operation,
+                429,
+                False,
+            ) from None
+        if (
+            unknown_on_success_shape
+            and (response.status == expected_status or response.status >= 500)
+        ):
             raise XPostError("x_post_outcome_unknown", "%s响应无法确认" % operation, 502, True) from None
         raise XPostError("x_upstream_error", "%s返回非JSON响应" % operation, 502) from None
+    if response.status == 429 or _is_x_rate_limit_payload(payload):
+        raise XPostError(
+            "x_post_rate_limited",
+            "%s触发X限流或用量上限" % operation,
+            429,
+            False,
+        )
     if response.status != expected_status:
         detail = ""
         if isinstance(payload, dict):
@@ -898,7 +2040,7 @@ class XApiClient:
             if unknown:
                 raise XPostError("x_post_outcome_unknown", str(exc), exc.status, True) from None
             raise
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             raise XPostError(
                 "x_post_outcome_unknown" if unknown else "x_upstream_error",
                 "%s网络失败: %s" % (operation, exc), 502, unknown,
@@ -1003,6 +2145,7 @@ def publish_canary(
     *, db_path, queue_id, account, access_token, public_root, short_base_url,
     allowed_media_hosts, http_client=None, sleeper=None, timeout=30,
     max_media_bytes=DEFAULT_MAX_MEDIA_BYTES,
+    storage_guard=None, durable_storage=None,
 ):
     """Publish one queued canary. Must run inside the sidecar account lock."""
     if not isinstance(account, dict):
@@ -1027,57 +2170,152 @@ def publish_canary(
         code = "x_post_unknown_outcome" if unknown else "x_post_retry_requires_review"
         raise XPostError(code, "发布日志已执行，禁止自动重复发帖", 409, unknown)
 
-    if log["long_url"]:
-        long_url = log["long_url"]
-        short_url = log["short_url"]
-        post_text = log["post_text"]
-    else:
-        long_url = build_w2a_url(
-            {
-                "username": queue["account_username"],
-                "timestamp": int(time.time()),
-                "material_language": queue["material_language"],
-                "drama_name": queue["drama_name"],
-                "tag": queue["tag"],
-                "log_id": log["id"],
-                "page_name": queue["page_name"],
-                "page_id": queue["page_id"],
-                "material_name": queue["material_name"],
-                "material_id": queue["material_id"],
-                "queue_id": queue["id"],
-                "content_id": queue["content_id"],
-            }
-        )
-        short_url = _build_short_url(short_base_url, log["id"])
-        post_text = build_post_text(short_url, queue["description"])
-        log = store.prepare_log(log["id"], long_url, short_url, post_text)
-    write_short_redirect(public_root, log["id"], long_url)
-
-    work_root = Path(public_root).resolve().parent / "media-work"
-    work_root.mkdir(parents=True, exist_ok=True)
-    work_dir = Path(tempfile.mkdtemp(prefix="log-%s-" % log["id"], dir=str(work_root)))
+    work_dir = None
+    confirmed_post = None
+    confirmed_post_url = ""
+    confirmed_media_id = ""
     try:
+        if log["long_url"]:
+            long_url = log["long_url"]
+            short_url = log["short_url"]
+            post_text = log["post_text"]
+        else:
+            long_url = build_w2a_url(
+                {
+                    "username": queue["account_username"],
+                    "timestamp": int(time.time()),
+                    "material_language": queue["material_language"],
+                    "drama_name": queue["drama_name"],
+                    "tag": queue["tag"],
+                    "log_id": log["id"],
+                    "page_name": queue["page_name"],
+                    "page_id": queue["page_id"],
+                    "material_name": queue["material_name"],
+                    "material_id": queue["material_id"],
+                    "queue_id": queue["id"],
+                    "content_id": queue["content_id"],
+                }
+            )
+            short_url = _build_short_url(short_base_url, log["id"])
+            post_text = build_post_text(short_url, queue["description"])
+            log = store.prepare_log(log["id"], long_url, short_url, post_text)
+
+        if callable(storage_guard):
+            storage_guard()
+        write_short_redirect(
+            public_root,
+            log["id"],
+            long_url,
+            durable_storage=durable_storage,
+        )
+
+        if durable_storage is not None:
+            layout = _validate_post_storage_layout(
+                public_root,
+                mount_root=durable_storage.get("mount_root", DEFAULT_STORAGE_MOUNT_ROOT),
+                storage_root=durable_storage.get("storage_root", DEFAULT_STORAGE_ROOT),
+            )
+            work_root = layout["media_work"]
+            if (
+                work_root.resolve(strict=True).parent != layout["storage"]
+                or work_root.stat().st_dev != layout["storage"].stat().st_dev
+            ):
+                raise XPostError("x_post_storage_unavailable", "X Post媒体工作目录无效", 503)
+        else:
+            work_root = Path(public_root).resolve().parent / "media-work"
+            work_root.mkdir(parents=True, exist_ok=True)
+        work_dir = Path(tempfile.mkdtemp(prefix="log-%s-" % log["id"], dir=str(work_root)))
+
         media = download_media(
             queue["material_url"], work_dir / "material.mp4", allowed_media_hosts,
             max_bytes=max_media_bytes, timeout=timeout, http_client=http_client,
         )
+        expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
+        expected_size = int(queue.get("preflight_size", 0) or 0)
+        if queue.get("run_id") and (
+            not expected_sha256
+            or expected_size <= 0
+            or not secrets.compare_digest(expected_sha256, str(media["sha256"]).lower())
+            or expected_size != int(media["size"])
+        ):
+            raise XPostError(
+                "media_preflight_changed",
+                "素材内容与建计划前的预检指纹不一致",
+                409,
+            )
         probe_media(media["path"], max_bytes=max_media_bytes, timeout=timeout)
+        if callable(storage_guard):
+            storage_guard()
         store.mark_publishing(log["id"])
         x_client = XApiClient(http_client=http_client, sleeper=sleeper, timeout=timeout)
         uploaded = x_client.upload_media(access_token, media["path"], media_type=media["media_type"])
+        if callable(storage_guard):
+            storage_guard()
         store.mark_media_uploaded(log["id"], uploaded["media_id"])
         created = x_client.create_post(access_token, post_text, uploaded["media_id"])
         post_url = "https://x.com/%s/status/%s" % (username, created["post_id"])
+        confirmed_post = created["post_id"]
+        confirmed_post_url = post_url
+        confirmed_media_id = uploaded["media_id"]
         published = store.mark_published(log["id"], uploaded["media_id"], created["post_id"], post_url)
         return _result_from_log(published)
     except XPostError as exc:
+        if confirmed_post is not None:
+            try:
+                recovered = store.mark_post_commit_unknown(
+                    log["id"],
+                    confirmed_media_id,
+                    confirmed_post,
+                    confirmed_post_url,
+                    "Post已创建，但最终发布日志写入失败: %s" % exc,
+                )
+                if recovered["status"] == "published":
+                    return _result_from_log(recovered)
+            except Exception:
+                # The existing post_creating state is itself a durable
+                # no-retry marker if the reconciliation write is unavailable.
+                pass
+            raise XPostError(
+                "x_post_outcome_unknown",
+                "X已返回Post ID，但最终发布日志写入失败，请人工核对",
+                503,
+                True,
+            ) from None
         failed = store.mark_failed(log["id"], exc.code, str(exc), exc.unknown_outcome)
         raise XPostError(exc.code, str(exc), exc.status, bool(failed["unknown_outcome"])) from None
     except Exception as exc:
-        store.mark_failed(log["id"], "x_post_internal_error", str(exc), False)
-        raise XPostError("x_post_internal_error", "发布处理失败: %s" % exc, 500) from None
+        if confirmed_post is not None:
+            try:
+                recovered = store.mark_post_commit_unknown(
+                    log["id"],
+                    confirmed_media_id,
+                    confirmed_post,
+                    confirmed_post_url,
+                    "Post已创建，但最终发布日志写入异常: %s" % exc,
+                )
+                if recovered["status"] == "published":
+                    return _result_from_log(recovered)
+            except Exception:
+                pass
+            raise XPostError(
+                "x_post_outcome_unknown",
+                "X已返回Post ID，但最终发布日志写入异常，请人工核对",
+                503,
+                True,
+            ) from None
+        current = store.get_log(log["id"])
+        unknown = bool(current["unknown_outcome"]) or current["status"] == "post_creating"
+        code = "x_post_outcome_unknown" if unknown else "x_post_internal_error"
+        failed = store.mark_failed(log["id"], code, str(exc), unknown)
+        raise XPostError(
+            code,
+            "发布结果未知，请人工核对" if unknown else "发布处理失败: %s" % exc,
+            503 if unknown else 500,
+            bool(failed["unknown_outcome"]),
+        ) from None
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _env_int(name, default, minimum=1, maximum=2 ** 63 - 1):

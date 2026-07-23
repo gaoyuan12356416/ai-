@@ -36,7 +36,7 @@
 ## 用户故事 / 业务规则
 
 1. 定时任务使用北京时间当天作为 `run_date`，前一天作为 `source_date`。
-2. 三个账号由 root-only 配置 `X_POST_DAILY_ACCOUNT_IDS` 明确指定；必须恰好三个不同正整数账号，且运行时均为 `active + publish_eligible`，否则本批次不创建队列。
+2. 三个账号由 root-owned `0400` 配置 `X_POST_DAILY_ACCOUNT_IDS` 明确指定；必须恰好三个不同正整数账号，且运行时均为 `active + publish_eligible`，否则本批次不创建队列。
 3. 候选按 `SUM(spend) DESC, material_id ASC` 稳定排序，最多读取配置上限内的候选。
 4. 素材必须为 HTTPS 视频、未删除、时长 `1..140` 秒；实际下载与 ffprobe 必须通过现有 X 视频门禁。
 5. `ads_facebook_violations`、`ads_tiktok_violations`、`ads_twitter_violations` 或 `ads_resource_audit` 任一命中即排除。
@@ -45,10 +45,23 @@
 8. 只有先找到三个不同且技术预检通过的素材，才用一个 SQLite 事务创建批次和三条队列。
 9. `material_key` 为规范十进制素材 ID；它在全库唯一。凡已进入队列的素材，无论最终成功、失败或 unknown，均不再用于任何账号和日期。
 10. `account_id + run_date` 全库唯一；一个账号一天最多占用一条。
-11. `reserved` 可在同一队列上安全恢复；进入 `media_uploading`、`post_creating`、`published` 或 `unknown` 后禁止自动重复 Create Post。
+11. 只有 queue=`queued` 且 publish log=`reserved`、`attempt_count=0` 时可在同一队列上安全恢复；进入 `media_uploading`、`post_creating`、`published`，或 `unknown_outcome=1` 后禁止自动重复 Create Post。
 12. 三个账号顺序发布，不并发上传。单账号失败继续写日志；X 429、应用级限流或不确定结果会停止剩余批次，等待人工核查。
 13. 日志只返回安全字段；Token、内部 bearer、数据库密码、OAuth code/state/verifier 不进入 API、DOM、journal 或 SQLite 错误文本。
 14. timer 部署首日配置 `X_POST_DAILY_START_DATE` 为次日，避免 `Persistent=true` 在部署当天补跑。
+15. 账号、数据源、合规或媒体预检在建计划前失败时，写入脱敏的 `failed_preflight` run，但不创建 queue、短链或 Post；正式计划一旦存在不得被失败记录覆盖。
+16. 五类合规计数必须逐项显式提供且均为 0；缺字段、NULL、别名冲突一律拒绝，不能按 0 推断。
+17. 建计划前必须确认 `/mnt/data-disk` 是真实挂载点，固定 `s2l`/`media-work` 目录均非符号链接、同盘、可原子写入且空间充足。
+18. 预检视频 SHA-256/字节数写入 queue；正式发布重新下载后必须完全一致，否则按明确失败记录且不调用 X。
+19. 短链基础地址固定为 `https://ai.yingliangads.com/s2l`；不接受其他 HTTPS 主机或路径。
+20. 剧描述在 selector、queue 和 daily-plan 统一限制为最多 4096 个字符；daily-plan 使用独立 256 KiB UTF-8 JSON 硬上限。
+21. daily runner 使用与后台管理令牌不同的专用 loopback bearer；该令牌不能访问 canary、authorize、通用 accounts verify/query/logout 或日志查询，只能访问固定日更路由。
+22. Sidecar 对 daily bearer 强制配置中的三个账号，daily-plan 必须恰好覆盖三者；publish 只能处理三者所属且带 `run_id` 的正式日更 queue。
+23. 短链临时文件必须先 `fchmod(0644)`、fsync 后再原子 replace，并 fsync `s2l` 目录；任一步失败都必须发生在 Create Post 前并记录 known failure。
+24. daily-plan 响应必须回显同一 run ID、run/source date 和请求素材，三条 queue ID 和 account ID 均为互异正整数且账号顺序一致；响应丢失/畸形按 plan outcome unknown 人工核对。
+25. plan/publish 写接口错误必须显式返回 `outcome_known/unknown_outcome`；缺失、矛盾或不可解析的 publish 响应一律 unknown。Create Post 非 JSON 5xx 同样 unknown。
+26. X HTTP 429、官方 `usage-capped` / `rate-limit-exceeded` type 及 error code `88` 统一为 `x_post_rate_limited`，停止剩余账号并将 run 标记 `stopped`。
+27. Sidecar 的 root-only EnvironmentFile 只由 systemd 读取并注入；降权进程遇 EACCES 安全跳过重读。所有 loopback bearer/readiness 客户端显式禁用环境代理。
 
 ## 交互与流程
 
@@ -56,11 +69,13 @@
 x-post-daily.timer
   -> x-post-daily.service
   -> 每日 runner 计算 run_date/source_date
-  -> 校验固定三个账号
+  -> Sidecar 数据盘/短链目录原子写与空间门禁
+  -> 专用 daily bearer + Sidecar 固定三账号范围校验
   -> 只读 MySQL 候选与合规筛选
-  -> 下载 + ffprobe 预检，凑齐 3 条
+  -> 下载 + ffprobe 预检，冻结 SHA-256/尺寸，凑齐 3 条
   -> SQLite 单事务创建 run + 3 条 queue
   -> 逐条调用 loopback Sidecar publish-by-queue
+  -> 重新下载并核对指纹
   -> 账号锁内校验身份/刷新 Token/上传/Create Post
   -> 更新 run、queue、publish_log
   -> AI 后台管理员日志表查询
@@ -81,7 +96,7 @@ x-post-daily.timer
 ### 数据结构
 
 - 新增 `x_post_daily_run`：`run_date` 唯一，记录目标数、队列数、成功/失败/unknown 数及开始/结束时间。
-- `x_post_queue` 增量增加 `run_id`、`run_date`、`material_key`、`candidate_rank`、`spend` 与合规计数快照。
+- `x_post_queue` 增量增加 `run_id`、`run_date`、`material_key`、`candidate_rank`、`spend`、媒体预检指纹与合规计数快照。
 - 唯一索引：非空 `material_key` 全局唯一；非空 `account_id + run_date` 唯一。
 - 旧 canary 行回填规范 `material_key` 和实际运行日期，使素材 `5221348` 进入永久排重。
 - 保留 `x_post_publish_log` 作为唯一正式发布日志，不复制第二套含义相同的表。
@@ -89,6 +104,8 @@ x-post-daily.timer
 ### API / 接口
 
 - Sidecar：`POST /internal/posts/queue/{queue_id}/publish`。
+- Sidecar：`POST /internal/posts/accounts/{account_id}/verify`，仅供 daily bearer 校验配置中的三个账号。
+- Sidecar：`POST /internal/posts/storage/preflight`，必须在 daily plan 前成功。
 - Sidecar：`POST /internal/posts/logs/query`、`POST /internal/posts/runs/query`。
 - AI 后台：`GET /api/admin/x-posts/logs`、`GET /api/admin/x-posts/runs`。
 - AI 后台接口必须 Cookie 管理员鉴权、`Cache-Control: no-store`，API Token/普通用户拒绝。
@@ -96,9 +113,10 @@ x-post-daily.timer
 
 ### 异常与边界
 
-- 候选不足三个、账号不足三个、只读数据库异常、磁盘未挂载、Sidecar health 异常：不创建正式队列或 Post。
+- 候选不足三个、合规证据不完整、账号不足三个、只读数据库异常、磁盘未挂载/不可写/空间不足、Sidecar health 异常：不创建正式队列或 Post。
 - 旧库存在重复素材或同账号同日冲突时，迁移中止，不使用 `INSERT OR IGNORE` 掩盖。
-- Create Post 网络/5xx/响应形状不确定时记录 unknown，不自动重试。
+- Create Post 网络断连、非 JSON 5xx、无效响应或结果形状不确定时记录 unknown，不自动重试；只有 Sidecar 显式标记 `outcome_known=true` 的结构化错误才按 known 处理。
+- X HTTP 429 与官方应用级 `usage-capped`、`rate-limit-exceeded`、code 88 均按稳定 429 停止本批次。
 - 进程在 X 返回后、数据库写 published 前中断时，`post_creating` 视为待人工确认。
 - 明确失败的素材也保持占用，这是当前“发布素材永不重复”的最保守口径。
 
@@ -116,7 +134,7 @@ x-post-daily.timer
 
 - 用户未指定发布时间；本次采用可配置默认值 `10:00 Asia/Shanghai`。
 - 生产主后台可能是多功能 composite，部署前必须用 live blob/hash 确认 GitHub 基线；不允许用旧分支覆盖当前 `app.py`。
-- 素材预检与正式发布各下载一次视频，换取选择阶段和发布阶段独立 fail-closed。
+- 素材预检与正式发布各下载一次视频，并以 SHA-256/尺寸强制一致，避免可变 URL 在两次下载间替换内容。
 
 ## 变更记录
 
