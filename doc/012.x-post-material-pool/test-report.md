@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-代码与生产部署 GO，首轮自然 timer 发布验收待 2026-07-24 10:00 CST。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口、检查回写分批和素材源文件预览修订后，最终工作树的全部 X 回归为 141/141。原素材池版本的服务器精确 release 已完成 139/139；素材预览增量待精确 commit 部署后补充生产证据。本轮未调用真实 X。
+代码与生产部署 GO，首轮自然 timer 发布验收待 2026-07-24 10:00 CST。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口、检查回写分批和素材源文件预览修订后，本地与服务器精确 commit 的全部 X 回归均为 141/141。素材预览接口、生产页面、管理员登录态跳转和账本零变化均已验收；本轮未调用真实 X。
 
 ## 测试范围
 
@@ -28,13 +28,13 @@
 
 | 项目 | 结果 | 证据 |
 | --- | --- | --- |
-| 精确 release | 通过 | `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`，服务器工作树 clean |
+| 精确 release | 通过 | Sidecar/daily 保持 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`；主后台接口与素材池静态页精确来自 `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4`，服务器 release clean、部署 hash 一致 |
 | 生产 MySQL | 通过 | product 字段存在，Dramawave 样本命中，只读会话 |
-| SQLite 副本/正式迁移 | 通过 | `integrity_check=ok`；账号/run/queue/log/pool=`10/0/1/1/0`；8 个跨表保护 trigger |
+| SQLite 副本/正式迁移 | 通过 | 初始迁移账号/run/queue/log/pool=`10/0/1/1/0`；预览增量部署后 pool/queue/log=`2/1/1`，`integrity_check=ok`，8 个跨表保护 trigger 不变 |
 | Sidecar/主后台/timer | 通过 | active/active/active，daily service inactive |
-| 内部接口 | 通过 | 管理员 query 200、daily available 200，均返回 0 条 |
-| 公网接口/页面 | 通过 | 匿名管理 API 401 + no-store；素材池页、日志页、OAuth health 200 |
-| 管理员浏览器 | 通过 | 素材池 0 条、导航正常、console warning/error 0 |
+| 内部接口 | 通过 | 初始上线时管理员 query、daily available 均 200 且池为 0；当前登录态列表正常返回 2 条 |
+| 公网接口/页面 | 通过 | 匿名素材预览 API 401 + no-store；公网素材池页与精确 release hash 一致 |
+| 管理员浏览器 | 通过 | 明细显示独立“素材预览 / Post 预览”列；`5503209` 302 到实际 MP4，`11761405635` 因源记录/URL 不可解析返回安全 404 |
 | 原有证据保护 | 通过 | 原 canary queue/log 各 1 条，部署未新增 queue/log/Post |
 | 配置与秘密 | 通过 | 敏感值未变化，env/DB 权限保持 0400/0600 |
 
@@ -54,4 +54,4 @@
 
 ## 发布建议
 
-生产已按 GitHub-first 精确 commit 发布，timer 已恢复。素材池初始为空；管理员应在下一次自然触发前录入至少三条可校验的 Dramawave 素材，否则任务会按设计整批不发。首轮真实发布仍由自然调度验收，不手工触发 daily service。
+生产已按 GitHub-first 精确 commit 发布，timer 保持 active。当前素材池 2 条均为 `unpublished / validation_failed`，不足三条且不可供发布，下一次自然触发会按设计整批不发。应先删除或修复无效 ID，并录入至少三条可校验的 Dramawave 素材；首轮真实发布仍由自然调度验收，不手工触发 daily service。

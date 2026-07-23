@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-已于 2026-07-23 部署生产，运行版本为 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`。Sidecar、主后台与 `x-post-daily.timer` 均为 active，下一次自然触发为 2026-07-24 10:00 CST；本次部署未启动 daily service、未创建 queue、未上传媒体、未调用真实 X。
+已于 2026-07-23 部署生产。Sidecar/daily 运行版本保持 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`；主后台 `app.py` 与素材池页面精确来自 `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4`。Sidecar、主后台与 `x-post-daily.timer` 均为 active，下一次自然触发为 2026-07-24 10:00 CST；素材预览增量未启动 daily service、未创建 queue、未上传媒体、未调用真实 X。
 
 ## 生产执行记录
 
@@ -11,9 +11,13 @@
 - SQLite 副本迁移与生产迁移均通过；迁移后账号/run/queue/log/pool 计数为 `10/0/1/1/0`，`PRAGMA integrity_check=ok`，原 canary queue/log 保留。
 - 第一次维护窗在部署脚本写错预期索引名称时 fail closed 并自动回滚，服务、timer、旧 release 与原数据库全部恢复；修正校验名为 `ux_x_post_queue_pool_item_id` 后第二次部署成功。
 - `/usr/share/nginx/html/quick-nav.js` 保持部署前 hash `64aa18e75b6f421cbb37f68150526bc576352d3c15c434fd06e526a3e0a6dccf`，只结构化更新公网 `navigation.json` 并部署素材池/日志页面。
-- 内部管理员查询与 daily available 均返回 200、池内 0 条；公网匿名管理 API 返回 401 且 `Cache-Control: no-store`，素材池页、日志页与 OAuth health 均返回 200。
-- Chrome 管理员登录态验收显示“池内素材/未发布/可供发布/已发布”均为 0，导航入口和筛选表格正常，浏览器 warning/error 为 0。
+- 初始上线时内部管理员查询与 daily available 均返回 200、池内 0 条；公网匿名管理 API 返回 401 且 `Cache-Control: no-store`，素材池页、日志页与 OAuth health 均返回 200。
+- 初始上线时 Chrome 管理员登录态显示“池内素材/未发布/可供发布/已发布”均为 0，导航入口和筛选表格正常，浏览器 warning/error 为 0。
 - 生产敏感配置值与部署前一致；daily env 权限为 0400、Sidecar env/SQLite 为 0600。
+- 素材预览增量备份为 `/mnt/data-disk/x-post-automation/backups/20260723T090326Z-material-preview-9711ef7`；备份 manifest 自校验全部通过，包含上线前主后台、服务/公网页面和 SQLite 在线备份。
+- 精确 commit 在服务器 141/141 通过；主后台/Sidecar/timer 最终均 active，daily inactive，SQLite `integrity_check=ok`，pool/queue/log 保持 `2/1/1`。
+- 公网匿名素材预览返回 401 + no-store；管理员浏览器显示独立“素材预览 / Post 预览”列。`5503209` 成功 302 到实际 HTTPS MP4，`11761405635` 因素材源记录或 URL 不可解析返回 404。
+- 首次错误补全的 commit SHA 在 checkout 阶段即被 Git 拒绝，未进入备份/覆盖/重启；后续两次门禁分别因服务尚未监听的瞬时 502、以及本机直连 401 无 Nginx no-store 的过严断言自动恢复旧文件。修正为本机就绪 + 公网 no-store 分层验证后部署成功。
 
 ## 变更内容
 
