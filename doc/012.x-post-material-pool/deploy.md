@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-已于 2026-07-23 部署生产。Sidecar/daily 运行版本保持 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`；主后台 `app.py` 与素材池页面精确来自 `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4`。Sidecar、主后台与 `x-post-daily.timer` 均为 active，下一次自然触发为 2026-07-24 10:00 CST；素材预览增量未启动 daily service、未创建 queue、未上传媒体、未调用真实 X。
+上一版已于 2026-07-23 部署生产：Sidecar/daily 运行版本为 `75f46e77b46f1cda6f05b53b02a96002c75b4bf6`；主后台 `app.py` 与素材池页面来自 `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4`。本次“入池即时 X 校验 + `ads_custom_source.url` 直链预览”增量已在本地 143/143 通过，尚待按 GitHub-first 精确 commit 部署；部署过程不得启动 daily service 或调用真实 X。
 
 ## 生产执行记录
 
@@ -25,6 +25,8 @@
 - daily selector 从前日 spend 排名切换为素材池 FIFO。
 - 增量迁移 queue 的 pool 关联、唯一索引和跨表触发器。
 - 素材池明细新增独立素材预览列；管理员点击后由主后台安全跳转到池内素材对应的 HTTPS 源 URL。
+- 本次增量：添加素材前复用 X selector 做只读即时校验，校验结果与池记录原子写入；失败/不存在立即显示“不可用”。
+- 本次增量：素材池列表直接附加 `ads_custom_source.url` 的安全 HTTPS 地址，页面直接打开源素材，旧 302 接口仅保留兼容。
 - 保留现有 X 日批次、W2A/短链、日志、账号、timer 和失败语义。
 
 ## 配置项

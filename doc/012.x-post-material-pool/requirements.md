@@ -19,7 +19,7 @@
 
 - 新增 `x_post_material_pool` SQLite 表及 queue 关联字段、索引、触发器。
 - 素材池管理页面、管理员查询/添加/删除 API、素材源文件预览和后台审计日志。
-- daily runner 从素材池读取候选并回写素材校验结果。
+- 素材入池前由主后台复用 X selector 做即时只读校验，并将结果与素材池记录原子写入；daily runner 仍会重新检查并回写最新结果。
 - 从 `ads_custom_source` 直接按 ID 加载素材，不再用前一天消耗作为排序或入选条件。
 - 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射、违规记录、色情/暴力标签和媒体文件预检。
 - queue 创建时的全局素材排重、账号日排重、三条计划原子提交。
@@ -36,7 +36,7 @@
 
 1. 管理员可一次录入 1 至 100 个正整数素材 ID；前导零统一规范为十进制 `material_key`。
 2. 同一批次重复、已在池中、或已有任意 X queue 历史的素材，整批添加失败，不做部分写入。
-3. 录入只建立待选记录，不代表素材已通过安全检查。
+3. 录入时立即复用 X selector 检查素材源资格、违规记录、危险标签和剧映射；找不到素材或任一检查不通过时仍保留池记录，但派生状态立即显示为 `validation_failed`（页面文案“不可用”）。
 4. 正式日更只接受 `ads_custom_source.product = 'Dramawave'`、`type = 2`、`is_delete = 0`、视频时长 1 至 140 秒的素材。
 5. 素材必须有 HTTPS URL、完整名称/语言/content ID，并能唯一解析到同 content ID、同语言的短剧记录。
 6. Facebook、TikTok、Twitter 违规表和资源审核记录必须全部为 0。
@@ -51,13 +51,14 @@
 15. 只有未发布且不存在任何同池 ID/同素材 key queue 的记录可以删除；已发布和已占用记录必须保留审计。
 16. runner 按 `X_POST_DAILY_SCAN_LIMIT` 读取最老的池记录，默认和当前生产建议均为 1000、允许 3 至 1000；selector 再按 FIFO 保留最多 `X_POST_DAILY_CANDIDATE_POOL_LIMIT=50` 条合规候选供媒体预检补位。最老 1000 条内不足三条合格素材时整批不发布。
 17. selector/媒体拒绝结果按 Sidecar 单次上限 100 条分批回写；例如 205 条必须按 100/100/5 三批提交，避免整批审计丢失。
-18. 素材池明细将“素材预览”和“Post 预览”分列展示。管理员点击素材预览时，主后台先确认素材仍在池中，再按素材 ID 只读解析 `ads_custom_source.url`；仅允许无凭据、无控制字符的 HTTPS URL，并以 no-store 的 302 跳转打开。不存在、重复、非法或非 HTTPS 的源 URL 一律显示为不可预览，且该操作不修改池、queue 或发布日志。
+18. 素材池明细将“素材预览”和“Post 预览”分列展示。管理员查询列表时，主后台按素材 ID 只读读取 `ads_custom_source.url` 并返回安全 HTTPS `material_preview_url`；页面直接以该 URL 打开源素材，不再经后台 302。素材不合规但源记录和安全 URL 存在时仍可预览；素材不存在、URL 缺失/非法或非 HTTPS 时显示“无法预览”。预览不修改池、queue 或发布日志。
+19. 入池即时校验覆盖与 X selector 相同的数据库级发布标准；媒体文件下载、大小、编码、真实时长和分辨率校验仍在 daily 任务建计划前执行，不能因入池状态“可供发布”而跳过。
 
 ## 交互与流程
 
 1. 管理员进入“X 平台 > Post 素材池”，粘贴素材 ID 并提交；可在明细点击“预览素材”核对自定义素材库源文件。
-2. 主后台验证 Cookie 管理员和同源 JSON，将 actor 与素材 ID 转发给 loopback Sidecar。
-3. Sidecar 在一个事务中完成规范化、池内排重、历史 queue 排重和入池。
+2. 主后台验证 Cookie 管理员和同源 JSON，规范化素材 ID，使用只读业务库复用 X selector 完成即时检查。
+3. 主后台将 actor、素材 ID 和逐素材校验结果转发给 loopback Sidecar；Sidecar 在一个事务中完成规范化、池内排重、历史 queue 排重、入池和校验状态落库。校验服务异常时 fail closed 为“不可用”，不先暴露可供发布状态。
 4. daily runner 先验证存储和三个固定账号，再取得最老的未发布且未占用素材。
 5. selector 直接读取 `ads_custom_source` 与安全/剧映射表，返回合格候选和逐素材拒绝原因。
 6. runner 回写校验结果，下载并预检媒体；不足三条时只记录 `failed_preflight` run，不创建 queue。
@@ -74,9 +75,9 @@
 | `features/x_posts/selector.py` | 手工池素材加载与合规/映射校验，不使用 insight 排名 |
 | `scripts/x_post_daily_runner.py` | 读取池、回写检查、三条成组预检与计划 |
 | `features/x_accounts/oauth_service.py` | backend/daily 两种 bearer 的素材池内部路由 |
-| `features/x_accounts/client.py` | 主后台到 Sidecar 的管理客户端 |
-| `app.py` | Cookie 管理员 API、同源写校验、素材池范围内的安全源 URL 跳转、审计日志 |
-| `static/x-post-material-pool.html` | 批量添加、筛选、分页、状态、素材/Post 双预览和受限删除 |
+| `features/x_accounts/client.py` | 主后台到 Sidecar 的管理客户端及即时校验结果传递 |
+| `app.py` | Cookie 管理员 API、同源写校验、复用 selector 的入池即时校验、列表源 URL 补全、审计日志 |
+| `static/x-post-material-pool.html` | 批量添加、筛选、分页、不可用状态、素材直链/Post 双预览和受限删除 |
 | `static/navigation.json` / `static/quick-nav.js` | 管理员导航入口 |
 | `.env.example` / `deploy/x-post-daily.env.example` | daily 素材池可用项与检查回写路径 |
 
@@ -138,11 +139,12 @@
 - 校验失败记录仍可在后续运行重新检查，但只要已有任何 queue，就永不回到可选择集合。
 - 失败/unknown 不能靠删除池记录或重新入池绕过。
 - 查询返回脱敏错误，不返回 OAuth Token、内部 bearer 或数据库凭据；响应使用 `Cache-Control: no-store`。
-- 素材预览只接受池内 1 至 19 位正整数 ID，源地址只允许安全 HTTPS；跳转响应不缓存、不发送来源页，预览失败不回退到任意外部 URL。
+- 列表只附加与池内素材 ID 精确匹配的安全 HTTPS 源地址；页面使用 `noopener,noreferrer` 直开，预览失败不回退到任意外部 URL。旧 `/preview` 跳转接口仅保留兼容，不再被页面使用。
 
 ## 验收标准
 
 - [x] 管理员可批量添加规范素材 ID，重复/历史占用时整批回滚。
+- [x] 入池时立即按 X selector 检查并原子记录结果；素材不存在、不合规或校验服务异常均立即显示“不可用”。
 - [x] 非管理员、API Token、跨源写请求均无法管理素材池。
 - [x] 正式选择路径不查询 `ads_custom_source_insight`，不使用 spend 排序。
 - [x] 只有 Dramawave 的有效视频素材可以进入候选。
@@ -154,8 +156,8 @@
 - [x] 只有确认成功的三方结果才把对应池记录改为 `published`。
 - [x] 已发布或任意 queue 占用素材不可删除；未占用未发布素材可删除。
 - [x] 管理页状态、筛选、分页、预览 URL allowlist 和 no-store 契约通过。
-- [x] 素材预览仅对管理员开放、仅解析池内素材的安全 HTTPS URL，并与 Post 预览分列。
-- [x] 全部 X 回归与新增素材池测试 141/141 通过。
+- [x] 素材预览直接使用 `ads_custom_source.url` 的安全 HTTPS 地址，不合规但可解析的素材仍可预览，并与 Post 预览分列。
+- [x] 全部 X 回归与新增素材池测试 143/143 通过。
 - [x] 生产副本迁移、live composite、精确 release 部署与 timer 恢复通过。
 - [ ] 首轮自然 timer 发布验收待 2026-07-24 10:00 CST；素材池不足三条时应整批不发。
 
@@ -177,3 +179,4 @@
 | 2026-07-23 | 精确 commit `75f46e7` 部署生产；素材池初始为空，恢复次日 10:00 自然调度 |
 | 2026-07-23 | 素材池明细新增独立“素材预览”列，通过管理员池范围校验后安全跳转自定义素材库 HTTPS URL |
 | 2026-07-23 | 精确 commit `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4` 的主后台接口与素材池页面部署生产；浏览器实测有效素材 302、缺失素材 404，发布账本零变化 |
+| 2026-07-23 | 入池改为即时复用 X selector 并原子落校验状态；素材预览改为列表直接附加 `ads_custom_source.url`，页面将不合规/不存在素材明确标记为“不可用” |

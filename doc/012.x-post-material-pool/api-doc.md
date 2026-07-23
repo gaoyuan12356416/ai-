@@ -49,6 +49,7 @@
       "queue_status": null,
       "publish_status": "",
       "unknown_outcome": false,
+      "material_preview_url": "https://example-cdn.invalid/material.mp4",
       "preview_url": "",
       "publish_error_code": "",
       "publish_error_message": ""
@@ -72,7 +73,9 @@
 
 `summary.available` 必须与 `availability=available` 相同口径，不包含 `validation_failed`。
 
-## GET /api/admin/x-posts/material-pool/preview
+列表的 `material_preview_url` 由主后台按当前页素材 ID 批量、只读、精确查询 `ads_custom_source.url` 后附加。仅返回无凭据、无控制字符、端口为空或 443 的 HTTPS URL；素材的 X 合规状态不影响 URL 返回，源记录或安全 URL 不存在时返回空字符串。页面直接用该字段打开素材。
+
+## GET /api/admin/x-posts/material-pool/preview（兼容接口）
 
 仅接受 Feishu Cookie 管理员。查询参数必须且只能包含：
 
@@ -87,7 +90,7 @@
 3. URL 必须是无用户名/密码、无控制字符、带 hostname 的 HTTPS 地址。
 4. 成功返回 `302`，`Location` 为素材源 URL，并设置 `Cache-Control: no-store`、`Pragma: no-cache`、`Referrer-Policy: no-referrer` 和 `X-Content-Type-Options: nosniff`。
 
-非法参数返回 400；素材不在池中、源记录缺失/重复或 URL 不安全返回 404 `x_post_material_preview_unavailable`；只读数据源异常返回 503。接口不返回 MySQL 凭据，不修改素材池状态、queue 或发布日志。页面中的 X Post 预览继续使用列表 DTO 的 `preview_url`，与本接口分列展示。
+非法参数返回 400；素材不在池中、源记录缺失/重复或 URL 不安全返回 404 `x_post_material_preview_unavailable`；只读数据源异常返回 503。接口不返回 MySQL 凭据，不修改素材池状态、queue 或发布日志。该跳转入口仅为旧调用兼容，当前素材池页面不再使用；页面直接使用列表 DTO 的 `material_preview_url`，X Post 预览继续使用 `preview_url`。
 
 ## POST /api/admin/x-posts/material-pool
 
@@ -102,6 +105,10 @@
 - 数组必须包含 1 至 100 项。
 - 每项规范为正整数文本，`"00101"` 保存为 `"101"`。
 - 同批重复、池内重复、已有任意 queue 历史时，整个事务回滚。
+- 主后台先复用正式 X selector 做只读即时校验，覆盖 Dramawave、视频类型/删除态/时长、HTTPS、必填元数据、违规记录、色情/暴力危险标签和短剧映射。
+- 素材不存在或任一标准不通过时仍可加入池，但 `availability` 立即为 `validation_failed`，页面显示“不可用”；检查服务异常统一 fail closed 为 `material_validation_unavailable`。
+- 素材 ID、校验时间和逐素材错误与池记录在 Sidecar 同一事务写入，不存在先显示 `available` 的窗口。
+- 入池校验不替代 daily 的媒体文件下载/ffprobe 预检。
 - 兼容单值 `material_id`，主页面统一发送 `material_ids`。
 - 成功写入后台审计日志。
 
@@ -110,7 +117,9 @@
 ```json
 {
   "items": [],
-  "created_count": 3
+  "created_count": 3,
+  "available_count": 1,
+  "validation_failed_count": 2
 }
 ```
 
@@ -149,11 +158,18 @@
     "role": "admin"
   },
   "scope": "all",
-  "material_ids": ["5221348"]
+  "material_ids": ["5221348"],
+  "validation_checks": [
+    {
+      "material_id": "5221348",
+      "error_code": "",
+      "error_message": ""
+    }
+  ]
 }
 ```
 
-`scope` 非 `all` 返回 403。
+`scope` 非 `all` 返回 403。`validation_checks` 必须与本批规范化后的素材 ID 一一对应；缺失时 Sidecar 不信任调用方，统一以 `material_validation_pending` 入池并显示不可用。提供了不完整、重复或越界的检查集合时整批 400 且不写入。
 
 ## POST /internal/posts/material-pool/{pool_item_id}/delete
 

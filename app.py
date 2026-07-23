@@ -41303,6 +41303,12 @@ from features.x_accounts.client import (
     start_x_authorization,
     verify_x_account,
 )
+from features.x_posts.selector import (
+    connect_read_only as connect_x_post_read_only,
+    material_key as x_post_material_key,
+    previous_source_date as x_post_previous_source_date,
+    select_pool_candidates as select_x_post_pool_candidates,
+)
 
 try:
     X_POST_AUTOMATION_INTERNAL_TIMEOUT = int(os.environ.get("X_POST_AUTOMATION_INTERNAL_TIMEOUT", "30") or "30")
@@ -41452,45 +41458,227 @@ def x_post_pool_query_params(raw_query):
     return result
 
 
-def x_post_material_preview_location(material_id, row_loader=None):
-    material_id = str(material_id or "").strip()
-    if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
-        raise ValueError("material_id must be a positive integer")
+X_POST_POOL_VALIDATION_MESSAGES = {
+    "material_not_found_or_ineligible": "素材ID不存在，或不是符合X发布要求的Dramawave有效视频",
+    "material_product_mismatch": "素材不属于Dramawave",
+    "material_metadata_invalid": "素材元数据不完整或无效",
+    "material_url_not_https": "素材URL不是HTTPS地址",
+    "material_has_violation": "素材存在违规记录",
+    "violation_check_invalid": "素材违规记录无法安全核验",
+    "material_source_tag_invalid": "素材标签无法安全核验",
+    "material_source_tag_unsafe": "素材标签包含色情、暴力等禁用内容",
+    "material_tag_invalid": "素材关联标签无法安全核验",
+    "material_tag_unsafe": "素材关联标签包含色情、暴力等禁用内容",
+    "drama_mapping_missing": "素材没有匹配到短剧信息",
+    "drama_mapping_invalid": "素材对应的短剧信息不完整",
+    "drama_mapping_ambiguous": "素材匹配到多条不一致的短剧信息",
+    "drama_label_invalid": "短剧标签无法安全核验",
+    "drama_label_unsafe": "短剧标签包含色情、暴力等禁用内容",
+    "pool_item_invalid": "素材ID或素材池记录无效",
+    "material_safety_check_failed": "素材未通过X发布安全校验",
+}
+
+
+def x_post_normalize_material_ids(material_ids):
+    if (
+        not isinstance(material_ids, (list, tuple))
+        or not material_ids
+        or len(material_ids) > 100
+    ):
+        raise ValueError("material_ids must contain 1 to 100 items")
+    normalized = []
+    seen = set()
+    for raw in material_ids:
+        try:
+            key = x_post_material_key(raw)
+        except Exception:
+            raise ValueError("material_id must be a positive integer") from None
+        if key in seen:
+            raise ValueError("material_ids contains a duplicate material")
+        seen.add(key)
+        normalized.append(key)
+    return normalized
+
+
+def x_post_material_preview_urls(material_ids, row_loader=None):
+    normalized = x_post_normalize_material_ids(material_ids)
     database = str(DB_NAME or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", database):
         raise RuntimeError("material source database is unavailable")
     query = (
-        "SELECT CAST(id AS CHAR),url "
-        "FROM `%s`.ads_custom_source WHERE id=%d LIMIT 2"
-        % (database, int(material_id))
+        "SELECT CAST(id AS CHAR),url FROM `%s`.ads_custom_source "
+        "WHERE id IN (%s) ORDER BY id"
+        % (database, ",".join(str(int(item)) for item in normalized))
     )
     loader = row_loader or (
         lambda sql: ad_control_run_mysql(sql, timeout_seconds=10)
     )
     rows = loader(query)
-    if (
-        not isinstance(rows, (list, tuple))
-        or len(rows) != 1
-        or len(rows[0]) < 2
-        or str(rows[0][0] or "").strip() != material_id
-    ):
+    if not isinstance(rows, (list, tuple)):
+        raise RuntimeError("material source query returned invalid rows")
+    allowed = set(normalized)
+    values = {}
+    duplicates = set()
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        material_id = str(row[0] or "").strip()
+        if material_id not in allowed:
+            continue
+        if material_id in values:
+            duplicates.add(material_id)
+            continue
+        location = str(row[1] or "").strip()
+        if (
+            not location
+            or len(location) > 4096
+            or "\\" in location
+            or any(char.isspace() or ord(char) == 127 for char in location)
+        ):
+            continue
+        parsed = urlparse(location)
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+        ):
+            continue
+        values[material_id] = location
+    for material_id in duplicates:
+        values.pop(material_id, None)
+    return {material_id: values.get(material_id, "") for material_id in normalized}
+
+
+def x_post_material_preview_location(material_id, row_loader=None):
+    material_id = x_post_normalize_material_ids([material_id])[0]
+    location = x_post_material_preview_urls([material_id], row_loader=row_loader).get(
+        material_id, ""
+    )
+    if not location:
         raise LookupError("素材不存在或没有可用的素材 URL")
-    location = str(rows[0][1] or "").strip()
-    if (
-        not location
-        or len(location) > 4096
-        or any(ord(char) < 32 or ord(char) == 127 for char in location)
-    ):
-        raise LookupError("素材不存在或没有可用的素材 URL")
-    parsed = urlparse(location)
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        raise LookupError("素材 URL 不是可预览的 HTTPS 地址")
     return location
+
+
+def x_post_enrich_material_pool_preview_urls(result, row_loader=None):
+    if not isinstance(result, dict):
+        return result
+    items = result.get("items")
+    if not isinstance(items, list):
+        return result
+    material_ids = [
+        str(item.get("material_id") or "").strip()
+        for item in items
+        if isinstance(item, dict) and item.get("material_id") not in (None, "")
+    ]
+    preview_urls = {}
+    if material_ids:
+        try:
+            preview_urls = x_post_material_preview_urls(
+                material_ids, row_loader=row_loader
+            )
+        except Exception:
+            preview_urls = {}
+    for item in items:
+        if isinstance(item, dict):
+            material_id = str(item.get("material_id") or "").strip()
+            item["material_preview_url"] = preview_urls.get(material_id, "")
+    return result
+
+
+def x_post_initial_material_checks(
+    material_ids,
+    connection_factory=None,
+    candidate_loader=None,
+    now=None,
+):
+    normalized = x_post_normalize_material_ids(material_ids)
+    checked_at = (
+        now.astimezone(timezone.utc)
+        if isinstance(now, datetime) and now.tzinfo is not None
+        else datetime.now(timezone.utc)
+    )
+    created_at = checked_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+    pool_items = [
+        {"id": index, "material_id": material_id, "created_at": created_at}
+        for index, material_id in enumerate(normalized, 1)
+    ]
+    loader = candidate_loader or select_x_post_pool_candidates
+    connection = None
+    try:
+        if connection_factory is not None:
+            connection = connection_factory()
+        else:
+            connection = connect_x_post_read_only(
+                host=MYSQL_HOST,
+                port=int(MYSQL_PORT or 3306),
+                user=MYSQL_USER,
+                password=MYSQL_PASSWORD,
+                database=DB_NAME,
+                connect_timeout=5,
+                read_timeout=30,
+            )
+        selected, rejections = loader(
+            connection,
+            pool_items,
+            x_post_previous_source_date(now),
+            limit=len(normalized),
+            schema=DB_NAME,
+        )
+    except Exception:
+        return [
+            {
+                "material_id": material_id,
+                "error_code": "material_validation_unavailable",
+                "error_message": "素材暂时无法完成X发布标准校验，当前不可发布",
+            }
+            for material_id in normalized
+        ]
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
+
+    outcomes = {
+        index: {
+            "material_id": material_id,
+            "error_code": "material_validation_incomplete",
+            "error_message": "素材未完成X发布标准校验，当前不可发布",
+        }
+        for index, material_id in enumerate(normalized, 1)
+    }
+    for candidate in selected if isinstance(selected, list) else []:
+        pool_item_id = candidate.get("pool_item_id") if isinstance(candidate, dict) else None
+        if pool_item_id in outcomes:
+            outcomes[pool_item_id] = {
+                "material_id": outcomes[pool_item_id]["material_id"],
+                "error_code": "",
+                "error_message": "",
+            }
+    for rejection in rejections if isinstance(rejections, list) else []:
+        pool_item_id = (
+            rejection.get("pool_item_id") if isinstance(rejection, dict) else None
+        )
+        if pool_item_id not in outcomes:
+            continue
+        code = str(rejection.get("error_code") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", code):
+            code = "material_validation_failed"
+        message = X_POST_POOL_VALIDATION_MESSAGES.get(
+            code,
+            str(rejection.get("error_message") or "素材未通过X发布标准校验").strip(),
+        )
+        outcomes[pool_item_id] = {
+            "material_id": outcomes[pool_item_id]["material_id"],
+            "error_code": code,
+            "error_message": message[:500],
+        }
+    return [outcomes[index] for index in sorted(outcomes)]
 
 
 def parse_ad_material_task_route(path):
@@ -91883,10 +92071,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 params.update(
                     {"actor": x_accounts_actor(self._session()), "scope": "all"}
                 )
+                result = query_x_post_material_pool(params)
                 json_response(
                     self,
                     200,
-                    query_x_post_material_pool(params),
+                    x_post_enrich_material_pool_preview_urls(result),
                     no_store=True,
                 )
             except ValueError as exc:
@@ -95077,9 +95266,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     "",
                 ):
                     material_ids = [payload.get("material_id")]
+                validation_checks = x_post_initial_material_checks(material_ids)
                 result = add_x_post_material_pool(
                     material_ids,
                     x_accounts_actor(session),
+                    validation_checks=validation_checks,
                 )
                 append_audit_log(
                     session,
@@ -95091,7 +95282,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             result.get("created_count", 0)
                             if isinstance(result, dict)
                             else 0
-                        )
+                        ),
+                        "validation_failed_count": sum(
+                            1
+                            for item in validation_checks
+                            if item.get("error_code")
+                        ),
                     },
                 )
                 json_response(self, 200, result, no_store=True)

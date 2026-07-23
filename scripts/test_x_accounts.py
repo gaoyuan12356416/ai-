@@ -1413,6 +1413,18 @@ class XAccountsTestCase(unittest.TestCase):
             added_pool = client.add_x_post_material_pool(
                 ["08001", "8002"],
                 self.admin,
+                validation_checks=[
+                    {
+                        "material_id": "8001",
+                        "error_code": "",
+                        "error_message": "",
+                    },
+                    {
+                        "material_id": "8002",
+                        "error_code": "",
+                        "error_message": "",
+                    },
+                ],
             )
             self.assertEqual(added_pool["created_count"], 2)
             queried_pool = client.query_x_post_material_pool(
@@ -1429,6 +1441,28 @@ class XAccountsTestCase(unittest.TestCase):
             self.assertEqual(
                 [item["material_id"] for item in queried_pool["items"]],
                 ["8001", "8002"],
+            )
+            checked_pool = client.record_x_post_material_pool_checks(
+                [
+                    {
+                        "pool_item_id": added_pool["items"][1]["id"],
+                        "error_code": "material_not_found_or_ineligible",
+                        "error_message": "素材不可用",
+                    }
+                ]
+            )
+            self.assertEqual(checked_pool["item"]["updated_count"], 1)
+            self.assertEqual(
+                client.query_x_post_material_pool(
+                    {
+                        "actor": self.admin,
+                        "scope": "all",
+                        "page": 1,
+                        "page_size": 10,
+                        "availability": "validation_failed",
+                    }
+                )["pagination"]["total"],
+                1,
             )
             with self.assertRaises(client.XAccountsClientError) as pool_denied:
                 client.add_x_post_material_pool(["8003"], self.owner)

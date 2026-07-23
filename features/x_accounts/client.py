@@ -229,17 +229,24 @@ def query_x_post_material_pool(params):
     )
 
 
-def add_x_post_material_pool(material_ids, actor):
+def add_x_post_material_pool(material_ids, actor, validation_checks=None):
     if not isinstance(material_ids, (list, tuple)):
         raise XAccountsClientError("invalid_request", "素材ID列表必须是数组", 400)
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+        "material_ids": list(material_ids),
+    }
+    if validation_checks is not None:
+        if not isinstance(validation_checks, (list, tuple)):
+            raise XAccountsClientError(
+                "invalid_request", "素材校验结果必须是数组", 400
+            )
+        payload["validation_checks"] = list(validation_checks)
     return _request(
         "/internal/posts/material-pool/add",
         method="POST",
-        payload={
-            "actor": normalize_actor(actor),
-            "scope": "all",
-            "material_ids": list(material_ids),
-        },
+        payload=payload,
     )
 
 
@@ -251,6 +258,18 @@ def delete_x_post_material_pool(pool_item_id, actor):
         "/internal/posts/material-pool/%s/delete" % pool_item_id,
         method="POST",
         payload={"actor": normalize_actor(actor), "scope": "all"},
+    )
+
+
+def record_x_post_material_pool_checks(checks):
+    if not isinstance(checks, (list, tuple)) or not checks:
+        raise XAccountsClientError(
+            "invalid_request", "素材校验结果必须是非空数组", 400
+        )
+    return _request(
+        "/internal/posts/material-pool/check",
+        method="POST",
+        payload={"checks": list(checks)},
     )
 
 

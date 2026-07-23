@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from features.x_posts.selector import material_key  # noqa: E402
+
+
 APP_PATH = ROOT / "app.py"
 APP_SOURCE = APP_PATH.read_text(encoding="utf-8")
 NGINX_SOURCE = (ROOT / "deploy" / "nginx-x-oauth.conf").read_text(encoding="utf-8")
@@ -116,6 +123,7 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("query_x_post_logs(params)", routes)
         self.assertIn("query_x_post_runs(params)", routes)
         self.assertIn("query_x_post_material_pool(params)", routes)
+        self.assertIn("x_post_enrich_material_pool_preview_urls(result)", routes)
         self.assertGreaterEqual(routes.count("no_store=True"), 6)
 
     def test_x_post_material_preview_is_admin_only_pool_scoped_and_no_store(self):
@@ -136,21 +144,27 @@ class XAccountsAppContractTest(unittest.TestCase):
 
     def test_x_post_material_preview_location_is_https_and_injection_safe(self):
         tree = ast.parse(APP_SOURCE)
-        function = next(
+        functions = [
             node
             for node in tree.body
             if isinstance(node, ast.FunctionDef)
-            and node.name == "x_post_material_preview_location"
-        )
+            and node.name
+            in {
+                "x_post_normalize_material_ids",
+                "x_post_material_preview_urls",
+                "x_post_material_preview_location",
+            }
+        ]
         namespace = {
             "DB_NAME": "kunlunads_dev",
             "re": re,
             "urlparse": urlparse,
+            "x_post_material_key": material_key,
         }
         exec(
             compile(
                 ast.fix_missing_locations(
-                    ast.Module(body=[function], type_ignores=[])
+                    ast.Module(body=functions, type_ignores=[])
                 ),
                 str(APP_PATH),
                 "exec",
@@ -172,7 +186,8 @@ class XAccountsAppContractTest(unittest.TestCase):
             queries,
             [
                 "SELECT CAST(id AS CHAR),url FROM "
-                "`kunlunads_dev`.ads_custom_source WHERE id=5503209 LIMIT 2"
+                "`kunlunads_dev`.ads_custom_source "
+                "WHERE id IN (5503209) ORDER BY id"
             ],
         )
         for invalid in ("", "0", "-1", "1 OR 1=1", "1%20OR%201=1"):
@@ -195,6 +210,125 @@ class XAccountsAppContractTest(unittest.TestCase):
                 "5503209",
                 lambda _query: [["5503209", "https://example.test/a.mp4\r\nX-Test: 1"]],
             )
+        preview_urls = namespace["x_post_material_preview_urls"]
+        self.assertEqual(
+            preview_urls(
+                ["5503209", "11761405635"],
+                lambda _query: [
+                    ["5503209", "https://media.example.test/source.mp4"],
+                ],
+            ),
+            {
+                "5503209": "https://media.example.test/source.mp4",
+                "11761405635": "",
+            },
+        )
+
+    def test_x_post_initial_material_checks_reuse_selector_and_fail_closed(self):
+        tree = ast.parse(APP_SOURCE)
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name
+            in {
+                "x_post_normalize_material_ids",
+                "x_post_initial_material_checks",
+            }
+        ]
+        namespace = {
+            "DB_NAME": "kunlunads_dev",
+            "MYSQL_HOST": "readonly.example.test",
+            "MYSQL_PORT": "63350",
+            "MYSQL_USER": "reader",
+            "MYSQL_PASSWORD": "secret",
+            "X_POST_POOL_VALIDATION_MESSAGES": {
+                "material_not_found_or_ineligible": "素材不可用",
+            },
+            "datetime": datetime,
+            "timezone": timezone,
+            "re": re,
+            "x_post_material_key": material_key,
+            "x_post_previous_source_date": lambda _now=None: "2026-07-22",
+            "connect_x_post_read_only": lambda **_kwargs: None,
+            "select_x_post_pool_candidates": None,
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=functions, type_ignores=[])
+                ),
+                str(APP_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        validate = namespace["x_post_initial_material_checks"]
+        captured = {}
+
+        class Connection:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        connection = Connection()
+
+        def loader(_connection, pool_items, source_date, limit, schema):
+            captured.update(
+                {
+                    "pool_items": pool_items,
+                    "source_date": source_date,
+                    "limit": limit,
+                    "schema": schema,
+                }
+            )
+            return (
+                [{"pool_item_id": 1, "material_id": "5503209"}],
+                [
+                    {
+                        "pool_item_id": 2,
+                        "material_id": "11761405635",
+                        "error_code": "material_not_found_or_ineligible",
+                        "error_message": "missing",
+                    }
+                ],
+            )
+
+        checks = validate(
+            ["5503209", "11761405635"],
+            connection_factory=lambda: connection,
+            candidate_loader=loader,
+            now=datetime(2026, 7, 23, 9, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            checks,
+            [
+                {
+                    "material_id": "5503209",
+                    "error_code": "",
+                    "error_message": "",
+                },
+                {
+                    "material_id": "11761405635",
+                    "error_code": "material_not_found_or_ineligible",
+                    "error_message": "素材不可用",
+                },
+            ],
+        )
+        self.assertEqual(captured["source_date"], "2026-07-22")
+        self.assertEqual(captured["limit"], 2)
+        self.assertEqual(captured["schema"], "kunlunads_dev")
+        self.assertTrue(connection.closed)
+        failed = validate(
+            ["5503209"],
+            connection_factory=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+            candidate_loader=loader,
+        )
+        self.assertEqual(
+            failed[0]["error_code"],
+            "material_validation_unavailable",
+        )
 
     def test_x_post_query_parameter_validation(self):
         tree = ast.parse(APP_SOURCE)
@@ -262,7 +396,9 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         self.assertIn("_require_cookie_admin()", post_route)
         self.assertIn("_require_same_origin_json()", post_route)
+        self.assertIn("x_post_initial_material_checks(material_ids)", post_route)
         self.assertIn("add_x_post_material_pool(", post_route)
+        self.assertIn("validation_checks=validation_checks", post_route)
         self.assertIn("append_audit_log(", post_route)
         self.assertIn("no_store=True", post_route)
 
@@ -288,10 +424,13 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn('url.hostname === "x.com"', X_POST_POOL_SOURCE)
         self.assertIn("<th>素材预览</th>", X_POST_POOL_SOURCE)
         self.assertIn("<th>Post 预览</th>", X_POST_POOL_SOURCE)
-        self.assertIn(
+        self.assertIn("safeMaterialUrl(item.material_preview_url)", X_POST_POOL_SOURCE)
+        self.assertNotIn(
             "/api/admin/x-posts/material-pool/preview?material_id=",
             X_POST_POOL_SOURCE,
         )
+        self.assertIn('validation_failed: "不可用"', X_POST_POOL_SOURCE)
+        self.assertIn('setText(cell, "无法预览")', X_POST_POOL_SOURCE)
         self.assertIn('link.rel = "noopener noreferrer"', X_POST_POOL_SOURCE)
         self.assertIn("cell.colSpan = 10", X_POST_POOL_SOURCE)
         self.assertIn("replaceChildren()", X_POST_LOGS_SOURCE)

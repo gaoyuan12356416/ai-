@@ -1441,7 +1441,11 @@ def add_post_material_pool_request(payload):
         material_ids = [payload.get("material_id")]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
-        return XPostStore(POST_DB_PATH).add_pool_materials(material_ids, actor)
+        return XPostStore(POST_DB_PATH).add_pool_materials(
+            material_ids,
+            actor,
+            validation_checks=payload.get("validation_checks"),
+        )
     except XPostError as exc:
         _raise_x_post_error(exc)
 

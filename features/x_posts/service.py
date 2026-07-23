@@ -1137,7 +1137,12 @@ class XPostStore:
             item["created"] = True
             return item
 
-    def add_pool_materials(self, material_ids, actor=None):
+    def add_pool_materials(
+        self,
+        material_ids,
+        actor=None,
+        validation_checks=None,
+    ):
         if (
             not isinstance(material_ids, list)
             or not material_ids
@@ -1160,6 +1165,72 @@ class XPostStore:
                 )
             seen.add(key)
             normalized.append(key)
+        if validation_checks is None:
+            checks_by_material = {
+                material_id: (
+                    "material_validation_pending",
+                    "素材尚未完成X发布标准校验，当前不可发布",
+                )
+                for material_id in normalized
+            }
+        else:
+            if (
+                not isinstance(validation_checks, list)
+                or len(validation_checks) != len(normalized)
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "validation_checks必须与material_ids逐项对应",
+                    400,
+                )
+            checks_by_material = {}
+            for raw in validation_checks:
+                if not isinstance(raw, dict):
+                    raise XPostError(
+                        "invalid_request",
+                        "validation_check必须是对象",
+                        400,
+                    )
+                check_material_id = normalize_material_key(raw.get("material_id"))
+                if (
+                    check_material_id not in seen
+                    or check_material_id in checks_by_material
+                ):
+                    raise XPostError(
+                        "invalid_request",
+                        "validation_check素材ID无效或重复",
+                        400,
+                    )
+                raw_code = str(raw.get("error_code", "") or "").strip()
+                if raw_code:
+                    try:
+                        error_code = _clean_token(
+                            raw_code, "validation error code", 64
+                        )
+                    except ValueError:
+                        raise XPostError(
+                            "invalid_request",
+                            "validation_check错误码无效",
+                            400,
+                        ) from None
+                    error_message = redact_text(
+                        raw.get("error_message")
+                        or "素材未通过X发布标准校验",
+                        500,
+                    )
+                else:
+                    error_code = ""
+                    error_message = ""
+                checks_by_material[check_material_id] = (
+                    error_code,
+                    error_message,
+                )
+            if set(checks_by_material) != seen:
+                raise XPostError(
+                    "invalid_request",
+                    "validation_checks未覆盖全部素材ID",
+                    400,
+                )
         actor = actor if isinstance(actor, dict) else {}
         created_by_user_id = str(actor.get("user_id", "") or "").strip()[:255]
         created_by_name = str(
@@ -1202,13 +1273,17 @@ class XPostStore:
                     cursor = conn.execute(
                         "INSERT INTO x_post_material_pool("
                         "material_key,material_id,status,created_by_user_id,created_by_name,"
+                        "last_checked_at,last_error_code,last_error_message,"
                         "created_at,updated_at"
-                        ") VALUES(?,?,'unpublished',?,?,?,?)",
+                        ") VALUES(?,?,'unpublished',?,?,?,?,?,?,?)",
                         (
                             material_key_value,
                             material_key_value,
                             created_by_user_id,
                             created_by_name,
+                            timestamp,
+                            checks_by_material[material_key_value][0],
+                            checks_by_material[material_key_value][1],
                             timestamp,
                             timestamp,
                         ),
@@ -1227,7 +1302,20 @@ class XPostStore:
                 tuple(created_ids),
             ).fetchall()
             conn.commit()
-        return {"items": [_row_dict(row) for row in rows], "created_count": len(rows)}
+        return {
+            "items": [_row_dict(row) for row in rows],
+            "created_count": len(rows),
+            "available_count": sum(
+                1
+                for material_id in normalized
+                if not checks_by_material[material_id][0]
+            ),
+            "validation_failed_count": sum(
+                1
+                for material_id in normalized
+                if checks_by_material[material_id][0]
+            ),
+        }
 
     def available_pool_items(self, limit=50):
         try:

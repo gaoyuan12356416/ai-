@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-代码与生产部署 GO，首轮自然 timer 发布验收待 2026-07-24 10:00 CST。跨表双键占用、Dramawave 产品门禁、summary.available 口径、1000/50 两级扫描窗口、检查回写分批和素材源文件预览修订后，本地与服务器精确 commit 的全部 X 回归均为 141/141。素材预览接口、生产页面、管理员登录态跳转和账本零变化均已验收；本轮未调用真实 X。
+入池即时 X 校验与素材源 URL 直链增量的本地代码 GO，完整 X 回归为 143/143。生产仍运行上一版素材预览实现，待精确 commit 部署并回填服务器/浏览器证据；本轮测试未调用真实 X。
 
 ## 测试范围
 
@@ -11,20 +11,23 @@
 - daily runner 的三账号、存储/媒体预检、三条成组、known/unknown 和停止语义。
 - SQLite migration、全局 material/account-day/pool 唯一约束和成功态联动。
 - Sidecar backend/daily 鉴权、管理员 API、DOM/URL allowlist 和 no-store。
-- 素材预览的池归属、精确 ID 只读查询、安全 HTTPS 跳转、浏览器双预览列和失败关闭。
+- 素材预览按当前页 ID 批量精确读取 `ads_custom_source.url`、仅返回安全 HTTPS、页面直链和失败关闭。
+- 入池复用正式 selector，合规/不合规/不存在/校验服务异常的原子状态写入与 fail closed。
 - 既有 X publish、OAuth、账号 owner/admin、短链和 canary 回归。
 
 ## 已执行结果
 
 | 命令组 | 数量 | 结果 | 说明 |
 | --- | ---: | --- | --- |
-| pool + pool selector + daily + ledger + app contract | 67 | 67 通过 | 含素材预览接口、URL 安全与页面契约 |
+| pool + pool selector + daily + ledger + app contract | 69 | 69 通过 | 含入池即时校验、素材 URL 直链和页面契约 |
 | X Post service + X accounts + owner backfill | 74 | 74 通过 | 最终关键修订后执行 |
-| 合计 | 141 | 141 通过 | 0 失败、0 阻塞 |
-| `python -m py_compile`（实际目标） | — | 通过 | oauth/client/service/selector/runner |
-| `node --check static/quick-nav.js` | — | 通过 | 无输出、exit 0 |
+| 合计 | 143 | 143 通过 | 0 失败、0 阻塞 |
+| `python -m py_compile`（实际目标） | — | 通过 | app/oauth/client/service 与新增测试 |
+| Node `vm.Script` 页面内嵌脚本校验 | 3 段 | 通过 | `x-post-material-pool.html` |
 
 ## 生产验收结果
+
+下表为上一版生产基线；本次 143 项增量尚未部署，部署后覆盖更新。
 
 | 项目 | 结果 | 证据 |
 | --- | --- | --- |
@@ -45,7 +48,8 @@
 - `query_pool.summary.available` 已排除 `validation_failed`，专项断言通过。
 - runner 已按 scan limit 读取最老 1000 条，再保留最多 50 条合规候选供媒体补位，避免前 50 条不合规直接遮挡。
 - 超过 100 条的检查结果已按 API 上限分批；205 条 100/100/5 回归通过。
-- 素材预览使用管理员同源入口，先验证素材仍属于素材池，再精确只读解析源 URL；HTTP、凭据、控制字符、重复/缺失记录全部失败关闭，不改变发布状态。
+- 入池即时校验直接复用 manual selector；Sidecar 只接受与本批素材一一对应的检查结果，缺失时 pending/不可用，非法集合整批回滚。
+- 素材池列表按当前页精确批量读取源 URL；不合规但源 URL 安全的素材仍可预览，不存在/HTTP/凭据/控制字符/异常端口全部显示无法预览。
 
 ## 未执行
 
@@ -54,4 +58,4 @@
 
 ## 发布建议
 
-生产已按 GitHub-first 精确 commit 发布，timer 保持 active。当前素材池 2 条均为 `unpublished / validation_failed`，不足三条且不可供发布，下一次自然触发会按设计整批不发。应先删除或修复无效 ID，并录入至少三条可校验的 Dramawave 素材；首轮真实发布仍由自然调度验收，不手工触发 daily service。
+待按 GitHub-first 部署本次精确 commit 后，对生产现有池记录做一次只更新校验字段的回填，并确认 timer 仍为 active、daily service inactive、queue/log/Post 计数不变。首轮真实发布仍由自然调度验收，不手工触发 daily service。

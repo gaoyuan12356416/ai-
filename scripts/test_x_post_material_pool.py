@@ -55,7 +55,70 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def add(self, *material_ids):
-        return self.store.add_pool_materials(list(material_ids), self.actor)["items"]
+        checks = [
+            {
+                "material_id": service.normalize_material_key(material_id),
+                "error_code": "",
+                "error_message": "",
+            }
+            for material_id in material_ids
+        ]
+        return self.store.add_pool_materials(
+            list(material_ids),
+            self.actor,
+            validation_checks=checks,
+        )["items"]
+
+    def test_unchecked_add_is_fail_closed_until_x_validation_finishes(self):
+        result = self.store.add_pool_materials(["91"], self.actor)
+        self.assertEqual(result["available_count"], 0)
+        self.assertEqual(result["validation_failed_count"], 1)
+        queried = self.store.query_pool({"material_id": "91"})
+        self.assertEqual(queried["items"][0]["availability"], "validation_failed")
+        self.assertEqual(
+            queried["items"][0]["last_error_code"],
+            "material_validation_pending",
+        )
+        checked = self.store.add_pool_materials(
+            ["92", "93"],
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": "92",
+                    "error_code": "",
+                    "error_message": "",
+                },
+                {
+                    "material_id": "93",
+                    "error_code": "material_not_found_or_ineligible",
+                    "error_message": "素材ID不存在",
+                },
+            ],
+        )
+        self.assertEqual(checked["available_count"], 1)
+        self.assertEqual(checked["validation_failed_count"], 1)
+        self.assertEqual(
+            self.store.query_pool({"material_id": "92"})["items"][0][
+                "availability"
+            ],
+            "available",
+        )
+        self.assertEqual(
+            self.store.query_pool({"material_id": "93"})["items"][0][
+                "availability"
+            ],
+            "validation_failed",
+        )
+        with self.assertRaises(service.XPostError):
+            self.store.add_pool_materials(
+                ["94"],
+                self.actor,
+                validation_checks=[],
+            )
+        self.assertEqual(
+            self.store.query_pool({"material_id": "94"})["pagination"]["total"],
+            0,
+        )
 
     def test_add_fifo_validation_and_delete_available_item(self):
         items = self.add("00101", "102", "103", "104")

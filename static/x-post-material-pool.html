@@ -214,7 +214,7 @@
             <div class="field">
               <label for="materialIds">自定义素材 ID</label>
               <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
-              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。加入素材池不代表跳过违规、色情、暴力标签和媒体可用性检查。</span>
+              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。加入后立即按 X 发布标准检查素材、违规记录、色情/暴力标签和短剧映射。</span>
             </div>
             <div class="add-actions">
               <button id="addMaterials" class="button primary" type="button">加入素材池</button>
@@ -226,7 +226,7 @@
         <section class="panel">
           <div class="section-head">
             <h2>素材池明细</h2>
-            <p>主状态仅区分已发布/未发布；“可用状态”用于说明素材当前能否被定时任务选中。发布失败或结果待确认的队列不会自动重发。</p>
+            <p>主状态仅区分已发布/未发布；“不可用”表示素材ID不存在或未通过 X 发布标准。发布失败或结果待确认的队列不会自动重发。</p>
           </div>
           <form id="filters" class="filters">
             <input id="materialIdFilter" inputmode="numeric" placeholder="素材 ID" aria-label="素材 ID" />
@@ -238,7 +238,7 @@
             <select id="availabilityFilter" aria-label="可用状态">
               <option value="">全部可用状态</option>
               <option value="available">可供发布</option>
-              <option value="validation_failed">校验失败（可重试）</option>
+              <option value="validation_failed">不可用</option>
               <option value="occupied">已被队列占用</option>
               <option value="failed">发布失败（不重发）</option>
               <option value="needs_review">结果待核查（不重发）</option>
@@ -303,6 +303,16 @@
         try {
           const url = new URL(String(value || ""));
           return url.protocol === "https:" && url.hostname === "x.com" && /^\/[A-Za-z0-9_]{1,50}\/status\/\d+$/.test(url.pathname)
+            ? url.href
+            : "";
+        } catch (_) {
+          return "";
+        }
+      };
+      const safeMaterialUrl = value => {
+        try {
+          const url = new URL(String(value || ""));
+          return url.protocol === "https:" && !url.username && !url.password && !url.hash
             ? url.href
             : "";
         } catch (_) {
@@ -387,7 +397,7 @@
           available: "可供发布",
           occupied: "已被队列占用",
           published: "已发布",
-          validation_failed: "校验失败（可重试）",
+          validation_failed: "不可用",
           failed: "发布失败（不重发）",
           needs_review: "结果待核查（不重发）",
         };
@@ -420,14 +430,14 @@
         body.appendChild(row);
       }
       function appendMaterialPreview(cell, item) {
-        const materialId = String(item.material_id || item.material_key || "").trim();
-        if (!/^[1-9][0-9]{0,18}$/.test(materialId)) {
-          setText(cell, "—");
+        const href = safeMaterialUrl(item.material_preview_url);
+        if (!href) {
+          setText(cell, "无法预览");
           return;
         }
         cell.className = "links";
         const link = document.createElement("a");
-        link.href = `/api/admin/x-posts/material-pool/preview?material_id=${encodeURIComponent(materialId)}`;
+        link.href = href;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         setText(link, "预览素材");
@@ -602,9 +612,15 @@
             body: JSON.stringify({ material_ids: materialIds }),
           });
           const addedCount = Number(result.added_count ?? result.created_count ?? materialIds.length);
+          const unavailableCount = Number(result.validation_failed_count ?? 0);
           byId("materialIds").value = "";
           state.page = 1;
-          showToast(`已加入 ${addedCount} 个素材，定时任务将按创建时间正序处理。`, false);
+          showToast(
+            unavailableCount
+              ? `已加入 ${addedCount} 个素材，其中 ${unavailableCount} 个未通过 X 发布校验，已标记不可用。`
+              : `已加入 ${addedCount} 个素材，均已通过入池校验。`,
+            false
+          );
           await Promise.all([loadPool(), loadStats()]);
         } catch (error) {
           showToast(`添加失败：${error.message}`, true);
