@@ -2,7 +2,7 @@
 
 ## 测试范围
 
-覆盖素材池管理、FIFO、Dramawave 与合规校验、跨表永久排重、三条成组、状态转换、管理员/daily 鉴权、页面安全、迁移和既有 X 发布回归。
+覆盖素材池管理、FIFO、Dramawave 与合规校验、跨表永久排重、三条成组、状态转换、快速导航/daily 鉴权、页面安全、迁移和既有 X 发布回归。
 
 ## 测试数据
 
@@ -40,7 +40,7 @@
 | TC-023 | 成功态 | media + Create Post + 本地事务成功 | queue/log/pool 同步 published，记录 preview/published_at |
 | TC-024 | 成功重放 | 相同已发布 log/post ID 重放 | 不再次写 X；可自愈池 published |
 | TC-025 | 删除门禁 | 删除 available、occupied、published | 仅 available 成功 |
-| TC-026 | 管理 API 鉴权 | 管理员/普通用户/API Token/跨源请求 | 仅 Cookie 管理员同源读写成功 |
+| TC-026 | 素材池 API 鉴权 | 导航 `adminOnly` 开/关、模块权限有/无、菜单启用/禁用、API Token/跨源请求 | 仅符合 `xPostMaterialPool` 快速导航配置的 Cookie 用户可访问；写请求仍须同源 |
 | TC-027 | daily bearer 范围 | 调用 available/check 与 add/query/delete | 前者允许，管理路由 403 |
 | TC-028 | 查询参数与脱敏 | 非法枚举、未知参数、错误文本、敏感词 | 400 或脱敏安全 DTO，no-store |
 | TC-029 | 页面 DOM 安全 | 恶意素材名/错误/URL | 使用 textContent/replaceChildren；素材预览仅安全 HTTPS 直链并带 noopener/noreferrer，Post 预览仅 x.com allowlist |
@@ -51,6 +51,7 @@
 | TC-034 | 素材源文件预览 | 管理员查询含合规/不合规/不存在素材的池列表；再测试 HTTP、凭据、端口和 CRLF URL | 有安全源 URL的合规/不合规项均返回精确 `material_preview_url`；不存在/不安全项为空；页面直接打开且发布状态 0 写入 |
 | TC-035 | 入池即时 X 校验 | 混合提交合规、不合规、不存在素材；模拟 selector/数据库异常 | 复用正式 selector；合规项立即 available，其余立即 validation_failed/“不可用”；异常 fail closed，不出现待校验可用窗口 |
 | TC-036 | Sidecar 入池校验合同 | 省略、错配、重复或不完整 `validation_checks` | 省略时统一 pending/不可用；非法集合整批 400、0 写入；合法集合与池记录原子写入 |
+| TC-037 | 页面导航授权一致性 | 普通用户有 `x_accounts` 且 `adminOnly=false`，再覆盖 true/禁用/配置读取失败 | false 时页面可加载；true、禁用或读取失败时 fail closed；页面不再写死 `user.is_admin` |
 
 ## 自动化映射
 
@@ -59,7 +60,7 @@
 - `scripts/test_x_post_daily.py`：TC-016 至 TC-019、TC-027、runner 失败语义。
 - `scripts/test_x_post_ledger.py`：TC-019、TC-020、TC-024、TC-030。
 - `scripts/test_x_accounts.py`：Sidecar 路由、daily bearer 和发布状态回归。
-- `scripts/test_x_accounts_app_contract.py`：TC-026、TC-028、TC-029、TC-034、TC-035。
+- `scripts/test_x_accounts_app_contract.py`：TC-026、TC-028、TC-029、TC-034、TC-035、TC-037。
 - `scripts/test_x_posts.py` / `scripts/test_x_account_owner_backfill.py`：TC-032。
 
 ## 生产验收边界

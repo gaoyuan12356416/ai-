@@ -195,7 +195,7 @@
       </header>
 
       <section id="loginGate" class="panel gate hidden"><strong>请先登录 AI 自动后台</strong><span>登录后才能维护 Post 素材池。</span></section>
-      <section id="adminGate" class="panel gate hidden"><strong>仅管理员可以维护 Post 素材池</strong><span>普通用户没有查看或修改权限。</span></section>
+      <section id="permissionGate" class="panel gate hidden"><strong>当前账号没有 Post 素材池权限</strong><span id="permissionGateMessage">请检查快速导航栏中的“仅管理员可见”“权限模块”和“启用”设置。</span></section>
 
       <div id="pageRoot" class="hidden">
         <section class="stats">
@@ -346,6 +346,42 @@
         try { payload = body ? JSON.parse(body) : {}; } catch (_) { payload = {}; }
         if (!response.ok) throw new Error(getErrorMessage(payload) || `HTTP ${response.status}`);
         return payload;
+      }
+      function navigationNodeVisible(auth, node) {
+        const user = auth && auth.user;
+        if (!node || typeof node !== "object" || node.enabled === false) return false;
+        if (node.adminOnly && !(user && user.is_admin)) return false;
+        if (node.module) {
+          if (!user) return false;
+          if (!user.is_admin && !(user.permissions && user.permissions[node.module])) return false;
+        }
+        return true;
+      }
+      function navigationAllows(auth, config, itemKey) {
+        if (!Array.isArray(config)) return false;
+        return config.some(group =>
+          navigationNodeVisible(auth, group) &&
+          Array.isArray(group.items) &&
+          group.items.some(item =>
+            item &&
+            String(item.key || "") === itemKey &&
+            navigationNodeVisible(auth, item)
+          )
+        );
+      }
+      async function loadFreshNavigationConfig() {
+        const response = await fetch("/navigation.json", {
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const config = await response.json();
+        if (!Array.isArray(config)) throw new Error("invalid navigation config");
+        return config;
+      }
+      function showPermissionGate(message) {
+        if (message) setText(byId("permissionGateMessage"), message);
+        byId("permissionGate").classList.remove("hidden");
       }
       function showToast(message, isError) {
         const toast = byId("toast");
@@ -671,8 +707,15 @@
           byId("loginGate").classList.remove("hidden");
           return;
         }
-        if (!user.is_admin) {
-          byId("adminGate").classList.remove("hidden");
+        let navigationConfig;
+        try {
+          navigationConfig = await loadFreshNavigationConfig();
+        } catch (_) {
+          showPermissionGate("快速导航配置读取失败，已拒绝访问；请刷新页面后重试。");
+          return;
+        }
+        if (!navigationAllows(state.auth, navigationConfig, "xPostMaterialPool")) {
+          showPermissionGate("");
           return;
         }
         byId("pageRoot").classList.remove("hidden");

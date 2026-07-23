@@ -2,7 +2,8 @@
 
 ## 鉴权边界
 
-- 浏览器管理接口仅接受 Feishu Cookie 管理员，不接受 API Token 或普通用户。
+- 浏览器素材池接口仅接受 Feishu Cookie，并按快速导航栏 `xPostMaterialPool` 的实时配置授权：分组/菜单必须启用，任一级 `adminOnly=true` 时要求管理员，分组和菜单声明的每个 `module` 都要求当前用户具备。API Token 始终拒绝。
+- 导航配置缺失或禁用返回 403 `navigation_item_unavailable`；仅管理员门禁返回 403 `admin_required`；模块缺失返回 403 `permission_denied`；生产配置读取/解析失败返回 503 `navigation_config_unavailable`。所有拒绝响应 no-store。
 - 浏览器写接口同时要求同源 JSON；响应均为 `Cache-Control: no-store`。
 - 主后台到 Sidecar 使用 loopback backend bearer。
 - daily bearer 只允许 `available`、`check`、固定三账号 verify、正式 `daily-plan` 和对应 queue publish；不能查询、添加或删除素材池。
@@ -77,7 +78,7 @@
 
 ## GET /api/admin/x-posts/material-pool/preview（兼容接口）
 
-仅接受 Feishu Cookie 管理员。查询参数必须且只能包含：
+鉴权与素材池列表接口相同，按 `xPostMaterialPool` 快速导航配置授权。查询参数必须且只能包含：
 
 | 参数 | 规则 |
 | --- | --- |

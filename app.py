@@ -54542,6 +54542,61 @@ def load_navigation_config():
         return json.load(handle)
 
 
+def navigation_item_access(session, item_key, config):
+    """Evaluate a page against the same group/item rules used by quick-nav.js."""
+    unavailable = {"allowed": False, "error": "navigation_item_unavailable"}
+    if not session or not str(item_key or "").strip() or not isinstance(config, list):
+        return unavailable
+
+    target_key = str(item_key).strip()
+    denied = None
+    for group in config:
+        if not isinstance(group, dict):
+            continue
+        items = group.get("items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict) or str(item.get("key", "")).strip() != target_key:
+                continue
+            if group.get("enabled") is False or item.get("enabled") is False:
+                continue
+            if (
+                (group.get("adminOnly") or item.get("adminOnly"))
+                and session.get("role") != "admin"
+            ):
+                denied = denied or {"allowed": False, "error": "admin_required"}
+                continue
+
+            required_modules = []
+            for node in (group, item):
+                module_key = str(node.get("module", "") or "").strip()
+                if module_key and module_key not in required_modules:
+                    required_modules.append(module_key)
+            missing_module = next(
+                (
+                    module_key
+                    for module_key in required_modules
+                    if not has_module_permission(session, module_key)
+                ),
+                "",
+            )
+            if missing_module:
+                if denied is None or denied.get("error") != "admin_required":
+                    denied = {
+                        "allowed": False,
+                        "error": "permission_denied",
+                        "module": missing_module,
+                    }
+                continue
+            return {
+                "allowed": True,
+                "item_key": target_key,
+                "modules": required_modules,
+            }
+    return denied or unavailable
+
+
 def validate_navigation_config(config):
     if not isinstance(config, list):
         raise ValueError("导航配置必须是数组")
@@ -91432,6 +91487,50 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         json_response(self, 403, {"error": "admin_required"})
         return False
 
+    def _require_cookie_navigation_item(self, item_key):
+        if not self._require_auth():
+            return False
+        session = self._session()
+        if session and session.get("auth_type") == "api_token":
+            json_response(
+                self,
+                403,
+                {"error": "cookie_auth_required", "navigation_item": item_key},
+                no_store=True,
+            )
+            return False
+        try:
+            access = navigation_item_access(
+                session,
+                item_key,
+                load_navigation_config(),
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            logging.exception(
+                "failed to load navigation config for item %s",
+                item_key,
+            )
+            json_response(
+                self,
+                503,
+                {
+                    "error": "navigation_config_unavailable",
+                    "navigation_item": item_key,
+                },
+                no_store=True,
+            )
+            return False
+        if access.get("allowed"):
+            return True
+        payload = {
+            "error": access.get("error", "navigation_item_unavailable"),
+            "navigation_item": item_key,
+        }
+        if access.get("module"):
+            payload["module"] = access["module"]
+        json_response(self, 403, payload, no_store=True)
+        return False
+
     def _require_same_origin_json(self):
         content_type = str(self.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
@@ -91987,7 +92086,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-posts/material-pool/preview":
-            if not self._require_cookie_admin():
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
                 return
             try:
                 raw_preview_query = parse_qs(
@@ -92064,7 +92163,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-posts/material-pool":
-            if not self._require_cookie_admin():
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
                 return
             try:
                 params = x_post_pool_query_params(parsed.query)
@@ -95253,7 +95352,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-posts/material-pool":
-            if not self._require_cookie_admin():
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
                 return
             if not self._require_same_origin_json():
                 return
@@ -96066,7 +96165,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             parsed.path,
         )
         if x_pool_delete_match:
-            if not self._require_cookie_admin():
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
                 return
             if not self._require_same_origin_json():
                 return

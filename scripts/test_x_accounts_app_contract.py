@@ -90,11 +90,110 @@ class XAccountsAppContractTest(unittest.TestCase):
     def test_admin_gate_explicitly_rejects_api_tokens(self):
         admin_gate = source_between(
             "def _require_cookie_admin(self):",
-            "def _require_same_origin_json(self):",
+            "def _require_cookie_navigation_item(self, item_key):",
         )
         self.assertIn('session.get("auth_type") == "api_token"', admin_gate)
         self.assertIn('session.get("role") == "admin"', admin_gate)
         self.assertIn('"cookie_auth_required"', admin_gate)
+
+    def test_navigation_item_access_matches_quick_nav_rules(self):
+        tree = ast.parse(APP_SOURCE)
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "navigation_item_access"
+        )
+        namespace = {
+            "has_module_permission": lambda session, module: (
+                session.get("role") == "admin"
+                or bool((session.get("permissions") or {}).get(module))
+            )
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[function], type_ignores=[])
+                ),
+                str(APP_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        access = namespace["navigation_item_access"]
+        user = {
+            "role": "user",
+            "permissions": {"x_accounts": True, "group_access": True},
+        }
+        config = [
+            {
+                "key": "x",
+                "module": "group_access",
+                "items": [
+                    {
+                        "key": "xPostMaterialPool",
+                        "module": "x_accounts",
+                        "enabled": True,
+                    }
+                ],
+            }
+        ]
+        self.assertTrue(access(user, "xPostMaterialPool", config)["allowed"])
+
+        missing_item_permission = {
+            **user,
+            "permissions": {"x_accounts": False, "group_access": True},
+        }
+        denied = access(
+            missing_item_permission,
+            "xPostMaterialPool",
+            config,
+        )
+        self.assertEqual(denied["error"], "permission_denied")
+        self.assertEqual(denied["module"], "x_accounts")
+
+        admin_only_config = [
+            {
+                **config[0],
+                "items": [{**config[0]["items"][0], "adminOnly": True}],
+            }
+        ]
+        self.assertEqual(
+            access(user, "xPostMaterialPool", admin_only_config)["error"],
+            "admin_required",
+        )
+        self.assertTrue(
+            access(
+                {"role": "admin", "permissions": {}},
+                "xPostMaterialPool",
+                admin_only_config,
+            )["allowed"]
+        )
+        disabled_config = [
+            {
+                **config[0],
+                "items": [{**config[0]["items"][0], "enabled": False}],
+            }
+        ]
+        self.assertEqual(
+            access(user, "xPostMaterialPool", disabled_config)["error"],
+            "navigation_item_unavailable",
+        )
+        self.assertEqual(
+            access(user, "missing", config)["error"],
+            "navigation_item_unavailable",
+        )
+
+    def test_navigation_item_gate_is_cookie_only_and_fail_closed(self):
+        gate = source_between(
+            "def _require_cookie_navigation_item(self, item_key):",
+            "def _require_same_origin_json(self):",
+        )
+        self.assertIn('session.get("auth_type") == "api_token"', gate)
+        self.assertIn("load_navigation_config()", gate)
+        self.assertIn("navigation_item_access(", gate)
+        self.assertIn('"navigation_config_unavailable"', gate)
+        self.assertIn("no_store=True", gate)
 
     def test_x_routes_and_nginx_force_no_store(self):
         get_routes = source_between(
@@ -112,12 +211,18 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("location ^~ /api/admin/x-posts/", NGINX_SOURCE)
         self.assertGreaterEqual(NGINX_SOURCE.count('add_header Cache-Control "no-store" always;'), 5)
 
-    def test_x_post_admin_routes_are_cookie_admin_only_and_no_store(self):
+    def test_x_post_routes_use_scoped_cookie_gates_and_no_store(self):
         routes = source_between(
             'if parsed.path == "/api/admin/x-posts/logs":',
             'if parsed.path == "/api/drama-material/products":',
         )
-        self.assertEqual(routes.count("_require_cookie_admin()"), 4)
+        self.assertEqual(routes.count("_require_cookie_admin()"), 2)
+        self.assertEqual(
+            routes.count(
+                '_require_cookie_navigation_item("xPostMaterialPool")'
+            ),
+            2,
+        )
         self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 4)
         self.assertEqual(routes.count('"scope": "all"'), 4)
         self.assertIn("query_x_post_logs(params)", routes)
@@ -126,12 +231,15 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("x_post_enrich_material_pool_preview_urls(result)", routes)
         self.assertGreaterEqual(routes.count("no_store=True"), 6)
 
-    def test_x_post_material_preview_is_admin_only_pool_scoped_and_no_store(self):
+    def test_x_post_material_preview_uses_navigation_gate_pool_scope_and_no_store(self):
         route = source_between(
             'if parsed.path == "/api/admin/x-posts/material-pool/preview":',
             'if parsed.path == "/api/admin/x-posts/material-pool":',
         )
-        self.assertIn("_require_cookie_admin()", route)
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostMaterialPool")',
+            route,
+        )
         self.assertIn("query_x_post_material_pool(", route)
         self.assertIn('"material_id": material_id', route)
         self.assertIn('"actor": x_accounts_actor(self._session())', route)
@@ -389,12 +497,15 @@ class XAccountsAppContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_pool("material_id=0")
 
-    def test_x_post_pool_mutations_are_cookie_admin_same_origin_and_no_store(self):
+    def test_x_post_pool_mutations_use_navigation_gate_same_origin_and_no_store(self):
         post_route = source_between(
             'if parsed.path == "/api/admin/x-posts/material-pool":',
             'if parsed.path == "/api/x-accounts/authorize":',
         )
-        self.assertIn("_require_cookie_admin()", post_route)
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostMaterialPool")',
+            post_route,
+        )
         self.assertIn("_require_same_origin_json()", post_route)
         self.assertIn("x_post_initial_material_checks(material_ids)", post_route)
         self.assertIn("add_x_post_material_pool(", post_route)
@@ -406,7 +517,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             "x_pool_delete_match = re.fullmatch(",
             'if parsed.path == "/api/ad-control/v3"',
         )
-        self.assertIn("_require_cookie_admin()", delete_route)
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostMaterialPool")',
+            delete_route,
+        )
         self.assertIn("_require_same_origin_json()", delete_route)
         self.assertIn("delete_x_post_material_pool(", delete_route)
         self.assertIn("append_audit_log(", delete_route)
@@ -431,6 +545,15 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         self.assertIn('validation_failed: "不可用"', X_POST_POOL_SOURCE)
         self.assertIn('setText(cell, "无法预览")', X_POST_POOL_SOURCE)
+        self.assertIn('fetch("/navigation.json"', X_POST_POOL_SOURCE)
+        self.assertIn('cache: "no-store"', X_POST_POOL_SOURCE)
+        self.assertIn(
+            'navigationAllows(state.auth, navigationConfig, "xPostMaterialPool")',
+            X_POST_POOL_SOURCE,
+        )
+        self.assertIn('id="permissionGate"', X_POST_POOL_SOURCE)
+        self.assertNotIn("if (!user.is_admin)", X_POST_POOL_SOURCE)
+        self.assertNotIn('id="adminGate"', X_POST_POOL_SOURCE)
         self.assertIn('link.rel = "noopener noreferrer"', X_POST_POOL_SOURCE)
         self.assertIn("cell.colSpan = 10", X_POST_POOL_SOURCE)
         self.assertIn("replaceChildren()", X_POST_LOGS_SOURCE)

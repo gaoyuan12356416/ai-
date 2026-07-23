@@ -6,7 +6,7 @@
 
 ## 目标
 
-- 在 AI 后台提供管理员专用的“Post 素材池”页面，可批量录入 `ads_custom_source.id`。
+- 在 AI 后台提供“Post 素材池”页面，可批量录入 `ads_custom_source.id`；页面和素材池 API 的访问权与快速导航栏 `xPostMaterialPool` 配置一致。
 - 素材池全局共享，不按账号拆池；定时任务按 `created_at ASC, id ASC` 选择最早的合格素材。
 - 素材池主状态只保存 `unpublished`、`published`，其他运行态从 queue/log 派生。
 - 任何素材一旦进入任意 X 发布队列即永久占用，不能删除、重新入池或自动换账号补发。
@@ -18,7 +18,7 @@
 ### 包含
 
 - 新增 `x_post_material_pool` SQLite 表及 queue 关联字段、索引、触发器。
-- 素材池管理页面、管理员查询/添加/删除 API、素材源文件预览和后台审计日志。
+- 素材池管理页面、导航配置授权的查询/添加/删除 API、素材源文件预览和后台审计日志。
 - 素材入池前由主后台复用 X selector 做即时只读校验，并将结果与素材池记录原子写入；daily runner 仍会重新检查并回写最新结果。
 - 从 `ads_custom_source` 直接按 ID 加载素材，不再用前一天消耗作为排序或入选条件。
 - 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射、违规记录、色情/暴力标签和媒体文件预检。
@@ -56,8 +56,8 @@
 
 ## 交互与流程
 
-1. 管理员进入“X 平台 > Post 素材池”，粘贴素材 ID 并提交；可在明细点击“预览素材”核对自定义素材库源文件。
-2. 主后台验证 Cookie 管理员和同源 JSON，规范化素材 ID，使用只读业务库复用 X selector 完成即时检查。
+1. 具备快速导航栏 `xPostMaterialPool` 访问权的登录用户进入“X 平台 > Post 素材池”，粘贴素材 ID 并提交；可在明细点击“预览素材”核对自定义素材库源文件。
+2. 主后台验证 Feishu Cookie、导航项配置和同源 JSON，规范化素材 ID，使用只读业务库复用 X selector 完成即时检查。
 3. 主后台将 actor、素材 ID 和逐素材校验结果转发给 loopback Sidecar；Sidecar 在一个事务中完成规范化、池内排重、历史 queue 排重、入池和校验状态落库。校验服务异常时 fail closed 为“不可用”，不先暴露可供发布状态。
 4. daily runner 先验证存储和三个固定账号，再取得最老的未发布且未占用素材。
 5. selector 直接读取 `ads_custom_source` 与安全/剧映射表，返回合格候选和逐素材拒绝原因。
@@ -76,9 +76,9 @@
 | `scripts/x_post_daily_runner.py` | 读取池、回写检查、三条成组预检与计划 |
 | `features/x_accounts/oauth_service.py` | backend/daily 两种 bearer 的素材池内部路由 |
 | `features/x_accounts/client.py` | 主后台到 Sidecar 的管理客户端及即时校验结果传递 |
-| `app.py` | Cookie 管理员 API、同源写校验、复用 selector 的入池即时校验、列表源 URL 补全、审计日志 |
+| `app.py` | Cookie + 快速导航配置授权、同源写校验、复用 selector 的入池即时校验、列表源 URL 补全、审计日志 |
 | `static/x-post-material-pool.html` | 批量添加、筛选、分页、不可用状态、素材直链/Post 双预览和受限删除 |
-| `static/navigation.json` / `static/quick-nav.js` | 管理员导航入口 |
+| `static/navigation.json` / `static/quick-nav.js` | 导航入口、`adminOnly` / `module` / `enabled` 可见性配置 |
 | `.env.example` / `deploy/x-post-daily.env.example` | daily 素材池可用项与检查回写路径 |
 
 ### 数据结构
@@ -133,7 +133,8 @@
 
 ### 异常与边界
 
-- 管理页面只接受 Feishu Cookie 管理员；API Token、普通用户和跨源写请求拒绝。
+- 管理页面和四个素材池 API 只接受 Feishu Cookie，并实时读取快速导航栏 `xPostMaterialPool` 配置：分组或菜单禁用/缺失时拒绝；任一级 `adminOnly=true` 时只允许管理员；分组和菜单配置的每个 `module` 都必须具备。API Token 和跨源写请求始终拒绝。
+- 页面权限判断直接以 `cache: no-store` 读取 `/navigation.json`；读取失败时 fail closed。后端每次请求独立读取同一生产配置并作为最终授权边界，不依赖浏览器缓存或 DOM 隐藏。
 - daily bearer 只能读取可用项、回写检查、创建固定三账号计划和发布正式 queue，不能管理池或查询后台列表。
 - 添加、计划和成功态联动均使用 `BEGIN IMMEDIATE`，冲突全部回滚。
 - 校验失败记录仍可在后续运行重新检查，但只要已有任何 queue，就永不回到可选择集合。
@@ -145,7 +146,7 @@
 
 - [x] 管理员可批量添加规范素材 ID，重复/历史占用时整批回滚。
 - [x] 入池时立即按 X selector 检查并原子记录结果；素材不存在、不合规或校验服务异常均立即显示“不可用”。
-- [x] 非管理员、API Token、跨源写请求均无法管理素材池。
+- [x] 素材池页面和查询/预览/添加/删除 API 与快速导航栏 `xPostMaterialPool` 的 `adminOnly`、`module`、`enabled` 设置一致；API Token、缺少模块权限和跨源写请求均被拒绝。
 - [x] 正式选择路径不查询 `ads_custom_source_insight`，不使用 spend 排序。
 - [x] 只有 Dramawave 的有效视频素材可以进入候选。
 - [x] 四类违规证据、三处危险标签、剧映射和媒体预检全部 fail closed。
