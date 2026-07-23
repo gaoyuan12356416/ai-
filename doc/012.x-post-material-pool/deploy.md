@@ -1,0 +1,81 @@
+# 012.x-post-material-pool 部署文档
+
+## 当前状态
+
+本轮只完成设计/实现审查与离线验证，未部署生产、未重启服务、未启用 timer、未调用真实 X。以下步骤仅在 SA 代码评审门禁全部关闭后执行。
+
+## 变更内容
+
+- 增量部署 X Post 全局人工素材池、管理员 API/页面和导航。
+- daily selector 从前日 spend 排名切换为素材池 FIFO。
+- 增量迁移 queue 的 pool 关联、唯一索引和跨表触发器。
+- 保留现有 X 日批次、W2A/短链、日志、账号、timer 和失败语义。
+
+## 配置项
+
+- 新增 `X_POST_DAILY_POOL_AVAILABLE_PATH=/internal/posts/material-pool/available`。
+- 新增 `X_POST_DAILY_POOL_CHECK_PATH=/internal/posts/material-pool/check`。
+- 既有 `/etc/x-post-automation.env`、`/etc/x-post-daily.env` 的 ownership/mode、backend/daily bearer 隔离、三个固定账号 ID 不变。
+- `X_POST_DAILY_SCAN_LIMIT` 默认/生产建议 1000、允许 3 至 1000，用于读取最老原始池记录。
+- `X_POST_DAILY_CANDIDATE_POOL_LIMIT` 默认 50、允许 3 至 100，用于保留合规候选供媒体补位，且不得大于 scan limit。
+- 首次部署继续使用次日 `X_POST_DAILY_START_DATE`，防止 Persistent timer 当天补跑。
+
+## 数据库变更
+
+- 新表 `x_post_material_pool`。
+- `x_post_queue` 新增 `pool_item_id`、`pool_created_at`。
+- 新增 pool FIFO、queue pool ID 唯一索引。
+- 新增 pool/queue 绑定一致性、池中素材不能被非池 queue 绕过、已占用池记录不能删除的触发器。
+- 迁移函数为 additive/idempotent；legacy 重复 material 或账号日冲突继续 fail closed。
+
+## 部署前门禁
+
+1. CR-001 至 CR-004、CR-006 已关闭，最终离线回归 139/139 通过。
+2. Dramawave product exact-match 在生产 schema 副本/只读查询中确认。
+3. 最终工作树全部 X 测试、编译、JS 和 diff 检查通过。
+4. GitHub 已推送精确 commit，服务器只从该 commit 建 release。
+5. live `app.py`/静态资源 composite 基线与审计版本一致。
+6. 生产 SQLite 在线备份完成，副本迁移、旧 queue/canary 查询和重复检测通过。
+7. 素材池至少准备三条可验证的 Dramawave 素材；若不足三条，接受首轮整批不发。
+
+## 部署步骤
+
+1. 停止新代码变更，记录 Git commit、工作树状态和测试证据。
+2. 只读核对生产服务、timer、三个账号、MySQL schema、数据盘和当前 release。
+3. 备份 SQLite、Token 目录 hash/mode、env、unit、Nginx、静态页面和当前 release；不输出秘密内容。
+4. 在 SQLite 备份副本运行迁移和完整测试，核对旧 run/queue/log/pool 计数。
+5. 从 GitHub 精确 commit 建新 release，验证 Python 3.9、依赖和文件 hash。
+6. 停止 Sidecar 的最小窗口内对 live SQLite 执行迁移；失败立即保持旧 release，不启用 timer。
+7. 切换 Sidecar release 并窄重启；仅在 composite 基线一致时更新主后台和静态页面。
+8. 验证管理员素材池查询，录入经人工确认的素材 ID；不手工创建 daily plan 或真实 Post。
+9. 更新 daily env 的两个 pool 路径，验证 unit 后重启/启用 timer；首日用 start_date 门禁确认不会补发。
+10. 核对 next trigger、journal 脱敏、素材池 FIFO、失败 run 记录和后台日志。
+
+生产 `/usr/share/nginx/html/quick-nav.js` 与 GitHub release 存在已确认的导航 composite 差异。部署时必须备份并保留该 live 文件，不得用 release 版本整文件覆盖；只以结构化 JSON 方式在 live `navigation.json` 的 `x_platform.items` 中增量加入 `xPostMaterialPool`、把 `xPostLogs` 顺序调整为 40，并部署新页面。`/root/drama_material_service/static` 仍更新为精确 release 文件，便于主后台源码与回滚审计。
+
+## 验证步骤
+
+- Sidecar health 200；公网 internal 路由不可访问。
+- 管理员素材池页面/API 200，普通用户/API Token/cross-origin 写请求拒绝。
+- 批量添加重复或历史 queue 素材整批回滚。
+- 临时未占用素材可删除；已占用/已发布素材返回 409。
+- daily bearer 可访问 available/check，不能访问 query/add/delete。
+- available 返回严格 `created_at,id` 顺序，非 Dramawave/违规/危险标签/媒体异常不进入计划。
+- 只有三条全部通过时才出现三条 queue；不足三条时 Post 数为 0。
+- 首轮自然 timer 后核对 queue/log/pool：成功项 published，known failure/unknown 保持 unpublished 且派生不可重发。
+- 既有 canary、OAuth、短链、X 日志页面和账号权限回归正常。
+
+## 回滚方案
+
+1. `systemctl disable --now x-post-daily.timer`，立即停止新批次。
+2. 保留当前 SQLite、短链、Token 和日志证据，切回上一精确 release 并窄重启。
+3. 已产生任何新 queue/log/Post 后，不恢复部署前 SQLite，不删除新表/触发器；以修复前滚为主。
+4. 若迁移后尚无任何新记录，可在停服和人工核对计数/hash 后恢复数据库备份。
+5. 静态页面可回滚，但必须保留已发布 Post 对应的 `/s2l/{log_id}.html`。
+
+## 注意事项
+
+- 部署不是授权手工发帖；首个正式发布仍由确认后的自然 timer 执行。
+- pool ID、queue ID、log ID 和 X post ID 都是审计证据，不做重编号或清理。
+- 不提交或输出真实密码、OAuth Token、内部 bearer、数据库连接串。
+- 失败和 unknown 不通过删池、改状态或重新入池处理，应在日志页人工核查。

@@ -59,6 +59,8 @@ QUEUE_LEDGER_FIELDS = (
     "run_id",
     "run_date",
     "material_key",
+    "pool_item_id",
+    "pool_created_at",
     "candidate_rank",
     "spend",
     "preflight_sha256",
@@ -649,12 +651,33 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_material_pool (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    material_key TEXT NOT NULL UNIQUE,
+                    material_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'unpublished'
+                        CHECK(status IN ('unpublished','published')),
+                    published_at TEXT NOT NULL DEFAULT '',
+                    last_checked_at TEXT NOT NULL DEFAULT '',
+                    last_error_code TEXT NOT NULL DEFAULT '',
+                    last_error_message TEXT NOT NULL DEFAULT '',
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
             CREATE TABLE IF NOT EXISTS x_post_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 run_id INTEGER,
                 run_date TEXT NOT NULL DEFAULT '',
                 material_key TEXT NOT NULL DEFAULT '',
+                pool_item_id INTEGER,
+                pool_created_at TEXT NOT NULL DEFAULT '',
                 account_id INTEGER NOT NULL,
                 account_username TEXT NOT NULL,
                 source_date TEXT NOT NULL,
@@ -680,7 +703,8 @@ def ensure_storage(db_path):
                 status TEXT NOT NULL DEFAULT 'queued',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                FOREIGN KEY(run_id) REFERENCES x_post_daily_run(id)
+                FOREIGN KEY(run_id) REFERENCES x_post_daily_run(id),
+                FOREIGN KEY(pool_item_id) REFERENCES x_post_material_pool(id)
             )
                 """
             )
@@ -715,6 +739,8 @@ def ensure_storage(db_path):
                 "run_id": "INTEGER",
                 "run_date": "TEXT NOT NULL DEFAULT ''",
                 "material_key": "TEXT NOT NULL DEFAULT ''",
+                "pool_item_id": "INTEGER",
+                "pool_created_at": "TEXT NOT NULL DEFAULT ''",
                 "candidate_rank": "INTEGER NOT NULL DEFAULT 0",
                 "spend": "REAL NOT NULL DEFAULT 0",
                 "preflight_sha256": "TEXT NOT NULL DEFAULT ''",
@@ -791,6 +817,10 @@ def ensure_storage(db_path):
                 "ON x_post_queue(account_id,run_date) WHERE run_date<>''"
             )
             conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_pool_item_id "
+                "ON x_post_queue(pool_item_id) WHERE pool_item_id IS NOT NULL"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_run ON x_post_queue(run_id,id)"
             )
             conn.execute(
@@ -804,6 +834,10 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_run_status ON x_post_daily_run(status,run_date,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_pool_fifo "
+                "ON x_post_material_pool(status,created_at,id)"
             )
             # SQLite cannot add a FOREIGN KEY to a legacy table with ALTER
             # TABLE. These triggers preserve the same run_id integrity for
@@ -827,6 +861,97 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(SELECT 1 FROM x_post_daily_run WHERE id=NEW.run_id)
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue run_id missing');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_pool_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_pool_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.pool_item_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1 FROM x_post_material_pool
+                       WHERE id=NEW.pool_item_id
+                         AND material_key=NEW.material_key
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue pool binding invalid');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_pool_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_pool_update
+                BEFORE UPDATE OF pool_item_id,material_key ON x_post_queue
+                WHEN NEW.pool_item_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1 FROM x_post_material_pool
+                       WHERE id=NEW.pool_item_id
+                         AND material_key=NEW.material_key
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue pool binding invalid');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_pool_required_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_pool_required_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.pool_item_id IS NULL
+                  AND EXISTS(
+                      SELECT 1 FROM x_post_material_pool
+                       WHERE material_key=NEW.material_key
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue pool binding required');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_pool_required_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_pool_required_update
+                BEFORE UPDATE OF pool_item_id,material_key ON x_post_queue
+                WHEN NEW.pool_item_id IS NULL
+                  AND EXISTS(
+                      SELECT 1 FROM x_post_material_pool
+                       WHERE material_key=NEW.material_key
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue pool binding required');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_pool_queue_guard")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_pool_queue_guard
+                BEFORE INSERT ON x_post_material_pool
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_queue
+                     WHERE material_key=NEW.material_key
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_material_pool material occupied');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_pool_delete_guard")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_pool_delete_guard
+                BEFORE DELETE ON x_post_material_pool
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_queue
+                     WHERE pool_item_id=OLD.id
+                        OR material_key=OLD.material_key
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_material_pool item occupied');
                 END
                 """
             )
@@ -880,6 +1005,21 @@ class XPostStore:
         )
         raw_run_id = payload.get("run_id")
         result["run_id"] = _positive_int(raw_run_id, "run_id") if raw_run_id not in (None, "") else None
+        raw_pool_item_id = payload.get("pool_item_id")
+        result["pool_item_id"] = (
+            _positive_int(raw_pool_item_id, "pool_item_id")
+            if raw_pool_item_id not in (None, "")
+            else None
+        )
+        pool_created_at = str(payload.get("pool_created_at", "") or "").strip()
+        if (
+            len(pool_created_at) > 64
+            or any(ord(char) < 32 for char in pool_created_at)
+            or (result["pool_item_id"] is None and pool_created_at)
+            or (result["pool_item_id"] is not None and not pool_created_at)
+        ):
+            raise XPostError("invalid_request", "pool_created_at无效", 400)
+        result["pool_created_at"] = pool_created_at
         rank_value = candidate_rank if candidate_rank is not None else payload.get("candidate_rank")
         result["candidate_rank"] = _nonnegative_int(rank_value, "candidate_rank", 0)
         result["spend"] = _nonnegative_float(payload.get("spend"), "spend", 0)
@@ -922,6 +1062,8 @@ class XPostStore:
                 for field in (
                     "run_id",
                     "run_date",
+                    "pool_item_id",
+                    "pool_created_at",
                     "candidate_rank",
                     "spend",
                     "preflight_sha256",
@@ -944,6 +1086,30 @@ class XPostStore:
                 item = _row_dict(existing)
                 item["created"] = False
                 return item
+            pool = conn.execute(
+                "SELECT * FROM x_post_material_pool WHERE material_key=?",
+                (values["material_key"],),
+            ).fetchone()
+            if values["pool_item_id"] is None:
+                if pool:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_item_occupied",
+                        "该素材已进入素材池，发布队列必须绑定对应素材池记录",
+                        409,
+                    )
+            elif (
+                not pool
+                or int(pool["id"]) != values["pool_item_id"]
+                or pool["status"] != "unpublished"
+                or str(pool["created_at"]) != values["pool_created_at"]
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pool_item_unavailable",
+                    "素材池记录不存在、已发布、已变更或与素材不一致",
+                    409,
+                )
             if conn.execute(
                 "SELECT id FROM x_post_queue WHERE material_key=?",
                 (values["material_key"],),
@@ -971,7 +1137,323 @@ class XPostStore:
             item["created"] = True
             return item
 
-    def create_daily_plan(self, run_date, source_date, candidates):
+    def add_pool_materials(self, material_ids, actor=None):
+        if (
+            not isinstance(material_ids, list)
+            or not material_ids
+            or len(material_ids) > 100
+        ):
+            raise XPostError(
+                "invalid_request",
+                "material_ids必须是包含1到100项的数组",
+                400,
+            )
+        normalized = []
+        seen = set()
+        for raw in material_ids:
+            key = normalize_material_key(raw)
+            if key in seen:
+                raise XPostError(
+                    "x_post_pool_material_already_exists",
+                    "本次提交包含重复素材%s" % key,
+                    409,
+                )
+            seen.add(key)
+            normalized.append(key)
+        actor = actor if isinstance(actor, dict) else {}
+        created_by_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        created_by_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        for value, label in (
+            (created_by_user_id, "created_by_user_id"),
+            (created_by_name, "created_by_name"),
+        ):
+            if any(ord(char) < 32 for char in value):
+                raise XPostError("invalid_request", "%s无效" % label, 400)
+
+        timestamp = utc_now()
+        created_ids = []
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for material_key_value in normalized:
+                if conn.execute(
+                    "SELECT id FROM x_post_material_pool WHERE material_key=?",
+                    (material_key_value,),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_material_already_exists",
+                        "素材%s已在素材池中" % material_key_value,
+                        409,
+                    )
+                if conn.execute(
+                    "SELECT id FROM x_post_queue WHERE material_key=?",
+                    (material_key_value,),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_material_already_used",
+                        "素材%s已有X发布历史，不能重新入池" % material_key_value,
+                        409,
+                    )
+            try:
+                for material_key_value in normalized:
+                    cursor = conn.execute(
+                        "INSERT INTO x_post_material_pool("
+                        "material_key,material_id,status,created_by_user_id,created_by_name,"
+                        "created_at,updated_at"
+                        ") VALUES(?,?,'unpublished',?,?,?,?)",
+                        (
+                            material_key_value,
+                            material_key_value,
+                            created_by_user_id,
+                            created_by_name,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    created_ids.append(int(cursor.lastrowid))
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pool_material_already_exists",
+                    "素材池唯一约束冲突",
+                    409,
+                ) from exc
+            rows = conn.execute(
+                "SELECT * FROM x_post_material_pool WHERE id IN (%s) ORDER BY id"
+                % ",".join("?" for _item in created_ids),
+                tuple(created_ids),
+            ).fetchall()
+            conn.commit()
+        return {"items": [_row_dict(row) for row in rows], "created_count": len(rows)}
+
+    def available_pool_items(self, limit=50):
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            raise XPostError("invalid_request", "limit无效", 400) from None
+        if limit <= 0 or limit > 1000:
+            raise XPostError("invalid_request", "limit必须在1到1000之间", 400)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT p.id,p.material_key,p.material_id,p.created_at "
+                "FROM x_post_material_pool p "
+                "WHERE p.status='unpublished' "
+                "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
+                "WHERE q.pool_item_id=p.id OR q.material_key=p.material_key) "
+                "ORDER BY p.created_at ASC,p.id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_row_dict(row) for row in rows]
+
+    def record_pool_checks(self, checks):
+        if not isinstance(checks, list) or not checks or len(checks) > 100:
+            raise XPostError(
+                "invalid_request",
+                "checks必须是包含1到100项的数组",
+                400,
+            )
+        normalized = []
+        seen = set()
+        for raw in checks:
+            if not isinstance(raw, dict):
+                raise XPostError("invalid_request", "check必须是对象", 400)
+            pool_item_id = _positive_int(raw.get("pool_item_id"), "pool_item_id")
+            if pool_item_id in seen:
+                raise XPostError("invalid_request", "pool_item_id重复", 400)
+            seen.add(pool_item_id)
+            raw_code = str(raw.get("error_code", "") or "").strip()
+            try:
+                code = _clean_token(raw_code, "error code", 64) if raw_code else ""
+            except ValueError:
+                raise XPostError("invalid_request", "error_code无效", 400) from None
+            message = redact_text(raw.get("error_message", ""), 500) if code else ""
+            normalized.append((pool_item_id, code, message))
+        timestamp = utc_now()
+        updated = 0
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for pool_item_id, code, message in normalized:
+                row = conn.execute(
+                    "SELECT id,status,material_key FROM x_post_material_pool WHERE id=?",
+                    (pool_item_id,),
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_item_not_found",
+                        "素材池记录不存在",
+                        404,
+                    )
+                if row["status"] != "unpublished" or conn.execute(
+                    "SELECT 1 FROM x_post_queue "
+                    "WHERE pool_item_id=? OR material_key=?",
+                    (pool_item_id, row["material_key"]),
+                ).fetchone():
+                    continue
+                cursor = conn.execute(
+                    "UPDATE x_post_material_pool SET last_checked_at=?,last_error_code=?,"
+                    "last_error_message=?,updated_at=? WHERE id=? AND status='unpublished'",
+                    (timestamp, code, message, timestamp, pool_item_id),
+                )
+                updated += int(cursor.rowcount or 0)
+            conn.commit()
+        return {"updated_count": updated}
+
+    def query_pool(self, payload=None):
+        payload = payload if isinstance(payload, dict) else {}
+        page, page_size = self._pagination(payload)
+        availability_sql = (
+            "CASE "
+            "WHEN p.status='published' THEN 'published' "
+            "WHEN q.id IS NOT NULL AND "
+            "(COALESCE(l.unknown_outcome,0)=1 OR l.status='post_creating') "
+            "THEN 'needs_review' "
+            "WHEN q.id IS NOT NULL AND COALESCE(l.status,q.status)='failed' "
+            "THEN 'failed' "
+            "WHEN q.id IS NOT NULL THEN 'occupied' "
+            "WHEN p.last_error_code<>'' THEN 'validation_failed' "
+            "ELSE 'available' END"
+        )
+        clauses = []
+        values = []
+        status = str(payload.get("status", "") or "").strip().lower()
+        if status:
+            if status not in {"unpublished", "published"}:
+                raise XPostError("invalid_request", "status筛选值无效", 400)
+            clauses.append("p.status=?")
+            values.append(status)
+        availability = str(payload.get("availability", "") or "").strip().lower()
+        if availability:
+            if availability not in {
+                "available",
+                "validation_failed",
+                "occupied",
+                "failed",
+                "needs_review",
+                "published",
+            }:
+                raise XPostError("invalid_request", "availability筛选值无效", 400)
+            clauses.append("(%s)=?" % availability_sql)
+            values.append(availability)
+        material_id = str(payload.get("material_id", "") or "").strip()
+        if material_id:
+            clauses.append("p.material_key=?")
+            values.append(normalize_material_key(material_id))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        join_sql = (
+            " FROM x_post_material_pool p "
+            "LEFT JOIN x_post_queue q "
+            "ON q.pool_item_id=p.id OR q.material_key=p.material_key "
+            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
+        )
+        select_sql = (
+            "SELECT p.id,p.material_key,p.material_id,p.status,p.published_at,"
+            "p.last_checked_at,p.last_error_code,p.last_error_message,"
+            "p.created_by_user_id,p.created_by_name,p.created_at,p.updated_at,"
+            "q.id AS queue_id,q.run_id,q.run_date,q.account_id,"
+            "q.account_username,q.status AS queue_status,"
+            "COALESCE(l.status,'') AS publish_status,"
+            "COALESCE(l.unknown_outcome,0) AS unknown_outcome,"
+            "COALESCE(l.x_post_url,'') AS preview_url,"
+            "COALESCE(l.error_code,'') AS publish_error_code,"
+            "COALESCE(l.error_message,'') AS publish_error_message,"
+            + availability_sql
+            + " AS availability"
+            + join_sql
+        )
+        offset = (page - 1) * page_size
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*)" + join_sql + where,
+                    tuple(values),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                select_sql
+                + where
+                + " ORDER BY p.created_at ASC,p.id ASC LIMIT ? OFFSET ?",
+                tuple(values) + (page_size, offset),
+            ).fetchall()
+            summary = conn.execute(
+                "SELECT COUNT(*) AS total,"
+                "SUM(CASE WHEN p.status='unpublished' THEN 1 ELSE 0 END) AS unpublished,"
+                "SUM(CASE WHEN p.status='published' THEN 1 ELSE 0 END) AS published,"
+                "SUM(CASE WHEN p.status='unpublished' AND q.id IS NULL "
+                "AND p.last_error_code='' "
+                "THEN 1 ELSE 0 END) AS available,"
+                "SUM(CASE WHEN p.status='unpublished' AND q.id IS NOT NULL "
+                "THEN 1 ELSE 0 END) AS occupied"
+                + join_sql
+            ).fetchone()
+        items = []
+        for row in rows:
+            item = _row_dict(row)
+            item["unknown_outcome"] = bool(item["unknown_outcome"])
+            item["last_error_message"] = redact_text(item["last_error_message"], 500)
+            item["publish_error_message"] = redact_text(
+                item["publish_error_message"], 500
+            )
+            items.append(item)
+        return {
+            "items": items,
+            "summary": {
+                key: int(summary[key] or 0)
+                for key in ("total", "unpublished", "published", "available", "occupied")
+            },
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": (total + page_size - 1) // page_size,
+            },
+        }
+
+    def delete_pool_material(self, pool_item_id):
+        pool_item_id = _positive_int(pool_item_id, "pool_item_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_material_pool WHERE id=?",
+                (pool_item_id,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pool_item_not_found",
+                    "素材池记录不存在",
+                    404,
+                )
+            if row["status"] == "published":
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pool_item_published",
+                    "已发布素材必须保留审计记录",
+                    409,
+                )
+            if conn.execute(
+                "SELECT 1 FROM x_post_queue "
+                "WHERE pool_item_id=? OR material_key=?",
+                (pool_item_id, row["material_key"]),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pool_item_occupied",
+                    "已被发布队列占用的素材不能删除",
+                    409,
+                )
+            conn.execute("DELETE FROM x_post_material_pool WHERE id=?", (pool_item_id,))
+            conn.commit()
+        item = _row_dict(row)
+        item["deleted"] = True
+        return item
+
+    def create_daily_plan(
+        self, run_date, source_date, candidates, require_pool=False
+    ):
         run_date = _date_value(run_date, "run_date")
         source_date = _date_value(source_date, "source_date")
         if (
@@ -984,6 +1466,7 @@ class XPostStore:
         prepared = []
         account_ids = set()
         material_keys = set()
+        pool_item_ids = set()
         for index, candidate in enumerate(candidates, 1):
             payload = dict(candidate) if isinstance(candidate, dict) else candidate
             if isinstance(payload, dict) and _date_value(payload.get("source_date"), "source_date") != source_date:
@@ -999,11 +1482,27 @@ class XPostStore:
                 raise XPostError("invalid_request", "每日计划账号必须互不相同", 400)
             if values["material_key"] in material_keys:
                 raise XPostError("invalid_request", "每日计划素材必须互不相同", 400)
+            if require_pool and values["pool_item_id"] is None:
+                raise XPostError(
+                    "x_post_pool_required",
+                    "正式每日计划候选必须来自素材池",
+                    409,
+                )
+            if values["pool_item_id"] is not None:
+                if values["pool_item_id"] in pool_item_ids:
+                    raise XPostError("invalid_request", "每日计划素材池记录必须互不相同", 400)
+                pool_item_ids.add(values["pool_item_id"])
             if any(values[field] != 0 for field in COMPLIANCE_COUNT_FIELDS):
                 raise XPostError("invalid_request", "每日计划候选存在违规或危险标签计数", 400)
             account_ids.add(values["account_id"])
             material_keys.add(values["material_key"])
             prepared.append(values)
+        if pool_item_ids and len(pool_item_ids) != len(prepared):
+            raise XPostError(
+                "invalid_request",
+                "每日计划候选必须全部来自素材池或全部不关联素材池",
+                400,
+            )
 
         timestamp = utc_now()
         columns = ("idempotency_key",) + QUEUE_LEDGER_FIELDS + QUEUE_FIELDS
@@ -1023,6 +1522,31 @@ class XPostStore:
                     (existing_run["id"],),
                 ).fetchall()
                 if len(existing_queues) == 3:
+                    expected = [
+                        (
+                            int(values["account_id"]),
+                            values["material_key"],
+                            values["pool_item_id"],
+                        )
+                        for values in prepared
+                    ]
+                    actual = [
+                        (
+                            int(row["account_id"]),
+                            str(row["material_key"]),
+                            int(row["pool_item_id"])
+                            if row["pool_item_id"] is not None
+                            else None,
+                        )
+                        for row in existing_queues
+                    ]
+                    if actual != expected:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_daily_run_exists",
+                            "该日期已存在不同的X发布批次",
+                            409,
+                        )
                     conn.commit()
                     item = _row_dict(existing_run)
                     item["queues"] = [_row_dict(row) for row in existing_queues]
@@ -1033,7 +1557,61 @@ class XPostStore:
                     raise XPostError("x_post_storage_conflict", "已有每日批次队列数量异常", 500)
                 run_id = int(existing_run["id"])
 
+            previous_pool_order = None
             for values in prepared:
+                if values["pool_item_id"] is not None:
+                    pool = conn.execute(
+                        "SELECT * FROM x_post_material_pool WHERE id=?",
+                        (values["pool_item_id"],),
+                    ).fetchone()
+                    if not pool:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_not_found",
+                            "候选素材池记录不存在",
+                            404,
+                        )
+                    if (
+                        pool["status"] != "unpublished"
+                        or str(pool["material_key"]) != values["material_key"]
+                        or str(pool["created_at"]) != values["pool_created_at"]
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_unavailable",
+                            "候选素材池记录已发布、已变更或与素材不一致",
+                            409,
+                        )
+                    if conn.execute(
+                        "SELECT 1 FROM x_post_queue "
+                        "WHERE pool_item_id=? OR material_key=?",
+                        (values["pool_item_id"], values["material_key"]),
+                    ).fetchone():
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_occupied",
+                            "候选素材池记录已被发布队列占用",
+                            409,
+                        )
+                    pool_order = (str(pool["created_at"]), int(pool["id"]))
+                    if previous_pool_order is not None and pool_order <= previous_pool_order:
+                        conn.rollback()
+                        raise XPostError(
+                            "invalid_request",
+                            "每日计划必须按素材池创建时间正序提交",
+                            400,
+                        )
+                    previous_pool_order = pool_order
+                elif conn.execute(
+                    "SELECT 1 FROM x_post_material_pool WHERE material_key=?",
+                    (values["material_key"],),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_item_occupied",
+                        "候选素材已进入素材池，正式队列必须绑定对应素材池记录",
+                        409,
+                    )
                 if conn.execute(
                     "SELECT id FROM x_post_queue WHERE material_key=?",
                     (values["material_key"],),
@@ -1077,6 +1655,13 @@ class XPostStore:
                         tuple(values[field] for field in columns) + (timestamp, timestamp),
                     )
                     queue_ids.append(int(queue_cursor.lastrowid))
+                    if values["pool_item_id"] is not None:
+                        conn.execute(
+                            "UPDATE x_post_material_pool SET last_checked_at=?,"
+                            "last_error_code='',last_error_message='',updated_at=? "
+                            "WHERE id=? AND status='unpublished'",
+                            (timestamp, timestamp, values["pool_item_id"]),
+                        )
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise XPostError("x_post_storage_conflict", "每日X发布计划唯一约束冲突", 409) from exc
@@ -1271,6 +1856,7 @@ class XPostStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         select = (
             "SELECT q.id AS queue_id,q.run_id,q.run_date,q.source_date,q.account_id,"
+            "q.pool_item_id,q.pool_created_at,"
             "q.account_username,q.page_name,q.page_id,q.material_id,q.material_name,q.content_id,"
             "q.material_language,q.drama_name,q.tag,q.candidate_rank,q.spend,"
             "q.facebook_violation_count,q.tiktok_violation_count,q.twitter_violation_count,"
@@ -1419,6 +2005,41 @@ class XPostStore:
             ),
         )
 
+    @staticmethod
+    def _mark_pool_published(conn, queue_id, timestamp):
+        queue = conn.execute(
+            "SELECT pool_item_id,material_key FROM x_post_queue WHERE id=?",
+            (queue_id,),
+        ).fetchone()
+        if not queue or queue["pool_item_id"] is None:
+            return
+        pool = conn.execute(
+            "SELECT id,material_key,status,published_at FROM x_post_material_pool WHERE id=?",
+            (queue["pool_item_id"],),
+        ).fetchone()
+        if not pool or str(pool["material_key"]) != str(queue["material_key"]):
+            raise XPostError(
+                "x_post_storage_conflict",
+                "发布队列与素材池记录不一致",
+                500,
+                True,
+            )
+        if pool["status"] == "published" and pool["published_at"]:
+            return
+        cursor = conn.execute(
+            "UPDATE x_post_material_pool SET status='published',published_at=?,"
+            "last_checked_at=?,last_error_code='',last_error_message='',updated_at=? "
+            "WHERE id=? AND status='unpublished'",
+            (timestamp, timestamp, timestamp, pool["id"]),
+        )
+        if cursor.rowcount != 1:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "素材池发布状态写入冲突",
+                500,
+                True,
+            )
+
     def get_log(self, log_id):
         log_id = _positive_int(log_id, "log_id")
         with contextlib.closing(_connect(self.db_path)) as conn:
@@ -1533,6 +2154,7 @@ class XPostStore:
                 if row["x_post_id"] != post_id:
                     conn.rollback()
                     raise XPostError("x_post_log_conflict", "发布日志已对应其他Post", 409)
+                self._mark_pool_published(conn, row["queue_id"], timestamp)
                 conn.commit()
                 return _row_dict(row)
             if row["status"] != "post_creating":
@@ -1544,6 +2166,7 @@ class XPostStore:
                 (media_id, post_id, str(post_url), timestamp, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='published',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            self._mark_pool_published(conn, row["queue_id"], timestamp)
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)

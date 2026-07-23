@@ -70,7 +70,7 @@
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="title"><h1>X Post 发布日志</h1><p>查看每日 Dramawave 选材、全局排重、发布结果及公开预览链接。</p></div>
+        <div class="title"><h1>X Post 发布日志</h1><p>查看人工素材池 FIFO 选材、全局排重、发布结果及公开预览链接。</p></div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
@@ -93,7 +93,7 @@
           <div class="section-head"><h2>每日运行批次</h2><p>展示最近 10 次定时任务；发布前失败也会在这里留下原因。</p></div>
           <div class="table-wrap">
             <table class="run-table">
-              <thead><tr><th>运行日期</th><th>数据日期</th><th>状态</th><th>队列</th><th>已发布</th><th>失败/待确认</th><th>开始/完成</th><th>错误</th></tr></thead>
+              <thead><tr><th>运行日期</th><th>批次参考日</th><th>状态</th><th>队列</th><th>已发布</th><th>失败/待确认</th><th>开始/完成</th><th>错误</th></tr></thead>
               <tbody id="runRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
@@ -124,7 +124,7 @@
 
           <div class="table-wrap">
             <table>
-              <thead><tr><th>运行/数据日期</th><th>X账号</th><th>素材</th><th>短剧</th><th>消耗/排名</th><th>状态</th><th>链接</th><th>时间</th><th>错误</th></tr></thead>
+              <thead><tr><th>运行/参考日期</th><th>X账号</th><th>素材</th><th>短剧</th><th>素材池顺序</th><th>状态</th><th>链接</th><th>时间</th><th>错误</th></tr></thead>
               <tbody id="logRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
@@ -247,7 +247,7 @@
           appendCell(row, item.account_username ? `@${item.account_username}` : `账号 ${item.account_id || "—"}`, item.account_display_name || item.page_name || "");
           appendCell(row, item.material_name || `素材 ${item.material_id || "—"}`, `ID ${item.material_id || "—"} · Content ${item.content_id || "—"}`);
           appendCell(row, item.drama_name || "—", `${item.language || item.material_language || "—"} · ${item.tag || "—"}`);
-          appendCell(row, formatSpend(item.spend), `候选排名 ${item.candidate_rank || "—"}`);
+          appendCell(row, formatTime(item.pool_created_at), `池 ID ${item.pool_item_id || "—"} · 当日顺序 ${item.candidate_rank || "—"}`);
           const statusCell = document.createElement("td");
           const badge = document.createElement("span");
           const meta = statusLabel(item);

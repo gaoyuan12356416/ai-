@@ -28,8 +28,7 @@ from features.x_posts.selector import (  # noqa: E402
     connect_read_only,
     normalize_date,
     previous_source_date,
-    ranked_material_ids,
-    select_candidates,
+    select_pool_candidates,
     shanghai_now,
 )
 from features.x_posts.service import (  # noqa: E402
@@ -125,6 +124,8 @@ class DailyConfig:
     failure_path: str
     plan_path: str
     publish_path_template: str
+    pool_available_path: str = "/internal/posts/material-pool/available"
+    pool_check_path: str = "/internal/posts/material-pool/check"
 
     @classmethod
     def from_env(cls):
@@ -193,6 +194,14 @@ class DailyConfig:
                 "X_POST_DAILY_PUBLISH_PATH_TEMPLATE",
                 "/internal/posts/queue/{queue_id}/publish",
             ).strip(),
+            pool_available_path=os.environ.get(
+                "X_POST_DAILY_POOL_AVAILABLE_PATH",
+                "/internal/posts/material-pool/available",
+            ).strip(),
+            pool_check_path=os.environ.get(
+                "X_POST_DAILY_POOL_CHECK_PATH",
+                "/internal/posts/material-pool/check",
+            ).strip(),
         )
 
     def validate(self):
@@ -226,6 +235,8 @@ class DailyConfig:
             self.storage_preflight_path,
             self.failure_path,
             self.plan_path,
+            self.pool_available_path,
+            self.pool_check_path,
         ):
             if not path.startswith("/internal/") or "?" in path or "#" in path:
                 raise DailyRunError("invalid sidecar endpoint path")
@@ -417,6 +428,86 @@ class SidecarClient:
             )
         return occupied
 
+    def available_pool_items(self, path, limit):
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            raise DailyRunError("pool candidate limit is invalid") from None
+        if limit <= 0 or limit > 1000:
+            raise DailyRunError("pool candidate limit is out of range")
+        result = self.post(path, {"limit": limit})
+        items = result.get("items") if isinstance(result, dict) else None
+        if not isinstance(items, list) or len(items) > limit:
+            raise SidecarError(
+                "x_post_pool_invalid_response",
+                "Material pool response is invalid",
+            )
+        normalized = []
+        seen_ids = set()
+        seen_materials = set()
+        previous_order = None
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise SidecarError(
+                    "x_post_pool_invalid_response",
+                    "Material pool item is invalid",
+                )
+            pool_item_id = raw.get("id")
+            material_id = str(raw.get("material_id", "") or "")
+            material_key = str(raw.get("material_key", "") or "")
+            created_at = str(raw.get("created_at", "") or "")
+            if (
+                not isinstance(pool_item_id, int)
+                or isinstance(pool_item_id, bool)
+                or pool_item_id <= 0
+                or pool_item_id in seen_ids
+                or not re.fullmatch(r"[1-9][0-9]*", material_id)
+                or material_key != material_id
+                or material_id in seen_materials
+                or not created_at
+                or len(created_at) > 64
+            ):
+                raise SidecarError(
+                    "x_post_pool_invalid_response",
+                    "Material pool item identity is invalid",
+                )
+            order = (created_at, pool_item_id)
+            if previous_order is not None and order <= previous_order:
+                raise SidecarError(
+                    "x_post_pool_invalid_response",
+                    "Material pool FIFO order is invalid",
+                )
+            previous_order = order
+            seen_ids.add(pool_item_id)
+            seen_materials.add(material_id)
+            normalized.append(
+                {
+                    "id": pool_item_id,
+                    "material_id": material_id,
+                    "material_key": material_key,
+                    "created_at": created_at,
+                }
+            )
+        return normalized
+
+    def record_pool_checks(self, path, checks):
+        if not checks:
+            return {"updated_count": 0}
+        result = self.post(path, {"checks": checks})
+        item = result.get("item") if isinstance(result.get("item"), dict) else result
+        updated_count = item.get("updated_count") if isinstance(item, dict) else None
+        if (
+            not isinstance(updated_count, int)
+            or isinstance(updated_count, bool)
+            or updated_count < 0
+            or updated_count > len(checks)
+        ):
+            raise SidecarError(
+                "x_post_pool_check_invalid_response",
+                "Material pool check response is invalid",
+            )
+        return {"updated_count": updated_count}
+
     def preflight_storage(self, path):
         result = self.post(path, {})
         item = result.get("item") if isinstance(result.get("item"), dict) else result
@@ -469,13 +560,18 @@ class SidecarClient:
             )
         requested_account_ids = []
         requested_material_ids = []
+        requested_pool_item_ids = []
         for candidate in candidates:
             account_id = candidate.get("account_id") if isinstance(candidate, dict) else None
             material_id = candidate.get("material_id") if isinstance(candidate, dict) else None
+            pool_item_id = candidate.get("pool_item_id") if isinstance(candidate, dict) else None
             if (
                 not isinstance(account_id, int)
                 or isinstance(account_id, bool)
                 or account_id <= 0
+                or not isinstance(pool_item_id, int)
+                or isinstance(pool_item_id, bool)
+                or pool_item_id <= 0
                 or not re.fullmatch(r"[1-9][0-9]*", str(material_id or ""))
             ):
                 raise SidecarError(
@@ -485,6 +581,13 @@ class SidecarClient:
                 )
             requested_account_ids.append(account_id)
             requested_material_ids.append(str(material_id))
+            requested_pool_item_ids.append(pool_item_id)
+        if len(set(requested_pool_item_ids)) != 3:
+            raise SidecarError(
+                "x_daily_plan_invalid_response",
+                "Daily plan request pool identity is invalid",
+                unknown_outcome=True,
+            )
         normalized = []
         queue_ids = set()
         response_account_ids = []
@@ -518,6 +621,8 @@ class SidecarClient:
                 or queue.get("source_date") != payload.get("source_date")
                 or str(queue.get("material_id") or "")
                 != requested_material_ids[len(response_account_ids)]
+                or queue.get("pool_item_id")
+                != requested_pool_item_ids[len(response_account_ids)]
             ):
                 raise SidecarError(
                     "x_daily_plan_invalid_response",
@@ -712,12 +817,16 @@ def _preflight_candidates(
             except (XPostError, KeyError, TypeError, ValueError) as exc:
                 failures.append(
                     {
+                        "pool_item_id": candidate.get("pool_item_id")
+                        if isinstance(candidate, dict)
+                        else None,
                         "material_id": str(
                             candidate.get("material_id", "")
                             if isinstance(candidate, dict)
                             else ""
                         ),
                         "error_code": "x_post_daily_copy_validation_failed",
+                        "error_message": redact_text(str(exc), 240),
                     }
                 )
                 continue
@@ -743,8 +852,10 @@ def _preflight_candidates(
             ) as exc:
                 failures.append(
                     {
+                        "pool_item_id": candidate.get("pool_item_id"),
                         "material_id": candidate["material_id"],
                         "error_code": str(getattr(exc, "code", "media_preflight_failed"))[:64],
+                        "error_message": redact_text(str(exc), 240),
                     }
                 )
                 continue
@@ -765,12 +876,6 @@ def _preflight_candidates(
                         "daily media preflight cleanup failed: %s" % exc,
                         code="x_post_storage_unavailable",
                     ) from None
-    if len(accepted) != 3:
-        raise DailyRunError(
-            "only %s candidates passed all local preflight gates (required 3)"
-            % len(accepted),
-            code="x_post_daily_candidate_preflight_shortage",
-        )
     return accepted, failures
 
 
@@ -807,13 +912,49 @@ def _record_failure_best_effort(sidecar, config, run_date, source_date, exc):
         return
 
 
+def _record_pool_checks_best_effort(sidecar, config, checks):
+    recorder = getattr(sidecar, "record_pool_checks", None)
+    if not callable(recorder) or not checks:
+        return
+    normalized = []
+    seen = set()
+    for raw in checks:
+        if not isinstance(raw, dict):
+            continue
+        pool_item_id = raw.get("pool_item_id")
+        if (
+            not isinstance(pool_item_id, int)
+            or isinstance(pool_item_id, bool)
+            or pool_item_id <= 0
+            or pool_item_id in seen
+        ):
+            continue
+        code = str(raw.get("error_code", "") or "")[:64]
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", code):
+            code = "x_post_pool_material_check_failed"
+        seen.add(pool_item_id)
+        normalized.append(
+            {
+                "pool_item_id": pool_item_id,
+                "error_code": code,
+                "error_message": redact_text(raw.get("error_message", ""), 240),
+            }
+        )
+    if not normalized:
+        return
+    for start in range(0, len(normalized), 100):
+        try:
+            recorder(config.pool_check_path, normalized[start : start + 100])
+        except Exception:
+            return
+
+
 def execute_daily_run(
     config,
     *,
     sidecar=None,
     connection_factory=None,
-    candidate_loader=select_candidates,
-    ranked_loader=ranked_material_ids,
+    pool_candidate_loader=select_pool_candidates,
     downloader=download_media,
     prober=probe_media,
     now=None,
@@ -845,31 +986,37 @@ def execute_daily_run(
                 code="x_post_daily_account_mismatch",
             )
 
+        pool_items = sidecar.available_pool_items(
+            config.pool_available_path,
+            config.scan_limit,
+        )
+        if len(pool_items) < 3:
+            raise DailyRunError(
+                "fewer than three unused materials are available in the manual pool",
+                code="x_post_daily_pool_shortage",
+            )
         connection_factory = connection_factory or _connect_from_config
         connection = connection_factory(config)
         try:
-            ranked_ids = ranked_loader(
+            candidates, selector_rejections = pool_candidate_loader(
                 connection,
+                pool_items,
                 source_date,
-                scan_limit=config.scan_limit,
-                schema=config.mysql_database,
-            )
-            excluded = sidecar.used_material_keys(config.material_keys_path, ranked_ids)
-            candidates = candidate_loader(
-                connection,
-                source_date,
-                excluded_material_keys=excluded,
                 limit=config.candidate_pool_limit,
-                scan_limit=config.scan_limit,
                 schema=config.mysql_database,
             )
         finally:
             close = getattr(connection, "close", None)
             if callable(close):
                 close()
+        _record_pool_checks_best_effort(
+            sidecar,
+            config,
+            selector_rejections,
+        )
         if len(candidates) < 3:
             raise DailyRunError(
-                "fewer than three compliant unused candidates were found",
+                "fewer than three compliant manual-pool candidates were found",
                 code="x_post_daily_candidate_shortage",
             )
 
@@ -881,6 +1028,17 @@ def execute_daily_run(
             downloader,
             prober,
         )
+        _record_pool_checks_best_effort(
+            sidecar,
+            config,
+            preflight_failures,
+        )
+        if len(planned_candidates) != 3:
+            raise DailyRunError(
+                "only %s manual-pool candidates passed all local preflight gates "
+                "(required 3)" % len(planned_candidates),
+                code="x_post_daily_candidate_preflight_shortage",
+            )
         # Re-check immediately before the sidecar's transactional plan call.
         # The sidecar performs the same point-of-use guard again server-side.
         sidecar.preflight_storage(config.storage_preflight_path)

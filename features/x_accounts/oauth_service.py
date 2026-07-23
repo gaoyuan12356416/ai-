@@ -1111,6 +1111,7 @@ def _safe_daily_plan_result(result):
     )
     allowed_queue = (
         "id", "run_id", "run_date", "source_date", "account_id", "account_username",
+        "pool_item_id", "pool_created_at",
         "material_id", "material_name", "content_id", "material_language", "drama_name",
         "tag", "candidate_rank", "spend", "status", "created_at", "updated_at",
     )
@@ -1234,7 +1235,9 @@ def _daily_account_scope(allowed_account_ids):
     return frozenset(values)
 
 
-def create_daily_plan_request(payload, allowed_account_ids=None):
+def create_daily_plan_request(
+    payload, allowed_account_ids=None, require_pool=False
+):
     """Freeze three trusted account identities and candidates in one transaction."""
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
@@ -1289,6 +1292,7 @@ def create_daily_plan_request(payload, allowed_account_ids=None):
             payload.get("run_date"),
             payload.get("source_date"),
             trusted,
+            require_pool=bool(require_pool),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -1418,6 +1422,67 @@ def query_post_logs_request(payload):
 
 def query_post_runs_request(payload):
     return _admin_post_query(payload, "query_runs")
+
+
+def query_post_material_pool_request(payload):
+    return _admin_post_query(payload, "query_pool")
+
+
+def add_post_material_pool_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    actor, scope = normalize_account_scope(
+        payload.get("actor", {}), payload.get("scope", "all")
+    )
+    if scope != "all":
+        raise ServiceError("x_admin_required", "仅管理员可维护X素材池", 403)
+    material_ids = payload.get("material_ids")
+    if material_ids is None and payload.get("material_id") not in (None, ""):
+        material_ids = [payload.get("material_id")]
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).add_pool_materials(material_ids, actor)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def delete_post_material_pool_request(payload, pool_item_id):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    _actor, scope = normalize_account_scope(
+        payload.get("actor", {}), payload.get("scope", "all")
+    )
+    if scope != "all":
+        raise ServiceError("x_admin_required", "仅管理员可维护X素材池", 403)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).delete_pool_material(pool_item_id)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def available_post_material_pool_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return {
+            "items": XPostStore(POST_DB_PATH).available_pool_items(
+                payload.get("limit", 50)
+            )
+        }
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def record_post_material_pool_checks_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).record_pool_checks(payload.get("checks"))
+    except XPostError as exc:
+        _raise_x_post_error(exc)
 
 
 def record_post_run_failure_request(payload):
@@ -1704,11 +1769,16 @@ class Handler(BaseHTTPRequestHandler):
         daily_publish_match = re.fullmatch(
             r"/internal/posts/queue/([0-9]+)/publish", parsed.path
         )
+        pool_delete_match = re.fullmatch(
+            r"/internal/posts/material-pool/([0-9]+)/delete", parsed.path
+        )
         daily_exact_paths = {
             "/internal/posts/daily-plan",
             "/internal/posts/storage/preflight",
             "/internal/posts/runs/record-failure",
             "/internal/posts/material-keys/query",
+            "/internal/posts/material-pool/available",
+            "/internal/posts/material-pool/check",
         }
         allow_daily = bool(
             parsed.path in daily_exact_paths
@@ -1729,7 +1799,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/internal/posts/daily-plan":
                 if internal_role == "daily":
-                    plan = create_daily_plan_request(payload, DAILY_ACCOUNT_IDS)
+                    plan = create_daily_plan_request(
+                        payload,
+                        DAILY_ACCOUNT_IDS,
+                        require_pool=True,
+                    )
                 else:
                     plan = create_daily_plan_request(payload)
                 self.send_json(
@@ -1751,6 +1825,32 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/internal/posts/material-keys/query":
                 self.send_json(200, {"item": query_post_material_keys_request(payload)})
+                return
+            if parsed.path == "/internal/posts/material-pool/available":
+                self.send_json(200, available_post_material_pool_request(payload))
+                return
+            if parsed.path == "/internal/posts/material-pool/check":
+                self.send_json(
+                    200,
+                    {"item": record_post_material_pool_checks_request(payload)},
+                )
+                return
+            if parsed.path == "/internal/posts/material-pool/query":
+                self.send_json(200, query_post_material_pool_request(payload))
+                return
+            if parsed.path == "/internal/posts/material-pool/add":
+                self.send_json(200, add_post_material_pool_request(payload))
+                return
+            if pool_delete_match:
+                self.send_json(
+                    200,
+                    {
+                        "item": delete_post_material_pool_request(
+                            payload,
+                            pool_delete_match.group(1),
+                        )
+                    },
+                )
                 return
             if daily_verify_match:
                 account_id = int(daily_verify_match.group(1))

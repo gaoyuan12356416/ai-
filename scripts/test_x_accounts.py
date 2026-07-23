@@ -1053,6 +1053,9 @@ class XAccountsTestCase(unittest.TestCase):
             "/internal/accounts/%s/logout" % accounts[0]["id"],
             "/internal/posts/logs/query",
             "/internal/posts/runs/query",
+            "/internal/posts/material-pool/query",
+            "/internal/posts/material-pool/add",
+            "/internal/posts/material-pool/1/delete",
         )
         expected_plan = {
             "id": 11,
@@ -1111,10 +1114,63 @@ class XAccountsTestCase(unittest.TestCase):
                     timeout=5,
                 ) as response:
                     self.assertEqual(response.status, 200)
-                plan_mock.assert_called_once_with(
-                    plan_payload,
-                    service.DAILY_ACCOUNT_IDS,
-                )
+            plan_mock.assert_called_once_with(
+                plan_payload,
+                service.DAILY_ACCOUNT_IDS,
+                require_pool=True,
+            )
+
+            available_items = {
+                "items": [
+                    {
+                        "id": 1,
+                        "material_id": "7001",
+                        "material_key": "7001",
+                        "created_at": "2026-07-23T00:00:00Z",
+                    }
+                ]
+            }
+            with mock.patch.object(
+                service,
+                "available_post_material_pool_request",
+                return_value=available_items,
+            ) as available_mock:
+                with urllib.request.urlopen(
+                    request(
+                        "/internal/posts/material-pool/available",
+                        {"limit": 50},
+                    ),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(
+                        json.loads(response.read().decode("utf-8")),
+                        available_items,
+                    )
+                available_mock.assert_called_once_with({"limit": 50})
+
+            with mock.patch.object(
+                service,
+                "record_post_material_pool_checks_request",
+                return_value={"updated_count": 1},
+            ) as check_mock:
+                check_payload = {
+                    "checks": [
+                        {
+                            "pool_item_id": 1,
+                            "error_code": "material_invalid",
+                            "error_message": "invalid",
+                        }
+                    ]
+                }
+                with urllib.request.urlopen(
+                    request("/internal/posts/material-pool/check", check_payload),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(
+                        json.loads(response.read().decode("utf-8")),
+                        {"item": {"updated_count": 1}},
+                    )
+                check_mock.assert_called_once_with(check_payload)
 
             with mock.patch.object(
                 service,
@@ -1351,6 +1407,45 @@ class XAccountsTestCase(unittest.TestCase):
             self.assertEqual(
                 client.query_x_post_runs(
                     {"actor": self.admin, "scope": "all", "page": 1, "page_size": 10}
+                )["pagination"]["total"],
+                1,
+            )
+            added_pool = client.add_x_post_material_pool(
+                ["08001", "8002"],
+                self.admin,
+            )
+            self.assertEqual(added_pool["created_count"], 2)
+            queried_pool = client.query_x_post_material_pool(
+                {
+                    "actor": self.admin,
+                    "scope": "all",
+                    "page": 1,
+                    "page_size": 10,
+                    "status": "unpublished",
+                    "availability": "available",
+                }
+            )
+            self.assertEqual(queried_pool["pagination"]["total"], 2)
+            self.assertEqual(
+                [item["material_id"] for item in queried_pool["items"]],
+                ["8001", "8002"],
+            )
+            with self.assertRaises(client.XAccountsClientError) as pool_denied:
+                client.add_x_post_material_pool(["8003"], self.owner)
+            self.assertEqual(pool_denied.exception.code, "x_admin_required")
+            deleted_pool = client.delete_x_post_material_pool(
+                added_pool["items"][0]["id"],
+                self.admin,
+            )
+            self.assertTrue(deleted_pool["item"]["deleted"])
+            self.assertEqual(
+                client.query_x_post_material_pool(
+                    {
+                        "actor": self.admin,
+                        "scope": "all",
+                        "page": 1,
+                        "page_size": 10,
+                    }
                 )["pagination"]["total"],
                 1,
             )

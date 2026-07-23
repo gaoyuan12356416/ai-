@@ -22,6 +22,9 @@ NGINX_SOURCE = (ROOT / "deploy" / "nginx-x-oauth.conf").read_text(encoding="utf-
 NAVIGATION_SOURCE = (ROOT / "static" / "navigation.json").read_text(encoding="utf-8")
 QUICK_NAV_SOURCE = (ROOT / "static" / "quick-nav.js").read_text(encoding="utf-8")
 X_POST_LOGS_SOURCE = (ROOT / "static" / "x-post-logs.html").read_text(encoding="utf-8")
+X_POST_POOL_SOURCE = (ROOT / "static" / "x-post-material-pool.html").read_text(
+    encoding="utf-8"
+)
 
 
 def source_between(start, end):
@@ -107,11 +110,12 @@ class XAccountsAppContractTest(unittest.TestCase):
             'if parsed.path == "/api/admin/x-posts/logs":',
             'if parsed.path == "/api/drama-material/products":',
         )
-        self.assertEqual(routes.count("_require_cookie_admin()"), 2)
-        self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 2)
-        self.assertEqual(routes.count('"scope": "all"'), 2)
+        self.assertEqual(routes.count("_require_cookie_admin()"), 3)
+        self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 3)
+        self.assertEqual(routes.count('"scope": "all"'), 3)
         self.assertIn("query_x_post_logs(params)", routes)
         self.assertIn("query_x_post_runs(params)", routes)
+        self.assertIn("query_x_post_material_pool(params)", routes)
         self.assertGreaterEqual(routes.count("no_store=True"), 6)
 
     def test_x_post_query_parameter_validation(self):
@@ -137,15 +141,81 @@ class XAccountsAppContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse("account_id=1%20OR%201=1")
 
-    def test_x_post_log_navigation_and_dom_link_allowlists(self):
+        pool_function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "x_post_pool_query_params"
+        )
+        pool_namespace = {"parse_qs": parse_qs, "re": re}
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[pool_function], type_ignores=[])
+                ),
+                str(APP_PATH),
+                "exec",
+            ),
+            pool_namespace,
+        )
+        parse_pool = pool_namespace["x_post_pool_query_params"]
+        self.assertEqual(
+            parse_pool(
+                "page=2&page_size=500&status=unpublished"
+                "&availability=validation_failed&material_id=5221348"
+            ),
+            {
+                "page": 2,
+                "page_size": 100,
+                "status": "unpublished",
+                "availability": "validation_failed",
+                "material_id": "5221348",
+            },
+        )
+        with self.assertRaises(ValueError):
+            parse_pool("access_token=secret")
+        with self.assertRaises(ValueError):
+            parse_pool("availability=queued%20OR%201=1")
+        with self.assertRaises(ValueError):
+            parse_pool("material_id=0")
+
+    def test_x_post_pool_mutations_are_cookie_admin_same_origin_and_no_store(self):
+        post_route = source_between(
+            'if parsed.path == "/api/admin/x-posts/material-pool":',
+            'if parsed.path == "/api/x-accounts/authorize":',
+        )
+        self.assertIn("_require_cookie_admin()", post_route)
+        self.assertIn("_require_same_origin_json()", post_route)
+        self.assertIn("add_x_post_material_pool(", post_route)
+        self.assertIn("append_audit_log(", post_route)
+        self.assertIn("no_store=True", post_route)
+
+        delete_route = source_between(
+            "x_pool_delete_match = re.fullmatch(",
+            'if parsed.path == "/api/ad-control/v3"',
+        )
+        self.assertIn("_require_cookie_admin()", delete_route)
+        self.assertIn("_require_same_origin_json()", delete_route)
+        self.assertIn("delete_x_post_material_pool(", delete_route)
+        self.assertIn("append_audit_log(", delete_route)
+        self.assertIn("no_store=True", delete_route)
+
+    def test_x_post_navigation_and_dom_link_allowlists(self):
         self.assertIn('"key": "xPostLogs"', NAVIGATION_SOURCE)
+        self.assertIn('"key": "xPostMaterialPool"', NAVIGATION_SOURCE)
         self.assertIn('xPostLogs: "/x-post-logs.html"', QUICK_NAV_SOURCE)
+        self.assertIn('xPostMaterialPool: "/x-post-material-pool.html"', QUICK_NAV_SOURCE)
         self.assertIn('activeKey:"xPostLogs"', X_POST_LOGS_SOURCE)
+        self.assertIn('activeKey: "xPostMaterialPool"', X_POST_POOL_SOURCE)
         self.assertIn('url.hostname === "x.com"', X_POST_LOGS_SOURCE)
         self.assertIn('url.hostname === "ai.yingliangads.com"', X_POST_LOGS_SOURCE)
+        self.assertIn('url.hostname === "x.com"', X_POST_POOL_SOURCE)
         self.assertIn("replaceChildren()", X_POST_LOGS_SOURCE)
+        self.assertIn("replaceChildren()", X_POST_POOL_SOURCE)
         self.assertNotIn("access_token", X_POST_LOGS_SOURCE.lower())
         self.assertNotIn("refresh_token", X_POST_LOGS_SOURCE.lower())
+        self.assertNotIn("access_token", X_POST_POOL_SOURCE.lower())
+        self.assertNotIn("refresh_token", X_POST_POOL_SOURCE.lower())
+        self.assertNotIn("innerhtml", X_POST_POOL_SOURCE.lower())
+        self.assertNotIn("\ufffd", X_POST_POOL_SOURCE)
 
 
 if __name__ == "__main__":

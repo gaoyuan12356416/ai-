@@ -38,6 +38,7 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     SidecarClient,
     SidecarError,
     _preflight_candidates,
+    _record_pool_checks_best_effort,
     execute_daily_run,
 )
 from scripts import wait_x_post_sidecar  # noqa: E402
@@ -255,6 +256,8 @@ def candidate(material_id, spend):
         "source_date": "2026-07-22",
         "material_key": str(material_id),
         "material_id": str(material_id),
+        "pool_item_id": int(material_id),
+        "pool_created_at": "2026-07-22T00:00:%02dZ" % (int(material_id) % 60),
         "content_id": "C%s" % material_id,
         "material_url": "https://media.example.test/%s.mp4" % material_id,
         "material_name": "material-%s.mp4" % material_id,
@@ -323,6 +326,22 @@ class FakeSidecar:
         self.events.append(("used", path, list(material_ids)))
         return {"99"}
 
+    def available_pool_items(self, path, limit):
+        self.events.append(("pool", path, limit))
+        return [
+            {
+                "id": material_id,
+                "material_id": str(material_id),
+                "material_key": str(material_id),
+                "created_at": "2026-07-22T00:00:%02dZ" % (material_id % 60),
+            }
+            for material_id in range(10, 10 + limit)
+        ]
+
+    def record_pool_checks(self, path, checks):
+        self.events.append(("pool_checks", path, list(checks)))
+        return {"updated_count": len(checks)}
+
     def create_plan(self, path, payload):
         self.events.append(
             (
@@ -383,6 +402,28 @@ class RunnerTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_pool_check_audit_is_chunked_to_sidecar_batch_limit(self):
+        sidecar = FakeSidecar()
+        checks = [
+            {
+                "pool_item_id": index,
+                "error_code": "material_invalid",
+                "error_message": "invalid material %s" % index,
+            }
+            for index in range(1, 206)
+        ]
+
+        _record_pool_checks_best_effort(sidecar, test_config(), checks)
+
+        batches = [
+            event[2] for event in sidecar.events if event[0] == "pool_checks"
+        ]
+        self.assertEqual([len(batch) for batch in batches], [100, 100, 5])
+        self.assertEqual(
+            [item["pool_item_id"] for batch in batches for item in batch],
+            list(range(1, 206)),
+        )
 
     def test_loopback_daily_and_health_clients_disable_environment_proxies(self):
         with mock.patch.dict(
@@ -718,9 +759,9 @@ class RunnerTests(unittest.TestCase):
             "run_date": "2026-07-23",
             "source_date": "2026-07-22",
             "candidates": [
-                {"account_id": 2, "material_id": "10"},
-                {"account_id": 3, "material_id": "11"},
-                {"account_id": 4, "material_id": "12"},
+                {"account_id": 2, "material_id": "10", "pool_item_id": 10},
+                {"account_id": 3, "material_id": "11", "pool_item_id": 11},
+                {"account_id": 4, "material_id": "12", "pool_item_id": 12},
             ],
         }
         valid_queues = [
@@ -729,6 +770,7 @@ class RunnerTests(unittest.TestCase):
                 "run_id": 51,
                 "account_id": account_id,
                 "material_id": str(10 + index),
+                "pool_item_id": 10 + index,
                 "run_date": request_payload["run_date"],
                 "source_date": request_payload["source_date"],
             }
@@ -802,6 +844,9 @@ class RunnerTests(unittest.TestCase):
         wrong_material = [dict(item) for item in valid_queues]
         wrong_material[1]["material_id"] = "999"
         invalid_cases["wrong_material_id"] = wrong_material
+        wrong_pool = [dict(item) for item in valid_queues]
+        wrong_pool[1]["pool_item_id"] = 999
+        invalid_cases["wrong_pool_item_id"] = wrong_pool
 
         for name, queues in invalid_cases.items():
             with self.subTest(name=name):
@@ -851,22 +896,24 @@ class RunnerTests(unittest.TestCase):
 
         def loader(
             _connection,
+            pool_items,
             source_date,
-            excluded_material_keys,
             limit,
-            scan_limit,
             schema,
         ):
             self.assertEqual(source_date, "2026-07-22")
-            self.assertEqual(excluded_material_keys, {"99"})
+            self.assertEqual([item["id"] for item in pool_items], list(range(10, 110)))
             self.assertEqual(limit, 10)
-            self.assertEqual(scan_limit, 100)
             self.assertEqual(schema, "kunlunads_dev")
-            return loaded_candidates or [
-                candidate(10, 400),
-                candidate(11, 300),
-                candidate(12, 200),
-            ]
+            return (
+                loaded_candidates
+                or [
+                    candidate(10, 400),
+                    candidate(11, 300),
+                    candidate(12, 200),
+                ],
+                [],
+            )
 
         def downloader(url, destination, allowed_hosts, max_bytes, timeout):
             preflight_events.append(("download", url))
@@ -881,15 +928,7 @@ class RunnerTests(unittest.TestCase):
             test_config(),
             sidecar=sidecar,
             connection_factory=lambda _config: connection,
-            candidate_loader=loader,
-            ranked_loader=lambda *_args, **_kwargs: [
-                item["material_id"]
-                for item in (
-                    loaded_candidates
-                    or [candidate(10, 400), candidate(11, 300), candidate(12, 200)]
-                )
-            ]
-            + ["99"],
+            pool_candidate_loader=loader,
             downloader=downloader,
             prober=prober,
             now=datetime(2026, 7, 23, 10, 0, tzinfo=timezone(timedelta(hours=8))),
@@ -909,9 +948,9 @@ class RunnerTests(unittest.TestCase):
                 ("verify", 3),
                 ("verify", 4),
                 (
-                    "used",
-                    "/internal/posts/material-keys/query",
-                    ["10", "11", "12", "99"],
+                    "pool",
+                    "/internal/posts/material-pool/available",
+                    100,
                 ),
             ],
         )
@@ -1138,7 +1177,7 @@ class RunnerTests(unittest.TestCase):
         sidecar = FakeSidecar()
 
         def loader(*_args, **_kwargs):
-            return [candidate(10, 400), candidate(11, 300), candidate(12, 200)]
+            return [candidate(10, 400), candidate(11, 300), candidate(12, 200)], []
 
         def bad_download(*_args, **_kwargs):
             raise XPostError("invalid_media_codec", "bad codec", 422)
@@ -1148,8 +1187,7 @@ class RunnerTests(unittest.TestCase):
                 test_config(),
                 sidecar=sidecar,
                 connection_factory=lambda _config: FakeConnection([]),
-                candidate_loader=loader,
-                ranked_loader=lambda *_args, **_kwargs: ["10", "11", "12"],
+                pool_candidate_loader=loader,
                 downloader=bad_download,
                 now=datetime(2026, 7, 23, 10, 0, tzinfo=timezone(timedelta(hours=8))),
             )

@@ -76,6 +76,15 @@ class CandidateQueryError(CandidateSelectionError):
     """A read-only database query failed; the entire run must stop."""
 
 
+class PoolCandidateRejection(CandidateSelectionError):
+    """A single pool item is unsafe or incomplete and must be skipped."""
+
+    def __init__(self, error_code, error_message):
+        super().__init__(error_message)
+        self.error_code = str(error_code)
+        self.error_message = str(error_message)
+
+
 def shanghai_now(now=None):
     """Return an aware Asia/Shanghai timestamp without requiring zoneinfo data."""
     if now is None:
@@ -297,6 +306,239 @@ class DramawaveCandidateSelector:
         """.format(schema=self.schema)
         return _cursor_rows(self.connection, sql, (content_id, series_code, language))
 
+    def _pool_material_rows(self, material_id):
+        """Load one eligible video directly from the custom material library."""
+        sql = """
+            SELECT
+                CAST(cs.id AS CHAR) AS material_id,
+                cs.product AS product,
+                cs.url AS material_url,
+                cs.name AS material_name,
+                cs.language AS material_language,
+                cs.data_source_id AS content_id,
+                cs.tag_name AS source_tag_name,
+                cs.video_duration AS video_duration
+             FROM `{schema}`.ads_custom_source cs
+             WHERE cs.id = %s
+               AND cs.product = %s
+               AND cs.type = %s
+               AND cs.is_delete = %s
+               AND cs.video_duration BETWEEN %s AND %s
+             LIMIT 2
+        """.format(schema=self.schema)
+        return _cursor_rows(
+            self.connection,
+            sql,
+            (material_id, DEFAULT_PRODUCT, 2, 0, 1, 140),
+        )
+
+    def _pool_drama_rows(self, content_id, language):
+        """Resolve a manual material without depending on delivery insight rows."""
+        sql = """
+            SELECT
+                r.content_id, r.series_code, r.language, r.name AS drama_name,
+                r.labels AS drama_labels, r.desc AS drama_description
+              FROM `{schema}`.ads_drama_resource r FORCE INDEX (content_id)
+             WHERE r.content_id = %s
+               AND LOWER(TRIM(r.language)) = LOWER(%s)
+             ORDER BY r.id ASC
+        """.format(schema=self.schema)
+        return _cursor_rows(self.connection, sql, (content_id, language))
+
+    def _pool_candidate(self, material_id, source_date):
+        material_rows = self._pool_material_rows(material_id)
+        if len(material_rows) != 1:
+            raise PoolCandidateRejection(
+                "material_not_found_or_ineligible",
+                "material is missing or is not an eligible active video",
+            )
+        row = material_rows[0]
+        try:
+            candidate_id = _text(row.get("material_id"), "material_id", limit=64)
+            key = material_key(candidate_id)
+            if key != material_id:
+                raise CandidateSelectionError("material identity mismatch")
+            product = _text(row.get("product"), "product", limit=64)
+            if product != DEFAULT_PRODUCT:
+                raise PoolCandidateRejection(
+                    "material_product_mismatch",
+                    "material does not belong to Dramawave",
+                )
+            material_language = _text(
+                row.get("material_language"), "material_language", limit=32
+            )
+            content_id = _text(row.get("content_id"), "content_id", limit=128)
+            material_url = _text(row.get("material_url"), "material_url", limit=4096)
+            material_name = _text(
+                row.get("material_name"), "material_name", limit=500
+            )
+        except PoolCandidateRejection:
+            raise
+        except CandidateSelectionError as exc:
+            raise PoolCandidateRejection(
+                "material_metadata_invalid",
+                "material metadata is incomplete or invalid: %s" % exc,
+            ) from None
+        if not material_url.startswith("https://"):
+            raise PoolCandidateRejection(
+                "material_url_not_https",
+                "material URL is not HTTPS",
+            )
+
+        violation_counts = self._violation_counts(candidate_id)
+        normalized_counts = {}
+        try:
+            for field in (
+                "facebook_count",
+                "tiktok_count",
+                "twitter_count",
+                "resource_audit_count",
+            ):
+                normalized_counts[field] = _integer(violation_counts.get(field), field)
+        except CandidateSelectionError as exc:
+            raise PoolCandidateRejection(
+                "violation_check_invalid",
+                "violation check returned invalid data: %s" % exc,
+            ) from None
+        if any(value != 0 for value in normalized_counts.values()):
+            raise PoolCandidateRejection(
+                "material_has_violation",
+                "material has a violation record",
+            )
+
+        source_tag = row.get("source_tag_name")
+        if source_tag not in (None, ""):
+            try:
+                source_tag_is_unsafe = contains_dangerous_tag(source_tag)
+            except CandidateSelectionError as exc:
+                raise PoolCandidateRejection(
+                    "material_source_tag_invalid",
+                    "material source tag cannot be checked safely: %s" % exc,
+                ) from None
+            if source_tag_is_unsafe:
+                raise PoolCandidateRejection(
+                    "material_source_tag_unsafe",
+                    "material source tag is unsafe",
+                )
+
+        material_tags = self._material_tags(candidate_id)
+        for tag_value in material_tags:
+            try:
+                tag_is_unsafe = contains_dangerous_tag(tag_value)
+            except CandidateSelectionError as exc:
+                raise PoolCandidateRejection(
+                    "material_tag_invalid",
+                    "material tag cannot be checked safely: %s" % exc,
+                ) from None
+            if tag_is_unsafe:
+                raise PoolCandidateRejection(
+                    "material_tag_unsafe",
+                    "material tag is unsafe",
+                )
+
+        drama_rows = self._pool_drama_rows(content_id, material_language)
+        if not drama_rows:
+            raise PoolCandidateRejection(
+                "drama_mapping_missing",
+                "drama mapping is missing",
+            )
+
+        canonical = {}
+        for drama in drama_rows:
+            try:
+                mapped_content_id = _text(
+                    drama.get("content_id"), "drama content_id", limit=128
+                )
+                series_code = _text(
+                    drama.get("series_code"), "drama series_code", limit=128
+                )
+                mapped_language = _text(
+                    drama.get("language"), "drama language", limit=32
+                )
+                drama_name = _text(drama.get("drama_name"), "drama name", limit=500)
+                raw_labels = _text(
+                    drama.get("drama_labels"), "drama labels", limit=4096
+                )
+                description = _text(
+                    drama.get("drama_description"),
+                    "drama description",
+                    limit=4096,
+                )
+            except CandidateSelectionError as exc:
+                raise PoolCandidateRejection(
+                    "drama_mapping_invalid",
+                    "drama mapping is incomplete or invalid: %s" % exc,
+                ) from None
+            if (
+                mapped_content_id != content_id
+                or mapped_language.casefold() != material_language.casefold()
+            ):
+                raise PoolCandidateRejection(
+                    "drama_mapping_invalid",
+                    "drama mapping identity does not match the material",
+                )
+            labels = [item.strip() for item in raw_labels.split(",") if item.strip()]
+            if not labels:
+                raise PoolCandidateRejection(
+                    "drama_mapping_invalid",
+                    "drama labels are incomplete",
+                )
+            for label in labels:
+                try:
+                    label_is_unsafe = contains_dangerous_tag(label)
+                except CandidateSelectionError as exc:
+                    raise PoolCandidateRejection(
+                        "drama_label_invalid",
+                        "drama label cannot be checked safely: %s" % exc,
+                    ) from None
+                if label_is_unsafe:
+                    raise PoolCandidateRejection(
+                        "drama_label_unsafe",
+                        "drama label is unsafe",
+                    )
+            canonical_key = (
+                mapped_content_id,
+                series_code,
+                mapped_language.casefold(),
+                drama_name,
+                tuple(label.casefold() for label in labels),
+                description,
+            )
+            canonical.setdefault(
+                canonical_key,
+                {
+                    "series_code": series_code,
+                    "drama_name": drama_name,
+                    "labels": labels,
+                    "description": description,
+                },
+            )
+        if len(canonical) != 1:
+            raise PoolCandidateRejection(
+                "drama_mapping_ambiguous",
+                "drama mapping is ambiguous",
+            )
+        drama = next(iter(canonical.values()))
+
+        return {
+            "source_date": source_date,
+            "material_key": key,
+            "material_id": candidate_id,
+            "content_id": content_id,
+            "material_url": material_url,
+            "material_name": material_name,
+            "material_language": material_language,
+            "drama_name": drama["drama_name"],
+            "tag": drama["labels"][0],
+            "description": drama["description"],
+            "spend": 0.0,
+            "facebook_violation_count": normalized_counts["facebook_count"],
+            "tiktok_violation_count": normalized_counts["tiktok_count"],
+            "twitter_violation_count": normalized_counts["twitter_count"],
+            "resource_audit_count": normalized_counts["resource_audit_count"],
+            "dangerous_tag_count": 0,
+        }
+
     def _candidate(self, row, source_date):
         candidate_id = _text(row.get("material_id"), "material_id", limit=64)
         key = material_key(candidate_id)
@@ -438,6 +680,135 @@ class DramawaveCandidateSelector:
                 break
         return selected
 
+    def select_pool(self, pool_items, source_date, limit=3):
+        """Hydrate the oldest safe manual-pool items.
+
+        Pool order is determined exclusively by ``created_at`` then ``id``.
+        A data-quality or safety rejection is returned per item, while a
+        database query failure aborts the whole operation.
+        """
+        source_date = normalize_date(source_date)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            raise CandidateSelectionError("candidate limit is invalid") from None
+        if limit <= 0 or limit > 100:
+            raise CandidateSelectionError("candidate limit is out of range")
+        try:
+            raw_items = list(pool_items)
+        except TypeError:
+            raise CandidateSelectionError("pool_items must be iterable") from None
+        if len(raw_items) > 5000:
+            raise CandidateSelectionError("pool_items exceeds the safety limit")
+
+        prepared = []
+        rejections = []
+        for position, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                rejections.append(
+                    {
+                        "pool_item_id": "",
+                        "material_id": "",
+                        "error_code": "pool_item_invalid",
+                        "error_message": "pool item is not an object",
+                    }
+                )
+                continue
+            raw_pool_item_id = item.get("id", item.get("pool_item_id"))
+            raw_material_id = item.get("material_id")
+            try:
+                pool_item_id = _integer(raw_pool_item_id, "pool_item_id")
+                if pool_item_id <= 0:
+                    raise CandidateSelectionError("pool_item_id is invalid")
+                created_at = _text(
+                    item.get("created_at"), "pool created_at", limit=64
+                )
+                parsed_created_at = datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                )
+                if parsed_created_at.tzinfo is None:
+                    parsed_created_at = parsed_created_at.replace(tzinfo=timezone.utc)
+                created_timestamp = parsed_created_at.astimezone(timezone.utc).timestamp()
+                key = material_key(raw_material_id)
+            except (CandidateSelectionError, ValueError, OverflowError, OSError) as exc:
+                rejections.append(
+                    {
+                        "pool_item_id": raw_pool_item_id,
+                        "material_id": str(raw_material_id or "").strip(),
+                        "error_code": "pool_item_invalid",
+                        "error_message": "pool item is invalid: %s" % exc,
+                    }
+                )
+                continue
+            prepared.append(
+                {
+                    "pool_item_id": pool_item_id,
+                    "material_id": key,
+                    "created_at": created_at,
+                    "sort_key": (created_timestamp, pool_item_id, position),
+                }
+            )
+        prepared.sort(key=lambda item: item["sort_key"])
+
+        selected = []
+        seen_pool_ids = set()
+        seen_material_keys = set()
+        for item in prepared:
+            pool_item_id = item["pool_item_id"]
+            candidate_id = item["material_id"]
+            if pool_item_id in seen_pool_ids:
+                rejections.append(
+                    {
+                        "pool_item_id": pool_item_id,
+                        "material_id": candidate_id,
+                        "error_code": "duplicate_pool_item",
+                        "error_message": "pool item is duplicated",
+                    }
+                )
+                continue
+            seen_pool_ids.add(pool_item_id)
+            if candidate_id in seen_material_keys:
+                rejections.append(
+                    {
+                        "pool_item_id": pool_item_id,
+                        "material_id": candidate_id,
+                        "error_code": "duplicate_material_id",
+                        "error_message": "material ID is duplicated in the pool input",
+                    }
+                )
+                continue
+            seen_material_keys.add(candidate_id)
+            try:
+                candidate = self._pool_candidate(candidate_id, source_date)
+            except CandidateQueryError:
+                raise
+            except PoolCandidateRejection as exc:
+                rejections.append(
+                    {
+                        "pool_item_id": pool_item_id,
+                        "material_id": candidate_id,
+                        "error_code": exc.error_code,
+                        "error_message": exc.error_message,
+                    }
+                )
+                continue
+            except CandidateSelectionError as exc:
+                rejections.append(
+                    {
+                        "pool_item_id": pool_item_id,
+                        "material_id": candidate_id,
+                        "error_code": "material_safety_check_failed",
+                        "error_message": str(exc),
+                    }
+                )
+                continue
+            candidate["pool_item_id"] = pool_item_id
+            candidate["pool_created_at"] = item["created_at"]
+            selected.append(candidate)
+            if len(selected) >= limit:
+                break
+        return selected, rejections
+
 
 def select_candidates(
     connection,
@@ -452,6 +823,25 @@ def select_candidates(
         excluded_material_keys=excluded_material_keys,
         limit=limit,
         scan_limit=scan_limit,
+    )
+
+
+def select_pool_candidates(
+    connection,
+    pool_items,
+    source_date,
+    limit=3,
+    schema=DEFAULT_SCHEMA,
+):
+    """Hydrate manual-pool materials in oldest-first order.
+
+    Returns ``(candidates, rejections)``. Rejections are safe item-level
+    outcomes; a :class:`CandidateQueryError` still aborts the whole call.
+    """
+    return DramawaveCandidateSelector(connection, schema=schema).select_pool(
+        pool_items,
+        source_date,
+        limit=limit,
     )
 
 

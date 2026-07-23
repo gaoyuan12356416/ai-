@@ -196,6 +196,17 @@
           module: "x_accounts",
           adminOnly: true,
           enabled: true,
+          order: 40,
+        },
+        {
+          key: "xPostMaterialPool",
+          label: "Post素材池",
+          description: "维护定时发布使用的自定义素材",
+          kind: "page",
+          href: "/x-post-material-pool.html",
+          module: "x_accounts",
+          adminOnly: true,
+          enabled: true,
           order: 30,
         },
       ],
@@ -376,6 +387,7 @@
     voiceoverTasks: "/voiceover-drama.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
+    xPostMaterialPool: "/x-post-material-pool.html",
     xPostLogs: "/x-post-logs.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
@@ -401,7 +413,28 @@
 
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
-    return cloneNav(config);
+    const normalized = cloneNav(config);
+    const xPlatform = normalized.find(group => group && group.key === "x_platform");
+    if (xPlatform) {
+      if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      const exists = xPlatform.items.some(item => item && item.key === "xPostMaterialPool");
+      if (!exists) {
+        xPlatform.items.push({
+          key: "xPostMaterialPool",
+          label: "Post素材池",
+          description: "维护定时发布使用的自定义素材",
+          kind: "page",
+          href: "/x-post-material-pool.html",
+          module: "x_accounts",
+          adminOnly: true,
+          enabled: true,
+          order: 30,
+        });
+      }
+      const postLogs = xPlatform.items.find(item => item && item.key === "xPostLogs");
+      if (postLogs && Number(postLogs.order || 0) <= 30) postLogs.order = 40;
+    }
+    return normalized;
   }
 
   function readStoredConfig() {

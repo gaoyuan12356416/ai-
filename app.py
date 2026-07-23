@@ -41293,7 +41293,10 @@ from features.x_accounts.client import (
     XAccountsClientError,
     configure_x_accounts_client,
     get_x_accounts_config,
+    add_x_post_material_pool,
+    delete_x_post_material_pool,
     query_x_post_logs,
+    query_x_post_material_pool,
     query_x_post_runs,
     query_x_accounts as query_x_authorized_accounts,
     logout_x_account,
@@ -41331,6 +41334,13 @@ X_ACCOUNTS_ERROR_META = {
     "x_disconnect_pending": (409, "X账号存在旧退出待处理状态，请先完成停用"),
     "x_identity_mismatch": (409, "X Token账号身份不匹配，请重新授权"),
     "x_oauth_not_configured": (503, "X OAuth客户端尚未完整配置"),
+    "x_post_pool_item_not_found": (404, "X素材池记录不存在"),
+    "x_post_pool_item_occupied": (409, "素材已被发布队列占用，不能删除或重复使用"),
+    "x_post_pool_item_published": (409, "已发布素材必须保留审计记录"),
+    "x_post_pool_item_unavailable": (409, "素材池记录已发布、已变更或不可用"),
+    "x_post_pool_material_already_exists": (409, "素材已在X素材池中"),
+    "x_post_pool_material_already_used": (409, "素材已有X发布历史，不能重新入池"),
+    "x_post_pool_required": (409, "正式每日计划必须使用素材池记录"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
     "x_token_revoked": (409, "X授权已失效，请重新授权"),
     "x_upstream_error": (502, "X API请求失败，请稍后重试"),
@@ -41397,6 +41407,48 @@ def x_post_admin_query_params(raw_query, *, runs=False):
             if unknown_outcome not in ("0", "1", "true", "false"):
                 raise ValueError("unknown_outcome must be 0 or 1")
             result["unknown_outcome"] = 1 if unknown_outcome in ("1", "true") else 0
+    return result
+
+
+def x_post_pool_query_params(raw_query):
+    raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
+    allowed = {"page", "page_size", "status", "availability", "material_id"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unsupported query parameter: %s" % unknown[0])
+    try:
+        page = max(1, int((raw.get("page") or ["1"])[0] or "1"))
+        page_size = max(
+            1,
+            min(100, int((raw.get("page_size") or ["20"])[0] or "20")),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("page and page_size must be integers")
+    result = {"page": page, "page_size": page_size}
+    status = str((raw.get("status") or [""])[0] or "").strip().lower()
+    if status:
+        if status not in {"unpublished", "published"}:
+            raise ValueError("invalid status")
+        result["status"] = status
+    availability = str(
+        (raw.get("availability") or [""])[0] or ""
+    ).strip().lower()
+    if availability:
+        if availability not in {
+            "available",
+            "validation_failed",
+            "occupied",
+            "failed",
+            "needs_review",
+            "published",
+        }:
+            raise ValueError("invalid availability")
+        result["availability"] = availability
+    material_id = str((raw.get("material_id") or [""])[0] or "").strip()
+    if material_id:
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
+            raise ValueError("material_id must be a positive integer")
+        result["material_id"] = material_id
     return result
 
 
@@ -91705,6 +91757,32 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, status, payload, no_store=True)
             return
 
+        if parsed.path == "/api/admin/x-posts/material-pool":
+            if not self._require_cookie_admin():
+                return
+            try:
+                params = x_post_pool_query_params(parsed.query)
+                params.update(
+                    {"actor": x_accounts_actor(self._session()), "scope": "all"}
+                )
+                json_response(
+                    self,
+                    200,
+                    query_x_post_material_pool(params),
+                    no_store=True,
+                )
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
 
 
 
@@ -94867,6 +94945,57 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 400, api_error_payload(exc))
             return
 
+        if parsed.path == "/api/admin/x-posts/material-pool":
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                payload = self._read_json()
+                material_ids = payload.get("material_ids")
+                if material_ids is None and payload.get("material_id") not in (
+                    None,
+                    "",
+                ):
+                    material_ids = [payload.get("material_id")]
+                result = add_x_post_material_pool(
+                    material_ids,
+                    x_accounts_actor(session),
+                )
+                append_audit_log(
+                    session,
+                    "add_x_post_material_pool",
+                    "x_post_material_pool",
+                    "batch",
+                    {
+                        "created_count": int(
+                            result.get("created_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        )
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "add_x_post_material_pool_failed",
+                    "x_post_material_pool",
+                    "batch",
+                    {"error": error_payload["error"]},
+                )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
         if parsed.path == "/api/x-accounts/authorize":
             if not self._require_cookie_module("x_accounts"):
                 return
@@ -95617,6 +95746,42 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        x_pool_delete_match = re.fullmatch(
+            r"/api/admin/x-posts/material-pool/([0-9]+)",
+            parsed.path,
+        )
+        if x_pool_delete_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            pool_item_id = x_pool_delete_match.group(1)
+            try:
+                result = delete_x_post_material_pool(
+                    pool_item_id,
+                    x_accounts_actor(session),
+                )
+                append_audit_log(
+                    session,
+                    "delete_x_post_material_pool",
+                    "x_post_material_pool",
+                    pool_item_id,
+                    {},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "delete_x_post_material_pool_failed",
+                    "x_post_material_pool",
+                    pool_item_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(self, status, error_payload, no_store=True)
+            return
 
         if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
             self._dispatch_ad_control_v3(parsed)

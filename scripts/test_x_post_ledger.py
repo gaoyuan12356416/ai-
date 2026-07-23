@@ -139,10 +139,27 @@ class XPostLedgerTests(unittest.TestCase):
                 item[0]
                 for item in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
             }
+            triggers = {
+                item[0]
+                for item in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                )
+            }
+            queue_columns = {
+                item[1] for item in conn.execute("PRAGMA table_info(x_post_queue)")
+            }
         self.assertEqual(row, ("5221348", "2026-07-23"))
         self.assertIn("x_post_daily_run", tables)
+        self.assertIn("x_post_material_pool", tables)
+        self.assertIn("pool_item_id", queue_columns)
+        self.assertIn("pool_created_at", queue_columns)
         self.assertIn("ux_x_post_queue_material_key", indexes)
         self.assertIn("ux_x_post_queue_account_run_date", indexes)
+        self.assertIn("ux_x_post_queue_pool_item_id", indexes)
+        self.assertIn("idx_x_post_pool_fifo", indexes)
+        self.assertIn("trg_x_post_queue_pool_required_insert", triggers)
+        self.assertIn("trg_x_post_pool_queue_guard", triggers)
+        self.assertIn("trg_x_post_pool_delete_guard", triggers)
 
     def test_migrated_published_canary_replays_across_days_without_x_write(self):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
@@ -232,7 +249,7 @@ class XPostLedgerTests(unittest.TestCase):
             "2026-07-23", "2026-07-22", plan_candidates()
         )
         repeated = store.create_daily_plan(
-            "2026-07-23", "2026-07-22", plan_candidates((2001, 2002, 2003))
+            "2026-07-23", "2026-07-22", plan_candidates()
         )
         self.assertTrue(first["created"])
         self.assertFalse(repeated["created"])
@@ -240,6 +257,13 @@ class XPostLedgerTests(unittest.TestCase):
             [row["id"] for row in first["queues"]],
             [row["id"] for row in repeated["queues"]],
         )
+        with self.assertRaises(service.XPostError) as changed:
+            store.create_daily_plan(
+                "2026-07-23",
+                "2026-07-22",
+                plan_candidates((2001, 2002, 2003)),
+            )
+        self.assertEqual(changed.exception.code, "x_post_daily_run_exists")
 
         next_day = plan_candidates((1001, 3002, 3003))
         for item in next_day:

@@ -26,6 +26,13 @@ SAFE_ERROR_CODES = {
     "x_post_daily_run_exists",
     "x_post_idempotency_conflict",
     "x_post_material_already_used",
+    "x_post_pool_item_not_found",
+    "x_post_pool_item_occupied",
+    "x_post_pool_item_published",
+    "x_post_pool_item_unavailable",
+    "x_post_pool_material_already_exists",
+    "x_post_pool_material_already_used",
+    "x_post_pool_required",
     "x_post_queue_not_found",
     "x_post_rate_limited",
     "x_post_retry_requires_review",
@@ -207,6 +214,43 @@ def query_x_post_runs(params):
         "/internal/posts/runs/query",
         method="POST",
         payload=_post_query_payload(params),
+    )
+
+
+def query_x_post_material_pool(params):
+    params = params if isinstance(params, dict) else {}
+    payload = _post_query_payload(params)
+    if "availability" in params and params["availability"] not in (None, ""):
+        payload["availability"] = params["availability"]
+    return _request(
+        "/internal/posts/material-pool/query",
+        method="POST",
+        payload=payload,
+    )
+
+
+def add_x_post_material_pool(material_ids, actor):
+    if not isinstance(material_ids, (list, tuple)):
+        raise XAccountsClientError("invalid_request", "素材ID列表必须是数组", 400)
+    return _request(
+        "/internal/posts/material-pool/add",
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "material_ids": list(material_ids),
+        },
+    )
+
+
+def delete_x_post_material_pool(pool_item_id, actor):
+    pool_item_id = str(pool_item_id or "")
+    if not pool_item_id.isdigit() or int(pool_item_id) <= 0:
+        raise XAccountsClientError("invalid_request", "素材池记录ID无效", 400)
+    return _request(
+        "/internal/posts/material-pool/%s/delete" % pool_item_id,
+        method="POST",
+        payload={"actor": normalize_actor(actor), "scope": "all"},
     )
 
 
