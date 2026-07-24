@@ -63,6 +63,11 @@ QUEUE_LEDGER_FIELDS = (
     "pool_created_at",
     "candidate_rank",
     "spend",
+    "original_material_url",
+    "media_repair_trigger_code",
+    "media_repair_job_key",
+    "media_repair_profile",
+    "media_repair_source_sha256",
     "preflight_sha256",
     "preflight_size",
     "facebook_violation_count",
@@ -693,6 +698,11 @@ def ensure_storage(db_path):
                 page_id TEXT NOT NULL,
                 candidate_rank INTEGER NOT NULL DEFAULT 0,
                 spend REAL NOT NULL DEFAULT 0,
+                original_material_url TEXT NOT NULL DEFAULT '',
+                media_repair_trigger_code TEXT NOT NULL DEFAULT '',
+                media_repair_job_key TEXT NOT NULL DEFAULT '',
+                media_repair_profile TEXT NOT NULL DEFAULT '',
+                media_repair_source_sha256 TEXT NOT NULL DEFAULT '',
                 preflight_sha256 TEXT NOT NULL DEFAULT '',
                 preflight_size INTEGER NOT NULL DEFAULT 0,
                 facebook_violation_count INTEGER NOT NULL DEFAULT 0,
@@ -743,6 +753,11 @@ def ensure_storage(db_path):
                 "pool_created_at": "TEXT NOT NULL DEFAULT ''",
                 "candidate_rank": "INTEGER NOT NULL DEFAULT 0",
                 "spend": "REAL NOT NULL DEFAULT 0",
+                "original_material_url": "TEXT NOT NULL DEFAULT ''",
+                "media_repair_trigger_code": "TEXT NOT NULL DEFAULT ''",
+                "media_repair_job_key": "TEXT NOT NULL DEFAULT ''",
+                "media_repair_profile": "TEXT NOT NULL DEFAULT ''",
+                "media_repair_source_sha256": "TEXT NOT NULL DEFAULT ''",
                 "preflight_sha256": "TEXT NOT NULL DEFAULT ''",
                 "preflight_size": "INTEGER NOT NULL DEFAULT 0",
                 "facebook_violation_count": "INTEGER NOT NULL DEFAULT 0",
@@ -992,6 +1007,80 @@ class XPostStore:
         material = urllib.parse.urlsplit(result["material_url"])
         if material.scheme != "https" or not material.hostname or material.username or material.password or material.fragment:
             raise XPostError("invalid_media_url", "素材地址必须是HTTPS URL", 400)
+        original_material_url = str(
+            payload.get("original_material_url", "") or ""
+        ).strip()
+        repair_trigger_code = str(
+            payload.get("media_repair_trigger_code", "") or ""
+        ).strip()
+        repair_job_key = str(payload.get("media_repair_job_key", "") or "").strip()
+        repair_profile = str(payload.get("media_repair_profile", "") or "").strip()
+        repair_source_sha256 = str(
+            payload.get("media_repair_source_sha256", "") or ""
+        ).strip().lower()
+        repair_values = (
+            original_material_url,
+            repair_trigger_code,
+            repair_job_key,
+            repair_profile,
+            repair_source_sha256,
+        )
+        if any(repair_values):
+            if not all(repair_values):
+                raise XPostError(
+                    "invalid_request",
+                    "媒体修复审计字段必须完整提供",
+                    400,
+                )
+            original = urllib.parse.urlsplit(original_material_url)
+            if (
+                len(original_material_url) > 4096
+                or any(ord(char) < 32 for char in original_material_url)
+                or original.scheme != "https"
+                or not original.hostname
+                or original.username
+                or original.password
+                or original.fragment
+                or original_material_url == result["material_url"]
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "媒体修复原始素材地址无效",
+                    400,
+                )
+            if repair_trigger_code not in {
+                "invalid_media_codec",
+                "invalid_media_dimensions",
+            }:
+                raise XPostError(
+                    "invalid_request",
+                    "媒体修复触发原因无效",
+                    400,
+                )
+            try:
+                repair_job_key = _clean_token(
+                    repair_job_key, "media repair job key", 200
+                )
+                repair_profile = _clean_token(
+                    repair_profile, "media repair profile", 64
+                )
+            except ValueError:
+                raise XPostError(
+                    "invalid_request",
+                    "媒体修复标识无效",
+                    400,
+                ) from None
+            if not re.fullmatch(r"[0-9a-f]{64}", repair_source_sha256):
+                raise XPostError(
+                    "invalid_request",
+                    "媒体修复源文件指纹无效",
+                    400,
+                )
+        result["original_material_url"] = original_material_url
+        result["media_repair_trigger_code"] = repair_trigger_code
+        result["media_repair_job_key"] = repair_job_key
+        result["media_repair_profile"] = repair_profile
+        result["media_repair_source_sha256"] = repair_source_sha256
         material_key = normalize_material_key(result["material_id"])
         supplied_material_key = payload.get("material_key")
         if supplied_material_key not in (None, ""):
@@ -1066,6 +1155,11 @@ class XPostStore:
                     "pool_created_at",
                     "candidate_rank",
                     "spend",
+                    "original_material_url",
+                    "media_repair_trigger_code",
+                    "media_repair_job_key",
+                    "media_repair_profile",
+                    "media_repair_source_sha256",
                     "preflight_sha256",
                     "preflight_size",
                 ):
@@ -1781,6 +1875,65 @@ class XPostStore:
             row = conn.execute("SELECT * FROM x_post_daily_run WHERE run_date=?", (run_date,)).fetchone()
         return _row_dict(row)
 
+    def query_daily_plan(self, run_date):
+        """Return one atomic, identity-only snapshot for daily-run recovery."""
+        run_date = _date_value(run_date, "run_date")
+        run_fields = (
+            "id",
+            "run_date",
+            "source_date",
+            "status",
+            "expected_count",
+            "queued_count",
+            "published_count",
+            "failed_count",
+            "unknown_count",
+            "started_at",
+            "finished_at",
+            "created_at",
+            "updated_at",
+        )
+        queue_fields = (
+            "id",
+            "run_id",
+            "run_date",
+            "source_date",
+            "account_id",
+            "candidate_rank",
+            "status",
+            "created_at",
+            "updated_at",
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            # Keep the run and queue reads in one SQLite snapshot. This route is
+            # deliberately read-only and never returns copy, URLs, or log data.
+            conn.execute("BEGIN")
+            run_row = conn.execute(
+                "SELECT %s FROM x_post_daily_run WHERE run_date=?"
+                % ",".join(run_fields),
+                (run_date,),
+            ).fetchone()
+            if run_row:
+                queue_rows = conn.execute(
+                    "SELECT %s FROM x_post_queue WHERE run_id=? "
+                    "ORDER BY candidate_rank,id"
+                    % ",".join(queue_fields),
+                    (run_row["id"],),
+                ).fetchall()
+            else:
+                queue_rows = []
+            conn.commit()
+        if not run_row:
+            return {"found": False, "run": None, "queues": []}
+        return {
+            "found": True,
+            "run": {field: run_row[field] for field in run_fields},
+            "queues": [
+                {field: row[field] for field in queue_fields}
+                for row in queue_rows
+            ],
+        }
+
     def record_run_failure(self, run_date, source_date, error_code, error_message):
         run_date = _date_value(run_date, "run_date")
         source_date = _date_value(source_date, "source_date")
@@ -1947,6 +2100,7 @@ class XPostStore:
             "q.pool_item_id,q.pool_created_at,"
             "q.account_username,q.page_name,q.page_id,q.material_id,q.material_name,q.content_id,"
             "q.material_language,q.drama_name,q.tag,q.candidate_rank,q.spend,"
+            "q.media_repair_trigger_code,q.media_repair_job_key,q.media_repair_profile,"
             "q.facebook_violation_count,q.tiktok_violation_count,q.twitter_violation_count,"
             "q.resource_audit_count,q.dangerous_tag_count,q.status AS queue_status,"
             "l.id AS log_id,COALESCE(l.status,q.status) AS status,COALESCE(l.attempt_count,0) AS attempt_count,"

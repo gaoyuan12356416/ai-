@@ -1126,6 +1126,55 @@ def _safe_daily_plan_result(result):
     return safe
 
 
+def _safe_daily_plan_query_result(result):
+    """Expose only the frozen run/queue identities needed by the daily runner."""
+    if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
+        raise ServiceError("x_posts_unavailable", "X daily plan query returned invalid data", 503)
+    queues = result.get("queues")
+    run = result.get("run")
+    if not result["found"]:
+        if run is not None or queues != []:
+            raise ServiceError("x_posts_unavailable", "X daily plan query returned invalid data", 503)
+        return {"found": False, "run": None, "queues": []}
+    if not isinstance(run, dict) or not isinstance(queues, list):
+        raise ServiceError("x_posts_unavailable", "X daily plan query returned invalid data", 503)
+    allowed_run = (
+        "id",
+        "run_date",
+        "source_date",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    )
+    allowed_queue = (
+        "id",
+        "run_id",
+        "run_date",
+        "source_date",
+        "account_id",
+        "candidate_rank",
+        "status",
+        "created_at",
+        "updated_at",
+    )
+    return {
+        "found": True,
+        "run": {key: run[key] for key in allowed_run if key in run},
+        "queues": [
+            {key: queue[key] for key in allowed_queue if key in queue}
+            for queue in queues
+            if isinstance(queue, dict)
+        ],
+    }
+
+
 def _safe_run_result(result):
     if not isinstance(result, dict):
         raise ServiceError("x_posts_unavailable", "X每日发布批次返回无效", 503)
@@ -1297,6 +1346,31 @@ def create_daily_plan_request(
     except XPostError as exc:
         _raise_x_post_error(exc)
     return _safe_daily_plan_result(result)
+
+
+def query_daily_plan_request(payload, allowed_account_ids=None):
+    """Read a frozen daily plan without exposing post copy, URLs, or credentials."""
+    if not isinstance(payload, dict) or set(payload) != {"run_date"}:
+        raise ServiceError("invalid_request", "run_date is required", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).query_daily_plan(payload.get("run_date"))
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    safe = _safe_daily_plan_query_result(result)
+    allowed_accounts = _daily_account_scope(allowed_account_ids)
+    if allowed_accounts is not None and safe["found"]:
+        queue_accounts = {
+            int(queue.get("account_id") or 0)
+            for queue in safe["queues"]
+        }
+        if not queue_accounts.issubset(allowed_accounts):
+            raise ServiceError(
+                "x_daily_account_scope_denied",
+                "X daily plan contains an account outside the configured scope",
+                403,
+            )
+    return safe
 
 
 def preflight_post_storage_request():
@@ -1792,6 +1866,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         daily_exact_paths = {
             "/internal/posts/daily-plan",
+            "/internal/posts/daily-plan/query",
             "/internal/posts/storage/preflight",
             "/internal/posts/runs/record-failure",
             "/internal/posts/material-keys/query",
@@ -1827,6 +1902,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(
                     200,
                     {"item": plan},
+                )
+                return
+            if parsed.path == "/internal/posts/daily-plan/query":
+                self.send_json(
+                    200,
+                    {
+                        "item": query_daily_plan_request(
+                            payload,
+                            DAILY_ACCOUNT_IDS
+                            if internal_role == "daily"
+                            else None,
+                        )
+                    },
                 )
                 return
             if parsed.path == "/internal/posts/storage/preflight":

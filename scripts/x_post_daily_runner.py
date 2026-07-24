@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -43,8 +45,13 @@ from features.x_posts.service import (  # noqa: E402
 
 DEFAULT_INTERNAL_URL = "http://127.0.0.1:8810"
 MAX_ERROR_BODY_BYTES = 64 * 1024
+MAX_REPAIR_RESPONSE_BYTES = 64 * 1024
 _SAFE_INTERNAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 FIXED_DAILY_WORK_DIR = Path("/mnt/data-disk/x-post-automation/daily-work")
+REPAIRABLE_MEDIA_CODES = frozenset(
+    {"invalid_media_codec", "invalid_media_dimensions"}
+)
+DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-v1"
 
 
 class DailyRunError(RuntimeError):
@@ -61,6 +68,19 @@ class SidecarError(DailyRunError):
         super().__init__(
             str(message or "X sidecar request failed")[:240],
             code=self.code,
+        )
+
+
+class CandidatePreflightError(DailyRunError):
+    """A known candidate-local failure that may safely replenish from FIFO."""
+
+
+class MediaRepairError(CandidatePreflightError):
+    def __init__(self, code, message, status=503):
+        self.status = int(status or 503)
+        super().__init__(
+            str(message or "X media repair request failed")[:240],
+            code=str(code or "x_post_media_repair_failed")[:64],
         )
 
 
@@ -126,6 +146,12 @@ class DailyConfig:
     publish_path_template: str
     pool_available_path: str = "/internal/posts/material-pool/available"
     pool_check_path: str = "/internal/posts/material-pool/check"
+    repair_url: str = ""
+    repair_token: str = ""
+    repair_timeout: int = 900
+    repair_profile: str = DEFAULT_REPAIR_PROFILE
+    max_repairs_per_run: int = 6
+    plan_query_path: str = "/internal/posts/daily-plan/query"
 
     @classmethod
     def from_env(cls):
@@ -202,6 +228,27 @@ class DailyConfig:
                 "X_POST_DAILY_POOL_CHECK_PATH",
                 "/internal/posts/material-pool/check",
             ).strip(),
+            repair_url=os.environ.get(
+                "X_POST_DAILY_REPAIR_URL", ""
+            ).strip(),
+            repair_token=os.environ.get(
+                "X_POST_DAILY_REPAIR_TOKEN",
+                os.environ.get("X_POST_MEDIA_REPAIR_TOKEN", ""),
+            ).strip(),
+            repair_timeout=_env_int(
+                "X_POST_DAILY_REPAIR_TIMEOUT", 900, 5, 3600
+            ),
+            repair_profile=os.environ.get(
+                "X_POST_DAILY_REPAIR_PROFILE",
+                DEFAULT_REPAIR_PROFILE,
+            ).strip(),
+            max_repairs_per_run=_env_int(
+                "X_POST_DAILY_MAX_REPAIRS_PER_RUN", 6, 0, 50
+            ),
+            plan_query_path=os.environ.get(
+                "X_POST_DAILY_PLAN_QUERY_PATH",
+                "/internal/posts/daily-plan/query",
+            ).strip(),
         )
 
     def validate(self):
@@ -234,6 +281,7 @@ class DailyConfig:
             self.material_keys_path,
             self.storage_preflight_path,
             self.failure_path,
+            self.plan_query_path,
             self.plan_path,
             self.pool_available_path,
             self.pool_check_path,
@@ -245,11 +293,273 @@ class DailyConfig:
             or not self.publish_path_template.startswith("/internal/")
         ):
             raise DailyRunError("invalid publish endpoint path template")
+        if self.repair_url:
+            repair = urllib.parse.urlsplit(self.repair_url)
+            try:
+                repair_port = repair.port
+            except ValueError:
+                raise DailyRunError("X Post media repair URL is invalid") from None
+            if (
+                repair.scheme != "http"
+                or repair.hostname not in _SAFE_INTERNAL_HOSTS
+                or repair.username is not None
+                or repair.password is not None
+                or repair.query
+                or repair.fragment
+                or (
+                    repair_port is not None
+                    and not 1 <= repair_port <= 65535
+                )
+                or not repair.path.startswith("/")
+                or repair.path == "/"
+            ):
+                raise DailyRunError(
+                    "X Post media repair URL must be a loopback HTTP endpoint"
+                )
+            if not self.repair_token:
+                raise DailyRunError("X_POST_DAILY_REPAIR_TOKEN is required")
+            if self.repair_token == self.internal_token:
+                raise DailyRunError(
+                    "X Post media repair token must be independent"
+                )
+            if not re.fullmatch(
+                r"[A-Za-z0-9_.:-]{1,64}", self.repair_profile
+            ):
+                raise DailyRunError("X_POST_DAILY_REPAIR_PROFILE is invalid")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, _request, _file_pointer, _code, _message, _headers, _url):
         return None
+
+
+def _finite_number(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return normalized if math.isfinite(normalized) else None
+
+
+def _validate_repair_probe(raw, output_size):
+    if not isinstance(raw, dict):
+        raise MediaRepairError(
+            "x_post_media_repair_invalid_response",
+            "X media repair probe is invalid",
+            502,
+        )
+    width = raw.get("width")
+    height = raw.get("height")
+    size = raw.get("size")
+    if (
+        not isinstance(width, int)
+        or isinstance(width, bool)
+        or not isinstance(height, int)
+        or isinstance(height, bool)
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size != output_size
+        or width < 32
+        or height < 32
+        or width > 1280
+        or height > 1280
+    ):
+        raise MediaRepairError(
+            "x_post_media_repair_invalid_response",
+            "X media repair dimensions or size are invalid",
+            502,
+        )
+    ratio = float(width) / float(height)
+    frame_rate = _finite_number(raw.get("frame_rate"))
+    duration = _finite_number(raw.get("duration"))
+    if (
+        ratio < (1.0 / 3.0)
+        or ratio > 3.0
+        or frame_rate is None
+        or frame_rate <= 0
+        or frame_rate > 60
+        or duration is None
+        or duration < 0.5
+        or duration > 140
+        or str(raw.get("codec", "") or "").lower() != "h264"
+        or str(raw.get("pixel_format", "") or "").lower() != "yuv420p"
+        or str(raw.get("audio_codec", "") or "").lower() != "aac"
+    ):
+        raise MediaRepairError(
+            "x_post_media_repair_invalid_response",
+            "X media repair probe does not meet the X video contract",
+            502,
+        )
+    return {
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_codec": "aac",
+        "width": width,
+        "height": height,
+        "frame_rate": frame_rate,
+        "duration": duration,
+        "size": size,
+    }
+
+
+class MediaRepairClient:
+    """Strict loopback client for the independently authenticated GPU worker."""
+
+    def __init__(
+        self,
+        url,
+        token,
+        *,
+        timeout=900,
+        max_output_bytes=512 * 1024 * 1024,
+        opener=None,
+    ):
+        self.url = str(url or "")
+        self.token = str(token or "")
+        self.timeout = int(timeout)
+        self.max_output_bytes = int(max_output_bytes)
+        self.opener = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _NoRedirect(),
+        )
+
+    @staticmethod
+    def _decode(raw):
+        if len(raw or b"") > MAX_REPAIR_RESPONSE_BYTES:
+            return {}
+        try:
+            value = json.loads(bytes(raw or b"{}").decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def repair(self, payload):
+        body = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.url,
+            method="POST",
+            data=body,
+            headers={
+                "Authorization": "Bearer " + self.token,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            response = self.opener.open(request, timeout=self.timeout)
+            with response:
+                raw = response.read(MAX_REPAIR_RESPONSE_BYTES + 1)
+                status = int(
+                    getattr(response, "status", response.getcode())
+                )
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            try:
+                try:
+                    raw = exc.read(MAX_REPAIR_RESPONSE_BYTES + 1)
+                except (
+                    http.client.HTTPException,
+                    TimeoutError,
+                    OSError,
+                ):
+                    raise MediaRepairError(
+                        "x_post_media_repair_unreachable",
+                        "X media repair error response was interrupted",
+                        503,
+                    ) from None
+            finally:
+                exc.close()
+            data = self._decode(raw)
+            raw_error = data.get("error") if isinstance(data, dict) else None
+            if isinstance(raw_error, dict):
+                code = raw_error.get("code") or raw_error.get("error")
+                message = raw_error.get("message") or data.get("message")
+            else:
+                code = raw_error or (
+                    data.get("code") if isinstance(data, dict) else ""
+                )
+                message = data.get("message") if isinstance(data, dict) else ""
+            code = str(code or "")
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", code):
+                code = "x_post_media_repair_http_error"
+            raise MediaRepairError(
+                code,
+                redact_text(message or "X media repair worker rejected the job", 240),
+                status,
+            ) from None
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            TimeoutError,
+            OSError,
+        ):
+            raise MediaRepairError(
+                "x_post_media_repair_unreachable",
+                "X media repair worker network request failed",
+                503,
+            ) from None
+        if len(raw) > MAX_REPAIR_RESPONSE_BYTES:
+            raise MediaRepairError(
+                "x_post_media_repair_invalid_response",
+                "X media repair response is too large",
+                502,
+            )
+        data = self._decode(raw)
+        if status < 200 or status >= 300 or not isinstance(data, dict):
+            raise MediaRepairError(
+                "x_post_media_repair_invalid_response",
+                "X media repair worker returned an invalid response",
+                502,
+            )
+        expected_job_key = str(payload.get("job_key", "") or "")
+        expected_profile = str(payload.get("profile", "") or "")
+        output_url = str(data.get("output_url", "") or "")
+        output_sha256 = str(data.get("output_sha256", "") or "").lower()
+        output_size = data.get("output_size")
+        parsed = urllib.parse.urlsplit(output_url)
+        try:
+            output_port = parsed.port
+        except ValueError:
+            output_port = -1
+        if (
+            data.get("status") != "ready"
+            or str(data.get("job_key", "") or "") != expected_job_key
+            or str(data.get("profile", "") or "") != expected_profile
+            or not isinstance(data.get("reused"), bool)
+            or not re.fullmatch(r"[a-f0-9]{64}", output_sha256)
+            or not isinstance(output_size, int)
+            or isinstance(output_size, bool)
+            or output_size <= 0
+            or output_size > self.max_output_bytes
+            or len(output_url) > 2048
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or output_port not in {None, 443}
+        ):
+            raise MediaRepairError(
+                "x_post_media_repair_invalid_response",
+                "X media repair worker response identity is invalid",
+                502,
+            )
+        probe = _validate_repair_probe(data.get("probe"), output_size)
+        return {
+            "status": "ready",
+            "job_key": expected_job_key,
+            "profile": expected_profile,
+            "reused": data["reused"],
+            "output_url": output_url,
+            "output_sha256": output_sha256,
+            "output_size": output_size,
+            "probe": probe,
+        }
 
 
 class SidecarClient:
@@ -523,6 +833,159 @@ class SidecarClient:
             )
         return item
 
+    def query_daily_plan(self, path, run_date):
+        """Strictly parse the identity-only snapshot used for same-day recovery."""
+        requested_date = normalize_date(run_date, "run_date")
+        result = self.post(path, {"run_date": requested_date})
+        item = result.get("item")
+        if not isinstance(item, dict) or set(item) != {"found", "run", "queues"}:
+            raise SidecarError(
+                "x_daily_plan_query_invalid_response",
+                "Daily plan query response is invalid",
+            )
+        found = item.get("found")
+        queues = item.get("queues")
+        run = item.get("run")
+        if not isinstance(found, bool) or not isinstance(queues, list):
+            raise SidecarError(
+                "x_daily_plan_query_invalid_response",
+                "Daily plan query response is invalid",
+            )
+        if not found:
+            if run is not None or queues:
+                raise SidecarError(
+                    "x_daily_plan_query_invalid_response",
+                    "Missing daily plan response is inconsistent",
+                )
+            return {"found": False, "run": None, "queues": []}
+
+        run_fields = {
+            "id",
+            "run_date",
+            "source_date",
+            "status",
+            "expected_count",
+            "queued_count",
+            "published_count",
+            "failed_count",
+            "unknown_count",
+            "started_at",
+            "finished_at",
+            "created_at",
+            "updated_at",
+        }
+        queue_fields = {
+            "id",
+            "run_id",
+            "run_date",
+            "source_date",
+            "account_id",
+            "candidate_rank",
+            "status",
+            "created_at",
+            "updated_at",
+        }
+        run_statuses = {
+            "queued",
+            "running",
+            "completed",
+            "completed_with_errors",
+            "needs_review",
+            "stopped",
+            "failed_preflight",
+        }
+        queue_statuses = {"queued", "publishing", "published", "failed"}
+        if not isinstance(run, dict) or set(run) != run_fields:
+            raise SidecarError(
+                "x_daily_plan_query_invalid_response",
+                "Daily plan identity is invalid",
+            )
+        run_id = run.get("id")
+        counters = [
+            run.get("expected_count"),
+            run.get("queued_count"),
+            run.get("published_count"),
+            run.get("failed_count"),
+            run.get("unknown_count"),
+        ]
+        if (
+            not isinstance(run_id, int)
+            or isinstance(run_id, bool)
+            or run_id <= 0
+            or run.get("run_date") != requested_date
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(run.get("source_date") or ""))
+            or run.get("status") not in run_statuses
+            or any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > 3
+                for value in counters
+            )
+            or run.get("expected_count") != 3
+            or any(
+                not isinstance(run.get(field), str)
+                or len(run.get(field)) > 64
+                or any(ord(char) < 32 for char in run.get(field))
+                for field in ("started_at", "finished_at", "created_at", "updated_at")
+            )
+            or len(queues) > 3
+        ):
+            raise SidecarError(
+                "x_daily_plan_query_invalid_response",
+                "Daily plan identity is invalid",
+            )
+
+        normalized = []
+        queue_ids = set()
+        account_ids = set()
+        candidate_ranks = set()
+        previous_rank = 0
+        for queue in queues:
+            if not isinstance(queue, dict) or set(queue) != queue_fields:
+                raise SidecarError(
+                    "x_daily_plan_query_invalid_response",
+                    "Daily plan queue identity is invalid",
+                )
+            queue_id = queue.get("id")
+            account_id = queue.get("account_id")
+            candidate_rank = queue.get("candidate_rank")
+            if (
+                not isinstance(queue_id, int)
+                or isinstance(queue_id, bool)
+                or queue_id <= 0
+                or queue_id in queue_ids
+                or not isinstance(account_id, int)
+                or isinstance(account_id, bool)
+                or account_id <= 0
+                or account_id in account_ids
+                or not isinstance(candidate_rank, int)
+                or isinstance(candidate_rank, bool)
+                or candidate_rank not in {1, 2, 3}
+                or candidate_rank in candidate_ranks
+                or candidate_rank <= previous_rank
+                or queue.get("run_id") != run_id
+                or queue.get("run_date") != requested_date
+                or queue.get("source_date") != run.get("source_date")
+                or queue.get("status") not in queue_statuses
+                or any(
+                    not isinstance(queue.get(field), str)
+                    or len(queue.get(field)) > 64
+                    or any(ord(char) < 32 for char in queue.get(field))
+                    for field in ("created_at", "updated_at")
+                )
+            ):
+                raise SidecarError(
+                    "x_daily_plan_query_invalid_response",
+                    "Daily plan queue identity is invalid",
+                )
+            queue_ids.add(queue_id)
+            account_ids.add(account_id)
+            candidate_ranks.add(candidate_rank)
+            previous_rank = candidate_rank
+            normalized.append(dict(queue))
+        return {"found": True, "run": dict(run), "queues": normalized}
+
     def create_plan(self, path, payload):
         result = self.post(path, payload, write_may_have_happened=True)
         item = result.get("item") if isinstance(result.get("item"), dict) else result
@@ -787,11 +1250,209 @@ def _plan_candidate(account, candidate, rank, timestamp):
     return item
 
 
+def _media_fingerprint(media):
+    if not isinstance(media, dict):
+        raise CandidatePreflightError(
+            "media download fingerprint is invalid",
+            code="media_preflight_failed",
+        )
+    sha256 = str(media.get("sha256", "") or "").lower()
+    size = media.get("size")
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", sha256)
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size <= 0
+    ):
+        raise CandidatePreflightError(
+            "media download fingerprint is invalid",
+            code="media_preflight_failed",
+        )
+    return sha256, size
+
+
+def _repair_job_key(item, source_sha256, profile):
+    identity = "\0".join(
+        (
+            "x-post-media-repair-v1",
+            str(item["material_id"]),
+            str(item["pool_item_id"]),
+            str(source_sha256),
+            str(profile),
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _remove_preflight_file(destination):
+    try:
+        Path(destination).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise DailyRunError(
+            "daily media preflight cleanup failed: %s" % exc,
+            code="x_post_storage_unavailable",
+        ) from None
+
+
+def _verify_repaired_download(worker_result, media, probe):
+    sha256, size = _media_fingerprint(media)
+    if (
+        sha256 != worker_result["output_sha256"]
+        or size != worker_result["output_size"]
+    ):
+        raise MediaRepairError(
+            "x_post_media_repair_fingerprint_mismatch",
+            "Repaired media fingerprint does not match the GPU worker response",
+            502,
+        )
+    local_probe = _validate_repair_probe(probe, size)
+    worker_probe = worker_result["probe"]
+    if (
+        local_probe["codec"] != worker_probe["codec"]
+        or local_probe["pixel_format"] != worker_probe["pixel_format"]
+        or local_probe["audio_codec"] != worker_probe["audio_codec"]
+        or local_probe["width"] != worker_probe["width"]
+        or local_probe["height"] != worker_probe["height"]
+        or local_probe["size"] != worker_probe["size"]
+        or abs(local_probe["frame_rate"] - worker_probe["frame_rate"]) > 0.01
+        or abs(local_probe["duration"] - worker_probe["duration"]) > 0.05
+    ):
+        raise MediaRepairError(
+            "x_post_media_repair_probe_mismatch",
+            "Repaired media probe does not match the GPU worker response",
+            502,
+        )
+    return sha256, size, local_probe
+
+
+def _preflight_candidate(
+    config,
+    candidate,
+    account,
+    rank,
+    timestamp,
+    destination,
+    downloader,
+    prober,
+    *,
+    repair_client=None,
+    repair_state=None,
+):
+    """Validate one FIFO candidate and perform at most one repair attempt."""
+    try:
+        item = _plan_candidate(
+            account,
+            candidate,
+            rank,
+            timestamp,
+        )
+    except (XPostError, KeyError, TypeError, ValueError) as exc:
+        raise CandidatePreflightError(
+            redact_text(str(exc), 240),
+            code="x_post_daily_copy_validation_failed",
+        ) from None
+
+    try:
+        media = downloader(
+            item["material_url"],
+            destination,
+            config.media_allowed_hosts,
+            max_bytes=config.max_media_bytes,
+            timeout=config.media_timeout,
+        )
+        try:
+            probe = prober(
+                destination,
+                max_bytes=config.max_media_bytes,
+                timeout=config.media_timeout,
+            )
+        except XPostError as exc:
+            trigger_code = str(getattr(exc, "code", "") or "")
+            state = repair_state if isinstance(repair_state, dict) else {}
+            repairs_attempted = int(state.get("attempted", 0) or 0)
+            if (
+                trigger_code not in REPAIRABLE_MEDIA_CODES
+                or repair_client is None
+                or repairs_attempted >= config.max_repairs_per_run
+            ):
+                raise
+            source_sha256, source_size = _media_fingerprint(media)
+            state["attempted"] = repairs_attempted + 1
+            original_url = str(item["material_url"])
+            job_key = _repair_job_key(
+                item, source_sha256, config.repair_profile
+            )
+            repaired = repair_client.repair(
+                {
+                    "job_key": job_key,
+                    "material_id": str(item["material_id"]),
+                    "pool_item_id": int(item["pool_item_id"]),
+                    "source_url": original_url,
+                    "source_sha256": source_sha256,
+                    "source_size": source_size,
+                    "trigger_code": trigger_code,
+                    "profile": config.repair_profile,
+                }
+            )
+            _remove_preflight_file(destination)
+            item["material_url"] = repaired["output_url"]
+            repaired_media = downloader(
+                item["material_url"],
+                destination,
+                config.media_allowed_hosts,
+                max_bytes=config.max_media_bytes,
+                timeout=config.media_timeout,
+            )
+            repaired_probe = prober(
+                destination,
+                max_bytes=config.max_media_bytes,
+                timeout=config.media_timeout,
+            )
+            final_sha256, final_size, probe = _verify_repaired_download(
+                repaired,
+                repaired_media,
+                repaired_probe,
+            )
+            media = {
+                "sha256": final_sha256,
+                "size": final_size,
+            }
+            item.update(
+                {
+                    "original_material_url": original_url,
+                    "media_repair_trigger_code": trigger_code,
+                    "media_repair_job_key": job_key,
+                    "media_repair_profile": config.repair_profile,
+                    "media_repair_source_sha256": source_sha256,
+                }
+            )
+        final_sha256, final_size = _media_fingerprint(media)
+        item["preflight_sha256"] = final_sha256
+        item["preflight_size"] = final_size
+        item["preflight_duration"] = float(
+            probe.get("duration", 0) or 0
+        )
+        item["preflight_width"] = int(probe.get("width", 0) or 0)
+        item["preflight_height"] = int(probe.get("height", 0) or 0)
+        return item
+    finally:
+        _remove_preflight_file(destination)
+
+
 def _preflight_candidates(
-    config, candidates, verified_accounts, timestamp, downloader, prober
+    config,
+    candidates,
+    verified_accounts,
+    timestamp,
+    downloader,
+    prober,
+    repair_client=None,
 ):
     accepted = []
     failures = []
+    repair_state = {"attempted": 0}
     work_root = Path(config.work_dir)
     if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
         raise DailyRunError(
@@ -807,75 +1468,44 @@ def _preflight_candidates(
             if len(accepted) == 3:
                 break
             account = verified_accounts[len(accepted)]
+            material_id = str(
+                candidate.get("material_id", "")
+                if isinstance(candidate, dict)
+                else ""
+            )
+            destination = root / ("%s.mp4" % material_id)
             try:
-                item = _plan_candidate(
-                    account,
+                item = _preflight_candidate(
+                    config,
                     candidate,
+                    account,
                     len(accepted) + 1,
                     timestamp,
-                )
-            except (XPostError, KeyError, TypeError, ValueError) as exc:
-                failures.append(
-                    {
-                        "pool_item_id": candidate.get("pool_item_id")
-                        if isinstance(candidate, dict)
-                        else None,
-                        "material_id": str(
-                            candidate.get("material_id", "")
-                            if isinstance(candidate, dict)
-                            else ""
-                        ),
-                        "error_code": "x_post_daily_copy_validation_failed",
-                        "error_message": redact_text(str(exc), 240),
-                    }
-                )
-                continue
-            destination = root / ("%s.mp4" % item["material_id"])
-            try:
-                media = downloader(
-                    item["material_url"],
                     destination,
-                    config.media_allowed_hosts,
-                    max_bytes=config.max_media_bytes,
-                    timeout=config.media_timeout,
-                )
-                probe = prober(
-                    destination,
-                    max_bytes=config.max_media_bytes,
-                    timeout=config.media_timeout,
+                    downloader,
+                    prober,
+                    repair_client=repair_client,
+                    repair_state=repair_state,
                 )
             except (
                 XPostError,
+                CandidatePreflightError,
                 http.client.HTTPException,
                 OSError,
                 ValueError,
             ) as exc:
                 failures.append(
                     {
-                        "pool_item_id": candidate.get("pool_item_id"),
-                        "material_id": candidate["material_id"],
+                        "pool_item_id": candidate.get("pool_item_id")
+                        if isinstance(candidate, dict)
+                        else None,
+                        "material_id": material_id,
                         "error_code": str(getattr(exc, "code", "media_preflight_failed"))[:64],
                         "error_message": redact_text(str(exc), 240),
                     }
                 )
                 continue
-            else:
-                item["preflight_sha256"] = str(media.get("sha256", "") or "")
-                item["preflight_size"] = int(media.get("size", 0) or 0)
-                item["preflight_duration"] = float(probe.get("duration", 0) or 0)
-                item["preflight_width"] = int(probe.get("width", 0) or 0)
-                item["preflight_height"] = int(probe.get("height", 0) or 0)
-                accepted.append(item)
-            finally:
-                try:
-                    destination.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    raise DailyRunError(
-                        "daily media preflight cleanup failed: %s" % exc,
-                        code="x_post_storage_unavailable",
-                    ) from None
+            accepted.append(item)
     return accepted, failures
 
 
@@ -949,6 +1579,69 @@ def _record_pool_checks_best_effort(sidecar, config, checks):
             return
 
 
+def _publish_daily_queues(
+    config,
+    sidecar,
+    queues,
+    *,
+    run_date,
+    source_date,
+    preflight_rejected_count,
+    resumed_existing_plan=False,
+):
+    """Run the one-at-a-time publish loop for a newly frozen or recovered plan."""
+    results = []
+    stopped = False
+    for queue in queues:
+        account_id = int(queue.get("account_id") or 0)
+        entry = {
+            "account_id": account_id,
+            "queue_id": queue["id"],
+            "status": "failed",
+        }
+        try:
+            published = sidecar.publish_queue(
+                config.publish_path_template, queue["id"]
+            )
+            entry.update(
+                {
+                    "status": published["status"],
+                    "log_id": published["log_id"],
+                    "preview_url": published["preview_url"],
+                }
+            )
+        except SidecarError as exc:
+            entry.update(
+                {
+                    "error_code": exc.code,
+                    "unknown_outcome": exc.unknown_outcome,
+                }
+            )
+            if exc.status == 429 or exc.unknown_outcome:
+                stopped = True
+        results.append(entry)
+        if stopped:
+            break
+
+    return {
+        "status": (
+            "published"
+            if len(results) == 3
+            and all(item.get("status") == "published" for item in results)
+            else ("stopped" if stopped else "completed_with_failures")
+        ),
+        "run_date": run_date,
+        "source_date": source_date,
+        "planned_count": len(queues),
+        "published_count": sum(
+            item.get("status") == "published" for item in results
+        ),
+        "preflight_rejected_count": int(preflight_rejected_count),
+        "resumed_existing_plan": bool(resumed_existing_plan),
+        "results": results,
+    }
+
+
 def execute_daily_run(
     config,
     *,
@@ -957,6 +1650,7 @@ def execute_daily_run(
     pool_candidate_loader=select_pool_candidates,
     downloader=download_media,
     prober=probe_media,
+    repair_client=None,
     now=None,
 ):
     """Execute one run. Collaborators are injectable for offline unit tests."""
@@ -975,6 +1669,55 @@ def execute_daily_run(
     sidecar = sidecar or SidecarClient(
         config.internal_url, config.internal_token, timeout=config.internal_timeout
     )
+    if repair_client is None and config.repair_url:
+        repair_client = MediaRepairClient(
+            config.repair_url,
+            config.repair_token,
+            timeout=config.repair_timeout,
+            max_output_bytes=config.max_media_bytes,
+        )
+
+    # Read the durable plan before account refresh, pool selection, source
+    # queries, downloads, or GPU repair. A frozen same-day plan is the only
+    # source of truth for recovery and must never be regenerated.
+    existing_plan = sidecar.query_daily_plan(config.plan_query_path, run_date)
+    if existing_plan["found"]:
+        existing_run = existing_plan["run"]
+        existing_queues = existing_plan["queues"]
+        if existing_run.get("source_date") != source_date:
+            raise DailyRunError(
+                "existing daily plan source_date does not match this run",
+                code="x_post_daily_resume_conflict",
+            )
+        if existing_run.get("status") == "failed_preflight":
+            if existing_queues:
+                raise DailyRunError(
+                    "failed-preflight daily run unexpectedly has queues",
+                    code="x_post_daily_resume_conflict",
+                )
+        else:
+            if (
+                len(existing_queues) != 3
+                or tuple(
+                    int(queue.get("account_id") or 0)
+                    for queue in existing_queues
+                )
+                != tuple(config.account_ids)
+            ):
+                raise DailyRunError(
+                    "existing daily plan queue identity is inconsistent",
+                    code="x_post_daily_resume_conflict",
+                )
+            return _publish_daily_queues(
+                config,
+                sidecar,
+                existing_queues,
+                run_date=run_date,
+                source_date=source_date,
+                preflight_rejected_count=0,
+                resumed_existing_plan=True,
+            )
+
     try:
         sidecar.preflight_storage(config.storage_preflight_path)
         verified = []
@@ -1027,6 +1770,7 @@ def execute_daily_run(
             max(1, int(current.timestamp())),
             downloader,
             prober,
+            repair_client,
         )
         _record_pool_checks_best_effort(
             sidecar,
@@ -1073,51 +1817,14 @@ def execute_daily_run(
     ):
         raise DailyRunError("daily plan queue order does not match configured accounts")
 
-    results = []
-    stopped = False
-    for account, queue in zip(verified, queues):
-        entry = {
-            "account_id": account["id"],
-            "queue_id": queue["id"],
-            "status": "failed",
-        }
-        try:
-            published = sidecar.publish_queue(
-                config.publish_path_template, queue["id"]
-            )
-            entry.update(
-                {
-                    "status": published["status"],
-                    "log_id": published["log_id"],
-                    "preview_url": published["preview_url"],
-                }
-            )
-        except SidecarError as exc:
-            entry.update(
-                {
-                    "error_code": exc.code,
-                    "unknown_outcome": exc.unknown_outcome,
-                }
-            )
-            if exc.status == 429 or exc.unknown_outcome:
-                stopped = True
-        results.append(entry)
-        if stopped:
-            break
-
-    return {
-        "status": (
-            "published"
-            if len(results) == 3 and all(item.get("status") == "published" for item in results)
-            else ("stopped" if stopped else "completed_with_failures")
-        ),
-        "run_date": run_date,
-        "source_date": source_date,
-        "planned_count": len(queues),
-        "published_count": sum(item.get("status") == "published" for item in results),
-        "preflight_rejected_count": len(preflight_failures),
-        "results": results,
-    }
+    return _publish_daily_queues(
+        config,
+        sidecar,
+        queues,
+        run_date=run_date,
+        source_date=source_date,
+        preflight_rejected_count=len(preflight_failures),
+    )
 
 
 @contextlib.contextmanager

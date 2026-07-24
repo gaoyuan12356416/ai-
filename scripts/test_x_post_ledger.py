@@ -129,7 +129,10 @@ class XPostLedgerTests(unittest.TestCase):
         service.ensure_storage(self.db_path)
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             row = conn.execute(
-                "SELECT material_key,run_date FROM x_post_queue WHERE material_id='005221348'"
+                "SELECT material_key,run_date,original_material_url,"
+                "media_repair_trigger_code,media_repair_job_key,"
+                "media_repair_profile,media_repair_source_sha256 "
+                "FROM x_post_queue WHERE material_id='005221348'"
             ).fetchone()
             tables = {
                 item[0]
@@ -148,11 +151,16 @@ class XPostLedgerTests(unittest.TestCase):
             queue_columns = {
                 item[1] for item in conn.execute("PRAGMA table_info(x_post_queue)")
             }
-        self.assertEqual(row, ("5221348", "2026-07-23"))
+        self.assertEqual(
+            row,
+            ("5221348", "2026-07-23", "", "", "", "", ""),
+        )
         self.assertIn("x_post_daily_run", tables)
         self.assertIn("x_post_material_pool", tables)
         self.assertIn("pool_item_id", queue_columns)
         self.assertIn("pool_created_at", queue_columns)
+        self.assertIn("original_material_url", queue_columns)
+        self.assertIn("media_repair_source_sha256", queue_columns)
         self.assertIn("ux_x_post_queue_material_key", indexes)
         self.assertIn("ux_x_post_queue_account_run_date", indexes)
         self.assertIn("ux_x_post_queue_pool_item_id", indexes)
@@ -160,6 +168,72 @@ class XPostLedgerTests(unittest.TestCase):
         self.assertIn("trg_x_post_queue_pool_required_insert", triggers)
         self.assertIn("trg_x_post_pool_queue_guard", triggers)
         self.assertIn("trg_x_post_pool_delete_guard", triggers)
+
+    def test_repaired_candidate_freezes_final_url_and_safe_audit_fields(self):
+        store = service.XPostStore(self.db_path)
+        values = plan_candidates((6101, 6102, 6103))
+        repaired = values[0]
+        repaired["original_material_url"] = repaired["material_url"]
+        repaired["material_url"] = (
+            "https://media.example.com/x-post-repair/6101-output.mp4"
+        )
+        repaired["media_repair_trigger_code"] = "invalid_media_codec"
+        repaired["media_repair_job_key"] = "xpost-repair:x-video-v1:6101:" + (
+            "a" * 64
+        )
+        repaired["media_repair_profile"] = "x-video-v1"
+        repaired["media_repair_source_sha256"] = "b" * 64
+
+        plan = store.create_daily_plan("2026-07-23", "2026-07-22", values)
+        queue = plan["queues"][0]
+        self.assertEqual(queue["material_url"], repaired["material_url"])
+        self.assertEqual(
+            queue["original_material_url"], repaired["original_material_url"]
+        )
+        self.assertEqual(
+            queue["media_repair_trigger_code"], "invalid_media_codec"
+        )
+        self.assertEqual(queue["media_repair_profile"], "x-video-v1")
+
+        queried = store.query_logs(
+            {"run_date": "2026-07-23", "page": 1, "page_size": 10}
+        )
+        item = next(
+            row for row in queried["items"] if row["queue_id"] == queue["id"]
+        )
+        self.assertEqual(item["media_repair_trigger_code"], "invalid_media_codec")
+        self.assertEqual(item["media_repair_profile"], "x-video-v1")
+        self.assertNotIn("original_material_url", item)
+        self.assertNotIn("media_repair_source_sha256", item)
+
+    def test_partial_or_nonrepairable_media_audit_is_rejected(self):
+        store = service.XPostStore(self.db_path)
+        cases = []
+        partial = plan_candidates((6201, 6202, 6203))
+        partial[0]["original_material_url"] = partial[0]["material_url"]
+        cases.append(("partial", partial))
+
+        wrong_trigger = plan_candidates((6301, 6302, 6303))
+        repaired = wrong_trigger[0]
+        repaired["original_material_url"] = repaired["material_url"]
+        repaired["material_url"] = (
+            "https://media.example.com/x-post-repair/6301-output.mp4"
+        )
+        repaired["media_repair_trigger_code"] = "invalid_media_duration"
+        repaired["media_repair_job_key"] = "xpost-repair:x-video-v1:6301:" + (
+            "c" * 64
+        )
+        repaired["media_repair_profile"] = "x-video-v1"
+        repaired["media_repair_source_sha256"] = "d" * 64
+        cases.append(("wrong_trigger", wrong_trigger))
+
+        for label, values in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(service.XPostError) as caught:
+                    store.create_daily_plan(
+                        "2026-07-23", "2026-07-22", values
+                    )
+                self.assertEqual(caught.exception.code, "invalid_request")
 
     def test_migrated_published_canary_replays_across_days_without_x_write(self):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
@@ -274,6 +348,55 @@ class XPostLedgerTests(unittest.TestCase):
         self.assertIsNone(store.get_run_by_date("2026-07-24"))
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 3)
+
+    def test_daily_plan_query_returns_only_atomic_run_and_queue_identity(self):
+        store = service.XPostStore(self.db_path)
+        missing = store.query_daily_plan("2026-07-23")
+        self.assertEqual(
+            missing,
+            {"found": False, "run": None, "queues": []},
+        )
+
+        plan = store.create_daily_plan(
+            "2026-07-23",
+            "2026-07-22",
+            plan_candidates(),
+        )
+        snapshot = store.query_daily_plan("2026-07-23")
+        self.assertTrue(snapshot["found"])
+        self.assertEqual(snapshot["run"]["id"], plan["id"])
+        self.assertEqual(
+            [queue["id"] for queue in snapshot["queues"]],
+            [queue["id"] for queue in plan["queues"]],
+        )
+        self.assertEqual(
+            [queue["account_id"] for queue in snapshot["queues"]],
+            [2, 3, 4],
+        )
+        self.assertEqual(
+            set(snapshot["queues"][0]),
+            {
+                "id",
+                "run_id",
+                "run_date",
+                "source_date",
+                "account_id",
+                "candidate_rank",
+                "status",
+                "created_at",
+                "updated_at",
+            },
+        )
+        serialized = str(snapshot).lower()
+        for forbidden in (
+            "material_url",
+            "description",
+            "post_text",
+            "short_url",
+            "long_url",
+            "token",
+        ):
+            self.assertNotIn(forbidden, serialized)
 
     def test_account_day_and_compliance_guards_hold_before_insert(self):
         store = service.XPostStore(self.db_path)

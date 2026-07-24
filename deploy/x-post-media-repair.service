@@ -1,0 +1,42 @@
+[Unit]
+Description=X Post GPU media repair worker
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/x-post-media-repair/current
+EnvironmentFile=-/root/drama_material_service/.env
+EnvironmentFile=/etc/x-post-media-repair.env
+EnvironmentFile=/etc/x-post-media-repair.token
+ExecStart=/root/miniconda3/envs/drama-voice/bin/python /opt/x-post-media-repair/current/scripts/x_post_media_repair_worker.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=x-post-media-repair
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/x-post-media-repair/current
+ReadWritePaths=/data/x-post-media-repair
+UMask=0077
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

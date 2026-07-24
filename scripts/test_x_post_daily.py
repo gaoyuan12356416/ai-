@@ -7,6 +7,7 @@ import io
 import http.client
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.error
@@ -34,7 +35,10 @@ from features.x_posts.service import XPostError  # noqa: E402
 from scripts.x_post_daily_runner import (  # noqa: E402
     DailyConfig,
     DailyRunError,
+    DEFAULT_REPAIR_PROFILE,
     MAX_ERROR_BODY_BYTES,
+    MediaRepairClient,
+    MediaRepairError,
     SidecarClient,
     SidecarError,
     _preflight_candidates,
@@ -273,6 +277,61 @@ def candidate(material_id, spend):
     }
 
 
+def repair_response(job_key, *, sha256="b" * 64, size=8):
+    return {
+        "status": "ready",
+        "job_key": job_key,
+        "profile": DEFAULT_REPAIR_PROFILE,
+        "reused": False,
+        "output_url": "https://cos.example.test/repaired.mp4",
+        "output_sha256": sha256,
+        "output_size": size,
+        "probe": {
+            "codec": "h264",
+            "pixel_format": "yuv420p",
+            "audio_codec": "aac",
+            "width": 720,
+            "height": 1280,
+            "frame_rate": 30.0,
+            "duration": 30.0,
+            "size": size,
+        },
+    }
+
+
+def frozen_plan_snapshot(status="running", source_date="2026-07-22"):
+    run = {
+        "id": 51,
+        "run_date": "2026-07-23",
+        "source_date": source_date,
+        "status": status,
+        "expected_count": 3,
+        "queued_count": 3,
+        "published_count": 0,
+        "failed_count": 0,
+        "unknown_count": 0,
+        "started_at": "2026-07-23T02:00:00Z",
+        "finished_at": "",
+        "created_at": "2026-07-23T02:00:00Z",
+        "updated_at": "2026-07-23T02:00:00Z",
+    }
+    queues = [
+        {
+            "id": 101 + index,
+            "run_id": 51,
+            "run_date": "2026-07-23",
+            "source_date": source_date,
+            "account_id": account_id,
+            "candidate_rank": index + 1,
+            "status": "queued",
+            "created_at": "2026-07-23T02:00:00Z",
+            "updated_at": "2026-07-23T02:00:00Z",
+        }
+        for index, account_id in enumerate((2, 3, 4))
+    ]
+    return {"found": True, "run": run, "queues": queues}
+
+
 def test_config(start_date="2026-07-23"):
     return DailyConfig(
         internal_url="http://127.0.0.1:8810",
@@ -321,6 +380,10 @@ class FakeSidecar:
     def preflight_storage(self, path):
         self.events.append(("storage", path))
         return {"ready": True, "mounted": True, "atomic_write": True}
+
+    def query_daily_plan(self, path, run_date):
+        self.events.append(("plan_query", path, run_date))
+        return {"found": False, "run": None, "queues": []}
 
     def used_material_keys(self, path, material_ids):
         self.events.append(("used", path, list(material_ids)))
@@ -439,7 +502,16 @@ class RunnerTests(unittest.TestCase):
                 "secret",
                 timeout=30,
             )
-        for opener in (client.opener, wait_x_post_sidecar._DIRECT_OPENER):
+            repair_client = MediaRepairClient(
+                "http://127.0.0.1:18799/internal/x-post-media-repair",
+                "repair-secret",
+                timeout=30,
+            )
+        for opener in (
+            client.opener,
+            repair_client.opener,
+            wait_x_post_sidecar._DIRECT_OPENER,
+        ):
             proxy_handlers = [
                 handler
                 for handler in opener.handlers
@@ -448,6 +520,157 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse(
                 any(handler.proxies for handler in proxy_handlers)
             )
+
+    def test_repair_configuration_is_optional_but_independently_authenticated(self):
+        disabled = test_config()
+        disabled.validate()
+        self.assertEqual(disabled.repair_url, "")
+        self.assertEqual(disabled.max_repairs_per_run, 6)
+        self.assertEqual(disabled.repair_profile, DEFAULT_REPAIR_PROFILE)
+
+        enabled = replace(
+            disabled,
+            repair_url=(
+                "http://127.0.0.1:18799/internal/x-post-media-repair"
+            ),
+            repair_token="repair-secret",
+        )
+        enabled.validate()
+
+        with self.assertRaises(DailyRunError):
+            replace(
+                enabled, repair_token=enabled.internal_token
+            ).validate()
+        with self.assertRaises(DailyRunError):
+            replace(
+                enabled,
+                repair_url=(
+                    "http://gpu.example.test:8799/internal/x-post-media-repair"
+                ),
+            ).validate()
+
+    def test_daily_repair_token_falls_back_to_dedicated_worker_secret(self):
+        environment = {
+            "X_POST_DAILY_ACCOUNT_IDS": "2,3,4",
+            "X_POST_DAILY_INTERNAL_TOKEN": "daily-secret",
+            "X_POST_DAILY_MYSQL_HOST": "read-only.example",
+            "X_POST_DAILY_MYSQL_USER": "reader",
+            "X_POST_DAILY_MYSQL_PASSWORD": "password",
+            "X_POST_DAILY_MEDIA_ALLOWED_HOSTS": "media.example.com",
+            "X_POST_DAILY_REPAIR_URL": (
+                "http://127.0.0.1/internal/x-post-media-repair"
+            ),
+            "X_POST_MEDIA_REPAIR_TOKEN": "dedicated-repair-secret",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            config = DailyConfig.from_env()
+        self.assertEqual(config.repair_token, "dedicated-repair-secret")
+        self.assertNotEqual(config.repair_token, config.internal_token)
+
+    def test_repair_client_sends_exact_contract_and_validates_ready_response(self):
+        class Response:
+            status = 200
+
+            def __init__(self, payload):
+                self.raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, _limit):
+                return self.raw
+
+            def getcode(self):
+                return self.status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class CaptureOpener:
+            def __init__(self):
+                self.payload = None
+                self.authorization = ""
+
+            def open(self, request, timeout):
+                self.payload = json.loads(request.data.decode("utf-8"))
+                self.authorization = request.headers["Authorization"]
+                self.timeout = timeout
+                return Response(repair_response(self.payload["job_key"]))
+
+        request_payload = {
+            "job_key": "c" * 64,
+            "material_id": "10",
+            "pool_item_id": 10,
+            "source_url": "https://media.example.test/10.mp4",
+            "source_sha256": "a" * 64,
+            "source_size": 5,
+            "trigger_code": "invalid_media_codec",
+            "profile": DEFAULT_REPAIR_PROFILE,
+        }
+        opener = CaptureOpener()
+        client = MediaRepairClient(
+            "http://127.0.0.1:18799/internal/x-post-media-repair",
+            "repair-secret",
+            timeout=45,
+            max_output_bytes=1024,
+            opener=opener,
+        )
+
+        result = client.repair(request_payload)
+
+        self.assertEqual(opener.payload, request_payload)
+        self.assertEqual(opener.authorization, "Bearer repair-secret")
+        self.assertEqual(opener.timeout, 45)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["output_sha256"], "b" * 64)
+
+    def test_repair_client_rejects_oversized_or_non_https_output(self):
+        class Response:
+            status = 200
+
+            def __init__(self, raw):
+                self.raw = raw
+
+            def read(self, _limit):
+                return self.raw
+
+            def getcode(self):
+                return self.status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class StaticOpener:
+            def __init__(self, raw):
+                self.raw = raw
+
+            def open(self, _request, timeout):
+                return Response(self.raw)
+
+        payload = {
+            "job_key": "c" * 64,
+            "profile": DEFAULT_REPAIR_PROFILE,
+        }
+        oversized = MediaRepairClient(
+            "http://127.0.0.1:18799/internal/x-post-media-repair",
+            "repair-secret",
+            opener=StaticOpener(b"x" * (64 * 1024 + 1)),
+        )
+        with self.assertRaises(MediaRepairError):
+            oversized.repair(payload)
+
+        invalid = repair_response(payload["job_key"])
+        invalid["output_url"] = "http://cos.example.test/repaired.mp4"
+        non_https = MediaRepairClient(
+            "http://127.0.0.1:18799/internal/x-post-media-repair",
+            "repair-secret",
+            opener=StaticOpener(json.dumps(invalid).encode("utf-8")),
+        )
+        with self.assertRaises(MediaRepairError):
+            non_https.repair(payload)
 
     def test_material_occupancy_request_is_bounded_to_supplied_keys(self):
         class Response:
@@ -754,6 +977,71 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "x_publish_invalid_response")
         self.assertTrue(captured.exception.unknown_outcome)
 
+    def test_daily_plan_query_strictly_accepts_only_identity_snapshot(self):
+        class Response:
+            status = 200
+
+            def __init__(self, payload):
+                self.raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, _limit):
+                return self.raw
+
+            def getcode(self):
+                return self.status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Opener:
+            def __init__(self, payload):
+                self.payload = payload
+                self.request_payload = None
+
+            def open(self, request, timeout):
+                self.request_payload = json.loads(request.data.decode("utf-8"))
+                return Response(self.payload)
+
+        snapshot = frozen_plan_snapshot()
+        opener = Opener({"item": snapshot})
+        client = SidecarClient(
+            "http://127.0.0.1:8810",
+            "secret",
+            timeout=30,
+            opener=opener,
+        )
+        queried = client.query_daily_plan(
+            "/internal/posts/daily-plan/query",
+            "2026-07-23",
+        )
+        self.assertEqual(opener.request_payload, {"run_date": "2026-07-23"})
+        self.assertEqual(
+            [queue["account_id"] for queue in queried["queues"]],
+            [2, 3, 4],
+        )
+
+        leaked = frozen_plan_snapshot()
+        leaked["queues"][0]["material_url"] = (
+            "https://media.example.test/private-copy.mp4"
+        )
+        with self.assertRaises(SidecarError) as rejected:
+            SidecarClient(
+                "http://127.0.0.1:8810",
+                "secret",
+                timeout=30,
+                opener=Opener({"item": leaked}),
+            ).query_daily_plan(
+                "/internal/posts/daily-plan/query",
+                "2026-07-23",
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_daily_plan_query_invalid_response",
+        )
+
     def test_daily_plan_response_requires_unique_queue_and_account_identities(self):
         request_payload = {
             "run_date": "2026-07-23",
@@ -941,8 +1229,13 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "published")
         self.assertEqual(result["published_count"], 3)
         self.assertEqual(
-            events[:5],
+            events[:6],
             [
+                (
+                    "plan_query",
+                    "/internal/posts/daily-plan/query",
+                    "2026-07-23",
+                ),
                 ("storage", "/internal/posts/storage/preflight"),
                 ("verify", 2),
                 ("verify", 3),
@@ -955,14 +1248,153 @@ class RunnerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            events[5], ("storage", "/internal/posts/storage/preflight")
+            events[6], ("storage", "/internal/posts/storage/preflight")
         )
-        self.assertEqual(events[6][0], "plan")
-        self.assertEqual(events[6][2], [2, 3, 4])
-        self.assertEqual(events[6][3], ["10", "11", "12"])
-        self.assertEqual(events[7:], [("publish", 101), ("publish", 102), ("publish", 103)])
+        self.assertEqual(events[7][0], "plan")
+        self.assertEqual(events[7][2], [2, 3, 4])
+        self.assertEqual(events[7][3], ["10", "11", "12"])
+        self.assertEqual(events[8:], [("publish", 101), ("publish", 102), ("publish", 103)])
         self.assertEqual(len([item for item in preflight_events if item[0] == "download"]), 3)
         self.assertTrue(connection.closed)
+
+    def test_existing_plan_resumes_before_accounts_pool_or_gpu(self):
+        class ExistingPlanSidecar(FakeSidecar):
+            def query_daily_plan(self, path, run_date):
+                self.events.append(("plan_query", path, run_date))
+                return frozen_plan_snapshot()
+
+        class ForbiddenRepair:
+            def repair(self, _payload):
+                raise AssertionError("GPU repair must not run for a frozen plan")
+
+        sidecar = ExistingPlanSidecar()
+        result = execute_daily_run(
+            test_config(),
+            sidecar=sidecar,
+            connection_factory=lambda _config: self.fail(
+                "source database must not be queried for a frozen plan"
+            ),
+            pool_candidate_loader=lambda *_args, **_kwargs: self.fail(
+                "material pool selection must not run for a frozen plan"
+            ),
+            downloader=lambda *_args, **_kwargs: self.fail(
+                "media download must not run for a frozen plan"
+            ),
+            repair_client=ForbiddenRepair(),
+            now=datetime(
+                2026,
+                7,
+                23,
+                10,
+                0,
+                tzinfo=timezone(timedelta(hours=8)),
+            ),
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(result["resumed_existing_plan"])
+        self.assertEqual(
+            sidecar.events,
+            [
+                (
+                    "plan_query",
+                    "/internal/posts/daily-plan/query",
+                    "2026-07-23",
+                ),
+                ("publish", 101),
+                ("publish", 102),
+                ("publish", 103),
+            ],
+        )
+
+    def test_existing_plan_unknown_outcome_still_stops_recovery(self):
+        class UnknownPlanSidecar(FakeSidecar):
+            def query_daily_plan(self, path, run_date):
+                self.events.append(("plan_query", path, run_date))
+                return frozen_plan_snapshot(status="needs_review")
+
+            def publish_queue(self, path_template, queue_id):
+                self.events.append(("publish", queue_id))
+                if queue_id == 102:
+                    raise SidecarError(
+                        "x_post_unknown_outcome",
+                        "requires reconciliation",
+                        409,
+                        unknown_outcome=True,
+                    )
+                return {
+                    "status": "published",
+                    "log_id": queue_id + 1000,
+                    "short_url": (
+                        "https://ai.yingliangads.com/s2l/%s.html"
+                        % (queue_id + 1000)
+                    ),
+                    "post_id": str(queue_id),
+                    "preview_url": (
+                        "https://x.com/account/status/%s" % queue_id
+                    ),
+                }
+
+        sidecar = UnknownPlanSidecar()
+        result = execute_daily_run(
+            test_config(),
+            sidecar=sidecar,
+            now=datetime(
+                2026,
+                7,
+                23,
+                10,
+                0,
+                tzinfo=timezone(timedelta(hours=8)),
+            ),
+        )
+        self.assertEqual(result["status"], "stopped")
+        self.assertTrue(result["resumed_existing_plan"])
+        self.assertEqual(
+            [event for event in sidecar.events if event[0] == "publish"],
+            [("publish", 101), ("publish", 102)],
+        )
+
+    def test_existing_plan_anomaly_fails_before_preflight(self):
+        class PartialPlanSidecar(FakeSidecar):
+            def query_daily_plan(self, path, run_date):
+                self.events.append(("plan_query", path, run_date))
+                snapshot = frozen_plan_snapshot()
+                snapshot["queues"] = snapshot["queues"][:2]
+                return snapshot
+
+        sidecar = PartialPlanSidecar()
+        with self.assertRaises(DailyRunError) as captured:
+            execute_daily_run(
+                test_config(),
+                sidecar=sidecar,
+                now=datetime(
+                    2026,
+                    7,
+                    23,
+                    10,
+                    0,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+            )
+        self.assertEqual(captured.exception.code, "x_post_daily_resume_conflict")
+        self.assertEqual(len(sidecar.events), 1)
+
+    def test_failed_preflight_without_queues_can_build_a_fresh_plan(self):
+        class FailedPreflightSidecar(FakeSidecar):
+            def query_daily_plan(self, path, run_date):
+                self.events.append(("plan_query", path, run_date))
+                snapshot = frozen_plan_snapshot(status="failed_preflight")
+                snapshot["run"]["queued_count"] = 0
+                snapshot["queues"] = []
+                return snapshot
+
+        sidecar = FailedPreflightSidecar()
+        result, events, _preflight, _connection = self._run(sidecar)
+        self.assertEqual(result["status"], "published")
+        self.assertFalse(result["resumed_existing_plan"])
+        self.assertTrue(any(event[0] == "verify" for event in events))
+        self.assertTrue(any(event[0] == "pool" for event in events))
+        self.assertTrue(any(event[0] == "plan" for event in events))
 
     def test_429_stops_remaining_accounts(self):
         sidecar = FakeSidecar(rate_limit_second=True)
@@ -1089,6 +1521,268 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(failures), 2)
         self.assertEqual(peak_files[0], 1)
 
+    def test_repairable_media_is_rebuilt_once_then_revalidated_from_cos(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(
+                test_config(),
+                work_dir=temporary,
+                repair_url=(
+                    "http://127.0.0.1:18799/internal/x-post-media-repair"
+                ),
+                repair_token="repair-secret",
+            )
+            accounts = [
+                {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "200%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                }
+                for account_id in (2, 3, 4)
+            ]
+            candidates = [
+                candidate(material_id, 100 - material_id)
+                for material_id in (10, 11, 12)
+            ]
+            events = []
+
+            class Repair:
+                def repair(self, payload):
+                    events.append(("repair", dict(payload)))
+                    return repair_response(payload["job_key"])
+
+            def downloader(url, destination, _hosts, max_bytes, timeout):
+                self.assertFalse(Path(destination).exists())
+                if url.startswith("https://cos.example.test/"):
+                    Path(destination).write_bytes(b"repaired")
+                    events.append(("download_repaired", url))
+                    return {
+                        "size": 8,
+                        "sha256": "b" * 64,
+                        "media_type": "video/mp4",
+                    }
+                Path(destination).write_bytes(b"video")
+                events.append(("download_source", url))
+                return {
+                    "size": 5,
+                    "sha256": "a" * 64,
+                    "media_type": "video/mp4",
+                }
+
+            def prober(path, max_bytes, timeout):
+                if Path(path).read_bytes() == b"video" and Path(path).stem == "10":
+                    raise XPostError(
+                        "invalid_media_codec", "bad codec", 422
+                    )
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 30.0,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            accepted, failures = _preflight_candidates(
+                config,
+                candidates,
+                accounts,
+                1784772000,
+                downloader,
+                prober,
+                Repair(),
+            )
+
+        self.assertEqual([item["material_id"] for item in accepted], ["10", "11", "12"])
+        self.assertEqual(failures, [])
+        repaired = accepted[0]
+        self.assertEqual(
+            repaired["original_material_url"],
+            "https://media.example.test/10.mp4",
+        )
+        self.assertEqual(repaired["material_url"], "https://cos.example.test/repaired.mp4")
+        self.assertEqual(repaired["media_repair_trigger_code"], "invalid_media_codec")
+        self.assertEqual(
+            repaired["media_repair_profile"], DEFAULT_REPAIR_PROFILE
+        )
+        self.assertEqual(repaired["media_repair_source_sha256"], "a" * 64)
+        self.assertEqual(repaired["preflight_sha256"], "b" * 64)
+        self.assertEqual(repaired["preflight_size"], 8)
+        repair_payload = next(item[1] for item in events if item[0] == "repair")
+        self.assertEqual(
+            set(repair_payload),
+            {
+                "job_key",
+                "material_id",
+                "pool_item_id",
+                "source_url",
+                "source_sha256",
+                "source_size",
+                "trigger_code",
+                "profile",
+            },
+        )
+        self.assertEqual(repair_payload["pool_item_id"], 10)
+        self.assertEqual(repair_payload["source_size"], 5)
+        self.assertTrue(
+            re.fullmatch(
+                r"[a-f0-9]{64}", repaired["media_repair_job_key"]
+            )
+        )
+
+    def test_repair_quota_is_shared_and_nonrepairable_errors_never_call_worker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(
+                test_config(),
+                work_dir=temporary,
+                max_repairs_per_run=1,
+            )
+            accounts = [
+                {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "200%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                }
+                for account_id in (2, 3, 4)
+            ]
+            candidates = [
+                candidate(material_id, 100 - material_id)
+                for material_id in (10, 11, 12, 13, 14)
+            ]
+
+            class Repair:
+                def __init__(self):
+                    self.calls = []
+
+                def repair(self, payload):
+                    self.calls.append(dict(payload))
+                    return repair_response(payload["job_key"])
+
+            repair = Repair()
+
+            def downloader(url, destination, _hosts, max_bytes, timeout):
+                repaired = url.startswith("https://cos.example.test/")
+                content = b"repaired" if repaired else b"video"
+                Path(destination).write_bytes(content)
+                return {
+                    "size": len(content),
+                    "sha256": ("b" if repaired else "a") * 64,
+                    "media_type": "video/mp4",
+                }
+
+            def prober(path, max_bytes, timeout):
+                material_id = Path(path).stem
+                if Path(path).read_bytes() == b"video" and material_id in {"10", "11"}:
+                    raise XPostError(
+                        "invalid_media_dimensions", "bad dimensions", 422
+                    )
+                if Path(path).read_bytes() == b"video" and material_id == "12":
+                    raise XPostError(
+                        "invalid_media_duration", "bad duration", 422
+                    )
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 30.0,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            accepted, failures = _preflight_candidates(
+                config,
+                candidates,
+                accounts,
+                1784772000,
+                downloader,
+                prober,
+                repair,
+            )
+
+        self.assertEqual([item["material_id"] for item in accepted], ["10", "13", "14"])
+        self.assertEqual(len(repair.calls), 1)
+        self.assertEqual(repair.calls[0]["material_id"], "10")
+        self.assertEqual(
+            [item["error_code"] for item in failures],
+            ["invalid_media_dimensions", "invalid_media_duration"],
+        )
+
+    def test_repaired_media_fingerprint_mismatch_replenishes_without_recursion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(test_config(), work_dir=temporary)
+            accounts = [
+                {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "200%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                }
+                for account_id in (2, 3, 4)
+            ]
+            candidates = [
+                candidate(material_id, 100 - material_id)
+                for material_id in (10, 11, 12, 13)
+            ]
+
+            class Repair:
+                def __init__(self):
+                    self.calls = 0
+
+                def repair(self, payload):
+                    self.calls += 1
+                    return repair_response(payload["job_key"])
+
+            repair = Repair()
+
+            def downloader(url, destination, _hosts, max_bytes, timeout):
+                repaired = url.startswith("https://cos.example.test/")
+                Path(destination).write_bytes(
+                    b"repaired" if repaired else b"video"
+                )
+                return {
+                    "size": 8 if repaired else 5,
+                    "sha256": ("c" if repaired else "a") * 64,
+                    "media_type": "video/mp4",
+                }
+
+            def prober(path, max_bytes, timeout):
+                if Path(path).stem == "10" and Path(path).read_bytes() == b"video":
+                    raise XPostError(
+                        "invalid_media_codec", "bad codec", 422
+                    )
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 30.0,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            accepted, failures = _preflight_candidates(
+                config,
+                candidates,
+                accounts,
+                1784772000,
+                downloader,
+                prober,
+                repair,
+            )
+
+        self.assertEqual([item["material_id"] for item in accepted], ["11", "12", "13"])
+        self.assertEqual(repair.calls, 1)
+        self.assertEqual(
+            failures[0]["error_code"],
+            "x_post_media_repair_fingerprint_mismatch",
+        )
+
     def test_truncated_candidate_download_replenishes_from_next_material(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = replace(test_config(), work_dir=temporary)
@@ -1152,7 +1846,8 @@ class RunnerTests(unittest.TestCase):
                 sidecar=sidecar,
                 now=datetime(2026, 7, 23, 10, 0, tzinfo=timezone(timedelta(hours=8))),
             )
-        self.assertEqual(sidecar.events[0][0], "storage")
+        self.assertEqual(sidecar.events[0][0], "plan_query")
+        self.assertEqual(sidecar.events[1][0], "storage")
         self.assertFalse(any(event[0] in {"verify", "plan", "publish"} for event in sidecar.events))
 
     def test_all_accounts_must_verify_before_plan(self):

@@ -1120,6 +1120,33 @@ class XAccountsTestCase(unittest.TestCase):
                 require_pool=True,
             )
 
+            query_payload = {"run_date": "2026-07-23"}
+            expected_query = {
+                "found": False,
+                "run": None,
+                "queues": [],
+            }
+            with mock.patch.object(
+                service,
+                "query_daily_plan_request",
+                return_value=expected_query,
+            ) as query_mock:
+                with urllib.request.urlopen(
+                    request(
+                        "/internal/posts/daily-plan/query",
+                        query_payload,
+                    ),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(
+                        json.loads(response.read().decode("utf-8")),
+                        {"item": expected_query},
+                    )
+            query_mock.assert_called_once_with(
+                query_payload,
+                service.DAILY_ACCOUNT_IDS,
+            )
+
             available_items = {
                 "items": [
                     {
