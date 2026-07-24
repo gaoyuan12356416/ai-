@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-素材池导航配置授权增量已于 2026-07-23 按 GitHub-first 部署生产，精确运行 commit 为 `3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`。主后台、Sidecar 和素材池公网页面均与精确 release 一致；生产 `navigation.json` 哈希保持 `f676df8771523de7695ba635ad997dcdbf03456578e5c074111ae56395616e75`，未覆盖用户保存的“非仅管理员 + x_accounts + 启用”设置。苏斯琪普通用户现有会话访问素材池 200，管理员日志仍 403。
+素材 URL HTTPS 规范化增量已于 2026-07-24 按 GitHub-first 部署生产，精确运行 commit 为 `b4b9287602eb53840ca093cc7e1165f03eef295a`，release 为 `/opt/x-post-automation/releases/b4b9287602eb53840ca093cc7e1165f03eef295a`。主后台素材预览与 daily selector 统一把源表绝对 `http://` 地址在内存中升级为 `https://`，不回写 `ads_custom_source`；素材池导航仍沿用用户保存的“非仅管理员 + x_accounts + 启用”配置。
 
 ## 生产执行记录
 
@@ -32,6 +32,11 @@
 - 苏斯琪生产现有会话验收：topbar 200，普通用户、`x_accounts=true`；素材池列表 200、X 账号配置 200；管理员发布日志 403。验收前后 pool/queue/log 均为 `1/1/1`。
 - 2026-07-24 10:00 CST 自然 timer 按既有计划触发，因池内不足三条记录 `failed_preflight/x_post_daily_pool_shortage`；未新增 queue/log/Post。timer 仍 active，下次触发为 2026-07-25 10:00 CST。
 - 自然任务在池不足判断前完成三个账号预检，因此 10:00 窗口有 3 个 Token 文件正常更新；当前 Token 文件总数 10、非 0600 文件数 0。部署时的 Token hash 校验已在自然任务前通过，不以部署前 Token 内容覆盖自然刷新结果。
+- HTTPS 规范化增量的 GitHub commit 为 `b4b9287602eb53840ca093cc7e1165f03eef295a`；本地 X 相关测试共 142 项通过，服务器定向 selector 7 项、主后台契约 14 项通过，Python 编译和 `git diff --check` 通过。
+- 部署前在线 SQLite/代码/unit/Token hash+mode 备份为 `/mnt/data-disk/x-post-automation/backups/20260724T033330Z-material-url-https-b4b9287`，`PRAGMA integrity_check=ok`、manifest 自校验通过，10 个 Token 文件 hash/mode 在部署后保持不变。
+- 主后台只替换来自精确 release 的 `app.py` 与 `features/x_posts/selector.py`，仅重启 `drama-material-api.service`；Sidecar 与 timer 未重启。主后台、Sidecar、timer 均 active，内外 health 和素材池公网页面均为 200，部署后主后台 error/exception 日志计数为 0。
+- 对全部 7 条未占用 `material_url_not_https` 池记录重新执行完整 selector 校验后，池 ID `6/11/12/16/29/30/32` 的错误字段均清空并派生为 `available`；对应 HTTPS 地址 HEAD 均为 200。当前 pool 汇总为总数 32、可供发布 28、校验失败 3、已占用 1、已发布 1，unknown/post_creating 为 0。
+- 部署后验证窗口内，另一路 loopback canary 调用在 2026-07-24 11:35 CST 创建 queue `2` / log `2` 并发布素材 `5801636`，Post 为 `https://x.com/ShortsDramhx/status/2080497085518884880`。该记录 `run_id` 为空；`x-post-daily.service` 在窗口内无启动日志，最后一次仍为 10:00 自然任务，因此不得归因于 timer 或本次校验刷新。由于该真实发布发生在备份之后，回滚严禁恢复部署前 SQLite。
 
 ## 变更内容
 
@@ -43,6 +48,7 @@
 - 本次增量：素材池列表直接附加 `ads_custom_source.url` 的安全 HTTPS 地址，页面直接打开源素材，旧 302 接口仅保留兼容。
 - 本次增量：页面与素材池查询/预览/添加/删除统一跟随 `xPostMaterialPool` 快速导航配置；API Token、缺少模块权限、禁用/缺失配置继续 fail closed。
 - 本次增量：主后台完成导航授权后才向 loopback Sidecar 附加精确素材池授权标记；不改变发布日志、运行记录、X 账号全量列表或 daily 权限。
+- 本次增量：`ads_custom_source.url` 为绝对 HTTP 地址时，素材预览和 selector 共用同一规范化函数升级为 HTTPS；FTP、相对路径、带凭据、控制字符和非标准端口继续 fail closed。
 - 保留现有 X 日批次、W2A/短链、日志、账号、timer 和失败语义。
 
 ## 配置项
@@ -91,7 +97,7 @@
 
 - Sidecar health 200；公网 internal 路由不可访问。
 - 管理员素材池页面/API 200，普通用户/API Token/cross-origin 写请求拒绝。
-- 管理员列表为池内素材附加安全 HTTPS `material_preview_url`，页面直接打开；不存在/非法 URL 显示“无法预览”，且不会修改池、queue 或日志。旧 302 接口仅做兼容。
+- 管理员列表为池内素材附加安全 HTTPS `material_preview_url`；源表绝对 HTTP 地址只在内存中升级为 HTTPS，页面直接打开且不回写源表。不存在/非法/非 HTTP(S) URL 显示“无法预览”，且不会修改池、queue 或日志。旧 302 接口仅做兼容。
 - 批量添加重复或历史 queue 素材整批回滚。
 - 临时未占用素材可删除；已占用/已发布素材返回 409。
 - daily bearer 可访问 available/check，不能访问 query/add/delete。
@@ -107,6 +113,8 @@
 3. 已产生任何新 queue/log/Post 后，不恢复部署前 SQLite，不删除新表/触发器；以修复前滚为主。
 4. 若迁移后尚无任何新记录，可在停服和人工核对计数/hash 后恢复数据库备份。
 5. 静态页面可回滚，但必须保留已发布 Post 对应的 `/s2l/{log_id}.html`。
+
+本次代码回滚点为上一 release `/opt/x-post-automation/releases/3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`，代码快照位于上述 `20260724T033330Z` 备份。切回 release 后从备份恢复主后台 `app.py` 和 selector，并仅重启 `drama-material-api.service`；保留当前 live SQLite、queue `2`、log `2`、短链和 Token，不能使用部署前 `accounts.sqlite3` 覆盖。
 
 ## 注意事项
 
