@@ -158,7 +158,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertEqual(drama_calls[0][1], ("C10", "en"))
 
     def test_item_level_safety_rejections_are_reported_and_scanning_continues(self):
-        connection = PoolConnection(range(1, 8))
+        connection = PoolConnection(range(1, 7))
         connection.violations["1"] = 1
         connection.materials["2"]["source_tag_name"] = "sexual_content"
         connection.material_tags["3"] = ["blood_gore"]
@@ -166,22 +166,19 @@ class ManualPoolSelectorTests(unittest.TestCase):
             drama_row(4),
             drama_row(4, series_code="ANOTHER_SERIES"),
         ]
-        connection.drama_rows["5"] = [
-            drama_row(5, drama_labels="Fantasy,Graphic Violence"),
-        ]
-        connection.materials["6"]["material_url"] = "ftp://media.example.test/6.mp4"
+        connection.materials["5"]["material_url"] = "ftp://media.example.test/5.mp4"
 
         selected, rejections = select_pool_candidates(
             connection,
             [
                 pool_item(material_id, material_id, "2026-07-23T00:00:0%sZ" % material_id)
-                for material_id in range(1, 8)
+                for material_id in range(1, 7)
             ],
             "2026-07-22",
             limit=1,
         )
 
-        self.assertEqual([item["material_id"] for item in selected], ["7"])
+        self.assertEqual([item["material_id"] for item in selected], ["6"])
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
@@ -189,7 +186,6 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 "material_source_tag_unsafe",
                 "material_tag_unsafe",
                 "drama_mapping_ambiguous",
-                "drama_label_unsafe",
                 "material_url_not_https",
             ],
         )
@@ -200,6 +196,23 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 for item in rejections
             )
         )
+
+    def test_sexual_or_violent_drama_labels_are_allowed(self):
+        connection = PoolConnection([8])
+        connection.drama_rows["8"] = [
+            drama_row(8, drama_labels="Sexual Content,Graphic Violence"),
+        ]
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [pool_item(1, 8, "2026-07-23T00:00:00Z")],
+            "2026-07-22",
+            limit=1,
+        )
+
+        self.assertEqual(rejections, [])
+        self.assertEqual([item["material_id"] for item in selected], ["8"])
+        self.assertEqual(selected[0]["tag"], "Sexual Content")
 
     def test_http_material_url_is_upgraded_to_https_before_selection(self):
         connection = PoolConnection([6])

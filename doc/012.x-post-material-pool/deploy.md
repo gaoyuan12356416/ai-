@@ -101,7 +101,7 @@
 - 批量添加重复或历史 queue 素材整批回滚。
 - 临时未占用素材可删除；已占用/已发布素材返回 409。
 - daily bearer 可访问 available/check，不能访问 query/add/delete。
-- available 返回严格 `created_at,id` 顺序，非 Dramawave/违规/危险标签/媒体异常不进入计划。
+- available 返回严格 `created_at,id` 顺序，非 Dramawave/违规/素材源或资源危险标签/媒体异常不进入计划；短剧 labels 内容词不拦截。
 - 只有三条全部通过时才出现三条 queue；不足三条时 Post 数为 0。
 - 首轮自然 timer 后核对 queue/log/pool：成功项 published，known failure/unknown 保持 unpublished 且派生不可重发。
 - 既有 canary、OAuth、短链、X 日志页面和账号权限回归正常。

@@ -500,19 +500,6 @@ class DramawaveCandidateSelector:
                     "drama_mapping_invalid",
                     "drama labels are incomplete",
                 )
-            for label in labels:
-                try:
-                    label_is_unsafe = contains_dangerous_tag(label)
-                except CandidateSelectionError as exc:
-                    raise PoolCandidateRejection(
-                        "drama_label_invalid",
-                        "drama label cannot be checked safely: %s" % exc,
-                    ) from None
-                if label_is_unsafe:
-                    raise PoolCandidateRejection(
-                        "drama_label_unsafe",
-                        "drama label is unsafe",
-                    )
             canonical_key = (
                 mapped_content_id,
                 series_code,
@@ -645,9 +632,6 @@ class DramawaveCandidateSelector:
         labels = [item.strip() for item in drama_labels.split(",") if item.strip()]
         if not labels:
             raise CandidateSelectionError("drama labels are incomplete")
-        for label in labels:
-            if contains_dangerous_tag(label):
-                raise CandidateSelectionError("drama label is unsafe")
 
         return {
             "source_date": source_date,

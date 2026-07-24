@@ -21,7 +21,7 @@
 - 素材池管理页面、导航配置授权的查询/添加/删除 API、素材源文件预览和后台审计日志。
 - 素材入池前由主后台复用 X selector 做即时只读校验，并将结果与素材池记录原子写入；daily runner 仍会重新检查并回写最新结果。
 - 从 `ads_custom_source` 直接按 ID 加载素材，不再用前一天消耗作为排序或入选条件。
-- 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射、违规记录、色情/暴力标签和媒体文件预检。
+- 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射、违规记录、素材源/资源色情暴力标签和媒体文件预检；短剧 labels 仅作发布归因元数据，不再据此拒绝素材。
 - queue 创建时的全局素材排重、账号日排重、三条计划原子提交。
 - 已发布、已占用、已失败、结果待核查和校验失败的后台展示。
 
@@ -36,11 +36,11 @@
 
 1. 管理员可一次录入 1 至 100 个正整数素材 ID；前导零统一规范为十进制 `material_key`。
 2. 同一批次重复、已在池中、或已有任意 X queue 历史的素材，整批添加失败，不做部分写入。
-3. 录入时立即复用 X selector 检查素材源资格、违规记录、危险标签和剧映射；找不到素材或任一检查不通过时仍保留池记录，但派生状态立即显示为 `validation_failed`（页面文案“不可用”）。
+3. 录入时立即复用 X selector 检查素材源资格、违规记录、素材源/资源危险标签和剧映射；找不到素材或任一检查不通过时仍保留池记录，但派生状态立即显示为 `validation_failed`（页面文案“不可用”）。
 4. 正式日更只接受 `ads_custom_source.product = 'Dramawave'`、`type = 2`、`is_delete = 0`、视频时长 1 至 140 秒的素材。
 5. 素材必须有 HTTPS URL、完整名称/语言/content ID，并能唯一解析到同 content ID、同语言的短剧记录。
 6. Facebook、TikTok、Twitter 违规表和资源审核记录必须全部为 0。
-7. `ads_custom_source.tag_name`、`resource_tags.tag_name` 和短剧 labels 均执行色情、暴力等危险词检查；任一命中即跳过。
+7. `ads_custom_source.tag_name`、`resource_tags.tag_name` 继续执行色情、暴力等危险词检查，任一命中即跳过；自 2026-07-24 起，短剧 labels 只要求存在且映射一致，即使包含这些内容词也允许候选。
 8. 选择顺序仅由池记录的 `created_at`、`id` 决定；`source_date` 仍记录为运行日前一天，但不再查询 `ads_custom_source_insight`，候选 `spend` 固定为 0。
 9. 数据质量或安全不通过是单素材拒绝，可继续扫描后续素材；MySQL 查询异常是批次异常，整批停止。
 10. 下载、大小、编码、时长、分辨率等媒体预检在建计划前执行；可用后续候选补位。
@@ -150,7 +150,7 @@
 - [x] 素材池页面和查询/预览/添加/删除 API 与快速导航栏 `xPostMaterialPool` 的 `adminOnly`、`module`、`enabled` 设置一致；API Token、缺少模块权限和跨源写请求均被拒绝。
 - [x] 正式选择路径不查询 `ads_custom_source_insight`，不使用 spend 排序。
 - [x] 只有 Dramawave 的有效视频素材可以进入候选。
-- [x] 四类违规证据、三处危险标签、剧映射和媒体预检全部 fail closed。
+- [x] 四类违规证据、两处素材危险标签、剧映射和媒体预检全部 fail closed；短剧 labels 内容词不构成拒绝条件。
 - [x] 合格素材严格按 `created_at,id` 顺序进入三个固定账号队列。
 - [x] 少于三条合格素材时 run 记录失败原因，但 queue、短链和 X Post 均为 0。
 - [x] queue 先于池、池先于 queue 两个方向都无法绕过全局排重。

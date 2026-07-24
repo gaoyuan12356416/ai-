@@ -25,7 +25,7 @@
 | TC-008 | Dramawave 产品门禁 | 同结构素材分别为 Dramawave/其他产品 | 仅精确 Dramawave 通过 |
 | TC-009 | 素材基本资格 | 缺失、非视频、删除、时长越界、HTTP URL | 分项安全拒绝，继续扫描 |
 | TC-010 | 违规记录 | 四类违规计数逐一设为非 0 | 均拒绝 |
-| TC-011 | 危险标签 | source tag、resource tag、drama label 分别命中 | 均拒绝 |
+| TC-011 | 危险标签 | source tag、resource tag、drama label 分别命中 | source/resource tag 拒绝；drama label 在其他检查通过时允许 |
 | TC-012 | 剧映射 | 缺失、不完整、跨语言、多个不等价映射 | fail closed；规范等价重复允许 |
 | TC-013 | MySQL 查询异常 | fake connection 抛查询错误 | 整批中止，不降级为单素材拒绝 |
 | TC-014 | 校验结果回写 | 对未占用素材写 error，再查询 | 主状态 unpublished，派生 validation_failed |

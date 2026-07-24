@@ -106,7 +106,7 @@
 - 数组必须包含 1 至 100 项。
 - 每项规范为正整数文本，`"00101"` 保存为 `"101"`。
 - 同批重复、池内重复、已有任意 queue 历史时，整个事务回滚。
-- 主后台先复用正式 X selector 做只读即时校验，覆盖 Dramawave、视频类型/删除态/时长、HTTPS、必填元数据、违规记录、色情/暴力危险标签和短剧映射。
+- 主后台先复用正式 X selector 做只读即时校验，覆盖 Dramawave、视频类型/删除态/时长、HTTPS、必填元数据、违规记录、素材源/资源色情暴力危险标签和短剧映射；短剧 labels 只作必填归因元数据，不按内容词拒绝。
 - 素材不存在或任一标准不通过时仍可加入池，但 `availability` 立即为 `validation_failed`，页面显示“不可用”；检查服务异常统一 fail closed 为 `material_validation_unavailable`。
 - 素材 ID、校验时间和逐素材错误与池记录在 Sidecar 同一事务写入，不存在先显示 `available` 的窗口。
 - 入池校验不替代 daily 的媒体文件下载/ffprobe 预检。
