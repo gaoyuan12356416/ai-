@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-入池即时 X 校验与素材源 URL 直链增量已部署生产，代码与生产 GO。精确 commit `00b5b088af76dce4a02866beaf0186713daa46fb` 在本地和服务器均完成 143/143 X 回归；现有两条池记录已按 selector 回填为“不可用”，预览 URL 与缺失态符合要求。本轮未调用真实 X。
+素材池页面与四个管理 API 已改为跟随快速导航栏 `xPostMaterialPool` 的 `adminOnly`、`module`、`enabled` 配置，精确生产 commit 为 `3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`。本地和服务器均完成 145/145 X 回归；苏斯琪现有 Cookie 会话以普通用户、`x_accounts=true` 成功查询素材池 200，同时管理员发布日志仍为 403。导航配置未被覆盖，本轮未手工触发 daily、未调用真实 X。
 
 ## 测试范围
 
@@ -19,25 +19,25 @@
 
 | 命令组 | 数量 | 结果 | 说明 |
 | --- | ---: | --- | --- |
-| pool + pool selector + daily + ledger + app contract | 69 | 69 通过 | 含入池即时校验、素材 URL 直链和页面契约 |
+| pool + pool selector + daily + ledger + app contract | 71 | 71 通过 | 含导航配置授权、入池即时校验、素材 URL 直链和页面契约 |
 | X Post service + X accounts + owner backfill | 74 | 74 通过 | 最终关键修订后执行 |
-| 合计 | 143 | 143 通过 | 0 失败、0 阻塞 |
+| 合计 | 145 | 145 通过 | 0 失败、0 阻塞 |
 | `python -m py_compile`（实际目标） | — | 通过 | app/oauth/client/service 与新增测试 |
-| Node `vm.Script` 页面内嵌脚本校验 | 3 段 | 通过 | `x-post-material-pool.html` |
+| Node `vm.Script` 页面内嵌脚本校验 | 1 段 | 通过 | `x-post-material-pool.html` |
 
 ## 生产验收结果
 
 | 项目 | 结果 | 证据 |
 | --- | --- | --- |
-| 精确 release | 通过 | `00b5b088af76dce4a02866beaf0186713daa46fb`；服务器 release clean，主后台 app/client/x_posts、服务静态页和公网页面哈希与 release 一致 |
-| 生产 MySQL | 通过 | 只读 selector：`5503209` 因 1352 秒超过 X 140 秒上限不合格；`11761405635` 在当前源库无记录 |
-| SQLite | 通过 | 本次无 schema 迁移；回填前后 pool/queue/log 均为 `2/1/1`，两条仅更新检查字段，`integrity_check=ok` |
-| Sidecar/主后台/timer | 通过 | active/active/active，daily service inactive |
-| 内部接口 | 通过 | 两条均返回 `validation_failed`；`5503209` 的 `material_preview_url` 为安全 MyQcloud HTTPS，`11761405635` 为空 |
+| 精确 release | 通过 | `3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`；主后台 app/client、Sidecar oauth/client、服务静态页和公网页面均与 release 一致 |
+| 历史素材校验 | 通过 | 只读 selector 曾确认：`5503209` 因 1352 秒超过 X 140 秒上限不合格；`11761405635` 在当时源库无记录 |
+| SQLite | 通过 | 权限部署前后 pool/queue/log 均为 `1/1/1`，`integrity_check=ok`；没有因权限验收写入素材池、queue 或发布日志 |
+| Sidecar/主后台/timer | 通过 | active/active/active；2026-07-24 10:00 自然任务因池内不足三条记录 `failed_preflight/x_post_daily_pool_shortage`，未创建 queue/log/Post；下次触发 2026-07-25 10:00 CST |
+| 内部接口 | 通过 | 苏斯琪查询当前 `POOL_TOTAL=1`；列表仍按安全 HTTPS 规则附加 `material_preview_url`，不返回内部凭据 |
 | 公网接口/页面 | 通过 | 匿名管理 API 401 + no-store；公网页面 200，与精确 release hash 一致，页面不再引用旧 preview 跳转端点 |
-| 管理员浏览器 | 受限 | Chrome 原标签页登录态已过期，仅显示“登录”；未代替用户登录，接口/页面代码与服务端数据已分别验收 |
+| 普通用户实会话 | 通过 | 苏斯琪：topbar 200、`is_admin=false`、`x_accounts=true`、素材池 200；同会话 X 账号配置 200、管理员发布日志 403 |
 | 原有证据保护 | 通过 | 原 canary queue/log 各 1 条，部署未新增 queue/log/Post |
-| 配置与秘密 | 通过 | 敏感值未变化，daily env 0400、Sidecar env/SQLite 0600；部署后无 warning 级服务日志 |
+| 配置与秘密 | 通过 | 部署时 env/Token hash 未变，最终备份 manifest 通过；次日 10:00 自然任务账号预检窗口有 3 个 Token 文件正常更新，当前 10 个 Token 文件仍全部 0600；部署后主后台/Sidecar 无 warning 级日志 |
 
 ## 评审发现
 
@@ -48,12 +48,13 @@
 - 超过 100 条的检查结果已按 API 上限分批；205 条 100/100/5 回归通过。
 - 入池即时校验直接复用 manual selector；Sidecar 只接受与本批素材一一对应的检查结果，缺失时 pending/不可用，非法集合整批回滚。
 - 素材池列表按当前页精确批量读取源 URL；不合规但源 URL 安全的素材仍可预览，不存在/HTTP/凭据/控制字符/异常端口全部显示无法预览。
+- 页面直接 no-store 读取 `/navigation.json`，后端独立读取相同生产配置；主后台放行后只向 loopback Sidecar 的素材池 query/add/delete 附加精确导航授权标记。错误标记仍 403，账号全量列表、发布日志、运行记录和 daily 路由未放权。
 
 ## 未执行
 
 - 未调用 X 媒体上传/发帖接口，未创建新的真实 X Post。
-- 未做首轮自然 timer 验收。
+- 未出现可发布的三素材批次，因此仍未执行真实媒体上传或 X Post 成功态验收。
 
 ## 发布建议
 
-生产已按 GitHub-first 部署本次精确 commit，现有两条记录均不可用且池内不足三条，2026-07-24 10:00 CST 的自然任务会按设计整批不发。应删除或修复无效 ID，并录入至少三条可校验的 Dramawave 素材；首轮真实发布仍由自然调度验收，不手工触发 daily service。
+生产已按 GitHub-first 部署本次精确 commit。2026-07-24 10:00 CST 的自然任务已按设计因池内不足三条整批不发；应补充至少三条可校验的 Dramawave 素材，首轮真实发布继续由自然调度验收，不手工触发 daily service。

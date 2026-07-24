@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-“入池即时 X 校验 + `ads_custom_source.url` 直链预览”已于 2026-07-23 按 GitHub-first 部署生产，精确运行 commit 为 `00b5b088af76dce4a02866beaf0186713daa46fb`。服务器 release clean，主后台、Sidecar 和素材池公网页面均与该 release 的目标文件哈希一致；Sidecar、主后台、`x-post-daily.timer` 为 active，daily service 为 inactive，下一次自然触发为 2026-07-24 10:00 CST。本次未启动 daily、未创建 queue/日志/短链、未上传媒体、未调用真实 X。
+素材池导航配置授权增量已于 2026-07-23 按 GitHub-first 部署生产，精确运行 commit 为 `3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`。主后台、Sidecar 和素材池公网页面均与精确 release 一致；生产 `navigation.json` 哈希保持 `f676df8771523de7695ba635ad997dcdbf03456578e5c074111ae56395616e75`，未覆盖用户保存的“非仅管理员 + x_accounts + 启用”设置。苏斯琪普通用户现有会话访问素材池 200，管理员日志仍 403。
 
 ## 生产执行记录
 
@@ -25,6 +25,13 @@
 - 只读列表验证：`5503209` 虽不合规但成功附加 `ads_custom_source.url`，域名为 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`；`11761405635` 无源记录，`material_preview_url` 为空并显示“无法预览”。
 - 最终主后台/Sidecar/timer 为 active，daily inactive，Sidecar health `ok`，公网素材池页 200，匿名管理 API 401 + no-store，部署后两个服务无 warning 级日志。
 - Chrome 中原管理员标签页登录态已过期，只显示登录按钮，因此未代替用户重新登录做表格视觉验收；同一生产环境下的管理员内部接口、源 URL 查询和公网页面哈希均已验证。
+- 导航授权第一阶段 commit `91026670f367f86afc15e47a4515058384cb70fb` 先消除页面与主后台的写死管理员判断；实会话验收发现 Sidecar 仍返回 `x_admin_required`，未误判为完成。
+- 最终 commit `3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8` 增加仅 backend bearer 素材池路由识别的 `navigation_item=xPostMaterialPool` 内部授权标记；错误标记和无标记普通用户仍 403，daily bearer 仍不能查询/添加/删除素材池。
+- 两次权限增量备份分别为 `/mnt/data-disk/x-post-automation/backups/20260723T103847Z-x-pool-navigation-9102667` 和 `/mnt/data-disk/x-post-automation/backups/20260723T104611Z-x-pool-navigation-3d5ba0b`；最终备份 manifest 自校验通过，含 SQLite 在线备份、Token/配置、运行文件和回滚证据。
+- 最终 release 在服务器完成 145/145 测试；主后台 app/client、Sidecar oauth/client、服务静态页和公网页面哈希一致，主后台与 Sidecar 部署后无 warning 级日志。
+- 苏斯琪生产现有会话验收：topbar 200，普通用户、`x_accounts=true`；素材池列表 200、X 账号配置 200；管理员发布日志 403。验收前后 pool/queue/log 均为 `1/1/1`。
+- 2026-07-24 10:00 CST 自然 timer 按既有计划触发，因池内不足三条记录 `failed_preflight/x_post_daily_pool_shortage`；未新增 queue/log/Post。timer 仍 active，下次触发为 2026-07-25 10:00 CST。
+- 自然任务在池不足判断前完成三个账号预检，因此 10:00 窗口有 3 个 Token 文件正常更新；当前 Token 文件总数 10、非 0600 文件数 0。部署时的 Token hash 校验已在自然任务前通过，不以部署前 Token 内容覆盖自然刷新结果。
 
 ## 变更内容
 
@@ -34,6 +41,8 @@
 - 素材池明细新增独立素材预览列；管理员点击后由主后台安全跳转到池内素材对应的 HTTPS 源 URL。
 - 本次增量：添加素材前复用 X selector 做只读即时校验，校验结果与池记录原子写入；失败/不存在立即显示“不可用”。
 - 本次增量：素材池列表直接附加 `ads_custom_source.url` 的安全 HTTPS 地址，页面直接打开源素材，旧 302 接口仅保留兼容。
+- 本次增量：页面与素材池查询/预览/添加/删除统一跟随 `xPostMaterialPool` 快速导航配置；API Token、缺少模块权限、禁用/缺失配置继续 fail closed。
+- 本次增量：主后台完成导航授权后才向 loopback Sidecar 附加精确素材池授权标记；不改变发布日志、运行记录、X 账号全量列表或 daily 权限。
 - 保留现有 X 日批次、W2A/短链、日志、账号、timer 和失败语义。
 
 ## 配置项
