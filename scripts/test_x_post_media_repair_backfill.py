@@ -150,10 +150,10 @@ class BackfillTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def config(self, temporary):
+    def config(self, _temporary):
         return replace(
             test_config(),
-            work_dir=temporary,
+            work_dir=str(Path(tempfile.gettempdir()).resolve()),
             repair_url=(
                 "http://127.0.0.1:18820/internal/x-post-media-repair"
             ),
