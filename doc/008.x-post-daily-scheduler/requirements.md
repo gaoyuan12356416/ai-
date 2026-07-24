@@ -10,7 +10,7 @@
 - 素材来自前一日 `ads_custom_source_insight`，按素材总消耗降序筛选。
 - 排除违规记录、色情/暴力危险标签、剧信息不完整或多义、媒体技术规格不合格的素材。
 - 同一素材跨账号、跨日期永久不重复；同一账号同一天最多一条。
-- 发布正文保持 `{short_url}\n☝️Click to watch the full series👆\n\n{name}\n{desc}\n______`，其中 `name` 为剧名称；短链再跳转到固定 Dramawave W2A 长链。
+- 发布正文保持 `{short_url}\n☝️Click to watch the full series👆\n\n{name}\n{desc}`，其中 `name` 为剧名称；短链再跳转到固定 Dramawave W2A 长链。
 - AI 后台提供管理员可见的发布批次和发布日志表。
 - 任务可审计、可恢复、可回滚，且不向日志或后台暴露 OAuth/数据库敏感值。
 

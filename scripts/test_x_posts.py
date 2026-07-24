@@ -268,7 +268,6 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(lines[2], "")
         self.assertEqual(lines[3], drama_name)
         self.assertTrue(lines[4].endswith("…"))
-        self.assertEqual(lines[5], service.POST_FOOTER)
         weighted_body = sum(
             1
             if (
@@ -291,7 +290,6 @@ class XPostsTests(unittest.TestCase):
                 + "\n☝️Click to watch the full series👆"
                 + "\n\nLove Again"
                 + "\nA second chance at love."
-                + "\n______"
             ),
         )
 

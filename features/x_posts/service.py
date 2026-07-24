@@ -237,7 +237,6 @@ def _build_short_url(short_base_url, log_id):
 
 
 POST_CTA = "☝️Click to watch the full series👆"
-POST_FOOTER = "______"
 
 
 def build_post_text(short_url, drama_name, description):
@@ -266,9 +265,8 @@ def build_post_text(short_url, drama_name, description):
     # X shortens an HTTPS URL to a fixed t.co length.  Keep every fixed field
     # intact and use the remaining weighted budget only for the description.
     suffix = "\n%s\n\n%s\n" % (POST_CTA, drama_name)
-    footer = "\n%s" % POST_FOOTER
     remaining = 280 - 23
-    remaining -= sum(char_weight(char) for char in suffix + footer)
+    remaining -= sum(char_weight(char) for char in suffix)
     if remaining <= char_weight("…"):
         raise XPostError("invalid_request", "剧名过长，无法生成帖子正文", 400)
 
@@ -289,7 +287,7 @@ def build_post_text(short_url, drama_name, description):
         rendered = "".join(selected).rstrip() + ellipsis
     if not rendered.strip():
         raise XPostError("invalid_request", "剧描述截断后为空", 400)
-    return str(short_url) + suffix + rendered + footer
+    return str(short_url) + suffix + rendered
 
 
 def _validate_post_storage_layout(
