@@ -124,6 +124,21 @@ def material_key(material_id):
     return str(parsed)
 
 
+def normalize_material_url(value):
+    """Upgrade an absolute HTTP material URL to HTTPS without changing its target."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    scheme = value[:8].lower()
+    if scheme.startswith("http://"):
+        return "https://" + value[7:]
+    if scheme == "https://":
+        return "https://" + value[8:]
+    return value
+
+
 def contains_dangerous_tag(value):
     """Fail closed for undecodable tag values; otherwise apply the shared lexicon."""
     if value is None:
@@ -368,7 +383,9 @@ class DramawaveCandidateSelector:
                 row.get("material_language"), "material_language", limit=32
             )
             content_id = _text(row.get("content_id"), "content_id", limit=128)
-            material_url = _text(row.get("material_url"), "material_url", limit=4096)
+            material_url = normalize_material_url(
+                _text(row.get("material_url"), "material_url", limit=4096)
+            )
             material_name = _text(
                 row.get("material_name"), "material_name", limit=500
             )
@@ -560,7 +577,9 @@ class DramawaveCandidateSelector:
         )
         if insight_content_id != content_id:
             raise CandidateSelectionError("insight and material content IDs do not match")
-        material_url = _text(row.get("material_url"), "material_url", limit=4096)
+        material_url = normalize_material_url(
+            _text(row.get("material_url"), "material_url", limit=4096)
+        )
         if not material_url.startswith("https://"):
             raise CandidateSelectionError("material URL is not HTTPS")
 

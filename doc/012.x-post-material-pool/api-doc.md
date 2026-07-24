@@ -74,7 +74,7 @@
 
 `summary.available` 必须与 `availability=available` 相同口径，不包含 `validation_failed`。
 
-列表的 `material_preview_url` 由主后台按当前页素材 ID 批量、只读、精确查询 `ads_custom_source.url` 后附加。仅返回无凭据、无控制字符、端口为空或 443 的 HTTPS URL；素材的 X 合规状态不影响 URL 返回，源记录或安全 URL 不存在时返回空字符串。页面直接用该字段打开素材。
+列表的 `material_preview_url` 由主后台按当前页素材 ID 批量、只读、精确查询 `ads_custom_source.url` 后附加。绝对 `http://` 地址会在内存中升级为 `https://`，不回写 `ads_custom_source`；最终仅返回无凭据、无控制字符、端口为空或 443 的 HTTPS URL。素材的 X 合规状态不影响 URL 返回，源记录或安全 URL 不存在时返回空字符串。发布筛选使用相同的 HTTP→HTTPS 规范化结果，页面直接用该字段打开素材。
 
 ## GET /api/admin/x-posts/material-pool/preview（兼容接口）
 

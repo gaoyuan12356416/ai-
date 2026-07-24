@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from features.x_posts.selector import material_key  # noqa: E402
+from features.x_posts.selector import material_key, normalize_material_url  # noqa: E402
 
 
 APP_PATH = ROOT / "app.py"
@@ -269,6 +269,7 @@ class XAccountsAppContractTest(unittest.TestCase):
             "re": re,
             "urlparse": urlparse,
             "x_post_material_key": material_key,
+            "x_post_normalize_material_url": normalize_material_url,
         }
         exec(
             compile(
@@ -304,10 +305,17 @@ class XAccountsAppContractTest(unittest.TestCase):
                 preview_location(invalid, valid_loader)
         with self.assertRaises(LookupError):
             preview_location("5503209", lambda _query: [])
-        with self.assertRaises(LookupError):
+        self.assertEqual(
             preview_location(
                 "5503209",
                 lambda _query: [["5503209", "http://media.example.test/a.mp4"]],
+            ),
+            "https://media.example.test/a.mp4",
+        )
+        with self.assertRaises(LookupError):
+            preview_location(
+                "5503209",
+                lambda _query: [["5503209", "ftp://media.example.test/a.mp4"]],
             )
         with self.assertRaises(LookupError):
             preview_location(

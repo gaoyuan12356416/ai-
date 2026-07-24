@@ -41306,6 +41306,7 @@ from features.x_accounts.client import (
 from features.x_posts.selector import (
     connect_read_only as connect_x_post_read_only,
     material_key as x_post_material_key,
+    normalize_material_url as x_post_normalize_material_url,
     previous_source_date as x_post_previous_source_date,
     select_pool_candidates as select_x_post_pool_candidates,
 )
@@ -41528,7 +41529,7 @@ def x_post_material_preview_urls(material_ids, row_loader=None):
         if material_id in values:
             duplicates.add(material_id)
             continue
-        location = str(row[1] or "").strip()
+        location = x_post_normalize_material_url(row[1])
         if (
             not location
             or len(location) > 4096

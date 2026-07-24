@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from features.x_posts.selector import (  # noqa: E402
     CandidateQueryError,
+    normalize_material_url,
     select_pool_candidates,
 )
 
@@ -168,7 +169,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
         connection.drama_rows["5"] = [
             drama_row(5, drama_labels="Fantasy,Graphic Violence"),
         ]
-        connection.materials["6"]["material_url"] = "http://media.example.test/6.mp4"
+        connection.materials["6"]["material_url"] = "ftp://media.example.test/6.mp4"
 
         selected, rejections = select_pool_candidates(
             connection,
@@ -198,6 +199,29 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 == {"pool_item_id", "material_id", "error_code", "error_message"}
                 for item in rejections
             )
+        )
+
+    def test_http_material_url_is_upgraded_to_https_before_selection(self):
+        connection = PoolConnection([6])
+        connection.materials["6"]["material_url"] = (
+            "http://media.example.test/custom/source/6.mp4"
+        )
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [pool_item(1, 6, "2026-07-23T00:00:00Z")],
+            "2026-07-22",
+            limit=1,
+        )
+
+        self.assertEqual(rejections, [])
+        self.assertEqual(
+            selected[0]["material_url"],
+            "https://media.example.test/custom/source/6.mp4",
+        )
+        self.assertEqual(
+            normalize_material_url("HTTP://media.example.test/a.mp4"),
+            "https://media.example.test/a.mp4",
         )
 
     def test_duplicate_normalized_drama_rows_are_accepted(self):
