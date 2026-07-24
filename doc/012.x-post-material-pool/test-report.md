@@ -2,7 +2,20 @@
 
 ## 测试结论
 
-素材池页面与四个管理 API 已改为跟随快速导航栏 `xPostMaterialPool` 的 `adminOnly`、`module`、`enabled` 配置，精确生产 commit 为 `3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`。本地和服务器均完成 145/145 X 回归；苏斯琪现有 Cookie 会话以普通用户、`x_accounts=true` 成功查询素材池 200，同时管理员发布日志仍为 403。导航配置未被覆盖，本轮未手工触发 daily、未调用真实 X。
+生产当前精确 commit 为 `622a8caff321dc297871d7cea354ad8d5fed4e52`。仅 X Post selector 已取消 `drama_labels` 色情/暴力内容词拦截，其他渠道、违规历史、素材源/资源危险标签和既有权限边界均未修改。本次本地和服务器均完成 143/143 X 回归；旧 `drama_label_unsafe` 三条记录重校验为可供发布，未手工触发 daily、未调用真实 X。
+
+## 2026-07-24 X Post 短剧标签增量
+
+| 项目 | 结果 | 证据 |
+| --- | --- | --- |
+| 规则边界 | 通过 | 仅移除 X manual/legacy selector 的短剧 labels 危险词拒绝；source tag、resource tag、四类违规证据继续拒绝 |
+| 正向用例 | 通过 | `Sexual Content,Graphic Violence` 作为 drama labels 时可进入 X 候选，首个 label 仍用于归因 |
+| 本地回归 | 通过 | 143/143；Python 编译、Node 语法、`git diff --check` 均通过 |
+| 服务器回归 | 通过 | GitHub 精确 commit `622a8ca` 同组 143/143 通过后才切换 release |
+| 生产重校验 | 通过 | 池 ID `17/18/19`、素材 `5580542/5399394/5307937` 均清空错误；`drama_label_unsafe` 剩余 0 |
+| 无发布副作用 | 通过 | 重校验前后 run/queue/log 为 `1/2/2`，pool 为 32；未创建 Post |
+| 运行状态 | 通过 | 主后台/Sidecar/timer active；health/public page 200；下次 timer 为 2026-07-25 10:00 CST |
+| 配置保护 | 通过 | Token hash/mode 未变化，SQLite `integrity_check=ok`，部署后 warning 级日志为 0 |
 
 ## 测试范围
 

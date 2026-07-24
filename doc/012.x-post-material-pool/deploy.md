@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-素材 URL HTTPS 规范化增量已于 2026-07-24 按 GitHub-first 部署生产，精确运行 commit 为 `b4b9287602eb53840ca093cc7e1165f03eef295a`，release 为 `/opt/x-post-automation/releases/b4b9287602eb53840ca093cc7e1165f03eef295a`。主后台素材预览与 daily selector 统一把源表绝对 `http://` 地址在内存中升级为 `https://`，不回写 `ads_custom_source`；素材池导航仍沿用用户保存的“非仅管理员 + x_accounts + 启用”配置。
+X Post 短剧标签放行增量已于 2026-07-24 按 GitHub-first 部署生产，精确运行 commit 为 `622a8caff321dc297871d7cea354ad8d5fed4e52`，release 为 `/opt/x-post-automation/releases/622a8caff321dc297871d7cea354ad8d5fed4e52`。仅 X Post selector 不再因 `drama_labels` 含色情/暴力内容词拒绝素材；违规历史、`ads_custom_source.tag_name`、`resource_tags.tag_name`、其他素材资格和其他渠道规则均保持不变。此前素材 URL HTTP 到 HTTPS 的内存规范化仍保留。
 
 ## 生产执行记录
 
@@ -37,6 +37,11 @@
 - 主后台只替换来自精确 release 的 `app.py` 与 `features/x_posts/selector.py`，仅重启 `drama-material-api.service`；Sidecar 与 timer 未重启。主后台、Sidecar、timer 均 active，内外 health 和素材池公网页面均为 200，部署后主后台 error/exception 日志计数为 0。
 - 对全部 7 条未占用 `material_url_not_https` 池记录重新执行完整 selector 校验后，池 ID `6/11/12/16/29/30/32` 的错误字段均清空并派生为 `available`；对应 HTTPS 地址 HEAD 均为 200。当前 pool 汇总为总数 32、可供发布 28、校验失败 3、已占用 1、已发布 1，unknown/post_creating 为 0。
 - 部署后验证窗口内，另一路 loopback canary 调用在 2026-07-24 11:35 CST 创建 queue `2` / log `2` 并发布素材 `5801636`，Post 为 `https://x.com/ShortsDramhx/status/2080497085518884880`。该记录 `run_id` 为空；`x-post-daily.service` 在窗口内无启动日志，最后一次仍为 10:00 自然任务，因此不得归因于 timer 或本次校验刷新。由于该真实发布发生在备份之后，回滚严禁恢复部署前 SQLite。
+- X Post 短剧标签放行 commit 为 `622a8caff321dc297871d7cea354ad8d5fed4e52`；本地与服务器同一组 X 回归均为 143/143，通过 Python 编译、Node 语法和 diff 检查。
+- 本次上线前备份为 `/mnt/data-disk/x-post-automation/backups/20260724T035301Z-drama-label-policy-622a8ca`，SQLite 在线备份 `integrity_check=ok`，备份 manifest 通过；部署前后 Token hash/mode 一致。
+- 精确 release 切换后只同步主后台 X selector 并重启 `drama-material-api.service`，Sidecar 与 timer 未重启；主后台、Sidecar、timer 均 active，Sidecar health 与公网页面均为 200，部署后 warning 级日志为 0。
+- 仅重新校验旧错误为 `drama_label_unsafe` 且未绑定 queue 的池 ID `17/18/19`：素材 `5580542/5399394/5307937` 全部通过 selector，错误字段清空并派生为 `available`；全池 `drama_label_unsafe` 剩余 0 条，可供发布 31 条。
+- 重校验前后 run/queue/log 计数保持 `1/2/2`，pool 保持 32，未创建新计划、短链、日志或 X Post。`x-post-daily.service` 仍显示 10:00 自然任务的既有池不足失败，timer active，下次为 2026-07-25 10:00 CST。
 
 ## 变更内容
 
@@ -114,7 +119,7 @@
 4. 若迁移后尚无任何新记录，可在停服和人工核对计数/hash 后恢复数据库备份。
 5. 静态页面可回滚，但必须保留已发布 Post 对应的 `/s2l/{log_id}.html`。
 
-本次代码回滚点为上一 release `/opt/x-post-automation/releases/3d5ba0b0cc708a3d49dda43b8d59cf0b179ad1c8`，代码快照位于上述 `20260724T033330Z` 备份。切回 release 后从备份恢复主后台 `app.py` 和 selector，并仅重启 `drama-material-api.service`；保留当前 live SQLite、queue `2`、log `2`、短链和 Token，不能使用部署前 `accounts.sqlite3` 覆盖。
+本次代码回滚点为上一 release `/opt/x-post-automation/releases/b4b9287602eb53840ca093cc7e1165f03eef295a`，代码快照位于上述 `20260724T035301Z` 备份。切回 release 后只从备份恢复主后台 selector，并仅重启 `drama-material-api.service`；保留当前 live SQLite、queue `2`、log `2`、短链和 Token，不能使用部署前 `accounts.sqlite3` 覆盖。
 
 ## 注意事项
 

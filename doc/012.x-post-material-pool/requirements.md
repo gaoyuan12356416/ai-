@@ -40,7 +40,7 @@
 4. 正式日更只接受 `ads_custom_source.product = 'Dramawave'`、`type = 2`、`is_delete = 0`、视频时长 1 至 140 秒的素材。
 5. 素材必须有 HTTPS URL、完整名称/语言/content ID，并能唯一解析到同 content ID、同语言的短剧记录。
 6. Facebook、TikTok、Twitter 违规表和资源审核记录必须全部为 0。
-7. `ads_custom_source.tag_name`、`resource_tags.tag_name` 继续执行色情、暴力等危险词检查，任一命中即跳过；自 2026-07-24 起，短剧 labels 只要求存在且映射一致，即使包含这些内容词也允许候选。
+7. `ads_custom_source.tag_name`、`resource_tags.tag_name` 继续执行色情、暴力等危险词检查，任一命中即跳过；自 2026-07-24 起，仅 X Post selector 将短剧 labels 作为必填归因元数据，即使包含这些内容词也允许候选，其他渠道规则不受影响。
 8. 选择顺序仅由池记录的 `created_at`、`id` 决定；`source_date` 仍记录为运行日前一天，但不再查询 `ads_custom_source_insight`，候选 `spend` 固定为 0。
 9. 数据质量或安全不通过是单素材拒绝，可继续扫描后续素材；MySQL 查询异常是批次异常，整批停止。
 10. 下载、大小、编码、时长、分辨率等媒体预检在建计划前执行；可用后续候选补位。
