@@ -36,7 +36,7 @@
 3. 候选在 Facebook、TikTok、Twitter 违规表或素材审核表中存在历史违规记录即排除；同时检查原素材 ID 映射。
 4. 候选携带任何色情或暴力相关标签即排除，不按严重级别放宽；标签无法证明干净也排除。
 5. 素材必须是可下载、非空、受支持的视频，并通过 `ffprobe`/等价预检。
-6. 帖子正文固定为两行：`{url}\n{desc}`。描述为空或清洗后为空不得发布；超出 X 文本限制时只截断描述，不改 URL。
+6. 帖子正文固定为 `{url}\n☝️Click to watch the full series👆\n\n{name}\n{desc}\n______`，其中 `name` 为剧名称。描述为空或清洗后为空不得发布；超出 X 文本限制时只截断描述，不改 URL、引导语、剧名和分隔线。
 7. 长链基址固定为 `https://www.dramawavew2a.com/ads/101/2116/view`，参数名与业务规则一致并逐项 URL 编码。
 8. `c` 参数固定为 `yingliang_post_CLV_VL_<用户名>*<Unix秒级时间戳>none<素材语言>*<剧名>*<标签>*<日志ID>`。
 9. `af_dp` 使用 `content_id`；短链只能跳转到允许的 Dramawave W2A 主机和固定路径前缀。

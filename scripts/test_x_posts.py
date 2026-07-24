@@ -260,12 +260,48 @@ class XPostsTests(unittest.TestCase):
 
     def test_post_text_preserves_url_and_conservatively_truncates(self):
         short = "https://ai.yingliangads.com/s2l/12.html"
-        text = service.build_post_text(short, "剧" * 300)
-        first, second = text.split("\n", 1)
-        self.assertEqual(first, short)
-        self.assertTrue(second)
-        self.assertTrue(second.endswith("…"))
-        self.assertLessEqual(23 + 1 + sum(1 if ord(char) <= 0x10FF else 2 for char in second), 280)
+        drama_name = "My Drama"
+        text = service.build_post_text(short, drama_name, "剧" * 300)
+        lines = text.split("\n")
+        self.assertEqual(lines[0], short)
+        self.assertEqual(lines[1], service.POST_CTA)
+        self.assertEqual(lines[2], "")
+        self.assertEqual(lines[3], drama_name)
+        self.assertTrue(lines[4].endswith("…"))
+        self.assertEqual(lines[5], service.POST_FOOTER)
+        weighted_body = sum(
+            1
+            if (
+                ord(char) <= 0x10FF
+                or 0x2000 <= ord(char) <= 0x200D
+                or 0x2010 <= ord(char) <= 0x201F
+                or 0x2032 <= ord(char) <= 0x2037
+            )
+            else 2
+            for char in "\n".join(lines[1:])
+        )
+        self.assertLessEqual(23 + weighted_body, 280)
+
+    def test_post_text_matches_requested_template(self):
+        short = "https://ai.yingliangads.com/s2l/12.html"
+        self.assertEqual(
+            service.build_post_text(short, "Love Again", "A second chance at love."),
+            (
+                short
+                + "\n☝️Click to watch the full series👆"
+                + "\n\nLove Again"
+                + "\nA second chance at love."
+                + "\n______"
+            ),
+        )
+
+    def test_post_text_rejects_missing_or_multiline_drama_name(self):
+        short = "https://ai.yingliangads.com/s2l/12.html"
+        for drama_name in ("", "Line one\nLine two"):
+            with self.subTest(drama_name=drama_name):
+                with self.assertRaises(service.XPostError) as caught:
+                    service.build_post_text(short, drama_name, "Description")
+                self.assertEqual(caught.exception.code, "invalid_request")
 
     def test_short_redirect_is_atomic_immutable_and_public_readable(self):
         long_url = service.build_w2a_url(

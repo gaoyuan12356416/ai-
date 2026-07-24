@@ -236,24 +236,41 @@ def _build_short_url(short_base_url, log_id):
     return "%s/%s.html" % (base, log_id)
 
 
-def build_post_text(short_url, description):
+POST_CTA = "☝️Click to watch the full series👆"
+POST_FOOTER = "______"
+
+
+def build_post_text(short_url, drama_name, description):
     parsed = urllib.parse.urlsplit(str(short_url or ""))
     if parsed.scheme != "https" or not parsed.hostname or parsed.query or parsed.fragment:
         raise XPostError("invalid_request", "短链无效", 400)
+    drama_name = str(drama_name or "").strip()
+    if (
+        not drama_name
+        or "\x00" in drama_name
+        or "\r" in drama_name
+        or "\n" in drama_name
+        or len(drama_name) > 500
+    ):
+        raise XPostError("invalid_request", "剧名无效", 400)
     description = str(description or "").strip()
     if not description or "\x00" in description or len(description) > 10000:
         raise XPostError("invalid_request", "剧描述无效", 400)
-    # X shortens an HTTPS URL to a fixed t.co length.  The description uses a
-    # conservative subset of twitter-text weighting: common Latin/punctuation
-    # is weight 1 and every other code point is weight 2.  This can under-use a
-    # few characters, but will not knowingly exceed the 280 weighted limit.
-    remaining = 280 - 23 - 1  # complete first-line URL plus newline
 
     def char_weight(char):
         value = ord(char)
         if value <= 0x10FF or 0x2000 <= value <= 0x200D or 0x2010 <= value <= 0x201F or 0x2032 <= value <= 0x2037:
             return 1
         return 2
+
+    # X shortens an HTTPS URL to a fixed t.co length.  Keep every fixed field
+    # intact and use the remaining weighted budget only for the description.
+    suffix = "\n%s\n\n%s\n" % (POST_CTA, drama_name)
+    footer = "\n%s" % POST_FOOTER
+    remaining = 280 - 23
+    remaining -= sum(char_weight(char) for char in suffix + footer)
+    if remaining <= char_weight("…"):
+        raise XPostError("invalid_request", "剧名过长，无法生成帖子正文", 400)
 
     total = sum(char_weight(char) for char in description)
     if total <= remaining:
@@ -272,7 +289,7 @@ def build_post_text(short_url, description):
         rendered = "".join(selected).rstrip() + ellipsis
     if not rendered.strip():
         raise XPostError("invalid_request", "剧描述截断后为空", 400)
-    return str(short_url) + "\n" + rendered
+    return str(short_url) + suffix + rendered + footer
 
 
 def _validate_post_storage_layout(
@@ -2913,7 +2930,11 @@ def publish_canary(
                 }
             )
             short_url = _build_short_url(short_base_url, log["id"])
-            post_text = build_post_text(short_url, queue["description"])
+            post_text = build_post_text(
+                short_url,
+                queue["drama_name"],
+                queue["description"],
+            )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)
 
         if callable(storage_guard):

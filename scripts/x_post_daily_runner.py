@@ -782,6 +782,7 @@ def _plan_candidate(account, candidate, rank, timestamp):
     )
     build_post_text(
         "https://ai.yingliangads.com/s2l/1.html",
+        item["drama_name"],
         item["description"],
     )
     return item
