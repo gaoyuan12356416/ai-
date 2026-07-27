@@ -45,3 +45,28 @@ daily 的两个 EnvironmentFile、用户、同一 flock、只读 release、数�
 ## 注意事项
 
 生产补发属于显式一次性操作；runner 不安装 timer。发布后剩余素材必须足以支持下一次 9 账号批次。
+
+## 2026-07-27 生产记录
+
+- Git commit / release：
+  `5c8fc4f1f6d6a7d31e340c89e80ae373d8dbb73a`。
+- 部署前备份：
+  `/mnt/data-disk/x-post-automation/backups/20260727T115741+0800-pre-5c8fc4f`。
+- 补发后备份：
+  `/mnt/data-disk/x-post-automation/backups/20260727T1232+0800-post-catchup-5c8fc4f`；
+  `SHA256SUMS` 全部通过，SQLite `integrity_check=ok`。
+- 真实页面 `/x-account-list.html?v=20260727catchup1` 的第 2 列显示
+  9 个“已配置”、1 个“未配置”，页面响应 no-store/no-cache。
+- 手工启动 `x-post-catchup.service` 一次；12:22:54 CST 正常退出，
+  child run 1 为 6/6 completed，失败/unknown 为 0。
+- 队列/日志 20–25 对应账号 5–10；三个素材由 GPU 修复后发布。
+- 日志页首次验收发现主 API 仍加载旧版共享
+  `features/x_posts/service.py`。已先备份旧文件，再从相同不可变 release
+  安装新版并只重启 `drama-material-api.service`；浏览器复验六行均显示
+  “补发批次 1”。主 API 与 release 文件摘要一致。
+- 原父批次 4 与部署前备份逐字段完全一致，仍为 3/3 completed。
+- 既有 Token 文件 hash/mode/owner 与部署前一致，三份既有环境文件摘要
+  未变化。
+- `x-post-daily.timer` 保持 active；daily/catch-up oneshot 均 inactive；
+  下一次为 `2026-07-28 10:00 CST`。
+- 当前未绑定候选 17 个：15 个最近校验通过，2 个已标记不可用。
