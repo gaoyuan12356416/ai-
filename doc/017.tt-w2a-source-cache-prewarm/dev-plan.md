@@ -16,10 +16,10 @@
 | resolver 选择与应用装配 | `app.py`、`.env.example` | 已完成 |
 | 最近 3 日候选、cursor v2 轮转/重试与预热 | `features/tt_drama_prewarm/`、`scripts/prewarm_tt_drama_resources.py` | 已完成 |
 | Featured 复用资源缓存 | `features/tt_drama_featured/`、`scripts/refresh_tt_drama_featured.py` | 已完成 |
-| systemd oneshot/timer 文件 | `deploy/tt-drama-resource-prewarm.*`、`deploy/tt-drama-featured.service` | 已完成，生产启用待执行 |
-| 单元、集成和回归测试 | `tests/test_tt_drama_*.py`、Node TT 页面断言 | 本地门禁已通过；Linux/生产待验 |
-| SA 代码评审与测试报告 | `doc/017.tt-w2a-source-cache-prewarm/` | 本地完成；证据见 `test-report.md` |
-| GitHub-first 提交、生产部署与回滚验证 | GitHub、CPU 服务器 | 待执行 |
+| systemd oneshot/timer 文件 | `deploy/tt-drama-resource-prewarm.*`、`deploy/tt-drama-featured.service` | 已完成并通过生产验证 |
+| 单元、集成和回归测试 | `tests/test_tt_drama_*.py`、Node TT/X 回归 | 已完成并通过 Linux/生产验证 |
+| SA 代码评审与测试报告 | `doc/017.tt-w2a-source-cache-prewarm/` | 已完成 |
+| GitHub-first 提交、生产部署与回滚点 | GitHub、CPU 服务器 | 已完成 |
 
 ## 实现顺序
 
@@ -29,22 +29,20 @@
 4. 已由 `app.py` 通过 `TT_DRAMA_RESOURCE_SOURCE=w2a_cache` 选择共享 resolver，并把内部 `ORIGIN_FILL/DISK_HIT/NEGATIVE_FILL` 映射回公开 `MISS/HIT` 兼容语义。
 5. 已完成固定 `kunlunads_dev.ads_custom_source_insight`/`as` 索引的只读候选查询、保持花费排名且以 `next_content_id`/`next_index` 接续的 cursor v2、最多 5000 条的失败积压/每轮最多 100 条重试、新鲜缓存跳过、普通任务硬上限 500 及仅显式 bootstrap 可到 3000；bootstrap 从最高花费候选开始。
 6. 已将 featured 资源读取接到共享服务，MySQL 只保留昨日花费排名并继续使用 LKG。
-7. 已补齐环境示例和 systemd 文件；主 API drop-in 不设置全局 `UMask`，state 目录由固定 `install` 创建为 `tt-drama-featured:tt-drama-featured`/`2770`，缓存模块只把 DB、`-wal`、`-shm` 规范为 `0660`；生产安装、启用与回滚验证待执行。
-8. 已完成 SA 代码评审和本地门禁，证据见 `test-report.md`；Windows 跳过的 POSIX mode 项须在 Linux 补跑，GitHub-first 提交与生产发布待执行。
+7. 已补齐并安装环境配置和 systemd 文件；主 API drop-in 不设置全局 `UMask`，state 目录由固定 `install` 创建为 `tt-drama-featured:tt-drama-featured`/`2770`，缓存模块只把 DB、`-wal`、`-shm` 规范为 `0660`；生产定时任务与跨用户权限 canary 通过。
+8. 已完成 SA 评审、本地/Linux 门禁、GitHub-first release、生产 API/性能/浏览器验证和回滚点记录。
 
-## 构建与验证命令
+## 构建与验证结果
 
-最新本地自动化、兼容性与静态门禁已通过，权威证据见 `test-report.md`。唯一 Windows POSIX mode skip 必须在 Linux 补跑；生产门禁仍待执行。
+最终门禁全部通过：
 
-此前不受本轮统计刷新影响的真实源观察：`Ag0rfr5F0F -> Her Beast`，419.7 ms；错误 `ZZZ…` 被 W2A 回退到 `Yqq…`，精确 ID 不匹配被拒绝，332.0 ms。
+- Linux TT Python 104、Node 53、X pool 7、X routes 14。
+- `compileall`、Python 3.9 AST、diff-check 均为 OK。
+- 有效 `Ag0rfr5F0F` 返回 `Her Beast` 与 CDN 封面；错误 `ZZZZZZZZZZ` 首次 `404 MISS`、再次 `404 NEGATIVE_HIT`；短 ID 为 `400 BYPASS`。
+- 30 次 `HIT` 的 p95 为 `14.162 ms`。
+- Featured、prewarm、timer、跨用户 SQLite/WAL 权限和真实浏览器均通过生产验收。
 
-生产发布阶段仍需执行：
-
-```bash
-python3 -m py_compile app.py features/tt_drama_resources/*.py scripts/prewarm_tt_drama_resources.py
-systemd-analyze verify deploy/tt-drama-resource-prewarm.service deploy/tt-drama-resource-prewarm.timer
-nginx -t
-```
+完整证据见 `test-report.md` 和 `deploy.md`。
 
 ## 风险与依赖
 
@@ -57,4 +55,4 @@ nginx -t
 
 ## 完成记录
 
-预发布实现、SA 代码评审和本地门禁已完成，包含运行期存储身份加固，证据见 `test-report.md`。Linux POSIX mode preservation、GitHub commit、release、生产 systemd、Nginx、公网 API 和真实浏览器证据尚未完成；这些项目不得标记为完成。
+需求已完成生产发布与验收。生产 commit 为 `e77dba9c5d742e5e982c3faa44e9303761f0ff0b`，release 为 `/mnt/data-disk/tt-drama-resource-cache/releases/ai-tt-w2a-cache-e77dba9c5d74`；备份、运行文件哈希和验收明细见 `deploy.md`、`test-report.md`。

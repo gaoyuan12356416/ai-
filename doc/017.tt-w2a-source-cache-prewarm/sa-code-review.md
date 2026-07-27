@@ -2,7 +2,7 @@
 
 ## 结论
 
-**预发布实现代码评审与本地门禁通过。** 最终全量审计无剩余 P0/P1/P2，测试证据见 `test-report.md`；Windows 跳过的 POSIX mode preservation 必须在 Linux 补跑。该结论不代表已经提交、部署或完成生产验收。
+**代码评审、Linux 门禁与生产验收通过。** 最终全量审计无剩余 P0/P1/P2。生产运行版本可追溯到 commit `e77dba9c5d742e5e982c3faa44e9303761f0ff0b`，release、备份、运行文件哈希和功能证据均已核对。
 
 ## 实际评审范围
 
@@ -31,20 +31,23 @@
 
 | 门禁 | 结果 | 证据 |
 | --- | --- | --- |
-| TT Python 自动化测试 | 本地通过 | 计数与平台 skip 见 `test-report.md`；Linux 补跑待执行 |
-| TT Node 断言 | 本地通过 | 证据见 `test-report.md` |
-| Python 编译/兼容检查 | 本地通过 | `compileall` 与 Python 3.9 AST 证据见 `test-report.md` |
-| 补丁格式检查 | 本地通过 | `diff-check` 证据见 `test-report.md`；生产 release 仍需重跑 |
-| 此前本地真实源 canary：有效 ID | 通过 | `Ag0rfr5F0F` 解析为 `Her Beast`，419.7 ms |
-| 此前本地真实源 canary：错误 ID | 通过 | 请求 `ZZZ…` 时源页实际解析为 `Yqq…`，因精确 ID 不匹配被拒绝，332.0 ms |
+| Linux TT Python | 通过 | 104/104 |
+| TT Node | 通过 | 53/53 |
+| X pool / X routes 回归 | 通过 | 7/7、14/14 |
+| Python 编译/兼容检查 | 通过 | `compileall`、Python 3.9 AST 均 OK |
+| 补丁格式检查 | 通过 | diff-check OK |
+| 生产有效 ID canary | 通过 | `Ag0rfr5F0F` 返回 `Her Beast` 与 CDN 封面 |
+| 生产错误/短 ID canary | 通过 | `ZZZZZZZZZZ` 为 `404 MISS` 后 `404 NEGATIVE_HIT`；短 ID 为 `400 BYPASS` |
+| 生产缓存性能 | 通过 | 30 次 HIT，p95 `14.162 ms` |
 
-## 尚未完成的发布证据
+## 生产发布与验收证据
 
-- 尚无 GitHub commit、push、release 或生产部署证据。
-- 尚未在生产数据盘验证目录、权限、SQLite WAL、租约和重启持久化。
-- 尚未验证生产 systemd unit/timer、journal、错峰执行和 last-known-good。
-- 尚未完成公开 API、生产性能与 `/tt` 真实浏览器回归。
+- Commit：`e77dba9c5d742e5e982c3faa44e9303761f0ff0b`
+- Release：`/mnt/data-disk/tt-drama-resource-cache/releases/ai-tt-w2a-cache-e77dba9c5d74`
+- 备份：`20260727T092255Z-predeploy`、`20260727T094144Z-concurrent-x-baseline`
+- 生产 app SHA-256：`ac68d0cc7c4b58ce9a242b6c12d6b45391b57f847a5e0801aff30d6f69310398`
+- 跨用户 SQLite/WAL 权限、systemd timer、featured 5 项、prewarm 500 部和真实浏览器均通过。
 
 ## 评审建议
 
-实现代码评审和本地门禁已通过，具备进入 GitHub-first 部署流程的条件。生产发布仍必须在 Linux 验证 POSIX mode preservation 和 connect 前后设备身份保护，并执行部署文档中的备份、release/current 切换、systemd、HTTP canary、浏览器和回滚门禁；在这些证据完成前不得标记为“已上线”。
+本次生产 release 验收通过。保留两份备份和 release manifest，持续监控 W2A 结构、SQLite/WAL、预热 timer 与 featured last-known-good。

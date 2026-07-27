@@ -115,3 +115,13 @@ Accept: application/json
 - 排名仍来自昨日 W2A 花费；MySQL 不再查询剧库元数据，标题和封面来自共享 SQLite/W2A 服务。
 - 刷新失败不覆盖 last-known-good 文件。
 - 不返回 spend 或任何内部数据源信息。
+
+## 生产接口验收
+
+- `Ag0rfr5F0F` 返回 `Her Beast` 与 CDN 封面；最终复核缓存状态为 `HIT`。
+- `ZZZZZZZZZZ` 首次返回 `404`、`X-TT-Drama-Cache: MISS`；再次及最终复核返回 `404`、`X-TT-Drama-Cache: NEGATIVE_HIT`。
+- 短 ID 返回 `400`、`X-TT-Drama-Cache: BYPASS`。
+- 连续 30 次 `HIT`：p50 `13.358 ms`、p95 `14.162 ms`、max `15.401 ms`。
+- Featured 的 `source_date` 为 `2026-07-26`，返回 5 项且均可跳转。
+- 真实浏览器中封面、标题和简介正常展示，错误 ID 无卡片，`af_adset_id=XXX` 正确透传。
+- 错误 ID 在浏览器 console 中只有预期接口 `404 Failed to load resource`，没有 JavaScript exception 或 CSP warning/error。

@@ -210,6 +210,16 @@ W2A 源不提供的兼容字段使用安全默认值：`country=""`、`language=
 - 所有发布文件来自已推送的 GitHub 精确 commit，具备可验证回滚点。
 - 生产预检必须确认 `TT_DRAMA_RESOURCE_SOURCE=w2a_cache` 且 `TT_DRAMA_RESOURCE_LANDING_ID=2049`；任一不满足都应阻止新功能发布，不能把运行时 MySQL 安全回退当作验收通过。
 
+## 生产验收记录
+
+以上验收标准已通过：
+
+- 生产 commit：`e77dba9c5d742e5e982c3faa44e9303761f0ff0b`
+- Release：`/mnt/data-disk/tt-drama-resource-cache/releases/ai-tt-w2a-cache-e77dba9c5d74`
+- 生产 app SHA-256：`ac68d0cc7c4b58ce9a242b6c12d6b45391b57f847a5e0801aff30d6f69310398`
+- 有效、错误、短 ID API canary、30 次缓存性能、featured 5 项、500 部预热、timer、跨用户 SQLite/WAL 权限与真实浏览器均通过；详细数值见 `test-report.md`
+- 回滚点：`20260727T092255Z-predeploy`、`20260727T094144Z-concurrent-x-baseline`
+
 ## 风险与决策
 
 - W2A HTML 结构可能调整：parser 版本化，结构异常返回 503，并通过测试样本和任务日志暴露。
@@ -221,4 +231,4 @@ W2A 源不提供的兼容字段使用安全默认值：`country=""`、`language=
 ## 变更记录
 
 - 2026-07-27：方案确认，资源源改为 W2A 原始 HTML GET，新增 SQLite 持久缓存和最近 3 日投放剧预热。
-- 2026-07-27：预发布实现完成；对齐复合主键、无源 URL 持久化、公开缓存状态兼容映射、cursor v2 有界重试、固定 insight 表/索引、state `2770` 与 SQLite 文件 `0660` 的局部权限规范、connect 前后 `st_dev` 存储身份复查、无主 API 全局 UMask、装配错误安全回退，以及 featured 无剧库元数据查询等实际行为。本地门禁已通过，证据见 `test-report.md`；Linux/生产验证与部署仍待执行。
+- 2026-07-27：实现、GitHub-first release 与生产验收完成；复合主键、无源 URL 持久化、公开缓存状态兼容映射、cursor v2 有界重试、固定 insight 表/索引、state `2770` 与 SQLite 文件 `0660`、connect 前后 `st_dev` 复查、无主 API 全局 UMask、装配错误安全回退，以及 featured 无剧库元数据查询均已验证。

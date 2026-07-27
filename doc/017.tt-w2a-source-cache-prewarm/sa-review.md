@@ -2,7 +2,7 @@
 
 ## 结论
 
-通过，需求与设计已落实到预发布实现。方案采用固定 URL 的原始 HTML GET、精确 ID 校验和数据盘 SQLite；不依赖浏览器渲染，且不扩大 W2A 归因脚本的执行范围。生产部署与真实 systemd/浏览器验收另行执行。
+通过，需求与设计已落实并完成生产验收。方案采用固定 URL 的原始 HTML GET、精确 ID 校验和数据盘 SQLite；不依赖浏览器渲染，且不扩大 W2A 归因脚本的执行范围。生产 API、systemd、数据盘权限、缓存性能、featured、prewarm 与真实浏览器均已验证。
 
 ## 问题清单
 
@@ -40,4 +40,4 @@
 
 ## PM 修订确认
 
-以上问题均已写入 `requirements.md`、`dev-plan.md` 和 `test-cases.md` 并在本地实现；最终本地审计无剩余 P0/P1/P2。生产 Linux 与发布证据仍待补充。
+以上问题均已写入 `requirements.md`、`dev-plan.md` 和 `test-cases.md` 并在生产实现；最终审计无剩余 P0/P1/P2。生产版本、备份、哈希和验收证据见 `deploy.md`、`test-report.md`。

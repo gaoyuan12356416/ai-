@@ -9,7 +9,7 @@
 
 ## 关键配置
 
-配置名以最终实现和 `.env.example` 为准，计划包含：
+生产配置以最终实现和 `.env.example` 为准，包含：
 
 - `TT_DRAMA_RESOURCE_DB_PATH=/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3`
 - `TT_DRAMA_RESOURCE_SOURCE=w2a_cache`
@@ -72,7 +72,7 @@
 - `systemctl cat drama-material-api.service` 确认 TT 缓存 drop-in 未设置全局 `UMask`；state 目录 owner/group 为 `tt-drama-featured`、mode 为 `2770`
 - `stat` 确认 `resources.sqlite3` 及已生成的 `resources.sqlite3-wal`、`resources.sqlite3-shm` 均为 mode `0660`；重启 API 和离线任务后权限保持不变
 - featured 公共 JSON 恰好 5 条、无 spend、刷新失败 hash 不变
-- 390×844 真实浏览器搜索、卡片和跳转参数验证
+- 真实浏览器搜索、卡片、错误 ID、console 和跳转参数验证
 
 ## 回滚方案
 
@@ -94,4 +94,34 @@
 
 ## 实际部署记录
 
-当前预发布实现、SA 代码评审和本地门禁已完成，证据见 `test-report.md`；Linux POSIX mode preservation 与全部生产验证仍待执行。待生产部署后填写 commit、release、backup、manifest、SQLite schema、timer、性能和回滚点；当前没有 commit 或部署证据。
+**生产部署与验收已通过。**
+
+### 版本与回滚点
+
+- Commit：`e77dba9c5d742e5e982c3faa44e9303761f0ff0b`
+- Release：`/mnt/data-disk/tt-drama-resource-cache/releases/ai-tt-w2a-cache-e77dba9c5d74`
+- Predeploy 备份：`20260727T092255Z-predeploy`
+- Concurrent X baseline 备份：`20260727T094144Z-concurrent-x-baseline`
+- 生产 app SHA-256：`ac68d0cc7c4b58ce9a242b6c12d6b45391b57f847a5e0801aff30d6f69310398`
+- 最终复核时 current release 与 app hash 均未变化
+
+### 门禁与运行状态
+
+- Linux TT Python 104、Node 53、X pool 7、X routes 14 全部通过
+- `compileall`、Python 3.9 AST、diff-check 均为 OK
+- API PID `2462658`，`NRestarts=0`，`TT_DRAMA_RESOURCE_SOURCE=w2a_cache`
+- 两个 TT timer 均为 `active/waiting`
+- 验收快照中 prewarm 下一次触发时间为 `2026-07-27 20:24:53 CST`
+- SQLite 共 501 条：`ready=500`、`not_found=1`
+- API 与离线用户跨用户访问 SQLite/WAL 的权限 canary 通过
+
+### 功能与性能
+
+- `Ag0rfr5F0F` 返回 `Her Beast` 与 CDN 封面；最终复核为 `HIT`
+- `ZZZZZZZZZZ` 首次为 `404 MISS`、再次及最终复核为 `404 NEGATIVE_HIT`
+- 短 ID 为 `400 BYPASS`
+- 30 次 HIT：p50 `13.358 ms`、p95 `14.162 ms`、max `15.401 ms`
+- Featured `source_date=2026-07-26`，5 项且可跳转；最终复核仍为 5 项
+- Prewarm 候选 2880、处理 500、填充 495、已有 5、错误 0，cursor `next_index=500`
+- 浏览器显示封面、标题和简介，错误 ID 无卡片，`af_adset_id=XXX` 成功透传
+- 错误 ID 的 console 只有预期接口 `404 Failed to load resource`，无 JavaScript exception、CSP warning 或 CSP error
