@@ -15,8 +15,8 @@
 | 排行、校验与原子快照 | Codex | `features/tt_drama_featured/`, `scripts/` | 已完成 |
 | 本地 JSON 路由与定时器 | Codex | `deploy/` | 已完成 |
 | 动态卡片与点击透传 | Codex | `static/tt-drama-search.*` | 已完成 |
-| 单测、浏览器和故障注入 | Codex/QA | `tests/`, Playwright | 进行中 |
-| GitHub-first 生产部署 | Codex | CPU 服务器 | 待执行 |
+| 单测、浏览器和故障注入 | Codex/QA | `tests/`, Playwright | 已完成 |
+| GitHub-first 生产部署 | Codex | CPU 服务器 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -37,4 +37,14 @@ git diff --check
 
 ## 完成记录
 
-待实现、验证和部署后补充 commit、测试数、快照与 timer 证据。
+- 生产源 commit：
+  `bfe4bc499b95470dba55ff158015b7f5b5ea113c`。
+- Python 43/43、Node 53/53、验收用例 29/29。
+- 生产 release：
+  `/mnt/data-disk/tt-drama-featured/releases/ai-tt-featured-bfe4bc499b95470d`。
+- 生产 backup：
+  `/mnt/data-disk/tt-drama-featured/backups/20260727T151000+0800-bfe4bc4`。
+- 快照 hash：
+  `37e3a126a258e03b89ec743f08300e9d5582dc07f92916349b45c7dec2f5b2df`。
+- timer enabled/active；15:30 首次自动触发成功，下一次 18:00；
+  主 API 未重启，`NRestarts=0`。

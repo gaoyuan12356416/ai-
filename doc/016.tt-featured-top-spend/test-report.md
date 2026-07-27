@@ -2,8 +2,8 @@
 
 ## 测试结论
 
-发布前本地与生产只读 canary 通过；尚待完成 GitHub-first 部署后的公网、
-timer、LKG hash 和主服务无重启验收。
+通过。GitHub-first 生产部署、公网、timer、LKG 故障注入和主服务无重启
+验收均完成，无未解决 P0/P1。
 
 ## 测试范围
 
@@ -18,9 +18,9 @@ timer、LKG hash 和主服务无重启验收。
 | --- | --- | --- | --- | --- |
 | Python featured + resolver | 43 | 43 | 0 | 0 |
 | Node 页面逻辑断言 | 53 | 53 | 0 | 0 |
-| Playwright 关键流程 | 1 | 1 | 0 | 0 |
+| Playwright 关键流程 | 4 | 4 | 0 | 0 |
 | 生产只读 Top20 SQL canary | 2 | 2 | 0 | 0 |
-| 部署后生产验收 | 待补 | 0 | 0 | 待部署 |
+| 需求验收用例 | 29 | 29 | 0 | 0 |
 
 ## 缺陷情况
 
@@ -38,8 +38,21 @@ timer、LKG hash 和主服务无重启验收。
   `2026-07-26` 动态缓存渲染 5 个链接；点击 `BQ3Y3JcLWA` 前先请求同源
   resolver，再到标题为 `Wrong Sister in His Bed` 的 W2A 页；URL 保留
   `af_adset_id=XXX`，初始 href 为同页安全锚点，本页无 JS/CSP error。
+  resolver 404 时留在 `/tt` 并显示 `Story unavailable`；featured API
+  503 时回退 5 个不可点击人工卡；首图失败时占位为 `grid` 且链接仍保留。
 - 生产只读 SQL：EXPLAIN `key=as/type=ref`；含 LIMIT 前正则的 Top20
   连续两次 1.487s / 1.408s，签名均 `2143235fdcee2b8a`。
+- 生产快照：
+  `source_date=2026-07-26`、5 条、1,102 bytes、无 `spend`；
+  SHA-256 `37e3a126a258e03b89ec743f08300e9d5582dc07f92916349b45c7dec2f5b2df`。
+  不存在日期的只读 dry-run 以非零退出，前后 hash 相同；第二次正常刷新
+  `changed=false`。
+- 公网接口：HTTP 200、ETag、`public,max-age=300`；Windows 侧 5 次
+  TTFB 0.929–1.008s，CPU 本机 Nginx 5 次 TTFB 0.134–0.265ms，
+  证明用户链路不等待数据库。
+- systemd：独立用户与 0600 env，安全评分 3.7/OK；timer enabled/active，
+  15:30 首次计划任务自动触发，8 秒成功、`changed=false`、hash 不变，
+  下一次 18:00；主 API active、`NRestarts=0`。
 
 ## 遗留风险
 
@@ -51,6 +64,5 @@ timer、LKG hash 和主服务无重启验收。
 
 ## 发布建议
 
-满足先生成快照、再发布 Nginx/前端、最后启用 timer 的顺序后可发布。
-部署后必须补齐公网响应头、快照 hash、故障注入、timer 和主 API
-`NRestarts` 证据。
+已发布，可进入运营测试。保持 15:30 主刷和 18:00 对账；若需主动 Feishu
+失败告警，另行确认通知群与最小凭据。

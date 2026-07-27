@@ -82,7 +82,35 @@
 5. 保留数据盘缓存供审计，不删除远端或本地业务数据。
 6. 验证 `/tt` 回到旧静态卡、搜索 resolver 正常。
 
-最终生产 commit、release、backup、manifest 和精确命令在实际部署后补录。
+## 生产记录（2026-07-27）
+
+- 源 commit：
+  `bfe4bc499b95470dba55ff158015b7f5b5ea113c`
+- release：
+  `/mnt/data-disk/tt-drama-featured/releases/ai-tt-featured-bfe4bc499b95470d`
+- backup：
+  `/mnt/data-disk/tt-drama-featured/backups/20260727T151000+0800-bfe4bc4`
+- pre/post manifest：
+  `pre-deploy.sha256` / `post-deploy.sha256`
+- 快照：
+  `2026-07-26`、5 条、1,102 bytes、SHA-256
+  `37e3a126a258e03b89ec743f08300e9d5582dc07f92916349b45c7dec2f5b2df`
+- timer：enabled/active；首次计划任务在
+  `2026-07-27 15:30:00 CST` 自动触发，8 秒成功且 `changed=false`；
+  下一次为同日 `18:00` 对账。
+- 主 API：active，`NRestarts=0`；仅 reload Nginx。
+- 根盘仍约 92%；release、backup、cache 均在 6% 使用率的数据盘。
+
+精确回滚：
+
+1. `systemctl disable --now tt-drama-featured.timer`
+2. 从 backup 将 `root-*`、`nginx-*` 两组静态文件及
+   `tt-drama-search.conf` 恢复到原路径。
+3. `nginx -t` 后 `systemctl reload nginx`。
+4. `systemctl stop tt-drama-featured.service`；新 unit/env/current/cache
+   可保留审计，不需要删除业务数据。
+5. 验证 `/tt` 回到旧人工卡、resolver 正确/404 均正常、主 API
+   `NRestarts` 不增加。
 
 ## 注意事项
 
