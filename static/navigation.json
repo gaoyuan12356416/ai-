@@ -223,7 +223,18 @@
         "enabled": true,
         "order": 30,
         "module": "x_accounts",
-        "adminOnly": true
+        "adminOnly": false
+      },
+      {
+        "key": "xPostDramaPool",
+        "label": "Post短剧池",
+        "description": "按短剧免费集数顺序维护和发布Post",
+        "kind": "page",
+        "href": "/x-post-drama-pool.html",
+        "enabled": true,
+        "order": 40,
+        "module": "x_accounts",
+        "adminOnly": false
       },
       {
         "key": "xPostLogs",
@@ -232,7 +243,7 @@
         "kind": "page",
         "href": "/x-post-logs.html",
         "enabled": true,
-        "order": 40,
+        "order": 50,
         "module": "x_accounts",
         "adminOnly": true
       }

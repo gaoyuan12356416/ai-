@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Offline tests for the scheduled X short-drama selector."""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from features.x_posts.drama_selector import (  # noqa: E402
+    DramaPoolRejection,
+    DramaQueryError,
+    DramaSelectionError,
+    audit_drama,
+    build_name_tag,
+    select_drama_pool_episodes,
+)
+
+
+def episode_row(number, *, unlocked=3, url=None, name="Drama Alpha"):
+    return {
+        "resource_id": "resource%02d" % number,
+        "app_id": "1479",
+        "app": "DramaWave",
+        "content_id": "DRAMA-A",
+        "drama_name": name,
+        "drama_description": "A complete drama description.",
+        "drama_labels": "Fantasy, Counter Attack, Romance",
+        "country": "US",
+        "language": "en",
+        "series_code": "SERIES-A",
+        "data_origin": 0,
+        "unlocked_episodes_count": unlocked,
+        "sub_number": number,
+        "sub_name": "Episode %s" % number,
+        "sub_url": url or "http://media.example.test/ep%s.mp4" % number,
+    }
+
+
+class FakeCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.rows = []
+
+    def execute(self, sql, params):
+        self.connection.calls.append((sql, tuple(params)))
+        if self.connection.fail:
+            raise RuntimeError("read connection unavailable")
+        self.rows = list(self.connection.rows_by_content.get(str(params[2]), []))
+
+    def fetchall(self):
+        return list(self.rows)
+
+    def close(self):
+        return None
+
+
+class FakeConnection:
+    def __init__(self, rows=None):
+        self.rows_by_content = {"DRAMA-A": list(rows or [])}
+        self.calls = []
+        self.fail = False
+
+    def cursor(self):
+        return FakeCursor(self)
+
+
+class DramaSelectorTests(unittest.TestCase):
+    def test_audit_uses_minimum_unlocked_count_and_https_urls(self):
+        rows = [
+            episode_row(1, unlocked=3),
+            episode_row(2, unlocked=2),
+            episode_row(3, unlocked=3),
+        ]
+        connection = FakeConnection(rows)
+        result = audit_drama(connection, "DRAMA-A")
+        self.assertEqual(result["free_episode_count"], 2)
+        self.assertEqual(
+            [item["sub_number"] for item in result["episodes"]], [1, 2]
+        )
+        self.assertEqual(
+            result["episodes"][0]["material_url"],
+            "https://media.example.test/ep1.mp4",
+        )
+        self.assertEqual(
+            result["name_tag"],
+            "#Drama_Alpha #Fantasy #Counter_Attack",
+        )
+        sql, params = connection.calls[0]
+        self.assertTrue(sql.lstrip().upper().startswith("SELECT"))
+        self.assertIn("r.app_id = %s", sql)
+        self.assertIn("r.type = %s", sql)
+        self.assertEqual(params, (1479, 2, "DRAMA-A"))
+
+    def test_description_line_breaks_are_normalized_for_posting(self):
+        row = episode_row(1, unlocked=1)
+        row["drama_description"] = "First line.\r\nSecond\tline."
+        result = audit_drama(FakeConnection([row]), "DRAMA-A")
+        self.assertEqual(
+            result["description"],
+            "First line. Second line.",
+        )
+
+    def test_same_episode_must_have_one_normalized_url(self):
+        connection = FakeConnection(
+            [
+                episode_row(1, unlocked=1, url="https://a.example/ep1.mp4"),
+                episode_row(1, unlocked=1, url="https://b.example/ep1.mp4"),
+            ]
+        )
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(connection, "DRAMA-A")
+        self.assertEqual(raised.exception.code, "drama_episode_url_ambiguous")
+
+    def test_identical_duplicate_source_row_is_deterministic(self):
+        first = episode_row(1, unlocked=1)
+        duplicate = dict(first)
+        duplicate["resource_id"] = "resource01copy"
+        result = audit_drama(FakeConnection([first, duplicate]), "DRAMA-A")
+        self.assertEqual(result["episodes"][0]["resource_id"], "resource01")
+
+    def test_free_episode_numbers_must_be_continuous(self):
+        connection = FakeConnection(
+            [episode_row(1, unlocked=3), episode_row(3, unlocked=3)]
+        )
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(connection, "DRAMA-A")
+        self.assertEqual(raised.exception.code, "drama_episode_gap")
+
+    def test_all_episode_metadata_must_match(self):
+        connection = FakeConnection(
+            [
+                episode_row(1, unlocked=2),
+                episode_row(2, unlocked=2, name="Another Drama"),
+            ]
+        )
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(connection, "DRAMA-A")
+        self.assertEqual(raised.exception.code, "drama_metadata_ambiguous")
+
+    def test_fifo_pool_expands_current_drama_before_next(self):
+        connection = FakeConnection(
+            [
+                episode_row(1, unlocked=3),
+                episode_row(2, unlocked=3),
+                episode_row(3, unlocked=3),
+            ]
+        )
+        selected = select_drama_pool_episodes(
+            connection,
+            [
+                {
+                    "id": 10,
+                    "content_id": "DRAMA-A",
+                    "created_at": "2026-07-27T01:00:00Z",
+                    "next_sub_number": 2,
+                }
+            ],
+            limit=2,
+        )
+        self.assertEqual(
+            [item["episode_key"] for item in selected],
+            ["DRAMA-A:2", "DRAMA-A:3"],
+        )
+        self.assertTrue(all(item["source_type"] == "drama" for item in selected))
+        self.assertTrue(all(item["drama_pool_item_id"] == 10 for item in selected))
+        self.assertTrue(all(item["pool_item_id"] is None for item in selected))
+        self.assertTrue(all(item["tag"] == "Fantasy" for item in selected))
+
+    def test_pool_order_is_not_silently_resorted(self):
+        connection = FakeConnection([episode_row(1, unlocked=1)])
+        with self.assertRaises(DramaSelectionError):
+            select_drama_pool_episodes(
+                connection,
+                [
+                    {
+                        "id": 2,
+                        "content_id": "DRAMA-A",
+                        "created_at": "2026-07-27T02:00:00Z",
+                    },
+                    {
+                        "id": 1,
+                        "content_id": "DRAMA-B",
+                        "created_at": "2026-07-27T01:00:00Z",
+                    },
+                ],
+                limit=1,
+            )
+
+    def test_query_error_stops_the_complete_selection(self):
+        connection = FakeConnection([episode_row(1, unlocked=1)])
+        connection.fail = True
+        with self.assertRaises(DramaQueryError):
+            audit_drama(connection, "DRAMA-A")
+
+    def test_name_tag_deduplicates_and_limits_hashtags(self):
+        self.assertEqual(
+            build_name_tag(
+                "Drama",
+                "Power Romance, power-romance, Family Love, Extra",
+            ),
+            "#Drama #Power_Romance #Family_Love",
+        )
+        self.assertEqual(build_name_tag("Drama", ""), "#Drama")
+
+    def test_unlabelled_drama_uses_name_for_required_w2a_tag(self):
+        row = episode_row(1, unlocked=1)
+        row["drama_labels"] = ""
+        selected = select_drama_pool_episodes(
+            FakeConnection([row]),
+            [
+                {
+                    "id": 10,
+                    "content_id": "DRAMA-A",
+                    "created_at": "2026-07-27T01:00:00Z",
+                }
+            ],
+            limit=1,
+        )
+        self.assertEqual(selected[0]["name_tag"], "#Drama_Alpha")
+        self.assertEqual(selected[0]["tag"], "Drama Alpha")
+
+
+if __name__ == "__main__":
+    unittest.main()

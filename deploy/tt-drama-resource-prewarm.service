@@ -1,0 +1,49 @@
+[Unit]
+Description=Prewarm cached W2A metadata for recently active DramaWave dramas
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=tt-drama-featured
+Group=tt-drama-featured
+WorkingDirectory=/mnt/data-disk/tt-drama-resource-cache/current
+EnvironmentFile=/etc/tt-drama-featured.env
+Environment=TT_DRAMA_RESOURCE_DB_PATH=/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3
+Environment=TT_DRAMA_RESOURCE_PREWARM_CURSOR_PATH=/mnt/data-disk/tt-drama-resource-cache/state/prewarm-cursor.json
+Environment=TT_DRAMA_RESOURCE_PREWARM_LOCK_PATH=/run/tt-drama-resource-prewarm/prewarm.lock
+Environment=TT_DRAMA_RESOURCE_PREWARM_BATCH_LIMIT=500
+Environment=TT_DRAMA_RESOURCE_PREWARM_WORKERS=4
+Environment=TT_DRAMA_RESOURCE_PREWARM_QPS=2
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=+/usr/bin/install -d -m 2770 -o tt-drama-featured -g tt-drama-featured /mnt/data-disk/tt-drama-resource-cache/state
+ExecStartPre=/usr/bin/test -d /mnt/data-disk/tt-drama-resource-cache/state
+ExecStartPre=/usr/bin/test -w /mnt/data-disk/tt-drama-resource-cache/state
+ExecStart=/usr/bin/python3 /mnt/data-disk/tt-drama-resource-cache/current/scripts/prewarm_tt_drama_resources.py
+RuntimeDirectory=tt-drama-resource-prewarm
+RuntimeDirectoryMode=0700
+UMask=0027
+TimeoutStartSec=45min
+TimeoutStopSec=30s
+Nice=10
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/mnt/data-disk/tt-drama-resource-cache/current
+ReadWritePaths=/mnt/data-disk/tt-drama-resource-cache/state /run/tt-drama-resource-prewarm
+InaccessiblePaths=/root/.ssh

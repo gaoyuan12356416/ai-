@@ -267,6 +267,21 @@ class XAccountsAppContractTest(unittest.TestCase):
             'add_header Cache-Control "no-cache, no-store, must-revalidate" always;',
             account_page.group("body"),
         )
+        for page_name in (
+            "x-post-material-pool",
+            "x-post-drama-pool",
+        ):
+            page = re.search(
+                r"location = /%s\.html \{(?P<body>.*?)\n\}"
+                % re.escape(page_name),
+                NGINX_SOURCE,
+                flags=re.DOTALL,
+            )
+            self.assertIsNotNone(page)
+            self.assertIn(
+                'add_header Cache-Control "no-cache, no-store, must-revalidate" always;',
+                page.group("body"),
+            )
 
     def test_x_post_routes_use_scoped_cookie_gates_and_no_store(self):
         routes = source_between(
@@ -278,10 +293,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             routes.count(
                 '_require_cookie_navigation_item("xPostMaterialPool")'
             ),
-            2,
+            4,
         )
-        self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 4)
-        self.assertEqual(routes.count('"scope": "all"'), 4)
+        self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 5)
+        self.assertEqual(routes.count('"scope": "all"'), 5)
         self.assertIn("query_x_post_logs(params)", routes)
         self.assertIn("query_x_post_runs(params)", routes)
         self.assertIn("query_x_post_material_pool(", routes)

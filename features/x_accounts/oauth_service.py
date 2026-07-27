@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -49,6 +49,7 @@ USERS_ME_URL = "https://api.x.com/2/users/me?" + urllib.parse.urlencode(
 MAX_BODY_BYTES = 16 * 1024
 MAX_DAILY_PLAN_BODY_BYTES = 2 * 1024 * 1024
 MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
+MAX_DRAMA_POOL_BODY_BYTES = 5 * 1024 * 1024
 MAX_ERROR_TEXT = 240
 MAX_DAILY_ACCOUNTS = 50
 
@@ -910,6 +911,35 @@ def list_accounts(actor, scope="mine"):
         finally:
             conn.close()
     items = [row_to_item(row) for row in rows]
+    try:
+        _XPostError, XPostStore, _publish_canary = _x_posts_api()
+        schedule_store = XPostStore(POST_DB_PATH)
+        material_config = schedule_store.get_schedule_config("material")
+        drama_config = schedule_store.get_schedule_config("drama")
+        material_ids = set(
+            material_config["account_ids"]
+            if material_config["enabled"]
+            else []
+        )
+        drama_ids = set(
+            drama_config["account_ids"]
+            if drama_config["enabled"]
+            else []
+        )
+    except Exception as exc:
+        XPostError, _XPostStore, _publish_canary = _x_posts_api()
+        if isinstance(exc, XPostError):
+            _raise_x_post_error(exc)
+        raise
+    for item in items:
+        account_id = int(item.get("id") or 0)
+        sources = []
+        if account_id in material_ids:
+            sources.append("material")
+        if account_id in drama_ids:
+            sources.append("drama")
+        item["daily_auto_publish_configured"] = bool(sources)
+        item["auto_publish_sources"] = sources
     return {"items": items, "total": len(items), "updated_at": iso_utc()}
 
 
@@ -1569,6 +1599,19 @@ def _daily_account_scope(allowed_account_ids):
     return values
 
 
+def _active_schedule_account_scope():
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return tuple(
+            XPostStore(POST_DB_PATH).scheduled_account_ids(
+                enabled_only=True,
+                include_nonterminal_runs=True,
+            )
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
 def create_daily_plan_request(
     payload, allowed_account_ids=None, require_pool=False
 ):
@@ -1963,22 +2006,46 @@ def preflight_post_storage_request(required_media_count=1):
         raise
 
 
-def publish_queue_request(queue_id, allowed_account_ids=None):
+def publish_queue_request(
+    queue_id,
+    allowed_account_ids=None,
+    *,
+    allow_schedule=None,
+):
     """Publish one frozen queue row; no request field can override its account or copy."""
     XPostError, XPostStore, publish_canary = _x_posts_api()
     try:
+        if allow_schedule is None:
+            allow_schedule = allowed_account_ids is not None
         store = XPostStore(POST_DB_PATH)
         queue = store.get_queue(queue_id)
-        allowed_accounts = _daily_account_scope(allowed_account_ids)
+        allowed_accounts = (
+            ()
+            if allow_schedule and not allowed_account_ids
+            else _daily_account_scope(allowed_account_ids)
+        )
         run_id = int(queue.get("run_id") or 0)
         catchup_run_id = int(queue.get("catchup_run_id") or 0)
+        schedule_run_id = int(queue.get("schedule_run_id") or 0)
+        parent_count = sum(
+            value > 0
+            for value in (run_id, catchup_run_id, schedule_run_id)
+        )
         if allowed_accounts is not None and (
-            int(queue.get("account_id") or 0) not in allowed_accounts
-            or (run_id > 0) == (catchup_run_id > 0)
+            parent_count != 1
+            or (
+                schedule_run_id > 0
+                and not allow_schedule
+            )
+            or (
+                schedule_run_id == 0
+                and int(queue.get("account_id") or 0)
+                not in allowed_accounts
+            )
         ):
             raise ServiceError(
                 "x_daily_account_scope_denied",
-                "X每日发布只能处理配置账号的正式日更队列",
+                "X自动发布只能处理已冻结的授权账号队列",
                 403,
             )
         log = store.reserve_log(queue["id"])
@@ -2072,22 +2139,136 @@ def query_post_runs_request(payload):
 
 
 POST_MATERIAL_POOL_NAVIGATION_ITEM = "xPostMaterialPool"
+POST_DRAMA_POOL_NAVIGATION_ITEM = "xPostDramaPool"
+POST_PAGE_NAVIGATION_ITEMS = frozenset(
+    {
+        POST_MATERIAL_POOL_NAVIGATION_ITEM,
+        POST_DRAMA_POOL_NAVIGATION_ITEM,
+    }
+)
 
 
-def _material_pool_actor(payload):
+def _post_page_actor(payload, navigation_item):
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
     actor = require_actor_subject(payload.get("actor", {}))
     scope = str(payload.get("scope", "all") or "all").strip().lower()
     if scope != "all":
         raise ServiceError("x_admin_required", "仅授权用户可维护X素材池", 403)
-    navigation_item = clean_text(payload.get("navigation_item", ""), 64)
+    requested_navigation_item = clean_text(
+        payload.get("navigation_item", ""),
+        64,
+    )
+    if navigation_item not in POST_PAGE_NAVIGATION_ITEMS:
+        raise ServiceError(
+            "x_admin_required",
+            "X Post页面权限配置无效",
+            403,
+        )
     if (
         actor.get("role") != "admin"
-        and navigation_item != POST_MATERIAL_POOL_NAVIGATION_ITEM
+        and requested_navigation_item != navigation_item
     ):
-        raise ServiceError("x_admin_required", "仅授权用户可维护X素材池", 403)
+        raise ServiceError(
+            "x_admin_required",
+            "仅页面授权用户可维护X Post配置",
+            403,
+        )
     return actor
+
+
+def _material_pool_actor(payload):
+    return _post_page_actor(payload, POST_MATERIAL_POOL_NAVIGATION_ITEM)
+
+
+def _drama_pool_actor(payload):
+    return _post_page_actor(payload, POST_DRAMA_POOL_NAVIGATION_ITEM)
+
+
+def post_schedule_account_options_request(payload, navigation_item):
+    _post_page_actor(payload, navigation_item)
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM x_authorized_account "
+                "ORDER BY updated_at DESC,id DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+    items = []
+    for row in rows:
+        account = row_to_item(row)
+        items.append(
+            {
+                "id": int(account["id"]),
+                "x_user_id": str(account.get("x_user_id", "") or ""),
+                "username": str(account.get("username", "") or ""),
+                "display_name": str(
+                    account.get("display_name", "")
+                    or account.get("username", "")
+                    or ""
+                ),
+                "profile_image_url": str(
+                    account.get("profile_image_url", "") or ""
+                ),
+                "status": str(account.get("status", "") or ""),
+                "publish_eligible": bool(
+                    account.get("publish_eligible")
+                ),
+            }
+        )
+    return {"items": items, "total": len(items), "updated_at": iso_utc()}
+
+
+def query_post_schedule_request(payload, source_type, navigation_item):
+    _post_page_actor(payload, navigation_item)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return {"item": XPostStore(POST_DB_PATH).get_schedule_config(source_type)}
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def save_post_schedule_request(payload, source_type, navigation_item):
+    actor = _post_page_actor(payload, navigation_item)
+    settings = payload.get("settings")
+    if not isinstance(settings, dict):
+        settings = {
+            key: payload.get(key)
+            for key in (
+                "enabled",
+                "timezone",
+                "account_ids",
+                "publish_times",
+                "version",
+            )
+        }
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM x_authorized_account ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+    eligible_ids = [
+        int(account["id"])
+        for account in (row_to_item(row) for row in rows)
+        if account.get("status") == "active"
+        and account.get("publish_eligible")
+    ]
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).save_schedule_config(
+            source_type,
+            settings,
+            actor,
+            eligible_account_ids=eligible_ids,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": item}
 
 
 def query_post_material_pool_request(payload):
@@ -2148,6 +2329,360 @@ def record_post_material_pool_checks_request(payload):
         return XPostStore(POST_DB_PATH).record_pool_checks(payload.get("checks"))
     except XPostError as exc:
         _raise_x_post_error(exc)
+
+
+def query_post_drama_pool_request(payload):
+    _drama_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        query = dict(payload)
+        query.pop("navigation_item", None)
+        return XPostStore(POST_DB_PATH).query_drama_pool(query)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def add_post_drama_pool_request(payload):
+    actor = _drama_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).add_drama_pool_items(
+            payload.get("drama_ids"),
+            payload.get("validation_checks"),
+            actor,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def delete_post_drama_pool_request(payload, pool_item_id):
+    _drama_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).delete_drama_pool_item(pool_item_id)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def query_post_drama_pool_episodes_request(payload, pool_item_id):
+    _drama_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).query_drama_pool_episodes(
+            pool_item_id,
+            payload,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def available_post_drama_pool_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return {
+            "items": XPostStore(POST_DB_PATH).available_drama_pool_items(
+                payload.get("limit", 50)
+            )
+        }
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def _safe_schedule_queue(queue):
+    if not isinstance(queue, dict):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布队列返回无效",
+            503,
+        )
+    try:
+        queue_id = int(queue.get("id") or 0)
+        account_id = int(queue.get("account_id") or 0)
+        candidate_rank = int(queue.get("candidate_rank") or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布队列返回无效",
+            503,
+        ) from None
+    if queue_id <= 0 or account_id <= 0 or candidate_rank <= 0:
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布队列返回无效",
+            503,
+        )
+    status = str(queue.get("status", "") or "")
+    if status not in {
+        "queued",
+        "reserved",
+        "publishing",
+        "published",
+        "failed",
+    }:
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布队列状态无效",
+            503,
+        )
+    return {
+        "id": queue_id,
+        "account_id": account_id,
+        "candidate_rank": candidate_rank,
+        "status": status,
+        "unknown_outcome": bool(queue.get("unknown_outcome", False)),
+    }
+
+
+def _safe_schedule_plan_query_result(result):
+    if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布计划查询返回无效",
+            503,
+        )
+    if not result["found"]:
+        if result.get("run") is not None or result.get("queues") != []:
+            raise ServiceError(
+                "x_posts_unavailable",
+                "X定时发布计划查询返回无效",
+                503,
+            )
+        return {"found": False, "run": None, "queues": []}
+    run = result.get("run")
+    queues = result.get("queues")
+    if not isinstance(run, dict) or not isinstance(queues, list):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布计划查询返回无效",
+            503,
+        )
+    allowed_run = (
+        "id",
+        "slot_key",
+        "source_type",
+        "run_date",
+        "publish_time",
+        "timezone",
+        "config_version",
+        "account_ids",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "error_code",
+        "error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    )
+    return {
+        "found": True,
+        "run": {key: run[key] for key in allowed_run if key in run},
+        "queues": [_safe_schedule_queue(queue) for queue in queues],
+    }
+
+
+def due_post_schedules_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    try:
+        requested_now = datetime.fromisoformat(
+            str(payload.get("now", "") or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        raise ServiceError("invalid_request", "now无效", 400) from None
+    if requested_now.tzinfo is None:
+        raise ServiceError("invalid_request", "now必须包含时区", 400)
+    requested_now = requested_now.astimezone(timezone(timedelta(hours=8)))
+    server_now = datetime.now(timezone(timedelta(hours=8)))
+    if abs((server_now - requested_now).total_seconds()) > 120:
+        raise ServiceError(
+            "x_post_schedule_clock_skew",
+            "调度器时间与服务端时间不一致",
+            409,
+        )
+    if (
+        str(payload.get("run_date", "") or "")
+        != server_now.date().isoformat()
+        or payload.get("grace_seconds") != 90
+    ):
+        raise ServiceError(
+            "invalid_request",
+            "调度时间范围无效",
+            400,
+        )
+    try:
+        limit = int(payload.get("limit", 4))
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "limit无效", 400) from None
+    if limit < 1 or limit > 10:
+        raise ServiceError("invalid_request", "limit无效", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).due_schedule_slots(
+            now=server_now,
+            grace_seconds=90,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"items": list(result.get("items", []))[:limit]}
+
+
+def query_post_schedule_plan_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).query_schedule_plan(
+            payload.get("source_type"),
+            payload.get("run_date"),
+            payload.get("publish_time"),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    safe = _safe_schedule_plan_query_result(result)
+    if safe["found"] and int(
+        safe["run"].get("config_version") or 0
+    ) != int(payload.get("version") or 0):
+        raise ServiceError(
+            "x_post_schedule_run_exists",
+            "该时间点已存在其他版本的冻结计划",
+            409,
+        )
+    return safe
+
+
+def create_post_schedule_plan_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    candidates = payload.get("candidates")
+    account_ids = payload.get("account_ids")
+    if not isinstance(candidates, list) or not isinstance(account_ids, list):
+        raise ServiceError(
+            "invalid_request",
+            "定时发布计划账号或候选无效",
+            400,
+        )
+    try:
+        requested_ids = [int(value) for value in account_ids]
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "account_ids无效", 400) from None
+    if (
+        not requested_ids
+        or len(requested_ids) != len(candidates)
+        or len(set(requested_ids)) != len(requested_ids)
+        or any(value <= 0 for value in requested_ids)
+    ):
+        raise ServiceError("invalid_request", "account_ids无效", 400)
+    trusted = []
+    for candidate, account_id in zip(candidates, requested_ids):
+        if not isinstance(candidate, dict):
+            raise ServiceError("invalid_request", "candidate必须是对象", 400)
+        account = find_account(account_id)
+        if account.get("status") != "active" or not account.get(
+            "publish_eligible"
+        ):
+            raise ServiceError(
+                "x_account_not_publishable",
+                "X账号当前状态不可用于发布",
+                409,
+            )
+        item = dict(candidate)
+        item.update(
+            {
+                "account_id": int(account["id"]),
+                "account_username": str(
+                    account.get("username", "") or ""
+                ),
+                "page_name": str(
+                    account.get("display_name", "")
+                    or account.get("username", "")
+                    or ""
+                ),
+                "page_id": str(account.get("x_user_id", "") or ""),
+            }
+        )
+        trusted.append(item)
+    preflight_post_storage_request(len(trusted))
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).create_schedule_plan(
+            payload.get("source_type"),
+            payload.get("run_date"),
+            payload.get("publish_time"),
+            payload.get("version"),
+            trusted,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    queues = [
+        _safe_schedule_queue(queue)
+        for queue in result.get("queues", [])
+    ]
+    if [queue["account_id"] for queue in queues] != requested_ids:
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X定时发布计划账号范围不一致",
+            503,
+        )
+    return {
+        "run": {
+            key: result[key]
+            for key in (
+                "id",
+                "source_type",
+                "run_date",
+                "publish_time",
+                "config_version",
+                "account_ids",
+                "status",
+                "created",
+            )
+            if key in result
+        },
+        "queues": queues,
+    }
+
+
+def record_post_schedule_failure_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        result = XPostStore(POST_DB_PATH).record_schedule_failure(
+            payload.get("source_type"),
+            payload.get("run_date"),
+            payload.get("publish_time"),
+            payload.get("version"),
+            payload.get("account_ids"),
+            payload.get("error_code"),
+            payload.get("error_message") or payload.get("message"),
+            drama_pool_item_id=payload.get("drama_pool_item_id"),
+            content_id=payload.get("content_id"),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {
+        key: result[key]
+        for key in (
+            "id",
+            "source_type",
+            "run_date",
+            "publish_time",
+            "config_version",
+            "account_ids",
+            "status",
+            "error_code",
+            "error_message",
+            "recorded",
+        )
+        if key in result
+    }
 
 
 def record_post_run_failure_request(payload, allowed_account_ids=None):
@@ -2459,6 +2994,14 @@ class Handler(BaseHTTPRequestHandler):
         pool_delete_match = re.fullmatch(
             r"/internal/posts/material-pool/([0-9]+)/delete", parsed.path
         )
+        drama_pool_delete_match = re.fullmatch(
+            r"/internal/posts/drama-pool/([0-9]+)/delete",
+            parsed.path,
+        )
+        drama_pool_episodes_match = re.fullmatch(
+            r"/internal/posts/drama-pool/([0-9]+)/episodes",
+            parsed.path,
+        )
         daily_exact_paths = {
             "/internal/posts/daily-plan",
             "/internal/posts/daily-plan/query",
@@ -2473,21 +3016,32 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/catchup-plan/query",
             "/internal/posts/catchup-runs/record-failure",
         }
+        schedule_exact_paths = {
+            "/internal/posts/schedules/due",
+            "/internal/posts/schedule-plan",
+            "/internal/posts/schedule-plan/query",
+            "/internal/posts/schedule-runs/record-failure",
+            "/internal/posts/drama-pool/available",
+        }
         allow_daily = bool(
             parsed.path in daily_exact_paths
             or parsed.path in catchup_exact_paths
+            or parsed.path in schedule_exact_paths
             or daily_verify_match
             or daily_publish_match
         )
         internal_role = self.require_internal(allow_daily=allow_daily)
         if not internal_role:
             return
-        if parsed.path in catchup_exact_paths and internal_role != "daily":
+        if (
+            parsed.path in catchup_exact_paths.union(schedule_exact_paths)
+            and internal_role != "daily"
+        ):
             self.send_json(
                 403,
                 {
                     "error": "x_daily_internal_required",
-                    "message": "X catch-up routes require the daily internal bearer",
+                    "message": "X scheduled routes require the daily internal bearer",
                 },
             )
             return
@@ -2496,10 +3050,13 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path in {
                 "/internal/posts/daily-plan",
                 "/internal/posts/catchup-plan",
+                "/internal/posts/schedule-plan",
             }:
                 request_body_limit = MAX_DAILY_PLAN_BODY_BYTES
             elif parsed.path == "/internal/posts/material-pool/check":
                 request_body_limit = MAX_DAILY_CHECK_BODY_BYTES
+            elif parsed.path == "/internal/posts/drama-pool/add":
+                request_body_limit = MAX_DRAMA_POOL_BODY_BYTES
             payload = self.read_json(
                 request_body_limit
             )
@@ -2567,6 +3124,35 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if parsed.path == "/internal/posts/schedules/due":
+                self.send_json(200, due_post_schedules_request(payload))
+                return
+            if parsed.path == "/internal/posts/schedule-plan/query":
+                self.send_json(
+                    200,
+                    {
+                        "item": query_post_schedule_plan_request(payload)
+                    },
+                )
+                return
+            if parsed.path == "/internal/posts/schedule-plan":
+                self.send_json(
+                    200,
+                    {
+                        "item": create_post_schedule_plan_request(payload)
+                    },
+                )
+                return
+            if parsed.path == "/internal/posts/schedule-runs/record-failure":
+                self.send_json(
+                    200,
+                    {
+                        "item": record_post_schedule_failure_request(
+                            payload
+                        )
+                    },
+                )
+                return
             if parsed.path == "/internal/posts/storage/preflight":
                 self.send_json(
                     200,
@@ -2600,6 +3186,12 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/internal/posts/material-pool/available":
                 self.send_json(200, available_post_material_pool_request(payload))
                 return
+            if parsed.path == "/internal/posts/drama-pool/available":
+                self.send_json(
+                    200,
+                    available_post_drama_pool_request(payload),
+                )
+                return
             if parsed.path == "/internal/posts/material-pool/check":
                 self.send_json(
                     200,
@@ -2612,6 +3204,35 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/internal/posts/material-pool/add":
                 self.send_json(200, add_post_material_pool_request(payload))
                 return
+            if parsed.path == "/internal/posts/material-pool/account-options":
+                self.send_json(
+                    200,
+                    post_schedule_account_options_request(
+                        payload,
+                        POST_MATERIAL_POOL_NAVIGATION_ITEM,
+                    ),
+                )
+                return
+            if parsed.path == "/internal/posts/material-pool/schedule/query":
+                self.send_json(
+                    200,
+                    query_post_schedule_request(
+                        payload,
+                        "material",
+                        POST_MATERIAL_POOL_NAVIGATION_ITEM,
+                    ),
+                )
+                return
+            if parsed.path == "/internal/posts/material-pool/schedule/save":
+                self.send_json(
+                    200,
+                    save_post_schedule_request(
+                        payload,
+                        "material",
+                        POST_MATERIAL_POOL_NAVIGATION_ITEM,
+                    ),
+                )
+                return
             if pool_delete_match:
                 self.send_json(
                     200,
@@ -2623,13 +3244,79 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if parsed.path == "/internal/posts/drama-pool/query":
+                self.send_json(
+                    200,
+                    query_post_drama_pool_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/drama-pool/add":
+                self.send_json(
+                    200,
+                    add_post_drama_pool_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/drama-pool/account-options":
+                self.send_json(
+                    200,
+                    post_schedule_account_options_request(
+                        payload,
+                        POST_DRAMA_POOL_NAVIGATION_ITEM,
+                    ),
+                )
+                return
+            if parsed.path == "/internal/posts/drama-pool/schedule/query":
+                self.send_json(
+                    200,
+                    query_post_schedule_request(
+                        payload,
+                        "drama",
+                        POST_DRAMA_POOL_NAVIGATION_ITEM,
+                    ),
+                )
+                return
+            if parsed.path == "/internal/posts/drama-pool/schedule/save":
+                self.send_json(
+                    200,
+                    save_post_schedule_request(
+                        payload,
+                        "drama",
+                        POST_DRAMA_POOL_NAVIGATION_ITEM,
+                    ),
+                )
+                return
+            if drama_pool_episodes_match:
+                self.send_json(
+                    200,
+                    query_post_drama_pool_episodes_request(
+                        payload,
+                        drama_pool_episodes_match.group(1),
+                    ),
+                )
+                return
+            if drama_pool_delete_match:
+                self.send_json(
+                    200,
+                    {
+                        "item": delete_post_drama_pool_request(
+                            payload,
+                            drama_pool_delete_match.group(1),
+                        )
+                    },
+                )
+                return
             if daily_verify_match:
                 account_id = int(daily_verify_match.group(1))
-                allowed_accounts = _daily_account_scope(DAILY_ACCOUNT_IDS)
+                allowed_accounts = tuple(
+                    dict.fromkeys(
+                        tuple(DAILY_ACCOUNT_IDS)
+                        + tuple(_active_schedule_account_scope())
+                    )
+                )
                 if internal_role == "daily" and account_id not in allowed_accounts:
                     raise ServiceError(
                         "x_daily_account_scope_denied",
-                        "X每日发布只能校验当前配置的账号",
+                        "X自动发布只能校验当前配置的账号",
                         403,
                     )
                 self.send_json(

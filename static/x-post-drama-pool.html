@@ -1,0 +1,1263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>X Post 短剧池 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #13233a;
+      --muted: #687894;
+      --line: #dce5f1;
+      --blue: #2563eb;
+      --green: #14885f;
+      --amber: #a66a05;
+      --red: #c43b49;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at 72% -10%, rgba(37, 99, 235, .12), transparent 35%), #f4f7fb;
+    }
+    button, input, select, textarea { font: inherit; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 270px minmax(0, 1fr); }
+    .sidebar { padding: 24px 18px; background: linear-gradient(180deg, #0e1d35, #162c50); color: #fff; }
+    .brand { display: flex; align-items: center; gap: 12px; margin: 0 8px 22px; }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #2f66ff, #21c78b);
+      font-weight: 900;
+    }
+    .brand strong, .brand span { display: block; }
+    .brand span { margin-top: 3px; color: rgba(230, 239, 255, .62); font-size: 12px; }
+    .main { min-width: 0; padding: 26px 30px 44px; }
+    .topbar { margin-bottom: 22px; }
+    .title h1 { margin: 0; font-size: 28px; letter-spacing: -.02em; }
+    .title p { margin: 7px 0 0; color: var(--muted); font-size: 14px; }
+    .top-actions, .inline-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .button {
+      min-height: 40px;
+      padding: 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 700;
+      box-shadow: 0 7px 18px rgba(31, 51, 82, .06);
+    }
+    .button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .button.danger { border-color: #f3c8cd; color: #ab2e3a; background: #fff8f8; }
+    .button.small { min-height: 32px; padding: 0 11px; border-radius: 9px; font-size: 12px; }
+    .button:disabled { opacity: .5; cursor: not-allowed; }
+    .panel {
+      padding: 20px;
+      border: 1px solid rgba(210, 222, 238, .9);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, .94);
+      box-shadow: 0 16px 42px rgba(30, 51, 83, .07);
+    }
+    .panel + .panel { margin-top: 18px; }
+    .section-head { margin-bottom: 14px; }
+    .section-head h2 { margin: 0; font-size: 18px; }
+    .section-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .hidden { display: none !important; }
+    .gate { padding: 48px 24px; text-align: center; color: var(--muted); }
+    .gate strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 18px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .stat { min-height: 104px; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
+    .stat span { color: var(--muted); font-size: 13px; }
+    .stat strong { display: block; margin-top: 11px; font-size: 26px; }
+    .field { display: grid; gap: 7px; }
+    .field label { color: #44536b; font-size: 13px; font-weight: 800; }
+    .field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .field-head label { margin: 0; }
+    .helper, .subtle { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .text-link { color: var(--blue); font-size: 12px; font-weight: 800; text-decoration: none; }
+    .text-link:hover { text-decoration: underline; }
+    .schedule-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 1.25fr) minmax(280px, .9fr);
+      gap: 18px;
+    }
+    .account-search, .time-input, .filters input, .filters select {
+      width: 100%;
+      min-height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+    .account-search:focus, .time-input:focus, .filters input:focus, .filters select:focus, .field textarea:focus {
+      border-color: #86a8f8;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, .11);
+    }
+    .account-options {
+      min-height: 116px;
+      max-height: 248px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    .account-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 52px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #edf2f8;
+      cursor: pointer;
+    }
+    .account-option:last-child { border-bottom: 0; }
+    .account-option:hover { background: #f8faff; }
+    .account-option.disabled { cursor: not-allowed; opacity: .62; background: #fafbfc; }
+    .account-option input { width: 17px; height: 17px; accent-color: var(--blue); }
+    .account-option strong, .account-option span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .account-option span { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .account-status { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .account-option.disabled .account-status { color: var(--red); }
+    .selection-summary { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .time-add { display: grid; grid-template-columns: minmax(150px, 1fr) auto; gap: 8px; }
+    .time-chips { display: flex; flex-wrap: wrap; gap: 8px; min-height: 34px; }
+    .time-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 31px;
+      padding: 4px 9px;
+      border: 1px solid #cbdaf7;
+      border-radius: 999px;
+      color: #2457b8;
+      background: #eef4ff;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .time-chip button {
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      color: #2457b8;
+      background: rgba(37, 99, 235, .12);
+      cursor: pointer;
+    }
+    .schedule-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid #e7edf6;
+    }
+    .switch-row { display: flex; align-items: center; gap: 10px; font-weight: 800; }
+    .switch-row input { width: 18px; height: 18px; accent-color: var(--blue); }
+    .schedule-summary { color: #344760; font-size: 13px; line-height: 1.55; }
+    .schedule-summary strong { color: var(--blue); }
+    .schedule-meta { margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .message { min-height: 20px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .message.error { color: var(--red); }
+    .add-layout { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
+    .field textarea {
+      width: 100%;
+      min-height: 112px;
+      resize: vertical;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      line-height: 1.55;
+      outline: none;
+    }
+    .add-actions { display: grid; gap: 8px; min-width: 170px; }
+    .preview-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }
+    .preview-card { padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: #f9fbfe; }
+    .preview-card strong { display: block; margin-bottom: 6px; }
+    .preview-card .preview-meta { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .template-box {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px dashed #bfcdea;
+      border-radius: 12px;
+      background: #f7f9fd;
+    }
+    .template-box strong { display: block; margin-bottom: 8px; font-size: 13px; }
+    .template-box pre { margin: 0; overflow: auto; color: #273b58; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+    .filters {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto auto;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
+    table { width: 100%; min-width: 1450px; border-collapse: collapse; background: #fff; }
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid #e8eef6;
+      vertical-align: top;
+      text-align: left;
+      font-size: 13px;
+    }
+    th { position: sticky; top: 0; z-index: 1; background: #f7f9fc; color: #5d6d86; font-size: 12px; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    .badge {
+      display: inline-flex;
+      min-height: 27px;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .badge.completed, .badge.published, .badge.available { color: #08734f; background: #e8f8f1; }
+    .badge.pending, .badge.publishing, .badge.reserved, .badge.queued { color: #2457b8; background: #eef4ff; }
+    .badge.validation_failed, .badge.failed, .badge.blocked { color: #ad2f3b; background: #ffedef; }
+    .badge.needs_review, .badge.paused { color: #925d00; background: #fff4d9; }
+    .badge.other { color: #56657b; background: #edf1f6; }
+    .progress { width: 150px; height: 7px; margin: 8px 0 5px; overflow: hidden; border-radius: 99px; background: #e9eef6; }
+    .progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2563eb, #20ba85); }
+    .links { display: flex; flex-direction: column; gap: 6px; min-width: 116px; }
+    .links a { color: var(--blue); font-weight: 700; text-decoration: none; }
+    .links a:hover { text-decoration: underline; }
+    .error { max-width: 320px; color: #a62f3a; line-height: 1.45; word-break: break-word; }
+    .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 150px; }
+    .empty { padding: 34px 18px; text-align: center; color: var(--muted); }
+    .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+    .pager-actions { display: flex; gap: 8px; }
+    .episode-panel { margin-top: 18px; padding-top: 18px; border-top: 1px solid #e2eaf4; }
+    .episode-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .episode-head h3 { margin: 0; font-size: 16px; }
+    .episode-table { min-width: 980px; }
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 20;
+      max-width: min(440px, calc(100vw - 32px));
+      padding: 13px 16px;
+      border-radius: 12px;
+      color: #fff;
+      background: #1d3150;
+      box-shadow: 0 16px 36px rgba(20, 38, 66, .28);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .toast.error { background: #a72d3a; }
+    @media (max-width: 1080px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .schedule-grid { grid-template-columns: 1fr; }
+      .filters { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+    }
+    @media (max-width: 820px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { padding: 18px; }
+      .main { padding: 20px 16px 36px; }
+      .stats, .schedule-grid, .filters, .add-layout { grid-template-columns: 1fr; }
+      .schedule-footer { align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">AI</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>Post短剧池</h1>
+          <p>按加入顺序逐剧发布免费剧集；当前短剧按集数从小到大发完后，才会进入下一部短剧。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden"><strong>请先登录 AI 自动后台</strong><span>登录后才能维护 Post 短剧池。</span></section>
+      <section id="permissionGate" class="panel gate hidden"><strong>当前账号没有 Post 短剧池权限</strong><span id="permissionGateMessage">请检查快速导航栏中的“仅管理员可见”“权限模块”和“启用”设置。</span></section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="stats">
+          <article class="stat"><span>池内短剧</span><strong id="dramaCount">—</strong></article>
+          <article class="stat"><span>当前发布剧</span><strong id="activeDramaCount">—</strong></article>
+          <article class="stat"><span>待发免费剧集</span><strong id="pendingEpisodeCount">—</strong></article>
+          <article class="stat"><span>已发布免费剧集</span><strong id="publishedEpisodeCount">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <h2>自动发布设置</h2>
+            <p>只有这里选中的账号才会发布短剧免费剧集；同一时间有多个账号时，会按账号顺序领取连续的下一集。</p>
+          </div>
+          <div class="schedule-grid">
+            <div class="field">
+              <div class="field-head">
+                <label for="accountSearch">发布账号</label>
+                <div class="inline-actions">
+                  <button id="refreshAccounts" class="button small" type="button">刷新账号</button>
+                  <a class="text-link" href="/x-accounts.html">添加/授权新账号</a>
+                </div>
+              </div>
+              <input id="accountSearch" class="account-search" autocomplete="off" placeholder="搜索账号名称或 @用户名" />
+              <div id="accountOptions" class="account-options" role="group" aria-label="选择发布账号">
+                <div class="empty">正在加载账号…</div>
+              </div>
+              <div id="selectedAccountSummary" class="selection-summary">尚未选择发布账号。</div>
+            </div>
+            <div class="field">
+              <label for="publishTimeInput">发布时间点</label>
+              <div class="time-add">
+                <input id="publishTimeInput" class="time-input" type="time" step="60" aria-describedby="publishTimeHelp" />
+                <button id="addPublishTime" class="button" type="button">添加时间</button>
+              </div>
+              <div id="publishTimeChips" class="time-chips" aria-live="polite"></div>
+              <span id="publishTimeHelp" class="helper">统一使用北京时间（Asia/Shanghai）；同一时间不能重复添加。</span>
+            </div>
+          </div>
+          <div class="schedule-footer">
+            <div>
+              <label class="switch-row"><input id="scheduleEnabled" type="checkbox" />启用短剧池自动发布</label>
+              <div id="scheduleSummary" class="schedule-summary">请先选择账号和发布时间。</div>
+              <div id="scheduleMeta" class="schedule-meta">配置尚未加载。</div>
+            </div>
+            <button id="saveSchedule" class="button primary" type="button">保存发布设置</button>
+          </div>
+          <div id="scheduleMessage" class="message" role="status" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <h2>添加短剧</h2>
+            <p>填写短剧 content_id，先检查剧信息和免费集数，再确认加入。支持一次粘贴多个 ID。</p>
+          </div>
+          <div class="add-layout">
+            <div class="field">
+              <label for="dramaIds">短剧 ID（content_id）</label>
+              <textarea id="dramaIds" autocomplete="off" placeholder="例如：3CRScaBEY0&#10;another_content_id" aria-describedby="dramaHelp"></textarea>
+              <span id="dramaHelp" class="helper">以逗号、空格或换行分隔；每次最多 100 个，只允许字母、数字、短横线和下划线。</span>
+            </div>
+            <div class="add-actions">
+              <button id="previewDramas" class="button primary" type="button">检查并预览</button>
+              <button id="confirmAddDramas" class="button" type="button" disabled>确认加入短剧池</button>
+              <button id="clearDramas" class="button" type="button">清空输入</button>
+            </div>
+          </div>
+          <div id="dramaPreviewList" class="preview-list hidden" aria-live="polite"></div>
+          <div id="dramaActionMessage" class="message" role="status" aria-live="polite"></div>
+          <div class="template-box">
+            <strong>短剧 Post 描述模板</strong>
+            <pre id="postTemplatePreview">{url}
+ 👆Full story continues here:☝️
+Episode👉{sub_num}
+
+{name_tag}
+
+ {desc}</pre>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <h2>短剧池明细</h2>
+            <p>免费剧集按集数正序占用；出现“结果待核查”时会暂停推进，避免同一集重复发布。</p>
+          </div>
+          <form id="filters" class="filters">
+            <input id="dramaIdFilter" placeholder="短剧 ID" aria-label="短剧 ID" />
+            <select id="statusFilter" aria-label="短剧状态">
+              <option value="">全部状态</option>
+              <option value="pending">待发布</option>
+              <option value="active">发布中</option>
+              <option value="completed">已完成</option>
+              <option value="validation_failed">不可用</option>
+              <option value="needs_review">结果待核查</option>
+            </select>
+            <button class="button primary" type="submit">查询</button>
+            <button id="resetFilters" class="button" type="button">重置</button>
+          </form>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>加入顺序</th>
+                  <th>短剧 ID</th>
+                  <th>短剧信息</th>
+                  <th>免费剧集进度</th>
+                  <th>状态</th>
+                  <th>账号 / 下次发布时间</th>
+                  <th>最近 Post</th>
+                  <th>校验/发布错误</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="dramaRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <span id="pageInfo">第 1 页</span>
+            <div class="pager-actions">
+              <button id="prevPage" class="button" type="button">上一页</button>
+              <button id="nextPage" class="button" type="button">下一页</button>
+            </div>
+          </div>
+          <div id="episodePanel" class="episode-panel hidden">
+            <div class="episode-head">
+              <h3 id="episodePanelTitle">免费剧集明细</h3>
+              <button id="closeEpisodes" class="button small" type="button">收起</button>
+            </div>
+            <div class="table-wrap">
+              <table class="episode-table">
+                <thead><tr><th>集数</th><th>状态</th><th>X账号</th><th>计划时间</th><th>Post预览</th><th>错误</th></tr></thead>
+                <tbody id="episodeRows"><tr><td colspan="6" class="empty">请选择一部短剧查看。</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script>
+    (() => {
+      const state = {
+        auth: null,
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        busy: false,
+        toastTimer: null,
+        previewIds: [],
+        accountOptions: [],
+        scheduleBusy: false,
+        schedule: {
+          enabled: false,
+          timezone: "Asia/Shanghai",
+          accountIds: new Set(),
+          publishTimes: [],
+          version: 0,
+          updatedByName: "",
+          updatedAt: "",
+          nextDueAt: "",
+        },
+      };
+      const byId = id => document.getElementById(id);
+      const setText = (node, value, fallback = "—") => {
+        node.textContent = value == null || value === "" ? fallback : String(value);
+      };
+      const formatTime = value => {
+        if (!value) return "—";
+        const raw = String(value);
+        const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? raw : raw.replace(" ", "T") + "Z";
+        const date = new Date(normalized);
+        return Number.isNaN(date.getTime())
+          ? raw
+          : new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium", hour12: false }).format(date);
+      };
+      const safePostUrl = value => {
+        try {
+          const url = new URL(String(value || ""));
+          return url.protocol === "https:" && url.hostname === "x.com" && /^\/[A-Za-z0-9_]{1,50}\/status\/\d+$/.test(url.pathname)
+            ? url.href
+            : "";
+        } catch (_) {
+          return "";
+        }
+      };
+      const getErrorMessage = payload => {
+        if (!payload || typeof payload !== "object") return "";
+        if (payload.message) return String(payload.message);
+        if (typeof payload.error === "string") return payload.error;
+        if (payload.error && typeof payload.error === "object") return payload.error.message || payload.error.code || "";
+        if (Array.isArray(payload.errors)) {
+          return payload.errors.map(item => item && typeof item === "object" ? (item.message || item.error || item.drama_id || "") : item).filter(Boolean).join("；");
+        }
+        return "";
+      };
+      async function api(path, options) {
+        const request = Object.assign({ credentials: "same-origin", cache: "no-store" }, options || {});
+        if (request.body != null) request.headers = Object.assign({ "Content-Type": "application/json" }, request.headers || {});
+        const response = await fetch(path, request);
+        const body = await response.text();
+        let payload = {};
+        try { payload = body ? JSON.parse(body) : {}; } catch (_) { payload = {}; }
+        if (!response.ok) throw new Error(getErrorMessage(payload) || `HTTP ${response.status}`);
+        return payload;
+      }
+      function navigationNodeVisible(auth, node) {
+        const user = auth && auth.user;
+        if (!node || typeof node !== "object" || node.enabled === false) return false;
+        if (node.adminOnly && !(user && user.is_admin)) return false;
+        if (node.module) {
+          if (!user) return false;
+          if (!user.is_admin && !(user.permissions && user.permissions[node.module])) return false;
+        }
+        return true;
+      }
+      function navigationAllows(auth, config, itemKey) {
+        if (!Array.isArray(config)) return false;
+        return config.some(group =>
+          navigationNodeVisible(auth, group) &&
+          Array.isArray(group.items) &&
+          group.items.some(item => item && String(item.key || "") === itemKey && navigationNodeVisible(auth, item))
+        );
+      }
+      async function loadFreshNavigationConfig() {
+        const response = await fetch("/navigation.json", { credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const config = await response.json();
+        if (!Array.isArray(config)) throw new Error("invalid navigation config");
+        return config;
+      }
+      function showPermissionGate(message) {
+        if (message) setText(byId("permissionGateMessage"), message);
+        byId("permissionGate").classList.remove("hidden");
+      }
+      function showToast(message, isError) {
+        const toast = byId("toast");
+        setText(toast, message, "");
+        toast.classList.toggle("error", !!isError);
+        toast.classList.remove("hidden");
+        if (state.toastTimer) window.clearTimeout(state.toastTimer);
+        state.toastTimer = window.setTimeout(() => toast.classList.add("hidden"), 5000);
+      }
+      function setMessage(id, message, isError) {
+        const node = byId(id);
+        setText(node, message, "");
+        node.classList.toggle("error", !!isError);
+      }
+      function badge(label, kind) {
+        const node = document.createElement("span");
+        node.className = `badge ${kind || "other"}`;
+        setText(node, label);
+        return node;
+      }
+      function appendCell(row, primary, secondary) {
+        const cell = document.createElement("td");
+        setText(cell, primary);
+        if (secondary) {
+          const sub = document.createElement("div");
+          sub.className = "subtle";
+          setText(sub, secondary);
+          cell.appendChild(sub);
+        }
+        row.appendChild(cell);
+        return cell;
+      }
+      function setTableEmpty(bodyId, colSpan, message) {
+        const body = byId(bodyId);
+        body.replaceChildren();
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = colSpan;
+        cell.className = "empty";
+        setText(cell, message);
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+      function responseItem(payload) {
+        if (!payload || typeof payload !== "object") return {};
+        if (payload.item && typeof payload.item === "object") return payload.item;
+        if (payload.schedule && typeof payload.schedule === "object") return payload.schedule;
+        return payload;
+      }
+      function responseItems(payload) {
+        const root = responseItem(payload);
+        if (Array.isArray(root.items)) return root.items;
+        if (Array.isArray(root.accounts)) return root.accounts;
+        if (Array.isArray(root.episodes)) return root.episodes;
+        return Array.isArray(payload) ? payload : [];
+      }
+      function accountId(item) {
+        const value = item && (item.id ?? item.account_id);
+        return /^\d+$/.test(String(value || "")) && Number(value) > 0 ? String(value) : "";
+      }
+      function accountEligible(item) {
+        return !!item && item.status === "active" && item.publish_eligible === true;
+      }
+      function accountTitle(item) {
+        const username = String(item && item.username || "").trim().replace(/^@/, "");
+        return String(item && item.display_name || "").trim() || (username ? `@${username}` : `账号 ${accountId(item) || "—"}`);
+      }
+      function renderSelectedAccountSummary() {
+        const selected = state.schedule.accountIds.size;
+        const missing = Array.from(state.schedule.accountIds).filter(id =>
+          !state.accountOptions.some(item => accountId(item) === id)
+        ).length;
+        setText(
+          byId("selectedAccountSummary"),
+          selected
+            ? `已选择 ${selected} 个账号${missing ? `，其中 ${missing} 个账号当前未返回，请刷新或移除后再保存。` : "。"}`
+            : "尚未选择发布账号。"
+        );
+      }
+      function renderAccountOptions() {
+        const container = byId("accountOptions");
+        container.replaceChildren();
+        const query = byId("accountSearch").value.trim().toLocaleLowerCase();
+        const items = state.accountOptions.filter(item => {
+          if (!query) return true;
+          return [item.display_name, item.username, item.x_user_id, item.owner_name]
+            .map(value => String(value || "").toLocaleLowerCase()).join(" ").includes(query);
+        });
+        if (!items.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          setText(empty, query ? "没有匹配的账号。" : "暂无可选择账号，请先添加或授权账号。");
+          container.appendChild(empty);
+          renderSelectedAccountSummary();
+          return;
+        }
+        items.forEach(item => {
+          const id = accountId(item);
+          if (!id) return;
+          const selected = state.schedule.accountIds.has(id);
+          const eligible = accountEligible(item);
+          const label = document.createElement("label");
+          label.className = `account-option${eligible ? "" : " disabled"}`;
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selected;
+          checkbox.disabled = !eligible && !selected;
+          checkbox.dataset.accountId = id;
+          const textWrap = document.createElement("span");
+          const strong = document.createElement("strong");
+          setText(strong, accountTitle(item));
+          const secondary = document.createElement("span");
+          const username = String(item.username || "").trim().replace(/^@/, "");
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id}`);
+          textWrap.append(strong, secondary);
+          const status = document.createElement("span");
+          status.className = "account-status";
+          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
+          label.append(checkbox, textWrap, status);
+          container.appendChild(label);
+        });
+        renderSelectedAccountSummary();
+      }
+      function validPublishTime(value) {
+        return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
+      }
+      function renderScheduleSummary() {
+        const accountCount = state.schedule.accountIds.size;
+        const timeCount = state.schedule.publishTimes.length;
+        const total = accountCount * timeCount;
+        const node = byId("scheduleSummary");
+        node.replaceChildren();
+        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个时间点 = 每日最多 `));
+        const strong = document.createElement("strong");
+        setText(strong, `${total} 篇 Post`);
+        node.appendChild(strong);
+      }
+      function renderPublishTimes() {
+        const container = byId("publishTimeChips");
+        container.replaceChildren();
+        if (!state.schedule.publishTimes.length) {
+          const empty = document.createElement("span");
+          empty.className = "helper";
+          setText(empty, "尚未添加发布时间。");
+          container.appendChild(empty);
+        } else {
+          state.schedule.publishTimes.forEach(value => {
+            const chip = document.createElement("span");
+            chip.className = "time-chip";
+            const text = document.createElement("span");
+            setText(text, value);
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.dataset.removePublishTime = value;
+            remove.title = `删除 ${value}`;
+            remove.setAttribute("aria-label", `删除发布时间 ${value}`);
+            setText(remove, "×");
+            chip.append(text, remove);
+            container.appendChild(chip);
+          });
+        }
+        renderScheduleSummary();
+      }
+      function applySchedule(payload) {
+        const item = responseItem(payload);
+        const rawAccounts = Array.isArray(item.account_ids)
+          ? item.account_ids
+          : (Array.isArray(item.accounts) ? item.accounts.map(account => account && (account.id ?? account.account_id)) : []);
+        state.schedule.enabled = item.enabled === true;
+        state.schedule.timezone = String(item.timezone || "Asia/Shanghai");
+        state.schedule.accountIds = new Set(
+          rawAccounts.map(value => String(value || "")).filter(value => /^\d+$/.test(value) && Number(value) > 0)
+        );
+        state.schedule.publishTimes = Array.from(new Set(
+          (Array.isArray(item.publish_times) ? item.publish_times : [])
+            .map(value => String(value || "").trim()).filter(validPublishTime)
+        )).sort();
+        state.schedule.version = Number.isInteger(Number(item.version)) ? Number(item.version) : 0;
+        state.schedule.updatedByName = String(item.updated_by_name || item.updated_by || "");
+        state.schedule.updatedAt = String(item.updated_at || "");
+        state.schedule.nextDueAt = String(item.next_due_at || "");
+        byId("scheduleEnabled").checked = state.schedule.enabled;
+        renderAccountOptions();
+        renderPublishTimes();
+        const updated = state.schedule.updatedAt
+          ? `${state.schedule.updatedByName || "未知用户"} · ${formatTime(state.schedule.updatedAt)}`
+          : "尚未保存发布设置";
+        const next = state.schedule.nextDueAt ? `；下次执行 ${formatTime(state.schedule.nextDueAt)}` : "";
+        setText(byId("scheduleMeta"), `${updated}${next}`);
+      }
+      async function loadScheduleSettings() {
+        setMessage("scheduleMessage", "正在加载发布设置…", false);
+        try {
+          const [accountsResult, scheduleResult] = await Promise.all([
+            api("/api/admin/x-posts/drama-pool/account-options"),
+            api("/api/admin/x-posts/drama-pool/schedule"),
+          ]);
+          state.accountOptions = responseItems(accountsResult);
+          applySchedule(scheduleResult);
+          setMessage("scheduleMessage", "发布设置已加载。", false);
+        } catch (error) {
+          setMessage("scheduleMessage", `发布设置加载失败：${error.message}`, true);
+          renderAccountOptions();
+          renderPublishTimes();
+        }
+      }
+      async function refreshAccountOptions() {
+        const button = byId("refreshAccounts");
+        button.disabled = true;
+        setMessage("scheduleMessage", "正在刷新账号…", false);
+        try {
+          state.accountOptions = responseItems(await api("/api/admin/x-posts/drama-pool/account-options"));
+          renderAccountOptions();
+          setMessage("scheduleMessage", "账号列表已刷新。", false);
+        } catch (error) {
+          setMessage("scheduleMessage", `账号刷新失败：${error.message}`, true);
+        } finally {
+          button.disabled = false;
+        }
+      }
+      function addPublishTime() {
+        const input = byId("publishTimeInput");
+        const value = String(input.value || "").trim();
+        if (!validPublishTime(value)) {
+          setMessage("scheduleMessage", "请选择有效的发布时间。", true);
+          input.focus();
+          return;
+        }
+        if (state.schedule.publishTimes.includes(value)) {
+          setMessage("scheduleMessage", `发布时间 ${value} 已存在。`, true);
+          return;
+        }
+        state.schedule.publishTimes.push(value);
+        state.schedule.publishTimes.sort();
+        input.value = "";
+        renderPublishTimes();
+        setMessage("scheduleMessage", `已添加发布时间 ${value}，保存后生效。`, false);
+      }
+      async function saveSchedule() {
+        if (state.scheduleBusy) return;
+        const enabled = byId("scheduleEnabled").checked;
+        const selectedIds = Array.from(state.schedule.accountIds);
+        if (enabled && !selectedIds.length) {
+          setMessage("scheduleMessage", "启用自动发布前，请至少选择一个可发布账号。", true);
+          return;
+        }
+        if (enabled && !state.schedule.publishTimes.length) {
+          setMessage("scheduleMessage", "启用自动发布前，请至少添加一个发布时间。", true);
+          return;
+        }
+        if (selectedIds.some(id => {
+          const item = state.accountOptions.find(account => accountId(account) === id);
+          return !item || !accountEligible(item);
+        })) {
+          setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请移除后再保存。", true);
+          return;
+        }
+        state.scheduleBusy = true;
+        const button = byId("saveSchedule");
+        button.disabled = true;
+        setText(button, "正在保存…");
+        try {
+          const result = await api("/api/admin/x-posts/drama-pool/schedule", {
+            method: "PUT",
+            body: JSON.stringify({
+              enabled,
+              timezone: "Asia/Shanghai",
+              account_ids: selectedIds.map(value => Number(value)),
+              publish_times: state.schedule.publishTimes.slice(),
+              version: state.schedule.version,
+            }),
+          });
+          applySchedule(result);
+          setMessage("scheduleMessage", "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
+          showToast("短剧池自动发布设置已保存。", false);
+        } catch (error) {
+          setMessage("scheduleMessage", `保存失败：${error.message}`, true);
+        } finally {
+          state.scheduleBusy = false;
+          button.disabled = false;
+          setText(button, "保存发布设置");
+        }
+      }
+      function parseDramaIds() {
+        const raw = byId("dramaIds").value.trim();
+        if (!raw) throw new Error("请先输入至少一个短剧 ID");
+        const tokens = raw.split(/[\s,，;；]+/).filter(Boolean);
+        const invalid = tokens.filter(value => !/^[A-Za-z0-9_-]{1,128}$/.test(value));
+        if (invalid.length) throw new Error(`存在无效短剧 ID：${invalid.slice(0, 5).join("、")}`);
+        const ids = Array.from(new Set(tokens));
+        if (ids.length > 100) throw new Error("每次最多提交 100 个短剧 ID");
+        return ids;
+      }
+      function renderDramaPreviews(items) {
+        const container = byId("dramaPreviewList");
+        container.replaceChildren();
+        container.classList.remove("hidden");
+        if (!items.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          setText(empty, "没有返回可预览的短剧信息。");
+          container.appendChild(empty);
+          return;
+        }
+        items.forEach(item => {
+          const card = document.createElement("article");
+          card.className = "preview-card";
+          const title = document.createElement("strong");
+          setText(title, item.drama_name || item.name || item.drama_id || item.content_id || "未知短剧");
+          const valid = item.valid !== false && item.available !== false && !item.error_code;
+          card.appendChild(title);
+          card.appendChild(badge(valid ? "可加入" : "不可用", valid ? "available" : "validation_failed"));
+          const meta = document.createElement("div");
+          meta.className = "preview-meta";
+          const dramaId = item.drama_id || item.content_id || "—";
+          const freeCount = Number(item.free_episode_count ?? item.free_count ?? 0);
+          const first = item.first_sub_num ?? item.free_episode_start ?? "";
+          const last = item.last_sub_num ?? item.free_episode_end ?? "";
+          const range = first !== "" && last !== "" ? ` · 集数 ${first}-${last}` : "";
+          setText(meta, `ID ${dramaId} · ${item.language || "语言未知"} · 免费 ${freeCount} 集${range}`);
+          card.appendChild(meta);
+          if (item.name_tag) {
+            const nameTag = document.createElement("div");
+            nameTag.className = "preview-meta";
+            setText(nameTag, `name_tag：${item.name_tag}`);
+            card.appendChild(nameTag);
+          }
+          if (item.description || item.desc) {
+            const desc = document.createElement("div");
+            desc.className = "preview-meta";
+            setText(desc, item.description || item.desc);
+            card.appendChild(desc);
+          }
+          if (!valid) {
+            const error = document.createElement("div");
+            error.className = "error";
+            setText(error, `${item.error_code || "validation_failed"}：${item.error_message || "未找到可发布的免费剧集"}`);
+            card.appendChild(error);
+          }
+          container.appendChild(card);
+        });
+      }
+      async function previewDramas() {
+        if (state.busy) return;
+        let dramaIds;
+        try { dramaIds = parseDramaIds(); }
+        catch (error) {
+          setMessage("dramaActionMessage", error.message, true);
+          return;
+        }
+        state.busy = true;
+        const button = byId("previewDramas");
+        button.disabled = true;
+        setText(button, "正在检查…");
+        byId("confirmAddDramas").disabled = true;
+        try {
+          const result = await api("/api/admin/x-posts/drama-pool/preview", {
+            method: "POST",
+            body: JSON.stringify({ drama_ids: dramaIds }),
+          });
+          state.previewIds = dramaIds;
+          renderDramaPreviews(responseItems(result));
+          byId("confirmAddDramas").disabled = false;
+          setMessage("dramaActionMessage", `已检查 ${dramaIds.length} 个短剧 ID，请确认预览后加入。`, false);
+        } catch (error) {
+          state.previewIds = [];
+          setMessage("dramaActionMessage", `检查失败：${error.message}`, true);
+        } finally {
+          state.busy = false;
+          button.disabled = false;
+          setText(button, "检查并预览");
+        }
+      }
+      async function addDramas() {
+        if (state.busy || !state.previewIds.length) return;
+        state.busy = true;
+        const button = byId("confirmAddDramas");
+        button.disabled = true;
+        setText(button, "正在加入…");
+        try {
+          const result = await api("/api/admin/x-posts/drama-pool", {
+            method: "POST",
+            body: JSON.stringify({ drama_ids: state.previewIds.slice() }),
+          });
+          const added = Number(result.added_count ?? result.created_count ?? state.previewIds.length);
+          const unavailable = Number(result.validation_failed_count ?? 0);
+          showToast(unavailable ? `已加入 ${added} 部短剧，其中 ${unavailable} 部已标记不可用。` : `已加入 ${added} 部短剧。`, false);
+          clearDramaInput();
+          state.page = 1;
+          await loadDramaPool();
+        } catch (error) {
+          setMessage("dramaActionMessage", `加入失败：${error.message}`, true);
+          button.disabled = false;
+        } finally {
+          state.busy = false;
+          setText(button, "确认加入短剧池");
+        }
+      }
+      function clearDramaInput() {
+        byId("dramaIds").value = "";
+        state.previewIds = [];
+        byId("dramaPreviewList").replaceChildren();
+        byId("dramaPreviewList").classList.add("hidden");
+        byId("confirmAddDramas").disabled = true;
+        setMessage("dramaActionMessage", "", false);
+      }
+      function poolStatus(item) {
+        const value = String(item.status || item.availability || "pending").toLowerCase();
+        const labels = {
+          pending: "待发布",
+          active: "发布中",
+          publishing: "发布中",
+          completed: "已完成",
+          published: "已完成",
+          validation_failed: "不可用",
+          failed: "发布失败",
+          blocked: "已阻塞",
+          needs_review: "结果待核查",
+          paused: "已暂停",
+        };
+        return { value: labels[value] ? value : "other", label: labels[value] || value || "未知" };
+      }
+      function extractPagination(result) {
+        const pagination = result && result.pagination && typeof result.pagination === "object" ? result.pagination : (result || {});
+        return {
+          page: Number(pagination.page || state.page),
+          pageSize: Number(pagination.page_size || state.pageSize),
+          total: Number(pagination.total || 0),
+        };
+      }
+      function renderStats(result, items) {
+        const summary = result && result.summary && typeof result.summary === "object" ? result.summary : {};
+        const visiblePublished = items.reduce((sum, item) => sum + Number(item.published_episode_count || 0), 0);
+        const visiblePending = items.reduce((sum, item) => sum + Number(item.remaining_episode_count || 0), 0);
+        const visibleActive = items.filter(item => ["active", "publishing", "needs_review", "blocked"].includes(String(item.status || ""))).length;
+        setText(byId("dramaCount"), summary.total ?? state.total);
+        setText(byId("activeDramaCount"), summary.active ?? visibleActive);
+        setText(byId("pendingEpisodeCount"), summary.remaining_episodes ?? visiblePending);
+        setText(byId("publishedEpisodeCount"), summary.published_episodes ?? visiblePublished);
+      }
+      function appendPostLink(cell, value, labelText) {
+        const href = safePostUrl(value);
+        if (!href) {
+          setText(cell, "—");
+          return;
+        }
+        cell.className = "links";
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        setText(link, labelText || "预览 Post");
+        cell.appendChild(link);
+      }
+      function renderDramaRows(items) {
+        const body = byId("dramaRows");
+        body.replaceChildren();
+        if (!items.length) {
+          setTableEmpty("dramaRows", 9, "没有符合当前筛选条件的短剧。");
+          return;
+        }
+        items.forEach(item => {
+          const row = document.createElement("tr");
+          appendCell(row, formatTime(item.created_at), `池 ID ${item.id || "—"}`);
+          appendCell(row, item.drama_id || item.content_id || "—");
+          appendCell(
+            row,
+            item.drama_name || item.name || "剧名待校验",
+            [item.language, item.name_tag].filter(Boolean).join(" · ")
+          );
+          const total = Math.max(0, Number(item.free_episode_count || 0));
+          const published = Math.max(0, Number(item.published_episode_count || 0));
+          const percent = total ? Math.min(100, Math.round((published / total) * 100)) : 0;
+          const progressCell = appendCell(
+            row,
+            `${published} / ${total} 集`,
+            item.next_sub_num ? `下一集：Episode ${item.next_sub_num}` : (total && published >= total ? "免费剧集已完成" : "下一集待校验")
+          );
+          const progress = document.createElement("div");
+          progress.className = "progress";
+          const bar = document.createElement("span");
+          bar.style.width = `${percent}%`;
+          progress.appendChild(bar);
+          progressCell.insertBefore(progress, progressCell.lastElementChild || null);
+          const status = poolStatus(item);
+          const statusCell = document.createElement("td");
+          statusCell.appendChild(badge(status.label, status.value));
+          row.appendChild(statusCell);
+          const username = String(item.last_account_username || item.account_username || "").replace(/^@/, "");
+          appendCell(
+            row,
+            username ? `@${username}` : (item.last_account_id || item.account_id ? `账号 ${item.last_account_id || item.account_id}` : "—"),
+            item.next_due_at || item.next_scheduled_at ? `下次：${formatTime(item.next_due_at || item.next_scheduled_at)}` : ""
+          );
+          const postCell = document.createElement("td");
+          appendPostLink(postCell, item.last_post_url || item.preview_url || item.x_post_url, "预览最近 Post");
+          row.appendChild(postCell);
+          const errorCode = item.last_publish_error_code || item.last_error_code || item.error_code || "";
+          const errorMessage = item.last_publish_error_message || item.last_error_message || item.error_message || "";
+          const errorCell = appendCell(row, errorCode || "—", errorMessage);
+          if (errorCode || errorMessage) errorCell.className = "error";
+          const actionCell = document.createElement("td");
+          actionCell.className = "row-actions";
+          const episodes = document.createElement("button");
+          episodes.type = "button";
+          episodes.className = "button small";
+          episodes.dataset.episodesPoolId = String(item.id || "");
+          episodes.dataset.dramaLabel = String(item.drama_name || item.drama_id || item.content_id || "");
+          setText(episodes, "查看剧集");
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "button danger small";
+          remove.dataset.deletePoolId = String(item.id || "");
+          remove.dataset.dramaId = String(item.drama_id || item.content_id || "");
+          const hasHistory = Number(item.queue_count || item.episode_queue_count || 0) > 0 || item.has_history === true;
+          remove.disabled = hasHistory || ["publishing", "completed", "published", "needs_review", "blocked"].includes(String(item.status || "").toLowerCase());
+          if (remove.disabled) remove.title = "已有发布队列或历史的短剧不能删除";
+          setText(remove, "删除");
+          actionCell.append(episodes, remove);
+          row.appendChild(actionCell);
+          body.appendChild(row);
+        });
+      }
+      function queryString() {
+        const params = new URLSearchParams({ page: String(state.page), page_size: String(state.pageSize) });
+        const dramaId = byId("dramaIdFilter").value.trim();
+        const status = byId("statusFilter").value.trim();
+        if (dramaId) params.set("drama_id", dramaId);
+        if (status) params.set("status", status);
+        return params.toString();
+      }
+      async function loadDramaPool() {
+        setTableEmpty("dramaRows", 9, "正在加载…");
+        try {
+          const result = await api(`/api/admin/x-posts/drama-pool?${queryString()}`);
+          const items = responseItems(result);
+          const pagination = extractPagination(result);
+          state.page = pagination.page;
+          state.pageSize = pagination.pageSize;
+          state.total = pagination.total;
+          renderDramaRows(items);
+          renderStats(result, items);
+          const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+          setText(byId("pageInfo"), `第 ${state.page} / ${pages} 页，共 ${state.total} 条`);
+          byId("prevPage").disabled = state.page <= 1;
+          byId("nextPage").disabled = state.page >= pages;
+        } catch (error) {
+          setTableEmpty("dramaRows", 9, `加载失败：${error.message}`);
+          ["dramaCount", "activeDramaCount", "pendingEpisodeCount", "publishedEpisodeCount"].forEach(id => setText(byId(id), "—"));
+        }
+      }
+      async function loadEpisodes(poolId, dramaLabel) {
+        if (!poolId) return;
+        byId("episodePanel").classList.remove("hidden");
+        setText(byId("episodePanelTitle"), `${dramaLabel || "短剧"} · 免费剧集明细`);
+        setTableEmpty("episodeRows", 6, "正在加载剧集…");
+        byId("episodePanel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+        try {
+          const result = await api(`/api/admin/x-posts/drama-pool/${encodeURIComponent(poolId)}/episodes?page=1&page_size=100`);
+          const items = responseItems(result);
+          const body = byId("episodeRows");
+          body.replaceChildren();
+          if (!items.length) {
+            setTableEmpty("episodeRows", 6, "当前没有可显示的免费剧集。");
+            return;
+          }
+          items.forEach(item => {
+            const row = document.createElement("tr");
+            appendCell(row, `Episode ${item.sub_num ?? item.episode_number ?? "—"}`);
+            const status = poolStatus({
+              status: item.publish_status || item.queue_status || "pending",
+            });
+            const statusCell = document.createElement("td");
+            statusCell.appendChild(badge(status.label, status.value));
+            row.appendChild(statusCell);
+            const username = String(item.account_username || "").replace(/^@/, "");
+            appendCell(row, username ? `@${username}` : (item.account_id ? `账号 ${item.account_id}` : "—"));
+            appendCell(
+              row,
+              item.run_date && item.publish_time
+                ? `${item.run_date} ${item.publish_time}`
+                : "—"
+            );
+            const postCell = document.createElement("td");
+            appendPostLink(postCell, item.post_url || item.preview_url || item.x_post_url, "预览 Post");
+            row.appendChild(postCell);
+            const errorCell = appendCell(row, item.error_code || "—", item.error_message || "");
+            if (item.error_code || item.error_message) errorCell.className = "error";
+            body.appendChild(row);
+          });
+        } catch (error) {
+          setTableEmpty("episodeRows", 6, `剧集加载失败：${error.message}`);
+        }
+      }
+      async function deleteDrama(poolId, dramaId) {
+        if (!poolId || state.busy) return;
+        if (!window.confirm(`确认从短剧池删除 ${dramaId || `池记录 ${poolId}`}？`)) return;
+        state.busy = true;
+        try {
+          await api(`/api/admin/x-posts/drama-pool/${encodeURIComponent(poolId)}`, { method: "DELETE", body: "{}" });
+          showToast(`短剧 ${dramaId || poolId} 已删除。`, false);
+          await loadDramaPool();
+        } catch (error) {
+          showToast(`删除失败：${error.message}`, true);
+        } finally {
+          state.busy = false;
+        }
+      }
+      async function init() {
+        try {
+          state.auth = await api("/api/ui/topbar");
+        } catch (_) {
+          state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
+        }
+        await window.QuickNav.render({ container: "#quickNav", auth: state.auth, activeKey: "xPostDramaPool" });
+        window.UiTopbar.render({
+          auth: state.auth,
+          userCard: "#userCard",
+          authButton: "#authButton",
+          refreshButton: "#refreshPage",
+        });
+        byId("authButton").addEventListener("click", () => window.UiTopbar.handleAuthAction({ auth: state.auth, api }));
+        const user = state.auth && state.auth.user;
+        if (!(state.auth && state.auth.authenticated && user)) {
+          byId("loginGate").classList.remove("hidden");
+          return;
+        }
+        let navigationConfig;
+        try {
+          navigationConfig = await loadFreshNavigationConfig();
+        } catch (_) {
+          showPermissionGate("快速导航配置读取失败，已拒绝访问；请刷新页面后重试。");
+          return;
+        }
+        if (!navigationAllows(state.auth, navigationConfig, "xPostDramaPool")) {
+          showPermissionGate("");
+          return;
+        }
+        byId("pageRoot").classList.remove("hidden");
+        await Promise.all([loadDramaPool(), loadScheduleSettings()]);
+      }
+
+      byId("accountSearch").addEventListener("input", renderAccountOptions);
+      byId("accountOptions").addEventListener("change", event => {
+        const checkbox = event.target.closest("input[data-account-id]");
+        if (!checkbox) return;
+        const id = String(checkbox.dataset.accountId || "");
+        const item = state.accountOptions.find(account => accountId(account) === id);
+        if (checkbox.checked) {
+          if (!accountEligible(item)) {
+            checkbox.checked = false;
+            setMessage("scheduleMessage", "该账号当前不可发布，请先完成授权或校验。", true);
+            return;
+          }
+          state.schedule.accountIds.add(id);
+        } else {
+          state.schedule.accountIds.delete(id);
+        }
+        renderAccountOptions();
+        renderScheduleSummary();
+        setMessage("scheduleMessage", "账号选择已修改，保存后生效。", false);
+      });
+      byId("refreshAccounts").addEventListener("click", refreshAccountOptions);
+      byId("addPublishTime").addEventListener("click", addPublishTime);
+      byId("publishTimeInput").addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          addPublishTime();
+        }
+      });
+      byId("publishTimeChips").addEventListener("click", event => {
+        const button = event.target.closest("button[data-remove-publish-time]");
+        if (!button) return;
+        const value = String(button.dataset.removePublishTime || "");
+        state.schedule.publishTimes = state.schedule.publishTimes.filter(item => item !== value);
+        renderPublishTimes();
+        setMessage("scheduleMessage", `已移除发布时间 ${value}，保存后生效。`, false);
+      });
+      byId("scheduleEnabled").addEventListener("change", () => setMessage("scheduleMessage", "启用状态已修改，保存后生效。", false));
+      byId("saveSchedule").addEventListener("click", saveSchedule);
+      byId("previewDramas").addEventListener("click", previewDramas);
+      byId("confirmAddDramas").addEventListener("click", addDramas);
+      byId("clearDramas").addEventListener("click", clearDramaInput);
+      byId("dramaIds").addEventListener("input", () => {
+        state.previewIds = [];
+        byId("confirmAddDramas").disabled = true;
+      });
+      byId("filters").addEventListener("submit", event => {
+        event.preventDefault();
+        state.page = 1;
+        loadDramaPool();
+      });
+      byId("resetFilters").addEventListener("click", () => {
+        byId("filters").reset();
+        state.page = 1;
+        loadDramaPool();
+      });
+      byId("prevPage").addEventListener("click", () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          loadDramaPool();
+        }
+      });
+      byId("nextPage").addEventListener("click", () => {
+        if (state.page * state.pageSize < state.total) {
+          state.page += 1;
+          loadDramaPool();
+        }
+      });
+      byId("dramaRows").addEventListener("click", event => {
+        const episodeButton = event.target.closest("button[data-episodes-pool-id]");
+        if (episodeButton) {
+          loadEpisodes(episodeButton.dataset.episodesPoolId, episodeButton.dataset.dramaLabel);
+          return;
+        }
+        const deleteButton = event.target.closest("button[data-delete-pool-id]");
+        if (deleteButton && !deleteButton.disabled) {
+          deleteDrama(deleteButton.dataset.deletePoolId, deleteButton.dataset.dramaId);
+        }
+      });
+      byId("closeEpisodes").addEventListener("click", () => byId("episodePanel").classList.add("hidden"));
+
+      init();
+    })();
+  </script>
+</body>
+</html>

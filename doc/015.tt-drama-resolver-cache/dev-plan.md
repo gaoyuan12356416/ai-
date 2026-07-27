@@ -16,8 +16,8 @@
 | 公共 HTTP 路由 | Codex | `app.py` | 已完成 |
 | 动态结果卡与失败关闭 | Codex | `static/tt-drama-search.*` | 已完成 |
 | CSP 与配置 | Codex | `deploy/nginx/tt-drama-search.conf`, `.env.example` | 已完成 |
-| 自动测试和浏览器回归 | QA/Codex | `tests/`, `scripts/test_tt_drama_bridge.js` | 本地已完成，生产待验 |
-| GitHub、部署、测速与回滚证据 | Codex | GitHub / CPU server / 文档 | 待开始 |
+| 自动测试和浏览器回归 | QA/Codex | `tests/`, `scripts/test_tt_drama_bridge.js` | 已完成 |
+| GitHub、部署、测速与回滚证据 | Codex | GitHub / CPU server / 文档 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -41,3 +41,4 @@ git diff --check
 - 2026-07-27：完成需求、SA 风险审查和本地/线上基线核对。
 - 2026-07-27：完成 resolver、公开路由、精确 Nginx 代理、动态结果卡和本地移动端浏览器验证。
 - 2026-07-27：确认线上 `content_id` 为 `utf8mb4_unicode_ci`，实现 SQL 二进制精确匹配和 canonical ID 二次校验。
+- 2026-07-27：GitHub commit `bc565924fdee9c4da7cc7b20408e1d800c6c80ae` 发布到 CPU 服务器；完成冷/热、负缓存、真实封面、390x844 和 W2A 点击回归。

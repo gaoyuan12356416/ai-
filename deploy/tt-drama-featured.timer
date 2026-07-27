@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh TT featured dramas after yesterday's W2A spend settles
+
+[Timer]
+OnCalendar=*-*-* 15:30:00 Asia/Shanghai
+OnCalendar=*-*-* 18:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=tt-drama-featured.service
+
+[Install]
+WantedBy=timers.target

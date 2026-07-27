@@ -1,0 +1,12 @@
+[Unit]
+Description=Prewarm recent active DramaWave W2A metadata every four hours
+
+[Timer]
+OnCalendar=*-*-* 00,04,08,12,16,20:20:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=5m
+AccuracySec=1min
+Unit=tt-drama-resource-prewarm.service
+
+[Install]
+WantedBy=timers.target

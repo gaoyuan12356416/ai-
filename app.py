@@ -757,6 +757,13 @@ from features.tt_drama_resolver import (
     TokenBucketRateLimiter,
     normalize_content_id,
 )
+from features.tt_drama_resources import (
+    InvalidContentIdError as ResourceInvalidContentIdError,
+    ResourceSourceError,
+    SQLiteResourceCache,
+    W2AHTMLClient,
+    W2AResourceService,
+)
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -905,6 +912,17 @@ def _bounded_env_int(name, default, minimum, maximum):
     return max(int(minimum), min(value, int(maximum)))
 
 
+def _fixed_tt_drama_resource_landing_id():
+    landing_id = _bounded_env_int(
+        "TT_DRAMA_RESOURCE_LANDING_ID", 2049, 1, 9999999999
+    )
+    if landing_id != 2049:
+        raise RuntimeError(
+            "TT_DRAMA_RESOURCE_LANDING_ID must be exactly 2049"
+        )
+    return landing_id
+
+
 TT_DRAMA_RESOLVER_APP_ID = str(
     os.environ.get("TT_DRAMA_RESOLVER_APP_ID", "1479") or "1479"
 ).strip()
@@ -930,7 +948,7 @@ TT_DRAMA_RESOLVER_REPOSITORY = MySQLDramaRepository(
     max_concurrency=TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY,
     allowed_cover_hosts=os.environ.get("TT_DRAMA_RESOLVER_COVER_HOSTS", ""),
 )
-TT_DRAMA_RESOLVER = TTDramaResolver(
+TT_DRAMA_MYSQL_RESOLVER = TTDramaResolver(
     loader=TT_DRAMA_RESOLVER_REPOSITORY.lookup,
     positive_ttl_seconds=_bounded_env_int(
         "TT_DRAMA_RESOLVER_CACHE_TTL_SECONDS", 3600, 30, 86400
@@ -950,6 +968,100 @@ TT_DRAMA_RESOLVER = TTDramaResolver(
         + 3
     ),
 )
+TT_DRAMA_RESOURCE_SOURCE = str(
+    os.environ.get("TT_DRAMA_RESOURCE_SOURCE", "mysql") or "mysql"
+).strip().lower()
+if TT_DRAMA_RESOURCE_SOURCE not in {"mysql", "w2a_cache"}:
+    logging.error(
+        "unsupported TT_DRAMA_RESOURCE_SOURCE=%s; using mysql failback",
+        TT_DRAMA_RESOURCE_SOURCE,
+    )
+    TT_DRAMA_RESOURCE_SOURCE = "mysql"
+
+TT_DRAMA_RESOURCE_CACHE = None
+TT_DRAMA_RESOURCE_CLIENT = None
+TT_DRAMA_RESOURCE_SERVICE = None
+if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+    try:
+        TT_DRAMA_RESOURCE_LANDING_ID = (
+            _fixed_tt_drama_resource_landing_id()
+        )
+    except RuntimeError as exc:
+        logging.error("%s; using mysql failback", exc)
+        TT_DRAMA_RESOURCE_SOURCE = "mysql"
+if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+    TT_DRAMA_RESOURCE_CACHE = SQLiteResourceCache(
+        os.environ.get(
+            "TT_DRAMA_RESOURCE_DB_PATH",
+            "/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3",
+        ),
+        busy_timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_SQLITE_BUSY_TIMEOUT_SECONDS", 5, 1, 30
+        ),
+    )
+    TT_DRAMA_RESOURCE_CLIENT = W2AHTMLClient(
+        landing_id=TT_DRAMA_RESOURCE_LANDING_ID,
+        timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_TIMEOUT_SECONDS", 5, 1, 10
+        ),
+        max_html_bytes=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_MAX_BYTES",
+            512 * 1024,
+            16 * 1024,
+            2 * 1024 * 1024,
+        ),
+        allowed_cover_hosts=os.environ.get(
+            "TT_DRAMA_RESOURCE_COVER_HOSTS", "cdn.usrgrow.com"
+        ),
+    )
+    TT_DRAMA_RESOURCE_SERVICE = W2AResourceService(
+        cache=TT_DRAMA_RESOURCE_CACHE,
+        client=TT_DRAMA_RESOURCE_CLIENT,
+        landing_id=TT_DRAMA_RESOURCE_CLIENT.landing_id,
+        positive_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_POSITIVE_TTL_SECONDS",
+            86400,
+            300,
+            604800,
+        ),
+        negative_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_NEGATIVE_TTL_SECONDS", 900, 30, 3600
+        ),
+        stale_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_STALE_TTL_SECONDS",
+            604800,
+            3600,
+            2592000,
+        ),
+        lease_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_LEASE_SECONDS", 15, 5, 60
+        ),
+        wait_timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_WAIT_TIMEOUT_SECONDS", 5, 1, 10
+        ),
+    )
+    TT_DRAMA_RESOLVER = TT_DRAMA_RESOURCE_SERVICE
+else:
+    TT_DRAMA_RESOLVER = TT_DRAMA_MYSQL_RESOLVER
+TT_DRAMA_RESOLVER_PUBLIC_FIELDS = (
+    "content_id",
+    "title",
+    "description",
+    "cover_url",
+    "country",
+    "language",
+    "episode_count",
+    "source_updated_at",
+)
+TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES = {
+    "MISS": "MISS",
+    "ORIGIN_FILL": "MISS",
+    "NEGATIVE_FILL": "MISS",
+    "HIT": "HIT",
+    "DISK_HIT": "HIT",
+    "NEGATIVE_HIT": "NEGATIVE_HIT",
+    "STALE": "STALE",
+}
 TT_DRAMA_RESOLVER_RATE_LIMITER = TokenBucketRateLimiter(
     limit_per_minute=_bounded_env_int(
         "TT_DRAMA_RESOLVER_RATE_LIMIT_PER_MINUTE", 30, 0, 600
@@ -41373,15 +41485,26 @@ from features.x_accounts.client import (
     XAccountsClientError,
     configure_x_accounts_client,
     get_x_accounts_config,
+    add_x_post_drama_pool,
     add_x_post_material_pool,
+    delete_x_post_drama_pool,
     delete_x_post_material_pool,
+    query_x_post_account_options,
+    query_x_post_drama_pool,
+    query_x_post_drama_pool_episodes,
     query_x_post_logs,
     query_x_post_material_pool,
     query_x_post_runs,
+    query_x_post_schedule,
     query_x_accounts as query_x_authorized_accounts,
     logout_x_account,
+    save_x_post_schedule,
     start_x_authorization,
     verify_x_account,
+)
+from features.x_posts.drama_selector import (
+    DramaSelectionError as XPostDramaSelectionError,
+    audit_drama as audit_x_post_drama,
 )
 from features.x_posts.selector import (
     connect_read_only as connect_x_post_read_only,
@@ -41429,6 +41552,18 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_pool_material_already_used": (409, "素材已有X发布历史，不能重新入池"),
     "x_post_storage_conflict": (409, "素材池写入冲突，请刷新后重试"),
     "x_post_pool_required": (409, "正式每日计划必须使用素材池记录"),
+    "x_post_schedule_collision": (409, "同一账号不能在两个发布池配置相同时间点"),
+    "x_post_schedule_config_changed": (409, "自动发布设置已变更，请刷新后重试"),
+    "x_post_schedule_not_found": (404, "自动发布设置不存在"),
+    "x_post_schedule_run_exists": (409, "该时间点已存在不同的冻结发布批次"),
+    "x_post_schedule_version_conflict": (409, "自动发布设置已被修改，请刷新后重试"),
+    "x_post_drama_already_used": (409, "该短剧已有X发布历史"),
+    "x_post_drama_episode_already_used": (409, "该短剧集数已被发布队列占用"),
+    "x_post_drama_pool_item_exists": (409, "该短剧已在短剧池中"),
+    "x_post_drama_pool_item_not_found": (404, "短剧池记录不存在"),
+    "x_post_drama_pool_item_occupied": (409, "已生成发布队列的短剧不能删除"),
+    "x_post_drama_pool_item_unavailable": (409, "短剧池记录当前不可用于发布"),
+    "x_post_drama_sequence_conflict": (409, "短剧没有按入池和免费集数顺序发布"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
     "x_token_revoked": (409, "X授权已失效，请重新授权"),
     "x_upstream_error": (502, "X API请求失败，请稍后重试"),
@@ -41537,6 +41672,40 @@ def x_post_pool_query_params(raw_query):
         if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
             raise ValueError("material_id must be a positive integer")
         result["material_id"] = material_id
+    return result
+
+
+def x_post_drama_pool_query_params(raw_query):
+    raw = parse_qs(str(raw_query or ""), keep_blank_values=False)
+    allowed = {"page", "page_size", "status", "drama_id"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unsupported query parameter: %s" % unknown[0])
+    try:
+        page = max(1, int((raw.get("page") or ["1"])[0] or "1"))
+        page_size = max(
+            1,
+            min(100, int((raw.get("page_size") or ["20"])[0] or "20")),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("page and page_size must be integers")
+    result = {"page": page, "page_size": page_size}
+    status = str((raw.get("status") or [""])[0] or "").strip().lower()
+    if status:
+        if status not in {
+            "pending",
+            "active",
+            "completed",
+            "validation_failed",
+            "needs_review",
+        }:
+            raise ValueError("invalid status")
+        result["status"] = status
+    drama_id = str((raw.get("drama_id") or [""])[0] or "").strip()
+    if drama_id:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", drama_id):
+            raise ValueError("invalid drama_id")
+        result["drama_id"] = drama_id
     return result
 
 
@@ -41761,6 +41930,148 @@ def x_post_initial_material_checks(
             "error_message": message[:500],
         }
     return [outcomes[index] for index in sorted(outcomes)]
+
+
+def x_post_normalize_drama_ids(drama_ids):
+    if (
+        not isinstance(drama_ids, (list, tuple))
+        or not drama_ids
+        or len(drama_ids) > 100
+    ):
+        raise ValueError("drama_ids must contain 1 to 100 items")
+    normalized = []
+    seen = set()
+    for raw in drama_ids:
+        content_id = str(raw or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", content_id):
+            raise ValueError("drama_id is invalid")
+        if content_id in seen:
+            raise ValueError("drama_ids contains a duplicate")
+        seen.add(content_id)
+        normalized.append(content_id)
+    return normalized
+
+
+X_POST_DRAMA_VALIDATION_MESSAGES = {
+    "drama_not_found": "未找到对应的Dramawave短剧",
+    "drama_no_free_episodes": "该短剧没有可发布的免费剧集",
+    "drama_episode_gap": "免费剧集集数不连续",
+    "drama_episode_url_ambiguous": "同一免费剧集存在多个不一致的视频URL",
+    "drama_metadata_ambiguous": "短剧元数据在不同资源记录中不一致",
+    "drama_resource_invalid": "短剧资源数据不完整",
+    "x_post_drama_query_failed": "短剧资源查询暂不可用",
+}
+
+
+def x_post_drama_validation_checks(
+    drama_ids,
+    connection_factory=None,
+):
+    normalized = x_post_normalize_drama_ids(drama_ids)
+    connection = None
+    try:
+        connection = (
+            connection_factory()
+            if callable(connection_factory)
+            else connect_x_post_read_only(
+                host=MYSQL_HOST,
+                port=int(MYSQL_PORT or 3306),
+                user=MYSQL_USER,
+                password=MYSQL_PASSWORD,
+                database=DB_NAME,
+                connect_timeout=5,
+                read_timeout=30,
+            )
+        )
+        results = []
+        for content_id in normalized:
+            try:
+                audit = audit_x_post_drama(
+                    connection,
+                    content_id,
+                    schema=DB_NAME,
+                    app_id=1479,
+                )
+                episodes = audit.get("episodes", [])
+                results.append(
+                    {
+                        "drama_id": content_id,
+                        "content_id": content_id,
+                        "available": True,
+                        "valid": True,
+                        "drama_name": audit["drama_name"],
+                        "description": audit["description"],
+                        "language": audit["language"],
+                        "labels": audit["labels"],
+                        "name_tag": audit["name_tag"],
+                        "free_episode_count": int(
+                            audit["free_episode_count"]
+                        ),
+                        "first_sub_num": (
+                            int(episodes[0]["sub_number"])
+                            if episodes
+                            else 0
+                        ),
+                        "last_sub_num": (
+                            int(episodes[-1]["sub_number"])
+                            if episodes
+                            else 0
+                        ),
+                        "error_code": "",
+                        "error_message": "",
+                    }
+                )
+            except XPostDramaSelectionError as exc:
+                code = str(
+                    getattr(exc, "code", "drama_resource_invalid")
+                    or "drama_resource_invalid"
+                )[:64]
+                results.append(
+                    {
+                        "drama_id": content_id,
+                        "content_id": content_id,
+                        "available": False,
+                        "valid": False,
+                        "drama_name": "",
+                        "description": "",
+                        "language": "",
+                        "labels": "",
+                        "name_tag": "",
+                        "free_episode_count": 0,
+                        "first_sub_num": 0,
+                        "last_sub_num": 0,
+                        "error_code": code,
+                        "error_message": X_POST_DRAMA_VALIDATION_MESSAGES.get(
+                            code,
+                            str(exc) or "短剧未通过X发布校验",
+                        )[:500],
+                    }
+                )
+        return results
+    except Exception:
+        return [
+            {
+                "drama_id": content_id,
+                "content_id": content_id,
+                "available": False,
+                "valid": False,
+                "drama_name": "",
+                "description": "",
+                "language": "",
+                "labels": "",
+                "name_tag": "",
+                "free_episode_count": 0,
+                "first_sub_num": 0,
+                "last_sub_num": 0,
+                "error_code": "x_post_drama_query_failed",
+                "error_message": "短剧资源查询暂不可用",
+            }
+            for content_id in normalized
+        ]
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
 
 
 def parse_ad_material_task_route(path):
@@ -91727,7 +92038,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 outcome = TT_DRAMA_RESOLVER.resolve(content_id)
             finally:
                 TT_DRAMA_RESOLVER_REQUEST_GATE.release()
-            cache_state = outcome.cache_state
+            cache_state = TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES.get(
+                str(outcome.cache_state or ""),
+                "MISS",
+            )
             if not outcome.found:
                 respond(
                     404,
@@ -91738,8 +92052,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            respond(200, {"found": True, "data": outcome.item})
-        except InvalidContentIdError:
+            public_item = {
+                key: outcome.item.get(key)
+                for key in TT_DRAMA_RESOLVER_PUBLIC_FIELDS
+            }
+            respond(200, {"found": True, "data": public_item})
+        except (InvalidContentIdError, ResourceInvalidContentIdError):
             respond(
                 400,
                 {
@@ -91748,7 +92066,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     "message": "Enter one complete DramaWave Content ID.",
                 },
             )
-        except ResolverUnavailableError:
+        except (ResolverUnavailableError, ResourceSourceError):
             cache_state = "ERROR"
             respond(
                 503,
@@ -92283,6 +92601,149 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, 200, query_x_post_runs(params), no_store=True)
             except ValueError as exc:
                 json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/account-options":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_account_options(
+                        x_accounts_actor(self._session()),
+                        "material",
+                        "xPostMaterialPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/material-pool/schedule":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_schedule(
+                        x_accounts_actor(self._session()),
+                        "material",
+                        "xPostMaterialPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/account-options":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_account_options(
+                        x_accounts_actor(self._session()),
+                        "drama",
+                        "xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/schedule":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_schedule(
+                        x_accounts_actor(self._session()),
+                        "drama",
+                        "xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        drama_episodes_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/episodes",
+            parsed.path,
+        )
+        if drama_episodes_match:
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                params = x_post_drama_pool_query_params(parsed.query)
+                json_response(
+                    self,
+                    200,
+                    query_x_post_drama_pool_episodes(
+                        drama_episodes_match.group(1),
+                        {
+                            "page": params["page"],
+                            "page_size": params["page_size"],
+                        },
+                        x_accounts_actor(self._session()),
+                        navigation_item="xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            try:
+                params = x_post_drama_pool_query_params(parsed.query)
+                params.update(
+                    {
+                        "actor": x_accounts_actor(self._session()),
+                        "scope": "all",
+                    }
+                )
+                json_response(
+                    self,
+                    200,
+                    query_x_post_drama_pool(
+                        params,
+                        navigation_item="xPostDramaPool",
+                    ),
+                    no_store=True,
+                )
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 json_response(self, status, payload, no_store=True)
@@ -95394,6 +95855,184 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        x_post_schedule_routes = {
+            "/api/admin/x-posts/material-pool/schedule": (
+                "material",
+                "xPostMaterialPool",
+            ),
+            "/api/admin/x-posts/drama-pool/schedule": (
+                "drama",
+                "xPostDramaPool",
+            ),
+        }
+        if parsed.path in x_post_schedule_routes:
+            source_type, navigation_item = x_post_schedule_routes[
+                parsed.path
+            ]
+            if not self._require_cookie_navigation_item(navigation_item):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                settings = self._read_json()
+                result = save_x_post_schedule(
+                    settings,
+                    x_accounts_actor(session),
+                    source_type,
+                    navigation_item,
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "update_x_post_%s_schedule" % source_type,
+                        "x_post_schedule",
+                        source_type,
+                        {
+                            "enabled": bool(settings.get("enabled")),
+                            "account_count": len(
+                                settings.get("account_ids", [])
+                                if isinstance(
+                                    settings.get("account_ids"),
+                                    list,
+                                )
+                                else []
+                            ),
+                            "publish_time_count": len(
+                                settings.get("publish_times", [])
+                                if isinstance(
+                                    settings.get("publish_times"),
+                                    list,
+                                )
+                                else []
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post %s schedule audit write failed",
+                        source_type,
+                    )
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/preview":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            try:
+                payload = self._read_json()
+                json_response(
+                    self,
+                    200,
+                    {
+                        "items": x_post_drama_validation_checks(
+                            payload.get("drama_ids")
+                        )
+                    },
+                    no_store=True,
+                )
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                payload = self._read_json()
+                drama_ids = payload.get("drama_ids")
+                validation_checks = x_post_drama_validation_checks(
+                    drama_ids
+                )
+                result = add_x_post_drama_pool(
+                    drama_ids,
+                    validation_checks,
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "add_x_post_drama_pool",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "created_count": int(
+                                result.get("created_count", 0)
+                                if isinstance(result, dict)
+                                else 0
+                            ),
+                            "validation_failed_count": sum(
+                                1
+                                for item in validation_checks
+                                if item.get("error_code")
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool audit write failed"
+                    )
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "add_x_post_drama_pool_failed",
+                        "x_post_drama_pool",
+                        "batch",
+                        {"error": error_payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
         if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
             self._dispatch_ad_control_v3(parsed)
             return
@@ -96387,6 +97026,48 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             r"/api/admin/x-posts/material-pool/([0-9]+)",
             parsed.path,
         )
+        x_drama_pool_delete_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)",
+            parsed.path,
+        )
+        if x_drama_pool_delete_match:
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            pool_item_id = x_drama_pool_delete_match.group(1)
+            try:
+                result = delete_x_post_drama_pool(
+                    pool_item_id,
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                append_audit_log(
+                    session,
+                    "delete_x_post_drama_pool",
+                    "x_post_drama_pool",
+                    pool_item_id,
+                    {},
+                )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "delete_x_post_drama_pool_failed",
+                    "x_post_drama_pool",
+                    pool_item_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            return
+
         if x_pool_delete_match:
             if not self._require_cookie_navigation_item("xPostMaterialPool"):
                 return
@@ -97235,9 +97916,13 @@ def main():
 
     resolver_warmup_started = time.perf_counter()
     try:
-        resolver_warmed = TT_DRAMA_RESOLVER_REPOSITORY.warmup()
+        if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+            resolver_warmed = TT_DRAMA_RESOURCE_SERVICE.warmup()
+        else:
+            resolver_warmed = TT_DRAMA_RESOLVER_REPOSITORY.warmup()
         logging.info(
-            "TT drama resolver read-only pool warmup ready=%s elapsed_ms=%.2f",
+            "TT drama resolver warmup source=%s ready=%s elapsed_ms=%.2f",
+            TT_DRAMA_RESOURCE_SOURCE,
             resolver_warmed,
             (time.perf_counter() - resolver_warmup_started) * 1000.0,
         )

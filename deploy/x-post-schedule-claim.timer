@@ -1,0 +1,12 @@
+[Unit]
+Description=Claim configured Dramawave X Post points every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 Asia/Shanghai
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=x-post-schedule-claim.service
+
+[Install]
+WantedBy=timers.target

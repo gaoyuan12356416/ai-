@@ -37,6 +37,19 @@ SAFE_ERROR_CODES = {
     "x_post_rate_limited",
     "x_post_retry_requires_review",
     "x_post_run_not_found",
+    "x_post_schedule_collision",
+    "x_post_schedule_config_changed",
+    "x_post_schedule_not_found",
+    "x_post_schedule_run_exists",
+    "x_post_schedule_run_not_found",
+    "x_post_schedule_version_conflict",
+    "x_post_drama_already_used",
+    "x_post_drama_episode_already_used",
+    "x_post_drama_pool_item_exists",
+    "x_post_drama_pool_item_not_found",
+    "x_post_drama_pool_item_occupied",
+    "x_post_drama_pool_item_unavailable",
+    "x_post_drama_sequence_conflict",
     "x_post_storage_conflict",
     "x_post_unknown_outcome",
     "x_posts_unavailable",
@@ -268,6 +281,177 @@ def delete_x_post_material_pool(pool_item_id, actor, navigation_item=""):
         payload["navigation_item"] = str(navigation_item)
     return _request(
         "/internal/posts/material-pool/%s/delete" % pool_item_id,
+        method="POST",
+        payload=payload,
+    )
+
+
+def query_x_post_account_options(actor, source_type, navigation_item):
+    source_type = str(source_type or "").strip().lower()
+    if source_type not in {"material", "drama"}:
+        raise XAccountsClientError(
+            "invalid_request",
+            "X发布来源无效",
+            400,
+        )
+    prefix = "material-pool" if source_type == "material" else "drama-pool"
+    return _request(
+        "/internal/posts/%s/account-options" % prefix,
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "navigation_item": str(navigation_item or ""),
+        },
+    )
+
+
+def query_x_post_schedule(actor, source_type, navigation_item):
+    source_type = str(source_type or "").strip().lower()
+    if source_type not in {"material", "drama"}:
+        raise XAccountsClientError(
+            "invalid_request",
+            "X发布来源无效",
+            400,
+        )
+    prefix = "material-pool" if source_type == "material" else "drama-pool"
+    return _request(
+        "/internal/posts/%s/schedule/query" % prefix,
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "navigation_item": str(navigation_item or ""),
+        },
+    )
+
+
+def save_x_post_schedule(
+    settings,
+    actor,
+    source_type,
+    navigation_item,
+):
+    if not isinstance(settings, dict):
+        raise XAccountsClientError(
+            "invalid_request",
+            "自动发布设置必须是对象",
+            400,
+        )
+    source_type = str(source_type or "").strip().lower()
+    if source_type not in {"material", "drama"}:
+        raise XAccountsClientError(
+            "invalid_request",
+            "X发布来源无效",
+            400,
+        )
+    prefix = "material-pool" if source_type == "material" else "drama-pool"
+    return _request(
+        "/internal/posts/%s/schedule/save" % prefix,
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "navigation_item": str(navigation_item or ""),
+            "settings": dict(settings),
+        },
+    )
+
+
+def query_x_post_drama_pool(params, navigation_item=""):
+    params = params if isinstance(params, dict) else {}
+    payload = _post_query_payload(params)
+    if "drama_id" in params and params["drama_id"] not in (None, ""):
+        payload["drama_id"] = params["drama_id"]
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/query",
+        method="POST",
+        payload=payload,
+    )
+
+
+def add_x_post_drama_pool(
+    drama_ids,
+    validation_checks,
+    actor,
+    navigation_item="",
+):
+    if not isinstance(drama_ids, (list, tuple)):
+        raise XAccountsClientError(
+            "invalid_request",
+            "短剧ID列表必须是数组",
+            400,
+        )
+    if not isinstance(validation_checks, (list, tuple)):
+        raise XAccountsClientError(
+            "invalid_request",
+            "短剧校验结果必须是数组",
+            400,
+        )
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+        "drama_ids": list(drama_ids),
+        "validation_checks": list(validation_checks),
+    }
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/add",
+        method="POST",
+        payload=payload,
+    )
+
+
+def query_x_post_drama_pool_episodes(
+    pool_item_id,
+    params,
+    actor,
+    navigation_item="",
+):
+    pool_item_id = str(pool_item_id or "")
+    if not pool_item_id.isdigit() or int(pool_item_id) <= 0:
+        raise XAccountsClientError(
+            "invalid_request",
+            "短剧池记录ID无效",
+            400,
+        )
+    params = params if isinstance(params, dict) else {}
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+    }
+    for field in ("page", "page_size"):
+        if field in params and params[field] not in (None, ""):
+            payload[field] = params[field]
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/%s/episodes" % pool_item_id,
+        method="POST",
+        payload=payload,
+    )
+
+
+def delete_x_post_drama_pool(
+    pool_item_id,
+    actor,
+    navigation_item="",
+):
+    pool_item_id = str(pool_item_id or "")
+    if not pool_item_id.isdigit() or int(pool_item_id) <= 0:
+        raise XAccountsClientError(
+            "invalid_request",
+            "短剧池记录ID无效",
+            400,
+        )
+    payload = {"actor": normalize_actor(actor), "scope": "all"}
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/%s/delete" % pool_item_id,
         method="POST",
         payload=payload,
     )

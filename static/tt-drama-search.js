@@ -3,7 +3,11 @@
 
   const W2A_BASE = "https://www.dramawavew2a.com/ads/0/2049/view";
   const RESOLVER_PATH = "/api/public/tt-drama/resolve";
+  const FEATURED_PATH = "/api/public/tt-drama/featured";
   const REQUEST_TIMEOUT_MS = 6000;
+  const FEATURED_TIMEOUT_MS = 2000;
+  const FEATURED_MAX_STALE_MS = 72 * 60 * 60 * 1000;
+  const FEATURED_MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
   const CORE_PARAMS = Object.freeze({
     c: "TTpost",
     af_c_id: "0001"
@@ -22,7 +26,7 @@
   const MAX_PARAM_KEY_LENGTH = 100;
   const MAX_PARAM_VALUE_LENGTH = 1024;
 
-  const FEATURED_DRAMAS = Object.freeze([
+  const FALLBACK_FEATURED_DRAMAS = Object.freeze([
     {
       title: "Countdown King",
       language: "English",
@@ -130,6 +134,13 @@
     return url.toString();
   }
 
+  function buildFeaturedUrl(origin) {
+    return new URL(
+      FEATURED_PATH,
+      origin || "https://ai.yingliangads.com"
+    ).toString();
+  }
+
   function trackingCountText(passthrough) {
     const count = passthrough.entries.length;
     if (count === 0 && passthrough.skipped === 0) {
@@ -144,15 +155,132 @@
       : base;
   }
 
-  function renderFeaturedStories(container) {
-    for (const drama of FEATURED_DRAMAS) {
-      const card = document.createElement("article");
-      card.className = "story";
+  function isSafeFeaturedCover(value) {
+    const allowedHosts = new Set([
+      "ads-cdn.yingliang.tech",
+      "cdn.usrgrow.com",
+      "static.mydramawave.com",
+      "static-v1.mydramawave.com",
+      "static-v2.mydramawave.com"
+    ]);
+    try {
+      const url = new URL(String(value || ""));
+      return (
+        url.protocol === "https:" &&
+        allowedHosts.has(url.hostname.toLowerCase()) &&
+        !url.username &&
+        !url.password &&
+        (!url.port || url.port === "443")
+      );
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function normalizeFeaturedPayload(payload, nowMs) {
+    if (!payload || Number(payload.schema_version) !== 1 ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(String(payload.source_date || "")) ||
+        !Array.isArray(payload.items) ||
+        payload.items.length !== 5) {
+      throw new TypeError("Invalid featured stories payload");
+    }
+    const generatedAtMs = Date.parse(String(payload.generated_at || ""));
+    const currentMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+    const sourceDateMs = Date.parse(`${payload.source_date}T00:00:00Z`);
+    const yesterdayMs = Date.parse(`${shanghaiYesterday(currentMs)}T00:00:00Z`);
+    if (!Number.isFinite(generatedAtMs) ||
+        generatedAtMs - currentMs > FEATURED_MAX_FUTURE_SKEW_MS ||
+        currentMs - generatedAtMs > FEATURED_MAX_STALE_MS ||
+        !Number.isFinite(sourceDateMs) ||
+        sourceDateMs > yesterdayMs ||
+        yesterdayMs - sourceDateMs > FEATURED_MAX_STALE_MS) {
+      throw new TypeError("Featured stories payload is stale");
+    }
+
+    const items = [];
+    const seen = new Set();
+    for (const source of payload.items.slice(0, 5)) {
+      const rawContentId = String(source && source.content_id || "");
+      const contentId = normalizeContentId(rawContentId);
+      const title = String(source && source.title || "").trim().slice(0, 240);
+      const coverUrl = String(source && source.cover_url || "").trim();
+      if (
+        !source ||
+        Object.prototype.hasOwnProperty.call(source, "spend") ||
+        Object.prototype.hasOwnProperty.call(source, "spend_n") ||
+        contentId !== rawContentId ||
+        !isValidContentId(contentId) ||
+        seen.has(contentId) ||
+        !title ||
+        !isSafeFeaturedCover(coverUrl)
+      ) {
+        continue;
+      }
+      seen.add(contentId);
+      items.push(Object.freeze({
+        content_id: contentId,
+        title,
+        cover_url: coverUrl,
+        language: String(source.language || "").trim().slice(0, 32),
+        episode_count: Math.max(0, Number(source.episode_count) || 0)
+      }));
+    }
+    if (items.length !== 5) {
+      throw new TypeError("Featured stories payload is incomplete");
+    }
+    return Object.freeze({
+      source_date: String(payload.source_date),
+      generated_at: String(payload.generated_at || ""),
+      items: Object.freeze(items)
+    });
+  }
+
+  function shanghaiYesterday(nowMs) {
+    const currentMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+    const shifted = new Date(currentMs + (8 * 60 * 60 * 1000));
+    const midnight = Date.UTC(
+      shifted.getUTCFullYear(),
+      shifted.getUTCMonth(),
+      shifted.getUTCDate()
+    );
+    const previous = new Date(midnight - (24 * 60 * 60 * 1000));
+    const year = previous.getUTCFullYear();
+    const month = String(previous.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(previous.getUTCDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function renderFeaturedStories(container, dramas, search) {
+    container.replaceChildren();
+    for (const drama of dramas) {
+      const isLinked = Boolean(drama.content_id);
+      const card = document.createElement(isLinked ? "a" : "article");
+      card.className = isLinked ? "story story-link" : "story";
+      if (isLinked) {
+        const target = createTarget(drama.content_id, search);
+        card.href = `#story-${target.contentId}`;
+        card.rel = "noreferrer";
+        card.dataset.contentId = target.contentId;
+        card.dataset.targetUrl = target.url;
+        card.setAttribute(
+          "aria-label",
+          `Open ${drama.title} in DramaWave`
+        );
+      }
+
+      const placeholder = document.createElement("div");
+      placeholder.className = "story-cover-placeholder";
+      placeholder.textContent = String(drama.title || "D").trim().slice(0, 1) || "D";
+      placeholder.setAttribute("aria-hidden", "true");
 
       const image = document.createElement("img");
-      image.src = drama.cover;
+      image.src = drama.cover_url || drama.cover;
       image.alt = `${drama.title} cover`;
       image.loading = "lazy";
+      image.decoding = "async";
+      image.addEventListener("error", () => {
+        image.hidden = true;
+      }, { once: true });
 
       const info = document.createElement("div");
       info.className = "story-info";
@@ -164,8 +292,50 @@
       tag.textContent = drama.language;
 
       info.append(title, tag);
-      card.append(image, info);
+      card.append(placeholder, image, info);
       container.appendChild(card);
+    }
+  }
+
+  async function loadFeaturedStories(container, title, note, search, origin) {
+    const controller = typeof root.AbortController === "function"
+      ? new root.AbortController()
+      : { signal: undefined, abort() {} };
+    let timeoutId = null;
+    const timeoutPromise = new Promise((_resolve, reject) => {
+      timeoutId = root.setTimeout(() => {
+        controller.abort();
+        reject(new Error("Featured stories request timed out"));
+      }, FEATURED_TIMEOUT_MS);
+    });
+    try {
+      const response = await Promise.race([
+        root.fetch(buildFeaturedUrl(origin), {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          credentials: "omit",
+          cache: "default",
+          signal: controller.signal
+        }),
+        timeoutPromise
+      ]);
+      if (!response.ok) {
+        throw new Error("Featured stories are unavailable");
+      }
+      const featured = normalizeFeaturedPayload(await response.json());
+      renderFeaturedStories(container, featured.items, search);
+      title.textContent = featured.source_date === shanghaiYesterday()
+        ? "Yesterday's top stories"
+        : "Featured stories";
+      note.textContent = "Swipe & tap";
+      container.dataset.sourceDate = featured.source_date;
+      container.dataset.cacheState = "dynamic";
+      return true;
+    } catch (_error) {
+      container.dataset.cacheState = "fallback";
+      return false;
+    } finally {
+      root.clearTimeout(timeoutId);
     }
   }
 
@@ -183,15 +353,19 @@
     const continueLink = document.querySelector("#continue-link");
     const continueText = document.querySelector("#continue-text");
     const stories = document.querySelector("#stories");
+    const featuredTitle = document.querySelector("#recent-title");
+    const featuredNote = document.querySelector("#recent-note");
 
     if (!contentIdInput || !searchButton || !helper || !trackingSummary || !result ||
         !resultTitle || !resultMeta || !resultDescription || !resultCover ||
-        !resultCoverPlaceholder || !continueLink || !continueText || !stories) {
+        !resultCoverPlaceholder || !continueLink || !continueText || !stories ||
+        !featuredTitle || !featuredNote) {
       return;
     }
 
     let activeController = null;
     let activeRequest = 0;
+    let featuredOpenController = null;
 
     function clockNow() {
       return root.performance && typeof root.performance.now === "function"
@@ -426,14 +600,80 @@
         continueText.textContent = "Opening DramaWave";
       }
     });
+    stories.addEventListener("click", async (event) => {
+      const card = event.target.closest
+        ? event.target.closest("a.story-link[data-content-id]")
+        : null;
+      if (!card || !stories.contains(card)) {
+        return;
+      }
+      event.preventDefault();
+      if (card.dataset.opening === "true") {
+        return;
+      }
+      if (featuredOpenController) {
+        featuredOpenController.abort();
+      }
+      const controller = typeof root.AbortController === "function"
+        ? new root.AbortController()
+        : { signal: undefined, abort() {} };
+      featuredOpenController = controller;
+      card.dataset.opening = "true";
+      card.setAttribute("aria-busy", "true");
+      featuredNote.textContent = "Checking story…";
+      let timeoutId = null;
+      const timeoutPromise = new Promise((_resolve, reject) => {
+        timeoutId = root.setTimeout(() => {
+          controller.abort();
+          reject(new Error("Featured story check timed out"));
+        }, REQUEST_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race([
+          resolveDrama(card.dataset.contentId, controller.signal),
+          timeoutPromise
+        ]);
+        root.location.assign(card.dataset.targetUrl);
+      } catch (error) {
+        if (error && error.name === "AbortError" &&
+            featuredOpenController !== controller) {
+          return;
+        }
+        featuredNote.textContent = error && error.status === 404
+          ? "Story unavailable"
+          : "Please try again";
+      } finally {
+        root.clearTimeout(timeoutId);
+        card.removeAttribute("aria-busy");
+        delete card.dataset.opening;
+        if (featuredOpenController === controller) {
+          featuredOpenController = null;
+        }
+      }
+    });
 
-    renderFeaturedStories(stories);
+    renderFeaturedStories(
+      stories,
+      FALLBACK_FEATURED_DRAMAS,
+      root.location.search
+    );
+    loadFeaturedStories(
+      stories,
+      featuredTitle,
+      featuredNote,
+      root.location.search,
+      root.location.origin
+    );
   }
 
   const api = Object.freeze({
     W2A_BASE,
     RESOLVER_PATH,
+    FEATURED_PATH,
     REQUEST_TIMEOUT_MS,
+    FEATURED_TIMEOUT_MS,
+    FEATURED_MAX_STALE_MS,
+    FEATURED_MAX_FUTURE_SKEW_MS,
     CORE_PARAMS,
     RESERVED_QUERY_KEYS,
     MAX_PASSTHROUGH_PARAMS,
@@ -444,7 +684,11 @@
     collectPassthroughParams,
     createTarget,
     buildW2AUrl,
-    buildResolverUrl
+    buildResolverUrl,
+    buildFeaturedUrl,
+    isSafeFeaturedCover,
+    normalizeFeaturedPayload,
+    shanghaiYesterday
   });
 
   if (typeof module !== "undefined" && module.exports) {
