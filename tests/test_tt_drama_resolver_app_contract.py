@@ -25,6 +25,39 @@ class ResolverAppContractTests(unittest.TestCase):
         self.assertIn('"X-TT-Drama-Cache": cache_state', source)
         self.assertIn('"Server-Timing": "tt-drama-resolver;dur=%.2f"', source)
 
+    def test_w2a_cache_is_explicitly_activated_without_leaking_internal_fields(self):
+        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        drop_in = (
+            ROOT / "deploy" / "drama-material-api-tt-drama-resource.conf"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "Environment=TT_DRAMA_RESOURCE_SOURCE=w2a_cache",
+            drop_in,
+        )
+        self.assertIn(
+            "Environment=TT_DRAMA_RESOURCE_DB_PATH="
+            "/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3",
+            drop_in,
+        )
+        self.assertNotIn("UMask=", drop_in)
+        self.assertIn(
+            "Environment=TT_DRAMA_RESOURCE_LANDING_ID=2049",
+            drop_in,
+        )
+        self.assertIn(
+            "TT_DRAMA_RESOURCE_LANDING_ID must be exactly 2049",
+            source,
+        )
+        self.assertIn(
+            'logging.error("%s; using mysql failback", exc)',
+            source,
+        )
+        self.assertIn("TT_DRAMA_RESOLVER_PUBLIC_FIELDS", source)
+        self.assertIn(
+            "for key in TT_DRAMA_RESOLVER_PUBLIC_FIELDS",
+            source,
+        )
+
     def test_bridge_fetches_before_building_destination(self):
         source = (ROOT / "static" / "tt-drama-search.js").read_text(
             encoding="utf-8"

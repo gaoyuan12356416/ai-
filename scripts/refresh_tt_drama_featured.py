@@ -23,12 +23,23 @@ from features.tt_drama_featured import (  # noqa: E402
     build_snapshot,
     ensure_safe_data_disk_target,
     previous_source_date,
+    resolve_ranked_resources,
     shanghai_now,
+)
+from features.tt_drama_resources import (  # noqa: E402
+    DEFAULT_LANDING_ID,
+    ResourceError,
+    SQLiteResourceCache,
+    W2AHTMLClient,
+    W2AResourceService,
 )
 
 
 DEFAULT_CACHE_PATH = (
     "/mnt/data-disk/tt-drama-featured/public/current.json"
+)
+DEFAULT_RESOURCE_DB_PATH = (
+    "/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3"
 )
 DEFAULT_LOCK_PATH = "/run/tt-drama-featured/refresh.lock"
 
@@ -154,20 +165,12 @@ def _build_config(settings):
             "ads_custom_source_insight",
         ),
         insight_index=_env("TT_DRAMA_FEATURED_INSIGHT_INDEX", "as"),
-        drama_table=_env(
-            "TT_DRAMA_FEATURED_DRAMA_TABLE",
-            _env("DRAMA_SOURCE_TABLE", "ads_drama_resource"),
-        ),
         product=_env("TT_DRAMA_FEATURED_PRODUCT", "Dramawave"),
         source_app_id=_env(
             "TT_DRAMA_FEATURED_SOURCE_APP_ID",
             "[w2a]drama-double",
         ),
         data_source=_env_int("TT_DRAMA_FEATURED_DATA_SOURCE", 6, 0, 100),
-        drama_app_id=_env(
-            "TT_DRAMA_FEATURED_DRAMA_APP_ID",
-            _env("TT_DRAMA_RESOLVER_APP_ID", "1479"),
-        ),
         candidate_limit=_env_int(
             "TT_DRAMA_FEATURED_CANDIDATE_LIMIT",
             20,
@@ -179,10 +182,100 @@ def _build_config(settings):
     )
 
 
-def refresh(source_date, cache_path, dry_run=False):
+def _build_resource_service():
+    landing_id = _env_int(
+        "TT_DRAMA_RESOURCE_LANDING_ID",
+        DEFAULT_LANDING_ID,
+        1,
+        9999999999,
+    )
+    if landing_id != DEFAULT_LANDING_ID:
+        raise FeaturedRefreshError(
+            "featured resources must use W2A landing_id 2049"
+        )
+    cache = SQLiteResourceCache(
+        _env("TT_DRAMA_RESOURCE_DB_PATH", DEFAULT_RESOURCE_DB_PATH),
+        busy_timeout_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_SQLITE_BUSY_TIMEOUT_SECONDS",
+            5,
+            1,
+            30,
+        ),
+    )
+    client = W2AHTMLClient(
+        landing_id=landing_id,
+        timeout_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_TIMEOUT_SECONDS",
+            5,
+            1,
+            10,
+        ),
+        max_html_bytes=_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_MAX_BYTES",
+            512 * 1024,
+            16 * 1024,
+            2 * 1024 * 1024,
+        ),
+        allowed_cover_hosts=_env(
+            "TT_DRAMA_RESOURCE_COVER_HOSTS",
+            "cdn.usrgrow.com",
+        ),
+    )
+    service = W2AResourceService(
+        cache=cache,
+        client=client,
+        landing_id=landing_id,
+        positive_ttl_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_POSITIVE_TTL_SECONDS",
+            86400,
+            300,
+            604800,
+        ),
+        negative_ttl_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_NEGATIVE_TTL_SECONDS",
+            900,
+            30,
+            3600,
+        ),
+        stale_ttl_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_STALE_TTL_SECONDS",
+            604800,
+            3600,
+            2592000,
+        ),
+        lease_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_LEASE_SECONDS",
+            15,
+            5,
+            60,
+        ),
+        wait_timeout_seconds=_env_int(
+            "TT_DRAMA_RESOURCE_WAIT_TIMEOUT_SECONDS",
+            5,
+            1,
+            10,
+        ),
+    )
+    try:
+        service.warmup()
+    except Exception:
+        service.close()
+        raise
+    return service
+
+
+def refresh(
+    source_date,
+    cache_path,
+    dry_run=False,
+    *,
+    repository=None,
+    resource_service=None,
+    generated_at=None,
+):
     settings = _mysql_settings()
     config = _build_config(settings)
-    repository = FeaturedDramaRepository(
+    ranking_repository = repository or FeaturedDramaRepository(
         host=settings["host"],
         port=settings["port"],
         user=settings["user"],
@@ -201,31 +294,47 @@ def refresh(source_date, cache_path, dry_run=False):
             60,
         ),
     )
-    spend_rows, metadata_rows = repository.fetch(source_date)
-    snapshot = build_snapshot(
-        source_date=source_date,
-        generated_at=shanghai_now(),
-        spend_rows=spend_rows,
-        metadata_rows=metadata_rows,
-        item_limit=config.item_limit,
-        allowed_cover_hosts=config.allowed_cover_hosts,
-    )
-    changed = False
-    if not dry_run:
-        target = ensure_safe_data_disk_target(
-            cache_path,
-            mount_path="/mnt/data-disk",
-            expected_uuid=DATA_DISK_UUID,
-            mount_info=_mount_info,
+    owns_resource_service = resource_service is None
+    resources = resource_service or _build_resource_service()
+    try:
+        spend_rows = ranking_repository.fetch_ranked(source_date)
+        cover_hosts = (
+            getattr(getattr(resources, "client", None), "allowed_cover_hosts", None)
+            or config.allowed_cover_hosts
         )
-        _make_public_parent(target)
-        ensure_safe_data_disk_target(
-            target,
-            mount_path="/mnt/data-disk",
-            expected_uuid=DATA_DISK_UUID,
-            mount_info=_mount_info,
+        resource_items = resolve_ranked_resources(
+            spend_rows,
+            resources,
+            item_limit=config.item_limit,
+            allowed_cover_hosts=cover_hosts,
         )
-        changed = atomic_write_snapshot(target, snapshot)
+        snapshot = build_snapshot(
+            source_date=source_date,
+            generated_at=generated_at or shanghai_now(),
+            spend_rows=spend_rows,
+            resource_items=resource_items,
+            item_limit=config.item_limit,
+            allowed_cover_hosts=cover_hosts,
+        )
+        changed = False
+        if not dry_run:
+            target = ensure_safe_data_disk_target(
+                cache_path,
+                mount_path="/mnt/data-disk",
+                expected_uuid=DATA_DISK_UUID,
+                mount_info=_mount_info,
+            )
+            _make_public_parent(target)
+            ensure_safe_data_disk_target(
+                target,
+                mount_path="/mnt/data-disk",
+                expected_uuid=DATA_DISK_UUID,
+                mount_info=_mount_info,
+            )
+            changed = atomic_write_snapshot(target, snapshot)
+    finally:
+        if owns_resource_service:
+            resources.close()
     return {
         "status": "ok",
         "source_date": snapshot["source_date"],
@@ -256,7 +365,10 @@ def _parser():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Query and validate without writing the local cache.",
+        help=(
+            "Query and validate without replacing the public featured JSON; "
+            "the shared resource cache may still be filled."
+        ),
     )
     return parser
 
@@ -271,7 +383,12 @@ def main(argv=None):
                 cache_path=args.cache_path,
                 dry_run=args.dry_run,
             )
-    except (FeaturedRefreshError, FeaturedCacheError, ValueError) as exc:
+    except (
+        FeaturedRefreshError,
+        FeaturedCacheError,
+        ResourceError,
+        ValueError,
+    ) as exc:
         print(
             json.dumps(
                 {

@@ -1,13 +1,19 @@
 import http.client
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 import threading
 import unittest
+from unittest import mock
 
 import app
 from features.tt_drama_resolver.service import (
     ResolveOutcome,
     ResolverUnavailableError,
 )
+from features.tt_drama_resources import ResourceSourceError
 
 
 VALID_CONTENT_ID = "l9rP6ey2CB"
@@ -28,11 +34,15 @@ class _FakeResolver:
     def __init__(self):
         self.calls = []
         self.unavailable = False
+        self.source_error = False
+        self.cache_state = "MISS"
 
     def resolve(self, content_id):
         self.calls.append(content_id)
         if self.unavailable:
             raise ResolverUnavailableError("unavailable")
+        if self.source_error:
+            raise ResourceSourceError("source unavailable")
         if content_id == VALID_CONTENT_ID:
             return ResolveOutcome(
                 True,
@@ -45,13 +55,52 @@ class _FakeResolver:
                     "language": "en",
                     "episode_count": 80,
                     "source_updated_at": "2026-07-27T00:00:00",
+                    "source_url": "https://www.dramawavew2a.com/private",
+                    "content_hash": "not-public",
                 },
-                "MISS",
+                self.cache_state,
             )
-        return ResolveOutcome(False, None, "MISS")
+        return ResolveOutcome(False, None, self.cache_state)
 
 
 class ResolverHttpTests(unittest.TestCase):
+    def test_w2a_landing_id_is_fixed_to_2049(self):
+        with mock.patch.dict(
+            os.environ,
+            {"TT_DRAMA_RESOURCE_LANDING_ID": "2050"},
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "must be exactly 2049",
+            ):
+                app._fixed_tt_drama_resource_landing_id()
+
+    def test_invalid_w2a_landing_id_falls_back_without_import_failure(self):
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "TT_DRAMA_RESOURCE_SOURCE": "w2a_cache",
+                "TT_DRAMA_RESOURCE_LANDING_ID": "2050",
+            }
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import app; "
+                    "print(app.TT_DRAMA_RESOURCE_SOURCE)"
+                ),
+            ],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip().splitlines()[-1], "mysql")
+
     @classmethod
     def setUpClass(cls):
         cls.original_resolver = app.TT_DRAMA_RESOLVER
@@ -81,6 +130,8 @@ class ResolverHttpTests(unittest.TestCase):
     def setUp(self):
         self.resolver.calls.clear()
         self.resolver.unavailable = False
+        self.resolver.source_error = False
+        self.resolver.cache_state = "MISS"
         app.TT_DRAMA_RESOLVER_RATE_LIMITER = _AllowLimiter()
         app.TT_DRAMA_RESOLVER_REQUEST_GATE = threading.BoundedSemaphore(4)
 
@@ -110,10 +161,24 @@ class ResolverHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["found"])
         self.assertEqual(payload["data"]["content_id"], VALID_CONTENT_ID)
+        self.assertEqual(
+            set(payload["data"]),
+            set(app.TT_DRAMA_RESOLVER_PUBLIC_FIELDS),
+        )
+        self.assertNotIn("source_url", payload["data"])
+        self.assertNotIn("content_hash", payload["data"])
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-TT-Drama-Cache"], "MISS")
         self.assertIn("tt-drama-resolver;dur=", headers["Server-Timing"])
         self.assertEqual(self.resolver.calls, [VALID_CONTENT_ID])
+
+        self.resolver.cache_state = "DISK_HIT"
+        status, headers, payload = self.request(
+            "/api/public/tt-drama/resolve?content_id=" + VALID_CONTENT_ID
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["found"])
+        self.assertEqual(headers["X-TT-Drama-Cache"], "HIT")
 
     def test_not_found_is_404_and_does_not_return_data(self):
         status, headers, payload = self.request(
@@ -153,6 +218,15 @@ class ResolverHttpTests(unittest.TestCase):
 
         app.TT_DRAMA_RESOLVER_RATE_LIMITER = _AllowLimiter()
         self.resolver.unavailable = True
+        status, headers, payload = self.request(
+            "/api/public/tt-drama/resolve?content_id=" + VALID_CONTENT_ID
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "resolver_unavailable")
+        self.assertEqual(headers["X-TT-Drama-Cache"], "ERROR")
+
+        self.resolver.unavailable = False
+        self.resolver.source_error = True
         status, headers, payload = self.request(
             "/api/public/tt-drama/resolve?content_id=" + VALID_CONTENT_ID
         )

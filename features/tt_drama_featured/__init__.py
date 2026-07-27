@@ -10,6 +10,7 @@ from .service import (
     build_snapshot,
     ensure_safe_data_disk_target,
     previous_source_date,
+    resolve_ranked_resources,
     shanghai_now,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "build_snapshot",
     "ensure_safe_data_disk_target",
     "previous_source_date",
+    "resolve_ranked_resources",
     "shanghai_now",
 ]

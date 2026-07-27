@@ -9,11 +9,12 @@ from pathlib import Path
 import re
 import tempfile
 
-from features.tt_drama_resolver.service import (
-    compact_text,
+from features.tt_drama_resources import (
+    ResourceError,
     normalize_content_id,
     sanitize_cover_url,
 )
+from features.tt_drama_resources.models import compact_text
 
 
 SHANGHAI_TZ = timezone(timedelta(hours=8))
@@ -23,8 +24,9 @@ CONTENT_ID_SQL_PATTERN = r"^[A-Za-z0-9_-]{10,32}$"
 VERIFIED_READONLY_HOST = "101.32.56.53"
 VERIFIED_READONLY_PORT = 63350
 VERIFIED_DATABASE = "kunlunads_dev"
+VERIFIED_INSIGHT_TABLE = "ads_custom_source_insight"
+VERIFIED_INSIGHT_INDEX = "as"
 MAX_CANDIDATE_LIMIT = 20
-MAX_METADATA_ROWS_PER_CONTENT = 500
 SNAPSHOT_VERSION = 1
 MAX_PUBLIC_SNAPSHOT_BYTES = 32 * 1024
 
@@ -46,11 +48,9 @@ class FeaturedConfig:
         database="kunlunads_dev",
         insight_table="ads_custom_source_insight",
         insight_index="as",
-        drama_table="ads_drama_resource",
         product="Dramawave",
         source_app_id="[w2a]drama-double",
         data_source=6,
-        drama_app_id=1479,
         candidate_limit=20,
         item_limit=5,
         allowed_cover_hosts=None,
@@ -59,18 +59,29 @@ class FeaturedConfig:
             ("database", database),
             ("insight_table", insight_table),
             ("insight_index", insight_index),
-            ("drama_table", drama_table),
         ):
             if not SAFE_IDENTIFIER_PATTERN.fullmatch(str(value or "")):
                 raise ValueError("%s is invalid" % label)
         self.database = str(database)
         self.insight_table = str(insight_table)
         self.insight_index = str(insight_index)
-        self.drama_table = str(drama_table)
         self.product = compact_text(product, 100)
         self.source_app_id = compact_text(source_app_id, 100)
         self.data_source = int(data_source)
-        self.drama_app_id = str(drama_app_id)
+        if self.insight_table != VERIFIED_INSIGHT_TABLE:
+            raise ValueError(
+                "featured insight table scope cannot be expanded"
+            )
+        if self.insight_index != VERIFIED_INSIGHT_INDEX:
+            raise ValueError(
+                "featured insight index scope cannot be expanded"
+            )
+        if (
+            self.product != "Dramawave"
+            or self.source_app_id != "[w2a]drama-double"
+            or self.data_source != 6
+        ):
+            raise ValueError("featured production scope cannot be expanded")
         self.candidate_limit = max(
             5,
             min(int(candidate_limit), MAX_CANDIDATE_LIMIT),
@@ -78,7 +89,7 @@ class FeaturedConfig:
         self.item_limit = max(1, min(int(item_limit), 10))
         if self.candidate_limit < self.item_limit:
             raise ValueError("candidate_limit must be at least item_limit")
-        if not self.product or not self.source_app_id or not self.drama_app_id:
+        if not self.product or not self.source_app_id:
             raise ValueError("featured source scope is incomplete")
         self.allowed_cover_hosts = allowed_cover_hosts
 
@@ -123,22 +134,6 @@ def _close_quietly(value):
         pass
 
 
-def _timestamp_key(value):
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=SHANGHAI_TZ)
-        return value.timestamp()
-    text = str(value or "").strip()
-    if not text:
-        return 0.0
-    try:
-        return datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=SHANGHAI_TZ
-        ).timestamp()
-    except ValueError:
-        return 0.0
-
-
 def _positive_integer(value):
     try:
         number = int(value)
@@ -148,7 +143,7 @@ def _positive_integer(value):
 
 
 class FeaturedDramaRepository:
-    """Bounded two-step query against a verified read-only MySQL replica."""
+    """Bounded spend ranking query against a verified read-only replica."""
 
     def __init__(
         self,
@@ -321,139 +316,92 @@ class FeaturedDramaRepository:
             )
         return result
 
-    def _metadata_rows(self, connection, content_ids):
-        cfg = self.config
-        row_budget = (
-            min(len(content_ids), cfg.candidate_limit)
-            * MAX_METADATA_ROWS_PER_CONTENT
-        )
-        placeholders = ",".join(["%s"] * len(content_ids))
-        sql = """
-            SELECT /*+ MAX_EXECUTION_TIME(15000) */
-                r.content_id,
-                r.app,
-                r.country,
-                r.language,
-                LEFT(r.name, 241) AS title,
-                LEFT(r.cover, 2048) AS cover_url,
-                r.sub_number,
-                r.updated_at
-              FROM {drama} r FORCE INDEX (content_id)
-             WHERE r.content_id IN ({placeholders})
-               AND r.app_id = %s
-               AND r.type = 2
-               AND r.sub_number > 0
-               AND r.sub_url <> ''
-             ORDER BY
-                r.content_id ASC,
-                r.app ASC,
-                r.country ASC,
-                r.language ASC,
-                r.sub_number ASC,
-                r.updated_at DESC
-             LIMIT %s
-        """.format(
-            drama=_qualified(cfg.database, cfg.drama_table),
-            placeholders=placeholders,
-        )
-        rows = self._rows(
-            connection,
-            sql,
-            list(content_ids) + [cfg.drama_app_id, row_budget + 1],
-        )
-        if len(rows) > row_budget:
-            raise FeaturedRefreshError(
-                "featured metadata result exceeded the row budget"
-            )
-        return rows
-
-    def fetch(self, source_date):
+    def fetch_ranked(self, source_date):
         source_date = normalize_source_date(source_date)
         connection = self._connect()
         try:
-            spend_rows = self._spend_rows(connection, source_date)
-            metadata_rows = self._metadata_rows(
-                connection,
-                [row["content_id"] for row in spend_rows],
-            )
+            return self._spend_rows(connection, source_date)
         finally:
             _close_quietly(connection)
-        return spend_rows, metadata_rows
+
+    def fetch(self, source_date):
+        """Compatibility alias for callers that only need ranked IDs."""
+        return self.fetch_ranked(source_date)
 
 
-def _pick_metadata(metadata_rows, content_ids, allowed_cover_hosts=None):
-    wanted = set(content_ids)
-    variants = {}
-    for source_row in metadata_rows:
-        row = dict(source_row or {})
-        content_id = str(row.get("content_id") or "")
-        if content_id not in wanted:
+def resolve_ranked_resources(
+    spend_rows,
+    resource_service,
+    *,
+    item_limit=5,
+    allowed_cover_hosts=None,
+):
+    """Resolve ranked IDs in order, skipping only explicit not-found results."""
+    if resource_service is None or not callable(
+        getattr(resource_service, "resolve", None)
+    ):
+        raise FeaturedRefreshError("W2A resource service is unavailable")
+    limit = max(1, min(int(item_limit), 10))
+    selected = []
+    seen = set()
+    for ranked in spend_rows:
+        candidate = str(dict(ranked or {}).get("content_id") or "")
+        try:
+            content_id = normalize_content_id(candidate)
+        except ValueError:
             continue
-        variant_key = (
-            content_id,
-            compact_text(row.get("app"), 100),
-            compact_text(row.get("country"), 16),
-            compact_text(row.get("language"), 16),
-        )
-        variants.setdefault(variant_key, []).append(row)
-
-    best = {}
-    for variant_key, rows in variants.items():
-        episode_numbers = {
-            _positive_integer(row.get("sub_number"))
-            for row in rows
-            if _positive_integer(row.get("sub_number"))
-        }
-        latest = max((_timestamp_key(row.get("updated_at")) for row in rows), default=0)
-        score = (
-            len(episode_numbers),
-            latest,
-            variant_key[1:],
-        )
-        content_id = variant_key[0]
-        current = best.get(content_id)
-        if current is None or score > current["score"]:
-            best[content_id] = {
-                "score": score,
-                "rows": rows,
-                "episode_count": len(episode_numbers),
-                "country": variant_key[2],
-                "language": variant_key[3],
-            }
-
-    result = {}
-    for content_id, selected in best.items():
-        rows = list(selected["rows"])
-        rows.sort(
-            key=lambda row: (
-                _positive_integer(row.get("sub_number")) or 10 ** 9,
-                -_timestamp_key(row.get("updated_at")),
+        if content_id in seen:
+            continue
+        seen.add(content_id)
+        try:
+            outcome = resource_service.resolve(
+                content_id,
+                allow_stale=True,
             )
-        )
-        title = ""
-        cover_url = ""
-        for row in rows:
-            if not title:
-                title = compact_text(row.get("title"), 240)
-            if not cover_url:
-                cover_url = sanitize_cover_url(
-                    row.get("cover_url"), allowed_cover_hosts
-                )
-        if (
-            not title
-            or not cover_url
-            or selected["episode_count"] <= 0
-        ):
+        except ResourceError as exc:
+            raise FeaturedRefreshError(
+                "W2A resource resolution failed: %s" % type(exc).__name__
+            ) from None
+        if outcome is None or not hasattr(outcome, "found"):
+            raise FeaturedRefreshError(
+                "W2A resource returned an invalid outcome"
+            )
+        if not bool(outcome.found):
             continue
-        result[content_id] = {
-            "content_id": content_id,
-            "title": title,
-            "cover_url": cover_url,
-            "country": selected["country"],
-            "language": selected["language"],
-            "episode_count": selected["episode_count"],
-        }
-    return result
+        item = dict(getattr(outcome, "item", None) or {})
+        if str(item.get("content_id") or "") != content_id:
+            raise FeaturedRefreshError(
+                "W2A resource returned a mismatched content ID"
+            )
+        title = compact_text(item.get("title"), 240)
+        cover_url = sanitize_cover_url(
+            item.get("cover_url"),
+            allowed_cover_hosts,
+        )
+        if not title or not cover_url:
+            raise FeaturedRefreshError(
+                "W2A resource omitted required featured fields"
+            )
+        selected.append(
+            {
+                "content_id": content_id,
+                "title": title,
+                "cover_url": cover_url,
+                "language": compact_text(item.get("language"), 16),
+                "episode_count": max(
+                    0,
+                    _positive_integer(item.get("episode_count")),
+                ),
+            }
+        )
+        if len(selected) >= limit:
+            break
+    if len(selected) != limit:
+        raise FeaturedRefreshError(
+            "only %d of %d required featured dramas were valid"
+            % (len(selected), limit)
+        )
+    return selected
 
 
 def _deterministic_public_order(items, source_date):
@@ -469,32 +417,52 @@ def build_snapshot(
     source_date,
     generated_at,
     spend_rows,
-    metadata_rows,
+    resource_items,
     item_limit=5,
     allowed_cover_hosts=None,
 ):
     source_date = normalize_source_date(source_date)
     generated = shanghai_now(generated_at)
     limit = max(1, min(int(item_limit), 10))
-    ranked_ids = [str(row.get("content_id") or "") for row in spend_rows]
-    metadata = _pick_metadata(
-        metadata_rows,
-        ranked_ids,
-        allowed_cover_hosts=allowed_cover_hosts,
-    )
+    ranked_ids = [
+        str(dict(row or {}).get("content_id") or "")
+        for row in spend_rows
+    ]
+    ranked_set = {content_id for content_id in ranked_ids if content_id}
+    resources_by_id = {}
+    for source_item in resource_items:
+        item = dict(source_item or {})
+        content_id = str(item.get("content_id") or "")
+        if content_id in ranked_set and content_id not in resources_by_id:
+            resources_by_id[content_id] = item
     selected = []
-    for ranked in spend_rows:
-        content_id = str(ranked.get("content_id") or "")
-        item = metadata.get(content_id)
+    seen = set()
+    for content_id in ranked_ids:
+        if content_id in seen:
+            continue
+        item = resources_by_id.get(content_id)
         if item is None:
             continue
+        title = compact_text(item.get("title"), 240)
+        cover_url = sanitize_cover_url(
+            item.get("cover_url"),
+            allowed_cover_hosts,
+        )
+        if not title or not cover_url:
+            raise FeaturedRefreshError(
+                "W2A resource omitted required featured fields"
+            )
+        seen.add(content_id)
         selected.append(
             {
-                "content_id": item["content_id"],
-                "title": item["title"],
-                "cover_url": item["cover_url"],
-                "language": item["language"],
-                "episode_count": item["episode_count"],
+                "content_id": content_id,
+                "title": title,
+                "cover_url": cover_url,
+                "language": compact_text(item.get("language"), 16),
+                "episode_count": max(
+                    0,
+                    _positive_integer(item.get("episode_count")),
+                ),
             }
         )
         if len(selected) >= limit:

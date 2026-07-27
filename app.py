@@ -757,6 +757,13 @@ from features.tt_drama_resolver import (
     TokenBucketRateLimiter,
     normalize_content_id,
 )
+from features.tt_drama_resources import (
+    InvalidContentIdError as ResourceInvalidContentIdError,
+    ResourceSourceError,
+    SQLiteResourceCache,
+    W2AHTMLClient,
+    W2AResourceService,
+)
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -905,6 +912,17 @@ def _bounded_env_int(name, default, minimum, maximum):
     return max(int(minimum), min(value, int(maximum)))
 
 
+def _fixed_tt_drama_resource_landing_id():
+    landing_id = _bounded_env_int(
+        "TT_DRAMA_RESOURCE_LANDING_ID", 2049, 1, 9999999999
+    )
+    if landing_id != 2049:
+        raise RuntimeError(
+            "TT_DRAMA_RESOURCE_LANDING_ID must be exactly 2049"
+        )
+    return landing_id
+
+
 TT_DRAMA_RESOLVER_APP_ID = str(
     os.environ.get("TT_DRAMA_RESOLVER_APP_ID", "1479") or "1479"
 ).strip()
@@ -930,7 +948,7 @@ TT_DRAMA_RESOLVER_REPOSITORY = MySQLDramaRepository(
     max_concurrency=TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY,
     allowed_cover_hosts=os.environ.get("TT_DRAMA_RESOLVER_COVER_HOSTS", ""),
 )
-TT_DRAMA_RESOLVER = TTDramaResolver(
+TT_DRAMA_MYSQL_RESOLVER = TTDramaResolver(
     loader=TT_DRAMA_RESOLVER_REPOSITORY.lookup,
     positive_ttl_seconds=_bounded_env_int(
         "TT_DRAMA_RESOLVER_CACHE_TTL_SECONDS", 3600, 30, 86400
@@ -950,6 +968,100 @@ TT_DRAMA_RESOLVER = TTDramaResolver(
         + 3
     ),
 )
+TT_DRAMA_RESOURCE_SOURCE = str(
+    os.environ.get("TT_DRAMA_RESOURCE_SOURCE", "mysql") or "mysql"
+).strip().lower()
+if TT_DRAMA_RESOURCE_SOURCE not in {"mysql", "w2a_cache"}:
+    logging.error(
+        "unsupported TT_DRAMA_RESOURCE_SOURCE=%s; using mysql failback",
+        TT_DRAMA_RESOURCE_SOURCE,
+    )
+    TT_DRAMA_RESOURCE_SOURCE = "mysql"
+
+TT_DRAMA_RESOURCE_CACHE = None
+TT_DRAMA_RESOURCE_CLIENT = None
+TT_DRAMA_RESOURCE_SERVICE = None
+if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+    try:
+        TT_DRAMA_RESOURCE_LANDING_ID = (
+            _fixed_tt_drama_resource_landing_id()
+        )
+    except RuntimeError as exc:
+        logging.error("%s; using mysql failback", exc)
+        TT_DRAMA_RESOURCE_SOURCE = "mysql"
+if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+    TT_DRAMA_RESOURCE_CACHE = SQLiteResourceCache(
+        os.environ.get(
+            "TT_DRAMA_RESOURCE_DB_PATH",
+            "/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3",
+        ),
+        busy_timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_SQLITE_BUSY_TIMEOUT_SECONDS", 5, 1, 30
+        ),
+    )
+    TT_DRAMA_RESOURCE_CLIENT = W2AHTMLClient(
+        landing_id=TT_DRAMA_RESOURCE_LANDING_ID,
+        timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_TIMEOUT_SECONDS", 5, 1, 10
+        ),
+        max_html_bytes=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_HTTP_MAX_BYTES",
+            512 * 1024,
+            16 * 1024,
+            2 * 1024 * 1024,
+        ),
+        allowed_cover_hosts=os.environ.get(
+            "TT_DRAMA_RESOURCE_COVER_HOSTS", "cdn.usrgrow.com"
+        ),
+    )
+    TT_DRAMA_RESOURCE_SERVICE = W2AResourceService(
+        cache=TT_DRAMA_RESOURCE_CACHE,
+        client=TT_DRAMA_RESOURCE_CLIENT,
+        landing_id=TT_DRAMA_RESOURCE_CLIENT.landing_id,
+        positive_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_POSITIVE_TTL_SECONDS",
+            86400,
+            300,
+            604800,
+        ),
+        negative_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_NEGATIVE_TTL_SECONDS", 900, 30, 3600
+        ),
+        stale_ttl_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_STALE_TTL_SECONDS",
+            604800,
+            3600,
+            2592000,
+        ),
+        lease_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_LEASE_SECONDS", 15, 5, 60
+        ),
+        wait_timeout_seconds=_bounded_env_int(
+            "TT_DRAMA_RESOURCE_WAIT_TIMEOUT_SECONDS", 5, 1, 10
+        ),
+    )
+    TT_DRAMA_RESOLVER = TT_DRAMA_RESOURCE_SERVICE
+else:
+    TT_DRAMA_RESOLVER = TT_DRAMA_MYSQL_RESOLVER
+TT_DRAMA_RESOLVER_PUBLIC_FIELDS = (
+    "content_id",
+    "title",
+    "description",
+    "cover_url",
+    "country",
+    "language",
+    "episode_count",
+    "source_updated_at",
+)
+TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES = {
+    "MISS": "MISS",
+    "ORIGIN_FILL": "MISS",
+    "NEGATIVE_FILL": "MISS",
+    "HIT": "HIT",
+    "DISK_HIT": "HIT",
+    "NEGATIVE_HIT": "NEGATIVE_HIT",
+    "STALE": "STALE",
+}
 TT_DRAMA_RESOLVER_RATE_LIMITER = TokenBucketRateLimiter(
     limit_per_minute=_bounded_env_int(
         "TT_DRAMA_RESOLVER_RATE_LIMIT_PER_MINUTE", 30, 0, 600
@@ -91726,7 +91838,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 outcome = TT_DRAMA_RESOLVER.resolve(content_id)
             finally:
                 TT_DRAMA_RESOLVER_REQUEST_GATE.release()
-            cache_state = outcome.cache_state
+            cache_state = TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES.get(
+                str(outcome.cache_state or ""),
+                "MISS",
+            )
             if not outcome.found:
                 respond(
                     404,
@@ -91737,8 +91852,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            respond(200, {"found": True, "data": outcome.item})
-        except InvalidContentIdError:
+            public_item = {
+                key: outcome.item.get(key)
+                for key in TT_DRAMA_RESOLVER_PUBLIC_FIELDS
+            }
+            respond(200, {"found": True, "data": public_item})
+        except (InvalidContentIdError, ResourceInvalidContentIdError):
             respond(
                 400,
                 {
@@ -91747,7 +91866,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     "message": "Enter one complete DramaWave Content ID.",
                 },
             )
-        except ResolverUnavailableError:
+        except (ResolverUnavailableError, ResourceSourceError):
             cache_state = "ERROR"
             respond(
                 503,
@@ -97219,9 +97338,13 @@ def main():
 
     resolver_warmup_started = time.perf_counter()
     try:
-        resolver_warmed = TT_DRAMA_RESOLVER_REPOSITORY.warmup()
+        if TT_DRAMA_RESOURCE_SOURCE == "w2a_cache":
+            resolver_warmed = TT_DRAMA_RESOURCE_SERVICE.warmup()
+        else:
+            resolver_warmed = TT_DRAMA_RESOLVER_REPOSITORY.warmup()
         logging.info(
-            "TT drama resolver read-only pool warmup ready=%s elapsed_ms=%.2f",
+            "TT drama resolver warmup source=%s ready=%s elapsed_ms=%.2f",
+            TT_DRAMA_RESOURCE_SOURCE,
             resolver_warmed,
             (time.perf_counter() - resolver_warmup_started) * 1000.0,
         )
