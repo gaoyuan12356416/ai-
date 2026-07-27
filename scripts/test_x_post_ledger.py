@@ -446,16 +446,20 @@ class XPostLedgerTests(unittest.TestCase):
             "2026-07-22",
             "x_post_daily_candidate_shortage",
             "Authorization=do-not-store",
+            9,
         )
         repeated = store.record_run_failure(
             "2026-07-23",
             "2026-07-22",
             "x_post_daily_candidate_shortage",
             "Authorization=do-not-store",
+            9,
         )
         self.assertTrue(first["recorded"])
         self.assertFalse(repeated["recorded"])
         self.assertEqual(first["id"], repeated["id"])
+        self.assertEqual(first["expected_count"], 9)
+        self.assertEqual(repeated["expected_count"], 9)
         self.assertNotIn("do-not-store", first["error_message"])
         self.assertEqual(
             store.query_runs(
@@ -464,17 +468,29 @@ class XPostLedgerTests(unittest.TestCase):
             1,
         )
 
+        candidates = [
+            candidate(
+                account_id,
+                "daily_account_%s" % account_id,
+                1000 + account_id,
+                rank,
+            )
+            for rank, account_id in enumerate(range(2, 11), 1)
+        ]
         plan = store.create_daily_plan(
-            "2026-07-23", "2026-07-22", plan_candidates()
+            "2026-07-23", "2026-07-22", candidates
         )
         self.assertEqual(plan["id"], first["id"])
         self.assertEqual(plan["status"], "queued")
+        self.assertEqual(plan["expected_count"], 9)
+        self.assertEqual(len(plan["queues"]), 9)
         self.assertEqual(plan["error_code"], "")
         refused = store.record_run_failure(
             "2026-07-23",
             "2026-07-22",
             "late_failure",
             "must not overwrite a formal plan",
+            9,
         )
         self.assertFalse(refused["recorded"])
         self.assertEqual(refused["status"], "queued")

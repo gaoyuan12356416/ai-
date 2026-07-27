@@ -45,6 +45,7 @@ from features.x_posts.service import (  # noqa: E402
 
 DEFAULT_INTERNAL_URL = "http://127.0.0.1:8810"
 MAX_ERROR_BODY_BYTES = 64 * 1024
+MAX_SIDECAR_RESPONSE_BYTES = 1024 * 1024
 MAX_REPAIR_RESPONSE_BYTES = 64 * 1024
 _SAFE_INTERNAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 FIXED_DAILY_WORK_DIR = Path("/mnt/data-disk/x-post-automation/daily-work")
@@ -52,6 +53,7 @@ REPAIRABLE_MEDIA_CODES = frozenset(
     {"invalid_media_codec", "invalid_media_dimensions"}
 )
 DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-v1"
+MAX_DAILY_ACCOUNTS = 50
 
 
 class DailyRunError(RuntimeError):
@@ -97,9 +99,19 @@ def _parse_account_ids(value):
     try:
         items = tuple(int(item) for item in raw.split(",") if item)
     except (TypeError, ValueError, OverflowError):
-        raise DailyRunError("X_POST_DAILY_ACCOUNT_IDS must contain three integer IDs") from None
-    if len(items) != 3 or len(set(items)) != 3 or any(item <= 0 for item in items):
-        raise DailyRunError("X_POST_DAILY_ACCOUNT_IDS must contain three unique positive IDs")
+        raise DailyRunError(
+            "X_POST_DAILY_ACCOUNT_IDS must contain comma-separated integer IDs"
+        ) from None
+    if (
+        not items
+        or len(items) > MAX_DAILY_ACCOUNTS
+        or len(set(items)) != len(items)
+        or any(item <= 0 for item in items)
+    ):
+        raise DailyRunError(
+            "X_POST_DAILY_ACCOUNT_IDS must contain 1 to %s unique positive IDs"
+            % MAX_DAILY_ACCOUNTS
+        )
     return items
 
 
@@ -270,6 +282,14 @@ class DailyConfig:
             raise DailyRunError("read-only MySQL configuration is incomplete")
         if self.candidate_pool_limit > self.scan_limit:
             raise DailyRunError("candidate pool limit cannot exceed scan limit")
+        if self.scan_limit < len(self.account_ids):
+            raise DailyRunError(
+                "scan limit cannot be smaller than the configured account count"
+            )
+        if self.candidate_pool_limit < len(self.account_ids):
+            raise DailyRunError(
+                "candidate pool limit cannot be smaller than the configured account count"
+            )
         work_dir = Path(self.work_dir)
         if not work_dir.is_absolute():
             raise DailyRunError("X_POST_DAILY_WORK_DIR must be absolute")
@@ -588,7 +608,7 @@ class SidecarClient:
         try:
             response = self.opener.open(request, timeout=self.timeout)
             with response:
-                raw = response.read(MAX_ERROR_BODY_BYTES + 1)
+                raw = response.read(MAX_SIDECAR_RESPONSE_BYTES + 1)
                 status = int(getattr(response, "status", response.getcode()))
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
@@ -654,14 +674,14 @@ class SidecarClient:
                 503,
                 unknown_outcome=write_may_have_happened,
             ) from None
-        if len(raw) > MAX_ERROR_BODY_BYTES:
+        if len(raw) > MAX_SIDECAR_RESPONSE_BYTES:
             raise SidecarError(
                 "x_sidecar_invalid_response",
                 "X sidecar response is too large",
                 502,
                 unknown_outcome=write_may_have_happened,
             )
-        data = self._decode(raw)
+        data = self._decode(raw, MAX_SIDECAR_RESPONSE_BYTES)
         if status < 200 or status >= 300 or not isinstance(data, dict):
             raise SidecarError(
                 "x_sidecar_invalid_response",
@@ -672,8 +692,8 @@ class SidecarClient:
         return data
 
     @staticmethod
-    def _decode(raw):
-        if len(raw or b"") > MAX_ERROR_BODY_BYTES:
+    def _decode(raw, max_bytes=MAX_ERROR_BODY_BYTES):
+        if len(raw or b"") > int(max_bytes):
             return {}
         try:
             value = json.loads(bytes(raw or b"{}").decode("utf-8"))
@@ -901,8 +921,9 @@ class SidecarClient:
                 "Daily plan identity is invalid",
             )
         run_id = run.get("id")
+        expected_count = run.get("expected_count")
         counters = [
-            run.get("expected_count"),
+            expected_count,
             run.get("queued_count"),
             run.get("published_count"),
             run.get("failed_count"),
@@ -915,21 +936,24 @@ class SidecarClient:
             or run.get("run_date") != requested_date
             or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(run.get("source_date") or ""))
             or run.get("status") not in run_statuses
+            or not isinstance(expected_count, int)
+            or isinstance(expected_count, bool)
+            or expected_count < 1
+            or expected_count > MAX_DAILY_ACCOUNTS
             or any(
                 not isinstance(value, int)
                 or isinstance(value, bool)
                 or value < 0
-                or value > 3
+                or value > expected_count
                 for value in counters
             )
-            or run.get("expected_count") != 3
             or any(
                 not isinstance(run.get(field), str)
                 or len(run.get(field)) > 64
                 or any(ord(char) < 32 for char in run.get(field))
                 for field in ("started_at", "finished_at", "created_at", "updated_at")
             )
-            or len(queues) > 3
+            or len(queues) > expected_count
         ):
             raise SidecarError(
                 "x_daily_plan_query_invalid_response",
@@ -961,7 +985,8 @@ class SidecarClient:
                 or account_id in account_ids
                 or not isinstance(candidate_rank, int)
                 or isinstance(candidate_rank, bool)
-                or candidate_rank not in {1, 2, 3}
+                or candidate_rank < 1
+                or candidate_rank > expected_count
                 or candidate_rank in candidate_ranks
                 or candidate_rank <= previous_rank
                 or queue.get("run_id") != run_id
@@ -987,39 +1012,16 @@ class SidecarClient:
         return {"found": True, "run": dict(run), "queues": normalized}
 
     def create_plan(self, path, payload):
-        result = self.post(path, payload, write_may_have_happened=True)
-        item = result.get("item") if isinstance(result.get("item"), dict) else result
-        queues = item.get("queues") if isinstance(item, dict) else None
-        run_id = item.get("id") if isinstance(item, dict) else None
+        candidates = payload.get("candidates")
+        expected_count = len(candidates) if isinstance(candidates, list) else 0
         if (
-            not isinstance(item, dict)
-            or not isinstance(run_id, int)
-            or isinstance(run_id, bool)
-            or run_id <= 0
-            or item.get("run_date") != payload.get("run_date")
-            or item.get("source_date") != payload.get("source_date")
-            or item.get("status") not in {
-                "queued",
-                "running",
-                "stopped",
-                "completed",
-                "completed_with_errors",
-                "needs_review",
-            }
-            or not isinstance(queues, list)
-            or len(queues) != 3
+            not isinstance(candidates, list)
+            or expected_count < 1
+            or expected_count > MAX_DAILY_ACCOUNTS
         ):
             raise SidecarError(
-                "x_daily_plan_invalid_response",
-                "Daily plan response is invalid",
-                unknown_outcome=True,
-            )
-        candidates = payload.get("candidates")
-        if not isinstance(candidates, list) or len(candidates) != 3:
-            raise SidecarError(
-                "x_daily_plan_invalid_response",
+                "x_daily_plan_invalid_request",
                 "Daily plan request identity is invalid",
-                unknown_outcome=True,
             )
         requested_account_ids = []
         requested_material_ids = []
@@ -1038,17 +1040,47 @@ class SidecarClient:
                 or not re.fullmatch(r"[1-9][0-9]*", str(material_id or ""))
             ):
                 raise SidecarError(
-                    "x_daily_plan_invalid_response",
+                    "x_daily_plan_invalid_request",
                     "Daily plan request account identity is invalid",
-                    unknown_outcome=True,
                 )
             requested_account_ids.append(account_id)
             requested_material_ids.append(str(material_id))
             requested_pool_item_ids.append(pool_item_id)
-        if len(set(requested_pool_item_ids)) != 3:
+        if (
+            len(set(requested_account_ids)) != expected_count
+            or len(set(requested_material_ids)) != expected_count
+            or len(set(requested_pool_item_ids)) != expected_count
+        ):
+            raise SidecarError(
+                "x_daily_plan_invalid_request",
+                "Daily plan request identity is not unique",
+            )
+        result = self.post(path, payload, write_may_have_happened=True)
+        item = result.get("item") if isinstance(result.get("item"), dict) else result
+        queues = item.get("queues") if isinstance(item, dict) else None
+        run_id = item.get("id") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or not isinstance(run_id, int)
+            or isinstance(run_id, bool)
+            or run_id <= 0
+            or item.get("run_date") != payload.get("run_date")
+            or item.get("source_date") != payload.get("source_date")
+            or item.get("expected_count") != expected_count
+            or item.get("status") not in {
+                "queued",
+                "running",
+                "stopped",
+                "completed",
+                "completed_with_errors",
+                "needs_review",
+            }
+            or not isinstance(queues, list)
+            or len(queues) != expected_count
+        ):
             raise SidecarError(
                 "x_daily_plan_invalid_response",
-                "Daily plan request pool identity is invalid",
+                "Daily plan response is invalid",
                 unknown_outcome=True,
             )
         normalized = []
@@ -1103,7 +1135,15 @@ class SidecarClient:
             )
         return normalized
 
-    def record_run_failure(self, path, run_date, source_date, error_code, error_message):
+    def record_run_failure(
+        self,
+        path,
+        run_date,
+        source_date,
+        error_code,
+        error_message,
+        expected_count,
+    ):
         result = self.post(
             path,
             {
@@ -1111,6 +1151,7 @@ class SidecarClient:
                 "source_date": source_date,
                 "error_code": error_code,
                 "error_message": error_message,
+                "expected_count": int(expected_count),
             },
         )
         item = result.get("item")
@@ -1452,6 +1493,11 @@ def _preflight_candidates(
 ):
     accepted = []
     failures = []
+    target_count = len(verified_accounts)
+    if target_count < 1 or target_count > MAX_DAILY_ACCOUNTS:
+        raise DailyRunError(
+            "configured account count is outside the supported daily batch range"
+        )
     repair_state = {"attempted": 0}
     work_root = Path(config.work_dir)
     if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
@@ -1465,7 +1511,7 @@ def _preflight_candidates(
     ) as temporary:
         root = Path(temporary)
         for candidate in candidates:
-            if len(accepted) == 3:
+            if len(accepted) == target_count:
                 break
             account = verified_accounts[len(accepted)]
             material_id = str(
@@ -1535,6 +1581,7 @@ def _record_failure_best_effort(sidecar, config, run_date, source_date, exc):
             source_date,
             code,
             message,
+            len(config.account_ids),
         )
     except Exception:
         # This audit is best effort because the original failure may itself be
@@ -1626,7 +1673,8 @@ def _publish_daily_queues(
     return {
         "status": (
             "published"
-            if len(results) == 3
+            if queues
+            and len(results) == len(queues)
             and all(item.get("status") == "published" for item in results)
             else ("stopped" if stopped else "completed_with_failures")
         ),
@@ -1689,20 +1737,25 @@ def execute_daily_run(
                 "existing daily plan source_date does not match this run",
                 code="x_post_daily_resume_conflict",
             )
+        existing_expected_count = int(existing_run.get("expected_count") or 0)
         if existing_run.get("status") == "failed_preflight":
-            if existing_queues:
+            if (
+                existing_expected_count != len(config.account_ids)
+                or existing_queues
+            ):
                 raise DailyRunError(
-                    "failed-preflight daily run unexpectedly has queues",
+                    "failed-preflight daily run scope is inconsistent",
                     code="x_post_daily_resume_conflict",
                 )
         else:
+            existing_account_ids = tuple(
+                int(queue.get("account_id") or 0)
+                for queue in existing_queues
+            )
             if (
-                len(existing_queues) != 3
-                or tuple(
-                    int(queue.get("account_id") or 0)
-                    for queue in existing_queues
-                )
-                != tuple(config.account_ids)
+                len(existing_queues) != existing_expected_count
+                or len(set(existing_account_ids)) != existing_expected_count
+                or not set(existing_account_ids).issubset(set(config.account_ids))
             ):
                 raise DailyRunError(
                     "existing daily plan queue identity is inconsistent",
@@ -1733,9 +1786,11 @@ def execute_daily_run(
             config.pool_available_path,
             config.scan_limit,
         )
-        if len(pool_items) < 3:
+        required_count = len(config.account_ids)
+        if len(pool_items) < required_count:
             raise DailyRunError(
-                "fewer than three unused materials are available in the manual pool",
+                "fewer than %s unused materials are available in the manual pool"
+                % required_count,
                 code="x_post_daily_pool_shortage",
             )
         connection_factory = connection_factory or _connect_from_config
@@ -1757,9 +1812,10 @@ def execute_daily_run(
             config,
             selector_rejections,
         )
-        if len(candidates) < 3:
+        if len(candidates) < required_count:
             raise DailyRunError(
-                "fewer than three compliant manual-pool candidates were found",
+                "fewer than %s compliant manual-pool candidates were found"
+                % required_count,
                 code="x_post_daily_candidate_shortage",
             )
 
@@ -1777,10 +1833,10 @@ def execute_daily_run(
             config,
             preflight_failures,
         )
-        if len(planned_candidates) != 3:
+        if len(planned_candidates) != required_count:
             raise DailyRunError(
                 "only %s manual-pool candidates passed all local preflight gates "
-                "(required 3)" % len(planned_candidates),
+                "(required %s)" % (len(planned_candidates), required_count),
                 code="x_post_daily_candidate_preflight_shortage",
             )
         # Re-check immediately before the sidecar's transactional plan call.
@@ -1792,7 +1848,7 @@ def execute_daily_run(
         )
         raise
 
-    # From this point onward the plan call may have committed all three queues.
+    # From this point onward the plan call may have committed the whole batch.
     # Never write a preflight failure over a possibly-created formal run.
     try:
         queues = sidecar.create_plan(

@@ -36,4 +36,4 @@ InaccessiblePaths=/var/lib/x-post-automation /etc/ssh
 ReadOnlyPaths=/opt/x-post-automation/current /mnt/data-disk/x-post-automation/bin
 ReadWritePaths=/run/x-post-daily /mnt/data-disk/x-post-automation/daily-work
 UMask=0077
-TimeoutStartSec=120min
+TimeoutStartSec=360min

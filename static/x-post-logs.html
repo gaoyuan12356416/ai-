@@ -85,7 +85,7 @@
         <section class="stats">
           <article class="stat"><span>最近运行日期</span><strong id="latestRunDate">—</strong></article>
           <article class="stat"><span>最近批次状态</span><strong id="latestRunStatus">—</strong></article>
-          <article class="stat"><span>最近批次已发布</span><strong id="latestPublished">0 / 3</strong></article>
+          <article class="stat"><span>最近批次已发布</span><strong id="latestPublished">0 / 0</strong></article>
           <article class="stat"><span>筛选结果</span><strong id="resultTotal">0</strong></article>
         </section>
 
@@ -228,7 +228,7 @@
           const meta = statusLabel(item);
           badge.className = `status ${meta[1]}`; text(badge, meta[0]);
           statusCell.appendChild(badge); row.appendChild(statusCell);
-          appendCell(row, `${item.queued_count || 0} / ${item.expected_count || 3}`);
+          appendCell(row, `${item.queued_count ?? 0} / ${item.expected_count ?? 0}`);
           appendCell(row, item.published_count || 0);
           appendCell(row, `${item.failed_count || 0} / ${item.unknown_count || 0}`);
           appendCell(row, formatTime(item.started_at), `完成：${formatTime(item.finished_at)}`);
@@ -292,7 +292,7 @@
         renderRuns(items);
         text(byId("latestRunDate"), latest.run_date || "—");
         text(byId("latestRunStatus"), statusLabel(latest)[0]);
-        text(byId("latestPublished"), `${latest.published_count || 0} / ${latest.expected_count || 3}`);
+        text(byId("latestPublished"), `${latest.published_count ?? 0} / ${latest.expected_count ?? 0}`);
       }
       async function loadLogs() {
         setEmpty("正在加载…");

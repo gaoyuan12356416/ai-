@@ -37,11 +37,13 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     DailyRunError,
     DEFAULT_REPAIR_PROFILE,
     MAX_ERROR_BODY_BYTES,
+    MAX_SIDECAR_RESPONSE_BYTES,
     MediaRepairClient,
     MediaRepairError,
     SidecarClient,
     SidecarError,
     _preflight_candidates,
+    _parse_account_ids,
     _record_pool_checks_best_effort,
     execute_daily_run,
 )
@@ -299,14 +301,19 @@ def repair_response(job_key, *, sha256="b" * 64, size=8):
     }
 
 
-def frozen_plan_snapshot(status="running", source_date="2026-07-22"):
+def frozen_plan_snapshot(
+    status="running",
+    source_date="2026-07-22",
+    account_ids=(2, 3, 4),
+):
+    expected_count = len(account_ids)
     run = {
         "id": 51,
         "run_date": "2026-07-23",
         "source_date": source_date,
         "status": status,
-        "expected_count": 3,
-        "queued_count": 3,
+        "expected_count": expected_count,
+        "queued_count": expected_count,
         "published_count": 0,
         "failed_count": 0,
         "unknown_count": 0,
@@ -327,16 +334,16 @@ def frozen_plan_snapshot(status="running", source_date="2026-07-22"):
             "created_at": "2026-07-23T02:00:00Z",
             "updated_at": "2026-07-23T02:00:00Z",
         }
-        for index, account_id in enumerate((2, 3, 4))
+        for index, account_id in enumerate(account_ids)
     ]
     return {"found": True, "run": run, "queues": queues}
 
 
-def test_config(start_date="2026-07-23"):
+def test_config(start_date="2026-07-23", account_ids=(2, 3, 4)):
     return DailyConfig(
         internal_url="http://127.0.0.1:8810",
         internal_token="unit-test-secret",
-        account_ids=(2, 3, 4),
+        account_ids=tuple(account_ids),
         start_date=start_date,
         mysql_host="read-only.example.test",
         mysql_port=63350,
@@ -415,13 +422,18 @@ class FakeSidecar:
             )
         )
         return [
-            {"id": 101, "account_id": 2},
-            {"id": 102, "account_id": 3},
-            {"id": 103, "account_id": 4},
+            {"id": 101 + index, "account_id": item["account_id"]}
+            for index, item in enumerate(payload["candidates"])
         ]
 
     def record_run_failure(
-        self, path, run_date, source_date, error_code, error_message
+        self,
+        path,
+        run_date,
+        source_date,
+        error_code,
+        error_message,
+        expected_count,
     ):
         self.events.append(
             (
@@ -431,6 +443,7 @@ class FakeSidecar:
                 source_date,
                 error_code,
                 error_message,
+                expected_count,
             )
         )
         return {
@@ -438,6 +451,7 @@ class FakeSidecar:
             "run_date": run_date,
             "source_date": source_date,
             "status": "failed_preflight",
+            "expected_count": expected_count,
             "recorded": True,
         }
 
@@ -456,6 +470,24 @@ class FakeSidecar:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_account_id_parser_accepts_one_and_fifty_but_rejects_invalid_scope(self):
+        self.assertEqual(_parse_account_ids("7"), (7,))
+        fifty = tuple(range(1, 51))
+        self.assertEqual(
+            _parse_account_ids(",".join(str(value) for value in fifty)),
+            fifty,
+        )
+        for raw in (
+            "",
+            "1,1",
+            "0",
+            "-1",
+            "not-an-id",
+            ",".join(str(value) for value in range(1, 52)),
+        ):
+            with self.subTest(raw=raw), self.assertRaises(DailyRunError):
+                _parse_account_ids(raw)
+
     def setUp(self):
         # Keep unit-test media under the OS temp root while preserving the
         # production invariant that work_dir must equal its fixed root.
@@ -918,7 +950,7 @@ class RunnerTests(unittest.TestCase):
             status = 200
 
             def read(self, _limit):
-                return b"x" * (MAX_ERROR_BODY_BYTES + 1)
+                return b"x" * (MAX_SIDECAR_RESPONSE_BYTES + 1)
 
             def getcode(self):
                 return self.status
@@ -1097,6 +1129,7 @@ class RunnerTests(unittest.TestCase):
                 "status": "queued",
                 "run_date": request_payload["run_date"],
                 "source_date": request_payload["source_date"],
+                "expected_count": len(request_payload["candidates"]),
                 "queues": queues,
             }
             item.update(overrides)
@@ -1178,7 +1211,8 @@ class RunnerTests(unittest.TestCase):
             config.validate()
         self.assertIn("X_POST_DAILY_INTERNAL_TOKEN", str(missing.exception))
 
-    def _run(self, sidecar, loaded_candidates=None):
+    def _run(self, sidecar, loaded_candidates=None, config=None):
+        config = config or test_config()
         connection = FakeConnection([])
         preflight_events = []
 
@@ -1191,8 +1225,8 @@ class RunnerTests(unittest.TestCase):
         ):
             self.assertEqual(source_date, "2026-07-22")
             self.assertEqual([item["id"] for item in pool_items], list(range(10, 110)))
-            self.assertEqual(limit, 10)
-            self.assertEqual(schema, "kunlunads_dev")
+            self.assertEqual(limit, config.candidate_pool_limit)
+            self.assertEqual(schema, config.mysql_database)
             return (
                 loaded_candidates
                 or [
@@ -1213,7 +1247,7 @@ class RunnerTests(unittest.TestCase):
             return {"duration": 30.0, "width": 720, "height": 1280}
 
         result = execute_daily_run(
-            test_config(),
+            config,
             sidecar=sidecar,
             connection_factory=lambda _config: connection,
             pool_candidate_loader=loader,
@@ -1255,6 +1289,41 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(events[7][3], ["10", "11", "12"])
         self.assertEqual(events[8:], [("publish", 101), ("publish", 102), ("publish", 103)])
         self.assertEqual(len([item for item in preflight_events if item[0] == "download"]), 3)
+        self.assertTrue(connection.closed)
+
+    def test_nine_accounts_all_publish_successfully_in_configured_order(self):
+        account_ids = tuple(range(2, 11))
+        config = test_config(account_ids=account_ids)
+        loaded_candidates = [
+            candidate(material_id, 1000 - rank)
+            for rank, material_id in enumerate(range(10, 19), 1)
+        ]
+        sidecar = FakeSidecar()
+
+        result, events, preflight_events, connection = self._run(
+            sidecar,
+            loaded_candidates=loaded_candidates,
+            config=config,
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["planned_count"], 9)
+        self.assertEqual(result["published_count"], 9)
+        self.assertEqual(
+            [event[1] for event in events if event[0] == "verify"],
+            list(account_ids),
+        )
+        plan = next(event for event in events if event[0] == "plan")
+        self.assertEqual(plan[2], list(account_ids))
+        self.assertEqual(plan[3], [str(value) for value in range(10, 19)])
+        self.assertEqual(
+            [event[1] for event in events if event[0] == "publish"],
+            list(range(101, 110)),
+        )
+        self.assertEqual(
+            len([event for event in preflight_events if event[0] == "download"]),
+            9,
+        )
         self.assertTrue(connection.closed)
 
     def test_existing_plan_resumes_before_accounts_pool_or_gpu(self):
@@ -1303,6 +1372,97 @@ class RunnerTests(unittest.TestCase):
                 ("publish", 101),
                 ("publish", 102),
                 ("publish", 103),
+            ],
+        )
+
+    def test_existing_three_queue_plan_resumes_under_expanded_nine_account_scope(self):
+        class ExistingPlanSidecar(FakeSidecar):
+            def query_daily_plan(self, path, run_date):
+                self.events.append(("plan_query", path, run_date))
+                return frozen_plan_snapshot(account_ids=(2, 3, 4))
+
+            def preflight_storage(self, _path):
+                raise AssertionError("frozen plan recovery must skip storage preflight")
+
+            def verify_account(self, _account_id):
+                raise AssertionError("frozen plan recovery must skip account verification")
+
+            def available_pool_items(self, _path, _limit):
+                raise AssertionError("frozen plan recovery must skip material selection")
+
+            def create_plan(self, _path, _payload):
+                raise AssertionError("frozen plan recovery must not create six queues")
+
+        sidecar = ExistingPlanSidecar()
+        result = execute_daily_run(
+            test_config(account_ids=tuple(range(2, 11))),
+            sidecar=sidecar,
+            connection_factory=lambda _config: self.fail(
+                "source database must not be queried for a frozen plan"
+            ),
+            now=datetime(
+                2026,
+                7,
+                23,
+                10,
+                0,
+                tzinfo=timezone(timedelta(hours=8)),
+            ),
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(result["resumed_existing_plan"])
+        self.assertEqual(result["planned_count"], 3)
+        self.assertEqual(result["published_count"], 3)
+        self.assertEqual(
+            sidecar.events,
+            [
+                (
+                    "plan_query",
+                    "/internal/posts/daily-plan/query",
+                    "2026-07-23",
+                ),
+                ("publish", 101),
+                ("publish", 102),
+                ("publish", 103),
+            ],
+        )
+
+    def test_old_three_account_failed_preflight_conflicts_with_nine_account_scope(self):
+        class FailedPreflightSidecar(FakeSidecar):
+            def query_daily_plan(self, path, run_date):
+                self.events.append(("plan_query", path, run_date))
+                snapshot = frozen_plan_snapshot(
+                    status="failed_preflight",
+                    account_ids=(2, 3, 4),
+                )
+                snapshot["run"]["queued_count"] = 0
+                snapshot["queues"] = []
+                return snapshot
+
+        sidecar = FailedPreflightSidecar()
+        with self.assertRaises(DailyRunError) as captured:
+            execute_daily_run(
+                test_config(account_ids=tuple(range(2, 11))),
+                sidecar=sidecar,
+                now=datetime(
+                    2026,
+                    7,
+                    23,
+                    10,
+                    0,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+            )
+        self.assertEqual(captured.exception.code, "x_post_daily_resume_conflict")
+        self.assertEqual(
+            sidecar.events,
+            [
+                (
+                    "plan_query",
+                    "/internal/posts/daily-plan/query",
+                    "2026-07-23",
+                )
             ],
         )
 
@@ -1867,6 +2027,7 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(any(event[0] == "plan" for event in sidecar.events))
         failure = next(event for event in sidecar.events if event[0] == "failure")
         self.assertEqual(failure[4], "x_account_not_publishable")
+        self.assertEqual(failure[6], 3)
 
     def test_preflight_shortage_never_creates_plan(self):
         sidecar = FakeSidecar()
@@ -1891,6 +2052,44 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(
             failure[4], "x_post_daily_candidate_preflight_shortage"
         )
+        self.assertEqual(failure[6], 3)
+
+    def test_nine_account_preflight_failure_audit_records_dynamic_expected_count(self):
+        sidecar = FakeSidecar()
+        config = test_config(account_ids=tuple(range(2, 11)))
+
+        def loader(*_args, **_kwargs):
+            return [
+                candidate(material_id, 1000 - rank)
+                for rank, material_id in enumerate(range(10, 19), 1)
+            ], []
+
+        def bad_download(*_args, **_kwargs):
+            raise XPostError("invalid_media_codec", "bad codec", 422)
+
+        with self.assertRaises(DailyRunError):
+            execute_daily_run(
+                config,
+                sidecar=sidecar,
+                connection_factory=lambda _config: FakeConnection([]),
+                pool_candidate_loader=loader,
+                downloader=bad_download,
+                now=datetime(
+                    2026,
+                    7,
+                    23,
+                    10,
+                    0,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+            )
+        self.assertFalse(any(event[0] == "plan" for event in sidecar.events))
+        failure = next(event for event in sidecar.events if event[0] == "failure")
+        self.assertEqual(
+            failure[4],
+            "x_post_daily_candidate_preflight_shortage",
+        )
+        self.assertEqual(failure[6], 9)
 
     def test_plan_error_is_not_misrecorded_as_preflight_failure(self):
         class PlanFailureSidecar(FakeSidecar):
@@ -1925,6 +2124,7 @@ class RunnerTests(unittest.TestCase):
             self._run(sidecar)
         failure = next(event for event in sidecar.events if event[0] == "failure")
         self.assertEqual(failure[4], "x_post_material_already_used")
+        self.assertEqual(failure[6], 3)
 
 
 if __name__ == "__main__":

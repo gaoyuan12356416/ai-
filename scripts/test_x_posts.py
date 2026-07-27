@@ -118,6 +118,101 @@ class XPostsTests(unittest.TestCase):
             self.assertIn("account_username", columns)
             self.assertNotIn("source_queue_id", columns)
 
+    def test_daily_plan_accepts_nine_candidates_with_dynamic_expected_count(self):
+        candidates = []
+        for rank, account_id in enumerate(range(2, 11), 1):
+            item = candidate(account_id, "DailyAccount%02d" % account_id)
+            material_id = str(89000 + rank)
+            item.update(
+                {
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 100 - rank,
+                    "preflight_sha256": (
+                        "%064x" % int(material_id)
+                    )[-64:],
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            candidates.append(item)
+
+        plan = service.XPostStore(self.db_path).create_daily_plan(
+            "2026-07-23",
+            "2026-07-22",
+            candidates,
+        )
+
+        self.assertEqual(plan["expected_count"], 9)
+        self.assertEqual(plan["queued_count"], 9)
+        self.assertEqual(len(plan["queues"]), 9)
+        self.assertEqual(
+            [queue["account_id"] for queue in plan["queues"]],
+            list(range(2, 11)),
+        )
+
+    def test_daily_plan_batch_size_accepts_one_and_fifty_but_rejects_fifty_one(self):
+        def planned(account_id, rank, material_base, source_date):
+            item = candidate(account_id, "DailyBound%02d" % account_id)
+            material_id = str(material_base + rank)
+            item.update(
+                {
+                    "source_date": source_date,
+                    "material_id": material_id,
+                    "content_id": "content-" + material_id,
+                    "candidate_rank": rank,
+                    "spend": 1000 - rank,
+                    "preflight_sha256": ("%064x" % int(material_id))[-64:],
+                    "preflight_size": 5,
+                    "compliance_counts": {
+                        "facebook_violation_count": 0,
+                        "tiktok_violation_count": 0,
+                        "twitter_violation_count": 0,
+                        "resource_audit_count": 0,
+                        "dangerous_tag_count": 0,
+                    },
+                }
+            )
+            return item
+
+        store = service.XPostStore(self.db_path)
+        one = store.create_daily_plan(
+            "2026-07-23",
+            "2026-07-22",
+            [planned(1, 1, 90000, "2026-07-22")],
+        )
+        fifty_candidates = [
+            planned(account_id, rank, 91000, "2026-07-23")
+            for rank, account_id in enumerate(range(1, 51), 1)
+        ]
+        fifty = store.create_daily_plan(
+            "2026-07-24",
+            "2026-07-23",
+            fifty_candidates,
+        )
+
+        self.assertEqual(one["expected_count"], 1)
+        self.assertEqual(len(one["queues"]), 1)
+        self.assertEqual(fifty["expected_count"], 50)
+        self.assertEqual(len(fifty["queues"]), 50)
+        with self.assertRaises(service.XPostError) as rejected:
+            store.create_daily_plan(
+                "2026-07-25",
+                "2026-07-24",
+                [{} for _index in range(51)],
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_daily_candidate_shortage",
+        )
+
     def test_enqueue_is_idempotent_and_conflicts_fail_closed(self):
         store = service.XPostStore(self.db_path)
         first = store.enqueue(candidate())

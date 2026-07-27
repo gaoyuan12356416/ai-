@@ -38,6 +38,7 @@ DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
 DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 SQLITE_QUERY_BATCH_SIZE = 900
+MAX_DAILY_BATCH_SIZE = 50
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1643,8 +1644,13 @@ class XPostStore:
             - datetime.strptime(source_date, "%Y-%m-%d").date()
         ).days != 1:
             raise XPostError("invalid_request", "source_date必须是run_date前一天", 400)
-        if not isinstance(candidates, list) or len(candidates) != 3:
-            raise XPostError("x_post_daily_candidate_shortage", "每日计划必须一次提交三个候选", 409)
+        batch_size = len(candidates) if isinstance(candidates, list) else 0
+        if batch_size < 1 or batch_size > MAX_DAILY_BATCH_SIZE:
+            raise XPostError(
+                "x_post_daily_candidate_shortage",
+                "每日计划必须一次提交1到%s个候选" % MAX_DAILY_BATCH_SIZE,
+                409,
+            )
         prepared = []
         account_ids = set()
         material_keys = set()
@@ -1696,14 +1702,17 @@ class XPostStore:
             ).fetchone()
             run_id = None
             if existing_run:
-                if str(existing_run["source_date"]) != source_date or int(existing_run["expected_count"]) != 3:
+                if (
+                    str(existing_run["source_date"]) != source_date
+                    or int(existing_run["expected_count"]) != batch_size
+                ):
                     conn.rollback()
                     raise XPostError("x_post_daily_run_exists", "该日期已存在不同的X发布批次", 409)
                 existing_queues = conn.execute(
                     "SELECT * FROM x_post_queue WHERE run_id=? ORDER BY candidate_rank,id",
                     (existing_run["id"],),
                 ).fetchall()
-                if len(existing_queues) == 3:
+                if len(existing_queues) == batch_size:
                     expected = [
                         (
                             int(values["account_id"]),
@@ -1815,16 +1824,24 @@ class XPostStore:
                 cursor = conn.execute(
                     "INSERT INTO x_post_daily_run("
                     "run_date,source_date,status,expected_count,queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,'queued',3,3,?,?,?)",
-                    (run_date, source_date, timestamp, timestamp, timestamp),
+                    ") VALUES(?,?,'queued',?,?,?,?,?)",
+                    (
+                        run_date,
+                        source_date,
+                        batch_size,
+                        batch_size,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
                 )
                 run_id = int(cursor.lastrowid)
             else:
                 conn.execute(
-                    "UPDATE x_post_daily_run SET status='queued',queued_count=3,published_count=0,"
+                    "UPDATE x_post_daily_run SET status='queued',expected_count=?,queued_count=?,published_count=0,"
                     "failed_count=0,unknown_count=0,error_code='',error_message='',started_at=?,"
                     "finished_at='',updated_at=? WHERE id=? AND status='failed_preflight'",
-                    (timestamp, timestamp, run_id),
+                    (batch_size, batch_size, timestamp, timestamp, run_id),
                 )
             queue_ids = []
             placeholders = ",".join("?" for _field in columns)
@@ -1934,9 +1951,23 @@ class XPostStore:
             ],
         }
 
-    def record_run_failure(self, run_date, source_date, error_code, error_message):
+    def record_run_failure(
+        self,
+        run_date,
+        source_date,
+        error_code,
+        error_message,
+        expected_count,
+    ):
         run_date = _date_value(run_date, "run_date")
         source_date = _date_value(source_date, "source_date")
+        expected_count = _positive_int(expected_count, "expected_count")
+        if expected_count > MAX_DAILY_BATCH_SIZE:
+            raise XPostError(
+                "invalid_request",
+                "expected_count不能超过%s" % MAX_DAILY_BATCH_SIZE,
+                400,
+            )
         if (
             datetime.strptime(run_date, "%Y-%m-%d").date()
             - datetime.strptime(source_date, "%Y-%m-%d").date()
@@ -1957,9 +1988,16 @@ class XPostStore:
                 (run_date,),
             ).fetchone()
             if existing:
-                if str(existing["source_date"]) != source_date:
+                if (
+                    str(existing["source_date"]) != source_date
+                    or int(existing["expected_count"]) != expected_count
+                ):
                     conn.rollback()
-                    raise XPostError("x_post_daily_run_exists", "该日期已存在不同来源日期的批次", 409)
+                    raise XPostError(
+                        "x_post_daily_run_exists",
+                        "该日期已存在不同范围的X发布批次",
+                        409,
+                    )
                 queue_count = int(
                     conn.execute(
                         "SELECT COUNT(*) FROM x_post_queue WHERE run_id=?",
@@ -1993,10 +2031,11 @@ class XPostStore:
                     "INSERT INTO x_post_daily_run("
                     "run_date,source_date,status,expected_count,queued_count,error_code,error_message,"
                     "started_at,finished_at,created_at,updated_at"
-                    ") VALUES(?,?,'failed_preflight',3,0,?,?,?,?,?,?)",
+                    ") VALUES(?,?,'failed_preflight',?,0,?,?,?,?,?,?)",
                     (
                         run_date,
                         source_date,
+                        expected_count,
                         code,
                         message,
                         timestamp,

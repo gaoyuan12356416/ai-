@@ -47,8 +47,10 @@ USERS_ME_URL = "https://api.x.com/2/users/me?" + urllib.parse.urlencode(
     {"user.fields": ",".join(USER_FIELDS)}
 )
 MAX_BODY_BYTES = 16 * 1024
-MAX_DAILY_PLAN_BODY_BYTES = 256 * 1024
+MAX_DAILY_PLAN_BODY_BYTES = 2 * 1024 * 1024
+MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
 MAX_ERROR_TEXT = 240
+MAX_DAILY_ACCOUNTS = 50
 
 
 def load_env_file(path):
@@ -859,6 +861,9 @@ def row_to_item(row):
         status = "token_missing"
     item["status"] = status
     item["publish_eligible"] = status == "active"
+    item["daily_auto_publish_configured"] = (
+        int(item.get("id") or 0) in DAILY_ACCOUNT_IDS
+    )
     item["scopes"] = scopes
     item["missing_scopes"] = missing
     for field in ("verified", "protected"):
@@ -1121,7 +1126,14 @@ def _safe_daily_plan_result(result):
         for queue in result["queues"]
         if isinstance(queue, dict)
     ]
-    if len(safe["queues"]) != 3:
+    expected_count = safe.get("expected_count")
+    if (
+        not isinstance(expected_count, int)
+        or isinstance(expected_count, bool)
+        or expected_count < 1
+        or expected_count > MAX_DAILY_ACCOUNTS
+        or len(safe["queues"]) != expected_count
+    ):
         raise ServiceError("x_posts_unavailable", "X每日发布计划队列数量异常", 503)
     return safe
 
@@ -1276,18 +1288,19 @@ def _daily_account_scope(allowed_account_ids):
     except (TypeError, ValueError, OverflowError):
         raise ServiceError("x_daily_scope_invalid", "X每日发布账号范围配置无效", 503) from None
     if (
-        len(values) != 3
-        or len(set(values)) != 3
+        not values
+        or len(values) > MAX_DAILY_ACCOUNTS
+        or len(set(values)) != len(values)
         or any(value <= 0 for value in values)
     ):
         raise ServiceError("x_daily_scope_invalid", "X每日发布账号范围配置无效", 503)
-    return frozenset(values)
+    return values
 
 
 def create_daily_plan_request(
     payload, allowed_account_ids=None, require_pool=False
 ):
-    """Freeze three trusted account identities and candidates in one transaction."""
+    """Freeze every configured account identity and candidate in one transaction."""
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
     candidates = payload.get("candidates")
@@ -1306,13 +1319,12 @@ def create_daily_plan_request(
         except (TypeError, ValueError, OverflowError):
             raise ServiceError("invalid_request", "account_id无效", 400) from None
     if allowed_accounts is not None and (
-        len(requested_accounts) != 3
-        or len(set(requested_accounts)) != 3
-        or frozenset(requested_accounts) != allowed_accounts
+        len(requested_accounts) != len(allowed_accounts)
+        or tuple(requested_accounts) != allowed_accounts
     ):
         raise ServiceError(
             "x_daily_account_scope_denied",
-            "X每日发布计划只能使用配置的三个账号",
+            "X每日发布计划必须完整使用当前配置的账号范围",
             403,
         )
     trusted = []
@@ -1334,7 +1346,7 @@ def create_daily_plan_request(
         trusted.append(candidate)
     # This check is intentionally adjacent to the SQLite plan transaction.
     # A lost mount must never allow a formal daily reservation to be created.
-    preflight_post_storage_request()
+    preflight_post_storage_request(len(trusted))
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
         result = XPostStore(POST_DB_PATH).create_daily_plan(
@@ -1373,7 +1385,15 @@ def query_daily_plan_request(payload, allowed_account_ids=None):
     return safe
 
 
-def preflight_post_storage_request():
+def preflight_post_storage_request(required_media_count=1):
+    if isinstance(required_media_count, bool):
+        raise ServiceError("invalid_request", "required_media_count无效", 400)
+    try:
+        required_media_count = int(required_media_count)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "required_media_count无效", 400) from None
+    if required_media_count < 1 or required_media_count > MAX_DAILY_ACCOUNTS:
+        raise ServiceError("invalid_request", "required_media_count无效", 400)
     try:
         from features.x_posts import preflight_post_storage
     except (ImportError, ModuleNotFoundError):
@@ -1383,7 +1403,8 @@ def preflight_post_storage_request():
             POST_PUBLIC_ROOT,
             mount_root=POST_STORAGE_MOUNT_ROOT,
             storage_root=POST_STORAGE_ROOT,
-            minimum_free_bytes=(POST_MAX_MEDIA_BYTES * 3) + (64 * 1024 * 1024),
+            minimum_free_bytes=(POST_MAX_MEDIA_BYTES * required_media_count)
+            + (64 * 1024 * 1024),
         )
     except Exception as exc:
         XPostError, _XPostStore, _publish_canary = _x_posts_api()
@@ -1577,9 +1598,30 @@ def record_post_material_pool_checks_request(payload):
         _raise_x_post_error(exc)
 
 
-def record_post_run_failure_request(payload):
+def record_post_run_failure_request(payload, allowed_account_ids=None):
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    raw_expected_count = payload.get("expected_count")
+    if isinstance(raw_expected_count, bool):
+        raise ServiceError("invalid_request", "expected_count无效", 400)
+    try:
+        expected_count = int(raw_expected_count)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "expected_count无效", 400) from None
+    allowed_accounts = _daily_account_scope(allowed_account_ids)
+    if (
+        expected_count < 1
+        or expected_count > MAX_DAILY_ACCOUNTS
+        or (
+            allowed_accounts is not None
+            and expected_count != len(allowed_accounts)
+        )
+    ):
+        raise ServiceError(
+            "x_daily_account_scope_denied",
+            "X每日发布账号范围配置无效",
+            403,
+        )
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
         item = XPostStore(POST_DB_PATH).record_run_failure(
@@ -1587,6 +1629,7 @@ def record_post_run_failure_request(payload):
             payload.get("source_date"),
             payload.get("error_code"),
             payload.get("error_message") or payload.get("message"),
+            expected_count,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -1882,10 +1925,13 @@ class Handler(BaseHTTPRequestHandler):
         if not internal_role:
             return
         try:
+            request_body_limit = MAX_BODY_BYTES
+            if parsed.path == "/internal/posts/daily-plan":
+                request_body_limit = MAX_DAILY_PLAN_BODY_BYTES
+            elif parsed.path == "/internal/posts/material-pool/check":
+                request_body_limit = MAX_DAILY_CHECK_BODY_BYTES
             payload = self.read_json(
-                MAX_DAILY_PLAN_BODY_BYTES
-                if parsed.path == "/internal/posts/daily-plan"
-                else MAX_BODY_BYTES
+                request_body_limit
             )
             if parsed.path == "/internal/posts/canary":
                 self.send_json(200, {"item": publish_canary_request(payload)})
@@ -1918,7 +1964,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if parsed.path == "/internal/posts/storage/preflight":
-                self.send_json(200, {"item": preflight_post_storage_request()})
+                self.send_json(
+                    200,
+                    {
+                        "item": preflight_post_storage_request(
+                            len(DAILY_ACCOUNT_IDS) if internal_role == "daily" else 1
+                        )
+                    },
+                )
                 return
             if parsed.path == "/internal/posts/logs/query":
                 self.send_json(200, query_post_logs_request(payload))
@@ -1927,7 +1980,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, query_post_runs_request(payload))
                 return
             if parsed.path == "/internal/posts/runs/record-failure":
-                self.send_json(200, {"item": record_post_run_failure_request(payload)})
+                self.send_json(
+                    200,
+                    {
+                        "item": record_post_run_failure_request(
+                            payload,
+                            DAILY_ACCOUNT_IDS if internal_role == "daily" else None,
+                        )
+                    },
+                )
                 return
             if parsed.path == "/internal/posts/material-keys/query":
                 self.send_json(200, {"item": query_post_material_keys_request(payload)})
@@ -1964,7 +2025,7 @@ class Handler(BaseHTTPRequestHandler):
                 if internal_role == "daily" and account_id not in allowed_accounts:
                     raise ServiceError(
                         "x_daily_account_scope_denied",
-                        "X每日发布只能校验配置的三个账号",
+                        "X每日发布只能校验当前配置的账号",
                         403,
                     )
                 self.send_json(
@@ -2043,8 +2104,16 @@ def serve():
         raise RuntimeError("X_POST_DAILY_INTERNAL_TOKEN is required")
     if secrets.compare_digest(INTERNAL_TOKEN, DAILY_INTERNAL_TOKEN):
         raise RuntimeError("daily and backend internal tokens must be different")
-    if len(DAILY_ACCOUNT_IDS) != 3:
-        raise RuntimeError("X_POST_DAILY_ACCOUNT_IDS must contain three unique positive IDs")
+    if (
+        not DAILY_ACCOUNT_IDS
+        or len(DAILY_ACCOUNT_IDS) > MAX_DAILY_ACCOUNTS
+        or len(set(DAILY_ACCOUNT_IDS)) != len(DAILY_ACCOUNT_IDS)
+        or any(account_id <= 0 for account_id in DAILY_ACCOUNT_IDS)
+    ):
+        raise RuntimeError(
+            "X_POST_DAILY_ACCOUNT_IDS must contain 1 to %s unique positive IDs"
+            % MAX_DAILY_ACCOUNTS
+        )
     require_oauth_config()
     os.umask(0o077)
     ensure_storage()

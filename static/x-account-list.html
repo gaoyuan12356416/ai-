@@ -43,7 +43,7 @@
     .filters input:focus,.filters select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); }
     .result-count { margin-left:auto; color:var(--muted); font-size:13px; }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
-    table { width:100%; min-width:1960px; border-collapse:collapse; background:#fff; }
+    table { width:100%; min-width:2080px; border-collapse:collapse; background:#fff; }
     th,td { padding:13px 14px; border-bottom:1px solid #e8eef6; vertical-align:top; text-align:left; font-size:13px; }
     th { position:sticky; top:0; z-index:1; background:#f7f9fc; color:#5d6d86; font-size:12px; white-space:nowrap; }
     tr:last-child td { border-bottom:0; }
@@ -128,8 +128,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="11" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>自动发布 Post</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="12" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -235,7 +235,7 @@
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="11" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="12" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -247,6 +247,7 @@
           const scopes = Array.isArray(item.scopes) ? item.scopes : [];
           const missingScopes = Array.isArray(item.missing_scopes) ? item.missing_scopes : [];
           const meta = statusMeta[item.status] || [item.status || "未知","error"];
+          const autoPublishConfigured = item.daily_auto_publish_configured === true;
           const ownerName = item.owner_name || item.authorized_by_name || item.owner_user_id || item.authorized_by_user_id || "—";
           const ownerEmail = item.owner_email || item.authorized_by_email || "";
           const xCreatedAt = item.x_created_at || "";
@@ -259,6 +260,7 @@
             <td>${metricsHtml(item)}</td>
             <td><div class="meta-stack"><div>地区：${escapeHtml(item.location || "—")}</div><div class="subtle">加入 X：${escapeHtml(formatTime(xCreatedAt))}</div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
+            <td><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
             <td><div class="chip-list">${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("") || "—"}${missingScopes.map(scope => `<span class="chip missing">缺少 ${escapeHtml(scope)}</span>`).join("")}</div></td>
             <td><div class="owner">${escapeHtml(ownerName)}${ownerEmail ? `<div class="subtle">${escapeHtml(ownerEmail)}</div>` : ""}</div></td>
             <td><div class="meta-stack">首次：${escapeHtml(formatTime(item.first_authorized_at))}<div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></div></td>
@@ -271,13 +273,13 @@
       }
 
       async function loadData() {
-        el("accountRows").innerHTML = `<tr><td colspan="11" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="12" class="empty">正在加载…</td></tr>`;
         try {
           const result = await api("/api/admin/x-accounts");
           state.accounts = Array.isArray(result.items) ? result.items : [];
           renderStats(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="11" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="12" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         }

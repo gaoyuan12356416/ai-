@@ -74,6 +74,20 @@ class XAccountsTestCase(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_daily_account_scope_accepts_one_and_fifty_but_rejects_invalid_scope(self):
+        self.assertEqual(service._daily_account_scope((7,)), (7,))
+        fifty = tuple(range(1, 51))
+        self.assertEqual(service._daily_account_scope(fifty), fifty)
+        for values in (
+            (),
+            (1, 1),
+            (0,),
+            (-1,),
+            tuple(range(1, 52)),
+        ):
+            with self.subTest(values=values), self.assertRaises(service.ServiceError):
+                service._daily_account_scope(values)
+
     def test_root_only_systemd_environment_file_is_not_reopened_after_privilege_drop(self):
         env_file = self.root / "root-only.env"
         env_file.write_text("X_INTERNAL_TOKEN=must-not-be-read\n", encoding="utf-8")
@@ -310,6 +324,33 @@ class XAccountsTestCase(unittest.TestCase):
         with mock.patch.object(service, "user_request", return_value=verified_payload):
             verified = service.verify_account(second["id"], self.admin, "all")
         self.assertEqual(verified["username"], "admin-verified")
+
+    def test_account_dto_marks_only_configured_daily_auto_publish_accounts(self):
+        configured = self.complete(
+            "222222223",
+            "daily_configured",
+            actor=self.owner,
+        )
+        manual_only = self.complete(
+            "222222224",
+            "manual_only",
+            actor=self.owner,
+        )
+        service.DAILY_ACCOUNT_IDS = (configured["id"],)
+
+        items = service.list_accounts(self.admin, "all")["items"]
+        by_id = {item["id"]: item for item in items}
+
+        self.assertIs(
+            by_id[configured["id"]]["daily_auto_publish_configured"],
+            True,
+        )
+        self.assertIs(
+            by_id[manual_only["id"]]["daily_auto_publish_configured"],
+            False,
+        )
+        self.assertTrue(by_id[configured["id"]]["publish_eligible"])
+        self.assertTrue(by_id[manual_only["id"]]["publish_eligible"])
 
     def test_different_owner_cannot_overwrite_existing_account_or_token(self):
         original = self.complete(username="original", actor=self.owner)
@@ -1023,9 +1064,12 @@ class XAccountsTestCase(unittest.TestCase):
 
     def test_daily_token_is_route_scoped_and_passes_fixed_account_scope(self):
         accounts = [
-            self.complete("2101", "daily_scope_one", actor=self.owner),
-            self.complete("2102", "daily_scope_two", actor=self.owner),
-            self.complete("2103", "daily_scope_three", actor=self.owner),
+            self.complete(
+                str(2101 + index),
+                "daily_scope_%s" % (index + 1),
+                actor=self.owner,
+            )
+            for index in range(9)
         ]
         service.DAILY_ACCOUNT_IDS = tuple(item["id"] for item in accounts)
         server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
@@ -1068,7 +1112,7 @@ class XAccountsTestCase(unittest.TestCase):
             "log_id": 12,
             "short_url": "https://ai.yingliangads.com/s2l/12.html",
             "post_id": "1900000000000000012",
-            "preview_url": "https://x.com/daily_scope_one/status/1900000000000000012",
+            "preview_url": "https://x.com/daily_scope_1/status/1900000000000000012",
         }
         try:
             for path in forbidden:
@@ -1146,6 +1190,54 @@ class XAccountsTestCase(unittest.TestCase):
                 query_payload,
                 service.DAILY_ACCOUNT_IDS,
             )
+
+            with mock.patch.object(
+                service,
+                "preflight_post_storage_request",
+                return_value={"ready": True, "mounted": True, "atomic_write": True},
+            ) as storage_mock:
+                with urllib.request.urlopen(
+                    request("/internal/posts/storage/preflight"),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                storage_mock.assert_called_once_with(9)
+
+            failure_payload = {
+                "run_date": "2026-07-23",
+                "source_date": "2026-07-22",
+                "error_code": "x_post_daily_candidate_shortage",
+                "error_message": "not enough candidates",
+                "expected_count": 9,
+            }
+            expected_failure = {
+                "id": 15,
+                "run_date": "2026-07-23",
+                "source_date": "2026-07-22",
+                "status": "failed_preflight",
+                "expected_count": 9,
+                "recorded": True,
+            }
+            with mock.patch.object(
+                service,
+                "record_post_run_failure_request",
+                return_value=expected_failure,
+            ) as failure_mock:
+                with urllib.request.urlopen(
+                    request(
+                        "/internal/posts/runs/record-failure",
+                        failure_payload,
+                    ),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(
+                        json.loads(response.read().decode("utf-8")),
+                        {"item": expected_failure},
+                    )
+                failure_mock.assert_called_once_with(
+                    failure_payload,
+                    service.DAILY_ACCOUNT_IDS,
+                )
 
             available_items = {
                 "items": [
@@ -1265,19 +1357,174 @@ class XAccountsTestCase(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_daily_plan_requires_complete_ordered_nine_account_scope(self):
+        accounts = [
+            self.complete(
+                str(2201 + index),
+                "nine_scope_%s" % (index + 1),
+                actor=self.owner,
+            )
+            for index in range(10)
+        ]
+        service.DAILY_ACCOUNT_IDS = tuple(
+            item["id"] for item in accounts[:9]
+        )
+
+        def build_candidates(account_ids):
+            items = []
+            for rank, account_id in enumerate(account_ids, 1):
+                material_id = str(7200 + rank)
+                items.append(
+                    {
+                        "account_id": account_id,
+                        "source_date": "2026-07-22",
+                        "material_id": material_id,
+                        "content_id": "content-" + material_id,
+                        "material_url": (
+                            "https://media.example.com/%s.mp4" % material_id
+                        ),
+                        "material_name": "material-" + material_id,
+                        "material_language": "English",
+                        "drama_name": "Daily Drama",
+                        "tag": "romance",
+                        "description": "Safe daily description",
+                        "candidate_rank": rank,
+                        "spend": 100 - rank,
+                        "preflight_sha256": (
+                            "%064x" % int(material_id)
+                        )[-64:],
+                        "preflight_size": 5,
+                        "compliance_counts": {
+                            "facebook_violation_count": 0,
+                            "tiktok_violation_count": 0,
+                            "twitter_violation_count": 0,
+                            "resource_audit_count": 0,
+                            "dangerous_tag_count": 0,
+                        },
+                    }
+                )
+            return items
+
+        configured_ids = service.DAILY_ACCOUNT_IDS
+        invalid_scopes = {
+            "missing_account": configured_ids[:-1],
+            "same_set_wrong_order": (
+                configured_ids[1],
+                configured_ids[0],
+                *configured_ids[2:],
+            ),
+            "out_of_scope": (
+                *configured_ids[:-1],
+                accounts[9]["id"],
+            ),
+        }
+        for label, account_ids in invalid_scopes.items():
+            with self.subTest(label=label):
+                with self.assertRaises(service.ServiceError) as denied:
+                    service.create_daily_plan_request(
+                        {
+                            "run_date": "2026-07-23",
+                            "source_date": "2026-07-22",
+                            "candidates": build_candidates(account_ids),
+                        },
+                        configured_ids,
+                    )
+                self.assertEqual(
+                    denied.exception.code,
+                    "x_daily_account_scope_denied",
+                )
+                self.assertEqual(denied.exception.status, 403)
+
+        with mock.patch.object(
+            service,
+            "preflight_post_storage_request",
+            return_value={"ready": True, "mounted": True, "atomic_write": True},
+        ) as storage_preflight:
+            plan = service.create_daily_plan_request(
+                {
+                    "run_date": "2026-07-23",
+                    "source_date": "2026-07-22",
+                    "candidates": build_candidates(configured_ids),
+                },
+                configured_ids,
+            )
+
+        storage_preflight.assert_called_once_with(9)
+        self.assertEqual(plan["expected_count"], 9)
+        self.assertEqual(len(plan["queues"]), 9)
+        self.assertEqual(
+            tuple(queue["account_id"] for queue in plan["queues"]),
+            configured_ids,
+        )
+
     def test_daily_plan_route_accepts_bounded_non_ascii_descriptions(self):
         server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
         server.daemon_threads = True
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         url = "http://127.0.0.1:%s/internal/posts/daily-plan" % server.server_address[1]
+
+        def max_url(host, fill):
+            prefix = "https://%s/" % host
+            suffix = ".mp4"
+            return prefix + (fill * (4096 - len(prefix) - len(suffix))) + suffix
+
+        from features.x_posts import XPostStore
+
+        candidates = []
+        validator = XPostStore(self.root / "body-limit.sqlite3")
+        for index in range(50):
+            material_id = str(9000 + index)
+            item = {
+                "account_id": 1000 + index,
+                "account_username": "daily_%02d" % index,
+                "source_date": "2026-07-22",
+                "material_id": material_id,
+                "content_id": "c" * 128,
+                "material_url": max_url("media.example.com", "a"),
+                "material_name": "素材" * 127 + "名",
+                "material_language": "语" * 32,
+                "drama_name": "短剧" * 127 + "名",
+                "tag": "标签" * 127 + "类",
+                "description": "剧" * 4096,
+                "page_name": "页面" * 127 + "名",
+                "page_id": "p" * 64,
+                "candidate_rank": index + 1,
+                "spend": 100 - index,
+                "original_material_url": max_url(
+                    "origin.example.com",
+                    "b",
+                ),
+                "media_repair_trigger_code": "invalid_media_codec",
+                "media_repair_job_key": "repair-%02d" % index,
+                "media_repair_profile": "x-h264-yuv420p",
+                "media_repair_source_sha256": ("%064x" % (index + 1))[-64:],
+                "preflight_sha256": ("%064x" % (index + 101))[-64:],
+                "preflight_size": 5,
+                "compliance_counts": {
+                    "facebook_violation_count": 0,
+                    "tiktok_violation_count": 0,
+                    "twitter_violation_count": 0,
+                    "resource_audit_count": 0,
+                    "dangerous_tag_count": 0,
+                },
+            }
+            validator._queue_payload(
+                item,
+                run_date="2026-07-23",
+                candidate_rank=index + 1,
+                require_compliance=True,
+            )
+            candidates.append(item)
         payload = {
             "run_date": "2026-07-23",
             "source_date": "2026-07-22",
-            "candidates": [{"description": "剧" * 2000} for _index in range(3)],
+            "candidates": candidates,
         }
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.assertGreater(len(raw), service.MAX_BODY_BYTES)
+        self.assertEqual(service.MAX_BODY_BYTES, 16 * 1024)
+        self.assertEqual(service.MAX_DAILY_PLAN_BODY_BYTES, 2 * 1024 * 1024)
+        self.assertGreater(len(raw), 1024 * 1024)
         self.assertLess(len(raw), service.MAX_DAILY_PLAN_BODY_BYTES)
         expected = {
             "id": 1,
@@ -1327,6 +1574,93 @@ class XAccountsTestCase(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_internal_route_body_limits_keep_check_batch_separate_from_common_routes(self):
+        self.assertEqual(service.MAX_BODY_BYTES, 16 * 1024)
+        self.assertEqual(service.MAX_DAILY_CHECK_BODY_BYTES, 128 * 1024)
+        check_payload = {
+            "checks": [
+                {
+                    "pool_item_id": 1,
+                    "error_code": "material_invalid",
+                    "error_message": "错" * 7000,
+                }
+            ]
+        }
+        raw = json.dumps(check_payload, ensure_ascii=False).encode("utf-8")
+        self.assertGreater(len(raw), service.MAX_BODY_BYTES)
+        self.assertLess(len(raw), service.MAX_DAILY_CHECK_BODY_BYTES)
+
+        server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = "http://127.0.0.1:%s" % server.server_address[1]
+
+        def request(path):
+            return urllib.request.Request(
+                base_url + path,
+                data=raw,
+                headers={
+                    "Authorization": "Bearer " + service.INTERNAL_TOKEN,
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                method="POST",
+            )
+
+        try:
+            with mock.patch.object(
+                service,
+                "record_post_material_pool_checks_request",
+                return_value={"updated_count": 1},
+            ) as check_mock:
+                with urllib.request.urlopen(
+                    request("/internal/posts/material-pool/check"),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                check_mock.assert_called_once_with(check_payload)
+
+            with mock.patch.object(service, "publish_canary_request") as canary_mock:
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(
+                        request("/internal/posts/canary"),
+                        timeout=5,
+                    )
+                self.assertEqual(rejected.exception.code, 413)
+                rejected.exception.close()
+                canary_mock.assert_not_called()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_run_failure_client_forwards_dynamic_expected_count(self):
+        payload = {
+            "run_date": "2026-07-23",
+            "source_date": "2026-07-22",
+            "error_code": "x_post_daily_candidate_shortage",
+            "error_message": "not enough candidates",
+            "expected_count": 9,
+            "ignored": "must not cross the sidecar boundary",
+        }
+        with mock.patch.object(
+            client,
+            "_request",
+            return_value={"item": {"recorded": True}},
+        ) as request_mock:
+            client.record_x_post_run_failure(payload)
+        request_mock.assert_called_once_with(
+            "/internal/posts/runs/record-failure",
+            method="POST",
+            payload={
+                "run_date": "2026-07-23",
+                "source_date": "2026-07-22",
+                "error_code": "x_post_daily_candidate_shortage",
+                "error_message": "not enough candidates",
+                "expected_count": 9,
+            },
+        )
 
     def test_daily_plan_log_queries_and_material_key_contract(self):
         accounts = [
@@ -1391,7 +1725,7 @@ class XAccountsTestCase(unittest.TestCase):
                 },
                 service.DAILY_ACCOUNT_IDS,
             )
-        storage_preflight.assert_called_once_with()
+        storage_preflight.assert_called_once_with(3)
         self.assertEqual(len(plan["queues"]), 3)
         self.assertEqual(plan["queues"][0]["account_username"], "daily_one")
         self.assertNotIn("material_url", plan["queues"][0])
@@ -1552,6 +1886,7 @@ class XAccountsTestCase(unittest.TestCase):
                     "source_date": "2026-07-22",
                     "error_code": "late_failure",
                     "error_message": "must not overwrite",
+                    "expected_count": 3,
                 }
             )
             self.assertFalse(not_overwritten["item"]["recorded"])

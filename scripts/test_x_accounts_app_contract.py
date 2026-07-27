@@ -28,10 +28,19 @@ APP_SOURCE = APP_PATH.read_text(encoding="utf-8")
 NGINX_SOURCE = (ROOT / "deploy" / "nginx-x-oauth.conf").read_text(encoding="utf-8")
 NAVIGATION_SOURCE = (ROOT / "static" / "navigation.json").read_text(encoding="utf-8")
 QUICK_NAV_SOURCE = (ROOT / "static" / "quick-nav.js").read_text(encoding="utf-8")
+X_ACCOUNT_LIST_SOURCE = (ROOT / "static" / "x-account-list.html").read_text(
+    encoding="utf-8"
+)
 X_POST_LOGS_SOURCE = (ROOT / "static" / "x-post-logs.html").read_text(encoding="utf-8")
 X_POST_POOL_SOURCE = (ROOT / "static" / "x-post-material-pool.html").read_text(
     encoding="utf-8"
 )
+X_POST_DAILY_SERVICE_SOURCE = (
+    ROOT / "deploy" / "x-post-daily.service"
+).read_text(encoding="utf-8")
+X_POST_DAILY_TIMER_SOURCE = (
+    ROOT / "deploy" / "x-post-daily.timer"
+).read_text(encoding="utf-8")
 
 
 def source_between(start, end):
@@ -41,6 +50,30 @@ def source_between(start, end):
 
 
 class XAccountsAppContractTest(unittest.TestCase):
+    def test_dynamic_daily_batch_has_extended_timeout_and_generic_timer_label(self):
+        self.assertIn("TimeoutStartSec=360min", X_POST_DAILY_SERVICE_SOURCE)
+        self.assertIn(
+            "Description=Publish configured daily Dramawave X posts",
+            X_POST_DAILY_TIMER_SOURCE,
+        )
+        self.assertNotIn("Publish three daily", X_POST_DAILY_TIMER_SOURCE)
+
+    def test_x_account_list_displays_daily_auto_publish_status_in_twelve_columns(self):
+        self.assertIn("<th>自动发布 Post</th>", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn(
+            "item.daily_auto_publish_configured === true",
+            X_ACCOUNT_LIST_SOURCE,
+        )
+        self.assertIn("已配置", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn("未配置", X_ACCOUNT_LIST_SOURCE)
+        self.assertGreaterEqual(
+            X_ACCOUNT_LIST_SOURCE.count('colspan="12"'),
+            4,
+        )
+        self.assertNotIn('colspan="11"', X_ACCOUNT_LIST_SOURCE)
+        self.assertNotIn("expected_count || 3", X_POST_LOGS_SOURCE)
+        self.assertNotIn('id="latestPublished">0 / 3', X_POST_LOGS_SOURCE)
+
     def test_actor_includes_tenant_and_user_identity(self):
         tree = ast.parse(APP_SOURCE)
         function = next(

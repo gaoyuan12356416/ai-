@@ -315,7 +315,13 @@ def query_x_post_material_keys(material_keys):
 def record_x_post_run_failure(payload):
     if not isinstance(payload, dict):
         raise XAccountsClientError("invalid_request", "X每日发布失败记录必须是对象", 400)
-    allowed = {"run_date", "source_date", "error_code", "error_message"}
+    allowed = {
+        "run_date",
+        "source_date",
+        "error_code",
+        "error_message",
+        "expected_count",
+    }
     body = {key: payload.get(key) for key in allowed if key in payload}
     return _request(
         "/internal/posts/runs/record-failure",
