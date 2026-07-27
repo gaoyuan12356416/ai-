@@ -208,7 +208,7 @@
         "label": "X账号列表",
         "description": "查看全部X账号及授权状态",
         "kind": "page",
-        "href": "/x-account-list.html",
+        "href": "/x-account-list.html?v=20260727catchup1",
         "enabled": true,
         "order": 20,
         "module": "x_accounts",

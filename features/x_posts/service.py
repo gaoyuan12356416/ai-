@@ -58,6 +58,7 @@ QUEUE_FIELDS = (
 
 QUEUE_LEDGER_FIELDS = (
     "run_id",
+    "catchup_run_id",
     "run_date",
     "material_key",
     "pool_item_id",
@@ -565,6 +566,68 @@ def normalize_material_key(value, error_code="invalid_request"):
     return str(parsed)
 
 
+def _catchup_reason(value):
+    reason = str(value or "").strip()
+    if reason != "scope_expansion_v1":
+        raise XPostError(
+            "invalid_request",
+            "补发原因必须为scope_expansion_v1",
+            400,
+        )
+    return reason
+
+
+def _configured_account_scope(values):
+    if not isinstance(values, (list, tuple)):
+        raise XPostError(
+            "invalid_request",
+            "configured_account_ids必须为有序数组",
+            400,
+        )
+    normalized = tuple(
+        _positive_int(value, "configured_account_ids")
+        for value in values
+    )
+    if (
+        not normalized
+        or len(normalized) > MAX_DAILY_BATCH_SIZE
+        or len(set(normalized)) != len(normalized)
+    ):
+        raise XPostError(
+            "invalid_request",
+            "configured_account_ids必须包含1到%s个互异正整数"
+            % MAX_DAILY_BATCH_SIZE,
+            400,
+        )
+    return normalized
+
+
+def _stored_account_ids(value, expected_count=None):
+    try:
+        decoded = json.loads(str(value or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise XPostError(
+            "x_post_storage_conflict",
+            "补发批次账号快照无效",
+            500,
+        ) from None
+    try:
+        normalized = _configured_account_scope(decoded)
+    except XPostError:
+        raise XPostError(
+            "x_post_storage_conflict",
+            "补发批次账号快照无效",
+            500,
+        ) from None
+    if expected_count is not None and len(normalized) != int(expected_count):
+        raise XPostError(
+            "x_post_storage_conflict",
+            "补发批次账号快照数量异常",
+            500,
+        )
+    return normalized
+
+
 def _nonnegative_int(value, label, default=0):
     if value in (None, ""):
         return int(default)
@@ -657,6 +720,33 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_catchup_run (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_run_id INTEGER NOT NULL UNIQUE,
+                    catchup_key TEXT NOT NULL UNIQUE,
+                    run_date TEXT NOT NULL,
+                    source_date TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                        CHECK(reason='scope_expansion_v1'),
+                    account_ids_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    expected_count INTEGER NOT NULL,
+                    queued_count INTEGER NOT NULL DEFAULT 0,
+                    published_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    unknown_count INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(parent_run_id) REFERENCES x_post_daily_run(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_material_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     material_key TEXT NOT NULL UNIQUE,
@@ -680,6 +770,7 @@ def ensure_storage(db_path):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 run_id INTEGER,
+                catchup_run_id INTEGER,
                 run_date TEXT NOT NULL DEFAULT '',
                 material_key TEXT NOT NULL DEFAULT '',
                 pool_item_id INTEGER,
@@ -715,6 +806,7 @@ def ensure_storage(db_path):
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES x_post_daily_run(id),
+                FOREIGN KEY(catchup_run_id) REFERENCES x_post_catchup_run(id),
                 FOREIGN KEY(pool_item_id) REFERENCES x_post_material_pool(id)
             )
                 """
@@ -748,6 +840,7 @@ def ensure_storage(db_path):
             additive_columns = {
                 "account_username": "TEXT NOT NULL DEFAULT ''",
                 "run_id": "INTEGER",
+                "catchup_run_id": "INTEGER",
                 "run_date": "TEXT NOT NULL DEFAULT ''",
                 "material_key": "TEXT NOT NULL DEFAULT ''",
                 "pool_item_id": "INTEGER",
@@ -840,6 +933,10 @@ def ensure_storage(db_path):
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_run ON x_post_queue(run_id,id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_queue_catchup "
+                "ON x_post_queue(catchup_run_id,candidate_rank,id)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_status ON x_post_queue(status,created_at,id)"
             )
             conn.execute(
@@ -850,6 +947,10 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_run_status ON x_post_daily_run(status,run_date,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_catchup_status "
+                "ON x_post_catchup_run(status,run_date,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_pool_fifo "
@@ -877,6 +978,60 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(SELECT 1 FROM x_post_daily_run WHERE id=NEW.run_id)
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue run_id missing');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_catchup_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.catchup_run_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                        FROM x_post_catchup_run
+                       WHERE id=NEW.catchup_run_id
+                         AND run_date=NEW.run_date
+                         AND source_date=NEW.source_date
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue catchup_run_id missing or mismatched');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_catchup_update
+                BEFORE UPDATE OF catchup_run_id,run_date,source_date ON x_post_queue
+                WHEN NEW.catchup_run_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                        FROM x_post_catchup_run
+                       WHERE id=NEW.catchup_run_id
+                         AND run_date=NEW.run_date
+                         AND source_date=NEW.source_date
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue catchup_run_id missing or mismatched');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_batch_parent_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.run_id IS NOT NULL AND NEW.catchup_run_id IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue has multiple batch parents');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_batch_parent_update
+                BEFORE UPDATE OF run_id,catchup_run_id ON x_post_queue
+                WHEN NEW.run_id IS NOT NULL AND NEW.catchup_run_id IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue has multiple batch parents');
                 END
                 """
             )
@@ -1095,6 +1250,18 @@ class XPostStore:
         )
         raw_run_id = payload.get("run_id")
         result["run_id"] = _positive_int(raw_run_id, "run_id") if raw_run_id not in (None, "") else None
+        raw_catchup_run_id = payload.get("catchup_run_id")
+        result["catchup_run_id"] = (
+            _positive_int(raw_catchup_run_id, "catchup_run_id")
+            if raw_catchup_run_id not in (None, "")
+            else None
+        )
+        if result["run_id"] is not None and result["catchup_run_id"] is not None:
+            raise XPostError(
+                "invalid_request",
+                "发布队列不能同时关联每日批次和补发批次",
+                400,
+            )
         raw_pool_item_id = payload.get("pool_item_id")
         result["pool_item_id"] = (
             _positive_int(raw_pool_item_id, "pool_item_id")
@@ -1151,6 +1318,7 @@ class XPostStore:
                 comparison_fields = list(("idempotency_key", "material_key") + QUEUE_FIELDS)
                 for field in (
                     "run_id",
+                    "catchup_run_id",
                     "run_date",
                     "pool_item_id",
                     "pool_created_at",
@@ -1870,6 +2038,781 @@ class XPostStore:
         item["created"] = True
         return item
 
+    @staticmethod
+    def _catchup_parent_context(
+        conn,
+        run_date,
+        source_date,
+        parent_run_id,
+        configured_account_ids,
+        exclude_catchup_run_id=None,
+    ):
+        parent = conn.execute(
+            "SELECT * FROM x_post_daily_run WHERE id=?",
+            (parent_run_id,),
+        ).fetchone()
+        if (
+            not parent
+            or str(parent["run_date"]) != run_date
+            or str(parent["source_date"]) != source_date
+            or str(parent["status"]) != "completed"
+            or int(parent["expected_count"]) != 3
+            or int(parent["queued_count"]) != 3
+            or int(parent["published_count"]) != 3
+            or int(parent["failed_count"]) != 0
+            or int(parent["unknown_count"]) != 0
+        ):
+            raise XPostError(
+                "x_post_catchup_parent_not_ready",
+                "原每日批次必须为无失败、无未知结果的3/3已完成批次",
+                409,
+            )
+        parent_queues = conn.execute(
+            """
+            SELECT q.account_id,q.status AS queue_status,
+                   l.status AS log_status,COALESCE(l.unknown_outcome,0) AS unknown_outcome
+              FROM x_post_queue q
+              LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+             WHERE q.run_id=?
+             ORDER BY q.candidate_rank,q.id
+            """,
+            (parent_run_id,),
+        ).fetchall()
+        parent_accounts = tuple(int(row["account_id"]) for row in parent_queues)
+        if (
+            len(parent_queues) != 3
+            or len(set(parent_accounts)) != 3
+            or any(account_id not in configured_account_ids for account_id in parent_accounts)
+            or any(
+                str(row["queue_status"]) != "published"
+                or str(row["log_status"]) != "published"
+                or int(row["unknown_outcome"] or 0) != 0
+                for row in parent_queues
+            )
+        ):
+            raise XPostError(
+                "x_post_catchup_parent_not_ready",
+                "原每日批次队列必须全部确认发布且属于当前配置",
+                409,
+            )
+        if exclude_catchup_run_id is None:
+            occupied_rows = conn.execute(
+                "SELECT account_id FROM x_post_queue WHERE run_date=?",
+                (run_date,),
+            ).fetchall()
+        else:
+            occupied_rows = conn.execute(
+                "SELECT account_id FROM x_post_queue WHERE run_date=? "
+                "AND (catchup_run_id IS NULL OR catchup_run_id<>?)",
+                (run_date, exclude_catchup_run_id),
+            ).fetchall()
+        occupied_accounts = {
+            int(row["account_id"])
+            for row in occupied_rows
+        }
+        missing_accounts = tuple(
+            account_id
+            for account_id in configured_account_ids
+            if account_id not in occupied_accounts
+        )
+        return parent, parent_accounts, missing_accounts
+
+    @staticmethod
+    def _catchup_item(row):
+        item = _row_dict(row)
+        if item is None:
+            return None
+        item["account_ids"] = list(
+            _stored_account_ids(
+                item.pop("account_ids_json", ""),
+                item.get("expected_count"),
+            )
+        )
+        item["batch_kind"] = "catchup"
+        return item
+
+    @staticmethod
+    def _catchup_key(run_date, parent_run_id, reason):
+        return "xpost:catchup:%s:%s:%s" % (
+            reason,
+            run_date,
+            parent_run_id,
+        )
+
+    def get_catchup_run(self, catchup_run_id):
+        catchup_run_id = _positive_int(catchup_run_id, "catchup_run_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM x_post_catchup_run WHERE id=?",
+                (catchup_run_id,),
+            ).fetchone()
+        if not row:
+            raise XPostError(
+                "x_post_catchup_run_not_found",
+                "补发批次不存在",
+                404,
+            )
+        return self._catchup_item(row)
+
+    def query_catchup_plan(
+        self,
+        run_date,
+        parent_run_id,
+        reason="scope_expansion_v1",
+    ):
+        run_date = _date_value(run_date, "run_date")
+        parent_run_id = _positive_int(parent_run_id, "parent_run_id")
+        reason = _catchup_reason(reason)
+        run_fields = (
+            "id",
+            "parent_run_id",
+            "catchup_key",
+            "run_date",
+            "source_date",
+            "reason",
+            "account_ids_json",
+            "status",
+            "expected_count",
+            "queued_count",
+            "published_count",
+            "failed_count",
+            "unknown_count",
+            "error_code",
+            "error_message",
+            "started_at",
+            "finished_at",
+            "created_at",
+            "updated_at",
+        )
+        queue_fields = (
+            "id",
+            "run_id",
+            "catchup_run_id",
+            "run_date",
+            "source_date",
+            "account_id",
+            "candidate_rank",
+            "status",
+            "created_at",
+            "updated_at",
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN")
+            run_row = conn.execute(
+                "SELECT %s FROM x_post_catchup_run "
+                "WHERE parent_run_id=? AND run_date=? AND reason=?"
+                % ",".join(run_fields),
+                (parent_run_id, run_date, reason),
+            ).fetchone()
+            if run_row:
+                queue_rows = conn.execute(
+                    "SELECT %s FROM x_post_queue WHERE catchup_run_id=? "
+                    "ORDER BY candidate_rank,id"
+                    % ",".join(queue_fields),
+                    (run_row["id"],),
+                ).fetchall()
+            else:
+                queue_rows = []
+            conn.commit()
+        if not run_row:
+            return {"found": False, "run": None, "queues": []}
+        run_item = self._catchup_item(run_row)
+        return {
+            "found": True,
+            "run": run_item,
+            "queues": [
+                dict(_row_dict(row), batch_kind="catchup")
+                for row in queue_rows
+            ],
+        }
+
+    def create_catchup_plan(
+        self,
+        run_date,
+        source_date,
+        parent_run_id,
+        reason,
+        candidates,
+        configured_account_ids,
+        require_pool=True,
+    ):
+        run_date = _date_value(run_date, "run_date")
+        source_date = _date_value(source_date, "source_date")
+        parent_run_id = _positive_int(parent_run_id, "parent_run_id")
+        reason = _catchup_reason(reason)
+        configured_account_ids = _configured_account_scope(
+            configured_account_ids
+        )
+        if (
+            datetime.strptime(run_date, "%Y-%m-%d").date()
+            - datetime.strptime(source_date, "%Y-%m-%d").date()
+        ).days != 1:
+            raise XPostError(
+                "invalid_request",
+                "source_date必须是run_date前一天",
+                400,
+            )
+        batch_size = len(candidates) if isinstance(candidates, list) else 0
+        if batch_size < 1 or batch_size > MAX_DAILY_BATCH_SIZE:
+            raise XPostError(
+                "x_post_catchup_candidate_shortage",
+                "补发计划必须一次提交1到%s个候选"
+                % MAX_DAILY_BATCH_SIZE,
+                409,
+            )
+
+        prepared = []
+        account_ids = set()
+        material_keys = set()
+        pool_item_ids = set()
+        for index, candidate in enumerate(candidates, 1):
+            payload = (
+                dict(candidate)
+                if isinstance(candidate, dict)
+                else candidate
+            )
+            if (
+                isinstance(payload, dict)
+                and _date_value(
+                    payload.get("source_date"),
+                    "source_date",
+                )
+                != source_date
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "候选source_date与补发批次不一致",
+                    400,
+                )
+            values = self._queue_payload(
+                payload,
+                run_date=run_date,
+                candidate_rank=index,
+                require_compliance=True,
+            )
+            values["run_id"] = None
+            values["catchup_run_id"] = None
+            values["idempotency_key"] = (
+                "xpost:catchup:v1:%s:%s"
+                % (run_date, values["account_id"])
+            )
+            if values["account_id"] in account_ids:
+                raise XPostError(
+                    "invalid_request",
+                    "补发计划账号必须互不相同",
+                    400,
+                )
+            if values["material_key"] in material_keys:
+                raise XPostError(
+                    "invalid_request",
+                    "补发计划素材必须互不相同",
+                    400,
+                )
+            if require_pool and values["pool_item_id"] is None:
+                raise XPostError(
+                    "x_post_pool_required",
+                    "正式补发计划候选必须来自素材池",
+                    409,
+                )
+            if values["pool_item_id"] is not None:
+                if values["pool_item_id"] in pool_item_ids:
+                    raise XPostError(
+                        "invalid_request",
+                        "补发计划素材池记录必须互不相同",
+                        400,
+                    )
+                pool_item_ids.add(values["pool_item_id"])
+            if any(
+                values[field] != 0
+                for field in COMPLIANCE_COUNT_FIELDS
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "补发计划候选存在违规或危险标签计数",
+                    400,
+                )
+            account_ids.add(values["account_id"])
+            material_keys.add(values["material_key"])
+            prepared.append(values)
+        if pool_item_ids and len(pool_item_ids) != len(prepared):
+            raise XPostError(
+                "invalid_request",
+                "补发计划候选必须全部来自素材池或全部不关联素材池",
+                400,
+            )
+
+        timestamp = utc_now()
+        columns = (
+            ("idempotency_key",)
+            + QUEUE_LEDGER_FIELDS
+            + QUEUE_FIELDS
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_run = conn.execute(
+                "SELECT * FROM x_post_catchup_run WHERE parent_run_id=?",
+                (parent_run_id,),
+            ).fetchone()
+            exclude_id = (
+                int(existing_run["id"])
+                if existing_run
+                else None
+            )
+            _parent, _parent_accounts, missing_accounts = (
+                self._catchup_parent_context(
+                    conn,
+                    run_date,
+                    source_date,
+                    parent_run_id,
+                    configured_account_ids,
+                    exclude_catchup_run_id=exclude_id,
+                )
+            )
+            requested_accounts = tuple(
+                int(values["account_id"])
+                for values in prepared
+            )
+            if (
+                not missing_accounts
+                or requested_accounts != missing_accounts
+                or batch_size != len(missing_accounts)
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_catchup_scope_mismatch",
+                    "补发候选账号必须严格等于当前配置减去当日已有队列",
+                    409,
+                )
+            expected_key = self._catchup_key(
+                run_date,
+                parent_run_id,
+                reason,
+            )
+            account_ids_json = json.dumps(
+                list(missing_accounts),
+                separators=(",", ":"),
+            )
+            catchup_run_id = None
+            if existing_run:
+                stored_accounts = _stored_account_ids(
+                    existing_run["account_ids_json"],
+                    existing_run["expected_count"],
+                )
+                if (
+                    str(existing_run["catchup_key"]) != expected_key
+                    or str(existing_run["run_date"]) != run_date
+                    or str(existing_run["source_date"]) != source_date
+                    or str(existing_run["reason"]) != reason
+                    or stored_accounts != missing_accounts
+                    or int(existing_run["expected_count"])
+                    != batch_size
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_catchup_run_exists",
+                        "该每日批次已存在不同范围的补发批次",
+                        409,
+                    )
+                existing_queues = conn.execute(
+                    "SELECT * FROM x_post_queue "
+                    "WHERE catchup_run_id=? "
+                    "ORDER BY candidate_rank,id",
+                    (existing_run["id"],),
+                ).fetchall()
+                if len(existing_queues) == batch_size:
+                    expected = [
+                        (
+                            int(values["account_id"]),
+                            values["material_key"],
+                            values["pool_item_id"],
+                        )
+                        for values in prepared
+                    ]
+                    actual = [
+                        (
+                            int(row["account_id"]),
+                            str(row["material_key"]),
+                            int(row["pool_item_id"])
+                            if row["pool_item_id"] is not None
+                            else None,
+                        )
+                        for row in existing_queues
+                    ]
+                    if actual != expected:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_catchup_run_exists",
+                            "该每日批次已存在不同的补发计划",
+                            409,
+                        )
+                    conn.commit()
+                    item = self._catchup_item(existing_run)
+                    item["queues"] = [
+                        _row_dict(row)
+                        for row in existing_queues
+                    ]
+                    item["created"] = False
+                    return item
+                if (
+                    existing_queues
+                    or existing_run["status"] != "failed_preflight"
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "已有补发批次队列数量异常",
+                        500,
+                    )
+                catchup_run_id = int(existing_run["id"])
+
+            previous_pool_order = None
+            for values in prepared:
+                if values["pool_item_id"] is not None:
+                    pool = conn.execute(
+                        "SELECT * FROM x_post_material_pool WHERE id=?",
+                        (values["pool_item_id"],),
+                    ).fetchone()
+                    if not pool:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_not_found",
+                            "候选素材池记录不存在",
+                            404,
+                        )
+                    if (
+                        pool["status"] != "unpublished"
+                        or str(pool["material_key"])
+                        != values["material_key"]
+                        or str(pool["created_at"])
+                        != values["pool_created_at"]
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_unavailable",
+                            "候选素材池记录已发布、已变更或与素材不一致",
+                            409,
+                        )
+                    if conn.execute(
+                        "SELECT 1 FROM x_post_queue "
+                        "WHERE pool_item_id=? OR material_key=?",
+                        (
+                            values["pool_item_id"],
+                            values["material_key"],
+                        ),
+                    ).fetchone():
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_occupied",
+                            "候选素材池记录已被发布队列占用",
+                            409,
+                        )
+                    pool_order = (
+                        str(pool["created_at"]),
+                        int(pool["id"]),
+                    )
+                    if (
+                        previous_pool_order is not None
+                        and pool_order <= previous_pool_order
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "invalid_request",
+                            "补发计划必须按素材池创建时间正序提交",
+                            400,
+                        )
+                    previous_pool_order = pool_order
+                elif conn.execute(
+                    "SELECT 1 FROM x_post_material_pool "
+                    "WHERE material_key=?",
+                    (values["material_key"],),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_item_occupied",
+                        "候选素材已进入素材池，正式队列必须绑定对应素材池记录",
+                        409,
+                    )
+                if conn.execute(
+                    "SELECT id FROM x_post_queue WHERE material_key=?",
+                    (values["material_key"],),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_material_already_used",
+                        "候选素材已被X发布队列占用",
+                        409,
+                    )
+                if conn.execute(
+                    "SELECT id FROM x_post_queue "
+                    "WHERE account_id=? AND run_date=?",
+                    (values["account_id"], run_date),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_account_day_already_reserved",
+                        "候选X账号当日已有发布队列",
+                        409,
+                    )
+
+            if catchup_run_id is None:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_catchup_run("
+                    "parent_run_id,catchup_key,run_date,source_date,"
+                    "reason,account_ids_json,status,expected_count,"
+                    "queued_count,started_at,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    (
+                        parent_run_id,
+                        expected_key,
+                        run_date,
+                        source_date,
+                        reason,
+                        account_ids_json,
+                        batch_size,
+                        batch_size,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                catchup_run_id = int(cursor.lastrowid)
+            else:
+                conn.execute(
+                    "UPDATE x_post_catchup_run SET status='queued',"
+                    "expected_count=?,queued_count=?,published_count=0,"
+                    "failed_count=0,unknown_count=0,error_code='',"
+                    "error_message='',started_at=?,finished_at='',"
+                    "updated_at=? WHERE id=? AND status='failed_preflight'",
+                    (
+                        batch_size,
+                        batch_size,
+                        timestamp,
+                        timestamp,
+                        catchup_run_id,
+                    ),
+                )
+
+            queue_ids = []
+            placeholders = ",".join("?" for _field in columns)
+            try:
+                for values in prepared:
+                    values["catchup_run_id"] = catchup_run_id
+                    queue_cursor = conn.execute(
+                        "INSERT INTO x_post_queue("
+                        "%s,status,created_at,updated_at"
+                        ") VALUES(%s,'queued',?,?)"
+                        % (",".join(columns), placeholders),
+                        tuple(values[field] for field in columns)
+                        + (timestamp, timestamp),
+                    )
+                    queue_ids.append(int(queue_cursor.lastrowid))
+                    if values["pool_item_id"] is not None:
+                        conn.execute(
+                            "UPDATE x_post_material_pool "
+                            "SET last_checked_at=?,last_error_code='',"
+                            "last_error_message='',updated_at=? "
+                            "WHERE id=? AND status='unpublished'",
+                            (
+                                timestamp,
+                                timestamp,
+                                values["pool_item_id"],
+                            ),
+                        )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "补发计划唯一约束冲突",
+                    409,
+                ) from exc
+            conn.commit()
+        item = self.get_catchup_run(catchup_run_id)
+        item["queues"] = [
+            self.get_queue(queue_id)
+            for queue_id in queue_ids
+        ]
+        item["created"] = True
+        return item
+
+    def record_catchup_failure(
+        self,
+        run_date,
+        source_date,
+        parent_run_id,
+        reason,
+        expected_missing_count,
+        configured_account_ids,
+        error_code,
+        error_message,
+    ):
+        run_date = _date_value(run_date, "run_date")
+        source_date = _date_value(source_date, "source_date")
+        parent_run_id = _positive_int(parent_run_id, "parent_run_id")
+        reason = _catchup_reason(reason)
+        expected_missing_count = _positive_int(
+            expected_missing_count,
+            "expected_missing_count",
+        )
+        if expected_missing_count > MAX_DAILY_BATCH_SIZE:
+            raise XPostError(
+                "invalid_request",
+                "expected_missing_count不能超过%s"
+                % MAX_DAILY_BATCH_SIZE,
+                400,
+            )
+        configured_account_ids = _configured_account_scope(
+            configured_account_ids
+        )
+        if (
+            datetime.strptime(run_date, "%Y-%m-%d").date()
+            - datetime.strptime(source_date, "%Y-%m-%d").date()
+        ).days != 1:
+            raise XPostError(
+                "invalid_request",
+                "source_date必须是run_date前一天",
+                400,
+            )
+        try:
+            code = _clean_token(
+                error_code or "x_post_catchup_preflight_failed",
+                "error code",
+                64,
+            )
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "error_code无效",
+                400,
+            ) from None
+        message = redact_text(error_message, 500)
+        if not message:
+            message = "X补发批次预检失败"
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM x_post_catchup_run WHERE parent_run_id=?",
+                (parent_run_id,),
+            ).fetchone()
+            exclude_id = int(existing["id"]) if existing else None
+            _parent, _parent_accounts, missing_accounts = (
+                self._catchup_parent_context(
+                    conn,
+                    run_date,
+                    source_date,
+                    parent_run_id,
+                    configured_account_ids,
+                    exclude_catchup_run_id=exclude_id,
+                )
+            )
+            if (
+                not missing_accounts
+                or len(missing_accounts) != expected_missing_count
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_catchup_scope_mismatch",
+                    "补发失败记录数量与当日缺失账号范围不一致",
+                    409,
+                )
+            expected_key = self._catchup_key(
+                run_date,
+                parent_run_id,
+                reason,
+            )
+            account_ids_json = json.dumps(
+                list(missing_accounts),
+                separators=(",", ":"),
+            )
+            if existing:
+                stored_accounts = _stored_account_ids(
+                    existing["account_ids_json"],
+                    existing["expected_count"],
+                )
+                if (
+                    str(existing["catchup_key"]) != expected_key
+                    or str(existing["run_date"]) != run_date
+                    or str(existing["source_date"]) != source_date
+                    or str(existing["reason"]) != reason
+                    or stored_accounts != missing_accounts
+                    or int(existing["expected_count"])
+                    != expected_missing_count
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_catchup_run_exists",
+                        "该每日批次已存在不同范围的补发批次",
+                        409,
+                    )
+                queue_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM x_post_queue "
+                        "WHERE catchup_run_id=?",
+                        (existing["id"],),
+                    ).fetchone()[0]
+                )
+                if queue_count:
+                    conn.commit()
+                    item = self._catchup_item(existing)
+                    item["recorded"] = False
+                    return item
+                if (
+                    existing["status"] == "failed_preflight"
+                    and existing["error_code"] == code
+                    and existing["error_message"] == message
+                ):
+                    conn.commit()
+                    item = self._catchup_item(existing)
+                    item["recorded"] = False
+                    return item
+                conn.execute(
+                    "UPDATE x_post_catchup_run "
+                    "SET status='failed_preflight',queued_count=0,"
+                    "published_count=0,failed_count=0,unknown_count=0,"
+                    "error_code=?,error_message=?,finished_at=?,updated_at=? "
+                    "WHERE id=?",
+                    (
+                        code,
+                        message,
+                        timestamp,
+                        timestamp,
+                        existing["id"],
+                    ),
+                )
+                catchup_run_id = int(existing["id"])
+                recorded = True
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_catchup_run("
+                    "parent_run_id,catchup_key,run_date,source_date,"
+                    "reason,account_ids_json,status,expected_count,"
+                    "queued_count,error_code,error_message,started_at,"
+                    "finished_at,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,'failed_preflight',?,0,"
+                    "?,?,?,?,?,?)",
+                    (
+                        parent_run_id,
+                        expected_key,
+                        run_date,
+                        source_date,
+                        reason,
+                        account_ids_json,
+                        expected_missing_count,
+                        code,
+                        message,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                catchup_run_id = int(cursor.lastrowid)
+                recorded = True
+            conn.commit()
+        item = self.get_catchup_run(catchup_run_id)
+        item["recorded"] = recorded
+        return item
+
     def get_queue(self, queue_id):
         queue_id = _positive_int(queue_id, "queue_id")
         with contextlib.closing(_connect(self.db_path)) as conn:
@@ -2135,7 +3078,11 @@ class XPostStore:
             values.append(unknown_outcome)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         select = (
-            "SELECT q.id AS queue_id,q.run_id,q.run_date,q.source_date,q.account_id,"
+            "SELECT q.id AS queue_id,q.run_id,q.catchup_run_id,"
+            "CASE WHEN q.run_id IS NOT NULL THEN 'daily' "
+            "WHEN q.catchup_run_id IS NOT NULL THEN 'catchup' "
+            "ELSE 'canary' END AS batch_kind,"
+            "q.run_date,q.source_date,q.account_id,"
             "q.pool_item_id,q.pool_created_at,"
             "q.account_username,q.page_name,q.page_id,q.material_id,q.material_name,q.content_id,"
             "q.material_language,q.drama_name,q.tag,q.candidate_rank,q.spend,"
@@ -2230,12 +3177,31 @@ class XPostStore:
 
     @staticmethod
     def _sync_run(conn, queue_id, timestamp):
-        queue = conn.execute("SELECT run_id FROM x_post_queue WHERE id=?", (queue_id,)).fetchone()
-        if not queue or not queue["run_id"]:
+        queue = conn.execute(
+            "SELECT run_id,catchup_run_id FROM x_post_queue WHERE id=?",
+            (queue_id,),
+        ).fetchone()
+        if not queue:
             return
-        run_id = int(queue["run_id"])
+        if queue["run_id"] and queue["catchup_run_id"]:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "发布队列关联了多个批次",
+                500,
+            )
+        if queue["catchup_run_id"]:
+            table_name = "x_post_catchup_run"
+            queue_column = "catchup_run_id"
+            batch_id = int(queue["catchup_run_id"])
+        elif queue["run_id"]:
+            table_name = "x_post_daily_run"
+            queue_column = "run_id"
+            batch_id = int(queue["run_id"])
+        else:
+            return
         counts = conn.execute(
-            """
+            (
+                """
             SELECT
                 COUNT(q.id) AS queued_count,
                 SUM(CASE WHEN l.status='published' THEN 1 ELSE 0 END) AS published_count,
@@ -2245,11 +3211,16 @@ class XPostStore:
                 SUM(CASE WHEN l.error_code='x_post_rate_limited' THEN 1 ELSE 0 END) AS rate_limited_count
             FROM x_post_queue q
             LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
-            WHERE q.run_id=?
-            """,
-            (run_id,),
+            WHERE q.%s=?
+            """
+                % queue_column
+            ),
+            (batch_id,),
         ).fetchone()
-        run = conn.execute("SELECT * FROM x_post_daily_run WHERE id=?", (run_id,)).fetchone()
+        run = conn.execute(
+            "SELECT * FROM %s WHERE id=?" % table_name,
+            (batch_id,),
+        ).fetchone()
         if not run:
             raise XPostError("x_post_storage_conflict", "发布队列关联批次不存在", 500)
         queued_count = int(counts["queued_count"] or 0)
@@ -2272,8 +3243,9 @@ class XPostStore:
             status = "queued"
         finished_at = timestamp if status in {"completed", "completed_with_errors", "needs_review", "stopped"} else ""
         conn.execute(
-            "UPDATE x_post_daily_run SET status=?,queued_count=?,published_count=?,failed_count=?,"
-            "unknown_count=?,finished_at=?,updated_at=? WHERE id=?",
+            "UPDATE %s SET status=?,queued_count=?,published_count=?,failed_count=?,"
+            "unknown_count=?,finished_at=?,updated_at=? WHERE id=?"
+            % table_name,
             (
                 status,
                 queued_count,
@@ -2282,7 +3254,7 @@ class XPostStore:
                 unknown_count,
                 finished_at,
                 timestamp,
-                run_id,
+                batch_id,
             ),
         )
 
@@ -3141,7 +4113,7 @@ def publish_canary(
         )
         expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
         expected_size = int(queue.get("preflight_size", 0) or 0)
-        if queue.get("run_id") and (
+        if (queue.get("run_id") or queue.get("catchup_run_id")) and (
             not expected_sha256
             or expected_size <= 0
             or not secrets.compare_digest(expected_sha256, str(media["sha256"]).lower())

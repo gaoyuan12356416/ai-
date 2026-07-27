@@ -107,6 +107,7 @@ INTERNAL_TOKEN = (
 )
 DAILY_INTERNAL_TOKEN = os.environ.get("X_POST_DAILY_INTERNAL_TOKEN", "").strip()
 DAILY_ACCOUNT_IDS = env_positive_int_tuple("X_POST_DAILY_ACCOUNT_IDS")
+CATCHUP_REASON_SCOPE_EXPANSION = "scope_expansion_v1"
 PUBLIC_BASE_URL = os.environ.get(
     "X_PUBLIC_BASE_URL", "https://ai.yingliangads.com/x-oauth"
 ).rstrip("/")
@@ -1115,7 +1116,8 @@ def _safe_daily_plan_result(result):
         "finished_at", "created_at", "updated_at", "created",
     )
     allowed_queue = (
-        "id", "run_id", "run_date", "source_date", "account_id", "account_username",
+        "id", "run_id", "catchup_run_id", "batch_kind", "run_date", "source_date",
+        "account_id", "account_username",
         "pool_item_id", "pool_created_at",
         "material_id", "material_name", "content_id", "material_language", "drama_name",
         "tag", "candidate_rank", "spend", "status", "created_at", "updated_at",
@@ -1168,6 +1170,8 @@ def _safe_daily_plan_query_result(result):
     allowed_queue = (
         "id",
         "run_id",
+        "catchup_run_id",
+        "batch_kind",
         "run_date",
         "source_date",
         "account_id",
@@ -1185,6 +1189,274 @@ def _safe_daily_plan_query_result(result):
             if isinstance(queue, dict)
         ],
     }
+
+
+def _catchup_identity(payload, expected_keys):
+    if not isinstance(payload, dict) or set(payload) != set(expected_keys):
+        raise ServiceError("invalid_request", "X catch-up request fields are invalid", 400)
+    raw_parent_run_id = payload.get("parent_run_id")
+    if isinstance(raw_parent_run_id, bool):
+        raise ServiceError("invalid_request", "parent_run_id is invalid", 400)
+    try:
+        parent_run_id = int(raw_parent_run_id)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "parent_run_id is invalid", 400) from None
+    if parent_run_id <= 0:
+        raise ServiceError("invalid_request", "parent_run_id is invalid", 400)
+    reason = str(payload.get("reason", "") or "").strip()
+    if reason != CATCHUP_REASON_SCOPE_EXPANSION:
+        raise ServiceError("x_catchup_reason_denied", "X catch-up reason is not allowed", 403)
+    return parent_run_id, reason
+
+
+def _safe_catchup_queue(queue):
+    allowed = (
+        "id",
+        "run_id",
+        "catchup_run_id",
+        "batch_kind",
+        "run_date",
+        "source_date",
+        "account_id",
+        "account_username",
+        "pool_item_id",
+        "pool_created_at",
+        "material_id",
+        "material_name",
+        "content_id",
+        "material_language",
+        "drama_name",
+        "tag",
+        "candidate_rank",
+        "spend",
+        "status",
+        "created_at",
+        "updated_at",
+    )
+    safe = {key: queue[key] for key in allowed if key in queue}
+    if "batch_kind" not in safe:
+        try:
+            run_id = int(safe.get("run_id") or 0)
+            catchup_run_id = int(safe.get("catchup_run_id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError("x_posts_unavailable", "X queue parent is invalid", 503) from None
+        if catchup_run_id > 0:
+            safe["batch_kind"] = "catchup"
+        elif run_id > 0:
+            safe["batch_kind"] = "daily"
+        else:
+            safe["batch_kind"] = "canary"
+    return safe
+
+
+def _safe_catchup_plan_query_result(
+    result, parent_run_id, reason, missing_account_ids
+):
+    if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan query returned invalid data", 503)
+    run = result.get("run")
+    queues = result.get("queues")
+    base = {
+        "found": bool(result["found"]),
+        "parent_run_id": int(parent_run_id),
+        "reason": reason,
+        "missing_account_ids": [int(value) for value in missing_account_ids],
+    }
+    if not result["found"]:
+        if run is not None or queues != []:
+            raise ServiceError("x_posts_unavailable", "X catch-up plan query returned invalid data", 503)
+        base.update({"run": None, "queues": []})
+        return base
+    if not isinstance(run, dict) or not isinstance(queues, list):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan query returned invalid data", 503)
+    if any(not isinstance(queue, dict) for queue in queues):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan query returned invalid data", 503)
+    allowed_run = (
+        "id",
+        "parent_run_id",
+        "batch_kind",
+        "reason",
+        "account_ids",
+        "run_date",
+        "source_date",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "error_code",
+        "error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    )
+    safe_run = {key: run[key] for key in allowed_run if key in run}
+    safe_queues = [
+        _safe_catchup_queue(queue)
+        for queue in queues
+        if isinstance(queue, dict)
+    ]
+    expected_count = safe_run.get("expected_count")
+    catchup_run_id = safe_run.get("id")
+    stored_account_ids = safe_run.get("account_ids")
+    if (
+        not isinstance(expected_count, int)
+        or isinstance(expected_count, bool)
+        or expected_count != len(missing_account_ids)
+        or int(safe_run.get("parent_run_id") or 0) != int(parent_run_id)
+        or safe_run.get("reason") != reason
+        or safe_run.get("batch_kind") != "catchup"
+        or not isinstance(catchup_run_id, int)
+        or isinstance(catchup_run_id, bool)
+        or catchup_run_id <= 0
+        or not isinstance(stored_account_ids, list)
+        or tuple(stored_account_ids) != tuple(missing_account_ids)
+    ):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan scope is inconsistent", 503)
+    failed_preflight = safe_run.get("status") == "failed_preflight"
+    if (
+        (failed_preflight and safe_queues)
+        or (not failed_preflight and len(safe_queues) != expected_count)
+    ):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan queue count is inconsistent", 503)
+    if failed_preflight:
+        base.update({"run": safe_run, "queues": []})
+        return base
+    queue_accounts = []
+    for queue in safe_queues:
+        try:
+            account_id = int(queue.get("account_id") or 0)
+            queue_run_id = int(queue.get("run_id") or 0)
+            queue_catchup_run_id = int(queue.get("catchup_run_id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError("x_posts_unavailable", "X catch-up queue is invalid", 503) from None
+        if (
+            queue_run_id != 0
+            or queue_catchup_run_id != catchup_run_id
+            or queue.get("batch_kind") != "catchup"
+        ):
+            raise ServiceError("x_posts_unavailable", "X catch-up queue parent is invalid", 503)
+        queue_accounts.append(account_id)
+    if tuple(queue_accounts) != tuple(missing_account_ids):
+        raise ServiceError("x_posts_unavailable", "X catch-up account scope is inconsistent", 503)
+    base.update({"run": safe_run, "queues": safe_queues})
+    return base
+
+
+def _safe_catchup_plan_result(
+    result, parent_run_id, reason, missing_account_ids
+):
+    if not isinstance(result, dict) or not isinstance(result.get("queues"), list):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan returned invalid data", 503)
+    if any(not isinstance(queue, dict) for queue in result["queues"]):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan returned invalid data", 503)
+    allowed_run = (
+        "id",
+        "parent_run_id",
+        "batch_kind",
+        "reason",
+        "account_ids",
+        "run_date",
+        "source_date",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "error_code",
+        "error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+        "created",
+    )
+    safe = {key: result[key] for key in allowed_run if key in result}
+    safe["queues"] = [
+        _safe_catchup_queue(queue)
+        for queue in result["queues"]
+        if isinstance(queue, dict)
+    ]
+    safe["missing_account_ids"] = [int(value) for value in missing_account_ids]
+    expected_count = safe.get("expected_count")
+    catchup_run_id = safe.get("id")
+    if (
+        not isinstance(expected_count, int)
+        or isinstance(expected_count, bool)
+        or expected_count != len(missing_account_ids)
+        or len(safe["queues"]) != expected_count
+        or int(safe.get("parent_run_id") or 0) != int(parent_run_id)
+        or safe.get("reason") != reason
+        or safe.get("batch_kind") != "catchup"
+        or not isinstance(catchup_run_id, int)
+        or isinstance(catchup_run_id, bool)
+        or catchup_run_id <= 0
+        or not isinstance(safe.get("account_ids"), list)
+        or tuple(safe.get("account_ids")) != tuple(missing_account_ids)
+    ):
+        raise ServiceError("x_posts_unavailable", "X catch-up plan scope is inconsistent", 503)
+    queue_accounts = []
+    for queue in safe["queues"]:
+        try:
+            account_id = int(queue.get("account_id") or 0)
+            queue_run_id = int(queue.get("run_id") or 0)
+            queue_catchup_run_id = int(queue.get("catchup_run_id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError("x_posts_unavailable", "X catch-up queue is invalid", 503) from None
+        if (
+            queue_run_id != 0
+            or queue_catchup_run_id != catchup_run_id
+            or queue.get("batch_kind") != "catchup"
+        ):
+            raise ServiceError("x_posts_unavailable", "X catch-up queue parent is invalid", 503)
+        queue_accounts.append(account_id)
+    if tuple(queue_accounts) != tuple(missing_account_ids):
+        raise ServiceError("x_posts_unavailable", "X catch-up account scope is inconsistent", 503)
+    return safe
+
+
+def _safe_catchup_run_result(
+    result, parent_run_id, reason, missing_account_ids
+):
+    if not isinstance(result, dict):
+        raise ServiceError("x_posts_unavailable", "X catch-up run returned invalid data", 503)
+    allowed = (
+        "id",
+        "parent_run_id",
+        "batch_kind",
+        "reason",
+        "account_ids",
+        "run_date",
+        "source_date",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "error_code",
+        "error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+        "recorded",
+    )
+    safe = {key: result[key] for key in allowed if key in result}
+    safe["missing_account_ids"] = [int(value) for value in missing_account_ids]
+    if (
+        int(safe.get("parent_run_id") or 0) != int(parent_run_id)
+        or safe.get("reason") != reason
+        or safe.get("batch_kind") != "catchup"
+        or int(safe.get("expected_count") or 0) != len(missing_account_ids)
+        or not isinstance(safe.get("account_ids"), list)
+        or tuple(safe.get("account_ids")) != tuple(missing_account_ids)
+    ):
+        raise ServiceError("x_posts_unavailable", "X catch-up run scope is inconsistent", 503)
+    return safe
 
 
 def _safe_run_result(result):
@@ -1385,6 +1657,284 @@ def query_daily_plan_request(payload, allowed_account_ids=None):
     return safe
 
 
+def _catchup_scope_snapshot(
+    store, run_date, parent_run_id, reason, allowed_account_ids
+):
+    allowed_accounts = _daily_account_scope(allowed_account_ids)
+    if allowed_accounts is None:
+        raise ServiceError(
+            "x_daily_account_scope_denied",
+            "X catch-up requires the configured daily account scope",
+            403,
+        )
+    try:
+        parent_result = store.query_daily_plan(run_date)
+    except Exception as exc:
+        XPostError, _XPostStore, _publish_canary = _x_posts_api()
+        if isinstance(exc, XPostError):
+            _raise_x_post_error(exc)
+        raise
+    parent = _safe_daily_plan_query_result(parent_result)
+    if not parent["found"]:
+        raise ServiceError("x_catchup_parent_not_found", "X catch-up parent run does not exist", 409)
+    parent_run = parent["run"]
+    if (
+        int(parent_run.get("id") or 0) != int(parent_run_id)
+        or str(parent_run.get("run_date") or "") != str(run_date or "")
+    ):
+        raise ServiceError("x_catchup_parent_mismatch", "X catch-up parent run does not match", 409)
+    parent_expected_count = int(parent_run.get("expected_count") or 0)
+    parent_published_count = int(parent_run.get("published_count") or 0)
+    parent_unknown_count = int(parent_run.get("unknown_count") or 0)
+    parent_queues = parent["queues"]
+    parent_accounts = tuple(
+        int(queue.get("account_id") or 0)
+        for queue in parent_queues
+    )
+    if (
+        parent_run.get("status") != "completed"
+        or parent_expected_count < 1
+        or parent_expected_count != len(parent_queues)
+        or parent_published_count != parent_expected_count
+        or parent_unknown_count != 0
+        or len(set(parent_accounts)) != len(parent_accounts)
+        or any(queue.get("status") != "published" for queue in parent_queues)
+    ):
+        raise ServiceError(
+            "x_catchup_parent_not_completed",
+            "X catch-up requires a fully published parent run with no ambiguous outcome",
+            409,
+        )
+    configured_parent_order = tuple(
+        account_id for account_id in allowed_accounts if account_id in set(parent_accounts)
+    )
+    if (
+        parent_accounts != configured_parent_order
+        or not set(parent_accounts).issubset(set(allowed_accounts))
+    ):
+        raise ServiceError(
+            "x_daily_account_scope_denied",
+            "X catch-up parent accounts are outside the configured daily scope",
+            403,
+        )
+    missing_account_ids = tuple(
+        account_id for account_id in allowed_accounts if account_id not in set(parent_accounts)
+    )
+    if not missing_account_ids:
+        raise ServiceError(
+            "x_catchup_no_missing_accounts",
+            "All configured X accounts already have a parent daily queue",
+            409,
+        )
+    try:
+        catchup_result = store.query_catchup_plan(
+            run_date,
+            parent_run_id,
+            reason=reason,
+        )
+    except Exception as exc:
+        XPostError, _XPostStore, _publish_canary = _x_posts_api()
+        if isinstance(exc, XPostError):
+            _raise_x_post_error(exc)
+        raise
+    safe_catchup = _safe_catchup_plan_query_result(
+        catchup_result,
+        parent_run_id,
+        reason,
+        missing_account_ids,
+    )
+    return {
+        "parent": parent,
+        "catchup": safe_catchup,
+        "missing_account_ids": missing_account_ids,
+    }
+
+
+def query_catchup_plan_request(payload, allowed_account_ids=None):
+    parent_run_id, reason = _catchup_identity(
+        payload,
+        {"run_date", "parent_run_id", "reason"},
+    )
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        store = XPostStore(POST_DB_PATH)
+        snapshot = _catchup_scope_snapshot(
+            store,
+            payload.get("run_date"),
+            parent_run_id,
+            reason,
+            allowed_account_ids,
+        )
+    except ServiceError:
+        raise
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return snapshot["catchup"]
+
+
+def create_catchup_plan_request(
+    payload, allowed_account_ids=None, require_pool=False
+):
+    parent_run_id, reason = _catchup_identity(
+        payload,
+        {"run_date", "source_date", "parent_run_id", "reason", "candidates"},
+    )
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise ServiceError("invalid_request", "candidates must be an array", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        store = XPostStore(POST_DB_PATH)
+        snapshot = _catchup_scope_snapshot(
+            store,
+            payload.get("run_date"),
+            parent_run_id,
+            reason,
+            allowed_account_ids,
+        )
+    except ServiceError:
+        raise
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    parent_source_date = str(
+        snapshot["parent"]["run"].get("source_date", "") or ""
+    )
+    if str(payload.get("source_date", "") or "") != parent_source_date:
+        raise ServiceError(
+            "x_catchup_parent_mismatch",
+            "X catch-up source_date does not match the parent run",
+            409,
+        )
+    missing_account_ids = snapshot["missing_account_ids"]
+    requested_account_ids = []
+    for raw in candidates:
+        if not isinstance(raw, dict) or isinstance(raw.get("account_id"), bool):
+            raise ServiceError("invalid_request", "candidate account_id is invalid", 400)
+        try:
+            requested_account_ids.append(int(raw.get("account_id")))
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError("invalid_request", "candidate account_id is invalid", 400) from None
+    if tuple(requested_account_ids) != tuple(missing_account_ids):
+        raise ServiceError(
+            "x_daily_account_scope_denied",
+            "X catch-up candidates must exactly match the configured missing accounts",
+            403,
+        )
+    trusted = []
+    for raw, account_id in zip(candidates, requested_account_ids):
+        account = find_account(account_id)
+        if account.get("status") != "active" or not account.get("publish_eligible"):
+            raise ServiceError(
+                "x_account_not_publishable",
+                "X catch-up target account is not publishable",
+                409,
+            )
+        candidate = dict(raw)
+        candidate.update(
+            {
+                "account_id": int(account["id"]),
+                "account_username": str(account.get("username", "") or ""),
+                "page_name": str(
+                    account.get("display_name", "")
+                    or account.get("username", "")
+                    or ""
+                ),
+                "page_id": str(account.get("x_user_id", "") or ""),
+            }
+        )
+        trusted.append(candidate)
+    preflight_post_storage_request(len(missing_account_ids))
+    try:
+        result = store.create_catchup_plan(
+            payload.get("run_date"),
+            payload.get("source_date"),
+            parent_run_id,
+            reason,
+            trusted,
+            tuple(_daily_account_scope(allowed_account_ids)),
+            require_pool=bool(require_pool),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return _safe_catchup_plan_result(
+        result,
+        parent_run_id,
+        reason,
+        missing_account_ids,
+    )
+
+
+def record_catchup_failure_request(payload, allowed_account_ids=None):
+    parent_run_id, reason = _catchup_identity(
+        payload,
+        {
+            "run_date",
+            "source_date",
+            "parent_run_id",
+            "reason",
+            "expected_missing_count",
+            "error_code",
+            "error_message",
+        },
+    )
+    raw_expected_count = payload.get("expected_missing_count")
+    if isinstance(raw_expected_count, bool):
+        raise ServiceError("invalid_request", "expected_missing_count is invalid", 400)
+    try:
+        expected_missing_count = int(raw_expected_count)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "expected_missing_count is invalid", 400) from None
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        store = XPostStore(POST_DB_PATH)
+        snapshot = _catchup_scope_snapshot(
+            store,
+            payload.get("run_date"),
+            parent_run_id,
+            reason,
+            allowed_account_ids,
+        )
+    except ServiceError:
+        raise
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    missing_account_ids = snapshot["missing_account_ids"]
+    if expected_missing_count != len(missing_account_ids):
+        raise ServiceError(
+            "x_daily_account_scope_denied",
+            "X catch-up failure count does not match the configured missing scope",
+            403,
+        )
+    parent_source_date = str(
+        snapshot["parent"]["run"].get("source_date", "") or ""
+    )
+    if str(payload.get("source_date", "") or "") != parent_source_date:
+        raise ServiceError(
+            "x_catchup_parent_mismatch",
+            "X catch-up source_date does not match the parent run",
+            409,
+        )
+    try:
+        result = store.record_catchup_failure(
+            payload.get("run_date"),
+            payload.get("source_date"),
+            parent_run_id,
+            reason,
+            expected_missing_count,
+            tuple(_daily_account_scope(allowed_account_ids)),
+            payload.get("error_code"),
+            payload.get("error_message"),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return _safe_catchup_run_result(
+        result,
+        parent_run_id,
+        reason,
+        missing_account_ids,
+    )
+
+
 def preflight_post_storage_request(required_media_count=1):
     if isinstance(required_media_count, bool):
         raise ServiceError("invalid_request", "required_media_count无效", 400)
@@ -1420,9 +1970,11 @@ def publish_queue_request(queue_id, allowed_account_ids=None):
         store = XPostStore(POST_DB_PATH)
         queue = store.get_queue(queue_id)
         allowed_accounts = _daily_account_scope(allowed_account_ids)
+        run_id = int(queue.get("run_id") or 0)
+        catchup_run_id = int(queue.get("catchup_run_id") or 0)
         if allowed_accounts is not None and (
             int(queue.get("account_id") or 0) not in allowed_accounts
-            or int(queue.get("run_id") or 0) <= 0
+            or (run_id > 0) == (catchup_run_id > 0)
         ):
             raise ServiceError(
                 "x_daily_account_scope_denied",
@@ -1916,17 +2468,35 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/material-pool/available",
             "/internal/posts/material-pool/check",
         }
+        catchup_exact_paths = {
+            "/internal/posts/catchup-plan",
+            "/internal/posts/catchup-plan/query",
+            "/internal/posts/catchup-runs/record-failure",
+        }
         allow_daily = bool(
             parsed.path in daily_exact_paths
+            or parsed.path in catchup_exact_paths
             or daily_verify_match
             or daily_publish_match
         )
         internal_role = self.require_internal(allow_daily=allow_daily)
         if not internal_role:
             return
+        if parsed.path in catchup_exact_paths and internal_role != "daily":
+            self.send_json(
+                403,
+                {
+                    "error": "x_daily_internal_required",
+                    "message": "X catch-up routes require the daily internal bearer",
+                },
+            )
+            return
         try:
             request_body_limit = MAX_BODY_BYTES
-            if parsed.path == "/internal/posts/daily-plan":
+            if parsed.path in {
+                "/internal/posts/daily-plan",
+                "/internal/posts/catchup-plan",
+            }:
                 request_body_limit = MAX_DAILY_PLAN_BODY_BYTES
             elif parsed.path == "/internal/posts/material-pool/check":
                 request_body_limit = MAX_DAILY_CHECK_BODY_BYTES
@@ -1959,6 +2529,40 @@ class Handler(BaseHTTPRequestHandler):
                             DAILY_ACCOUNT_IDS
                             if internal_role == "daily"
                             else None,
+                        )
+                    },
+                )
+                return
+            if parsed.path == "/internal/posts/catchup-plan/query":
+                self.send_json(
+                    200,
+                    {
+                        "item": query_catchup_plan_request(
+                            payload,
+                            DAILY_ACCOUNT_IDS,
+                        )
+                    },
+                )
+                return
+            if parsed.path == "/internal/posts/catchup-plan":
+                self.send_json(
+                    200,
+                    {
+                        "item": create_catchup_plan_request(
+                            payload,
+                            DAILY_ACCOUNT_IDS,
+                            require_pool=True,
+                        )
+                    },
+                )
+                return
+            if parsed.path == "/internal/posts/catchup-runs/record-failure":
+                self.send_json(
+                    200,
+                    {
+                        "item": record_catchup_failure_request(
+                            payload,
+                            DAILY_ACCOUNT_IDS,
                         )
                     },
                 )
@@ -2089,6 +2693,7 @@ class Handler(BaseHTTPRequestHandler):
                 include_write_outcome=bool(
                     daily_publish_match
                     or parsed.path == "/internal/posts/daily-plan"
+                    or parsed.path == "/internal/posts/catchup-plan"
                 ),
             )
         except Exception:

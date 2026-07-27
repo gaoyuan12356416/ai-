@@ -48,6 +48,7 @@
     th { position:sticky; top:0; z-index:1; background:#f7f9fc; color:#5d6d86; font-size:12px; white-space:nowrap; }
     tr:last-child td { border-bottom:0; }
     .account { display:flex; align-items:center; gap:10px; min-width:245px; }
+    .auto-publish-col { min-width:120px; white-space:nowrap; }
     .account-avatar { width:42px; height:42px; flex:0 0 auto; display:grid; place-items:center; overflow:hidden; border-radius:50%; background:#12233f; color:#fff; font-weight:800; }
     .account-avatar img { width:100%; height:100%; object-fit:cover; }
     .account strong,.account span { display:block; }
@@ -128,7 +129,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>自动发布 Post</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
+              <thead><tr><th>X账号</th><th class="auto-publish-col">自动发布 Post</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
               <tbody id="accountRows"><tr><td colspan="12" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
@@ -257,10 +258,10 @@
             : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">同步/校验</button>`;
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
+            <td class="auto-publish-col"><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
             <td>${metricsHtml(item)}</td>
             <td><div class="meta-stack"><div>地区：${escapeHtml(item.location || "—")}</div><div class="subtle">加入 X：${escapeHtml(formatTime(xCreatedAt))}</div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
-            <td><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
             <td><div class="chip-list">${scopes.map(scope => `<span class="chip scope">${escapeHtml(scope)}</span>`).join("") || "—"}${missingScopes.map(scope => `<span class="chip missing">缺少 ${escapeHtml(scope)}</span>`).join("")}</div></td>
             <td><div class="owner">${escapeHtml(ownerName)}${ownerEmail ? `<div class="subtle">${escapeHtml(ownerEmail)}</div>` : ""}</div></td>
             <td><div class="meta-stack">首次：${escapeHtml(formatTime(item.first_authorized_at))}<div class="subtle">最近：${escapeHtml(formatTime(item.last_authorized_at))}</div></div></td>

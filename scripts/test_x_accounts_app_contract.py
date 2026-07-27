@@ -59,7 +59,15 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertNotIn("Publish three daily", X_POST_DAILY_TIMER_SOURCE)
 
     def test_x_account_list_displays_daily_auto_publish_status_in_twelve_columns(self):
-        self.assertIn("<th>自动发布 Post</th>", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn(
+            '<th>X账号</th><th class="auto-publish-col">自动发布 Post</th>',
+            X_ACCOUNT_LIST_SOURCE,
+        )
+        self.assertRegex(
+            X_ACCOUNT_LIST_SOURCE,
+            r'\$\{booleanChips\(item\)\}</div></div></td>\s*'
+            r'<td class="auto-publish-col">',
+        )
         self.assertIn(
             "item.daily_auto_publish_configured === true",
             X_ACCOUNT_LIST_SOURCE,
@@ -73,6 +81,12 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertNotIn('colspan="11"', X_ACCOUNT_LIST_SOURCE)
         self.assertNotIn("expected_count || 3", X_POST_LOGS_SOURCE)
         self.assertNotIn('id="latestPublished">0 / 3', X_POST_LOGS_SOURCE)
+        self.assertIn('item.batch_kind === "catchup"', X_POST_LOGS_SOURCE)
+        self.assertIn("`补发批次 ${item.catchup_run_id}`", X_POST_LOGS_SOURCE)
+        self.assertIn(
+            '"href": "/x-account-list.html?v=20260727catchup1"',
+            NAVIGATION_SOURCE,
+        )
 
     def test_actor_includes_tenant_and_user_identity(self):
         tree = ast.parse(APP_SOURCE)
@@ -243,6 +257,16 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("location ^~ /api/admin/x-accounts/", NGINX_SOURCE)
         self.assertIn("location ^~ /api/admin/x-posts/", NGINX_SOURCE)
         self.assertGreaterEqual(NGINX_SOURCE.count('add_header Cache-Control "no-store" always;'), 5)
+        account_page = re.search(
+            r"location = /x-account-list\.html \{(?P<body>.*?)\n\}",
+            NGINX_SOURCE,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(account_page)
+        self.assertIn(
+            'add_header Cache-Control "no-cache, no-store, must-revalidate" always;',
+            account_page.group("body"),
+        )
 
     def test_x_post_routes_use_scoped_cookie_gates_and_no_store(self):
         routes = source_between(

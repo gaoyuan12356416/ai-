@@ -243,7 +243,10 @@
         if (!items.length) { setEmpty("没有符合当前筛选条件的发布记录。"); return; }
         items.forEach(item => {
           const row = document.createElement("tr");
-          appendCell(row, item.run_date, `数据：${item.source_date || "—"} · 批次 ${item.run_id || "—"}`);
+          const batchLabel = item.batch_kind === "catchup" && item.catchup_run_id
+            ? `补发批次 ${item.catchup_run_id}`
+            : (item.run_id ? `日批次 ${item.run_id}` : "测试批次");
+          appendCell(row, item.run_date, `数据：${item.source_date || "—"} · ${batchLabel}`);
           appendCell(row, item.account_username ? `@${item.account_username}` : `账号 ${item.account_id || "—"}`, item.account_display_name || item.page_name || "");
           appendCell(row, item.material_name || `素材 ${item.material_id || "—"}`, `ID ${item.material_id || "—"} · Content ${item.content_id || "—"}`);
           appendCell(row, item.drama_name || "—", `${item.language || item.material_language || "—"} · ${item.tag || "—"}`);
