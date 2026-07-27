@@ -59,6 +59,19 @@ class ResolverAppContractTests(unittest.TestCase):
             nginx,
         )
         self.assertIn("proxy_set_header X-Real-IP $remote_addr", nginx)
+        self.assertIn(
+            "location = /api/public/tt-drama/featured",
+            nginx,
+        )
+        self.assertIn(
+            "alias /mnt/data-disk/tt-drama-featured/public/current.json",
+            nginx,
+        )
+        featured_location = nginx.split(
+            "location = /api/public/tt-drama/featured", 1
+        )[1].split("location =", 1)[0]
+        self.assertNotIn("proxy_pass", featured_location)
+        self.assertIn("public, max-age=300", featured_location)
 
     def test_result_link_has_no_seed_href(self):
         html = (ROOT / "static" / "tt-drama-search.html").read_text(
@@ -66,6 +79,60 @@ class ResolverAppContractTests(unittest.TestCase):
         )
         self.assertIn('class="continue" id="continue-link" rel="noreferrer"', html)
         self.assertNotIn('id="continue-link" href="#"', html)
+
+    def test_featured_cards_use_local_cache_and_existing_target_builder(self):
+        script = (ROOT / "static" / "tt-drama-search.js").read_text(
+            encoding="utf-8"
+        )
+        html = (ROOT / "static" / "tt-drama-search.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'const FEATURED_PATH = "/api/public/tt-drama/featured"',
+            script,
+        )
+        self.assertIn(
+            "const target = createTarget(drama.content_id, search)",
+            script,
+        )
+        self.assertIn('card.dataset.contentId = target.contentId', script)
+        self.assertIn("card.dataset.targetUrl = target.url", script)
+        self.assertIn('card.href = `#story-${target.contentId}`', script)
+        click_handler = script.split(
+            'stories.addEventListener("click"', 1
+        )[1]
+        self.assertLess(
+            click_handler.index(
+                "resolveDrama(card.dataset.contentId, controller.signal)"
+            ),
+            click_handler.index(
+                "root.location.assign(card.dataset.targetUrl)"
+            ),
+        )
+        self.assertIn('id="recent-note"', html)
+        self.assertIn("story-link:focus-visible", html)
+
+    def test_featured_refresh_is_offline_and_data_disk_backed(self):
+        service = (
+            ROOT / "deploy" / "tt-drama-featured.service"
+        ).read_text(encoding="utf-8")
+        timer = (
+            ROOT / "deploy" / "tt-drama-featured.timer"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("User=tt-drama-featured", service)
+        self.assertIn(
+            "EnvironmentFile=/etc/tt-drama-featured.env",
+            service,
+        )
+        self.assertIn("ConditionPathIsMountPoint=/mnt/data-disk", service)
+        self.assertIn(
+            "ReadWritePaths=/mnt/data-disk/tt-drama-featured/public",
+            service,
+        )
+        self.assertIn("15:30:00 Asia/Shanghai", timer)
+        self.assertIn("18:00:00 Asia/Shanghai", timer)
+        self.assertIn("Persistent=true", timer)
 
 
 if __name__ == "__main__":
