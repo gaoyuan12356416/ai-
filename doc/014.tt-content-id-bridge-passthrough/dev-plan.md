@@ -12,8 +12,8 @@
 | 安全透传逻辑 | Codex | `static/tt-drama-search.js` | 已完成 |
 | `/tt` 短路径 | Codex | `deploy/nginx/tt-drama-search.conf` | 已完成 |
 | 契约测试 | Codex | `scripts/test_tt_drama_bridge.js` | 已通过 |
-| 生产发布与浏览器验证 | Codex | AI CPU 静态目录 | 待执行 |
-| 文档闭环 | Codex | `doc/014.*` | 进行中 |
+| 生产发布与浏览器验证 | Codex | AI CPU 静态目录 | 已完成 |
+| 文档闭环 | Codex | `doc/014.*` | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -34,3 +34,5 @@ node scripts/test_tt_drama_bridge.js
 - 2026-07-24：本地 Node 契约测试通过 31 项断言。
 - 2026-07-24：390×844 Playwright 真实浏览器验证通过，生成示例链接与需求完全一致。
 - 2026-07-24：从本地中间页实际进入 W2A，最终 URL 保留 `af_adset_id=XXX`，页面解析出对应日语剧集。
+- 2026-07-24：GitHub 提交 `4328ac02024e19ba661926ee4beb4490eb5a576f` 已发布到 CPU 生产机；仅 reload Nginx，主 API 未重启。
+- 2026-07-27：再次核对公开 URL、线上哈希、Nginx 配置及真实 W2A 点击，状态未漂移。

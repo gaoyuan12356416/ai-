@@ -27,3 +27,4 @@
 - `static/quick-nav.js` 与 `static/tt-drama-search.js` 的 `node --check` 通过。
 - `node scripts/test_tt_drama_bridge.js` 通过，示例链接精确匹配。
 - Playwright 390×844 页面无控制台错误或警告，中间页实际导航到预期 W2A URL。
+- 2026-07-27 公网复测仍通过，线上静态文件与发布哈希一致，Nginx 和主 API 均为 active。
