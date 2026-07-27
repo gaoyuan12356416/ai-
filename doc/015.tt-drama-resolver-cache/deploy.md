@@ -38,7 +38,14 @@ Nginx 必须同时发布精确的
 `location = /api/public/tt-drama/resolve`，代理到 `127.0.0.1:8787` 并设置
 `X-Real-IP` / `X-Forwarded-For`；仅更新 `/tt` 静态页不能完成本需求。
 
-实际 commit、release、backup 和命令在发布后补录。
+实际发布记录：
+
+- GitHub commit：`bc565924fdee9c4da7cc7b20408e1d800c6c80ae`
+- GitHub branch：`codex/tt-drama-resolver-cache-20260727`
+- Release：`/root/releases/ai-tt-drama-resolver-bc565924fdee`
+- Backup：`/root/backups/drama_material_service/20260727T040618Z-tt-drama-resolver-bc565924fdee`
+- 变更前 `features/tt_drama_resolver` 不存在；回滚时应移走新目录。
+- `drama-material-api.service` 重启后 PID `2314201`，`NRestarts=0`；Nginx 只执行 reload。
 
 ## 验证步骤
 
@@ -49,6 +56,20 @@ Nginx 必须同时发布精确的
 - 390x844 浏览器验证命中、未命中、封面失败、参数透传和 CTA。
 - 比较 GitHub release、运行目录和 Nginx 发布目录 SHA-256。
 
+实际验证：
+
+- Release HEAD 与 GitHub commit 一致且 worktree clean。
+- 9 个发布目标均与 release 逐字节一致。
+- 连接预热 `1303.18 ms`，`ready=True`。
+- 首次未缓存有效 ID：`521.44 ms` / `MISS`。
+- 后续 5 次 loopback：`1.08 / 0.90 / 0.78 / 0.73 / 0.71 ms` / `HIT`。
+- 公网 CPU 主机命中：`16.81 ms`；Windows 真实浏览器首次/再次为 `896 / 298 ms`。
+- 错误大小写：首次 `404 MISS 215.50 ms`，再次 `404 NEGATIVE_HIT 0.93 ms`。
+- 不存在 ID：首次 `404 MISS 219.06 ms`，再次 `404 NEGATIVE_HIT 1.08 ms`。
+- 当前封面大小 `1,108,037 bytes`；CPU 到 CDN `23.24 ms`，Windows 客户端首次约 `3.71 s`，浏览器记录 `3.742 s`。
+- 390x844 浏览器命中、404、非法字符、封面双 CDN 失败占位、参数透传均通过；真实 CTA 点击进入匹配剧集页。
+- `/api/auth/status` 和 `/tt` 均为 200；Nginx 配置通过；重启后主 API 无 error/traceback。
+
 ## 回滚方案
 
 1. 从备份恢复 `app.py`、新增 feature 目录、两份静态文件和 Nginx 配置。
@@ -56,7 +77,23 @@ Nginx 必须同时发布精确的
 3. 重启 `drama-material-api.service`，reload Nginx。
 4. 验证 `/api/auth/status` 和原 `/tt` 页面。
 
-具体备份路径和可复制命令在部署后补录。
+本次精确回滚：
+
+```bash
+backup=/root/backups/drama_material_service/20260727T040618Z-tt-drama-resolver-bc565924fdee
+cp -a "$backup/root/drama_material_service/app.py" /root/drama_material_service/app.py
+cp -a "$backup/root/drama_material_service/.env.example" /root/drama_material_service/.env.example
+cp -a "$backup/root/drama_material_service/static/tt-drama-search.html" /root/drama_material_service/static/tt-drama-search.html
+cp -a "$backup/root/drama_material_service/static/tt-drama-search.js" /root/drama_material_service/static/tt-drama-search.js
+cp -a "$backup/usr/share/nginx/html/tt-drama-search.html" /usr/share/nginx/html/tt-drama-search.html
+cp -a "$backup/usr/share/nginx/html/tt-drama-search.js" /usr/share/nginx/html/tt-drama-search.js
+cp -a "$backup/etc/nginx/default.d/tt-drama-search.conf" /etc/nginx/default.d/tt-drama-search.conf
+mv /root/drama_material_service/features/tt_drama_resolver "$backup/rolled-back-new-feature"
+python3 -m py_compile /root/drama_material_service/app.py
+nginx -t
+systemctl restart drama-material-api.service
+systemctl reload nginx
+```
 
 ## 注意事项
 

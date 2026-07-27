@@ -33,3 +33,4 @@
 - 线上只读列排序规则为 `utf8mb4_unicode_ci`；错误大小写在新 SQL 中无结果。
 - 线上新 SQL：同一持久连接 5 次为 450.66 / 222.79 / 223.44 / 223.33 / 222.40 ms。
 - 本地 390x844 浏览器：非法 ID 不请求；命中后 CTA 参数完整；404 后无 href；无 CSP 警告。
+- 生产 commit `bc565924fdee9c4da7cc7b20408e1d800c6c80ae` 的 9 个发布目标与 release 一致；服务重启后 `NRestarts=0` 且无 error/traceback。
