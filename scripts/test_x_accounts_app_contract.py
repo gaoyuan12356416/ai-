@@ -385,6 +385,11 @@ class XAccountsAppContractTest(unittest.TestCase):
                 lambda _query: [["5503209", "https://example.test/a.mp4\r\nX-Test: 1"]],
             )
         preview_urls = namespace["x_post_material_preview_urls"]
+        normalize_material_ids = namespace["x_post_normalize_material_ids"]
+        self.assertEqual(
+            normalize_material_ids(["005503209", "5503209", "11761405635"]),
+            ["5503209", "11761405635"],
+        )
         self.assertEqual(
             preview_urls(
                 ["5503209", "11761405635"],
@@ -607,6 +612,9 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("<th>素材预览</th>", X_POST_POOL_SOURCE)
         self.assertIn("<th>Post 预览</th>", X_POST_POOL_SOURCE)
         self.assertIn("safeMaterialUrl(item.material_preview_url)", X_POST_POOL_SOURCE)
+        self.assertIn("result.skipped_count", X_POST_POOL_SOURCE)
+        self.assertIn("result.already_in_pool_count", X_POST_POOL_SOURCE)
+        self.assertIn("result.already_used_count", X_POST_POOL_SOURCE)
         self.assertNotIn(
             "/api/admin/x-posts/material-pool/preview?material_id=",
             X_POST_POOL_SOURCE,

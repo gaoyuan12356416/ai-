@@ -16,9 +16,9 @@
 | 编号 | 场景 | 关键步骤 | 预期 |
 | --- | --- | --- | --- |
 | TC-001 | 批量入池、即时校验与规范化 | 添加 `00101,102,103` 并传一一对应 selector 结果 | 三条及校验状态原子写入，`00101` 规范为 `101`，顺序稳定 |
-| TC-002 | 同批重复 | 一次提交 `101,00101` | 409，整批 0 写入 |
-| TC-003 | 池内重复 | 已有 101 后再次添加 | `x_post_pool_material_already_exists` |
-| TC-004 | queue 先存在 | legacy/canary queue 已有 101，再入池 | `x_post_pool_material_already_used` |
+| TC-002 | 同批重复 | 一次提交 `101,00101,102` | 重复输入计为跳过 1 条，101/102 各写入一次 |
+| TC-003 | 池内重复 | 已有 101 后批量添加 `101,102` | 跳过 101，正常写入 102，响应分类计数准确 |
+| TC-004 | queue 先存在 | legacy/canary queue 已有 101，再批量添加 `101,102` | 跳过 101，正常写入 102，历史素材不可重新入池 |
 | TC-005 | 池先存在再走非池 queue | 先入池 101，再 enqueue 相同 key 且不带 pool ID | fail closed，池不可删除且不显示 available |
 | TC-006 | FIFO | 混排传入不同 created_at/id | 选择按 `created_at,id` 正序 |
 | TC-007 | 不使用 insight/spend | 执行 manual selector 并检查 SQL | 无 `ads_custom_source_insight`；spend=0 |
@@ -50,12 +50,14 @@
 | TC-033 | 检查回写分批 | 生成 205 条互异 pool check | 调用 Sidecar 三次，批量严格为 100/100/5，无记录因超限整批丢失 |
 | TC-034 | 素材源文件预览 | 管理员查询含合规/不合规/不存在素材的池列表；再测试 HTTP、凭据、端口和 CRLF URL | 有安全源 URL的合规/不合规项均返回精确 `material_preview_url`；不存在/不安全项为空；页面直接打开且发布状态 0 写入 |
 | TC-035 | 入池即时 X 校验 | 混合提交合规、不合规、不存在素材；模拟 selector/数据库异常 | 复用正式 selector；合规项立即 available，其余立即 validation_failed/“不可用”；异常 fail closed，不出现待校验可用窗口 |
-| TC-036 | Sidecar 入池校验合同 | 省略、错配、重复或不完整 `validation_checks` | 省略时统一 pending/不可用；非法集合整批 400、0 写入；合法集合与池记录原子写入 |
+| TC-036 | Sidecar 入池校验合同 | 省略、错配、冲突重复或不完整 `validation_checks` | 省略时统一 pending/不可用；非法集合整批 400、0 写入；相同重复检查可去重，合法集合与池记录原子写入 |
 | TC-037 | 页面导航授权一致性 | 普通用户有 `x_accounts` 且 `adminOnly=false`，再覆盖 true/禁用/配置读取失败 | false 时页面可加载；true、禁用或读取失败时 fail closed；页面不再写死 `user.is_admin` |
+| TC-038 | 100 条批量入池 | 一次提交 100 个互异全新 ID | 100 条全部写入，不触发上限误判 |
+| TC-039 | 10 条含 1 条池内重复 | 已有 1 条后提交该条加 9 条全新 ID | 新增 9、跳过 1；前端提示新增/跳过分类，不整批失败 |
 
 ## 自动化映射
 
-- `scripts/test_x_post_material_pool.py`：TC-001 至 TC-005、TC-014 至 TC-025、TC-036 的账本核心。
+- `scripts/test_x_post_material_pool.py`：TC-001 至 TC-005、TC-014 至 TC-025、TC-036、TC-038、TC-039 的账本核心。
 - `scripts/test_x_post_material_pool_selector.py`：TC-006 至 TC-013。
 - `scripts/test_x_post_daily.py`：TC-016 至 TC-019、TC-027、runner 失败语义。
 - `scripts/test_x_post_ledger.py`：TC-019、TC-020、TC-024、TC-030。

@@ -41347,6 +41347,7 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_pool_item_unavailable": (409, "素材池记录已发布、已变更或不可用"),
     "x_post_pool_material_already_exists": (409, "素材已在X素材池中"),
     "x_post_pool_material_already_used": (409, "素材已有X发布历史，不能重新入池"),
+    "x_post_storage_conflict": (409, "素材池写入冲突，请刷新后重试"),
     "x_post_pool_required": (409, "正式每日计划必须使用素材池记录"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
     "x_token_revoked": (409, "X授权已失效，请重新授权"),
@@ -41495,7 +41496,7 @@ def x_post_normalize_material_ids(material_ids):
         except Exception:
             raise ValueError("material_id must be a positive integer") from None
         if key in seen:
-            raise ValueError("material_ids contains a duplicate material")
+            continue
         seen.add(key)
         normalized.append(key)
     return normalized
@@ -95388,10 +95389,25 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             if isinstance(result, dict)
                             else 0
                         ),
-                        "validation_failed_count": sum(
-                            1
-                            for item in validation_checks
-                            if item.get("error_code")
+                        "skipped_count": int(
+                            result.get("skipped_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "already_in_pool_count": int(
+                            result.get("already_in_pool_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "already_used_count": int(
+                            result.get("already_used_count", 0)
+                            if isinstance(result, dict)
+                            else 0
+                        ),
+                        "validation_failed_count": int(
+                            result.get("validation_failed_count", 0)
+                            if isinstance(result, dict)
+                            else 0
                         ),
                     },
                 )

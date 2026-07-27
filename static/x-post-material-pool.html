@@ -649,14 +649,30 @@
           });
           const addedCount = Number(result.added_count ?? result.created_count ?? materialIds.length);
           const unavailableCount = Number(result.validation_failed_count ?? 0);
+          const skippedCount = Number(result.skipped_count ?? 0);
+          const duplicateInputCount = Number(result.duplicate_input_count ?? 0);
+          const alreadyInPoolCount = Number(result.already_in_pool_count ?? 0);
+          const alreadyUsedCount = Number(result.already_used_count ?? 0);
           byId("materialIds").value = "";
           state.page = 1;
-          showToast(
-            unavailableCount
-              ? `已加入 ${addedCount} 个素材，其中 ${unavailableCount} 个未通过 X 发布校验，已标记不可用。`
-              : `已加入 ${addedCount} 个素材，均已通过入池校验。`,
-            false
-          );
+          const messages = [
+            addedCount ? `已加入 ${addedCount} 个素材` : "未新增素材",
+          ];
+          if (unavailableCount) {
+            messages.push(`新增素材中 ${unavailableCount} 个未通过 X 发布校验，已标记不可用`);
+          } else if (addedCount) {
+            messages.push("新增素材均已通过入池校验");
+          }
+          if (skippedCount) {
+            const skippedDetails = [];
+            if (alreadyInPoolCount) skippedDetails.push(`已在池中 ${alreadyInPoolCount}`);
+            if (alreadyUsedCount) skippedDetails.push(`已有发布历史 ${alreadyUsedCount}`);
+            if (duplicateInputCount) skippedDetails.push(`本批重复 ${duplicateInputCount}`);
+            messages.push(
+              `已跳过 ${skippedCount} 个${skippedDetails.length ? `（${skippedDetails.join("、")}）` : ""}`
+            );
+          }
+          showToast(`${messages.join("；")}。`, false);
           await Promise.all([loadPool(), loadStats()]);
         } catch (error) {
           showToast(`添加失败：${error.message}`, true);

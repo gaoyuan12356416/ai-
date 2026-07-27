@@ -103,7 +103,7 @@ X Post 短剧标签放行增量已于 2026-07-24 按 GitHub-first 部署生产�
 - Sidecar health 200；公网 internal 路由不可访问。
 - 管理员素材池页面/API 200，普通用户/API Token/cross-origin 写请求拒绝。
 - 管理员列表为池内素材附加安全 HTTPS `material_preview_url`；源表绝对 HTTP 地址只在内存中升级为 HTTPS，页面直接打开且不回写源表。不存在/非法/非 HTTP(S) URL 显示“无法预览”，且不会修改池、queue 或日志。旧 302 接口仅做兼容。
-- 批量添加重复或历史 queue 素材整批回滚。
+- 批量添加中的同批重复、池内重复或历史 queue 素材逐条跳过；其余全新素材仍在同一事务写入，非法请求和未知存储冲突继续整批回滚。
 - 临时未占用素材可删除；已占用/已发布素材返回 409。
 - daily bearer 可访问 available/check，不能访问 query/add/delete。
 - available 返回严格 `created_at,id` 顺序，非 Dramawave/违规/素材源或资源危险标签/媒体异常不进入计划；短剧 labels 内容词不拦截。

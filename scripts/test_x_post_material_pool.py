@@ -119,6 +119,27 @@ class XPostMaterialPoolTests(unittest.TestCase):
             self.store.query_pool({"material_id": "94"})["pagination"]["total"],
             0,
         )
+        with self.assertRaises(service.XPostError):
+            self.store.add_pool_materials(
+                ["95", "095"],
+                self.actor,
+                validation_checks=[
+                    {
+                        "material_id": "95",
+                        "error_code": "",
+                        "error_message": "",
+                    },
+                    {
+                        "material_id": "095",
+                        "error_code": "material_not_found_or_ineligible",
+                        "error_message": "素材ID不存在",
+                    },
+                ],
+            )
+        self.assertEqual(
+            self.store.query_pool({"material_id": "95"})["pagination"]["total"],
+            0,
+        )
 
     def test_add_fifo_validation_and_delete_available_item(self):
         items = self.add("00101", "102", "103", "104")
@@ -130,9 +151,30 @@ class XPostMaterialPoolTests(unittest.TestCase):
             sorted((item["created_at"], item["id"]) for item in available),
         )
 
-        with self.assertRaises(service.XPostError) as duplicate:
-            self.add("101")
-        self.assertEqual(duplicate.exception.code, "x_post_pool_material_already_exists")
+        duplicate = self.store.add_pool_materials(
+            ["101"],
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": "101",
+                    "error_code": "",
+                    "error_message": "",
+                }
+            ],
+        )
+        self.assertEqual(duplicate["created_count"], 0)
+        self.assertEqual(duplicate["skipped_count"], 1)
+        self.assertEqual(duplicate["already_in_pool_count"], 1)
+        self.assertEqual(
+            duplicate["skipped_items"],
+            [
+                {
+                    "material_id": "101",
+                    "code": "x_post_pool_material_already_exists",
+                    "message": "素材已在X素材池中",
+                }
+            ],
+        )
 
         check = self.store.record_pool_checks(
             [
@@ -259,6 +301,91 @@ class XPostMaterialPoolTests(unittest.TestCase):
                 {"x_post_pool_item_published", "x_post_pool_item_occupied"},
             )
 
+    def test_bulk_add_skips_existing_and_input_duplicates_without_blocking_new(self):
+        self.add("301")
+        result = self.store.add_pool_materials(
+            ["301", "302", "302", "303"],
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": "301",
+                    "error_code": "",
+                    "error_message": "",
+                },
+                {
+                    "material_id": "302",
+                    "error_code": "",
+                    "error_message": "",
+                },
+                {
+                    "material_id": "303",
+                    "error_code": "material_not_found_or_ineligible",
+                    "error_message": "素材ID不存在",
+                },
+            ],
+        )
+        self.assertEqual(
+            [item["material_id"] for item in result["items"]],
+            ["302", "303"],
+        )
+        self.assertEqual(result["requested_count"], 4)
+        self.assertEqual(result["unique_count"], 3)
+        self.assertEqual(result["created_count"], 2)
+        self.assertEqual(result["skipped_count"], 2)
+        self.assertEqual(result["duplicate_input_count"], 1)
+        self.assertEqual(result["already_in_pool_count"], 1)
+        self.assertEqual(result["already_used_count"], 0)
+        self.assertEqual(result["available_count"], 1)
+        self.assertEqual(result["validation_failed_count"], 1)
+
+    def test_bulk_add_accepts_exactly_one_hundred_unique_materials(self):
+        material_ids = [str(value) for value in range(1001, 1101)]
+        result = self.store.add_pool_materials(
+            material_ids,
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": material_id,
+                    "error_code": "",
+                    "error_message": "",
+                }
+                for material_id in material_ids
+            ],
+        )
+        self.assertEqual(result["requested_count"], 100)
+        self.assertEqual(result["unique_count"], 100)
+        self.assertEqual(result["created_count"], 100)
+        self.assertEqual(result["skipped_count"], 0)
+        self.assertEqual(result["available_count"], 100)
+        self.assertEqual(
+            [item["material_id"] for item in result["items"]],
+            material_ids,
+        )
+
+    def test_bulk_add_with_one_existing_still_inserts_other_nine(self):
+        self.add("2001")
+        material_ids = [str(value) for value in range(2001, 2011)]
+        result = self.store.add_pool_materials(
+            material_ids,
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": material_id,
+                    "error_code": "",
+                    "error_message": "",
+                }
+                for material_id in material_ids
+            ],
+        )
+        self.assertEqual(result["requested_count"], 10)
+        self.assertEqual(result["created_count"], 9)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["already_in_pool_count"], 1)
+        self.assertEqual(
+            [item["material_id"] for item in result["items"]],
+            [str(value) for value in range(2002, 2011)],
+        )
+
     def test_historical_queue_material_cannot_reenter_pool(self):
         payload = plan_candidate(
             2,
@@ -272,9 +399,33 @@ class XPostMaterialPoolTests(unittest.TestCase):
         payload.pop("pool_created_at")
         payload["run_date"] = "2026-07-23"
         self.store.enqueue(payload)
-        with self.assertRaises(service.XPostError) as used:
-            self.add("999")
-        self.assertEqual(used.exception.code, "x_post_pool_material_already_used")
+        result = self.store.add_pool_materials(
+            ["999", "1000"],
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": "999",
+                    "error_code": "",
+                    "error_message": "",
+                },
+                {
+                    "material_id": "1000",
+                    "error_code": "",
+                    "error_message": "",
+                },
+            ],
+        )
+        self.assertEqual(
+            [item["material_id"] for item in result["items"]],
+            ["1000"],
+        )
+        self.assertEqual(result["created_count"], 1)
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["already_used_count"], 1)
+        self.assertEqual(
+            result["skipped_items"][0]["code"],
+            "x_post_pool_material_already_used",
+        )
 
     def test_pool_material_cannot_enter_non_pool_queue_or_legacy_plan(self):
         pool_item = self.add("701")[0]

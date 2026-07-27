@@ -1416,16 +1416,23 @@ class XPostStore:
                 "material_ids必须是包含1到100项的数组",
                 400,
             )
+        requested_count = len(material_ids)
         normalized = []
         seen = set()
+        skipped_items = []
+        duplicate_input_count = 0
         for raw in material_ids:
             key = normalize_material_key(raw)
             if key in seen:
-                raise XPostError(
-                    "x_post_pool_material_already_exists",
-                    "本次提交包含重复素材%s" % key,
-                    409,
+                duplicate_input_count += 1
+                skipped_items.append(
+                    {
+                        "material_id": key,
+                        "code": "x_post_pool_material_duplicate_input",
+                        "message": "本次提交中素材ID重复，已跳过",
+                    }
                 )
+                continue
             seen.add(key)
             normalized.append(key)
         if validation_checks is None:
@@ -1437,13 +1444,10 @@ class XPostStore:
                 for material_id in normalized
             }
         else:
-            if (
-                not isinstance(validation_checks, list)
-                or len(validation_checks) != len(normalized)
-            ):
+            if not isinstance(validation_checks, list):
                 raise XPostError(
                     "invalid_request",
-                    "validation_checks必须与material_ids逐项对应",
+                    "validation_checks必须是数组",
                     400,
                 )
             checks_by_material = {}
@@ -1455,13 +1459,10 @@ class XPostStore:
                         400,
                     )
                 check_material_id = normalize_material_key(raw.get("material_id"))
-                if (
-                    check_material_id not in seen
-                    or check_material_id in checks_by_material
-                ):
+                if check_material_id not in seen:
                     raise XPostError(
                         "invalid_request",
-                        "validation_check素材ID无效或重复",
+                        "validation_check素材ID无效",
                         400,
                     )
                 raw_code = str(raw.get("error_code", "") or "").strip()
@@ -1484,10 +1485,20 @@ class XPostStore:
                 else:
                     error_code = ""
                     error_message = ""
-                checks_by_material[check_material_id] = (
+                check_value = (
                     error_code,
                     error_message,
                 )
+                if (
+                    check_material_id in checks_by_material
+                    and checks_by_material[check_material_id] != check_value
+                ):
+                    raise XPostError(
+                        "invalid_request",
+                        "重复素材的validation_check结果不一致",
+                        400,
+                    )
+                checks_by_material[check_material_id] = check_value
             if set(checks_by_material) != seen:
                 raise XPostError(
                     "invalid_request",
@@ -1508,6 +1519,9 @@ class XPostStore:
 
         timestamp = utc_now()
         created_ids = []
+        created_material_ids = []
+        already_in_pool_count = 0
+        already_used_count = 0
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             for material_key_value in normalized:
@@ -1515,24 +1529,29 @@ class XPostStore:
                     "SELECT id FROM x_post_material_pool WHERE material_key=?",
                     (material_key_value,),
                 ).fetchone():
-                    conn.rollback()
-                    raise XPostError(
-                        "x_post_pool_material_already_exists",
-                        "素材%s已在素材池中" % material_key_value,
-                        409,
+                    already_in_pool_count += 1
+                    skipped_items.append(
+                        {
+                            "material_id": material_key_value,
+                            "code": "x_post_pool_material_already_exists",
+                            "message": "素材已在X素材池中",
+                        }
                     )
+                    continue
                 if conn.execute(
                     "SELECT id FROM x_post_queue WHERE material_key=?",
                     (material_key_value,),
                 ).fetchone():
-                    conn.rollback()
-                    raise XPostError(
-                        "x_post_pool_material_already_used",
-                        "素材%s已有X发布历史，不能重新入池" % material_key_value,
-                        409,
+                    already_used_count += 1
+                    skipped_items.append(
+                        {
+                            "material_id": material_key_value,
+                            "code": "x_post_pool_material_already_used",
+                            "message": "素材已有X发布历史，已跳过",
+                        }
                     )
-            try:
-                for material_key_value in normalized:
+                    continue
+                try:
                     cursor = conn.execute(
                         "INSERT INTO x_post_material_pool("
                         "material_key,material_id,status,created_by_user_id,created_by_name,"
@@ -1552,30 +1571,43 @@ class XPostStore:
                         ),
                     )
                     created_ids.append(int(cursor.lastrowid))
-            except sqlite3.IntegrityError as exc:
-                conn.rollback()
-                raise XPostError(
-                    "x_post_pool_material_already_exists",
-                    "素材池唯一约束冲突",
-                    409,
-                ) from exc
-            rows = conn.execute(
-                "SELECT * FROM x_post_material_pool WHERE id IN (%s) ORDER BY id"
-                % ",".join("?" for _item in created_ids),
-                tuple(created_ids),
-            ).fetchall()
+                    created_material_ids.append(material_key_value)
+                except sqlite3.IntegrityError as exc:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "素材池唯一约束冲突，请重试",
+                        409,
+                    ) from exc
+            if created_ids:
+                rows = conn.execute(
+                    "SELECT * FROM x_post_material_pool WHERE id IN (%s) ORDER BY id"
+                    % ",".join("?" for _item in created_ids),
+                    tuple(created_ids),
+                ).fetchall()
+            else:
+                rows = []
             conn.commit()
+        created_items = [_row_dict(row) for row in rows]
         return {
-            "items": [_row_dict(row) for row in rows],
-            "created_count": len(rows),
+            "items": created_items,
+            "requested_count": requested_count,
+            "unique_count": len(normalized),
+            "added_count": len(created_items),
+            "created_count": len(created_items),
+            "skipped_count": len(skipped_items),
+            "duplicate_input_count": duplicate_input_count,
+            "already_in_pool_count": already_in_pool_count,
+            "already_used_count": already_used_count,
+            "skipped_items": skipped_items,
             "available_count": sum(
                 1
-                for material_id in normalized
+                for material_id in created_material_ids
                 if not checks_by_material[material_id][0]
             ),
             "validation_failed_count": sum(
                 1
-                for material_id in normalized
+                for material_id in created_material_ids
                 if checks_by_material[material_id][0]
             ),
         }

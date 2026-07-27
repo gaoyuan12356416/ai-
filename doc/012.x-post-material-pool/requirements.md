@@ -137,7 +137,7 @@
 - 页面权限判断直接以 `cache: no-store` 读取 `/navigation.json`；读取失败时 fail closed。后端每次请求独立读取同一生产配置并作为最终授权边界，不依赖浏览器缓存或 DOM 隐藏。
 - 主后台通过导航门禁后，才向 loopback Sidecar 的素材池 query/add/delete 请求附加精确 `navigation_item=xPostMaterialPool`；Sidecar 对非管理员缺失/错误标记继续返回 403。该标记不用于账号全量列表、发布日志、运行记录或 daily 路由。
 - daily bearer 只能读取可用项、回写检查、创建固定三账号计划和发布正式 queue，不能管理池或查询后台列表。
-- 添加、计划和成功态联动均使用 `BEGIN IMMEDIATE`，冲突全部回滚。
+- 添加、计划和成功态联动均使用 `BEGIN IMMEDIATE`。入池时可预期的同批重复、池内重复和 queue 历史逐条跳过；非法请求、校验错配和未知存储冲突仍整批回滚。
 - 校验失败记录仍可在后续运行重新检查，但只要已有任何 queue，就永不回到可选择集合。
 - 失败/unknown 不能靠删除池记录或重新入池绕过。
 - 查询返回脱敏错误，不返回 OAuth Token、内部 bearer 或数据库凭据；响应使用 `Cache-Control: no-store`。
@@ -145,7 +145,7 @@
 
 ## 验收标准
 
-- [x] 管理员可批量添加规范素材 ID，重复/历史占用时整批回滚。
+- [x] 管理员可一次添加最多 100 个规范素材 ID；重复/历史占用逐条跳过，其余素材正常入池并返回分类汇总。
 - [x] 入池时立即按 X selector 检查并原子记录结果；素材不存在、不合规或校验服务异常均立即显示“不可用”。
 - [x] 素材池页面和查询/预览/添加/删除 API 与快速导航栏 `xPostMaterialPool` 的 `adminOnly`、`module`、`enabled` 设置一致；API Token、缺少模块权限和跨源写请求均被拒绝。
 - [x] 正式选择路径不查询 `ads_custom_source_insight`，不使用 spend 排序。
