@@ -17,8 +17,8 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 聚焦 store/runner/selector/UI/API 合同 | 70 | 70 | 0 | 0 |
-| 生产基线合并后完整 `test_x*.py` | 288 | 288 | 0 | 0 |
-| TT source-cache Python 回归 | 88 | 87 | 0 | 0（1 项 Windows 预期跳过） |
+| 生产基线合并后完整 `test_x*.py` | 291 | 291 | 0 | 0 |
+| TT source-cache Python 回归 | 104 | 103 | 0 | 0（1 项 Windows 预期跳过） |
 | TT bridge Node 断言 | 53 | 53 | 0 | 0 |
 | Python 编译文件 | 14 | 14 | 0 | 0 |
 | HTML 内联脚本 | 2 | 2 | 0 | 0 |
@@ -32,8 +32,8 @@
 
 ## 验证证据
 
-- 合并生产 sidecar `f8389fe` 和主 API TT source-cache `efa8652` 后，`test_x*.py` 288/288 通过，耗时 19.420 秒。
-- TT source-cache Python 88 项通过（1 项仅在 Linux 验证 POSIX mode，Windows 按预期跳过）；Node 53 个断言通过。
+- 合并现网多时段排期 release `194fc42` 后，`test_x*.py` 291/291 通过，耗时 18.833 秒，其中新增短剧可投放时间边界、多端最晚值和缺失/非法 fail-closed 用例全部通过。
+- TT source-cache Python 104 项通过（1 项仅在 Linux 验证 POSIX mode，Windows 按预期跳过）；Node 53 个断言通过。
 - UI 专项：7/7 通过；两个页面各 1 段内联脚本解析成功。
 - 所有本次变更 Python 文件 `py_compile` 成功。
 - `static/navigation.json` 可解析。

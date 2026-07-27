@@ -35,6 +35,7 @@
 | TC-19 | 动态权限 | adminOnly=false、有模块权限 | 非管理员打开页面 | 可访问；无权限仍拒绝 | P0 | 通过 |
 | TC-20 | 页面缓存 | 请求两个池 HTML | 检查响应头 | no-cache/no-store | P1 | 通过 |
 | TC-21 | SQLite 迁移 | 旧数据库 | 启动 ensure_storage | 完整性通过、旧数据保留 | P0 | 通过 |
+| TC-22 | 素材短剧可投放时间 | 构造多端过去/等于/未来/缺失/非法 `deploy_time` | 在边界前后运行素材 selector | 多端取最晚值；未来暂时跳过并继续 FIFO；到达边界自动恢复；缺失/非法 fail closed | P0 | 通过 |
 
 ## 回归范围
 

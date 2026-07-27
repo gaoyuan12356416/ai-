@@ -6,6 +6,7 @@
 - sidecar 增加排期、短剧池和冻结计划接口。
 - 增加 claim/worker 两个 systemd timer，替代固定 10:00 的旧 daily timer。
 - nginx 为两个管理页面增加禁止缓存。
+- 素材池 selector 增加 Dramawave `deploy_time` 门禁；未来时间素材仅临时跳过，不提前创建 queue，后续排期到时自动重新校验。
 
 ## 配置项
 
@@ -42,6 +43,7 @@
 - 用管理员和有 `x_accounts` 权限的非管理员分别验证动态可见性。
 - 浏览器保存/刷新多个账号和时间；不要选择已到点的当前窗口。
 - 加入一个已知短剧 ID，只验证预览、入池和剧集明细；短剧排期未启用时不得创建 Post。
+- 用只读源表数据验证素材关联短剧的未来时间在边界前返回 `drama_not_yet_deliverable`，边界时恢复；不得为了验证手工启动发布 service。
 - 只读核对：
   - 旧 timer masked，新 timers active；
   - schedule config 与页面一致；
