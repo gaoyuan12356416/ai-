@@ -749,6 +749,14 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 
 import requests
 
+from features.tt_drama_resolver import (
+    InvalidContentIdError,
+    MySQLDramaRepository,
+    ResolverUnavailableError,
+    TTDramaResolver,
+    TokenBucketRateLimiter,
+    normalize_content_id,
+)
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -887,6 +895,75 @@ DB_NAME = os.environ.get("DRAMA_DB_NAME", "kunlunads_dev")
 
 
 SOURCE_TABLE = os.environ.get("DRAMA_SOURCE_TABLE", "ads_drama_resource")
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, str(default)) or str(default))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(int(minimum), min(value, int(maximum)))
+
+
+TT_DRAMA_RESOLVER_APP_ID = str(
+    os.environ.get("TT_DRAMA_RESOLVER_APP_ID", "1479") or "1479"
+).strip()
+TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT_SECONDS", 2, 1, 10
+)
+TT_DRAMA_RESOLVER_DB_READ_TIMEOUT = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_DB_READ_TIMEOUT_SECONDS", 3, 1, 15
+)
+TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY", 4, 1, 16
+)
+TT_DRAMA_RESOLVER_REPOSITORY = MySQLDramaRepository(
+    host=MYSQL_HOST,
+    port=MYSQL_PORT,
+    user=MYSQL_USER,
+    password=MYSQL_PASSWORD,
+    database=DB_NAME,
+    table=SOURCE_TABLE,
+    app_id=TT_DRAMA_RESOLVER_APP_ID,
+    connect_timeout_seconds=TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT,
+    read_timeout_seconds=TT_DRAMA_RESOLVER_DB_READ_TIMEOUT,
+    max_concurrency=TT_DRAMA_RESOLVER_DB_MAX_CONCURRENCY,
+    allowed_cover_hosts=os.environ.get("TT_DRAMA_RESOLVER_COVER_HOSTS", ""),
+)
+TT_DRAMA_RESOLVER = TTDramaResolver(
+    loader=TT_DRAMA_RESOLVER_REPOSITORY.lookup,
+    positive_ttl_seconds=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_CACHE_TTL_SECONDS", 3600, 30, 86400
+    ),
+    negative_ttl_seconds=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_NEGATIVE_TTL_SECONDS", 300, 10, 3600
+    ),
+    stale_ttl_seconds=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_STALE_TTL_SECONDS", 21600, 60, 172800
+    ),
+    max_entries=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_CACHE_MAX_ENTRIES", 10000, 100, 100000
+    ),
+    wait_timeout_seconds=(
+        TT_DRAMA_RESOLVER_DB_CONNECT_TIMEOUT
+        + TT_DRAMA_RESOLVER_DB_READ_TIMEOUT
+        + 3
+    ),
+)
+TT_DRAMA_RESOLVER_RATE_LIMITER = TokenBucketRateLimiter(
+    limit_per_minute=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_RATE_LIMIT_PER_MINUTE", 30, 0, 600
+    ),
+    max_keys=_bounded_env_int(
+        "TT_DRAMA_RESOLVER_RATE_LIMIT_MAX_KEYS", 10000, 100, 100000
+    ),
+)
+TT_DRAMA_RESOLVER_MAX_INFLIGHT = _bounded_env_int(
+    "TT_DRAMA_RESOLVER_MAX_INFLIGHT", 32, 4, 256
+)
+TT_DRAMA_RESOLVER_REQUEST_GATE = threading.BoundedSemaphore(
+    TT_DRAMA_RESOLVER_MAX_INFLIGHT
+)
 
 
 
@@ -11291,7 +11368,7 @@ def shell_quote(value):
 
 
 
-def json_response(handler, status_code, payload, no_store=False):
+def json_response(handler, status_code, payload, no_store=False, extra_headers=None):
 
 
 
@@ -11392,6 +11469,9 @@ def json_response(handler, status_code, payload, no_store=False):
     if no_store:
 
         handler.send_header("Cache-Control", "no-store")
+
+    for header_name, header_value in (extra_headers or {}).items():
+        handler.send_header(str(header_name), str(header_value))
 
 
 
@@ -91573,6 +91653,123 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             )
         return True
 
+    def _tt_drama_client_key(self):
+        peer = str((self.client_address or ("",))[0] or "").strip()
+        try:
+            peer_ip = ipaddress.ip_address(peer)
+        except ValueError:
+            peer_ip = None
+        if peer_ip is not None and peer_ip.is_loopback:
+            candidate = str(
+                self.headers.get("X-Real-IP", "")
+                or self.headers.get("X-Forwarded-For", "")
+                or ""
+            ).split(",", 1)[0].strip()
+            try:
+                return ipaddress.ip_address(candidate).compressed
+            except ValueError:
+                pass
+        return peer_ip.compressed if peer_ip is not None else (peer or "unknown")
+
+    def _dispatch_tt_drama_resolver(self, parsed):
+        started_at = time.perf_counter()
+        cache_state = "BYPASS"
+
+        def respond(status_code, payload):
+            elapsed_ms = max(
+                0.0, (time.perf_counter() - started_at) * 1000.0
+            )
+            json_response(
+                self,
+                status_code,
+                payload,
+                no_store=True,
+                extra_headers={
+                    "X-TT-Drama-Cache": cache_state,
+                    "Server-Timing": "tt-drama-resolver;dur=%.2f" % elapsed_ms,
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            if set(params) != {"content_id"}:
+                raise InvalidContentIdError("content_id is required")
+            values = params.get("content_id") or []
+            if len(values) != 1:
+                raise InvalidContentIdError("content_id must appear exactly once")
+            content_id = normalize_content_id(values[0])
+            if not TT_DRAMA_RESOLVER_RATE_LIMITER.allow(
+                self._tt_drama_client_key()
+            ):
+                cache_state = "RATE_LIMITED"
+                respond(
+                    429,
+                    {
+                        "found": False,
+                        "error": "rate_limited",
+                        "message": "Too many searches. Please wait a moment and try again.",
+                    },
+                )
+                return
+            if not TT_DRAMA_RESOLVER_REQUEST_GATE.acquire(blocking=False):
+                cache_state = "OVERLOADED"
+                respond(
+                    503,
+                    {
+                        "found": False,
+                        "error": "resolver_overloaded",
+                        "message": "Story search is busy. Please try again.",
+                    },
+                )
+                return
+            try:
+                outcome = TT_DRAMA_RESOLVER.resolve(content_id)
+            finally:
+                TT_DRAMA_RESOLVER_REQUEST_GATE.release()
+            cache_state = outcome.cache_state
+            if not outcome.found:
+                respond(
+                    404,
+                    {
+                        "found": False,
+                        "error": "not_found",
+                        "message": "No matching DramaWave story was found.",
+                    },
+                )
+                return
+            respond(200, {"found": True, "data": outcome.item})
+        except InvalidContentIdError:
+            respond(
+                400,
+                {
+                    "found": False,
+                    "error": "invalid_request",
+                    "message": "Enter one complete DramaWave Content ID.",
+                },
+            )
+        except ResolverUnavailableError:
+            cache_state = "ERROR"
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+        except Exception:
+            cache_state = "ERROR"
+            logging.exception("unexpected TT drama resolver failure")
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+
     def _require_any_module(self, module_keys):
         if not self._require_auth():
             return False
@@ -91918,6 +92115,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/public/tt-drama/resolve":
+            self._dispatch_tt_drama_resolver(parsed)
+            return
 
         if parsed.path == "/api/ad-control/v3" or parsed.path.startswith("/api/ad-control/v3/"):
             self._dispatch_ad_control_v3(parsed)
@@ -97031,6 +97232,21 @@ def main():
     recover_inflight_jobs()
     recover_inflight_screenshot_jobs()
     recover_inflight_ad_material_tasks()
+
+    resolver_warmup_started = time.perf_counter()
+    try:
+        resolver_warmed = TT_DRAMA_RESOLVER_REPOSITORY.warmup()
+        logging.info(
+            "TT drama resolver read-only pool warmup ready=%s elapsed_ms=%.2f",
+            resolver_warmed,
+            (time.perf_counter() - resolver_warmup_started) * 1000.0,
+        )
+    except Exception as exc:
+        logging.warning(
+            "TT drama resolver warmup unavailable: %s elapsed_ms=%.2f",
+            type(exc).__name__,
+            (time.perf_counter() - resolver_warmup_started) * 1000.0,
+        )
 
 
 
