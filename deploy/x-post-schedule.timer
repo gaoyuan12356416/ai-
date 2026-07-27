@@ -1,0 +1,12 @@
+[Unit]
+Description=Evaluate configured Dramawave X Post times every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:10 Asia/Shanghai
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=x-post-schedule.service
+
+[Install]
+WantedBy=timers.target

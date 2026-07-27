@@ -188,6 +188,28 @@
           order: 20,
         },
         {
+          key: "xPostMaterialPool",
+          label: "Post素材池",
+          description: "维护定时发布使用的自定义素材",
+          kind: "page",
+          href: "/x-post-material-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 30,
+        },
+        {
+          key: "xPostDramaPool",
+          label: "Post短剧池",
+          description: "按短剧免费集数顺序维护和发布Post",
+          kind: "page",
+          href: "/x-post-drama-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 40,
+        },
+        {
           key: "xPostLogs",
           label: "Post发布日志",
           description: "查看每日选材、发布结果和预览链接",
@@ -196,18 +218,7 @@
           module: "x_accounts",
           adminOnly: true,
           enabled: true,
-          order: 40,
-        },
-        {
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: true,
-          enabled: true,
-          order: 30,
+          order: 50,
         },
       ],
     },
@@ -388,6 +399,7 @@
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
     xPostMaterialPool: "/x-post-material-pool.html",
+    xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
@@ -426,13 +438,27 @@
           kind: "page",
           href: "/x-post-material-pool.html",
           module: "x_accounts",
-          adminOnly: true,
+          adminOnly: false,
           enabled: true,
           order: 30,
         });
       }
+      const dramaPoolExists = xPlatform.items.some(item => item && item.key === "xPostDramaPool");
+      if (!dramaPoolExists) {
+        xPlatform.items.push({
+          key: "xPostDramaPool",
+          label: "Post短剧池",
+          description: "按短剧免费集数顺序维护和发布Post",
+          kind: "page",
+          href: "/x-post-drama-pool.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 40,
+        });
+      }
       const postLogs = xPlatform.items.find(item => item && item.key === "xPostLogs");
-      if (postLogs && Number(postLogs.order || 0) <= 30) postLogs.order = 40;
+      if (postLogs && Number(postLogs.order || 0) <= 40) postLogs.order = 50;
     }
     return normalized;
   }

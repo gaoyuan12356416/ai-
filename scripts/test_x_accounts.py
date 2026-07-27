@@ -336,7 +336,22 @@ class XAccountsTestCase(unittest.TestCase):
             "manual_only",
             actor=self.owner,
         )
-        service.DAILY_ACCOUNT_IDS = (configured["id"],)
+        from features.x_posts.service import XPostStore
+        from datetime import datetime
+
+        XPostStore(service.POST_DB_PATH).save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [configured["id"]],
+                "publish_times": ["10:00"],
+                "version": 1,
+            },
+            actor=self.admin,
+            eligible_account_ids=[configured["id"], manual_only["id"]],
+            now=datetime.fromisoformat("2026-07-27T08:00:00+08:00"),
+        )
 
         items = service.list_accounts(self.admin, "all")["items"]
         by_id = {item["id"]: item for item in items}
@@ -351,6 +366,47 @@ class XAccountsTestCase(unittest.TestCase):
         )
         self.assertTrue(by_id[configured["id"]]["publish_eligible"])
         self.assertTrue(by_id[manual_only["id"]]["publish_eligible"])
+
+    def test_internal_schedule_scope_keeps_claimed_account_after_config_change(self):
+        from datetime import datetime
+        from features.x_posts.service import BEIJING_TZ, XPostStore
+
+        store = XPostStore(service.POST_DB_PATH)
+        store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [2],
+                "publish_times": ["10:00"],
+                "version": 1,
+            },
+            actor=self.admin,
+            eligible_account_ids=[2, 3],
+            now=datetime(2026, 7, 27, 8, 0, tzinfo=BEIJING_TZ),
+        )
+        store.due_schedule_slots(
+            datetime(2026, 7, 27, 10, 0, 10, tzinfo=BEIJING_TZ),
+            grace_seconds=90,
+        )
+        store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [3],
+                "publish_times": ["11:00"],
+                "version": 2,
+            },
+            actor=self.admin,
+            eligible_account_ids=[2, 3],
+            now=datetime(2026, 7, 27, 12, 0, tzinfo=BEIJING_TZ),
+        )
+
+        self.assertEqual(
+            service._active_schedule_account_scope(),
+            (3, 2),
+        )
 
     def test_different_owner_cannot_overwrite_existing_account_or_token(self):
         original = self.complete(username="original", actor=self.owner)

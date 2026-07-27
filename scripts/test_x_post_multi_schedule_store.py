@@ -1,0 +1,862 @@
+#!/usr/bin/env python3
+"""Offline integration tests for X multi-time schedules and drama progress."""
+
+import contextlib
+import json
+import sqlite3
+import sys
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from features.x_posts import service
+
+
+def compliance():
+    return {
+        "facebook_violation_count": 0,
+        "tiktok_violation_count": 0,
+        "twitter_violation_count": 0,
+        "resource_audit_count": 0,
+        "dangerous_tag_count": 0,
+    }
+
+
+def base_candidate(account_id, username, material_id, content_id):
+    return {
+        "account_id": account_id,
+        "account_username": username,
+        "source_date": "2026-07-26",
+        "material_id": str(material_id),
+        "content_id": str(content_id),
+        "material_url": "https://media.example.test/%s.mp4" % material_id,
+        "material_name": "Episode %s" % material_id,
+        "material_language": "en",
+        "drama_name": "Drama One",
+        "tag": "Romance",
+        "description": "A complete short-drama episode description.",
+        "page_name": "Drama Account",
+        "page_id": "900%s" % account_id,
+        "preflight_sha256": ("%064x" % int(account_id + int(str(material_id).lstrip("R"))))[-64:],
+        "preflight_size": 1024,
+        **compliance(),
+    }
+
+
+class XPostMultiScheduleStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp.name) / "x-post.sqlite3"
+        self.store = service.XPostStore(self.db_path)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save_schedule(self, source_type, accounts, times, version=1):
+        return self.store.save_schedule_config(
+            source_type,
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": accounts,
+                "publish_times": times,
+                "version": version,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4],
+            now=datetime(
+                2026,
+                7,
+                27,
+                8,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+
+    def add_drama(self, content_id="D1", free_episode_count=2, labels=""):
+        name_tag = "#Drama_One"
+        if labels:
+            name_tag += " #Romance"
+        result = self.store.add_drama_pool_items(
+            [content_id],
+            [
+                {
+                    "content_id": content_id,
+                    "drama_name": "Drama One",
+                    "description": "A complete short-drama episode description.",
+                    "language": "en",
+                    "labels": labels,
+                    "name_tag": name_tag,
+                    "free_episode_count": free_episode_count,
+                }
+            ],
+            actor={"user_id": "admin-1", "name": "Admin"},
+        )
+        return result["items"][0]
+
+    def drama_candidate(self, pool, account_id, episode_number):
+        item = base_candidate(
+            account_id,
+            "DramaAccount%s" % account_id,
+            "R%s" % episode_number,
+            pool["content_id"],
+        )
+        item.update(
+            {
+                "source_type": "drama",
+                "drama_pool_item_id": pool["id"],
+                "drama_pool_created_at": pool["created_at"],
+                "episode_number": episode_number,
+                "episode_key": "%s:%s"
+                % (pool["content_id"], episode_number),
+                "name_tag": "#Drama_One",
+            }
+        )
+        return item
+
+    def material_candidate(self, pool, account_id):
+        item = base_candidate(
+            account_id,
+            "MaterialAccount%s" % account_id,
+            pool["material_id"],
+            "C%s" % pool["material_id"],
+        )
+        item.update(
+            {
+                "source_type": "material",
+                "pool_item_id": pool["id"],
+                "pool_created_at": pool["created_at"],
+            }
+        )
+        return item
+
+    def publish_queue(self, queue, episode_number):
+        log = self.store.reserve_log(queue["id"])
+        text = service.build_drama_episode_post_text(
+            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
+            episode_number,
+            "#Drama_One",
+            "A complete short-drama episode description.",
+        )
+        self.store.prepare_log(
+            log["id"],
+            "https://www.dramawavew2a.com/ads/101/2116/view?x=1",
+            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
+            text,
+        )
+        self.store.mark_publishing(log["id"])
+        self.store.mark_media_uploaded(log["id"], "media%s" % episode_number)
+        return self.store.mark_published(
+            log["id"],
+            "media%s" % episode_number,
+            "post%s" % episode_number,
+            "https://x.com/DramaAccount/status/post%s" % episode_number,
+        )
+
+    def test_schedule_config_is_versioned_due_and_cross_source_collision_safe(self):
+        material = self.save_schedule(
+            "material",
+            [2, 3],
+            ["09:00", "12:30"],
+        )
+        self.assertEqual(material["version"], 2)
+        self.assertEqual(material["posts_per_day"], 4)
+
+        due = self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ)
+        )
+        self.assertEqual(len(due["items"]), 1)
+        self.assertEqual(due["items"][0]["account_ids"], [2, 3])
+        self.assertEqual(due["items"][0]["version"], 2)
+
+        with self.assertRaises(service.XPostError) as collision:
+            self.save_schedule("drama", [2], ["09:00"])
+        self.assertEqual(collision.exception.code, "x_post_schedule_collision")
+
+        drama = self.save_schedule("drama", [4], ["09:00"])
+        self.assertEqual(drama["version"], 2)
+        with self.assertRaises(service.XPostError) as stale:
+            self.save_schedule("drama", [4], ["10:00"], version=1)
+        self.assertEqual(
+            stale.exception.code,
+            "x_post_schedule_version_conflict",
+        )
+
+    def test_schedule_change_is_rejected_during_the_current_slot_window(self):
+        self.save_schedule("material", [2], ["10:00"])
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.save_schedule_config(
+                "material",
+                {
+                    "enabled": True,
+                    "timezone": "Asia/Shanghai",
+                    "account_ids": [3],
+                    "publish_times": ["10:00"],
+                    "version": 2,
+                },
+                actor={"user_id": "admin-1", "name": "Admin"},
+                eligible_account_ids=[2, 3],
+                now=datetime(
+                    2026,
+                    7,
+                    27,
+                    10,
+                    1,
+                    0,
+                    tzinfo=service.BEIJING_TZ,
+                ),
+            )
+
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_schedule_slot_in_progress",
+        )
+
+    def test_due_schedule_honors_ninety_second_grace_without_replaying_older_slots(self):
+        self.save_schedule("material", [2], ["10:00"])
+        within_grace = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                10,
+                1,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(len(within_grace["items"]), 1)
+        self.assertEqual(
+            within_grace["items"][0]["publish_time"],
+            "10:00",
+        )
+        self.assertIs(within_grace["items"][0]["frozen"], True)
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "10:00",
+            2,
+            [2],
+            "test_terminal",
+            "finish the claimed test slot",
+        )
+        updated = self.store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [2],
+                "publish_times": ["11:00"],
+                "version": 2,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2],
+            now=datetime(
+                2026,
+                7,
+                27,
+                12,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+        self.assertEqual(updated["version"], 3)
+        outside_grace = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                11,
+                1,
+                31,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(outside_grace["items"], [])
+
+    def test_claimed_slot_keeps_its_frozen_accounts_after_config_change(self):
+        self.save_schedule("material", [2], ["10:00"])
+        claimed = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                10,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(claimed["items"][0]["account_ids"], [2])
+        self.store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [3],
+                "publish_times": ["11:00"],
+                "version": 2,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4],
+            now=datetime(
+                2026,
+                7,
+                27,
+                12,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+        pool = self.store.add_pool_materials(
+            ["105"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "105", "error_code": ""},
+            ],
+        )["items"][0]
+        plan = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.material_candidate(pool, 2)],
+        )
+        self.assertEqual(plan["account_ids"], [2])
+        self.assertEqual(
+            [item["account_id"] for item in plan["queues"]],
+            [2],
+        )
+
+    def test_nonterminal_frozen_accounts_remain_in_internal_scope(self):
+        self.save_schedule("material", [2], ["10:00"])
+        self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                10,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.store.save_schedule_config(
+            "material",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [3],
+                "publish_times": ["11:00"],
+                "version": 2,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4],
+            now=datetime(
+                2026,
+                7,
+                27,
+                12,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+        self.assertEqual(
+            self.store.scheduled_account_ids(
+                enabled_only=True,
+                include_nonterminal_runs=True,
+            ),
+            [3, 2],
+        )
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "10:00",
+            2,
+            [2],
+            "test_terminal",
+            "finish the frozen slot",
+        )
+        self.assertEqual(
+            self.store.scheduled_account_ids(
+                enabled_only=True,
+                include_nonterminal_runs=True,
+            ),
+            [3],
+        )
+
+    def test_previous_day_claim_is_stopped_instead_of_auto_published(self):
+        self.save_schedule("material", [2], ["10:00"])
+        claimed = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                26,
+                10,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(len(claimed["items"]), 1)
+
+        next_day = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                9,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+
+        self.assertEqual(next_day["items"], [])
+        frozen = self.store.query_schedule_plan(
+            "material",
+            "2026-07-26",
+            "10:00",
+        )
+        self.assertEqual(frozen["run"]["status"], "stopped")
+        self.assertEqual(
+            frozen["run"]["error_code"],
+            "x_post_schedule_stale_claim",
+        )
+
+    def test_previous_day_slot_remains_due_during_midnight_grace(self):
+        self.save_schedule("material", [2], ["23:59"])
+        claimed = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                26,
+                23,
+                59,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(len(claimed["items"]), 1)
+
+        midnight = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                0,
+                0,
+                30,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(len(midnight["items"]), 1)
+        self.assertEqual(midnight["items"][0]["run_date"], "2026-07-26")
+        self.assertEqual(midnight["items"][0]["publish_time"], "23:59")
+        within_grace = self.store.query_schedule_plan(
+            "material",
+            "2026-07-26",
+            "23:59",
+        )
+        self.assertEqual(within_grace["run"]["status"], "claimed")
+
+        expired = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                0,
+                0,
+                31,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(expired["items"], [])
+        stopped = self.store.query_schedule_plan(
+            "material",
+            "2026-07-26",
+            "23:59",
+        )
+        self.assertEqual(stopped["run"]["status"], "stopped")
+
+    def test_stale_drama_schedule_marks_pool_needs_review(self):
+        self.save_schedule("drama", [2], ["10:00"])
+        pool = self.add_drama()
+        claimed = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                26,
+                10,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(len(claimed["items"]), 1)
+        self.store.create_schedule_plan(
+            "drama",
+            "2026-07-26",
+            "10:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+
+        next_day = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                9,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+
+        self.assertEqual(next_day["items"], [])
+        frozen = self.store.query_schedule_plan(
+            "drama",
+            "2026-07-26",
+            "10:00",
+        )
+        self.assertEqual(frozen["run"]["status"], "stopped")
+        blocked = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(blocked["status"], "needs_review")
+        self.assertEqual(
+            blocked["last_error_code"],
+            "x_post_schedule_stale_claim",
+        )
+        with self.assertRaises(service.XPostError) as unavailable:
+            self.store.available_drama_pool_items()
+        self.assertEqual(
+            unavailable.exception.code,
+            "x_post_drama_pool_needs_review",
+        )
+
+    def test_bound_schedule_failure_marks_drama_pool_in_same_transaction(self):
+        self.save_schedule("drama", [2], ["10:00"])
+        pool = self.add_drama()
+        claimed = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                27,
+                10,
+                0,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            ),
+            grace_seconds=90,
+        )
+        self.assertEqual(len(claimed["items"]), 1)
+
+        with self.assertRaises(service.XPostError) as mismatched:
+            self.store.record_schedule_failure(
+                "drama",
+                "2026-07-27",
+                "10:00",
+                2,
+                [2],
+                "media_preflight_failed",
+                "episode media is invalid",
+                drama_pool_item_id=pool["id"],
+                content_id="DIFFERENT",
+            )
+        self.assertEqual(
+            mismatched.exception.code,
+            "x_post_drama_pool_item_unavailable",
+        )
+        unchanged = self.store.query_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+        )
+        self.assertEqual(unchanged["run"]["status"], "claimed")
+
+        failure = self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [2],
+            "media_preflight_failed",
+            "episode media is invalid",
+            drama_pool_item_id=pool["id"],
+            content_id=pool["content_id"],
+        )
+        self.assertEqual(failure["status"], "failed_preflight")
+        self.assertTrue(failure["recorded"])
+        blocked = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(blocked["status"], "needs_review")
+        self.assertEqual(
+            blocked["last_error_code"],
+            "media_preflight_failed",
+        )
+        self.assertEqual(
+            blocked["last_error_message"],
+            "episode media is invalid",
+        )
+
+    def test_drama_pool_accepts_large_batch_and_returns_compact_items(self):
+        drama_ids = ["D%03d" % index for index in range(100)]
+        validation_checks = [
+            {
+                "content_id": content_id,
+                "drama_name": "Drama %s" % content_id,
+                "description": "剧" * 10000,
+                "language": "en",
+                "labels": "",
+                "name_tag": "#Drama_%s" % content_id,
+                "free_episode_count": 1,
+            }
+            for content_id in drama_ids
+        ]
+        request_size = len(
+            json.dumps(
+                {
+                    "drama_ids": drama_ids,
+                    "validation_checks": validation_checks,
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        self.assertGreater(request_size, 16 * 1024)
+        self.assertLess(request_size, 5 * 1024 * 1024)
+
+        result = self.store.add_drama_pool_items(
+            drama_ids,
+            validation_checks,
+            actor={"user_id": "admin-1", "name": "Admin"},
+        )
+        self.assertEqual(result["created_count"], 100)
+        self.assertEqual(len(result["items"]), 100)
+        self.assertNotIn("description", result["items"][0])
+        response_size = len(
+            json.dumps(result, ensure_ascii=False).encode("utf-8")
+        )
+        self.assertLess(response_size, 2 * 1024 * 1024)
+
+    def test_drama_post_template_matches_the_requested_copy(self):
+        rendered = service.build_drama_episode_post_text(
+            "https://ai.yingliangads.com/s2l/1.html",
+            2,
+            "#Drama_One #Romance",
+            "A complete drama description.",
+        )
+        self.assertEqual(
+            rendered,
+            "https://ai.yingliangads.com/s2l/1.html\n"
+            " 👆Full story continues here:☝️\n"
+            "Episode👉2\n\n"
+            "#Drama_One #Romance\n\n"
+            " A complete drama description.",
+        )
+
+    def test_one_account_can_run_multiple_material_points_without_reuse(self):
+        self.save_schedule("material", [2], ["09:00", "10:00"])
+        added = self.store.add_pool_materials(
+            ["101", "102"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "101", "error_code": ""},
+                {"material_id": "102", "error_code": ""},
+            ],
+        )
+        first_pool, second_pool = added["items"]
+
+        first = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.material_candidate(first_pool, 2)],
+        )
+        second = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.material_candidate(second_pool, 2)],
+        )
+
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["queues"][0]["account_id"], 2)
+        self.assertEqual(second["queues"][0]["account_id"], 2)
+        self.assertNotEqual(
+            first["queues"][0]["material_key"],
+            second["queues"][0]["material_key"],
+        )
+
+    def test_material_schedule_cannot_skip_the_oldest_available_pool_item(self):
+        self.save_schedule("material", [2], ["09:00"])
+        added = self.store.add_pool_materials(
+            ["201", "202"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "201", "error_code": ""},
+                {"material_id": "202", "error_code": ""},
+            ],
+        )
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "material",
+                "2026-07-27",
+                "09:00",
+                2,
+                [self.material_candidate(added["items"][1], 2)],
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_pool_fifo_conflict",
+        )
+
+    def test_drama_plan_advances_only_after_each_episode_is_published(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        pool = self.add_drama(free_episode_count=2, labels="")
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(pool, 2, 1),
+                self.drama_candidate(pool, 3, 2),
+            ],
+        )
+        self.assertEqual(
+            [item["episode_key"] for item in plan["queues"]],
+            ["D1:1", "D1:2"],
+        )
+
+        self.publish_queue(plan["queues"][0], 1)
+        active = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(active["status"], "active")
+        self.assertEqual(active["next_sub_num"], 2)
+        self.assertEqual(active["published_episode_count"], 1)
+
+        self.publish_queue(plan["queues"][1], 2)
+        completed = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["next_sub_num"], 3)
+        self.assertEqual(completed["published_episode_count"], 2)
+        self.assertEqual(
+            self.store.query_schedule_plan(
+                "drama", "2026-07-27", "09:00"
+            )["run"]["status"],
+            "completed",
+        )
+
+    def test_known_drama_failure_blocks_later_episodes(self):
+        self.save_schedule("drama", [2], ["09:00", "10:00"])
+        pool = self.add_drama(free_episode_count=2)
+        later_pool = self.add_drama(
+            content_id="D2",
+            free_episode_count=1,
+        )
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+        log = self.store.reserve_log(plan["queues"][0]["id"])
+        self.store.mark_failed_if_reserved(
+            log["id"],
+            "media_preflight_failed",
+            "known media failure",
+        )
+        blocked = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(blocked["status"], "needs_review")
+        with self.assertRaises(service.XPostError) as unavailable:
+            self.store.available_drama_pool_items()
+        self.assertEqual(
+            unavailable.exception.code,
+            "x_post_drama_pool_needs_review",
+        )
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "drama",
+                "2026-07-27",
+                "10:00",
+                2,
+                [self.drama_candidate(later_pool, 2, 1)],
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_pool_needs_review",
+        )
+
+    def test_first_drama_failure_stops_batch_with_later_queues_unexecuted(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        pool = self.add_drama(free_episode_count=2)
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(pool, 2, 1),
+                self.drama_candidate(pool, 3, 2),
+            ],
+        )
+        log = self.store.reserve_log(plan["queues"][0]["id"])
+        self.store.mark_failed_if_reserved(
+            log["id"],
+            "x_upstream_error",
+            "known X rejection",
+        )
+
+        frozen = self.store.query_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+        )
+        self.assertEqual(frozen["run"]["status"], "stopped")
+        self.assertTrue(frozen["run"]["finished_at"])
+        self.assertEqual(
+            [item["status"] for item in frozen["queues"]],
+            ["failed", "queued"],
+        )
+
+    def test_schema_is_additive_and_integrity_check_passes(self):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("x_post_schedule_config", tables)
+            self.assertIn("x_post_schedule_run", tables)
+            self.assertIn("x_post_drama_pool", tables)
+            self.assertEqual(
+                conn.execute("PRAGMA integrity_check").fetchone()[0],
+                "ok",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

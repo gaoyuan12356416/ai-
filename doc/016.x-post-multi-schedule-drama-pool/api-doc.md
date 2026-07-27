@@ -1,0 +1,94 @@
+# API 文档
+
+## 页面 API
+
+所有接口要求登录 Cookie、对应快速导航权限、同源 JSON 写请求，并返回 `Cache-Control: no-store`。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/admin/x-posts/material-pool/account-options` | 素材池可选账号 |
+| GET/POST | `/api/admin/x-posts/material-pool/schedule` | 查询/保存素材池排期 |
+| GET | `/api/admin/x-posts/drama-pool/account-options` | 短剧池可选账号 |
+| GET/POST | `/api/admin/x-posts/drama-pool/schedule` | 查询/保存短剧池排期 |
+| POST | `/api/admin/x-posts/drama-pool/preview` | 只读预检短剧 ID |
+| GET/POST | `/api/admin/x-posts/drama-pool` | 查询/加入短剧池 |
+| GET | `/api/admin/x-posts/drama-pool/{pool_id}/episodes` | 剧集发布明细 |
+| POST | `/api/admin/x-posts/drama-pool/{pool_id}/delete` | 删除未占用短剧 |
+
+## 排期保存
+
+```json
+{
+  "enabled": true,
+  "timezone": "Asia/Shanghai",
+  "account_ids": [2, 3, 4],
+  "publish_times": ["09:00", "12:30", "18:00"],
+  "version": 2
+}
+```
+
+- `version` 为乐观锁版本。
+- 账号按提交顺序冻结；时间会去重并按 `HH:MM` 排序。
+- 启用时账号和时间均不能为空。
+- 同一账号不能在两个池配置同一时间。
+
+## 短剧加入
+
+页面只提交 `drama_ids`；后台先从源表生成逐项 `validation_checks`，再经 sidecar 原子写入。一次 1–100 个 ID，内部最大请求 5 MiB。
+
+成功响应仅返回：
+
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "content_id": "123456",
+      "status": "pending",
+      "free_episode_count": 8,
+      "last_error_code": "",
+      "last_error_message": "",
+      "created_at": "2026-07-27T10:00:00Z"
+    }
+  ],
+  "created_count": 1,
+  "available_count": 1,
+  "validation_failed_count": 0,
+  "audit_recorded": true
+}
+```
+
+## 定时内部 API
+
+仅 loopback 和 daily bearer 可访问：
+
+| 路径 | 用途 |
+| --- | --- |
+| `/internal/posts/schedules/due` | 原子认领并返回到期/同日待恢复批次 |
+| `/internal/posts/schedule-plan/query` | 查询冻结批次和队列 |
+| `/internal/posts/schedule-plan` | 原子创建素材或短剧队列 |
+| `/internal/posts/schedule-runs/record-failure` | 记录预检失败；可绑定短剧池并标记待确认 |
+| `/internal/posts/material-pool/available` | 返回 FIFO 可用素材 |
+| `/internal/posts/drama-pool/available` | 返回精简 FIFO 短剧进度 |
+| `/internal/posts/storage/preflight` | 数据盘/短链目录预检 |
+| `/internal/posts/queue/{queue_id}/publish` | 发布既有冻结队列 |
+
+## 主要错误码
+
+| 错误码 | 含义 |
+| --- | --- |
+| `x_post_schedule_collision` | 两个池的账号和时间发生冲突 |
+| `x_post_schedule_version_conflict` | 排期已被其他操作修改 |
+| `x_post_schedule_slot_in_progress` | 当前 90 秒窗口内禁止修改 |
+| `x_post_drama_pool_needs_review` | 前序短剧需人工确认，暂停后续 |
+| `x_post_drama_sequence_conflict` | 候选没有按剧/集 FIFO 提交 |
+| `drama_episode_gap` | 免费集数不连续 |
+| `drama_episode_url_ambiguous` | 同一集存在不一致 URL |
+| `drama_metadata_ambiguous` | 短剧元数据不一致 |
+| `x_post_schedule_stale_claim` | 跨日冻结批次已安全停止 |
+
+## 兼容性说明
+
+- SQLite 仅增表、增列、增索引和触发器，保留旧 daily/catch-up 数据。
+- 未绑定 `schedule_run_id` 的旧队列继续使用既有唯一性合同。
+- 旧页面接口保持不变；素材池新增排期区但不改变加入/预览合同。

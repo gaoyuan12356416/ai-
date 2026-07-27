@@ -39,6 +39,9 @@ DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 SQLITE_QUERY_BATCH_SIZE = 900
 MAX_DAILY_BATCH_SIZE = 50
+MAX_SCHEDULE_ACCOUNTS = 50
+SCHEDULE_TIMEZONE = "Asia/Shanghai"
+SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
 
 QUEUE_FIELDS = (
     "account_id",
@@ -59,10 +62,17 @@ QUEUE_FIELDS = (
 QUEUE_LEDGER_FIELDS = (
     "run_id",
     "catchup_run_id",
+    "schedule_run_id",
     "run_date",
+    "source_type",
     "material_key",
+    "episode_key",
     "pool_item_id",
+    "drama_pool_item_id",
     "pool_created_at",
+    "drama_pool_created_at",
+    "episode_number",
+    "name_tag",
     "candidate_rank",
     "spend",
     "original_material_url",
@@ -280,6 +290,85 @@ def build_post_text(short_url, description):
     if not rendered.strip():
         raise XPostError("invalid_request", "剧描述截断后为空", 400)
     return str(short_url) + "\n" + rendered
+
+
+def _tweet_char_weight(char):
+    value = ord(char)
+    if (
+        value <= 0x10FF
+        or 0x2000 <= value <= 0x200D
+        or 0x2010 <= value <= 0x201F
+        or 0x2032 <= value <= 0x2037
+    ):
+        return 1
+    return 2
+
+
+def build_drama_episode_post_text(short_url, sub_num, name_tag, description):
+    """Build the fixed episode post template without truncating its identity.
+
+    X assigns every HTTPS URL a fixed t.co weight of 23.  The URL, CTA,
+    episode number and name tag are mandatory; only the final description may
+    be shortened.
+    """
+    parsed = urllib.parse.urlsplit(str(short_url or ""))
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise XPostError("invalid_request", "短链无效", 400)
+    episode_number = _positive_int(sub_num, "sub_num")
+    normalized_tag = re.sub(r"\s+", " ", str(name_tag or "")).strip()
+    if (
+        not normalized_tag
+        or len(normalized_tag) > 500
+        or any(ord(char) < 32 for char in normalized_tag)
+    ):
+        raise XPostError("invalid_request", "name_tag无效", 400)
+    normalized_description = re.sub(r"\s+", " ", str(description or "")).strip()
+    if (
+        not normalized_description
+        or "\x00" in normalized_description
+        or len(normalized_description) > 10000
+    ):
+        raise XPostError("invalid_request", "剧描述无效", 400)
+
+    suffix_prefix = (
+        "\n 👆Full story continues here:☝️"
+        "\nEpisode👉%s"
+        "\n\n%s"
+        "\n\n "
+    ) % (episode_number, normalized_tag)
+    mandatory_weight = 23 + sum(_tweet_char_weight(char) for char in suffix_prefix)
+    remaining = 280 - mandatory_weight
+    if remaining < 1:
+        raise XPostError("x_post_copy_too_long", "短剧Post固定文案超过X字数限制", 409)
+    description_weight = sum(
+        _tweet_char_weight(char) for char in normalized_description
+    )
+    if description_weight <= remaining:
+        rendered_description = normalized_description
+    else:
+        ellipsis = "…"
+        budget = remaining - _tweet_char_weight(ellipsis)
+        if budget < 1:
+            raise XPostError("x_post_copy_too_long", "短剧Post没有可用的描述空间", 409)
+        selected = []
+        used = 0
+        for char in normalized_description:
+            weight = _tweet_char_weight(char)
+            if used + weight > budget:
+                break
+            selected.append(char)
+            used += weight
+        rendered_description = "".join(selected).rstrip() + ellipsis
+    if not rendered_description.strip(" …"):
+        raise XPostError("x_post_copy_too_long", "短剧Post描述截断后为空", 409)
+    return str(short_url) + suffix_prefix + rendered_description
 
 
 def _validate_post_storage_layout(
@@ -836,15 +925,100 @@ def ensure_storage(db_path):
             )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_config (
+                    source_type TEXT PRIMARY KEY
+                        CHECK(source_type IN ('material','drama')),
+                    enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(enabled IN (0,1)),
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(timezone='Asia/Shanghai'),
+                    account_ids_json TEXT NOT NULL DEFAULT '[]',
+                    publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_run (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot_key TEXT NOT NULL UNIQUE,
+                    source_type TEXT NOT NULL
+                        CHECK(source_type IN ('material','drama')),
+                    run_date TEXT NOT NULL,
+                    publish_time TEXT NOT NULL,
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(timezone='Asia/Shanghai'),
+                    config_version INTEGER NOT NULL,
+                    account_ids_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    expected_count INTEGER NOT NULL,
+                    queued_count INTEGER NOT NULL DEFAULT 0,
+                    published_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    unknown_count INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(source_type,run_date,publish_time)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_drama_pool (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content_id TEXT NOT NULL UNIQUE,
+                    app_id INTEGER NOT NULL DEFAULT 1479,
+                    drama_name TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    language TEXT NOT NULL DEFAULT '',
+                    labels TEXT NOT NULL DEFAULT '',
+                    name_tag TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN (
+                            'pending','active','completed',
+                            'validation_failed','needs_review'
+                        )),
+                    free_episode_count INTEGER NOT NULL DEFAULT 0,
+                    next_sub_number INTEGER NOT NULL DEFAULT 1,
+                    published_episode_count INTEGER NOT NULL DEFAULT 0,
+                    last_checked_at TEXT NOT NULL DEFAULT '',
+                    last_error_code TEXT NOT NULL DEFAULT '',
+                    last_error_message TEXT NOT NULL DEFAULT '',
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    completed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
             additive_columns = {
                 "account_username": "TEXT NOT NULL DEFAULT ''",
                 "run_id": "INTEGER",
                 "catchup_run_id": "INTEGER",
+                "schedule_run_id": "INTEGER",
                 "run_date": "TEXT NOT NULL DEFAULT ''",
+                "source_type": "TEXT NOT NULL DEFAULT 'material'",
                 "material_key": "TEXT NOT NULL DEFAULT ''",
+                "episode_key": "TEXT NOT NULL DEFAULT ''",
                 "pool_item_id": "INTEGER",
+                "drama_pool_item_id": "INTEGER",
                 "pool_created_at": "TEXT NOT NULL DEFAULT ''",
+                "drama_pool_created_at": "TEXT NOT NULL DEFAULT ''",
+                "episode_number": "INTEGER NOT NULL DEFAULT 0",
+                "name_tag": "TEXT NOT NULL DEFAULT ''",
                 "candidate_rank": "INTEGER NOT NULL DEFAULT 0",
                 "spend": "REAL NOT NULL DEFAULT 0",
                 "original_material_url": "TEXT NOT NULL DEFAULT ''",
@@ -864,22 +1038,65 @@ def ensure_storage(db_path):
                 if name not in queue_columns:
                     conn.execute("ALTER TABLE x_post_queue ADD COLUMN %s %s" % (name, definition))
 
+            migration_timestamp = utc_now()
+            for source_type in sorted(SCHEDULE_SOURCE_TYPES):
+                conn.execute(
+                    "INSERT OR IGNORE INTO x_post_schedule_config("
+                    "source_type,enabled,timezone,account_ids_json,publish_times_json,"
+                    "version,created_at,updated_at"
+                    ") VALUES(?,0,?,'[]','[]',1,?,?)",
+                    (
+                        source_type,
+                        SCHEDULE_TIMEZONE,
+                        migration_timestamp,
+                        migration_timestamp,
+                    ),
+                )
+
             legacy_rows = conn.execute(
-                "SELECT id,material_id,material_key,run_date,created_at FROM x_post_queue ORDER BY id"
+                "SELECT id,source_type,material_id,material_key,episode_key,"
+                "content_id,episode_number,run_date,created_at "
+                "FROM x_post_queue ORDER BY id"
             ).fetchall()
             for row in legacy_rows:
-                material_key = normalize_material_key(
-                    row["material_id"],
-                    error_code="x_post_storage_conflict",
-                )
-                existing_material_key = str(row["material_key"] or "").strip()
-                if existing_material_key and normalize_material_key(
-                    existing_material_key,
-                    error_code="x_post_storage_conflict",
-                ) != material_key:
+                source_type = str(row["source_type"] or "material").strip()
+                if source_type == "drama":
+                    content_id = _clean_token(
+                        row["content_id"], "content_id", 128
+                    )
+                    episode_number = _positive_int(
+                        row["episode_number"], "episode_number"
+                    )
+                    expected_episode_key = "%s:%s" % (
+                        content_id,
+                        episode_number,
+                    )
+                    if str(row["episode_key"] or "") != expected_episode_key:
+                        raise XPostError(
+                            "x_post_storage_conflict",
+                            "历史X短剧队列episode_key不一致，迁移已中止",
+                            500,
+                        )
+                    material_key = ""
+                elif source_type == "material":
+                    material_key = normalize_material_key(
+                        row["material_id"],
+                        error_code="x_post_storage_conflict",
+                    )
+                    existing_material_key = str(row["material_key"] or "").strip()
+                    if existing_material_key and normalize_material_key(
+                        existing_material_key,
+                        error_code="x_post_storage_conflict",
+                    ) != material_key:
+                        raise XPostError(
+                            "x_post_storage_conflict",
+                            "历史X发布队列material_key与素材ID不一致，迁移已中止",
+                            500,
+                        )
+                else:
                     raise XPostError(
                         "x_post_storage_conflict",
-                        "历史X发布队列material_key与素材ID不一致，迁移已中止",
+                        "历史X发布队列source_type无效，迁移已中止",
                         500,
                     )
                 run_date = str(row["run_date"] or "").strip() or _legacy_run_date(row["created_at"])
@@ -892,8 +1109,8 @@ def ensure_storage(db_path):
                         500,
                     ) from None
                 conn.execute(
-                    "UPDATE x_post_queue SET material_key=?,run_date=? WHERE id=?",
-                    (material_key, run_date, row["id"]),
+                    "UPDATE x_post_queue SET source_type=?,material_key=?,run_date=? WHERE id=?",
+                    (source_type, material_key, run_date, row["id"]),
                 )
 
             duplicate_material = conn.execute(
@@ -908,7 +1125,8 @@ def ensure_storage(db_path):
                 )
             duplicate_account_day = conn.execute(
                 "SELECT account_id,run_date,COUNT(*) AS total FROM x_post_queue "
-                "WHERE run_date<>'' GROUP BY account_id,run_date HAVING COUNT(*)>1 LIMIT 1"
+                "WHERE run_date<>'' AND schedule_run_id IS NULL "
+                "GROUP BY account_id,run_date HAVING COUNT(*)>1 LIMIT 1"
             ).fetchone()
             if duplicate_account_day:
                 raise XPostError(
@@ -921,9 +1139,23 @@ def ensure_storage(db_path):
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_material_key "
                 "ON x_post_queue(material_key) WHERE material_key<>''"
             )
+            conn.execute("DROP INDEX IF EXISTS ux_x_post_queue_account_run_date")
+            conn.execute(
+                "DROP INDEX IF EXISTS ux_x_post_queue_legacy_account_run_date"
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_account_run_date "
-                "ON x_post_queue(account_id,run_date) WHERE run_date<>''"
+                "ON x_post_queue(account_id,run_date) "
+                "WHERE run_date<>'' AND schedule_run_id IS NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_schedule_account "
+                "ON x_post_queue(schedule_run_id,account_id) "
+                "WHERE schedule_run_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_episode_key "
+                "ON x_post_queue(episode_key) WHERE episode_key<>''"
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_pool_item_id "
@@ -935,6 +1167,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_catchup "
                 "ON x_post_queue(catchup_run_id,candidate_rank,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_queue_schedule "
+                "ON x_post_queue(schedule_run_id,candidate_rank,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_status ON x_post_queue(status,created_at,id)"
@@ -955,6 +1191,14 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_pool_fifo "
                 "ON x_post_material_pool(status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_run_status "
+                "ON x_post_schedule_run(status,run_date,publish_time,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_fifo "
+                "ON x_post_drama_pool(status,created_at,id)"
             )
             # SQLite cannot add a FOREIGN KEY to a legacy table with ALTER
             # TABLE. These triggers preserve the same run_id integrity for
@@ -1015,23 +1259,112 @@ def ensure_storage(db_path):
                 END
                 """
             )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_schedule_insert")
             conn.execute(
                 """
-                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_batch_parent_insert
+                CREATE TRIGGER trg_x_post_queue_schedule_insert
                 BEFORE INSERT ON x_post_queue
-                WHEN NEW.run_id IS NOT NULL AND NEW.catchup_run_id IS NOT NULL
+                WHEN NEW.schedule_run_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                        FROM x_post_schedule_run
+                       WHERE id=NEW.schedule_run_id
+                         AND source_type=NEW.source_type
+                         AND run_date=NEW.run_date
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue schedule_run_id missing or mismatched');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_schedule_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_schedule_update
+                BEFORE UPDATE OF schedule_run_id,source_type,run_date ON x_post_queue
+                WHEN NEW.schedule_run_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                        FROM x_post_schedule_run
+                       WHERE id=NEW.schedule_run_id
+                         AND source_type=NEW.source_type
+                         AND run_date=NEW.run_date
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue schedule_run_id missing or mismatched');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_batch_parent_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_batch_parent_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN (
+                    (NEW.run_id IS NOT NULL)
+                    + (NEW.catchup_run_id IS NOT NULL)
+                    + (NEW.schedule_run_id IS NOT NULL)
+                ) > 1
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue has multiple batch parents');
                 END
                 """
             )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_batch_parent_update")
             conn.execute(
                 """
-                CREATE TRIGGER IF NOT EXISTS trg_x_post_queue_batch_parent_update
-                BEFORE UPDATE OF run_id,catchup_run_id ON x_post_queue
-                WHEN NEW.run_id IS NOT NULL AND NEW.catchup_run_id IS NOT NULL
+                CREATE TRIGGER trg_x_post_queue_batch_parent_update
+                BEFORE UPDATE OF run_id,catchup_run_id,schedule_run_id ON x_post_queue
+                WHEN (
+                    (NEW.run_id IS NOT NULL)
+                    + (NEW.catchup_run_id IS NOT NULL)
+                    + (NEW.schedule_run_id IS NOT NULL)
+                ) > 1
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue has multiple batch parents');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_drama_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_drama_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.source_type='drama'
+                  AND (
+                      NEW.drama_pool_item_id IS NULL
+                      OR NEW.episode_number <= 0
+                      OR NEW.episode_key=''
+                      OR NOT EXISTS(
+                          SELECT 1 FROM x_post_drama_pool
+                           WHERE id=NEW.drama_pool_item_id
+                             AND content_id=NEW.content_id
+                      )
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue drama binding invalid');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_drama_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_drama_update
+                BEFORE UPDATE OF source_type,drama_pool_item_id,content_id,
+                    episode_number,episode_key ON x_post_queue
+                WHEN NEW.source_type='drama'
+                  AND (
+                      NEW.drama_pool_item_id IS NULL
+                      OR NEW.episode_number <= 0
+                      OR NEW.episode_key=''
+                      OR NOT EXISTS(
+                          SELECT 1 FROM x_post_drama_pool
+                           WHERE id=NEW.drama_pool_item_id
+                             AND content_id=NEW.content_id
+                      )
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue drama binding invalid');
                 END
                 """
             )
@@ -1126,6 +1459,24 @@ def ensure_storage(db_path):
                 END
                 """
             )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_drama_pool_delete_guard")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_pool_delete_guard
+                BEFORE DELETE ON x_post_drama_pool
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_queue
+                     WHERE drama_pool_item_id=OLD.id
+                        OR (
+                            source_type='drama'
+                            AND content_id=OLD.content_id
+                        )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_drama_pool item occupied');
+                END
+                """
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1140,10 +1491,592 @@ def _row_dict(row):
     return dict(row) if row is not None else None
 
 
+def _schedule_source_type(value):
+    source_type = str(value or "").strip().lower()
+    if source_type not in SCHEDULE_SOURCE_TYPES:
+        raise XPostError("invalid_request", "排程来源无效", 400)
+    return source_type
+
+
+def _schedule_publish_time(value):
+    publish_time = str(value or "").strip()
+    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", publish_time):
+        raise XPostError("invalid_request", "发布时间必须为HH:MM", 400)
+    return publish_time
+
+
+def _schedule_account_ids(values, *, allow_empty=False):
+    if not isinstance(values, list):
+        raise XPostError("invalid_request", "account_ids必须是数组", 400)
+    if (not allow_empty and not values) or len(values) > MAX_SCHEDULE_ACCOUNTS:
+        raise XPostError(
+            "invalid_request",
+            "account_ids必须包含1到%s个账号" % MAX_SCHEDULE_ACCOUNTS,
+            400,
+        )
+    normalized = []
+    seen = set()
+    for raw in values:
+        account_id = _positive_int(raw, "account_id")
+        if account_id in seen:
+            raise XPostError("invalid_request", "account_ids不能重复", 400)
+        seen.add(account_id)
+        normalized.append(account_id)
+    return normalized
+
+
+def _schedule_publish_times(values, *, allow_empty=False):
+    if not isinstance(values, list):
+        raise XPostError("invalid_request", "publish_times必须是数组", 400)
+    if (not allow_empty and not values) or len(values) > 24:
+        raise XPostError(
+            "invalid_request",
+            "publish_times必须包含1到24个时间点",
+            400,
+        )
+    normalized = [_schedule_publish_time(value) for value in values]
+    if len(set(normalized)) != len(normalized):
+        raise XPostError("invalid_request", "publish_times不能重复", 400)
+    return sorted(normalized)
+
+
+def _json_array(value, label):
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise XPostError(
+            "x_post_storage_conflict",
+            "%s存储格式无效" % label,
+            500,
+        ) from None
+    if not isinstance(parsed, list):
+        raise XPostError(
+            "x_post_storage_conflict",
+            "%s存储格式无效" % label,
+            500,
+        )
+    return parsed
+
+
+def _drama_content_id(value):
+    content_id = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", content_id):
+        raise XPostError("invalid_request", "短剧ID无效", 400)
+    return content_id
+
+
+def _schedule_next_due(account_ids, publish_times, enabled, now=None):
+    if not enabled or not account_ids or not publish_times:
+        return ""
+    current = now or datetime.now(BEIJING_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=BEIJING_TZ)
+    else:
+        current = current.astimezone(BEIJING_TZ)
+    for day_offset in (0, 1):
+        target_date = current.date() + timedelta(days=day_offset)
+        for publish_time in publish_times:
+            hour, minute = (int(part) for part in publish_time.split(":"))
+            candidate = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                hour,
+                minute,
+                tzinfo=BEIJING_TZ,
+            )
+            if candidate > current:
+                return candidate.isoformat(timespec="minutes")
+    return ""
+
+
 class XPostStore:
     def __init__(self, db_path):
         self.db_path = Path(db_path)
         ensure_storage(self.db_path)
+
+    @staticmethod
+    def _schedule_config_item(row, now=None):
+        if not row:
+            raise XPostError(
+                "x_post_schedule_not_found",
+                "X自动发布设置不存在",
+                404,
+            )
+        item = _row_dict(row)
+        account_ids = _schedule_account_ids(
+            _json_array(item.pop("account_ids_json"), "account_ids"),
+            allow_empty=True,
+        )
+        publish_times = _schedule_publish_times(
+            _json_array(item.pop("publish_times_json"), "publish_times"),
+            allow_empty=True,
+        )
+        item["enabled"] = bool(item["enabled"])
+        item["account_ids"] = account_ids
+        item["publish_times"] = publish_times
+        item["posts_per_day"] = (
+            len(account_ids) * len(publish_times)
+            if item["enabled"]
+            else 0
+        )
+        item["next_due_at"] = _schedule_next_due(
+            account_ids,
+            publish_times,
+            item["enabled"],
+            now=now,
+        )
+        return item
+
+    def get_schedule_config(self, source_type, now=None):
+        source_type = _schedule_source_type(source_type)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM x_post_schedule_config WHERE source_type=?",
+                (source_type,),
+            ).fetchone()
+        return self._schedule_config_item(row, now=now)
+
+    def scheduled_account_ids(
+        self,
+        *,
+        enabled_only=True,
+        include_nonterminal_runs=False,
+    ):
+        clauses = " WHERE enabled=1" if enabled_only else ""
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT account_ids_json FROM x_post_schedule_config"
+                + clauses
+                + " ORDER BY source_type"
+            ).fetchall()
+            if include_nonterminal_runs:
+                rows = list(rows) + list(
+                    conn.execute(
+                        "SELECT account_ids_json FROM x_post_schedule_run "
+                        "WHERE status IN ('claimed','queued','running') "
+                        "ORDER BY run_date,publish_time,source_type,id"
+                    ).fetchall()
+                )
+        account_ids = []
+        seen = set()
+        for row in rows:
+            values = _schedule_account_ids(
+                _json_array(row["account_ids_json"], "account_ids"),
+                allow_empty=True,
+            )
+            for account_id in values:
+                if account_id not in seen:
+                    seen.add(account_id)
+                    account_ids.append(account_id)
+        return account_ids
+
+    def save_schedule_config(
+        self,
+        source_type,
+        payload,
+        actor=None,
+        eligible_account_ids=None,
+        now=None,
+    ):
+        source_type = _schedule_source_type(source_type)
+        if not isinstance(payload, dict):
+            raise XPostError("invalid_request", "自动发布设置必须是对象", 400)
+        if payload.get("timezone", SCHEDULE_TIMEZONE) != SCHEDULE_TIMEZONE:
+            raise XPostError(
+                "invalid_request",
+                "自动发布时区固定为Asia/Shanghai",
+                400,
+            )
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise XPostError("invalid_request", "enabled必须是布尔值", 400)
+        account_ids = _schedule_account_ids(
+            payload.get("account_ids"),
+            allow_empty=not enabled,
+        )
+        publish_times = _schedule_publish_times(
+            payload.get("publish_times"),
+            allow_empty=not enabled,
+        )
+        if enabled and (not account_ids or not publish_times):
+            raise XPostError(
+                "invalid_request",
+                "启用自动发布时必须选择账号和发布时间",
+                400,
+            )
+        if eligible_account_ids is not None:
+            eligible = set(
+                _schedule_account_ids(
+                    list(eligible_account_ids),
+                    allow_empty=True,
+                )
+            )
+            missing = [
+                account_id
+                for account_id in account_ids
+                if account_id not in eligible
+            ]
+            if missing:
+                raise XPostError(
+                    "x_account_not_publishable",
+                    "所选X账号当前不可用于发布",
+                    409,
+                )
+        expected_version = _positive_int(payload.get("version"), "version")
+        actor = actor if isinstance(actor, dict) else {}
+        updated_by_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        updated_by_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        if any(
+            ord(char) < 32
+            for value in (updated_by_user_id, updated_by_name)
+            for char in value
+        ):
+            raise XPostError("invalid_request", "修改人信息无效", 400)
+        timestamp = utc_now()
+        current_time = now or datetime.now(BEIJING_TZ)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=BEIJING_TZ)
+        else:
+            current_time = current_time.astimezone(BEIJING_TZ)
+        protected_times = set()
+        protected_cursor = (
+            current_time - timedelta(seconds=90)
+        ).replace(second=0, microsecond=0)
+        protected_end = current_time.replace(second=0, microsecond=0)
+        while protected_cursor <= protected_end:
+            if 0 <= (
+                current_time - protected_cursor
+            ).total_seconds() <= 90:
+                protected_times.add(
+                    protected_cursor.strftime("%H:%M")
+                )
+            protected_cursor += timedelta(minutes=1)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM x_post_schedule_config WHERE source_type=?",
+                (source_type,),
+            ).fetchone()
+            if not current:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_not_found",
+                    "X自动发布设置不存在",
+                    404,
+                )
+            if int(current["version"]) != expected_version:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_version_conflict",
+                    "自动发布设置已被其他人修改，请刷新后重试",
+                    409,
+                )
+            current_item = self._schedule_config_item(
+                current,
+                now=current_time,
+            )
+            settings_changed = (
+                bool(current_item["enabled"]) != enabled
+                or list(current_item["account_ids"]) != account_ids
+                or list(current_item["publish_times"]) != publish_times
+            )
+            protected_schedule_times = set(
+                current_item["publish_times"]
+                if current_item["enabled"]
+                else []
+            ).union(publish_times if enabled else [])
+            if (
+                settings_changed
+                and protected_schedule_times.intersection(
+                    protected_times
+                )
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_slot_in_progress",
+                    "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置",
+                    409,
+                )
+            if enabled:
+                other = conn.execute(
+                    "SELECT * FROM x_post_schedule_config "
+                    "WHERE source_type<>? AND enabled=1",
+                    (source_type,),
+                ).fetchone()
+                if other:
+                    other_accounts = set(
+                        _schedule_account_ids(
+                            _json_array(
+                                other["account_ids_json"],
+                                "account_ids",
+                            ),
+                            allow_empty=True,
+                        )
+                    )
+                    other_times = set(
+                        _schedule_publish_times(
+                            _json_array(
+                                other["publish_times_json"],
+                                "publish_times",
+                            ),
+                            allow_empty=True,
+                        )
+                    )
+                    if other_accounts.intersection(account_ids) and other_times.intersection(
+                        publish_times
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_schedule_collision",
+                            "同一X账号不能在素材池和短剧池配置相同发布时间",
+                            409,
+                        )
+            cursor = conn.execute(
+                "UPDATE x_post_schedule_config SET enabled=?,timezone=?,"
+                "account_ids_json=?,publish_times_json=?,version=version+1,"
+                "updated_by_user_id=?,updated_by_name=?,updated_at=? "
+                "WHERE source_type=? AND version=?",
+                (
+                    1 if enabled else 0,
+                    SCHEDULE_TIMEZONE,
+                    json.dumps(account_ids, separators=(",", ":")),
+                    json.dumps(publish_times, separators=(",", ":")),
+                    updated_by_user_id,
+                    updated_by_name,
+                    timestamp,
+                    source_type,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_version_conflict",
+                    "自动发布设置已被其他人修改，请刷新后重试",
+                    409,
+                )
+            row = conn.execute(
+                "SELECT * FROM x_post_schedule_config WHERE source_type=?",
+                (source_type,),
+            ).fetchone()
+            conn.commit()
+        return self._schedule_config_item(row)
+
+    def due_schedule_slots(self, now=None, grace_seconds=90):
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        if isinstance(grace_seconds, bool):
+            raise XPostError(
+                "invalid_request",
+                "grace_seconds无效",
+                400,
+            )
+        try:
+            grace_seconds = int(grace_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise XPostError(
+                "invalid_request",
+                "grace_seconds无效",
+                400,
+            ) from None
+        if grace_seconds < 0 or grace_seconds > 300:
+            raise XPostError(
+                "invalid_request",
+                "grace_seconds无效",
+                400,
+            )
+        earliest = current - timedelta(seconds=grace_seconds)
+        cursor = earliest.replace(second=0, microsecond=0)
+        final_minute = current.replace(second=0, microsecond=0)
+        slots = []
+        while cursor <= final_minute:
+            late_seconds = (current - cursor).total_seconds()
+            if 0 <= late_seconds <= grace_seconds:
+                slots.append(
+                    (
+                        cursor.date().isoformat(),
+                        cursor.strftime("%H:%M"),
+                    )
+                )
+            cursor += timedelta(minutes=1)
+        terminal_statuses = {
+            "completed",
+            "completed_with_errors",
+            "failed_preflight",
+            "needs_review",
+            "stopped",
+        }
+        terminal_status_values = tuple(sorted(terminal_statuses))
+        current_slot_keys = set(slots)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            configs = conn.execute(
+                "SELECT * FROM x_post_schedule_config "
+                "WHERE enabled=1 ORDER BY source_type"
+            ).fetchall()
+            for run_date, publish_time in slots:
+                for row in configs:
+                    config = self._schedule_config_item(row, now=current)
+                    if publish_time not in config["publish_times"]:
+                        continue
+                    slot_key = "xpost:schedule:v1:%s:%s:%s" % (
+                        config["source_type"],
+                        run_date,
+                        publish_time.replace(":", ""),
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO x_post_schedule_run("
+                        "slot_key,source_type,run_date,publish_time,timezone,"
+                        "config_version,account_ids_json,status,"
+                        "expected_count,queued_count,created_at,updated_at"
+                        ") VALUES(?,?,?,?,?,?,?,'claimed',?,0,?,?)",
+                        (
+                            slot_key,
+                            config["source_type"],
+                            run_date,
+                            publish_time,
+                            SCHEDULE_TIMEZONE,
+                            int(config["version"]),
+                            json.dumps(
+                                config["account_ids"],
+                                separators=(",", ":"),
+                            ),
+                            len(config["account_ids"]),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+            current_run_date = current.date().isoformat()
+            stale_rows = conn.execute(
+                "SELECT id,run_date,publish_time FROM x_post_schedule_run "
+                "WHERE run_date<? AND status NOT IN (?,?,?,?,?)",
+                (
+                    current_run_date,
+                    *terminal_status_values,
+                ),
+            ).fetchall()
+            stale_run_ids = [
+                int(row["id"])
+                for row in stale_rows
+                if (
+                    str(row["run_date"]),
+                    str(row["publish_time"]),
+                )
+                not in current_slot_keys
+            ]
+            if stale_run_ids:
+                stale_placeholders = ",".join(
+                    "?" for _run_id in stale_run_ids
+                )
+                stale_message = "冻结批次跨日未完成，已停止自动处理"
+                conn.execute(
+                    "UPDATE x_post_drama_pool SET status='needs_review',"
+                    "last_checked_at=?,"
+                    "last_error_code=CASE WHEN last_error_code='' "
+                    "THEN 'x_post_schedule_stale_claim' "
+                    "ELSE last_error_code END,"
+                    "last_error_message=CASE WHEN last_error_message='' "
+                    "THEN ? ELSE last_error_message END,updated_at=? "
+                    "WHERE status<>'completed' AND id IN ("
+                    "SELECT DISTINCT q.drama_pool_item_id "
+                    "FROM x_post_queue q "
+                    "WHERE q.source_type='drama' "
+                    "AND q.drama_pool_item_id IS NOT NULL "
+                    "AND q.schedule_run_id IN (%s))"
+                    % stale_placeholders,
+                    (
+                        timestamp,
+                        stale_message,
+                        timestamp,
+                        *stale_run_ids,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE x_post_schedule_run SET "
+                    "status=CASE WHEN unknown_count>0 "
+                    "THEN 'needs_review' ELSE 'stopped' END,"
+                    "error_code=CASE WHEN error_code='' "
+                    "THEN 'x_post_schedule_stale_claim' "
+                    "ELSE error_code END,"
+                    "error_message=CASE WHEN error_message='' "
+                    "THEN ? ELSE error_message END,"
+                    "finished_at=CASE WHEN finished_at='' "
+                    "THEN ? ELSE finished_at END,updated_at=? "
+                    "WHERE id IN (%s)" % stale_placeholders,
+                    (
+                        stale_message,
+                        timestamp,
+                        timestamp,
+                        *stale_run_ids,
+                    ),
+                )
+            scope_clauses = ["run_date=?"]
+            scope_values = [current_run_date]
+            for run_date, publish_time in slots:
+                if run_date == current_run_date:
+                    continue
+                scope_clauses.append(
+                    "(run_date=? AND publish_time=?)"
+                )
+                scope_values.extend((run_date, publish_time))
+            scoped_runs_sql = (
+                "SELECT * FROM x_post_schedule_run "
+                "WHERE (%s) AND status NOT IN (?,?,?,?,?) "
+                "ORDER BY run_date,publish_time,source_type,id"
+                % " OR ".join(scope_clauses)
+            )
+            rows = conn.execute(
+                scoped_runs_sql,
+                (*scope_values, *terminal_status_values),
+            ).fetchall()
+            conn.commit()
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                0
+                if (
+                    str(row["run_date"]),
+                    str(row["publish_time"]),
+                )
+                in current_slot_keys
+                else 1,
+                str(row["run_date"]),
+                str(row["publish_time"]),
+                str(row["source_type"]),
+                int(row["id"]),
+            ),
+        )[:100]
+        items = []
+        for row in rows:
+            account_ids = _schedule_account_ids(
+                _json_array(row["account_ids_json"], "account_ids")
+            )
+            if len(account_ids) != int(row["expected_count"]):
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "X定时发布冻结批次账号数量不一致",
+                    500,
+                )
+            items.append(
+                {
+                    "source_type": str(row["source_type"]),
+                    "run_date": str(row["run_date"]),
+                    "publish_time": str(row["publish_time"]),
+                    "timezone": str(row["timezone"]),
+                    "version": int(row["config_version"]),
+                    "account_ids": account_ids,
+                    "slot_key": str(row["slot_key"]),
+                    "frozen": True,
+                }
+            )
+        return {"items": items, "checked_at": current.isoformat(timespec="seconds")}
 
     def _queue_payload(
         self, payload, run_date=None, candidate_rank=None, require_compliance=False
@@ -1237,13 +2170,60 @@ class XPostStore:
         result["media_repair_job_key"] = repair_job_key
         result["media_repair_profile"] = repair_profile
         result["media_repair_source_sha256"] = repair_source_sha256
-        material_key = normalize_material_key(result["material_id"])
-        supplied_material_key = payload.get("material_key")
-        if supplied_material_key not in (None, ""):
-            supplied_material_key = normalize_material_key(supplied_material_key)
-            if supplied_material_key != material_key:
-                raise XPostError("invalid_request", "material_key与material_id不一致", 400)
-        result["material_key"] = material_key
+        source_type = str(payload.get("source_type", "material") or "").strip().lower()
+        if source_type not in SCHEDULE_SOURCE_TYPES:
+            raise XPostError("invalid_request", "source_type无效", 400)
+        result["source_type"] = source_type
+        if source_type == "material":
+            material_key = normalize_material_key(result["material_id"])
+            supplied_material_key = payload.get("material_key")
+            if supplied_material_key not in (None, ""):
+                supplied_material_key = normalize_material_key(supplied_material_key)
+                if supplied_material_key != material_key:
+                    raise XPostError(
+                        "invalid_request",
+                        "material_key与material_id不一致",
+                        400,
+                    )
+            result["material_key"] = material_key
+            result["episode_key"] = ""
+            result["episode_number"] = 0
+            result["name_tag"] = ""
+        else:
+            try:
+                content_id = _clean_token(
+                    result["content_id"], "content_id", 128
+                )
+                material_id = _clean_token(
+                    result["material_id"], "material_id", 128
+                )
+            except ValueError:
+                raise XPostError(
+                    "invalid_request",
+                    "短剧集数发布身份无效",
+                    400,
+                ) from None
+            result["content_id"] = content_id
+            result["material_id"] = material_id
+            episode_number = _positive_int(
+                payload.get("episode_number"), "episode_number"
+            )
+            expected_episode_key = "%s:%s" % (content_id, episode_number)
+            supplied_episode_key = str(
+                payload.get("episode_key", expected_episode_key) or ""
+            ).strip()
+            if supplied_episode_key != expected_episode_key:
+                raise XPostError(
+                    "invalid_request",
+                    "episode_key与短剧集数不一致",
+                    400,
+                )
+            result["material_key"] = ""
+            result["episode_key"] = supplied_episode_key
+            result["episode_number"] = episode_number
+            result["name_tag"] = _clean_text(
+                payload.get("name_tag"), "name_tag", 500
+            )
         result["run_date"] = _date_value(
             run_date if run_date is not None else (payload.get("run_date") or _beijing_today()),
             "run_date",
@@ -1256,10 +2236,23 @@ class XPostStore:
             if raw_catchup_run_id not in (None, "")
             else None
         )
-        if result["run_id"] is not None and result["catchup_run_id"] is not None:
+        raw_schedule_run_id = payload.get("schedule_run_id")
+        result["schedule_run_id"] = (
+            _positive_int(raw_schedule_run_id, "schedule_run_id")
+            if raw_schedule_run_id not in (None, "")
+            else None
+        )
+        if sum(
+            value is not None
+            for value in (
+                result["run_id"],
+                result["catchup_run_id"],
+                result["schedule_run_id"],
+            )
+        ) > 1:
             raise XPostError(
                 "invalid_request",
-                "发布队列不能同时关联每日批次和补发批次",
+                "发布队列不能同时关联多个批次",
                 400,
             )
         raw_pool_item_id = payload.get("pool_item_id")
@@ -1277,6 +2270,46 @@ class XPostStore:
         ):
             raise XPostError("invalid_request", "pool_created_at无效", 400)
         result["pool_created_at"] = pool_created_at
+        raw_drama_pool_item_id = payload.get("drama_pool_item_id")
+        result["drama_pool_item_id"] = (
+            _positive_int(raw_drama_pool_item_id, "drama_pool_item_id")
+            if raw_drama_pool_item_id not in (None, "")
+            else None
+        )
+        drama_pool_created_at = str(
+            payload.get("drama_pool_created_at", "") or ""
+        ).strip()
+        if (
+            len(drama_pool_created_at) > 64
+            or any(ord(char) < 32 for char in drama_pool_created_at)
+            or (
+                result["drama_pool_item_id"] is None
+                and drama_pool_created_at
+            )
+            or (
+                result["drama_pool_item_id"] is not None
+                and not drama_pool_created_at
+            )
+        ):
+            raise XPostError(
+                "invalid_request",
+                "drama_pool_created_at无效",
+                400,
+            )
+        result["drama_pool_created_at"] = drama_pool_created_at
+        if source_type == "material":
+            if result["drama_pool_item_id"] is not None:
+                raise XPostError(
+                    "invalid_request",
+                    "素材队列不能绑定短剧池",
+                    400,
+                )
+        elif result["pool_item_id"] is not None or result["drama_pool_item_id"] is None:
+            raise XPostError(
+                "invalid_request",
+                "短剧队列必须且只能绑定短剧池",
+                400,
+            )
         rank_value = candidate_rank if candidate_rank is not None else payload.get("candidate_rank")
         result["candidate_rank"] = _nonnegative_int(rank_value, "candidate_rank", 0)
         result["spend"] = _nonnegative_float(payload.get("spend"), "spend", 0)
@@ -1290,11 +2323,20 @@ class XPostStore:
             raise XPostError("invalid_request", "每日计划缺少完整媒体预检指纹", 400)
         result["preflight_sha256"] = preflight_sha256
         result.update(_compliance_counts(payload, require_all=require_compliance))
-        default_key = "xpost:%s:%s:%s" % (
-            result["source_date"],
-            result["account_id"],
-            result["material_key"],
-        )
+        if source_type == "material":
+            # Preserve the original canary idempotency identity so historical
+            # published rows remain replayable without another X write.
+            default_key = "xpost:%s:%s:%s" % (
+                result["source_date"],
+                result["account_id"],
+                result["material_key"],
+            )
+        else:
+            default_key = "xpost:drama:%s:%s:%s" % (
+                result["source_date"],
+                result["account_id"],
+                result["episode_key"],
+            )
         key = str(payload.get("idempotency_key", "") or default_key).strip()
         if not key or len(key) > 200 or any(ord(char) < 33 for char in key):
             raise XPostError("invalid_request", "idempotency_key无效", 400)
@@ -1315,13 +2357,26 @@ class XPostStore:
                 # ledger fields are compared only when the caller supplied
                 # them, so a migrated published canary remains replayable on a
                 # later calendar day without another X write.
-                comparison_fields = list(("idempotency_key", "material_key") + QUEUE_FIELDS)
+                comparison_fields = list(
+                    (
+                        "idempotency_key",
+                        "source_type",
+                        "material_key",
+                        "episode_key",
+                    )
+                    + QUEUE_FIELDS
+                )
                 for field in (
                     "run_id",
                     "catchup_run_id",
+                    "schedule_run_id",
                     "run_date",
                     "pool_item_id",
+                    "drama_pool_item_id",
                     "pool_created_at",
+                    "drama_pool_created_at",
+                    "episode_number",
+                    "name_tag",
                     "candidate_rank",
                     "spend",
                     "original_material_url",
@@ -1349,38 +2404,75 @@ class XPostStore:
                 item = _row_dict(existing)
                 item["created"] = False
                 return item
-            pool = conn.execute(
-                "SELECT * FROM x_post_material_pool WHERE material_key=?",
-                (values["material_key"],),
-            ).fetchone()
-            if values["pool_item_id"] is None:
-                if pool:
+            if values["source_type"] == "material":
+                pool = conn.execute(
+                    "SELECT * FROM x_post_material_pool WHERE material_key=?",
+                    (values["material_key"],),
+                ).fetchone()
+                if values["pool_item_id"] is None:
+                    if pool:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_occupied",
+                            "该素材已进入素材池，发布队列必须绑定对应素材池记录",
+                            409,
+                        )
+                elif (
+                    not pool
+                    or int(pool["id"]) != values["pool_item_id"]
+                    or pool["status"] != "unpublished"
+                    or str(pool["created_at"]) != values["pool_created_at"]
+                ):
                     conn.rollback()
                     raise XPostError(
-                        "x_post_pool_item_occupied",
-                        "该素材已进入素材池，发布队列必须绑定对应素材池记录",
+                        "x_post_pool_item_unavailable",
+                        "素材池记录不存在、已发布、已变更或与素材不一致",
                         409,
                     )
-            elif (
-                not pool
-                or int(pool["id"]) != values["pool_item_id"]
-                or pool["status"] != "unpublished"
-                or str(pool["created_at"]) != values["pool_created_at"]
-            ):
-                conn.rollback()
-                raise XPostError(
-                    "x_post_pool_item_unavailable",
-                    "素材池记录不存在、已发布、已变更或与素材不一致",
-                    409,
-                )
-            if conn.execute(
-                "SELECT id FROM x_post_queue WHERE material_key=?",
-                (values["material_key"],),
-            ).fetchone():
-                conn.rollback()
-                raise XPostError("x_post_material_already_used", "该素材已被X发布队列占用", 409)
-            if conn.execute(
-                "SELECT id FROM x_post_queue WHERE account_id=? AND run_date=?",
+                if conn.execute(
+                    "SELECT id FROM x_post_queue WHERE material_key=?",
+                    (values["material_key"],),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_material_already_used",
+                        "该素材已被X发布队列占用",
+                        409,
+                    )
+            else:
+                drama = conn.execute(
+                    "SELECT * FROM x_post_drama_pool WHERE id=?",
+                    (values["drama_pool_item_id"],),
+                ).fetchone()
+                if (
+                    not drama
+                    or str(drama["content_id"]) != values["content_id"]
+                    or str(drama["created_at"]) != values["drama_pool_created_at"]
+                    or drama["status"] in {
+                        "completed",
+                        "validation_failed",
+                        "needs_review",
+                    }
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_item_unavailable",
+                        "短剧池记录不存在、已完成、不可用或已变更",
+                        409,
+                    )
+                if conn.execute(
+                    "SELECT id FROM x_post_queue WHERE episode_key=?",
+                    (values["episode_key"],),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_episode_already_used",
+                        "该短剧集数已被X发布队列占用",
+                        409,
+                    )
+            if values["schedule_run_id"] is None and conn.execute(
+                "SELECT id FROM x_post_queue "
+                "WHERE account_id=? AND run_date=? AND schedule_run_id IS NULL",
                 (values["account_id"], values["run_date"]),
             ).fetchone():
                 conn.rollback()
@@ -1624,6 +2716,7 @@ class XPostStore:
                 "SELECT p.id,p.material_key,p.material_id,p.created_at "
                 "FROM x_post_material_pool p "
                 "WHERE p.status='unpublished' "
+                "AND p.last_error_code='' "
                 "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
                 "WHERE q.pool_item_id=p.id OR q.material_key=p.material_key) "
                 "ORDER BY p.created_at ASC,p.id ASC LIMIT ?",
@@ -1832,6 +2925,1311 @@ class XPostStore:
             conn.commit()
         item = _row_dict(row)
         item["deleted"] = True
+        return item
+
+    @staticmethod
+    def _drama_validation_check(raw, expected_content_id):
+        if not isinstance(raw, dict):
+            raise XPostError(
+                "invalid_request",
+                "短剧校验结果必须是对象",
+                400,
+            )
+        content_id = _drama_content_id(raw.get("content_id"))
+        if content_id != expected_content_id:
+            raise XPostError(
+                "invalid_request",
+                "短剧校验结果与短剧ID不一致",
+                400,
+            )
+        raw_code = str(raw.get("error_code", "") or "").strip()
+        if raw_code:
+            try:
+                error_code = _clean_token(
+                    raw_code,
+                    "drama validation error code",
+                    64,
+                )
+            except ValueError:
+                raise XPostError(
+                    "invalid_request",
+                    "短剧校验错误码无效",
+                    400,
+                ) from None
+            return {
+                "content_id": content_id,
+                "status": "validation_failed",
+                "error_code": error_code,
+                "error_message": redact_text(
+                    raw.get("error_message") or "短剧未通过X发布校验",
+                    500,
+                ),
+                "drama_name": "",
+                "description": "",
+                "language": "",
+                "labels": "",
+                "name_tag": "",
+                "free_episode_count": 0,
+            }
+        drama_name = _clean_text(
+            raw.get("drama_name"),
+            "drama_name",
+            500,
+        )
+        description = _clean_text(
+            re.sub(r"\s+", " ", str(raw.get("description") or "")).strip(),
+            "description",
+            10000,
+        )
+        language = _clean_text(
+            raw.get("language"),
+            "language",
+            64,
+        )
+        labels_value = raw.get("labels")
+        if isinstance(labels_value, list):
+            labels_value = ",".join(
+                str(value or "").strip()
+                for value in labels_value
+                if str(value or "").strip()
+            )
+        labels = str(labels_value or "").strip()
+        if len(labels) > 1000 or any(ord(char) < 32 for char in labels):
+            raise XPostError("invalid_request", "labels无效", 400)
+        name_tag = _clean_text(raw.get("name_tag"), "name_tag", 500)
+        free_episode_count = _positive_int(
+            raw.get("free_episode_count"),
+            "free_episode_count",
+        )
+        if free_episode_count > 10000:
+            raise XPostError(
+                "invalid_request",
+                "免费剧集数超过支持范围",
+                400,
+            )
+        build_drama_episode_post_text(
+            "https://ai.yingliangads.com/s2l/1.html",
+            1,
+            name_tag,
+            description,
+        )
+        return {
+            "content_id": content_id,
+            "status": "pending",
+            "error_code": "",
+            "error_message": "",
+            "drama_name": drama_name,
+            "description": description,
+            "language": language,
+            "labels": labels,
+            "name_tag": name_tag,
+            "free_episode_count": free_episode_count,
+        }
+
+    def add_drama_pool_items(
+        self,
+        drama_ids,
+        validation_checks,
+        actor=None,
+    ):
+        if not isinstance(drama_ids, list) or not drama_ids or len(drama_ids) > 100:
+            raise XPostError(
+                "invalid_request",
+                "drama_ids必须是包含1到100项的数组",
+                400,
+            )
+        if (
+            not isinstance(validation_checks, list)
+            or len(validation_checks) != len(drama_ids)
+        ):
+            raise XPostError(
+                "invalid_request",
+                "validation_checks必须与drama_ids逐项对应",
+                400,
+            )
+        content_ids = []
+        seen = set()
+        for raw in drama_ids:
+            content_id = _drama_content_id(raw)
+            if content_id in seen:
+                raise XPostError(
+                    "x_post_drama_pool_item_exists",
+                    "本次提交包含重复短剧%s" % content_id,
+                    409,
+                )
+            seen.add(content_id)
+            content_ids.append(content_id)
+        checks = {}
+        for raw in validation_checks:
+            content_id = _drama_content_id(
+                raw.get("content_id") if isinstance(raw, dict) else ""
+            )
+            if content_id not in seen or content_id in checks:
+                raise XPostError(
+                    "invalid_request",
+                    "短剧校验结果ID无效或重复",
+                    400,
+                )
+            checks[content_id] = self._drama_validation_check(
+                raw,
+                content_id,
+            )
+        if set(checks) != seen:
+            raise XPostError(
+                "invalid_request",
+                "短剧校验结果未覆盖全部短剧ID",
+                400,
+            )
+        actor = actor if isinstance(actor, dict) else {}
+        created_by_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        created_by_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        timestamp = utc_now()
+        created_ids = []
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for content_id in content_ids:
+                if conn.execute(
+                    "SELECT 1 FROM x_post_drama_pool WHERE content_id=?",
+                    (content_id,),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_item_exists",
+                        "短剧%s已在短剧池中" % content_id,
+                        409,
+                    )
+                if conn.execute(
+                    "SELECT 1 FROM x_post_queue "
+                    "WHERE source_type='drama' AND content_id=?",
+                    (content_id,),
+                ).fetchone():
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_already_used",
+                        "短剧%s已有X发布历史，不能重新入池" % content_id,
+                        409,
+                    )
+            try:
+                for content_id in content_ids:
+                    check = checks[content_id]
+                    cursor = conn.execute(
+                        "INSERT INTO x_post_drama_pool("
+                        "content_id,app_id,drama_name,description,language,"
+                        "labels,name_tag,status,free_episode_count,"
+                        "next_sub_number,published_episode_count,last_checked_at,"
+                        "last_error_code,last_error_message,created_by_user_id,"
+                        "created_by_name,created_at,updated_at"
+                        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            content_id,
+                            1479,
+                            check["drama_name"],
+                            check["description"],
+                            check["language"],
+                            check["labels"],
+                            check["name_tag"],
+                            check["status"],
+                            check["free_episode_count"],
+                            1,
+                            0,
+                            timestamp,
+                            check["error_code"],
+                            check["error_message"],
+                            created_by_user_id,
+                            created_by_name,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    created_ids.append(int(cursor.lastrowid))
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_exists",
+                    "短剧池唯一约束冲突",
+                    409,
+                ) from exc
+            rows = conn.execute(
+                "SELECT * FROM x_post_drama_pool WHERE id IN (%s) "
+                "ORDER BY created_at,id"
+                % ",".join("?" for _item in created_ids),
+                tuple(created_ids),
+            ).fetchall()
+            conn.commit()
+        return {
+            "items": [
+                {
+                    "id": int(row["id"]),
+                    "content_id": str(row["content_id"]),
+                    "status": str(row["status"]),
+                    "free_episode_count": int(
+                        row["free_episode_count"] or 0
+                    ),
+                    "last_error_code": str(
+                        row["last_error_code"] or ""
+                    ),
+                    "last_error_message": redact_text(
+                        row["last_error_message"],
+                        500,
+                    ),
+                    "created_at": str(row["created_at"]),
+                }
+                for row in rows
+            ],
+            "created_count": len(rows),
+            "available_count": sum(
+                row["status"] == "pending" for row in rows
+            ),
+            "validation_failed_count": sum(
+                row["status"] == "validation_failed" for row in rows
+            ),
+        }
+
+    def available_drama_pool_items(self, limit=50):
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            raise XPostError("invalid_request", "limit无效", 400) from None
+        if limit <= 0 or limit > 1000:
+            raise XPostError(
+                "invalid_request",
+                "limit必须在1到1000之间",
+                400,
+            )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            blocked = conn.execute(
+                "SELECT id,content_id FROM x_post_drama_pool "
+                "WHERE status='needs_review' "
+                "ORDER BY created_at,id LIMIT 1"
+            ).fetchone()
+            if blocked:
+                raise XPostError(
+                    "x_post_drama_pool_needs_review",
+                    "短剧%s存在待人工确认的发布结果，已暂停后续短剧发布"
+                    % blocked["content_id"],
+                    409,
+                    True,
+                )
+            rows = conn.execute(
+                "SELECT id,content_id,next_sub_number,created_at "
+                "FROM x_post_drama_pool "
+                "WHERE status IN ('pending','active') "
+                "AND last_error_code='' "
+                "AND free_episode_count>0 "
+                "AND next_sub_number<=free_episode_count "
+                "ORDER BY created_at,id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_row_dict(row) for row in rows]
+
+    def query_drama_pool(self, payload=None):
+        payload = payload if isinstance(payload, dict) else {}
+        page, page_size = self._pagination(payload)
+        clauses = []
+        values = []
+        content_id = str(
+            payload.get("drama_id", payload.get("content_id", "")) or ""
+        ).strip()
+        if content_id:
+            clauses.append("p.content_id=?")
+            values.append(_drama_content_id(content_id))
+        status = str(payload.get("status", "") or "").strip()
+        if status:
+            if status not in {
+                "pending",
+                "active",
+                "completed",
+                "validation_failed",
+                "needs_review",
+            }:
+                raise XPostError(
+                    "invalid_request",
+                    "短剧状态筛选值无效",
+                    400,
+                )
+            clauses.append("p.status=?")
+            values.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        offset = (page - 1) * page_size
+        select_sql = (
+            "SELECT p.*,"
+            "COALESCE(q.account_id,0) AS last_account_id,"
+            "COALESCE(q.account_username,'') AS last_account_username,"
+            "COALESCE(l.x_post_url,'') AS last_post_url,"
+            "COALESCE(l.error_code,'') AS last_publish_error_code,"
+            "COALESCE(l.error_message,'') AS last_publish_error_message "
+            "FROM x_post_drama_pool p "
+            "LEFT JOIN x_post_queue q ON q.id=("
+            "SELECT q2.id FROM x_post_queue q2 "
+            "WHERE q2.drama_pool_item_id=p.id "
+            "ORDER BY q2.episode_number DESC,q2.id DESC LIMIT 1"
+            ") "
+            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_drama_pool p" + where,
+                    tuple(values),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                select_sql
+                + where
+                + " ORDER BY p.created_at,p.id LIMIT ? OFFSET ?",
+                tuple(values) + (page_size, offset),
+            ).fetchall()
+            summary = conn.execute(
+                "SELECT COUNT(*) AS total,"
+                "SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,"
+                "SUM(published_episode_count) AS published_episodes,"
+                "SUM(CASE WHEN status IN ('pending','active') "
+                "THEN MAX(free_episode_count-published_episode_count,0) "
+                "ELSE 0 END) AS remaining_episodes "
+                "FROM x_post_drama_pool"
+            ).fetchone()
+        items = []
+        for row in rows:
+            item = _row_dict(row)
+            item["remaining_episode_count"] = max(
+                int(item["free_episode_count"] or 0)
+                - int(item["published_episode_count"] or 0),
+                0,
+            )
+            item["next_sub_num"] = int(item["next_sub_number"] or 0)
+            item["last_error_message"] = redact_text(
+                item["last_error_message"],
+                500,
+            )
+            item["last_publish_error_message"] = redact_text(
+                item["last_publish_error_message"],
+                500,
+            )
+            items.append(item)
+        return {
+            "items": items,
+            "summary": {
+                "total": int(summary["total"] or 0),
+                "active": int(summary["active"] or 0),
+                "published_episodes": int(
+                    summary["published_episodes"] or 0
+                ),
+                "remaining_episodes": int(
+                    summary["remaining_episodes"] or 0
+                ),
+            },
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": (total + page_size - 1) // page_size,
+            },
+        }
+
+    def query_drama_pool_episodes(self, pool_item_id, payload=None):
+        pool_item_id = _positive_int(pool_item_id, "pool_item_id")
+        payload = payload if isinstance(payload, dict) else {}
+        page, page_size = self._pagination(payload)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            pool = conn.execute(
+                "SELECT * FROM x_post_drama_pool WHERE id=?",
+                (pool_item_id,),
+            ).fetchone()
+            if not pool:
+                raise XPostError(
+                    "x_post_drama_pool_item_not_found",
+                    "短剧池记录不存在",
+                    404,
+                )
+            rows = conn.execute(
+                "SELECT q.id AS queue_id,q.episode_number,q.account_id,"
+                "q.account_username,q.status AS queue_status,"
+                "COALESCE(r.run_date,'') AS run_date,"
+                "COALESCE(r.publish_time,'') AS publish_time,"
+                "COALESCE(l.status,'') AS publish_status,"
+                "COALESCE(l.x_post_url,'') AS post_url,"
+                "COALESCE(l.error_code,'') AS error_code,"
+                "COALESCE(l.error_message,'') AS error_message,"
+                "COALESCE(l.unknown_outcome,0) AS unknown_outcome "
+                "FROM x_post_queue q "
+                "LEFT JOIN x_post_schedule_run r ON r.id=q.schedule_run_id "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? "
+                "ORDER BY q.episode_number,q.id",
+                (pool_item_id,),
+            ).fetchall()
+        by_episode = {int(row["episode_number"]): _row_dict(row) for row in rows}
+        total = int(pool["free_episode_count"] or 0)
+        start = (page - 1) * page_size + 1
+        end = min(total, start + page_size - 1)
+        items = []
+        for episode_number in range(start, end + 1):
+            item = by_episode.get(episode_number)
+            if item is None:
+                item = {
+                    "queue_id": None,
+                    "episode_number": episode_number,
+                    "account_id": 0,
+                    "account_username": "",
+                    "queue_status": "pending",
+                    "run_date": "",
+                    "publish_time": "",
+                    "publish_status": "",
+                    "post_url": "",
+                    "error_code": "",
+                    "error_message": "",
+                    "unknown_outcome": 0,
+                }
+            item["unknown_outcome"] = bool(item["unknown_outcome"])
+            item["error_message"] = redact_text(
+                item["error_message"],
+                500,
+            )
+            items.append(item)
+        return {
+            "items": items,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": (total + page_size - 1) // page_size,
+            },
+        }
+
+    def delete_drama_pool_item(self, pool_item_id):
+        pool_item_id = _positive_int(pool_item_id, "pool_item_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_drama_pool WHERE id=?",
+                (pool_item_id,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_not_found",
+                    "短剧池记录不存在",
+                    404,
+                )
+            if conn.execute(
+                "SELECT 1 FROM x_post_queue "
+                "WHERE drama_pool_item_id=? OR "
+                "(source_type='drama' AND content_id=?)",
+                (pool_item_id, row["content_id"]),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_occupied",
+                    "已生成发布队列的短剧不能删除",
+                    409,
+                )
+            conn.execute(
+                "DELETE FROM x_post_drama_pool WHERE id=?",
+                (pool_item_id,),
+            )
+            conn.commit()
+        item = _row_dict(row)
+        item["deleted"] = True
+        return item
+
+    def get_schedule_run(self, run_id):
+        run_id = _positive_int(run_id, "run_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM x_post_schedule_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+        if not row:
+            raise XPostError(
+                "x_post_schedule_run_not_found",
+                "X定时发布批次不存在",
+                404,
+            )
+        item = _row_dict(row)
+        item["account_ids"] = _schedule_account_ids(
+            _json_array(item.pop("account_ids_json"), "account_ids"),
+            allow_empty=True,
+        )
+        return item
+
+    def query_schedule_plan(self, source_type, run_date, publish_time):
+        source_type = _schedule_source_type(source_type)
+        run_date = _date_value(run_date, "run_date")
+        publish_time = _schedule_publish_time(publish_time)
+        run_fields = (
+            "id",
+            "slot_key",
+            "source_type",
+            "run_date",
+            "publish_time",
+            "timezone",
+            "config_version",
+            "account_ids_json",
+            "status",
+            "expected_count",
+            "queued_count",
+            "published_count",
+            "failed_count",
+            "unknown_count",
+            "error_code",
+            "error_message",
+            "started_at",
+            "finished_at",
+            "created_at",
+            "updated_at",
+        )
+        queue_fields = (
+            "id",
+            "schedule_run_id",
+            "source_type",
+            "run_date",
+            "source_date",
+            "account_id",
+            "candidate_rank",
+            "episode_number",
+            "status",
+            "unknown_outcome",
+            "created_at",
+            "updated_at",
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN")
+            run = conn.execute(
+                "SELECT %s FROM x_post_schedule_run "
+                "WHERE source_type=? AND run_date=? AND publish_time=?"
+                % ",".join(run_fields),
+                (source_type, run_date, publish_time),
+            ).fetchone()
+            queues = (
+                conn.execute(
+                    "SELECT q.id,q.schedule_run_id,q.source_type,q.run_date,"
+                    "q.source_date,q.account_id,q.candidate_rank,"
+                    "q.episode_number,q.status,"
+                    "CASE WHEN l.status='post_creating' "
+                    "OR COALESCE(l.unknown_outcome,0)=1 "
+                    "THEN 1 ELSE 0 END AS unknown_outcome,"
+                    "q.created_at,q.updated_at "
+                    "FROM x_post_queue q "
+                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "WHERE q.schedule_run_id=? "
+                    "ORDER BY q.candidate_rank,q.id",
+                    (run["id"],),
+                ).fetchall()
+                if run
+                else []
+            )
+            conn.commit()
+        if not run:
+            return {"found": False, "run": None, "queues": []}
+        run_item = {field: run[field] for field in run_fields}
+        run_item["account_ids"] = _schedule_account_ids(
+            _json_array(
+                run_item.pop("account_ids_json"),
+                "account_ids",
+            ),
+            allow_empty=True,
+        )
+        run_item["error_message"] = redact_text(
+            run_item["error_message"],
+            500,
+        )
+        return {
+            "found": True,
+            "run": run_item,
+            "queues": [
+                {
+                    field: (
+                        bool(row[field])
+                        if field == "unknown_outcome"
+                        else row[field]
+                    )
+                    for field in queue_fields
+                }
+                for row in queues
+            ],
+        }
+
+    def record_schedule_failure(
+        self,
+        source_type,
+        run_date,
+        publish_time,
+        config_version,
+        account_ids,
+        error_code,
+        error_message,
+        *,
+        drama_pool_item_id=None,
+        content_id="",
+    ):
+        source_type = _schedule_source_type(source_type)
+        run_date = _date_value(run_date, "run_date")
+        publish_time = _schedule_publish_time(publish_time)
+        config_version = _positive_int(config_version, "config_version")
+        account_ids = _schedule_account_ids(account_ids)
+        binding_requested = (
+            drama_pool_item_id is not None
+            or bool(str(content_id or "").strip())
+        )
+        bound_pool_item_id = None
+        bound_content_id = ""
+        if binding_requested:
+            if (
+                source_type != "drama"
+                or drama_pool_item_id is None
+                or not str(content_id or "").strip()
+            ):
+                raise XPostError(
+                    "invalid_request",
+                    "短剧失败记录必须同时携带短剧池ID和短剧ID",
+                    400,
+                )
+            bound_pool_item_id = _positive_int(
+                drama_pool_item_id,
+                "drama_pool_item_id",
+            )
+            bound_content_id = _drama_content_id(content_id)
+        try:
+            code = _clean_token(
+                error_code or "x_post_schedule_preflight_failed",
+                "error code",
+                64,
+            )
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "error_code无效",
+                400,
+            ) from None
+        message = redact_text(
+            error_message or "X定时发布预检失败",
+            500,
+        )
+        timestamp = utc_now()
+        slot_key = "xpost:schedule:v1:%s:%s:%s" % (
+            source_type,
+            run_date,
+            publish_time.replace(":", ""),
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if bound_pool_item_id is not None:
+                bound_pool = conn.execute(
+                    "SELECT id,content_id FROM x_post_drama_pool WHERE id=?",
+                    (bound_pool_item_id,),
+                ).fetchone()
+                if (
+                    not bound_pool
+                    or str(bound_pool["content_id"]) != bound_content_id
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_item_unavailable",
+                        "短剧失败记录与短剧池记录不一致",
+                        409,
+                    )
+
+            def mark_bound_pool_needs_review():
+                if bound_pool_item_id is None:
+                    return
+                conn.execute(
+                    "UPDATE x_post_drama_pool SET status='needs_review',"
+                    "last_checked_at=?,last_error_code=?,"
+                    "last_error_message=?,updated_at=? "
+                    "WHERE id=? AND status<>'completed'",
+                    (
+                        timestamp,
+                        code,
+                        message,
+                        timestamp,
+                        bound_pool_item_id,
+                    ),
+                )
+
+            existing = conn.execute(
+                "SELECT * FROM x_post_schedule_run "
+                "WHERE source_type=? AND run_date=? AND publish_time=?",
+                (source_type, run_date, publish_time),
+            ).fetchone()
+            if existing:
+                queue_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM x_post_queue "
+                        "WHERE schedule_run_id=?",
+                        (existing["id"],),
+                    ).fetchone()[0]
+                )
+                if queue_count:
+                    if bound_pool_item_id is not None and (
+                        int(existing["config_version"]) != config_version
+                        or _schedule_account_ids(
+                            _json_array(
+                                existing["account_ids_json"],
+                                "account_ids",
+                            )
+                        )
+                        != account_ids
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_schedule_run_exists",
+                            "该时间点已存在不同范围的发布批次",
+                            409,
+                        )
+                    mark_bound_pool_needs_review()
+                    conn.commit()
+                    item = self.get_schedule_run(existing["id"])
+                    item["recorded"] = False
+                    return item
+                if (
+                    int(existing["config_version"]) != config_version
+                    or _schedule_account_ids(
+                        _json_array(
+                            existing["account_ids_json"],
+                            "account_ids",
+                        )
+                    )
+                    != account_ids
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_run_exists",
+                        "该时间点已存在不同范围的发布批次",
+                        409,
+                    )
+                conn.execute(
+                    "UPDATE x_post_schedule_run SET status='failed_preflight',"
+                    "queued_count=0,published_count=0,failed_count=0,"
+                    "unknown_count=0,error_code=?,error_message=?,"
+                    "finished_at=?,updated_at=? WHERE id=?",
+                    (
+                        code,
+                        message,
+                        timestamp,
+                        timestamp,
+                        existing["id"],
+                    ),
+                )
+                run_id = int(existing["id"])
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_schedule_run("
+                    "slot_key,source_type,run_date,publish_time,timezone,"
+                    "config_version,account_ids_json,status,expected_count,"
+                    "queued_count,error_code,error_message,started_at,"
+                    "finished_at,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,'failed_preflight',?,0,?,?,?,?,?,?)",
+                    (
+                        slot_key,
+                        source_type,
+                        run_date,
+                        publish_time,
+                        SCHEDULE_TIMEZONE,
+                        config_version,
+                        json.dumps(account_ids, separators=(",", ":")),
+                        len(account_ids),
+                        code,
+                        message,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                run_id = int(cursor.lastrowid)
+            mark_bound_pool_needs_review()
+            conn.commit()
+        item = self.get_schedule_run(run_id)
+        item["recorded"] = True
+        return item
+
+    def create_schedule_plan(
+        self,
+        source_type,
+        run_date,
+        publish_time,
+        config_version,
+        candidates,
+    ):
+        source_type = _schedule_source_type(source_type)
+        run_date = _date_value(run_date, "run_date")
+        publish_time = _schedule_publish_time(publish_time)
+        config_version = _positive_int(config_version, "config_version")
+        if not isinstance(candidates, list):
+            raise XPostError("invalid_request", "candidates必须是数组", 400)
+        frozen = self.query_schedule_plan(
+            source_type,
+            run_date,
+            publish_time,
+        )
+        if frozen["found"]:
+            frozen_run = frozen["run"]
+            if int(frozen_run["config_version"]) != config_version:
+                raise XPostError(
+                    "x_post_schedule_run_exists",
+                    "该时间点已存在其他版本的冻结计划",
+                    409,
+                )
+            account_ids = list(frozen_run["account_ids"])
+        else:
+            config = self.get_schedule_config(source_type)
+            account_ids = list(config["account_ids"])
+            if (
+                not config["enabled"]
+                or int(config["version"]) != config_version
+                or publish_time not in config["publish_times"]
+            ):
+                raise XPostError(
+                    "x_post_schedule_config_changed",
+                    "自动发布设置已变更，本时间点不再创建新队列",
+                    409,
+                )
+        if len(candidates) != len(account_ids):
+            raise XPostError(
+                "x_post_schedule_candidate_shortage",
+                "定时发布计划候选数量与账号数量不一致",
+                409,
+            )
+        prepared = []
+        seen_accounts = set()
+        publication_keys = set()
+        for index, candidate in enumerate(candidates, 1):
+            payload = dict(candidate) if isinstance(candidate, dict) else candidate
+            if not isinstance(payload, dict):
+                raise XPostError("invalid_request", "candidate必须是对象", 400)
+            payload["source_type"] = source_type
+            values = self._queue_payload(
+                payload,
+                run_date=run_date,
+                candidate_rank=index,
+                require_compliance=True,
+            )
+            if values["account_id"] != account_ids[index - 1]:
+                raise XPostError(
+                    "x_post_schedule_account_mismatch",
+                    "候选账号顺序与自动发布设置不一致",
+                    409,
+                )
+            if values["account_id"] in seen_accounts:
+                raise XPostError(
+                    "invalid_request",
+                    "定时发布计划账号不能重复",
+                    400,
+                )
+            publication_key = (
+                values["material_key"]
+                if source_type == "material"
+                else values["episode_key"]
+            )
+            if publication_key in publication_keys:
+                raise XPostError(
+                    "invalid_request",
+                    "定时发布计划内容不能重复",
+                    400,
+                )
+            if source_type == "material" and values["pool_item_id"] is None:
+                raise XPostError(
+                    "x_post_pool_required",
+                    "素材定时发布候选必须来自素材池",
+                    409,
+                )
+            if source_type == "drama" and values["drama_pool_item_id"] is None:
+                raise XPostError(
+                    "x_post_drama_pool_required",
+                    "短剧定时发布候选必须来自短剧池",
+                    409,
+                )
+            values["idempotency_key"] = (
+                "xpost:schedule:v1:%s:%s:%s:%s"
+                % (
+                    source_type,
+                    run_date,
+                    publish_time.replace(":", ""),
+                    values["account_id"],
+                )
+            )
+            seen_accounts.add(values["account_id"])
+            publication_keys.add(publication_key)
+            prepared.append(values)
+
+        timestamp = utc_now()
+        slot_key = "xpost:schedule:v1:%s:%s:%s" % (
+            source_type,
+            run_date,
+            publish_time.replace(":", ""),
+        )
+        columns = ("idempotency_key",) + QUEUE_LEDGER_FIELDS + QUEUE_FIELDS
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM x_post_schedule_run "
+                "WHERE source_type=? AND run_date=? AND publish_time=?",
+                (source_type, run_date, publish_time),
+            ).fetchone()
+            if existing:
+                existing_account_ids = _schedule_account_ids(
+                    _json_array(
+                        existing["account_ids_json"],
+                        "account_ids",
+                    )
+                )
+                if (
+                    int(existing["config_version"]) != config_version
+                    or existing_account_ids != account_ids
+                    or int(existing["expected_count"]) != len(account_ids)
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_run_exists",
+                        "该时间点已存在不同范围的冻结计划",
+                        409,
+                    )
+                existing_queues = conn.execute(
+                    "SELECT * FROM x_post_queue WHERE schedule_run_id=? "
+                    "ORDER BY candidate_rank,id",
+                    (existing["id"],),
+                ).fetchall()
+                if existing_queues:
+                    expected = [
+                        (
+                            values["account_id"],
+                            values["material_key"],
+                            values["episode_key"],
+                        )
+                        for values in prepared
+                    ]
+                    actual = [
+                        (
+                            int(row["account_id"]),
+                            str(row["material_key"]),
+                            str(row["episode_key"]),
+                        )
+                        for row in existing_queues
+                    ]
+                    if actual != expected:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_schedule_run_exists",
+                            "该时间点已存在不同的发布计划",
+                            409,
+                        )
+                    conn.commit()
+                    item = self.get_schedule_run(existing["id"])
+                    item["queues"] = [
+                        _row_dict(row) for row in existing_queues
+                    ]
+                    item["created"] = False
+                    return item
+                if existing["status"] not in {
+                    "claimed",
+                    "failed_preflight",
+                }:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "已有时间点批次缺少冻结队列",
+                        500,
+                    )
+                schedule_run_id = int(existing["id"])
+            else:
+                current_config = conn.execute(
+                    "SELECT * FROM x_post_schedule_config "
+                    "WHERE source_type=?",
+                    (source_type,),
+                ).fetchone()
+                if (
+                    not current_config
+                    or not bool(current_config["enabled"])
+                    or int(current_config["version"]) != config_version
+                    or _schedule_account_ids(
+                        _json_array(
+                            current_config["account_ids_json"],
+                            "account_ids",
+                        )
+                    )
+                    != account_ids
+                    or publish_time
+                    not in _schedule_publish_times(
+                        _json_array(
+                            current_config["publish_times_json"],
+                            "publish_times",
+                        )
+                    )
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_config_changed",
+                        "自动发布设置已变更，本时间点不再创建新队列",
+                        409,
+                    )
+                schedule_run_id = None
+
+            placeholders_accounts = ",".join("?" for _item in account_ids)
+            unresolved = conn.execute(
+                "SELECT 1 FROM x_post_publish_log l "
+                "JOIN x_post_queue q ON q.id=l.queue_id "
+                "WHERE q.account_id IN (%s) "
+                "AND (COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status='post_creating') LIMIT 1"
+                % placeholders_accounts,
+                tuple(account_ids),
+            ).fetchone()
+            if unresolved:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_unknown_outcome",
+                    "所选账号存在待核对发布结果，已暂停后续自动发布",
+                    409,
+                    True,
+                )
+
+            if source_type == "material":
+                expected_pools = conn.execute(
+                    "SELECT p.* FROM x_post_material_pool p "
+                    "WHERE p.status='unpublished' "
+                    "AND p.last_error_code='' "
+                    "AND NOT EXISTS("
+                    "SELECT 1 FROM x_post_queue q "
+                    "WHERE q.pool_item_id=p.id "
+                    "OR q.material_key=p.material_key"
+                    ") "
+                    "ORDER BY p.created_at,p.id LIMIT ?",
+                    (len(prepared),),
+                ).fetchall()
+                expected_pool_ids = [
+                    int(pool["id"]) for pool in expected_pools
+                ]
+                actual_pool_ids = [
+                    int(values["pool_item_id"]) for values in prepared
+                ]
+                if actual_pool_ids != expected_pool_ids:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_pool_fifo_conflict",
+                        "素材计划必须使用当前素材池最早的可用记录",
+                        409,
+                    )
+                previous_order = None
+                for values in prepared:
+                    pool = conn.execute(
+                        "SELECT * FROM x_post_material_pool WHERE id=?",
+                        (values["pool_item_id"],),
+                    ).fetchone()
+                    if (
+                        not pool
+                        or pool["status"] != "unpublished"
+                        or str(pool["material_key"]) != values["material_key"]
+                        or str(pool["created_at"]) != values["pool_created_at"]
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_unavailable",
+                            "候选素材池记录已发布、已变更或不可用",
+                            409,
+                        )
+                    if conn.execute(
+                        "SELECT 1 FROM x_post_queue "
+                        "WHERE pool_item_id=? OR material_key=?",
+                        (
+                            values["pool_item_id"],
+                            values["material_key"],
+                        ),
+                    ).fetchone():
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_pool_item_occupied",
+                            "候选素材已被其他发布队列占用",
+                            409,
+                        )
+                    order_key = (str(pool["created_at"]), int(pool["id"]))
+                    if previous_order is not None and order_key <= previous_order:
+                        conn.rollback()
+                        raise XPostError(
+                            "invalid_request",
+                            "素材计划必须按素材池加入顺序提交",
+                            400,
+                        )
+                    previous_order = order_key
+            else:
+                blocked = conn.execute(
+                    "SELECT id,content_id FROM x_post_drama_pool "
+                    "WHERE status='needs_review' "
+                    "ORDER BY created_at,id LIMIT 1"
+                ).fetchone()
+                if blocked:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_needs_review",
+                        "短剧%s存在待人工确认的发布结果，已暂停后续短剧发布"
+                        % blocked["content_id"],
+                        409,
+                        True,
+                    )
+                pools = conn.execute(
+                    "SELECT * FROM x_post_drama_pool "
+                    "WHERE status IN ('pending','active') "
+                    "AND last_error_code='' "
+                    "AND next_sub_number<=free_episode_count "
+                    "ORDER BY created_at,id"
+                ).fetchall()
+                expected_pairs = []
+                for pool in pools:
+                    for episode_number in range(
+                        int(pool["next_sub_number"]),
+                        int(pool["free_episode_count"]) + 1,
+                    ):
+                        expected_pairs.append(
+                            (int(pool["id"]), episode_number)
+                        )
+                        if len(expected_pairs) == len(prepared):
+                            break
+                    if len(expected_pairs) == len(prepared):
+                        break
+                actual_pairs = [
+                    (
+                        int(values["drama_pool_item_id"]),
+                        int(values["episode_number"]),
+                    )
+                    for values in prepared
+                ]
+                if actual_pairs != expected_pairs:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_sequence_conflict",
+                        "短剧候选未按入池及免费集数顺序提交",
+                        409,
+                    )
+                pool_by_id = {int(pool["id"]): pool for pool in pools}
+                for values in prepared:
+                    pool = pool_by_id.get(
+                        int(values["drama_pool_item_id"])
+                    )
+                    if (
+                        not pool
+                        or str(pool["content_id"]) != values["content_id"]
+                        or str(pool["created_at"])
+                        != values["drama_pool_created_at"]
+                        or int(values["episode_number"])
+                        > int(pool["free_episode_count"])
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_drama_pool_item_unavailable",
+                            "短剧池记录或免费剧集范围已变更",
+                            409,
+                        )
+                    if conn.execute(
+                        "SELECT 1 FROM x_post_queue WHERE episode_key=?",
+                        (values["episode_key"],),
+                    ).fetchone():
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_drama_episode_already_used",
+                            "短剧集数已被其他发布队列占用",
+                            409,
+                        )
+
+            if schedule_run_id is None:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_schedule_run("
+                    "slot_key,source_type,run_date,publish_time,timezone,"
+                    "config_version,account_ids_json,status,expected_count,"
+                    "queued_count,started_at,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    (
+                        slot_key,
+                        source_type,
+                        run_date,
+                        publish_time,
+                        SCHEDULE_TIMEZONE,
+                        config_version,
+                        json.dumps(account_ids, separators=(",", ":")),
+                        len(prepared),
+                        len(prepared),
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                schedule_run_id = int(cursor.lastrowid)
+            else:
+                conn.execute(
+                    "UPDATE x_post_schedule_run SET status='queued',"
+                    "config_version=?,account_ids_json=?,expected_count=?,"
+                    "queued_count=?,published_count=0,failed_count=0,"
+                    "unknown_count=0,error_code='',error_message='',"
+                    "started_at=?,finished_at='',updated_at=? "
+                    "WHERE id=? AND status IN ('claimed','failed_preflight')",
+                    (
+                        config_version,
+                        json.dumps(account_ids, separators=(",", ":")),
+                        len(prepared),
+                        len(prepared),
+                        timestamp,
+                        timestamp,
+                        schedule_run_id,
+                    ),
+                )
+            queue_ids = []
+            placeholders = ",".join("?" for _field in columns)
+            try:
+                for values in prepared:
+                    values["schedule_run_id"] = schedule_run_id
+                    cursor = conn.execute(
+                        "INSERT INTO x_post_queue("
+                        + ",".join(columns)
+                        + ",status,created_at,updated_at"
+                        ") VALUES("
+                        + placeholders
+                        + ",'queued',?,?)",
+                        tuple(values[field] for field in columns)
+                        + (timestamp, timestamp),
+                    )
+                    queue_ids.append(int(cursor.lastrowid))
+                    if source_type == "material":
+                        conn.execute(
+                            "UPDATE x_post_material_pool SET "
+                            "last_checked_at=?,last_error_code='',"
+                            "last_error_message='',updated_at=? "
+                            "WHERE id=? AND status='unpublished'",
+                            (
+                                timestamp,
+                                timestamp,
+                                values["pool_item_id"],
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE x_post_drama_pool SET status='active',"
+                            "drama_name=?,description=?,language=?,labels=?,"
+                            "name_tag=?,last_checked_at=?,last_error_code='',"
+                            "last_error_message='',updated_at=? WHERE id=?",
+                            (
+                                values["drama_name"],
+                                values["description"],
+                                values["material_language"],
+                                values["tag"],
+                                values["name_tag"],
+                                timestamp,
+                                timestamp,
+                                values["drama_pool_item_id"],
+                            ),
+                        )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "X定时发布计划唯一约束冲突",
+                    409,
+                ) from exc
+            conn.commit()
+        item = self.get_schedule_run(schedule_run_id)
+        item["queues"] = [
+            self.get_queue(queue_id) for queue_id in queue_ids
+        ]
+        item["created"] = True
         return item
 
     def create_daily_plan(
@@ -3093,8 +5491,16 @@ class XPostStore:
             values.append(status)
         material_id = str(payload.get("material_id", "") or "").strip()
         if material_id:
-            clauses.append("q.material_key=?")
-            values.append(normalize_material_key(material_id))
+            if re.fullmatch(r"[0-9]+", material_id):
+                clauses.append("q.material_key=?")
+                values.append(normalize_material_key(material_id))
+            else:
+                clauses.append("q.content_id=?")
+                values.append(_drama_content_id(material_id))
+        source_type = str(payload.get("source_type", "") or "").strip()
+        if source_type:
+            clauses.append("q.source_type=?")
+            values.append(_schedule_source_type(source_type))
         if "unknown_outcome" in payload and payload.get("unknown_outcome") not in (None, ""):
             raw_unknown = payload.get("unknown_outcome")
             if isinstance(raw_unknown, bool):
@@ -3111,11 +5517,14 @@ class XPostStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         select = (
             "SELECT q.id AS queue_id,q.run_id,q.catchup_run_id,"
+            "q.schedule_run_id,"
             "CASE WHEN q.run_id IS NOT NULL THEN 'daily' "
             "WHEN q.catchup_run_id IS NOT NULL THEN 'catchup' "
+            "WHEN q.schedule_run_id IS NOT NULL THEN 'schedule' "
             "ELSE 'canary' END AS batch_kind,"
-            "q.run_date,q.source_date,q.account_id,"
-            "q.pool_item_id,q.pool_created_at,"
+            "q.source_type,q.run_date,q.source_date,q.account_id,"
+            "q.pool_item_id,q.pool_created_at,q.drama_pool_item_id,"
+            "q.drama_pool_created_at,q.episode_number,q.episode_key,q.name_tag,"
             "q.account_username,q.page_name,q.page_id,q.material_id,q.material_name,q.content_id,"
             "q.material_language,q.drama_name,q.tag,q.candidate_rank,q.spend,"
             "q.media_repair_trigger_code,q.media_repair_job_key,q.media_repair_profile,"
@@ -3210,12 +5619,20 @@ class XPostStore:
     @staticmethod
     def _sync_run(conn, queue_id, timestamp):
         queue = conn.execute(
-            "SELECT run_id,catchup_run_id FROM x_post_queue WHERE id=?",
+            "SELECT run_id,catchup_run_id,schedule_run_id "
+            "FROM x_post_queue WHERE id=?",
             (queue_id,),
         ).fetchone()
         if not queue:
             return
-        if queue["run_id"] and queue["catchup_run_id"]:
+        if sum(
+            value is not None
+            for value in (
+                queue["run_id"],
+                queue["catchup_run_id"],
+                queue["schedule_run_id"],
+            )
+        ) > 1:
             raise XPostError(
                 "x_post_storage_conflict",
                 "发布队列关联了多个批次",
@@ -3229,6 +5646,10 @@ class XPostStore:
             table_name = "x_post_daily_run"
             queue_column = "run_id"
             batch_id = int(queue["run_id"])
+        elif queue["schedule_run_id"]:
+            table_name = "x_post_schedule_run"
+            queue_column = "schedule_run_id"
+            batch_id = int(queue["schedule_run_id"])
         else:
             return
         counts = conn.execute(
@@ -3265,6 +5686,12 @@ class XPostStore:
             status = "needs_review"
         elif int(counts["rate_limited_count"] or 0):
             status = "stopped"
+        elif (
+            table_name == "x_post_schedule_run"
+            and str(run["source_type"]) == "drama"
+            and failed_count > 0
+        ):
+            status = "stopped"
         elif terminal_count >= expected_count and published_count == expected_count:
             status = "completed"
         elif terminal_count >= expected_count:
@@ -3287,6 +5714,103 @@ class XPostStore:
                 finished_at,
                 timestamp,
                 batch_id,
+            ),
+        )
+
+    @staticmethod
+    def _mark_drama_episode_published(conn, queue_id, timestamp):
+        queue = conn.execute(
+            "SELECT source_type,drama_pool_item_id,content_id,"
+            "episode_number,episode_key FROM x_post_queue WHERE id=?",
+            (queue_id,),
+        ).fetchone()
+        if not queue or queue["source_type"] != "drama":
+            return
+        pool = conn.execute(
+            "SELECT * FROM x_post_drama_pool WHERE id=?",
+            (queue["drama_pool_item_id"],),
+        ).fetchone()
+        expected_key = "%s:%s" % (
+            queue["content_id"],
+            queue["episode_number"],
+        )
+        if (
+            not pool
+            or str(pool["content_id"]) != str(queue["content_id"])
+            or str(queue["episode_key"]) != expected_key
+        ):
+            raise XPostError(
+                "x_post_storage_conflict",
+                "发布队列与短剧池记录不一致",
+                500,
+                True,
+            )
+        episode_number = int(queue["episode_number"])
+        next_sub_number = int(pool["next_sub_number"])
+        if episode_number < next_sub_number:
+            return
+        if episode_number != next_sub_number:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "短剧发布进度不是连续集数",
+                500,
+                True,
+            )
+        published_count = int(pool["published_episode_count"]) + 1
+        next_number = episode_number + 1
+        completed = next_number > int(pool["free_episode_count"])
+        cursor = conn.execute(
+            "UPDATE x_post_drama_pool SET status=?,next_sub_number=?,"
+            "published_episode_count=?,completed_at=?,last_checked_at=?,"
+            "last_error_code='',last_error_message='',updated_at=? "
+            "WHERE id=? AND next_sub_number=?",
+            (
+                "completed" if completed else "active",
+                next_number,
+                published_count,
+                timestamp if completed else "",
+                timestamp,
+                timestamp,
+                pool["id"],
+                episode_number,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "短剧发布进度写入冲突",
+                500,
+                True,
+            )
+
+    @staticmethod
+    def _mark_drama_needs_review(
+        conn,
+        queue_id,
+        timestamp,
+        error_code,
+        error_message,
+    ):
+        queue = conn.execute(
+            "SELECT source_type,drama_pool_item_id FROM x_post_queue WHERE id=?",
+            (queue_id,),
+        ).fetchone()
+        if (
+            not queue
+            or queue["source_type"] != "drama"
+            or queue["drama_pool_item_id"] is None
+        ):
+            return
+        conn.execute(
+            "UPDATE x_post_drama_pool SET status='needs_review',"
+            "last_checked_at=?,last_error_code=?,last_error_message=?,"
+            "updated_at=? WHERE id=? AND status<>'completed'",
+            (
+                timestamp,
+                str(error_code or "x_post_failed")[:64],
+                redact_text(error_message, 500),
+                timestamp,
+                queue["drama_pool_item_id"],
             ),
         )
 
@@ -3440,6 +5964,11 @@ class XPostStore:
                     conn.rollback()
                     raise XPostError("x_post_log_conflict", "发布日志已对应其他Post", 409)
                 self._mark_pool_published(conn, row["queue_id"], timestamp)
+                self._mark_drama_episode_published(
+                    conn,
+                    row["queue_id"],
+                    timestamp,
+                )
                 conn.commit()
                 return _row_dict(row)
             if row["status"] != "post_creating":
@@ -3452,6 +5981,11 @@ class XPostStore:
             )
             conn.execute("UPDATE x_post_queue SET status='published',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
             self._mark_pool_published(conn, row["queue_id"], timestamp)
+            self._mark_drama_episode_published(
+                conn,
+                row["queue_id"],
+                timestamp,
+            )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
@@ -3500,6 +6034,13 @@ class XPostStore:
                 "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
                 (timestamp, row["queue_id"]),
             )
+            self._mark_drama_needs_review(
+                conn,
+                row["queue_id"],
+                timestamp,
+                "x_post_outcome_unknown",
+                message,
+            )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
@@ -3529,6 +6070,13 @@ class XPostStore:
                 (code, message, 1 if unknown_outcome else 0, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            self._mark_drama_needs_review(
+                conn,
+                row["queue_id"],
+                timestamp,
+                code,
+                message,
+            )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
@@ -3558,6 +6106,13 @@ class XPostStore:
             conn.execute(
                 "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
                 (timestamp, row["queue_id"]),
+            )
+            self._mark_drama_needs_review(
+                conn,
+                row["queue_id"],
+                timestamp,
+                code,
+                message,
             )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
@@ -4110,7 +6665,18 @@ def publish_canary(
                 }
             )
             short_url = _build_short_url(short_base_url, log["id"])
-            post_text = build_post_text(short_url, queue["description"])
+            if queue.get("source_type") == "drama":
+                post_text = build_drama_episode_post_text(
+                    short_url,
+                    queue.get("episode_number"),
+                    queue.get("name_tag"),
+                    queue["description"],
+                )
+            else:
+                post_text = build_post_text(
+                    short_url,
+                    queue["description"],
+                )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)
 
         if callable(storage_guard):
@@ -4145,7 +6711,11 @@ def publish_canary(
         )
         expected_sha256 = str(queue.get("preflight_sha256", "") or "").lower()
         expected_size = int(queue.get("preflight_size", 0) or 0)
-        if (queue.get("run_id") or queue.get("catchup_run_id")) and (
+        if (
+            queue.get("run_id")
+            or queue.get("catchup_run_id")
+            or queue.get("schedule_run_id")
+        ) and (
             not expected_sha256
             or expected_size <= 0
             or not secrets.compare_digest(expected_sha256, str(media["sha256"]).lower())

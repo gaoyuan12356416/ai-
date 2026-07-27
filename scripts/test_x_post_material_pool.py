@@ -189,7 +189,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         queried = self.store.query_pool({"material_id": "101"})
         self.assertEqual(queried["items"][0]["status"], "unpublished")
         self.assertEqual(queried["items"][0]["availability"], "validation_failed")
-        self.assertIn(
+        self.assertNotIn(
             "101",
             [item["material_id"] for item in self.store.available_pool_items(10)],
         )
@@ -201,7 +201,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.assertTrue(deleted["deleted"])
         self.assertEqual(
             [item["material_id"] for item in self.store.available_pool_items(10)],
-            ["101", "102", "103"],
+            ["102", "103"],
         )
 
     def test_pool_plan_is_atomic_fifo_and_success_only_marks_published(self):
