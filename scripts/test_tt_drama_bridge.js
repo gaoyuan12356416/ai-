@@ -18,6 +18,99 @@ assert.equal(
 );
 assert.equal(bridge.RESOLVER_PATH, "/api/public/tt-drama/resolve");
 assert.equal(bridge.REQUEST_TIMEOUT_MS, 6000);
+assert.equal(bridge.FEATURED_PATH, "/api/public/tt-drama/featured");
+assert.equal(bridge.FEATURED_TIMEOUT_MS, 2000);
+assert.equal(bridge.FEATURED_MAX_STALE_MS, 72 * 60 * 60 * 1000);
+assert.equal(
+  bridge.FEATURED_MAX_FUTURE_SKEW_MS,
+  24 * 60 * 60 * 1000
+);
+assert.equal(
+  bridge.buildFeaturedUrl("https://ai.yingliangads.com"),
+  "https://ai.yingliangads.com/api/public/tt-drama/featured"
+);
+
+const featuredPayload = {
+  schema_version: 1,
+  source_date: "2026-07-26",
+  generated_at: "2026-07-27T18:00:00+08:00",
+  items: Array.from({ length: 5 }, (_unused, index) => ({
+    content_id: `DRAMA0000${index + 1}`,
+    title: `Drama ${index + 1}`,
+    cover_url: `https://static-v1.mydramawave.com/drama-${index + 1}.jpg`,
+    language: "en",
+    episode_count: 80
+  }))
+};
+const featuredNow = Date.parse("2026-07-27T18:00:00+08:00");
+const normalizedFeatured = bridge.normalizeFeaturedPayload(
+  featuredPayload,
+  featuredNow
+);
+assert.equal(normalizedFeatured.items.length, 5);
+assert.equal(normalizedFeatured.items[0].content_id, "DRAMA00001");
+assert.equal(
+  bridge.buildW2AUrl(
+    normalizedFeatured.items[0].content_id,
+    "?af_adset_id=XXX"
+  ),
+  "https://www.dramawavew2a.com/ads/0/2049/view?af_dp=DRAMA00001&c=TTpost&af_c_id=0001&af_adset_id=XXX"
+);
+assert.equal(
+  bridge.shanghaiYesterday(Date.parse("2026-07-27T00:30:00+08:00")),
+  "2026-07-26"
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    items: featuredPayload.items.slice(0, 4)
+  }, featuredNow),
+  /payload/
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    items: [...featuredPayload.items, featuredPayload.items[0]]
+  }, featuredNow),
+  /payload/
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    items: featuredPayload.items.map((item, index) => (
+      index === 0 ? { ...item, spend: 999 } : item
+    ))
+  }, featuredNow),
+  /incomplete/
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    generated_at: "2026-07-24T17:59:59+08:00"
+  }, featuredNow),
+  /stale/
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    generated_at: "2026-07-28T18:00:01+08:00"
+  }, featuredNow),
+  /stale/
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    source_date: "2026-07-27"
+  }, featuredNow),
+  /stale/
+);
+assert.throws(
+  () => bridge.normalizeFeaturedPayload({
+    ...featuredPayload,
+    source_date: "2026-07-22"
+  }, featuredNow),
+  /stale/
+);
 
 const protectedTarget = new URL(
   bridge.buildW2AUrl(
@@ -79,6 +172,6 @@ assert.throws(
 
 console.log(JSON.stringify({
   status: "ok",
-  assertions: 35,
+  assertions: 53,
   example: expectedExample
 }));
