@@ -28,4 +28,4 @@ SQLite 迁移、排期状态机、短剧选择器、runner、sidecar/后台 API�
 - 聚焦测试 70/70 通过。
 - Python 编译通过。
 - `git diff --check` 通过。
-- 完整 `test_x*.py` 285/285 通过；重放到生产当前 commit 后需再次执行。
+- 合并生产基线后完整 `test_x*.py` 288/288 通过；TT source-cache Python/Node 回归通过。

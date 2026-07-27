@@ -22,7 +22,7 @@
 
 ## 部署步骤
 
-1. 完成测试、提交并推送 GitHub 分支；服务器仅部署该远端 commit。
+1. 完成测试、合并生产 sidecar `f8389fe` 与主 API TT source-cache `efa8652`、提交并推送 GitHub 分支；服务器仅部署该远端 commit。
 2. 记录当前 release symlink/commit、systemd 状态和文件 hash。
 3. 备份 SQLite、环境文件权限/hash、nginx 配置和线上 `navigation.json`。
 4. 创建不可变 release，安装 Python/静态文件和新的 systemd unit。

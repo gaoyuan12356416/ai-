@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-离线回归通过，0 失败、0 阻塞；可以进入基于生产当前 commit 的重放测试和生产部署验证。
+离线回归和生产基线合并回归通过，0 失败、0 阻塞；可以进入生产部署验证。
 
 ## 测试范围
 
@@ -17,7 +17,9 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
 | 聚焦 store/runner/selector/UI/API 合同 | 70 | 70 | 0 | 0 |
-| 完整 `test_x*.py` | 285 | 285 | 0 | 0 |
+| 生产基线合并后完整 `test_x*.py` | 288 | 288 | 0 | 0 |
+| TT source-cache Python 回归 | 88 | 87 | 0 | 0（1 项 Windows 预期跳过） |
+| TT bridge Node 断言 | 53 | 53 | 0 | 0 |
 | Python 编译文件 | 14 | 14 | 0 | 0 |
 | HTML 内联脚本 | 2 | 2 | 0 | 0 |
 | navigation JSON | 1 | 1 | 0 | 0 |
@@ -30,7 +32,8 @@
 
 ## 验证证据
 
-- `python -m unittest discover -s scripts -p "test_x*.py"`：修复冻结账号授权范围后 285/285 通过，耗时 18.639 秒。
+- 合并生产 sidecar `f8389fe` 和主 API TT source-cache `efa8652` 后，`test_x*.py` 288/288 通过，耗时 19.420 秒。
+- TT source-cache Python 88 项通过（1 项仅在 Linux 验证 POSIX mode，Windows 按预期跳过）；Node 53 个断言通过。
 - UI 专项：7/7 通过；两个页面各 1 段内联脚本解析成功。
 - 所有本次变更 Python 文件 `py_compile` 成功。
 - `static/navigation.json` 可解析。
@@ -39,10 +42,9 @@
 
 ## 遗留风险
 
-- 当前工作分支起点早于生产运行 commit，提交后必须重放到生产当前 `f8389fe`，同时保留主 API 已上线的 TT source-cache 逻辑，并再次跑完整回归。
 - 生产登录态、systemd timer、现网导航合并和自然时间点尚未验证。
 - 不在部署验证中主动创建 X Post；实际自然发布由用户配置的未来时间点触发。
 
 ## 发布建议
 
-完成基线重放后再次执行 285 项回归；生产按备份、不可变 release、旧 timer mask、新 timer enable、浏览器验证顺序发布。
+生产按备份、不可变 release、旧 timer mask、新 timer enable、浏览器验证顺序发布。
