@@ -12,6 +12,13 @@ assert.equal(
   "single tracking parameter must match the product example exactly"
 );
 
+assert.equal(
+  bridge.buildResolverUrl("l9rP6ey2CB", "https://ai.yingliangads.com"),
+  "https://ai.yingliangads.com/api/public/tt-drama/resolve?content_id=l9rP6ey2CB"
+);
+assert.equal(bridge.RESOLVER_PATH, "/api/public/tt-drama/resolve");
+assert.equal(bridge.REQUEST_TIMEOUT_MS, 6000);
+
 const protectedTarget = new URL(
   bridge.buildW2AUrl(
     "l9rP6ey2CB",
@@ -65,9 +72,13 @@ assert.throws(
   () => bridge.buildW2AUrl("l9rP6ey2CB!", "?af_adset_id=XXX"),
   /Invalid DramaWave content_id/
 );
+assert.throws(
+  () => bridge.buildResolverUrl("short", "https://ai.yingliangads.com"),
+  /Invalid DramaWave content_id/
+);
 
 console.log(JSON.stringify({
   status: "ok",
-  assertions: 31,
+  assertions: 35,
   example: expectedExample
 }));

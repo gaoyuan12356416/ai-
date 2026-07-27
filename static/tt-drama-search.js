@@ -2,6 +2,8 @@
   "use strict";
 
   const W2A_BASE = "https://www.dramawavew2a.com/ads/0/2049/view";
+  const RESOLVER_PATH = "/api/public/tt-drama/resolve";
+  const REQUEST_TIMEOUT_MS = 6000;
   const CORE_PARAMS = Object.freeze({
     c: "TTpost",
     af_c_id: "0001"
@@ -117,6 +119,17 @@
     return createTarget(contentId, search).url;
   }
 
+  function buildResolverUrl(contentId, origin) {
+    const sourceContentId = String(contentId || "").trim();
+    const normalizedContentId = normalizeContentId(sourceContentId);
+    if (normalizedContentId !== sourceContentId || !isValidContentId(normalizedContentId)) {
+      throw new TypeError("Invalid DramaWave content_id");
+    }
+    const url = new URL(RESOLVER_PATH, origin || "https://ai.yingliangads.com");
+    url.searchParams.set("content_id", normalizedContentId);
+    return url.toString();
+  }
+
   function trackingCountText(passthrough) {
     const count = passthrough.entries.length;
     if (count === 0 && passthrough.skipped === 0) {
@@ -164,13 +177,26 @@
     const result = document.querySelector("#result");
     const resultTitle = document.querySelector("#result-title");
     const resultMeta = document.querySelector("#result-meta");
+    const resultDescription = document.querySelector("#result-description");
+    const resultCover = document.querySelector("#result-cover");
+    const resultCoverPlaceholder = document.querySelector("#result-cover-placeholder");
     const continueLink = document.querySelector("#continue-link");
     const continueText = document.querySelector("#continue-text");
     const stories = document.querySelector("#stories");
 
     if (!contentIdInput || !searchButton || !helper || !trackingSummary || !result ||
-        !resultTitle || !resultMeta || !continueLink || !continueText || !stories) {
+        !resultTitle || !resultMeta || !resultDescription || !resultCover ||
+        !resultCoverPlaceholder || !continueLink || !continueText || !stories) {
       return;
+    }
+
+    let activeController = null;
+    let activeRequest = 0;
+
+    function clockNow() {
+      return root.performance && typeof root.performance.now === "function"
+        ? root.performance.now()
+        : Date.now();
     }
 
     const currentPassthrough = collectPassthroughParams(root.location.search);
@@ -182,49 +208,211 @@
 
     function hideResult() {
       result.classList.remove("visible");
+      result.removeAttribute("data-resolve-ms");
+      result.removeAttribute("data-cache-state");
+      result.removeAttribute("data-cover-ms");
+      result.setAttribute("aria-busy", "false");
       helper.classList.remove("error");
       continueText.textContent = "Open matching story";
+      continueLink.removeAttribute("href");
+      delete continueLink.dataset.contentId;
+      resultTitle.textContent = "";
+      resultMeta.textContent = "";
+      resultDescription.textContent = "";
+      resultCover.onload = null;
+      resultCover.onerror = null;
+      resultCover.hidden = true;
+      resultCover.removeAttribute("src");
+      resultCover.alt = "";
+      resultCoverPlaceholder.hidden = false;
     }
 
-    function showContentId(contentId) {
+    function setLoading(loading) {
+      searchButton.disabled = loading;
+      searchButton.classList.toggle("loading", loading);
+      searchButton.setAttribute("aria-busy", loading ? "true" : "false");
+    }
+
+    function showCover(coverUrl, title) {
+      resultCover.hidden = true;
+      resultCoverPlaceholder.hidden = false;
+      resultCover.alt = title ? `${title} cover` : "Drama cover";
+      if (!coverUrl) {
+        return;
+      }
+
+      const startedAt = clockNow();
+      let triedAlternate = false;
+      resultCover.onload = () => {
+        result.dataset.coverMs = String(Math.max(0, Math.round(clockNow() - startedAt)));
+        resultCover.hidden = false;
+        resultCoverPlaceholder.hidden = true;
+      };
+      resultCover.onerror = () => {
+        if (!triedAlternate) {
+          try {
+            const alternate = new URL(resultCover.src);
+            if (alternate.hostname === "static-v1.mydramawave.com") {
+              triedAlternate = true;
+              alternate.hostname = "static-v2.mydramawave.com";
+              resultCover.src = alternate.toString();
+              return;
+            }
+          } catch (_error) {
+            // Fall through to the safe placeholder.
+          }
+        }
+        resultCover.hidden = true;
+        resultCoverPlaceholder.hidden = false;
+      };
+      resultCover.src = coverUrl;
+    }
+
+    async function resolveDrama(contentId, signal) {
+      const startedAt = clockNow();
+      const response = await root.fetch(
+        buildResolverUrl(contentId, root.location.origin),
+        {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          credentials: "omit",
+          cache: "no-store",
+          signal
+        }
+      );
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (_error) {
+        payload = {};
+      }
+      const durationMs = Math.max(0, Math.round(clockNow() - startedAt));
+      if (!response.ok || !payload.found || !payload.data) {
+        const error = new Error(payload.message || "Story search failed");
+        error.status = response.status;
+        error.code = payload.error || "resolver_unavailable";
+        throw error;
+      }
+      return {
+        item: payload.data,
+        durationMs,
+        cacheState: response.headers.get("X-TT-Drama-Cache") || ""
+      };
+    }
+
+    function showDrama(contentId, resolved) {
       const target = createTarget(contentId, root.location.search);
+      const item = resolved.item || {};
       const count = target.passthrough.entries.length;
       const skipped = target.passthrough.skipped;
 
-      resultTitle.textContent = target.contentId;
-      if (count > 0) {
-        resultMeta.textContent =
-          `${count} tracking ${count === 1 ? "parameter will" : "parameters will"} be carried to the DramaWave landing page.` +
-          (skipped > 0 ? ` ${skipped} unsupported ${skipped === 1 ? "parameter was" : "parameters were"} ignored.` : "");
-      } else {
-        resultMeta.textContent =
-          "DramaWave will resolve this Content ID and open the corresponding full story." +
-          (skipped > 0 ? ` ${skipped} unsupported tracking ${skipped === 1 ? "parameter was" : "parameters were"} ignored.` : "");
+      const title = String(item.title || target.contentId);
+      const facts = [];
+      if (item.language) {
+        facts.push(String(item.language).toUpperCase());
       }
+      if (Number(item.episode_count) > 0) {
+        facts.push(`${Number(item.episode_count)} episodes`);
+      }
+      facts.push(`ID ${target.contentId}`);
+
+      resultTitle.textContent = title;
+      resultMeta.textContent = facts.join(" · ");
+      resultDescription.textContent =
+        String(item.description || "").trim() || "Story description is not available yet.";
       continueLink.href = target.url;
       continueLink.dataset.contentId = target.contentId;
+      result.dataset.resolveMs = String(resolved.durationMs);
+      result.dataset.cacheState = resolved.cacheState;
       result.classList.add("visible");
       helper.classList.remove("error");
-      helper.textContent = "Content ID prepared. Tap below to open the matching story.";
+      helper.textContent =
+        "Match confirmed. Tap below to continue in DramaWave." +
+        (count > 0 ? ` ${count} tracking ${count === 1 ? "parameter is" : "parameters are"} ready.` : "") +
+        (skipped > 0 ? ` ${skipped} unsupported ${skipped === 1 ? "parameter was" : "parameters were"} ignored.` : "");
+      showCover(String(item.cover_url || ""), title);
     }
 
-    function prepareDrama() {
+    async function prepareDrama() {
       const original = contentIdInput.value.trim();
       const contentId = normalizeContentId(original);
-      contentIdInput.value = contentId;
       hideResult();
       if (contentId !== original || !isValidContentId(contentId)) {
         helper.textContent = "Enter the complete Content ID shown in the video (10–32 letters or numbers).";
         helper.classList.add("error");
         return;
       }
-      showContentId(contentId);
+      contentIdInput.value = contentId;
+
+      if (activeController) {
+        activeController.abort();
+      }
+      activeRequest += 1;
+      const requestNumber = activeRequest;
+      const controller = typeof root.AbortController === "function"
+        ? new root.AbortController()
+        : { signal: undefined, abort() {} };
+      activeController = controller;
+      let timedOut = false;
+      let timeoutId = null;
+      const timeoutPromise = new Promise((_resolve, reject) => {
+        timeoutId = root.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          const timeoutError = new Error("Story search timed out");
+          timeoutError.name = "AbortError";
+          reject(timeoutError);
+        }, REQUEST_TIMEOUT_MS);
+      });
+
+      setLoading(true);
+      result.setAttribute("aria-busy", "true");
+      helper.textContent = "Finding your story…";
+      try {
+        const resolved = await Promise.race([
+          resolveDrama(contentId, controller.signal),
+          timeoutPromise
+        ]);
+        if (requestNumber !== activeRequest) {
+          return;
+        }
+        showDrama(contentId, resolved);
+      } catch (error) {
+        if (requestNumber !== activeRequest) {
+          return;
+        }
+        hideResult();
+        helper.classList.add("error");
+        if (error && error.status === 404) {
+          helper.textContent = "We couldn’t find that Content ID. Check the final screen and try again.";
+        } else if (error && error.status === 429) {
+          helper.textContent = "Too many searches. Wait a moment and try again.";
+        } else if (timedOut) {
+          helper.textContent = "Story search took too long. Please try again.";
+        } else if (error && error.name === "AbortError") {
+          return;
+        } else {
+          helper.textContent = "Story search is temporarily unavailable. Please try again.";
+        }
+      } finally {
+        root.clearTimeout(timeoutId);
+        if (requestNumber === activeRequest) {
+          activeController = null;
+          setLoading(false);
+          result.setAttribute("aria-busy", "false");
+        }
+      }
     }
 
     contentIdInput.addEventListener("input", () => {
-      contentIdInput.value = normalizeContentId(contentIdInput.value);
+      activeRequest += 1;
+      if (activeController) {
+        activeController.abort();
+        activeController = null;
+      }
+      setLoading(false);
       hideResult();
-      helper.textContent = "Tap the arrow to prepare this Content ID.";
+      helper.textContent = "Tap the arrow to find this Content ID.";
     });
     contentIdInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -234,7 +422,9 @@
     });
     searchButton.addEventListener("click", prepareDrama);
     continueLink.addEventListener("click", () => {
-      continueText.textContent = "Opening DramaWave";
+      if (continueLink.hasAttribute("href")) {
+        continueText.textContent = "Opening DramaWave";
+      }
     });
 
     renderFeaturedStories(stories);
@@ -242,6 +432,8 @@
 
   const api = Object.freeze({
     W2A_BASE,
+    RESOLVER_PATH,
+    REQUEST_TIMEOUT_MS,
     CORE_PARAMS,
     RESERVED_QUERY_KEYS,
     MAX_PASSTHROUGH_PARAMS,
@@ -251,7 +443,8 @@
     isValidContentId,
     collectPassthroughParams,
     createTarget,
-    buildW2AUrl
+    buildW2AUrl,
+    buildResolverUrl
   });
 
   if (typeof module !== "undefined" && module.exports) {

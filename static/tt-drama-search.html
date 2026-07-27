@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#090612">
   <meta name="robots" content="noindex,nofollow">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://ads-cdn.yingliang.tech data:; style-src 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://ads-cdn.yingliang.tech https://cdn.usrgrow.com https://static.mydramawave.com https://static-v1.mydramawave.com https://static-v2.mydramawave.com data:; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self' https://static-v1.mydramawave.com https://static-v2.mydramawave.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="preconnect" href="https://static-v1.mydramawave.com" crossorigin>
+  <link rel="dns-prefetch" href="//static-v2.mydramawave.com">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23ff2d70'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Arial' font-size='36' font-weight='800' font-style='italic' fill='white'%3ED%3C/text%3E%3C/svg%3E">
   <title>Find your DramaWave story</title>
   <script src="/tt-drama-search.js" defer></script>
@@ -261,6 +263,21 @@
 
     .search-button:active { transform: scale(.97); }
 
+    .search-button:disabled {
+      cursor: wait;
+      opacity: .72;
+      transform: none;
+    }
+
+    .search-button.loading svg {
+      animation: searchPulse .8s ease-in-out infinite alternate;
+    }
+
+    @keyframes searchPulse {
+      from { opacity: .35; transform: translateX(-2px); }
+      to { opacity: 1; transform: translateX(2px); }
+    }
+
     .search-button svg {
       width: 22px;
       height: 22px;
@@ -317,12 +334,57 @@
 
     .result.visible {
       display: grid;
+      gap: 13px;
       animation: rise .34s cubic-bezier(.2, .8, .2, 1) both;
     }
 
     @keyframes rise {
       from { opacity: 0; transform: translateY(9px) scale(.985); }
       to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .result-layout {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 13px;
+      align-items: start;
+    }
+
+    .result-cover-shell {
+      position: relative;
+      width: 88px;
+      aspect-ratio: 2 / 3;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .12);
+      border-radius: 13px;
+      background:
+        radial-gradient(circle at 30% 20%, rgba(255, 90, 140, .42), transparent 38%),
+        linear-gradient(145deg, #43254f, #171020);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, .28);
+    }
+
+    .result-cover-shell img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .result-cover-placeholder {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255, 255, 255, .72);
+      font-size: 30px;
+      font-style: italic;
+      font-weight: 900;
+    }
+
+    .result-cover-placeholder[hidden],
+    .result-cover-shell img[hidden] {
+      display: none !important;
     }
 
     .result-body {
@@ -354,22 +416,32 @@
 
     .result-title {
       display: block;
-      margin: 0 0 7px;
+      margin: 0 0 6px;
       overflow: hidden;
       color: #fff;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 18px;
-      line-height: 1.2;
+      font-size: 16px;
+      line-height: 1.22;
       font-weight: 800;
-      letter-spacing: .3px;
+      letter-spacing: -.15px;
       overflow-wrap: anywhere;
     }
 
     .result-meta {
-      margin-bottom: 13px;
-      color: #9c92aa;
+      margin-bottom: 7px;
+      color: #b0a5bd;
       font-size: 10.5px;
       line-height: 1.45;
+    }
+
+    .result-description {
+      display: -webkit-box;
+      margin: 0;
+      overflow: hidden;
+      color: #8f849d;
+      font-size: 10.5px;
+      line-height: 1.45;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 4;
     }
 
     .continue {
@@ -387,6 +459,10 @@
       font-weight: 850;
       box-shadow: 0 9px 22px rgba(255, 45, 112, .22);
       -webkit-tap-highlight-color: transparent;
+    }
+
+    .continue:not([href]) {
+      display: none;
     }
 
     .continue svg {
@@ -544,7 +620,7 @@
               <circle cx="11" cy="11" r="7"></circle>
               <path d="m20 20-3.6-3.6"></path>
             </svg>
-            <input id="content-id" name="content-id" type="text" inputmode="text" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. l9rP6ey2CB" aria-describedby="search-helper">
+            <input id="content-id" name="content-id" type="text" inputmode="text" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. l9rP6ey2CB" aria-describedby="search-helper">
           </div>
           <button class="search-button" id="search-button" type="button" aria-label="Find story">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
@@ -556,17 +632,24 @@
         <div class="helper" id="search-helper" role="status" aria-live="polite">You’ll find this Content ID on the final screen of the TikTok video.</div>
 
         <article class="result" id="result" aria-live="polite">
-          <div class="result-body">
-            <div class="match">Content ID ready</div>
-            <h2 class="result-title" id="result-title"></h2>
-            <div class="result-meta" id="result-meta"></div>
-            <a class="continue" id="continue-link" href="#" rel="noreferrer">
-              <span id="continue-text">Open matching story</span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" aria-hidden="true">
-                <path d="M5 12h14M13 6l6 6-6 6"></path>
-              </svg>
-            </a>
+          <div class="result-layout">
+            <div class="result-cover-shell" id="result-cover-shell">
+              <div class="result-cover-placeholder" id="result-cover-placeholder" aria-hidden="true">D</div>
+              <img id="result-cover" alt="" hidden decoding="async" fetchpriority="high">
+            </div>
+            <div class="result-body">
+              <div class="match">Story found</div>
+              <h2 class="result-title" id="result-title"></h2>
+              <div class="result-meta" id="result-meta"></div>
+              <p class="result-description" id="result-description"></p>
+            </div>
           </div>
+          <a class="continue" id="continue-link" rel="noreferrer">
+            <span id="continue-text">Open matching story</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6"></path>
+            </svg>
+          </a>
         </article>
       </section>
 
