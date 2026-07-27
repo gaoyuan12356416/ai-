@@ -54,6 +54,7 @@ X Post 短剧标签放行增量已于 2026-07-24 按 GitHub-first 部署生产�
 - 本次增量：页面与素材池查询/预览/添加/删除统一跟随 `xPostMaterialPool` 快速导航配置；API Token、缺少模块权限、禁用/缺失配置继续 fail closed。
 - 本次增量：主后台完成导航授权后才向 loopback Sidecar 附加精确素材池授权标记；不改变发布日志、运行记录、X 账号全量列表或 daily 权限。
 - 本次增量：`ads_custom_source.url` 为绝对 HTTP 地址时，素材预览和 selector 共用同一规范化函数升级为 HTTPS；FTP、相对路径、带凭据、控制字符和非标准端口继续 fail closed。
+- 本次增量：素材入池和 daily 选材均校验 `ads_drama_info.app_id=1479` 的 `deploy_time`；未来时间暂时跳过并在后续自然批次重新检查，时间到达后自动恢复，不创建 queue、不提前发布。
 - 保留现有 X 日批次、W2A/短链、日志、账号、timer 和失败语义。
 
 ## 配置项
@@ -106,8 +107,8 @@ X Post 短剧标签放行增量已于 2026-07-24 按 GitHub-first 部署生产�
 - 批量添加中的同批重复、池内重复或历史 queue 素材逐条跳过；其余全新素材仍在同一事务写入，非法请求和未知存储冲突继续整批回滚。
 - 临时未占用素材可删除；已占用/已发布素材返回 409。
 - daily bearer 可访问 available/check，不能访问 query/add/delete。
-- available 返回严格 `created_at,id` 顺序，非 Dramawave/违规/素材源或资源危险标签/媒体异常不进入计划；短剧 labels 内容词不拦截。
-- 只有三条全部通过时才出现三条 queue；不足三条时 Post 数为 0。
+- available 返回严格 `created_at,id` 顺序，非 Dramawave/违规/素材源或资源危险标签/媒体异常不进入计划；短剧 labels 内容词不拦截。Dramawave 多端 `deploy_time` 取最晚值，未来时间素材跳过并继续扫描，等于或早于当前时间时允许候选。
+- 只有与当前目标账号数相同的素材全部通过时才按账号数创建 queue；素材不足时 Post 数为 0。
 - 首轮自然 timer 后核对 queue/log/pool：成功项 published，known failure/unknown 保持 unpublished 且派生不可重发。
 - 既有 canary、OAuth、短链、X 日志页面和账号权限回归正常。
 

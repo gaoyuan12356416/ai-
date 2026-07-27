@@ -107,7 +107,8 @@
 - 每项规范为正整数文本，`"00101"` 保存为 `"101"`。
 - 同批重复、池内重复、已有任意 queue 历史按素材逐条跳过；同批其余全新素材仍在一个事务中写入。
 - 非法 ID、校验结果缺失/冲突、数据库异常或未知唯一约束冲突仍 fail closed，并回滚本次所有待新增素材。
-- 主后台先复用正式 X selector 做只读即时校验，覆盖 Dramawave、视频类型/删除态/时长、HTTPS、必填元数据、违规记录、素材源/资源色情暴力危险标签和短剧映射；短剧 labels 只作必填归因元数据，不按内容词拒绝。
+- 主后台先复用正式 X selector 做只读即时校验，覆盖 Dramawave、视频类型/删除态/时长、HTTPS、必填元数据、违规记录、素材源/资源色情暴力危险标签、短剧映射和短剧可投放时间；短剧 labels 只作必填归因元数据，不按内容词拒绝。
+- 可投放时间读取 `ads_drama_info.app_id=1479`、同 `content_id + language` 的 `deploy_time`，多端取最晚值。严格晚于当前时间时保存 `drama_not_yet_deliverable` 和北京时间说明；素材不绑定 queue，后续 daily 每次重新校验，时间到达后自动恢复候选资格。
 - 素材不存在或任一标准不通过时仍可加入池，但 `availability` 立即为 `validation_failed`，页面显示“不可用”；检查服务异常统一 fail closed 为 `material_validation_unavailable`。
 - 素材 ID、校验时间和逐素材错误与池记录在 Sidecar 同一事务写入，不存在先显示 `available` 的窗口。
 - 入池校验不替代 daily 的媒体文件下载/ffprobe 预检。
@@ -233,8 +234,8 @@ backend 或 daily bearer。请求 1 至 100 条互异池 ID：
   "checks": [
     {
       "pool_item_id": 12,
-      "error_code": "material_has_violation",
-      "error_message": "material has a violation record"
+      "error_code": "drama_not_yet_deliverable",
+      "error_message": "短剧可投放时间为2026-07-28 10:00:00（北京时间），当前尚未到达"
     }
   ]
 }
@@ -276,3 +277,6 @@ backend 或 daily bearer。请求 1 至 100 条互异池 ID：
 - `x_post_daily_candidate_shortage`
 - `x_post_daily_run_exists`
 - `x_post_storage_conflict`
+- `drama_not_yet_deliverable`
+- `drama_deploy_time_missing`
+- `drama_deploy_time_invalid`

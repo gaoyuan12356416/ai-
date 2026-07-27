@@ -54,11 +54,12 @@
 | TC-037 | 页面导航授权一致性 | 普通用户有 `x_accounts` 且 `adminOnly=false`，再覆盖 true/禁用/配置读取失败 | false 时页面可加载；true、禁用或读取失败时 fail closed；页面不再写死 `user.is_admin` |
 | TC-038 | 100 条批量入池 | 一次提交 100 个互异全新 ID | 100 条全部写入，不触发上限误判 |
 | TC-039 | 10 条含 1 条池内重复 | 已有 1 条后提交该条加 9 条全新 ID | 新增 9、跳过 1；前端提示新增/跳过分类，不整批失败 |
+| TC-040 | 短剧可投放时间 | 构造 Dramawave 多端过去/等于/未来/缺失/非法 `deploy_time`，并把当前时间推进到边界 | 多端取最晚值；未来时间以 `drama_not_yet_deliverable` 跳过并继续 FIFO 扫描；等于或超过边界自动恢复；缺失/非法 fail closed |
 
 ## 自动化映射
 
 - `scripts/test_x_post_material_pool.py`：TC-001 至 TC-005、TC-014 至 TC-025、TC-036、TC-038、TC-039 的账本核心。
-- `scripts/test_x_post_material_pool_selector.py`：TC-006 至 TC-013。
+- `scripts/test_x_post_material_pool_selector.py`：TC-006 至 TC-013、TC-040。
 - `scripts/test_x_post_daily.py`：TC-016 至 TC-019、TC-027、runner 失败语义。
 - `scripts/test_x_post_ledger.py`：TC-019、TC-020、TC-024、TC-030。
 - `scripts/test_x_accounts.py`：Sidecar 路由、daily bearer 和发布状态回归。

@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 DEFAULT_SCHEMA = "kunlunads_dev"
 DEFAULT_PRODUCT = "Dramawave"
+DEFAULT_DRAMAWAVE_APP_ID = 1479
+MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
 _MATERIAL_ID = re.compile(r"^[0-9]+$")
@@ -229,11 +231,12 @@ def _cursor_row(connection, sql, params):
 class DramawaveCandidateSelector:
     """Select spend-ranked, compliant and unambiguous video candidates."""
 
-    def __init__(self, connection, schema=DEFAULT_SCHEMA):
+    def __init__(self, connection, schema=DEFAULT_SCHEMA, now=None):
         if not _SAFE_IDENTIFIER.fullmatch(str(schema or "")):
             raise CandidateSelectionError("invalid MySQL schema")
         self.connection = connection
         self.schema = str(schema)
+        self.now = shanghai_now(now)
 
     def _base_rows(self, source_date, scan_limit, product):
         schema = self.schema
@@ -359,6 +362,73 @@ class DramawaveCandidateSelector:
              ORDER BY r.id ASC
         """.format(schema=self.schema)
         return _cursor_rows(self.connection, sql, (content_id, language))
+
+    def _drama_deploy_rows(self, content_id, language):
+        """Load the authoritative Dramawave delivery time for one drama."""
+        sql = """
+            SELECT
+                i.content_id, i.app_id, i.app, i.language, i.deploy_time
+              FROM `{schema}`.ads_drama_info i FORCE INDEX (ac)
+             WHERE i.content_id = %s
+               AND i.app_id = %s
+               AND LOWER(TRIM(i.language)) = LOWER(%s)
+             ORDER BY i.app ASC
+        """.format(schema=self.schema)
+        return _cursor_rows(
+            self.connection,
+            sql,
+            (content_id, DEFAULT_DRAMAWAVE_APP_ID, language),
+        )
+
+    def _validate_drama_deploy_time(self, content_id, language):
+        rows = self._drama_deploy_rows(content_id, language)
+        if not rows:
+            raise PoolCandidateRejection(
+                "drama_deploy_time_missing",
+                "短剧没有可核验的Dramawave可投放时间",
+            )
+        deploy_times = []
+        for row in rows:
+            try:
+                mapped_content_id = _text(
+                    row.get("content_id"), "delivery content_id", limit=128
+                )
+                mapped_app_id = _integer(row.get("app_id"), "delivery app_id")
+                mapped_language = _text(
+                    row.get("language"), "delivery language", limit=32
+                )
+                deploy_time = _integer(
+                    row.get("deploy_time"), "drama deploy_time"
+                )
+            except CandidateSelectionError as exc:
+                raise PoolCandidateRejection(
+                    "drama_deploy_time_invalid",
+                    "短剧可投放时间数据无效：%s" % exc,
+                ) from None
+            if (
+                mapped_content_id != content_id
+                or mapped_app_id != DEFAULT_DRAMAWAVE_APP_ID
+                or mapped_language.casefold() != language.casefold()
+                or deploy_time < 0
+                or deploy_time > MAX_SUPPORTED_EPOCH_SECONDS
+            ):
+                raise PoolCandidateRejection(
+                    "drama_deploy_time_invalid",
+                    "短剧可投放时间与Dramawave素材映射不一致",
+                )
+            deploy_times.append(deploy_time)
+
+        effective_deploy_time = max(deploy_times)
+        if effective_deploy_time > int(self.now.timestamp()):
+            available_at = datetime.fromtimestamp(
+                effective_deploy_time, timezone.utc
+            ).astimezone(SHANGHAI_TZ)
+            raise PoolCandidateRejection(
+                "drama_not_yet_deliverable",
+                "短剧可投放时间为%s（北京时间），当前尚未到达"
+                % available_at.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        return effective_deploy_time
 
     def _pool_candidate(self, material_id, source_date):
         material_rows = self._pool_material_rows(material_id)
@@ -523,6 +593,10 @@ class DramawaveCandidateSelector:
                 "drama mapping is ambiguous",
             )
         drama = next(iter(canonical.values()))
+        drama_deploy_time = self._validate_drama_deploy_time(
+            content_id,
+            material_language,
+        )
 
         return {
             "source_date": source_date,
@@ -533,6 +607,7 @@ class DramawaveCandidateSelector:
             "material_name": material_name,
             "material_language": material_language,
             "drama_name": drama["drama_name"],
+            "drama_deploy_time": drama_deploy_time,
             "tag": drama["labels"][0],
             "description": drama["description"],
             "spend": 0.0,
@@ -835,13 +910,18 @@ def select_pool_candidates(
     source_date,
     limit=3,
     schema=DEFAULT_SCHEMA,
+    now=None,
 ):
     """Hydrate manual-pool materials in oldest-first order.
 
     Returns ``(candidates, rejections)``. Rejections are safe item-level
     outcomes; a :class:`CandidateQueryError` still aborts the whole call.
     """
-    return DramawaveCandidateSelector(connection, schema=schema).select_pool(
+    return DramawaveCandidateSelector(
+        connection,
+        schema=schema,
+        now=now,
+    ).select_pool(
         pool_items,
         source_date,
         limit=limit,

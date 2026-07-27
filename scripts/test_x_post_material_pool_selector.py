@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -42,6 +43,18 @@ def drama_row(material_id, **overrides):
         "drama_name": "Drama %s" % material_id,
         "drama_labels": "Fantasy,Counterattack",
         "drama_description": "A complete and safe drama description.",
+    }
+    row.update(overrides)
+    return row
+
+
+def deploy_row(material_id, deploy_time=0, **overrides):
+    row = {
+        "content_id": "C%s" % material_id,
+        "app_id": 1479,
+        "app": "com.dramawave.app",
+        "language": "en",
+        "deploy_time": deploy_time,
     }
     row.update(overrides)
     return row
@@ -86,6 +99,15 @@ class PoolCursor:
                 {"tag_name": value}
                 for value in self.connection.material_tags.get(str(params[0]), [])
             ]
+        elif "ads_drama_info i" in sql:
+            content_id = str(params[0])
+            material_id = content_id.lstrip("C")
+            if material_id in self.connection.query_error_material_ids:
+                raise RuntimeError("simulated read-only connection loss")
+            self.rows = self.connection.deploy_rows.get(
+                material_id,
+                [deploy_row(material_id)],
+            )
         elif "ads_drama_resource" in sql:
             content_id = str(params[0])
             material_id = content_id.lstrip("C")
@@ -112,6 +134,7 @@ class PoolConnection:
         self.violations = {}
         self.material_tags = {}
         self.drama_rows = {}
+        self.deploy_rows = {}
         self.query_error_material_ids = set()
         self.calls = []
 
@@ -156,6 +179,104 @@ class ManualPoolSelectorTests(unittest.TestCase):
             if "ads_drama_resource" in sql
         ]
         self.assertEqual(drama_calls[0][1], ("C10", "en"))
+        deploy_calls = [
+            (sql, params)
+            for sql, params in connection.calls
+            if "ads_drama_info i" in sql
+        ]
+        self.assertEqual(deploy_calls[0][1], ("C10", 1479, "en"))
+
+    def test_future_deploy_time_is_skipped_until_the_boundary_passes(self):
+        shanghai = timezone(timedelta(hours=8))
+        now = datetime(2026, 7, 27, 10, 0, 0, tzinfo=shanghai)
+        deploy_time = int((now + timedelta(hours=2)).timestamp())
+        connection = PoolConnection([1, 2])
+        connection.deploy_rows["1"] = [
+            deploy_row(1, deploy_time, app="com.dramawave.app"),
+            deploy_row(1, deploy_time, app="6670430706"),
+        ]
+        connection.deploy_rows["2"] = [
+            deploy_row(2, int(now.timestamp())),
+        ]
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [
+                pool_item(1, 1, "2026-07-23T00:00:00Z"),
+                pool_item(2, 2, "2026-07-23T00:00:01Z"),
+            ],
+            "2026-07-22",
+            limit=1,
+            now=now,
+        )
+
+        self.assertEqual([item["material_id"] for item in selected], ["2"])
+        self.assertEqual(
+            [item["error_code"] for item in rejections],
+            ["drama_not_yet_deliverable"],
+        )
+        self.assertIn("2026-07-27 12:00:00", rejections[0]["error_message"])
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [pool_item(1, 1, "2026-07-23T00:00:00Z")],
+            "2026-07-22",
+            limit=1,
+            now=now + timedelta(hours=2),
+        )
+        self.assertEqual(rejections, [])
+        self.assertEqual([item["material_id"] for item in selected], ["1"])
+        self.assertEqual(selected[0]["drama_deploy_time"], deploy_time)
+
+    def test_latest_dramawave_platform_time_controls_eligibility(self):
+        shanghai = timezone(timedelta(hours=8))
+        now = datetime(2026, 7, 27, 10, 0, 0, tzinfo=shanghai)
+        connection = PoolConnection([1])
+        connection.deploy_rows["1"] = [
+            deploy_row(1, int((now - timedelta(hours=1)).timestamp())),
+            deploy_row(
+                1,
+                int((now + timedelta(hours=1)).timestamp()),
+                app="6670430706",
+            ),
+        ]
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [pool_item(1, 1, "2026-07-23T00:00:00Z")],
+            "2026-07-22",
+            limit=1,
+            now=now,
+        )
+
+        self.assertEqual(selected, [])
+        self.assertEqual(rejections[0]["error_code"], "drama_not_yet_deliverable")
+
+    def test_missing_or_invalid_dramawave_deploy_time_fails_closed(self):
+        shanghai = timezone(timedelta(hours=8))
+        now = datetime(2026, 7, 27, 10, 0, 0, tzinfo=shanghai)
+        connection = PoolConnection([1, 2, 3])
+        connection.deploy_rows["1"] = []
+        connection.deploy_rows["2"] = [deploy_row(2, -1)]
+        connection.deploy_rows["3"] = [deploy_row(3, 0)]
+
+        selected, rejections = select_pool_candidates(
+            connection,
+            [
+                pool_item(1, 1, "2026-07-23T00:00:00Z"),
+                pool_item(2, 2, "2026-07-23T00:00:01Z"),
+                pool_item(3, 3, "2026-07-23T00:00:02Z"),
+            ],
+            "2026-07-22",
+            limit=1,
+            now=now,
+        )
+
+        self.assertEqual([item["material_id"] for item in selected], ["3"])
+        self.assertEqual(
+            [item["error_code"] for item in rejections],
+            ["drama_deploy_time_missing", "drama_deploy_time_invalid"],
+        )
 
     def test_item_level_safety_rejections_are_reported_and_scanning_continues(self):
         connection = PoolConnection(range(1, 7))
