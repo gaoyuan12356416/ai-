@@ -22,7 +22,9 @@ MAX_REQUEST_BYTES = 32 * 1024
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 PAYLOAD_FIELDS = (
     "resource_id",
+    "resource_name",
     "task_start_time",
+    "drama_dubbing_type",
     "task_type",
     "original_material_name",
     "material_name",
@@ -33,6 +35,8 @@ PAYLOAD_FIELDS = (
 
 _FIELD_LIMITS = {
     "resource_id": 128,
+    "resource_name": 255,
+    "drama_dubbing_type": 64,
     "task_type": 64,
     "original_material_name": 255,
     "material_name": 255,
@@ -226,7 +230,7 @@ def _parse_rfc3339(value):
 
 
 def normalize_payload(payload):
-    """Validate the exact eight-field contract and return canonical values."""
+    """Validate the exact ten-field contract and return canonical values."""
 
     if not isinstance(payload, dict):
         raise MaterialStatusError(
@@ -341,7 +345,9 @@ def _payload_message_lines(payload, event_id=None):
     optimizer = item["optimizer_name"] or "（未提供）"
     lines = [
         "资源ID：%s" % item["resource_id"],
+        "资源名：%s" % item["resource_name"],
         "任务开始时间：%s" % _display_shanghai_time(item["task_start_time"]),
+        "剧集配音类型：%s" % item["drama_dubbing_type"],
         "任务类型：%s" % item["task_type"],
         "素材原始名：%s" % item["original_material_name"],
         "素材名：%s" % item["material_name"],

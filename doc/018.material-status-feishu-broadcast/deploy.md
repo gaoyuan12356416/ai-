@@ -7,6 +7,8 @@
 - 新增优化师 MySQL 映射、飞书 open_id 解析、私聊和兜底群播报
 - 新增 Nginx 精确反向代理
 - 新增公开接口文档
+- 十字段增量新增 `resource_name` 和 `drama_dubbing_type`，保留既有
+  `task_type`，三项统一进入私聊与兜底播报
 
 ## 配置项
 
@@ -36,18 +38,20 @@ MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS=300
 1. 确认本地基线 `app.py` SHA-256 与部署前线上文件完全一致。
 2. 完成本地测试、提交并推送 GitHub。
 3. 记录线上服务状态、源文件 SHA-256 和当前配置。
-4. 在 `/mnt/data-disk` 创建带校验清单的回滚备份，至少包含：
+4. 查询 outbox，确认不存在携带旧八字段 payload 的
+   `queued/retry/processing` 事件；若非 0，先完成旧事件投递，不直接切换。
+5. 在 `/mnt/data-disk` 创建带校验清单的回滚备份，至少包含：
    - `app.py`
    - 新增 feature 目录的目标状态
    - `.env`
    - Nginx 配置
    - SQLite 在线备份
-5. 从精确 GitHub commit 构建发布目录，只安装本需求涉及的代码和配置，不覆盖无关线上复合文件。
-6. 原子更新 `.env`，生成高熵 Token；只报告 Token 指纹，不打印 Token。
-7. 安装 Nginx exact-location 配置并执行 `nginx -t`。
-8. 先执行生产代码编译和测试，再重启 `drama-material-api.service`。
-9. 验证 `/api/auth/status`、新接口错误 Token、正确 Token 入队、兜底群 canary 和日志。
-10. 发布无 Token 的 HTML 接口文档。
+6. 从精确 GitHub commit 构建发布目录，只安装本需求涉及的代码和配置，不覆盖无关线上复合文件。
+7. 首次发布时原子更新 `.env` 并生成高熵 Token；十字段增量不轮换 Token。
+8. 首次发布时安装 Nginx exact-location 配置；十字段增量只复核 `nginx -t`。
+9. 先执行生产代码编译和测试，再重启 `drama-material-api.service`。
+10. 验证 `/api/auth/status`、新接口错误 Token、旧八字段 `422`、合法十字段入队、兜底群 canary 和日志。
+11. 发布无 Token 的 HTML 接口文档。
 
 ## 验证步骤
 
@@ -64,8 +68,9 @@ curl -sS -i http://127.0.0.1:8787/api/auth/status
 安全 canary：
 
 - 错误 Token 必须返回 `401`，且事件表无新增。
-- 使用 `TEST-` 资源和不存在的测试优化师提交一次合法事件。
+- 使用 `TEST-` 资源、不存在的测试优化师和完整十字段提交一次合法事件。
 - 接口返回 `202` 后，兜底群出现一条明确标注联调测试的消息。
+- 飞书回读确认资源名、剧集配音类型、任务类型及其余字段完整展示。
 - 相同幂等键重放不产生第二条正常播报。
 - 日志和 SQLite 不包含 Token 或完整 open_id。
 

@@ -13,6 +13,8 @@
 - worker 就绪、租约和服务重启行为
 - Nginx 精确路由、32 KiB 限制和 413 JSON
 - Token、email、open_id 等敏感信息保护
+- 十字段规范化，以及私聊/兜底消息中 `resource_name`、
+  `drama_dubbing_type`、`task_type` 的固定顺序
 
 ## 问题清单
 
@@ -25,13 +27,17 @@
 | CR-005 | High | worker 生命周期 | worker 启动失败时接口可能仍返回 `202` | 入队前执行 readiness 门禁并按请求自愈，失败返回 `503` | 已修复 |
 | CR-006 | High | 飞书 Token 缓存 | Token 失效后重试可能持续复用旧缓存 | 识别鉴权错误码，条件清缓存并即时刷新一次 | 已修复 |
 | CR-007 | Medium | Nginx 413 | 代理层超限可能返回 HTML 而非接口 JSON | exact location 增加专用 `error_page 413` JSON | 已修复 |
+| CR-008 | Medium | 十字段切换 | 未完成的旧八字段 outbox 事件会在新 formatter 中校验失败 | 部署门禁检查 `queued/retry/processing=0`；生产切换前实查均为 0 | 已修复 |
+| CR-009 | Medium | 增量文档 | 测试报告与部署步骤存在旧字段口径 | 统一为十字段，并明确旧八字段 `422`、新 canary 和队列门禁 | 已修复 |
+| CR-010 | Low | 幂等测试 | 两个新字段循环测试的 HTTP 状态断言只落在循环末尾 | 将 `status=409` 断言移入每个 `subTest` | 已修复 |
 
 ## 编译 / 验证结果
 
 - Python 3.9 grammar：通过
 - `py_compile`：通过
 - 需求专项测试：28/28 通过
-- 相关既有回归：71/71 通过
+- 相关既有回归：111/111 通过
+- 合计：139/139 通过
 - `git diff --check`：通过
 - 最终静态复核：无 Blocker / High
 

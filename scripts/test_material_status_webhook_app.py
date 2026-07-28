@@ -25,7 +25,9 @@ TEST_TOKEN = "mst_test_" + ("a" * 48)
 def valid_payload(**changes):
     payload = {
         "resource_id": "TEST-RESOURCE-001",
+        "resource_name": "联调测试剧集",
         "task_start_time": "2026-07-28T14:30:00+08:00",
+        "drama_dubbing_type": "AI配音",
         "task_type": "素材制作联调测试",
         "original_material_name": "source.mp4",
         "material_name": "final.mp4",
@@ -146,7 +148,10 @@ class MaterialStatusHTTPTests(unittest.TestCase):
         first_status, _, first = self.post(valid_payload())
         duplicate_status, _, duplicate = self.post(valid_payload())
         conflict_status, _, conflict = self.post(
-            valid_payload(final_status="另一个状态")
+            valid_payload(resource_name="另一个资源名")
+        )
+        second_conflict_status, _, second_conflict = self.post(
+            valid_payload(drama_dubbing_type="真人配音")
         )
 
         self.assertEqual(first_status, 202)
@@ -158,6 +163,8 @@ class MaterialStatusHTTPTests(unittest.TestCase):
         self.assertEqual(duplicate["event_id"], first["event_id"])
         self.assertEqual(conflict_status, 409)
         self.assertEqual(conflict["code"], "idempotency_conflict")
+        self.assertEqual(second_conflict_status, 409)
+        self.assertEqual(second_conflict["code"], "idempotency_conflict")
 
         claimed = self.store.claim_next(lease_seconds=60)
         self.store.mark_delivered(
@@ -210,6 +217,28 @@ class MaterialStatusHTTPTests(unittest.TestCase):
         )
         self.assertEqual(status, 422)
         self.assertEqual(payload["code"], "invalid_payload")
+
+        for field in ("resource_name", "drama_dubbing_type"):
+            invalid = valid_payload()
+            invalid.pop(field)
+            status, _, payload = self.post(
+                invalid,
+                idempotency_key="mst-test-missing-" + field,
+            )
+            self.assertEqual(status, 422)
+            self.assertEqual(payload["code"], "invalid_payload")
+
+        legacy = valid_payload()
+        legacy.pop("resource_name")
+        legacy.pop("drama_dubbing_type")
+        status, _, payload = self.post(
+            legacy,
+            idempotency_key="mst-test-legacy-eight-fields",
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(payload["code"], "invalid_payload")
+        self.assertIn("resource_name", payload["message"])
+        self.assertIn("drama_dubbing_type", payload["message"])
 
         status, _, payload = self.post(
             b"{" + (b"x" * (app.MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES + 1)),
@@ -328,7 +357,11 @@ class MaterialStatusDeliveryTests(unittest.TestCase):
         self.assertNotIn("open_id", delivered["result"])
         self.assertEqual(sender.call_args.args[0], "open_id")
         self.assertEqual(sender.call_args.args[1], "ou_test_private")
-        self.assertIn("事件编号：MSE-", sender.call_args.args[2])
+        message = sender.call_args.args[2]
+        self.assertIn("资源名：联调测试剧集", message)
+        self.assertIn("剧集配音类型：AI配音", message)
+        self.assertIn("任务类型：素材制作联调测试", message)
+        self.assertIn("事件编号：MSE-", message)
         self.assertEqual(
             sender.call_args.args[3],
             "mst-MSE-0000000001-private",
@@ -362,6 +395,10 @@ class MaterialStatusDeliveryTests(unittest.TestCase):
             sender.call_args.args[1],
             app.MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID,
         )
+        message = sender.call_args.args[2]
+        self.assertIn("资源名：联调测试剧集", message)
+        self.assertIn("剧集配音类型：AI配音", message)
+        self.assertIn("任务类型：素材制作联调测试", message)
         self.assertEqual(
             sender.call_args.args[3],
             "mst-MSE-0000000001-fallback",

@@ -37,10 +37,11 @@
 ## 业务规则
 
 1. 请求必须携带 `Authorization: Bearer <token>` 和 `Idempotency-Key`。
-2. 请求体严格包含八个字段：
-   `resource_id`、`task_start_time`、`task_type`、`original_material_name`、
-   `material_name`、`language`、`final_status`、`optimizer_name`。
-3. `optimizer_name` 字段必须存在，允许空字符串；空字符串直接视为无法匹配并进入兜底群。其余七个字段必须为非空单行字符串。
+2. 请求体严格包含十个字段：
+   `resource_id`、`resource_name`、`task_start_time`、`drama_dubbing_type`、
+   `task_type`、`original_material_name`、`material_name`、`language`、
+   `final_status`、`optimizer_name`。
+3. `optimizer_name` 字段必须存在，允许空字符串；空字符串直接视为无法匹配并进入兜底群。其余九个字段必须为非空单行字符串。
 4. `task_start_time` 必须是带时区的 RFC 3339 时间，秒的小数部分支持 1–6 位；服务统一以 UTC 保存，播报时转换为 UTC+8。
 5. `optimizer_name` 只去除首尾空白后与 `admin_users.username` 做大小写敏感的精确匹配，不做模糊匹配。
 6. 只使用 `admin_user_group.status=0` 且 email 非空的映射。
@@ -128,7 +129,7 @@ SQLite 事件表至少保存：
 - 正常依赖下，私聊或兜底群播报在 5 秒内出现。
 - Token 不出现在代码、Git、响应、日志、文档或审计数据中。
 - 同一幂等键相同请求串行和并发重放均不重复创建正常播报。
-- 八个字段按固定顺序完整展示。
+- 十个字段按固定顺序完整展示；私聊与兜底业务字段顺序完全一致。
 - 所有无法私聊的业务原因均能在兜底群看到事件编号和失败码。
 - 服务重启后未完成事件可继续处理。
 
@@ -141,3 +142,6 @@ SQLite 事件表至少保存：
 ## 变更记录
 
 - 2026-07-28：首次建立需求，鉴权方案按用户最新指示确定为独立 Bearer Token，不使用 IP 白名单。
+- 2026-07-28：请求契约由八字段升级为十字段，新增 `resource_name`（资源名）和
+  `drama_dubbing_type`（剧集配音类型），保留既有 `task_type`（任务类型）；
+  三项均进入私聊和兜底播报。旧八字段请求按严格契约返回 `422`。

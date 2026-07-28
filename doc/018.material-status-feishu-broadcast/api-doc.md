@@ -22,12 +22,16 @@ Bearer Token 至少 32 个字符；真实 Token 由我方通过安全渠道单�
 
 ## 3. 请求字段
 
-请求体严格包含下列八个字段，不接受额外字段。
+请求体严格包含下列十个字段，不接受额外字段。2026-07-28 本次契约升级新增
+`resource_name` 和 `drama_dubbing_type`；`task_type` 为原有字段并继续保留。
+旧版仅包含八个字段的请求会返回 `422 invalid_payload`，甲方必须先完成字段升级。
 
 | 字段 | 类型 | 必填 | 最大长度 | 说明 |
 | --- | --- | --- | --- | --- |
 | `resource_id` | string | 是 | 128 | 资源 ID，必须按字符串传输 |
+| `resource_name` | string | 是 | 255 | 资源名 |
 | `task_start_time` | string | 是 | 64 | RFC 3339 且带时区；秒的小数部分可省略，提供时限 1–6 位，例如 `2026-07-28T14:30:00+08:00` |
+| `drama_dubbing_type` | string | 是 | 64 | 剧集配音类型 |
 | `task_type` | string | 是 | 64 | 任务类型 |
 | `original_material_name` | string | 是 | 255 | 素材原始名 |
 | `material_name` | string | 是 | 255 | 素材名 |
@@ -40,7 +44,9 @@ Bearer Token 至少 32 个字符；真实 Token 由我方通过安全渠道单�
 ```json
 {
   "resource_id": "RES-20260728-000123",
+  "resource_name": "暮色心约",
   "task_start_time": "2026-07-28T14:30:00+08:00",
+  "drama_dubbing_type": "AI配音",
   "task_type": "素材制作",
   "original_material_name": "episode_01_source.mp4",
   "material_name": "episode_01_final_zh.mp4",
@@ -60,7 +66,9 @@ curl --request POST \
   --header 'Content-Type: application/json; charset=utf-8' \
   --data '{
     "resource_id": "RES-20260728-000123",
+    "resource_name": "暮色心约",
     "task_start_time": "2026-07-28T14:30:00+08:00",
+    "drama_dubbing_type": "AI配音",
     "task_type": "素材制作",
     "original_material_name": "episode_01_source.mp4",
     "material_name": "episode_01_final_zh.mp4",
@@ -154,7 +162,9 @@ optimizer_name
 【素材任务最终状态播报】
 
 资源ID：RES-20260728-000123
+资源名：暮色心约
 任务开始时间：2026-07-28T14:30:00+08:00（Asia/Shanghai，UTC+08:00）
+剧集配音类型：AI配音
 任务类型：素材制作
 素材原始名：episode_01_source.mp4
 素材名：episode_01_final_zh.mp4
@@ -174,7 +184,9 @@ optimizer_name
 说明：admin_users.username 未找到完全匹配的用户
 
 资源ID：RES-20260728-000123
+资源名：暮色心约
 任务开始时间：2026-07-28T14:30:00+08:00（Asia/Shanghai，UTC+08:00）
+剧集配音类型：AI配音
 任务类型：素材制作
 素材原始名：episode_01_source.mp4
 素材名：episode_01_final_zh.mp4

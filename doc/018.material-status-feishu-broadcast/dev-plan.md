@@ -4,6 +4,10 @@
 
 实现素材任务状态 Webhook、持久化 outbox、优化师/飞书匹配、私聊与兜底群播报，并完成接口文档和生产部署。
 
+2026-07-28 十字段增量：新增 `resource_name`、`drama_dubbing_type`，
+保留 `task_type`，三项进入私聊和兜底消息；不修改 Token、Nginx、SQLite
+表结构或优化师匹配链。
+
 ## 任务拆分
 
 | 任务 | 文件/模块 | 状态 |
@@ -51,3 +55,11 @@ systemctl status drama-material-api.service --no-pager
 - 生产发布目录：`/root/releases/drama-material-service-f1d49213`
 - 回滚点：`/mnt/data-disk/backups/drama-material-service/material-status-20260728T1548-pre-f1d49213`
 - 兜底验收事件：`MSE-0000000001`，送达、幂等重放和飞书回读均通过
+
+## 十字段增量记录
+
+- 分支：`codex/material-status-add-fields-20260728`
+- 生产切换前 outbox：`delivered=2`，`queued/retry/processing=0`
+- 本地专项：28/28；相关回归：111/111；总计：139/139
+- Python 3.9 grammar、HTML 解析、`git diff --check`：通过
+- 生产提交、回滚点和十字段 canary：部署后追加到 `rollout.md`

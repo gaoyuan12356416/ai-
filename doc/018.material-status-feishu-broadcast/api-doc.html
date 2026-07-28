@@ -210,27 +210,39 @@
     </table>
 
     <h2>3. 请求字段</h2>
-    <p>请求体严格包含以下八个字段，不接受额外字段。</p>
+    <p>
+      请求体严格包含以下十个字段，不接受额外字段。本次契约升级新增
+      <code>resource_name</code> 和 <code>drama_dubbing_type</code>；
+      <code>task_type</code> 为原有字段并继续保留。
+    </p>
+    <div class="note warn">
+      旧版仅包含八个字段的请求会返回 <code>422 invalid_payload</code>；
+      甲方必须先完成字段升级。
+    </div>
     <table>
       <thead>
-        <tr><th>字段</th><th>类型</th><th>最大长度</th><th>说明</th></tr>
+        <tr><th>字段</th><th>类型</th><th>必填</th><th>最大长度</th><th>说明</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>resource_id</code></td><td>string</td><td>128</td><td>资源 ID，必须按字符串传输</td></tr>
-        <tr><td><code>task_start_time</code></td><td>string</td><td>64</td><td>RFC 3339 且必须带时区；秒的小数部分可省略，提供时限 1–6 位</td></tr>
-        <tr><td><code>task_type</code></td><td>string</td><td>64</td><td>任务类型</td></tr>
-        <tr><td><code>original_material_name</code></td><td>string</td><td>255</td><td>素材原始名</td></tr>
-        <tr><td><code>material_name</code></td><td>string</td><td>255</td><td>素材名</td></tr>
-        <tr><td><code>language</code></td><td>string</td><td>32</td><td>语种，推荐 BCP-47，例如 <code>zh-CN</code></td></tr>
-        <tr><td><code>final_status</code></td><td>string</td><td>64</td><td>最终状态</td></tr>
-        <tr><td><code>optimizer_name</code></td><td>string</td><td>100</td><td>优化师名称；字段必传，空字符串会触发兜底提醒</td></tr>
+        <tr><td><code>resource_id</code></td><td>string</td><td>是</td><td>128</td><td>资源 ID，必须按字符串传输</td></tr>
+        <tr><td><code>resource_name</code></td><td>string</td><td>是</td><td>255</td><td>资源名</td></tr>
+        <tr><td><code>task_start_time</code></td><td>string</td><td>是</td><td>64</td><td>RFC 3339 且必须带时区；秒的小数部分可省略，提供时限 1–6 位</td></tr>
+        <tr><td><code>drama_dubbing_type</code></td><td>string</td><td>是</td><td>64</td><td>剧集配音类型</td></tr>
+        <tr><td><code>task_type</code></td><td>string</td><td>是</td><td>64</td><td>任务类型</td></tr>
+        <tr><td><code>original_material_name</code></td><td>string</td><td>是</td><td>255</td><td>素材原始名</td></tr>
+        <tr><td><code>material_name</code></td><td>string</td><td>是</td><td>255</td><td>素材名</td></tr>
+        <tr><td><code>language</code></td><td>string</td><td>是</td><td>32</td><td>语种，推荐 BCP-47，例如 <code>zh-CN</code></td></tr>
+        <tr><td><code>final_status</code></td><td>string</td><td>是</td><td>64</td><td>最终状态</td></tr>
+        <tr><td><code>optimizer_name</code></td><td>string</td><td>是</td><td>100</td><td>优化师名称；字段必传，空字符串会触发兜底提醒</td></tr>
       </tbody>
     </table>
 
     <h3>JSON 示例</h3>
     <pre>{
   "resource_id": "RES-20260728-000123",
+  "resource_name": "暮色心约",
   "task_start_time": "2026-07-28T14:30:00+08:00",
+  "drama_dubbing_type": "AI配音",
   "task_type": "素材制作",
   "original_material_name": "episode_01_source.mp4",
   "material_name": "episode_01_final_zh.mp4",
@@ -247,7 +259,9 @@
   --header 'Content-Type: application/json; charset=utf-8' \
   --data '{
     "resource_id": "RES-20260728-000123",
+    "resource_name": "暮色心约",
     "task_start_time": "2026-07-28T14:30:00+08:00",
+    "drama_dubbing_type": "AI配音",
     "task_type": "素材制作",
     "original_material_name": "episode_01_source.mp4",
     "material_name": "episode_01_final_zh.mp4",
@@ -322,7 +336,9 @@
     <pre>【素材任务最终状态播报】
 
 资源ID：RES-20260728-000123
+资源名：暮色心约
 任务开始时间：2026-07-28T14:30:00+08:00（Asia/Shanghai，UTC+08:00）
+剧集配音类型：AI配音
 任务类型：素材制作
 素材原始名：episode_01_source.mp4
 素材名：episode_01_final_zh.mp4
@@ -339,7 +355,9 @@
 说明：admin_users.username 未找到完全匹配的用户
 
 资源ID：RES-20260728-000123
+资源名：暮色心约
 任务开始时间：2026-07-28T14:30:00+08:00（Asia/Shanghai，UTC+08:00）
+剧集配音类型：AI配音
 任务类型：素材制作
 素材原始名：episode_01_source.mp4
 素材名：episode_01_final_zh.mp4
@@ -361,7 +379,7 @@
   </article>
 
   <footer>
-    文档版本：v1 · 更新日期：2026-07-28 · 接口归属：AI 后台素材任务飞书播报
+    文档版本：v1.1 · 更新日期：2026-07-28 · 接口归属：AI 后台素材任务飞书播报
   </footer>
 </main>
 </body>

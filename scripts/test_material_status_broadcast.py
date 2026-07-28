@@ -21,7 +21,9 @@ from features.material_status_broadcast import service
 def valid_payload(**changes):
     item = {
         "resource_id": "res-20260728-001",
+        "resource_name": "暮色心约",
         "task_start_time": "2026-07-28T08:30:15+00:00",
+        "drama_dubbing_type": "AI配音",
         "task_type": "素材制作",
         "original_material_name": "source-video.mp4",
         "material_name": "source-video-final.mp4",
@@ -48,7 +50,9 @@ class ValidationTests(unittest.TestCase):
     def test_exact_payload_is_normalized_and_hashed(self):
         first = valid_payload(
             resource_id="  res-20260728-001  ",
+            resource_name="  暮色心约  ",
             task_start_time="2026-07-28T16:30:15+08:00",
+            drama_dubbing_type="  AI配音  ",
             optimizer_name="  张三  ",
         )
         second = valid_payload(task_start_time="2026-07-28T08:30:15Z")
@@ -56,6 +60,8 @@ class ValidationTests(unittest.TestCase):
         normalized = service.normalize_payload(first)
 
         self.assertEqual(normalized["resource_id"], "res-20260728-001")
+        self.assertEqual(normalized["resource_name"], "暮色心约")
+        self.assertEqual(normalized["drama_dubbing_type"], "AI配音")
         self.assertEqual(normalized["optimizer_name"], "张三")
         self.assertEqual(normalized["task_start_time"], "2026-07-28T08:30:15Z")
         self.assertEqual(service.payload_hash(first), service.payload_hash(second))
@@ -76,6 +82,8 @@ class ValidationTests(unittest.TestCase):
 
         limits = {
             "resource_id": 128,
+            "resource_name": 255,
+            "drama_dubbing_type": 64,
             "task_type": 64,
             "original_material_name": 255,
             "material_name": 255,
@@ -191,6 +199,9 @@ class ValidationTests(unittest.TestCase):
         )
 
         self.assertIn("【素材任务最终状态播报】", private)
+        self.assertIn("资源名：暮色心约", private)
+        self.assertIn("剧集配音类型：AI配音", private)
+        self.assertIn("任务类型：素材制作", private)
         self.assertIn("事件编号：MSE-0000000012", private)
         self.assertIn(
             "任务开始时间：2026-07-28T16:30:15+08:00"
@@ -201,7 +212,28 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("事件编号：MSE-0000000013", fallback)
         self.assertIn("失败原因：optimizer_name_missing", fallback)
         self.assertIn("说明：接口未提供优化师名称", fallback)
+        self.assertIn("资源名：暮色心约", fallback)
+        self.assertIn("剧集配音类型：AI配音", fallback)
+        self.assertIn("任务类型：素材制作", fallback)
         self.assertIn("优化师名称：（未提供）", fallback)
+
+        expected_labels = (
+            "资源ID：",
+            "资源名：",
+            "任务开始时间：",
+            "剧集配音类型：",
+            "任务类型：",
+            "素材原始名：",
+            "素材名：",
+            "语种：",
+            "最终状态：",
+            "优化师名称：",
+        )
+        for message in (private, fallback):
+            positions = [message.index(label) for label in expected_labels]
+            self.assertEqual(positions, sorted(positions))
+            for label in expected_labels:
+                self.assertEqual(message.count(label), 1)
 
     def test_result_details_are_whitelisted_and_require_masking(self):
         self.assertEqual(
@@ -287,13 +319,18 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(first["id"], duplicate["id"])
         self.assertEqual(duplicate["source_ip"], "203.0.113.8")
 
-        with self.assertRaises(service.MaterialStatusError) as caught:
-            self.store.enqueue(
-                "material:20260728:0001",
-                valid_payload(final_status="制作失败"),
-            )
-        self.assertEqual(caught.exception.code, "idempotency_conflict")
-        self.assertEqual(caught.exception.status, 409)
+        for changes in (
+            {"resource_name": "另一资源名"},
+            {"drama_dubbing_type": "真人配音"},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(service.MaterialStatusError) as caught:
+                    self.store.enqueue(
+                        "material:20260728:0001",
+                        valid_payload(**changes),
+                    )
+                self.assertEqual(caught.exception.code, "idempotency_conflict")
+                self.assertEqual(caught.exception.status, 409)
 
     def test_concurrent_enqueue_creates_exactly_one_event(self):
         def enqueue_once(_):
