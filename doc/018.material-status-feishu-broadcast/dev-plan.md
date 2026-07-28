@@ -59,7 +59,11 @@ systemctl status drama-material-api.service --no-pager
 ## 十字段增量记录
 
 - 分支：`codex/material-status-add-fields-20260728`
+- 精确提交：`8af21dbead5fd6fcf5f048319d76971573def77c`
 - 生产切换前 outbox：`delivered=2`，`queued/retry/processing=0`
 - 本地专项：28/28；相关回归：111/111；总计：139/139
 - Python 3.9 grammar、HTML 解析、`git diff --check`：通过
-- 生产提交、回滚点和十字段 canary：部署后追加到 `rollout.md`
+- 部署时间：2026-07-28 17:32（Asia/Shanghai）
+- 发布目录：`/root/releases/drama-material-service-8af21dbe-material-status-10fields`
+- 回滚点：`/mnt/data-disk/backups/drama-material-service/material-status-10fields-20260728T172922-pre-8af21dbe`
+- 十字段 canary：`MSE-0000000003`，兜底一次送达、幂等重放和飞书响应正文核对通过

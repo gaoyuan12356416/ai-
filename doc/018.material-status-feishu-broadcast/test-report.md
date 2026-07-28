@@ -3,8 +3,8 @@
 ## 测试结论
 
 总体通过。本次十字段增量在最新线上基线之上完成，本地自动化 139/139
-项通过；生产切换前 outbox 未完成事件为 0。首次发布的数据库映射、飞书
-兜底、幂等和公网契约证据继续有效，十字段生产 canary 在增量部署后追加。
+项通过；生产切换前 outbox 未完成事件为 0。十字段生产 canary 已验证旧
+八字段拒绝、新请求送达、幂等重放、兜底群目标和完整消息正文。
 
 ## 测试范围
 
@@ -79,3 +79,26 @@ Go。生产版本运行正常，回滚包及校验清单已验证。
 | 服务状态 | API 与 Nginx 均 active；发布后错误日志 0 |
 | 公开接口文档 | HTTP 200 |
 | 回滚包 | SHA-256 与 SQLite quick_check 均通过 |
+
+## 十字段增量生产验收
+
+| 检查 | 结果 |
+| --- | --- |
+| 精确提交 | `8af21dbead5fd6fcf5f048319d76971573def77c` |
+| 发布目录测试 | 需求专项 28/28、相关回归及 FB playable 检查共 138 项通过 |
+| 生产 Python 版本边界 | 无关的 playable 文档生成测试要求 Python 3.10+，生产默认 3.9；同一提交在本地已通过该项 |
+| 切换前 outbox | `delivered=2`，`queued/retry/processing=0` |
+| 旧八字段 | `422 invalid_payload`；没有创建 outbox 记录 |
+| 新十字段 | `202 accepted`，事件 `MSE-0000000003` |
+| 实时投递 | `delivered/fallback/attempt1`，失败码 `optimizer_not_found` |
+| 幂等重放 | `202 duplicate_accepted`，同一事件且该 key 仅 1 条 outbox |
+| 飞书确认 | 同一稳定 UUID 返回相同 message_id、指定兜底群和完全一致正文；十字段顺序正确且各出现一次 |
+| 公开文档 | HTTP 200；公网与源文件 SHA-256 均为 `75a28bf49f96a33870b2eee45ca0ba5b5f569b3a5f095c94d7a7b3e90dbd4ca3` |
+| 服务状态 | 17:32:04 起 active；发布后 warning/error journal 为 0 |
+| Token | 未轮换；指纹前缀保持 `ecd760a9d90b8399` |
+| 泄漏检查 | journal、Nginx 日志、SQLite、公开文档和源码均未发现 Token |
+| 回滚包 | `SHA256SUMS` 全通过，SQLite `PRAGMA quick_check=ok` |
+
+飞书应用缺少“获取会话历史消息”的只读权限，直接列表回查返回 `230027`。
+验收改用系统实际发送时的同一稳定 UUID 重放：飞书返回相同 message_id，
+相同 chat_id 和完全一致的响应正文，因此没有产生第二条消息。

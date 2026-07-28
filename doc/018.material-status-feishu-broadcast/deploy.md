@@ -88,3 +88,14 @@ curl -sS -i http://127.0.0.1:8787/api/auth/status
 - 不在命令行、Git 提交、PR、日志、接口文档或最终报告中显示真实 Token。
 - 不向任意员工发送私聊 canary；需要用户指定安全测试账号。
 - SQLite 备份必须使用在线 backup API 或停服务后的完整副本，不能复制正在写入的单一数据库文件后直接视为可恢复备份。
+
+## 2026-07-28 十字段增量实例
+
+- 精确提交：`8af21dbead5fd6fcf5f048319d76971573def77c`
+- 发布目录：`/root/releases/drama-material-service-8af21dbe-material-status-10fields`
+- 备份目录：`/mnt/data-disk/backups/drama-material-service/material-status-10fields-20260728T172922-pre-8af21dbe`
+- 仅替换 `features/material_status_broadcast/service.py`、两份专项测试和公开 HTML；
+  `app.py`、`.env`、Nginx 配置、MySQL、SQLite 结构均未修改。
+- 服务只重启 `drama-material-api.service`；17:32:04 恢复 active。
+- Token 数量与指纹前缀保持 `1 / ecd760a9d90b8399`，未轮换。
+- 回滚时从上述备份恢复同名四个目标文件并重启 API；SQLite 业务事件保留。
