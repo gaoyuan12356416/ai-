@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>素材任务最终状态飞书播报接口</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #647089;
+      --line: #dfe5ee;
+      --soft: #f5f7fb;
+      --brand: #315efb;
+      --brand-soft: #eef2ff;
+      --ok: #0f8a5f;
+      --warn: #a85b00;
+      --shadow: 0 18px 50px rgba(23, 32, 51, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f1f4f9;
+      color: var(--ink);
+      font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    main {
+      width: min(1080px, calc(100% - 32px));
+      margin: 32px auto 72px;
+      background: white;
+      border: 1px solid rgba(223, 229, 238, .9);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    header {
+      padding: 48px 52px 38px;
+      background:
+        radial-gradient(circle at 90% 10%, rgba(49, 94, 251, .17), transparent 34%),
+        linear-gradient(135deg, #fff 0%, #f7f9ff 100%);
+      border-bottom: 1px solid var(--line);
+    }
+    h1, h2, h3 { line-height: 1.28; }
+    h1 { margin: 0 0 12px; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.03em; }
+    h2 { margin: 42px 0 16px; font-size: 23px; }
+    h3 { margin: 28px 0 10px; font-size: 18px; }
+    p { margin: 10px 0; }
+    .subtitle { color: var(--muted); font-size: 17px; margin: 0; }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 4px 11px;
+      border: 1px solid #d9e0ff;
+      border-radius: 999px;
+      background: var(--brand-soft);
+      color: #274bc8;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    article { padding: 8px 52px 54px; }
+    .endpoint {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 12px;
+      align-items: center;
+      margin: 18px 0 8px;
+      padding: 16px;
+      border: 1px solid #cfdbff;
+      border-radius: 14px;
+      background: #f7f9ff;
+    }
+    .method {
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: var(--brand);
+      color: white;
+      font-weight: 750;
+      letter-spacing: .04em;
+    }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: var(--soft);
+      color: #253b80;
+    }
+    .endpoint code { padding: 0; background: transparent; color: var(--ink); overflow-wrap: anywhere; }
+    pre {
+      position: relative;
+      margin: 13px 0 20px;
+      padding: 20px;
+      overflow: auto;
+      border: 1px solid #26344c;
+      border-radius: 14px;
+      background: #172033;
+      color: #edf3ff;
+      font-size: 13px;
+      line-height: 1.65;
+      white-space: pre;
+    }
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      margin: 12px 0 22px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 11px 13px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
+    th { background: var(--soft); font-size: 13px; color: #43506a; }
+    .note {
+      margin: 16px 0;
+      padding: 14px 16px;
+      border-left: 4px solid var(--brand);
+      border-radius: 8px;
+      background: var(--brand-soft);
+    }
+    .note.warn { border-left-color: #e28a19; background: #fff7e9; color: #784500; }
+    .flow {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--soft);
+      text-align: center;
+      color: #33415d;
+      font-weight: 650;
+    }
+    .arrow { padding: 0 6px; color: var(--brand); }
+    .status-ok { color: var(--ok); font-weight: 700; }
+    footer {
+      padding: 22px 52px;
+      border-top: 1px solid var(--line);
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 720px) {
+      main { width: 100%; margin: 0; border: 0; border-radius: 0; }
+      header, article, footer { padding-left: 20px; padding-right: 20px; }
+      .endpoint { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>素材任务最终状态飞书播报接口</h1>
+    <p class="subtitle">甲方推送任务最终状态，我方实时匹配优化师并发送飞书私聊；无法私聊时自动通知兜底群。</p>
+    <div class="meta">
+      <span class="pill">API v1</span>
+      <span class="pill">HTTPS + Bearer Token</span>
+      <span class="pill">JSON</span>
+      <span class="pill">支持幂等重试</span>
+    </div>
+  </header>
+
+  <article>
+    <h2>1. 接口地址</h2>
+    <div class="endpoint">
+      <span class="method">POST</span>
+      <code>https://ai.yingliangads.com/api/integrations/v1/material-task-status-events</code>
+    </div>
+    <div class="note">
+      成功返回 <code>202 Accepted</code> 表示事件已经可靠落库并进入实时投递队列，不代表飞书在响应前已经送达。
+    </div>
+
+    <h2>2. 请求头</h2>
+    <table>
+      <thead>
+        <tr><th>Header</th><th>必填</th><th>值/规则</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>Authorization</code></td>
+          <td>是</td>
+          <td><code>Bearer &lt;由我方通过安全渠道单独提供的 Token&gt;</code>；Token 至少 32 个字符</td>
+        </tr>
+        <tr>
+          <td><code>Idempotency-Key</code></td>
+          <td>是</td>
+          <td>8–128 位；同一业务事件重试时必须复用同一值。允许字母、数字、点、下划线、冒号和短横线。</td>
+        </tr>
+        <tr>
+          <td><code>Content-Type</code></td>
+          <td>是</td>
+          <td><code>application/json; charset=utf-8</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>3. 请求字段</h2>
+    <p>请求体严格包含以下八个字段，不接受额外字段。</p>
+    <table>
+      <thead>
+        <tr><th>字段</th><th>类型</th><th>最大长度</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>resource_id</code></td><td>string</td><td>128</td><td>资源 ID，必须按字符串传输</td></tr>
+        <tr><td><code>task_start_time</code></td><td>string</td><td>64</td><td>RFC 3339 且必须带时区；秒的小数部分可省略，提供时限 1–6 位</td></tr>
+        <tr><td><code>task_type</code></td><td>string</td><td>64</td><td>任务类型</td></tr>
+        <tr><td><code>original_material_name</code></td><td>string</td><td>255</td><td>素材原始名</td></tr>
+        <tr><td><code>material_name</code></td><td>string</td><td>255</td><td>素材名</td></tr>
+        <tr><td><code>language</code></td><td>string</td><td>32</td><td>语种，推荐 BCP-47，例如 <code>zh-CN</code></td></tr>
+        <tr><td><code>final_status</code></td><td>string</td><td>64</td><td>最终状态</td></tr>
+        <tr><td><code>optimizer_name</code></td><td>string</td><td>100</td><td>优化师名称；字段必传，空字符串会触发兜底提醒</td></tr>
+      </tbody>
+    </table>
+
+    <h3>JSON 示例</h3>
+    <pre>{
+  "resource_id": "RES-20260728-000123",
+  "task_start_time": "2026-07-28T14:30:00+08:00",
+  "task_type": "素材制作",
+  "original_material_name": "episode_01_source.mp4",
+  "material_name": "episode_01_final_zh.mp4",
+  "language": "zh-CN",
+  "final_status": "已完成",
+  "optimizer_name": "张三"
+}</pre>
+
+    <h3>curl 示例</h3>
+    <pre>curl --request POST \
+  'https://ai.yingliangads.com/api/integrations/v1/material-task-status-events' \
+  --header 'Authorization: Bearer &lt;TOKEN&gt;' \
+  --header 'Idempotency-Key: mst-20260728-000001' \
+  --header 'Content-Type: application/json; charset=utf-8' \
+  --data '{
+    "resource_id": "RES-20260728-000123",
+    "task_start_time": "2026-07-28T14:30:00+08:00",
+    "task_type": "素材制作",
+    "original_material_name": "episode_01_source.mp4",
+    "material_name": "episode_01_final_zh.mp4",
+    "language": "zh-CN",
+    "final_status": "已完成",
+    "optimizer_name": "张三"
+  }'</pre>
+
+    <h2>4. 成功响应</h2>
+    <h3>首次接收</h3>
+    <pre>HTTP/1.1 202 Accepted
+
+{
+  "code": "accepted",
+  "message": "事件已接收，正在投递",
+  "event_id": "MSE-0000000123",
+  "duplicate": false,
+  "delivery_status": "queued",
+  "received_at": "2026-07-28T06:30:01.000000Z"
+}</pre>
+
+    <h3>相同事件重试</h3>
+    <p>相同 <code>Idempotency-Key</code> 与相同请求体会复用原事件，不再创建第二条正常播报。</p>
+    <pre>HTTP/1.1 202 Accepted
+
+{
+  "code": "duplicate_accepted",
+  "message": "事件已接收",
+  "event_id": "MSE-0000000123",
+  "duplicate": true,
+  "delivery_status": "delivered",
+  "received_at": "2026-07-28T06:30:01.000000Z"
+}</pre>
+
+    <h2>5. 错误码</h2>
+    <table>
+      <thead>
+        <tr><th>HTTP</th><th>code</th><th>说明</th><th>甲方处理</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>400</td><td><code>idempotency_key_required</code></td><td>缺少 Idempotency-Key</td><td>补充请求头</td></tr>
+        <tr><td>400</td><td><code>invalid_idempotency_key</code></td><td>幂等键格式不正确</td><td>按请求头规则修正</td></tr>
+        <tr><td>400</td><td><code>invalid_request</code></td><td>请求体传输方式或 Content-Length 不合法</td><td>修正 HTTP 请求</td></tr>
+        <tr><td>400</td><td><code>invalid_json</code></td><td>JSON 无法解析</td><td>修正请求</td></tr>
+        <tr><td>401</td><td><code>invalid_token</code></td><td>Token 缺失或错误</td><td>核对 Token</td></tr>
+        <tr><td>409</td><td><code>idempotency_conflict</code></td><td>同一 key 对应不同请求体</td><td>核对是否误用了 key</td></tr>
+        <tr><td>413</td><td><code>payload_too_large</code></td><td>请求体超过 32 KiB</td><td>缩小请求</td></tr>
+        <tr><td>415</td><td><code>unsupported_media_type</code></td><td>Content-Type 不是 JSON</td><td>改为 JSON</td></tr>
+        <tr><td>422</td><td><code>invalid_payload</code></td><td>字段缺失、额外字段、超长、非字符串或时间无时区</td><td>修正请求</td></tr>
+        <tr><td>503</td><td><code>service_unavailable</code></td><td>服务暂时无法可靠接收</td><td>保持原 key 重试</td></tr>
+      </tbody>
+    </table>
+    <div class="note warn">
+      甲方只应对网络超时和 5xx 使用原 <code>Idempotency-Key</code> 重试；4xx 需要先修正请求。
+    </div>
+
+    <h2>6. 匹配与播报规则</h2>
+    <div class="flow">
+      optimizer_name
+      <span class="arrow">→</span> admin_users.username
+      <span class="arrow">→</span> admin_users.id
+      <span class="arrow">→</span> admin_user_group.sub_user_id
+      <span class="arrow">→</span> email
+      <span class="arrow">→</span> Feishu open_id
+      <span class="arrow">→</span> 私聊
+    </div>
+    <p>
+      名称只去除首尾空白后做大小写敏感的精确匹配，不做模糊匹配或别名猜测。优化师、email、飞书用户无法匹配，或私聊最终失败时，系统会将同一事件发送到我方兜底群并附带失败原因。
+    </p>
+
+    <h3>私聊格式</h3>
+    <pre>【素材任务最终状态播报】
+
+资源ID：RES-20260728-000123
+任务开始时间：2026-07-28T14:30:00+08:00（Asia/Shanghai，UTC+08:00）
+任务类型：素材制作
+素材原始名：episode_01_source.mp4
+素材名：episode_01_final_zh.mp4
+语种：zh-CN
+最终状态：已完成
+优化师名称：张三
+
+事件编号：MSE-0000000123</pre>
+
+    <h3>兜底群格式</h3>
+    <pre>【⚠️ 素材任务播报未能私聊】
+
+失败原因：optimizer_not_found
+说明：admin_users.username 未找到完全匹配的用户
+
+资源ID：RES-20260728-000123
+任务开始时间：2026-07-28T14:30:00+08:00（Asia/Shanghai，UTC+08:00）
+任务类型：素材制作
+素材原始名：episode_01_source.mp4
+素材名：episode_01_final_zh.mp4
+语种：zh-CN
+最终状态：已完成
+优化师名称：张三
+
+事件编号：MSE-0000000123
+请检查优化师名称、admin_users.username、admin_user_group.email 及飞书用户映射。</pre>
+
+    <h2>7. 安全与 Token 轮换</h2>
+    <ul>
+      <li>全程使用 HTTPS；接口只接受 <code>Authorization: Bearer</code>。</li>
+      <li>Token 不放 URL、请求体、前端代码、群消息、截图或公开仓库。</li>
+      <li>接口不使用来源 IP 白名单；来源 IP 仅用于我方内部审计。</li>
+      <li>轮换时我方可短期同时接受新旧 Token，切换完成后立即撤销旧 Token。</li>
+    </ul>
+    <p class="status-ok">文档中不包含生产 Token；生产 Token 由我方通过安全渠道单独提供。</p>
+  </article>
+
+  <footer>
+    文档版本：v1 · 更新日期：2026-07-28 · 接口归属：AI 后台素材任务飞书播报
+  </footer>
+</main>
+</body>
+</html>
