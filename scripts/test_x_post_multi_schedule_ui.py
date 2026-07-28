@@ -106,6 +106,28 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("data-episodes-pool-id", DRAMA)
         self.assertIn("data-delete-pool-id", DRAMA)
 
+    def test_drama_pool_auto_verifies_only_refresh_required_accounts(self):
+        self.assertIn(
+            'item.status === "refresh_required"',
+            DRAMA,
+        )
+        self.assertIn("const AUTO_VERIFY_CONCURRENCY = 3", DRAMA)
+        self.assertIn("async function autoVerifyAccountOptions()", DRAMA)
+        self.assertIn(
+            "/api/admin/x-posts/drama-pool/account-options/${id}/verify",
+            DRAMA,
+        )
+        self.assertIn('{ method: "POST", body: "{}" }', DRAMA)
+        self.assertIn("await autoVerifyAccountOptions()", DRAMA)
+        self.assertIn("state.accountVerifyBusy", DRAMA)
+        self.assertIn('error.code === "x_post_rate_limited"', DRAMA)
+        self.assertIn("stopRequested = true", DRAMA)
+        self.assertIn("deferred: Math.max(0, targets.length - attempted)", DRAMA)
+        self.assertIn("busy: true", DRAMA)
+        self.assertIn("button.disabled = state.accountVerifyBusy", DRAMA)
+        self.assertIn('item.status === "active"', DRAMA)
+        self.assertIn("item.publish_eligible === true", DRAMA)
+
     def test_drama_template_is_rendered_exactly_and_not_merged_into_material_template(self):
         expected = (
             "{url}\n"

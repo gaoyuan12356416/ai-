@@ -109,6 +109,75 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertEqual(actor["user_id"], "user-a")
         self.assertEqual(actor["role"], "admin")
 
+    def test_post_page_auto_verification_preserves_actor_identity(self):
+        tree = ast.parse(APP_SOURCE)
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name
+            in {
+                "x_accounts_actor",
+                "x_post_drama_verification_actor",
+            }
+        ]
+        namespace = {}
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=functions, type_ignores=[])
+                ),
+                str(APP_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        actor = namespace["x_post_drama_verification_actor"](
+            {
+                "tenant_key": "tenant-a",
+                "user_id": "user-a",
+                "name": "Operator",
+                "email": "operator@example.com",
+                "role": "user",
+            }
+        )
+        self.assertEqual(actor["tenant_key"], "tenant-a")
+        self.assertEqual(actor["user_id"], "user-a")
+        self.assertEqual(actor["name"], "Operator")
+        self.assertEqual(actor["email"], "operator@example.com")
+        self.assertEqual(actor["role"], "admin")
+
+    def test_rate_limit_error_survives_main_backend_mapping(self):
+        tree = ast.parse(APP_SOURCE)
+        nodes = []
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name)
+                and target.id == "X_ACCOUNTS_ERROR_META"
+                for target in node.targets
+            ):
+                nodes.append(node)
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "x_accounts_error_payload"
+            ):
+                nodes.append(node)
+        namespace = {}
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=nodes, type_ignores=[])
+                ),
+                str(APP_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        error = type("RateLimitError", (), {"code": "x_post_rate_limited"})()
+        status, payload = namespace["x_accounts_error_payload"](error)
+        self.assertEqual(status, 429)
+        self.assertEqual(payload["error"], "x_post_rate_limited")
+
     def test_owner_and_admin_list_routes_use_distinct_scopes(self):
         owner = source_between(
             'if parsed.path == "/api/x-accounts":',
@@ -613,6 +682,26 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn('navigation_item="xPostMaterialPool"', delete_route)
         self.assertIn("append_audit_log(", delete_route)
         self.assertIn("no_store=True", delete_route)
+
+    def test_x_post_account_auto_verify_uses_navigation_gate_and_safe_scope(self):
+        route = source_between(
+            "x_post_account_verify_match = re.fullmatch(",
+            "x_post_schedule_routes = {",
+        )
+        self.assertIn("x-posts/drama-pool", route)
+        self.assertIn("_require_cookie_navigation_item(navigation_item)", route)
+        self.assertIn("_require_same_origin_json()", route)
+        self.assertIn(
+            "x_post_drama_verification_actor(session)",
+            route,
+        )
+        self.assertIn('scope="all"', route)
+        self.assertIn("verify_x_account(", route)
+        self.assertIn("only_refresh_required=True", route)
+        self.assertIn("preserve_transient_status=True", route)
+        self.assertIn("auto_verify_x_post_account", route)
+        self.assertIn("auto_verify_x_post_account_failed", route)
+        self.assertIn("no_store=True", route)
 
     def test_x_post_navigation_and_dom_link_allowlists(self):
         self.assertIn('"key": "xPostLogs"', NAVIGATION_SOURCE)

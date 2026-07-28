@@ -41550,6 +41550,7 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_pool_item_unavailable": (409, "素材池记录已发布、已变更或不可用"),
     "x_post_pool_material_already_exists": (409, "素材已在X素材池中"),
     "x_post_pool_material_already_used": (409, "素材已有X发布历史，不能重新入池"),
+    "x_post_rate_limited": (429, "X API请求过于频繁，请稍后重试"),
     "x_post_storage_conflict": (409, "素材池写入冲突，请刷新后重试"),
     "x_post_pool_required": (409, "正式每日计划必须使用素材池记录"),
     "x_post_schedule_collision": (409, "同一账号不能在两个发布池配置相同时间点"),
@@ -41586,6 +41587,13 @@ def x_accounts_actor(session):
         "email": str(session.get("email", "") or ""),
         "role": str(session.get("role", "user") or "user"),
     }
+
+
+def x_post_drama_verification_actor(session):
+    """Use all-account verification only after the drama-page permission gate."""
+    actor = x_accounts_actor(session)
+    actor["role"] = "admin"
+    return actor
 
 
 
@@ -95866,6 +95874,69 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+
+        x_post_account_verify_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool"
+            r"/account-options/([0-9]+)/verify",
+            parsed.path,
+        )
+        if x_post_account_verify_match:
+            account_id = x_post_account_verify_match.group(1)
+            navigation_item = "xPostDramaPool"
+            if not self._require_cookie_navigation_item(navigation_item):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            try:
+                result = verify_x_account(
+                    account_id,
+                    x_post_drama_verification_actor(session),
+                    scope="all",
+                    only_refresh_required=True,
+                    preserve_transient_status=True,
+                )
+                item = (
+                    result.get("item", result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        "auto_verify_x_post_account",
+                        "x_account",
+                        account_id,
+                        {
+                            "navigation_item": navigation_item,
+                            "status": item.get("status", ""),
+                            "username": item.get("username", ""),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post account auto-verification audit write failed"
+                    )
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "auto_verify_x_post_account_failed",
+                        "x_account",
+                        account_id,
+                        {
+                            "navigation_item": navigation_item,
+                            "error": payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post account auto-verification failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            return
 
         x_post_schedule_routes = {
             "/api/admin/x-posts/material-pool/schedule": (

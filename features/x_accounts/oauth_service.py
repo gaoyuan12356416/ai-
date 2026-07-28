@@ -52,6 +52,13 @@ MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
 MAX_DRAMA_POOL_BODY_BYTES = 5 * 1024 * 1024
 MAX_ERROR_TEXT = 240
 MAX_DAILY_ACCOUNTS = 50
+TRANSIENT_VERIFY_ERROR_CODES = frozenset(
+    {
+        "x_post_rate_limited",
+        "x_upstream_error",
+        "x_accounts_unavailable",
+    }
+)
 
 
 def load_env_file(path):
@@ -991,16 +998,29 @@ def update_account_error(account_id, status, error):
     with _DB_LOCK:
         conn = db_connect()
         try:
-            conn.execute(
-                "UPDATE x_authorized_account SET status=?,last_error_at=?,last_error=?,updated_at=? WHERE id=?",
-                (status, timestamp, clean_text(error), timestamp, int(account_id)),
-            )
+            if status is None:
+                conn.execute(
+                    "UPDATE x_authorized_account SET last_error_at=?,last_error=?,updated_at=? WHERE id=?",
+                    (timestamp, clean_text(error), timestamp, int(account_id)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE x_authorized_account SET status=?,last_error_at=?,last_error=?,updated_at=? WHERE id=?",
+                    (status, timestamp, clean_text(error), timestamp, int(account_id)),
+                )
             conn.commit()
         finally:
             conn.close()
 
 
-def verify_account(account_id, actor, scope="mine"):
+def verify_account(
+    account_id,
+    actor,
+    scope="mine",
+    *,
+    only_refresh_required=False,
+    preserve_transient_status=False,
+):
     account_id = int(account_id)
     actor, scope = normalize_account_scope(actor, scope)
     initial_row = find_scoped_account_row(account_id, actor, scope)
@@ -1015,6 +1035,8 @@ def verify_account(account_id, actor, scope="mine"):
         if stored_status == "revoke_pending":
             raise ServiceError("x_disconnect_pending", "X账号存在旧退出待处理状态，请先完成停用", 409)
         item = row_to_item(row)
+        if only_refresh_required and item.get("status") != "refresh_required":
+            return item
         try:
             token = read_token_file(item["x_user_id"])
             timestamp = iso_utc()
@@ -1070,12 +1092,19 @@ def verify_account(account_id, actor, scope="mine"):
             safe_record_event("verify", "completed", actor, x_user_id=item["x_user_id"])
             return find_account(account_id)
         except ServiceError as exc:
-            state = "revoked" if exc.code == "x_token_revoked" else ("token_missing" if exc.code == "x_token_missing" else "error")
+            if preserve_transient_status and exc.code in TRANSIENT_VERIFY_ERROR_CODES:
+                state = None
+            else:
+                state = "revoked" if exc.code == "x_token_revoked" else ("token_missing" if exc.code == "x_token_missing" else "error")
             update_account_error(account_id, state, str(exc))
             safe_record_event("verify", "failed", actor, x_user_id=item["x_user_id"], error_code=exc.code)
             raise
         except Exception:
-            update_account_error(account_id, "error", "X账号校验失败")
+            update_account_error(
+                account_id,
+                None if preserve_transient_status else "error",
+                "X账号校验失败",
+            )
             safe_record_event("verify", "failed", actor, x_user_id=item["x_user_id"], error_code="x_accounts_unavailable")
             raise ServiceError("x_accounts_unavailable", "X账号校验失败", 503) from None
 
@@ -3364,7 +3393,11 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "item": verify_account(
-                            match.group(1), payload.get("actor", {}), payload.get("scope", "mine")
+                            match.group(1),
+                            payload.get("actor", {}),
+                            payload.get("scope", "mine"),
+                            only_refresh_required=payload.get("only_refresh_required") is True,
+                            preserve_transient_status=payload.get("preserve_transient_status") is True,
                         )
                     },
                 )

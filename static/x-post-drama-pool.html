@@ -452,6 +452,8 @@ Episode👉{sub_num}
         previewIds: [],
         accountOptions: [],
         scheduleBusy: false,
+        accountVerifyBusy: false,
+        verifyingAccountIds: new Set(),
         schedule: {
           enabled: false,
           timezone: "Asia/Shanghai",
@@ -464,6 +466,7 @@ Episode👉{sub_num}
         },
       };
       const byId = id => document.getElementById(id);
+      const AUTO_VERIFY_CONCURRENCY = 3;
       const setText = (node, value, fallback = "—") => {
         node.textContent = value == null || value === "" ? fallback : String(value);
       };
@@ -503,7 +506,14 @@ Episode👉{sub_num}
         const body = await response.text();
         let payload = {};
         try { payload = body ? JSON.parse(body) : {}; } catch (_) { payload = {}; }
-        if (!response.ok) throw new Error(getErrorMessage(payload) || `HTTP ${response.status}`);
+        if (!response.ok) {
+          const error = new Error(getErrorMessage(payload) || `HTTP ${response.status}`);
+          error.code = typeof payload.error === "string"
+            ? payload.error
+            : String(payload.error && payload.error.code || payload.code || "");
+          error.status = response.status;
+          throw error;
+        }
         return payload;
       }
       function navigationNodeVisible(auth, node) {
@@ -597,6 +607,9 @@ Episode👉{sub_num}
       function accountEligible(item) {
         return !!item && item.status === "active" && item.publish_eligible === true;
       }
+      function accountNeedsAutoVerify(item) {
+        return !!item && item.status === "refresh_required";
+      }
       function accountTitle(item) {
         const username = String(item && item.username || "").trim().replace(/^@/, "");
         return String(item && item.display_name || "").trim() || (username ? `@${username}` : `账号 ${accountId(item) || "—"}`);
@@ -635,12 +648,13 @@ Episode👉{sub_num}
           if (!id) return;
           const selected = state.schedule.accountIds.has(id);
           const eligible = accountEligible(item);
+          const verifying = state.verifyingAccountIds.has(id);
           const label = document.createElement("label");
           label.className = `account-option${eligible ? "" : " disabled"}`;
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
           checkbox.checked = selected;
-          checkbox.disabled = !eligible && !selected;
+          checkbox.disabled = verifying || (!eligible && !selected);
           checkbox.dataset.accountId = id;
           const textWrap = document.createElement("span");
           const strong = document.createElement("strong");
@@ -651,11 +665,109 @@ Episode👉{sub_num}
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(
+            status,
+            verifying
+              ? "自动校验中"
+              : eligible
+                ? "可发布"
+                : (selected ? "不可发布，请移除" : "不可发布")
+          );
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
         renderSelectedAccountSummary();
+      }
+      async function autoVerifyAccountOptions() {
+        if (state.accountVerifyBusy) {
+          return { checked: 0, failed: 0, deferred: 0, busy: true };
+        }
+        const targets = state.accountOptions.filter(item =>
+          accountId(item) && accountNeedsAutoVerify(item)
+        );
+        if (!targets.length) {
+          return { checked: 0, failed: 0, deferred: 0, busy: false };
+        }
+
+        state.accountVerifyBusy = true;
+        state.verifyingAccountIds = new Set(targets.map(accountId));
+        byId("refreshAccounts").disabled = true;
+        byId("saveSchedule").disabled = true;
+        renderAccountOptions();
+        setMessage(
+          "scheduleMessage",
+          `正在自动校验 ${targets.length} 个待刷新的 X 账号…`,
+          false
+        );
+
+        let cursor = 0;
+        let attempted = 0;
+        let failed = 0;
+        let stopRequested = false;
+        const worker = async () => {
+          while (!stopRequested && cursor < targets.length) {
+            const item = targets[cursor++];
+            const id = accountId(item);
+            attempted += 1;
+            try {
+              const verified = responseItem(await api(
+                `/api/admin/x-posts/drama-pool/account-options/${id}/verify`,
+                { method: "POST", body: "{}" }
+              ));
+              if (accountId(verified) !== id) {
+                throw new Error("账号校验结果不匹配");
+              }
+              state.accountOptions = state.accountOptions.map(account =>
+                accountId(account) === id ? verified : account
+              );
+            } catch (error) {
+              failed += 1;
+              if (error && error.code === "x_post_rate_limited") {
+                stopRequested = true;
+              }
+              state.accountOptions = state.accountOptions.map(account =>
+                accountId(account) === id
+                  ? Object.assign({}, account, {
+                      auto_verify_error: String(error.message || error),
+                    })
+                  : account
+              );
+            } finally {
+              state.verifyingAccountIds.delete(id);
+              renderAccountOptions();
+            }
+          }
+        };
+
+        try {
+          const workerCount = Math.min(
+            AUTO_VERIFY_CONCURRENCY,
+            targets.length
+          );
+          await Promise.all(
+            Array.from({ length: workerCount }, () => worker())
+          );
+          try {
+            state.accountOptions = responseItems(await api(
+              "/api/admin/x-posts/drama-pool/account-options"
+            ));
+          } catch (_) {
+            // Keep the verified per-account results if the final list refresh fails.
+          }
+          renderAccountOptions();
+          return {
+            checked: attempted,
+            failed,
+            deferred: Math.max(0, targets.length - attempted),
+            busy: false,
+          };
+        } finally {
+          state.accountVerifyBusy = false;
+          state.verifyingAccountIds.clear();
+          byId("refreshAccounts").disabled = false;
+          byId("saveSchedule").disabled = state.scheduleBusy;
+          renderAccountOptions();
+        }
       }
       function validPublishTime(value) {
         return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
@@ -733,7 +845,16 @@ Episode👉{sub_num}
           ]);
           state.accountOptions = responseItems(accountsResult);
           applySchedule(scheduleResult);
-          setMessage("scheduleMessage", "发布设置已加载。", false);
+          const verification = await autoVerifyAccountOptions();
+          if (!verification.busy) {
+            setMessage(
+              "scheduleMessage",
+              verification.checked
+                ? `发布设置已加载；自动校验 ${verification.checked} 个账号，${verification.failed} 个未通过${verification.deferred ? `，因 X 限流暂缓 ${verification.deferred} 个` : ""}。`
+                : "发布设置已加载。",
+              verification.failed > 0
+            );
+          }
         } catch (error) {
           setMessage("scheduleMessage", `发布设置加载失败：${error.message}`, true);
           renderAccountOptions();
@@ -747,11 +868,20 @@ Episode👉{sub_num}
         try {
           state.accountOptions = responseItems(await api("/api/admin/x-posts/drama-pool/account-options"));
           renderAccountOptions();
-          setMessage("scheduleMessage", "账号列表已刷新。", false);
+          const verification = await autoVerifyAccountOptions();
+          if (!verification.busy) {
+            setMessage(
+              "scheduleMessage",
+              verification.checked
+                ? `账号列表已刷新；自动校验 ${verification.checked} 个账号，${verification.failed} 个未通过${verification.deferred ? `，因 X 限流暂缓 ${verification.deferred} 个` : ""}。`
+                : "账号列表已刷新。",
+              verification.failed > 0
+            );
+          }
         } catch (error) {
           setMessage("scheduleMessage", `账号刷新失败：${error.message}`, true);
         } finally {
-          button.disabled = false;
+          button.disabled = state.accountVerifyBusy;
         }
       }
       function addPublishTime() {
@@ -774,6 +904,10 @@ Episode👉{sub_num}
       }
       async function saveSchedule() {
         if (state.scheduleBusy) return;
+        if (state.accountVerifyBusy) {
+          setMessage("scheduleMessage", "账号正在自动校验，请完成后再保存。", true);
+          return;
+        }
         const enabled = byId("scheduleEnabled").checked;
         const selectedIds = Array.from(state.schedule.accountIds);
         if (enabled && !selectedIds.length) {

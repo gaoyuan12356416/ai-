@@ -868,6 +868,80 @@ class XAccountsTestCase(unittest.TestCase):
         saved = json.loads((service.TOKENS_DIR / "123456789.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["refresh_token"], "new-refresh-secret")
 
+    def test_auto_verify_skips_accounts_that_no_longer_need_refresh(self):
+        item = self.complete()
+        with mock.patch.object(service, "read_token_file") as read_mock, \
+                mock.patch.object(service, "token_request") as refresh_mock, \
+                mock.patch.object(service, "user_request") as user_mock:
+            read_mock.return_value = json.loads(
+                service.token_path(item["x_user_id"]).read_text(encoding="utf-8")
+            )
+            verified = service.verify_account(
+                item["id"],
+                self.owner,
+                only_refresh_required=True,
+                preserve_transient_status=True,
+            )
+        self.assertEqual(verified["status"], "active")
+        read_mock.assert_called_once_with(item["x_user_id"])
+        refresh_mock.assert_not_called()
+        user_mock.assert_not_called()
+
+    def test_auto_verify_preserves_refresh_required_after_transient_failure(self):
+        item = self.complete()
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET access_expires_at=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", item["id"]),
+            )
+            conn.commit()
+        with mock.patch.object(
+            service,
+            "token_request",
+            side_effect=service.ServiceError(
+                "x_post_rate_limited",
+                "X API rate limit reached",
+                429,
+            ),
+        ):
+            with self.assertRaises(service.ServiceError) as caught:
+                service.verify_account(
+                    item["id"],
+                    self.owner,
+                    only_refresh_required=True,
+                    preserve_transient_status=True,
+                )
+        self.assertEqual(caught.exception.code, "x_post_rate_limited")
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            stored_status, last_error = conn.execute(
+                "SELECT status,last_error FROM x_authorized_account WHERE id=?",
+                (item["id"],),
+            ).fetchone()
+        self.assertEqual(stored_status, "active")
+        self.assertIn("rate limit", last_error)
+        self.assertEqual(service.find_account(item["id"])["status"], "refresh_required")
+
+    def test_manual_verify_keeps_existing_transient_failure_status_semantics(self):
+        item = self.complete()
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE x_authorized_account SET access_expires_at=? WHERE id=?",
+                ("2000-01-01T00:00:00Z", item["id"]),
+            )
+            conn.commit()
+        with mock.patch.object(
+            service,
+            "token_request",
+            side_effect=service.ServiceError(
+                "x_post_rate_limited",
+                "X API rate limit reached",
+                429,
+            ),
+        ):
+            with self.assertRaises(service.ServiceError):
+                service.verify_account(item["id"], self.owner)
+        self.assertEqual(service.find_account(item["id"])["status"], "error")
+
     def test_invalid_grant_marks_account_revoked(self):
         item = self.complete()
         with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
@@ -2256,6 +2330,28 @@ class XAccountsTestCase(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_verify_client_forwards_auto_verify_guards(self):
+        expected = {"item": {"id": 12, "status": "refresh_required"}}
+        with mock.patch.object(client, "_request", return_value=expected) as request_mock:
+            result = client.verify_x_account(
+                12,
+                self.admin,
+                scope="all",
+                only_refresh_required=True,
+                preserve_transient_status=True,
+            )
+        self.assertEqual(result, expected)
+        request_mock.assert_called_once_with(
+            "/internal/accounts/12/verify",
+            method="POST",
+            payload={
+                "actor": client.normalize_actor(self.admin),
+                "scope": "all",
+                "only_refresh_required": True,
+                "preserve_transient_status": True,
+            },
+        )
 
     def test_authorization_headers_are_not_forwarded_across_redirects(self):
         captured = {"authorization": None, "count": 0}

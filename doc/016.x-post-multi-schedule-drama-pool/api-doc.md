@@ -9,6 +9,7 @@
 | GET | `/api/admin/x-posts/material-pool/account-options` | 素材池可选账号 |
 | GET/POST | `/api/admin/x-posts/material-pool/schedule` | 查询/保存素材池排期 |
 | GET | `/api/admin/x-posts/drama-pool/account-options` | 短剧池可选账号 |
+| POST | `/api/admin/x-posts/drama-pool/account-options/{account_id}/verify` | 在短剧池页面权限范围内校验并刷新一个账号；页面仅对 `refresh_required` 账号自动调用 |
 | GET/POST | `/api/admin/x-posts/drama-pool/schedule` | 查询/保存短剧池排期 |
 | POST | `/api/admin/x-posts/drama-pool/preview` | 只读预检短剧 ID |
 | GET/POST | `/api/admin/x-posts/drama-pool` | 查询/加入短剧池 |
@@ -87,6 +88,7 @@
 | `drama_metadata_ambiguous` | 短剧元数据不一致 |
 | `drama_resource_invalid` | 短剧资源字段非法；响应消息附具体字段原因 |
 | `x_post_schedule_stale_claim` | 跨日冻结批次已安全停止 |
+| `x_post_rate_limited` | X 临时限流；自动校验停止启动后续账号并保留账号待刷新状态 |
 
 ## 兼容性说明
 

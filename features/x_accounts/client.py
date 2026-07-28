@@ -174,14 +174,26 @@ def start_x_authorization(actor):
     return _request("/internal/authorize", method="POST", payload={"actor": normalize_actor(actor)})
 
 
-def verify_x_account(account_id, actor, scope="mine"):
+def verify_x_account(
+    account_id,
+    actor,
+    scope="mine",
+    *,
+    only_refresh_required=False,
+    preserve_transient_status=False,
+):
     account_id = str(account_id or "")
     if not account_id.isdigit():
         raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
+    payload = {"actor": normalize_actor(actor), "scope": normalize_scope(scope)}
+    if only_refresh_required:
+        payload["only_refresh_required"] = True
+    if preserve_transient_status:
+        payload["preserve_transient_status"] = True
     return _request(
         "/internal/accounts/%s/verify" % account_id,
         method="POST",
-        payload={"actor": normalize_actor(actor), "scope": normalize_scope(scope)},
+        payload=payload,
     )
 
 
