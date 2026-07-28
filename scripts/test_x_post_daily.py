@@ -656,6 +656,63 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["output_sha256"], "b" * 64)
 
+        resource_id = "21c09b915223a0695f0a4cf85386cabd"
+        resource_payload = dict(
+            request_payload,
+            material_id=resource_id,
+            job_key="d" * 64,
+        )
+        result = client.repair(resource_payload)
+        self.assertEqual(
+            opener.payload["material_id"],
+            resource_id,
+        )
+        self.assertEqual(result["job_key"], "d" * 64)
+
+    def test_repair_client_rejects_unsafe_material_id_before_network(self):
+        class RejectNetwork:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, _request, timeout):
+                self.calls += 1
+                raise AssertionError("invalid requests must not reach the worker")
+
+        opener = RejectNetwork()
+        client = MediaRepairClient(
+            "http://127.0.0.1:18799/internal/x-post-media-repair",
+            "repair-secret",
+            opener=opener,
+        )
+        payload = {
+            "job_key": "c" * 64,
+            "material_id": "../21c09b915223a0695f0a4cf85386cabd",
+            "pool_item_id": 10,
+            "source_url": "https://media.example.test/10.mp4",
+            "source_sha256": "a" * 64,
+            "source_size": 5,
+            "trigger_code": "invalid_media_codec",
+            "profile": DEFAULT_REPAIR_PROFILE,
+        }
+
+        with self.assertRaises(MediaRepairError) as caught:
+            client.repair(payload)
+
+        self.assertEqual(
+            caught.exception.code,
+            "x_post_media_repair_invalid_request",
+        )
+        self.assertEqual(opener.calls, 0)
+
+        payload["material_id"] = "21C09B915223A0695F0A4CF85386CABD"
+        with self.assertRaises(MediaRepairError) as caught:
+            client.repair(payload)
+        self.assertEqual(
+            caught.exception.code,
+            "x_post_media_repair_invalid_request",
+        )
+        self.assertEqual(opener.calls, 0)
+
     def test_repair_client_rejects_oversized_or_non_https_output(self):
         class Response:
             status = 200
@@ -684,6 +741,12 @@ class RunnerTests(unittest.TestCase):
 
         payload = {
             "job_key": "c" * 64,
+            "material_id": "10",
+            "pool_item_id": 10,
+            "source_url": "https://media.example.test/10.mp4",
+            "source_sha256": "a" * 64,
+            "source_size": 5,
+            "trigger_code": "invalid_media_codec",
             "profile": DEFAULT_REPAIR_PROFILE,
         }
         oversized = MediaRepairClient(
@@ -1704,6 +1767,11 @@ class RunnerTests(unittest.TestCase):
                 candidate(material_id, 100 - material_id)
                 for material_id in (10, 11, 12)
             ]
+            drama_resource_id = "21c09b915223a0695f0a4cf85386cabd"
+            candidates[0]["material_id"] = drama_resource_id
+            candidates[0]["material_url"] = (
+                "https://media.example.test/%s.mp4" % drama_resource_id
+            )
             events = []
 
             class Repair:
@@ -1730,7 +1798,10 @@ class RunnerTests(unittest.TestCase):
                 }
 
             def prober(path, max_bytes, timeout):
-                if Path(path).read_bytes() == b"video" and Path(path).stem == "10":
+                if (
+                    Path(path).read_bytes() == b"video"
+                    and Path(path).stem == drama_resource_id
+                ):
                     raise XPostError(
                         "invalid_media_codec", "bad codec", 422
                     )
@@ -1755,12 +1826,15 @@ class RunnerTests(unittest.TestCase):
                 Repair(),
             )
 
-        self.assertEqual([item["material_id"] for item in accepted], ["10", "11", "12"])
+        self.assertEqual(
+            [item["material_id"] for item in accepted],
+            [drama_resource_id, "11", "12"],
+        )
         self.assertEqual(failures, [])
         repaired = accepted[0]
         self.assertEqual(
             repaired["original_material_url"],
-            "https://media.example.test/10.mp4",
+            "https://media.example.test/%s.mp4" % drama_resource_id,
         )
         self.assertEqual(repaired["material_url"], "https://cos.example.test/repaired.mp4")
         self.assertEqual(repaired["media_repair_trigger_code"], "invalid_media_codec")
@@ -1785,6 +1859,7 @@ class RunnerTests(unittest.TestCase):
             },
         )
         self.assertEqual(repair_payload["pool_item_id"], 10)
+        self.assertEqual(repair_payload["material_id"], drama_resource_id)
         self.assertEqual(repair_payload["source_size"], 5)
         self.assertTrue(
             re.fullmatch(

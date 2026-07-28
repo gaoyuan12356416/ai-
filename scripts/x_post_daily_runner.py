@@ -54,6 +54,8 @@ REPAIRABLE_MEDIA_CODES = frozenset(
 )
 DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-v1"
 MAX_DAILY_ACCOUNTS = 50
+POSITIVE_REPAIR_MATERIAL_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
+DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 
 
 class DailyRunError(RuntimeError):
@@ -84,6 +86,19 @@ class MediaRepairError(CandidatePreflightError):
             str(message or "X media repair request failed")[:240],
             code=str(code or "x_post_media_repair_failed")[:64],
         )
+
+
+def _normalize_repair_material_id(value):
+    value = str(value or "").strip()
+    if POSITIVE_REPAIR_MATERIAL_ID_RE.fullmatch(value):
+        return value
+    if DRAMA_RESOURCE_ID_RE.fullmatch(value):
+        return value
+    raise MediaRepairError(
+        "x_post_media_repair_invalid_request",
+        "material_id must be a positive integer or a 32-character hexadecimal resource ID",
+        400,
+    )
 
 
 def _env_int(name, default, minimum, maximum):
@@ -456,6 +471,16 @@ class MediaRepairClient:
         return value if isinstance(value, dict) else {}
 
     def repair(self, payload):
+        if not isinstance(payload, dict):
+            raise MediaRepairError(
+                "x_post_media_repair_invalid_request",
+                "X media repair request must be an object",
+                400,
+            )
+        payload = dict(payload)
+        payload["material_id"] = _normalize_repair_material_id(
+            payload.get("material_id")
+        )
         body = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
@@ -1313,10 +1338,11 @@ def _media_fingerprint(media):
 
 
 def _repair_job_key(item, source_sha256, profile):
+    material_id = _normalize_repair_material_id(item["material_id"])
     identity = "\0".join(
         (
             "x-post-media-repair-v1",
-            str(item["material_id"]),
+            material_id,
             str(item["pool_item_id"]),
             str(source_sha256),
             str(profile),
