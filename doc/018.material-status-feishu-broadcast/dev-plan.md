@@ -15,7 +15,7 @@
 | Nginx 精确反向代理 | `deploy/nginx/material-status-webhook.conf` | 已完成 |
 | 单元和编排测试 | `scripts/test_material_status_*.py` | 已完成 |
 | 对外接口文档和公开 HTML | `doc/018.material-status-feishu-broadcast/` | 已完成 |
-| GitHub-first 部署和生产验收 | CPU 服务器 | 待执行 |
+| GitHub-first 部署和生产验收 | CPU 服务器 | 已完成 |
 
 ## 编译与测试命令
 
@@ -44,4 +44,10 @@ systemctl status drama-material-api.service --no-pager
 
 ## 完成记录
 
-完成后在本文件记录提交、部署时间、生产版本和回滚点。
+- 功能提交：`1498f6d236096242ae96ea7d58592e07848909c2`
+- 生产合并提交：`f1d49213c7a15632c92acfa9b2417493c24c3deb`
+- 合并的并发线上基线：`c254f388f4b876cf2f8c42507b352780d48b8930`
+- 部署时间：2026-07-28 15:52（Asia/Shanghai）
+- 生产发布目录：`/root/releases/drama-material-service-f1d49213`
+- 回滚点：`/mnt/data-disk/backups/drama-material-service/material-status-20260728T1548-pre-f1d49213`
+- 兜底验收事件：`MSE-0000000001`，送达、幂等重放和飞书回读均通过
