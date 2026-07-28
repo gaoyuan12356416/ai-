@@ -271,6 +271,37 @@ class ScheduleRunnerTests(unittest.TestCase):
                 limit=10,
             )
 
+    def test_drama_pool_client_forwards_frozen_account_order(self):
+        items = [
+            {
+                "id": 41,
+                "content_id": "DRAMA-A",
+                "candidate_account_id": 11,
+            },
+            {
+                "id": 42,
+                "content_id": "DRAMA-B",
+                "candidate_account_id": 12,
+            },
+        ]
+        client = StubScheduleClient([{"items": items}])
+
+        selected = client.available_drama_pool(
+            "/internal/posts/drama-pool/available",
+            100,
+            [11, 12],
+        )
+
+        self.assertEqual(selected, items)
+        path, payload, write_flag = client.requests[0]
+        self.assertEqual(
+            path,
+            "/internal/posts/drama-pool/available",
+        )
+        self.assertEqual(payload["limit"], 100)
+        self.assertEqual(payload["account_ids"], [11, 12])
+        self.assertFalse(write_flag)
+
     def test_plan_query_requires_exact_frozen_identity_and_account_order(self):
         identity = due_item(accounts=[11, 12])
         client = StubScheduleClient(

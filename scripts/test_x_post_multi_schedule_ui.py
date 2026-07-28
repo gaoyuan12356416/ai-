@@ -103,6 +103,25 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("published_episode_count", DRAMA)
         self.assertIn("remaining_episode_count", DRAMA)
         self.assertIn("next_sub_num", DRAMA)
+        self.assertIn("assigned_account_id", DRAMA)
+        self.assertIn("assigned_account_username", DRAMA)
+        self.assertIn("绑定账号 / 下次发布时间", DRAMA)
+        self.assertIn("调整账号顺序不会改变已有绑定", DRAMA)
+        self.assertIn('"待分配"', DRAMA)
+        self.assertIn('"不可分配"', DRAMA)
+        self.assertIn("历史发布账号 · 免费剧集已完成", DRAMA)
+        self.assertIn("state.schedule.nextDueAt", DRAMA)
+        self.assertIn(
+            "不可发布，请校验或重新授权",
+            DRAMA,
+        )
+        self.assertNotIn("不可发布，请移除", DRAMA)
+        self.assertNotIn("请移除后再保存", DRAMA)
+        self.assertNotIn(
+            "item.last_account_username || item.account_username",
+            DRAMA,
+        )
+        self.assertNotIn("last_account_", DRAMA)
         self.assertIn("data-episodes-pool-id", DRAMA)
         self.assertIn("data-delete-pool-id", DRAMA)
 

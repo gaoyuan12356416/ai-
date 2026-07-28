@@ -996,6 +996,10 @@ def ensure_storage(db_path):
                     free_episode_count INTEGER NOT NULL DEFAULT 0,
                     next_sub_number INTEGER NOT NULL DEFAULT 1,
                     published_episode_count INTEGER NOT NULL DEFAULT 0,
+                    assigned_account_id INTEGER NOT NULL DEFAULT 0
+                        CHECK(assigned_account_id>=0),
+                    assigned_at TEXT NOT NULL DEFAULT '',
+                    assigned_source_queue_id INTEGER,
                     last_checked_at TEXT NOT NULL DEFAULT '',
                     last_error_code TEXT NOT NULL DEFAULT '',
                     last_error_message TEXT NOT NULL DEFAULT '',
@@ -1041,6 +1045,27 @@ def ensure_storage(db_path):
             for name, definition in additive_columns.items():
                 if name not in queue_columns:
                     conn.execute("ALTER TABLE x_post_queue ADD COLUMN %s %s" % (name, definition))
+
+            drama_pool_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_drama_pool)"
+                )
+            }
+            drama_pool_additive_columns = {
+                "assigned_account_id": (
+                    "INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(assigned_account_id>=0)"
+                ),
+                "assigned_at": "TEXT NOT NULL DEFAULT ''",
+                "assigned_source_queue_id": "INTEGER",
+            }
+            for name, definition in drama_pool_additive_columns.items():
+                if name not in drama_pool_columns:
+                    conn.execute(
+                        "ALTER TABLE x_post_drama_pool ADD COLUMN %s %s"
+                        % (name, definition)
+                    )
 
             migration_timestamp = utc_now()
             for source_type in sorted(SCHEDULE_SOURCE_TYPES):
@@ -1116,6 +1141,65 @@ def ensure_storage(db_path):
                     "UPDATE x_post_queue SET source_type=?,material_key=?,run_date=? WHERE id=?",
                     (source_type, material_key, run_date, row["id"]),
                 )
+
+            # The legacy short-drama scheduler could spread consecutive
+            # episodes of one drama across multiple accounts.  Preserve every
+            # historical queue/log row, but deterministically bind the
+            # unfinished drama to the account that owns its earliest confirmed
+            # episode.  If no episode was confirmed, the earliest reservation
+            # remains the fail-closed owner.
+            drama_rows = conn.execute(
+                "SELECT id,content_id,assigned_account_id,assigned_at,"
+                "assigned_source_queue_id FROM x_post_drama_pool "
+                "ORDER BY created_at,id"
+            ).fetchall()
+            for pool in drama_rows:
+                canonical = conn.execute(
+                    "SELECT q.id,q.account_id,q.created_at "
+                    "FROM x_post_queue q "
+                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "WHERE q.source_type='drama' AND ("
+                    "q.drama_pool_item_id=? OR "
+                    "(q.drama_pool_item_id IS NULL AND q.content_id=?)"
+                    ") "
+                    "ORDER BY CASE WHEN q.status='published' "
+                    "AND COALESCE(l.status,'')='published' "
+                    "AND COALESCE(l.unknown_outcome,0)=0 "
+                    "THEN 0 ELSE 1 END,"
+                    "q.episode_number,q.created_at,q.id LIMIT 1",
+                    (pool["id"], pool["content_id"]),
+                ).fetchone()
+                current_owner = int(pool["assigned_account_id"] or 0)
+                if canonical is None:
+                    if current_owner:
+                        raise XPostError(
+                            "x_post_storage_conflict",
+                            "短剧池存在没有队列依据的账号绑定，迁移已中止",
+                            500,
+                        )
+                    continue
+                canonical_owner = int(canonical["account_id"])
+                if current_owner not in (0, canonical_owner):
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "短剧池账号绑定与首个发布账号冲突，迁移已中止",
+                        500,
+                    )
+                if (
+                    current_owner == 0
+                    or not str(pool["assigned_at"] or "")
+                    or pool["assigned_source_queue_id"] is None
+                ):
+                    conn.execute(
+                        "UPDATE x_post_drama_pool SET assigned_account_id=?,"
+                        "assigned_at=?,assigned_source_queue_id=? WHERE id=?",
+                        (
+                            canonical_owner,
+                            str(canonical["created_at"] or migration_timestamp),
+                            int(canonical["id"]),
+                            int(pool["id"]),
+                        ),
+                    )
 
             duplicate_material = conn.execute(
                 "SELECT material_key,COUNT(*) AS total FROM x_post_queue "
@@ -1203,6 +1287,18 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_fifo "
                 "ON x_post_drama_pool(status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "ux_x_post_drama_pool_active_account "
+                "ON x_post_drama_pool(assigned_account_id) "
+                "WHERE assigned_account_id>0 "
+                "AND status IN ('pending','active','needs_review') "
+                "AND next_sub_number<=free_episode_count"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_assignment "
+                "ON x_post_drama_pool(assigned_account_id,status,created_at,id)"
             )
             # SQLite cannot add a FOREIGN KEY to a legacy table with ALTER
             # TABLE. These triggers preserve the same run_id integrity for
@@ -1343,6 +1439,7 @@ def ensure_storage(db_path):
                           SELECT 1 FROM x_post_drama_pool
                            WHERE id=NEW.drama_pool_item_id
                              AND content_id=NEW.content_id
+                             AND assigned_account_id IN (0,NEW.account_id)
                       )
                   )
                 BEGIN
@@ -1355,9 +1452,11 @@ def ensure_storage(db_path):
                 """
                 CREATE TRIGGER trg_x_post_queue_drama_update
                 BEFORE UPDATE OF source_type,drama_pool_item_id,content_id,
-                    episode_number,episode_key ON x_post_queue
-                WHEN NEW.source_type='drama'
+                    episode_number,episode_key,account_id ON x_post_queue
+                WHEN (OLD.source_type='drama' OR NEW.source_type='drama')
                   AND (
+                      NEW.source_type<>'drama'
+                      OR
                       NEW.drama_pool_item_id IS NULL
                       OR NEW.episode_number <= 0
                       OR NEW.episode_key=''
@@ -1365,10 +1464,121 @@ def ensure_storage(db_path):
                           SELECT 1 FROM x_post_drama_pool
                            WHERE id=NEW.drama_pool_item_id
                              AND content_id=NEW.content_id
+                             AND assigned_account_id IN (0,NEW.account_id)
                       )
                   )
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue drama binding invalid');
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_queue_drama_assignment_source_delete"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_queue_drama_assignment_source_delete
+                BEFORE DELETE ON x_post_queue
+                WHEN EXISTS(
+                    SELECT 1 FROM x_post_drama_pool
+                     WHERE assigned_source_queue_id=OLD.id
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_pool assignment source immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_pool_assignment_immutable"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_pool_assignment_immutable
+                BEFORE UPDATE OF assigned_account_id,assigned_at,
+                    assigned_source_queue_id ON x_post_drama_pool
+                WHEN OLD.assigned_account_id>0
+                  AND (
+                      NEW.assigned_account_id<>OLD.assigned_account_id
+                      OR NEW.assigned_at<>OLD.assigned_at
+                      OR NEW.assigned_source_queue_id
+                         IS NOT OLD.assigned_source_queue_id
+                  )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_pool assignment immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_pool_assignment_evidence"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_drama_pool_assignment_evidence
+                BEFORE UPDATE OF assigned_account_id,assigned_at,
+                    assigned_source_queue_id ON x_post_drama_pool
+                WHEN (
+                    NEW.assigned_account_id=0
+                    AND (
+                        NEW.assigned_at<>''
+                        OR NEW.assigned_source_queue_id IS NOT NULL
+                    )
+                ) OR (
+                    NEW.assigned_account_id>0
+                    AND (
+                        NEW.assigned_at=''
+                        OR NEW.assigned_source_queue_id IS NULL
+                        OR NOT EXISTS(
+                            SELECT 1 FROM x_post_queue q
+                             WHERE q.id=NEW.assigned_source_queue_id
+                               AND q.source_type='drama'
+                               AND q.account_id=NEW.assigned_account_id
+                               AND (
+                                   q.drama_pool_item_id=NEW.id
+                                   OR (
+                                       q.drama_pool_item_id IS NULL
+                                       AND q.content_id=NEW.content_id
+                                   )
+                               )
+                        )
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_pool assignment evidence invalid'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_pool_assignment_insert_evidence"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_drama_pool_assignment_insert_evidence
+                BEFORE INSERT ON x_post_drama_pool
+                WHEN (
+                    NEW.assigned_account_id<>0
+                    OR NEW.assigned_at<>''
+                    OR NEW.assigned_source_queue_id IS NOT NULL
+                )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_pool insert assignment invalid'
+                    );
                 END
                 """
             )
@@ -1745,7 +1955,7 @@ class XPostStore:
                 "启用自动发布时必须选择账号和发布时间",
                 400,
             )
-        if eligible_account_ids is not None:
+        if enabled and eligible_account_ids is not None:
             eligible = set(
                 _schedule_account_ids(
                     list(eligible_account_ids),
@@ -1841,6 +2051,31 @@ class XPostStore:
                     409,
                 )
             if enabled:
+                if source_type == "drama":
+                    placeholders = ",".join(
+                        "?" for _item in account_ids
+                    )
+                    missing_owner = conn.execute(
+                        "SELECT content_id,assigned_account_id "
+                        "FROM x_post_drama_pool "
+                        "WHERE status IN ('pending','active','needs_review') "
+                        "AND assigned_account_id>0 "
+                        "AND next_sub_number<=free_episode_count "
+                        "AND assigned_account_id NOT IN (%s) "
+                        "ORDER BY created_at,id LIMIT 1" % placeholders,
+                        tuple(account_ids),
+                    ).fetchone()
+                    if missing_owner:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_drama_owner_not_configured",
+                            "短剧%s尚未发完，必须保留绑定账号%s"
+                            % (
+                                missing_owner["content_id"],
+                                missing_owner["assigned_account_id"],
+                            ),
+                            409,
+                        )
                 other = conn.execute(
                     "SELECT * FROM x_post_schedule_config "
                     "WHERE source_type<>? AND enabled=1",
@@ -3227,7 +3462,85 @@ class XPostStore:
             ),
         }
 
-    def available_drama_pool_items(self, limit=50):
+    @staticmethod
+    def _drama_assignment_candidates(conn, account_ids, limit):
+        account_ids = _schedule_account_ids(account_ids)
+        if limit < len(account_ids):
+            raise XPostError(
+                "invalid_request",
+                "短剧池扫描上限不能小于发布账号数量",
+                400,
+            )
+        placeholders = ",".join("?" for _item in account_ids)
+        foreign_owner = conn.execute(
+            "SELECT content_id,assigned_account_id "
+            "FROM x_post_drama_pool "
+            "WHERE status IN ('pending','active') "
+            "AND last_error_code='' "
+            "AND next_sub_number<=free_episode_count "
+            "AND assigned_account_id>0 "
+            "AND assigned_account_id NOT IN (%s) "
+            "ORDER BY created_at,id LIMIT 1" % placeholders,
+            tuple(account_ids),
+        ).fetchone()
+        if foreign_owner:
+            raise XPostError(
+                "x_post_drama_owner_not_configured",
+                "短剧%s绑定的账号%s未包含在当前发布设置中"
+                % (
+                    foreign_owner["content_id"],
+                    foreign_owner["assigned_account_id"],
+                ),
+                409,
+            )
+        owned_rows = conn.execute(
+            "SELECT * FROM x_post_drama_pool "
+            "WHERE status IN ('pending','active') "
+            "AND last_error_code='' "
+            "AND free_episode_count>0 "
+            "AND next_sub_number<=free_episode_count "
+            "AND assigned_account_id IN (%s) "
+            "ORDER BY created_at,id" % placeholders,
+            tuple(account_ids),
+        ).fetchall()
+        owned_by_account = {}
+        for row in owned_rows:
+            owner_id = int(row["assigned_account_id"])
+            if owner_id in owned_by_account:
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "同一X账号绑定了多部未完成短剧",
+                    500,
+                )
+            owned_by_account[owner_id] = row
+        unassigned_limit = min(
+            max(0, limit - len(owned_rows)),
+            max(0, len(account_ids) - len(owned_by_account)),
+        )
+        unassigned_rows = conn.execute(
+            "SELECT * FROM x_post_drama_pool "
+            "WHERE status IN ('pending','active') "
+            "AND last_error_code='' "
+            "AND free_episode_count>0 "
+            "AND next_sub_number<=free_episode_count "
+            "AND assigned_account_id=0 "
+            "ORDER BY created_at,id LIMIT ?",
+            (unassigned_limit,),
+        ).fetchall()
+        unassigned = iter(unassigned_rows)
+        assignments = []
+        for account_id in account_ids:
+            row = owned_by_account.get(account_id)
+            if row is None:
+                row = next(unassigned, None)
+            if row is None:
+                break
+            item = _row_dict(row)
+            item["candidate_account_id"] = account_id
+            assignments.append(item)
+        return assignments
+
+    def available_drama_pool_items(self, limit=50, account_ids=None):
         try:
             limit = int(limit)
         except (TypeError, ValueError, OverflowError):
@@ -3252,8 +3565,15 @@ class XPostStore:
                     409,
                     True,
                 )
+            if account_ids is not None:
+                return self._drama_assignment_candidates(
+                    conn,
+                    account_ids,
+                    limit,
+                )
             rows = conn.execute(
-                "SELECT id,content_id,next_sub_number,created_at "
+                "SELECT id,content_id,next_sub_number,created_at,"
+                "assigned_account_id,assigned_at,assigned_source_queue_id "
                 "FROM x_post_drama_pool "
                 "WHERE status IN ('pending','active') "
                 "AND last_error_code='' "
@@ -3262,7 +3582,7 @@ class XPostStore:
                 "ORDER BY created_at,id LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [_row_dict(row) for row in rows]
+            return [_row_dict(row) for row in rows]
 
     def query_drama_pool(self, payload=None):
         payload = payload if isinstance(payload, dict) else {}
@@ -3295,6 +3615,8 @@ class XPostStore:
         offset = (page - 1) * page_size
         select_sql = (
             "SELECT p.*,"
+            "COALESCE(aq.account_username,'') "
+            "AS assigned_account_username,"
             "COALESCE(q.account_id,0) AS last_account_id,"
             "COALESCE(q.account_username,'') AS last_account_username,"
             "COALESCE(l.x_post_url,'') AS last_post_url,"
@@ -3305,6 +3627,8 @@ class XPostStore:
             "(qh.source_type='drama' AND qh.content_id=p.content_id)"
             ") AS queue_count "
             "FROM x_post_drama_pool p "
+            "LEFT JOIN x_post_queue aq "
+            "ON aq.id=p.assigned_source_queue_id "
             "LEFT JOIN x_post_queue q ON q.id=("
             "SELECT q2.id FROM x_post_queue q2 "
             "WHERE q2.drama_pool_item_id=p.id "
@@ -4188,28 +4512,29 @@ class XPostStore:
                         409,
                         True,
                     )
-                pools = conn.execute(
-                    "SELECT * FROM x_post_drama_pool "
-                    "WHERE status IN ('pending','active') "
-                    "AND last_error_code='' "
-                    "AND next_sub_number<=free_episode_count "
-                    "ORDER BY created_at,id"
-                ).fetchall()
-                expected_pairs = []
-                for pool in pools:
-                    for episode_number in range(
-                        int(pool["next_sub_number"]),
-                        int(pool["free_episode_count"]) + 1,
-                    ):
-                        expected_pairs.append(
-                            (int(pool["id"]), episode_number)
-                        )
-                        if len(expected_pairs) == len(prepared):
-                            break
-                    if len(expected_pairs) == len(prepared):
-                        break
+                assignments = self._drama_assignment_candidates(
+                    conn,
+                    account_ids,
+                    len(account_ids),
+                )
+                if len(assignments) != len(prepared):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_drama_shortage",
+                        "短剧池中没有足够的未绑定短剧供全部账号发布",
+                        409,
+                    )
+                expected_pairs = [
+                    (
+                        int(item["candidate_account_id"]),
+                        int(item["id"]),
+                        int(item["next_sub_number"]),
+                    )
+                    for item in assignments
+                ]
                 actual_pairs = [
                     (
+                        int(values["account_id"]),
                         int(values["drama_pool_item_id"]),
                         int(values["episode_number"]),
                     )
@@ -4218,11 +4543,13 @@ class XPostStore:
                 if actual_pairs != expected_pairs:
                     conn.rollback()
                     raise XPostError(
-                        "x_post_drama_sequence_conflict",
-                        "短剧候选未按入池及免费集数顺序提交",
+                        "x_post_drama_assignment_conflict",
+                        "短剧候选与账号固定归属或新剧入池顺序不一致",
                         409,
                     )
-                pool_by_id = {int(pool["id"]): pool for pool in pools}
+                pool_by_id = {
+                    int(item["id"]): item for item in assignments
+                }
                 for values in prepared:
                     pool = pool_by_id.get(
                         int(values["drama_pool_item_id"])
@@ -4234,6 +4561,8 @@ class XPostStore:
                         != values["drama_pool_created_at"]
                         or int(values["episode_number"])
                         > int(pool["free_episode_count"])
+                        or int(pool["assigned_account_id"] or 0)
+                        not in (0, int(values["account_id"]))
                     ):
                         conn.rollback()
                         raise XPostError(
@@ -4322,22 +4651,55 @@ class XPostStore:
                             ),
                         )
                     else:
-                        conn.execute(
-                            "UPDATE x_post_drama_pool SET status='active',"
-                            "drama_name=?,description=?,language=?,labels=?,"
-                            "name_tag=?,last_checked_at=?,last_error_code='',"
-                            "last_error_message='',updated_at=? WHERE id=?",
-                            (
-                                values["drama_name"],
-                                values["description"],
-                                values["material_language"],
-                                values["tag"],
-                                values["name_tag"],
-                                timestamp,
-                                timestamp,
-                                values["drama_pool_item_id"],
-                            ),
-                        )
+                        pool = pool_by_id[
+                            int(values["drama_pool_item_id"])
+                        ]
+                        if int(pool["assigned_account_id"] or 0) == 0:
+                            assignment_cursor = conn.execute(
+                                "UPDATE x_post_drama_pool SET status='active',"
+                                "assigned_account_id=?,assigned_at=?,"
+                                "assigned_source_queue_id=?,drama_name=?,"
+                                "description=?,language=?,labels=?,name_tag=?,"
+                                "last_checked_at=?,last_error_code='',"
+                                "last_error_message='',updated_at=? "
+                                "WHERE id=? AND assigned_account_id=0",
+                                (
+                                    values["account_id"],
+                                    timestamp,
+                                    int(cursor.lastrowid),
+                                    values["drama_name"],
+                                    values["description"],
+                                    values["material_language"],
+                                    values["tag"],
+                                    values["name_tag"],
+                                    timestamp,
+                                    timestamp,
+                                    values["drama_pool_item_id"],
+                                ),
+                            )
+                            if assignment_cursor.rowcount != 1:
+                                raise XPostError(
+                                    "x_post_drama_assignment_conflict",
+                                    "短剧已被其他账号绑定",
+                                    409,
+                                )
+                        else:
+                            conn.execute(
+                                "UPDATE x_post_drama_pool SET status='active',"
+                                "drama_name=?,description=?,language=?,labels=?,"
+                                "name_tag=?,last_checked_at=?,last_error_code='',"
+                                "last_error_message='',updated_at=? WHERE id=?",
+                                (
+                                    values["drama_name"],
+                                    values["description"],
+                                    values["material_language"],
+                                    values["tag"],
+                                    values["name_tag"],
+                                    timestamp,
+                                    timestamp,
+                                    values["drama_pool_item_id"],
+                                ),
+                            )
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise XPostError(
@@ -5842,7 +6204,8 @@ class XPostStore:
     def _mark_drama_episode_published(conn, queue_id, timestamp):
         queue = conn.execute(
             "SELECT source_type,drama_pool_item_id,content_id,"
-            "episode_number,episode_key FROM x_post_queue WHERE id=?",
+            "episode_number,episode_key,account_id "
+            "FROM x_post_queue WHERE id=?",
             (queue_id,),
         ).fetchone()
         if not queue or queue["source_type"] != "drama":
@@ -5859,6 +6222,8 @@ class XPostStore:
             not pool
             or str(pool["content_id"]) != str(queue["content_id"])
             or str(queue["episode_key"]) != expected_key
+            or int(pool["assigned_account_id"] or 0)
+            != int(queue["account_id"])
         ):
             raise XPostError(
                 "x_post_storage_conflict",
@@ -5978,6 +6343,35 @@ class XPostStore:
             raise XPostError("x_post_log_not_found", "发布日志不存在", 404)
         return _row_dict(row)
 
+    @staticmethod
+    def _assert_drama_queue_assignment(conn, queue):
+        if not queue or str(queue["source_type"] or "") != "drama":
+            return
+        pool = None
+        if queue["drama_pool_item_id"] is not None:
+            pool = conn.execute(
+                "SELECT id,content_id,assigned_account_id "
+                "FROM x_post_drama_pool WHERE id=?",
+                (queue["drama_pool_item_id"],),
+            ).fetchone()
+        if pool is None:
+            pool = conn.execute(
+                "SELECT id,content_id,assigned_account_id "
+                "FROM x_post_drama_pool WHERE content_id=?",
+                (queue["content_id"],),
+            ).fetchone()
+        if (
+            not pool
+            or str(pool["content_id"]) != str(queue["content_id"])
+            or int(pool["assigned_account_id"] or 0) <= 0
+            or int(pool["assigned_account_id"]) != int(queue["account_id"])
+        ):
+            raise XPostError(
+                "x_post_drama_account_binding_conflict",
+                "短剧发布队列与固定发布账号不一致，已阻止发布",
+                409,
+            )
+
     def reserve_log(self, queue_id):
         queue_id = _positive_int(queue_id, "queue_id")
         timestamp = utc_now()
@@ -5988,6 +6382,8 @@ class XPostStore:
                 conn.rollback()
                 raise XPostError("x_post_queue_not_found", "发布队列记录不存在", 404)
             row = conn.execute("SELECT * FROM x_post_publish_log WHERE queue_id=?", (queue_id,)).fetchone()
+            if not row or str(row["status"]) != "published":
+                self._assert_drama_queue_assignment(conn, queue)
             created = False
             if not row:
                 cursor = conn.execute(
@@ -6036,6 +6432,11 @@ class XPostStore:
             if row["status"] == "published":
                 conn.commit()
                 return _row_dict(row)
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (row["queue_id"],),
+            ).fetchone()
+            self._assert_drama_queue_assignment(conn, queue)
             if row["status"] != "reserved":
                 conn.rollback()
                 code = "x_post_unknown_outcome" if row["unknown_outcome"] else "x_post_retry_requires_review"

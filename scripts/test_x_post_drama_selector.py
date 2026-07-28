@@ -22,12 +22,19 @@ from features.x_posts.drama_selector import (  # noqa: E402
 )
 
 
-def episode_row(number, *, unlocked=3, url=None, name="Drama Alpha"):
+def episode_row(
+    number,
+    *,
+    unlocked=3,
+    url=None,
+    name="Drama Alpha",
+    content_id="DRAMA-A",
+):
     return {
         "resource_id": "resource%02d" % number,
         "app_id": "1479",
         "app": "DramaWave",
-        "content_id": "DRAMA-A",
+        "content_id": content_id,
         "drama_name": name,
         "drama_description": "A complete drama description.",
         "drama_labels": "Fantasy, Counter Attack, Romance",
@@ -39,6 +46,31 @@ def episode_row(number, *, unlocked=3, url=None, name="Drama Alpha"):
         "sub_number": number,
         "sub_name": "Episode %s" % number,
         "sub_url": url or "http://media.example.test/ep%s.mp4" % number,
+    }
+
+
+def pool_row(
+    pool_id,
+    content_id,
+    created_at,
+    candidate_account_id,
+    *,
+    assigned_account_id=0,
+    next_sub_number=1,
+):
+    return {
+        "id": pool_id,
+        "content_id": content_id,
+        "created_at": created_at,
+        "next_sub_number": next_sub_number,
+        "assigned_account_id": assigned_account_id,
+        "assigned_at": (
+            "2026-07-27T00:30:00Z" if assigned_account_id else ""
+        ),
+        "assigned_source_queue_id": (
+            90 + pool_id if assigned_account_id else None
+        ),
+        "candidate_account_id": candidate_account_id,
     }
 
 
@@ -245,7 +277,7 @@ class DramaSelectorTests(unittest.TestCase):
             audit_drama(connection, "DRAMA-A")
         self.assertEqual(raised.exception.code, "drama_metadata_ambiguous")
 
-    def test_fifo_pool_expands_current_drama_before_next(self):
+    def test_account_affinity_selects_one_next_episode_per_account(self):
         connection = FakeConnection(
             [
                 episode_row(1, unlocked=3),
@@ -253,45 +285,70 @@ class DramaSelectorTests(unittest.TestCase):
                 episode_row(3, unlocked=3),
             ]
         )
+        connection.rows_by_content["DRAMA-B"] = [
+            episode_row(
+                1,
+                unlocked=2,
+                content_id="DRAMA-B",
+                name="Drama Beta",
+            ),
+            episode_row(
+                2,
+                unlocked=2,
+                content_id="DRAMA-B",
+                name="Drama Beta",
+            ),
+        ]
         selected = select_drama_pool_episodes(
             connection,
             [
-                {
-                    "id": 10,
-                    "content_id": "DRAMA-A",
-                    "created_at": "2026-07-27T01:00:00Z",
-                    "next_sub_number": 2,
-                }
+                pool_row(
+                    10,
+                    "DRAMA-A",
+                    "2026-07-27T01:00:00Z",
+                    2,
+                    assigned_account_id=2,
+                    next_sub_number=2,
+                ),
+                pool_row(
+                    11,
+                    "DRAMA-B",
+                    "2026-07-27T02:00:00Z",
+                    3,
+                ),
             ],
-            limit=2,
+            account_ids=[2, 3],
         )
         self.assertEqual(
             [item["episode_key"] for item in selected],
-            ["DRAMA-A:2", "DRAMA-A:3"],
+            ["DRAMA-A:2", "DRAMA-B:1"],
+        )
+        self.assertEqual(
+            [item["candidate_account_id"] for item in selected],
+            [2, 3],
         )
         self.assertTrue(all(item["source_type"] == "drama" for item in selected))
-        self.assertTrue(all(item["drama_pool_item_id"] == 10 for item in selected))
+        self.assertEqual(
+            [item["drama_pool_item_id"] for item in selected],
+            [10, 11],
+        )
         self.assertTrue(all(item["pool_item_id"] is None for item in selected))
         self.assertTrue(all(item["tag"] == "Fantasy" for item in selected))
 
-    def test_pool_order_is_not_silently_resorted(self):
+    def test_pool_account_order_must_match_configured_accounts(self):
         connection = FakeConnection([episode_row(1, unlocked=1)])
         with self.assertRaises(DramaSelectionError):
             select_drama_pool_episodes(
                 connection,
                 [
-                    {
-                        "id": 2,
-                        "content_id": "DRAMA-A",
-                        "created_at": "2026-07-27T02:00:00Z",
-                    },
-                    {
-                        "id": 1,
-                        "content_id": "DRAMA-B",
-                        "created_at": "2026-07-27T01:00:00Z",
-                    },
+                    pool_row(
+                        2,
+                        "DRAMA-A",
+                        "2026-07-27T02:00:00Z",
+                        3,
+                    ),
                 ],
-                limit=1,
+                account_ids=[2],
             )
 
     def test_query_error_stops_the_complete_selection(self):
@@ -316,13 +373,14 @@ class DramaSelectorTests(unittest.TestCase):
         selected = select_drama_pool_episodes(
             FakeConnection([row]),
             [
-                {
-                    "id": 10,
-                    "content_id": "DRAMA-A",
-                    "created_at": "2026-07-27T01:00:00Z",
-                }
+                pool_row(
+                    10,
+                    "DRAMA-A",
+                    "2026-07-27T01:00:00Z",
+                    2,
+                )
             ],
-            limit=1,
+            account_ids=[2],
         )
         self.assertEqual(selected[0]["name_tag"], "#Drama_Alpha")
         self.assertEqual(selected[0]["tag"], "Drama Alpha")

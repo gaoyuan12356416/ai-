@@ -1,10 +1,11 @@
 """Read-only Dramawave episode selection for scheduled X Posts.
 
 The selector treats ``ads_drama_resource`` as an external read-only source.
-One pool drama is audited as a complete snapshot before any of its free
-episodes can become queue candidates.  A missing episode, ambiguous URL or
-metadata drift blocks that drama instead of silently advancing to the next
-one.
+Each configured account receives exactly one pool drama selected by the X
+sidecar's durable account affinity.  One pool drama is audited as a complete
+snapshot before its next free episode can become a queue candidate.  A missing
+episode, ambiguous URL or metadata drift blocks that drama instead of silently
+advancing to the next one.
 """
 
 from __future__ import annotations
@@ -442,17 +443,30 @@ class DramawaveDramaSelector:
             "episodes": episodes,
         }
 
-    def select_pool(self, pool_items, *, limit):
+    def select_pool(self, pool_items, *, account_ids):
         if not isinstance(pool_items, list) or not 1 <= len(pool_items) <= MAX_POOL_ITEMS:
             raise DramaSelectionError("drama pool response must contain 1..1000 items")
-        limit = _positive_int(
-            limit, "limit", maximum=MAX_EPISODES_PER_SELECTION
-        )
+        if (
+            not isinstance(account_ids, (list, tuple))
+            or not 1 <= len(account_ids) <= MAX_EPISODES_PER_SELECTION
+        ):
+            raise DramaSelectionError("account_ids is invalid")
+        normalized_accounts = []
+        seen_accounts = set()
+        for raw_account_id in account_ids:
+            account_id = _positive_int(raw_account_id, "account_id")
+            if account_id in seen_accounts:
+                raise DramaSelectionError("account_ids is invalid")
+            seen_accounts.add(account_id)
+            normalized_accounts.append(account_id)
+        if len(pool_items) > len(normalized_accounts):
+            raise DramaSelectionError(
+                "drama pool response exceeds the configured account scope"
+            )
         normalized_pool = []
-        previous_order = None
         seen_ids = set()
         seen_content_ids = set()
-        for raw in pool_items:
+        for index, raw in enumerate(pool_items):
             if not isinstance(raw, dict):
                 raise DramaSelectionError("drama pool item must be an object")
             pool_item_id = _positive_int(raw.get("id"), "drama pool item id")
@@ -468,14 +482,50 @@ class DramawaveDramaSelector:
             ):
                 raise DramaSelectionError("drama pool identity is invalid")
             created_at = _text(raw.get("created_at"), "pool created_at", limit=64)
-            order = _created_order(created_at, pool_item_id)
-            if previous_order is not None and order <= previous_order:
-                raise DramaSelectionError("drama pool FIFO order is invalid")
+            _created_order(created_at, pool_item_id)
             next_sub_number = _positive_int(
                 raw.get("next_sub_number", 1),
                 "next_sub_number",
             )
-            previous_order = order
+            assigned_account_id = _nonnegative_int(
+                raw.get("assigned_account_id"),
+                "assigned_account_id",
+            )
+            candidate_account_id = _positive_int(
+                raw.get("candidate_account_id"),
+                "candidate_account_id",
+            )
+            if (
+                candidate_account_id != normalized_accounts[index]
+                or assigned_account_id not in (0, candidate_account_id)
+            ):
+                raise DramaSelectionError(
+                    "drama pool account assignment is invalid"
+                )
+            assigned_at = _text(
+                raw.get("assigned_at"),
+                "assigned_at",
+                required=False,
+                limit=64,
+            )
+            raw_source_queue_id = raw.get("assigned_source_queue_id")
+            assigned_source_queue_id = (
+                _positive_int(
+                    raw_source_queue_id,
+                    "assigned_source_queue_id",
+                )
+                if raw_source_queue_id not in (None, "")
+                else None
+            )
+            if assigned_account_id > 0:
+                if not assigned_at or assigned_source_queue_id is None:
+                    raise DramaSelectionError(
+                        "drama pool assignment evidence is incomplete"
+                    )
+            elif assigned_at or assigned_source_queue_id is not None:
+                raise DramaSelectionError(
+                    "unassigned drama contains assignment evidence"
+                )
             seen_ids.add(pool_item_id)
             seen_content_ids.add(content_id)
             normalized_pool.append(
@@ -484,6 +534,8 @@ class DramawaveDramaSelector:
                     "content_id": content_id,
                     "created_at": created_at,
                     "next_sub_number": next_sub_number,
+                    "assigned_account_id": assigned_account_id,
+                    "candidate_account_id": candidate_account_id,
                 }
             )
 
@@ -510,44 +562,44 @@ class DramawaveDramaSelector:
                 )
             if start == audit["free_episode_count"] + 1:
                 continue
-            for episode in audit["episodes"][start - 1 :]:
-                sub_number = episode["sub_number"]
-                material_name = episode["sub_name"] or (
-                    "%s Episode %s" % (audit["drama_name"], sub_number)
-                )
-                selected_candidates.append(
-                    {
-                        "source_type": "drama",
-                        "drama_pool_item_id": pool["id"],
-                        "drama_pool_created_at": pool["created_at"],
-                        "pool_item_id": None,
-                        "pool_created_at": "",
-                        "episode_number": sub_number,
-                        "sub_num": sub_number,
-                        "episode_key": "%s:%s" % (audit["content_id"], sub_number),
-                        "material_key": "",
-                        "material_id": episode["resource_id"],
-                        "content_id": audit["content_id"],
-                        "material_url": episode["material_url"],
-                        "material_name": material_name,
-                        "material_language": audit["language"],
-                        "drama_name": audit["drama_name"],
-                        # Match the existing W2A attribution contract: use
-                        # the first label, or the drama name when unlabelled.
-                        "tag": primary_tag,
-                        "name_tag": audit["name_tag"],
-                        "description": audit["description"],
-                        "free_episode_count": audit["free_episode_count"],
-                        "spend": 0,
-                        "facebook_violation_count": 0,
-                        "tiktok_violation_count": 0,
-                        "twitter_violation_count": 0,
-                        "resource_audit_count": 0,
-                        "dangerous_tag_count": 0,
-                    }
-                )
-                if len(selected_candidates) == limit:
-                    return selected_candidates
+            episode = audit["episodes"][start - 1]
+            sub_number = episode["sub_number"]
+            material_name = episode["sub_name"] or (
+                "%s Episode %s" % (audit["drama_name"], sub_number)
+            )
+            selected_candidates.append(
+                {
+                    "source_type": "drama",
+                    "drama_pool_item_id": pool["id"],
+                    "drama_pool_created_at": pool["created_at"],
+                    "pool_item_id": None,
+                    "pool_created_at": "",
+                    "episode_number": sub_number,
+                    "sub_num": sub_number,
+                    "episode_key": "%s:%s" % (audit["content_id"], sub_number),
+                    "material_key": "",
+                    "material_id": episode["resource_id"],
+                    "content_id": audit["content_id"],
+                    "material_url": episode["material_url"],
+                    "material_name": material_name,
+                    "material_language": audit["language"],
+                    "drama_name": audit["drama_name"],
+                    # Match the existing W2A attribution contract: use the
+                    # first label, or the drama name when unlabelled.
+                    "tag": primary_tag,
+                    "name_tag": audit["name_tag"],
+                    "description": audit["description"],
+                    "free_episode_count": audit["free_episode_count"],
+                    "assigned_account_id": pool["assigned_account_id"],
+                    "candidate_account_id": pool["candidate_account_id"],
+                    "spend": 0,
+                    "facebook_violation_count": 0,
+                    "tiktok_violation_count": 0,
+                    "twitter_violation_count": 0,
+                    "resource_audit_count": 0,
+                    "dangerous_tag_count": 0,
+                }
+            )
         return selected_candidates
 
 
@@ -569,7 +621,7 @@ def select_drama_pool_episodes(
     connection,
     pool_items,
     *,
-    limit,
+    account_ids,
     schema=DEFAULT_SCHEMA,
     app_id=DRAMAWAVE_APP_ID,
 ):
@@ -577,4 +629,4 @@ def select_drama_pool_episodes(
         connection,
         schema=schema,
         app_id=app_id,
-    ).select_pool(pool_items, limit=limit)
+    ).select_pool(pool_items, account_ids=account_ids)

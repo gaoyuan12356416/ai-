@@ -311,7 +311,7 @@
       <header class="topbar">
         <div class="title">
           <h1>Post短剧池</h1>
-          <p>按加入顺序逐剧发布免费剧集；当前短剧按集数从小到大发完后，才会进入下一部短剧。</p>
+          <p>每个账号固定续发自己已开始的短剧；其他账号按入池顺序领取尚未发布过的新剧，并分别按免费集数正序发布。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -334,7 +334,7 @@
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>只有这里选中的账号才会发布短剧免费剧集；同一时间有多个账号时，会按账号顺序领取连续的下一集。</p>
+            <p>每个账号会持续发布自己已绑定短剧的下一集；该剧免费集发完后，才按账号顺序领取最早的未绑定短剧。调整账号顺序不会改变已有绑定。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
@@ -446,7 +446,7 @@ Episode👉{sub_num}
                   <th>短剧信息</th>
                   <th>免费剧集进度</th>
                   <th>状态</th>
-                  <th>账号 / 下次发布时间</th>
+                  <th>绑定账号 / 下次发布时间</th>
                   <th>最近 Post</th>
                   <th>校验/发布错误</th>
                   <th>操作</th>
@@ -669,7 +669,7 @@ Episode👉{sub_num}
         setText(
           byId("selectedAccountSummary"),
           selected
-            ? `已选择 ${selected} 个账号${missing ? `，其中 ${missing} 个账号当前未返回，请刷新或移除后再保存。` : "。"}`
+            ? `已选择 ${selected} 个账号${missing ? `，其中 ${missing} 个账号当前未返回，请刷新并检查授权状态。` : "。"}`
             : "尚未选择发布账号。"
         );
       }
@@ -718,7 +718,7 @@ Episode👉{sub_num}
               ? "自动校验中"
               : eligible
                 ? "可发布"
-                : (selected ? "不可发布，请移除" : "不可发布")
+                : (selected ? "不可发布，请校验或重新授权" : "不可发布")
           );
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
@@ -882,6 +882,9 @@ Episode👉{sub_num}
           : "尚未保存发布设置";
         const next = state.schedule.nextDueAt ? `；下次执行 ${formatTime(state.schedule.nextDueAt)}` : "";
         setText(byId("scheduleMeta"), `${updated}${next}`);
+        if (state.currentPoolItems.length) {
+          renderDramaRows(state.currentPoolItems);
+        }
       }
       async function loadScheduleSettings() {
         setMessage("scheduleMessage", "正在加载发布设置…", false);
@@ -965,11 +968,11 @@ Episode👉{sub_num}
           setMessage("scheduleMessage", "启用自动发布前，请至少添加一个发布时间。", true);
           return;
         }
-        if (selectedIds.some(id => {
+        if (enabled && selectedIds.some(id => {
           const item = state.accountOptions.find(account => accountId(account) === id);
           return !item || !accountEligible(item);
         })) {
-          setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请移除后再保存。", true);
+          setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请先校验或重新授权；已绑定短剧会保留并暂停续发。", true);
           return;
         }
         state.scheduleBusy = true;
@@ -1315,11 +1318,48 @@ Episode👉{sub_num}
           const statusCell = document.createElement("td");
           statusCell.appendChild(badge(status.label, status.value));
           row.appendChild(statusCell);
-          const username = String(item.last_account_username || item.account_username || "").replace(/^@/, "");
+          const assignedAccountId = Math.max(0, Number(item.assigned_account_id || 0));
+          const username = String(item.assigned_account_username || "").replace(/^@/, "");
+          const statusValue = String(item.status || "").toLowerCase();
+          const assignedLabel = username
+            ? `@${username}`
+            : `账号 ${assignedAccountId}`;
+          let assignmentLabel = assignedAccountId
+            ? assignedLabel
+            : "待分配";
+          let assignmentNote = "";
+          if (assignedAccountId && statusValue === "completed") {
+            assignmentNote = "历史发布账号 · 免费剧集已完成";
+          } else if (
+            assignedAccountId
+            && ["needs_review", "blocked", "paused"].includes(statusValue)
+          ) {
+            assignmentNote = "绑定保留 · 已暂停自动续发";
+          } else if (assignedAccountId) {
+            const nextDueAt = item.next_due_at
+              || item.next_scheduled_at
+              || (state.schedule.enabled ? state.schedule.nextDueAt : "");
+            assignmentNote = nextDueAt
+              ? `下次：${formatTime(nextDueAt)}`
+              : (state.schedule.enabled ? "下次时间待计算" : "自动发布已关闭");
+          } else if (
+            ["validation_failed", "failed", "blocked"].includes(statusValue)
+          ) {
+            assignmentLabel = "不可分配";
+            assignmentNote = "短剧校验未通过";
+          } else if (statusValue === "completed") {
+            assignmentLabel = "已完成";
+            assignmentNote = "无当前绑定";
+          } else if (statusValue === "needs_review") {
+            assignmentLabel = "绑定异常";
+            assignmentNote = "已暂停，请人工核查";
+          } else {
+            assignmentNote = "首次发布时自动绑定";
+          }
           appendCell(
             row,
-            username ? `@${username}` : (item.last_account_id || item.account_id ? `账号 ${item.last_account_id || item.account_id}` : "—"),
-            item.next_due_at || item.next_scheduled_at ? `下次：${formatTime(item.next_due_at || item.next_scheduled_at)}` : ""
+            assignmentLabel,
+            assignmentNote
           );
           const postCell = document.createElement("td");
           appendPostLink(postCell, item.last_post_url || item.preview_url || item.x_post_url, "预览最近 Post");

@@ -731,41 +731,515 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pool_fifo_conflict",
         )
 
-    def test_drama_plan_advances_only_after_each_episode_is_published(self):
+    def test_drama_plan_keeps_each_unfinished_drama_on_one_account(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        first_pool = self.add_drama(free_episode_count=2, labels="")
+        second_pool = self.add_drama(
+            content_id="D2",
+            free_episode_count=2,
+            labels="",
+        )
+        first_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
+        self.assertEqual(
+            [
+                (item["account_id"], item["episode_key"])
+                for item in first_plan["queues"]
+            ],
+            [(2, "D1:1"), (3, "D2:1")],
+        )
+
+        for queue_item in first_plan["queues"]:
+            self.publish_queue(queue_item, 1)
+        active = self.store.query_drama_pool()["items"]
+        self.assertEqual(
+            [
+                (
+                    item["content_id"],
+                    item["assigned_account_id"],
+                    item["next_sub_num"],
+                )
+                for item in active
+            ],
+            [("D1", 2, 2), ("D2", 3, 2)],
+        )
+
+        second_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 2),
+                self.drama_candidate(second_pool, 3, 2),
+            ],
+        )
+        self.assertEqual(
+            [
+                (item["account_id"], item["episode_key"])
+                for item in second_plan["queues"]
+            ],
+            [(2, "D1:2"), (3, "D2:2")],
+        )
+        for queue_item in second_plan["queues"]:
+            self.publish_queue(queue_item, 2)
+        completed = self.store.query_drama_pool()["items"]
+        self.assertTrue(
+            all(item["status"] == "completed" for item in completed)
+        )
+        self.assertTrue(
+            all(item["next_sub_num"] == 3 for item in completed)
+        )
+        self.assertTrue(
+            all(item["published_episode_count"] == 2 for item in completed)
+        )
+        self.assertEqual(
+            self.store.query_schedule_plan(
+                "drama", "2026-07-27", "10:00"
+            )["run"]["status"],
+            "completed",
+        )
+
+    def test_reordering_accounts_keeps_existing_drama_bindings(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        pool = self.add_drama(free_episode_count=2, labels="")
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
+        second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
+        for queue_item in first_plan["queues"]:
+            self.publish_queue(queue_item, 1)
+        updated = self.store.save_schedule_config(
+            "drama",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [3, 2],
+                "publish_times": ["10:00"],
+                "version": 2,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4],
+            now=datetime(
+                2026,
+                7,
+                27,
+                8,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+
+        second_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            updated["version"],
+            [
+                self.drama_candidate(second_pool, 3, 2),
+                self.drama_candidate(first_pool, 2, 2),
+            ],
+        )
+        self.assertEqual(
+            [
+                (item["account_id"], item["episode_key"])
+                for item in second_plan["queues"]
+            ],
+            [(3, "D2:2"), (2, "D1:2")],
+        )
+
+    def test_new_account_receives_oldest_unassigned_drama(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
+        second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(first_pool, 2, 1)],
+        )
+        self.publish_queue(first_plan["queues"][0], 1)
+        updated = self.store.save_schedule_config(
+            "drama",
+            {
+                "enabled": True,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [2, 3],
+                "publish_times": ["10:00"],
+                "version": 2,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4],
+            now=datetime(
+                2026,
+                7,
+                27,
+                8,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+
+        second_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            updated["version"],
+            [
+                self.drama_candidate(first_pool, 2, 2),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
+        self.assertEqual(
+            [
+                (item["account_id"], item["content_id"])
+                for item in second_plan["queues"]
+            ],
+            [(2, "D1"), (3, "D2")],
+        )
+
+    def test_drama_shortage_creates_no_partial_queue(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        pool = self.add_drama(content_id="ONLY", free_episode_count=2)
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "drama",
+                "2026-07-27",
+                "09:00",
+                2,
+                [
+                    self.drama_candidate(pool, 2, 1),
+                    self.drama_candidate(pool, 3, 2),
+                ],
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_schedule_drama_shortage",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_drama_assignment_rejects_cross_account_continuation(self):
+        self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
+        second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
+        for queue_item in first_plan["queues"]:
+            self.publish_queue(queue_item, 1)
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.create_schedule_plan(
+                "drama",
+                "2026-07-27",
+                "10:00",
+                2,
+                [
+                    self.drama_candidate(second_pool, 2, 2),
+                    self.drama_candidate(first_pool, 3, 2),
+                ],
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_assignment_conflict",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_queue SET account_id=3 WHERE id=?",
+                    (first_plan["queues"][0]["id"],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_queue SET source_type='material' "
+                    "WHERE id=?",
+                    (first_plan["queues"][0]["id"],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_drama_pool SET assigned_at=? "
+                    "WHERE id=?",
+                    (
+                        "2026-07-28T00:00:00Z",
+                        first_pool["id"],
+                    ),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "DELETE FROM x_post_queue WHERE id=?",
+                    (first_plan["queues"][0]["id"],),
+                )
+
+    def test_legacy_frozen_cross_account_queue_is_blocked_before_publish(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
+        second_pool = self.add_drama(content_id="D2", free_episode_count=2)
         plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
             "09:00",
             2,
             [
-                self.drama_candidate(pool, 2, 1),
-                self.drama_candidate(pool, 3, 2),
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
             ],
         )
-        self.assertEqual(
-            [item["episode_key"] for item in plan["queues"]],
-            ["D1:1", "D1:2"],
-        )
+        foreign_queue_id = plan["queues"][1]["id"]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "DROP TRIGGER trg_x_post_queue_drama_update"
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET drama_pool_item_id=?,"
+                "content_id=?,episode_number=2,episode_key=? WHERE id=?",
+                (
+                    first_pool["id"],
+                    first_pool["content_id"],
+                    "D1:2",
+                    foreign_queue_id,
+                ),
+            )
+            conn.commit()
 
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.reserve_log(foreign_queue_id)
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_account_binding_conflict",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log "
+                    "WHERE queue_id=?",
+                    (foreign_queue_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_storage_migration_uses_earliest_confirmed_account_as_owner(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
+        second_pool = self.add_drama(content_id="D2", free_episode_count=1)
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
         self.publish_queue(plan["queues"][0], 1)
-        active = self.store.query_drama_pool()["items"][0]
-        self.assertEqual(active["status"], "active")
-        self.assertEqual(active["next_sub_num"], 2)
-        self.assertEqual(active["published_episode_count"], 1)
+        self.publish_queue(plan["queues"][1], 1)
+        first_queue_id = plan["queues"][0]["id"]
+        second_queue_id = plan["queues"][1]["id"]
 
-        self.publish_queue(plan["queues"][1], 2)
-        completed = self.store.query_drama_pool()["items"][0]
-        self.assertEqual(completed["status"], "completed")
-        self.assertEqual(completed["next_sub_num"], 3)
-        self.assertEqual(completed["published_episode_count"], 2)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "DROP TRIGGER trg_x_post_queue_drama_update"
+            )
+            conn.execute(
+                "DROP TRIGGER "
+                "trg_x_post_drama_pool_assignment_immutable"
+            )
+            conn.execute(
+                "DROP TRIGGER "
+                "trg_x_post_drama_pool_assignment_evidence"
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET drama_pool_item_id=?,"
+                "content_id=?,episode_number=2,episode_key=? WHERE id=?",
+                (
+                    first_pool["id"],
+                    first_pool["content_id"],
+                    "D1:2",
+                    second_queue_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE x_post_drama_pool SET assigned_account_id=0,"
+                "assigned_at='',assigned_source_queue_id=NULL"
+            )
+            conn.commit()
+
+        migrated = service.XPostStore(self.db_path)
+        pools = {
+            item["content_id"]: item
+            for item in migrated.query_drama_pool()["items"]
+        }
+        self.assertEqual(pools["D1"]["assigned_account_id"], 2)
         self.assertEqual(
-            self.store.query_schedule_plan(
-                "drama", "2026-07-27", "09:00"
-            )["run"]["status"],
-            "completed",
+            pools["D1"]["assigned_source_queue_id"],
+            first_queue_id,
         )
+        self.assertEqual(pools["D1"]["assigned_account_username"], "DramaAccount2")
+        self.assertEqual(pools["D2"]["assigned_account_id"], 0)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT account_id FROM x_post_queue WHERE id=?",
+                    (second_queue_id,),
+                ).fetchone()[0],
+                3,
+            )
+
+    def test_completed_drama_releases_account_to_oldest_unassigned_drama(self):
+        self.save_schedule("drama", [2], ["09:00", "10:00"])
+        completed_pool = self.add_drama(
+            content_id="DONE",
+            free_episode_count=1,
+        )
+        next_pool = self.add_drama(
+            content_id="NEXT",
+            free_episode_count=1,
+        )
+        first_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(completed_pool, 2, 1)],
+        )
+        self.publish_queue(first_plan["queues"][0], 1)
+
+        second_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.drama_candidate(next_pool, 2, 1)],
+        )
+        self.assertEqual(
+            second_plan["queues"][0]["content_id"],
+            "NEXT",
+        )
+        pools = {
+            item["content_id"]: item
+            for item in self.store.query_drama_pool()["items"]
+        }
+        self.assertEqual(pools["DONE"]["status"], "completed")
+        self.assertEqual(pools["DONE"]["assigned_account_id"], 2)
+        self.assertEqual(pools["NEXT"]["assigned_account_id"], 2)
+
+    def test_enabled_schedule_cannot_remove_unfinished_drama_owner(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
+        second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.save_schedule_config(
+                "drama",
+                {
+                    "enabled": True,
+                    "timezone": "Asia/Shanghai",
+                    "account_ids": [3],
+                    "publish_times": ["10:00"],
+                    "version": 2,
+                },
+                actor={"user_id": "admin-1", "name": "Admin"},
+                eligible_account_ids=[2, 3, 4],
+                now=datetime(
+                    2026,
+                    7,
+                    27,
+                    8,
+                    0,
+                    tzinfo=service.BEIJING_TZ,
+                ),
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_owner_not_configured",
+        )
+
+    def test_disabling_schedule_preserves_unfinished_drama_owner(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="D1", free_episode_count=2)
+        self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+
+        disabled = self.store.save_schedule_config(
+            "drama",
+            {
+                "enabled": False,
+                "timezone": "Asia/Shanghai",
+                "account_ids": [2],
+                "publish_times": ["09:00"],
+                "version": 2,
+            },
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[],
+            now=datetime(
+                2026,
+                7,
+                27,
+                8,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+
+        self.assertFalse(disabled["enabled"])
+        row = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(row["assigned_account_id"], 2)
+        self.assertTrue(row["assigned_at"])
 
     def test_known_drama_failure_blocks_later_episodes(self):
         self.save_schedule("drama", [2], ["09:00", "10:00"])
@@ -980,15 +1454,22 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_first_drama_failure_stops_batch_with_later_queues_unexecuted(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        pool = self.add_drama(free_episode_count=2)
+        first_pool = self.add_drama(
+            content_id="FIRST",
+            free_episode_count=2,
+        )
+        second_pool = self.add_drama(
+            content_id="SECOND",
+            free_episode_count=2,
+        )
         plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
             "09:00",
             2,
             [
-                self.drama_candidate(pool, 2, 1),
-                self.drama_candidate(pool, 3, 2),
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
             ],
         )
         log = self.store.reserve_log(plan["queues"][0]["id"])
@@ -1021,6 +1502,36 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.assertIn("x_post_schedule_config", tables)
             self.assertIn("x_post_schedule_run", tables)
             self.assertIn("x_post_drama_pool", tables)
+            drama_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_drama_pool)"
+                )
+            }
+            self.assertTrue(
+                {
+                    "assigned_account_id",
+                    "assigned_at",
+                    "assigned_source_queue_id",
+                }.issubset(drama_columns)
+            )
+            triggers = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='trigger'"
+                )
+            }
+            self.assertTrue(
+                {
+                    "trg_x_post_queue_drama_insert",
+                    "trg_x_post_queue_drama_update",
+                    "trg_x_post_queue_drama_assignment_source_delete",
+                    "trg_x_post_drama_pool_assignment_immutable",
+                    "trg_x_post_drama_pool_assignment_evidence",
+                    "trg_x_post_drama_pool_assignment_insert_evidence",
+                }.issubset(triggers)
+            )
             self.assertEqual(
                 conn.execute("PRAGMA integrity_check").fetchone()[0],
                 "ok",

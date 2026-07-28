@@ -2423,7 +2423,8 @@ def available_post_drama_pool_request(payload):
     try:
         return {
             "items": XPostStore(POST_DB_PATH).available_drama_pool_items(
-                payload.get("limit", 50)
+                payload.get("limit", 50),
+                account_ids=payload.get("account_ids"),
             )
         }
     except XPostError as exc:

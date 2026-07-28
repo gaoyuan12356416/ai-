@@ -1,0 +1,33 @@
+# 开发计划
+
+## 开发范围
+
+短剧池选择、账号归属存储、计划事务、发布前防线、sidecar 契约、页面展示和生产迁移。
+
+## 任务拆分
+
+| 任务 | 负责人 | 文件/模块 | 状态 |
+| --- | --- | --- | --- |
+| 现网历史与定时任务只读审计 | Codex | 生产 SQLite/systemd | 完成 |
+| 数据库字段、迁移、索引与触发器 | Codex | `features/x_posts/service.py` | 完成 |
+| sidecar 与 selector 账号映射 | Codex | `oauth_service.py`、`drama_selector.py`、runner | 完成 |
+| 冻结旧队列发布前阻断 | Codex | `service.py` | 完成 |
+| 绑定账号页面展示 | Codex | `x-post-drama-pool.html` | 完成 |
+| 单元与集成回归 | Codex | `scripts/test_x_post_*.py` | 完成 |
+| GitHub 推送与生产部署 | Codex | 不可变 release | 待执行 |
+
+## 编译 / 构建命令
+
+```text
+python -m py_compile features/x_posts/service.py features/x_posts/drama_selector.py features/x_accounts/oauth_service.py scripts/x_post_schedule_runner.py
+```
+
+## 风险与依赖
+
+- 依赖当前 SQLite 结构与既有队列/日志证据。
+- 升级必须避开短剧定时点并确认没有非终态批次。
+- 根盘空间紧张，备份、演练和 release 必须放数据盘。
+
+## 完成记录
+
+- 2026-07-28：本地实现完成，327 个相关测试通过；等待生产演练。

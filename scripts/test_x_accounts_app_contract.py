@@ -64,6 +64,12 @@ class XAccountsAppContractTest(unittest.TestCase):
         )
         self.assertNotIn("Publish three daily", X_POST_DAILY_TIMER_SOURCE)
 
+    def test_drama_pool_sidecar_forwards_account_affinity_scope(self):
+        self.assertIn(
+            'account_ids=payload.get("account_ids")',
+            X_ACCOUNTS_SIDECAR_SOURCE,
+        )
+
     def test_x_account_list_displays_daily_auto_publish_status_in_twelve_columns(self):
         self.assertIn(
             '<th>X账号</th><th class="auto-publish-col">自动发布 Post</th>',

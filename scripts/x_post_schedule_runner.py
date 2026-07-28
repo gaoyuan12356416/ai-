@@ -699,10 +699,20 @@ class ScheduleSidecarClient(SidecarClient):
             )
         return dict(item)
 
-    def available_drama_pool(self, path, limit):
-        result = self.post(path, {"limit": int(limit)})
+    def available_drama_pool(self, path, limit, account_ids):
+        normalized_accounts = [int(value) for value in account_ids]
+        result = self.post(
+            path,
+            {
+                "limit": int(limit),
+                "account_ids": normalized_accounts,
+            },
+        )
         items = result.get("items") if isinstance(result, dict) else None
-        if not isinstance(items, list) or len(items) > int(limit):
+        if (
+            not isinstance(items, list)
+            or len(items) > len(normalized_accounts)
+        ):
             raise SidecarError(
                 "x_post_drama_pool_invalid_response",
                 "Drama pool response is invalid",
@@ -881,7 +891,9 @@ def _drama_candidates(
     timestamp,
 ):
     pool_items = sidecar.available_drama_pool(
-        config.drama_pool_path, config.scan_limit
+        config.drama_pool_path,
+        config.scan_limit,
+        [int(account["id"]) for account in accounts],
     )
     if not pool_items:
         raise ScheduleRunError(
@@ -894,7 +906,7 @@ def _drama_candidates(
             candidates = select_drama_pool_episodes(
                 connection,
                 pool_items,
-                limit=len(accounts),
+                account_ids=[int(account["id"]) for account in accounts],
                 schema=config.mysql_database,
                 app_id=config.drama_app_id,
             )
@@ -929,6 +941,17 @@ def _drama_candidates(
         for rank, (candidate, account) in enumerate(
             zip(candidates, accounts), 1
         ):
+            if int(candidate.get("candidate_account_id") or 0) != int(
+                account["id"]
+            ):
+                raise ScheduleRunError(
+                    "short-drama account assignment changed during preflight",
+                    "x_post_schedule_account_mismatch",
+                    drama_pool_item_id=candidate.get(
+                        "drama_pool_item_id"
+                    ),
+                    content_id=candidate.get("content_id", ""),
+                )
             try:
                 build_drama_episode_post_text(
                     "https://ai.yingliangads.com/s2l/1.html",
