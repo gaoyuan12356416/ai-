@@ -34,6 +34,9 @@ STALE_IF_ERROR_SECONDS = max(
 )
 CACHE_PATH_TEXT = os.environ.get("CAMPAIGN_COPY_REPORT_CACHE_PATH", "").strip()
 CACHE_PATH = Path(CACHE_PATH_TEXT) if CACHE_PATH_TEXT else None
+SUPPORTED_PLATFORMS = (0, 3)
+PLATFORM_LABELS = {0: "Meta", 3: "TikTok"}
+INSIGHT_CHUNK_SIZES = {0: 500, 3: 2000}
 METRIC_FIELDS = (
     "impressions",
     "clicks",
@@ -48,6 +51,8 @@ METRIC_FIELDS = (
     "source_rows",
 )
 CAMPAIGN_FIELDS = (
+    "platform",
+    "platform_label",
     "campaign_id",
     "campaign_name",
     "origin_campaign_id",
@@ -69,6 +74,7 @@ CAMPAIGN_FIELDS = (
     "languages",
 )
 DAILY_FIELDS = (
+    "platform",
     "campaign_id",
     "dt",
     "spend",
@@ -84,6 +90,8 @@ DAILY_FIELDS = (
     "source_rows",
 )
 EXTRA_ENTITY_FIELDS = (
+    "platform",
+    "platform_label",
     "level",
     "entity_key",
     "entity_id",
@@ -113,6 +121,7 @@ EXTRA_ENTITY_FIELDS = (
     "languages",
 )
 EXTRA_DAILY_FIELDS = (
+    "platform",
     "level",
     "entity_key",
     "entity_id",
@@ -162,6 +171,19 @@ def ratio(numerator: float, denominator: float) -> float | None:
     return round(numerator / denominator, 6) if denominator else None
 
 
+def platform_id(row: dict) -> int:
+    return int(row.get("platform") or 0)
+
+
+def platform_label(value: object) -> str:
+    platform = int(value or 0)
+    return PLATFORM_LABELS.get(platform, f"平台 {platform}")
+
+
+def report_entity_key(platform: int, level: int, entity_id: object) -> str:
+    return f"{platform}:{level}:{entity_id}"
+
+
 def mysql_connection():
     port = int(os.environ.get("ADMIN_MAPPING_MYSQL_PORT", "63350"))
     if port != 63350:
@@ -206,7 +228,7 @@ def query_raw() -> dict:
                 """
                 SELECT level, status, COUNT(*) AS n
                 FROM ads_business.ads_campaign_rule_logs
-                WHERE platform=0 AND level IN (0,1,2) AND data_source=1
+                WHERE platform IN (0,3) AND level IN (0,1,2) AND data_source=1
                 GROUP BY level, status
                 ORDER BY level, status
                 """
@@ -215,7 +237,7 @@ def query_raw() -> dict:
 
             cur.execute(
                 """
-                SELECT l.id, l.level, l.account_id, l.origin_id, l.new_id, l.queue_id,
+                SELECT l.id, l.platform, l.level, l.account_id, l.origin_id, l.new_id, l.queue_id,
                        l.user_id, l.app_id, l.content_id, l.created_at,
                        r.name AS rule_name, a.name AS app_name,
                        aug.name AS user_name
@@ -231,7 +253,8 @@ def query_raw() -> dict:
                     FROM kunlunads_dev.admin_user_group
                     GROUP BY sub_user_id
                 ) aug ON aug.sub_user_id=l.user_id
-                WHERE l.platform=0 AND l.level IN (0,1,2) AND l.data_source=1 AND l.status=1
+                WHERE l.platform IN (0,3) AND l.level IN (0,1,2)
+                  AND l.data_source=1 AND l.status=1
                 ORDER BY l.created_at, l.id
                 """
             )
@@ -245,30 +268,41 @@ def query_raw() -> dict:
             payload["logs"] = logs
             payload["extra_logs"] = extra_logs
 
-            campaign_ids = sorted({str(row["new_id"]) for row in logs})
             mapping: list[dict] = []
-            for part in chunks(campaign_ids, 300):
-                placeholders = ",".join(["%s"] * len(part))
-                cur.execute(
-                    f"""
-                    SELECT campaign_id, ad_id, campaign_name, product,
-                           ad_account_id, status, country, language, budget
-                    FROM kunlunads_dev.ads_facebook_auto_created_data FORCE INDEX (campaign_id)
-                    WHERE campaign_id IN ({placeholders})
-                    """,
-                    part,
-                )
-                mapping.extend(cur.fetchall())
+            meta_campaign_ids = sorted(
+                {str(row["new_id"]) for row in logs if platform_id(row) == 0}
+            )
+            found_meta_campaigns: set[str] = set()
+            for source_table in (
+                "kunlunads_dev.ads_facebook_auto_created_data",
+                "ads_ai.ads_facebook_auto_created_data",
+            ):
+                remaining = sorted(set(meta_campaign_ids) - found_meta_campaigns)
+                for part in chunks(remaining, 300):
+                    placeholders = ",".join(["%s"] * len(part))
+                    cur.execute(
+                        f"""
+                        SELECT 0 AS platform, campaign_id, ad_id, campaign_name, product,
+                               ad_account_id, status, country, language, budget
+                        FROM {source_table} FORCE INDEX (campaign_id)
+                        WHERE campaign_id IN ({placeholders})
+                        """,
+                        part,
+                    )
+                    for source_row in cur.fetchall():
+                        mapping.append(source_row)
+                        found_meta_campaigns.add(str(source_row["campaign_id"]))
 
-            mapped_campaigns = {str(row["campaign_id"]) for row in mapping}
-            missing = sorted(set(campaign_ids) - mapped_campaigns)
-            for part in chunks(missing, 300):
+            tiktok_campaign_ids = sorted(
+                {str(row["new_id"]) for row in logs if platform_id(row) == 3}
+            )
+            for part in chunks(tiktok_campaign_ids, 300):
                 placeholders = ",".join(["%s"] * len(part))
                 cur.execute(
                     f"""
-                    SELECT campaign_id, ad_id, campaign_name, product,
-                           ad_account_id, status, country, language, budget
-                    FROM ads_ai.ads_facebook_auto_created_data FORCE INDEX (campaign_id)
+                    SELECT 3 AS platform, campaign_id, ad_id, campaign_name,
+                           '' AS product, ad_account_id, status, country, language, budget
+                    FROM kunlunads_dev.ads_tiktok_auto_created_data FORCE INDEX (campaign_id)
                     WHERE campaign_id IN ({placeholders})
                     """,
                     part,
@@ -277,124 +311,158 @@ def query_raw() -> dict:
             payload["mapping"] = mapping
 
             extra_mapping: list[dict] = []
-            for level, id_field in ((1, "adset_id"), (2, "ad_id")):
-                entity_ids = sorted(
-                    {str(row["new_id"]) for row in extra_logs if int(row.get("level") or 0) == level}
-                )
-                found: set[str] = set()
-                for source_table in (
-                    "kunlunads_dev.ads_facebook_auto_created_data",
-                    "ads_ai.ads_facebook_auto_created_data",
-                ):
-                    remaining = sorted(set(entity_ids) - found)
-                    for part in chunks(remaining, 300):
-                        placeholders = ",".join(["%s"] * len(part))
-                        cur.execute(
-                            f"""
-                            SELECT campaign_id, adset_id, ad_id, campaign_name,
-                                   adset_name, ad_name, product, ad_account_id,
-                                   status, country, language, budget
-                            FROM {source_table}
-                            WHERE {id_field} IN ({placeholders})
-                            """,
-                            part,
+            for platform in SUPPORTED_PLATFORMS:
+                for level, id_field in ((1, "adset_id"), (2, "ad_id")):
+                    entity_ids = sorted(
+                        {
+                            str(row["new_id"])
+                            for row in extra_logs
+                            if platform_id(row) == platform
+                            and int(row.get("level") or 0) == level
+                        }
+                    )
+                    found: set[str] = set()
+                    if platform == 0:
+                        source_specs = (
+                            ("kunlunads_dev.ads_facebook_auto_created_data", "product", ""),
+                            ("ads_ai.ads_facebook_auto_created_data", "product", ""),
                         )
-                        for source_row in cur.fetchall():
-                            entity_id = str(source_row.get(id_field) or "")
-                            if not entity_id:
-                                continue
-                            source_row["level"] = level
-                            source_row["entity_id"] = entity_id
-                            extra_mapping.append(source_row)
-                            found.add(entity_id)
+                    else:
+                        source_specs = (
+                            (
+                                "kunlunads_dev.ads_tiktok_auto_created_data",
+                                "'' AS product",
+                                f" FORCE INDEX ({id_field})",
+                            ),
+                        )
+                    for source_table, product_sql, index_hint in source_specs:
+                        remaining = sorted(set(entity_ids) - found)
+                        for part in chunks(remaining, 300):
+                            placeholders = ",".join(["%s"] * len(part))
+                            cur.execute(
+                                f"""
+                                SELECT {platform} AS platform, campaign_id, adset_id, ad_id,
+                                       campaign_name, adset_name, ad_name, {product_sql},
+                                       ad_account_id, status, country, language, budget
+                                FROM {source_table}{index_hint}
+                                WHERE {id_field} IN ({placeholders})
+                                """,
+                                part,
+                            )
+                            for source_row in cur.fetchall():
+                                entity_id = str(source_row.get(id_field) or "")
+                                if not entity_id:
+                                    continue
+                                source_row["level"] = level
+                                source_row["entity_id"] = entity_id
+                                extra_mapping.append(source_row)
+                                found.add(entity_id)
             payload["extra_mapping"] = extra_mapping
 
             cur.execute(
                 "SELECT dt FROM kunlunads_dev.ads_custom_source_insight "
-                "FORCE INDEX (index_dad) ORDER BY dt DESC LIMIT 1"
+                "FORCE INDEX (index_dad) WHERE platform IN (0,3) "
+                "ORDER BY dt DESC LIMIT 1"
             )
             latest = cur.fetchone()
             max_dt = latest["dt"] if latest else None
             payload["insight_max_dt"] = max_dt
 
-            ad_ids = sorted(
-                {
-                    str(row["ad_id"])
-                    for row in mapping
-                    if str(row.get("ad_id") or "").isdigit() and int(row["ad_id"]) > 0
-                }
-            )
-            log_dates = [parse_datetime(row.get("created_at")) for row in logs]
-            min_dt = min((value.date() for value in log_dates if value), default=max_dt)
             daily: list[dict] = []
-            current = min_dt
-            while current and max_dt and current <= max_dt:
-                for part in chunks(ad_ids, 500):
-                    placeholders = ",".join(["%s"] * len(part))
-                    cur.execute(
-                        f"""
-                        SELECT campaign_id,
-                               SUM(impressions) AS impressions,
-                               SUM(clicks) AS clicks,
-                               SUM(installs) AS installs,
-                               SUM(spend) AS spend,
-                               SUM(purchase) AS purchase,
-                               SUM(revenue) AS revenue,
-                               SUM(af_installs) AS af_installs,
-                               SUM(af_revenue0) AS af_revenue0,
-                               SUM(af_revenue) AS af_revenue,
-                               SUM(ad_impression_revenue) AS iaa_revenue,
-                               COUNT(*) AS source_rows
-                        FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
-                        WHERE dt=%s AND platform=0 AND ad_id IN ({placeholders})
-                        GROUP BY campaign_id
-                        """,
-                        [current] + part,
-                    )
-                    for row in cur.fetchall():
-                        row["dt"] = current
-                        daily.append(row)
-                current += dt.timedelta(days=1)
+            for platform in SUPPORTED_PLATFORMS:
+                ad_ids = sorted(
+                    {
+                        str(row["ad_id"])
+                        for row in mapping
+                        if platform_id(row) == platform
+                        and str(row.get("ad_id") or "").isdigit()
+                        and int(row["ad_id"]) > 0
+                    }
+                )
+                log_dates = [
+                    parse_datetime(row.get("created_at"))
+                    for row in logs
+                    if platform_id(row) == platform
+                ]
+                min_dt = min((value.date() for value in log_dates if value), default=max_dt)
+                current = min_dt
+                while current and max_dt and current <= max_dt:
+                    for part in chunks(ad_ids, INSIGHT_CHUNK_SIZES[platform]):
+                        placeholders = ",".join(["%s"] * len(part))
+                        cur.execute(
+                            f"""
+                            SELECT {platform} AS platform, campaign_id,
+                                   SUM(impressions) AS impressions,
+                                   SUM(clicks) AS clicks,
+                                   SUM(installs) AS installs,
+                                   SUM(spend) AS spend,
+                                   SUM(purchase) AS purchase,
+                                   SUM(revenue) AS revenue,
+                                   SUM(af_installs) AS af_installs,
+                                   SUM(af_revenue0) AS af_revenue0,
+                                   SUM(af_revenue) AS af_revenue,
+                                   SUM(ad_impression_revenue) AS iaa_revenue,
+                                   COUNT(*) AS source_rows
+                            FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
+                            WHERE dt=%s AND platform=%s AND ad_id IN ({placeholders})
+                            GROUP BY campaign_id
+                            """,
+                            [current, platform] + part,
+                        )
+                        for row in cur.fetchall():
+                            row["dt"] = current
+                            daily.append(row)
+                    current += dt.timedelta(days=1)
             payload["daily"] = daily
 
-            extra_ad_ids = sorted(
-                {
-                    str(row["ad_id"])
-                    for row in extra_mapping
-                    if str(row.get("ad_id") or "").isdigit() and int(row["ad_id"]) > 0
-                }
-            )
-            extra_log_dates = [parse_datetime(row.get("created_at")) for row in extra_logs]
-            extra_min_dt = min((value.date() for value in extra_log_dates if value), default=max_dt)
             extra_daily: list[dict] = []
-            current = extra_min_dt
-            while current and max_dt and current <= max_dt:
-                for part in chunks(extra_ad_ids, 500):
-                    placeholders = ",".join(["%s"] * len(part))
-                    cur.execute(
-                        f"""
-                        SELECT ad_id,
-                               SUM(impressions) AS impressions,
-                               SUM(clicks) AS clicks,
-                               SUM(installs) AS installs,
-                               SUM(spend) AS spend,
-                               SUM(purchase) AS purchase,
-                               SUM(revenue) AS revenue,
-                               SUM(af_installs) AS af_installs,
-                               SUM(af_revenue0) AS af_revenue0,
-                               SUM(af_revenue) AS af_revenue,
-                               SUM(ad_impression_revenue) AS iaa_revenue,
-                               COUNT(*) AS source_rows
-                        FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
-                        WHERE dt=%s AND platform=0 AND ad_id IN ({placeholders})
-                        GROUP BY ad_id
-                        """,
-                        [current] + part,
-                    )
-                    for row in cur.fetchall():
-                        row["dt"] = current
-                        extra_daily.append(row)
-                current += dt.timedelta(days=1)
+            for platform in SUPPORTED_PLATFORMS:
+                extra_ad_ids = sorted(
+                    {
+                        str(row["ad_id"])
+                        for row in extra_mapping
+                        if platform_id(row) == platform
+                        and str(row.get("ad_id") or "").isdigit()
+                        and int(row["ad_id"]) > 0
+                    }
+                )
+                extra_log_dates = [
+                    parse_datetime(row.get("created_at"))
+                    for row in extra_logs
+                    if platform_id(row) == platform
+                ]
+                extra_min_dt = min(
+                    (value.date() for value in extra_log_dates if value),
+                    default=max_dt,
+                )
+                current = extra_min_dt
+                while current and max_dt and current <= max_dt:
+                    for part in chunks(extra_ad_ids, INSIGHT_CHUNK_SIZES[platform]):
+                        placeholders = ",".join(["%s"] * len(part))
+                        cur.execute(
+                            f"""
+                            SELECT {platform} AS platform, ad_id,
+                                   SUM(impressions) AS impressions,
+                                   SUM(clicks) AS clicks,
+                                   SUM(installs) AS installs,
+                                   SUM(spend) AS spend,
+                                   SUM(purchase) AS purchase,
+                                   SUM(revenue) AS revenue,
+                                   SUM(af_installs) AS af_installs,
+                                   SUM(af_revenue0) AS af_revenue0,
+                                   SUM(af_revenue) AS af_revenue,
+                                   SUM(ad_impression_revenue) AS iaa_revenue,
+                                   COUNT(*) AS source_rows
+                            FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (index_dad)
+                            WHERE dt=%s AND platform=%s AND ad_id IN ({placeholders})
+                            GROUP BY ad_id
+                            """,
+                            [current, platform] + part,
+                        )
+                        for row in cur.fetchall():
+                            row["dt"] = current
+                            extra_daily.append(row)
+                    current += dt.timedelta(days=1)
             payload["extra_daily"] = extra_daily
             return payload
     finally:
@@ -407,35 +475,41 @@ def build_payload(raw: dict) -> dict:
         raise RuntimeError("refusing report build: MySQL endpoint is not read-only")
     report_time = parse_datetime(safety.get("server_time")) or dt.datetime.now()
 
-    logs_by_campaign: dict[str, list[dict]] = collections.defaultdict(list)
+    logs_by_campaign: dict[tuple[int, str], list[dict]] = collections.defaultdict(list)
     for row in raw.get("logs", []):
-        logs_by_campaign[str(row["new_id"])].append(row)
-    mapping_by_campaign: dict[str, list[dict]] = collections.defaultdict(list)
+        logs_by_campaign[(platform_id(row), str(row["new_id"]))].append(row)
+    mapping_by_campaign: dict[tuple[int, str], list[dict]] = collections.defaultdict(list)
     for row in raw.get("mapping", []):
-        mapping_by_campaign[str(row["campaign_id"])].append(row)
+        mapping_by_campaign[(platform_id(row), str(row["campaign_id"]))].append(row)
 
-    daily_by_key: dict[tuple[str, str], dict] = {}
+    daily_by_key: dict[tuple[int, str, str], dict] = {}
     for row in raw.get("daily", []):
+        platform = platform_id(row)
         campaign_id = str(row.get("campaign_id") or "")
         stat_date = str(row.get("dt") or "")
         if not campaign_id or not stat_date:
             continue
-        key = (campaign_id, stat_date)
+        key = (platform, campaign_id, stat_date)
         aggregate = daily_by_key.setdefault(
             key,
-            {"campaign_id": campaign_id, "dt": stat_date, **{field: 0.0 for field in METRIC_FIELDS}},
+            {
+                "platform": platform,
+                "campaign_id": campaign_id,
+                "dt": stat_date,
+                **{field: 0.0 for field in METRIC_FIELDS},
+            },
         )
         for field in METRIC_FIELDS:
             aggregate[field] += number(row.get(field))
 
     campaigns: list[dict] = []
-    copy_date_by_campaign: dict[str, str] = {}
-    for campaign_id, logs in logs_by_campaign.items():
+    copy_date_by_campaign: dict[tuple[int, str], str] = {}
+    for (platform, campaign_id), logs in logs_by_campaign.items():
         log = sorted(logs, key=lambda row: (str(row.get("created_at")), int(row.get("id") or 0)))[0]
-        mapping = mapping_by_campaign.get(campaign_id, [])
+        mapping = mapping_by_campaign.get((platform, campaign_id), [])
         copy_at = parse_datetime(log.get("created_at"))
         copy_date = copy_at.date().isoformat() if copy_at else ""
-        copy_date_by_campaign[campaign_id] = copy_date
+        copy_date_by_campaign[(platform, campaign_id)] = copy_date
         queue_id = int(log.get("queue_id") or 0)
         rule_name = str(log.get("rule_name") or "").strip()
         rule_label = (
@@ -452,6 +526,8 @@ def build_payload(raw: dict) -> dict:
         )
         campaigns.append(
             {
+                "platform": platform,
+                "platform_label": platform_label(platform),
                 "campaign_id": campaign_id,
                 "campaign_name": dominant([row.get("campaign_name") for row in mapping]),
                 "origin_campaign_id": str(log.get("origin_id") or ""),
@@ -476,57 +552,76 @@ def build_payload(raw: dict) -> dict:
             }
         )
 
-    campaigns.sort(key=lambda row: (row["copy_at"], row["campaign_id"]), reverse=True)
+    campaigns.sort(
+        key=lambda row: (row["copy_at"], row["platform"], row["campaign_id"]),
+        reverse=True,
+    )
     campaign_daily = []
-    for (campaign_id, stat_date), row in sorted(daily_by_key.items()):
-        copy_date = copy_date_by_campaign.get(campaign_id, "")
+    for (platform, campaign_id, stat_date), row in sorted(daily_by_key.items()):
+        copy_date = copy_date_by_campaign.get((platform, campaign_id), "")
         if copy_date and stat_date < copy_date:
             continue
         campaign_daily.append(
             {
+                "platform": platform,
                 "campaign_id": campaign_id,
                 "dt": stat_date,
                 **{field: round(number(row.get(field)), 4) for field in METRIC_FIELDS},
             }
         )
 
-    extra_logs_by_entity: dict[tuple[int, str], list[dict]] = collections.defaultdict(list)
+    extra_logs_by_entity: dict[tuple[int, int, str], list[dict]] = collections.defaultdict(list)
     for row in raw.get("extra_logs", []):
+        platform = platform_id(row)
         level = int(row.get("level") or 0)
         if level in (1, 2):
-            extra_logs_by_entity[(level, str(row["new_id"]))].append(row)
+            extra_logs_by_entity[(platform, level, str(row["new_id"]))].append(row)
 
-    extra_mapping_by_entity: dict[tuple[int, str], list[dict]] = collections.defaultdict(list)
-    ad_to_entities: dict[str, set[tuple[int, str]]] = collections.defaultdict(set)
+    extra_mapping_by_entity: dict[tuple[int, int, str], list[dict]] = collections.defaultdict(list)
+    ad_to_entities: dict[tuple[int, str], set[tuple[int, int, str]]] = collections.defaultdict(set)
     for row in raw.get("extra_mapping", []):
-        key = (int(row.get("level") or 0), str(row.get("entity_id") or ""))
-        if key[0] not in (1, 2) or not key[1]:
+        key = (
+            platform_id(row),
+            int(row.get("level") or 0),
+            str(row.get("entity_id") or ""),
+        )
+        if key[1] not in (1, 2) or not key[2]:
             continue
         extra_mapping_by_entity[key].append(row)
         ad_id = str(row.get("ad_id") or "")
         if ad_id:
-            ad_to_entities[ad_id].add(key)
+            ad_to_entities[(key[0], ad_id)].add(key)
 
-    extra_daily_by_key: dict[tuple[int, str, str], dict] = {}
+    extra_daily_by_key: dict[tuple[int, int, str, str], dict] = {}
     for row in raw.get("extra_daily", []):
+        platform = platform_id(row)
         stat_date = str(row.get("dt") or "")
-        for level, entity_id in ad_to_entities.get(str(row.get("ad_id") or ""), set()):
-            key = (level, entity_id, stat_date)
+        for _, level, entity_id in ad_to_entities.get(
+            (platform, str(row.get("ad_id") or "")),
+            set(),
+        ):
+            key = (platform, level, entity_id, stat_date)
             aggregate = extra_daily_by_key.setdefault(
                 key,
-                {"level": level, "entity_id": entity_id, "dt": stat_date, **{field: 0.0 for field in METRIC_FIELDS}},
+                {
+                    "platform": platform,
+                    "level": level,
+                    "entity_id": entity_id,
+                    "dt": stat_date,
+                    **{field: 0.0 for field in METRIC_FIELDS},
+                },
             )
             for field in METRIC_FIELDS:
                 aggregate[field] += number(row.get(field))
 
     extra_entities: list[dict] = []
-    copy_date_by_entity: dict[tuple[int, str], str] = {}
-    for (level, entity_id), logs in extra_logs_by_entity.items():
+    copy_date_by_entity: dict[tuple[int, int, str], str] = {}
+    for (platform, level, entity_id), logs in extra_logs_by_entity.items():
         log = sorted(logs, key=lambda row: (str(row.get("created_at")), int(row.get("id") or 0)))[0]
-        mapping = extra_mapping_by_entity.get((level, entity_id), [])
+        mapping = extra_mapping_by_entity.get((platform, level, entity_id), [])
         copy_at = parse_datetime(log.get("created_at"))
         copy_date = copy_at.date().isoformat() if copy_at else ""
-        copy_date_by_entity[(level, entity_id)] = copy_date
+        copy_date_by_entity[(platform, level, entity_id)] = copy_date
         queue_id = int(log.get("queue_id") or 0)
         rule_name = str(log.get("rule_name") or "").strip()
         rule_label = (
@@ -549,8 +644,10 @@ def build_payload(raw: dict) -> dict:
         )
         extra_entities.append(
             {
+                "platform": platform,
+                "platform_label": platform_label(platform),
                 "level": level,
-                "entity_key": f"{level}:{entity_id}",
+                "entity_key": report_entity_key(platform, level, entity_id),
                 "entity_id": entity_id,
                 "entity_name": entity_name,
                 "origin_entity_id": str(log.get("origin_id") or ""),
@@ -580,17 +677,21 @@ def build_payload(raw: dict) -> dict:
                 "languages": joined_distinct([row.get("language") for row in mapping]),
             }
         )
-    extra_entities.sort(key=lambda row: (row["copy_at"], row["level"], row["entity_id"]), reverse=True)
+    extra_entities.sort(
+        key=lambda row: (row["copy_at"], row["platform"], row["level"], row["entity_id"]),
+        reverse=True,
+    )
 
     extra_entity_daily: list[dict] = []
-    for (level, entity_id, stat_date), row in sorted(extra_daily_by_key.items()):
-        copy_date = copy_date_by_entity.get((level, entity_id), "")
+    for (platform, level, entity_id, stat_date), row in sorted(extra_daily_by_key.items()):
+        copy_date = copy_date_by_entity.get((platform, level, entity_id), "")
         if copy_date and stat_date < copy_date:
             continue
         extra_entity_daily.append(
             {
+                "platform": platform,
                 "level": level,
-                "entity_key": f"{level}:{entity_id}",
+                "entity_key": report_entity_key(platform, level, entity_id),
                 "entity_id": entity_id,
                 "dt": stat_date,
                 **{field: round(number(row.get(field)), 4) for field in METRIC_FIELDS},
@@ -621,6 +722,7 @@ def build_payload(raw: dict) -> dict:
             "session_time_zone": str(safety.get("session_time_zone") or ""),
             "insight_max_dt": str(raw.get("insight_max_dt") or ""),
             "source": "ads_business.ads_campaign_rule_logs + kunlunads_dev.admin_user_group + kunlunads_dev.ads_custom_source_insight",
+            "platform_scope": "0=Meta, 3=TikTok",
             "read_only_verified": True,
             "copy_start": min(copy_times, default=""),
             "copy_end": max(copy_times, default=""),
@@ -1094,6 +1196,7 @@ def self_test() -> int:
     payload = build_payload(raw)
     assert payload["meta"]["today"] == "2026-07-20"
     assert payload["campaigns"][0]["user_label"] == "测试用户（ID 42）"
+    assert payload["campaigns"][0]["platform_label"] == "Meta"
     assert payload["daily"][0]["spend"] == 10
     assert payload["copy_pipeline"]["terminal_success_rate"] == 1.0
     assert payload["copy_pipelines"]["1"]["success"] == 1
@@ -1103,6 +1206,7 @@ def self_test() -> int:
     wire = encode_wire_payload(payload)
     assert wire["v"] == 2
     assert wire["c"][0][CAMPAIGN_FIELDS.index("user_label")] == "测试用户（ID 42）"
+    assert wire["c"][0][CAMPAIGN_FIELDS.index("platform_label")] == "Meta"
     assert wire["d"][0][DAILY_FIELDS.index("spend")] == 10
     assert wire["x"][0][EXTRA_ENTITY_FIELDS.index("entity_id")] == "3001"
     assert wire["xd"][0][EXTRA_DAILY_FIELDS.index("spend")] == 4

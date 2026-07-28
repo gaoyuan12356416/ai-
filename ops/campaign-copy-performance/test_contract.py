@@ -22,6 +22,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn('data-level="0">Campaign', source)
         self.assertIn('data-level="1">Ad Set', source)
         self.assertIn('data-level="2">Ad', source)
+        self.assertIn('id="platformFilter"', source)
+        self.assertIn("platform_label", source)
         self.assertIn("new_id = adset_id", source)
         self.assertIn("new_id = ad_id", source)
         self.assertIn('id="loadingPanel"', source)
@@ -39,12 +41,61 @@ class ContractTest(unittest.TestCase):
     def test_level_query_contract(self):
         source = (ROOT / "service.py").read_text(encoding="utf-8")
         self.assertIn("l.level IN (0,1,2)", source)
+        self.assertIn("l.platform IN (0,3)", source)
+        self.assertIn("ads_tiktok_auto_created_data", source)
+        self.assertIn("WHERE dt=%s AND platform=%s", source)
         self.assertIn('for level, id_field in ((1, "adset_id"), (2, "ad_id"))', source)
         self.assertIn('"copy_pipelines": copy_pipelines', source)
         self.assertIn('"extra_entities": extra_entities', source)
 
     def test_payload_contract(self):
         self.assertEqual(service.self_test(), 0)
+
+    def test_platform_ids_isolate_same_campaign_id(self):
+        raw = {
+            "safety": {
+                "is_read_only": 1,
+                "server_time": "2026-07-28 12:00:00",
+                "session_time_zone": "+08:00",
+            },
+            "copy_status_counts": [{"level": 0, "status": 1, "n": 2}],
+            "insight_max_dt": "2026-07-28",
+            "logs": [
+                {
+                    "id": 1,
+                    "platform": 0,
+                    "new_id": "1001",
+                    "app_name": "Meta App",
+                    "created_at": "2026-07-28 08:00:00",
+                },
+                {
+                    "id": 2,
+                    "platform": 3,
+                    "new_id": "1001",
+                    "app_name": "dramawaveminis",
+                    "created_at": "2026-07-28 09:00:00",
+                },
+            ],
+            "mapping": [
+                {"platform": 0, "campaign_id": "1001", "ad_id": "2001"},
+                {"platform": 3, "campaign_id": "1001", "ad_id": "3001"},
+            ],
+            "daily": [
+                {"platform": 0, "campaign_id": "1001", "dt": "2026-07-28", "spend": 10},
+                {"platform": 3, "campaign_id": "1001", "dt": "2026-07-28", "spend": 20},
+            ],
+            "extra_logs": [],
+            "extra_mapping": [],
+            "extra_daily": [],
+        }
+        payload = service.build_payload(raw)
+        campaigns = {row["platform"]: row for row in payload["campaigns"]}
+        daily = {row["platform"]: row for row in payload["daily"]}
+        self.assertEqual(set(campaigns), {0, 3})
+        self.assertEqual(campaigns[0]["platform_label"], "Meta")
+        self.assertEqual(campaigns[3]["platform_label"], "TikTok")
+        self.assertEqual(daily[0]["spend"], 10)
+        self.assertEqual(daily[3]["spend"], 20)
 
     def test_read_only_port_guard(self):
         with mock.patch.dict(os.environ, {"ADMIN_MAPPING_MYSQL_PORT": "63353"}):

@@ -71,6 +71,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     <div class="field"><label for="statEndDate">数据统计结束日期</label><input type="date" id="statEndDate"></div>
     <div class="field"><label for="ruleFilter">复制规则</label><select id="ruleFilter"></select></div>
     <div class="field"><label for="productFilter">投放产品</label><select id="productFilter"></select></div>
+    <div class="field"><label for="platformFilter">投放平台</label><select id="platformFilter"></select></div>
     <div class="field"><label for="userFilter">操作人</label><select id="userFilter"></select></div>
     <div class="field"><label for="accountFilter">广告账户</label><select id="accountFilter"></select></div>
     <div class="field"><label for="bandFilter">效果区间</label><select id="bandFilter"></select></div>
@@ -123,8 +124,11 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const extraEntities = RAW.v===2 ? inflate(RAW.xf||[],RAW.x||[]) : RAW.extra_entities||[];
   const extraDaily = RAW.v===2 ? inflate(RAW.xdf||[],RAW.xd||[]) : RAW.extra_daily||[];
   const pipelines = RAW.v===2 ? RAW.lp||{'0':RAW.p||{}} : RAW.copy_pipelines||{'0':RAW.copy_pipeline||{}};
-  const allEntities = baseCampaigns.map(row=>({...row,level:0,entity_key:'0:'+row.campaign_id,entity_id:row.campaign_id,entity_name:row.campaign_name,origin_entity_id:row.origin_campaign_id,adset_id:'',adset_name:'',ad_id:'',ad_name:''})).concat(extraEntities);
-  const allDaily = baseDaily.map(row=>({...row,level:0,entity_key:'0:'+row.campaign_id,entity_id:row.campaign_id})).concat(extraDaily);
+  const wirePlatform=row=>Number(row.platform??0);
+  const wirePlatformLabel=row=>row.platform_label||(wirePlatform(row)===3?'TikTok':'Meta');
+  const wireEntityKey=(row,level,id)=>wirePlatform(row)+':'+level+':'+id;
+  const allEntities = baseCampaigns.map(row=>({...row,platform:wirePlatform(row),platform_label:wirePlatformLabel(row),level:0,entity_key:wireEntityKey(row,0,row.campaign_id),entity_id:row.campaign_id,entity_name:row.campaign_name,origin_entity_id:row.origin_campaign_id,adset_id:'',adset_name:'',ad_id:'',ad_name:''})).concat(extraEntities);
+  const allDaily = baseDaily.map(row=>({...row,platform:wirePlatform(row),level:0,entity_key:wireEntityKey(row,0,row.campaign_id),entity_id:row.campaign_id})).concat(extraDaily);
   performance.mark('campaign-copy-data-ready');
   let campaigns = [];
   let dailyRows = [];
@@ -168,7 +172,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   function currentLevel(){return levelInfo[state.level]||levelInfo['0']}
   function buildDimensions(){
     const info=currentLevel();
-    dimensions=[['copy_date','复制日期'],['dt','统计日期'],['maturity_label','观察时长'],['rule_label','复制规则'],['product','投放产品'],['user_label','操作人'],['account_id','广告账户'],['entity_id',info.newLabel],['origin_entity_id',info.originLabel]];
+    dimensions=[['copy_date','复制日期'],['dt','统计日期'],['maturity_label','观察时长'],['rule_label','复制规则'],['product','投放产品'],['platform_label','投放平台'],['user_label','操作人'],['account_id','广告账户'],['entity_id',info.newLabel],['origin_entity_id',info.originLabel]];
     if(state.level!=='0')dimensions.push(['campaign_id','所属 Campaign']);
     if(state.level==='2')dimensions.push(['adset_id','所属 Ad Set']);
     dimensions.push(['content_id','短剧 ID'],['performance_band','效果区间']);
@@ -205,12 +209,12 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     });
   }
 
-  function searchable(row){return [row.dt,row.copy_date,row.age_bucket,row.performance_band,row.entity_id,row.entity_name,row.origin_entity_id,row.campaign_id,row.campaign_name,row.adset_id,row.adset_name,row.ad_id,row.ad_name,row.account_id,row.content_id,row.rule_label,row.product,row.user_id,row.user_name,row.user_label,row.countries,row.languages].map(normalized).join(' ')}
+  function searchable(row){return [row.dt,row.copy_date,row.age_bucket,row.performance_band,row.entity_id,row.entity_name,row.origin_entity_id,row.campaign_id,row.campaign_name,row.adset_id,row.adset_name,row.ad_id,row.ad_name,row.account_id,row.content_id,row.rule_label,row.product,row.platform_label,row.user_id,row.user_name,row.user_label,row.countries,row.languages].map(normalized).join(' ')}
   function copyFilteredCampaigns(){
-    const start=get('copyStartDate').value,end=get('copyEndDate').value,rule=get('ruleFilter').value,product=get('productFilter').value,user=get('userFilter').value,account=get('accountFilter').value,attribution=get('attributionFilter').value,maturity=get('maturityFilter').value;
+    const start=get('copyStartDate').value,end=get('copyEndDate').value,rule=get('ruleFilter').value,product=get('productFilter').value,platform=get('platformFilter').value,user=get('userFilter').value,account=get('accountFilter').value,attribution=get('attributionFilter').value,maturity=get('maturityFilter').value;
     return campaigns.filter(row=>{
       if(start&&row.copy_date<start)return false;if(end&&row.copy_date>end)return false;
-      if(rule&&row.rule_label!==rule)return false;if(product&&row.product!==product)return false;if(user&&row.user_label!==user)return false;if(account&&row.account_id!==account)return false;
+      if(rule&&row.rule_label!==rule)return false;if(product&&row.product!==product)return false;if(platform&&row.platform_label!==platform)return false;if(user&&row.user_label!==user)return false;if(account&&row.account_id!==account)return false;
       if(attribution==='attributed'&&num(row.queue_id)<=0)return false;if(attribution==='unattributed'&&num(row.queue_id)>0)return false;
       if(maturity==='6h'&&num(row.age_hours)<6)return false;if(maturity==='24h'&&num(row.age_hours)<24)return false;return true;
     });
@@ -293,7 +297,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   function scheduleRender(){clearTimeout(state.renderTimer);state.renderTimer=setTimeout(()=>requestAnimationFrame(render),160)}
 
   function resetFilters(){
-    setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);['ruleFilter','productFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>get(id).value='');get('presets').querySelectorAll('button').forEach(item=>item.classList.toggle('active',item.dataset.kind==='all'));render();
+    setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);['ruleFilter','productFilter','platformFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>get(id).value='');get('presets').querySelectorAll('button').forEach(item=>item.classList.toggle('active',item.dataset.kind==='all'));render();
   }
 
   function exportCsv(){
@@ -310,16 +314,16 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     state.level=String(level);campaigns=allEntities.filter(row=>String(row.level)===state.level);dailyRows=allDaily.filter(row=>String(row.level)===state.level);pipeline=pipelines[state.level]||{};
     allCopyStart=campaigns.map(row=>row.copy_date).filter(Boolean).sort()[0]||'';allCopyEnd=campaigns.map(row=>row.copy_date).filter(Boolean).sort().slice(-1)[0]||'';allStatStart=dailyRows.map(row=>row.dt).filter(Boolean).sort()[0]||'';allStatEnd=dailyRows.map(row=>row.dt).filter(Boolean).sort().slice(-1)[0]||'';
     campaigns.forEach(row=>{row.maturity_label=num(row.age_hours)>=24?'≥24h':num(row.age_hours)>=6?'6–24h':'<6h'});state.dims=[...defaultDims];state.sortKey='spend';state.sortDir=-1;buildDimensions();updateLevelTabs();
-    fillSelect('ruleFilter','全部规则',unique('rule_label'));fillSelect('productFilter','全部产品',unique('product'));fillSelect('userFilter','全部操作人',unique('user_label'));fillSelect('accountFilter','全部账户',unique('account_id'));fillSelect('bandFilter','全部效果区间',bandOrder);
+    fillSelect('ruleFilter','全部规则',unique('rule_label'));fillSelect('productFilter','全部产品',unique('product'));fillSelect('platformFilter','全部平台',unique('platform_label'));fillSelect('userFilter','全部操作人',unique('user_label'));fillSelect('accountFilter','全部账户',unique('account_id'));fillSelect('bandFilter','全部效果区间',bandOrder);
     setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
     const generated=meta.generated_at||'',copyStart=allCopyStart||'无成功样本',copyEnd=allCopyEnd||'无成功样本',statStart=allStatStart||'无效果数据',statEnd=allStatEnd||'无效果数据';
     get('metaLine').textContent=currentLevel().name+'｜复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
-    get('scopeHint').textContent='每15分钟后台自动刷新｜platform=0 · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
+    get('scopeHint').textContent='每15分钟后台自动刷新｜'+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
     get('keyword').placeholder='搜索统计日期、规则、'+currentLevel().name+'、账户、短剧、产品、操作人...';render();
   }
 
   function init(){
-    ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>requestAnimationFrame(render))});
+    ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','platformFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>requestAnimationFrame(render))});
     get('levelTabs').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>applyLevel(button.dataset.level)));get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);applyLevel('0');
     get('resetBtn').disabled=false;get('exportBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
   }
