@@ -200,10 +200,35 @@ class MediaRepairTests(unittest.TestCase):
         request = media_repair.validate_request(make_request())
         self.assertEqual(request["profile"], media_repair.REPAIR_PROFILE)
         self.assertEqual(request["pool_item_id"], "8")
+        resource_id = "21c09b915223a0695f0a4cf85386cabd"
+        resource_request = media_repair.validate_request(
+            make_request(material_id=resource_id)
+        )
+        self.assertEqual(resource_request["material_id"], resource_id)
 
         for trigger in ("invalid_media_codec", "invalid_media_dimensions"):
             request = media_repair.validate_request(make_request(trigger_code=trigger))
             self.assertEqual(request["trigger_code"], trigger)
+        for invalid_material_id in (
+            "../21c09b915223a0695f0a4cf85386cabd",
+            "21c09b915223a0695f0a4cf85386cab/",
+            "g1c09b915223a0695f0a4cf85386cabd",
+            "21C09B915223A0695F0A4CF85386CABD",
+            "21c09b915223a0695f0a4cf85386cab",
+            "021c09b915223a0695f0a4cf85386cabd",
+            "0",
+        ):
+            with self.subTest(material_id=invalid_material_id):
+                with self.assertRaises(media_repair.MediaRepairError) as caught:
+                    media_repair.validate_request(
+                        make_request(material_id=invalid_material_id)
+                    )
+                self.assertEqual(caught.exception.code, "invalid_request")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.validate_request(
+                make_request(pool_item_id="21c09b915223a0695f0a4cf85386cabd")
+            )
+        self.assertEqual(caught.exception.code, "invalid_request")
         with self.assertRaises(media_repair.MediaRepairError) as caught:
             media_repair.validate_request(make_request(trigger_code="invalid_media_duration"))
         self.assertEqual(caught.exception.code, "trigger_not_repairable")
@@ -370,6 +395,32 @@ class MediaRepairTests(unittest.TestCase):
             self.assertNotIn("X_POST_MEDIA_REPAIR_TOKEN", kwargs["env"])
             self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
             self.assertTrue(kwargs["close_fds"])
+
+    def test_drama_resource_id_uses_a_canonical_path_safe_cos_segment(self):
+        config = make_config(self.root)
+        processor = media_repair.MediaRepairProcessor(
+            config,
+            runner=FakeRunner(),
+            cos_client=FakeCosClient(),
+        )
+        resource_id = "21c09b915223a0695f0a4cf85386cabd"
+        request = media_repair.validate_request(
+            make_request(material_id=resource_id)
+        )
+
+        key = processor._cos_key(request, "b" * 64)
+
+        self.assertEqual(
+            key,
+            "x-post-media-repair/%s/drama-resource-%s/source-%s/output-%s.mp4"
+            % (
+                media_repair.REPAIR_PROFILE,
+                resource_id,
+                request["source_sha256"],
+                "b" * 64,
+            ),
+        )
+        self.assertNotIn("..", key)
 
     def test_integrity_mismatch_stops_before_probe_or_cos(self):
         source = b"actual-source"

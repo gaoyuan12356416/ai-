@@ -24,6 +24,11 @@
 }
 ```
 
+`material_id` 仅允许两种互不重叠的源身份：原素材池的正十进制 ID，或
+`ads_drama_resource.id` 的 32 位小写十六进制 ID。后者只用于 GPU 修复源身份
+和 COS 路径，不替代短剧发布的 `episode_key` 排重；`pool_item_id` 始终保持正
+十进制短剧池/素材池记录 ID。大写十六进制、路径字符和其他自由文本均拒绝。
+
 成功响应：
 
 ```json

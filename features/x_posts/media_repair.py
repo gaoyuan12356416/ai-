@@ -57,6 +57,7 @@ REQUEST_FIELDS = frozenset(
 )
 HEX_64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 POSITIVE_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
+DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 SAFE_PREFIX_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]{0,240}\Z")
 MAX_REQUEST_BYTES = 64 * 1024
 DEFAULT_OUTPUT_MAX_BYTES = DEFAULT_MAX_MEDIA_BYTES
@@ -417,6 +418,19 @@ def _parse_positive_id(value, name):
     return value
 
 
+def _parse_material_id(value):
+    value = str(value or "").strip()
+    if POSITIVE_ID_RE.fullmatch(value):
+        return value
+    if DRAMA_RESOURCE_ID_RE.fullmatch(value):
+        return value
+    raise MediaRepairError(
+        "invalid_request",
+        "material_id must be a positive integer or a 32-character hexadecimal resource ID",
+        400,
+    )
+
+
 def _parse_sha256(value, name):
     value = str(value or "").strip().lower()
     if not HEX_64_RE.fullmatch(value):
@@ -450,7 +464,7 @@ def validate_request(payload, profile=REPAIR_PROFILE):
         )
     job_key = _parse_sha256(payload.get("job_key"), "job_key")
     source_sha256 = _parse_sha256(payload.get("source_sha256"), "source_sha256")
-    material_id = _parse_positive_id(payload.get("material_id"), "material_id")
+    material_id = _parse_material_id(payload.get("material_id"))
     pool_item_id = _parse_positive_id(payload.get("pool_item_id"), "pool_item_id")
     source_url = str(payload.get("source_url") or "").strip()
     parsed = urllib.parse.urlsplit(source_url)
@@ -1067,12 +1081,18 @@ class MediaRepairProcessor:
         self.job_root = _ensure_private_directory(config.work_root / "work")
 
     def _cos_key(self, request, output_sha256):
+        material_id = _parse_material_id(request.get("material_id"))
+        material_segment = (
+            "material-%s" % material_id
+            if POSITIVE_ID_RE.fullmatch(material_id)
+            else "drama-resource-%s" % material_id
+        )
         return (
-            "%s/%s/material-%s/source-%s/output-%s.mp4"
+            "%s/%s/%s/source-%s/output-%s.mp4"
             % (
                 self.config.cos_prefix,
                 self.config.profile,
-                request["material_id"],
+                material_segment,
                 request["source_sha256"],
                 output_sha256,
             )
