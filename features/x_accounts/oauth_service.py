@@ -2393,6 +2393,17 @@ def delete_post_drama_pool_request(payload, pool_item_id):
         _raise_x_post_error(exc)
 
 
+def batch_delete_post_drama_pool_request(payload):
+    _drama_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).delete_drama_pool_items(
+            payload.get("pool_item_ids")
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
 def query_post_drama_pool_episodes_request(payload, pool_item_id):
     _drama_pool_actor(payload)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
@@ -3283,6 +3294,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(
                     200,
                     add_post_drama_pool_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/drama-pool/batch-delete":
+                self.send_json(
+                    200,
+                    {
+                        "item": batch_delete_post_drama_pool_request(
+                            payload
+                        )
+                    },
                 )
                 return
             if parsed.path == "/internal/posts/drama-pool/account-options":

@@ -469,6 +469,60 @@ def delete_x_post_drama_pool(
     )
 
 
+def batch_delete_x_post_drama_pool(
+    pool_item_ids,
+    actor,
+    navigation_item="",
+):
+    if (
+        not isinstance(pool_item_ids, list)
+        or not pool_item_ids
+        or len(pool_item_ids) > 100
+    ):
+        raise XAccountsClientError(
+            "invalid_request",
+            "pool_item_ids必须是包含1到100项的数组",
+            400,
+        )
+    normalized = []
+    seen = set()
+    for raw in pool_item_ids:
+        if isinstance(raw, bool):
+            raise XAccountsClientError(
+                "invalid_request",
+                "短剧池记录ID无效",
+                400,
+            )
+        value = str(raw or "")
+        if not value.isdigit() or int(value) <= 0:
+            raise XAccountsClientError(
+                "invalid_request",
+                "短剧池记录ID无效",
+                400,
+            )
+        pool_item_id = int(value)
+        if pool_item_id in seen:
+            raise XAccountsClientError(
+                "invalid_request",
+                "pool_item_ids不能重复",
+                400,
+            )
+        seen.add(pool_item_id)
+        normalized.append(pool_item_id)
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+        "pool_item_ids": normalized,
+    }
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/batch-delete",
+        method="POST",
+        payload=payload,
+    )
+
+
 def record_x_post_material_pool_checks(checks):
     if not isinstance(checks, (list, tuple)) or not checks:
         raise XAccountsClientError(

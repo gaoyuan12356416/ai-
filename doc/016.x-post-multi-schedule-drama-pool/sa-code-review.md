@@ -24,6 +24,9 @@ SQLite 迁移、排期状态机、短剧选择器、runner、sidecar/后台 API�
 | CR-10 | P1 | frozen account verify | claim 后移除账号会被当前配置 scope 拒绝，冻结批次无法恢复 | 内部 scope 合并 claimed/queued/running 批次账号 | 已修复 |
 | CR-11 | P0 | `drama_selector.audit` | 0 集平台记录被当作剧集，双平台 `app` 差异被当作剧元数据冲突 | 忽略 0 集；从剧身份键移除 `app`，保留 URL/其余元数据硬校验 | 已修复 |
 | CR-12 | P1 | `x_post_drama_validation_checks` | 页面丢弃 `drama_resource_invalid` 的具体字段原因 | 中文主提示后附加截断后的字段级原因 | 已修复 |
+| CR-13 | P1 | 短剧池页面 | `queue_count/has_history` 未由列表接口返回，已占用记录可能仍显示可删 | 后台返回 `queue_count/has_history/deletable/delete_block_reason`，页面仅信任显式 `deletable=true` | 已修复 |
+| CR-14 | P0 | 批量删除 | 多次单删不能保证整批一致性 | 单个 `BEGIN IMMEDIATE` 完成存在性、状态、双键历史检查和一次删除；单删复用同一核心 | 已修复 |
+| CR-15 | P1 | 批删审计 | 删除提交后审计写失败若转成 HTTP 失败会诱发重复操作 | 审计 best-effort，响应增加 `audit_recorded` | 已修复 |
 
 ## 编译 / 验证结果
 
@@ -32,3 +35,4 @@ SQLite 迁移、排期状态机、短剧选择器、runner、sidecar/后台 API�
 - `git diff --check` 通过。
 - 合并生产基线后完整 `test_x*.py` 288/288 通过；TT source-cache Python/Node 回归通过。
 - BUG-002 修复专项 22/22、聚焦回归 66/66、完整 `test_x*.py` 302/302 通过。
+- 短剧池全选/原子批删独立审查无 P0/P1；请求乱序、越界空页、共享忙碌状态、不可删原因可见性和异常返回计数等 P2 已加固；完整 `test_x*.py` 320/320 通过。

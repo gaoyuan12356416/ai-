@@ -106,6 +106,40 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("data-episodes-pool-id", DRAMA)
         self.assertIn("data-delete-pool-id", DRAMA)
 
+    def test_drama_pool_supports_current_page_select_all_and_atomic_batch_delete(self):
+        for element_id in (
+            "selectAllDramaPage",
+            "selectedDramaCount",
+            "clearDramaSelection",
+            "batchDeleteDramas",
+            "dramaTableWrap",
+        ):
+            self.assertIn(f'id="{element_id}"', DRAMA)
+        self.assertIn("全选仅作用于当前页", DRAMA)
+        self.assertIn("selectedPoolIds: new Set()", DRAMA)
+        self.assertIn("function currentDeletablePoolIds()", DRAMA)
+        self.assertIn("item.deletable === true", DRAMA)
+        self.assertIn("selectAll.indeterminate", DRAMA)
+        self.assertIn("const requestSeq = ++state.poolRequestSeq", DRAMA)
+        self.assertIn("if (requestSeq !== state.poolRequestSeq) return", DRAMA)
+        self.assertIn("if (state.page > maxPage)", DRAMA)
+        self.assertIn('reason.className = "subtle delete-reason"', DRAMA)
+        self.assertIn('aria-live="polite">已选择 0 部', DRAMA)
+        self.assertIn("Number.isInteger(returnedCount)", DRAMA)
+        self.assertIn("state.selectedPoolIds.clear()", DRAMA)
+        self.assertIn(
+            '"/api/admin/x-posts/drama-pool/batch-delete"',
+            DRAMA,
+        )
+        self.assertIn('method: "POST"', DRAMA)
+        self.assertIn(
+            "JSON.stringify({ pool_item_ids: poolItemIds })",
+            DRAMA,
+        )
+        self.assertIn('colspan="10"', DRAMA)
+        self.assertIn('setTableEmpty("dramaRows", 10,', DRAMA)
+        self.assertNotIn('setTableEmpty("dramaRows", 9,', DRAMA)
+
     def test_drama_pool_auto_verifies_only_refresh_required_accounts(self):
         self.assertIn(
             'item.status === "refresh_required"',

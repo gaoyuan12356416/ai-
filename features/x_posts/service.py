@@ -40,8 +40,12 @@ MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 SQLITE_QUERY_BATCH_SIZE = 900
 MAX_DAILY_BATCH_SIZE = 50
 MAX_SCHEDULE_ACCOUNTS = 50
+MAX_DRAMA_POOL_BATCH_DELETE_SIZE = 100
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
+DRAMA_POOL_DELETABLE_STATUSES = frozenset(
+    {"pending", "validation_failed"}
+)
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1464,14 +1468,15 @@ def ensure_storage(db_path):
                 """
                 CREATE TRIGGER trg_x_post_drama_pool_delete_guard
                 BEFORE DELETE ON x_post_drama_pool
-                WHEN EXISTS(
-                    SELECT 1 FROM x_post_queue
-                     WHERE drama_pool_item_id=OLD.id
-                        OR (
-                            source_type='drama'
-                            AND content_id=OLD.content_id
-                        )
-                )
+                WHEN OLD.status NOT IN ('pending','validation_failed')
+                  OR EXISTS(
+                      SELECT 1 FROM x_post_queue
+                       WHERE drama_pool_item_id=OLD.id
+                          OR (
+                              source_type='drama'
+                              AND content_id=OLD.content_id
+                          )
+                  )
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_drama_pool item occupied');
                 END
@@ -1563,6 +1568,41 @@ def _drama_content_id(value):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", content_id):
         raise XPostError("invalid_request", "短剧ID无效", 400)
     return content_id
+
+
+def _drama_pool_item_ids(values):
+    if (
+        not isinstance(values, list)
+        or not values
+        or len(values) > MAX_DRAMA_POOL_BATCH_DELETE_SIZE
+    ):
+        raise XPostError(
+            "invalid_request",
+            "pool_item_ids必须是包含1到%s项的数组"
+            % MAX_DRAMA_POOL_BATCH_DELETE_SIZE,
+            400,
+        )
+    normalized = []
+    seen = set()
+    for raw in values:
+        pool_item_id = _positive_int(raw, "pool_item_id")
+        if pool_item_id in seen:
+            raise XPostError(
+                "invalid_request",
+                "pool_item_ids不能重复",
+                400,
+            )
+        seen.add(pool_item_id)
+        normalized.append(pool_item_id)
+    return normalized
+
+
+def _drama_pool_delete_block_reason(status, has_history):
+    if has_history:
+        return "已有发布队列或历史，不能删除"
+    if str(status or "").strip().lower() not in DRAMA_POOL_DELETABLE_STATUSES:
+        return "仅待发布或不可用且无发布历史的短剧可以删除"
+    return ""
 
 
 def _schedule_next_due(account_ids, publish_times, enabled, now=None):
@@ -3259,7 +3299,11 @@ class XPostStore:
             "COALESCE(q.account_username,'') AS last_account_username,"
             "COALESCE(l.x_post_url,'') AS last_post_url,"
             "COALESCE(l.error_code,'') AS last_publish_error_code,"
-            "COALESCE(l.error_message,'') AS last_publish_error_message "
+            "COALESCE(l.error_message,'') AS last_publish_error_message,"
+            "(SELECT COUNT(*) FROM x_post_queue qh "
+            "WHERE qh.drama_pool_item_id=p.id OR "
+            "(qh.source_type='drama' AND qh.content_id=p.content_id)"
+            ") AS queue_count "
             "FROM x_post_drama_pool p "
             "LEFT JOIN x_post_queue q ON q.id=("
             "SELECT q2.id FROM x_post_queue q2 "
@@ -3293,6 +3337,13 @@ class XPostStore:
         items = []
         for row in rows:
             item = _row_dict(row)
+            item["queue_count"] = int(item["queue_count"] or 0)
+            item["has_history"] = item["queue_count"] > 0
+            item["delete_block_reason"] = _drama_pool_delete_block_reason(
+                item["status"],
+                item["has_history"],
+            )
+            item["deletable"] = not bool(item["delete_block_reason"])
             item["remaining_episode_count"] = max(
                 int(item["free_episode_count"] or 0)
                 - int(item["published_episode_count"] or 0),
@@ -3398,38 +3449,108 @@ class XPostStore:
             },
         }
 
+    def delete_drama_pool_items(self, pool_item_ids):
+        pool_item_ids = _drama_pool_item_ids(pool_item_ids)
+        placeholders = ",".join("?" for _item in pool_item_ids)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT * FROM x_post_drama_pool WHERE id IN (%s)"
+                % placeholders,
+                tuple(pool_item_ids),
+            ).fetchall()
+            rows_by_id = {
+                int(row["id"]): row
+                for row in rows
+            }
+            if len(rows_by_id) != len(pool_item_ids):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_not_found",
+                    "部分短剧池记录不存在，未删除任何短剧",
+                    404,
+                )
+            content_ids = [
+                str(rows_by_id[pool_item_id]["content_id"])
+                for pool_item_id in pool_item_ids
+            ]
+            content_placeholders = ",".join("?" for _item in content_ids)
+            occupied = conn.execute(
+                "SELECT 1 FROM x_post_queue "
+                "WHERE drama_pool_item_id IN (%s) OR "
+                "(source_type='drama' AND content_id IN (%s)) "
+                "LIMIT 1"
+                % (placeholders, content_placeholders),
+                tuple(pool_item_ids) + tuple(content_ids),
+            ).fetchone()
+            if occupied:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_occupied",
+                    "所选短剧中存在发布队列或历史，未删除任何短剧",
+                    409,
+                )
+            if any(
+                str(rows_by_id[pool_item_id]["status"] or "").lower()
+                not in DRAMA_POOL_DELETABLE_STATUSES
+                for pool_item_id in pool_item_ids
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_occupied",
+                    "所选短剧包含发布中、已完成或待核查记录，未删除任何短剧",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    "DELETE FROM x_post_drama_pool WHERE id IN (%s)"
+                    % placeholders,
+                    tuple(pool_item_ids),
+                )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_occupied",
+                    "所选短剧已被发布任务占用，未删除任何短剧",
+                    409,
+                ) from exc
+            if int(cursor.rowcount or 0) != len(pool_item_ids):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "短剧池批量删除数量异常，未删除任何短剧",
+                    409,
+                )
+            conn.commit()
+        items = []
+        for pool_item_id in pool_item_ids:
+            row = rows_by_id[pool_item_id]
+            items.append(
+                {
+                    "id": int(row["id"]),
+                    "content_id": str(row["content_id"]),
+                    "deleted": True,
+                }
+            )
+        return {
+            "items": items,
+            "deleted_count": len(items),
+        }
+
     def delete_drama_pool_item(self, pool_item_id):
         pool_item_id = _positive_int(pool_item_id, "pool_item_id")
         with contextlib.closing(_connect(self.db_path)) as conn:
-            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM x_post_drama_pool WHERE id=?",
                 (pool_item_id,),
             ).fetchone()
-            if not row:
-                conn.rollback()
-                raise XPostError(
-                    "x_post_drama_pool_item_not_found",
-                    "短剧池记录不存在",
-                    404,
-                )
-            if conn.execute(
-                "SELECT 1 FROM x_post_queue "
-                "WHERE drama_pool_item_id=? OR "
-                "(source_type='drama' AND content_id=?)",
-                (pool_item_id, row["content_id"]),
-            ).fetchone():
-                conn.rollback()
-                raise XPostError(
-                    "x_post_drama_pool_item_occupied",
-                    "已生成发布队列的短剧不能删除",
-                    409,
-                )
-            conn.execute(
-                "DELETE FROM x_post_drama_pool WHERE id=?",
-                (pool_item_id,),
+        self.delete_drama_pool_items([pool_item_id])
+        if row is None:
+            raise XPostError(
+                "x_post_drama_pool_item_not_found",
+                "短剧池记录不存在",
+                404,
             )
-            conn.commit()
         item = _row_dict(row)
         item["deleted"] = True
         return item

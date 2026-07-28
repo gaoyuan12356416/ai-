@@ -41487,6 +41487,7 @@ from features.x_accounts.client import (
     get_x_accounts_config,
     add_x_post_drama_pool,
     add_x_post_material_pool,
+    batch_delete_x_post_drama_pool,
     delete_x_post_drama_pool,
     delete_x_post_material_pool,
     query_x_post_account_options,
@@ -96032,6 +96033,111 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     no_store=True,
                 )
             except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        if parsed.path == "/api/admin/x-posts/drama-pool/batch-delete":
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            requested_pool_item_ids = []
+            requested_count = 0
+            try:
+                payload = self._read_json()
+                raw_pool_item_ids = payload.get("pool_item_ids")
+                if isinstance(raw_pool_item_ids, list):
+                    requested_count = len(raw_pool_item_ids)
+                    requested_pool_item_ids = [
+                        int(value)
+                        for value in raw_pool_item_ids[:100]
+                        if not isinstance(value, bool)
+                        and str(value or "").isdigit()
+                        and int(value) > 0
+                    ]
+                result = batch_delete_x_post_drama_pool(
+                    raw_pool_item_ids,
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                item = (
+                    result.get("item", result)
+                    if isinstance(result, dict)
+                    else {}
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "batch_delete_x_post_drama_pool",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "requested_count": requested_count,
+                            "deleted_count": int(
+                                item.get("deleted_count", 0)
+                                if isinstance(item, dict)
+                                else 0
+                            ),
+                            "pool_item_ids": requested_pool_item_ids,
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool batch-delete audit write failed"
+                    )
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "batch_delete_x_post_drama_pool_failed",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "requested_count": requested_count,
+                            "pool_item_ids": requested_pool_item_ids,
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool batch-delete failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception as exc:
+                try:
+                    append_audit_log(
+                        session,
+                        "batch_delete_x_post_drama_pool_failed",
+                        "x_post_drama_pool",
+                        "batch",
+                        {
+                            "requested_count": requested_count,
+                            "pool_item_ids": requested_pool_item_ids,
+                            "error": "invalid_request",
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama pool invalid batch-delete audit write failed"
+                    )
                 json_response(
                     self,
                     400,

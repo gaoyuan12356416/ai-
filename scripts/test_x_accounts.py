@@ -2010,6 +2010,40 @@ class XAccountsTestCase(unittest.TestCase):
                 navigation_item="xPostMaterialPool",
             )
             self.assertTrue(owner_deleted["item"]["deleted"])
+            drama_ids = ["DRAMA_DELETE_1", "DRAMA_DELETE_2"]
+            added_dramas = client.add_x_post_drama_pool(
+                drama_ids,
+                [
+                    {
+                        "content_id": content_id,
+                        "drama_name": "Drama %s" % index,
+                        "description": "Safe drama description.",
+                        "language": "en",
+                        "labels": "",
+                        "name_tag": "#Drama_%s" % index,
+                        "free_episode_count": 1,
+                    }
+                    for index, content_id in enumerate(drama_ids, 1)
+                ],
+                self.admin,
+            )
+            self.assertEqual(added_dramas["created_count"], 2)
+            batch_deleted = client.batch_delete_x_post_drama_pool(
+                [item["id"] for item in added_dramas["items"]],
+                self.admin,
+            )
+            self.assertEqual(batch_deleted["item"]["deleted_count"], 2)
+            self.assertEqual(
+                client.query_x_post_drama_pool(
+                    {
+                        "actor": self.admin,
+                        "scope": "all",
+                        "page": 1,
+                        "page_size": 10,
+                    }
+                )["pagination"]["total"],
+                0,
+            )
             not_overwritten = client.record_x_post_run_failure(
                 {
                     "run_date": "2026-07-23",

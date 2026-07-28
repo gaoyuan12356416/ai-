@@ -14,7 +14,8 @@
 | POST | `/api/admin/x-posts/drama-pool/preview` | 只读预检短剧 ID |
 | GET/POST | `/api/admin/x-posts/drama-pool` | 查询/加入短剧池 |
 | GET | `/api/admin/x-posts/drama-pool/{pool_id}/episodes` | 剧集发布明细 |
-| POST | `/api/admin/x-posts/drama-pool/{pool_id}/delete` | 删除未占用短剧 |
+| DELETE | `/api/admin/x-posts/drama-pool/{pool_id}` | 删除单条未占用短剧 |
+| POST | `/api/admin/x-posts/drama-pool/batch-delete` | 原子批量删除当前页明确选中的未占用短剧 |
 
 ## 排期保存
 
@@ -59,6 +60,43 @@
 }
 ```
 
+## 短剧查询与批量删除
+
+短剧池列表每行额外返回：
+
+```json
+{
+  "queue_count": 0,
+  "has_history": false,
+  "deletable": true,
+  "delete_block_reason": ""
+}
+```
+
+批量删除请求只接受 1–100 个唯一正整数池记录 ID：
+
+```json
+{
+  "pool_item_ids": [2, 5, 11]
+}
+```
+
+成功响应：
+
+```json
+{
+  "item": {
+    "items": [
+      {"id": 2, "content_id": "abc", "deleted": true}
+    ],
+    "deleted_count": 1
+  },
+  "audit_recorded": true
+}
+```
+
+任一记录不存在、已有 `drama_pool_item_id` 或同短剧 `content_id` 队列历史，或状态不是 `pending/validation_failed` 时整批回滚。内部接口为 `/internal/posts/drama-pool/batch-delete`，仅主后台 loopback bearer 可调用。
+
 ## 定时内部 API
 
 仅 loopback 和 daily bearer 可访问：
@@ -89,6 +127,8 @@
 | `drama_resource_invalid` | 短剧资源字段非法；响应消息附具体字段原因 |
 | `x_post_schedule_stale_claim` | 跨日冻结批次已安全停止 |
 | `x_post_rate_limited` | X 临时限流；自动校验停止启动后续账号并保留账号待刷新状态 |
+| `x_post_drama_pool_item_not_found` | 批删中至少一个池记录不存在，整批未删除 |
+| `x_post_drama_pool_item_occupied` | 批删中至少一个记录已有历史或状态不可删，整批未删除 |
 
 ## 兼容性说明
 

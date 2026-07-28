@@ -14,6 +14,7 @@
 | claim/worker 运行器 | Codex | `scripts/x_post_schedule_*.py` | 已完成 |
 | sidecar 与后台 API | Codex | `oauth_service.py`、`client.py`、`app.py` | 已完成 |
 | 素材池/短剧池页面 | Codex | `static/*.html`、导航 | 已完成 |
+| 短剧池当前页全选与原子批量删除 | Codex | `service.py`、sidecar/client、`app.py`、短剧池页面 | 已完成 |
 | 单元、合同、UI 回归 | Codex | `scripts/test_x*.py` | 已完成 |
 | GitHub 推送、生产部署与浏览器验收 | Codex | CPU 服务器 / AI 后台 | 待执行 |
 
@@ -35,3 +36,4 @@ git diff --check
 ## 完成记录
 
 - 2026-07-27：核心实现、边界修复和聚焦测试完成。
+- 2026-07-28：完成短剧池可删除状态下沉、当前页全选、原子批删接口、审计及回归用例。

@@ -35,6 +35,12 @@ X_POST_LOGS_SOURCE = (ROOT / "static" / "x-post-logs.html").read_text(encoding="
 X_POST_POOL_SOURCE = (ROOT / "static" / "x-post-material-pool.html").read_text(
     encoding="utf-8"
 )
+X_ACCOUNTS_CLIENT_SOURCE = (
+    ROOT / "features" / "x_accounts" / "client.py"
+).read_text(encoding="utf-8")
+X_ACCOUNTS_SIDECAR_SOURCE = (
+    ROOT / "features" / "x_accounts" / "oauth_service.py"
+).read_text(encoding="utf-8")
 X_POST_DAILY_SERVICE_SOURCE = (
     ROOT / "deploy" / "x-post-daily.service"
 ).read_text(encoding="utf-8")
@@ -682,6 +688,39 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn('navigation_item="xPostMaterialPool"', delete_route)
         self.assertIn("append_audit_log(", delete_route)
         self.assertIn("no_store=True", delete_route)
+
+    def test_x_post_drama_batch_delete_keeps_navigation_audit_and_sidecar_boundary(self):
+        route = source_between(
+            'if parsed.path == "/api/admin/x-posts/drama-pool/batch-delete":',
+            'if parsed.path == "/api/admin/x-posts/drama-pool":',
+        )
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostDramaPool")',
+            route,
+        )
+        self.assertIn("_require_same_origin_json()", route)
+        self.assertIn("batch_delete_x_post_drama_pool(", route)
+        self.assertIn('navigation_item="xPostDramaPool"', route)
+        self.assertIn("batch_delete_x_post_drama_pool_failed", route)
+        self.assertIn("audit_recorded", route)
+        self.assertIn("no_store=True", route)
+
+        self.assertIn(
+            "def batch_delete_x_post_drama_pool(",
+            X_ACCOUNTS_CLIENT_SOURCE,
+        )
+        self.assertIn(
+            '"/internal/posts/drama-pool/batch-delete"',
+            X_ACCOUNTS_CLIENT_SOURCE,
+        )
+        self.assertIn(
+            'parsed.path == "/internal/posts/drama-pool/batch-delete"',
+            X_ACCOUNTS_SIDECAR_SOURCE,
+        )
+        self.assertIn(
+            "batch_delete_post_drama_pool_request(payload)",
+            X_ACCOUNTS_SIDECAR_SOURCE,
+        )
 
     def test_x_post_account_auto_verify_uses_navigation_gate_and_safe_scope(self):
         route = source_between(
