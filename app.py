@@ -41963,6 +41963,18 @@ X_POST_DRAMA_VALIDATION_MESSAGES = {
 }
 
 
+def x_post_drama_validation_message(code, error):
+    code = str(code or "drama_resource_invalid")[:64]
+    detail = str(error or "").strip()
+    message = X_POST_DRAMA_VALIDATION_MESSAGES.get(code, "")
+    if code == "drama_resource_invalid" and detail:
+        message = "%s：%s" % (
+            message or "短剧资源数据不完整",
+            detail,
+        )
+    return (message or detail or "短剧未通过X发布校验")[:500]
+
+
 def x_post_drama_validation_checks(
     drama_ids,
     connection_factory=None,
@@ -42041,10 +42053,10 @@ def x_post_drama_validation_checks(
                         "first_sub_num": 0,
                         "last_sub_num": 0,
                         "error_code": code,
-                        "error_message": X_POST_DRAMA_VALIDATION_MESSAGES.get(
+                        "error_message": x_post_drama_validation_message(
                             code,
-                            str(exc) or "短剧未通过X发布校验",
-                        )[:500],
+                            exc,
+                        ),
                     }
                 )
         return results

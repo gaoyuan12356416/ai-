@@ -266,6 +266,7 @@ class DramawaveDramaSelector:
 
         normalized_rows = []
         metadata_values = set()
+        app_values = set()
         unlocked_values = []
         for row in rows:
             try:
@@ -278,7 +279,16 @@ class DramawaveDramaSelector:
                 row_app_id = _positive_int(row.get("app_id"), "app_id")
                 if row_app_id != self.app_id:
                     raise DramaSelectionError("app identity mismatch")
-                sub_number = _positive_int(row.get("sub_number"), "sub_number")
+                sub_number = _nonnegative_int(
+                    row.get("sub_number"),
+                    "sub_number",
+                )
+                # Some Dramawave titles include one platform-level metadata row
+                # with sub_number=0 for each client app. These rows are not
+                # publishable episodes and must not participate in episode or
+                # drama-metadata validation.
+                if sub_number == 0:
+                    continue
                 unlocked = _nonnegative_int(
                     row.get("unlocked_episodes_count"),
                     "unlocked_episodes_count",
@@ -322,12 +332,12 @@ class DramawaveDramaSelector:
                     description,
                     labels,
                     language,
-                    app,
                     country,
                     series_code,
                     data_origin,
                 )
             )
+            app_values.add(app)
             unlocked_values.append(unlocked)
             normalized_rows.append(
                 {
@@ -348,6 +358,12 @@ class DramawaveDramaSelector:
                 }
             )
 
+        if not normalized_rows:
+            raise DramaPoolRejection(
+                "drama_resource_invalid",
+                "no positive episode rows were found",
+                content_id=content_id,
+            )
         if len(metadata_values) != 1:
             raise DramaPoolRejection(
                 "drama_metadata_ambiguous",
@@ -402,11 +418,14 @@ class DramawaveDramaSelector:
             description,
             labels,
             language,
-            app,
             country,
             series_code,
             data_origin,
         ) = next(iter(metadata_values))
+        # iOS and Android rows may describe the same episode snapshot. The app
+        # value is platform attribution, not drama identity; return one stable
+        # representative while the per-episode URL checks above stay strict.
+        app = sorted(app_values, key=lambda value: (value.casefold(), value))[0]
         return {
             "content_id": content_id,
             "app_id": self.app_id,

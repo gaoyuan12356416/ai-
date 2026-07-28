@@ -124,6 +124,108 @@ class DramaSelectorTests(unittest.TestCase):
         result = audit_drama(FakeConnection([first, duplicate]), "DRAMA-A")
         self.assertEqual(result["episodes"][0]["resource_id"], "resource01")
 
+    def test_zero_number_platform_metadata_rows_are_ignored(self):
+        metadata = episode_row(0, unlocked=1)
+        metadata.update(
+            {
+                "app": "",
+                "drama_name": "",
+                "drama_description": "",
+                "language": "",
+                "country": "",
+                "sub_url": "",
+            }
+        )
+        result = audit_drama(
+            FakeConnection([metadata, episode_row(1, unlocked=1)]),
+            "DRAMA-A",
+        )
+        self.assertEqual(result["free_episode_count"], 1)
+        self.assertEqual(
+            [item["sub_number"] for item in result["episodes"]],
+            [1],
+        )
+
+    def test_cross_platform_duplicate_episode_rows_are_allowed(self):
+        ios = episode_row(1, unlocked=1)
+        ios["app"] = "6670430706"
+        android = dict(ios)
+        android["resource_id"] = "resource01android"
+        android["app"] = "com.dramawave.app"
+        result = audit_drama(FakeConnection([ios, android]), "DRAMA-A")
+        self.assertEqual(result["app"], "6670430706")
+        self.assertEqual(len(result["episodes"]), 1)
+        self.assertEqual(result["episodes"][0]["resource_id"], "resource01")
+
+    def test_cross_platform_url_conflict_remains_rejected(self):
+        ios = episode_row(
+            1,
+            unlocked=1,
+            url="https://ios.example.test/ep1.mp4",
+        )
+        ios["app"] = "6670430706"
+        android = dict(ios)
+        android["resource_id"] = "resource01android"
+        android["app"] = "com.dramawave.app"
+        android["sub_url"] = "https://android.example.test/ep1.mp4"
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(FakeConnection([ios, android]), "DRAMA-A")
+        self.assertEqual(
+            raised.exception.code,
+            "drama_episode_url_ambiguous",
+        )
+
+    def test_cross_platform_metadata_conflict_remains_rejected(self):
+        ios = episode_row(1, unlocked=1)
+        ios["app"] = "6670430706"
+        android = dict(ios)
+        android["resource_id"] = "resource01android"
+        android["app"] = "com.dramawave.app"
+        android["drama_name"] = "Another Drama"
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(FakeConnection([ios, android]), "DRAMA-A")
+        self.assertEqual(raised.exception.code, "drama_metadata_ambiguous")
+
+    def test_realistic_zero_row_and_dual_platform_shape_selects_free_episodes(self):
+        rows = []
+        for app_index, app in enumerate(("6670430706", "com.dramawave.app")):
+            metadata = episode_row(0, unlocked=11)
+            metadata["resource_id"] = "metadata%s" % app_index
+            metadata["app"] = app
+            rows.append(metadata)
+            for number in range(1, 46):
+                row = episode_row(number, unlocked=11)
+                row["resource_id"] = "resource%s-%02d" % (app_index, number)
+                row["app"] = app
+                rows.append(row)
+        result = audit_drama(FakeConnection(rows), "DRAMA-A")
+        self.assertEqual(result["free_episode_count"], 11)
+        self.assertEqual(
+            [item["sub_number"] for item in result["episodes"]],
+            list(range(1, 12)),
+        )
+
+    def test_negative_episode_number_remains_invalid(self):
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(
+                FakeConnection([episode_row(-1, unlocked=1)]),
+                "DRAMA-A",
+            )
+        self.assertEqual(raised.exception.code, "drama_resource_invalid")
+        self.assertEqual(str(raised.exception), "sub_number is invalid")
+
+    def test_only_zero_number_rows_fail_closed(self):
+        with self.assertRaises(DramaPoolRejection) as raised:
+            audit_drama(
+                FakeConnection([episode_row(0, unlocked=1)]),
+                "DRAMA-A",
+            )
+        self.assertEqual(raised.exception.code, "drama_resource_invalid")
+        self.assertEqual(
+            str(raised.exception),
+            "no positive episode rows were found",
+        )
+
     def test_free_episode_numbers_must_be_continuous(self):
         connection = FakeConnection(
             [episode_row(1, unlocked=3), episode_row(3, unlocked=3)]

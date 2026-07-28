@@ -85,6 +85,7 @@
 | `drama_episode_gap` | 免费集数不连续 |
 | `drama_episode_url_ambiguous` | 同一集存在不一致 URL |
 | `drama_metadata_ambiguous` | 短剧元数据不一致 |
+| `drama_resource_invalid` | 短剧资源字段非法；响应消息附具体字段原因 |
 | `x_post_schedule_stale_claim` | 跨日冻结批次已安全停止 |
 
 ## 兼容性说明
@@ -92,3 +93,4 @@
 - SQLite 仅增表、增列、增索引和触发器，保留旧 daily/catch-up 数据。
 - 未绑定 `schedule_run_id` 的旧队列继续使用既有唯一性合同。
 - 旧页面接口保持不变；素材池新增排期区但不改变加入/预览合同。
+- `ads_drama_resource.sub_number=0` 作为非剧集平台记录忽略；同集双平台行仅在媒体 URL 和其余剧元数据一致时合并。

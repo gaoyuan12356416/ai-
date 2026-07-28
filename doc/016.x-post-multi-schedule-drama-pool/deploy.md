@@ -65,3 +65,13 @@
 - 不覆盖线上整份导航配置。
 - 不打印 token、env 内容、完整 Post body 或带参数长链。
 - 生产证据和最终 commit 在部署完成后补入本文件。
+
+## 2026-07-28 BUG-002 修复
+
+- 仅更新短剧源表选择器和主 API 错误提示，不修改 SQLite schema、排期配置、素材池或短剧池数据。
+- 基线为生产 release `8094aabce13949897629303e7b9b36fefd4a185e`。
+- 部署前在线备份 X SQLite，并记录当前 release、相关文件 hash、timer 和队列/日志计数。
+- 从已推送 GitHub 提交创建新不可变 release；主 API 同步同一提交的 `app.py` 和选择器。
+- 只重启受影响的主 API；schedule runner 由下一次 oneshot 从新 release 加载，不手工启动任何发布 service。
+- 生产验收只读预览 `bURak9Oyn7`，预期免费 11 集、范围 1–11；不执行“确认加入短剧池”。
+- 回滚仅切回部署前 release/代码备份；不得恢复覆盖已产生新审计事实的 SQLite。
