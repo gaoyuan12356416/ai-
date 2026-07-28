@@ -156,12 +156,13 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const additiveMetrics = ['impressions','clicks','installs','spend','purchase','revenue','af_installs','af_revenue0','af_revenue','iaa_revenue','source_rows'];
   const bandOrder = ['无统计行','有统计无消耗','ROAS < 0.20','0.20–0.35','0.35–0.50','ROAS ≥ 0.50'];
   const defaultDims = ['rule_label'];
-  const defaultMetrics = ['campaign_count','spend','af_revenue0','af_d0_roas','af_installs','cpi','purchase','cpa'];
+  const defaultMetrics = ['campaign_count','spend','af_revenue0','af_d0_roas','iaa_revenue','iaa_roas','af_installs','cpi','purchase','cpa'];
   const state = {level:'0',dims:[...defaultDims], metrics:[...defaultMetrics], sortKey:'spend', sortDir:-1, currentExportRows:[], renderTimer:0};
   let dimensions = [];
   const metrics = [
     ['campaign_count','复制数','int'],['insight_campaigns','进入统计','int'],['spending_campaigns','有消耗','int'],
     ['spend','消耗','money'],['af_revenue0','AF D0收入','money'],['af_d0_roas','AF D0 ROAS','ratio'],
+    ['iaa_revenue','IAA收入','money'],['iaa_roas','IAA ROAS','ratio'],
     ['af_installs','AF安装','int'],['cpi','CPI','money'],['purchase','付费','int'],['cpa','CPA','money'],
     ['impressions','曝光','int'],['clicks','点击','int'],['ctr','CTR','percent']
   ];
@@ -205,7 +206,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     });
     get('metricToggles').innerHTML=metrics.map(item=>'<label class="chip '+(state.metrics.includes(item[0])?'active':'')+'"><input type="checkbox" value="'+item[0]+'" '+(state.metrics.includes(item[0])?'checked':'')+'>'+(metricLabels[item[0]]||item[1])+'</label>').join('');
     get('metricToggles').querySelectorAll('input').forEach(input=>input.onchange=()=>{
-      state.metrics=[...get('metricToggles').querySelectorAll('input:checked')].map(item=>item.value);if(!state.metrics.length)state.metrics=['campaign_count','spend','af_revenue0','af_d0_roas'];buildChips();renderTable(filteredRows());
+      state.metrics=[...get('metricToggles').querySelectorAll('input:checked')].map(item=>item.value);if(!state.metrics.length)state.metrics=[...defaultMetrics];buildChips();renderTable(filteredRows());
     });
   }
 
@@ -221,7 +222,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   }
 
   function emptyEffect(){const value={fact_rows:0,stat_days:0};additiveMetrics.forEach(metric=>value[metric]=0);return value}
-  function finalizeEffect(agg){agg.af_d0_roas=agg.spend?agg.af_revenue0/agg.spend:null;agg.af_total_roas=agg.spend?agg.af_revenue/agg.spend:null;agg.platform_roas=agg.spend?agg.revenue/agg.spend:null;agg.cpi=agg.af_installs?agg.spend/agg.af_installs:null;agg.cpa=agg.purchase?agg.spend/agg.purchase:null;agg.ctr=agg.impressions?agg.clicks/agg.impressions:null;return agg}
+  function finalizeEffect(agg){agg.af_d0_roas=agg.spend?agg.af_revenue0/agg.spend:null;agg.af_total_roas=agg.spend?agg.af_revenue/agg.spend:null;agg.iaa_roas=agg.spend?agg.iaa_revenue/agg.spend:null;agg.platform_roas=agg.spend?agg.revenue/agg.spend:null;agg.cpi=agg.af_installs?agg.spend/agg.af_installs:null;agg.cpa=agg.purchase?agg.spend/agg.purchase:null;agg.ctr=agg.impressions?agg.clicks/agg.impressions:null;return agg}
   function effectFromDailyFact(fact){const effect=emptyEffect();effect.fact_rows=1;effect.stat_days=1;additiveMetrics.forEach(metric=>effect[metric]=num(fact[metric]));return finalizeEffect(effect)}
   function performanceBand(row){if(!row.has_insight)return '无统计行';if(num(row.spend)<=0)return '有统计无消耗';const value=num(row.af_d0_roas);if(value<.2)return 'ROAS < 0.20';if(value<.35)return '0.20–0.35';if(value<.5)return '0.35–0.50';return 'ROAS ≥ 0.50'}
   function filteredRows(){
@@ -234,7 +235,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
 
   function emptyAgg(){return {campaign_count:0,insight_campaigns:0,spending_campaigns:0,spend:0,af_revenue0:0,af_revenue:0,af_installs:0,installs:0,purchase:0,revenue:0,iaa_revenue:0,impressions:0,clicks:0,source_rows:0,mapped_campaigns:0,attributed_campaigns:0}}
   function addAgg(agg,row){agg.campaign_count+=1;agg.insight_campaigns+=row.has_insight?1:0;agg.spending_campaigns+=num(row.spend)>0?1:0;additiveMetrics.forEach(metric=>agg[metric]+=num(row[metric]));agg.mapped_campaigns+=row.mapped?1:0;agg.attributed_campaigns+=num(row.queue_id)>0?1:0;return agg}
-  function finalize(agg){agg.af_d0_roas=agg.spend?agg.af_revenue0/agg.spend:null;agg.af_total_roas=agg.spend?agg.af_revenue/agg.spend:null;agg.platform_roas=agg.spend?agg.revenue/agg.spend:null;agg.cpi=agg.af_installs?agg.spend/agg.af_installs:null;agg.cpa=agg.purchase?agg.spend/agg.purchase:null;agg.ctr=agg.impressions?agg.clicks/agg.impressions:null;return agg}
+  function finalize(agg){agg.af_d0_roas=agg.spend?agg.af_revenue0/agg.spend:null;agg.af_total_roas=agg.spend?agg.af_revenue/agg.spend:null;agg.iaa_roas=agg.spend?agg.iaa_revenue/agg.spend:null;agg.platform_roas=agg.spend?agg.revenue/agg.spend:null;agg.cpi=agg.af_installs?agg.spend/agg.af_installs:null;agg.cpa=agg.purchase?agg.spend/agg.purchase:null;agg.ctr=agg.impressions?agg.clicks/agg.impressions:null;return agg}
   function aggregate(rows,dims){const map=new Map();rows.forEach(row=>{const key=dims.map(dim=>text(row[dim])||'未填').join('\u001f');if(!map.has(key)){const agg=emptyAgg();agg._entityIds=new Set();dims.forEach(dim=>agg[dim]=text(row[dim])||'未填');map.set(key,agg)}const agg=map.get(key),entityKey=text(row.entity_key);if(!agg._entityIds.has(entityKey)){agg._entityIds.add(entityKey);agg.campaign_count+=1;agg.insight_campaigns+=row.has_insight?1:0;agg.spending_campaigns+=num(row.spend)>0?1:0;agg.mapped_campaigns+=row.mapped?1:0;agg.attributed_campaigns+=num(row.queue_id)>0?1:0}additiveMetrics.forEach(metric=>agg[metric]+=num(row[metric]))});return [...map.values()].map(agg=>{delete agg._entityIds;return finalize(agg)})}
   function fmt(metric,value){const format=metricFormats[metric]||'int';if(format==='money')return value==null?'—':money(value);if(format==='ratio')return ratio(value);if(format==='percent')return percent(value);return integer(value)}
 
@@ -254,6 +255,8 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
       ['统计期消耗',money(total.spend),'有消耗 '+currentLevel().name+' '+integer(total.spending_campaigns),''],
       ['统计期 AF D0收入',money(total.af_revenue0),'按数据统计日期 dt 汇总',''],
       ['AF D0 ROAS',ratio(total.af_d0_roas),'收入 / 消耗',roasClass(total.af_d0_roas)],
+      ['统计期 IAA收入',money(total.iaa_revenue),'按数据统计日期 dt 汇总',''],
+      ['IAA ROAS',ratio(total.iaa_roas),'IAA收入 / 消耗',roasClass(total.iaa_roas)],
       ['AF安装',integer(total.af_installs),'统计日期窗口',''],
       ['CPI',total.cpi==null?'—':money(total.cpi),'消耗 / AF安装',''],
       ['付费 / CPA',integer(total.purchase)+' / '+(total.cpa==null?'—':money(total.cpa)),'付费数 / 单次付费成本','']

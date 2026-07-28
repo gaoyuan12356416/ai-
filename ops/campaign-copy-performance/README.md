@@ -12,7 +12,7 @@ The report supports the three `ads_campaign_rule_logs.level` values and exposes 
 - `level=1`: `new_id = adset_id`; sum the mapped Ads under that Ad Set.
 - `level=2`: `new_id = ad_id`; sum that exact Ad.
 
-Meta structures are resolved through `ads_facebook_auto_created_data`; TikTok structures are resolved through `ads_tiktok_auto_created_data`. Both platforms use normalized effect rows from `ads_custom_source_insight`, filtered by the matching platform and exact mapped Ad IDs. Platform is part of every internal entity key so equal numeric IDs cannot mix across Meta and TikTok. The page exposes platform as a filter and pivot dimension.
+Meta structures are resolved through `ads_facebook_auto_created_data`; TikTok structures are resolved through `ads_tiktok_auto_created_data`. Both platforms use normalized effect rows from `ads_custom_source_insight`, filtered by the matching platform and exact mapped Ad IDs. Platform is part of every internal entity key so equal numeric IDs cannot mix across Meta and TikTok. The page exposes platform as a filter and pivot dimension, and exposes both AF D0 and IAA revenue/ROAS so TikTok Minis monetization is visible without combining distinct revenue definitions.
 
 Each tab shows its own running/success/failed pipeline counts. Failed copies remain in the pipeline totals but cannot have post-copy effect rows because they have no successful `new_id`.
 
