@@ -1126,6 +1126,57 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 3,
             )
 
+        reopened = service.XPostStore(self.db_path)
+        reopened_pools = {
+            item["content_id"]: item
+            for item in reopened.query_drama_pool()["items"]
+        }
+        self.assertEqual(reopened_pools["D1"]["assigned_account_id"], 2)
+        self.assertEqual(
+            reopened_pools["D1"]["assigned_source_queue_id"],
+            first_queue_id,
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log"
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_storage_migration_still_rejects_invalid_drama_episode_identity(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama(content_id="D1", free_episode_count=2)
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "DROP TRIGGER trg_x_post_queue_drama_update"
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET episode_key='D1:999' WHERE id=?",
+                (plan["queues"][0]["id"],),
+            )
+            conn.commit()
+
+        with self.assertRaises(service.XPostError) as rejected:
+            service.XPostStore(self.db_path)
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_storage_conflict",
+        )
+
     def test_completed_drama_releases_account_to_oldest_unassigned_drama(self):
         self.save_schedule("drama", [2], ["09:00", "10:00"])
         completed_pool = self.add_drama(

@@ -1137,10 +1137,18 @@ def ensure_storage(db_path):
                         "历史X发布队列run_date无效，迁移已中止",
                         500,
                     ) from None
-                conn.execute(
-                    "UPDATE x_post_queue SET source_type=?,material_key=?,run_date=? WHERE id=?",
-                    (source_type, material_key, run_date, row["id"]),
+                normalized_values = (source_type, material_key, run_date)
+                stored_values = (
+                    str(row["source_type"] or ""),
+                    str(row["material_key"] or ""),
+                    str(row["run_date"] or ""),
                 )
+                if stored_values != normalized_values:
+                    conn.execute(
+                        "UPDATE x_post_queue SET source_type=?,material_key=?,"
+                        "run_date=? WHERE id=?",
+                        normalized_values + (row["id"],),
+                    )
 
             # The legacy short-drama scheduler could spread consecutive
             # episodes of one drama across multiple accounts.  Preserve every
