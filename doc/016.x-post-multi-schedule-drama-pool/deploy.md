@@ -75,3 +75,23 @@
 - 只重启受影响的主 API；schedule runner 由下一次 oneshot 从新 release 加载，不手工启动任何发布 service。
 - 生产验收只读预览 `bURak9Oyn7`，预期免费 11 集、范围 1–11；不执行“确认加入短剧池”。
 - 回滚仅切回部署前 release/代码备份；不得恢复覆盖已产生新审计事实的 SQLite。
+
+### 生产结果
+
+- 运行代码提交：`7177a3e8ddb955bb2fe5dcc35ec2c7f35ee18514`。
+- X release：`/mnt/data-disk/x-post-automation/releases/7177a3e8ddb955bb2fe5dcc35ec2c7f35ee18514`。
+- 部署前备份：`/mnt/data-disk/x-post-automation/backups/20260728T024719Z-drama-validation-8094aab`；在线 SQLite 备份 `integrity_check=ok`，备份 manifest 校验通过。
+- 生产 `app.py` SHA-256：`6ac0fd6b7138a52a7a11276c2e8c998e576946bbc278ee067eb14ed03df87661`。
+- 生产 selector SHA-256：`e94d0cebb53612fd3fd4501894dea9d3b54860f8fc0473fab5a2ac3e1d99182e`；X release 与主 API 两份一致。
+- 只重启 `drama-material-api.service`；主 API、X sidecar、claim timer、worker timer 均为 active，旧 daily timer 保持 inactive/masked。
+- 主 API 同路径只读校验和 schedule selector 均通过 `63350` 端口读取：`bURak9Oyn7` 可用，语言 `en`，免费 11 集，范围 1–11。
+- 页面返回 HTTP 200 和 `no-cache, no-store`。
+- 部署前后 X SQLite 完全一致：短剧池 0，queue 34（max id 34），publish log 34（max id 34）；10 份 Token 的内容 hash 和 mode 未变化。
+- 未加入短剧池、未创建 queue/log、未触发或补发任何 X Post。
+
+### BUG-002 回滚点
+
+1. 原子切回 `/mnt/data-disk/x-post-automation/releases/8094aabce13949897629303e7b9b36fefd4a185e`。
+2. 从上述备份恢复 `main-app.py` 和 `main-drama-selector.py` 到主 API 对应路径。
+3. 仅重启 `drama-material-api.service` 并复核 API/sidecar/timer。
+4. 本次无 schema 或业务数据变更，默认不得恢复 SQLite。
