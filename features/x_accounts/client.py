@@ -174,14 +174,26 @@ def start_x_authorization(actor):
     return _request("/internal/authorize", method="POST", payload={"actor": normalize_actor(actor)})
 
 
-def verify_x_account(account_id, actor, scope="mine"):
+def verify_x_account(
+    account_id,
+    actor,
+    scope="mine",
+    *,
+    only_refresh_required=False,
+    preserve_transient_status=False,
+):
     account_id = str(account_id or "")
     if not account_id.isdigit():
         raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
+    payload = {"actor": normalize_actor(actor), "scope": normalize_scope(scope)}
+    if only_refresh_required:
+        payload["only_refresh_required"] = True
+    if preserve_transient_status:
+        payload["preserve_transient_status"] = True
     return _request(
         "/internal/accounts/%s/verify" % account_id,
         method="POST",
-        payload={"actor": normalize_actor(actor), "scope": normalize_scope(scope)},
+        payload=payload,
     )
 
 
@@ -452,6 +464,60 @@ def delete_x_post_drama_pool(
         payload["navigation_item"] = str(navigation_item)
     return _request(
         "/internal/posts/drama-pool/%s/delete" % pool_item_id,
+        method="POST",
+        payload=payload,
+    )
+
+
+def batch_delete_x_post_drama_pool(
+    pool_item_ids,
+    actor,
+    navigation_item="",
+):
+    if (
+        not isinstance(pool_item_ids, list)
+        or not pool_item_ids
+        or len(pool_item_ids) > 100
+    ):
+        raise XAccountsClientError(
+            "invalid_request",
+            "pool_item_ids必须是包含1到100项的数组",
+            400,
+        )
+    normalized = []
+    seen = set()
+    for raw in pool_item_ids:
+        if isinstance(raw, bool):
+            raise XAccountsClientError(
+                "invalid_request",
+                "短剧池记录ID无效",
+                400,
+            )
+        value = str(raw or "")
+        if not value.isdigit() or int(value) <= 0:
+            raise XAccountsClientError(
+                "invalid_request",
+                "短剧池记录ID无效",
+                400,
+            )
+        pool_item_id = int(value)
+        if pool_item_id in seen:
+            raise XAccountsClientError(
+                "invalid_request",
+                "pool_item_ids不能重复",
+                400,
+            )
+        seen.add(pool_item_id)
+        normalized.append(pool_item_id)
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+        "pool_item_ids": normalized,
+    }
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/batch-delete",
         method="POST",
         payload=payload,
     )

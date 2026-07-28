@@ -205,8 +205,24 @@
       gap: 10px;
       margin-bottom: 16px;
     }
+    .bulk-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      min-height: 52px;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8faff;
+    }
+    .bulk-summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+    .bulk-summary strong { color: #2457b8; font-size: 13px; }
+    .bulk-summary span { color: var(--muted); font-size: 12px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
-    table { width: 100%; min-width: 1450px; border-collapse: collapse; background: #fff; }
+    table { width: 100%; min-width: 1530px; border-collapse: collapse; background: #fff; }
     th, td {
       padding: 13px 14px;
       border-bottom: 1px solid #e8eef6;
@@ -238,6 +254,17 @@
     .links a:hover { text-decoration: underline; }
     .error { max-width: 320px; color: #a62f3a; line-height: 1.45; word-break: break-word; }
     .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 150px; }
+    .select-column { width: 70px; min-width: 70px; text-align: center; }
+    .select-column input { width: 17px; height: 17px; accent-color: var(--blue); cursor: pointer; }
+    .select-column input:disabled { cursor: not-allowed; }
+    .select-all {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .delete-reason { flex-basis: 100%; max-width: 190px; color: var(--red); }
     .empty { padding: 34px 18px; text-align: center; color: var(--muted); }
     .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 13px; }
     .pager-actions { display: flex; gap: 8px; }
@@ -394,10 +421,26 @@ Episode👉{sub_num}
             <button class="button primary" type="submit">查询</button>
             <button id="resetFilters" class="button" type="button">重置</button>
           </form>
-          <div class="table-wrap">
+          <div class="bulk-toolbar">
+            <div class="bulk-summary">
+              <strong id="selectedDramaCount" aria-live="polite">已选择 0 部</strong>
+              <span>全选仅作用于当前页，并自动跳过已有发布队列或历史的短剧。</span>
+            </div>
+            <div class="inline-actions">
+              <button id="clearDramaSelection" class="button small" type="button" disabled>清空选择</button>
+              <button id="batchDeleteDramas" class="button danger small" type="button" disabled>批量删除</button>
+            </div>
+          </div>
+          <div id="dramaTableWrap" class="table-wrap" aria-busy="false">
             <table>
               <thead>
                 <tr>
+                  <th class="select-column">
+                    <label class="select-all">
+                      <input id="selectAllDramaPage" type="checkbox" aria-label="全选当前页可删除短剧" />
+                      <span>全选</span>
+                    </label>
+                  </th>
                   <th>加入顺序</th>
                   <th>短剧 ID</th>
                   <th>短剧信息</th>
@@ -409,7 +452,7 @@ Episode👉{sub_num}
                   <th>操作</th>
                 </tr>
               </thead>
-              <tbody id="dramaRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+              <tbody id="dramaRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
           <div class="pager">
@@ -448,10 +491,16 @@ Episode👉{sub_num}
         pageSize: 20,
         total: 0,
         busy: false,
+        poolMutationBusy: false,
+        poolRequestSeq: 0,
         toastTimer: null,
         previewIds: [],
+        currentPoolItems: [],
+        selectedPoolIds: new Set(),
         accountOptions: [],
         scheduleBusy: false,
+        accountVerifyBusy: false,
+        verifyingAccountIds: new Set(),
         schedule: {
           enabled: false,
           timezone: "Asia/Shanghai",
@@ -464,6 +513,7 @@ Episode👉{sub_num}
         },
       };
       const byId = id => document.getElementById(id);
+      const AUTO_VERIFY_CONCURRENCY = 3;
       const setText = (node, value, fallback = "—") => {
         node.textContent = value == null || value === "" ? fallback : String(value);
       };
@@ -503,7 +553,14 @@ Episode👉{sub_num}
         const body = await response.text();
         let payload = {};
         try { payload = body ? JSON.parse(body) : {}; } catch (_) { payload = {}; }
-        if (!response.ok) throw new Error(getErrorMessage(payload) || `HTTP ${response.status}`);
+        if (!response.ok) {
+          const error = new Error(getErrorMessage(payload) || `HTTP ${response.status}`);
+          error.code = typeof payload.error === "string"
+            ? payload.error
+            : String(payload.error && payload.error.code || payload.code || "");
+          error.status = response.status;
+          throw error;
+        }
         return payload;
       }
       function navigationNodeVisible(auth, node) {
@@ -597,6 +654,9 @@ Episode👉{sub_num}
       function accountEligible(item) {
         return !!item && item.status === "active" && item.publish_eligible === true;
       }
+      function accountNeedsAutoVerify(item) {
+        return !!item && item.status === "refresh_required";
+      }
       function accountTitle(item) {
         const username = String(item && item.username || "").trim().replace(/^@/, "");
         return String(item && item.display_name || "").trim() || (username ? `@${username}` : `账号 ${accountId(item) || "—"}`);
@@ -635,12 +695,13 @@ Episode👉{sub_num}
           if (!id) return;
           const selected = state.schedule.accountIds.has(id);
           const eligible = accountEligible(item);
+          const verifying = state.verifyingAccountIds.has(id);
           const label = document.createElement("label");
           label.className = `account-option${eligible ? "" : " disabled"}`;
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
           checkbox.checked = selected;
-          checkbox.disabled = !eligible && !selected;
+          checkbox.disabled = verifying || (!eligible && !selected);
           checkbox.dataset.accountId = id;
           const textWrap = document.createElement("span");
           const strong = document.createElement("strong");
@@ -651,11 +712,109 @@ Episode👉{sub_num}
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(
+            status,
+            verifying
+              ? "自动校验中"
+              : eligible
+                ? "可发布"
+                : (selected ? "不可发布，请移除" : "不可发布")
+          );
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
         renderSelectedAccountSummary();
+      }
+      async function autoVerifyAccountOptions() {
+        if (state.accountVerifyBusy) {
+          return { checked: 0, failed: 0, deferred: 0, busy: true };
+        }
+        const targets = state.accountOptions.filter(item =>
+          accountId(item) && accountNeedsAutoVerify(item)
+        );
+        if (!targets.length) {
+          return { checked: 0, failed: 0, deferred: 0, busy: false };
+        }
+
+        state.accountVerifyBusy = true;
+        state.verifyingAccountIds = new Set(targets.map(accountId));
+        byId("refreshAccounts").disabled = true;
+        byId("saveSchedule").disabled = true;
+        renderAccountOptions();
+        setMessage(
+          "scheduleMessage",
+          `正在自动校验 ${targets.length} 个待刷新的 X 账号…`,
+          false
+        );
+
+        let cursor = 0;
+        let attempted = 0;
+        let failed = 0;
+        let stopRequested = false;
+        const worker = async () => {
+          while (!stopRequested && cursor < targets.length) {
+            const item = targets[cursor++];
+            const id = accountId(item);
+            attempted += 1;
+            try {
+              const verified = responseItem(await api(
+                `/api/admin/x-posts/drama-pool/account-options/${id}/verify`,
+                { method: "POST", body: "{}" }
+              ));
+              if (accountId(verified) !== id) {
+                throw new Error("账号校验结果不匹配");
+              }
+              state.accountOptions = state.accountOptions.map(account =>
+                accountId(account) === id ? verified : account
+              );
+            } catch (error) {
+              failed += 1;
+              if (error && error.code === "x_post_rate_limited") {
+                stopRequested = true;
+              }
+              state.accountOptions = state.accountOptions.map(account =>
+                accountId(account) === id
+                  ? Object.assign({}, account, {
+                      auto_verify_error: String(error.message || error),
+                    })
+                  : account
+              );
+            } finally {
+              state.verifyingAccountIds.delete(id);
+              renderAccountOptions();
+            }
+          }
+        };
+
+        try {
+          const workerCount = Math.min(
+            AUTO_VERIFY_CONCURRENCY,
+            targets.length
+          );
+          await Promise.all(
+            Array.from({ length: workerCount }, () => worker())
+          );
+          try {
+            state.accountOptions = responseItems(await api(
+              "/api/admin/x-posts/drama-pool/account-options"
+            ));
+          } catch (_) {
+            // Keep the verified per-account results if the final list refresh fails.
+          }
+          renderAccountOptions();
+          return {
+            checked: attempted,
+            failed,
+            deferred: Math.max(0, targets.length - attempted),
+            busy: false,
+          };
+        } finally {
+          state.accountVerifyBusy = false;
+          state.verifyingAccountIds.clear();
+          byId("refreshAccounts").disabled = false;
+          byId("saveSchedule").disabled = state.scheduleBusy;
+          renderAccountOptions();
+        }
       }
       function validPublishTime(value) {
         return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
@@ -733,7 +892,16 @@ Episode👉{sub_num}
           ]);
           state.accountOptions = responseItems(accountsResult);
           applySchedule(scheduleResult);
-          setMessage("scheduleMessage", "发布设置已加载。", false);
+          const verification = await autoVerifyAccountOptions();
+          if (!verification.busy) {
+            setMessage(
+              "scheduleMessage",
+              verification.checked
+                ? `发布设置已加载；自动校验 ${verification.checked} 个账号，${verification.failed} 个未通过${verification.deferred ? `，因 X 限流暂缓 ${verification.deferred} 个` : ""}。`
+                : "发布设置已加载。",
+              verification.failed > 0
+            );
+          }
         } catch (error) {
           setMessage("scheduleMessage", `发布设置加载失败：${error.message}`, true);
           renderAccountOptions();
@@ -747,11 +915,20 @@ Episode👉{sub_num}
         try {
           state.accountOptions = responseItems(await api("/api/admin/x-posts/drama-pool/account-options"));
           renderAccountOptions();
-          setMessage("scheduleMessage", "账号列表已刷新。", false);
+          const verification = await autoVerifyAccountOptions();
+          if (!verification.busy) {
+            setMessage(
+              "scheduleMessage",
+              verification.checked
+                ? `账号列表已刷新；自动校验 ${verification.checked} 个账号，${verification.failed} 个未通过${verification.deferred ? `，因 X 限流暂缓 ${verification.deferred} 个` : ""}。`
+                : "账号列表已刷新。",
+              verification.failed > 0
+            );
+          }
         } catch (error) {
           setMessage("scheduleMessage", `账号刷新失败：${error.message}`, true);
         } finally {
-          button.disabled = false;
+          button.disabled = state.accountVerifyBusy;
         }
       }
       function addPublishTime() {
@@ -774,6 +951,10 @@ Episode👉{sub_num}
       }
       async function saveSchedule() {
         if (state.scheduleBusy) return;
+        if (state.accountVerifyBusy) {
+          setMessage("scheduleMessage", "账号正在自动校验，请完成后再保存。", true);
+          return;
+        }
         const enabled = byId("scheduleEnabled").checked;
         const selectedIds = Array.from(state.schedule.accountIds);
         if (enabled && !selectedIds.length) {
@@ -885,6 +1066,7 @@ Episode👉{sub_num}
           return;
         }
         state.busy = true;
+        syncDramaSelectionControls();
         const button = byId("previewDramas");
         button.disabled = true;
         setText(button, "正在检查…");
@@ -905,11 +1087,13 @@ Episode👉{sub_num}
           state.busy = false;
           button.disabled = false;
           setText(button, "检查并预览");
+          syncDramaSelectionControls();
         }
       }
       async function addDramas() {
         if (state.busy || !state.previewIds.length) return;
         state.busy = true;
+        syncDramaSelectionControls();
         const button = byId("confirmAddDramas");
         button.disabled = true;
         setText(button, "正在加入…");
@@ -930,6 +1114,7 @@ Episode👉{sub_num}
         } finally {
           state.busy = false;
           setText(button, "确认加入短剧池");
+          syncDramaSelectionControls();
         }
       }
       function clearDramaInput() {
@@ -988,15 +1173,123 @@ Episode👉{sub_num}
         setText(link, labelText || "预览 Post");
         cell.appendChild(link);
       }
+      function poolItemId(item) {
+        const value = item && item.id;
+        return /^\d+$/.test(String(value || "")) && Number(value) > 0
+          ? String(value)
+          : "";
+      }
+      function dramaItemDeletable(item) {
+        return !!poolItemId(item) && !!item && item.deletable === true;
+      }
+      function currentDeletablePoolIds() {
+        return state.currentPoolItems
+          .filter(dramaItemDeletable)
+          .map(poolItemId)
+          .filter(Boolean);
+      }
+      function updatePoolPager() {
+        const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+        byId("prevPage").disabled = state.poolMutationBusy || state.page <= 1;
+        byId("nextPage").disabled = state.poolMutationBusy || state.page >= pages;
+      }
+      function syncDramaSelectionControls() {
+        const actionBusy = state.poolMutationBusy || state.busy;
+        const visibleIds = currentDeletablePoolIds();
+        const selectedVisible = visibleIds.filter(id =>
+          state.selectedPoolIds.has(id)
+        );
+        const selectAll = byId("selectAllDramaPage");
+        selectAll.checked = visibleIds.length > 0
+          && selectedVisible.length === visibleIds.length;
+        selectAll.indeterminate = selectedVisible.length > 0
+          && selectedVisible.length < visibleIds.length;
+        selectAll.disabled = actionBusy || visibleIds.length === 0;
+        document.querySelectorAll("input[data-select-pool-id]").forEach(
+          checkbox => {
+            const id = String(checkbox.dataset.selectPoolId || "");
+            checkbox.checked = state.selectedPoolIds.has(id);
+            checkbox.disabled = actionBusy
+              || checkbox.dataset.deletable !== "true";
+          }
+        );
+        document.querySelectorAll("button[data-delete-pool-id]").forEach(
+          button => {
+            button.disabled = actionBusy
+              || button.dataset.deletable !== "true";
+          }
+        );
+        setText(
+          byId("selectedDramaCount"),
+          `已选择 ${state.selectedPoolIds.size} 部`
+        );
+        byId("clearDramaSelection").disabled = actionBusy
+          || state.selectedPoolIds.size === 0;
+        byId("batchDeleteDramas").disabled = actionBusy
+          || state.selectedPoolIds.size === 0;
+      }
+      function clearDramaSelection() {
+        state.selectedPoolIds.clear();
+        syncDramaSelectionControls();
+      }
+      function setPoolMutationBusy(value) {
+        state.poolMutationBusy = !!value;
+        byId("dramaTableWrap").setAttribute(
+          "aria-busy",
+          state.poolMutationBusy ? "true" : "false"
+        );
+        byId("filters").querySelectorAll("input, select, button").forEach(
+          control => {
+            control.disabled = state.poolMutationBusy;
+          }
+        );
+        byId("previewDramas").disabled = state.poolMutationBusy;
+        byId("clearDramas").disabled = state.poolMutationBusy;
+        byId("confirmAddDramas").disabled = state.poolMutationBusy
+          || state.previewIds.length === 0;
+        document.querySelectorAll("button[data-episodes-pool-id]").forEach(
+          button => {
+            button.disabled = state.poolMutationBusy;
+          }
+        );
+        updatePoolPager();
+        syncDramaSelectionControls();
+      }
       function renderDramaRows(items) {
         const body = byId("dramaRows");
         body.replaceChildren();
+        state.currentPoolItems = items.slice();
         if (!items.length) {
-          setTableEmpty("dramaRows", 9, "没有符合当前筛选条件的短剧。");
+          setTableEmpty("dramaRows", 10, "没有符合当前筛选条件的短剧。");
+          syncDramaSelectionControls();
           return;
         }
-        items.forEach(item => {
+        items.forEach((item, itemIndex) => {
           const row = document.createElement("tr");
+          const selectable = dramaItemDeletable(item);
+          const blockReason = String(
+            item.delete_block_reason
+            || "当前短剧不可删除"
+          );
+          const selectionCell = document.createElement("td");
+          selectionCell.className = "select-column";
+          const selection = document.createElement("input");
+          selection.type = "checkbox";
+          selection.dataset.selectPoolId = poolItemId(item);
+          selection.dataset.deletable = selectable ? "true" : "false";
+          selection.checked = state.selectedPoolIds.has(poolItemId(item));
+          selection.disabled = state.poolMutationBusy || !selectable;
+          selection.setAttribute(
+            "aria-label",
+            `选择短剧 ${item.drama_id || item.content_id || item.id || ""}`
+          );
+          const blockReasonId = `delete-block-reason-${poolItemId(item) || `unknown-${itemIndex}`}`;
+          if (!selectable) {
+            selection.title = blockReason;
+            selection.setAttribute("aria-describedby", blockReasonId);
+          }
+          selectionCell.appendChild(selection);
+          row.appendChild(selectionCell);
           appendCell(row, formatTime(item.created_at), `池 ID ${item.id || "—"}`);
           appendCell(row, item.drama_id || item.content_id || "—");
           appendCell(
@@ -1042,20 +1335,32 @@ Episode👉{sub_num}
           episodes.className = "button small";
           episodes.dataset.episodesPoolId = String(item.id || "");
           episodes.dataset.dramaLabel = String(item.drama_name || item.drama_id || item.content_id || "");
+          episodes.disabled = state.poolMutationBusy;
           setText(episodes, "查看剧集");
           const remove = document.createElement("button");
           remove.type = "button";
           remove.className = "button danger small";
           remove.dataset.deletePoolId = String(item.id || "");
           remove.dataset.dramaId = String(item.drama_id || item.content_id || "");
-          const hasHistory = Number(item.queue_count || item.episode_queue_count || 0) > 0 || item.has_history === true;
-          remove.disabled = hasHistory || ["publishing", "completed", "published", "needs_review", "blocked"].includes(String(item.status || "").toLowerCase());
-          if (remove.disabled) remove.title = "已有发布队列或历史的短剧不能删除";
+          remove.dataset.deletable = selectable ? "true" : "false";
+          remove.disabled = state.poolMutationBusy || !selectable;
+          if (!selectable) {
+            remove.title = blockReason;
+            remove.setAttribute("aria-describedby", blockReasonId);
+          }
           setText(remove, "删除");
           actionCell.append(episodes, remove);
+          if (!selectable) {
+            const reason = document.createElement("div");
+            reason.id = blockReasonId;
+            reason.className = "subtle delete-reason";
+            setText(reason, `不可删除：${blockReason}`);
+            actionCell.appendChild(reason);
+          }
           row.appendChild(actionCell);
           body.appendChild(row);
         });
+        syncDramaSelectionControls();
       }
       function queryString() {
         const params = new URLSearchParams({ page: String(state.page), page_size: String(state.pageSize) });
@@ -1066,22 +1371,38 @@ Episode👉{sub_num}
         return params.toString();
       }
       async function loadDramaPool() {
-        setTableEmpty("dramaRows", 9, "正在加载…");
+        const requestSeq = ++state.poolRequestSeq;
+        state.currentPoolItems = [];
+        state.selectedPoolIds.clear();
+        setTableEmpty("dramaRows", 10, "正在加载…");
+        syncDramaSelectionControls();
         try {
           const result = await api(`/api/admin/x-posts/drama-pool?${queryString()}`);
+          if (requestSeq !== state.poolRequestSeq) return;
           const items = responseItems(result);
           const pagination = extractPagination(result);
           state.page = pagination.page;
           state.pageSize = pagination.pageSize;
           state.total = pagination.total;
+          const maxPage = Math.max(
+            1,
+            Math.ceil(state.total / state.pageSize)
+          );
+          if (state.page > maxPage) {
+            state.page = maxPage;
+            await loadDramaPool();
+            return;
+          }
           renderDramaRows(items);
           renderStats(result, items);
           const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
           setText(byId("pageInfo"), `第 ${state.page} / ${pages} 页，共 ${state.total} 条`);
-          byId("prevPage").disabled = state.page <= 1;
-          byId("nextPage").disabled = state.page >= pages;
+          updatePoolPager();
         } catch (error) {
-          setTableEmpty("dramaRows", 9, `加载失败：${error.message}`);
+          if (requestSeq !== state.poolRequestSeq) return;
+          state.currentPoolItems = [];
+          setTableEmpty("dramaRows", 10, `加载失败：${error.message}`);
+          syncDramaSelectionControls();
           ["dramaCount", "activeDramaCount", "pendingEpisodeCount", "publishedEpisodeCount"].forEach(id => setText(byId(id), "—"));
         }
       }
@@ -1129,17 +1450,64 @@ Episode👉{sub_num}
         }
       }
       async function deleteDrama(poolId, dramaId) {
-        if (!poolId || state.busy) return;
+        if (!poolId || state.busy || state.poolMutationBusy) return;
         if (!window.confirm(`确认从短剧池删除 ${dramaId || `池记录 ${poolId}`}？`)) return;
         state.busy = true;
+        setPoolMutationBusy(true);
         try {
           await api(`/api/admin/x-posts/drama-pool/${encodeURIComponent(poolId)}`, { method: "DELETE", body: "{}" });
           showToast(`短剧 ${dramaId || poolId} 已删除。`, false);
+          if (state.page > 1 && state.total - 1 <= (state.page - 1) * state.pageSize) {
+            state.page -= 1;
+          }
           await loadDramaPool();
         } catch (error) {
           showToast(`删除失败：${error.message}`, true);
         } finally {
           state.busy = false;
+          setPoolMutationBusy(false);
+        }
+      }
+      async function batchDeleteDramas() {
+        const poolItemIds = Array.from(state.selectedPoolIds).map(Number);
+        if (!poolItemIds.length || state.busy || state.poolMutationBusy) return;
+        if (!window.confirm(
+          `确认删除当前页已选择的 ${poolItemIds.length} 部短剧？删除后无法在页面恢复；已有发布队列或历史的短剧不会被选中。`
+        )) return;
+        state.busy = true;
+        setPoolMutationBusy(true);
+        const button = byId("batchDeleteDramas");
+        setText(button, "删除中…");
+        try {
+          const result = await api(
+            "/api/admin/x-posts/drama-pool/batch-delete",
+            {
+              method: "POST",
+              body: JSON.stringify({ pool_item_ids: poolItemIds }),
+            }
+          );
+          const item = responseItem(result);
+          const returnedCount = Number(item.deleted_count);
+          const deletedCount = Number.isInteger(returnedCount)
+            && returnedCount > 0
+            && returnedCount <= poolItemIds.length
+            ? returnedCount
+            : poolItemIds.length;
+          showToast(`已批量删除 ${deletedCount} 部短剧。`, false);
+          state.selectedPoolIds.clear();
+          if (
+            state.page > 1
+            && state.total - deletedCount <= (state.page - 1) * state.pageSize
+          ) {
+            state.page -= 1;
+          }
+          await loadDramaPool();
+        } catch (error) {
+          showToast(`批量删除失败：${error.message}`, true);
+        } finally {
+          state.busy = false;
+          setText(button, "批量删除");
+          setPoolMutationBusy(false);
         }
       }
       async function init() {
@@ -1223,25 +1591,53 @@ Episode👉{sub_num}
       });
       byId("filters").addEventListener("submit", event => {
         event.preventDefault();
+        clearDramaSelection();
         state.page = 1;
         loadDramaPool();
       });
       byId("resetFilters").addEventListener("click", () => {
         byId("filters").reset();
+        clearDramaSelection();
         state.page = 1;
         loadDramaPool();
       });
       byId("prevPage").addEventListener("click", () => {
         if (state.page > 1) {
+          clearDramaSelection();
           state.page -= 1;
           loadDramaPool();
         }
       });
       byId("nextPage").addEventListener("click", () => {
         if (state.page * state.pageSize < state.total) {
+          clearDramaSelection();
           state.page += 1;
           loadDramaPool();
         }
+      });
+      byId("selectAllDramaPage").addEventListener("change", event => {
+        const visibleIds = currentDeletablePoolIds();
+        visibleIds.forEach(id => {
+          if (event.target.checked) state.selectedPoolIds.add(id);
+          else state.selectedPoolIds.delete(id);
+        });
+        syncDramaSelectionControls();
+      });
+      byId("clearDramaSelection").addEventListener(
+        "click",
+        clearDramaSelection
+      );
+      byId("batchDeleteDramas").addEventListener(
+        "click",
+        batchDeleteDramas
+      );
+      byId("dramaRows").addEventListener("change", event => {
+        const checkbox = event.target.closest("input[data-select-pool-id]");
+        if (!checkbox || checkbox.disabled) return;
+        const poolId = String(checkbox.dataset.selectPoolId || "");
+        if (checkbox.checked) state.selectedPoolIds.add(poolId);
+        else state.selectedPoolIds.delete(poolId);
+        syncDramaSelectionControls();
       });
       byId("dramaRows").addEventListener("click", event => {
         const episodeButton = event.target.closest("button[data-episodes-pool-id]");

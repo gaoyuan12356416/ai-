@@ -809,6 +809,175 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_drama_pool_needs_review",
         )
 
+    def test_drama_pool_batch_delete_is_atomic_and_returns_compact_items(self):
+        first = self.add_drama(content_id="DELETE1")
+        second = self.add_drama(content_id="DELETE2")
+
+        result = self.store.delete_drama_pool_items(
+            [second["id"], first["id"]]
+        )
+
+        self.assertEqual(result["deleted_count"], 2)
+        self.assertEqual(
+            result["items"],
+            [
+                {
+                    "id": second["id"],
+                    "content_id": "DELETE2",
+                    "deleted": True,
+                },
+                {
+                    "id": first["id"],
+                    "content_id": "DELETE1",
+                    "deleted": True,
+                },
+            ],
+        )
+        self.assertEqual(
+            self.store.query_drama_pool()["pagination"]["total"],
+            0,
+        )
+
+    def test_drama_pool_batch_delete_rolls_back_when_any_item_has_history(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        occupied = self.add_drama(content_id="OCCUPIED")
+        deletable = self.add_drama(content_id="DELETABLE")
+        self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(occupied, 2, 1)],
+        )
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.delete_drama_pool_items(
+                [deletable["id"], occupied["id"]]
+            )
+
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_pool_item_occupied",
+        )
+        rows = self.store.query_drama_pool()["items"]
+        self.assertEqual(
+            {item["content_id"] for item in rows},
+            {"OCCUPIED", "DELETABLE"},
+        )
+        occupied_row = next(
+            item for item in rows if item["content_id"] == "OCCUPIED"
+        )
+        deletable_row = next(
+            item for item in rows if item["content_id"] == "DELETABLE"
+        )
+        self.assertTrue(occupied_row["has_history"])
+        self.assertFalse(occupied_row["deletable"])
+        self.assertEqual(occupied_row["queue_count"], 1)
+        self.assertFalse(deletable_row["has_history"])
+        self.assertTrue(deletable_row["deletable"])
+
+    def test_drama_pool_batch_delete_rejects_legacy_content_history(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        occupied = self.add_drama(content_id="LEGACY")
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(occupied, 2, 1)],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_x_post_queue_drama_update"
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET drama_pool_item_id=NULL WHERE id=?",
+                (plan["queues"][0]["id"],),
+            )
+            conn.commit()
+
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.delete_drama_pool_items([occupied["id"]])
+
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_pool_item_occupied",
+        )
+        row = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(row["queue_count"], 1)
+        self.assertTrue(row["has_history"])
+        self.assertFalse(row["deletable"])
+
+    def test_drama_pool_batch_delete_validates_entire_request_before_delete(self):
+        pool = self.add_drama(content_id="KEEP")
+        invalid_requests = (
+            [],
+            [pool["id"], pool["id"]],
+            [0],
+            list(range(1, 102)),
+        )
+        for pool_item_ids in invalid_requests:
+            with self.subTest(pool_item_ids=pool_item_ids[:3]):
+                with self.assertRaises(service.XPostError) as rejected:
+                    self.store.delete_drama_pool_items(pool_item_ids)
+                self.assertEqual(rejected.exception.code, "invalid_request")
+        with self.assertRaises(service.XPostError) as missing:
+            self.store.delete_drama_pool_items([pool["id"], 999999])
+        self.assertEqual(
+            missing.exception.code,
+            "x_post_drama_pool_item_not_found",
+        )
+        self.assertEqual(
+            self.store.query_drama_pool()["pagination"]["total"],
+            1,
+        )
+
+    def test_drama_pool_delete_allows_unoccupied_validation_failure_only(self):
+        invalid = self.store.add_drama_pool_items(
+            ["INVALID"],
+            [
+                {
+                    "content_id": "INVALID",
+                    "error_code": "drama_resource_invalid",
+                    "error_message": "短剧资源数据不完整",
+                }
+            ],
+            actor={"user_id": "admin-1", "name": "Admin"},
+        )["items"][0]
+        row = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(row["status"], "validation_failed")
+        self.assertTrue(row["deletable"])
+        deleted = self.store.delete_drama_pool_item(invalid["id"])
+        self.assertEqual(deleted["id"], invalid["id"])
+        self.assertEqual(deleted["content_id"], "INVALID")
+        self.assertEqual(deleted["status"], "validation_failed")
+        self.assertTrue(deleted["deleted"])
+
+    def test_drama_pool_status_guard_rejects_unbound_active_record(self):
+        pool = self.add_drama(content_id="ACTIVE")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_drama_pool SET status='active' WHERE id=?",
+                (pool["id"],),
+            )
+            conn.commit()
+
+        row = self.store.query_drama_pool()["items"][0]
+        self.assertFalse(row["deletable"])
+        self.assertFalse(row["has_history"])
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.delete_drama_pool_items([pool["id"]])
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_drama_pool_item_occupied",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "DELETE FROM x_post_drama_pool WHERE id=?",
+                    (pool["id"],),
+                )
+
     def test_first_drama_failure_stops_batch_with_later_queues_unexecuted(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
         pool = self.add_drama(free_episode_count=2)
