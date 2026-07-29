@@ -764,6 +764,7 @@ from features.tt_drama_resources import (
     W2AHTMLClient,
     W2AResourceService,
 )
+from features.material_status_broadcast import service as material_status_service
 from fb_playable_generator import (
     build_browser_preview_html,
     build_meta_playable_html,
@@ -1507,6 +1508,36 @@ ADMIN_MAPPING_MYSQL_USER = os.environ.get("ADMIN_MAPPING_MYSQL_USER", "").strip(
 ADMIN_MAPPING_MYSQL_PASSWORD = os.environ.get("ADMIN_MAPPING_MYSQL_PASSWORD", "")
 ADMIN_MAPPING_MYSQL_DATABASE = os.environ.get("ADMIN_MAPPING_MYSQL_DATABASE", "").strip()
 ADMIN_MAPPING_MYSQL_TIMEOUT = int(os.environ.get("ADMIN_MAPPING_MYSQL_TIMEOUT", "8"))
+
+MATERIAL_STATUS_WEBHOOK_TOKENS = tuple(
+    item.strip()
+    for item in os.environ.get("MATERIAL_STATUS_WEBHOOK_TOKENS", "").split(",")
+    if item.strip()
+)
+MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID = os.environ.get(
+    "MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID",
+    "oc_88f2eb329508d13bfd2be3de0e221797",
+).strip()
+MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES = max(
+    1024,
+    min(
+        material_status_service.MAX_REQUEST_BYTES,
+        int(os.environ.get("MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES", "32768")),
+    ),
+)
+MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS = max(
+    1,
+    min(20, int(os.environ.get("MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS", "5"))),
+)
+MATERIAL_STATUS_WEBHOOK_POLL_SECONDS = max(
+    0.2,
+    min(30.0, float(os.environ.get("MATERIAL_STATUS_WEBHOOK_POLL_SECONDS", "1"))),
+)
+MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS = max(
+    300,
+    min(3600, int(os.environ.get("MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS", "300"))),
+)
+MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS = (1, 5, 30, 120, 600)
 
 COS_SECRET_ID = os.environ.get("COS_SECRET_ID", "").strip()
 
@@ -2676,6 +2707,11 @@ logging.basicConfig(
 
 
 JOB_DB_LOCK = threading.Lock()
+MATERIAL_STATUS_OUTBOX_LOCK = threading.Lock()
+MATERIAL_STATUS_OUTBOX = None
+MATERIAL_STATUS_WORKER_STOP = threading.Event()
+MATERIAL_STATUS_WORKER_LOCK = threading.Lock()
+MATERIAL_STATUS_WORKER_THREAD = None
 
 
 
@@ -3214,6 +3250,10 @@ FEISHU_AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize
 
 
 FEISHU_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
+FEISHU_BATCH_GET_ID_URL = (
+    "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id"
+    "?user_id_type=open_id"
+)
 
 
 
@@ -46821,6 +46861,932 @@ def send_feishu_text(receive_id_type, receive_id, text):
 
 
 
+
+
+class MaterialStatusDeliveryError(RuntimeError):
+    def __init__(
+        self,
+        code,
+        message,
+        retryable=False,
+        refresh_token=False,
+    ):
+        self.code = str(code or "delivery_failed")
+        self.retryable = bool(retryable)
+        self.refresh_token = bool(refresh_token)
+        super().__init__(
+            material_status_service.redact_sensitive_text(message, limit=500)
+        )
+
+
+def material_status_webhook_token_eligible(token):
+    token = str(token or "")
+    return (
+        len(token) >= 32
+        and token.isascii()
+        and not any(char.isspace() for char in token)
+    )
+
+
+def material_status_webhook_config_error():
+    if not any(
+        material_status_webhook_token_eligible(token)
+        for token in MATERIAL_STATUS_WEBHOOK_TOKENS
+    ):
+        return "material status webhook token is not configured"
+    if not MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID:
+        return "material status fallback chat is not configured"
+    if not (FEISHU_APP_ID and FEISHU_APP_SECRET):
+        return "Feishu app is not configured"
+    if not (
+        ADMIN_MAPPING_MYSQL_HOST
+        and ADMIN_MAPPING_MYSQL_USER
+        and (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME)
+    ):
+        return "admin mapping database is not configured"
+    return ""
+
+
+def material_status_webhook_token_valid(authorization_header):
+    matched = False
+    for expected_token in MATERIAL_STATUS_WEBHOOK_TOKENS:
+        current = (
+            material_status_webhook_token_eligible(expected_token)
+            and material_status_service.validate_bearer_authorization(
+                authorization_header,
+                expected_token,
+            )
+        )
+        matched = bool(current) or matched
+    return matched
+
+
+def get_material_status_outbox():
+    global MATERIAL_STATUS_OUTBOX
+    with MATERIAL_STATUS_OUTBOX_LOCK:
+        if MATERIAL_STATUS_OUTBOX is None:
+            MATERIAL_STATUS_OUTBOX = material_status_service.MaterialStatusOutbox(
+                JOB_DB_PATH
+            )
+        return MATERIAL_STATUS_OUTBOX
+
+
+def run_material_status_mapping_query(query):
+    database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
+    if not (
+        ADMIN_MAPPING_MYSQL_HOST
+        and ADMIN_MAPPING_MYSQL_USER
+        and database
+    ):
+        raise MaterialStatusDeliveryError(
+            "mapping_not_configured",
+            "admin mapping database is not configured",
+            retryable=False,
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_]+", database):
+        raise MaterialStatusDeliveryError(
+            "mapping_not_configured",
+            "admin mapping database name is invalid",
+            retryable=False,
+        )
+    cmd = ["mysql", "-h", ADMIN_MAPPING_MYSQL_HOST]
+    if ADMIN_MAPPING_MYSQL_PORT:
+        cmd.extend(["-P", ADMIN_MAPPING_MYSQL_PORT])
+    cmd.extend(
+        [
+            "-u",
+            ADMIN_MAPPING_MYSQL_USER,
+            "--default-character-set=utf8mb4",
+            "--connect-timeout=%s"
+            % max(1, min(ADMIN_MAPPING_MYSQL_TIMEOUT, 30)),
+            "-N",
+            "-B",
+            database,
+            "-e",
+            query,
+        ]
+    )
+    mysql_env = os.environ.copy()
+    mysql_env["MYSQL_PWD"] = ADMIN_MAPPING_MYSQL_PASSWORD
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(2, min(ADMIN_MAPPING_MYSQL_TIMEOUT, 30)),
+            env=mysql_env,
+            universal_newlines=True,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise MaterialStatusDeliveryError(
+            "mapping_unavailable",
+            "admin mapping query unavailable: %s" % exc.__class__.__name__,
+            retryable=True,
+        ) from None
+    if result.returncode != 0:
+        raise MaterialStatusDeliveryError(
+            "mapping_unavailable",
+            "admin mapping query failed with code %s" % result.returncode,
+            retryable=True,
+        )
+    return [
+        line.split("\t")
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def resolve_material_status_optimizer(optimizer_name):
+    optimizer_name = str(optimizer_name or "").strip()
+    if not optimizer_name:
+        return {
+            "matched": False,
+            "code": "optimizer_name_missing",
+            "message": "接口未提供优化师名称",
+        }
+    database = (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
+    optimizer_name_hex = optimizer_name.encode("utf-8").hex()
+    user_rows = run_material_status_mapping_query(
+        "SELECT CAST(id AS CHAR), username "
+        "FROM `%s`.admin_users "
+        "WHERE BINARY TRIM(username)="
+        "BINARY TRIM(CONVERT(0x%s USING utf8mb4)) "
+        "LIMIT 2"
+        % (database, optimizer_name_hex)
+    )
+    if not user_rows:
+        return {
+            "matched": False,
+            "code": "optimizer_not_found",
+            "message": "admin_users.username 未找到完全匹配的用户",
+        }
+    if len(user_rows) != 1:
+        return {
+            "matched": False,
+            "code": "optimizer_ambiguous",
+            "message": "admin_users.username 匹配到多个用户",
+        }
+    admin_user_id = str(user_rows[0][0] or "").strip()
+    if not admin_user_id.isdigit():
+        raise MaterialStatusDeliveryError(
+            "mapping_invalid",
+            "admin user id is invalid",
+            retryable=False,
+        )
+    email_rows = run_material_status_mapping_query(
+        "SELECT email "
+        "FROM `%s`.admin_user_group "
+        "WHERE sub_user_id=%s AND status=0 AND TRIM(email)<>'' "
+        "ORDER BY id ASC LIMIT 20"
+        % (database, admin_user_id)
+    )
+    emails = {}
+    for row in email_rows:
+        email = str(row[0] if row else "").strip()
+        if email:
+            emails.setdefault(email.lower(), email)
+    if not emails:
+        return {
+            "matched": False,
+            "code": "optimizer_email_missing",
+            "message": "admin_user_group 未配置可用 email",
+            "admin_user_id": admin_user_id,
+        }
+    if len(emails) != 1:
+        return {
+            "matched": False,
+            "code": "optimizer_email_ambiguous",
+            "message": "admin_user_group 存在多个不同 email",
+            "admin_user_id": admin_user_id,
+        }
+    return {
+        "matched": True,
+        "admin_user_id": admin_user_id,
+        "email": next(iter(emails.values())),
+    }
+
+
+def mask_material_status_email(email):
+    email = str(email or "").strip()
+    if "@" not in email:
+        return ""
+    local, domain = email.rsplit("@", 1)
+    if not local or not domain:
+        return ""
+    return "%s***@%s" % (local[:1], domain)
+
+
+def invalidate_material_status_feishu_token(expected_token):
+    expected_token = str(expected_token or "")
+    with AUTH_CACHE_LOCK:
+        cached_token = str(
+            FEISHU_TENANT_ACCESS_TOKEN_CACHE.get("token") or ""
+        )
+        if expected_token and cached_token == expected_token:
+            FEISHU_TENANT_ACCESS_TOKEN_CACHE["token"] = ""
+            FEISHU_TENANT_ACCESS_TOKEN_CACHE["expires_at"] = 0
+
+
+def material_status_feishu_response(
+    response,
+    operation,
+    tenant_access_token="",
+):
+    try:
+        data = response.json()
+    except Exception:
+        raise MaterialStatusDeliveryError(
+            "%s_invalid_response" % operation,
+            "Feishu %s returned invalid JSON" % operation,
+            retryable=response.status_code >= 500,
+        ) from None
+    if not isinstance(data, dict) or "code" not in data:
+        raise MaterialStatusDeliveryError(
+            "%s_invalid_response" % operation,
+            "Feishu %s response is missing a result code" % operation,
+            retryable=True,
+        )
+    feishu_code = data.get("code")
+    retryable_codes = {
+        99991400,
+        99991401,
+        99991663,
+        99991664,
+        99991668,
+    }
+    refresh_token_codes = {
+        99991661,
+        99991663,
+        99991664,
+        99991668,
+    }
+    if response.status_code >= 400 or feishu_code != 0:
+        retryable = (
+            response.status_code == 429
+            or response.status_code >= 500
+            or feishu_code in retryable_codes
+        )
+        refresh_token = feishu_code in refresh_token_codes
+        if refresh_token:
+            invalidate_material_status_feishu_token(
+                tenant_access_token
+            )
+        raise MaterialStatusDeliveryError(
+            "%s_failed" % operation,
+            "Feishu %s failed: http=%s code=%s message=%s"
+            % (
+                operation,
+                response.status_code,
+                feishu_code,
+                data.get("msg") or "",
+            ),
+            retryable=retryable,
+            refresh_token=refresh_token,
+        )
+    return data
+
+
+def lookup_material_status_feishu_open_id(email):
+    data = None
+    for auth_attempt in range(2):
+        try:
+            tenant_access_token = get_feishu_tenant_access_token()
+            response = requests.post(
+                FEISHU_BATCH_GET_ID_URL,
+                headers={
+                    "Authorization": "Bearer " + tenant_access_token,
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json={"emails": [str(email or "").strip()]},
+                timeout=15,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_lookup_unavailable",
+                "Feishu user lookup unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+            ) from None
+        except Exception as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_lookup_unavailable",
+                "Feishu user lookup unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+            ) from None
+        try:
+            data = material_status_feishu_response(
+                response,
+                "user_lookup",
+                tenant_access_token=tenant_access_token,
+            )
+            break
+        except MaterialStatusDeliveryError as exc:
+            if exc.refresh_token and auth_attempt == 0:
+                continue
+            raise
+    user_list = ((data.get("data") or {}).get("user_list") or [])
+    open_ids = []
+    for item in user_list:
+        if not isinstance(item, dict):
+            continue
+        open_id = str(
+            item.get("user_id")
+            or item.get("open_id")
+            or ""
+        ).strip()
+        if open_id.startswith("ou_") and open_id not in open_ids:
+            open_ids.append(open_id)
+    if not open_ids:
+        return {
+            "matched": False,
+            "code": "feishu_user_not_found",
+            "message": "email 未匹配到飞书 open_id",
+        }
+    if len(open_ids) != 1:
+        return {
+            "matched": False,
+            "code": "feishu_user_ambiguous",
+            "message": "email 匹配到多个飞书 open_id",
+        }
+    return {"matched": True, "open_id": open_ids[0]}
+
+
+def send_material_status_feishu_text(
+    receive_id_type,
+    receive_id,
+    text,
+    message_uuid,
+):
+    receive_id = str(receive_id or "").strip()
+    if not receive_id:
+        raise MaterialStatusDeliveryError(
+            "feishu_receive_id_missing",
+            "Feishu receive id is missing",
+            retryable=False,
+        )
+    message_uuid = str(message_uuid or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,50}", message_uuid):
+        raise MaterialStatusDeliveryError(
+            "feishu_message_uuid_invalid",
+            "Feishu message uuid is invalid",
+            retryable=False,
+        )
+    data = None
+    for auth_attempt in range(2):
+        try:
+            tenant_access_token = get_feishu_tenant_access_token()
+            response = requests.post(
+                FEISHU_MESSAGE_URL
+                + "?"
+                + urlencode({"receive_id_type": receive_id_type}),
+                headers={
+                    "Authorization": "Bearer " + tenant_access_token,
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json={
+                    "receive_id": receive_id,
+                    "msg_type": "text",
+                    "content": json.dumps({"text": text}, ensure_ascii=False),
+                    "uuid": message_uuid,
+                },
+                timeout=15,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_send_unavailable",
+                "Feishu send unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+            ) from None
+        except Exception as exc:
+            raise MaterialStatusDeliveryError(
+                "feishu_send_unavailable",
+                "Feishu send unavailable: %s" % exc.__class__.__name__,
+                retryable=True,
+            ) from None
+        try:
+            data = material_status_feishu_response(
+                response,
+                "message_send",
+                tenant_access_token=tenant_access_token,
+            )
+            break
+        except MaterialStatusDeliveryError as exc:
+            if exc.refresh_token and auth_attempt == 0:
+                continue
+            raise
+    message_id = str(
+        (data.get("data") or {}).get("message_id")
+        or data.get("message_id")
+        or ""
+    ).strip()
+    if not message_id:
+        raise MaterialStatusDeliveryError(
+            "message_send_invalid_response",
+            "Feishu message_send response is missing message_id",
+            retryable=True,
+        )
+    return {
+        "message_id": message_id,
+        "status_code": response.status_code,
+    }
+
+
+def material_status_retry_delay(attempt_count):
+    index = max(
+        0,
+        min(
+            len(MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS) - 1,
+            int(attempt_count or 1) - 1,
+        ),
+    )
+    return MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS[index]
+
+
+def material_status_record_audit(event, action, detail):
+    safe_detail = {
+        "event_id": material_status_service.format_event_id(event["id"]),
+        "resource_id": str((event.get("payload") or {}).get("resource_id") or ""),
+        "optimizer_name": str(
+            (event.get("payload") or {}).get("optimizer_name") or ""
+        ),
+    }
+    safe_detail.update(
+        {
+            str(key): value
+            for key, value in (detail or {}).items()
+            if key in ("delivery_kind", "failure_code", "attempt_count")
+        }
+    )
+    try:
+        append_audit_log(
+            None,
+            action,
+            "material_status_broadcast",
+            material_status_service.format_event_id(event["id"]),
+            safe_detail,
+        )
+    except Exception:
+        logging.exception(
+            "material status audit write failed event=%s",
+            material_status_service.format_event_id(event["id"]),
+        )
+
+
+def material_status_retry_or_dead(
+    event,
+    outbox,
+    error_code,
+    error_message,
+    result=None,
+):
+    if int(event.get("attempt_count") or 0) < int(
+        event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+    ):
+        return outbox.schedule_retry(
+            event["id"],
+            event["lease_id"],
+            error_code,
+            error_message,
+            delay_seconds=material_status_retry_delay(
+                event.get("attempt_count")
+            ),
+            result=result,
+        )
+    terminal = outbox.mark_dead_letter(
+        event["id"],
+        event["lease_id"],
+        error_code,
+        error_message,
+        result=result,
+    )
+    material_status_record_audit(
+        terminal,
+        "material_status_broadcast_dead_letter",
+        {
+            "failure_code": error_code,
+            "attempt_count": terminal.get("attempt_count", 0),
+        },
+    )
+    return terminal
+
+
+def deliver_material_status_fallback(
+    event,
+    outbox,
+    reason_code,
+    reason_message,
+    resolution=None,
+):
+    resolution = resolution or {}
+    message = material_status_service.format_fallback_message(
+        event["payload"],
+        reason_code=reason_code,
+        reason_text=reason_message,
+        event_id=event["id"],
+    )
+    result_meta = {"failure_code": reason_code}
+    admin_user_id = str(resolution.get("admin_user_id") or "").strip()
+    if admin_user_id:
+        result_meta["admin_user_id"] = admin_user_id
+    masked_email = mask_material_status_email(resolution.get("email"))
+    if masked_email:
+        result_meta["masked_email"] = masked_email
+    try:
+        sent = send_material_status_feishu_text(
+            "chat_id",
+            MATERIAL_STATUS_WEBHOOK_FALLBACK_CHAT_ID,
+            message,
+            "mst-%s-fallback"
+            % material_status_service.format_event_id(event["id"]),
+        )
+        if sent.get("message_id"):
+            result_meta["feishu_message_id"] = sent["message_id"]
+        delivered = outbox.mark_delivered(
+            event["id"],
+            event["lease_id"],
+            delivery_kind="fallback",
+            result=result_meta,
+        )
+        material_status_record_audit(
+            delivered,
+            "material_status_broadcast_delivered",
+            {
+                "delivery_kind": "fallback",
+                "failure_code": reason_code,
+                "attempt_count": delivered.get("attempt_count", 0),
+            },
+        )
+        return delivered
+    except MaterialStatusDeliveryError as exc:
+        return material_status_retry_or_dead(
+            event,
+            outbox,
+            "fallback_send_failed",
+            str(exc),
+            result={"failure_code": reason_code},
+        )
+
+
+def process_material_status_event(event, outbox=None):
+    outbox = outbox or get_material_status_outbox()
+    payload = event.get("payload") or {}
+    if event.get("last_error_code") == "fallback_send_failed":
+        prior_result = event.get("result") or {}
+        prior_reason = (
+            prior_result.get("failure_code") or "optimizer_not_matched"
+        )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            prior_reason,
+            "",
+        )
+    try:
+        resolution = resolve_material_status_optimizer(
+            payload.get("optimizer_name")
+        )
+    except MaterialStatusDeliveryError as exc:
+        if exc.retryable and int(event.get("attempt_count") or 0) < int(
+            event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+        ):
+            return material_status_retry_or_dead(
+                event,
+                outbox,
+                exc.code,
+                str(exc),
+                result={"failure_code": exc.code},
+            )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            exc.code,
+            str(exc),
+        )
+    if not resolution.get("matched"):
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            resolution.get("code") or "optimizer_not_found",
+            resolution.get("message") or "未匹配到对应优化师",
+            resolution=resolution,
+        )
+
+    try:
+        feishu_user = lookup_material_status_feishu_open_id(
+            resolution["email"]
+        )
+    except MaterialStatusDeliveryError as exc:
+        if exc.retryable and int(event.get("attempt_count") or 0) < int(
+            event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+        ):
+            return material_status_retry_or_dead(
+                event,
+                outbox,
+                exc.code,
+                str(exc),
+                result={
+                    "admin_user_id": resolution["admin_user_id"],
+                    "masked_email": mask_material_status_email(
+                        resolution["email"]
+                    ),
+                    "failure_code": exc.code,
+                },
+            )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            exc.code,
+            str(exc),
+            resolution=resolution,
+        )
+    if not feishu_user.get("matched"):
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            feishu_user.get("code") or "feishu_user_not_found",
+            feishu_user.get("message") or "email 未匹配到飞书用户",
+            resolution=resolution,
+        )
+
+    private_message = material_status_service.format_private_message(
+        payload,
+        event_id=event["id"],
+    )
+    try:
+        sent = send_material_status_feishu_text(
+            "open_id",
+            feishu_user["open_id"],
+            private_message,
+            "mst-%s-private"
+            % material_status_service.format_event_id(event["id"]),
+        )
+    except MaterialStatusDeliveryError as exc:
+        if exc.retryable and int(event.get("attempt_count") or 0) < int(
+            event.get("max_attempts") or MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS
+        ):
+            return material_status_retry_or_dead(
+                event,
+                outbox,
+                exc.code,
+                str(exc),
+                result={
+                    "admin_user_id": resolution["admin_user_id"],
+                    "masked_email": mask_material_status_email(
+                        resolution["email"]
+                    ),
+                    "failure_code": exc.code,
+                },
+            )
+        return deliver_material_status_fallback(
+            event,
+            outbox,
+            "private_send_failed",
+            str(exc),
+            resolution=resolution,
+        )
+
+    result_meta = {
+        "admin_user_id": resolution["admin_user_id"],
+        "masked_email": mask_material_status_email(resolution["email"]),
+    }
+    if sent.get("message_id"):
+        result_meta["feishu_message_id"] = sent["message_id"]
+    delivered = outbox.mark_delivered(
+        event["id"],
+        event["lease_id"],
+        delivery_kind="private",
+        result=result_meta,
+    )
+    material_status_record_audit(
+        delivered,
+        "material_status_broadcast_delivered",
+        {
+            "delivery_kind": "private",
+            "attempt_count": delivered.get("attempt_count", 0),
+        },
+    )
+    return delivered
+
+
+def material_status_worker_loop():
+    outbox = get_material_status_outbox()
+    while not MATERIAL_STATUS_WORKER_STOP.is_set():
+        try:
+            event = outbox.claim_next(
+                lease_seconds=MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS
+            )
+        except Exception:
+            logging.exception("material status outbox claim failed")
+            MATERIAL_STATUS_WORKER_STOP.wait(
+                MATERIAL_STATUS_WEBHOOK_POLL_SECONDS
+            )
+            continue
+        if not event:
+            MATERIAL_STATUS_WORKER_STOP.wait(
+                MATERIAL_STATUS_WEBHOOK_POLL_SECONDS
+            )
+            continue
+        try:
+            process_material_status_event(event, outbox=outbox)
+        except Exception as exc:
+            logging.exception(
+                "material status processing failed event=%s",
+                material_status_service.format_event_id(event["id"]),
+            )
+            try:
+                material_status_retry_or_dead(
+                    event,
+                    outbox,
+                    "internal_error",
+                    "%s: %s" % (exc.__class__.__name__, exc),
+                    result={"failure_code": "internal_error"},
+                )
+            except Exception:
+                logging.exception(
+                    "material status failure state write failed event=%s",
+                    material_status_service.format_event_id(event["id"]),
+                )
+
+
+def start_material_status_worker():
+    global MATERIAL_STATUS_WORKER_THREAD
+    with MATERIAL_STATUS_WORKER_LOCK:
+        if (
+            MATERIAL_STATUS_WORKER_THREAD is not None
+            and MATERIAL_STATUS_WORKER_THREAD.is_alive()
+        ):
+            return MATERIAL_STATUS_WORKER_THREAD
+        get_material_status_outbox()
+        MATERIAL_STATUS_WORKER_STOP.clear()
+        MATERIAL_STATUS_WORKER_THREAD = threading.Thread(
+            target=material_status_worker_loop,
+            name="material-status-broadcast-worker",
+            daemon=True,
+        )
+        MATERIAL_STATUS_WORKER_THREAD.start()
+        return MATERIAL_STATUS_WORKER_THREAD
+
+
+def material_status_worker_ready():
+    try:
+        thread = start_material_status_worker()
+        return bool(thread and thread.is_alive())
+    except Exception:
+        logging.exception("material status broadcast worker is unavailable")
+        return False
+
+
+def handle_material_status_webhook_request(handler):
+    config_error = material_status_webhook_config_error()
+    if config_error:
+        json_response(
+            handler,
+            503,
+            {
+                "code": "service_unavailable",
+                "message": "素材状态播报接口暂未配置",
+            },
+            no_store=True,
+        )
+        return
+    if not material_status_webhook_token_valid(
+        handler.headers.get("Authorization", "")
+    ):
+        json_response(
+            handler,
+            401,
+            {
+                "code": "invalid_token",
+                "message": "Bearer Token 缺失或错误",
+            },
+            no_store=True,
+            extra_headers={"WWW-Authenticate": "Bearer"},
+        )
+        return
+    if not material_status_worker_ready():
+        json_response(
+            handler,
+            503,
+            {
+                "code": "service_unavailable",
+                "message": "素材状态播报投递服务暂不可用",
+            },
+            no_store=True,
+        )
+        return
+    content_type = str(handler.headers.get("Content-Type") or "").lower()
+    if content_type.split(";", 1)[0].strip() != "application/json":
+        json_response(
+            handler,
+            415,
+            {
+                "code": "unsupported_media_type",
+                "message": "Content-Type 必须为 application/json",
+            },
+            no_store=True,
+        )
+        return
+    if str(handler.headers.get("Transfer-Encoding") or "").strip():
+        json_response(
+            handler,
+            400,
+            {
+                "code": "invalid_request",
+                "message": "不支持 chunked 请求体",
+            },
+            no_store=True,
+        )
+        return
+    try:
+        content_length = int(handler.headers.get("Content-Length", ""))
+    except (TypeError, ValueError):
+        content_length = -1
+    if content_length < 0:
+        json_response(
+            handler,
+            400,
+            {
+                "code": "invalid_request",
+                "message": "缺少有效 Content-Length",
+            },
+            no_store=True,
+        )
+        return
+    if content_length > MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES:
+        handler.close_connection = True
+        json_response(
+            handler,
+            413,
+            {
+                "code": "payload_too_large",
+                "message": "请求体超过 32 KiB",
+            },
+            no_store=True,
+        )
+        return
+    try:
+        raw_body = handler.rfile.read(content_length)
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        json_response(
+            handler,
+            400,
+            {
+                "code": "invalid_json",
+                "message": "请求体不是有效 UTF-8 JSON",
+            },
+            no_store=True,
+        )
+        return
+    try:
+        source_ip = material_status_service.extract_audit_source_ip(
+            handler.client_address[0],
+            handler.headers.get("X-Real-IP", ""),
+        )
+        event = get_material_status_outbox().enqueue(
+            handler.headers.get(
+                material_status_service.IDEMPOTENCY_KEY_HEADER
+            ),
+            payload,
+            max_attempts=MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS,
+            source_ip=source_ip,
+        )
+    except material_status_service.MaterialStatusError as exc:
+        json_response(
+            handler,
+            exc.status,
+            {
+                "code": exc.code,
+                "message": str(exc),
+            },
+            no_store=True,
+        )
+        return
+    except Exception:
+        logging.exception("material status event enqueue failed")
+        json_response(
+            handler,
+            503,
+            {
+                "code": "service_unavailable",
+                "message": "事件暂时无法可靠落库",
+            },
+            no_store=True,
+        )
+        return
+    created = bool(event.pop("created", False))
+    json_response(
+        handler,
+        202,
+        {
+            "code": "accepted" if created else "duplicate_accepted",
+            "message": "事件已接收，正在投递" if created else "事件已接收",
+            "event_id": material_status_service.format_event_id(event["id"]),
+            "duplicate": not created,
+            "delivery_status": event.get("status", ""),
+            "received_at": event.get("created_at", ""),
+        },
+        no_store=True,
+    )
 
 
 def build_job_completion_message(job):
@@ -96226,6 +97192,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             self._dispatch_ad_control_v3(parsed)
             return
 
+        if (
+            parsed.path
+            == "/api/integrations/v1/material-task-status-events"
+        ):
+            handle_material_status_webhook_request(self)
+            return
+
         if parsed.path in ("/api/ad-material/playable-preview", "/api/fb-playable/preview"):
             if not require_playable_preview_access(self):
                 return
@@ -98020,6 +98993,15 @@ def main():
 
 
     ensure_audit_log_table()
+
+    try:
+        start_material_status_worker()
+        logging.info(
+            "material status broadcast worker started configured=%s",
+            not bool(material_status_webhook_config_error()),
+        )
+    except Exception:
+        logging.exception("material status broadcast worker startup failed")
 
 
 
