@@ -173,4 +173,6 @@ SQLite。若已产生 Post，任何回滚都不得删除 queue/log/绑定或回�
   `/etc/x-post-automation.env` 在 14:44 已被改为代码不允许的
   `https://gy.g2flow.com/s2l`，15:46 sidecar 重启后才激活该漂移。
   16:40 再次暂停 timer；按 `BUG-002.md` 修复配置并执行严格零尝试恢复后，
-  才允许 frozen run 继续，禁止新建计划或直接发布。
+  才允许 frozen run 继续，禁止新建计划或直接发布。真实恢复的报告必须是
+  `/mnt/data-disk/x-post-automation/recoveries/` 下的全新 JSON 文件；路径
+  越界、符号链接祖先、既有目标或缺少报告均失败关闭。

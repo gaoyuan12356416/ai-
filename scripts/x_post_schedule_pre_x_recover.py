@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,12 +20,14 @@ from scripts.x_post_daily_runner import process_lock  # noqa: E402
 from scripts.x_post_media_repair_backfill import (  # noqa: E402
     _atomic_write_report,
     _safe_error,
-    _validate_report_path,
 )
 
 
 DB_PATH = Path("/var/lib/x-post-automation/accounts.sqlite3")
 LOCK_PATH = "/run/x-post-daily/runner.lock"
+RECOVERY_REPORT_ROOT = Path(
+    "/mnt/data-disk/x-post-automation/recoveries"
+)
 _ERROR_CODE = re.compile(r"\A[A-Za-z0-9_.:-]{1,64}\Z")
 
 
@@ -88,12 +91,102 @@ def _argument_parser():
     return parser
 
 
+def _validate_recovery_report_path(path, report_root=None):
+    """Restrict recovery evidence to one root-owned audit tree."""
+    supplied = Path(path)
+    root = Path(report_root or RECOVERY_REPORT_ROOT)
+    if (
+        not supplied.is_absolute()
+        or not root.is_absolute()
+        or supplied.suffix.lower() != ".json"
+    ):
+        raise XPostError(
+            "x_post_pre_x_recovery_report_path_invalid",
+            "Recovery report path must be an absolute JSON path",
+            400,
+        )
+    lexical_root = Path(os.path.abspath(root))
+    lexical_target = Path(os.path.abspath(supplied))
+    try:
+        relative = lexical_target.relative_to(lexical_root)
+    except ValueError:
+        relative = None
+    if relative is None or not relative.parts:
+        raise XPostError(
+            "x_post_pre_x_recovery_report_path_invalid",
+            "Recovery report path is outside the dedicated audit root",
+            400,
+        )
+    if (
+        not lexical_root.exists()
+        or not lexical_root.is_dir()
+        or lexical_root.is_symlink()
+    ):
+        raise XPostError(
+            "x_post_pre_x_recovery_report_path_invalid",
+            "Recovery report root is unavailable or unsafe",
+            400,
+        )
+    cursor = lexical_target.parent
+    while True:
+        if cursor.exists() and cursor.is_symlink():
+            raise XPostError(
+                "x_post_pre_x_recovery_report_path_invalid",
+                "Recovery report path contains a symlink",
+                400,
+            )
+        if cursor == lexical_root:
+            break
+        if cursor == cursor.parent:
+            raise XPostError(
+                "x_post_pre_x_recovery_report_path_invalid",
+                "Recovery report path is outside the dedicated audit root",
+                400,
+            )
+        cursor = cursor.parent
+    resolved_root = lexical_root.resolve(strict=True)
+    resolved_target = lexical_target.resolve(strict=False)
+    try:
+        resolved_target.relative_to(resolved_root)
+    except ValueError:
+        raise XPostError(
+            "x_post_pre_x_recovery_report_path_invalid",
+            "Recovery report path resolves outside the audit root",
+            400,
+        ) from None
+    if (
+        not lexical_target.parent.exists()
+        or not lexical_target.parent.is_dir()
+        or lexical_target.exists()
+        or lexical_target.is_symlink()
+    ):
+        raise XPostError(
+            "x_post_pre_x_recovery_report_path_invalid",
+            "Recovery report target must be a new file in an existing directory",
+            400,
+        )
+    return resolved_target
+
+
+def _atomic_write_recovery_report(path, result):
+    target = _validate_recovery_report_path(path)
+    _atomic_write_report(target, result)
+
+
 def main(argv=None):
     args = _argument_parser().parse_args(argv)
     report_target = None
     try:
+        if not args.validate_only and not args.report_path:
+            raise XPostError(
+                "x_post_pre_x_recovery_report_required",
+                "A dedicated report path is required for state recovery",
+                400,
+            )
         if args.report_path:
-            report_target = _validate_report_path(args.report_path)
+            report_target = _validate_recovery_report_path(
+                args.report_path
+            )
         result = execute_recovery(
             args.queue_id,
             args.expected_error_code,
@@ -114,7 +207,7 @@ def main(argv=None):
         }
     if report_target is not None:
         try:
-            _atomic_write_report(report_target, result)
+            _atomic_write_recovery_report(report_target, result)
         except Exception:
             result = dict(result)
             result["report_status"] = "failed"
