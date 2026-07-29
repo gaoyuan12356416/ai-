@@ -31,7 +31,7 @@ from pathlib import Path
 W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2116/view"
 X_API_BASE_URL = "https://api.x.com"
 DEFAULT_PUBLIC_ROOT = "/mnt/data-disk/x-post-automation/s2l"
-DEFAULT_SHORT_BASE_URL = "https://ai.yingliangads.com/s2l"
+DEFAULT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
 DEFAULT_STORAGE_MOUNT_ROOT = "/mnt/data-disk"
 DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
@@ -244,7 +244,7 @@ def _build_short_url(short_base_url, log_id):
     parsed = urllib.parse.urlsplit(str(short_base_url or "").rstrip("/"))
     if (
         parsed.scheme != "https"
-        or parsed.hostname != "ai.yingliangads.com"
+        or parsed.hostname != "gy.g2flow.com"
         or parsed.port is not None
         or parsed.username is not None
         or parsed.password is not None
@@ -3291,7 +3291,7 @@ class XPostStore:
                 400,
             )
         build_drama_episode_post_text(
-            "https://ai.yingliangads.com/s2l/1.html",
+            "https://gy.g2flow.com/s2l/1.html",
             1,
             name_tag,
             description,

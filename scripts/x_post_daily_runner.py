@@ -1237,7 +1237,7 @@ class SidecarClient:
                 and preview_match is not None
                 and preview_match.group(1) == post_id
                 and short.scheme == "https"
-                and short.hostname == "ai.yingliangads.com"
+                and short.hostname == "gy.g2flow.com"
                 and short_port is None
                 and not short.username
                 and not short.password
@@ -1310,7 +1310,7 @@ def _plan_candidate(account, candidate, rank, timestamp):
         }
     )
     build_post_text(
-        "https://ai.yingliangads.com/s2l/1.html",
+        "https://gy.g2flow.com/s2l/1.html",
         item["description"],
     )
     return item

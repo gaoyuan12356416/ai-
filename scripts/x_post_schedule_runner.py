@@ -954,7 +954,7 @@ def _drama_candidates(
                 )
             try:
                 build_drama_episode_post_text(
-                    "https://ai.yingliangads.com/s2l/1.html",
+                    "https://gy.g2flow.com/s2l/1.html",
                     candidate["sub_num"],
                     candidate["name_tag"],
                     candidate["description"],

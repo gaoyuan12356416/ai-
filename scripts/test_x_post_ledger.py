@@ -254,8 +254,8 @@ class XPostLedgerTests(unittest.TestCase):
                     queue_id,account_id,status,attempt_count,long_url,short_url,
                     post_text,x_media_id,x_post_id,x_post_url,published_at,created_at,updated_at
                 ) VALUES(1,2,'published',1,'https://example.invalid/frozen',
-                    'https://ai.yingliangads.com/s2l/1.html',
-                    'https://ai.yingliangads.com/s2l/1.html\ndescription',
+                    'https://gy.g2flow.com/s2l/1.html',
+                    'https://gy.g2flow.com/s2l/1.html\ndescription',
                     'media1','2080128600917905497',
                     'https://x.com/legacy2/status/2080128600917905497',
                     '2026-07-23T02:11:00Z','2026-07-23T02:10:00Z',
@@ -289,7 +289,7 @@ class XPostLedgerTests(unittest.TestCase):
             account={"id": 2, "username": "legacy2"},
             access_token="unused-but-required",
             public_root=Path(self.temp.name) / "s2l",
-            short_base_url="https://ai.yingliangads.com/s2l",
+            short_base_url="https://gy.g2flow.com/s2l",
             allowed_media_hosts=["media.example.com"],
         )
         self.assertEqual(result["post_id"], "2080128600917905497")
@@ -521,8 +521,8 @@ class XPostLedgerTests(unittest.TestCase):
                     "content_id": queue["content_id"],
                 }
             ),
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\ndescription" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\ndescription" % log["id"],
         )
         store.mark_publishing(log["id"])
         store.mark_media_uploaded(log["id"], "media1")
@@ -534,7 +534,7 @@ class XPostLedgerTests(unittest.TestCase):
                 account={"id": queue["account_id"], "username": queue["account_username"]},
                 access_token="secret",
                 public_root=Path(self.temp.name) / "s2l",
-                short_base_url="https://ai.yingliangads.com/s2l",
+                short_base_url="https://gy.g2flow.com/s2l",
                 allowed_media_hosts=["media.example.com"],
             )
         self.assertEqual(caught.exception.code, "x_post_unknown_outcome")

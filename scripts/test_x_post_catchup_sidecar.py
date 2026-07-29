@@ -115,7 +115,7 @@ class FakeStore:
         return {
             "id": 77,
             "status": "published",
-            "short_url": "https://ai.yingliangads.com/s2l/77.html",
+            "short_url": "https://gy.g2flow.com/s2l/77.html",
             "x_post_id": "2081561021546696798",
             "x_post_url": (
                 "https://x.com/catchup_account/status/2081561021546696798"

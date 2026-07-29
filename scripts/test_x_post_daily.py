@@ -462,7 +462,7 @@ class FakeSidecar:
         return {
             "status": "published",
             "log_id": queue_id + 1000,
-            "short_url": "https://ai.yingliangads.com/s2l/%s.html"
+            "short_url": "https://gy.g2flow.com/s2l/%s.html"
             % (queue_id + 1000),
             "post_id": str(queue_id),
             "preview_url": "https://x.com/account/status/%s" % queue_id,
@@ -1548,7 +1548,7 @@ class RunnerTests(unittest.TestCase):
                     "status": "published",
                     "log_id": queue_id + 1000,
                     "short_url": (
-                        "https://ai.yingliangads.com/s2l/%s.html"
+                        "https://gy.g2flow.com/s2l/%s.html"
                         % (queue_id + 1000)
                     ),
                     "post_id": str(queue_id),
@@ -1643,7 +1643,7 @@ class RunnerTests(unittest.TestCase):
                 return {
                     "status": "published",
                     "log_id": queue_id + 1000,
-                    "short_url": "https://ai.yingliangads.com/s2l/%s.html"
+                    "short_url": "https://gy.g2flow.com/s2l/%s.html"
                     % (queue_id + 1000),
                     "post_id": str(queue_id),
                     "preview_url": "https://x.com/account/status/%s" % queue_id,

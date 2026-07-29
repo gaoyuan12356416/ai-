@@ -263,13 +263,14 @@ class XPostsTests(unittest.TestCase):
         with self.assertRaises(service.XPostError):
             service.build_w2a_url({"username": "bad name"})
 
-    def test_short_link_base_is_fixed_to_public_ai_host(self):
+    def test_short_link_base_is_fixed_to_g2flow_host(self):
         self.assertEqual(
-            service._build_short_url("https://ai.yingliangads.com/s2l", 7),
-            "https://ai.yingliangads.com/s2l/7.html",
+            service._build_short_url("https://gy.g2flow.com/s2l", 7),
+            "https://gy.g2flow.com/s2l/7.html",
         )
         for value in (
             "https://example.com/s2l",
+            "https://ai.yingliangads.com/s2l",
             "https://ai.yingliangads.com/other",
             "https://ai.yingliangads.com:443/s2l",
         ):
@@ -354,7 +355,7 @@ class XPostsTests(unittest.TestCase):
             self.assertEqual(len(client.requests), 1)
 
     def test_post_text_preserves_url_and_conservatively_truncates(self):
-        short = "https://ai.yingliangads.com/s2l/12.html"
+        short = "https://gy.g2flow.com/s2l/12.html"
         text = service.build_post_text(short, "剧" * 300)
         first, second = text.split("\n", 1)
         self.assertEqual(first, short)
@@ -456,7 +457,7 @@ class XPostsTests(unittest.TestCase):
                     account={"id": 2, "username": "ShortsDramhx"},
                     access_token="secret-token",
                     public_root=self.root / "public" / "s2l",
-                    short_base_url="https://ai.yingliangads.com/s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
                     allowed_media_hosts=["media.example.com"],
                     http_client=ScriptedHttpClient([]),
                     timeout=5,
@@ -729,7 +730,7 @@ class XPostsTests(unittest.TestCase):
                     account={"id": 2, "username": "ShortsDramhx"},
                     access_token="secret-token",
                     public_root=self.root / "public" / "s2l",
-                    short_base_url="https://ai.yingliangads.com/s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
                     allowed_media_hosts=["media.example.com"],
                     http_client=client,
                     timeout=5,
@@ -800,7 +801,7 @@ class XPostsTests(unittest.TestCase):
                     account={"id": 2, "username": "ShortsDramhx"},
                     access_token="secret-token",
                     public_root=self.root / "public" / "s2l",
-                    short_base_url="https://ai.yingliangads.com/s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
                     allowed_media_hosts=["media.example.com"],
                     http_client=client,
                     timeout=5,
@@ -835,7 +836,7 @@ class XPostsTests(unittest.TestCase):
             result = service.publish_canary(
                 db_path=self.db_path, queue_id=queue["id"],
                 account={"id": 2, "username": "ShortsDramhx"}, access_token="secret-token",
-                public_root=public_root, short_base_url="https://ai.yingliangads.com/s2l",
+                public_root=public_root, short_base_url="https://gy.g2flow.com/s2l",
                 allowed_media_hosts=["media.example.com"], http_client=client,
                 sleeper=lambda _seconds: None, timeout=5,
             )
@@ -848,7 +849,7 @@ class XPostsTests(unittest.TestCase):
         repeated = service.publish_canary(
             db_path=self.db_path, queue_id=queue["id"],
             account={"id": 2, "username": "ShortsDramhx"}, access_token="secret-token",
-            public_root=public_root, short_base_url="https://ai.yingliangads.com/s2l",
+            public_root=public_root, short_base_url="https://gy.g2flow.com/s2l",
             allowed_media_hosts=["media.example.com"], http_client=client, timeout=5,
         )
         self.assertEqual(repeated["post_id"], "190002")
@@ -885,7 +886,7 @@ class XPostsTests(unittest.TestCase):
                     account={"id": 2, "username": "ShortsDramhx"},
                     access_token="secret-token",
                     public_root=self.root / "public" / "s2l",
-                    short_base_url="https://ai.yingliangads.com/s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
                     allowed_media_hosts=["media.example.com"],
                     http_client=ScriptedHttpClient([]),
                     timeout=5,
@@ -910,7 +911,7 @@ class XPostsTests(unittest.TestCase):
         kwargs = dict(
             db_path=self.db_path, queue_id=queue["id"], account={"id": 2, "username": "ShortsDramhx"},
             access_token="access-secret", public_root=self.root / "public" / "s2l",
-            short_base_url="https://ai.yingliangads.com/s2l", allowed_media_hosts=["media.example.com"],
+            short_base_url="https://gy.g2flow.com/s2l", allowed_media_hosts=["media.example.com"],
             http_client=client, timeout=5,
         )
         with mock.patch.object(service, "probe_media", return_value=valid_probe_payload()):
@@ -982,7 +983,7 @@ class XPostsTests(unittest.TestCase):
                     account={"id": 2, "username": "ShortsDramhx"},
                     access_token="secret-token",
                     public_root=self.root / "public" / "s2l",
-                    short_base_url="https://ai.yingliangads.com/s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
                     allowed_media_hosts=["media.example.com"],
                     http_client=client,
                     sleeper=lambda _seconds: None,
@@ -1050,7 +1051,7 @@ class XPostsTests(unittest.TestCase):
                 account={"id": 2, "username": "ShortsDramhx"},
                 access_token="secret-token",
                 public_root=self.root / "public" / "s2l",
-                short_base_url="https://ai.yingliangads.com/s2l",
+                short_base_url="https://gy.g2flow.com/s2l",
                 allowed_media_hosts=["media.example.com"],
                 http_client=client,
                 timeout=5,
@@ -1066,7 +1067,7 @@ class XPostsTests(unittest.TestCase):
             service.publish_canary(
                 db_path=self.db_path, queue_id=queue["id"],
                 account={"id": 2, "username": "OtherAccount"}, access_token="token",
-                public_root=self.root / "s2l", short_base_url="https://ai.yingliangads.com/s2l",
+                public_root=self.root / "s2l", short_base_url="https://gy.g2flow.com/s2l",
                 allowed_media_hosts=["media.example.com"], http_client=client,
             )
         self.assertEqual(caught.exception.code, "x_post_account_mismatch")
