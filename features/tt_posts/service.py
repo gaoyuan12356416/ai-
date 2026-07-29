@@ -23,6 +23,7 @@ import secrets
 import socket
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,7 @@ from .core import (
     AccountSourceError,
     FIXED_CAPTION_TEMPLATE,
     LiveGates,
+    MAX_ACCOUNT_SETTINGS_BATCH,
     MaterialResolution,
     SafeAccount,
     SnapshotAccountSource,
@@ -75,6 +77,25 @@ MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
 TOKEN_MIN_VALIDITY_SECONDS = 300
 CAPTION_DRAMA_LINE_RE = re.compile(r"(?m)^[ \t]*Drama ID:[ \t]*(\S+)[ \t]*$")
 SAFE_INTERNAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+ACCOUNT_SETTINGS_VALUE_FIELDS = frozenset(
+    {
+        "privacy_level",
+        "allow_comment",
+        "allow_duet",
+        "allow_stitch",
+        "commercial_disclosure",
+        "brand_organic_toggle",
+        "brand_content_toggle",
+        "is_aigc",
+    }
+)
+PRIVACY_LEVEL_ORDER = (
+    "PUBLIC_TO_EVERYONE",
+    "MUTUAL_FOLLOW_FRIENDS",
+    "FOLLOWER_OF_CREATOR",
+    "SELF_ONLY",
+)
+CREATOR_INFO_BATCH_WORKERS = 4
 
 
 # This statement is deliberately metadata-only.  Do not add token predicates,
@@ -231,6 +252,83 @@ def _account_settings_version(value: Any, maximum: int = 2**31 - 1) -> int:
             "invalid_account_settings_version",
             "个号发布设置版本无效",
             400,
+        )
+    return result
+
+
+def _batch_account_ids(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        raise TTPostServiceError(
+            "invalid_batch_targets",
+            "批量个号目标必须是列表",
+            400,
+        )
+    if not value or len(value) > MAX_ACCOUNT_SETTINGS_BATCH:
+        raise TTPostServiceError(
+            "invalid_batch_targets",
+            "批量个号数量必须在1到%d之间"
+            % MAX_ACCOUNT_SETTINGS_BATCH,
+            400,
+        )
+    result = []
+    seen = set()
+    for raw_account_id in value:
+        account_id = _positive_decimal(raw_account_id, "TikTok账号ID")
+        if account_id in seen:
+            raise TTPostServiceError(
+                "invalid_batch_targets",
+                "批量个号目标不能重复",
+                400,
+            )
+        seen.add(account_id)
+        result.append(account_id)
+    return result
+
+
+def _batch_targets(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        raise TTPostServiceError(
+            "invalid_batch_targets",
+            "批量个号目标必须是列表",
+            400,
+        )
+    if not value or len(value) > MAX_ACCOUNT_SETTINGS_BATCH:
+        raise TTPostServiceError(
+            "invalid_batch_targets",
+            "批量个号数量必须在1到%d之间"
+            % MAX_ACCOUNT_SETTINGS_BATCH,
+            400,
+        )
+    result = []
+    seen = set()
+    for raw_target in value:
+        if not isinstance(raw_target, Mapping) or set(raw_target) != {
+            "source_account_id",
+            "expected_version",
+        }:
+            raise TTPostServiceError(
+                "invalid_batch_targets",
+                "批量个号目标字段无效",
+                400,
+            )
+        account_id = _positive_decimal(
+            raw_target.get("source_account_id"),
+            "TikTok账号ID",
+        )
+        if account_id in seen:
+            raise TTPostServiceError(
+                "invalid_batch_targets",
+                "批量个号目标不能重复",
+                400,
+            )
+        seen.add(account_id)
+        result.append(
+            {
+                "source_account_id": account_id,
+                "expected_version": _account_settings_version(
+                    raw_target.get("expected_version")
+                ),
+            }
         )
     return result
 
@@ -1326,12 +1424,11 @@ class TTPostService:
     def account_settings(self) -> Dict[str, Any]:
         return self.accounts()
 
-    def creator_info(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
-        account_id = _positive_decimal(
-            payload.get("source_account_id"),
-            "TikTok账号ID",
-        )
-        self.account_repository.get_public_account(account_id)
+    def _creator_info_for_account(
+        self,
+        account_id: str,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        account = self.account_repository.get_public_account(account_id)
         job_id = _job_id("ttcreator", account_id)
         with self.account_source.publish_credentials(account_id) as credentials:
             raw = self.gpu_client.creator_info(
@@ -1340,7 +1437,123 @@ class TTPostService:
                 access_token=credentials.reveal_access_token(),
             )
         item = raw.get("creator_info", raw)
-        return {"item": _normalized_creator_info(item), "gates": self._gates()}
+        return account, _normalized_creator_info(item)
+
+    def creator_info(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        account_id = _positive_decimal(
+            payload.get("source_account_id"),
+            "TikTok账号ID",
+        )
+        _, item = self._creator_info_for_account(account_id)
+        return {"item": item, "gates": self._gates()}
+
+    @staticmethod
+    def _common_creator_capabilities(
+        creators: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        if not creators:
+            raise TTPostServiceError(
+                "invalid_batch_targets",
+                "批量个号目标不能为空",
+                400,
+            )
+        privacy_sets = [
+            set(item.get("privacy_level_options") or [])
+            for item in creators
+        ]
+        privacy_options = [
+            value
+            for value in PRIVACY_LEVEL_ORDER
+            if all(value in options for options in privacy_sets)
+        ]
+        positive_durations = [
+            int(item.get("max_video_post_duration_sec") or 0)
+            for item in creators
+            if int(item.get("max_video_post_duration_sec") or 0) > 0
+        ]
+        return {
+            "account_count": len(creators),
+            "privacy_level_options": privacy_options,
+            "comment_disabled": not all(
+                item.get("comment_disabled") is False for item in creators
+            ),
+            "duet_disabled": not all(
+                item.get("duet_disabled") is False for item in creators
+            ),
+            "stitch_disabled": not all(
+                item.get("stitch_disabled") is False for item in creators
+            ),
+            "max_video_post_duration_sec": (
+                min(positive_durations) if positive_durations else 0
+            ),
+        }
+
+    def _batch_creator_info(
+        self,
+        account_ids: Sequence[str],
+    ) -> Dict[str, Any]:
+        results: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+        worker_count = min(CREATOR_INFO_BATCH_WORKERS, len(account_ids))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(
+                    self._creator_info_for_account,
+                    account_id,
+                ): account_id
+                for account_id in account_ids
+            }
+            for future in as_completed(futures):
+                account_id = futures[future]
+                try:
+                    results[account_id] = future.result()
+                except Exception as exc:
+                    for pending in futures:
+                        pending.cancel()
+                    status = (
+                        exc.status
+                        if isinstance(exc, TTPostError)
+                        and exc.status in (400, 404, 409)
+                        else 502
+                    )
+                    raise TTPostServiceError(
+                        "tt_batch_creator_info_failed",
+                        "TikTok账号%s实时能力检测失败" % account_id,
+                        status,
+                    ) from None
+
+        items = []
+        creators = []
+        for account_id in account_ids:
+            account, creator = results[account_id]
+            item = dict(account)
+            item["account_settings"] = (
+                self.store.get_account_settings(account_id)
+                or {"configured": False}
+            )
+            item["creator_info"] = creator
+            items.append(item)
+            creators.append(creator)
+        return {
+            "items": items,
+            "common_capabilities": self._common_creator_capabilities(creators),
+            "gates": self._gates(),
+        }
+
+    def account_settings_batch_creator_info(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "source_account_ids"
+        }:
+            raise TTPostServiceError(
+                "invalid_batch_targets",
+                "批量能力检测请求字段无效",
+                400,
+            )
+        return self._batch_creator_info(
+            _batch_account_ids(payload.get("source_account_ids"))
+        )
 
     def _resolve_and_prepare(
         self,
@@ -1475,18 +1688,12 @@ class TTPostService:
     def _account_settings_from_payload(
         payload: Mapping[str, Any],
     ) -> TTPostAccountSettings:
-        allowed = {
-            "source_account_id",
-            "privacy_level",
-            "allow_comment",
-            "allow_duet",
-            "allow_stitch",
-            "commercial_disclosure",
-            "brand_organic_toggle",
-            "brand_content_toggle",
-            "is_aigc",
-            "expected_version",
-        }
+        allowed = set(ACCOUNT_SETTINGS_VALUE_FIELDS).union(
+            {
+                "source_account_id",
+                "expected_version",
+            }
+        )
         if set(payload).difference(allowed):
             raise TTPostServiceError(
                 "invalid_request",
@@ -1617,6 +1824,67 @@ class TTPostService:
         item["account_settings"] = saved
         item["creator_info"] = creator
         return {"item": item, "gates": self._gates()}
+
+    def account_settings_batch_save(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise TTPostServiceError("invalid_request", "请求体必须是对象", 400)
+        allowed = set(ACCOUNT_SETTINGS_VALUE_FIELDS).union({"targets"})
+        if set(payload).difference(allowed):
+            raise TTPostServiceError(
+                "invalid_request",
+                "批量个号发布设置包含未知字段",
+                400,
+            )
+        targets = _batch_targets(payload.get("targets"))
+        settings_payload = {
+            key: payload.get(key) for key in ACCOUNT_SETTINGS_VALUE_FIELDS
+        }
+        settings_payload.update(
+            {
+                "source_account_id": targets[0]["source_account_id"],
+                "expected_version": targets[0]["expected_version"],
+            }
+        )
+        settings = self._account_settings_from_payload(settings_payload)
+        account_ids = [target["source_account_id"] for target in targets]
+        detected = self._batch_creator_info(account_ids)
+        detected_by_id = {
+            str(item["source_account_id"]): item
+            for item in detected["items"]
+        }
+        for account_id in account_ids:
+            self._assert_creator_settings(
+                detected_by_id[account_id]["creator_info"],
+                settings,
+            )
+
+        saved_items = self.store.save_account_settings_batch(
+            [
+                {
+                    "account_id": target["source_account_id"],
+                    "settings": settings,
+                    "expected_version": target["expected_version"],
+                }
+                for target in targets
+            ]
+        )
+        saved_by_id = {
+            str(item["account_id"]): item for item in saved_items
+        }
+        items = []
+        for account_id in account_ids:
+            item = dict(detected_by_id[account_id])
+            item["account_settings"] = saved_by_id[account_id]
+            items.append(item)
+        return {
+            "items": items,
+            "saved_count": len(items),
+            "common_capabilities": detected["common_capabilities"],
+            "gates": self._gates(),
+        }
 
     def _ensure_pool_item(self, material_id: str) -> Dict[str, Any]:
         try:
@@ -2481,6 +2749,17 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             and path == "/api/admin/tt-posts/account-settings/creator-info"
         ):
             return service.creator_info(self._body())
+        if (
+            self.command == "POST"
+            and path
+            == "/api/admin/tt-posts/account-settings/batch/creator-info"
+        ):
+            return service.account_settings_batch_creator_info(self._body())
+        if (
+            self.command == "POST"
+            and path == "/api/admin/tt-posts/account-settings/batch"
+        ):
+            return service.account_settings_batch_save(self._body())
         if (
             self.command == "POST"
             and path == "/api/admin/tt-posts/account-settings"

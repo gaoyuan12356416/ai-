@@ -129,6 +129,25 @@
     .panel-head h2 { margin: 0; font-size: 18px; }
     .panel-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
     .search-row { display: flex; gap: 9px; margin-top: 15px; }
+    .batch-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+      padding: 11px;
+      border: 1px solid #cbdaf7;
+      border-radius: 12px;
+      background: #f3f7ff;
+    }
+    .batch-actions, .batch-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .batch-toolbar .button { min-height: 34px; padding: 0 11px; font-size: 12px; }
+    .batch-status strong { color: #285ed8; font-size: 12px; white-space: nowrap; }
     input[type="search"], select {
       min-height: 42px;
       width: 100%;
@@ -169,6 +188,21 @@
       border-color: #5d84eb;
       background: #f4f7ff;
       box-shadow: 0 0 0 3px rgba(47, 102, 255, .08);
+    }
+    .account-row.batch {
+      grid-template-columns: 22px 42px minmax(0, 1fr) auto;
+      user-select: none;
+    }
+    .account-row.batch.selected {
+      border-color: #5d84eb;
+      background: #f4f7ff;
+      box-shadow: 0 0 0 3px rgba(47, 102, 255, .08);
+    }
+    .batch-selector {
+      width: 17px;
+      height: 17px;
+      margin: 0;
+      accent-color: var(--blue);
     }
     .account-row:disabled { opacity: .55; cursor: not-allowed; }
     .avatar {
@@ -346,6 +380,9 @@
       .setting-grid, .check-grid, .disclosure-options { grid-template-columns: 1fr; }
       .form-footer { align-items: stretch; flex-direction: column; }
       .form-footer .button { width: 100%; }
+      .search-row, .batch-toolbar { align-items: stretch; flex-direction: column; }
+      .batch-actions, .batch-status { width: 100%; }
+      .batch-status .button { flex: 1; }
     }
   </style>
 </head>
@@ -398,7 +435,20 @@
               <p>这里只展示快照表中当前有效且允许发布的个号，不读取或展示凭据。</p>
               <div class="search-row">
                 <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称、用户名或账号 ID" />
+                <button id="batchModeToggle" class="button" type="button">批量设置</button>
                 <button id="refreshAccounts" class="button" type="button">刷新账号</button>
+              </div>
+              <div id="batchToolbar" class="batch-toolbar hidden">
+                <div class="batch-actions">
+                  <button id="selectAllVisible" class="button" type="button">全选当前结果</button>
+                  <button id="selectPendingAccounts" class="button" type="button">选择全部待配置</button>
+                  <button id="clearBatchSelection" class="button" type="button">清空</button>
+                  <button id="exitBatchMode" class="button" type="button">退出批量</button>
+                </div>
+                <div class="batch-status">
+                  <strong id="batchSelectionCount">已选 0 个</strong>
+                  <button id="inspectBatchSelection" class="button primary" type="button" disabled>检测并设置</button>
+                </div>
               </div>
             </div>
             <div id="accountList" class="account-list"></div>
@@ -406,7 +456,7 @@
 
           <div class="panel">
             <div id="editorEmpty" class="editor-empty">
-              <div>请从左侧选择一个 TikTok 个号。<br />系统会实时读取该账号当前允许的隐私和互动能力。</div>
+              <div id="editorEmptyText">请从左侧选择一个 TikTok 个号。<br />系统会实时读取该账号当前允许的隐私和互动能力。</div>
             </div>
 
             <form id="settingsForm" class="editor hidden">
@@ -500,11 +550,16 @@
   <script>
     (() => {
       const API_BASE = "/api/admin/tt-posts/account-settings";
+      const MAX_BATCH_ACCOUNTS = 50;
       const state = {
         auth: null,
         accounts: [],
+        mode: "single",
         selectedAccountId: "",
+        selectedAccountIds: new Set(),
         creatorInfo: null,
+        batchCreatorItems: [],
+        batchSelectionSignature: "",
         busy: false,
         toastTimer: null,
       };
@@ -535,6 +590,22 @@
       };
       const accountEligible = item => boolValue(item && item.publish_eligible) === true;
       const selectedAccount = () => state.accounts.find(item => accountId(item) === state.selectedAccountId) || null;
+      const filteredAccounts = () => {
+        const keyword = byId("accountSearch").value.trim().toLowerCase();
+        return state.accounts.filter(item => {
+          if (!keyword) return true;
+          return [
+            accountId(item),
+            accountName(item),
+            item.external_account_id,
+            item.main_account_id,
+          ].some(value => String(value || "").toLowerCase().includes(keyword));
+        });
+      };
+      const batchAccountIds = () => state.accounts
+        .map(accountId)
+        .filter(id => state.selectedAccountIds.has(id));
+      const currentBatchSignature = () => batchAccountIds().join(",");
 
       async function api(path, options = {}) {
         const request = Object.assign({
@@ -583,19 +654,71 @@
         return badge;
       }
 
+      function updateBatchToolbar() {
+        const batch = state.mode === "batch";
+        byId("batchToolbar").classList.toggle("hidden", !batch);
+        byId("batchModeToggle").classList.toggle("hidden", batch);
+        const count = batchAccountIds().length;
+        setText(byId("batchSelectionCount"), `已选 ${count} 个`);
+        byId("inspectBatchSelection").disabled = state.busy || count === 0;
+        [
+          "selectAllVisible",
+          "selectPendingAccounts",
+          "clearBatchSelection",
+          "exitBatchMode",
+        ].forEach(id => { byId(id).disabled = state.busy; });
+      }
+
+      function setEditorEmptyText() {
+        if (state.mode === "batch") {
+          const count = batchAccountIds().length;
+          setText(
+            byId("editorEmptyText"),
+            count
+              ? `已选择 ${count} 个账号，请点击“检测并设置”读取共同能力。`
+              : "请从左侧勾选要统一设置的 TikTok 个号。"
+          );
+          return;
+        }
+        setText(
+          byId("editorEmptyText"),
+          "请从左侧选择一个 TikTok 个号。系统会实时读取该账号当前允许的隐私和互动能力。"
+        );
+      }
+
+      function invalidateBatchDetection() {
+        state.creatorInfo = null;
+        state.batchCreatorItems = [];
+        state.batchSelectionSignature = "";
+        hide(byId("settingsForm"));
+        show(byId("editorEmpty"));
+        resetCreatorInfo("请选择账号后重新检测共同能力。");
+        setEditorEmptyText();
+        updateBatchToolbar();
+      }
+
+      function setBatchSelection(ids) {
+        const allowed = new Set(
+          state.accounts.filter(accountEligible).map(accountId)
+        );
+        const requested = Array.from(ids || [])
+          .map(cleanId)
+          .filter(id => allowed.has(id));
+        state.selectedAccountIds = new Set(
+          requested.slice(0, MAX_BATCH_ACCOUNTS)
+        );
+        if (requested.length > MAX_BATCH_ACCOUNTS) {
+          showToast(`单次最多选择 ${MAX_BATCH_ACCOUNTS} 个账号。`, true);
+        }
+        invalidateBatchDetection();
+        renderAccounts();
+      }
+
       function renderAccounts() {
         const list = byId("accountList");
         list.replaceChildren();
         const keyword = byId("accountSearch").value.trim().toLowerCase();
-        const items = state.accounts.filter(item => {
-          if (!keyword) return true;
-          return [
-            accountId(item),
-            accountName(item),
-            item.external_account_id,
-            item.main_account_id,
-          ].some(value => String(value || "").toLowerCase().includes(keyword));
-        });
+        const items = filteredAccounts();
         if (!items.length) {
           const empty = document.createElement("div");
           empty.className = "empty";
@@ -605,11 +728,27 @@
         }
         items.forEach(item => {
           const id = accountId(item);
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = `account-row${id === state.selectedAccountId ? " active" : ""}`;
-          row.dataset.accountId = id;
-          row.disabled = !accountEligible(item);
+          const batch = state.mode === "batch";
+          const row = document.createElement(batch ? "label" : "button");
+          if (!batch) {
+            row.type = "button";
+            row.dataset.accountId = id;
+            row.disabled = !accountEligible(item);
+          }
+          row.className = batch
+            ? `account-row batch${state.selectedAccountIds.has(id) ? " selected" : ""}`
+            : `account-row${id === state.selectedAccountId ? " active" : ""}`;
+
+          if (batch) {
+            const selector = document.createElement("input");
+            selector.type = "checkbox";
+            selector.className = "batch-selector";
+            selector.dataset.batchAccountId = id;
+            selector.checked = state.selectedAccountIds.has(id);
+            selector.disabled = state.busy || !accountEligible(item);
+            selector.setAttribute("aria-label", `选择 ${accountName(item)}`);
+            row.appendChild(selector);
+          }
 
           const avatar = document.createElement("span");
           avatar.className = "avatar";
@@ -626,6 +765,7 @@
           row.append(avatar, copy, statusBadge(item));
           list.appendChild(row);
         });
+        updateBatchToolbar();
       }
 
       function setInteraction(name, disabled, checked) {
@@ -644,9 +784,20 @@
 
       function resetCreatorInfo(message = "等待 TikTok 实时检测。") {
         state.creatorInfo = null;
-        setText(byId("creatorAvatar"), "TT");
-        setText(byId("creatorName"), "正在确认账号…");
+        setText(byId("creatorAvatar"), state.mode === "batch" ? "多" : "TT");
+        setText(
+          byId("creatorName"),
+          state.mode === "batch" ? "等待批量检测…" : "正在确认账号…"
+        );
         setText(byId("creatorMeta"), message);
+        setText(
+          byId("refreshCreator"),
+          state.mode === "batch" ? "重新检测选中账号" : "重新检测"
+        );
+        setText(
+          byId("saveSettings"),
+          state.mode === "batch" ? "批量保存" : "保存个号设置"
+        );
         const privacy = byId("privacyLevel");
         privacy.replaceChildren();
         const option = document.createElement("option");
@@ -677,9 +828,10 @@
       }
 
       function renderSavedValues(info) {
-        const item = selectedAccount();
+        const batch = state.mode === "batch";
+        const item = batch ? null : selectedAccount();
         const saved = accountSettings(item);
-        const configured = boolValue(saved.configured) === true;
+        const configured = !batch && boolValue(saved.configured) === true;
         const options = Array.isArray(info.privacy_level_options)
           ? info.privacy_level_options.filter(value => typeof value === "string" && value)
           : [];
@@ -732,7 +884,9 @@
         applyCommercialVisibility();
         setText(
           byId("versionText"),
-          configured
+          batch
+            ? `将同时校验 ${batchAccountIds().length} 个账号的当前版本`
+            : configured
             ? `版本 ${Number(saved.version || 1)} · ${saved.updated_at || "已保存"}`
             : "尚未保存"
         );
@@ -749,6 +903,35 @@
           `${username ? `@${username}` : "用户名未返回"}${maximum > 0 ? ` · 最长视频 ${maximum} 秒` : ""}`
         );
         renderSavedValues(info);
+        updateValidation();
+      }
+
+      function renderBatchCreatorInfo(result) {
+        const items = Array.isArray(result && result.items)
+          ? result.items
+          : [];
+        const common = result && result.common_capabilities &&
+          typeof result.common_capabilities === "object"
+          ? result.common_capabilities
+          : null;
+        if (!common || items.length !== batchAccountIds().length) {
+          throw new Error("服务端未返回完整的批量账号能力");
+        }
+        state.creatorInfo = common;
+        state.batchCreatorItems = items;
+        state.batchSelectionSignature = currentBatchSignature();
+        const configured = items.filter(
+          item => boolValue(accountSettings(item).configured) === true
+        ).length;
+        const maximum = Number(common.max_video_post_duration_sec || 0);
+        setText(byId("creatorAvatar"), String(items.length));
+        setText(byId("creatorName"), `已检测 ${items.length} 个 TikTok 个号`);
+        setText(
+          byId("creatorMeta"),
+          `已配置 ${configured} · 待配置 ${items.length - configured}` +
+          `${maximum > 0 ? ` · 共同最长视频 ${maximum} 秒` : ""}`
+        );
+        renderSavedValues(common);
         updateValidation();
       }
 
@@ -783,7 +966,40 @@
         }
       }
 
+      async function loadBatchCreatorInfo() {
+        const ids = batchAccountIds();
+        if (!ids.length) {
+          showToast("请至少选择一个 TikTok 个号。", true);
+          return;
+        }
+        const requestedSignature = currentBatchSignature();
+        resetCreatorInfo(`正在检测 ${ids.length} 个账号的共同能力…`);
+        hide(byId("editorEmpty"));
+        show(byId("settingsForm"));
+        state.busy = true;
+        renderAccounts();
+        updateValidation();
+        try {
+          const result = await api(`${API_BASE}/batch/creator-info`, {
+            method: "POST",
+            body: JSON.stringify({ source_account_ids: ids }),
+          });
+          if (requestedSignature !== currentBatchSignature()) {
+            throw new Error("账号选择已变化，请重新检测。");
+          }
+          renderBatchCreatorInfo(result);
+        } catch (error) {
+          invalidateBatchDetection();
+          showToast(error.message, true);
+        } finally {
+          state.busy = false;
+          renderAccounts();
+          updateValidation();
+        }
+      }
+
       function selectAccount(id) {
+        if (state.mode !== "single") return;
         state.selectedAccountId = cleanId(id);
         state.creatorInfo = null;
         renderAccounts();
@@ -793,10 +1009,47 @@
         loadCreatorInfo();
       }
 
+      function enterBatchMode() {
+        if (state.busy) return;
+        state.mode = "batch";
+        state.selectedAccountId = "";
+        state.selectedAccountIds = new Set();
+        invalidateBatchDetection();
+        renderAccounts();
+      }
+
+      function exitBatchMode() {
+        if (state.busy) return;
+        state.mode = "single";
+        state.selectedAccountIds = new Set();
+        state.batchCreatorItems = [];
+        state.batchSelectionSignature = "";
+        state.creatorInfo = null;
+        hide(byId("settingsForm"));
+        show(byId("editorEmpty"));
+        resetCreatorInfo();
+        setEditorEmptyText();
+        renderAccounts();
+      }
+
       function validationError() {
-        const item = selectedAccount();
-        if (!item) return "请选择一个 TikTok 个号。";
-        if (!accountEligible(item)) return "该账号当前不可用于发布。";
+        if (state.mode === "batch") {
+          if (!batchAccountIds().length) return "请至少选择一个 TikTok 个号。";
+          if (batchAccountIds().length > MAX_BATCH_ACCOUNTS) {
+            return `单次最多设置 ${MAX_BATCH_ACCOUNTS} 个 TikTok 个号。`;
+          }
+          if (
+            !state.batchSelectionSignature ||
+            state.batchSelectionSignature !== currentBatchSignature()
+          ) return "请先检测所有选中账号的共同能力。";
+          if (
+            state.batchCreatorItems.length !== batchAccountIds().length
+          ) return "批量账号能力结果不完整，请重新检测。";
+        } else {
+          const item = selectedAccount();
+          if (!item) return "请选择一个 TikTok 个号。";
+          if (!accountEligible(item)) return "该账号当前不可用于发布。";
+        }
         if (!state.creatorInfo) return "请等待 TikTok 实时检测完成。";
         if (!byId("privacyLevel").value) return "请手动选择谁可以观看。";
         if (
@@ -825,9 +1078,14 @@
         output.className = `form-state${error ? " error" : " success"}`;
         setText(
           output,
-          error || "设置完整；保存时服务端会再次核对 TikTok 实时能力。"
+          error || (
+            state.mode === "batch"
+              ? "批量设置完整；服务端会再次逐个检测并原子保存。"
+              : "设置完整；保存时服务端会再次核对 TikTok 实时能力。"
+          )
         );
         byId("saveSettings").disabled = !!error || state.busy;
+        updateBatchToolbar();
       }
 
       function settingsPayload() {
@@ -850,6 +1108,35 @@
         };
       }
 
+      function batchSettingsPayload() {
+        const ids = batchAccountIds();
+        const detectedById = new Map(
+          state.batchCreatorItems.map(item => [accountId(item), item])
+        );
+        const commercial = byId("commercialDisclosure").checked;
+        return {
+          targets: ids.map(id => {
+            const item = detectedById.get(id);
+            if (!item) throw new Error(`账号 ${id} 的检测结果已失效`);
+            const saved = accountSettings(item);
+            return {
+              source_account_id: id,
+              expected_version: boolValue(saved.configured) === true
+                ? Number(saved.version || 0)
+                : 0,
+            };
+          }),
+          privacy_level: byId("privacyLevel").value,
+          allow_comment: byId("allowComment").checked,
+          allow_duet: byId("allowDuet").checked,
+          allow_stitch: byId("allowStitch").checked,
+          commercial_disclosure: commercial,
+          brand_organic_toggle: commercial && byId("ownBrand").checked,
+          brand_content_toggle: commercial && byId("brandedContent").checked,
+          is_aigc: byId("isAigc").checked,
+        };
+      }
+
       async function saveSettings(event) {
         event.preventDefault();
         const error = validationError();
@@ -860,10 +1147,44 @@
         state.busy = true;
         updateValidation();
         try {
-          const result = await api(API_BASE, {
+          const batch = state.mode === "batch";
+          const result = await api(batch ? `${API_BASE}/batch` : API_BASE, {
             method: "POST",
-            body: JSON.stringify(settingsPayload()),
+            body: JSON.stringify(
+              batch ? batchSettingsPayload() : settingsPayload()
+            ),
           });
+          if (batch) {
+            const items = Array.isArray(result && result.items)
+              ? result.items
+              : [];
+            if (
+              items.length !== batchAccountIds().length ||
+              Number(result.saved_count || 0) !== items.length
+            ) {
+              throw new Error("服务端未返回完整的批量保存结果");
+            }
+            items.forEach(item => {
+              const id = accountId(item);
+              const index = state.accounts.findIndex(
+                account => accountId(account) === id
+              );
+              if (index < 0 || !item.account_settings) {
+                throw new Error(`账号 ${id || "未知"} 的保存结果不完整`);
+              }
+              state.accounts[index] = Object.assign(
+                {},
+                state.accounts[index],
+                item
+              );
+            });
+            const savedCount = items.length;
+            state.busy = false;
+            exitBatchMode();
+            updateStats();
+            showToast(`已批量保存 ${savedCount} 个账号的发布设置。`);
+            return;
+          }
           const item = result && result.item && typeof result.item === "object"
             ? result.item
             : {};
@@ -896,7 +1217,13 @@
           const result = await api(API_BASE);
           const items = Array.isArray(result.items) ? result.items : [];
           state.accounts = items.filter(item => accountId(item));
-          if (
+          if (state.mode === "batch") {
+            const available = new Set(state.accounts.map(accountId));
+            state.selectedAccountIds = new Set(
+              batchAccountIds().filter(id => available.has(id))
+            );
+            invalidateBatchDetection();
+          } else if (
             state.selectedAccountId &&
             !state.accounts.some(item => accountId(item) === state.selectedAccountId)
           ) {
@@ -907,7 +1234,7 @@
           }
           renderAccounts();
           updateStats();
-          if (state.selectedAccountId) {
+          if (state.mode === "single" && state.selectedAccountId) {
             await loadCreatorInfo();
           }
         } catch (error) {
@@ -957,12 +1284,44 @@
 
       byId("accountSearch").addEventListener("input", renderAccounts);
       byId("accountList").addEventListener("click", event => {
+        if (state.mode !== "single") return;
         const row = event.target.closest("[data-account-id]");
         if (!row || row.disabled) return;
         selectAccount(row.dataset.accountId);
       });
+      byId("accountList").addEventListener("change", event => {
+        if (state.mode !== "batch") return;
+        const selector = event.target.closest("[data-batch-account-id]");
+        if (!selector || selector.disabled) return;
+        const next = new Set(state.selectedAccountIds);
+        if (selector.checked) next.add(selector.dataset.batchAccountId);
+        else next.delete(selector.dataset.batchAccountId);
+        setBatchSelection(next);
+      });
+      byId("batchModeToggle").addEventListener("click", enterBatchMode);
+      byId("exitBatchMode").addEventListener("click", exitBatchMode);
+      byId("selectAllVisible").addEventListener("click", () => {
+        setBatchSelection(new Set(
+          filteredAccounts().filter(accountEligible).map(accountId)
+        ));
+      });
+      byId("selectPendingAccounts").addEventListener("click", () => {
+        setBatchSelection(new Set(state.accounts.filter(item => (
+          accountEligible(item) &&
+          boolValue(accountSettings(item).configured) !== true
+        )).map(accountId)));
+      });
+      byId("clearBatchSelection").addEventListener("click", () => {
+        setBatchSelection(new Set());
+      });
+      byId("inspectBatchSelection").addEventListener(
+        "click",
+        loadBatchCreatorInfo
+      );
       byId("refreshAccounts").addEventListener("click", loadAccounts);
-      byId("refreshCreator").addEventListener("click", loadCreatorInfo);
+      byId("refreshCreator").addEventListener("click", () => (
+        state.mode === "batch" ? loadBatchCreatorInfo() : loadCreatorInfo()
+      ));
       byId("settingsForm").addEventListener("submit", saveSettings);
       [
         "privacyLevel",

@@ -71,6 +71,8 @@ def _client_namespace():
             "/api/admin/tt-posts/accounts": {"GET"},
             "/api/admin/tt-posts/account-settings": {"GET", "POST"},
             "/api/admin/tt-posts/account-settings/creator-info": {"POST"},
+            "/api/admin/tt-posts/account-settings/batch": {"POST"},
+            "/api/admin/tt-posts/account-settings/batch/creator-info": {"POST"},
             "/api/admin/tt-posts/creator-info": {"POST"},
             "/api/admin/tt-posts/materials/preview": {"POST"},
             "/api/admin/tt-posts/queue": {"GET", "POST"},
@@ -219,15 +221,30 @@ class TTPostsAppContractTest(unittest.TestCase):
             '"/api/admin/tt-posts/account-settings/creator-info"',
             route,
         )
+        self.assertIn(
+            '"/api/admin/tt-posts/account-settings/batch"',
+            route,
+        )
+        self.assertIn(
+            '"/api/admin/tt-posts/account-settings/batch/creator-info"',
+            route,
+        )
         self.assertIn('"/api/admin/tt-posts/materials/preview"', route)
         self.assertIn('"/api/admin/tt-posts/queue"', route)
         self.assertIn("_tt_post_service_request(", route)
         self.assertIn("append_audit_log(", route)
         self.assertIn('"save_tt_post_account_settings"', route)
+        self.assertIn('"batch_save_tt_post_account_settings"', route)
+        self.assertIn(
+            '"batch_check_tt_post_account_settings_creator_info"',
+            route,
+        )
         self.assertIn(
             '"check_tt_post_account_settings_creator_info"',
             route,
         )
+        self.assertIn('"source_account_ids"', route)
+        self.assertIn('"saved_count"', route)
         self.assertIn('"privacy_level"', route)
         self.assertIn('"version"', route)
         self.assertNotIn('"caption_text":', route)

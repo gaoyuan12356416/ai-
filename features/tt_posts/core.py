@@ -34,6 +34,7 @@ UTC = timezone.utc
 BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 MAX_CAPTION_CHARS = 2200
 MAX_EVENT_MESSAGE_CHARS = 500
+MAX_ACCOUNT_SETTINGS_BATCH = 50
 FIXED_CAPTION_TEMPLATE = (
     "Watch the full story in the app 🎬\n\n"
     "Drama ID: {{contect_id}}\n\n"
@@ -1152,14 +1153,70 @@ class TTPostStore:
         *,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
-        normalized_account_id = _account_id(account_id)
-        normalized_settings = (
-            settings
-            if isinstance(settings, TTPostAccountSettings)
-            else TTPostAccountSettings.from_mapping(settings)
-        )
-        if expected_version is not None:
-            if (
+        return self.save_account_settings_batch(
+            [
+                {
+                    "account_id": account_id,
+                    "settings": settings,
+                    "expected_version": expected_version,
+                }
+            ]
+        )[0]
+
+    def save_account_settings_batch(
+        self,
+        updates: Any,
+    ) -> List[Dict[str, Any]]:
+        if (
+            isinstance(updates, (str, bytes, bytearray, Mapping))
+            or not isinstance(updates, Iterable)
+        ):
+            raise TTPostError(
+                "invalid_batch_targets",
+                "批量个号目标必须是列表",
+                400,
+            )
+        raw_updates = list(updates)
+        if (
+            not raw_updates
+            or len(raw_updates) > MAX_ACCOUNT_SETTINGS_BATCH
+        ):
+            raise TTPostError(
+                "invalid_batch_targets",
+                "批量个号数量必须在1到%d之间"
+                % MAX_ACCOUNT_SETTINGS_BATCH,
+                400,
+            )
+
+        normalized_updates = []
+        seen_account_ids = set()
+        for raw_update in raw_updates:
+            if not isinstance(raw_update, Mapping) or set(raw_update) != {
+                "account_id",
+                "settings",
+                "expected_version",
+            }:
+                raise TTPostError(
+                    "invalid_batch_targets",
+                    "批量个号目标字段无效",
+                    400,
+                )
+            normalized_account_id = _account_id(raw_update.get("account_id"))
+            if normalized_account_id in seen_account_ids:
+                raise TTPostError(
+                    "invalid_batch_targets",
+                    "批量个号目标不能重复",
+                    400,
+                )
+            seen_account_ids.add(normalized_account_id)
+            raw_settings = raw_update.get("settings")
+            normalized_settings = (
+                raw_settings
+                if isinstance(raw_settings, TTPostAccountSettings)
+                else TTPostAccountSettings.from_mapping(raw_settings)
+            )
+            expected_version = raw_update.get("expected_version")
+            if expected_version is not None and (
                 isinstance(expected_version, bool)
                 or not isinstance(expected_version, int)
                 or expected_version < 0
@@ -1169,80 +1226,104 @@ class TTPostStore:
                     "个号发布设置版本无效",
                     400,
                 )
+            normalized_updates.append(
+                (
+                    normalized_account_id,
+                    normalized_settings,
+                    expected_version,
+                )
+            )
+
         timestamp = self._now_iso()
         with self._transaction() as conn:
-            current = conn.execute(
-                "SELECT * FROM tt_post_account_setting WHERE account_id=?",
-                (normalized_account_id,),
-            ).fetchone()
-            if current is None:
-                if expected_version not in (None, 0):
-                    raise TTPostError(
-                        "tt_account_settings_version_conflict",
-                        "个号发布设置已被其他操作更新，请刷新后重试",
-                        409,
-                    )
-                version = 1
-                conn.execute(
-                    """
-                    INSERT INTO tt_post_account_setting(
-                        account_id,privacy_level,allow_comment,allow_duet,
-                        allow_stitch,brand_content_toggle,brand_organic_toggle,
-                        is_aigc,version,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        normalized_account_id,
-                        normalized_settings.privacy_level,
-                        int(normalized_settings.allow_comment),
-                        int(normalized_settings.allow_duet),
-                        int(normalized_settings.allow_stitch),
-                        int(normalized_settings.brand_content_toggle),
-                        int(normalized_settings.brand_organic_toggle),
-                        int(normalized_settings.is_aigc),
-                        version,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            else:
-                current_version = int(current["version"])
-                if (
+            current_rows = {}
+            for normalized_account_id, _, expected_version in normalized_updates:
+                current = conn.execute(
+                    "SELECT * FROM tt_post_account_setting WHERE account_id=?",
+                    (normalized_account_id,),
+                ).fetchone()
+                current_rows[normalized_account_id] = current
+                if current is None:
+                    if expected_version not in (None, 0):
+                        raise TTPostError(
+                            "tt_account_settings_version_conflict",
+                            "个号发布设置已被其他操作更新，请刷新后重试",
+                            409,
+                        )
+                elif (
                     expected_version is not None
-                    and expected_version != current_version
+                    and expected_version != int(current["version"])
                 ):
                     raise TTPostError(
                         "tt_account_settings_version_conflict",
                         "个号发布设置已被其他操作更新，请刷新后重试",
                         409,
                     )
-                version = current_version + 1
-                conn.execute(
-                    """
-                    UPDATE tt_post_account_setting
-                    SET privacy_level=?,allow_comment=?,allow_duet=?,
-                        allow_stitch=?,brand_content_toggle=?,
-                        brand_organic_toggle=?,is_aigc=?,version=?,updated_at=?
-                    WHERE account_id=?
-                    """,
-                    (
-                        normalized_settings.privacy_level,
-                        int(normalized_settings.allow_comment),
-                        int(normalized_settings.allow_duet),
-                        int(normalized_settings.allow_stitch),
-                        int(normalized_settings.brand_content_toggle),
-                        int(normalized_settings.brand_organic_toggle),
-                        int(normalized_settings.is_aigc),
-                        version,
-                        timestamp,
-                        normalized_account_id,
-                    ),
-                )
-            row = conn.execute(
-                "SELECT * FROM tt_post_account_setting WHERE account_id=?",
-                (normalized_account_id,),
-            ).fetchone()
-        return _public_account_settings(row)
+
+            for normalized_account_id, normalized_settings, _ in normalized_updates:
+                current = current_rows[normalized_account_id]
+                if current is None:
+                    conn.execute(
+                        """
+                        INSERT INTO tt_post_account_setting(
+                            account_id,privacy_level,allow_comment,allow_duet,
+                            allow_stitch,brand_content_toggle,
+                            brand_organic_toggle,is_aigc,version,
+                            created_at,updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            normalized_account_id,
+                            normalized_settings.privacy_level,
+                            int(normalized_settings.allow_comment),
+                            int(normalized_settings.allow_duet),
+                            int(normalized_settings.allow_stitch),
+                            int(normalized_settings.brand_content_toggle),
+                            int(normalized_settings.brand_organic_toggle),
+                            int(normalized_settings.is_aigc),
+                            1,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE tt_post_account_setting
+                        SET privacy_level=?,allow_comment=?,allow_duet=?,
+                            allow_stitch=?,brand_content_toggle=?,
+                            brand_organic_toggle=?,is_aigc=?,version=?,
+                            updated_at=?
+                        WHERE account_id=?
+                        """,
+                        (
+                            normalized_settings.privacy_level,
+                            int(normalized_settings.allow_comment),
+                            int(normalized_settings.allow_duet),
+                            int(normalized_settings.allow_stitch),
+                            int(normalized_settings.brand_content_toggle),
+                            int(normalized_settings.brand_organic_toggle),
+                            int(normalized_settings.is_aigc),
+                            int(current["version"]) + 1,
+                            timestamp,
+                            normalized_account_id,
+                        ),
+                    )
+
+            rows = []
+            for normalized_account_id, _, _ in normalized_updates:
+                row = conn.execute(
+                    "SELECT * FROM tt_post_account_setting WHERE account_id=?",
+                    (normalized_account_id,),
+                ).fetchone()
+                if row is None:
+                    raise TTPostError(
+                        "tt_account_settings_write_failed",
+                        "批量个号发布设置保存失败",
+                        500,
+                    )
+                rows.append(_public_account_settings(row))
+        return rows
 
     def add_material(
         self,
