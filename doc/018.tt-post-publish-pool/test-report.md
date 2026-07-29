@@ -10,7 +10,7 @@
 
 Python 编译检查与 Git diff check 均通过。当前结果证明代码层面的核心状态机、CPU/GPU 协议、Runner 调度、页面契约和既有功能回归符合预期。
 
-生产关闭态验收同时通过：真实 GPU NVENC 成片、COS 上传与公开访问、GPU 出口账号预检、AI 后台登录态页面均已验证。TikTok Direct Post 三重门禁全程关闭，未创建真实 Post。
+生产关闭态验收同时通过：真实 GPU NVENC 成片、COS 上传与公开访问、GPU 出口账号预检、AI 后台登录态页面均已验证。CPU 当前运行提交为 `2fd07d3e1a6a7ef13982263cbf44297ef4a94156`；TikTok Direct Post 三重门禁全程关闭，发布池任务总数保持为 0，未初始化、未创建、未发布真实 Post。
 
 ## 测试范围
 
@@ -67,6 +67,16 @@ Python 编译检查与 Git diff check 均通过。当前结果证明代码层面
 - 即使保留正确 Drama ID，只要修改其他文案，服务端即返回 `tt_caption_fixed_template_mismatch`，且不会开始 GPU 制作。
 - Core 冻结层再次要求唯一固定模板，数据库只保存固定模板及其真实 ID 渲染结果。
 - 历史自定义描述任务不会被改写；原始请求按同一幂等键重放时直接返回既有冻结任务，不触发 GPU 再制作。
+- 线上登录态浏览器使用素材 `5824343` 验证 `readonly=true`，真实
+  `content_id=Y9v1yQcFqM`，页面逐字显示：
+
+```text
+Watch the full story in the app 🎬
+
+Drama ID: Y9v1yQcFqM
+
+Visit my profile → Open the link → Search the Drama ID → Watch now.
+```
 
 ### 回归验证
 
@@ -93,9 +103,11 @@ Python 编译检查与 Git diff check 均通过。当前结果证明代码层面
 
 ## 生产关闭态验收
 
-- 运行提交：`18148b2`
-- CPU release：`/opt/tt-post/releases/18148b2`
+- CPU 运行提交：`2fd07d3e1a6a7ef13982263cbf44297ef4a94156`
+- CPU release：`/opt/tt-post/releases/2fd07d3`
 - GPU release：`/opt/tt-post-gpu/releases/18148b2`
+- CPU 更新前备份：`/root/tt-post-backups/20260729T170730+0800-18148b2-fixed-caption`
+- 已部署静态页 SHA-256：`7f298293d6a4202687d3db7809cb3aadca6fa59651d3731f6bbb9984de3ce7e2`
 - CPU sidecar、每分钟 Runner timer、GPU sidecar 和 18830 反向隧道均为 active；SQLite `PRAGMA integrity_check=ok`。
 - 只读快照返回 23 个候选账号；账号 `700` 从 GPU 实时确认：
   - `@dramawave998`
@@ -111,7 +123,8 @@ Python 编译检查与 Git diff check 均通过。当前结果证明代码层面
   - 动态 Drama ID、教程标记和 0.9 秒 phone-match 过渡已抽帧检查
 - COS `HEAD` 返回 200，`x-cos-meta-sha256` 与成片一致；`Range: bytes=0-1023` 返回 206、无重定向。
 - GPU manifest `direct_post_eligible=false`、敏感标记数 0、publish ledger 文件数 0、残留 job 目录数 0。
-- 公网页面 `/tt-post-pool.html` 返回 200 且 no-store；登录态浏览器显示 23 个账号，账号 700 和素材 5824343 的最终成片/描述预览正确，队列仍为 0。
+- 公网页面 `/tt-post-pool.html` 返回 200 且 no-store；登录态浏览器使用账号 `700` / `@dramawave998` 和素材 `5824343` 验证，页面解析出真实 `content_id=Y9v1yQcFqM`，描述框 `readonly=true` 且内容与固定模板逐字一致。
+- 发布池任务总数仍为 0；三项 Direct Post 门禁保持关闭，验收过程未执行 TikTok 发布初始化、未创建远端 Post、未发布帖子。
 - 既有 X sidecar、两个 X timer 和 GPU X 修复服务在部署后保持 active。
 
 ## 发布建议

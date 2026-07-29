@@ -85,8 +85,8 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 2. GPU `/health`、CPU 内部健康和反向隧道均通过。
 3. SQLite `PRAGMA integrity_check=ok`。
 4. 公网 `/tt-post-pool.html` 为 200，登录后账号数与只读快照一致。
-5. 创建测试队列，GPU 完成成片且文件位于 `/data`。
-6. 到期任务被 `blocked_compliance`，TikTok init 调用计数为 0。
+5. 通过素材预览触发 GPU 成片并确认文件位于 `/data`，不创建测试队列。
+6. 确认三项门禁与品牌媒体门禁均为关闭态，TikTok init 调用计数为 0。
 7. 搜索日志、SQLite、manifest，确认无 Token。
 8. X 发布池页面、timer和最近任务保持正常。
 
@@ -107,12 +107,25 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 ## 2026-07-29 部署记录
 
 - GitHub 分支：`codex/tiktok-post-pool-20260729`
-- 运行提交：`18148b2`
-- CPU：`/opt/tt-post/releases/18148b2`
-- GPU：`/opt/tt-post-gpu/releases/18148b2`
-- CPU 部署前备份：`/root/tt-post-backups/20260729T082210Z-cec5dab`
+- CPU 当前运行提交：`2fd07d3e1a6a7ef13982263cbf44297ef4a94156`
+- CPU 当前 release：`/opt/tt-post/releases/2fd07d3`
+- GPU 当前 release：`/opt/tt-post-gpu/releases/18148b2`
+- 本次 CPU 更新前备份：`/root/tt-post-backups/20260729T170730+0800-18148b2-fixed-caption`
 - 页面：`https://ai.yingliangads.com/tt-post-pool.html`
+- 已部署静态页 SHA-256：`7f298293d6a4202687d3db7809cb3aadca6fa59651d3731f6bbb9984de3ce7e2`
+- 部署版本全回归：`212/212` 通过
 - Direct Post 三重 gate：全部为 `0`
-- 真实 TikTok Post：0
+- 线上登录态浏览器验收：
+  - 账号：`700` / `@dramawave998`
+  - 素材：`5824343`
+  - 真实 `content_id`：`Y9v1yQcFqM`
+  - 描述框：`readonly=true`
+  - 页面显示的描述与固定模板逐字一致，仅 Drama ID 使用真实 `content_id`
+  - 发布池任务总数：`0`
+- TikTok 发布初始化：`0`
+- 真实 TikTok Post：`0`
 - 实际 GPU/COS 成片：
   `https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/tt-post-prepared/56/568fde32b0bde91935a12af7bf732ffe537be99cc0e5fea94a1a2091d72ed492.mp4`
+
+本次更新只替换 CPU release 和后台静态页；GPU 继续运行
+`/opt/tt-post-gpu/releases/18148b2`。三项 Direct Post 门禁未开启，浏览器验收未创建任务、未调用 TikTok 发布初始化接口，也未发布帖子。

@@ -4,7 +4,10 @@
 
 当前实现未发现阻断合入的 P0 问题。TT Post 发布池的 CPU/GPU 边界、Token 传递、幂等与未知结果保护、定时 Runner 调度顺序以及 Direct Post 关闭态均已按设计落地，并通过自动化测试与生产关闭态验收。
 
-运行代码已以提交 `18148b2` 部署到 CPU/GPU 不可变 release。真实 GPU NVENC、COS 上传、账号 `creator_info` 与浏览器页面已经验证；TikTok Direct Post 始终保持关闭，未创建真实帖子。
+CPU 当前以提交 `2fd07d3e1a6a7ef13982263cbf44297ef4a94156`
+运行于 `/opt/tt-post/releases/2fd07d3`；GPU 保持
+`/opt/tt-post-gpu/releases/18148b2`。真实 GPU NVENC、COS 上传、账号
+`creator_info` 与浏览器页面已经验证；TikTok Direct Post 三项门禁始终关闭，发布池任务总数为 0，未调用 TikTok 发布初始化、未创建或发布真实帖子。
 
 ## 评审范围
 
