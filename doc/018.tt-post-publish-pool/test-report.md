@@ -2,22 +2,23 @@
 
 ## 测试结论
 
-本地自动化测试共执行 212 项，212 项全部通过：
+最终整合版本自动化测试共执行 275 项，275 项全部通过：
 
-- TT Post 新功能：112/112
-- X 发布池回归：72/72
+- TT Post：154/154
+- X 发布池回归：93/93
 - 素材状态回归：28/28
 
-Python 编译检查与 Git diff check 均通过。当前结果证明代码层面的核心状态机、CPU/GPU 协议、Runner 调度、页面契约和既有功能回归符合预期。
+Python 编译检查与 Git diff check 均通过。当前结果证明批量素材、可编辑描述模板、账号设置只读消费、核心状态机、CPU/GPU 协议、Runner 调度、页面契约和既有功能回归符合预期。
 
-生产关闭态验收同时通过：真实 GPU NVENC 成片、COS 上传与公开访问、GPU 出口账号预检、AI 后台登录态页面均已验证。CPU 当前运行提交为 `2fd07d3e1a6a7ef13982263cbf44297ef4a94156`；TikTok Direct Post 三重门禁全程关闭，发布池任务总数保持为 0，未初始化、未创建、未发布真实 Post。
+生产关闭态验收同时通过。CPU 于 2026-07-29 18:48:36 CST 切换至 `/opt/tt-post/releases/5cfc657`；GPU 保持 `/opt/tt-post-gpu/releases/18148b2` 未改。公网页面返回 200 且 `Cache-Control: no-store`；TikTok Direct Post 三重门禁全程为 0，数据库队列保持为 0，验收未创建任务、未初始化或发布真实 Post。
 
 ## 测试范围
 
 - TT Core：任务状态、参数冻结、幂等、时间转换、发布门禁和未知结果保护
 - TT Service：账号与素材读取、预检、入队、取消、调和、GPU 协议和 Runner 行为
 - GPU Worker：媒体准备、manifest、凭据封装、Direct Post 门禁、发布与调和协议
-- TT UI：页面字段、账号选择、素材预览、发布时间、披露项、同意确认和状态展示
+- TT 发布池 UI：批量素材、账号选择、素材预览、发布时间间隔、可编辑描述模板、同意确认和逐项状态展示
+- TT 个号设置 UI：只读消费已保存设置、未配置禁用及原子批量设置能力回归
 - App contract：路由、权限、内部服务调用和前端静态资源契约
 - X 发布池回归：既有发布逻辑、存储层和 UI
 - 素材状态回归：webhook 与广播逻辑
@@ -26,18 +27,23 @@ Python 编译检查与 Git diff check 均通过。当前结果证明代码层面
 
 | 测试集 | 通过 | 失败 | 阻塞 |
 | --- | ---: | ---: | ---: |
-| TT Core | 33 | 0 | 0 |
-| TT Service | 33 | 0 | 0 |
+| TT Core | 38 | 0 | 0 |
+| TT Service | 52 | 0 | 0 |
 | TT GPU | 25 | 0 | 0 |
-| TT UI | 11 | 0 | 0 |
+| TT 发布池 UI | 18 | 0 | 0 |
+| TT 个号设置 UI | 11 | 0 | 0 |
 | TT App contract | 10 | 0 | 0 |
-| **TT 小计** | **112** | **0** | **0** |
+| **TT 小计** | **154** | **0** | **0** |
 | X posts 回归 | 29 | 0 | 0 |
 | X store 回归 | 34 | 0 | 0 |
-| X UI 回归 | 9 | 0 | 0 |
-| **X 小计** | **72** | **0** | **0** |
-| 素材状态回归 | 28 | 0 | 0 |
-| **总计** | **212** | **0** | **0** |
+| X 多排期 UI 回归 | 9 | 0 | 0 |
+| X 素材池 UI 回归 | 10 | 0 | 0 |
+| X 账号选择器回归 | 11 | 0 | 0 |
+| **X 小计** | **93** | **0** | **0** |
+| 素材状态广播回归 | 13 | 0 | 0 |
+| 素材状态 Webhook/App 回归 | 15 | 0 | 0 |
+| **素材状态小计** | **28** | **0** | **0** |
+| **总计** | **275** | **0** | **0** |
 
 ## 重点验证结果
 
@@ -60,27 +66,29 @@ Python 编译检查与 Git diff check 均通过。当前结果证明代码层面
 - 自动化测试确认关闭门禁或媒体不合规时均会在 TikTok 发布初始化前 fail-close。
 - 带查询签名或 fragment 的 TikTok 头像 URL 不会从 GPU/CPU DTO 透传到浏览器。
 
-### 固定发布描述
+### 批量素材与可编辑发布描述
 
-- 页面描述框为只读，固定展示产品模板，仅 Drama ID 按当前素材动态替换。
-- 客户端省略 `caption_text` 时，服务端仍会根据真实 `content_id` 生成完整描述。
-- 即使保留正确 Drama ID，只要修改其他文案，服务端即返回 `tt_caption_fixed_template_mismatch`，且不会开始 GPU 制作。
-- Core 冻结层再次要求唯一固定模板，数据库只保存固定模板及其真实 ID 渲染结果。
-- 历史自定义描述任务不会被改写；原始请求按同一幂等键重放时直接返回既有冻结任务，不触发 GPU 再制作。
-- 线上登录态浏览器使用素材 `5824343` 验证 `readonly=true`，真实
-  `content_id=Y9v1yQcFqM`，页面逐字显示：
+- 素材框支持空白、换行、中英文逗号及分号分隔，规范化后按首次出现顺序去重，并限制为 1–100 个唯一素材 ID。
+- 前端在请求前拒绝规范化后超过 19 位的 ID；Chrome 验收已确认 20 位 ID 不发起读取请求。
+- preview 和 queue 均逐项执行；单项失败不会中断后续项，结果区展示每个素材的成功或失败状态。
+- 首条时间按 Asia/Shanghai 保存，间隔为 1–1440 分钟整数，默认 10 分钟；预览失败不占时间槽，建队失败后续项不前移。
+- 页面描述框可编辑，首屏展示当前默认模板；支持 `{{contect_id}}` 与 `{{content_id}}`，服务端按每个素材真实 `content_id` 渲染并冻结最终描述。
+- 缺失、未知、畸形或未闭合占位符均被拒绝；最终文案按 UTF-16 单位执行 2200 上限校验。
+- 精确幂等重放在 creator info 和 GPU 之前返回；同键修改模板产生冲突，旧 `caption_text` 和历史任务精确重放继续兼容。
+- preview 与 queue 使用确定性的 prepare 身份，源素材或媒体 profile 改变时身份才变化。
+- Chrome 验收确认页面默认显示并允许编辑下列模板：
 
 ```text
 Watch the full story in the app 🎬
 
-Drama ID: Y9v1yQcFqM
+Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.
 ```
 
 ### 回归验证
 
-- X 发布池 72 项既有测试全部通过，未发现 TT 新功能对 X 路由、存储或页面造成回归。
+- X 发布池 93 项既有测试全部通过，未发现 TT 新功能对 X 路由、存储或页面造成回归。
 - 素材状态 webhook 与广播共 28 项测试全部通过。
 - Python 编译检查通过。
 - Git diff whitespace/check 通过。
@@ -97,35 +105,24 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.
 ## 遗留风险
 
 - P1：GPU Worker 目前仍以 root 运行，且 `PrivateDevices=false`。当前通过 `ProtectHome`、只读目录和 `InaccessiblePaths` 阻断已知秘密路径；后续应迁移至专用服务用户和独立运行环境。
-- P2：预览和正式入队可能重复转码，后续应增加预览产物复用机制。
 - P2：SQLite 尚缺少显式 schema version 与迁移框架，后续升级前需补齐。
 - Direct Post 平台审核、URL Property 验证以及品牌片尾的合规路径均未完成，因此不得开启真实发布。
 
 ## 生产关闭态验收
 
-- CPU 运行提交：`2fd07d3e1a6a7ef13982263cbf44297ef4a94156`
-- CPU release：`/opt/tt-post/releases/2fd07d3`
+- CPU release：`/opt/tt-post/releases/5cfc657`
+- 切换时间：2026-07-29 18:48:36 CST
+- 上一 CPU release：`/opt/tt-post/releases/779ac3b`
 - GPU release：`/opt/tt-post-gpu/releases/18148b2`
-- CPU 更新前备份：`/root/tt-post-backups/20260729T170730+0800-18148b2-fixed-caption`
-- 已部署静态页 SHA-256：`7f298293d6a4202687d3db7809cb3aadca6fa59651d3731f6bbb9984de3ce7e2`
-- CPU sidecar、每分钟 Runner timer、GPU sidecar 和 18830 反向隧道均为 active；SQLite `PRAGMA integrity_check=ok`。
-- 只读快照返回 23 个候选账号；账号 `700` 从 GPU 实时确认：
-  - `@dramawave998`
-  - `Dramawave Short Dramas`
-  - 隐私选项：`PUBLIC_TO_EVERYONE`、`MUTUAL_FOLLOW_FRIENDS`、`SELF_ONLY`
-  - 最长视频：3600 秒
-  - 账号/头像响应未包含账号 Token、Authorization 或带签名查询参数的头像 URL
-- 实际素材 `5824343` 映射到 `Y9v1yQcFqM`，GPU NVENC 成片：
-  - SHA-256：`568fde32b0bde91935a12af7bf732ffe537be99cc0e5fea94a1a2091d72ed492`
-  - 大小：45,496,176 字节
-  - 时长：45.685 秒
-  - 1080 × 1920、30 fps、H.264 High、yuv420p、AAC-LC 48 kHz 双声道
-  - 动态 Drama ID、教程标记和 0.9 秒 phone-match 过渡已抽帧检查
-- COS `HEAD` 返回 200，`x-cos-meta-sha256` 与成片一致；`Range: bytes=0-1023` 返回 206、无重定向。
-- GPU manifest `direct_post_eligible=false`、敏感标记数 0、publish ledger 文件数 0、残留 job 目录数 0。
-- 公网页面 `/tt-post-pool.html` 返回 200 且 no-store；登录态浏览器使用账号 `700` / `@dramawave998` 和素材 `5824343` 验证，页面解析出真实 `content_id=Y9v1yQcFqM`，描述框 `readonly=true` 且内容与固定模板逐字一致。
-- 发布池任务总数仍为 0；三项 Direct Post 门禁保持关闭，验收过程未执行 TikTok 发布初始化、未创建远端 Post、未发布帖子。
-- 既有 X sidecar、两个 X timer 和 GPU X 修复服务在部署后保持 active。
+- CPU 更新前备份：`/root/tt-post-backups/20260729T183935+0800-9fd6431-batch-caption`。备份目录名含 `9fd6431`，但其中 `current` 实际捕获的是切换前在线 release `/opt/tt-post/releases/779ac3b`。
+- TT 发布池静态页 SHA-256 `5eb01246d3e2c8b5ba619f70ffa89132bd5879c59656fa63d3b1c5acfde68cea`，release、主服务静态目录和 nginx 三处一致。
+- TT 个号设置页 SHA-256 `54a73f9fa26f827ff80b3e447c49ee7f62ec12c258aace9b34c4dd6dd64ce88f`，本次部署前后未改变；既有“TT 个号设置原子批量保存”能力完整保留。
+- SQLite `PRAGMA integrity_check=ok`；`material=0`、`queue=0`、`event=0`、`settings=1`。
+- 三项 Direct Post 门禁均为 `0`。
+- 公网页面 `/tt-post-pool.html` 返回 200 且 no-store。
+- Chrome 登录态验收通过：批量框可用，20 位 ID 被前端拦截，当前默认模板可见且可编辑，排期间隔默认 10 分钟；发布池只读展示账号设置，账号未配置设置时建队按钮禁用。
+- 浏览器验收未创建队列任务；数据库 `queue=0`，未调用 TikTok 发布初始化，也未发布帖子。
+- GPU current 保持 `/opt/tt-post-gpu/releases/18148b2`，本次未切换 GPU release。
 
 ## 发布建议
 

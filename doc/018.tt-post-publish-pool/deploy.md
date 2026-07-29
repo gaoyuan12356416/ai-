@@ -65,7 +65,7 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 
 ## 数据库变更
 
-不修改 MySQL。CPU 首次启动在独立 SQLite 中幂等创建 `tt_post_material_pool`、`tt_post_queue`、`tt_post_event`。
+不修改 MySQL。CPU 在独立 SQLite 中幂等维护 `tt_post_material_pool`、`tt_post_queue`、`tt_post_event`、`tt_post_account_setting` 四张表。本轮批量素材仍复用单项 preview/queue 路由，不新增批次表。
 
 ## 部署步骤
 
@@ -92,9 +92,9 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 
 ## 回滚方案
 
-1. 停止并禁用 TT claim/runner、CPU sidecar、GPU sidecar和 18830 隧道。
+1. 停止 TT claim/runner 和 CPU sidecar；本轮 GPU 未改，不停止 GPU sidecar 或 18830 隧道。
 2. 主 API和静态页恢复部署前备份或切回上一 immutable release。
-3. CPU/GPU symlink切回各自上一 release。
+3. CPU symlink 切回 `/opt/tt-post/releases/779ac3b`；GPU 未变更，无需回滚。
 4. TT SQLite保留只读审计，不删除；回滚不触碰 X SQLite和快照同步。
 5. 验证主 API、X sidecar、X timers和 18820 隧道。
 
@@ -107,25 +107,32 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 ## 2026-07-29 部署记录
 
 - GitHub 分支：`codex/tiktok-post-pool-20260729`
-- CPU 当前运行提交：`2fd07d3e1a6a7ef13982263cbf44297ef4a94156`
-- CPU 当前 release：`/opt/tt-post/releases/2fd07d3`
+- CPU 当前提交：`5cfc65715c8d6b91653c9ed8c397b823a6d3bd4d`
+- CPU 当前 release：`/opt/tt-post/releases/5cfc657`
+- 切换时间：2026-07-29 18:48:36 CST
+- 切换前 CPU release：`/opt/tt-post/releases/779ac3b`
 - GPU 当前 release：`/opt/tt-post-gpu/releases/18148b2`
-- 本次 CPU 更新前备份：`/root/tt-post-backups/20260729T170730+0800-18148b2-fixed-caption`
+- 本次 CPU 更新前备份：`/root/tt-post-backups/20260729T183935+0800-9fd6431-batch-caption`
+  - 目录名包含 `9fd6431`，但备份中 `current` 实际捕获的是 `/opt/tt-post/releases/779ac3b`，回滚以实际捕获的 release 为准。
 - 页面：`https://ai.yingliangads.com/tt-post-pool.html`
-- 已部署静态页 SHA-256：`7f298293d6a4202687d3db7809cb3aadca6fa59651d3731f6bbb9984de3ce7e2`
-- 部署版本全回归：`212/212` 通过
+- TT 发布池静态页 SHA-256：`5eb01246d3e2c8b5ba619f70ffa89132bd5879c59656fa63d3b1c5acfde68cea`，release、主服务静态目录、nginx 三处一致
+- TT 个号设置页 SHA-256：`54a73f9fa26f827ff80b3e447c49ee7f62ec12c258aace9b34c4dd6dd64ce88f`，本次未改变
+- 部署版本全回归：`275/275` 通过
+  - TT：`154/154`（Core 38、Service 52、GPU 25、发布池 UI 18、个号设置 UI 11、App contract 10）
+  - X：`93/93`
+  - 素材状态：`28/28`
 - Direct Post 三重 gate：全部为 `0`
 - 线上登录态浏览器验收：
-  - 账号：`700` / `@dramawave998`
-  - 素材：`5824343`
-  - 真实 `content_id`：`Y9v1yQcFqM`
-  - 描述框：`readonly=true`
-  - 页面显示的描述与固定模板逐字一致，仅 Drama ID 使用真实 `content_id`
-  - 发布池任务总数：`0`
+  - 批量素材框可用，规范化后 20 位 ID 在前端即被拦截
+  - 当前默认描述模板完整显示且允许编辑
+  - 排期间隔默认 10 分钟
+  - 发布池只读消费 TT 个号设置，未配置设置时建队按钮禁用
+  - 既有 TT 个号设置原子批量保存能力保留
+  - 验收未创建任务
+- 公网响应：200，`Cache-Control: no-store`
+- SQLite：`PRAGMA integrity_check=ok`，`material=0`、`queue=0`、`event=0`、`settings=1`
 - TikTok 发布初始化：`0`
 - 真实 TikTok Post：`0`
-- 实际 GPU/COS 成片：
-  `https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/tt-post-prepared/56/568fde32b0bde91935a12af7bf732ffe537be99cc0e5fea94a1a2091d72ed492.mp4`
 
 本次更新只替换 CPU release 和后台静态页；GPU 继续运行
 `/opt/tt-post-gpu/releases/18148b2`。三项 Direct Post 门禁未开启，浏览器验收未创建任务、未调用 TikTok 发布初始化接口，也未发布帖子。
