@@ -3583,7 +3583,7 @@ MODULE_PERMISSIONS = {
     "ad_control_v3": "AI自动调控 V3",
     "voiceover_drama_tasks": "配音剧语种任务",
     "x_accounts": "X账号授权管理",
-    "tt_posts": "TT Post 发布池",
+    "tt_posts": "TikTok 社媒发布",
 
 
 
@@ -41486,6 +41486,8 @@ TT_POST_ADMIN_TIMEOUT = max(1, min(TT_POST_ADMIN_TIMEOUT, 600))
 
 TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/accounts": {"GET"},
+    "/api/admin/tt-posts/account-settings": {"GET", "POST"},
+    "/api/admin/tt-posts/account-settings/creator-info": {"POST"},
     "/api/admin/tt-posts/creator-info": {"POST"},
     "/api/admin/tt-posts/materials/preview": {"POST"},
     "/api/admin/tt-posts/queue": {"GET", "POST"},
@@ -93844,13 +93846,22 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {
             "/api/admin/tt-posts/accounts",
+            "/api/admin/tt-posts/account-settings",
             "/api/admin/tt-posts/queue",
             "/api/admin/tt-posts/events",
         }:
-            if not self._require_cookie_navigation_item("ttPostPool"):
+            navigation_key = (
+                "ttAccountSettings"
+                if parsed.path == "/api/admin/tt-posts/account-settings"
+                else "ttPostPool"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
                 return
             try:
-                if parsed.path == "/api/admin/tt-posts/accounts":
+                if parsed.path in {
+                    "/api/admin/tt-posts/accounts",
+                    "/api/admin/tt-posts/account-settings",
+                }:
                     query = _tt_post_query_params(parsed.query, set())
                 elif parsed.path == "/api/admin/tt-posts/events":
                     query = _tt_post_query_params(
@@ -97306,17 +97317,32 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {
+            "/api/admin/tt-posts/account-settings",
+            "/api/admin/tt-posts/account-settings/creator-info",
             "/api/admin/tt-posts/creator-info",
             "/api/admin/tt-posts/materials/preview",
             "/api/admin/tt-posts/queue",
         }:
-            if not self._require_cookie_navigation_item("ttPostPool"):
+            navigation_key = (
+                "ttAccountSettings"
+                if parsed.path.startswith(
+                    "/api/admin/tt-posts/account-settings"
+                )
+                else "ttPostPool"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
                 return
             if not self._require_same_origin_json():
                 return
             session = self._session() or {}
             request_payload = {}
             action_by_path = {
+                "/api/admin/tt-posts/account-settings": (
+                    "save_tt_post_account_settings"
+                ),
+                "/api/admin/tt-posts/account-settings/creator-info": (
+                    "check_tt_post_account_settings_creator_info"
+                ),
                 "/api/admin/tt-posts/creator-info": "check_tt_post_creator_info",
                 "/api/admin/tt-posts/materials/preview": "prepare_tt_post_material",
                 "/api/admin/tt-posts/queue": "create_tt_post_queue",
@@ -97341,43 +97367,69 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     and isinstance(result.get("item"), dict)
                     else {}
                 )
-                target_id = str(
-                    item.get("queue_id")
-                    or item.get("id")
-                    or request_payload.get("source_account_id")
-                    or request_payload.get("material_id")
-                    or ""
+                target_id = (
+                    str(request_payload.get("source_account_id") or "")
+                    if parsed.path.startswith(
+                        "/api/admin/tt-posts/account-settings"
+                    )
+                    else str(
+                        item.get("queue_id")
+                        or item.get("id")
+                        or request_payload.get("source_account_id")
+                        or request_payload.get("material_id")
+                        or ""
+                    )
                 )
                 try:
+                    audit_details = {
+                        "source_account_id": str(
+                            request_payload.get("source_account_id") or ""
+                        ),
+                        "material_id": str(
+                            request_payload.get("material_id") or ""
+                        ),
+                        "content_id": str(
+                            item.get("content_id")
+                            or request_payload.get("content_id")
+                            or ""
+                        ),
+                        "queue_id": str(
+                            item.get("queue_id") or item.get("id") or ""
+                        ),
+                        "scheduled_at": str(
+                            item.get("scheduled_at")
+                            or request_payload.get("scheduled_at")
+                            or ""
+                        ),
+                        "publish_mode": str(
+                            item.get("publish_mode") or ""
+                        ),
+                    }
+                    if parsed.path == "/api/admin/tt-posts/account-settings":
+                        saved_settings = (
+                            item.get("account_settings")
+                            if isinstance(item.get("account_settings"), dict)
+                            else {}
+                        )
+                        for key in (
+                            "privacy_level",
+                            "allow_comment",
+                            "allow_duet",
+                            "allow_stitch",
+                            "commercial_disclosure",
+                            "brand_organic_toggle",
+                            "brand_content_toggle",
+                            "is_aigc",
+                            "version",
+                        ):
+                            if key in saved_settings:
+                                audit_details[key] = saved_settings[key]
                     append_audit_log(
                         session,
                         action,
                         "tt_post",
                         target_id,
-                        {
-                            "source_account_id": str(
-                                request_payload.get("source_account_id") or ""
-                            ),
-                            "material_id": str(
-                                request_payload.get("material_id") or ""
-                            ),
-                            "content_id": str(
-                                item.get("content_id")
-                                or request_payload.get("content_id")
-                                or ""
-                            ),
-                            "queue_id": str(
-                                item.get("queue_id") or item.get("id") or ""
-                            ),
-                            "scheduled_at": str(
-                                item.get("scheduled_at")
-                                or request_payload.get("scheduled_at")
-                                or ""
-                            ),
-                            "publish_mode": str(
-                                item.get("publish_mode") or ""
-                            ),
-                        },
+                        audit_details,
                     )
                 except Exception:
                     logging.exception("TT Post admin audit write failed")

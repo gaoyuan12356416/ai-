@@ -21,6 +21,7 @@ from features.tt_posts import (  # noqa: E402
     PublishCredentials,
     SafeAccount,
     SnapshotAccountSource,
+    TTPostAccountSettings,
     TTPostError,
     TTPostPolicy,
     TTPostStore,
@@ -68,6 +69,20 @@ def resolver(material_id):
     }
 
 
+def account_settings(**overrides):
+    values = {
+        "privacy_level": "SELF_ONLY",
+        "allow_comment": False,
+        "allow_duet": False,
+        "allow_stitch": False,
+        "brand_content_toggle": False,
+        "brand_organic_toggle": True,
+        "is_aigc": True,
+    }
+    values.update(overrides)
+    return TTPostAccountSettings.from_mapping(values)
+
+
 class MutableClock:
     def __init__(self, current):
         self.current = current
@@ -112,7 +127,7 @@ class CoreTestCase(unittest.TestCase):
 
 
 class StorageTests(CoreTestCase):
-    def test_storage_has_exactly_three_feature_tables(self):
+    def test_storage_has_exactly_four_feature_tables(self):
         conn = sqlite3.connect(self.db_path)
         try:
             names = {
@@ -125,8 +140,60 @@ class StorageTests(CoreTestCase):
         finally:
             conn.close()
         self.assertEqual(
-            {"tt_post_material_pool", "tt_post_queue", "tt_post_event"},
+            {
+                "tt_post_material_pool",
+                "tt_post_queue",
+                "tt_post_event",
+                "tt_post_account_setting",
+            },
             names,
+        )
+
+    def test_account_settings_are_required_versioned_and_boolean_safe(self):
+        self.assertIsNone(self.store.get_account_settings("acct-1"))
+        with self.assertRaises(TTPostError) as caught:
+            self.store.get_account_settings("acct-1", required=True)
+        self.assertEqual("tt_account_settings_required", caught.exception.code)
+
+        created = self.store.save_account_settings(
+            "acct-1",
+            account_settings(),
+            expected_version=0,
+        )
+        self.assertEqual(created["account_id"], "acct-1")
+        self.assertEqual(created["version"], 1)
+        self.assertTrue(created["configured"])
+        self.assertTrue(created["commercial_disclosure"])
+        self.assertFalse(created["allow_comment"])
+        self.assertTrue(created["is_aigc"])
+
+        self.clock.current += timedelta(minutes=1)
+        updated = self.store.save_account_settings(
+            "acct-1",
+            account_settings(
+                privacy_level="PUBLIC_TO_EVERYONE",
+                allow_comment=True,
+                brand_organic_toggle=False,
+                is_aigc=False,
+            ),
+            expected_version=1,
+        )
+        self.assertEqual(updated["version"], 2)
+        self.assertEqual(updated["privacy_level"], "PUBLIC_TO_EVERYONE")
+        self.assertTrue(updated["allow_comment"])
+        self.assertFalse(updated["commercial_disclosure"])
+        self.assertFalse(updated["is_aigc"])
+        self.assertEqual(self.store.list_account_settings(), [updated])
+
+        with self.assertRaises(TTPostError) as conflict:
+            self.store.save_account_settings(
+                "acct-1",
+                account_settings(),
+                expected_version=1,
+            )
+        self.assertEqual(
+            "tt_account_settings_version_conflict",
+            conflict.exception.code,
         )
 
     def test_material_id_is_globally_unique(self):

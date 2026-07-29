@@ -1,6 +1,6 @@
 """Fail-closed TikTok organic Post pool and loopback service.
 
-The package exposes the three-table ledger, safe snapshot-account repository,
+The package exposes the four-table ledger, safe snapshot-account repository,
 strict Dramawave material resolver, encrypted GPU client, and CPU sidecar
 facade.  Production Direct Post remains gated off unless all three explicit
 compliance settings are enabled.
@@ -15,6 +15,7 @@ from .core import (
     QueueClaim,
     SafeAccount,
     SnapshotAccountSource,
+    TTPostAccountSettings,
     TTPostError,
     TTPostPolicy,
     TTPostStore,
@@ -56,6 +57,7 @@ __all__ = [
     "SnapshotMySQLConfig",
     "MySQLSnapshotAccountRepository",
     "TTPostHTTPServer",
+    "TTPostAccountSettings",
     "TTPostService",
     "TTPostServiceError",
     "TTPostError",

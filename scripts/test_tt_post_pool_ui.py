@@ -32,21 +32,38 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertEqual(group["label"], "TikTok 社媒")
         self.assertEqual(group["order"], 35)
         self.assertEqual(group["module"], "tt_posts")
+        settings = next(
+            entry
+            for entry in group["items"]
+            if entry.get("key") == "ttAccountSettings"
+        )
+        self.assertEqual(settings["label"], "TT 个号管理")
+        self.assertEqual(settings["href"], "/tt-account-settings.html")
+        self.assertEqual(settings["module"], "tt_posts")
+        self.assertEqual(settings["order"], 10)
+        self.assertFalse(settings["adminOnly"])
+        self.assertTrue(settings["enabled"])
         item = next(entry for entry in group["items"] if entry.get("key") == "ttPostPool")
         self.assertEqual(item["label"], "TT Post发布池")
         self.assertEqual(item["href"], "/tt-post-pool.html")
         self.assertEqual(item["module"], "tt_posts")
-        self.assertEqual(item["order"], 10)
+        self.assertEqual(item["order"], 20)
         self.assertFalse(item["adminOnly"])
         self.assertTrue(item["enabled"])
 
+        self.assertIn(
+            'ttAccountSettings: "/tt-account-settings.html"',
+            QUICK_NAV,
+        )
         self.assertIn('ttPostPool: "/tt-post-pool.html"', QUICK_NAV)
         self.assertIn('key: "tiktok_platform"', QUICK_NAV)
+        self.assertIn('key: "ttAccountSettings"', QUICK_NAV)
         self.assertIn('key: "ttPostPool"', QUICK_NAV)
         self.assertIn('module: "tt_posts"', QUICK_NAV)
         self.assertIn("if (!tiktokPlatform)", QUICK_NAV)
+        self.assertIn("if (!ttAccountSettingsExists)", QUICK_NAV)
         self.assertIn("if (!ttPostPoolExists)", QUICK_NAV)
-        self.assertIn('quickNavConfigCache:v4', QUICK_NAV)
+        self.assertIn('quickNavConfigCache:v5', QUICK_NAV)
 
     def test_page_uses_existing_shell_and_tt_permission(self):
         self.assertIn('href="/ui-topbar.css"', PAGE)
@@ -70,14 +87,9 @@ class TtPostPoolUiTest(unittest.TestCase):
             "videoShell",
             "caption",
             "scheduledAt",
-            "privacyLevel",
-            "allowComment",
-            "allowDuet",
-            "allowStitch",
-            "commercialDisclosure",
-            "ownBrand",
-            "brandedContent",
-            "isAigc",
+            "accountSettingsCard",
+            "accountSettingsStatus",
+            "accountSettingsSummary",
             "publishConsent",
             "createQueue",
         }
@@ -94,6 +106,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("content_id: state.material.content_id", PAGE)
         self.assertIn("CONSENT_VERSION", PAGE)
         self.assertIn("Music Usage Confirmation", PAGE)
+        self.assertIn('href="/tt-account-settings.html"', PAGE)
 
     def test_page_only_calls_same_origin_admin_contracts(self):
         for endpoint in (
@@ -128,34 +141,34 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("仅 Drama ID 会按当前素材动态替换，不可编辑", PAGE)
         self.assertIn("utf16Units", PAGE)
 
-    def test_creator_settings_fail_closed_and_have_no_platform_defaults(self):
-        privacy = re.search(
-            r'<select id="privacyLevel" disabled>(?P<body>.*?)</select>',
+    def test_account_settings_are_read_only_and_required_in_pool(self):
+        for removed_id in (
+            "privacyLevel",
+            "allowComment",
+            "allowDuet",
+            "allowStitch",
+            "commercialDisclosure",
+            "ownBrand",
+            "brandedContent",
+            "isAigc",
+        ):
+            self.assertNotIn(f'id="{removed_id}"', PAGE)
+
+        self.assertIn("function selectedAccountSettings()", PAGE)
+        self.assertIn(
+            'if (!selectedAccountSettings()) return "所选账号尚未配置',
             PAGE,
-            flags=re.DOTALL,
         )
-        self.assertIsNotNone(privacy)
-        self.assertIn('value=""', privacy.group("body"))
-        self.assertNotIn(" selected", privacy.group("body"))
-
-        for element_id in ("allowComment", "allowDuet", "allowStitch"):
-            checkbox = re.search(
-                rf'<input id="{element_id}"(?P<attrs>[^>]*)>',
-                PAGE,
-            )
-            self.assertIsNotNone(checkbox)
-            self.assertIn("disabled", checkbox.group("attrs"))
-            self.assertNotIn("checked", checkbox.group("attrs"))
-
-        self.assertIn("privacy_level_options", PAGE)
+        self.assertIn("renderAccountSettings", PAGE)
+        self.assertIn("settings.configured === true", PAGE)
+        self.assertNotIn('privacy_level: byId("privacyLevel").value', PAGE)
+        self.assertNotIn('allow_comment: byId("allowComment").checked', PAGE)
+        self.assertNotIn(
+            'brand_content_toggle: commercial && byId("brandedContent").checked',
+            PAGE,
+        )
         self.assertIn("max_video_post_duration_sec", PAGE)
-        self.assertIn("comment_disabled", PAGE)
-        self.assertIn("duet_disabled", PAGE)
-        self.assertIn("stitch_disabled", PAGE)
-        self.assertIn("boolValue(info.comment_disabled) !== false", PAGE)
-        self.assertIn("boolValue(info.duet_disabled) !== false", PAGE)
-        self.assertIn("boolValue(info.stitch_disabled) !== false", PAGE)
-        self.assertIn('if (!byId("privacyLevel").value)', PAGE)
+        self.assertIn("发布池不再单独编辑", PAGE)
 
     def test_live_compliance_gates_default_to_hold(self):
         for element_id in (

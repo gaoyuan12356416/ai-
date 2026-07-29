@@ -579,6 +579,75 @@ def render_fixed_caption(content_id: Any) -> str:
 
 
 @dataclass(frozen=True)
+class TTPostAccountSettings:
+    """Account-level defaults frozen into each new TikTok Post queue item."""
+
+    privacy_level: str
+    allow_comment: bool
+    allow_duet: bool
+    allow_stitch: bool
+    brand_content_toggle: bool
+    brand_organic_toggle: bool
+    is_aigc: bool
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> "TTPostAccountSettings":
+        if not isinstance(raw, Mapping):
+            raise TTPostError("invalid_account_settings", "个号发布设置必须是对象", 400)
+        required = {
+            "privacy_level",
+            "allow_comment",
+            "allow_duet",
+            "allow_stitch",
+            "brand_content_toggle",
+            "brand_organic_toggle",
+            "is_aigc",
+        }
+        missing = sorted(required.difference(raw))
+        unknown = sorted(set(raw).difference(required))
+        if missing or unknown:
+            raise TTPostError(
+                "invalid_account_settings",
+                "个号发布设置字段不完整或包含未知字段",
+                400,
+            )
+        privacy_level = str(raw.get("privacy_level") or "").strip()
+        if privacy_level not in PRIVACY_LEVELS:
+            raise TTPostError("invalid_privacy_level", "隐私级别无效", 400)
+        return cls(
+            privacy_level=privacy_level,
+            allow_comment=_exact_bool(raw.get("allow_comment"), "评论开关"),
+            allow_duet=_exact_bool(raw.get("allow_duet"), "合拍开关"),
+            allow_stitch=_exact_bool(raw.get("allow_stitch"), "拼接开关"),
+            brand_content_toggle=_exact_bool(
+                raw.get("brand_content_toggle"),
+                "品牌内容开关",
+            ),
+            brand_organic_toggle=_exact_bool(
+                raw.get("brand_organic_toggle"),
+                "自有品牌开关",
+            ),
+            is_aigc=_exact_bool(raw.get("is_aigc"), "AI内容声明"),
+        )
+
+    @property
+    def commercial_disclosure(self) -> bool:
+        return bool(self.brand_content_toggle or self.brand_organic_toggle)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "privacy_level": self.privacy_level,
+            "allow_comment": self.allow_comment,
+            "allow_duet": self.allow_duet,
+            "allow_stitch": self.allow_stitch,
+            "brand_content_toggle": self.brand_content_toggle,
+            "brand_organic_toggle": self.brand_organic_toggle,
+            "commercial_disclosure": self.commercial_disclosure,
+            "is_aigc": self.is_aigc,
+        }
+
+
+@dataclass(frozen=True)
 class TTPostPolicy:
     """Explicit TikTok privacy, interaction, disclosure and consent settings."""
 
@@ -771,7 +840,7 @@ def _connect(db_path: Any) -> sqlite3.Connection:
 
 
 def ensure_storage(db_path: Any) -> None:
-    """Create the three-table TikTok Post ledger."""
+    """Create the four-table TikTok Post ledger and account settings."""
 
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -787,6 +856,31 @@ def ensure_storage(db_path: Any) -> None:
                         CHECK(status IN ('available','reserved','published','canceled')),
                     created_by_user_id TEXT NOT NULL DEFAULT '',
                     created_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS tt_post_account_setting (
+                    account_id TEXT PRIMARY KEY,
+                    privacy_level TEXT NOT NULL
+                        CHECK(privacy_level IN (
+                            'PUBLIC_TO_EVERYONE',
+                            'MUTUAL_FOLLOW_FRIENDS',
+                            'FOLLOWER_OF_CREATOR',
+                            'SELF_ONLY'
+                        )),
+                    allow_comment INTEGER NOT NULL
+                        CHECK(allow_comment IN (0,1)),
+                    allow_duet INTEGER NOT NULL
+                        CHECK(allow_duet IN (0,1)),
+                    allow_stitch INTEGER NOT NULL
+                        CHECK(allow_stitch IN (0,1)),
+                    brand_content_toggle INTEGER NOT NULL
+                        CHECK(brand_content_toggle IN (0,1)),
+                    brand_organic_toggle INTEGER NOT NULL
+                        CHECK(brand_organic_toggle IN (0,1)),
+                    is_aigc INTEGER NOT NULL CHECK(is_aigc IN (0,1)),
+                    version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -925,6 +1019,25 @@ def _public_queue(row: sqlite3.Row) -> Dict[str, Any]:
     return result
 
 
+def _public_account_settings(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    for field in (
+        "allow_comment",
+        "allow_duet",
+        "allow_stitch",
+        "brand_content_toggle",
+        "brand_organic_toggle",
+        "is_aigc",
+    ):
+        result[field] = bool(result.get(field))
+    result["commercial_disclosure"] = bool(
+        result.get("brand_content_toggle")
+        or result.get("brand_organic_toggle")
+    )
+    result["configured"] = True
+    return result
+
+
 class TTPostStore:
     """Transactional TikTok Post material pool and queue ledger."""
 
@@ -990,6 +1103,134 @@ class TTPostStore:
                 created_at,
             ),
         )
+
+    def get_account_settings(
+        self,
+        account_id: Any,
+        *,
+        required: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        normalized = _account_id(account_id)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_account_setting WHERE account_id=?",
+                (normalized,),
+            ).fetchone()
+        if row is None:
+            if required:
+                raise TTPostError(
+                    "tt_account_settings_required",
+                    "请先在TT个号管理中完成该账号的发布设置",
+                    409,
+                )
+            return None
+        return _public_account_settings(row)
+
+    def list_account_settings(self) -> List[Dict[str, Any]]:
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT * FROM tt_post_account_setting ORDER BY account_id"
+            ).fetchall()
+        return [_public_account_settings(row) for row in rows]
+
+    def save_account_settings(
+        self,
+        account_id: Any,
+        settings: Any,
+        *,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        normalized_account_id = _account_id(account_id)
+        normalized_settings = (
+            settings
+            if isinstance(settings, TTPostAccountSettings)
+            else TTPostAccountSettings.from_mapping(settings)
+        )
+        if expected_version is not None:
+            if (
+                isinstance(expected_version, bool)
+                or not isinstance(expected_version, int)
+                or expected_version < 0
+            ):
+                raise TTPostError(
+                    "invalid_account_settings_version",
+                    "个号发布设置版本无效",
+                    400,
+                )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            current = conn.execute(
+                "SELECT * FROM tt_post_account_setting WHERE account_id=?",
+                (normalized_account_id,),
+            ).fetchone()
+            if current is None:
+                if expected_version not in (None, 0):
+                    raise TTPostError(
+                        "tt_account_settings_version_conflict",
+                        "个号发布设置已被其他操作更新，请刷新后重试",
+                        409,
+                    )
+                version = 1
+                conn.execute(
+                    """
+                    INSERT INTO tt_post_account_setting(
+                        account_id,privacy_level,allow_comment,allow_duet,
+                        allow_stitch,brand_content_toggle,brand_organic_toggle,
+                        is_aigc,version,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        normalized_account_id,
+                        normalized_settings.privacy_level,
+                        int(normalized_settings.allow_comment),
+                        int(normalized_settings.allow_duet),
+                        int(normalized_settings.allow_stitch),
+                        int(normalized_settings.brand_content_toggle),
+                        int(normalized_settings.brand_organic_toggle),
+                        int(normalized_settings.is_aigc),
+                        version,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                current_version = int(current["version"])
+                if (
+                    expected_version is not None
+                    and expected_version != current_version
+                ):
+                    raise TTPostError(
+                        "tt_account_settings_version_conflict",
+                        "个号发布设置已被其他操作更新，请刷新后重试",
+                        409,
+                    )
+                version = current_version + 1
+                conn.execute(
+                    """
+                    UPDATE tt_post_account_setting
+                    SET privacy_level=?,allow_comment=?,allow_duet=?,
+                        allow_stitch=?,brand_content_toggle=?,
+                        brand_organic_toggle=?,is_aigc=?,version=?,updated_at=?
+                    WHERE account_id=?
+                    """,
+                    (
+                        normalized_settings.privacy_level,
+                        int(normalized_settings.allow_comment),
+                        int(normalized_settings.allow_duet),
+                        int(normalized_settings.allow_stitch),
+                        int(normalized_settings.brand_content_toggle),
+                        int(normalized_settings.brand_organic_toggle),
+                        int(normalized_settings.is_aigc),
+                        version,
+                        timestamp,
+                        normalized_account_id,
+                    ),
+                )
+            row = conn.execute(
+                "SELECT * FROM tt_post_account_setting WHERE account_id=?",
+                (normalized_account_id,),
+            ).fetchone()
+        return _public_account_settings(row)
 
     def add_material(
         self,
