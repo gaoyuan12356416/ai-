@@ -48,11 +48,32 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | ---: | ---: | ---: | ---: |
-| 聚焦 unittest | 129 | 129 | 0 | 0 |
-| 全量 `test_x*.py` | 342 | 342 | 0 | 0 |
+| 聚焦 unittest | 135 | 135 | 0 | 0 |
+| 全量 `test_x*.py` | 348 | 348 | 0 | 0 |
 | Python 编译 / diff check | 2 | 2 | 0 | 0 |
 
-### 生产待回填
+### 生产验证
 
-GPU/CPU commit、release、备份、池 53/54 真实源/输出时长、恢复报告、timer 和
-下一自然发布结果在完成生产验证后追加；未取得这些证据前不把增量标记为生产通过。
+| 项目 | 结果 |
+| --- | --- |
+| GPU | `b6f95f3874a9bb187aa7e8c7faac6254893ba787`，worker/CPU tunnel 均为 v2 health |
+| CPU | `7a20f05ecc760a79f3776fded08d47ccfa76d5d8`，sidecar/main API active |
+| Linux | b6f95f3 直接相关 185/185、完整 342/342；7a20f05 新增配置/脱敏聚焦测试通过 |
+| 池 53 | 源 `182.791667s` -> 输出 `139.0s`，H264/yuv420p、AAC、720x1280，CPU 复检通过 |
+| 池 54 | 源 `171.52s` -> 输出 `139.0s`，H264/yuv420p、AAC、720x1280，CPU 复检通过 |
+| 恢复 | requested/ready/restored 均为 2；两项原地 `pending`、未绑定、Episode 1、零历史 |
+| 历史安全 | 10:06 run 14 保持 `failed_preflight`，queue/log=0；账号 10 粘性绑定未变 |
+| 数据库 | integrity `ok`；剧集重复组、`post_creating`、`unknown_outcome` 均为 0 |
+| timer | 16:12 CST 恢复 schedule/claim timer；旧 daily timer 保持 masked |
+
+第一次 canary 因 standalone 脚本未读取既有 schedule env 而在下载前返回
+`media_host_not_allowed`；未调用 GPU、未恢复池状态。修复提交只增加严格的
+schedule 非秘密白名单和异常脱敏，material backfill 合同未改；本地全量由
+342 增至 344 项且全部通过。成功报告 SHA-256：
+`e908d9d4eb50f1310d9e5189e15b767fcf622f452f6a00892d2cddfdee502471`。
+
+16:20 自然 run 17 的全部媒体预检通过，并新增 pool 2/57/60/131 四份 ready
+manifest；pool 131 在自然流程中由 `212.666667s` 裁为 `139.0s`。随后首队列
+在任何 X 请求前因磁盘短链域名漂移停止；attempt=0、unknown=0，其余五条没有
+publish log。受保护恢复及最终 queue/log/Post 结果完成后追加；不新建计划或
+直接发布。

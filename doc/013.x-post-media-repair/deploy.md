@@ -116,3 +116,61 @@ CPU daily runner
 CPU profile v1；保留 v2 COS/manifest 与 SQLite 事实。若池 53/54 已通过复验
 恢复但尚未发布，代码回滚后应暂停短剧 timer并人工评审，禁止直接用旧备份覆盖
 SQLite。若已产生 Post，任何回滚都不得删除 queue/log/绑定或回退剧集进度。
+
+## 2026-07-29 超长剧集裁尾生产记录
+
+- 15:32 CST 确认 `x-post-schedule.timer`、
+  `x-post-schedule-claim.timer` 及两个 oneshot 均为 inactive 后开始部署；
+  部署和 backfill 期间未启动旧批次。
+- GPU 使用提交
+  `b6f95f3874a9bb187aa7e8c7faac6254893ba787`，release 为
+  `/opt/x-post-media-repair/releases/b6f95f3874a9bb187aa7e8c7faac6254893ba787`，
+  备份为
+  `/data/x-post-media-repair/backups/20260729T153604+0800-prep-b6f95f3`。
+  本机及 CPU 隧道 health 均返回
+  `x-h264-nvenc-720-trim139-v2`。
+- CPU 首次使用同一提交，release 为
+  `/mnt/data-disk/x-post-automation/releases/b6f95f3874a9bb187aa7e8c7faac6254893ba787`，
+  全量备份为
+  `/mnt/data-disk/x-post-automation/backups/20260729T153641+0800-duration-trim-prep-b6f95f3`；
+  SQLite 在线备份 `integrity_check=ok`。
+- 首次生产 backfill 在 GPU 前按门禁失败，错误为
+  `media_host_not_allowed`。原因是 standalone 恢复脚本只安全读取 daily/token，
+  未读取正常 schedule unit 已使用的 `/etc/x-post-schedule.env`，因此遗漏
+  `img.tianmai.cn`。失败报告保留在
+  `/mnt/data-disk/x-post-automation/backfills/20260729T1547+0800-duration-trim/pool-53-54.json`；
+  当时池 53/54、队列、日志和 GPU manifest 均未改变。
+- 只在短剧恢复脚本增加严格三层配置解析
+  `daily -> 独立 repair token -> schedule`；schedule 文件只允许现有非秘密键，
+  明确拒绝 internal token、MySQL password 和 repair token，并将异常输出改为
+  脱敏。修复提交为
+  `7a20f05ecc760a79f3776fded08d47ccfa76d5d8`，CPU release 为
+  `/mnt/data-disk/x-post-automation/releases/7a20f05ecc760a79f3776fded08d47ccfa76d5d8`；
+  第二恢复点为
+  `/mnt/data-disk/x-post-automation/backups/20260729T1557+0800-schedule-loader-predeploy-7a20f05`。
+  GPU 业务代码未变化，继续使用 `b6f95f3` release。
+- 成功报告为
+  `/mnt/data-disk/x-post-automation/backfills/20260729T1602+0800-duration-trim-7a20f05/pool-53-54.json`，
+  SHA-256 为
+  `e908d9d4eb50f1310d9e5189e15b767fcf622f452f6a00892d2cddfdee502471`。
+  池 53 源时长 `182.791667s`、池 54 源时长 `171.52s`；两者均固定输出
+  `139.0s`，H264/yuv420p、AAC、720x1280，GPU manifest v2 为 ready，
+  CPU 二次下载 SHA/大小/probe 全部匹配。
+- 两项全链成功后于 16:09:38 CST 一次恢复为 `pending`；池 ID、FIFO、
+  Episode 1、未绑定状态和零队列历史保持不变。10:06 run `14` 仍为
+  `failed_preflight`，queue/log 均为 0；账号 10 仍绑定池 2、下一集 Episode 8。
+- 16:12 CST 只读候选预演为 6/6：账号 10 续发池 2 Episode 8；账号 9/8
+  分别领取池 53/54 Episode 1；账号 7/6/5 领取池 57/60/131 Episode 1。
+  SQLite `integrity_check=ok`，重复剧集组、`post_creating`、
+  `unknown_outcome` 均为 0。
+- 16:12 CST 恢复两个 timer；旧 daily timer 继续 masked。下一自然
+  16:20 批次的 queue/log/Post 结果完成后追加，不手工启动或重放。
+- 16:20 自然 run 17 完成全部媒体预检并原子建出 6 条队列；自然新增的
+  pool 2/57/60/131 四份 v2 manifest 全部 ready，其中 pool 131
+  `212.666667s -> 139.0s`，证明自然调度已实际执行超长裁尾。
+- 首队列 45 在 X 前因 `invalid_short_base_url` 停止；attempt=0、
+  unknown=0、X ID/URL 和短链/文案均为空，其余五条无 log。磁盘
+  `/etc/x-post-automation.env` 在 14:44 已被改为代码不允许的
+  `https://gy.g2flow.com/s2l`，15:46 sidecar 重启后才激活该漂移。
+  16:40 再次暂停 timer；按 `BUG-002.md` 修复配置并执行严格零尝试恢复后，
+  才允许 frozen run 继续，禁止新建计划或直接发布。

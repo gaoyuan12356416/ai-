@@ -67,6 +67,11 @@ DRAMA_POOL_DETERMINISTIC_REJECTION_CODES = frozenset(
         "x_post_daily_copy_validation_failed",
     }
 )
+PRE_X_RECOVERABLE_ERROR_CODES = frozenset(
+    {
+        "invalid_short_base_url",
+    }
+)
 
 QUEUE_FIELDS = (
     "account_id",
@@ -6932,6 +6937,285 @@ class XPostStore:
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
+
+    def recover_pre_x_schedule_failure(
+        self,
+        queue_id,
+        expected_error_code,
+        *,
+        validate_only=False,
+    ):
+        """Requeue one exact, proven pre-X drama failure without publishing."""
+        queue_id = _positive_int(queue_id, "queue_id")
+        if not isinstance(validate_only, bool):
+            raise XPostError(
+                "invalid_request",
+                "validate_only must be a boolean",
+                400,
+            )
+        try:
+            expected_error_code = _clean_token(
+                expected_error_code,
+                "expected error code",
+                64,
+            )
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "expected_error_code is invalid",
+                400,
+            ) from None
+        if expected_error_code not in PRE_X_RECOVERABLE_ERROR_CODES:
+            raise XPostError(
+                "x_post_pre_x_recovery_not_allowed",
+                "This failure code is not eligible for guarded recovery",
+                409,
+            )
+
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (queue_id,),
+            ).fetchone()
+            log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                (queue_id,),
+            ).fetchone()
+            run = (
+                conn.execute(
+                    "SELECT * FROM x_post_schedule_run WHERE id=?",
+                    (queue["schedule_run_id"],),
+                ).fetchone()
+                if queue and queue["schedule_run_id"] is not None
+                else None
+            )
+            pool = (
+                conn.execute(
+                    "SELECT * FROM x_post_drama_pool WHERE id=?",
+                    (queue["drama_pool_item_id"],),
+                ).fetchone()
+                if queue and queue["drama_pool_item_id"] is not None
+                else None
+            )
+            binding_queue = (
+                conn.execute(
+                    "SELECT id,source_type,drama_pool_item_id,content_id,"
+                    "account_id,episode_number,status "
+                    "FROM x_post_queue WHERE id=?",
+                    (pool["assigned_source_queue_id"],),
+                ).fetchone()
+                if pool and pool["assigned_source_queue_id"] is not None
+                else None
+            )
+            expected_slot_key = (
+                "xpost:schedule:v1:%s:%s:%s"
+                % (
+                    str(run["source_type"]),
+                    str(run["run_date"]),
+                    str(run["publish_time"]).replace(":", ""),
+                )
+                if run
+                else ""
+            )
+            try:
+                frozen_account_ids = (
+                    _stored_account_ids(
+                        run["account_ids_json"],
+                        run["expected_count"],
+                    )
+                    if run
+                    else ()
+                )
+            except XPostError:
+                frozen_account_ids = ()
+            conflict = (
+                not queue
+                or not log
+                or not run
+                or not pool
+                or not binding_queue
+                or str(queue["source_type"]) != "drama"
+                or str(run["source_type"]) != "drama"
+                or str(run["timezone"]) != SCHEDULE_TIMEZONE
+                or str(run["slot_key"]) != expected_slot_key
+                or str(queue["run_date"]) != str(run["run_date"])
+                or not frozen_account_ids
+                or str(queue["status"]) != "failed"
+                or int(queue["candidate_rank"] or 0) != 1
+                or str(log["status"]) != "failed"
+                or int(log["account_id"] or 0)
+                != int(queue["account_id"])
+                or str(log["error_code"]) != expected_error_code
+                or int(log["attempt_count"] or 0) != 0
+                or int(log["unknown_outcome"] or 0) != 0
+                or any(
+                    str(log[field] or "")
+                    for field in (
+                        "long_url",
+                        "short_url",
+                        "post_text",
+                        "x_media_id",
+                        "x_post_id",
+                        "x_post_url",
+                        "started_at",
+                        "published_at",
+                    )
+                )
+                or str(run["status"]) != "stopped"
+                or int(run["expected_count"] or 0)
+                != int(run["queued_count"] or 0)
+                or int(run["published_count"] or 0) != 0
+                or int(run["failed_count"] or 0) != 1
+                or int(run["unknown_count"] or 0) != 0
+                or str(pool["status"]) != "needs_review"
+                or str(pool["last_error_code"]) != expected_error_code
+                or int(pool["assigned_account_id"] or 0)
+                != int(queue["account_id"])
+                or int(pool["assigned_source_queue_id"] or 0) <= 0
+                or int(binding_queue["id"]) == queue_id
+                or str(binding_queue["source_type"]) != "drama"
+                or int(binding_queue["drama_pool_item_id"] or 0)
+                != int(pool["id"])
+                or str(binding_queue["content_id"])
+                != str(pool["content_id"])
+                or int(binding_queue["account_id"] or 0)
+                != int(queue["account_id"])
+                or str(binding_queue["status"]) != "published"
+                or int(binding_queue["episode_number"] or 0)
+                >= int(queue["episode_number"] or 0)
+                or str(pool["content_id"])
+                != str(queue["content_id"])
+                or int(pool["next_sub_number"] or 0)
+                != int(queue["episode_number"] or 0)
+            )
+            if conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pre_x_recovery_conflict",
+                    "Queue, log, run, or drama state is not an exact pre-X failure",
+                    409,
+                )
+
+            siblings = conn.execute(
+                "SELECT q.id,q.status,q.candidate_rank,q.account_id,"
+                "q.source_type,l.id AS log_id "
+                "FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.schedule_run_id=? ORDER BY q.candidate_rank,q.id",
+                (run["id"],),
+            ).fetchall()
+            if (
+                len(siblings) != int(run["expected_count"])
+                or int(siblings[0]["id"]) != queue_id
+                or int(siblings[0]["log_id"] or 0) != int(log["id"])
+                or [
+                    int(row["candidate_rank"] or 0)
+                    for row in siblings
+                ]
+                != list(range(1, len(siblings) + 1))
+                or tuple(
+                    int(row["account_id"] or 0)
+                    for row in siblings
+                )
+                != frozen_account_ids
+                or any(
+                    str(row["source_type"]) != "drama"
+                    for row in siblings
+                )
+                or any(
+                    str(row["status"]) != "queued"
+                    or row["log_id"] is not None
+                    for row in siblings[1:]
+                )
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pre_x_recovery_conflict",
+                    "Frozen schedule siblings changed before recovery",
+                    409,
+                )
+
+            result = {
+                "queue_id": queue_id,
+                "log_id": int(log["id"]),
+                "schedule_run_id": int(run["id"]),
+                "drama_pool_item_id": int(pool["id"]),
+                "expected_error_code": expected_error_code,
+                "validate_only": validate_only,
+                "validated_count": 1,
+                "updated_count": 0,
+            }
+            if validate_only:
+                conn.commit()
+                return result
+
+            log_cursor = conn.execute(
+                "UPDATE x_post_publish_log SET status='reserved',"
+                "long_url='',short_url='',post_text='',x_media_id='',"
+                "x_post_id='',x_post_url='',error_code='',error_message='',"
+                "unknown_outcome=0,started_at='',published_at='',updated_at=? "
+                "WHERE id=? AND status='failed' AND attempt_count=0 "
+                "AND unknown_outcome=0 AND error_code=?",
+                (
+                    timestamp,
+                    log["id"],
+                    expected_error_code,
+                ),
+            )
+            queue_cursor = conn.execute(
+                "UPDATE x_post_queue SET status='queued',updated_at=? "
+                "WHERE id=? AND status='failed'",
+                (timestamp, queue_id),
+            )
+            pool_cursor = conn.execute(
+                "UPDATE x_post_drama_pool SET status='active',"
+                "last_checked_at=?,last_error_code='',last_error_message='',"
+                "updated_at=? WHERE id=? AND status='needs_review' "
+                "AND assigned_account_id=? AND next_sub_number=? "
+                "AND last_error_code=?",
+                (
+                    timestamp,
+                    timestamp,
+                    pool["id"],
+                    queue["account_id"],
+                    queue["episode_number"],
+                    expected_error_code,
+                ),
+            )
+            if (
+                int(log_cursor.rowcount or 0) != 1
+                or int(queue_cursor.rowcount or 0) != 1
+                or int(pool_cursor.rowcount or 0) != 1
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pre_x_recovery_conflict",
+                    "Pre-X recovery state changed during the transaction",
+                    409,
+                )
+            self._sync_run(conn, queue_id, timestamp)
+            updated_run = conn.execute(
+                "SELECT status,failed_count,unknown_count "
+                "FROM x_post_schedule_run WHERE id=?",
+                (run["id"],),
+            ).fetchone()
+            if (
+                not updated_run
+                or str(updated_run["status"]) != "queued"
+                or int(updated_run["failed_count"] or 0) != 0
+                or int(updated_run["unknown_count"] or 0) != 0
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_pre_x_recovery_conflict",
+                    "Frozen schedule did not return to queued state",
+                    409,
+                )
+            conn.commit()
+            result["updated_count"] = 1
+            return result
 
 
 class HttpResponse:
