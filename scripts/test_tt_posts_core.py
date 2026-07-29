@@ -196,6 +196,100 @@ class StorageTests(CoreTestCase):
             conflict.exception.code,
         )
 
+    def test_account_settings_batch_is_atomic_and_versioned(self):
+        first = self.store.save_account_settings(
+            "acct-1",
+            account_settings(),
+            expected_version=0,
+        )
+        self.assertEqual(first["version"], 1)
+
+        saved = self.store.save_account_settings_batch(
+            [
+                {
+                    "account_id": "acct-1",
+                    "settings": account_settings(
+                        privacy_level="PUBLIC_TO_EVERYONE",
+                        allow_comment=True,
+                    ),
+                    "expected_version": 1,
+                },
+                {
+                    "account_id": "acct-2",
+                    "settings": account_settings(
+                        privacy_level="PUBLIC_TO_EVERYONE",
+                        allow_comment=True,
+                    ),
+                    "expected_version": 0,
+                },
+            ]
+        )
+        self.assertEqual([item["account_id"] for item in saved], ["acct-1", "acct-2"])
+        self.assertEqual([item["version"] for item in saved], [2, 1])
+        self.assertTrue(all(item["allow_comment"] for item in saved))
+
+        before_first = self.store.get_account_settings("acct-1")
+        before_second = self.store.get_account_settings("acct-2")
+        with self.assertRaises(TTPostError) as conflict:
+            self.store.save_account_settings_batch(
+                [
+                    {
+                        "account_id": "acct-1",
+                        "settings": account_settings(
+                            privacy_level="SELF_ONLY",
+                            allow_comment=False,
+                        ),
+                        "expected_version": 2,
+                    },
+                    {
+                        "account_id": "acct-2",
+                        "settings": account_settings(
+                            privacy_level="SELF_ONLY",
+                            allow_comment=False,
+                        ),
+                        "expected_version": 0,
+                    },
+                ]
+            )
+        self.assertEqual(
+            "tt_account_settings_version_conflict",
+            conflict.exception.code,
+        )
+        self.assertEqual(
+            self.store.get_account_settings("acct-1"),
+            before_first,
+        )
+        self.assertEqual(
+            self.store.get_account_settings("acct-2"),
+            before_second,
+        )
+
+    def test_account_settings_batch_rejects_empty_duplicate_and_oversized_targets(self):
+        with self.assertRaises(TTPostError) as empty:
+            self.store.save_account_settings_batch([])
+        self.assertEqual("invalid_batch_targets", empty.exception.code)
+
+        duplicate = {
+            "account_id": "acct-1",
+            "settings": account_settings(),
+            "expected_version": 0,
+        }
+        with self.assertRaises(TTPostError) as repeated:
+            self.store.save_account_settings_batch([duplicate, duplicate])
+        self.assertEqual("invalid_batch_targets", repeated.exception.code)
+
+        updates = [
+            {
+                "account_id": "acct-%d" % index,
+                "settings": account_settings(),
+                "expected_version": 0,
+            }
+            for index in range(1, 52)
+        ]
+        with self.assertRaises(TTPostError) as oversized:
+            self.store.save_account_settings_batch(updates)
+        self.assertEqual("invalid_batch_targets", oversized.exception.code)
+
     def test_material_id_is_globally_unique(self):
         self.store.add_material("1001")
         with self.assertRaises(TTPostError) as caught:

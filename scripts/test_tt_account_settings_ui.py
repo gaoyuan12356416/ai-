@@ -85,10 +85,53 @@ class TTAccountSettingsUiTest(unittest.TestCase):
             'const API_BASE = "/api/admin/tt-posts/account-settings"',
             PAGE,
         )
+        self.assertIn("const MAX_BATCH_ACCOUNTS = 50;", PAGE)
+        self.assertIn("requested.slice(0, MAX_BATCH_ACCOUNTS)", PAGE)
         self.assertIn("api(API_BASE)", PAGE)
         self.assertIn("api(`${API_BASE}/creator-info`", PAGE)
+        self.assertIn("api(`${API_BASE}/batch/creator-info`", PAGE)
+        self.assertIn("api(batch ? `${API_BASE}/batch` : API_BASE", PAGE)
         self.assertIn("method: \"POST\"", PAGE)
         self.assertNotIn("open.tiktokapis.com", PAGE)
+
+    def test_batch_mode_supports_selection_detection_and_atomic_save(self):
+        for element_id in (
+            "batchModeToggle",
+            "batchToolbar",
+            "selectAllVisible",
+            "selectPendingAccounts",
+            "clearBatchSelection",
+            "exitBatchMode",
+            "batchSelectionCount",
+            "inspectBatchSelection",
+        ):
+            self.assertIn(f'id="{element_id}"', PAGE)
+        self.assertIn("全选当前结果", PAGE)
+        self.assertIn("选择全部待配置", PAGE)
+        self.assertIn('mode: "single"', PAGE)
+        self.assertIn("selectedAccountIds: new Set()", PAGE)
+        self.assertIn("batchSelectionSignature", PAGE)
+        self.assertIn("currentBatchSignature()", PAGE)
+        self.assertIn("invalidateBatchDetection()", PAGE)
+        self.assertIn("source_account_ids: ids", PAGE)
+        self.assertIn("targets: ids.map", PAGE)
+        self.assertIn("expected_version:", PAGE)
+        self.assertIn("批量保存", PAGE)
+        self.assertIn("服务端会再次逐个检测并原子保存", PAGE)
+
+    def test_batch_mode_uses_common_capabilities_and_safe_defaults(self):
+        self.assertIn("common_capabilities", PAGE)
+        self.assertIn("renderSavedValues(common)", PAGE)
+        self.assertIn("const configured = !batch &&", PAGE)
+        self.assertIn(
+            'input.checked = disabled ? false : !!checked',
+            PAGE,
+        )
+        self.assertIn(
+            "state.batchCreatorItems.length !== batchAccountIds().length",
+            PAGE,
+        )
+        self.assertIn("账号选择已变化，请重新检测", PAGE)
 
     def test_saved_values_are_limited_by_live_creator_capability(self):
         self.assertIn("privacy_level_options", PAGE)

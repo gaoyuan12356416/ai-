@@ -41488,6 +41488,8 @@ TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/accounts": {"GET"},
     "/api/admin/tt-posts/account-settings": {"GET", "POST"},
     "/api/admin/tt-posts/account-settings/creator-info": {"POST"},
+    "/api/admin/tt-posts/account-settings/batch": {"POST"},
+    "/api/admin/tt-posts/account-settings/batch/creator-info": {"POST"},
     "/api/admin/tt-posts/creator-info": {"POST"},
     "/api/admin/tt-posts/materials/preview": {"POST"},
     "/api/admin/tt-posts/queue": {"GET", "POST"},
@@ -97319,6 +97321,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if parsed.path in {
             "/api/admin/tt-posts/account-settings",
             "/api/admin/tt-posts/account-settings/creator-info",
+            "/api/admin/tt-posts/account-settings/batch",
+            "/api/admin/tt-posts/account-settings/batch/creator-info",
             "/api/admin/tt-posts/creator-info",
             "/api/admin/tt-posts/materials/preview",
             "/api/admin/tt-posts/queue",
@@ -97343,11 +97347,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 "/api/admin/tt-posts/account-settings/creator-info": (
                     "check_tt_post_account_settings_creator_info"
                 ),
+                "/api/admin/tt-posts/account-settings/batch": (
+                    "batch_save_tt_post_account_settings"
+                ),
+                "/api/admin/tt-posts/account-settings/batch/creator-info": (
+                    "batch_check_tt_post_account_settings_creator_info"
+                ),
                 "/api/admin/tt-posts/creator-info": "check_tt_post_creator_info",
                 "/api/admin/tt-posts/materials/preview": "prepare_tt_post_material",
                 "/api/admin/tt-posts/queue": "create_tt_post_queue",
             }
             action = action_by_path[parsed.path]
+            batch_source_account_ids = []
             try:
                 request_payload = self._read_json()
                 if not isinstance(request_payload, dict):
@@ -97356,6 +97367,32 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         "请求体必须是对象",
                         400,
                     )
+                if parsed.path.endswith("/batch"):
+                    raw_targets = request_payload.get("targets")
+                    for target in (
+                        raw_targets[:50]
+                        if isinstance(raw_targets, list)
+                        else []
+                    ):
+                        if isinstance(target, dict):
+                            value = str(
+                                target.get("source_account_id") or ""
+                            ).strip()
+                            if value:
+                                batch_source_account_ids.append(value)
+                elif parsed.path.endswith("/batch/creator-info"):
+                    raw_account_ids = request_payload.get(
+                        "source_account_ids"
+                    )
+                    batch_source_account_ids = [
+                        str(value or "").strip()
+                        for value in (
+                            raw_account_ids[:50]
+                            if isinstance(raw_account_ids, list)
+                            else []
+                        )
+                        if str(value or "").strip()
+                    ]
                 result = _tt_post_service_request(
                     "POST",
                     parsed.path,
@@ -97367,19 +97404,22 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     and isinstance(result.get("item"), dict)
                     else {}
                 )
-                target_id = (
-                    str(request_payload.get("source_account_id") or "")
-                    if parsed.path.startswith(
-                        "/api/admin/tt-posts/account-settings"
+                if batch_source_account_ids:
+                    target_id = "batch:%d" % len(batch_source_account_ids)
+                elif parsed.path.startswith(
+                    "/api/admin/tt-posts/account-settings"
+                ):
+                    target_id = str(
+                        request_payload.get("source_account_id") or ""
                     )
-                    else str(
+                else:
+                    target_id = str(
                         item.get("queue_id")
                         or item.get("id")
                         or request_payload.get("source_account_id")
                         or request_payload.get("material_id")
                         or ""
                     )
-                )
                 try:
                     audit_details = {
                         "source_account_id": str(
@@ -97424,6 +97464,46 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         ):
                             if key in saved_settings:
                                 audit_details[key] = saved_settings[key]
+                    elif parsed.path == (
+                        "/api/admin/tt-posts/account-settings/batch"
+                    ):
+                        result_items = (
+                            result.get("items")
+                            if isinstance(result, dict)
+                            and isinstance(result.get("items"), list)
+                            else []
+                        )
+                        audit_details["source_account_ids"] = (
+                            batch_source_account_ids
+                        )
+                        audit_details["account_count"] = len(
+                            batch_source_account_ids
+                        )
+                        audit_details["saved_count"] = int(
+                            result.get("saved_count") or len(result_items)
+                        )
+                        for key in (
+                            "privacy_level",
+                            "allow_comment",
+                            "allow_duet",
+                            "allow_stitch",
+                            "commercial_disclosure",
+                            "brand_organic_toggle",
+                            "brand_content_toggle",
+                            "is_aigc",
+                        ):
+                            if key in request_payload:
+                                audit_details[key] = request_payload[key]
+                    elif parsed.path == (
+                        "/api/admin/tt-posts/account-settings"
+                        "/batch/creator-info"
+                    ):
+                        audit_details["source_account_ids"] = (
+                            batch_source_account_ids
+                        )
+                        audit_details["account_count"] = len(
+                            batch_source_account_ids
+                        )
                     append_audit_log(
                         session,
                         action,
@@ -97444,6 +97524,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         str(
                             request_payload.get("source_account_id")
                             or request_payload.get("material_id")
+                            or (
+                                "batch:%d" % len(batch_source_account_ids)
+                                if batch_source_account_ids
+                                else ""
+                            )
                             or ""
                         ),
                         {
@@ -97453,6 +97538,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             "material_id": str(
                                 request_payload.get("material_id") or ""
                             ),
+                            "source_account_ids": batch_source_account_ids,
+                            "account_count": len(batch_source_account_ids),
                             "error": error_payload["error"],
                         },
                     )

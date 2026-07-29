@@ -416,14 +416,32 @@ class FakeAccountRepository:
             "status": "active",
             "publish_eligible": True,
         }
+        self.accounts = {"101": self.account}
+
+    def add_account(self, account_id):
+        account_id = str(account_id)
+        item = {
+            **self.account,
+            "source_account_id": account_id,
+            "account_id": account_id,
+            "main_account_id": "main-" + account_id,
+            "external_account_id": "creator_" + account_id,
+            "username": "creator_" + account_id,
+            "display_name": "Creator " + account_id,
+            "account_name": "Creator " + account_id,
+            "account_link": "https://www.tiktok.com/@creator_" + account_id,
+        }
+        self.accounts[account_id] = item
+        return item
 
     def list_public_accounts(self):
-        return [dict(self.account)]
+        return [dict(item) for item in self.accounts.values()]
 
     def get_public_account(self, account_id):
-        if str(account_id) != "101":
+        item = self.accounts.get(str(account_id))
+        if item is None:
             raise TTPostServiceError("tt_account_not_found", "not found", 404)
-        return dict(self.account)
+        return dict(item)
 
     @staticmethod
     def _safe_account_mapping(item):
@@ -438,7 +456,10 @@ class FakeAccountRepository:
 
     def as_account_source(self):
         return SnapshotAccountSource(
-            list_loader=lambda: [self._safe_account_mapping(self.account)],
+            list_loader=lambda: [
+                self._safe_account_mapping(item)
+                for item in self.accounts.values()
+            ],
             account_loader=lambda account_id: self._safe_account_mapping(
                 self.get_public_account(account_id)
             ),
@@ -493,9 +514,23 @@ class FakeGPU:
             "status": {"status": "PUBLISH_COMPLETE"},
         }
         self.creator_info_override = None
+        self.creator_info_by_account = {}
+        self.creator_info_calls = []
 
-    def creator_info(self, **_kwargs):
-        return self.creator_info_override or creator_info()
+    def creator_info(self, **kwargs):
+        account_id = str(kwargs.get("source_account_id") or "")
+        self.creator_info_calls.append(account_id)
+        if self.creator_info_override is not None:
+            return self.creator_info_override
+        if account_id in self.creator_info_by_account:
+            return self.creator_info_by_account[account_id]
+        result = creator_info()
+        result["creator_info"] = {
+            **result["creator_info"],
+            "creator_nickname": "Creator " + (account_id or "101"),
+            "creator_username": "creator_live_" + (account_id or "101"),
+        }
+        return result
 
     def prepare(self, *, job_id, material, source_trim_tail_seconds):
         self.prepare_jobs.append(
@@ -713,6 +748,187 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(
             "invalid_account_settings_version",
             malformed.exception.code,
+        )
+
+    def test_batch_creator_info_returns_safe_common_capability_intersection(self):
+        self.accounts.add_account("102")
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        first = creator_info()
+        first["creator_info"]["privacy_level_options"] = [
+            "SELF_ONLY",
+            "PUBLIC_TO_EVERYONE",
+        ]
+        second = creator_info()
+        second["creator_info"].update(
+            {
+                "creator_nickname": "Creator 102",
+                "creator_username": "creator_live_102",
+                "privacy_level_options": [
+                    "MUTUAL_FOLLOW_FRIENDS",
+                    "PUBLIC_TO_EVERYONE",
+                ],
+                "duet_disabled": True,
+                "max_video_post_duration_sec": 300,
+            }
+        )
+        self.gpu.creator_info_by_account = {"101": first, "102": second}
+
+        result = service.account_settings_batch_creator_info(
+            {"source_account_ids": ["101", "102"]}
+        )
+        self.assertEqual(
+            [item["source_account_id"] for item in result["items"]],
+            ["101", "102"],
+        )
+        common = result["common_capabilities"]
+        self.assertEqual(
+            common["privacy_level_options"],
+            ["PUBLIC_TO_EVERYONE"],
+        )
+        self.assertFalse(common["comment_disabled"])
+        self.assertTrue(common["duet_disabled"])
+        self.assertFalse(common["stitch_disabled"])
+        self.assertEqual(common["max_video_post_duration_sec"], 300)
+        self.assertEqual(sorted(self.gpu.creator_info_calls), ["101", "102"])
+        self.assertNotIn("access_token", json.dumps(result))
+
+    def test_batch_target_validation_happens_before_creator_info_calls(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        for account_ids in (
+            [],
+            ["101", "101"],
+            [str(index) for index in range(1, 52)],
+        ):
+            with self.assertRaises(TTPostServiceError) as caught:
+                service.account_settings_batch_creator_info(
+                    {"source_account_ids": account_ids}
+                )
+            self.assertEqual("invalid_batch_targets", caught.exception.code)
+        self.assertEqual(self.gpu.creator_info_calls, [])
+
+    def test_batch_save_updates_mixed_versions_atomically(self):
+        self.accounts.add_account("102")
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        service.store.save_account_settings(
+            "101",
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": False,
+                }
+            ),
+            expected_version=0,
+        )
+        result = service.account_settings_batch_save(
+            {
+                "targets": [
+                    {"source_account_id": "101", "expected_version": 1},
+                    {"source_account_id": "102", "expected_version": 0},
+                ],
+                "privacy_level": "PUBLIC_TO_EVERYONE",
+                "allow_comment": True,
+                "allow_duet": True,
+                "allow_stitch": True,
+                "commercial_disclosure": False,
+                "brand_organic_toggle": False,
+                "brand_content_toggle": False,
+                "is_aigc": False,
+            }
+        )
+        self.assertEqual(result["saved_count"], 2)
+        self.assertEqual(
+            [item["account_settings"]["version"] for item in result["items"]],
+            [2, 1],
+        )
+        self.assertTrue(
+            service.store.get_account_settings("101")["allow_comment"]
+        )
+        self.assertTrue(
+            service.store.get_account_settings("102")["allow_duet"]
+        )
+
+    def test_batch_save_capability_failure_writes_nothing(self):
+        self.accounts.add_account("102")
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        second = creator_info()
+        second["creator_info"]["duet_disabled"] = True
+        self.gpu.creator_info_by_account["102"] = second
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.account_settings_batch_save(
+                {
+                    "targets": [
+                        {"source_account_id": "101", "expected_version": 0},
+                        {"source_account_id": "102", "expected_version": 0},
+                    ],
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": True,
+                    "allow_stitch": False,
+                    "commercial_disclosure": False,
+                    "brand_organic_toggle": False,
+                    "brand_content_toggle": False,
+                    "is_aigc": False,
+                }
+            )
+        self.assertEqual("tt_interaction_not_allowed", caught.exception.code)
+        self.assertIsNone(service.store.get_account_settings("101"))
+        self.assertIsNone(service.store.get_account_settings("102"))
+
+    def test_batch_save_version_conflict_rolls_back_all_targets(self):
+        self.accounts.add_account("102")
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        for account_id in ("101", "102"):
+            service.store.save_account_settings(
+                account_id,
+                TTPostAccountSettings.from_mapping(
+                    {
+                        "privacy_level": "SELF_ONLY",
+                        "allow_comment": False,
+                        "allow_duet": False,
+                        "allow_stitch": False,
+                        "brand_content_toggle": False,
+                        "brand_organic_toggle": False,
+                        "is_aigc": False,
+                    }
+                ),
+                expected_version=0,
+            )
+        before = {
+            account_id: service.store.get_account_settings(account_id)
+            for account_id in ("101", "102")
+        }
+        with self.assertRaises(TTPostError) as caught:
+            service.account_settings_batch_save(
+                {
+                    "targets": [
+                        {"source_account_id": "101", "expected_version": 1},
+                        {"source_account_id": "102", "expected_version": 0},
+                    ],
+                    "privacy_level": "PUBLIC_TO_EVERYONE",
+                    "allow_comment": True,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "commercial_disclosure": False,
+                    "brand_organic_toggle": False,
+                    "brand_content_toggle": False,
+                    "is_aigc": False,
+                }
+            )
+        self.assertEqual(
+            "tt_account_settings_version_conflict",
+            caught.exception.code,
+        )
+        self.assertEqual(
+            {
+                account_id: service.store.get_account_settings(account_id)
+                for account_id in ("101", "102")
+            },
+            before,
         )
 
     def test_queue_requires_saved_account_settings_before_gpu_work(self):
@@ -1488,6 +1704,21 @@ class HTTPContractTests(unittest.TestCase):
         def account_settings_save(self, payload):
             return {"item": {"marker": "account-settings-save", **payload}}
 
+        def account_settings_batch_creator_info(self, payload):
+            return {
+                "items": [
+                    {"marker": "account-settings-batch-creator", **payload}
+                ]
+            }
+
+        def account_settings_batch_save(self, payload):
+            return {
+                "items": [
+                    {"marker": "account-settings-batch-save", **payload}
+                ],
+                "saved_count": 1,
+            }
+
         def creator_info(self, payload):
             return {"item": {"marker": "creator", **payload}}
 
@@ -1579,6 +1810,22 @@ class HTTPContractTests(unittest.TestCase):
                 {"source_account_id": "101"},
             )["item"]["marker"],
             "account-settings-save",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/account-settings/batch/creator-info",
+                "POST",
+                {"source_account_ids": ["101"]},
+            )["items"][0]["marker"],
+            "account-settings-batch-creator",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/account-settings/batch",
+                "POST",
+                {"targets": [{"source_account_id": "101"}]},
+            )["items"][0]["marker"],
+            "account-settings-batch-save",
         )
         self.assertEqual(
             self.request(
