@@ -89,3 +89,30 @@ CPU daily runner
   `/opt/x-post-media-repair/releases/1f607dff4e4fde1c11931f32ab1d477adf5b610f`
   并使用上述配置备份；本次已经产生真实 Post、queue、log、短链和剧集进度，
   禁止用部署前 SQLite 覆盖当前审计事实。
+
+## 2026-07-29 超长剧集裁尾部署方案
+
+1. 以 GitHub 精确提交同时构建 CPU `/opt/x-post-automation/releases/<commit>`
+   与 GPU `/opt/x-post-media-repair/releases/<commit>`。
+2. 备份 CPU 在线 SQLite、Token 非秘密哈希/权限、daily env、release 指针及
+   受影响源码；备份 GPU worker env/unit、manifest 统计和 release 指针。
+3. 暂停 `x-post-schedule.timer` 与 `x-post-schedule-claim.timer`，等待正在运行的
+   oneshot 结束；不得启动或恢复 10:06 失败批次。
+4. 先切 GPU v2 worker，再把 CPU
+   `X_POST_DAILY_REPAIR_PROFILE` 改为
+   `x-h264-nvenc-720-trim139-v2` 并切 CPU release；在 timer 暂停期间完成。
+5. 核对 GPU 本机 `127.0.0.1:8820/health`、CPU 隧道
+   `127.0.0.1:18820/health` 和 CPU 实际配置 profile 三者一致。
+6. 在共享调度锁下运行 `scripts/x_post_drama_media_repair_backfill.py`，精确指定
+   池 53/54、各自 content ID、Episode 1 和旧错误
+   `source_not_repairable`。命令先 dry guard，再真实 GPU/COS/CPU 复验，全部
+   成功后才一次事务恢复 `pending`；报告写入 data disk。
+7. 只读核对原 URL、池 ID/FIFO/进度、账号粘性、10:06 旧 run/queue/log、
+   SQLite integrity 和重复组均未改变；恢复 timers。
+8. 不手工启动 schedule oneshot。由下一个自然发布点完成全账号原子建队列与
+   顺序发布，并核对 queue/log/Post。
+
+回滚：在自然发布前重新暂停 timers，CPU/GPU 分别切回部署前 release，并恢复
+CPU profile v1；保留 v2 COS/manifest 与 SQLite 事实。若池 53/54 已通过复验
+恢复但尚未发布，代码回滚后应暂停短剧 timer并人工评审，禁止直接用旧备份覆盖
+SQLite。若已产生 Post，任何回滚都不得删除 queue/log/绑定或回退剧集进度。

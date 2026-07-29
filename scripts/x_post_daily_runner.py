@@ -50,9 +50,13 @@ MAX_REPAIR_RESPONSE_BYTES = 64 * 1024
 _SAFE_INTERNAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 FIXED_DAILY_WORK_DIR = Path("/mnt/data-disk/x-post-automation/daily-work")
 REPAIRABLE_MEDIA_CODES = frozenset(
-    {"invalid_media_codec", "invalid_media_dimensions"}
+    {
+        "invalid_media_codec",
+        "invalid_media_dimensions",
+        "invalid_media_duration",
+    }
 )
-DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-v1"
+DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-trim139-v2"
 MAX_DAILY_ACCOUNTS = 50
 POSITIVE_REPAIR_MATERIAL_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
 DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
@@ -1341,7 +1345,7 @@ def _repair_job_key(item, source_sha256, profile):
     material_id = _normalize_repair_material_id(item["material_id"])
     identity = "\0".join(
         (
-            "x-post-media-repair-v1",
+            "x-post-media-repair-v2",
             material_id,
             str(item["pool_item_id"]),
             str(source_sha256),

@@ -1803,7 +1803,7 @@ class RunnerTests(unittest.TestCase):
                     and Path(path).stem == drama_resource_id
                 ):
                     raise XPostError(
-                        "invalid_media_codec", "bad codec", 422
+                        "invalid_media_duration", "over 140 seconds", 422
                     )
                 return {
                     "codec": "h264",
@@ -1837,7 +1837,10 @@ class RunnerTests(unittest.TestCase):
             "https://media.example.test/%s.mp4" % drama_resource_id,
         )
         self.assertEqual(repaired["material_url"], "https://cos.example.test/repaired.mp4")
-        self.assertEqual(repaired["media_repair_trigger_code"], "invalid_media_codec")
+        self.assertEqual(
+            repaired["media_repair_trigger_code"],
+            "invalid_media_duration",
+        )
         self.assertEqual(
             repaired["media_repair_profile"], DEFAULT_REPAIR_PROFILE
         )
@@ -1867,7 +1870,7 @@ class RunnerTests(unittest.TestCase):
             )
         )
 
-    def test_repair_quota_is_shared_and_nonrepairable_errors_never_call_worker(self):
+    def test_repair_quota_is_shared_across_all_repairable_errors(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = replace(
                 test_config(),

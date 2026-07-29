@@ -739,7 +739,13 @@ class ScheduleSidecarClient(SidecarClient):
         # The selector performs the full identity/FIFO validation.
         return [dict(item) if isinstance(item, dict) else item for item in items]
 
-    def record_drama_pool_checks(self, path, checks):
+    def record_drama_pool_checks(
+        self,
+        path,
+        checks,
+        *,
+        validate_only=False,
+    ):
         normalized = []
         for raw in checks:
             if not isinstance(raw, dict):
@@ -747,28 +753,51 @@ class ScheduleSidecarClient(SidecarClient):
                     "x_post_drama_pool_check_invalid_response",
                     "Drama pool check is invalid",
                 )
-            normalized.append(
-                {
-                    "pool_item_id": int(raw["pool_item_id"]),
-                    "content_id": str(raw["content_id"]),
-                    "error_code": str(raw["error_code"])[:64],
-                    "error_message": redact_text(
-                        raw.get("error_message", ""),
-                        240,
-                    ),
-                }
-            )
+            item = {
+                "pool_item_id": int(raw["pool_item_id"]),
+                "content_id": str(raw["content_id"]),
+                "error_code": str(raw["error_code"])[:64],
+                "error_message": redact_text(
+                    raw.get("error_message", ""),
+                    240,
+                ),
+            }
+            if not item["error_code"]:
+                item["expected_error_code"] = str(
+                    raw["expected_error_code"]
+                )[:64]
+                item["expected_episode_number"] = int(
+                    raw["expected_episode_number"]
+                )
+            normalized.append(item)
         result = self.post(
             path,
-            {"checks": normalized},
-            write_may_have_happened=True,
+            {
+                "checks": normalized,
+                "validate_only": bool(validate_only),
+            },
+            write_may_have_happened=not validate_only,
         )
         item = result.get("item") if isinstance(result, dict) else None
+        validated_count = (
+            item.get("validated_count", item.get("updated_count"))
+            if isinstance(item, dict)
+            else None
+        )
+        response_validate_only = (
+            item.get("validate_only", False)
+            if isinstance(item, dict)
+            else None
+        )
         if (
             not isinstance(item, dict)
             or not isinstance(item.get("updated_count"), int)
             or item["updated_count"] < 0
             or item["updated_count"] > len(normalized)
+            or not isinstance(validated_count, int)
+            or validated_count < 0
+            or validated_count > len(normalized)
+            or response_validate_only is not bool(validate_only)
         ):
             raise SidecarError(
                 "x_post_drama_pool_check_invalid_response",
@@ -776,7 +805,10 @@ class ScheduleSidecarClient(SidecarClient):
                 502,
                 unknown_outcome=True,
             )
-        return dict(item)
+        normalized_item = dict(item)
+        normalized_item["validated_count"] = validated_count
+        normalized_item["validate_only"] = response_validate_only
+        return normalized_item
 
 
 def _within_grace(item, current, grace_seconds):

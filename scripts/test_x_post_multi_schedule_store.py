@@ -783,6 +783,43 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )["items"][0]
         self.assertEqual(historical_pool["status"], "active")
 
+        success_check = {
+            "pool_item_id": rejected_pool["id"],
+            "content_id": rejected_pool["content_id"],
+            "error_code": "",
+            "error_message": "",
+            "expected_error_code": "source_not_repairable",
+            "expected_episode_number": 1,
+        }
+        guarded = self.store.record_drama_pool_checks(
+            [success_check],
+            validate_only=True,
+        )
+        self.assertEqual(guarded["updated_count"], 0)
+        self.assertEqual(guarded["validated_count"], 1)
+        self.assertTrue(guarded["validate_only"])
+        still_failed = self.store.query_drama_pool(
+            {"content_id": rejected_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(still_failed["status"], "validation_failed")
+
+        restored = self.store.record_drama_pool_checks([success_check])
+        self.assertEqual(restored["updated_count"], 1)
+        self.assertEqual(restored["validated_count"], 1)
+        recovered = self.store.query_drama_pool(
+            {"content_id": rejected_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(recovered["status"], "pending")
+        self.assertEqual(recovered["last_error_code"], "")
+        self.assertEqual(recovered["last_error_message"], "")
+
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.record_drama_pool_checks([success_check])
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_drama_pool_revalidation_conflict",
+        )
+
     def test_drama_pool_accepts_large_batch_and_returns_compact_items(self):
         drama_ids = ["D%03d" % index for index in range(100)]
         validation_checks = [

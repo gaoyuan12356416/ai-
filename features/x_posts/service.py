@@ -3613,11 +3613,17 @@ class XPostStore:
             ).fetchall()
             return [_row_dict(row) for row in rows]
 
-    def record_drama_pool_checks(self, checks):
+    def record_drama_pool_checks(self, checks, validate_only=False):
         if not isinstance(checks, list) or not checks or len(checks) > 100:
             raise XPostError(
                 "invalid_request",
                 "checks must contain 1 to 100 drama pool checks",
+                400,
+            )
+        if not isinstance(validate_only, bool):
+            raise XPostError(
+                "invalid_request",
+                "validate_only must be a boolean",
                 400,
             )
         normalized = []
@@ -3642,40 +3648,87 @@ class XPostStore:
             seen.add(pool_item_id)
             content_id = _drama_content_id(raw.get("content_id"))
             raw_code = str(raw.get("error_code", "") or "").strip()
-            try:
-                code = _clean_token(
-                    raw_code,
-                    "drama pool error code",
-                    64,
+            if raw_code:
+                try:
+                    code = _clean_token(
+                        raw_code,
+                        "drama pool error code",
+                        64,
+                    )
+                except ValueError:
+                    raise XPostError(
+                        "invalid_request",
+                        "error_code is invalid",
+                        400,
+                    ) from None
+                if code not in DRAMA_POOL_DETERMINISTIC_REJECTION_CODES:
+                    raise XPostError(
+                        "invalid_request",
+                        "error_code is not a deterministic drama rejection",
+                        400,
+                    )
+                expected_error_code = ""
+                expected_episode_number = 0
+                message = redact_text(
+                    raw.get("error_message")
+                    or "Drama episode did not pass X media preflight",
+                    500,
                 )
-            except ValueError:
-                raise XPostError(
-                    "invalid_request",
-                    "error_code is invalid",
-                    400,
-                ) from None
-            if code not in DRAMA_POOL_DETERMINISTIC_REJECTION_CODES:
-                raise XPostError(
-                    "invalid_request",
-                    "error_code is not a deterministic drama rejection",
-                    400,
+            else:
+                try:
+                    expected_error_code = _clean_token(
+                        raw.get("expected_error_code"),
+                        "expected drama pool error code",
+                        64,
+                    )
+                except ValueError:
+                    raise XPostError(
+                        "invalid_request",
+                        "expected_error_code is invalid",
+                        400,
+                    ) from None
+                if (
+                    expected_error_code
+                    not in DRAMA_POOL_DETERMINISTIC_REJECTION_CODES
+                ):
+                    raise XPostError(
+                        "invalid_request",
+                        "expected_error_code is not a deterministic drama rejection",
+                        400,
+                    )
+                expected_episode_number = _positive_int(
+                    raw.get("expected_episode_number"),
+                    "expected_episode_number",
                 )
-            message = redact_text(
-                raw.get("error_message")
-                or "Drama episode did not pass X media preflight",
-                500,
-            )
+                code = ""
+                message = ""
             normalized.append(
-                (pool_item_id, content_id, code, message)
+                (
+                    pool_item_id,
+                    content_id,
+                    code,
+                    message,
+                    expected_error_code,
+                    expected_episode_number,
+                )
             )
 
         timestamp = utc_now()
         updated = 0
+        validated = 0
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            for pool_item_id, content_id, code, message in normalized:
+            for (
+                pool_item_id,
+                content_id,
+                code,
+                message,
+                expected_error_code,
+                expected_episode_number,
+            ) in normalized:
                 row = conn.execute(
-                    "SELECT id,content_id,status,assigned_account_id "
+                    "SELECT id,content_id,status,assigned_account_id,"
+                    "next_sub_number,last_error_code "
                     "FROM x_post_drama_pool WHERE id=?",
                     (pool_item_id,),
                 ).fetchone()
@@ -3701,6 +3754,49 @@ class XPostStore:
                         "A bound drama cannot be rejected or reassigned",
                         409,
                     )
+                if not code:
+                    if (
+                        str(row["status"]) != "validation_failed"
+                        or str(row["last_error_code"] or "")
+                        != expected_error_code
+                        or int(row["next_sub_number"] or 0)
+                        != expected_episode_number
+                    ):
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_drama_pool_revalidation_conflict",
+                            "Drama pool state changed before successful revalidation",
+                            409,
+                        )
+                    validated += 1
+                    if validate_only:
+                        continue
+                    cursor = conn.execute(
+                        "UPDATE x_post_drama_pool SET status='pending',"
+                        "last_checked_at=?,last_error_code='',"
+                        "last_error_message='',updated_at=? "
+                        "WHERE id=? AND content_id=? "
+                        "AND status='validation_failed' "
+                        "AND assigned_account_id=0 "
+                        "AND next_sub_number=? AND last_error_code=?",
+                        (
+                            timestamp,
+                            timestamp,
+                            pool_item_id,
+                            content_id,
+                            expected_episode_number,
+                            expected_error_code,
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) != 1:
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_drama_pool_revalidation_conflict",
+                            "Drama pool state changed before successful revalidation",
+                            409,
+                        )
+                    updated += 1
+                    continue
                 if str(row["status"]) == "completed":
                     conn.rollback()
                     raise XPostError(
@@ -3708,6 +3804,9 @@ class XPostStore:
                         "Completed drama cannot be rejected",
                         409,
                     )
+                validated += 1
+                if validate_only:
+                    continue
                 cursor = conn.execute(
                     "UPDATE x_post_drama_pool SET status='validation_failed',"
                     "last_checked_at=?,last_error_code=?,"
@@ -3725,7 +3824,11 @@ class XPostStore:
                 )
                 updated += int(cursor.rowcount or 0)
             conn.commit()
-        return {"updated_count": updated}
+        return {
+            "updated_count": updated,
+            "validated_count": validated,
+            "validate_only": validate_only,
+        }
 
     def query_drama_pool(self, payload=None):
         payload = payload if isinstance(payload, dict) else {}

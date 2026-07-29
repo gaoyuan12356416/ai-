@@ -8,7 +8,7 @@
 | TC-004 | 横版/方版 | 分别输出 1280×720 / 720×720 | P1 |
 | TC-005 | 极端比例 | 等比缩放并补边，不裁剪/拉伸 | P1 |
 | TC-006 | 无音轨 | 补 AAC-LC 静音轨并通过 probe | P0 |
-| TC-007 | codec/dimensions 以外错误 | GPU 调用数为 0 | P0 |
+| TC-007 | duration >140 秒 | 固定保留开头 139 秒，输出不超过 140 秒 | P0 |
 | TC-008 | 同批超过六条需修复 | 第七条不调用 GPU，按不足处理 | P1 |
 | TC-009 | CPU/GPU source SHA 或 size 不同 | fail closed | P0 |
 | TC-010 | worker output SHA/size 与 CPU 下载不同 | fail closed | P0 |
@@ -26,3 +26,9 @@
 | TC-022 | 发布前 COS 对象变化 | `media_preflight_changed`，零 X 请求 | P0 |
 | TC-023 | 当前九条 backfill | 九条均上传新 COS 并通过 probe，零 queue/log/Post | P0 |
 | TC-024 | 服务回滚 | 保留 SQLite/Token/COS，旧 daily 不消费修复字段 | P1 |
+| TC-025 | duration <0.5 秒或 NaN/Inf | worker 拒绝，不启动 ffmpeg/COS | P0 |
+| TC-026 | codec/dimensions 首错且源同时超长 | 同次规范化并裁尾至 139 秒 | P0 |
+| TC-027 | 正常时长 codec/dimensions 修复 | 不带 `-t`，输出继续保持源时长 | P0 |
+| TC-028 | validation_failed 短剧成功重验 | 先 dry guard；全链成功后原地 pending，ID/FIFO/进度不变 | P0 |
+| TC-029 | 短剧绑定/历史/旧错误/集数任一不符 | 恢复冲突，保持原状态 | P0 |
+| TC-030 | 短剧恢复命令 | 共享调度锁，零 plan/queue/log/Post | P0 |
