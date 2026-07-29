@@ -1552,6 +1552,8 @@ def normalize_creator_info(data):
         and parsed.hostname
         and parsed.username is None
         and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
     ):
         result["creator_avatar_url"] = avatar[:2048]
     else:

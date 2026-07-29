@@ -44,6 +44,7 @@
 - CPU 仅在单个账号执行预检或发布时按账号精确读取 Token。
 - CPU 到 GPU 使用加密凭据封装传递，Token 不写入任务 SQLite、媒体 manifest 或前端响应。
 - 未发现将 Token 放入命令行参数或公开日志的实现。
+- TikTok 头像 URL 带查询签名或 fragment 时由 GPU 与 CPU 双层丢弃，避免把短时媒体签名参数透传给浏览器。
 - 主 API 通过独立 root-only `/etc/tt-post-app.env` 和 systemd drop-in
   取得 CPU sidecar 地址及内部 bearer；缺失时 TT 路由 fail-close，不影响主 API。
 
@@ -65,10 +66,10 @@
 
 ## 编译与验证结果
 
-- TT 测试：106/106 通过
+- TT 测试：108/108 通过
   - Core：32
-  - Service：29
-  - GPU：24
+  - Service：30
+  - GPU：25
   - UI：11
   - App contract：10
 - X 回归：72/72 通过

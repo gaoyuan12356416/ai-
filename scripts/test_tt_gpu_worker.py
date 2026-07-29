@@ -336,6 +336,24 @@ def make_publish(config, title="Watch now", **overrides):
 
 
 class TTGPUWorkerTests(unittest.TestCase):
+    def test_creator_avatar_signed_query_is_not_returned(self):
+        normalized = worker.normalize_creator_info(
+            {
+                "comment_disabled": False,
+                "creator_avatar_url": (
+                    "https://avatar.example.com/a.jpg"
+                    "?refresh_token=not-an-account-token"
+                ),
+                "creator_nickname": "Dramawave",
+                "creator_username": "dramawave",
+                "duet_disabled": False,
+                "max_video_post_duration_sec": 3600,
+                "privacy_level_options": ["SELF_ONLY"],
+                "stitch_disabled": False,
+            }
+        )
+        self.assertEqual(normalized["creator_avatar_url"], "")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

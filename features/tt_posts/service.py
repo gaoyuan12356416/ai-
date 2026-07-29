@@ -1183,10 +1183,14 @@ def _normalized_creator_info(raw: Mapping[str, Any]) -> Dict[str, Any]:
     avatar = str(raw.get("creator_avatar_url") or "").strip()
     if avatar:
         try:
-            result["creator_avatar_url"] = _safe_https_url(
-                avatar,
-                "TikTok头像",
-            )
+            parsed_avatar = urllib.parse.urlsplit(avatar)
+            if parsed_avatar.query or parsed_avatar.fragment:
+                raise TTPostServiceError(
+                    "tt_creator_avatar_signed_url_omitted",
+                    "TikTok头像签名地址不向前端透传",
+                    400,
+                )
+            result["creator_avatar_url"] = _safe_https_url(avatar, "TikTok头像")
         except TTPostError:
             result["creator_avatar_url"] = ""
     return result

@@ -36,6 +36,7 @@ from features.tt_posts.service import (
     TTPostService,
     TTPostServiceError,
     DramawaveMaterialResolver,
+    _normalized_creator_info,
 )
 from scripts.tt_post_runner import (
     RunnerConfig,
@@ -228,6 +229,24 @@ class CaptureConnection:
 
 
 class GPUClientTests(unittest.TestCase):
+    def test_signed_creator_avatar_url_is_omitted_from_public_dto(self):
+        normalized = _normalized_creator_info(
+            {
+                "creator_nickname": "Creator",
+                "creator_username": "creator",
+                "creator_avatar_url": (
+                    "https://avatar.example.com/a.jpg"
+                    "?refresh_token=not-an-account-token"
+                ),
+                "privacy_level_options": ["SELF_ONLY"],
+                "comment_disabled": False,
+                "duet_disabled": False,
+                "stitch_disabled": False,
+                "max_video_post_duration_sec": 3600,
+            }
+        )
+        self.assertEqual(normalized["creator_avatar_url"], "")
+
     def client(self, connection):
         return GPUClient(
             "http://127.0.0.1:18830",
