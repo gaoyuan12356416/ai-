@@ -188,6 +188,25 @@
     ]
   },
   {
+    "key": "tiktok_platform",
+    "label": "TikTok 社媒",
+    "order": 35,
+    "module": "tt_posts",
+    "items": [
+      {
+        "key": "ttPostPool",
+        "label": "TT Post发布池",
+        "description": "选择账号、素材和发布时间，确认后加入安全发布队列",
+        "kind": "page",
+        "href": "/tt-post-pool.html",
+        "enabled": true,
+        "order": 10,
+        "module": "tt_posts",
+        "adminOnly": false
+      }
+    ]
+  },
+  {
     "key": "x_platform",
     "label": "X平台推广",
     "order": 40,

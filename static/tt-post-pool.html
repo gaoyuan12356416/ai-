@@ -1,0 +1,1851 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TT Post 发布池 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #13233a;
+      --muted: #687894;
+      --line: #dce5f1;
+      --blue: #2563eb;
+      --cyan: #10a8b8;
+      --green: #14885f;
+      --amber: #a66a05;
+      --red: #c43b49;
+      --surface: rgba(255, 255, 255, .95);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 75% -8%, rgba(37, 99, 235, .13), transparent 35%),
+        radial-gradient(circle at 20% 10%, rgba(16, 168, 184, .08), transparent 26%),
+        #f4f7fb;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { touch-action: manipulation; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 270px minmax(0, 1fr); }
+    .sidebar { padding: 24px 18px; background: linear-gradient(180deg, #0e1d35, #162c50); color: #fff; }
+    .brand { display: flex; align-items: center; gap: 12px; margin: 0 8px 22px; }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #2f66ff, #21c78b);
+      font-weight: 900;
+    }
+    .brand strong, .brand span { display: block; }
+    .brand span { margin-top: 3px; color: rgba(230, 239, 255, .62); font-size: 12px; }
+    .main { min-width: 0; padding: 26px 30px 48px; }
+    .topbar { margin-bottom: 22px; }
+    .title h1 { margin: 0; font-size: 28px; letter-spacing: -.02em; }
+    .title p { margin: 7px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .button {
+      min-height: 40px;
+      padding: 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 750;
+      box-shadow: 0 7px 18px rgba(31, 51, 82, .06);
+    }
+    .button:hover:not(:disabled) { border-color: #9fb8df; }
+    .button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .button.primary:hover:not(:disabled) { background: #1d55d1; }
+    .button.warning { border-color: #e5b74f; color: #7a4d00; background: #fffaf0; }
+    .button.danger { border-color: #e5a8af; color: #a12636; background: #fff7f8; }
+    .button.small { min-height: 32px; padding: 0 11px; border-radius: 9px; font-size: 12px; }
+    .button:disabled { opacity: .52; cursor: not-allowed; }
+    .panel {
+      padding: 20px;
+      border: 1px solid rgba(210, 222, 238, .92);
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: 0 16px 42px rgba(30, 51, 83, .07);
+    }
+    .panel + .panel { margin-top: 18px; }
+    .hidden { display: none !important; }
+    .gate { padding: 48px 24px; text-align: center; color: var(--muted); }
+    .gate strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 18px; }
+    .notice {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 13px;
+      align-items: start;
+      margin-bottom: 18px;
+      padding: 16px 18px;
+      border: 1px solid #efdba8;
+      border-radius: 16px;
+      color: #744d05;
+      background: #fff9e9;
+      line-height: 1.58;
+      font-size: 13px;
+    }
+    .notice-mark {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: #d18b13;
+      font-weight: 900;
+    }
+    .notice strong { display: block; margin-bottom: 3px; color: #654300; }
+    .section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .section-head h2 { margin: 0; font-size: 18px; }
+    .section-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .gate-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .gate-card {
+      min-height: 92px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #fff;
+    }
+    .gate-card span { color: var(--muted); font-size: 12px; }
+    .gate-card strong { display: block; margin-top: 10px; font-size: 15px; }
+    .gate-card.ready { border-color: #b9e5d4; background: #f2fbf7; }
+    .gate-card.ready strong { color: var(--green); }
+    .gate-card.blocked { border-color: #efc9ce; background: #fff7f8; }
+    .gate-card.blocked strong { color: var(--red); }
+    .gate-card.unknown { border-color: #ecd9a8; background: #fffaf0; }
+    .gate-card.unknown strong { color: var(--amber); }
+    .create-grid {
+      display: grid;
+      grid-template-columns: minmax(300px, .9fr) minmax(440px, 1.35fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .column { display: grid; gap: 15px; min-width: 0; }
+    .step {
+      display: inline-grid;
+      place-items: center;
+      width: 27px;
+      height: 27px;
+      margin-right: 7px;
+      border-radius: 9px;
+      color: #fff;
+      background: linear-gradient(135deg, var(--blue), var(--cyan));
+      font-size: 13px;
+    }
+    .field { display: grid; gap: 7px; min-width: 0; }
+    .field > label, .field-label { color: #3f506a; font-size: 13px; font-weight: 800; }
+    .field input[type="text"],
+    .field input[type="search"],
+    .field input[type="datetime-local"],
+    .field select,
+    .field textarea,
+    .filters input,
+    .filters select {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+    .field textarea { min-height: 150px; resize: vertical; line-height: 1.55; }
+    .field input:focus, .field select:focus, .field textarea:focus,
+    .filters input:focus, .filters select:focus {
+      border-color: #86a8f8;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, .11);
+    }
+    .helper { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .helper.error { color: var(--red); }
+    .helper.success { color: var(--green); }
+    .search-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .account-list {
+      max-height: 272px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    .account-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 58px;
+      padding: 9px 12px;
+      border-bottom: 1px solid #edf2f8;
+      cursor: pointer;
+    }
+    .account-option:last-child { border-bottom: 0; }
+    .account-option:hover { background: #f7faff; }
+    .account-option.disabled { cursor: not-allowed; opacity: .62; background: #fafbfc; }
+    .account-option input { width: 17px; height: 17px; accent-color: var(--blue); }
+    .account-copy { min-width: 0; }
+    .account-copy strong, .account-copy span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .account-copy span { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .account-state { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .account-option.disabled .account-state { color: var(--red); }
+    .info-card {
+      min-height: 82px;
+      padding: 14px;
+      border: 1px solid #dbe5f2;
+      border-radius: 13px;
+      background: #f8faff;
+    }
+    .info-card strong { display: block; font-size: 14px; }
+    .info-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .creator-head { display: flex; align-items: center; gap: 11px; }
+    .creator-avatar {
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      overflow: hidden;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: linear-gradient(135deg, #111827, #384860);
+      font-weight: 850;
+    }
+    .creator-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .media-preview {
+      display: grid;
+      grid-template-columns: minmax(160px, 230px) minmax(0, 1fr);
+      gap: 14px;
+      min-height: 230px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f8faff;
+    }
+    .video-shell {
+      min-height: 230px;
+      overflow: hidden;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: rgba(255,255,255,.78);
+      background: #101827;
+      text-align: center;
+      font-size: 12px;
+    }
+    .video-shell video { width: 100%; max-height: 340px; display: block; background: #05070b; }
+    .media-meta { min-width: 0; display: grid; align-content: start; gap: 9px; }
+    .media-meta strong { overflow-wrap: anywhere; }
+    .meta-line { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .caption-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+    .check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+    .check-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      min-height: 64px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: #40516a;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .check-card input { width: 17px; height: 17px; flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--blue); }
+    .check-card.disabled { opacity: .55; background: #f4f5f7; }
+    .disclosure {
+      display: grid;
+      gap: 10px;
+      padding: 13px;
+      border: 1px solid #e5d8b7;
+      border-radius: 13px;
+      background: #fffbf2;
+    }
+    .inline-check { display: flex; align-items: flex-start; gap: 9px; color: #40516a; font-size: 13px; line-height: 1.5; }
+    .inline-check input { width: 17px; height: 17px; flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--blue); }
+    .disclosure-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding-left: 26px; }
+    .consent {
+      padding: 14px;
+      border: 1px solid #cbdaf7;
+      border-radius: 13px;
+      background: #f3f7ff;
+    }
+    .form-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding-top: 15px;
+      border-top: 1px solid #e6edf6;
+    }
+    .form-state { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .form-state.error { color: var(--red); }
+    .form-state.success { color: var(--green); }
+    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .stat { min-height: 94px; padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: #fff; }
+    .stat span { color: var(--muted); font-size: 12px; }
+    .stat strong { display: block; margin-top: 10px; font-size: 24px; }
+    .filters {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(150px, 1fr) auto auto;
+      gap: 9px;
+      margin-bottom: 15px;
+    }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
+    table { width: 100%; min-width: 1420px; border-collapse: collapse; background: #fff; }
+    th, td {
+      padding: 12px 13px;
+      border-bottom: 1px solid #e8eef6;
+      vertical-align: top;
+      text-align: left;
+      font-size: 13px;
+    }
+    th { position: sticky; top: 0; z-index: 1; color: #5d6d86; background: #f7f9fc; font-size: 12px; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    .badge {
+      display: inline-flex;
+      min-height: 27px;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .badge.success { color: #08734f; background: #e8f8f1; }
+    .badge.progress { color: #2457b8; background: #eef4ff; }
+    .badge.warning { color: #925d00; background: #fff4d9; }
+    .badge.failure { color: #ad2f3b; background: #ffedef; }
+    .badge.neutral { color: #56657b; background: #edf1f6; }
+    .subtle { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .error-copy { max-width: 300px; color: #a62f3a; line-height: 1.45; overflow-wrap: anywhere; }
+    .caption-cell { max-width: 300px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .empty { padding: 38px 18px; text-align: center; color: var(--muted); }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+    .pager-actions { display: flex; gap: 8px; }
+    .queue-actions { display: flex; flex-wrap: wrap; gap: 7px; min-width: 190px; }
+    dialog {
+      width: min(940px, calc(100vw - 32px));
+      max-height: calc(100vh - 48px);
+      padding: 0;
+      border: 0;
+      border-radius: 18px;
+      box-shadow: 0 24px 70px rgba(18, 35, 62, .28);
+    }
+    dialog::backdrop { background: rgba(13, 25, 44, .52); }
+    .dialog-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .dialog-head h2 { margin: 0; font-size: 18px; }
+    .dialog-body { max-height: 68vh; overflow: auto; padding: 18px 20px 22px; }
+    .event-list { display: grid; gap: 10px; }
+    .event-item {
+      display: grid;
+      grid-template-columns: 160px minmax(0, 1fr);
+      gap: 14px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8faff;
+    }
+    .event-item strong { display: block; font-size: 13px; }
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 30;
+      max-width: min(440px, calc(100vw - 32px));
+      padding: 13px 16px;
+      border-radius: 12px;
+      color: #fff;
+      background: #1d3150;
+      box-shadow: 0 16px 36px rgba(20, 38, 66, .28);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .toast.error { background: #a72d3a; }
+    @media (max-width: 1180px) {
+      .gate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .create-grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 820px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { padding: 18px; }
+      .main { padding: 20px 16px 38px; }
+      .gate-grid, .stats, .setting-grid, .check-grid, .disclosure-options, .filters { grid-template-columns: 1fr; }
+      .media-preview { grid-template-columns: 1fr; }
+      .form-footer { align-items: stretch; flex-direction: column; }
+      .form-footer .button { width: 100%; }
+      .event-item { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>TT Post 发布池</h1>
+          <p>选择 TikTok 个号和素材，确认最终成片、描述及发布设置后安排上海时间发布。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能查看和维护 TT Post 发布池。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 TT Post 发布池权限</strong>
+        <span>请联系管理员在用户管理中开启 tt_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="notice" aria-label="TikTok 合规提醒">
+          <div class="notice-mark">!</div>
+          <div>
+            <strong>当前片尾含 DramaWave 品牌与跳转引导，正式直发前必须完成平台审核确认。</strong>
+            TikTok 官方 Direct Post 对内部账号管理工具、品牌 Logo 和推广引导有额外限制。页面未显示全部开放时，新任务只会进入安全待处理状态，不会自动发送到 TikTok。
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>发布与合规状态</h2>
+              <p>三个条件全部通过后，页面才会把新任务标记为“允许直发”；状态缺失一律按未开放处理。</p>
+            </div>
+            <button id="refreshGates" class="button small" type="button">刷新状态</button>
+          </div>
+          <div class="gate-grid">
+            <article id="liveGateCard" class="gate-card unknown"><span>真实发布开关</span><strong id="liveGateText">正在确认…</strong></article>
+            <article id="auditGateCard" class="gate-card unknown"><span>Direct Post 审核</span><strong id="auditGateText">正在确认…</strong></article>
+            <article id="urlGateCard" class="gate-card unknown"><span>媒体域名验证</span><strong id="urlGateText">正在确认…</strong></article>
+            <article id="modeGateCard" class="gate-card unknown"><span>新任务模式</span><strong id="modeGateText">安全待处理</strong></article>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>新建发布任务</h2>
+              <p>每次只安排一个账号和一个素材。账号、素材、描述或隐私设置发生变化后，都需要重新确认发布。</p>
+            </div>
+          </div>
+
+          <div class="create-grid">
+            <div class="column">
+              <div class="field">
+                <label for="accountSearch"><span class="step">1</span>选择 TikTok 个号</label>
+                <div class="search-line">
+                  <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称或账号 ID" />
+                  <button id="refreshAccounts" class="button" type="button">刷新账号</button>
+                </div>
+                <div id="accountList" class="account-list" role="radiogroup" aria-label="选择 TikTok 发布账号">
+                  <div class="empty">正在加载账号…</div>
+                </div>
+                <span id="accountHelp" class="helper">账号列表不会显示或下发任何凭证。</span>
+              </div>
+
+              <div id="creatorCard" class="info-card" aria-live="polite">
+                <strong>等待确认目标账号</strong>
+                <p>选择账号后会实时读取 TikTok 昵称、可用隐私范围和互动能力。</p>
+              </div>
+
+              <div class="field">
+                <label for="materialId"><span class="step">2</span>填写素材 ID</label>
+                <div class="search-line">
+                  <input id="materialId" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：5221348" />
+                  <button id="previewMaterial" class="button primary" type="button">读取素材</button>
+                </div>
+                <span id="materialHelp" class="helper">系统会从素材库读取真实 Content ID，并生成带固定新版片尾的最终视频预览。</span>
+              </div>
+
+              <div id="mediaPreview" class="media-preview hidden">
+                <div id="videoShell" class="video-shell"><span>视频准备中</span></div>
+                <div class="media-meta">
+                  <strong id="mediaTitle">—</strong>
+                  <div id="mediaMaterialId" class="meta-line">素材 ID：—</div>
+                  <div id="mediaContentId" class="meta-line">Drama ID：—</div>
+                  <div id="mediaDuration" class="meta-line">最终时长：—</div>
+                  <div id="mediaStatus" class="meta-line">处理状态：—</div>
+                  <div class="meta-line">实际发布使用此处最终成片，不直接使用原始素材地址。</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="column">
+              <div class="field">
+                <label for="caption"><span class="step">3</span>确认发布描述</label>
+                <textarea id="caption" maxlength="2200" disabled aria-describedby="captionHelp"></textarea>
+                <div class="caption-meta">
+                  <span id="captionHelp">读取素材后自动填充；可以编辑，但必须保留准确的 Drama ID 行。</span>
+                  <span id="captionCount">0 / 2200</span>
+                </div>
+              </div>
+
+              <div class="setting-grid">
+                <div class="field">
+                  <label for="scheduledAt"><span class="step">4</span>上海发布时间</label>
+                  <input id="scheduledAt" type="datetime-local" step="60" />
+                  <span class="helper">按 Asia/Shanghai 保存，发布前会再次确认账号能力。</span>
+                </div>
+                <div class="field">
+                  <label for="privacyLevel">谁可以观看</label>
+                  <select id="privacyLevel" disabled>
+                    <option value="">请手动选择，不设默认值</option>
+                  </select>
+                  <span class="helper">仅显示目标账号实时返回的可选范围。</span>
+                </div>
+              </div>
+
+              <div class="field">
+                <span class="field-label">允许互动（默认全部关闭）</span>
+                <div class="check-grid">
+                  <label id="commentCard" class="check-card disabled">
+                    <input id="allowComment" type="checkbox" disabled />
+                    <span><strong>允许评论</strong><br />由运营手动开启</span>
+                  </label>
+                  <label id="duetCard" class="check-card disabled">
+                    <input id="allowDuet" type="checkbox" disabled />
+                    <span><strong>允许 Duet</strong><br />由运营手动开启</span>
+                  </label>
+                  <label id="stitchCard" class="check-card disabled">
+                    <input id="allowStitch" type="checkbox" disabled />
+                    <span><strong>允许 Stitch</strong><br />由运营手动开启</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="disclosure">
+                <label class="inline-check">
+                  <input id="commercialDisclosure" type="checkbox" />
+                  <span><strong>这条内容包含商业推广</strong><br />开启后必须说明推广自己品牌、第三方品牌或两者兼有。</span>
+                </label>
+                <div id="commercialOptions" class="disclosure-options hidden">
+                  <label class="inline-check"><input id="ownBrand" type="checkbox" /><span>推广自己的品牌或业务</span></label>
+                  <label class="inline-check"><input id="brandedContent" type="checkbox" /><span>推广第三方品牌或合作方</span></label>
+                </div>
+                <label class="inline-check">
+                  <input id="isAigc" type="checkbox" />
+                  <span>最终视频属于需要声明的 AI 生成或 AI 显著处理内容</span>
+                </label>
+              </div>
+
+              <div class="consent">
+                <label class="inline-check">
+                  <input id="publishConsent" type="checkbox" />
+                  <span id="consentText">我已核对目标账号、最终视频、描述、隐私和互动设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放时，此任务只会安全保存，不会自动发布。</span>
+                </label>
+              </div>
+
+              <div class="form-footer">
+                <div id="formState" class="form-state" role="status" aria-live="polite">请依次完成账号确认和素材读取。</div>
+                <button id="createQueue" class="button primary" type="button" disabled>加入发布池</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="stats">
+            <article class="stat"><span>任务总数</span><strong id="totalCount">—</strong></article>
+            <article class="stat"><span>等待发布时间</span><strong id="scheduledCount">—</strong></article>
+            <article class="stat"><span>发布处理中</span><strong id="processingCount">—</strong></article>
+            <article class="stat"><span>需要人工确认</span><strong id="reviewCount">—</strong></article>
+            <article class="stat"><span>已发布</span><strong id="publishedCount">—</strong></article>
+          </div>
+
+          <div class="section-head">
+            <div>
+              <h2>发布任务</h2>
+              <p>“处理中”和“结果待确认”都不会自动创建第二条发布请求；点击事件可查看状态变化。</p>
+            </div>
+          </div>
+
+          <form id="queueFilters" class="filters">
+            <input id="filterMaterialId" inputmode="numeric" placeholder="素材 ID" aria-label="筛选素材 ID" />
+            <select id="filterAccountId" aria-label="筛选 TikTok 账号">
+              <option value="">全部账号</option>
+            </select>
+            <select id="filterStatus" aria-label="筛选任务状态">
+              <option value="">全部状态</option>
+              <option value="scheduled">等待发布时间</option>
+              <option value="preparing">视频准备中</option>
+              <option value="processing_download">TikTok处理中</option>
+              <option value="published">已发布</option>
+              <option value="failed">发布失败</option>
+              <option value="needs_review">结果待确认</option>
+              <option value="missed">已错过时间</option>
+              <option value="hold">安全待处理</option>
+            </select>
+            <button class="button primary" type="submit">查询</button>
+            <button id="resetQueueFilters" class="button" type="button">重置</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>发布时间</th>
+                  <th>TikTok账号</th>
+                  <th>素材 / Drama ID</th>
+                  <th>描述</th>
+                  <th>发布设置</th>
+                  <th>任务状态</th>
+                  <th>TikTok状态</th>
+                  <th>错误</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="queueRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <span id="pageInfo">第 1 页</span>
+            <div class="pager-actions">
+              <button id="prevPage" class="button" type="button">上一页</button>
+              <button id="nextPage" class="button" type="button">下一页</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="eventDialog">
+    <div class="dialog-head">
+      <div><h2 id="eventTitle">任务事件</h2><div id="eventSubtitle" class="subtle">—</div></div>
+      <button id="closeEvents" class="button" type="button">关闭</button>
+    </div>
+    <div class="dialog-body">
+      <div id="eventList" class="event-list"><div class="empty">正在加载…</div></div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script>
+    (() => {
+      const API_BASE = "/api/admin/tt-posts";
+      const CAPTION_TEMPLATE = "Watch the full story in the app 🎬\n\nDrama ID: {{contect_id}}\n\nVisit my profile → Open the link → Search the Drama ID → Watch now.";
+      const CONSENT_VERSION = "tt-direct-post-consent-20260729";
+      const PROCESSING_STATUSES = new Set([
+        "claimed", "creator_recheck", "initializing", "processing_download", "reconciling",
+      ]);
+      const state = {
+        auth: null,
+        accounts: [],
+        selectedAccountId: "",
+        creatorInfo: null,
+        material: null,
+        gates: {
+          liveEnabled: undefined,
+          auditApproved: undefined,
+          urlVerified: undefined,
+        },
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        formKey: "",
+        busy: false,
+        queueActionsBusy: new Set(),
+        toastTimer: null,
+      };
+
+      const byId = id => document.getElementById(id);
+      const setText = (node, value, fallback = "—") => {
+        if (!node) return;
+        node.textContent = value == null || value === "" ? fallback : String(value);
+      };
+      const show = node => node && node.classList.remove("hidden");
+      const hide = node => node && node.classList.add("hidden");
+      const asObject = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+      const firstDefined = (...values) => values.find(value => value !== undefined && value !== null);
+      const boolValue = value => {
+        if (value === true || value === 1 || value === "1" || value === "true") return true;
+        if (value === false || value === 0 || value === "0" || value === "false") return false;
+        return undefined;
+      };
+      const cleanId = value => String(value == null ? "" : value).trim();
+      const accountId = item => cleanId(
+        firstDefined(item && item.source_account_id, item && item.account_id, item && item.id)
+      );
+      const accountName = item => String(
+        firstDefined(item && item.account_name, item && item.display_name, item && item.creator_nickname, `账号 ${accountId(item)}`) || ""
+      );
+      const formatTime = value => {
+        if (!value) return "—";
+        const raw = String(value);
+        const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? raw : raw.replace(" ", "T") + "Z";
+        const date = new Date(normalized);
+        if (Number.isNaN(date.getTime())) return raw;
+        return new Intl.DateTimeFormat("zh-CN", {
+          timeZone: "Asia/Shanghai",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(date);
+      };
+      const utf16Units = value => Array.from(String(value || "")).reduce(
+        (total, character) => total + (character.codePointAt(0) > 0xffff ? 2 : 1),
+        0
+      );
+      const safeHttpsUrl = value => {
+        try {
+          const url = new URL(String(value || ""), window.location.origin);
+          if (url.protocol !== "https:" || url.username || url.password) return "";
+          return url.href;
+        } catch (_) {
+          return "";
+        }
+      };
+      const safeAvatarUrl = value => {
+        const href = safeHttpsUrl(value);
+        if (!href) return "";
+        try {
+          const url = new URL(href);
+          return /(^|\.)tiktokcdn\.com$/i.test(url.hostname) ||
+            /(^|\.)tiktokcdn-us\.com$/i.test(url.hostname) ||
+            url.hostname === window.location.hostname
+            ? href
+            : "";
+        } catch (_) {
+          return "";
+        }
+      };
+      const showToast = (message, isError = false) => {
+        const toast = byId("toast");
+        setText(toast, message, "");
+        toast.classList.toggle("error", !!isError);
+        show(toast);
+        window.clearTimeout(state.toastTimer);
+        state.toastTimer = window.setTimeout(() => hide(toast), 4200);
+      };
+      async function api(path, options = {}) {
+        const init = Object.assign({
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "Accept": "application/json" },
+        }, options);
+        init.headers = Object.assign({}, init.headers || {});
+        if (init.body && !init.headers["Content-Type"]) {
+          init.headers["Content-Type"] = "application/json; charset=UTF-8";
+        }
+        const response = await fetch(path, init);
+        const raw = await response.text();
+        let payload = {};
+        try { payload = raw ? JSON.parse(raw) : {}; } catch (_) { payload = {}; }
+        if (!response.ok) {
+          const error = new Error(
+            payload.message || payload.error_message || payload.error || `请求失败（HTTP ${response.status}）`
+          );
+          error.code = payload.code || payload.error || "";
+          error.status = response.status;
+          throw error;
+        }
+        return payload;
+      }
+      function readPayloadItem(payload, keys = []) {
+        for (const key of keys) {
+          const value = payload && payload[key];
+          if (value && typeof value === "object" && !Array.isArray(value)) return value;
+        }
+        if (payload && payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+          return payload.data;
+        }
+        return asObject(payload);
+      }
+      function gateValue(payload, raw, names) {
+        const candidates = [];
+        names.forEach(name => {
+          candidates.push(raw[name]);
+          candidates.push(payload && payload[name]);
+        });
+        return boolValue(firstDefined(...candidates));
+      }
+      function applyGates(payload) {
+        const raw = asObject(firstDefined(
+          payload && payload.gates,
+          payload && payload.live_gate,
+          payload && payload.compliance,
+          payload && payload.config
+        ));
+        const liveEnabled = gateValue(payload, raw, [
+          "live_enabled", "live_publish_enabled", "direct_post_live_enabled",
+        ]);
+        const auditApproved = gateValue(payload, raw, [
+          "audit_approved", "direct_audit_approved", "direct_post_audit_approved",
+        ]);
+        const urlVerified = gateValue(payload, raw, [
+          "url_property_verified", "media_url_verified", "media_url_property_verified",
+        ]);
+        if (liveEnabled !== undefined) state.gates.liveEnabled = liveEnabled;
+        if (auditApproved !== undefined) state.gates.auditApproved = auditApproved;
+        if (urlVerified !== undefined) state.gates.urlVerified = urlVerified;
+        renderGates();
+      }
+      const gatesOpen = () => (
+        state.gates.liveEnabled === true &&
+        state.gates.auditApproved === true &&
+        state.gates.urlVerified === true
+      );
+      function renderGate(cardId, textId, value, readyText, blockedText) {
+        const card = byId(cardId);
+        card.classList.remove("ready", "blocked", "unknown");
+        if (value === true) {
+          card.classList.add("ready");
+          setText(byId(textId), readyText);
+        } else if (value === false) {
+          card.classList.add("blocked");
+          setText(byId(textId), blockedText);
+        } else {
+          card.classList.add("unknown");
+          setText(byId(textId), "未确认，按未开放处理");
+        }
+      }
+      function renderGates() {
+        renderGate("liveGateCard", "liveGateText", state.gates.liveEnabled, "已开放", "未开放");
+        renderGate("auditGateCard", "auditGateText", state.gates.auditApproved, "审核已确认", "审核未确认");
+        renderGate("urlGateCard", "urlGateText", state.gates.urlVerified, "媒体域名已验证", "媒体域名未验证");
+        const modeCard = byId("modeGateCard");
+        modeCard.classList.remove("ready", "blocked", "unknown");
+        if (gatesOpen()) {
+          modeCard.classList.add("ready");
+          setText(byId("modeGateText"), "允许新任务直发");
+          setText(
+            byId("consentText"),
+            "我已核对目标账号、最终视频、描述、隐私和互动设置，并同意 TikTok Music Usage Confirmation。到达发布时间后，系统将按上述设置提交到 TikTok。"
+          );
+        } else {
+          modeCard.classList.add("blocked");
+          setText(byId("modeGateText"), "安全待处理，不自动发送");
+          setText(
+            byId("consentText"),
+            "我已核对目标账号、最终视频、描述、隐私和互动设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放，此任务只会安全保存，不会自动发布。"
+          );
+        }
+        validateForm();
+      }
+      function accountEligible(item) {
+        if (!item) return false;
+        const explicit = firstDefined(
+          item.publish_eligible,
+          item.eligible,
+          item.eligible_by_snapshot,
+          item.is_publishable
+        );
+        if (explicit !== undefined) return boolValue(explicit) === true;
+        if (Number(item.is_active) === 0) return false;
+        if (item.token_status != null && Number(item.token_status) !== 2) return false;
+        if (item.account_status != null && Number(item.account_status) !== 2) return false;
+        if (Number(item.disable_publish || 0) !== 0) return false;
+        return true;
+      }
+      function accountReason(item) {
+        return String(firstDefined(
+          item && item.eligibility_reason,
+          item && item.block_reason,
+          item && item.status_label,
+          accountEligible(item) ? "可进行账号实时确认" : "当前不可用于发布"
+        ) || "");
+      }
+      function selectedAccount() {
+        return state.accounts.find(item => accountId(item) === state.selectedAccountId) || null;
+      }
+      function setAccountListEmpty(message) {
+        const list = byId("accountList");
+        list.replaceChildren();
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        setText(empty, message);
+        list.appendChild(empty);
+      }
+      function renderAccountFilters() {
+        const select = byId("filterAccountId");
+        const current = select.value;
+        select.replaceChildren();
+        const all = document.createElement("option");
+        all.value = "";
+        setText(all, "全部账号");
+        select.appendChild(all);
+        state.accounts.forEach(item => {
+          const id = accountId(item);
+          if (!id) return;
+          const option = document.createElement("option");
+          option.value = id;
+          setText(option, `${accountName(item)} · ${id}`);
+          select.appendChild(option);
+        });
+        if (Array.from(select.options).some(option => option.value === current)) select.value = current;
+      }
+      function renderAccounts() {
+        const query = byId("accountSearch").value.trim().toLowerCase();
+        const items = state.accounts.filter(item => {
+          if (!query) return true;
+          return [
+            accountName(item),
+            accountId(item),
+            item.external_account_id,
+            item.main_account_id,
+          ].some(value => String(value || "").toLowerCase().includes(query));
+        });
+        if (!items.length) {
+          setAccountListEmpty(query ? "没有匹配账号。" : "暂无可显示账号。");
+          return;
+        }
+        const list = byId("accountList");
+        list.replaceChildren();
+        items.forEach(item => {
+          const id = accountId(item);
+          const eligible = accountEligible(item);
+          const label = document.createElement("label");
+          label.className = `account-option${eligible ? "" : " disabled"}`;
+
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "ttAccount";
+          radio.value = id;
+          radio.dataset.accountId = id;
+          radio.checked = id === state.selectedAccountId;
+          radio.disabled = !eligible;
+          label.appendChild(radio);
+
+          const copy = document.createElement("div");
+          copy.className = "account-copy";
+          const name = document.createElement("strong");
+          setText(name, accountName(item));
+          const detail = document.createElement("span");
+          const publicId = firstDefined(item.external_account_id, item.main_account_id, id);
+          setText(detail, `账号 ID ${publicId || id} · 粉丝 ${Number(item.fan_count || 0).toLocaleString("zh-CN")}`);
+          copy.append(name, detail);
+          label.appendChild(copy);
+
+          const status = document.createElement("span");
+          status.className = "account-state";
+          setText(status, eligible ? "可确认" : "不可发布");
+          status.title = accountReason(item);
+          label.appendChild(status);
+
+          list.appendChild(label);
+        });
+      }
+      function resetCreatorInfo(message = "选择账号后会实时读取 TikTok 昵称、可用隐私范围和互动能力。") {
+        state.creatorInfo = null;
+        const card = byId("creatorCard");
+        card.replaceChildren();
+        const title = document.createElement("strong");
+        setText(title, "等待确认目标账号");
+        const copy = document.createElement("p");
+        setText(copy, message);
+        card.append(title, copy);
+        const privacy = byId("privacyLevel");
+        privacy.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        setText(placeholder, "请手动选择，不设默认值");
+        privacy.appendChild(placeholder);
+        privacy.value = "";
+        privacy.disabled = true;
+        configureInteraction("allowComment", "commentCard", true);
+        configureInteraction("allowDuet", "duetCard", true);
+        configureInteraction("allowStitch", "stitchCard", true);
+        validateForm();
+      }
+      function configureInteraction(inputId, cardId, disabled) {
+        const input = byId(inputId);
+        input.checked = false;
+        input.disabled = !!disabled;
+        byId(cardId).classList.toggle("disabled", !!disabled);
+      }
+      function renderCreatorInfo(info) {
+        const card = byId("creatorCard");
+        card.replaceChildren();
+        const head = document.createElement("div");
+        head.className = "creator-head";
+        const avatar = document.createElement("div");
+        avatar.className = "creator-avatar";
+        const avatarUrl = safeAvatarUrl(info.creator_avatar_url || info.avatar_url);
+        if (avatarUrl) {
+          const image = document.createElement("img");
+          image.src = avatarUrl;
+          image.alt = "";
+          image.loading = "lazy";
+          image.referrerPolicy = "no-referrer";
+          avatar.appendChild(image);
+        } else {
+          setText(avatar, String(info.creator_nickname || info.creator_username || "TT").slice(0, 1));
+        }
+        const copy = document.createElement("div");
+        const name = document.createElement("strong");
+        setText(name, info.creator_nickname || info.creator_username || "TikTok账号");
+        const username = document.createElement("p");
+        const maxDuration = Number(info.max_video_post_duration_sec || 0);
+        const usernameCopy = info.creator_username ? `@${String(info.creator_username).replace(/^@/, "")}` : "用户名未返回";
+        setText(username, `${usernameCopy}${maxDuration ? ` · 最长视频 ${maxDuration} 秒` : ""}`);
+        copy.append(name, username);
+        head.append(avatar, copy);
+        card.appendChild(head);
+
+        const options = Array.isArray(info.privacy_level_options)
+          ? info.privacy_level_options.filter(value => typeof value === "string" && value)
+          : [];
+        const privacy = byId("privacyLevel");
+        privacy.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        setText(placeholder, "请手动选择，不设默认值");
+        privacy.appendChild(placeholder);
+        const labels = {
+          PUBLIC_TO_EVERYONE: "所有人",
+          MUTUAL_FOLLOW_FRIENDS: "互相关注的朋友",
+          FOLLOWER_OF_CREATOR: "关注者",
+          SELF_ONLY: "仅自己",
+        };
+        options.forEach(value => {
+          const option = document.createElement("option");
+          option.value = value;
+          setText(option, labels[value] || value);
+          privacy.appendChild(option);
+        });
+        privacy.value = "";
+        privacy.disabled = options.length === 0;
+        configureInteraction("allowComment", "commentCard", boolValue(info.comment_disabled) !== false);
+        configureInteraction("allowDuet", "duetCard", boolValue(info.duet_disabled) !== false);
+        configureInteraction("allowStitch", "stitchCard", boolValue(info.stitch_disabled) !== false);
+      }
+      async function loadCreatorInfo() {
+        const item = selectedAccount();
+        if (!item || !accountEligible(item)) {
+          resetCreatorInfo("该账号当前不可用于发布，请刷新账号状态。");
+          return;
+        }
+        resetCreatorInfo("正在向 TikTok 确认账号昵称和发布能力…");
+        setText(byId("accountHelp"), "正在实时确认目标账号…");
+        try {
+          const result = await api(`${API_BASE}/creator-info`, {
+            method: "POST",
+            body: JSON.stringify({ source_account_id: state.selectedAccountId }),
+          });
+          applyGates(result);
+          const info = readPayloadItem(result, ["item", "creator_info"]);
+          if (!info.creator_nickname && !info.creator_username) {
+            throw new Error("TikTok 未返回可确认的账号昵称");
+          }
+          state.creatorInfo = info;
+          renderCreatorInfo(info);
+          setText(byId("accountHelp"), "已实时确认目标账号；发布时间前系统会再次确认。");
+        } catch (error) {
+          state.creatorInfo = null;
+          resetCreatorInfo(`账号确认失败：${error.message}`);
+          setText(byId("accountHelp"), `账号确认失败：${error.message}`);
+          byId("accountHelp").className = "helper error";
+        }
+        validateForm();
+      }
+      async function loadAccounts() {
+        setAccountListEmpty("正在加载账号…");
+        try {
+          const result = await api(`${API_BASE}/accounts`);
+          applyGates(result);
+          const items = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.accounts) ? result.accounts : []);
+          state.accounts = items.filter(item => accountId(item));
+          if (state.selectedAccountId && !state.accounts.some(item => accountId(item) === state.selectedAccountId)) {
+            state.selectedAccountId = "";
+            resetCreatorInfo();
+          }
+          renderAccounts();
+          renderAccountFilters();
+          setText(byId("accountHelp"), `已加载 ${state.accounts.length} 个账号；列表不包含任何凭证。`);
+          byId("accountHelp").className = "helper";
+        } catch (error) {
+          state.accounts = [];
+          setAccountListEmpty(`账号加载失败：${error.message}`);
+          setText(byId("accountHelp"), "账号列表不可用，已停止新建任务。");
+          byId("accountHelp").className = "helper error";
+        }
+        validateForm();
+      }
+      function resetMaterial(message = "系统会从素材库读取真实 Content ID，并生成带固定新版片尾的最终视频预览。") {
+        state.material = null;
+        hide(byId("mediaPreview"));
+        byId("caption").value = "";
+        byId("caption").disabled = true;
+        setText(byId("captionCount"), "0 / 2200");
+        setText(byId("materialHelp"), message);
+        byId("materialHelp").className = "helper";
+        state.formKey = "";
+        validateForm();
+      }
+      function renderVideoPreview(item) {
+        const shell = byId("videoShell");
+        shell.replaceChildren();
+        const href = safeHttpsUrl(firstDefined(
+          item.prepared_media_url,
+          item.final_media_url,
+          item.preview_url,
+          item.media_url,
+          item.video_url
+        ));
+        if (!href) {
+          const message = document.createElement("span");
+          setText(message, "最终视频尚未准备好");
+          shell.appendChild(message);
+          return;
+        }
+        const video = document.createElement("video");
+        video.controls = true;
+        video.preload = "metadata";
+        video.playsInline = true;
+        video.src = href;
+        shell.appendChild(video);
+      }
+      function renderMaterial(item) {
+        show(byId("mediaPreview"));
+        renderVideoPreview(item);
+        setText(byId("mediaTitle"), item.title || item.drama_name || item.material_name || "TT 最终成片");
+        setText(byId("mediaMaterialId"), `素材 ID：${item.material_id || byId("materialId").value.trim()}`);
+        setText(byId("mediaContentId"), `Drama ID：${item.content_id || "未返回"}`);
+        const duration = Number(firstDefined(item.duration_sec, item.final_duration_sec, 0));
+        setText(byId("mediaDuration"), `最终时长：${duration > 0 ? `${duration.toFixed(2)} 秒` : "等待媒体信息"}`);
+        setText(byId("mediaStatus"), `处理状态：${item.status_label || item.status || "已解析"}`);
+        const contentId = cleanId(item.content_id);
+        byId("caption").value = CAPTION_TEMPLATE.replace("{{contect_id}}", contentId);
+        byId("caption").disabled = !contentId;
+        updateCaptionState();
+      }
+      async function previewMaterial() {
+        const raw = byId("materialId").value.trim();
+        if (!/^\d+$/.test(raw) || /^0+$/.test(raw)) {
+          setText(byId("materialHelp"), "请输入有效的正整数素材 ID。");
+          byId("materialHelp").className = "helper error";
+          return;
+        }
+        const materialId = String(BigInt(raw));
+        byId("materialId").value = materialId;
+        resetMaterial("正在读取素材和最终成片…");
+        const button = byId("previewMaterial");
+        button.disabled = true;
+        setText(button, "读取中…");
+        try {
+          const result = await api(`${API_BASE}/materials/preview`, {
+            method: "POST",
+            body: JSON.stringify({ material_id: materialId }),
+          });
+          applyGates(result);
+          const item = readPayloadItem(result, ["item", "material"]);
+          const returnedMaterialId = cleanId(item.material_id || materialId);
+          const contentId = cleanId(item.content_id);
+          if (returnedMaterialId !== materialId) throw new Error("返回素材与输入素材不一致");
+          if (!/^[A-Za-z0-9_-]{1,128}$/.test(contentId)) throw new Error("素材没有可用的真实 Drama ID");
+          state.material = Object.assign({}, item, { material_id: materialId, content_id: contentId });
+          renderMaterial(state.material);
+          setText(byId("materialHelp"), "素材和真实 Drama ID 已确认；请预览最终成片。");
+          byId("materialHelp").className = "helper success";
+        } catch (error) {
+          resetMaterial(`素材读取失败：${error.message}`);
+          byId("materialHelp").className = "helper error";
+        } finally {
+          button.disabled = false;
+          setText(button, "读取素材");
+        }
+        validateForm();
+      }
+      function captionHasDramaId(caption, contentId) {
+        const expected = `Drama ID: ${contentId}`;
+        return String(caption || "").split(/\r?\n/).some(line => line.trim() === expected);
+      }
+      function updateCaptionState() {
+        const caption = byId("caption").value;
+        const count = utf16Units(caption);
+        setText(byId("captionCount"), `${count} / 2200`);
+        if (!state.material) {
+          setText(byId("captionHelp"), "读取素材后自动填充；可以编辑，但必须保留准确的 Drama ID 行。");
+          byId("captionHelp").className = "";
+        } else if (!captionHasDramaId(caption, state.material.content_id)) {
+          setText(byId("captionHelp"), `描述必须保留完整一行：Drama ID: ${state.material.content_id}`);
+          byId("captionHelp").className = "helper error";
+        } else if (count > 2200) {
+          setText(byId("captionHelp"), "描述超过 TikTok 允许的 2200 个 UTF-16 单位。");
+          byId("captionHelp").className = "helper error";
+        } else {
+          setText(byId("captionHelp"), "Drama ID 正确；提交后会冻结当前描述。");
+          byId("captionHelp").className = "helper success";
+        }
+        validateForm();
+      }
+      function shanghaiInputToUtc(value) {
+        const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(String(value || ""));
+        if (!match) return "";
+        const parts = match.slice(1).map(Number);
+        const timestamp = Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3] - 8, parts[4], 0);
+        const date = new Date(timestamp);
+        return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+      }
+      function shanghaiInputValue(date) {
+        const shifted = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+        return shifted.toISOString().slice(0, 16);
+      }
+      function updateScheduleMinimum() {
+        const minimum = new Date(Date.now() + 10 * 60 * 1000);
+        byId("scheduledAt").min = shanghaiInputValue(minimum);
+        if (!byId("scheduledAt").value) {
+          const suggested = new Date(Date.now() + 30 * 60 * 1000);
+          suggested.setUTCSeconds(0, 0);
+          byId("scheduledAt").value = shanghaiInputValue(suggested);
+        }
+      }
+      function formValidationError() {
+        const item = selectedAccount();
+        if (!item) return "请选择一个 TikTok 个号。";
+        if (!accountEligible(item)) return "所选账号当前不可用于发布。";
+        if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";
+        if (!state.material) return "请先读取素材并确认最终成片。";
+        const maxDuration = Number(state.creatorInfo.max_video_post_duration_sec || 0);
+        const duration = Number(firstDefined(state.material.duration_sec, state.material.final_duration_sec, 0));
+        if (maxDuration > 0 && duration > maxDuration) return `最终视频超过该账号允许的 ${maxDuration} 秒。`;
+        const caption = byId("caption").value;
+        if (!caption.trim()) return "发布描述不能为空。";
+        if (!captionHasDramaId(caption, state.material.content_id)) {
+          return `描述必须保留完整一行：Drama ID: ${state.material.content_id}`;
+        }
+        if (utf16Units(caption) > 2200) return "发布描述超过 TikTok 长度限制。";
+        const scheduledUtc = shanghaiInputToUtc(byId("scheduledAt").value);
+        if (!scheduledUtc) return "请选择有效的上海发布时间。";
+        if (new Date(scheduledUtc).getTime() < Date.now() + 60 * 1000) return "发布时间必须晚于当前时间。";
+        if (!byId("privacyLevel").value) return "请手动选择谁可以观看。";
+        if (byId("commercialDisclosure").checked && !byId("ownBrand").checked && !byId("brandedContent").checked) {
+          return "已开启商业推广披露，请至少选择自己的品牌或第三方品牌。";
+        }
+        if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
+        return "";
+      }
+      function validateForm() {
+        const error = formValidationError();
+        const formState = byId("formState");
+        const create = byId("createQueue");
+        create.disabled = !!error || state.busy;
+        formState.className = `form-state${error ? "" : " success"}`;
+        if (error) {
+          setText(formState, error);
+        } else {
+          setText(
+            formState,
+            gatesOpen()
+              ? "信息完整，任务到点后允许进入 TikTok 直发流程。"
+              : "信息完整；任务将以安全待处理模式保存，不会自动发送到 TikTok。"
+          );
+        }
+        setText(create, gatesOpen() ? "加入发布池" : "安全保存到发布池");
+      }
+      function ensureFormKey() {
+        if (state.formKey) return state.formKey;
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          state.formKey = `tt-post:${window.crypto.randomUUID()}`;
+        } else {
+          state.formKey = `tt-post:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        }
+        return state.formKey;
+      }
+      function queuePayload() {
+        const commercial = byId("commercialDisclosure").checked;
+        return {
+          idempotency_key: ensureFormKey(),
+          source_account_id: state.selectedAccountId,
+          material_id: state.material.material_id,
+          content_id: state.material.content_id,
+          scheduled_at: shanghaiInputToUtc(byId("scheduledAt").value),
+          timezone: "Asia/Shanghai",
+          caption_text: byId("caption").value,
+          privacy_level: byId("privacyLevel").value,
+          allow_comment: byId("allowComment").checked,
+          allow_duet: byId("allowDuet").checked,
+          allow_stitch: byId("allowStitch").checked,
+          commercial_disclosure: commercial,
+          brand_organic_toggle: commercial && byId("ownBrand").checked,
+          brand_content_toggle: commercial && byId("brandedContent").checked,
+          is_aigc: byId("isAigc").checked,
+          publish_mode: gatesOpen() ? "direct_post" : "hold",
+          consent: {
+            accepted: true,
+            version: CONSENT_VERSION,
+            accepted_at: new Date().toISOString(),
+          },
+        };
+      }
+      function resetCreateForm() {
+        state.selectedAccountId = "";
+        state.creatorInfo = null;
+        state.formKey = "";
+        byId("accountSearch").value = "";
+        byId("materialId").value = "";
+        byId("privacyLevel").value = "";
+        byId("allowComment").checked = false;
+        byId("allowDuet").checked = false;
+        byId("allowStitch").checked = false;
+        byId("commercialDisclosure").checked = false;
+        byId("ownBrand").checked = false;
+        byId("brandedContent").checked = false;
+        byId("isAigc").checked = false;
+        byId("publishConsent").checked = false;
+        hide(byId("commercialOptions"));
+        resetCreatorInfo();
+        resetMaterial();
+        updateScheduleMinimum();
+        renderAccounts();
+      }
+      async function createQueue() {
+        const error = formValidationError();
+        if (error || state.busy) {
+          if (error) showToast(error, true);
+          return;
+        }
+        state.busy = true;
+        validateForm();
+        const button = byId("createQueue");
+        setText(button, "正在保存…");
+        try {
+          const result = await api(`${API_BASE}/queue`, {
+            method: "POST",
+            body: JSON.stringify(queuePayload()),
+          });
+          applyGates(result);
+          const item = readPayloadItem(result, ["item", "queue"]);
+          const hold = String(item.publish_mode || item.status || "").toLowerCase() === "hold" || !gatesOpen();
+          showToast(
+            hold
+              ? "任务已安全保存；当前不会自动发送到 TikTok。"
+              : "任务已加入发布池，到达时间后将按确认设置执行。",
+            false
+          );
+          resetCreateForm();
+          state.page = 1;
+          await loadQueue();
+        } catch (requestError) {
+          showToast(`保存失败：${requestError.message}`, true);
+        } finally {
+          state.busy = false;
+          validateForm();
+        }
+      }
+      function statusMeta(item) {
+        const status = String(item.status || item.queue_status || "unknown").toLowerCase();
+        if (Number(item.unknown_outcome || 0) === 1 || status === "needs_review") {
+          return { status: "needs_review", label: "结果待确认", kind: "warning" };
+        }
+        const map = {
+          draft: ["草稿", "neutral"],
+          preparing: ["视频准备中", "progress"],
+          ready_for_consent: ["等待确认", "warning"],
+          hold: ["安全待处理", "warning"],
+          scheduled: ["等待发布时间", "progress"],
+          claimed: ["已领取任务", "progress"],
+          creator_recheck: ["确认账号中", "progress"],
+          initializing: ["提交 TikTok 中", "warning"],
+          processing_download: ["TikTok处理中", "progress"],
+          reconciling: ["状态核对中", "warning"],
+          published: ["已发布", "success"],
+          failed: ["发布失败", "failure"],
+          missed: ["已错过时间", "failure"],
+          cancelled: ["已取消", "neutral"],
+        };
+        const value = map[status] || [status || "未知", "neutral"];
+        return { status, label: value[0], kind: value[1] };
+      }
+      function appendCell(row, primary, secondary, className = "") {
+        const cell = document.createElement("td");
+        if (className) cell.className = className;
+        setText(cell, primary);
+        if (secondary) {
+          const detail = document.createElement("div");
+          detail.className = "subtle";
+          setText(detail, secondary);
+          cell.appendChild(detail);
+        }
+        row.appendChild(cell);
+        return cell;
+      }
+      function setQueueEmpty(message) {
+        const body = byId("queueRows");
+        body.replaceChildren();
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 9;
+        cell.className = "empty";
+        setText(cell, message);
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+      function badge(label, kind) {
+        const node = document.createElement("span");
+        node.className = `badge ${kind || "neutral"}`;
+        setText(node, label);
+        return node;
+      }
+      function interactionCopy(item) {
+        const enabled = [];
+        if (boolValue(item.allow_comment) === true) enabled.push("评论");
+        if (boolValue(item.allow_duet) === true) enabled.push("Duet");
+        if (boolValue(item.allow_stitch) === true) enabled.push("Stitch");
+        return enabled.length ? `互动：${enabled.join("、")}` : "互动全部关闭";
+      }
+      function rawQueueStatus(item) {
+        return String(item.queue_status || item.status || "").toLowerCase();
+      }
+      function canCancelQueue(item) {
+        return ["scheduled", "claimed"].includes(rawQueueStatus(item));
+      }
+      function canManuallyReconcileQueue(item) {
+        return Number(item.unknown_outcome || 0) === 1 ||
+          ["unknown", "needs_review", "reconciling"].includes(rawQueueStatus(item));
+      }
+      function queueActionButton(action, queueId, label, className = "") {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `button small ${className}`.trim();
+        button.dataset.action = action;
+        button.dataset.queueId = queueId;
+        setText(button, label);
+        button.disabled = !queueId;
+        return button;
+      }
+      function renderQueueRows(items) {
+        const body = byId("queueRows");
+        body.replaceChildren();
+        if (!items.length) {
+          setQueueEmpty("没有符合当前筛选条件的任务。");
+          return;
+        }
+        items.forEach(item => {
+          const row = document.createElement("tr");
+          appendCell(
+            row,
+            formatTime(item.scheduled_at || item.scheduled_at_utc),
+            `${item.timezone || "Asia/Shanghai"} · 任务 ${item.id || item.queue_id || "—"}`
+          );
+          appendCell(
+            row,
+            item.creator_nickname_snapshot || item.account_name_snapshot || item.account_name || `账号 ${item.source_account_id || "—"}`,
+            item.creator_username_snapshot ? `@${String(item.creator_username_snapshot).replace(/^@/, "")}` : `账号 ID ${item.source_account_id || "—"}`
+          );
+          appendCell(
+            row,
+            `素材 ${item.material_id || "—"}`,
+            `Drama ID ${item.content_id || "—"}`
+          );
+          appendCell(row, item.caption_text || item.caption || "—", "", "caption-cell");
+          const commercial = boolValue(item.commercial_disclosure) === true
+            ? (boolValue(item.brand_content_toggle) === true ? "第三方品牌披露" : "自有品牌披露")
+            : "未开启商业披露";
+          appendCell(
+            row,
+            item.privacy_level || "未选择",
+            `${interactionCopy(item)} · ${commercial}${boolValue(item.is_aigc) === true ? " · AI内容声明" : ""}`
+          );
+
+          const statusCell = document.createElement("td");
+          const meta = statusMeta(item);
+          statusCell.appendChild(badge(meta.label, meta.kind));
+          if (item.publish_mode === "hold") {
+            const hold = document.createElement("div");
+            hold.className = "subtle";
+            setText(hold, "不会自动发送");
+            statusCell.appendChild(hold);
+          }
+          row.appendChild(statusCell);
+
+          appendCell(
+            row,
+            item.remote_status || item.tiktok_status || "—",
+            item.publish_id ? "已获得 TikTok 发布标识" : ""
+          );
+          const errorCell = appendCell(
+            row,
+            item.error_code || item.fail_reason || "—",
+            item.error_message || item.safe_message || "",
+            (item.error_code || item.fail_reason || item.error_message) ? "error-copy" : ""
+          );
+          if (!errorCell.textContent) setText(errorCell, "—");
+
+          const actionCell = document.createElement("td");
+          const actionList = document.createElement("div");
+          actionList.className = "queue-actions";
+          const queueId = String(item.id || item.queue_id || "");
+          const events = queueActionButton("events", queueId, "查看事件");
+          events.dataset.materialId = String(item.material_id || "");
+          actionList.appendChild(events);
+          if (canCancelQueue(item)) {
+            actionList.appendChild(
+              queueActionButton("cancel", queueId, "取消任务", "danger")
+            );
+          }
+          if (canManuallyReconcileQueue(item)) {
+            actionList.appendChild(
+              queueActionButton("reconcile", queueId, "人工核对", "warning")
+            );
+          }
+          actionCell.appendChild(actionList);
+          row.appendChild(actionCell);
+          body.appendChild(row);
+        });
+      }
+      function queueQuery() {
+        const params = new URLSearchParams({
+          page: String(state.page),
+          page_size: String(state.pageSize),
+        });
+        [
+          ["material_id", "filterMaterialId"],
+          ["source_account_id", "filterAccountId"],
+          ["status", "filterStatus"],
+        ].forEach(([key, id]) => {
+          const value = byId(id).value.trim();
+          if (value) params.set(key, value);
+        });
+        return params.toString();
+      }
+      function updateStats(result, items, pagination) {
+        const summary = asObject(result.summary);
+        const total = Number(firstDefined(summary.total, pagination.total, 0) || 0);
+        const counts = {
+          scheduled: Number(firstDefined(summary.scheduled, summary.scheduled_count, 0) || 0),
+          processing: Number(firstDefined(summary.processing, summary.processing_count, 0) || 0),
+          review: Number(firstDefined(summary.needs_review, summary.review_count, summary.unknown_count, 0) || 0),
+          published: Number(firstDefined(summary.published, summary.published_count, 0) || 0),
+        };
+        if (!Object.keys(summary).length) {
+          items.forEach(item => {
+            const status = statusMeta(item).status;
+            if (status === "scheduled") counts.scheduled += 1;
+            if (PROCESSING_STATUSES.has(status)) counts.processing += 1;
+            if (status === "needs_review") counts.review += 1;
+            if (status === "published") counts.published += 1;
+          });
+        }
+        setText(byId("totalCount"), total);
+        setText(byId("scheduledCount"), counts.scheduled);
+        setText(byId("processingCount"), counts.processing);
+        setText(byId("reviewCount"), counts.review);
+        setText(byId("publishedCount"), counts.published);
+      }
+      async function loadQueue() {
+        setQueueEmpty("正在加载…");
+        try {
+          const result = await api(`${API_BASE}/queue?${queueQuery()}`);
+          applyGates(result);
+          const items = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.queues) ? result.queues : []);
+          const pagination = asObject(result.pagination);
+          state.total = Number(firstDefined(pagination.total, result.total, items.length) || 0);
+          state.page = Number(firstDefined(pagination.page, result.page, state.page) || 1);
+          state.pageSize = Number(firstDefined(pagination.page_size, result.page_size, state.pageSize) || 20);
+          renderQueueRows(items);
+          updateStats(result, items, { total: state.total });
+          const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+          setText(byId("pageInfo"), `第 ${state.page} / ${pages} 页，共 ${state.total} 条`);
+          byId("prevPage").disabled = state.page <= 1;
+          byId("nextPage").disabled = state.page >= pages;
+        } catch (error) {
+          setQueueEmpty(`任务加载失败：${error.message}`);
+          ["totalCount", "scheduledCount", "processingCount", "reviewCount", "publishedCount"]
+            .forEach(id => setText(byId(id), "—"));
+        }
+      }
+      function setEventsEmpty(message) {
+        const list = byId("eventList");
+        list.replaceChildren();
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        setText(empty, message);
+        list.appendChild(empty);
+      }
+      function renderEvents(items) {
+        const list = byId("eventList");
+        list.replaceChildren();
+        if (!items.length) {
+          setEventsEmpty("暂无事件记录。");
+          return;
+        }
+        items.forEach(item => {
+          const event = document.createElement("article");
+          event.className = "event-item";
+          const time = document.createElement("div");
+          const timeStrong = document.createElement("strong");
+          setText(timeStrong, formatTime(item.created_at || item.occurred_at));
+          const stage = document.createElement("div");
+          stage.className = "subtle";
+          setText(stage, item.stage || item.local_status || "状态变化");
+          time.append(timeStrong, stage);
+
+          const detail = document.createElement("div");
+          const title = document.createElement("strong");
+          setText(title, item.event_type || item.remote_status || item.status || "任务事件");
+          const message = document.createElement("div");
+          message.className = "subtle";
+          const pieces = [
+            item.tiktok_error_code || item.error_code,
+            item.fail_reason,
+            item.safe_message || item.message,
+          ].filter(Boolean);
+          setText(message, pieces.length ? pieces.join(" · ") : "状态已记录");
+          detail.append(title, message);
+          event.append(time, detail);
+          list.appendChild(event);
+        });
+      }
+      async function runQueueAction(action, queueId, button) {
+        const normalizedQueueId = String(queueId || "").trim();
+        if (!/^[1-9][0-9]*$/.test(normalizedQueueId)) {
+          showToast("任务 ID 无效，请刷新后重试。", true);
+          return;
+        }
+        if (!["cancel", "reconcile"].includes(action)) return;
+        const operationKey = `${action}:${normalizedQueueId}`;
+        if (state.queueActionsBusy.has(operationKey)) return;
+        const isCancel = action === "cancel";
+        const confirmed = window.confirm(
+          isCancel
+            ? `确定取消任务 ${normalizedQueueId}？取消后不会继续进入发布流程。`
+            : `确定人工核对任务 ${normalizedQueueId}？系统只会查询并核对已有结果，不会创建第二条发布请求。`
+        );
+        if (!confirmed) return;
+        state.queueActionsBusy.add(operationKey);
+        const originalLabel = button.textContent;
+        button.disabled = true;
+        setText(button, isCancel ? "正在取消…" : "正在核对…");
+        try {
+          const result = await api(
+            `${API_BASE}/queue/${encodeURIComponent(normalizedQueueId)}/${action}`,
+            {
+              method: "POST",
+              body: JSON.stringify(
+                isCancel ? { reason: "由AI后台操作人员人工取消" } : {}
+              ),
+            }
+          );
+          applyGates(result);
+          showToast(
+            isCancel
+              ? "任务已取消。"
+              : "人工核对完成，任务状态已刷新。"
+          );
+          await loadQueue();
+        } catch (error) {
+          showToast(
+            `${isCancel ? "取消" : "人工核对"}失败：${error.message}`,
+            true
+          );
+        } finally {
+          state.queueActionsBusy.delete(operationKey);
+          if (button.isConnected) {
+            button.disabled = false;
+            setText(button, originalLabel);
+          }
+        }
+      }
+      async function openEvents(queueId, materialId) {
+        setText(byId("eventTitle"), `任务 ${queueId} 事件`);
+        setText(byId("eventSubtitle"), materialId ? `素材 ${materialId}` : "状态变化记录");
+        setEventsEmpty("正在加载…");
+        const dialog = byId("eventDialog");
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "");
+        try {
+          const params = new URLSearchParams({ queue_id: String(queueId) });
+          const result = await api(`${API_BASE}/events?${params.toString()}`);
+          const items = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.events) ? result.events : []);
+          renderEvents(items);
+        } catch (error) {
+          setEventsEmpty(`事件加载失败：${error.message}`);
+        }
+      }
+      function closeEvents() {
+        const dialog = byId("eventDialog");
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      }
+      async function init() {
+        updateScheduleMinimum();
+        renderGates();
+        try {
+          state.auth = await api("/api/ui/topbar");
+        } catch (_) {
+          state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
+        }
+        await window.QuickNav.render({
+          container: "#quickNav",
+          auth: state.auth,
+          activeKey: "ttPostPool",
+        });
+        window.UiTopbar.render({
+          auth: state.auth,
+          userCard: "#userCard",
+          authButton: "#authButton",
+          refreshButton: "#refreshPage",
+        });
+        byId("authButton").addEventListener("click", () => (
+          window.UiTopbar.handleAuthAction({ auth: state.auth, api })
+        ));
+        const user = state.auth && state.auth.user;
+        if (!(state.auth && state.auth.authenticated && user)) {
+          show(byId("loginGate"));
+          return;
+        }
+        const allowed = !!(user.is_admin || (user.permissions && user.permissions.tt_posts));
+        if (!allowed) {
+          show(byId("permissionGate"));
+          return;
+        }
+        show(byId("pageRoot"));
+        await Promise.all([loadAccounts(), loadQueue()]);
+      }
+
+      byId("accountSearch").addEventListener("input", renderAccounts);
+      byId("accountList").addEventListener("change", event => {
+        const radio = event.target.closest("input[data-account-id]");
+        if (!radio || radio.disabled) return;
+        state.selectedAccountId = cleanId(radio.dataset.accountId);
+        state.formKey = "";
+        byId("publishConsent").checked = false;
+        renderAccounts();
+        loadCreatorInfo();
+      });
+      byId("refreshAccounts").addEventListener("click", loadAccounts);
+      byId("refreshGates").addEventListener("click", async () => {
+        await Promise.all([loadAccounts(), loadQueue()]);
+        showToast("发布与合规状态已刷新。");
+      });
+      byId("previewMaterial").addEventListener("click", previewMaterial);
+      byId("materialId").addEventListener("input", () => {
+        if (state.material && byId("materialId").value.trim() !== state.material.material_id) {
+          resetMaterial("素材 ID 已修改，请重新读取并确认最终成片。");
+        }
+      });
+      byId("materialId").addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          previewMaterial();
+        }
+      });
+      byId("caption").addEventListener("input", () => {
+        state.formKey = "";
+        byId("publishConsent").checked = false;
+        updateCaptionState();
+      });
+      [
+        "scheduledAt", "privacyLevel", "allowComment", "allowDuet", "allowStitch",
+        "ownBrand", "brandedContent", "isAigc", "publishConsent",
+      ].forEach(id => byId(id).addEventListener("change", () => {
+        state.formKey = "";
+        if (id !== "publishConsent") byId("publishConsent").checked = false;
+        validateForm();
+      }));
+      byId("commercialDisclosure").addEventListener("change", () => {
+        state.formKey = "";
+        byId("publishConsent").checked = false;
+        if (byId("commercialDisclosure").checked) {
+          show(byId("commercialOptions"));
+        } else {
+          hide(byId("commercialOptions"));
+          byId("ownBrand").checked = false;
+          byId("brandedContent").checked = false;
+        }
+        validateForm();
+      });
+      byId("createQueue").addEventListener("click", createQueue);
+      byId("queueFilters").addEventListener("submit", event => {
+        event.preventDefault();
+        state.page = 1;
+        loadQueue();
+      });
+      byId("resetQueueFilters").addEventListener("click", () => {
+        byId("queueFilters").reset();
+        state.page = 1;
+        loadQueue();
+      });
+      byId("prevPage").addEventListener("click", () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          loadQueue();
+        }
+      });
+      byId("nextPage").addEventListener("click", () => {
+        if (state.page * state.pageSize < state.total) {
+          state.page += 1;
+          loadQueue();
+        }
+      });
+      byId("queueRows").addEventListener("click", event => {
+        const button = event.target.closest("button[data-queue-id]");
+        if (!button || button.disabled) return;
+        const action = button.dataset.action;
+        if (action === "events") {
+          openEvents(button.dataset.queueId, button.dataset.materialId);
+        } else if (action === "cancel" || action === "reconcile") {
+          runQueueAction(action, button.dataset.queueId, button);
+        }
+      });
+      byId("closeEvents").addEventListener("click", closeEvents);
+      byId("eventDialog").addEventListener("click", event => {
+        if (event.target === byId("eventDialog")) closeEvents();
+      });
+
+      init();
+    })();
+  </script>
+</body>
+</html>

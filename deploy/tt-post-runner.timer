@@ -1,0 +1,12 @@
+[Unit]
+Description=Check due Dramawave TikTok Post tasks every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 Asia/Shanghai
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=tt-post-runner.service
+
+[Install]
+WantedBy=timers.target

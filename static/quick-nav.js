@@ -161,6 +161,25 @@
       ],
     },
     {
+      key: "tiktok_platform",
+      label: "TikTok 社媒",
+      order: 35,
+      module: "tt_posts",
+      items: [
+        {
+          key: "ttPostPool",
+          label: "TT Post发布池",
+          description: "选择账号、素材和发布时间，确认后加入安全发布队列",
+          kind: "page",
+          href: "/tt-post-pool.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 10,
+        },
+      ],
+    },
+    {
       key: "x_platform",
       label: "X平台推广",
       order: 40,
@@ -272,7 +291,7 @@
     },
   ];
 
-  const CONFIG_CACHE_KEY = "quickNavConfigCache:v3";
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v4";
   const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
@@ -396,6 +415,7 @@
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
     voiceoverTasks: "/voiceover-drama.html",
+    ttPostPool: "/tt-post-pool.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
     xPostMaterialPool: "/x-post-material-pool.html",
@@ -426,6 +446,32 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    let tiktokPlatform = normalized.find(group => group && group.key === "tiktok_platform");
+    if (!tiktokPlatform) {
+      tiktokPlatform = {
+        key: "tiktok_platform",
+        label: "TikTok 社媒",
+        order: 35,
+        module: "tt_posts",
+        items: [],
+      };
+      normalized.push(tiktokPlatform);
+    }
+    if (!Array.isArray(tiktokPlatform.items)) tiktokPlatform.items = [];
+    const ttPostPoolExists = tiktokPlatform.items.some(item => item && item.key === "ttPostPool");
+    if (!ttPostPoolExists) {
+      tiktokPlatform.items.push({
+        key: "ttPostPool",
+        label: "TT Post发布池",
+        description: "选择账号、素材和发布时间，确认后加入安全发布队列",
+        kind: "page",
+        href: "/tt-post-pool.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 10,
+      });
+    }
     const xPlatform = normalized.find(group => group && group.key === "x_platform");
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];

@@ -3583,6 +3583,7 @@ MODULE_PERMISSIONS = {
     "ad_control_v3": "AI自动调控 V3",
     "voiceover_drama_tasks": "配音剧语种任务",
     "x_accounts": "X账号授权管理",
+    "tt_posts": "TT Post 发布池",
 
 
 
@@ -3638,6 +3639,7 @@ DEFAULT_USER_PERMISSIONS = {
     "ad_control_v3": False,
     "voiceover_drama_tasks": False,
     "x_accounts": False,
+    "tt_posts": False,
     "settings": False,
 }
 
@@ -41453,6 +41455,298 @@ def post_ad_material_source(task, asset):
     if isinstance(data.get("data"), dict):
         source_id = str(data["data"].get("id") or "")
     return source_id or str(data.get("id") or "")
+
+
+class TTPostAdminClientError(RuntimeError):
+    """Secret-safe failure returned by the CPU-side TT Post service."""
+
+    def __init__(self, code, message, status=503):
+        self.code = str(code or "tt_post_service_unavailable")
+        self.status = int(status) if isinstance(status, int) else 503
+        super().__init__(str(message or "TT Post服务暂不可用"))
+
+
+TT_POST_ADMIN_SERVICE_URL = str(
+    os.environ.get(
+        "TT_POST_ADMIN_SERVICE_URL",
+        "http://127.0.0.1:18829",
+    )
+    or ""
+).strip().rstrip("/")
+TT_POST_ADMIN_INTERNAL_TOKEN = str(
+    os.environ.get("TT_POST_INTERNAL_TOKEN", "") or ""
+)
+try:
+    TT_POST_ADMIN_TIMEOUT = int(
+        os.environ.get("TT_POST_ADMIN_TIMEOUT", "360") or "360"
+    )
+except (TypeError, ValueError):
+    TT_POST_ADMIN_TIMEOUT = 360
+TT_POST_ADMIN_TIMEOUT = max(1, min(TT_POST_ADMIN_TIMEOUT, 600))
+
+TT_POST_ADMIN_ROUTE_METHODS = {
+    "/api/admin/tt-posts/accounts": {"GET"},
+    "/api/admin/tt-posts/creator-info": {"POST"},
+    "/api/admin/tt-posts/materials/preview": {"POST"},
+    "/api/admin/tt-posts/queue": {"GET", "POST"},
+    "/api/admin/tt-posts/events": {"GET"},
+}
+TT_POST_SENSITIVE_KEYS = {
+    "accesstoken",
+    "refreshtoken",
+    "authorization",
+    "credential",
+    "credentials",
+    "claimtoken",
+    "internaltoken",
+    "clientsecret",
+    "password",
+}
+
+
+def _tt_post_contains_sensitive_key(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized in TT_POST_SENSITIVE_KEYS:
+                return True
+            if _tt_post_contains_sensitive_key(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_tt_post_contains_sensitive_key(item) for item in value)
+    return False
+
+
+def _tt_post_safe_error_message(value):
+    text = str(value or "").strip()
+    if not text or len(text) > 500:
+        return "TT Post服务请求失败"
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "access_token",
+            "access token",
+            "refresh_token",
+            "refresh token",
+            "authorization:",
+            "bearer ",
+            "client_secret",
+            "claim_token",
+        )
+    ) or re.search(
+        r"(?:[A-Za-z0-9_-]{64,}|(?:[A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+)",
+        text,
+    ):
+        return "TT Post服务请求失败"
+    return text
+
+
+def _tt_post_public_payload(value):
+    if not isinstance(value, dict) or _tt_post_contains_sensitive_key(value):
+        raise TTPostAdminClientError(
+            "tt_post_unsafe_response",
+            "TT Post服务返回了非公开字段",
+            502,
+        )
+    result = dict(value)
+    items = result.get("items")
+    if isinstance(items, list):
+        normalized_items = []
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                normalized_items.append(raw_item)
+                continue
+            item = dict(raw_item)
+            for key in (
+                "source_account_id",
+                "account_id",
+                "main_account_id",
+                "external_account_id",
+            ):
+                if item.get(key) not in (None, ""):
+                    item[key] = str(item[key])
+            normalized_items.append(item)
+        result["items"] = normalized_items
+    item = result.get("item")
+    if isinstance(item, dict):
+        item = dict(item)
+        for key in (
+            "source_account_id",
+            "account_id",
+            "main_account_id",
+            "external_account_id",
+        ):
+            if item.get(key) not in (None, ""):
+                item[key] = str(item[key])
+        result["item"] = item
+    return result
+
+
+def _tt_post_query_params(raw_query, allowed, required=()):
+    parsed = parse_qs(str(raw_query or ""), keep_blank_values=True)
+    allowed_keys = set(allowed)
+    if set(parsed) - allowed_keys:
+        raise TTPostAdminClientError(
+            "invalid_request",
+            "查询参数无效",
+            400,
+        )
+    result = {}
+    for key, values in parsed.items():
+        if len(values) != 1 or not str(values[0]).strip():
+            raise TTPostAdminClientError(
+                "invalid_request",
+                "查询参数无效",
+                400,
+            )
+        result[key] = str(values[0]).strip()
+    if any(key not in result for key in required):
+        raise TTPostAdminClientError(
+            "invalid_request",
+            "缺少必要查询参数",
+            400,
+        )
+    return result
+
+
+def _tt_post_service_request(method, path, payload=None, query=None):
+    method = str(method or "").upper()
+    allowed_methods = TT_POST_ADMIN_ROUTE_METHODS.get(str(path or ""))
+    if allowed_methods is None and re.fullmatch(
+        r"/api/admin/tt-posts/queue/[1-9][0-9]*/(?:cancel|reconcile)",
+        str(path or ""),
+    ):
+        allowed_methods = {"POST"}
+    if not allowed_methods or method not in allowed_methods:
+        raise TTPostAdminClientError(
+            "tt_post_route_not_allowed",
+            "TT Post服务路由无效",
+            500,
+        )
+    parsed_base = urlparse(TT_POST_ADMIN_SERVICE_URL)
+    if (
+        parsed_base.scheme != "http"
+        or parsed_base.hostname not in {"127.0.0.1", "::1", "localhost"}
+        or parsed_base.username is not None
+        or parsed_base.password is not None
+        or parsed_base.query
+        or parsed_base.fragment
+        or parsed_base.path not in ("", "/")
+        or len(TT_POST_ADMIN_INTERNAL_TOKEN) < 32
+        or len(TT_POST_ADMIN_INTERNAL_TOKEN) > 512
+    ):
+        raise TTPostAdminClientError(
+            "tt_post_service_not_configured",
+            "TT Post服务尚未完成内部配置",
+            503,
+        )
+    if payload is not None and (
+        not isinstance(payload, dict)
+        or _tt_post_contains_sensitive_key(payload)
+    ):
+        raise TTPostAdminClientError(
+            "invalid_request",
+            "请求包含无效字段",
+            400,
+        )
+    safe_query = {}
+    if query is not None:
+        if not isinstance(query, dict):
+            raise TTPostAdminClientError(
+                "invalid_request",
+                "查询参数无效",
+                400,
+            )
+        for key, value in query.items():
+            normalized_key = str(key or "").strip()
+            if (
+                not normalized_key
+                or _tt_post_contains_sensitive_key({normalized_key: value})
+                or isinstance(value, (dict, list, tuple))
+            ):
+                raise TTPostAdminClientError(
+                    "invalid_request",
+                    "查询参数无效",
+                    400,
+                )
+            safe_query[normalized_key] = str(value)
+    try:
+        response = requests.request(
+            method,
+            TT_POST_ADMIN_SERVICE_URL + path,
+            headers={
+                "Accept": "application/json",
+                "Authorization": "Bearer %s"
+                % TT_POST_ADMIN_INTERNAL_TOKEN,
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+            params=safe_query or None,
+            json=payload,
+            timeout=TT_POST_ADMIN_TIMEOUT,
+        )
+    except requests.RequestException:
+        raise TTPostAdminClientError(
+            "tt_post_service_unavailable",
+            "TT Post服务暂不可用",
+            503,
+        ) from None
+    content = bytes(response.content or b"")
+    if len(content) > 1024 * 1024:
+        raise TTPostAdminClientError(
+            "tt_post_response_too_large",
+            "TT Post服务响应超过安全上限",
+            502,
+        )
+    try:
+        response_payload = json.loads(content.decode("utf-8")) if content else {}
+    except (UnicodeError, ValueError):
+        raise TTPostAdminClientError(
+            "tt_post_invalid_response",
+            "TT Post服务响应无效",
+            502,
+        ) from None
+    if not isinstance(response_payload, dict):
+        raise TTPostAdminClientError(
+            "tt_post_invalid_response",
+            "TT Post服务响应无效",
+            502,
+        )
+    if not 200 <= int(response.status_code) < 300:
+        code = str(
+            response_payload.get("code")
+            or response_payload.get("error")
+            or "tt_post_service_error"
+        ).strip()
+        if not re.fullmatch(r"[a-z0-9_]{1,80}", code):
+            code = "tt_post_service_error"
+        status = int(response.status_code)
+        if status < 400 or status > 599:
+            status = 502
+        raise TTPostAdminClientError(
+            code,
+            _tt_post_safe_error_message(
+                response_payload.get("message")
+                or response_payload.get("error_message")
+            ),
+            status,
+        )
+    return _tt_post_public_payload(response_payload)
+
+
+def tt_posts_error_payload(exc):
+    code = str(
+        getattr(exc, "code", "tt_post_service_unavailable")
+        or "tt_post_service_unavailable"
+    )
+    if not re.fullmatch(r"[a-z0-9_]{1,80}", code):
+        code = "tt_post_service_unavailable"
+    status = int(getattr(exc, "status", 503) or 503)
+    if status < 400 or status > 599:
+        status = 503
+    message = _tt_post_safe_error_message(str(exc))
+    return status, {"error": code, "code": code, "message": message}
 
 
 def complete_ad_material_upload(task_id, session):
@@ -92914,7 +93208,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def _require_same_origin_json(self):
         content_type = str(self.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
-            json_response(self, 415, {"error": "json_content_type_required"})
+            json_response(
+                self,
+                415,
+                {"error": "json_content_type_required"},
+                no_store=True,
+            )
             return False
 
         source = str(self.headers.get("Origin", "") or self.headers.get("Referer", "") or "").strip()
@@ -92924,10 +93223,20 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         expected_host = str(self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "") or "").split(",", 1)[0].strip()
         expected_proto = str(self.headers.get("X-Forwarded-Proto", "") or "").split(",", 1)[0].strip().lower()
         if not source_url.scheme or not source_url.netloc or source_url.netloc.lower() != expected_host.lower():
-            json_response(self, 403, {"error": "same_origin_required"})
+            json_response(
+                self,
+                403,
+                {"error": "same_origin_required"},
+                no_store=True,
+            )
             return False
         if expected_proto and source_url.scheme.lower() != expected_proto:
-            json_response(self, 403, {"error": "same_origin_required"})
+            json_response(
+                self,
+                403,
+                {"error": "same_origin_required"},
+                no_store=True,
+            )
             return False
         return True
 
@@ -93531,6 +93840,44 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/ui/topbar":
             json_response(self, 200, self._auth_payload())
+            return
+
+        if parsed.path in {
+            "/api/admin/tt-posts/accounts",
+            "/api/admin/tt-posts/queue",
+            "/api/admin/tt-posts/events",
+        }:
+            if not self._require_cookie_navigation_item("ttPostPool"):
+                return
+            try:
+                if parsed.path == "/api/admin/tt-posts/accounts":
+                    query = _tt_post_query_params(parsed.query, set())
+                elif parsed.path == "/api/admin/tt-posts/events":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {"queue_id"},
+                        required={"queue_id"},
+                    )
+                else:
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {
+                            "page",
+                            "page_size",
+                            "material_id",
+                            "source_account_id",
+                            "status",
+                        },
+                    )
+                result = _tt_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                )
+                json_response(self, 200, result, no_store=True)
+            except TTPostAdminClientError as exc:
+                status, payload = tt_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
         if parsed.path == "/api/x-accounts/config":
@@ -96841,6 +97188,256 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+
+        tt_post_queue_action_match = re.fullmatch(
+            r"/api/admin/tt-posts/queue/([1-9][0-9]*)/(cancel|reconcile)",
+            parsed.path,
+        )
+        if tt_post_queue_action_match:
+            if not self._require_cookie_navigation_item("ttPostPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            queue_id = tt_post_queue_action_match.group(1)
+            queue_action = tt_post_queue_action_match.group(2)
+            audit_action = (
+                "cancel_tt_post_queue"
+                if queue_action == "cancel"
+                else "manual_reconcile_tt_post_queue"
+            )
+            request_payload = {}
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise TTPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                allowed_fields = (
+                    {"reason"} if queue_action == "cancel" else set()
+                )
+                if set(request_payload) - allowed_fields:
+                    raise TTPostAdminClientError(
+                        "invalid_request",
+                        "请求包含无效字段",
+                        400,
+                    )
+                result = _tt_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=request_payload,
+                )
+                item = (
+                    result.get("item", {})
+                    if isinstance(result, dict)
+                    and isinstance(result.get("item"), dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        audit_action,
+                        "tt_post_queue",
+                        queue_id,
+                        {
+                            "queue_id": queue_id,
+                            "status": str(item.get("status") or ""),
+                            "remote_status": str(
+                                result.get("remote_status") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post queue action audit write failed"
+                    )
+                json_response(self, 200, result, no_store=True)
+            except TTPostAdminClientError as exc:
+                status, error_payload = tt_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        audit_action + "_failed",
+                        "tt_post_queue",
+                        queue_id,
+                        {
+                            "queue_id": queue_id,
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post queue action failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception:
+                try:
+                    append_audit_log(
+                        session,
+                        audit_action + "_failed",
+                        "tt_post_queue",
+                        queue_id,
+                        {
+                            "queue_id": queue_id,
+                            "error": "invalid_request",
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post queue action invalid-request audit failed"
+                    )
+                json_response(
+                    self,
+                    400,
+                    {
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
+
+        if parsed.path in {
+            "/api/admin/tt-posts/creator-info",
+            "/api/admin/tt-posts/materials/preview",
+            "/api/admin/tt-posts/queue",
+        }:
+            if not self._require_cookie_navigation_item("ttPostPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            request_payload = {}
+            action_by_path = {
+                "/api/admin/tt-posts/creator-info": "check_tt_post_creator_info",
+                "/api/admin/tt-posts/materials/preview": "prepare_tt_post_material",
+                "/api/admin/tt-posts/queue": "create_tt_post_queue",
+            }
+            action = action_by_path[parsed.path]
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise TTPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                result = _tt_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=request_payload,
+                )
+                item = (
+                    result.get("item", {})
+                    if isinstance(result, dict)
+                    and isinstance(result.get("item"), dict)
+                    else {}
+                )
+                target_id = str(
+                    item.get("queue_id")
+                    or item.get("id")
+                    or request_payload.get("source_account_id")
+                    or request_payload.get("material_id")
+                    or ""
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        action,
+                        "tt_post",
+                        target_id,
+                        {
+                            "source_account_id": str(
+                                request_payload.get("source_account_id") or ""
+                            ),
+                            "material_id": str(
+                                request_payload.get("material_id") or ""
+                            ),
+                            "content_id": str(
+                                item.get("content_id")
+                                or request_payload.get("content_id")
+                                or ""
+                            ),
+                            "queue_id": str(
+                                item.get("queue_id") or item.get("id") or ""
+                            ),
+                            "scheduled_at": str(
+                                item.get("scheduled_at")
+                                or request_payload.get("scheduled_at")
+                                or ""
+                            ),
+                            "publish_mode": str(
+                                item.get("publish_mode") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception("TT Post admin audit write failed")
+                json_response(self, 200, result, no_store=True)
+            except TTPostAdminClientError as exc:
+                status, error_payload = tt_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "tt_post",
+                        str(
+                            request_payload.get("source_account_id")
+                            or request_payload.get("material_id")
+                            or ""
+                        ),
+                        {
+                            "source_account_id": str(
+                                request_payload.get("source_account_id") or ""
+                            ),
+                            "material_id": str(
+                                request_payload.get("material_id") or ""
+                            ),
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post admin failure audit write failed"
+                    )
+                json_response(
+                    self,
+                    status,
+                    error_payload,
+                    no_store=True,
+                )
+            except Exception:
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "tt_post",
+                        "",
+                        {"error": "invalid_request"},
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT Post admin invalid-request audit write failed"
+                    )
+                json_response(
+                    self,
+                    400,
+                    {
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
 
         x_post_account_verify_match = re.fullmatch(
             r"/api/admin/x-posts/drama-pool"
