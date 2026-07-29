@@ -118,10 +118,14 @@ class TtPostPoolUiTest(unittest.TestCase):
             'CAPTION_TEMPLATE.replace("{{contect_id}}", contentId)',
             PAGE,
         )
-        self.assertIn("function captionHasDramaId(caption, contentId)", PAGE)
-        self.assertIn('String(caption || "").split(/\\r?\\n/)', PAGE)
-        self.assertIn("line.trim() === expected", PAGE)
-        self.assertIn('maxlength="2200"', PAGE)
+        self.assertIn("function fixedCaption(contentId)", PAGE)
+        caption = re.search(r'<textarea id="caption"(?P<attrs>[^>]*)>', PAGE)
+        self.assertIsNotNone(caption)
+        self.assertIn('maxlength="2200"', caption.group("attrs"))
+        self.assertIn("readonly", caption.group("attrs"))
+        self.assertNotIn("disabled", caption.group("attrs"))
+        self.assertNotIn('byId("caption").addEventListener("input"', PAGE)
+        self.assertIn("仅 Drama ID 会按当前素材动态替换，不可编辑", PAGE)
         self.assertIn("utf16Units", PAGE)
 
     def test_creator_settings_fail_closed_and_have_no_platform_defaults(self):

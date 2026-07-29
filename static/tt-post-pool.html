@@ -166,6 +166,7 @@
       outline: none;
     }
     .field textarea { min-height: 150px; resize: vertical; line-height: 1.55; }
+    .field textarea[readonly] { background: #f5f7fb; color: #24324a; cursor: default; }
     .field input:focus, .field select:focus, .field textarea:focus,
     .filters input:focus, .filters select:focus {
       border-color: #86a8f8;
@@ -520,10 +521,10 @@
 
             <div class="column">
               <div class="field">
-                <label for="caption"><span class="step">3</span>确认发布描述</label>
-                <textarea id="caption" maxlength="2200" disabled aria-describedby="captionHelp"></textarea>
+                <label for="caption"><span class="step">3</span>发布描述（系统固定）</label>
+                <textarea id="caption" maxlength="2200" readonly aria-describedby="captionHelp"></textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">读取素材后自动填充；可以编辑，但必须保留准确的 Drama ID 行。</span>
+                  <span id="captionHelp">读取素材后自动生成；仅 Drama ID 会按当前素材动态替换，不可编辑。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -1121,7 +1122,6 @@
         state.material = null;
         hide(byId("mediaPreview"));
         byId("caption").value = "";
-        byId("caption").disabled = true;
         setText(byId("captionCount"), "0 / 2200");
         setText(byId("materialHelp"), message);
         byId("materialHelp").className = "helper";
@@ -1162,7 +1162,6 @@
         setText(byId("mediaStatus"), `处理状态：${item.status_label || item.status || "已解析"}`);
         const contentId = cleanId(item.content_id);
         byId("caption").value = CAPTION_TEMPLATE.replace("{{contect_id}}", contentId);
-        byId("caption").disabled = !contentId;
         updateCaptionState();
       }
       async function previewMaterial() {
@@ -1202,25 +1201,24 @@
         }
         validateForm();
       }
-      function captionHasDramaId(caption, contentId) {
-        const expected = `Drama ID: ${contentId}`;
-        return String(caption || "").split(/\r?\n/).some(line => line.trim() === expected);
+      function fixedCaption(contentId) {
+        return CAPTION_TEMPLATE.replace("{{contect_id}}", cleanId(contentId));
       }
       function updateCaptionState() {
         const caption = byId("caption").value;
         const count = utf16Units(caption);
         setText(byId("captionCount"), `${count} / 2200`);
         if (!state.material) {
-          setText(byId("captionHelp"), "读取素材后自动填充；可以编辑，但必须保留准确的 Drama ID 行。");
+          setText(byId("captionHelp"), "读取素材后自动生成；仅 Drama ID 会按当前素材动态替换，不可编辑。");
           byId("captionHelp").className = "";
-        } else if (!captionHasDramaId(caption, state.material.content_id)) {
-          setText(byId("captionHelp"), `描述必须保留完整一行：Drama ID: ${state.material.content_id}`);
+        } else if (caption !== fixedCaption(state.material.content_id)) {
+          setText(byId("captionHelp"), "系统固定发布描述异常，请重新读取素材。");
           byId("captionHelp").className = "helper error";
         } else if (count > 2200) {
           setText(byId("captionHelp"), "描述超过 TikTok 允许的 2200 个 UTF-16 单位。");
           byId("captionHelp").className = "helper error";
         } else {
-          setText(byId("captionHelp"), "Drama ID 正确；提交后会冻结当前描述。");
+          setText(byId("captionHelp"), "固定模板已生成；Drama ID 来自当前素材，提交时服务端会再次核验。");
           byId("captionHelp").className = "helper success";
         }
         validateForm();
@@ -1257,8 +1255,8 @@
         if (maxDuration > 0 && duration > maxDuration) return `最终视频超过该账号允许的 ${maxDuration} 秒。`;
         const caption = byId("caption").value;
         if (!caption.trim()) return "发布描述不能为空。";
-        if (!captionHasDramaId(caption, state.material.content_id)) {
-          return `描述必须保留完整一行：Drama ID: ${state.material.content_id}`;
+        if (caption !== fixedCaption(state.material.content_id)) {
+          return "发布描述与系统固定模板不一致，请重新读取素材。";
         }
         if (utf16Units(caption) > 2200) return "发布描述超过 TikTok 长度限制。";
         const scheduledUtc = shanghaiInputToUtc(byId("scheduledAt").value);
@@ -1780,11 +1778,6 @@
           event.preventDefault();
           previewMaterial();
         }
-      });
-      byId("caption").addEventListener("input", () => {
-        state.formKey = "";
-        byId("publishConsent").checked = false;
-        updateCaptionState();
       });
       [
         "scheduledAt", "privacyLevel", "allowComment", "allowDuet", "allowStitch",

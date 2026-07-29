@@ -48,6 +48,13 @@
 - 主 API 通过独立 root-only `/etc/tt-post-app.env` 和 systemd drop-in
   取得 CPU sidecar 地址及内部 bearer；缺失时 TT 路由 fail-close，不影响主 API。
 
+### 4. 固定发布描述
+
+- 固定模板由 CPU Core 定义为唯一真值，页面只读展示，只有素材真实 `content_id` 可动态替换。
+- Sidecar 对客户端提交值做全文逐字校验；保留正确 Drama ID 但修改其他文案也会被拒绝。
+- Core 冻结层再次拒绝非固定模板，防止内部调用绕过页面和 Sidecar 校验。
+- GPU 发布协议和描述指纹无需改变，继续使用数据库中已冻结的最终描述。
+
 ## 问题与遗留风险
 
 | 编号 | 级别 | 问题 | 当前控制 | 后续建议 | 状态 |
@@ -66,9 +73,9 @@
 
 ## 编译与验证结果
 
-- TT 测试：108/108 通过
-  - Core：32
-  - Service：30
+- TT 测试：111/111 通过
+  - Core：33
+  - Service：32
   - GPU：25
   - UI：11
   - App contract：10

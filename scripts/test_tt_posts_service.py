@@ -628,6 +628,36 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(item["queue"]["queue_status"], "blocked_compliance")
         self.assertEqual(self.gpu.publish_jobs, [])
 
+    def test_queue_generates_fixed_caption_when_client_omits_it(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload.pop("caption_text")
+        created = service.queue_create(payload)["item"]
+        self.assertEqual(
+            created["caption_text"],
+            (
+                "Watch the full story in the app 🎬\n\n"
+                "Drama ID: ABCD1234\n\n"
+                "Visit my profile → Open the link → Search the Drama ID → Watch now."
+            ),
+        )
+
+    def test_queue_rejects_modified_caption_with_correct_drama_id(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload["caption_text"] = (
+            "Custom copy\n\n"
+            "Drama ID: ABCD1234\n\n"
+            "Visit my profile → Open the link → Search the Drama ID → Watch now."
+        )
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.queue_create(payload)
+        self.assertEqual(
+            "tt_caption_fixed_template_mismatch",
+            caught.exception.code,
+        )
+        self.assertEqual(self.gpu.prepare_jobs, [])
+
     def test_claim_lease_is_shorter_than_grace_and_reclaims_claimed_once(self):
         self.assertLessEqual(DEFAULT_LEASE_SECONDS, 300)
         self.assertLess(DEFAULT_LEASE_SECONDS, DEFAULT_GRACE_SECONDS)

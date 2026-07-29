@@ -34,6 +34,11 @@ UTC = timezone.utc
 BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 MAX_CAPTION_CHARS = 2200
 MAX_EVENT_MESSAGE_CHARS = 500
+FIXED_CAPTION_TEMPLATE = (
+    "Watch the full story in the app 🎬\n\n"
+    "Drama ID: {{contect_id}}\n\n"
+    "Visit my profile → Open the link → Search the Drama ID → Watch now."
+)
 
 PRIVACY_LEVELS = frozenset(
     {
@@ -565,6 +570,12 @@ def render_caption_template(
             400,
         )
     return rendered
+
+
+def render_fixed_caption(content_id: Any) -> str:
+    """Render the one product-approved caption for a resolved drama."""
+
+    return render_caption_template(FIXED_CAPTION_TEMPLATE, content_id)
 
 
 @dataclass(frozen=True)
@@ -1189,10 +1200,16 @@ class TTPostStore:
                 404,
             )
         resolution = resolve_material(material_resolver, pool["material_id"])
-        caption = render_caption_template(
-            caption_template,
-            resolution.content_id,
-        )
+        if not secrets.compare_digest(
+            str(caption_template or "").encode("utf-8"),
+            FIXED_CAPTION_TEMPLATE.encode("utf-8"),
+        ):
+            raise TTPostError(
+                "tt_caption_fixed_template_mismatch",
+                "TikTok发布描述必须使用系统固定模板",
+                400,
+            )
+        caption = render_fixed_caption(resolution.content_id)
         normalized_key = str(idempotency_key or "").strip()
         if not normalized_key:
             normalized_key = "tt-post:%s:%s:%s" % (
@@ -1315,7 +1332,7 @@ class TTPostStore:
                     frozen_creator_hash,
                     frozen_creator_synced_at,
                     scheduled_at_utc,
-                    str(caption_template),
+                    FIXED_CAPTION_TEMPLATE,
                     caption,
                     normalized_policy.privacy_level,
                     int(normalized_policy.allow_comment),

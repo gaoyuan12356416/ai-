@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from features.tt_posts import (  # noqa: E402
     AccountSourceError,
+    FIXED_CAPTION_TEMPLATE,
     LiveGates,
     PublishCredentials,
     SafeAccount,
@@ -24,17 +25,14 @@ from features.tt_posts import (  # noqa: E402
     TTPostPolicy,
     TTPostStore,
     beijing_to_utc,
+    render_fixed_caption,
     render_caption_template,
 )
 
 
 UTC = timezone.utc
 OPEN_GATES = LiveGates(True, True, True)
-CAPTION = (
-    "Watch the full story in the app 🎬\n\n"
-    "Drama ID: {{contect_id}}\n\n"
-    "Visit my profile → Open the link → Search the Drama ID → Watch now."
-)
+CAPTION = FIXED_CAPTION_TEMPLATE
 
 
 def policy(consented_at="2026-07-29 10:00:00"):
@@ -188,6 +186,16 @@ class StorageTests(CoreTestCase):
         serialized_events = repr(self.store.list_events(queue_id=queue["id"]))
         self.assertNotIn(claim.reveal_claim_token(), serialized_events)
 
+    def test_queue_rejects_non_fixed_caption_template(self):
+        with self.assertRaises(TTPostError) as caught:
+            self.add_and_freeze(
+                template="Custom copy\n\nDrama ID: {{contect_id}}",
+            )
+        self.assertEqual(
+            "tt_caption_fixed_template_mismatch",
+            caught.exception.code,
+        )
+
 
 class AccountSourceTests(unittest.TestCase):
     def metadata(self, account_id="acct-1"):
@@ -290,7 +298,7 @@ class CaptionPolicyAndTimeTests(unittest.TestCase):
         )
 
     def test_caption_renders_product_owner_placeholder(self):
-        rendered = render_caption_template(CAPTION, "Y9v1yQcFqM")
+        rendered = render_fixed_caption("Y9v1yQcFqM")
         self.assertIn("Drama ID: Y9v1yQcFqM", rendered)
         self.assertNotIn("{{contect_id}}", rendered)
 

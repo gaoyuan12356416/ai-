@@ -20,8 +20,8 @@ CPU 状态机、账号安全边界、GPU 成片、发布门禁、主后台权限
 | TC-002 | 不合格账号 | Token 过期或禁发 | 创建任务 | 返回 `account_not_eligible` | P0 | 待执行 |
 | TC-003 | creator info 无 scope | Mock `scope_not_authorized` | 预检 | fail-close，不显示可发 | P0 | 待执行 |
 | TC-004 | 素材解析 | 有效素材 ID | 预览 | 返回真实 `content_id` 和媒体 | P0 | 待执行 |
-| TC-005 | 描述模板 | 有效 `content_id` | 冻结任务 | `{{contect_id}}` 被正确替换 | P0 | 待执行 |
-| TC-006 | 描述缺 ID | 删除真实 ID | 创建任务 | 拒绝保存 | P0 | 待执行 |
+| TC-005 | 固定描述模板 | 有效 `content_id` | 冻结任务 | 固定全文逐字落库，`{{contect_id}}` 被真实 ID 替换 | P0 | 待执行 |
+| TC-006 | 篡改固定描述 | 保留正确 Drama ID、修改其他文案 | 创建任务 | `tt_caption_fixed_template_mismatch`，GPU 不开始制作 | P0 | 待执行 |
 | TC-007 | 隐私无默认 | creator info 成功 | 打开页面 | 未手选时不可提交 | P0 | 待执行 |
 | TC-008 | 互动无默认 | creator info 成功 | 打开页面 | 三项均未勾选，禁用项灰显 | P0 | 待执行 |
 | TC-009 | 显式同意 | 未勾同意 | 创建任务 | `consent_required` | P0 | 待执行 |

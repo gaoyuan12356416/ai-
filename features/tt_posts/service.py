@@ -42,6 +42,7 @@ from features.x_posts.selector import (
 
 from .core import (
     AccountSourceError,
+    FIXED_CAPTION_TEMPLATE,
     LiveGates,
     MaterialResolution,
     SafeAccount,
@@ -51,6 +52,7 @@ from .core import (
     TTPostStore,
     beijing_to_utc,
     redact_text,
+    render_fixed_caption,
 )
 
 
@@ -69,7 +71,6 @@ MAX_ACCOUNT_ROWS = 1000
 MAX_HTTP_BODY_BYTES = 256 * 1024
 MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
 TOKEN_MIN_VALIDITY_SECONDS = 300
-CAPTION_DRAMA_LINE_RE = re.compile(r"(?m)^[ \t]*Drama ID:[ \t]*(\S+)[ \t]*$")
 SAFE_INTERNAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -1088,21 +1089,21 @@ def _creator_info_hash(creator: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _caption_template_from_frozen(caption: Any, content_id: Any) -> str:
-    text = _bounded_text(caption, "发布描述", 2200)
-    normalized_content = _bounded_text(content_id, "Drama ID", 128)
-    matches = CAPTION_DRAMA_LINE_RE.findall(text)
-    if matches != [normalized_content]:
+def _fixed_caption_from_submission(caption: Any, content_id: Any) -> str:
+    canonical = render_fixed_caption(content_id)
+    if caption in (None, ""):
+        return canonical
+    submitted = _bounded_text(caption, "发布描述", 2200)
+    if not secrets.compare_digest(
+        submitted.encode("utf-8"),
+        canonical.encode("utf-8"),
+    ):
         raise TTPostServiceError(
-            "caption_content_id_required",
-            "发布描述必须保留唯一且准确的Drama ID行",
+            "tt_caption_fixed_template_mismatch",
+            "发布描述由系统固定生成，只允许根据素材替换Drama ID",
             400,
         )
-    return CAPTION_DRAMA_LINE_RE.sub(
-        "Drama ID: {{contect_id}}",
-        text,
-        count=1,
-    )
+    return canonical
 
 
 def _normalized_creator_info(raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1570,9 +1571,8 @@ class TTPostService:
                 "TikTok排期只接受Asia/Shanghai",
                 400,
             )
-        caption = _bounded_text(payload.get("caption_text"), "发布描述", 2200)
-        caption_template = _caption_template_from_frozen(
-            caption,
+        caption = _fixed_caption_from_submission(
+            payload.get("caption_text"),
             requested_content_id,
         )
         policy = self._policy_from_payload(payload)
@@ -1647,7 +1647,7 @@ class TTPostService:
             pool["id"],
             safe_account,
             scheduled_at_utc,
-            caption_template,
+            FIXED_CAPTION_TEMPLATE,
             policy,
             lambda _material_id: {
                 "material_id": prepared["material_id"],

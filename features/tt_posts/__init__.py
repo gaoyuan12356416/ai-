@@ -8,6 +8,7 @@ compliance settings are enabled.
 
 from .core import (
     AccountSourceError,
+    FIXED_CAPTION_TEMPLATE,
     LiveGates,
     MaterialResolution,
     PublishCredentials,
@@ -19,6 +20,7 @@ from .core import (
     TTPostStore,
     beijing_to_utc,
     ensure_storage,
+    render_fixed_caption,
     render_caption_template,
     resolve_material,
 )
@@ -42,6 +44,7 @@ __all__ = [
     "ACCOUNT_METADATA_SQL",
     "ACCOUNT_TOKEN_SQL",
     "DramawaveMaterialResolver",
+    "FIXED_CAPTION_TEMPLATE",
     "GPUClient",
     "GPUClientError",
     "LiveGates",
@@ -60,6 +63,7 @@ __all__ = [
     "TTPostStore",
     "beijing_to_utc",
     "ensure_storage",
+    "render_fixed_caption",
     "render_caption_template",
     "resolve_material",
 ]

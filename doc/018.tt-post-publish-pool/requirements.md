@@ -55,7 +55,7 @@ TikTok 当前官方规则同时构成本需求的强制发布门禁：
 
 1. 操作人员能搜索账号并看到账号名、主页、Token/账号状态、到期时间和“数据库候选/接口实测”两层状态。
 2. 操作人员输入素材 ID 后，系统自动查出素材、真实 `content_id` 和视频预览，不允许手填或伪造 `content_id`。
-3. 默认描述为：
+3. 发布描述固定为：
 
    ```text
    Watch the full story in the app 🎬
@@ -65,7 +65,7 @@ TikTok 当前官方规则同时构成本需求的强制发布门禁：
    Visit my profile → Open the link → Search the Drama ID → Watch now.
    ```
 
-   UI 可编辑描述，但保存时必须包含当前真实 `content_id`。
+   UI 只读展示该描述，仅 `<content_id>` 根据当前素材动态替换。服务端以素材真实映射重新生成全文，不接受自定义前后文。
 4. 账号隐私选项只能来自最新 `creator_info`，且无默认值；评论、Duet、Stitch 默认均关闭。
 5. 用户必须看到目标账号昵称、最终视频/描述预览，并显式确认音乐条款和商业内容披露，才可排期。
 6. 同一个素材在全局只能被一个未取消/未失败任务占用；同一账号同一发布时间只能有一个任务。
@@ -158,9 +158,9 @@ TikTok 当前官方规则同时构成本需求的强制发布门禁：
 1. 已授权人员可打开 TT 发布池，未授权人员返回 403。
 2. 页面/API/日志/SQLite/测试快照中均不出现 Token 或 Authorization。
 3. 账号列表与 63350 只读快照一致，Token 不合格账号不可选择。
-4. 素材 ID 自动得到真实 `content_id`，描述中的 Drama ID 正确。
+4. 素材 ID 自动得到真实 `content_id`；页面只读展示固定描述，服务端冻结的全文与固定模板逐字一致，Drama ID 正确。
 5. GPU 成片只写 `/data/tt-post-publisher`，返回源/Logo/片尾/成片 SHA、大小、时长和裁剪秒数；旧 CTA 被裁掉，phone-match 过渡及音频连续。
-6. 未选择隐私、未完成显式同意、描述缺少真实 Drama ID 时不能排期。
+6. 未选择隐私、未完成显式同意或提交描述与系统固定模板不一致时不能排期。
 7. 重复素材、账号时间冲突、并发 claim、unknown 重发均被数据库/状态机阻止。
 8. 三重门禁默认均为 0；验收过程中 TikTok Direct Post init 调用次数为 0。
 9. `creator_info` 可在不泄露 Token 的前提下返回脱敏结果；失败时 fail-close。
