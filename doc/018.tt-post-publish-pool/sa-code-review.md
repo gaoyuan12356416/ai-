@@ -2,9 +2,9 @@
 
 ## 评审结论
 
-当前本地实现未发现阻断合入的 P0 问题。TT Post 发布池的 CPU/GPU 边界、Token 传递、幂等与未知结果保护、定时 Runner 调度顺序以及 Direct Post 关闭态均已按设计落地，并通过本地自动化测试。
+当前实现未发现阻断合入的 P0 问题。TT Post 发布池的 CPU/GPU 边界、Token 传递、幂等与未知结果保护、定时 Runner 调度顺序以及 Direct Post 关闭态均已按设计落地，并通过自动化测试与生产关闭态验收。
 
-本结论仅覆盖代码与本地测试，不代表生产部署完成，也不代表真实 GPU 转码、COS 上传或 TikTok Direct Post 链路已经完成线上验证。
+运行代码已以提交 `18148b2` 部署到 CPU/GPU 不可变 release。真实 GPU NVENC、COS 上传、账号 `creator_info` 与浏览器页面已经验证；TikTok Direct Post 始终保持关闭，未创建真实帖子。
 
 ## 评审范围
 
@@ -82,4 +82,4 @@
 
 ## 合入建议
 
-代码可进入关闭门禁的预部署阶段。生产启用 Direct Post 前，仍必须分别完成平台审核、URL Property 验证、无品牌媒体策略确认，以及真实 GPU 转码、COS 可访问性和 TikTok 状态调和链路验收。
+当前关闭门禁版本可继续用于账号预检、成片、预览和发布池排期演练。生产启用 Direct Post 前，仍必须分别完成平台审核、URL Property 验证、无品牌媒体策略确认和 TikTok 状态调和链路验收。

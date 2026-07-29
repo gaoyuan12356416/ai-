@@ -10,7 +10,7 @@
 
 Python 编译检查与 Git diff check 均通过。当前结果证明代码层面的核心状态机、CPU/GPU 协议、Runner 调度、页面契约和既有功能回归符合预期。
 
-本报告不包含生产部署验收；尚未在真实 GPU 上验证 NVENC 成片，也尚未验证 COS 上传、公开 URL 可访问性或真实 TikTok Direct Post。
+生产关闭态验收同时通过：真实 GPU NVENC 成片、COS 上传与公开访问、GPU 出口账号预检、AI 后台登录态页面均已验证。TikTok Direct Post 三重门禁全程关闭，未创建真实 Post。
 
 ## 测试范围
 
@@ -83,15 +83,29 @@ Python 编译检查与 Git diff check 均通过。当前结果证明代码层面
 - P2：SQLite 尚缺少显式 schema version 与迁移框架，后续升级前需补齐。
 - Direct Post 平台审核、URL Property 验证以及品牌片尾的合规路径均未完成，因此不得开启真实发布。
 
-## 尚待部署后验证
+## 生产关闭态验收
 
-- CPU、GPU 服务及反向隧道健康检查
-- 真实 GPU NVENC 转码输出的分辨率、时长、音视频编码和 SHA
-- COS 上传、对象元数据、公开 HEAD/Range 访问
-- 真实账号 `creator_info` 预检是否由 GPU 出口完成
-- 任务 SQLite 与 GPU 发布 ledger 在失败、未知和调和场景下的一致性
-- AI 后台页面的真实登录态浏览器验收
+- 运行提交：`18148b2`
+- CPU release：`/opt/tt-post/releases/18148b2`
+- GPU release：`/opt/tt-post-gpu/releases/18148b2`
+- CPU sidecar、每分钟 Runner timer、GPU sidecar 和 18830 反向隧道均为 active；SQLite `PRAGMA integrity_check=ok`。
+- 只读快照返回 23 个候选账号；账号 `700` 从 GPU 实时确认：
+  - `@dramawave998`
+  - `Dramawave Short Dramas`
+  - 隐私选项：`PUBLIC_TO_EVERYONE`、`MUTUAL_FOLLOW_FRIENDS`、`SELF_ONLY`
+  - 最长视频：3600 秒
+  - 账号/头像响应未包含账号 Token、Authorization 或带签名查询参数的头像 URL
+- 实际素材 `5824343` 映射到 `Y9v1yQcFqM`，GPU NVENC 成片：
+  - SHA-256：`568fde32b0bde91935a12af7bf732ffe537be99cc0e5fea94a1a2091d72ed492`
+  - 大小：45,496,176 字节
+  - 时长：45.685 秒
+  - 1080 × 1920、30 fps、H.264 High、yuv420p、AAC-LC 48 kHz 双声道
+  - 动态 Drama ID、教程标记和 0.9 秒 phone-match 过渡已抽帧检查
+- COS `HEAD` 返回 200，`x-cos-meta-sha256` 与成片一致；`Range: bytes=0-1023` 返回 206、无重定向。
+- GPU manifest `direct_post_eligible=false`、敏感标记数 0、publish ledger 文件数 0、残留 job 目录数 0。
+- 公网页面 `/tt-post-pool.html` 返回 200 且 no-store；登录态浏览器显示 23 个账号，账号 700 和素材 5824343 的最终成片/描述预览正确，队列仍为 0。
+- 既有 X sidecar、两个 X timer 和 GPU X 修复服务在部署后保持 active。
 
 ## 发布建议
 
-当前仅建议部署三道 Direct Post 门禁关闭的准备/预检版本。完成上述线上验证之前，不应开启真实 TikTok Direct Post。
+当前仅允许继续运行三道 Direct Post 门禁关闭的准备/预检版本。完成 TikTok 平台审核、URL Property 验证与无品牌媒体合规确认之前，不得开启真实 Direct Post。

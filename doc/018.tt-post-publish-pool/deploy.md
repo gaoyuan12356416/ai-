@@ -103,3 +103,16 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 - 禁止在命令行、systemd 状态、journal、调试响应中输出真实 Token。
 - 禁止将 `TT_POST_LIVE_ENABLED` 单独打开；三重 gate 必须全部满足且经过独立变更审批。
 - 当前品牌片尾只允许关闭态成片/人工流程验收，不代表 TikTok Direct Post 合规；其 manifest 固定为 `direct_post_eligible=false`，不能靠修改三重 gate 绕过。
+
+## 2026-07-29 部署记录
+
+- GitHub 分支：`codex/tiktok-post-pool-20260729`
+- 运行提交：`18148b2`
+- CPU：`/opt/tt-post/releases/18148b2`
+- GPU：`/opt/tt-post-gpu/releases/18148b2`
+- CPU 部署前备份：`/root/tt-post-backups/20260729T082210Z-cec5dab`
+- 页面：`https://ai.yingliangads.com/tt-post-pool.html`
+- Direct Post 三重 gate：全部为 `0`
+- 真实 TikTok Post：0
+- 实际 GPU/COS 成片：
+  `https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/tt-post-prepared/56/568fde32b0bde91935a12af7bf732ffe537be99cc0e5fea94a1a2091d72ed492.mp4`
