@@ -186,15 +186,38 @@ class StorageTests(CoreTestCase):
         serialized_events = repr(self.store.list_events(queue_id=queue["id"]))
         self.assertNotIn(claim.reveal_claim_token(), serialized_events)
 
-    def test_queue_rejects_non_fixed_caption_template(self):
-        with self.assertRaises(TTPostError) as caught:
-            self.add_and_freeze(
-                template="Custom copy\n\nDrama ID: {{contect_id}}",
-            )
+    def test_queue_accepts_and_freezes_editable_caption_template(self):
+        template = "Custom copy\n\nDrama ID: {{contect_id}}"
+        queue = self.add_and_freeze(template=template)
+        self.assertEqual(template, queue["caption_template"])
         self.assertEqual(
-            "tt_caption_fixed_template_mismatch",
-            caught.exception.code,
+            "Custom copy\n\nDrama ID: Y9v1yQcFqM",
+            queue["caption"],
         )
+
+    def test_same_idempotency_key_with_changed_template_conflicts(self):
+        pool = self.store.add_material("1001")
+        first = self.store.freeze_queue(
+            pool["id"],
+            account(),
+            "2026-07-29 10:00:00",
+            CAPTION,
+            policy(),
+            resolver,
+            idempotency_key="tt-post:editable-template",
+        )
+        self.assertEqual(CAPTION, first["caption_template"])
+        with self.assertRaises(TTPostError) as caught:
+            self.store.freeze_queue(
+                pool["id"],
+                account(),
+                "2026-07-29 10:00:00",
+                "Custom\n\nDrama ID: {{contect_id}}",
+                policy(),
+                resolver,
+                idempotency_key="tt-post:editable-template",
+            )
+        self.assertEqual("tt_post_idempotency_conflict", caught.exception.code)
 
 
 class AccountSourceTests(unittest.TestCase):
@@ -319,6 +342,28 @@ class CaptionPolicyAndTimeTests(unittest.TestCase):
                 "{{contect_id}} {{access_token}}",
                 "ABC",
             )
+        for malformed in (
+            "{{contect_id}} {{bad-name}}",
+            "{{contect_id}} {{unfinished",
+            "{{contect_id}} stray }}",
+        ):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(TTPostError) as caught:
+                    render_caption_template(malformed, "ABC")
+                self.assertEqual(
+                    "caption_placeholder_invalid",
+                    caught.exception.code,
+                )
+
+    def test_caption_length_uses_utf16_units(self):
+        allowed = ("a" * 2197) + "😀" + "{{contect_id}}"
+        self.assertEqual(
+            ("a" * 2197) + "😀A",
+            render_caption_template(allowed, "A"),
+        )
+        with self.assertRaises(TTPostError) as caught:
+            render_caption_template(("a" * 2198) + "😀{{contect_id}}", "A")
+        self.assertEqual("caption_length_invalid", caught.exception.code)
 
     def test_policy_requires_every_explicit_field(self):
         data = policy()

@@ -53,6 +53,7 @@ from .core import (
     beijing_to_utc,
     redact_text,
     render_fixed_caption,
+    render_caption_template,
 )
 
 
@@ -71,6 +72,7 @@ MAX_ACCOUNT_ROWS = 1000
 MAX_HTTP_BODY_BYTES = 256 * 1024
 MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
 TOKEN_MIN_VALIDITY_SECONDS = 300
+CAPTION_DRAMA_LINE_RE = re.compile(r"(?m)^[ \t]*Drama ID:[ \t]*(\S+)[ \t]*$")
 SAFE_INTERNAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -1052,11 +1054,6 @@ def _job_id(prefix: str, identity: Any) -> str:
     return "%s-%s-%s" % (prefix, safe_identity or "item", secrets.token_hex(8))
 
 
-def _stable_gpu_job_id(idempotency_key: str) -> str:
-    digest = hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
-    return "ttpost-" + digest[:40]
-
-
 def _required_gpu_job_id(value: Any) -> str:
     job_id = str(value or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{11,127}", job_id):
@@ -1089,21 +1086,69 @@ def _creator_info_hash(creator: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _fixed_caption_from_submission(caption: Any, content_id: Any) -> str:
-    canonical = render_fixed_caption(content_id)
-    if caption in (None, ""):
-        return canonical
-    submitted = _bounded_text(caption, "发布描述", 2200)
-    if not secrets.compare_digest(
-        submitted.encode("utf-8"),
-        canonical.encode("utf-8"),
-    ):
+def _caption_template_from_frozen(caption: Any, content_id: Any) -> str:
+    """Recover the template used by the legacy rendered-caption API."""
+
+    text = _bounded_text(caption, "发布描述", 2200)
+    normalized_content = _bounded_text(content_id, "Drama ID", 128)
+    matches = CAPTION_DRAMA_LINE_RE.findall(text)
+    if matches != [normalized_content]:
         raise TTPostServiceError(
-            "tt_caption_fixed_template_mismatch",
-            "发布描述由系统固定生成，只允许根据素材替换Drama ID",
+            "caption_content_id_required",
+            "发布描述必须保留唯一且准确的Drama ID行",
             400,
         )
-    return canonical
+    return CAPTION_DRAMA_LINE_RE.sub(
+        "Drama ID: {{contect_id}}",
+        text,
+        count=1,
+    )
+
+
+def _caption_from_submission(
+    payload: Mapping[str, Any],
+    content_id: Any,
+) -> Tuple[str, str]:
+    """Normalize editable templates while preserving legacy callers."""
+
+    raw_template = payload.get("caption_template")
+    raw_caption = payload.get("caption_text")
+    if "caption_template" in payload:
+        template = _bounded_text(
+            raw_template,
+            "发布描述模板",
+            20000,
+        )
+        caption = render_caption_template(template, content_id)
+        if raw_caption not in (None, ""):
+            submitted = _bounded_text(raw_caption, "发布描述", 2200)
+            if not secrets.compare_digest(
+                submitted.encode("utf-8"),
+                caption.encode("utf-8"),
+            ):
+                raise TTPostServiceError(
+                    "tt_caption_template_render_mismatch",
+                    "发布描述与模板按当前Drama ID渲染后的内容不一致",
+                    400,
+                )
+        return template, caption
+
+    if raw_caption in (None, ""):
+        return FIXED_CAPTION_TEMPLATE, render_fixed_caption(content_id)
+
+    caption = _bounded_text(raw_caption, "发布描述", 2200)
+    template = _caption_template_from_frozen(caption, content_id)
+    rendered = render_caption_template(template, content_id)
+    if not secrets.compare_digest(
+        rendered.encode("utf-8"),
+        caption.encode("utf-8"),
+    ):
+        raise TTPostServiceError(
+            "tt_caption_template_render_mismatch",
+            "发布描述与Drama ID模板渲染结果不一致",
+            400,
+        )
+    return template, rendered
 
 
 def _normalized_creator_info(raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1502,6 +1547,7 @@ class TTPostService:
         material_id: str,
         content_id: str,
         scheduled_at_utc: str,
+        caption_template: Optional[str],
         caption: str,
         policy: TTPostPolicy,
         is_aigc: bool,
@@ -1512,7 +1558,7 @@ class TTPostService:
             if exc.code == "tt_post_queue_not_found":
                 return None
             raise
-        expected = {
+        expected: Dict[str, Any] = {
             "account_id": account_id,
             "material_id": material_id,
             "content_id": content_id,
@@ -1529,6 +1575,8 @@ class TTPostService:
             "consented_at_utc": policy.consented_at_utc,
             "is_aigc": is_aigc,
         }
+        if caption_template is not None:
+            expected["caption_template"] = caption_template
         if any(existing.get(key) != value for key, value in expected.items()):
             raise TTPostServiceError(
                 "tt_post_idempotency_conflict",
@@ -1572,11 +1620,21 @@ class TTPostService:
                 400,
             )
         submitted_caption = payload.get("caption_text")
-        caption = (
-            render_fixed_caption(requested_content_id)
-            if submitted_caption in (None, "")
-            else _bounded_text(submitted_caption, "发布描述", 2200)
-        )
+        if "caption_template" in payload:
+            candidate_template, candidate_caption = _caption_from_submission(
+                payload,
+                requested_content_id,
+            )
+        elif submitted_caption not in (None, ""):
+            candidate_template = None
+            candidate_caption = _bounded_text(
+                submitted_caption,
+                "发布描述",
+                2200,
+            )
+        else:
+            candidate_template = FIXED_CAPTION_TEMPLATE
+            candidate_caption = render_fixed_caption(requested_content_id)
         policy = self._policy_from_payload(payload)
         is_aigc = _exact_bool(payload.get("is_aigc"), "AI内容声明")
         account = self.account_repository.get_public_account(account_id)
@@ -1602,7 +1660,8 @@ class TTPostService:
             material_id=material_id,
             content_id=requested_content_id,
             scheduled_at_utc=scheduled_at_utc,
-            caption=caption,
+            caption_template=candidate_template,
+            caption=candidate_caption,
             policy=policy,
             is_aigc=is_aigc,
         )
@@ -1611,11 +1670,10 @@ class TTPostService:
                 "item": self._queue_api_item(existing, gates=self.gates),
                 "gates": self._gates(),
             }
-        caption = _fixed_caption_from_submission(
-            submitted_caption,
+        caption_template, caption = _caption_from_submission(
+            payload,
             requested_content_id,
         )
-
         creator_result = self.creator_info({"source_account_id": account_id})
         creator = creator_result["item"]
         self._assert_creator_policy(creator, policy)
@@ -1623,11 +1681,8 @@ class TTPostService:
         creator_synced_at = _now_utc(self._now_fn).replace(
             microsecond=0
         ).isoformat().replace("+00:00", "Z")
-        gpu_job_id = _stable_gpu_job_id(idempotency_key)
-        prepared = self._resolve_and_prepare(
-            material_id,
-            gpu_job_id=gpu_job_id,
-        )
+        prepared = self._resolve_and_prepare(material_id)
+        gpu_job_id = prepared["gpu_job_id"]
         if prepared["content_id"] != requested_content_id:
             raise TTPostServiceError(
                 "tt_content_id_mismatch",
@@ -1653,7 +1708,7 @@ class TTPostService:
             pool["id"],
             safe_account,
             scheduled_at_utc,
-            FIXED_CAPTION_TEMPLATE,
+            caption_template,
             policy,
             lambda _material_id: {
                 "material_id": prepared["material_id"],

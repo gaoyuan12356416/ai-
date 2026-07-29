@@ -22,7 +22,12 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from features.tt_gpu.credentials import open_access_token
-from features.tt_posts.core import LiveGates, SnapshotAccountSource, TTPostStore
+from features.tt_posts.core import (
+    LiveGates,
+    SnapshotAccountSource,
+    TTPostError,
+    TTPostStore,
+)
 from features.tt_posts.service import (
     ACCOUNT_LIST_SQL,
     ACCOUNT_METADATA_SQL,
@@ -643,21 +648,58 @@ class ServiceLifecycleTests(unittest.TestCase):
             ),
         )
 
-    def test_queue_rejects_modified_caption_with_correct_drama_id(self):
+    def test_queue_accepts_editable_template_and_renders_real_drama_id(self):
         service = self.service(CLOSED_GATES)
         payload = queue_payload(self.clock)
-        payload["caption_text"] = (
-            "Custom copy\n\n"
-            "Drama ID: ABCD1234\n\n"
-            "Visit my profile → Open the link → Search the Drama ID → Watch now."
+        payload.pop("caption_text")
+        payload["caption_template"] = (
+            "Custom copy for this drama\n\n"
+            "Drama ID: {{contect_id}}\n\n"
+            "Watch now."
         )
+        created = service.queue_create(payload)["item"]
+        self.assertEqual(
+            (
+                "Custom copy for this drama\n\n"
+                "Drama ID: ABCD1234\n\n"
+                "Watch now."
+            ),
+            created["caption_text"],
+        )
+        self.assertEqual(payload["caption_template"], created["caption_template"])
+
+    def test_queue_rejects_template_without_drama_placeholder_before_gpu(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload.pop("caption_text")
+        payload["caption_template"] = "Custom copy without a drama placeholder"
+        with self.assertRaises(TTPostError) as caught:
+            service.queue_create(payload)
+        self.assertEqual("caption_content_id_required", caught.exception.code)
+        self.assertEqual(self.gpu.prepare_jobs, [])
+
+    def test_queue_rejects_caption_that_does_not_match_template_render(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload["caption_template"] = "Drama ID: {{contect_id}}\nWatch now."
+        payload["caption_text"] = "Drama ID: WRONG\nWatch now."
         with self.assertRaises(TTPostServiceError) as caught:
             service.queue_create(payload)
         self.assertEqual(
-            "tt_caption_fixed_template_mismatch",
+            "tt_caption_template_render_mismatch",
             caught.exception.code,
         )
         self.assertEqual(self.gpu.prepare_jobs, [])
+
+    def test_queue_reuses_preview_prepare_identity(self):
+        service = self.service(CLOSED_GATES)
+        preview = service.material_preview({"material_id": "9001"})["item"]
+        created = service.queue_create(queue_payload(self.clock))["item"]
+        self.assertEqual(preview["gpu_job_id"], created["gpu_job_id"])
+        self.assertEqual(
+            [preview["gpu_job_id"], preview["gpu_job_id"]],
+            [job[0] for job in self.gpu.prepare_jobs],
+        )
 
     def test_historical_custom_caption_exact_replay_remains_idempotent(self):
         service = self.service(CLOSED_GATES)
@@ -692,6 +734,60 @@ class ServiceLifecycleTests(unittest.TestCase):
         replay = service.queue_create(payload)["item"]
         self.assertEqual(created["id"], replay["id"])
         self.assertEqual(historical_caption, replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+    def test_legacy_caption_replay_does_not_require_stored_template_spelling(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        created = service.queue_create(payload)["item"]
+        legacy_caption = payload["caption_text"].replace("\n", "\r\n")
+        legacy_template = legacy_caption.replace(
+            "ABCD1234",
+            "{{content_id}}",
+        )
+        connection = sqlite3.connect(Path(self.temp.name) / "tt.sqlite3")
+        try:
+            connection.execute(
+                """
+                UPDATE tt_post_queue
+                SET caption_template=?,caption=?
+                WHERE id=?
+                """,
+                (legacy_template, legacy_caption, created["id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        payload["caption_text"] = legacy_caption
+        replay = service.queue_create(payload)["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(legacy_template, replay["caption_template"])
+        self.assertEqual(legacy_caption, replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+    def test_explicit_template_change_with_same_key_conflicts(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload.pop("caption_text")
+        payload["caption_template"] = "Drama ID: {{contect_id}}\nWatch now."
+        service.queue_create(payload)
+        changed = dict(payload)
+        changed["caption_template"] = "Drama ID: {{content_id}}\nWatch now."
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.queue_create(changed)
+        self.assertEqual("tt_post_idempotency_conflict", caught.exception.code)
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+    def test_explicit_template_exact_replay_returns_existing_without_gpu(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload.pop("caption_text")
+        payload["caption_template"] = "Drama ID: {{contect_id}}\nWatch now."
+        created = service.queue_create(payload)["item"]
+        replay = service.queue_create(dict(payload))["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(created["caption_template"], replay["caption_template"])
+        self.assertEqual(created["caption_text"], replay["caption_text"])
         self.assertEqual(1, len(self.gpu.prepare_jobs))
 
     def test_claim_lease_is_shorter_than_grace_and_reclaims_claimed_once(self):

@@ -83,7 +83,7 @@ _PUBLISH_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,256}$")
 _WORKER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
 _GPU_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{11,127}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
-_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+_PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 
 
 def redact_text(value: Any, limit: int = MAX_EVENT_MESSAGE_CHARS) -> str:
@@ -541,11 +541,19 @@ def render_caption_template(
     normalized_content_id = str(content_id or "").strip()
     if not _CONTENT_ID_RE.fullmatch(normalized_content_id):
         raise TTPostError("tt_content_id_invalid", "content_id无效", 400)
-    placeholders = _PLACEHOLDER_RE.findall(text)
+    matches = list(_PLACEHOLDER_RE.finditer(text))
+    placeholders = [match.group(1).strip() for match in matches]
     if not placeholders:
         raise TTPostError(
             "caption_content_id_required",
             "发布描述模板必须包含{{contect_id}}",
+            400,
+        )
+    remainder = _PLACEHOLDER_RE.sub("", text)
+    if "{{" in remainder or "}}" in remainder:
+        raise TTPostError(
+            "caption_placeholder_invalid",
+            "发布描述模板包含不完整占位符",
             400,
         )
     unknown = sorted(
@@ -559,11 +567,15 @@ def render_caption_template(
         )
     rendered = _PLACEHOLDER_RE.sub(
         lambda match: normalized_content_id
-        if match.group(1) in {"contect_id", "content_id"}
+        if match.group(1).strip() in {"contect_id", "content_id"}
         else match.group(0),
         text,
     ).strip()
-    if not rendered or len(rendered) > int(max_chars):
+    try:
+        rendered_units = len(rendered.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        rendered_units = int(max_chars) + 1
+    if not rendered or rendered_units > int(max_chars):
         raise TTPostError(
             "caption_length_invalid",
             "发布描述渲染后为空或超过长度限制",
@@ -1200,16 +1212,11 @@ class TTPostStore:
                 404,
             )
         resolution = resolve_material(material_resolver, pool["material_id"])
-        if not secrets.compare_digest(
-            str(caption_template or "").encode("utf-8"),
-            FIXED_CAPTION_TEMPLATE.encode("utf-8"),
-        ):
-            raise TTPostError(
-                "tt_caption_fixed_template_mismatch",
-                "TikTok发布描述必须使用系统固定模板",
-                400,
-            )
-        caption = render_fixed_caption(resolution.content_id)
+        frozen_caption_template = str(caption_template or "").strip()
+        caption = render_caption_template(
+            frozen_caption_template,
+            resolution.content_id,
+        )
         normalized_key = str(idempotency_key or "").strip()
         if not normalized_key:
             normalized_key = "tt-post:%s:%s:%s" % (
@@ -1233,6 +1240,30 @@ class TTPostStore:
                     )
                     and str(existing["scheduled_at_utc"]) == scheduled_at_utc
                     and str(existing["content_id"]) == resolution.content_id
+                    and str(existing["caption_template"])
+                    == frozen_caption_template
+                    and str(existing["caption"]) == caption
+                    and str(existing["privacy_level"])
+                    == normalized_policy.privacy_level
+                    and bool(existing["allow_comment"])
+                    == normalized_policy.allow_comment
+                    and bool(existing["allow_duet"])
+                    == normalized_policy.allow_duet
+                    and bool(existing["allow_stitch"])
+                    == normalized_policy.allow_stitch
+                    and bool(existing["brand_content_toggle"])
+                    == normalized_policy.brand_content_toggle
+                    and bool(existing["brand_organic_toggle"])
+                    == normalized_policy.brand_organic_toggle
+                    and bool(existing["user_consent"])
+                    == normalized_policy.user_consent
+                    and str(existing["consent_version"])
+                    == normalized_policy.consent_version
+                    and str(existing["consented_at_utc"])
+                    == normalized_policy.consented_at_utc
+                    and bool(existing["is_aigc"]) == normalized_is_aigc
+                    and str(existing["publish_mode"])
+                    == normalized_publish_mode
                 ):
                     return _public_queue(existing)
                 raise TTPostError(
@@ -1332,7 +1363,7 @@ class TTPostStore:
                     frozen_creator_hash,
                     frozen_creator_synced_at,
                     scheduled_at_utc,
-                    FIXED_CAPTION_TEMPLATE,
+                    frozen_caption_template,
                     caption,
                     normalized_policy.privacy_level,
                     int(normalized_policy.allow_comment),
