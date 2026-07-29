@@ -176,3 +176,45 @@ SQLite。若已产生 Post，任何回滚都不得删除 queue/log/绑定或回�
   才允许 frozen run 继续，禁止新建计划或直接发布。真实恢复的报告必须是
   `/mnt/data-disk/x-post-automation/recoveries/` 下的全新 JSON 文件；路径
   越界、符号链接祖先、既有目标或缺少报告均失败关闭。
+- 最终 CPU 运行 release 为
+  `/mnt/data-disk/x-post-automation/releases/073d3f5523c5f8dba8e1babc9ce1447bcb1926fd`；
+  GitHub 远端精确提交已核对。Linux 恢复聚焦测试 41/41 通过，其中符号链接
+  祖先拒绝实测通过。GPU 继续使用 `b6f95f3` v2 release。
+- 17:05 CST 创建 root-only 备份
+  `/mnt/data-disk/x-post-automation/backups/20260729T170524+0800-pre-x-recovery-073d3f5`；
+  SQLite 在线备份 integrity 为 `ok`，manifest SHA-256 为
+  `d33cd170550b7123d76cdaef7eaef9e4f3d958b5443905826c637b8eeb42787e`。
+- 磁盘和 sidecar 进程的短链基础地址均精确恢复为
+  `https://ai.yingliangads.com/s2l`；sidecar/main API/public health 正常。
+  validate-only 报告 SHA-256 为
+  `afa8aa5e92ab866c39dbe7fe18854aeda64dc75cd02d8a79d6091c99f5e7f6e7`，
+  apply 报告 SHA-256 为
+  `ff2a491dc6237d87369293bd4f4e9752841b487740b4ce1185384bc0149a9c96`。
+  两份报告位于
+  `/mnt/data-disk/x-post-automation/recoveries/20260729T170702+0800-run17-q45/`。
+- 17:08 CST 恢复两个 timer 后，正常 scheduler 以
+  `resumed_existing_plan=true` 继续 run 17，没有新建批次。17:14:44 CST
+  完成 6/6，failed/unknown 均为 0：
+  - queue 45，账号 10，池 2 Episode 8：
+    `https://x.com/SecretAffa6ann/status/2082392814810214451`
+  - queue 46，账号 9，池 53 Episode 1：
+    `https://x.com/StorySnapj4ie/status/2082393104133304715`
+  - queue 47，账号 8，池 54 Episode 1：
+    `https://x.com/NaughtyLovm57c/status/2082393439207883000`
+  - queue 48，账号 7，池 57 Episode 1：
+    `https://x.com/ReelDramaves4/status/2082393766518743120`
+  - queue 49，账号 6，池 60 Episode 1：
+    `https://x.com/debil0j3/status/2082394043690958971`
+  - queue 50，账号 5，池 131 Episode 1：
+    `https://x.com/Kkkkkk2016911/status/2082394380652990480`
+- 六条 `https://ai.yingliangads.com/s2l/<queue>.html` 均无缓存实测 HTTP 200。
+  池 2 保持账号 10 粘性绑定并推进到 Episode 9；池 53/54/57/60/131 分别固定
+  到账号 9/8/7/6/5 并推进到 Episode 2。10:06 旧 run 14 继续保持
+  `failed_preflight`，queue/log 为 0。SQLite integrity 为 `ok`，重复剧集组、
+  `post_creating`、`unknown_outcome` 均为 0；schedule/claim timers active，
+  旧 daily timer 保持 masked。
+
+最终回滚边界：运行代码可切回
+`/mnt/data-disk/x-post-automation/releases/7a20f05ecc760a79f3776fded08d47ccfa76d5d8`，
+但应保留已修正的 `ai.yingliangads.com` 短链配置。由于 6 条 Post 已真实产生，
+禁止恢复部署前 SQLite、删除 queue/log/绑定或回退剧集进度。

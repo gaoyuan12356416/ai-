@@ -49,8 +49,11 @@
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | ---: | ---: | ---: | ---: |
 | 聚焦 unittest | 135 | 135 | 0 | 0 |
-| 全量 `test_x*.py` | 351 | 351 | 0 | 0 |
+| 全量 `test_x*.py` | 351 | 350 | 0 | 0 |
 | Python 编译 / diff check | 2 | 2 | 0 | 0 |
+
+Windows 本地因无创建目录符号链接权限跳过 1 项；同一符号链接祖先拒绝测试已在
+生产 Linux release 上通过，因此功能覆盖结果为 351/351。
 
 ### 生产验证
 
@@ -78,3 +81,22 @@ manifest；pool 131 在自然流程中由 `212.666667s` 裁为 `139.0s`。随后
 publish log。受保护恢复的真实写入强制使用专用 root-owned 审计目录下的新
 JSON 报告，拒绝越界、符号链接祖先和覆盖既有文件；最终 queue/log/Post 结果
 完成后追加，不新建计划或直接发布。
+
+### 最终恢复与发布验收
+
+| 项目 | 结果 |
+| --- | --- |
+| CPU 运行 release | `073d3f5523c5f8dba8e1babc9ce1447bcb1926fd` |
+| Linux 聚焦回归 | store 36/36、恢复 CLI 5/5；符号链接祖先拒绝通过 |
+| 配置 | 磁盘与 sidecar 进程均为 `https://ai.yingliangads.com/s2l` |
+| 恢复证据 | validate-only/apply 均成功写入专用 root-owned 目录；SHA 分别为 `afa8aa5e...`、`ff2a491d...` |
+| run 17 | `completed`，expected/queued/published=`6/6/6`，failed/unknown=`0/0` |
+| Post | queues 45-50 全部 `published`，attempt 均为 1，X media/Post ID 与 URL 完整 |
+| 短链 | `/s2l/45.html` 到 `/s2l/50.html` 全部无缓存 HTTP 200 |
+| 粘性 | pool 2 仍绑定账号 10 并推进到 Episode 9；其余五池绑定各自新账号并推进到 Episode 2 |
+| 旧批次 | run 14 仍为 `failed_preflight`，queue/log 均为 0 |
+| 数据库 | integrity `ok`；重复剧集、`post_creating`、`unknown_outcome` 均为 0 |
+| 运行态 | sidecar/main API/GPU v2/schedule timers/claim timers 正常；daily timer masked |
+
+scheduler 日志明确为 `resumed_existing_plan=true`，证明继续的是原 run 17，
+并未新建计划或绕过正常发布链路。
