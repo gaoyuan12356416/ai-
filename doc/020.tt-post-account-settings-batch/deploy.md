@@ -48,4 +48,32 @@
 
 - 生产浏览器验收禁止点击“批量保存”。
 - 审计不得记录 Token、Authorization 或 GPU 内部凭据。
-- 备份必须位于已确认挂载的数据盘，不得写入未挂载目录或根盘。
+- SQLite 与主要回滚证据必须位于已确认挂载的数据盘；共享 monolith 另按 live feature guard 在 `/root/drama_material_service/backups/` 保留完整文件备份。
+
+## 生产执行记录
+
+- 日期：2026-07-29。
+- 分支：`codex/tiktok-account-settings-20260729`。
+- GitHub 提交：`779ac3bdb1f14031eac1ca1ee353bfa0a883c9c7`。
+- 当前 CPU release：`/opt/tt-post/releases/779ac3b`。
+- 上一 CPU release：`/opt/tt-post/releases/9fd6431`。
+- 数据盘 UUID：`3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`。
+- 数据与运行文件备份：`/mnt/data-disk/tt-post-publisher/backups/20260729T182910+0800-9fd6431-to-779ac3b-account-settings-batch`。
+- 共享后台完整备份：`/root/drama_material_service/backups/20260729T182955+0800-pre-tt-account-settings-batch`，共 198 个文件。
+- 发布前 SQLite 在线备份完整性为 `ok`；原 release、后台文件和浏览器静态页均已记录。
+- 候选与部署后 live feature guard 均通过：4 个功能、16 条文件规则。
+- 服务器 TT 自动化 138/138 通过后才执行原子切换。
+- 仅重启 `tt-post-service.service` 和 `drama-material-api.service`；runner timer 保持启用，GPU 未连接、未修改、未重启。
+
+## 生产验证结果
+
+- `tt-post-service.service`、`tt-post-runner.timer`、`drama-material-api.service` 均为 active。
+- `x-post-automation.service`、`x-post-schedule.timer`、`x-post-schedule-claim.timer` 均为 active。
+- 个号管理页和发布池 HTTP 200；两个新增接口未登录请求均返回 401。
+- SQLite `PRAGMA integrity_check=ok`；账号设置行数 1，账号 640 保持版本 1、更新时间不变，队列数 0。
+- `TT_POST_LIVE_ENABLED`、`TT_POST_DIRECT_AUDIT_APPROVED`、`TT_POST_URL_PROPERTY_VERIFIED` 均为 0。
+- 登录态页面显示 17 个当前可发布账号、0 个当前列表内已配置账号。
+- 批量选择 17 个待配置账号，实时检测成功；共同最长视频 600 秒，共同观看范围为所有人、互相关注的朋友、仅自己。
+- 评论、Duet、Stitch 均可由运营选择；批量默认不继承任何账号设置，观看范围为空，互动和披露全部关闭。
+- 未选择观看范围时“批量保存”保持禁用；验收直接退出批量模式，未提交保存。
+- 验收后账号 640 版本、设置行数、队列数和三重门禁再次核对均无变化。

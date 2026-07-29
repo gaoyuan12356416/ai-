@@ -13,7 +13,7 @@
 | AI 后台同源代理与审计 | Codex | `app.py` | 已完成 |
 | 批量管理交互 | Codex | `static/tt-account-settings.html` | 已完成 |
 | 自动化测试 | Codex | `scripts/test_tt_*.py` | 已完成 |
-| GitHub/CPU 部署与浏览器验收 | Codex | release、服务、公开页面 | 待开始 |
+| GitHub/CPU 部署与浏览器验收 | Codex | release、服务、公开页面 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -39,4 +39,4 @@ git diff --check
 - 2026-07-29：完成批量选择、最多 50 个账号、共同能力检测和共享表单。
 - 2026-07-29：完成每账号独立版本校验和 SQLite 原子批量保存。
 - 2026-07-29：完成后台权限、同源代理、安全审计和自动化回归。
-- 生产发布和只读浏览器验收在 GitHub 提交后执行。
+- 2026-07-29：GitHub 提交 `779ac3b` 发布为 CPU release，生产只读浏览器验收通过。
