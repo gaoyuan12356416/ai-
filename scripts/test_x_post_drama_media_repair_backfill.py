@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,8 @@ from scripts.test_x_post_schedule_runner import make_config  # noqa: E402
 from scripts.x_post_drama_media_repair_backfill import (  # noqa: E402
     BackfillError,
     execute_backfill,
+    load_drama_environment_files,
+    main,
     normalize_items,
 )
 
@@ -84,6 +87,102 @@ class FakeSidecar:
 
 
 class DramaMediaRepairBackfillTests(unittest.TestCase):
+    def test_loads_strict_schedule_overrides_used_by_the_live_scheduler(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            daily = root / "daily.env"
+            token = root / "repair.token"
+            schedule = root / "schedule.env"
+            daily.write_text(
+                "X_POST_DAILY_MEDIA_ALLOWED_HOSTS=daily.example.test\n",
+                encoding="utf-8",
+            )
+            token.write_text(
+                "X_POST_MEDIA_REPAIR_TOKEN=repair-secret\n",
+                encoding="utf-8",
+            )
+            schedule.write_text(
+                "X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS="
+                "daily.example.test,drama.example.test\n"
+                "X_POST_SCHEDULE_DRAMA_APP_ID=1015\n",
+                encoding="utf-8",
+            )
+            values = load_drama_environment_files(
+                daily,
+                token,
+                schedule,
+            )
+            self.assertEqual(
+                values["X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS"],
+                "daily.example.test,drama.example.test",
+            )
+            self.assertEqual(
+                values["X_POST_SCHEDULE_DRAMA_APP_ID"],
+                "1015",
+            )
+            self.assertEqual(
+                values["X_POST_MEDIA_REPAIR_TOKEN"],
+                "repair-secret",
+            )
+
+            schedule.write_text(
+                "X_POST_SCHEDULE_UNSUPPORTED=unsafe\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(BackfillError) as raised:
+                load_drama_environment_files(daily, token, schedule)
+            self.assertEqual(
+                raised.exception.code,
+                "x_post_backfill_config_invalid",
+            )
+            for secret_key in (
+                "X_POST_SCHEDULE_INTERNAL_TOKEN",
+                "X_POST_SCHEDULE_MYSQL_PASSWORD",
+                "X_POST_SCHEDULE_REPAIR_TOKEN",
+            ):
+                with self.subTest(secret_key=secret_key):
+                    schedule.write_text(
+                        "%s=must-stay-in-dedicated-config\n" % secret_key,
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(BackfillError):
+                        load_drama_environment_files(
+                            daily,
+                            token,
+                            schedule,
+                        )
+
+    def test_unexpected_failure_output_never_echoes_exception_secrets(self):
+        sentinel = (
+            "https://source.example.test/private.mp4?"
+            "token=must-not-leak"
+        )
+        with mock.patch(
+            "scripts.x_post_drama_media_repair_backfill."
+            "load_drama_environment_files",
+            side_effect=RuntimeError(sentinel),
+        ), mock.patch("builtins.print") as output:
+            exit_code = main(
+                [
+                    "--pool-item-id",
+                    "53",
+                    "--content-id",
+                    "3CRScaBEY0",
+                    "--episode-number",
+                    "1",
+                    "--expected-error-code",
+                    "source_not_repairable",
+                ]
+            )
+        self.assertEqual(exit_code, 1)
+        result = json.loads(output.call_args.args[0])
+        self.assertEqual(
+            result["error_code"],
+            "x_post_drama_backfill_unexpected_error",
+        )
+        self.assertEqual(result["error_message"], "RuntimeError")
+        self.assertNotIn("must-not-leak", output.call_args.args[0])
+
     def test_exact_item_contract_rejects_mismatch_and_duplicates(self):
         normalized = normalize_items(
             ["53", "54"],

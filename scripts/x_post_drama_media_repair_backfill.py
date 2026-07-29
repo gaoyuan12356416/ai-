@@ -15,15 +15,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from features.x_posts.drama_selector import (  # noqa: E402
-    select_drama_pool_episodes,
-)
+from features.x_posts.drama_selector import select_drama_pool_episodes  # noqa: E402
 from features.x_posts.selector import (  # noqa: E402
+    CandidateSelectionError,
     previous_source_date,
     shanghai_now,
 )
-from features.x_posts.service import download_media, probe_media  # noqa: E402
+from features.x_posts.service import (  # noqa: E402
+    XPostError,
+    download_media,
+    probe_media,
+)
 from scripts.x_post_daily_runner import (  # noqa: E402
+    DailyRunError,
     MediaRepairClient,
     _connect_from_config,
     _preflight_candidate,
@@ -32,12 +36,15 @@ from scripts.x_post_daily_runner import (  # noqa: E402
 from scripts.x_post_media_repair_backfill import (  # noqa: E402
     BackfillError,
     _atomic_write_report,
+    _parse_environment_file,
+    _safe_error,
     _validate_report_path,
     configured_environment,
     load_environment_files,
 )
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
+    ScheduleRunError,
     ScheduleSidecarClient,
 )
 
@@ -45,12 +52,60 @@ from scripts.x_post_schedule_runner import (  # noqa: E402
 MAX_ITEMS = 20
 _CONTENT_ID = re.compile(r"\A[A-Za-z0-9_.:-]{1,128}\Z")
 _ERROR_CODE = re.compile(r"\A[A-Za-z0-9_.:-]{1,64}\Z")
+SCHEDULE_ENV_PATH = Path("/etc/x-post-schedule.env")
+_SAFE_SCHEDULE_KEYS = frozenset(
+    {
+        "X_POST_SCHEDULE_DRAMA_APP_ID",
+        "X_POST_SCHEDULE_DRAMA_CHECK_PATH",
+        "X_POST_SCHEDULE_DRAMA_POOL_PATH",
+        "X_POST_SCHEDULE_DUE_PATH",
+        "X_POST_SCHEDULE_FAILURE_PATH",
+        "X_POST_SCHEDULE_GRACE_SECONDS",
+        "X_POST_SCHEDULE_LOCK_PATH",
+        "X_POST_SCHEDULE_MATERIAL_CHECK_PATH",
+        "X_POST_SCHEDULE_MATERIAL_POOL_PATH",
+        "X_POST_SCHEDULE_MAX_DUE_BATCHES",
+        "X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS",
+        "X_POST_SCHEDULE_PLAN_PATH",
+        "X_POST_SCHEDULE_PLAN_QUERY_PATH",
+        "X_POST_SCHEDULE_PUBLISH_PATH_TEMPLATE",
+        "X_POST_SCHEDULE_START_DATE",
+        "X_POST_SCHEDULE_STORAGE_PREFLIGHT_PATH",
+        "X_POST_SCHEDULE_WORK_DIR",
+    }
+)
 _BACKFILL_ACCOUNT = {
     "id": 1,
     "username": "x_drama_repair",
     "x_user_id": "1",
     "display_name": "X Drama Repair",
 }
+
+
+def load_drama_environment_files(
+    daily_path=None,
+    token_path=None,
+    schedule_path=SCHEDULE_ENV_PATH,
+):
+    """Load the same bounded configuration layers as the schedule service."""
+    kwargs = {}
+    if daily_path is not None:
+        kwargs["daily_path"] = daily_path
+    if token_path is not None:
+        kwargs["token_path"] = token_path
+    values = load_environment_files(**kwargs)
+    schedule = _parse_environment_file(
+        schedule_path,
+        _SAFE_SCHEDULE_KEYS,
+    )
+    overlap = set(values).intersection(schedule)
+    if overlap:
+        raise BackfillError(
+            "schedule environment duplicates an existing assignment",
+            code="x_post_backfill_config_invalid",
+        )
+    values.update(schedule)
+    return values
 
 
 def normalize_items(pool_ids, content_ids, episode_numbers, error_codes):
@@ -321,19 +376,38 @@ def main(argv=None):
             args.episode_number,
             args.expected_error_code,
         )
-        values = load_environment_files()
+        values = load_drama_environment_files()
         with configured_environment(values):
             result = execute_backfill(ScheduleConfig.from_env(), items)
         if report_target is not None:
             _atomic_write_report(report_target, result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["status"] == "completed" else 2
-    except Exception as exc:
-        code = str(getattr(exc, "code", "x_post_drama_backfill_failed"))
+    except (
+        BackfillError,
+        DailyRunError,
+        CandidateSelectionError,
+        ScheduleRunError,
+        XPostError,
+    ) as exc:
+        code, message = _safe_error(exc)
         result = {
             "status": "failed",
             "error_code": code[:64],
-            "error_message": str(exc)[:240],
+            "error_message": message,
+        }
+        if report_target is not None:
+            try:
+                _atomic_write_report(report_target, result)
+            except Exception:
+                pass
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 1
+    except Exception as exc:
+        result = {
+            "status": "failed",
+            "error_code": "x_post_drama_backfill_unexpected_error",
+            "error_message": type(exc).__name__,
         }
         if report_target is not None:
             try:
