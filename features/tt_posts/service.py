@@ -1571,9 +1571,11 @@ class TTPostService:
                 "TikTok排期只接受Asia/Shanghai",
                 400,
             )
-        caption = _fixed_caption_from_submission(
-            payload.get("caption_text"),
-            requested_content_id,
+        submitted_caption = payload.get("caption_text")
+        caption = (
+            render_fixed_caption(requested_content_id)
+            if submitted_caption in (None, "")
+            else _bounded_text(submitted_caption, "发布描述", 2200)
         )
         policy = self._policy_from_payload(payload)
         is_aigc = _exact_bool(payload.get("is_aigc"), "AI内容声明")
@@ -1609,6 +1611,10 @@ class TTPostService:
                 "item": self._queue_api_item(existing, gates=self.gates),
                 "gates": self._gates(),
             }
+        caption = _fixed_caption_from_submission(
+            submitted_caption,
+            requested_content_id,
+        )
 
         creator_result = self.creator_info({"source_account_id": account_id})
         creator = creator_result["item"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -657,6 +658,41 @@ class ServiceLifecycleTests(unittest.TestCase):
             caught.exception.code,
         )
         self.assertEqual(self.gpu.prepare_jobs, [])
+
+    def test_historical_custom_caption_exact_replay_remains_idempotent(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        created = service.queue_create(payload)["item"]
+        historical_caption = (
+            "Historical custom copy\n\n"
+            "Drama ID: ABCD1234\n\n"
+            "Visit my profile → Open the link → Search the Drama ID → Watch now."
+        )
+        connection = sqlite3.connect(Path(self.temp.name) / "tt.sqlite3")
+        try:
+            connection.execute(
+                """
+                UPDATE tt_post_queue
+                SET caption_template=?,caption=?
+                WHERE id=?
+                """,
+                (
+                    historical_caption.replace(
+                        "ABCD1234",
+                        "{{contect_id}}",
+                    ),
+                    historical_caption,
+                    created["id"],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        payload["caption_text"] = historical_caption
+        replay = service.queue_create(payload)["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(historical_caption, replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
 
     def test_claim_lease_is_shorter_than_grace_and_reclaims_claimed_once(self):
         self.assertLessEqual(DEFAULT_LEASE_SECONDS, 300)
