@@ -80,3 +80,15 @@ X Post 短剧池增加账号粘性归属、确定性历史迁移、未绑定新�
 - 若业务仍需补发 10:06，必须另立需求，加入管理员审批、不可变审计、停用配置门禁和排重/结果核对；本部署不得夹带实现。
 - 数据库迁移失败必须原事务回滚并停止部署。
 - release commit 与实际服务器文件哈希必须可追溯。
+
+## 2026-07-29 生产发布记录
+
+- GitHub/生产 release：`569640e8ab737aaf720d2cfc1e7c7978a14d24dd`。
+- 停机点在线备份：`/mnt/data-disk/x-post-automation/backups/20260729T145013+0800-drama-preflight-fallback-final-569640e`。
+- 运行目录：`/opt/x-post-automation/current` → `/mnt/data-disk/x-post-automation/releases/569640e8ab737aaf720d2cfc1e7c7978a14d24dd`。
+- sidecar 与主 API 的 `features/x_posts/service.py` SHA-256 均为 `585872cbfcf2555b161a0f9013cf463a1bf9c605cefa8e73fdae7680abc62557`。
+- 池53、54的内部校验更新数为2；除两行允许的状态/错误/时间字段外，schedule config/run、queue、publish log、daily/catchup run 和 material pool 与停机点备份逐行一致。
+- 10:06原批次仍为 `failed_preflight`、0队列、0日志；没有补发。
+- Token哈希/权限清单未变化；SQLite `integrity_check=ok`；公网短剧池页和X health均为HTTP 200。
+- `x-post-schedule-claim.timer`、`x-post-schedule.timer` 已恢复；worker自然轮询返回 `no_due`。
+- 当前只读映射为账号10→池2/E8、9→池57/E1、8→池60/E1、7→池131/E1、6→池132/E1；账号5无候选。管理员新增至少1部合规新剧前，整批保持零发布。

@@ -16,7 +16,8 @@
 | 未绑定坏剧 FIFO 顺延与 fail-closed 边界 | Codex | `service.py`、`oauth_service.py`、schedule runner | 完成 |
 | 10:06 失败批次与坏剧遗留状态只读审计 | Codex | 生产 SQLite/systemd journal | 完成 |
 | 单元与集成回归 | Codex | `scripts/test_x_post_*.py` | 完成 |
-| GitHub 推送与生产部署 | Codex | 不可变 release | 待执行 |
+| GitHub 推送与生产部署 | Codex | 不可变 release | 完成 |
+| 补足第5部合规新剧 | 管理员 | Post短剧池 | 待管理员提供/添加短剧ID |
 
 ## 编译 / 构建命令
 
@@ -34,3 +35,4 @@ python -m py_compile features/x_posts/service.py features/x_posts/drama_selector
 
 - 2026-07-28：本地实现完成，327 个相关测试通过；等待生产演练。
 - 2026-07-29：确认 10:06 批次因未绑定坏剧 `3CRScaBEY0` Episode 1 时长不合规而提前结束；完成 FIFO 顺延、绑定/历史剧 fail-closed、失败批次不可重建和内部校验入口，335 个完整 X 回归测试通过。
+- 2026-07-29：生产发布 `569640e8ab737aaf720d2cfc1e7c7978a14d24dd`；池53、54经真实媒体证据校正为 `validation_failed`，10:06原批次保持0队列/0日志，timer恢复。当前仍差1部合规新剧覆盖账号5。
