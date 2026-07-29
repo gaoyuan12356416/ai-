@@ -218,6 +218,27 @@
     }
     .info-card strong { display: block; font-size: 14px; }
     .info-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .account-settings-card {
+      min-height: 104px;
+      padding: 13px;
+      border: 1px solid #dbe5f2;
+      border-radius: 13px;
+      background: #f8faff;
+    }
+    .account-settings-card.warning { border-color: #ead5a5; background: #fffaf0; }
+    .account-settings-card.success { border-color: #b9dfd1; background: #f2fbf7; }
+    .account-settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .account-settings-head span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .account-settings-head a { color: var(--blue); font-size: 12px; font-weight: 800; text-decoration: none; }
+    .account-settings-head a:hover { text-decoration: underline; }
+    .account-settings-card strong { display: block; font-size: 14px; }
+    .account-settings-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
     .creator-head { display: flex; align-items: center; gap: 11px; }
     .creator-avatar {
       width: 42px;
@@ -299,6 +320,14 @@
       color: #9f2d3a;
       background: #fff7f8;
     }
+    .material-result.success {
+      border-color: #b9dfd1;
+      background: #f2fbf7;
+    }
+    .material-result.saving {
+      border-color: #bfd2f6;
+      background: #f3f7ff;
+    }
     .material-result-copy { min-width: 0; }
     .material-result-copy strong,
     .material-result-copy span {
@@ -308,6 +337,17 @@
     .material-result-copy span { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; }
     .material-result.failure .material-result-copy span { color: #a94b56; }
     .material-result-state { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .material-result.failure .material-result-state { color: var(--red); }
+    .material-result.saving .material-result-state { color: var(--blue); }
+    .queue-submit-panel {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8faff;
+    }
+    .queue-submit-panel > strong { font-size: 13px; }
     .caption-meta {
       display: flex;
       align-items: center;
@@ -480,7 +520,7 @@
       <header class="topbar">
         <div class="title">
           <h1>TT Post 发布池</h1>
-          <p>选择 TikTok 个号和素材，确认最终成片、描述及发布设置后安排上海时间发布。</p>
+          <p>选择 TikTok 个号和素材，确认最终成片、描述及账号配置后安排上海时间发布。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -527,7 +567,7 @@
           <div class="section-head">
             <div>
               <h2>新建发布任务</h2>
-              <p>每批选择一个账号，可一次填写多个素材；系统会逐条读取、按顺序排期并分别保存任务。账号、素材、描述或发布设置变化后，都需要重新确认。</p>
+              <p>每批选择一个账号，可一次填写多个素材；隐私、互动与内容声明统一从“TT 个号管理”读取，发布池只读展示、不再单独编辑。系统会逐条读取素材、按顺序排期并分别保存任务。</p>
             </div>
           </div>
 
@@ -547,7 +587,7 @@
 
               <div id="creatorCard" class="info-card" aria-live="polite">
                 <strong>等待确认目标账号</strong>
-                <p>选择账号后会实时读取 TikTok 昵称、可用隐私范围和互动能力。</p>
+                <p>选择账号后会实时确认 TikTok 昵称和最长视频时长。</p>
               </div>
 
               <div class="field">
@@ -597,53 +637,26 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <input id="scheduleIntervalMinutes" type="number" min="1" max="1440" step="1" value="10" />
                   <span class="helper">成功读取的素材按原顺序依次顺延。</span>
                 </div>
-                <div class="field">
-                  <label for="privacyLevel">谁可以观看</label>
-                  <select id="privacyLevel" disabled>
-                    <option value="">请手动选择，不设默认值</option>
-                  </select>
-                  <span class="helper">仅显示目标账号实时返回的可选范围。</span>
+                <div id="accountSettingsCard" class="account-settings-card warning" aria-live="polite">
+                  <div class="account-settings-head">
+                    <span>账号发布设置</span>
+                    <a href="/tt-account-settings.html">前往管理</a>
+                  </div>
+                  <strong id="accountSettingsStatus">请选择账号</strong>
+                  <p id="accountSettingsSummary">选择账号后，这里会显示已保存的隐私、互动和内容声明设置。</p>
                 </div>
-              </div>
-
-              <div class="field">
-                <span class="field-label">允许互动（默认全部关闭）</span>
-                <div class="check-grid">
-                  <label id="commentCard" class="check-card disabled">
-                    <input id="allowComment" type="checkbox" disabled />
-                    <span><strong>允许评论</strong><br />由运营手动开启</span>
-                  </label>
-                  <label id="duetCard" class="check-card disabled">
-                    <input id="allowDuet" type="checkbox" disabled />
-                    <span><strong>允许 Duet</strong><br />由运营手动开启</span>
-                  </label>
-                  <label id="stitchCard" class="check-card disabled">
-                    <input id="allowStitch" type="checkbox" disabled />
-                    <span><strong>允许 Stitch</strong><br />由运营手动开启</span>
-                  </label>
-                </div>
-              </div>
-
-              <div class="disclosure">
-                <label class="inline-check">
-                  <input id="commercialDisclosure" type="checkbox" />
-                  <span><strong>这条内容包含商业推广</strong><br />开启后必须说明推广自己品牌、第三方品牌或两者兼有。</span>
-                </label>
-                <div id="commercialOptions" class="disclosure-options hidden">
-                  <label class="inline-check"><input id="ownBrand" type="checkbox" /><span>推广自己的品牌或业务</span></label>
-                  <label class="inline-check"><input id="brandedContent" type="checkbox" /><span>推广第三方品牌或合作方</span></label>
-                </div>
-                <label class="inline-check">
-                  <input id="isAigc" type="checkbox" />
-                  <span>最终视频属于需要声明的 AI 生成或 AI 显著处理内容</span>
-                </label>
               </div>
 
               <div class="consent">
                 <label class="inline-check">
                   <input id="publishConsent" type="checkbox" />
-                  <span id="consentText">我已核对目标账号、最终视频、描述、隐私和互动设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放时，此任务只会安全保存，不会自动发布。</span>
+                  <span id="consentText">我已核对目标账号、最终视频、描述及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放时，此任务只会安全保存，不会自动发布。</span>
                 </label>
+              </div>
+
+              <div id="queueSubmitPanel" class="queue-submit-panel hidden" aria-live="polite">
+                <strong id="queueSubmitSummary">最近一批入池结果</strong>
+                <div id="queueSubmitResults" class="material-results" aria-label="逐素材入池结果"></div>
               </div>
 
               <div class="form-footer">
@@ -749,6 +762,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         accounts: [],
         selectedAccountId: "",
         creatorInfo: null,
+        creatorRequestVersion: 0,
         materials: [],
         failures: [],
         activeMaterialId: "",
@@ -756,6 +770,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         previewTotal: 0,
         queueSummary: "",
         queueSummaryIsError: false,
+        queueResults: [],
         gates: {
           liveEnabled: undefined,
           auditApproved: undefined,
@@ -936,14 +951,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           setText(byId("modeGateText"), "允许新任务直发");
           setText(
             byId("consentText"),
-            "我已核对目标账号、最终视频、描述、隐私和互动设置，并同意 TikTok Music Usage Confirmation。到达发布时间后，系统将按上述设置提交到 TikTok。"
+            "我已核对目标账号、最终视频、描述及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。到达发布时间后，系统将按上述设置提交到 TikTok。"
           );
         } else {
           modeCard.classList.add("blocked");
           setText(byId("modeGateText"), "安全待处理，不自动发送");
           setText(
             byId("consentText"),
-            "我已核对目标账号、最终视频、描述、隐私和互动设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放，此任务只会安全保存，不会自动发布。"
+            "我已核对目标账号、最终视频、描述及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放，此任务只会安全保存，不会自动发布。"
           );
         }
         validateForm();
@@ -973,6 +988,55 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       }
       function selectedAccount() {
         return state.accounts.find(item => accountId(item) === state.selectedAccountId) || null;
+      }
+      function selectedAccountSettings() {
+        const item = selectedAccount();
+        const settings = asObject(item && item.account_settings);
+        return settings.configured === true ? settings : null;
+      }
+      function privacyLabel(value) {
+        return {
+          PUBLIC_TO_EVERYONE: "所有人可见",
+          MUTUAL_FOLLOW_FRIENDS: "互相关注的朋友可见",
+          FOLLOWER_OF_CREATOR: "关注者可见",
+          SELF_ONLY: "仅自己可见",
+        }[String(value || "")] || String(value || "未设置");
+      }
+      function renderAccountSettings() {
+        const card = byId("accountSettingsCard");
+        const status = byId("accountSettingsStatus");
+        const summary = byId("accountSettingsSummary");
+        const item = selectedAccount();
+        const settings = selectedAccountSettings();
+        card.classList.toggle("success", !!settings);
+        card.classList.toggle("warning", !settings);
+        if (!item) {
+          setText(status, "请选择账号");
+          setText(summary, "选择账号后，这里会显示已保存的隐私、互动和内容声明设置。");
+          return;
+        }
+        if (!settings) {
+          setText(status, "该账号尚未配置");
+          setText(summary, "请先前往“TT 个号管理”保存设置，再回到发布池排期。");
+          return;
+        }
+        const interactions = [];
+        if (boolValue(settings.allow_comment) === true) interactions.push("评论");
+        if (boolValue(settings.allow_duet) === true) interactions.push("Duet");
+        if (boolValue(settings.allow_stitch) === true) interactions.push("Stitch");
+        const disclosure = [];
+        if (boolValue(settings.brand_organic_toggle) === true) disclosure.push("自有品牌");
+        if (boolValue(settings.brand_content_toggle) === true) disclosure.push("第三方品牌");
+        setText(status, `已配置 · 版本 ${settings.version || 1}`);
+        setText(
+          summary,
+          [
+            privacyLabel(settings.privacy_level),
+            interactions.length ? `互动：${interactions.join("、")}` : "互动：全部关闭",
+            disclosure.length ? `商业声明：${disclosure.join("、")}` : "商业声明：关闭",
+            boolValue(settings.is_aigc) === true ? "AI 内容：声明" : "AI 内容：不声明",
+          ].join(" · ")
+        );
       }
       function setAccountListEmpty(message) {
         const list = byId("accountList");
@@ -1051,7 +1115,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           list.appendChild(label);
         });
       }
-      function resetCreatorInfo(message = "选择账号后会实时读取 TikTok 昵称、可用隐私范围和互动能力。") {
+      function resetCreatorInfo(message = "选择账号后会实时确认 TikTok 昵称和最长视频时长。") {
         state.creatorInfo = null;
         const card = byId("creatorCard");
         card.replaceChildren();
@@ -1060,24 +1124,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const copy = document.createElement("p");
         setText(copy, message);
         card.append(title, copy);
-        const privacy = byId("privacyLevel");
-        privacy.replaceChildren();
-        const placeholder = document.createElement("option");
-        placeholder.value = "";
-        setText(placeholder, "请手动选择，不设默认值");
-        privacy.appendChild(placeholder);
-        privacy.value = "";
-        privacy.disabled = true;
-        configureInteraction("allowComment", "commentCard", true);
-        configureInteraction("allowDuet", "duetCard", true);
-        configureInteraction("allowStitch", "stitchCard", true);
+        renderAccountSettings();
         validateForm();
-      }
-      function configureInteraction(inputId, cardId, disabled) {
-        const input = byId(inputId);
-        input.checked = false;
-        input.disabled = !!disabled;
-        byId(cardId).classList.toggle("disabled", !!disabled);
       }
       function renderCreatorInfo(info) {
         const card = byId("creatorCard");
@@ -1107,36 +1155,12 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         copy.append(name, username);
         head.append(avatar, copy);
         card.appendChild(head);
-
-        const options = Array.isArray(info.privacy_level_options)
-          ? info.privacy_level_options.filter(value => typeof value === "string" && value)
-          : [];
-        const privacy = byId("privacyLevel");
-        privacy.replaceChildren();
-        const placeholder = document.createElement("option");
-        placeholder.value = "";
-        setText(placeholder, "请手动选择，不设默认值");
-        privacy.appendChild(placeholder);
-        const labels = {
-          PUBLIC_TO_EVERYONE: "所有人",
-          MUTUAL_FOLLOW_FRIENDS: "互相关注的朋友",
-          FOLLOWER_OF_CREATOR: "关注者",
-          SELF_ONLY: "仅自己",
-        };
-        options.forEach(value => {
-          const option = document.createElement("option");
-          option.value = value;
-          setText(option, labels[value] || value);
-          privacy.appendChild(option);
-        });
-        privacy.value = "";
-        privacy.disabled = options.length === 0;
-        configureInteraction("allowComment", "commentCard", boolValue(info.comment_disabled) !== false);
-        configureInteraction("allowDuet", "duetCard", boolValue(info.duet_disabled) !== false);
-        configureInteraction("allowStitch", "stitchCard", boolValue(info.stitch_disabled) !== false);
+        renderAccountSettings();
       }
       async function loadCreatorInfo() {
+        const requestVersion = ++state.creatorRequestVersion;
         const item = selectedAccount();
+        const requestedAccountId = accountId(item);
         if (!item || !accountEligible(item)) {
           resetCreatorInfo("该账号当前不可用于发布，请刷新账号状态。");
           return;
@@ -1146,8 +1170,12 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         try {
           const result = await api(`${API_BASE}/creator-info`, {
             method: "POST",
-            body: JSON.stringify({ source_account_id: state.selectedAccountId }),
+            body: JSON.stringify({ source_account_id: requestedAccountId }),
           });
+          if (
+            requestVersion !== state.creatorRequestVersion ||
+            state.selectedAccountId !== requestedAccountId
+          ) return;
           applyGates(result);
           const info = readPayloadItem(result, ["item", "creator_info"]);
           if (!info.creator_nickname && !info.creator_username) {
@@ -1157,6 +1185,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           renderCreatorInfo(info);
           setText(byId("accountHelp"), "已实时确认目标账号；发布时间前系统会再次确认。");
         } catch (error) {
+          if (
+            requestVersion !== state.creatorRequestVersion ||
+            state.selectedAccountId !== requestedAccountId
+          ) return;
           state.creatorInfo = null;
           resetCreatorInfo(`账号确认失败：${error.message}`);
           setText(byId("accountHelp"), `账号确认失败：${error.message}`);
@@ -1178,6 +1210,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             resetCreatorInfo();
           }
           renderAccounts();
+          renderAccountSettings();
           renderAccountFilters();
           setText(byId("accountHelp"), `已加载 ${state.accounts.length} 个账号；列表不包含任何凭证。`);
           byId("accountHelp").className = "helper";
@@ -1196,13 +1229,22 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         state.queueSummaryIsError = false;
         byId("publishConsent").checked = false;
       }
+      function normalizeMaterialIdToken(value, index) {
+        if (!/^\d+$/.test(value)) {
+          throw new Error(`第 ${index + 1} 个素材 ID 不是正整数`);
+        }
+        const withoutLeadingZeros = value.replace(/^0+/, "");
+        if (!/^[1-9]\d{0,18}$/.test(withoutLeadingZeros)) {
+          throw new Error(`第 ${index + 1} 个素材 ID 规范化后必须是 1 到 19 位正整数`);
+        }
+        return String(BigInt(withoutLeadingZeros));
+      }
       function parseMaterialIds() {
         const raw = byId("materialIds").value.trim();
         if (!raw) throw new Error("请先输入至少一个素材 ID");
         const tokens = raw.split(/[\s,，;；]+/).filter(Boolean);
-        const invalid = tokens.filter(value => !/^\d+$/.test(value) || /^0+$/.test(value));
-        if (invalid.length) throw new Error(`存在无效素材 ID：${invalid.slice(0, 5).join("、")}`);
-        const ids = Array.from(new Set(tokens.map(value => String(BigInt(value)))));
+        const normalized = tokens.map((value, index) => normalizeMaterialIdToken(value, index));
+        const ids = Array.from(new Set(normalized));
         if (ids.length > 100) throw new Error("每次最多提交 100 个素材 ID");
         return ids;
       }
@@ -1253,6 +1295,51 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           container.appendChild(row);
         });
         show(container);
+      }
+      function renderQueueSubmitResults() {
+        const panel = byId("queueSubmitPanel");
+        const container = byId("queueSubmitResults");
+        container.replaceChildren();
+        if (!state.queueResults.length) {
+          hide(panel);
+          return;
+        }
+        const counts = state.queueResults.reduce(
+          (result, item) => {
+            result[item.status] = (result[item.status] || 0) + 1;
+            return result;
+          },
+          {}
+        );
+        setText(
+          byId("queueSubmitSummary"),
+          `最近一批共 ${state.queueResults.length} 条：成功 ${counts.success || 0}，失败 ${counts.failure || 0}，处理中 ${counts.saving || 0}，待处理 ${counts.pending || 0}`
+        );
+        const labels = {
+          pending: "等待入池",
+          saving: "正在入池",
+          success: "入池成功",
+          failure: "入池失败",
+        };
+        state.queueResults.forEach(item => {
+          const row = document.createElement("div");
+          row.className = `material-result ${item.status || "pending"}`;
+          const copy = document.createElement("span");
+          copy.className = "material-result-copy";
+          const title = document.createElement("strong");
+          setText(title, `素材 ${item.material_id}`);
+          const detail = document.createElement("span");
+          const pieces = [`计划时间：${formatTime(item.scheduled_at)}`];
+          if (item.message) pieces.push(item.message);
+          setText(detail, pieces.join(" · "));
+          copy.append(title, detail);
+          const status = document.createElement("span");
+          status.className = "material-result-state";
+          setText(status, labels[item.status] || "等待入池");
+          row.append(copy, status);
+          container.appendChild(row);
+        });
+        show(panel);
       }
       function resetMaterials(message = "支持一次读取最多 100 个素材；系统会逐条确认真实 Content ID 和最终成片。") {
         state.materials = [];
@@ -1495,6 +1582,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const item = selectedAccount();
         if (!item) return "请选择一个 TikTok 个号。";
         if (!accountEligible(item)) return "所选账号当前不可用于发布。";
+        if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
         if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";
         if (!state.materials.length) return "请先批量读取素材，并至少确认一个最终成片。";
         const maxDuration = Number(state.creatorInfo.max_video_post_duration_sec || 0);
@@ -1510,10 +1598,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (!scheduledUtc) return "请选择有效的首条上海发布时间。";
         if (new Date(scheduledUtc).getTime() < Date.now() + 60 * 1000) return "首条发布时间必须晚于当前时间。";
         if (!scheduleIntervalMinutes()) return "后续发布间隔必须是 1 到 1440 分钟的整数。";
-        if (!byId("privacyLevel").value) return "请手动选择谁可以观看。";
-        if (byId("commercialDisclosure").checked && !byId("ownBrand").checked && !byId("brandedContent").checked) {
-          return "已开启商业推广披露，请至少选择自己的品牌或第三方品牌。";
-        }
         if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
         return "";
       }
@@ -1557,7 +1641,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         return state.consentAcceptedAt;
       }
       function queuePayload(material, index) {
-        const commercial = byId("commercialDisclosure").checked;
         return {
           idempotency_key: `${ensureFormKey()}:${material.material_id}`,
           source_account_id: state.selectedAccountId,
@@ -1566,14 +1649,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           scheduled_at: scheduledAtForIndex(index),
           timezone: "Asia/Shanghai",
           caption_template: byId("caption").value,
-          privacy_level: byId("privacyLevel").value,
-          allow_comment: byId("allowComment").checked,
-          allow_duet: byId("allowDuet").checked,
-          allow_stitch: byId("allowStitch").checked,
-          commercial_disclosure: commercial,
-          brand_organic_toggle: commercial && byId("ownBrand").checked,
-          brand_content_toggle: commercial && byId("brandedContent").checked,
-          is_aigc: byId("isAigc").checked,
           publish_mode: gatesOpen() ? "direct_post" : "hold",
           consent: {
             accepted: true,
@@ -1591,16 +1666,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         byId("materialIds").value = "";
         byId("caption").value = CAPTION_TEMPLATE;
         byId("scheduleIntervalMinutes").value = "10";
-        byId("privacyLevel").value = "";
-        byId("allowComment").checked = false;
-        byId("allowDuet").checked = false;
-        byId("allowStitch").checked = false;
-        byId("commercialDisclosure").checked = false;
-        byId("ownBrand").checked = false;
-        byId("brandedContent").checked = false;
-        byId("isAigc").checked = false;
         byId("publishConsent").checked = false;
-        hide(byId("commercialOptions"));
         resetCreatorInfo();
         resetMaterials();
         updateScheduleMinimum();
@@ -1623,9 +1689,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const queueFailures = [];
         ensureFormKey();
         const payloads = materials.map((material, index) => queuePayload(material, index));
+        state.queueResults = payloads.map(payload => ({
+          material_id: payload.material_id,
+          scheduled_at: payload.scheduled_at,
+          status: "pending",
+          message: "",
+        }));
+        renderQueueSubmitResults();
         try {
           for (let index = 0; index < materials.length; index += 1) {
             const material = materials[index];
+            const queueResult = state.queueResults[index];
+            queueResult.status = "saving";
+            queueResult.message = "";
+            renderQueueSubmitResults();
             setText(button, `正在保存 ${index + 1}/${materials.length}`);
             try {
               const result = await api(`${API_BASE}/queue`, {
@@ -1633,16 +1710,24 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 body: JSON.stringify(payloads[index]),
               });
               applyGates(result);
+              const item = readPayloadItem(result, ["item", "queue"]);
+              queueResult.status = "success";
+              queueResult.message = item.id || item.queue_id
+                ? `任务 ${item.id || item.queue_id} 已保存`
+                : "任务已保存";
               created.push({
                 material_id: material.material_id,
-                item: readPayloadItem(result, ["item", "queue"]),
+                item,
               });
             } catch (requestError) {
+              queueResult.status = "failure";
+              queueResult.message = requestError.message || "保存失败";
               queueFailures.push({
                 material_id: material.material_id,
-                message: requestError.message || "保存失败",
+                message: queueResult.message,
               });
             }
+            renderQueueSubmitResults();
           }
           if (created.length) {
             state.page = 1;
@@ -2104,23 +2189,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         validateForm();
       });
       [
-        "scheduledAt", "privacyLevel", "allowComment", "allowDuet", "allowStitch",
-        "ownBrand", "brandedContent", "isAigc", "publishConsent",
+        "scheduledAt", "publishConsent",
       ].forEach(id => byId(id).addEventListener("change", () => {
         if (id !== "publishConsent") resetBatchConfirmation();
         validateForm();
       }));
-      byId("commercialDisclosure").addEventListener("change", () => {
-        resetBatchConfirmation();
-        if (byId("commercialDisclosure").checked) {
-          show(byId("commercialOptions"));
-        } else {
-          hide(byId("commercialOptions"));
-          byId("ownBrand").checked = false;
-          byId("brandedContent").checked = false;
-        }
-        validateForm();
-      });
       byId("createQueue").addEventListener("click", createQueue);
       byId("queueFilters").addEventListener("submit", event => {
         event.preventDefault();

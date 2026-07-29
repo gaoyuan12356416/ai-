@@ -25,6 +25,7 @@ from features.tt_gpu.credentials import open_access_token
 from features.tt_posts.core import (
     LiveGates,
     SnapshotAccountSource,
+    TTPostAccountSettings,
     TTPostError,
     TTPostStore,
 )
@@ -491,9 +492,10 @@ class FakeGPU:
             "state": "published",
             "status": {"status": "PUBLISH_COMPLETE"},
         }
+        self.creator_info_override = None
 
     def creator_info(self, **_kwargs):
-        return creator_info()
+        return self.creator_info_override or creator_info()
 
     def prepare(self, *, job_id, material, source_trim_tail_seconds):
         self.prepare_jobs.append(
@@ -540,14 +542,6 @@ def queue_payload(clock, publish_mode="hold", key="tt-post:test-key"):
             "Drama ID: ABCD1234\n\n"
             "Visit my profile → Open the link → Search the Drama ID → Watch now."
         ),
-        "privacy_level": "SELF_ONLY",
-        "allow_comment": False,
-        "allow_duet": False,
-        "allow_stitch": False,
-        "commercial_disclosure": False,
-        "brand_organic_toggle": False,
-        "brand_content_toggle": False,
-        "is_aigc": True,
         "publish_mode": publish_mode,
         "consent": {
             "accepted": True,
@@ -568,12 +562,29 @@ class ServiceLifecycleTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def service(self, gates):
+    def service(self, gates, *, configure_settings=True):
+        store = TTPostStore(
+            Path(self.temp.name) / "tt.sqlite3",
+            now_fn=self.clock,
+        )
+        if configure_settings and store.get_account_settings("101") is None:
+            store.save_account_settings(
+                "101",
+                TTPostAccountSettings.from_mapping(
+                    {
+                        "privacy_level": "SELF_ONLY",
+                        "allow_comment": False,
+                        "allow_duet": False,
+                        "allow_stitch": False,
+                        "brand_content_toggle": False,
+                        "brand_organic_toggle": False,
+                        "is_aigc": True,
+                    }
+                ),
+                expected_version=0,
+            )
         return TTPostService(
-            TTPostStore(
-                Path(self.temp.name) / "tt.sqlite3",
-                now_fn=self.clock,
-            ),
+            store,
             self.accounts,
             self.materials,
             self.gpu,
@@ -582,6 +593,183 @@ class ServiceLifecycleTests(unittest.TestCase):
             source_trim_tail_seconds=4.333333,
             media_profile_version="tt-post-outro-20260729-v1",
         )
+
+    def test_accounts_expose_configuration_state_without_credentials(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        initial = service.accounts()["items"][0]
+        self.assertEqual(initial["account_settings"], {"configured": False})
+        rendered = json.dumps(initial)
+        self.assertNotIn("access_token", rendered)
+
+        saved = service.account_settings_save(
+            {
+                "source_account_id": "101",
+                "privacy_level": "SELF_ONLY",
+                "allow_comment": True,
+                "allow_duet": False,
+                "allow_stitch": False,
+                "commercial_disclosure": True,
+                "brand_organic_toggle": True,
+                "brand_content_toggle": False,
+                "is_aigc": True,
+                "expected_version": 0,
+            }
+        )["item"]
+        self.assertEqual(saved["account_settings"]["version"], 1)
+        self.assertTrue(saved["account_settings"]["allow_comment"])
+        self.assertEqual(
+            saved["creator_info"]["creator_username"],
+            "creator_live_101",
+        )
+        listed = service.account_settings()["items"][0]
+        self.assertTrue(listed["account_settings"]["configured"])
+        self.assertEqual(listed["account_settings"]["version"], 1)
+
+    def test_account_settings_save_revalidates_live_tiktok_capability(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        self.gpu.creator_info_override = {
+            **creator_info(),
+            "creator_info": {
+                **creator_info()["creator_info"],
+                "comment_disabled": True,
+            },
+        }
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.account_settings_save(
+                {
+                    "source_account_id": "101",
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": True,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "commercial_disclosure": False,
+                    "brand_organic_toggle": False,
+                    "brand_content_toggle": False,
+                    "is_aigc": False,
+                    "expected_version": 0,
+                }
+            )
+        self.assertEqual("tt_interaction_not_allowed", caught.exception.code)
+        self.assertIsNone(service.store.get_account_settings("101"))
+
+    def test_account_settings_reject_inconsistent_commercial_disclosure(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.account_settings_save(
+                {
+                    "source_account_id": "101",
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "commercial_disclosure": False,
+                    "brand_organic_toggle": True,
+                    "brand_content_toggle": False,
+                    "is_aigc": False,
+                    "expected_version": 0,
+                }
+            )
+        self.assertEqual(
+            "tt_commercial_disclosure_invalid",
+            caught.exception.code,
+        )
+
+    def test_account_settings_require_optimistic_version(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.account_settings_save(
+                {
+                    "source_account_id": "101",
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "commercial_disclosure": False,
+                    "brand_organic_toggle": False,
+                    "brand_content_toggle": False,
+                    "is_aigc": False,
+                }
+            )
+        self.assertEqual(
+            "invalid_account_settings_version",
+            caught.exception.code,
+        )
+        self.assertEqual(self.gpu.prepare_jobs, [])
+
+        invalid = {
+            "source_account_id": "101",
+            "privacy_level": "SELF_ONLY",
+            "allow_comment": False,
+            "allow_duet": False,
+            "allow_stitch": False,
+            "commercial_disclosure": False,
+            "brand_organic_toggle": False,
+            "brand_content_toggle": False,
+            "is_aigc": False,
+            "expected_version": 0.5,
+        }
+        with self.assertRaises(TTPostServiceError) as malformed:
+            service.account_settings_save(invalid)
+        self.assertEqual(
+            "invalid_account_settings_version",
+            malformed.exception.code,
+        )
+
+    def test_queue_requires_saved_account_settings_before_gpu_work(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        with self.assertRaises(TTPostError) as caught:
+            service.queue_create(queue_payload(self.clock))
+        self.assertEqual("tt_account_settings_required", caught.exception.code)
+        self.assertEqual(self.gpu.prepare_jobs, [])
+
+    def test_queue_freezes_saved_settings_and_ignores_legacy_overrides(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        payload.update(
+            {
+                "privacy_level": "PUBLIC_TO_EVERYONE",
+                "allow_comment": True,
+                "allow_duet": True,
+                "allow_stitch": True,
+                "commercial_disclosure": True,
+                "brand_organic_toggle": True,
+                "brand_content_toggle": True,
+                "is_aigc": False,
+            }
+        )
+        created = service.queue_create(payload)["item"]
+        self.assertEqual(created["privacy_level"], "SELF_ONLY")
+        self.assertFalse(created["allow_comment"])
+        self.assertFalse(created["allow_duet"])
+        self.assertFalse(created["allow_stitch"])
+        self.assertFalse(created["commercial_disclosure"])
+        self.assertTrue(created["is_aigc"])
+
+    def test_idempotent_replay_keeps_original_after_account_setting_changes(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        created = service.queue_create(payload)["item"]
+        service.store.save_account_settings(
+            "101",
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": "PUBLIC_TO_EVERYONE",
+                    "allow_comment": True,
+                    "allow_duet": True,
+                    "allow_stitch": True,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": True,
+                    "is_aigc": False,
+                }
+            ),
+            expected_version=1,
+        )
+        replay = service.queue_create(payload)["item"]
+        self.assertEqual(replay["id"], created["id"])
+        self.assertEqual(replay["privacy_level"], "SELF_ONLY")
+        self.assertFalse(replay["allow_comment"])
+        self.assertTrue(replay["is_aigc"])
+        self.assertEqual(len(self.gpu.prepare_jobs), 1)
 
     def test_preview_job_changes_when_only_source_url_changes(self):
         service = self.service(CLOSED_GATES)
@@ -788,6 +976,25 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(created["id"], replay["id"])
         self.assertEqual(created["caption_template"], replay["caption_template"])
         self.assertEqual(created["caption_text"], replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+    def test_exact_replay_returns_existing_after_original_schedule_is_due(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        created = service.queue_create(payload)["item"]
+
+        self.clock.value += timedelta(minutes=31)
+        replay = service.queue_create(dict(payload))["item"]
+
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(created["scheduled_at_utc"], replay["scheduled_at_utc"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+        new_request = dict(payload)
+        new_request["idempotency_key"] = "tt-post:expired-new-request"
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.queue_create(new_request)
+        self.assertEqual("tt_schedule_too_soon", caught.exception.code)
         self.assertEqual(1, len(self.gpu.prepare_jobs))
 
     def test_claim_lease_is_shorter_than_grace_and_reclaims_claimed_once(self):
@@ -1385,6 +1592,12 @@ class HTTPContractTests(unittest.TestCase):
         def accounts(self):
             return {"items": [], "gates": self.gates.as_dict()}
 
+        def account_settings(self):
+            return {"items": [], "marker": "account-settings"}
+
+        def account_settings_save(self, payload):
+            return {"item": {"marker": "account-settings-save", **payload}}
+
         def creator_info(self, payload):
             return {"item": {"marker": "creator", **payload}}
 
@@ -1454,6 +1667,28 @@ class HTTPContractTests(unittest.TestCase):
         self.assertEqual(
             self.request("/api/admin/tt-posts/accounts")["items"],
             [],
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/account-settings"
+            )["marker"],
+            "account-settings",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/account-settings/creator-info",
+                "POST",
+                {"source_account_id": "101"},
+            )["item"]["marker"],
+            "creator",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/account-settings",
+                "POST",
+                {"source_account_id": "101"},
+            )["item"]["marker"],
+            "account-settings-save",
         )
         self.assertEqual(
             self.request(

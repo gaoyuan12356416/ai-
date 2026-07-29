@@ -38,21 +38,38 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertEqual(group["label"], "TikTok 社媒")
         self.assertEqual(group["order"], 35)
         self.assertEqual(group["module"], "tt_posts")
+        settings = next(
+            entry
+            for entry in group["items"]
+            if entry.get("key") == "ttAccountSettings"
+        )
+        self.assertEqual(settings["label"], "TT 个号管理")
+        self.assertEqual(settings["href"], "/tt-account-settings.html")
+        self.assertEqual(settings["module"], "tt_posts")
+        self.assertEqual(settings["order"], 10)
+        self.assertFalse(settings["adminOnly"])
+        self.assertTrue(settings["enabled"])
         item = next(entry for entry in group["items"] if entry.get("key") == "ttPostPool")
         self.assertEqual(item["label"], "TT Post发布池")
         self.assertEqual(item["href"], "/tt-post-pool.html")
         self.assertEqual(item["module"], "tt_posts")
-        self.assertEqual(item["order"], 10)
+        self.assertEqual(item["order"], 20)
         self.assertFalse(item["adminOnly"])
         self.assertTrue(item["enabled"])
 
+        self.assertIn(
+            'ttAccountSettings: "/tt-account-settings.html"',
+            QUICK_NAV,
+        )
         self.assertIn('ttPostPool: "/tt-post-pool.html"', QUICK_NAV)
         self.assertIn('key: "tiktok_platform"', QUICK_NAV)
+        self.assertIn('key: "ttAccountSettings"', QUICK_NAV)
         self.assertIn('key: "ttPostPool"', QUICK_NAV)
         self.assertIn('module: "tt_posts"', QUICK_NAV)
         self.assertIn("if (!tiktokPlatform)", QUICK_NAV)
+        self.assertIn("if (!ttAccountSettingsExists)", QUICK_NAV)
         self.assertIn("if (!ttPostPoolExists)", QUICK_NAV)
-        self.assertIn('quickNavConfigCache:v4', QUICK_NAV)
+        self.assertIn('quickNavConfigCache:v5', QUICK_NAV)
 
     def test_page_uses_existing_shell_and_tt_permission(self):
         self.assertIn('href="/ui-topbar.css"', PAGE)
@@ -79,14 +96,12 @@ class TtPostPoolUiTest(unittest.TestCase):
             "caption",
             "scheduledAt",
             "scheduleIntervalMinutes",
-            "privacyLevel",
-            "allowComment",
-            "allowDuet",
-            "allowStitch",
-            "commercialDisclosure",
-            "ownBrand",
-            "brandedContent",
-            "isAigc",
+            "accountSettingsCard",
+            "accountSettingsStatus",
+            "accountSettingsSummary",
+            "queueSubmitPanel",
+            "queueSubmitSummary",
+            "queueSubmitResults",
             "publishConsent",
             "createQueue",
         }
@@ -105,6 +120,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("failures: []", PAGE)
         self.assertIn("CONSENT_VERSION", PAGE)
         self.assertIn("Music Usage Confirmation", PAGE)
+        self.assertIn('href="/tt-account-settings.html"', PAGE)
 
     def test_page_only_calls_same_origin_admin_contracts(self):
         for endpoint in (
@@ -125,10 +141,13 @@ class TtPostPoolUiTest(unittest.TestCase):
         )
         self.assertIsNotNone(material_input)
         self.assertIn('inputmode="numeric"', material_input.group("attrs"))
+        self.assertIn("function normalizeMaterialIdToken(value, index)", PAGE)
         self.assertIn("function parseMaterialIds()", PAGE)
         self.assertIn(r"raw.split(/[\s,，;；]+/)", PAGE)
         self.assertIn(r"!/^\d+$/.test(value)", PAGE)
-        self.assertIn("String(BigInt(value))", PAGE)
+        self.assertIn('value.replace(/^0+/, "")', PAGE)
+        self.assertIn(r"!/^[1-9]\d{0,18}$/.test(withoutLeadingZeros)", PAGE)
+        self.assertIn("String(BigInt(withoutLeadingZeros))", PAGE)
         self.assertIn("Array.from(new Set(", PAGE)
         self.assertIn("if (ids.length > 100)", PAGE)
 
@@ -146,6 +165,10 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("renderMaterialResults()", preview)
         self.assertIn("成功 ${state.materials.length} 个", preview)
         self.assertIn("失败 ${state.failures.length} 个", preview)
+        self.assertLess(
+            preview.index("materialIds = parseMaterialIds()"),
+            preview.index("await api(`${API_BASE}/materials/preview`"),
+        )
         self.assertNotIn("Promise.all(", preview)
         self.assertIn(
             'byId("materialResults").addEventListener("click"',
@@ -246,6 +269,40 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("页面已保留", creation)
         self.assertIn("已成功任务不会重复创建", creation)
 
+    def test_queue_results_keep_every_material_visible_with_its_own_outcome(self):
+        creation = source_between(
+            "async function createQueue()",
+            "function statusMeta(",
+        )
+        renderer = source_between(
+            "function renderQueueSubmitResults()",
+            "function resetMaterials(",
+        )
+        self.assertIn("queueResults: []", PAGE)
+        self.assertIn(
+            "state.queueResults = payloads.map(payload => ({",
+            creation,
+        )
+        self.assertIn('status: "pending"', creation)
+        self.assertIn('queueResult.status = "saving"', creation)
+        self.assertIn('queueResult.status = "success"', creation)
+        self.assertIn('queueResult.status = "failure"', creation)
+        self.assertGreaterEqual(
+            creation.count("renderQueueSubmitResults()"),
+            3,
+        )
+        self.assertIn("state.queueResults.forEach(item => {", renderer)
+        self.assertIn("state.queueResults.length", renderer)
+        self.assertIn("item.material_id", renderer)
+        self.assertIn("item.message", renderer)
+        self.assertNotIn(".slice(", renderer)
+        reset = source_between(
+            "function resetCreateForm()",
+            "async function createQueue()",
+        )
+        self.assertNotIn("state.queueResults =", reset)
+        self.assertNotIn('hide(byId("queueSubmitPanel"))', reset)
+
     def test_task_setting_changes_reset_batch_key_and_consent(self):
         self.assertIn("function resetBatchConfirmation()", PAGE)
         self.assertIn('state.formKey = "";', PAGE)
@@ -278,34 +335,52 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("accepted_at: ensureConsentAcceptedAt()", payload)
         self.assertNotIn("accepted_at: new Date().toISOString()", payload)
 
-    def test_creator_settings_fail_closed_and_have_no_platform_defaults(self):
-        privacy = re.search(
-            r'<select id="privacyLevel" disabled>(?P<body>.*?)</select>',
-            PAGE,
-            flags=re.DOTALL,
+    def test_creator_info_ignores_stale_account_switch_responses(self):
+        creator = source_between(
+            "async function loadCreatorInfo()",
+            "async function loadAccounts()",
         )
-        self.assertIsNotNone(privacy)
-        self.assertIn('value=""', privacy.group("body"))
-        self.assertNotIn(" selected", privacy.group("body"))
+        self.assertIn("creatorRequestVersion: 0", PAGE)
+        self.assertIn(
+            "const requestVersion = ++state.creatorRequestVersion",
+            creator,
+        )
+        self.assertIn("const requestedAccountId = accountId(item)", creator)
+        self.assertIn("source_account_id: requestedAccountId", creator)
+        stale_guard = (
+            "requestVersion !== state.creatorRequestVersion ||\n"
+            "            state.selectedAccountId !== requestedAccountId"
+        )
+        self.assertGreaterEqual(creator.count(stale_guard), 2)
 
-        for element_id in ("allowComment", "allowDuet", "allowStitch"):
-            checkbox = re.search(
-                rf'<input id="{element_id}"(?P<attrs>[^>]*)>',
-                PAGE,
-            )
-            self.assertIsNotNone(checkbox)
-            self.assertIn("disabled", checkbox.group("attrs"))
-            self.assertNotIn("checked", checkbox.group("attrs"))
+    def test_account_settings_are_read_only_and_required_in_pool(self):
+        for removed_id in (
+            "privacyLevel",
+            "allowComment",
+            "allowDuet",
+            "allowStitch",
+            "commercialDisclosure",
+            "ownBrand",
+            "brandedContent",
+            "isAigc",
+        ):
+            self.assertNotIn(f'id="{removed_id}"', PAGE)
 
-        self.assertIn("privacy_level_options", PAGE)
+        self.assertIn("function selectedAccountSettings()", PAGE)
+        self.assertIn(
+            'if (!selectedAccountSettings()) return "所选账号尚未配置',
+            PAGE,
+        )
+        self.assertIn("renderAccountSettings", PAGE)
+        self.assertIn("settings.configured === true", PAGE)
+        self.assertNotIn('privacy_level: byId("privacyLevel").value', PAGE)
+        self.assertNotIn('allow_comment: byId("allowComment").checked', PAGE)
+        self.assertNotIn(
+            'brand_content_toggle: commercial && byId("brandedContent").checked',
+            PAGE,
+        )
         self.assertIn("max_video_post_duration_sec", PAGE)
-        self.assertIn("comment_disabled", PAGE)
-        self.assertIn("duet_disabled", PAGE)
-        self.assertIn("stitch_disabled", PAGE)
-        self.assertIn("boolValue(info.comment_disabled) !== false", PAGE)
-        self.assertIn("boolValue(info.duet_disabled) !== false", PAGE)
-        self.assertIn("boolValue(info.stitch_disabled) !== false", PAGE)
-        self.assertIn('if (!byId("privacyLevel").value)', PAGE)
+        self.assertIn("发布池只读展示、不再单独编辑", PAGE)
 
     def test_live_compliance_gates_default_to_hold(self):
         for element_id in (

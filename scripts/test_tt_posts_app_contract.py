@@ -69,6 +69,8 @@ def _client_namespace():
         "TT_POST_ADMIN_TIMEOUT": 360,
         "TT_POST_ADMIN_ROUTE_METHODS": {
             "/api/admin/tt-posts/accounts": {"GET"},
+            "/api/admin/tt-posts/account-settings": {"GET", "POST"},
+            "/api/admin/tt-posts/account-settings/creator-info": {"POST"},
             "/api/admin/tt-posts/creator-info": {"POST"},
             "/api/admin/tt-posts/materials/preview": {"POST"},
             "/api/admin/tt-posts/queue": {"GET", "POST"},
@@ -104,7 +106,7 @@ class TTPostsAppContractTest(unittest.TestCase):
     def test_permission_exists_and_is_default_off(self):
         modules = _literal_assignment("MODULE_PERMISSIONS")
         defaults = _literal_assignment("DEFAULT_USER_PERMISSIONS")
-        self.assertEqual(modules["tt_posts"], "TT Post 发布池")
+        self.assertEqual(modules["tt_posts"], "TikTok 社媒发布")
         self.assertIs(defaults["tt_posts"], False)
         self.assertIn(
             "ADMIN_PERMISSIONS = {key: True for key in MODULE_PERMISSIONS}",
@@ -153,6 +155,20 @@ class TTPostsAppContractTest(unittest.TestCase):
         )
         self.assertTrue(
             access(
+                {"role": "user", "permissions": {"tt_posts": True}},
+                "ttAccountSettings",
+                NAVIGATION,
+            )["allowed"]
+        )
+        denied_settings = access(
+            {"role": "user", "permissions": {"tt_posts": False}},
+            "ttAccountSettings",
+            NAVIGATION,
+        )
+        self.assertFalse(denied_settings["allowed"])
+        self.assertEqual(denied_settings["module"], "tt_posts")
+        self.assertTrue(
+            access(
                 {"role": "admin", "permissions": {}},
                 "ttPostPool",
                 NAVIGATION,
@@ -169,10 +185,13 @@ class TTPostsAppContractTest(unittest.TestCase):
             start,
         )
         route = APP_SOURCE[start:end]
+        self.assertIn('"ttAccountSettings"', route)
+        self.assertIn('"ttPostPool"', route)
         self.assertIn(
-            '_require_cookie_navigation_item("ttPostPool")',
+            "self._require_cookie_navigation_item(navigation_key)",
             route,
         )
+        self.assertIn('"/api/admin/tt-posts/account-settings"', route)
         self.assertIn('"/api/admin/tt-posts/queue"', route)
         self.assertIn('"/api/admin/tt-posts/events"', route)
         self.assertIn("_tt_post_query_params(", route)
@@ -182,22 +201,35 @@ class TTPostsAppContractTest(unittest.TestCase):
     def test_post_routes_use_same_origin_audit_and_no_store(self):
         start = APP_SOURCE.index(
             '        if parsed.path in {\n'
-            '            "/api/admin/tt-posts/creator-info",'
+            '            "/api/admin/tt-posts/account-settings",'
         )
         end = APP_SOURCE.index(
             "        x_post_account_verify_match = re.fullmatch(",
             start,
         )
         route = APP_SOURCE[start:end]
+        self.assertIn('"ttAccountSettings"', route)
+        self.assertIn('"ttPostPool"', route)
         self.assertIn(
-            '_require_cookie_navigation_item("ttPostPool")',
+            "self._require_cookie_navigation_item(navigation_key)",
             route,
         )
         self.assertIn("_require_same_origin_json()", route)
+        self.assertIn(
+            '"/api/admin/tt-posts/account-settings/creator-info"',
+            route,
+        )
         self.assertIn('"/api/admin/tt-posts/materials/preview"', route)
         self.assertIn('"/api/admin/tt-posts/queue"', route)
         self.assertIn("_tt_post_service_request(", route)
         self.assertIn("append_audit_log(", route)
+        self.assertIn('"save_tt_post_account_settings"', route)
+        self.assertIn(
+            '"check_tt_post_account_settings_creator_info"',
+            route,
+        )
+        self.assertIn('"privacy_level"', route)
+        self.assertIn('"version"', route)
         self.assertNotIn('"caption_text":', route)
         self.assertGreaterEqual(route.count("no_store=True"), 2)
 
@@ -207,7 +239,7 @@ class TTPostsAppContractTest(unittest.TestCase):
         )
         end = APP_SOURCE.index(
             '        if parsed.path in {\n'
-            '            "/api/admin/tt-posts/creator-info",',
+            '            "/api/admin/tt-posts/account-settings",',
             start,
         )
         route = APP_SOURCE[start:end]

@@ -59,14 +59,6 @@
   "scheduled_at": "2026-07-30T02:00:00.000Z",
   "timezone": "Asia/Shanghai",
   "caption_template": "Watch the full story in the app 🎬\n\nDrama ID: {{contect_id}}\n\nVisit my profile → Open the link → Search the Drama ID → Watch now.",
-  "privacy_level": "SELF_ONLY",
-  "allow_comment": false,
-  "allow_duet": false,
-  "allow_stitch": false,
-  "commercial_disclosure": false,
-  "brand_organic_toggle": false,
-  "brand_content_toggle": false,
-  "is_aigc": false,
   "publish_mode": "hold",
   "consent": {
     "accepted": true,
@@ -81,6 +73,10 @@
 重新解析素材真实 `content_id` 后渲染并冻结 `caption_template` 与最终
 `caption`；最终描述不得超过 2200 个 UTF-16 单位。请求中的 `content_id`
 仅用于核对页面预览身份，不能覆盖服务端真实映射。
+
+隐私、互动、商业披露和 AIGC 不由发布池请求决定。服务端必须读取
+“TT 个号管理”中已保存且经 `creator_info` 校验的账号设置；未配置时返回
+`tt_account_settings_required`。旧页面即使继续提交这些字段，服务端也不得用它们覆盖账号级设置。
 
 兼容旧调用方：
 
@@ -133,6 +129,7 @@ GPU publish 请求中的敏感账号凭证只存在于 AES-GCM 短时任务信�
 | 404 | `tt_account_not_found` | 账号不存在或不满足候选条件 |
 | 409 | `tt_post_material_already_used` | 素材已有排期或发布历史 |
 | 409 | `tt_post_account_time_conflict` | 同账号同一时间已有任务 |
+| 409 | `tt_account_settings_required` | 账号尚未在 TT 个号管理中完成发布设置 |
 | 409 | `tt_creator_info_changed` | 账号实时能力与冻结快照不同 |
 | 409 | `tt_post_unknown_no_retry` | 结果不明，禁止自动重发 |
 | 409 | `tt_post_reconcile_only` | 已有 `publish_id`，只能 reconcile |
@@ -143,9 +140,9 @@ GPU publish 请求中的敏感账号凭证只存在于 AES-GCM 短时任务信�
 
 - 用户原文变量为 `{{contect_id}}`，模板渲染兼容该拼写；数据库和 API 始终使用正确字段名 `content_id`。
 - 当前默认模板仍为上述产品文案，但新建任务允许编辑前后文；`caption_template` 与按素材真实 `content_id` 渲染的 `caption` 分别冻结。
-- Core 和 Service 的幂等比较都包含模板和最终文案；相同幂等键改变素材、账号、时间、模板、渲染文案或其他冻结设置时返回 `tt_post_idempotency_conflict`。
-- 历史固定描述和历史自定义描述均不做破坏性改写；旧 `caption_text` 请求和缺省默认模板请求可按原幂等键精确重放。
-- 页面批量功能复用现有单项路由和现有三张 TT SQLite 表，不增加批量接口、批次表或 MySQL 变更。
+- Core 和 Service 的幂等比较都包含模板和最终文案；相同幂等键改变请求中的素材、账号、时间、模板、渲染文案或确认信息时返回 `tt_post_idempotency_conflict`。
+- 历史固定描述和历史自定义描述均不做破坏性改写；旧 `caption_text` 请求和缺省默认模板请求可按原幂等键精确重放，即使原发布时间已经临近或经过也先返回历史任务。之后修改账号级设置不改变既有任务。
+- 页面批量功能复用现有单项路由和现有四张 TT SQLite 表，不增加批量接口、批次表或 MySQL 变更。
 - 批量部分失败不是事务性整批回滚：每个 preview/queue 请求独立，已成功项保留，失败项安全汇总，后续项继续。
 - 同账号同一 UTC 发布时间唯一约束保持不变；页面通过首条时间加正整数间隔避免本批内部重时点，服务端仍以数据库约束处理并发和历史冲突。
 - 时间输入为 `Asia/Shanghai`，数据库统一存 UTC。

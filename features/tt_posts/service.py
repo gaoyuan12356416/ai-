@@ -47,6 +47,7 @@ from .core import (
     MaterialResolution,
     SafeAccount,
     SnapshotAccountSource,
+    TTPostAccountSettings,
     TTPostError,
     TTPostPolicy,
     TTPostStore,
@@ -211,6 +212,26 @@ def _positive_int(value: Any, label: str, maximum: int = 2**63 - 1) -> int:
         raise TTPostServiceError("invalid_request", "%s无效" % label, 400) from None
     if result <= 0 or result > int(maximum):
         raise TTPostServiceError("invalid_request", "%s无效" % label, 400)
+    return result
+
+
+def _account_settings_version(value: Any, maximum: int = 2**31 - 1) -> int:
+    if type(value) is int:
+        result = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        result = int(value)
+    else:
+        raise TTPostServiceError(
+            "invalid_account_settings_version",
+            "个号发布设置版本无效",
+            400,
+        )
+    if result < 0 or result > int(maximum):
+        raise TTPostServiceError(
+            "invalid_account_settings_version",
+            "个号发布设置版本无效",
+            400,
+        )
     return result
 
 
@@ -1289,10 +1310,21 @@ class TTPostService:
         return self.gates.as_dict()
 
     def accounts(self) -> Dict[str, Any]:
+        items = []
+        for account in self.account_repository.list_public_accounts():
+            item = dict(account)
+            item["account_settings"] = (
+                self.store.get_account_settings(account["source_account_id"])
+                or {"configured": False}
+            )
+            items.append(item)
         return {
-            "items": self.account_repository.list_public_accounts(),
+            "items": items,
             "gates": self._gates(),
         }
+
+    def account_settings(self) -> Dict[str, Any]:
+        return self.accounts()
 
     def creator_info(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         account_id = _positive_decimal(
@@ -1414,12 +1446,51 @@ class TTPostService:
             "gates": self._gates(),
         }
 
-    def _policy_from_payload(self, payload: Mapping[str, Any]) -> TTPostPolicy:
+    def _consent_from_payload(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         consent = payload.get("consent")
         if not isinstance(consent, Mapping):
             raise TTPostServiceError(
                 "tt_post_consent_required",
                 "发布确认信息不完整",
+                400,
+            )
+        accepted = _exact_bool(consent.get("accepted"), "发布确认")
+        if not accepted:
+            raise TTPostServiceError(
+                "tt_post_consent_required",
+                "必须核对当前任务并显式确认后才能排期",
+                409,
+            )
+        return {
+            "accepted": accepted,
+            "version": _bounded_text(
+                consent.get("version"),
+                "发布确认版本",
+                64,
+            ),
+            "accepted_at": _utc_iso(consent.get("accepted_at")),
+        }
+
+    @staticmethod
+    def _account_settings_from_payload(
+        payload: Mapping[str, Any],
+    ) -> TTPostAccountSettings:
+        allowed = {
+            "source_account_id",
+            "privacy_level",
+            "allow_comment",
+            "allow_duet",
+            "allow_stitch",
+            "commercial_disclosure",
+            "brand_organic_toggle",
+            "brand_content_toggle",
+            "is_aigc",
+            "expected_version",
+        }
+        if set(payload).difference(allowed):
+            raise TTPostServiceError(
+                "invalid_request",
+                "个号发布设置包含未知字段",
                 400,
             )
         commercial = _exact_bool(
@@ -1440,7 +1511,7 @@ class TTPostService:
                 "商业内容披露选项不一致",
                 400,
             )
-        return TTPostPolicy.from_mapping(
+        return TTPostAccountSettings.from_mapping(
             {
                 "privacy_level": payload.get("privacy_level"),
                 "allow_comment": _exact_bool(
@@ -1457,30 +1528,47 @@ class TTPostService:
                 ),
                 "brand_content_toggle": brand_content,
                 "brand_organic_toggle": brand_organic,
-                "user_consent": _exact_bool(
-                    consent.get("accepted"),
-                    "发布确认",
+                "is_aigc": _exact_bool(
+                    payload.get("is_aigc"),
+                    "AI内容声明",
                 ),
+            }
+        )
+
+    @staticmethod
+    def _policy_from_account_settings(
+        settings: TTPostAccountSettings,
+        consent: Mapping[str, Any],
+    ) -> TTPostPolicy:
+        return TTPostPolicy.from_mapping(
+            {
+                "privacy_level": settings.privacy_level,
+                "allow_comment": settings.allow_comment,
+                "allow_duet": settings.allow_duet,
+                "allow_stitch": settings.allow_stitch,
+                "brand_content_toggle": settings.brand_content_toggle,
+                "brand_organic_toggle": settings.brand_organic_toggle,
+                "user_consent": consent.get("accepted"),
                 "consent_version": consent.get("version"),
                 "consented_at": consent.get("accepted_at"),
             }
         )
 
     @staticmethod
-    def _assert_creator_policy(
+    def _assert_creator_settings(
         creator: Mapping[str, Any],
-        policy: TTPostPolicy,
+        settings: Any,
     ) -> None:
-        if policy.privacy_level not in set(creator["privacy_level_options"]):
+        if settings.privacy_level not in set(creator["privacy_level_options"]):
             raise TTPostServiceError(
                 "tt_privacy_not_allowed",
                 "所选隐私级别不在TikTok实时允许范围内",
                 409,
             )
         for enabled, disabled_field, label in (
-            (policy.allow_comment, "comment_disabled", "评论"),
-            (policy.allow_duet, "duet_disabled", "Duet"),
-            (policy.allow_stitch, "stitch_disabled", "Stitch"),
+            (settings.allow_comment, "comment_disabled", "评论"),
+            (settings.allow_duet, "duet_disabled", "Duet"),
+            (settings.allow_stitch, "stitch_disabled", "Stitch"),
         ):
             if enabled and creator.get(disabled_field) is not False:
                 raise TTPostServiceError(
@@ -1488,6 +1576,47 @@ class TTPostService:
                     "TikTok实时能力不允许开启%s" % label,
                     409,
                 )
+
+    @classmethod
+    def _assert_creator_policy(
+        cls,
+        creator: Mapping[str, Any],
+        policy: TTPostPolicy,
+    ) -> None:
+        cls._assert_creator_settings(creator, policy)
+
+    def account_settings_save(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise TTPostServiceError("invalid_request", "请求体必须是对象", 400)
+        account_id = _positive_decimal(
+            payload.get("source_account_id"),
+            "TikTok账号ID",
+        )
+        settings = self._account_settings_from_payload(payload)
+        raw_expected_version = payload.get("expected_version")
+        if raw_expected_version in (None, ""):
+            raise TTPostServiceError(
+                "invalid_account_settings_version",
+                "个号发布设置版本不能为空",
+                400,
+            )
+        expected_version = _account_settings_version(raw_expected_version)
+        account = self.account_repository.get_public_account(account_id)
+        creator_result = self.creator_info({"source_account_id": account_id})
+        creator = creator_result["item"]
+        self._assert_creator_settings(creator, settings)
+        saved = self.store.save_account_settings(
+            account_id,
+            settings,
+            expected_version=expected_version,
+        )
+        item = dict(account)
+        item["account_settings"] = saved
+        item["creator_info"] = creator
+        return {"item": item, "gates": self._gates()}
 
     def _ensure_pool_item(self, material_id: str) -> Dict[str, Any]:
         try:
@@ -1549,8 +1678,7 @@ class TTPostService:
         scheduled_at_utc: str,
         caption_template: Optional[str],
         caption: str,
-        policy: TTPostPolicy,
-        is_aigc: bool,
+        consent: Mapping[str, Any],
     ) -> Optional[Dict[str, Any]]:
         try:
             existing = self.store.get_queue_by_idempotency_key(idempotency_key)
@@ -1564,16 +1692,9 @@ class TTPostService:
             "content_id": content_id,
             "scheduled_at_utc": scheduled_at_utc,
             "caption": caption,
-            "privacy_level": policy.privacy_level,
-            "allow_comment": policy.allow_comment,
-            "allow_duet": policy.allow_duet,
-            "allow_stitch": policy.allow_stitch,
-            "brand_content_toggle": policy.brand_content_toggle,
-            "brand_organic_toggle": policy.brand_organic_toggle,
-            "user_consent": policy.user_consent,
-            "consent_version": policy.consent_version,
-            "consented_at_utc": policy.consented_at_utc,
-            "is_aigc": is_aigc,
+            "user_consent": bool(consent.get("accepted")),
+            "consent_version": str(consent.get("version") or ""),
+            "consented_at_utc": str(consent.get("accepted_at") or ""),
         }
         if caption_template is not None:
             expected["caption_template"] = caption_template
@@ -1604,15 +1725,6 @@ class TTPostService:
             128,
         )
         scheduled_at_utc = _utc_iso(payload.get("scheduled_at"))
-        if (
-            datetime.fromisoformat(scheduled_at_utc.replace("Z", "+00:00"))
-            <= _now_utc(self._now_fn) + timedelta(seconds=60)
-        ):
-            raise TTPostServiceError(
-                "tt_schedule_too_soon",
-                "发布时间必须晚于当前时间",
-                400,
-            )
         if str(payload.get("timezone") or "") != "Asia/Shanghai":
             raise TTPostServiceError(
                 "tt_timezone_invalid",
@@ -1635,12 +1747,7 @@ class TTPostService:
         else:
             candidate_template = FIXED_CAPTION_TEMPLATE
             candidate_caption = render_fixed_caption(requested_content_id)
-        policy = self._policy_from_payload(payload)
-        is_aigc = _exact_bool(payload.get("is_aigc"), "AI内容声明")
-        account = self.account_repository.get_public_account(account_id)
-        safe_account = SafeAccount.from_mapping(
-            self.account_repository._safe_account_mapping(account)
-        )
+        consent = self._consent_from_payload(payload)
 
         requested_mode = str(payload.get("publish_mode") or "").strip()
         if requested_mode not in {"hold", "direct_post"}:
@@ -1662,18 +1769,51 @@ class TTPostService:
             scheduled_at_utc=scheduled_at_utc,
             caption_template=candidate_template,
             caption=candidate_caption,
-            policy=policy,
-            is_aigc=is_aigc,
+            consent=consent,
         )
         if existing is not None:
             return {
                 "item": self._queue_api_item(existing, gates=self.gates),
                 "gates": self._gates(),
             }
+        if (
+            datetime.fromisoformat(scheduled_at_utc.replace("Z", "+00:00"))
+            <= _now_utc(self._now_fn) + timedelta(seconds=60)
+        ):
+            raise TTPostServiceError(
+                "tt_schedule_too_soon",
+                "发布时间必须晚于当前时间",
+                400,
+            )
         caption_template, caption = _caption_from_submission(
             payload,
             requested_content_id,
         )
+        account = self.account_repository.get_public_account(account_id)
+        safe_account = SafeAccount.from_mapping(
+            self.account_repository._safe_account_mapping(account)
+        )
+        saved_settings = self.store.get_account_settings(
+            account_id,
+            required=True,
+        )
+        settings = TTPostAccountSettings.from_mapping(
+            {
+                key: saved_settings[key]
+                for key in (
+                    "privacy_level",
+                    "allow_comment",
+                    "allow_duet",
+                    "allow_stitch",
+                    "brand_content_toggle",
+                    "brand_organic_toggle",
+                    "is_aigc",
+                )
+            }
+        )
+        policy = self._policy_from_account_settings(settings, consent)
+        is_aigc = settings.is_aigc
+
         creator_result = self.creator_info({"source_account_id": account_id})
         creator = creator_result["item"]
         self._assert_creator_policy(creator, policy)
@@ -2329,8 +2469,23 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             raise PermissionError
         if self.command == "GET" and path == "/api/admin/tt-posts/accounts":
             return service.accounts()
+        if (
+            self.command == "GET"
+            and path == "/api/admin/tt-posts/account-settings"
+        ):
+            return service.account_settings()
         if self.command == "POST" and path == "/api/admin/tt-posts/creator-info":
             return service.creator_info(self._body())
+        if (
+            self.command == "POST"
+            and path == "/api/admin/tt-posts/account-settings/creator-info"
+        ):
+            return service.creator_info(self._body())
+        if (
+            self.command == "POST"
+            and path == "/api/admin/tt-posts/account-settings"
+        ):
+            return service.account_settings_save(self._body())
         creator = re.fullmatch(
             r"/api/admin/tt-posts/accounts/([1-9][0-9]*)/creator-info",
             path,

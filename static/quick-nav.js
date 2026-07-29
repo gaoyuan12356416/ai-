@@ -167,6 +167,17 @@
       module: "tt_posts",
       items: [
         {
+          key: "ttAccountSettings",
+          label: "TT 个号管理",
+          description: "维护每个 TikTok 个号的隐私、互动和内容披露设置",
+          kind: "page",
+          href: "/tt-account-settings.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 10,
+        },
+        {
           key: "ttPostPool",
           label: "TT Post发布池",
           description: "选择账号、素材和发布时间，确认后加入安全发布队列",
@@ -175,7 +186,7 @@
           module: "tt_posts",
           adminOnly: false,
           enabled: true,
-          order: 10,
+          order: 20,
         },
       ],
     },
@@ -291,7 +302,7 @@
     },
   ];
 
-  const CONFIG_CACHE_KEY = "quickNavConfigCache:v4";
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v5";
   const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
@@ -415,6 +426,7 @@
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
     voiceoverTasks: "/voiceover-drama.html",
+    ttAccountSettings: "/tt-account-settings.html",
     ttPostPool: "/tt-post-pool.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
@@ -458,6 +470,22 @@
       normalized.push(tiktokPlatform);
     }
     if (!Array.isArray(tiktokPlatform.items)) tiktokPlatform.items = [];
+    const ttAccountSettingsExists = tiktokPlatform.items.some(
+      item => item && item.key === "ttAccountSettings"
+    );
+    if (!ttAccountSettingsExists) {
+      tiktokPlatform.items.push({
+        key: "ttAccountSettings",
+        label: "TT 个号管理",
+        description: "维护每个 TikTok 个号的隐私、互动和内容披露设置",
+        kind: "page",
+        href: "/tt-account-settings.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 10,
+      });
+    }
     const ttPostPoolExists = tiktokPlatform.items.some(item => item && item.key === "ttPostPool");
     if (!ttPostPoolExists) {
       tiktokPlatform.items.push({
@@ -469,8 +497,14 @@
         module: "tt_posts",
         adminOnly: false,
         enabled: true,
-        order: 10,
+        order: 20,
       });
+    }
+    const ttPostPool = tiktokPlatform.items.find(
+      item => item && item.key === "ttPostPool"
+    );
+    if (ttPostPool && Number(ttPostPool.order || 0) <= 10) {
+      ttPostPool.order = 20;
     }
     const xPlatform = normalized.find(group => group && group.key === "x_platform");
     if (xPlatform) {

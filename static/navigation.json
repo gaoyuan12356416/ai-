@@ -194,13 +194,24 @@
     "module": "tt_posts",
     "items": [
       {
+        "key": "ttAccountSettings",
+        "label": "TT 个号管理",
+        "description": "维护每个 TikTok 个号的隐私、互动和内容披露设置",
+        "kind": "page",
+        "href": "/tt-account-settings.html",
+        "enabled": true,
+        "order": 10,
+        "module": "tt_posts",
+        "adminOnly": false
+      },
+      {
         "key": "ttPostPool",
         "label": "TT Post发布池",
         "description": "选择账号、素材和发布时间，确认后加入安全发布队列",
         "kind": "page",
         "href": "/tt-post-pool.html",
         "enabled": true,
-        "order": 10,
+        "order": 20,
         "module": "tt_posts",
         "adminOnly": false
       }
