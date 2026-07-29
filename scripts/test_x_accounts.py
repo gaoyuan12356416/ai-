@@ -1423,6 +1423,36 @@ class XAccountsTestCase(unittest.TestCase):
 
             with mock.patch.object(
                 service,
+                "record_post_drama_pool_checks_request",
+                return_value={"updated_count": 1},
+            ) as drama_check_mock:
+                drama_check_payload = {
+                    "checks": [
+                        {
+                            "pool_item_id": 53,
+                            "content_id": "DRAMA-BAD",
+                            "error_code": "source_not_repairable",
+                            "error_message": "duration outside contract",
+                        }
+                    ]
+                }
+                with urllib.request.urlopen(
+                    request(
+                        "/internal/posts/drama-pool/check",
+                        drama_check_payload,
+                    ),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(
+                        json.loads(response.read().decode("utf-8")),
+                        {"item": {"updated_count": 1}},
+                    )
+                drama_check_mock.assert_called_once_with(
+                    drama_check_payload
+                )
+
+            with mock.patch.object(
+                service,
                 "create_daily_plan_request",
                 side_effect=service.ServiceError(
                     "x_post_material_already_used",

@@ -74,6 +74,7 @@ DEFAULT_PLAN_QUERY_PATH = "/internal/posts/schedule-plan/query"
 DEFAULT_PLAN_PATH = "/internal/posts/schedule-plan"
 DEFAULT_FAILURE_PATH = "/internal/posts/schedule-runs/record-failure"
 DEFAULT_DRAMA_POOL_PATH = "/internal/posts/drama-pool/available"
+DEFAULT_DRAMA_CHECK_PATH = "/internal/posts/drama-pool/check"
 DEFAULT_MATERIAL_POOL_PATH = "/internal/posts/material-pool/available"
 DEFAULT_MATERIAL_CHECK_PATH = "/internal/posts/material-pool/check"
 DEFAULT_STORAGE_PREFLIGHT_PATH = "/internal/posts/storage/preflight"
@@ -91,6 +92,19 @@ _QUEUE_STATUSES = {
     "published",
     "failed",
 }
+_DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
+    {
+        "invalid_media_duration",
+        "invalid_media_frame_rate",
+        "invalid_media_scan",
+        "invalid_media_type",
+        "invalid_media_url",
+        "media_host_not_allowed",
+        "media_too_large",
+        "source_not_repairable",
+        "x_post_daily_copy_validation_failed",
+    }
+)
 
 
 class ScheduleRunError(RuntimeError):
@@ -171,6 +185,7 @@ class ScheduleConfig:
     material_pool_path: str
     material_check_path: str
     drama_pool_path: str
+    drama_check_path: str
     storage_preflight_path: str
     publish_path_template: str
     repair_url: str = ""
@@ -325,6 +340,9 @@ class ScheduleConfig:
             drama_pool_path=_env_value(
                 "X_POST_SCHEDULE_DRAMA_POOL_PATH", "", DEFAULT_DRAMA_POOL_PATH
             ),
+            drama_check_path=_env_value(
+                "X_POST_SCHEDULE_DRAMA_CHECK_PATH", "", DEFAULT_DRAMA_CHECK_PATH
+            ),
             storage_preflight_path=_env_value(
                 "X_POST_SCHEDULE_STORAGE_PREFLIGHT_PATH",
                 "X_POST_DAILY_STORAGE_PREFLIGHT_PATH",
@@ -409,6 +427,7 @@ class ScheduleConfig:
             self.material_pool_path,
             self.material_check_path,
             self.drama_pool_path,
+            self.drama_check_path,
             self.storage_preflight_path,
         ):
             _endpoint_path(path)
@@ -720,6 +739,45 @@ class ScheduleSidecarClient(SidecarClient):
         # The selector performs the full identity/FIFO validation.
         return [dict(item) if isinstance(item, dict) else item for item in items]
 
+    def record_drama_pool_checks(self, path, checks):
+        normalized = []
+        for raw in checks:
+            if not isinstance(raw, dict):
+                raise SidecarError(
+                    "x_post_drama_pool_check_invalid_response",
+                    "Drama pool check is invalid",
+                )
+            normalized.append(
+                {
+                    "pool_item_id": int(raw["pool_item_id"]),
+                    "content_id": str(raw["content_id"]),
+                    "error_code": str(raw["error_code"])[:64],
+                    "error_message": redact_text(
+                        raw.get("error_message", ""),
+                        240,
+                    ),
+                }
+            )
+        result = self.post(
+            path,
+            {"checks": normalized},
+            write_may_have_happened=True,
+        )
+        item = result.get("item") if isinstance(result, dict) else None
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("updated_count"), int)
+            or item["updated_count"] < 0
+            or item["updated_count"] > len(normalized)
+        ):
+            raise SidecarError(
+                "x_post_drama_pool_check_invalid_response",
+                "Drama pool check response is invalid",
+                502,
+                unknown_outcome=True,
+            )
+        return dict(item)
+
 
 def _within_grace(item, current, grace_seconds):
     scheduled = _scheduled_at(item)
@@ -890,131 +948,239 @@ def _drama_candidates(
     repair_client,
     timestamp,
 ):
-    pool_items = sidecar.available_drama_pool(
-        config.drama_pool_path,
-        config.scan_limit,
-        [int(account["id"]) for account in accounts],
-    )
-    if not pool_items:
-        raise ScheduleRunError(
-            "short-drama pool is empty",
-            "x_post_schedule_drama_shortage",
-        )
+    account_ids = [int(account["id"]) for account in accounts]
     connection = _open_source_connection(config, connection_factory)
-    try:
-        try:
-            candidates = select_drama_pool_episodes(
-                connection,
-                pool_items,
-                account_ids=[int(account["id"]) for account in accounts],
-                schema=config.mysql_database,
-                app_id=config.drama_app_id,
-            )
-        except DramaPoolRejection as exc:
-            raise ScheduleRunError(
-                str(exc),
-                exc.code,
-                drama_pool_item_id=exc.pool_item_id,
-                content_id=exc.content_id,
-            ) from None
-    finally:
+    work_root = Path(config.work_dir)
+    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
         close = getattr(connection, "close", None)
         if callable(close):
             close()
-    if len(candidates) != len(accounts):
-        raise ScheduleRunError(
-            "short-drama pool has fewer free episodes than this schedule requires",
-            "x_post_schedule_drama_shortage",
-        )
-
-    work_root = Path(config.work_dir)
-    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
         raise ScheduleRunError(
             "schedule media work directory is unavailable",
             "x_post_storage_unavailable",
         )
-    planned = []
-    repair_state = {"attempted": 0}
-    with tempfile.TemporaryDirectory(
-        prefix="x-post-schedule-drama-", dir=str(work_root)
-    ) as temporary:
-        for rank, (candidate, account) in enumerate(
-            zip(candidates, accounts), 1
-        ):
-            if int(candidate.get("candidate_account_id") or 0) != int(
-                account["id"]
-            ):
-                raise ScheduleRunError(
-                    "short-drama account assignment changed during preflight",
-                    "x_post_schedule_account_mismatch",
-                    drama_pool_item_id=candidate.get(
-                        "drama_pool_item_id"
-                    ),
-                    content_id=candidate.get("content_id", ""),
-                )
-            try:
-                build_drama_episode_post_text(
-                    "https://ai.yingliangads.com/s2l/1.html",
-                    candidate["sub_num"],
-                    candidate["name_tag"],
-                    candidate["description"],
-                )
-                helper_candidate = dict(candidate)
-                helper_candidate["pool_item_id"] = candidate[
-                    "drama_pool_item_id"
-                ]
-                helper_candidate["pool_created_at"] = candidate[
-                    "drama_pool_created_at"
-                ]
-                helper_candidate["source_date"] = source_date
-                destination = Path(temporary) / (
-                    "%s-%s.mp4"
-                    % (
-                        candidate["drama_pool_item_id"],
-                        candidate["sub_num"],
-                    )
-                )
-                item = _preflight_candidate(
-                    config,
-                    helper_candidate,
-                    account,
-                    rank,
-                    timestamp,
-                    destination,
-                    downloader,
-                    prober,
-                    repair_client=repair_client,
-                    repair_state=repair_state,
-                )
-            except (
-                CandidatePreflightError,
-                XPostError,
-                http.client.HTTPException,
-                OSError,
-                TypeError,
-                ValueError,
-            ) as exc:
-                raise ScheduleRunError(
-                    "episode %s media preflight failed: %s"
-                    % (candidate["episode_key"], exc),
-                    str(getattr(exc, "code", "x_post_drama_preflight_failed")),
-                    drama_pool_item_id=candidate[
-                        "drama_pool_item_id"
+
+    def reject_unassigned(pool_item_id, content_id, code, message):
+        result = sidecar.record_drama_pool_checks(
+            config.drama_check_path,
+            [
+                {
+                    "pool_item_id": int(pool_item_id),
+                    "content_id": str(content_id),
+                    "error_code": str(code or "x_post_drama_preflight_failed")[
+                        :64
                     ],
-                    content_id=candidate["content_id"],
-                ) from None
-            # pool_item_id was supplied only to preserve the existing GPU repair
-            # worker identity contract.  The durable binding is the drama pool.
-            item["pool_item_id"] = None
-            item["pool_created_at"] = ""
-            item["drama_pool_item_id"] = candidate["drama_pool_item_id"]
-            item["drama_pool_created_at"] = candidate[
+                    "error_message": redact_text(message, 240),
+                }
+            ],
+        )
+        if int(result.get("updated_count") or 0) != 1:
+            raise ScheduleRunError(
+                "unassigned drama rejection was not recorded",
+                "x_post_drama_pool_check_conflict",
+                drama_pool_item_id=pool_item_id,
+                content_id=content_id,
+            )
+
+    try:
+        repair_state = {"attempted": 0}
+        rejected_ids = set()
+        preflight_cache = {}
+
+        def preflight_one(candidate, account, rank, temporary):
+            cache_key = (
+                int(account["id"]),
+                int(candidate["drama_pool_item_id"]),
+                str(candidate["episode_key"]),
+                str(candidate["material_id"]),
+                str(candidate["material_url"]),
+                str(candidate["drama_pool_created_at"]),
+                str(candidate["description"]),
+                str(candidate["name_tag"]),
+                str(candidate["tag"]),
+            )
+            cached = preflight_cache.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+            build_drama_episode_post_text(
+                "https://ai.yingliangads.com/s2l/1.html",
+                candidate["sub_num"],
+                candidate["name_tag"],
+                candidate["description"],
+            )
+            helper_candidate = dict(candidate)
+            helper_candidate["pool_item_id"] = candidate[
+                "drama_pool_item_id"
+            ]
+            helper_candidate["pool_created_at"] = candidate[
                 "drama_pool_created_at"
             ]
-            item["source_type"] = "drama"
-            item["source_date"] = source_date
-            planned.append(item)
-    return planned
+            helper_candidate["source_date"] = source_date
+            destination = Path(temporary) / (
+                "%s-%s.mp4"
+                % (
+                    candidate["drama_pool_item_id"],
+                    candidate["sub_num"],
+                )
+            )
+            item = _preflight_candidate(
+                config,
+                helper_candidate,
+                account,
+                rank,
+                timestamp,
+                destination,
+                downloader,
+                prober,
+                repair_client=repair_client,
+                repair_state=repair_state,
+            )
+            preflight_cache[cache_key] = dict(item)
+            return item
+
+        with tempfile.TemporaryDirectory(
+            prefix="x-post-schedule-drama-", dir=str(work_root)
+        ) as temporary:
+            while len(rejected_ids) < config.scan_limit:
+                pool_items = sidecar.available_drama_pool(
+                    config.drama_pool_path,
+                    config.scan_limit,
+                    account_ids,
+                )
+                if len(pool_items) < len(accounts):
+                    raise ScheduleRunError(
+                        "short-drama pool has fewer free episodes than this "
+                        "schedule requires",
+                        "x_post_schedule_drama_shortage",
+                    )
+                pool_by_id = {
+                    int(item["id"]): item
+                    for item in pool_items
+                    if isinstance(item, dict) and item.get("id") is not None
+                }
+                try:
+                    candidates = select_drama_pool_episodes(
+                        connection,
+                        pool_items,
+                        account_ids=account_ids,
+                        schema=config.mysql_database,
+                        app_id=config.drama_app_id,
+                    )
+                except DramaPoolRejection as exc:
+                    pool = pool_by_id.get(int(exc.pool_item_id or 0), {})
+                    if int(pool.get("assigned_account_id") or 0) > 0:
+                        raise ScheduleRunError(
+                            str(exc),
+                            exc.code,
+                            drama_pool_item_id=exc.pool_item_id,
+                            content_id=exc.content_id,
+                        ) from None
+                    reject_unassigned(
+                        exc.pool_item_id,
+                        exc.content_id,
+                        exc.code,
+                        str(exc),
+                    )
+                    rejected_ids.add(int(exc.pool_item_id))
+                    continue
+                if len(candidates) != len(accounts):
+                    raise ScheduleRunError(
+                        "short-drama pool has fewer free episodes than this "
+                        "schedule requires",
+                        "x_post_schedule_drama_shortage",
+                    )
+
+                planned = []
+                rejected = False
+                for rank, (candidate, account) in enumerate(
+                    zip(candidates, accounts), 1
+                ):
+                    if int(candidate.get("candidate_account_id") or 0) != int(
+                        account["id"]
+                    ):
+                        raise ScheduleRunError(
+                            "short-drama account assignment changed during preflight",
+                            "x_post_schedule_account_mismatch",
+                            drama_pool_item_id=candidate.get(
+                                "drama_pool_item_id"
+                            ),
+                            content_id=candidate.get("content_id", ""),
+                        )
+                    try:
+                        item = preflight_one(
+                            candidate,
+                            account,
+                            rank,
+                            temporary,
+                        )
+                    except (
+                        CandidatePreflightError,
+                        XPostError,
+                        http.client.HTTPException,
+                        OSError,
+                        TypeError,
+                        ValueError,
+                    ) as exc:
+                        code = str(
+                            getattr(
+                                exc,
+                                "code",
+                                "x_post_drama_preflight_failed",
+                            )
+                        )
+                        message = "episode %s media preflight failed: %s" % (
+                            candidate["episode_key"],
+                            exc,
+                        )
+                        if code not in _DRAMA_DETERMINISTIC_REJECTION_CODES:
+                            raise ScheduleRunError(
+                                message,
+                                code,
+                            ) from None
+                        if int(candidate.get("assigned_account_id") or 0) > 0:
+                            raise ScheduleRunError(
+                                message,
+                                code,
+                                drama_pool_item_id=candidate[
+                                    "drama_pool_item_id"
+                                ],
+                                content_id=candidate["content_id"],
+                            ) from None
+                        reject_unassigned(
+                            candidate["drama_pool_item_id"],
+                            candidate["content_id"],
+                            code,
+                            message,
+                        )
+                        rejected_ids.add(
+                            int(candidate["drama_pool_item_id"])
+                        )
+                        rejected = True
+                        break
+                    # pool_item_id is used only by the GPU repair worker.
+                    # The durable affinity is stored on the drama pool row.
+                    item["pool_item_id"] = None
+                    item["pool_created_at"] = ""
+                    item["drama_pool_item_id"] = candidate[
+                        "drama_pool_item_id"
+                    ]
+                    item["drama_pool_created_at"] = candidate[
+                        "drama_pool_created_at"
+                    ]
+                    item["source_type"] = "drama"
+                    item["source_date"] = source_date
+                    planned.append(item)
+                if rejected:
+                    continue
+                return planned
+            raise ScheduleRunError(
+                "drama preflight rejection limit was reached",
+                "x_post_schedule_drama_shortage",
+            )
+    finally:
+        close = getattr(connection, "close", None)
+        if callable(close):
+            close()
 
 
 def _plan_payload(identity, candidates):

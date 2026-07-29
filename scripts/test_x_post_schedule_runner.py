@@ -8,17 +8,22 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.x_post_daily_runner import SidecarError  # noqa: E402
+from scripts.x_post_daily_runner import (  # noqa: E402
+    CandidatePreflightError,
+    SidecarError,
+)
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
     ScheduleSidecarClient,
+    _drama_candidates,
     execute_schedule_tick,
 )
 from scripts.x_post_schedule_claim_runner import execute_claim_tick  # noqa: E402
@@ -56,6 +61,7 @@ def make_config(work_dir):
         material_pool_path="/internal/posts/material-pool/available",
         material_check_path="/internal/posts/material-pool/check",
         drama_pool_path="/internal/posts/drama-pool/available",
+        drama_check_path="/internal/posts/drama-pool/check",
         storage_preflight_path="/internal/posts/storage/preflight",
         publish_path_template="/internal/posts/queue/{queue_id}/publish",
     )
@@ -301,6 +307,214 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(payload["limit"], 100)
         self.assertEqual(payload["account_ids"], [11, 12])
         self.assertFalse(write_flag)
+
+    def test_drama_pool_check_client_records_exact_rejection(self):
+        client = StubScheduleClient(
+            [{"item": {"updated_count": 1}}]
+        )
+
+        result = client.record_drama_pool_checks(
+            "/internal/posts/drama-pool/check",
+            [
+                {
+                    "pool_item_id": 53,
+                    "content_id": "DRAMA-BAD",
+                    "error_code": "source_not_repairable",
+                    "error_message": "duration is outside the X contract",
+                }
+            ],
+        )
+
+        self.assertEqual(result["updated_count"], 1)
+        path, payload, write_flag = client.requests[0]
+        self.assertEqual(path, "/internal/posts/drama-pool/check")
+        self.assertEqual(payload["checks"][0]["pool_item_id"], 53)
+        self.assertTrue(write_flag)
+
+    def test_unassigned_drama_preflight_failure_falls_forward_fifo(self):
+        class Connection:
+            def close(self):
+                return None
+
+        class DramaSidecar:
+            def __init__(self):
+                self.available_calls = 0
+                self.checks = []
+
+            def available_drama_pool(self, _path, _limit, _account_ids):
+                self.available_calls += 1
+                second = (
+                    {
+                        "id": 53,
+                        "content_id": "BAD",
+                        "created_at": "2026-07-28T01:00:00+00:00",
+                        "next_sub_number": 1,
+                        "assigned_account_id": 0,
+                        "candidate_account_id": 9,
+                    }
+                    if self.available_calls == 1
+                    else {
+                        "id": 54,
+                        "content_id": "NEXT",
+                        "created_at": "2026-07-28T02:00:00+00:00",
+                        "next_sub_number": 1,
+                        "assigned_account_id": 0,
+                        "candidate_account_id": 9,
+                    }
+                )
+                return [
+                    {
+                        "id": 2,
+                        "content_id": "OWNER",
+                        "created_at": "2026-07-28T00:00:00+00:00",
+                        "next_sub_number": 8,
+                        "assigned_account_id": 10,
+                        "candidate_account_id": 10,
+                    },
+                    second,
+                ]
+
+            def record_drama_pool_checks(self, _path, checks):
+                self.checks.extend(checks)
+                return {"updated_count": len(checks)}
+
+        def selected(_connection, pool_items, **_kwargs):
+            return [
+                {
+                    "drama_pool_item_id": item["id"],
+                    "drama_pool_created_at": item["created_at"],
+                    "episode_number": item["next_sub_number"],
+                    "sub_num": item["next_sub_number"],
+                    "episode_key": "%s:%s"
+                    % (item["content_id"], item["next_sub_number"]),
+                    "material_key": "",
+                    "material_id": str(item["id"]),
+                    "content_id": item["content_id"],
+                    "material_url": "https://media.example.test/%s.mp4"
+                    % item["id"],
+                    "material_name": "Episode",
+                    "material_language": "en",
+                    "drama_name": "Drama",
+                    "tag": "Drama",
+                    "name_tag": "#Drama",
+                    "description": "A complete episode description.",
+                    "free_episode_count": 20,
+                    "assigned_account_id": item["assigned_account_id"],
+                    "candidate_account_id": item["candidate_account_id"],
+                    "spend": 0,
+                    "facebook_violation_count": 0,
+                    "tiktok_violation_count": 0,
+                    "twitter_violation_count": 0,
+                    "resource_audit_count": 0,
+                    "dangerous_tag_count": 0,
+                }
+                for item in pool_items
+            ]
+
+        preflight_calls = []
+
+        def preflight(
+            _config,
+            candidate,
+            account,
+            _rank,
+            _timestamp,
+            _destination,
+            _downloader,
+            _prober,
+            **_kwargs,
+        ):
+            preflight_calls.append(candidate["content_id"])
+            if candidate["content_id"] == "BAD":
+                raise CandidatePreflightError(
+                    "source duration is outside the X contract",
+                    code="source_not_repairable",
+                )
+            return {
+                "account_id": account["id"],
+                "content_id": candidate["content_id"],
+            }
+
+        sidecar = DramaSidecar()
+        accounts = [
+            {"id": 10, "username": "owner"},
+            {"id": 9, "username": "new"},
+        ]
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_drama_pool_episodes",
+            side_effect=selected,
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            planned = _drama_candidates(
+                self.config,
+                sidecar,
+                accounts,
+                source_date="2026-07-28",
+                connection_factory=lambda _config: Connection(),
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+                timestamp=1,
+            )
+
+        self.assertEqual(sidecar.available_calls, 2)
+        self.assertEqual(
+            [(item["pool_item_id"], item["content_id"]) for item in sidecar.checks],
+            [(53, "BAD")],
+        )
+        self.assertEqual(
+            [(item["account_id"], item["content_id"]) for item in planned],
+            [(10, "OWNER"), (9, "NEXT")],
+        )
+        self.assertEqual(preflight_calls, ["OWNER", "BAD", "NEXT"])
+
+        transient_sidecar = DramaSidecar()
+
+        def transient_preflight(
+            _config,
+            candidate,
+            account,
+            _rank,
+            _timestamp,
+            _destination,
+            _downloader,
+            _prober,
+            **_kwargs,
+        ):
+            if candidate["content_id"] == "BAD":
+                raise OSError("temporary COS connection failure")
+            return {
+                "account_id": account["id"],
+                "content_id": candidate["content_id"],
+            }
+
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_drama_pool_episodes",
+            side_effect=selected,
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=transient_preflight,
+        ):
+            with self.assertRaises(ScheduleRunError) as transient:
+                _drama_candidates(
+                    self.config,
+                    transient_sidecar,
+                    accounts,
+                    source_date="2026-07-28",
+                    connection_factory=lambda _config: Connection(),
+                    downloader=object(),
+                    prober=object(),
+                    repair_client=None,
+                    timestamp=1,
+                )
+        self.assertEqual(
+            transient.exception.code,
+            "x_post_drama_preflight_failed",
+        )
+        self.assertEqual(transient_sidecar.checks, [])
+        self.assertEqual(transient_sidecar.available_calls, 1)
 
     def test_plan_query_requires_exact_frozen_identity_and_account_order(self):
         identity = due_item(accounts=[11, 12])

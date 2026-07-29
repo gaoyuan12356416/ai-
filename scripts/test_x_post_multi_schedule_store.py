@@ -553,7 +553,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_drama_pool_needs_review",
         )
 
-    def test_bound_schedule_failure_marks_drama_pool_in_same_transaction(self):
+    def test_unassigned_schedule_failure_does_not_classify_the_drama(self):
         self.save_schedule("drama", [2], ["10:00"])
         pool = self.add_drama()
         claimed = self.store.due_schedule_slots(
@@ -606,16 +606,182 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         self.assertEqual(failure["status"], "failed_preflight")
         self.assertTrue(failure["recorded"])
-        blocked = self.store.query_drama_pool()["items"][0]
-        self.assertEqual(blocked["status"], "needs_review")
+        unchanged_pool = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(unchanged_pool["status"], "pending")
+        self.assertEqual(unchanged_pool["last_error_code"], "")
+        self.assertEqual(unchanged_pool["last_error_message"], "")
+        with self.assertRaises(service.XPostError) as replay:
+            self.store.create_schedule_plan(
+                "drama",
+                "2026-07-27",
+                "10:00",
+                2,
+                [self.drama_candidate(pool, 2, 1)],
+            )
         self.assertEqual(
-            blocked["last_error_code"],
+            replay.exception.code,
+            "x_post_schedule_run_exists",
+        )
+        frozen_failure = self.store.query_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+        )
+        self.assertEqual(frozen_failure["run"]["status"], "failed_preflight")
+        self.assertEqual(
+            frozen_failure["run"]["error_code"],
             "media_preflight_failed",
         )
-        self.assertEqual(
-            blocked["last_error_message"],
-            "episode media is invalid",
+        self.assertEqual(frozen_failure["queues"], [])
+
+    def test_drama_pool_check_skips_unbound_failure_but_refuses_bound_drama(self):
+        rejected_pool = self.add_drama(content_id="REJECTED")
+        next_pool = self.add_drama(content_id="NEXT")
+        with self.assertRaises(service.XPostError) as transient:
+            self.store.record_drama_pool_checks(
+                [
+                    {
+                        "pool_item_id": rejected_pool["id"],
+                        "content_id": rejected_pool["content_id"],
+                        "error_code": "media_download_failed",
+                        "error_message": "temporary COS timeout",
+                    }
+                ]
+            )
+        self.assertEqual(transient.exception.code, "invalid_request")
+        transient_pool = self.store.query_drama_pool(
+            {"content_id": rejected_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(transient_pool["status"], "pending")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_drama_pool SET status='needs_review',"
+                "last_error_code='legacy_preflight_failure' WHERE id=?",
+                (rejected_pool["id"],),
+            )
+            conn.commit()
+
+        checked = self.store.record_drama_pool_checks(
+            [
+                {
+                    "pool_item_id": rejected_pool["id"],
+                    "content_id": rejected_pool["content_id"],
+                    "error_code": "source_not_repairable",
+                    "error_message": "source duration is outside the X contract",
+                }
+            ]
         )
+
+        self.assertEqual(checked["updated_count"], 1)
+        available = self.store.available_drama_pool_items(
+            limit=10,
+            account_ids=[2],
+        )
+        self.assertEqual(
+            [item["id"] for item in available],
+            [next_pool["id"]],
+        )
+        rejected = self.store.query_drama_pool(
+            {"content_id": rejected_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(rejected["status"], "validation_failed")
+
+        self.save_schedule("drama", [2], ["10:00"])
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.drama_candidate(next_pool, 2, 1)],
+        )
+        self.assertEqual(plan["queues"][0]["account_id"], 2)
+        unrelated_pool = self.add_drama(content_id="UNRELATED")
+        with self.assertRaises(service.XPostError) as unrelated:
+            self.store.record_schedule_failure(
+                "drama",
+                "2026-07-27",
+                "10:00",
+                2,
+                [2],
+                "media_preflight_failed",
+                "stale candidate failure",
+                drama_pool_item_id=unrelated_pool["id"],
+                content_id=unrelated_pool["content_id"],
+            )
+        self.assertEqual(
+            unrelated.exception.code,
+            "x_post_schedule_failure_scope_mismatch",
+        )
+        unrelated_row = self.store.query_drama_pool(
+            {"content_id": unrelated_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(unrelated_row["status"], "pending")
+        with self.assertRaises(service.XPostError) as bound:
+            self.store.record_drama_pool_checks(
+                [
+                    {
+                        "pool_item_id": next_pool["id"],
+                        "content_id": next_pool["content_id"],
+                        "error_code": "source_not_repairable",
+                        "error_message": "bound episode failed",
+                    }
+                ]
+            )
+        self.assertEqual(
+            bound.exception.code,
+            "x_post_drama_pool_item_bound",
+        )
+        failure = self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [2],
+            "media_preflight_failed",
+            "bound episode failed",
+            drama_pool_item_id=next_pool["id"],
+            content_id=next_pool["content_id"],
+        )
+        self.assertFalse(failure["recorded"])
+        bound_pool = self.store.query_drama_pool(
+            {"content_id": next_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(bound_pool["status"], "needs_review")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_pool_assignment_immutable"
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_pool_assignment_evidence"
+            )
+            conn.execute(
+                "UPDATE x_post_drama_pool SET assigned_account_id=0,"
+                "assigned_at='',assigned_source_queue_id=NULL,status='active' "
+                "WHERE id=?",
+                (next_pool["id"],),
+            )
+            conn.commit()
+        with self.assertRaises(service.XPostError) as historical:
+            self.store.record_drama_pool_checks(
+                [
+                    {
+                        "pool_item_id": next_pool["id"],
+                        "content_id": next_pool["content_id"],
+                        "error_code": "source_not_repairable",
+                        "error_message": "legacy unbound row still has history",
+                    }
+                ]
+            )
+        self.assertEqual(
+            historical.exception.code,
+            "x_post_drama_pool_item_bound",
+        )
+        historical_pool = self.store.query_drama_pool(
+            {"content_id": next_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(historical_pool["status"], "active")
 
     def test_drama_pool_accepts_large_batch_and_returns_compact_items(self):
         drama_ids = ["D%03d" % index for index in range(100)]

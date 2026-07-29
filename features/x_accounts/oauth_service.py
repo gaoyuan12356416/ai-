@@ -2431,6 +2431,22 @@ def available_post_drama_pool_request(payload):
         _raise_x_post_error(exc)
 
 
+def record_post_drama_pool_checks_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError(
+            "invalid_request",
+            "JSON request body must be an object",
+            400,
+        )
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return XPostStore(POST_DB_PATH).record_drama_pool_checks(
+            payload.get("checks")
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
 def _safe_schedule_queue(queue):
     if not isinstance(queue, dict):
         raise ServiceError(
@@ -3063,6 +3079,7 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/schedule-plan/query",
             "/internal/posts/schedule-runs/record-failure",
             "/internal/posts/drama-pool/available",
+            "/internal/posts/drama-pool/check",
         }
         allow_daily = bool(
             parsed.path in daily_exact_paths
@@ -3295,6 +3312,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(
                     200,
                     add_post_drama_pool_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/drama-pool/check":
+                self.send_json(
+                    200,
+                    {"item": record_post_drama_pool_checks_request(payload)},
                 )
                 return
             if parsed.path == "/internal/posts/drama-pool/batch-delete":

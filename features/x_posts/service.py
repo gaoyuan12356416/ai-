@@ -46,6 +46,27 @@ SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
 DRAMA_POOL_DELETABLE_STATUSES = frozenset(
     {"pending", "validation_failed"}
 )
+DRAMA_POOL_DETERMINISTIC_REJECTION_CODES = frozenset(
+    {
+        "drama_episode_gap",
+        "drama_episode_url_ambiguous",
+        "drama_id_invalid",
+        "drama_metadata_ambiguous",
+        "drama_no_free_episodes",
+        "drama_not_found",
+        "drama_progress_invalid",
+        "drama_resource_invalid",
+        "invalid_media_duration",
+        "invalid_media_frame_rate",
+        "invalid_media_scan",
+        "invalid_media_type",
+        "invalid_media_url",
+        "media_host_not_allowed",
+        "media_too_large",
+        "source_not_repairable",
+        "x_post_daily_copy_validation_failed",
+    }
+)
 
 QUEUE_FIELDS = (
     "account_id",
@@ -3592,6 +3613,120 @@ class XPostStore:
             ).fetchall()
             return [_row_dict(row) for row in rows]
 
+    def record_drama_pool_checks(self, checks):
+        if not isinstance(checks, list) or not checks or len(checks) > 100:
+            raise XPostError(
+                "invalid_request",
+                "checks must contain 1 to 100 drama pool checks",
+                400,
+            )
+        normalized = []
+        seen = set()
+        for raw in checks:
+            if not isinstance(raw, dict):
+                raise XPostError(
+                    "invalid_request",
+                    "drama pool check must be an object",
+                    400,
+                )
+            pool_item_id = _positive_int(
+                raw.get("pool_item_id"),
+                "pool_item_id",
+            )
+            if pool_item_id in seen:
+                raise XPostError(
+                    "invalid_request",
+                    "pool_item_id must be unique",
+                    400,
+                )
+            seen.add(pool_item_id)
+            content_id = _drama_content_id(raw.get("content_id"))
+            raw_code = str(raw.get("error_code", "") or "").strip()
+            try:
+                code = _clean_token(
+                    raw_code,
+                    "drama pool error code",
+                    64,
+                )
+            except ValueError:
+                raise XPostError(
+                    "invalid_request",
+                    "error_code is invalid",
+                    400,
+                ) from None
+            if code not in DRAMA_POOL_DETERMINISTIC_REJECTION_CODES:
+                raise XPostError(
+                    "invalid_request",
+                    "error_code is not a deterministic drama rejection",
+                    400,
+                )
+            message = redact_text(
+                raw.get("error_message")
+                or "Drama episode did not pass X media preflight",
+                500,
+            )
+            normalized.append(
+                (pool_item_id, content_id, code, message)
+            )
+
+        timestamp = utc_now()
+        updated = 0
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for pool_item_id, content_id, code, message in normalized:
+                row = conn.execute(
+                    "SELECT id,content_id,status,assigned_account_id "
+                    "FROM x_post_drama_pool WHERE id=?",
+                    (pool_item_id,),
+                ).fetchone()
+                if not row or str(row["content_id"]) != content_id:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_item_unavailable",
+                        "Drama pool check does not match the stored drama",
+                        409,
+                    )
+                has_history = bool(
+                    conn.execute(
+                        "SELECT 1 FROM x_post_queue "
+                        "WHERE drama_pool_item_id=? OR "
+                        "(source_type='drama' AND content_id=?) LIMIT 1",
+                        (pool_item_id, content_id),
+                    ).fetchone()
+                )
+                if int(row["assigned_account_id"] or 0) > 0 or has_history:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_item_bound",
+                        "A bound drama cannot be rejected or reassigned",
+                        409,
+                    )
+                if str(row["status"]) == "completed":
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_pool_item_unavailable",
+                        "Completed drama cannot be rejected",
+                        409,
+                    )
+                cursor = conn.execute(
+                    "UPDATE x_post_drama_pool SET status='validation_failed',"
+                    "last_checked_at=?,last_error_code=?,"
+                    "last_error_message=?,updated_at=? "
+                    "WHERE id=? AND assigned_account_id=0 "
+                    "AND status IN ('pending','active','validation_failed',"
+                    "'needs_review')",
+                    (
+                        timestamp,
+                        code,
+                        message,
+                        timestamp,
+                        pool_item_id,
+                    ),
+                )
+                updated += int(cursor.rowcount or 0)
+            conn.commit()
+        return {"updated_count": updated}
+
     def query_drama_pool(self, payload=None):
         payload = payload if isinstance(payload, dict) else {}
         page, page_size = self._pagination(payload)
@@ -4070,7 +4205,8 @@ class XPostStore:
             conn.execute("BEGIN IMMEDIATE")
             if bound_pool_item_id is not None:
                 bound_pool = conn.execute(
-                    "SELECT id,content_id FROM x_post_drama_pool WHERE id=?",
+                    "SELECT id,content_id,assigned_account_id "
+                    "FROM x_post_drama_pool WHERE id=?",
                     (bound_pool_item_id,),
                 ).fetchone()
                 if (
@@ -4084,8 +4220,33 @@ class XPostStore:
                         409,
                     )
 
-            def mark_bound_pool_needs_review():
+                if (
+                    int(bound_pool["assigned_account_id"] or 0) > 0
+                    and int(bound_pool["assigned_account_id"])
+                    not in account_ids
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_failure_scope_mismatch",
+                        "Drama pool owner is outside the failed schedule scope",
+                        409,
+                    )
+
+            def mark_drama_pool_failure():
                 if bound_pool_item_id is None:
+                    return
+                has_history = bool(
+                    conn.execute(
+                        "SELECT 1 FROM x_post_queue "
+                        "WHERE drama_pool_item_id=? OR "
+                        "(source_type='drama' AND content_id=?) LIMIT 1",
+                        (bound_pool_item_id, bound_content_id),
+                    ).fetchone()
+                )
+                if (
+                    int(bound_pool["assigned_account_id"] or 0) <= 0
+                    and not has_history
+                ):
                     return
                 conn.execute(
                     "UPDATE x_post_drama_pool SET status='needs_review',"
@@ -4115,6 +4276,23 @@ class XPostStore:
                     ).fetchone()[0]
                 )
                 if queue_count:
+                    if bound_pool_item_id is not None and not conn.execute(
+                        "SELECT 1 FROM x_post_queue "
+                        "WHERE schedule_run_id=? AND source_type='drama' "
+                        "AND drama_pool_item_id=? AND content_id=? LIMIT 1",
+                        (
+                            existing["id"],
+                            bound_pool_item_id,
+                            bound_content_id,
+                        ),
+                    ).fetchone():
+                        conn.rollback()
+                        raise XPostError(
+                            "x_post_schedule_failure_scope_mismatch",
+                            "Drama pool item does not belong to this "
+                            "schedule run",
+                            409,
+                        )
                     if bound_pool_item_id is not None and (
                         int(existing["config_version"]) != config_version
                         or _schedule_account_ids(
@@ -4131,7 +4309,7 @@ class XPostStore:
                             "该时间点已存在不同范围的发布批次",
                             409,
                         )
-                    mark_bound_pool_needs_review()
+                    mark_drama_pool_failure()
                     conn.commit()
                     item = self.get_schedule_run(existing["id"])
                     item["recorded"] = False
@@ -4192,7 +4370,7 @@ class XPostStore:
                     ),
                 )
                 run_id = int(cursor.lastrowid)
-            mark_bound_pool_needs_review()
+            mark_drama_pool_failure()
             conn.commit()
         item = self.get_schedule_run(run_id)
         item["recorded"] = True
@@ -4375,10 +4553,14 @@ class XPostStore:
                     ]
                     item["created"] = False
                     return item
-                if existing["status"] not in {
-                    "claimed",
-                    "failed_preflight",
-                }:
+                if existing["status"] == "failed_preflight":
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_schedule_run_exists",
+                        "已失败批次不能补建发布计划",
+                        409,
+                    )
+                if existing["status"] != "claimed":
                     conn.rollback()
                     raise XPostError(
                         "x_post_storage_conflict",
@@ -4619,7 +4801,7 @@ class XPostStore:
                     "queued_count=?,published_count=0,failed_count=0,"
                     "unknown_count=0,error_code='',error_message='',"
                     "started_at=?,finished_at='',updated_at=? "
-                    "WHERE id=? AND status IN ('claimed','failed_preflight')",
+                    "WHERE id=? AND status='claimed'",
                     (
                         config_version,
                         json.dumps(account_ids, separators=(",", ":")),
