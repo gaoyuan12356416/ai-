@@ -526,6 +526,7 @@ class FakeGPU:
     def __init__(self):
         self.timeout = 900
         self.prepare_jobs = []
+        self.prepare_error = None
         self.prepare_job_id_override = ""
         self.prepared_profile = "tt-post-hevc-720x1280-v2"
         self.publish_jobs = []
@@ -572,6 +573,8 @@ class FakeGPU:
                 expected_profile,
             )
         )
+        if self.prepare_error is not None:
+            raise self.prepare_error
         return {
             "job_id": self.prepare_job_id_override or job_id,
             "content_id": material["content_id"],
@@ -684,6 +687,30 @@ class ServiceLifecycleTests(unittest.TestCase):
             },
         }
 
+    def process_one_preparation(self, service):
+        claimed = service.preparation_claim(
+            {
+                "worker_id": "tt-post-prepare-test",
+                "lease_seconds": 180,
+            }
+        )
+        self.assertIsNotNone(claimed["item"])
+        return service.preparation_process(
+            claimed["item"]["id"],
+            {"claim_token": claimed["claim_token"]},
+        )
+
+    def add_ready(self, service, payload=None):
+        service.material_pool_add(
+            payload or self.recurring_material_payload()
+        )
+        processed = self.process_one_preparation(service)
+        self.assertEqual(
+            processed["item"]["preparation_status"],
+            "ready",
+        )
+        return processed["item"]
+
     def schedule_payload(self, version=0, enabled=True, publish_time="11:00"):
         return {
             "source_account_id": "101",
@@ -703,16 +730,21 @@ class ServiceLifecycleTests(unittest.TestCase):
         added = service.material_pool_add(
             self.recurring_material_payload()
         )["item"]
-        self.assertEqual(added["status"], "available")
+        self.assertEqual(added["preparation_status"], "queued")
+        self.assertFalse(added["publish_ready"])
         self.assertEqual(added["source_account_id"], "101")
         self.assertEqual(added["content_id"], "ABCD1234")
         self.assertIn("Drama ID: ABCD1234", added["caption_text"])
+        self.assertEqual(self.gpu.prepare_jobs, [])
+        self.assertEqual(self.gpu.creator_info_calls, [])
         self.assertEqual(
             service.material_pool_list(
                 {"source_account_id": ["101"]}
-            )["summary"]["available"],
+            )["summary"]["queued"],
             1,
         )
+        prepared = self.process_one_preparation(service)["item"]
+        self.assertEqual(prepared["preparation_status"], "ready")
 
         saved = service.schedule_save(self.schedule_payload())["item"]
         self.assertTrue(saved["enabled"])
@@ -735,6 +767,12 @@ class ServiceLifecycleTests(unittest.TestCase):
             self.recurring_material_payload()
         )["item"]
         self.assertEqual(first["id"], second["id"])
+        self.assertEqual(
+            service.store.count_recurring_materials(account_id="101"),
+            0,
+        )
+        self.assertEqual(len(service.store.list_material_intakes()), 1)
+        self.process_one_preparation(service)
         self.assertEqual(
             service.store.count_recurring_materials(account_id="101"),
             1,
@@ -857,7 +895,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_closed_gates_manual_publish_does_not_consume_material(self):
         service = self.service(CLOSED_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         with self.assertRaises(TTPostServiceError) as caught:
             service.run_now(
                 {
@@ -878,7 +916,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_manual_publish_is_idempotent_and_does_not_change_daily_schedule(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         saved = service.schedule_save(
             self.schedule_payload(publish_time="12:00")
         )["item"]
@@ -906,7 +944,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_daily_due_is_slot_idempotent_and_fifo(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         self.clock.value = datetime(2026, 7, 29, 3, 0, 20, tzinfo=UTC)
         service.schedule_save(
             self.schedule_payload(publish_time="11:00")
@@ -935,7 +973,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             ),
             expected_version=0,
         )
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         second_material = self.recurring_material_payload(
             "tt-post-pool:test:9002"
         )
@@ -945,7 +983,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                 "material_id": "9002",
             }
         )
-        service.material_pool_add(second_material)
+        self.add_ready(service, second_material)
         self.clock.value = datetime(2026, 7, 29, 3, 0, 20, tzinfo=UTC)
         service.schedule_save(self.schedule_payload(publish_time="11:00"))
         second_schedule = self.schedule_payload(publish_time="10:59")
@@ -975,12 +1013,43 @@ class ServiceLifecycleTests(unittest.TestCase):
     def test_material_pool_rejects_media_over_current_account_limit(self):
         service = self.service(OPEN_GATES)
         self.gpu.prepared_duration = 700
-        with self.assertRaises(TTPostServiceError) as caught:
-            service.material_pool_add(self.recurring_material_payload())
+        queued = service.material_pool_add(
+            self.recurring_material_payload()
+        )["item"]
+        self.assertEqual(queued["preparation_status"], "queued")
+        processed = self.process_one_preparation(service)
         self.assertEqual(
-            caught.exception.code,
+            processed["processing_error"]["code"],
             "tt_prepared_media_duration_invalid",
         )
+        self.assertEqual(
+            processed["item"]["preparation_status"],
+            "failed",
+        )
+        self.assertEqual(
+            service.store.count_recurring_materials(account_id="101"),
+            0,
+        )
+
+    def test_transient_prepare_failure_is_persisted_for_background_retry(self):
+        service = self.service(OPEN_GATES)
+        self.gpu.prepare_error = GPUClientError(
+            "prepare_timeout",
+            "temporary GPU timeout",
+            502,
+            publish_was_not_created=True,
+        )
+        queued = service.material_pool_add(
+            self.recurring_material_payload()
+        )["item"]
+        self.assertEqual(queued["preparation_status"], "queued")
+        processed = self.process_one_preparation(service)
+        self.assertTrue(processed["processing_error"]["retryable"])
+        self.assertEqual(
+            processed["item"]["preparation_status"],
+            "retry_wait",
+        )
+        self.assertTrue(processed["item"]["next_attempt_at_utc"])
         self.assertEqual(
             service.store.count_recurring_materials(account_id="101"),
             0,
@@ -989,7 +1058,7 @@ class ServiceLifecycleTests(unittest.TestCase):
     def test_live_creator_duration_failure_releases_fifo_material(self):
         service = self.service(OPEN_GATES)
         self.gpu.prepared_duration = 500
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         changed = creator_info()
         changed["creator_info"]["max_video_post_duration_sec"] = 300
         self.gpu.creator_info_override = changed
@@ -1012,7 +1081,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_manual_retry_recovers_queue_committed_before_run_binding(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         request = {
             "source_account_id": "101",
             "idempotency_key": "tt-post-manual:recover-bind-gap",
@@ -1064,7 +1133,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_daily_runner_recovers_claim_before_freeze_across_minutes(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         service.schedule_save(
             self.schedule_payload(publish_time="11:00")
         )
@@ -1098,7 +1167,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_claim_before_freeze_recovers_at_exact_600_second_boundary(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         service.schedule_save(
             self.schedule_payload(publish_time="11:00")
         )
@@ -1119,7 +1188,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_claim_without_queue_releases_only_after_600_seconds(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         service.schedule_save(
             self.schedule_payload(publish_time="11:00")
         )
@@ -1145,7 +1214,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_manual_crash_retry_uses_original_frozen_minute(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         request = {
             "source_account_id": "101",
             "idempotency_key": "tt-post-manual:frozen-minute",
@@ -1180,7 +1249,7 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_expired_owner_cannot_freeze_after_new_owner_preflight_release(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         request = {
             "source_account_id": "101",
             "idempotency_key": "tt-post-manual:execution-fence-race",
@@ -1264,13 +1333,13 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_daily_slot_retries_within_grace_after_manual_account_lock(self):
         service = self.service(OPEN_GATES)
-        service.material_pool_add(self.recurring_material_payload())
+        self.add_ready(service)
         self.materials.source_url = "https://cdn.example.com/source-b.mp4"
         second_payload = self.recurring_material_payload(
             "tt-post-pool:test:9002"
         )
         second_payload["material_id"] = "9002"
-        service.material_pool_add(second_payload)
+        self.add_ready(service, second_payload)
         service.schedule_save(
             self.schedule_payload(publish_time="11:01")
         )
@@ -1655,40 +1724,45 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertTrue(replay["is_aigc"])
         self.assertEqual(len(self.gpu.prepare_jobs), 1)
 
-    def test_preview_job_changes_when_only_source_url_changes(self):
+    def test_preview_only_validates_material_without_gpu_preparation(self):
         service = self.service(CLOSED_GATES)
         first = service.material_preview({"material_id": "9001"})["item"]
-        first_job = first["gpu_job_id"]
+        self.assertEqual(first["preparation_status"], "not_started")
+        self.assertFalse(first["publish_ready"])
+        self.assertEqual(
+            first["source_media_url"],
+            "https://cdn.example.com/source-a.mp4",
+        )
         self.materials.source_url = "https://cdn.example.com/source-b.mp4"
         second = service.material_preview({"material_id": "9001"})["item"]
-        self.assertNotEqual(first_job, second["gpu_job_id"])
         self.assertEqual(
-            [item[1] for item in self.gpu.prepare_jobs],
-            [
-                "https://cdn.example.com/source-a.mp4",
-                "https://cdn.example.com/source-b.mp4",
-            ],
+            second["source_media_url"],
+            "https://cdn.example.com/source-b.mp4",
         )
+        self.assertEqual(self.gpu.prepare_jobs, [])
+        self.assertEqual(self.gpu.creator_info_calls, [])
 
     def test_prepare_rejects_gpu_job_identity_mismatch(self):
         service = self.service(CLOSED_GATES)
+        service.material_pool_add(self.recurring_material_payload())
         self.gpu.prepare_job_id_override = "ttpost-wrong-job-identity"
-        with self.assertRaises(TTPostServiceError) as caught:
-            service.material_preview({"material_id": "9001"})
+        processed = self.process_one_preparation(service)
         self.assertEqual(
-            caught.exception.code,
+            processed["processing_error"]["code"],
             "tt_prepared_media_identity_mismatch",
         )
+        self.assertEqual(processed["item"]["preparation_status"], "failed")
 
     def test_prepare_rejects_gpu_profile_drift(self):
         service = self.service(CLOSED_GATES)
+        service.material_pool_add(self.recurring_material_payload())
         self.gpu.prepared_profile = "tt-post-h264-720x1280-v2"
-        with self.assertRaises(TTPostServiceError) as caught:
-            service.material_preview({"material_id": "9001"})
+        processed = self.process_one_preparation(service)
         self.assertEqual(
-            caught.exception.code,
+            processed["processing_error"]["code"],
             "tt_prepared_media_profile_mismatch",
         )
+        self.assertEqual(processed["item"]["preparation_status"], "failed")
 
     def test_closed_gate_hold_becomes_blocked_without_publish_init(self):
         service = self.service(CLOSED_GATES)
@@ -1773,13 +1847,14 @@ class ServiceLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(self.gpu.prepare_jobs, [])
 
-    def test_queue_reuses_preview_prepare_identity(self):
+    def test_queue_uses_same_deterministic_identity_as_validated_material(self):
         service = self.service(CLOSED_GATES)
         preview = service.material_preview({"material_id": "9001"})["item"]
+        expected_job_id = service._preparation_job_id(preview)
         created = service.queue_create(queue_payload(self.clock))["item"]
-        self.assertEqual(preview["gpu_job_id"], created["gpu_job_id"])
+        self.assertEqual(expected_job_id, created["gpu_job_id"])
         self.assertEqual(
-            [preview["gpu_job_id"], preview["gpu_job_id"]],
+            [expected_job_id],
             [job[0] for job in self.gpu.prepare_jobs],
         )
 
@@ -2863,6 +2938,27 @@ class HTTPContractTests(unittest.TestCase):
         def material_pool_add(self, payload):
             return {"item": {"marker": "material-pool-add", **payload}}
 
+        def preparation_claim(self, payload):
+            return {"item": {"id": 7, **payload}, "claim_token": "x" * 43}
+
+        def preparation_renew(self, intake_id, payload):
+            return {
+                "item": {
+                    "marker": "preparation-renew",
+                    "id": int(intake_id),
+                    **payload,
+                }
+            }
+
+        def preparation_process(self, intake_id, payload):
+            return {
+                "item": {
+                    "marker": "preparation-process",
+                    "id": int(intake_id),
+                    **payload,
+                }
+            }
+
         def schedule_get(self, _query):
             return {"item": {"marker": "schedule-get"}}
 
@@ -3007,6 +3103,31 @@ class HTTPContractTests(unittest.TestCase):
                 {"material_id": "9001"},
             )["item"]["marker"],
             "material-pool-add",
+        )
+        preparation_claim = self.request(
+            "/internal/tt-posts/preparations/claim",
+            "POST",
+            {"worker_id": "worker-1", "lease_seconds": 180},
+        )
+        self.assertEqual(preparation_claim["item"]["id"], 7)
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/preparations/7/renew",
+                "POST",
+                {
+                    "claim_token": "x" * 43,
+                    "lease_seconds": 180,
+                },
+            )["item"]["marker"],
+            "preparation-renew",
+        )
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/preparations/7/process",
+                "POST",
+                {"claim_token": "x" * 43},
+            )["item"]["marker"],
+            "preparation-process",
         )
         self.assertEqual(
             self.request(
@@ -3154,8 +3275,8 @@ class DeployContractTests(unittest.TestCase):
             "location = /api/admin/tt-posts/materials/preview",
             nginx,
         )
-        self.assertIn("proxy_read_timeout 9120s;", nginx)
-        self.assertIn("proxy_send_timeout 9120s;", nginx)
+        self.assertIn("proxy_read_timeout 120s;", nginx)
+        self.assertIn("proxy_send_timeout 120s;", nginx)
         self.assertIn("OnCalendar=*-*-* *:*:00 Asia/Shanghai", timer)
         self.assertIn(
             "PathChanged=/run/tt-post/manual-kick",
@@ -3182,7 +3303,7 @@ class DeployContractTests(unittest.TestCase):
             app_env,
         )
         self.assertIn("TT_POST_ADMIN_TIMEOUT=600", app_env)
-        self.assertIn("TT_POST_ADMIN_PREVIEW_TIMEOUT=9060", app_env)
+        self.assertIn("TT_POST_ADMIN_PREVIEW_TIMEOUT=60", app_env)
         self.assertIn("TT_POST_INTERNAL_TOKEN=", app_env)
         self.assertIn(
             "EnvironmentFile=-/etc/tt-post-app.env",

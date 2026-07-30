@@ -41485,13 +41485,13 @@ except (TypeError, ValueError):
 TT_POST_ADMIN_TIMEOUT = max(1, min(TT_POST_ADMIN_TIMEOUT, 600))
 try:
     TT_POST_ADMIN_PREVIEW_TIMEOUT = int(
-        os.environ.get("TT_POST_ADMIN_PREVIEW_TIMEOUT", "9060") or "9060"
+        os.environ.get("TT_POST_ADMIN_PREVIEW_TIMEOUT", "60") or "60"
     )
 except (TypeError, ValueError):
-    TT_POST_ADMIN_PREVIEW_TIMEOUT = 9060
+    TT_POST_ADMIN_PREVIEW_TIMEOUT = 60
 TT_POST_ADMIN_PREVIEW_TIMEOUT = max(
-    1,
-    min(TT_POST_ADMIN_PREVIEW_TIMEOUT, 9060),
+    5,
+    min(TT_POST_ADMIN_PREVIEW_TIMEOUT, 120),
 )
 
 TT_POST_ADMIN_ROUTE_METHODS = {

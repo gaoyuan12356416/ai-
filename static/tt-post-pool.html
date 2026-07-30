@@ -253,31 +253,6 @@
       font-weight: 850;
     }
     .creator-avatar img { width: 100%; height: 100%; object-fit: cover; }
-    .media-preview {
-      display: grid;
-      grid-template-columns: minmax(160px, 230px) minmax(0, 1fr);
-      gap: 14px;
-      min-height: 230px;
-      padding: 14px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #f8faff;
-    }
-    .video-shell {
-      min-height: 230px;
-      overflow: hidden;
-      display: grid;
-      place-items: center;
-      border-radius: 12px;
-      color: rgba(255,255,255,.78);
-      background: #101827;
-      text-align: center;
-      font-size: 12px;
-    }
-    .video-shell video { width: 100%; max-height: 340px; display: block; background: #05070b; }
-    .media-meta { min-width: 0; display: grid; align-content: start; gap: 9px; }
-    .media-meta strong { overflow-wrap: anywhere; }
-    .meta-line { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
     .material-progress {
       min-height: 20px;
       color: var(--muted);
@@ -348,6 +323,8 @@
       background: #f8faff;
     }
     .queue-submit-panel > strong { font-size: 13px; }
+    .preparation-table { min-width: 920px; }
+    .preparation-summary { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .schedule-panel {
       grid-column: span 2;
       display: grid;
@@ -580,7 +557,6 @@
       .schedule-controls, .schedule-facts { grid-template-columns: 1fr; }
       .schedule-panel { grid-column: auto; }
       .run-now-row { align-items: stretch; flex-direction: column; }
-      .media-preview { grid-template-columns: 1fr; }
       .form-footer { align-items: stretch; flex-direction: column; }
       .form-footer .button { width: 100%; }
       .event-item { grid-template-columns: 1fr; }
@@ -674,22 +650,10 @@
               <div class="field">
                 <label for="materialIds"><span class="step">2</span>批量填写素材 ID</label>
                 <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
-                <button id="previewMaterial" class="button primary" type="button">批量读取素材</button>
-                <span id="materialHelp" class="helper">支持逗号、空格、分号或换行分隔，每次最多 100 个正整数 ID。系统会逐条读取真实 Content ID，并生成带新版片尾的最终视频预览。</span>
-                <div id="materialProgress" class="material-progress" role="status" aria-live="polite">尚未读取素材。</div>
-                <div id="materialResults" class="material-results hidden" aria-label="素材读取结果"></div>
-              </div>
-
-              <div id="mediaPreview" class="media-preview hidden">
-                <div id="videoShell" class="video-shell"><span>视频准备中</span></div>
-                <div class="media-meta">
-                  <strong id="mediaTitle">—</strong>
-                  <div id="mediaMaterialId" class="meta-line">素材 ID：—</div>
-                  <div id="mediaContentId" class="meta-line">Drama ID：—</div>
-                  <div id="mediaDuration" class="meta-line">最终时长：—</div>
-                  <div id="mediaStatus" class="meta-line">处理状态：—</div>
-                  <div class="meta-line">实际发布使用此处最终成片，不直接使用原始素材地址。</div>
-                </div>
+                <button id="previewMaterial" class="button primary" type="button">批量校验素材</button>
+                <span id="materialHelp" class="helper">支持逗号、空格、分号或换行分隔，每次最多 100 个正整数 ID。这里只校验素材与真实 Drama ID，校验通过即可入池；视频下载和片尾预制作会在后台进行。</span>
+                <div id="materialProgress" class="material-progress" role="status" aria-live="polite">尚未校验素材。</div>
+                <div id="materialResults" class="material-results hidden" aria-label="素材校验结果"></div>
               </div>
             </div>
 
@@ -751,7 +715,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               <div class="consent">
                 <label class="inline-check">
                   <input id="publishConsent" type="checkbox" />
-                  <span id="consentText">我已核对目标账号、最终视频、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放时，素材与排期可以保存，但不会自动或立即发送到 TikTok。</span>
+                  <span id="consentText">我已核对目标账号、素材与 Drama ID、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。视频会在入池后由后台预制作；当前状态未全部开放时，不会自动或立即发送到 TikTok。</span>
                 </label>
               </div>
 
@@ -761,10 +725,36 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               </div>
 
               <div class="form-footer">
-                <div id="formState" class="form-state" role="status" aria-live="polite">请依次完成账号确认和素材读取。</div>
+                <div id="formState" class="form-state" role="status" aria-live="polite">请依次完成账号确认和素材校验。</div>
                 <button id="addMaterialsToPool" class="button primary" type="button" disabled>加入素材池</button>
               </div>
             </div>
+          </div>
+        </section>
+
+        <section class="panel" id="preparationPanel">
+          <div class="section-head">
+            <div>
+              <h2>后台预制作状态</h2>
+              <p>素材入池后立即显示在这里。系统会在后台下载、拼接片尾并校验成片；只有“制作完成”的素材才会进入待发布数量。</p>
+            </div>
+            <button id="refreshPreparationStatus" class="button small" type="button">刷新制作状态</button>
+          </div>
+          <div id="preparationSummary" class="preparation-summary" role="status" aria-live="polite">正在加载素材池…</div>
+          <div class="table-wrap">
+            <table class="preparation-table">
+              <thead>
+                <tr>
+                  <th>入池时间</th>
+                  <th>TikTok账号</th>
+                  <th>素材 / Drama ID</th>
+                  <th>预制作状态</th>
+                  <th>详情</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="preparationRows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody>
+            </table>
           </div>
         </section>
 
@@ -868,6 +858,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       const RUN_NOW_PENDING_STORAGE_KEY = "tt-post:pending-run-now:v1";
       const RUN_NOW_PENDING_STORAGE_MAX_BYTES = 32768;
       const RUN_NOW_PENDING_MAX_ACCOUNTS = 100;
+      const PREPARATION_ACTIVE_STATUSES = new Set(["queued", "preparing", "retry_wait"]);
+      const PREPARATION_POLL_INTERVAL_MS = 10000;
       const state = {
         auth: null,
         accounts: [],
@@ -876,12 +868,15 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         creatorRequestVersion: 0,
         materials: [],
         failures: [],
-        activeMaterialId: "",
-        previewCompleted: 0,
-        previewTotal: 0,
+        validationCompleted: 0,
+        validationTotal: 0,
         queueSummary: "",
         queueSummaryIsError: false,
         queueResults: [],
+        preparationItems: [],
+        preparationHasActive: false,
+        preparationLoading: false,
+        preparationPollTimer: null,
         schedule: null,
         scheduleRequestVersion: 0,
         scheduleBusy: false,
@@ -1067,14 +1062,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           setText(byId("modeGateText"), "允许消费下一条并直发");
           setText(
             byId("consentText"),
-            "我已核对目标账号、最终视频、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。到达每日发布时间或确认立即发布后，系统将按上述设置提交到 TikTok。"
+            "我已核对目标账号、素材与 Drama ID、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。视频会在入池后由后台预制作；制作完成后才会按上述设置提交到 TikTok。"
           );
         } else {
           modeCard.classList.add("blocked");
           setText(byId("modeGateText"), "已阻断，不消费素材");
           setText(
             byId("consentText"),
-            "我已核对目标账号、最终视频、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。当前状态未全部开放，素材与排期可以保存，但不会自动或立即发送到 TikTok。"
+            "我已核对目标账号、素材与 Drama ID、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。视频会在入池后由后台预制作；当前状态未全部开放，不会自动或立即发送到 TikTok。"
           );
         }
         validateForm();
@@ -1796,23 +1791,21 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           hide(container);
           return;
         }
-        state.materials.forEach((item, index) => {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = `material-result${state.activeMaterialId === item.material_id ? " active" : ""}`;
-          button.dataset.materialIndex = String(index);
+        state.materials.forEach(item => {
+          const row = document.createElement("div");
+          row.className = "material-result success";
           const copy = document.createElement("span");
           copy.className = "material-result-copy";
           const title = document.createElement("strong");
           setText(title, `素材 ${item.material_id}`);
           const detail = document.createElement("span");
-          setText(detail, `Drama ID：${item.content_id} · ${item.title || item.drama_name || item.status_label || "最终成片已准备"}`);
+          setText(detail, `Drama ID：${item.content_id} · ${item.title || item.drama_name || item.material_name || "素材身份已确认"}`);
           copy.append(title, detail);
           const status = document.createElement("span");
           status.className = "material-result-state";
-          setText(status, "查看预览");
-          button.append(copy, status);
-          container.appendChild(button);
+          setText(status, "校验通过");
+          row.append(copy, status);
+          container.appendChild(row);
         });
         state.failures.forEach(item => {
           const row = document.createElement("div");
@@ -1822,11 +1815,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           const title = document.createElement("strong");
           setText(title, `素材 ${item.material_id}`);
           const detail = document.createElement("span");
-          setText(detail, item.message || "素材读取失败");
+          setText(detail, item.message || "素材校验失败");
           copy.append(title, detail);
           const status = document.createElement("span");
           status.className = "material-result-state";
-          setText(status, "读取失败");
+          setText(status, "校验失败");
           row.append(copy, status);
           container.appendChild(row);
         });
@@ -1854,7 +1847,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const labels = {
           pending: "等待入池",
           saving: "正在入池",
-          success: "入池成功",
+          success: "已入池，后台预制作",
           failure: "入池失败",
         };
         state.queueResults.forEach(item => {
@@ -1867,7 +1860,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           const detail = document.createElement("span");
           const pieces = [];
           if (item.message) pieces.push(item.message);
-          setText(detail, pieces.join(" · ") || "等待加入该账号待发池");
+          setText(detail, pieces.join(" · ") || "等待加入该账号素材池");
           copy.append(title, detail);
           const status = document.createElement("span");
           status.className = "material-result-state";
@@ -1877,13 +1870,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         });
         show(panel);
       }
-      function resetMaterials(message = "支持一次读取最多 100 个素材；系统会逐条确认真实 Content ID 和最终成片。") {
+      function resetMaterials(message = "支持一次校验最多 100 个素材；系统只确认素材身份和真实 Drama ID。") {
         state.materials = [];
         state.failures = [];
-        state.activeMaterialId = "";
-        state.previewCompleted = 0;
-        state.previewTotal = 0;
-        hide(byId("mediaPreview"));
+        state.validationCompleted = 0;
+        state.validationTotal = 0;
         byId("materialResults").replaceChildren();
         hide(byId("materialResults"));
         updateMaterialProgress(message);
@@ -1892,42 +1883,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         resetBatchConfirmation();
         validateForm();
       }
-      function renderVideoPreview(item) {
-        const shell = byId("videoShell");
-        shell.replaceChildren();
-        const href = safeHttpsUrl(firstDefined(
-          item.prepared_media_url,
-          item.final_media_url,
-          item.preview_url,
-          item.media_url,
-          item.video_url
-        ));
-        if (!href) {
-          const message = document.createElement("span");
-          setText(message, "最终视频尚未准备好");
-          shell.appendChild(message);
-          return;
-        }
-        const video = document.createElement("video");
-        video.controls = true;
-        video.preload = "metadata";
-        video.playsInline = true;
-        video.src = href;
-        shell.appendChild(video);
-      }
-      function renderMaterial(item) {
-        state.activeMaterialId = cleanId(item.material_id);
-        show(byId("mediaPreview"));
-        renderVideoPreview(item);
-        setText(byId("mediaTitle"), item.title || item.drama_name || item.material_name || "TT 最终成片");
-        setText(byId("mediaMaterialId"), `素材 ID：${item.material_id || "—"}`);
-        setText(byId("mediaContentId"), `Drama ID：${item.content_id || "未返回"}`);
-        const duration = Number(firstDefined(item.duration_sec, item.final_duration_sec, 0));
-        setText(byId("mediaDuration"), `最终时长：${duration > 0 ? `${duration.toFixed(2)} 秒` : "等待媒体信息"}`);
-        setText(byId("mediaStatus"), `处理状态：${item.status_label || item.status || "已解析"}`);
-        renderMaterialResults();
-      }
-      async function previewMaterials() {
+      async function validateMaterials() {
         if (state.busy) return;
         let materialIds;
         try {
@@ -1939,20 +1895,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return;
         }
         byId("materialIds").value = materialIds.join("\n");
-        resetMaterials(`准备读取 ${materialIds.length} 个素材…`);
-        state.previewTotal = materialIds.length;
+        resetMaterials(`准备校验 ${materialIds.length} 个素材…`);
+        state.validationTotal = materialIds.length;
         state.busy = true;
         const button = byId("previewMaterial");
         button.disabled = true;
         byId("materialIds").disabled = true;
-        setText(button, `读取中 0/${materialIds.length}`);
+        setText(button, `校验中 0/${materialIds.length}`);
         try {
           for (let index = 0; index < materialIds.length; index += 1) {
             const materialId = materialIds[index];
             updateMaterialProgress(
-              `正在读取 ${index + 1}/${materialIds.length}：素材 ${materialId}`
+              `正在校验 ${index + 1}/${materialIds.length}：素材 ${materialId}`
             );
-            setText(button, `读取中 ${index + 1}/${materialIds.length}`);
+            setText(button, `校验中 ${index + 1}/${materialIds.length}`);
             try {
               const result = await api(`${API_BASE}/materials/preview`, {
                 method: "POST",
@@ -1975,27 +1931,26 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               state.failures.push({
                 material_id: materialId,
                 input_index: index,
-                message: error.message || "素材读取失败",
+                message: error.message || "素材校验失败",
               });
             }
-            state.previewCompleted = index + 1;
+            state.validationCompleted = index + 1;
             renderMaterialResults();
           }
-          if (state.materials.length) renderMaterial(state.materials[0]);
-          const summary = `读取完成：成功 ${state.materials.length} 个，失败 ${state.failures.length} 个。`;
+          const summary = `校验完成：通过 ${state.materials.length} 个，失败 ${state.failures.length} 个。`;
           updateMaterialProgress(summary, state.failures.length ? "error" : "success");
           setText(
             byId("materialHelp"),
             state.failures.length
-              ? `${summary} 可点击成功项查看最终视频；失败项不会阻塞成功素材入池。`
-              : `${summary} 可点击任一素材查看最终视频。`
+              ? `${summary} 失败项不会阻塞已通过素材入池；入池后由后台预制作视频。`
+              : `${summary} 已通过素材可以立即入池，视频将在后台预制作。`
           );
           byId("materialHelp").className = `helper ${state.failures.length ? "error" : "success"}`;
         } finally {
           state.busy = false;
           button.disabled = false;
           byId("materialIds").disabled = false;
-          setText(button, "批量读取素材");
+          setText(button, "批量校验素材");
         }
         resetBatchConfirmation();
         updateCaptionState();
@@ -2067,7 +2022,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         } else if (!state.materials.length) {
           setText(
             byId("captionHelp"),
-            "模板有效；读取素材后会逐条替换真实 Drama ID 并检查最终长度。"
+            "模板有效；校验素材后会逐条替换真实 Drama ID 并检查最终长度。"
           );
           byId("captionHelp").className = "helper success";
         } else {
@@ -2084,15 +2039,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (!item) return "请选择一个 TikTok 个号。";
         if (!accountEligible(item)) return "所选账号当前不可用于发布。";
         if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
-        if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";
-        if (!state.materials.length) return "请先批量读取素材，并至少确认一个最终成片。";
-        const maxDuration = Number(state.creatorInfo.max_video_post_duration_sec || 0);
-        for (const material of state.materials) {
-          const duration = Number(firstDefined(material.duration_sec, material.final_duration_sec, 0));
-          if (maxDuration > 0 && duration > maxDuration) {
-            return `素材 ${material.material_id} 的最终视频超过该账号允许的 ${maxDuration} 秒。`;
-          }
-        }
+        if (!state.materials.length) return "请先批量校验素材，并至少确认一个真实 Drama ID。";
         const captionValidation = captionTemplateValidation();
         if (captionValidation.error) return captionValidation.error;
         if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
@@ -2198,8 +2145,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               const item = readPayloadItem(result, ["item", "material"]);
               poolResult.status = "success";
               poolResult.message = item.id || item.pool_item_id
-                ? `池记录 ${item.id || item.pool_item_id} 已保存`
-                : "素材已入池";
+                ? `池记录 ${item.id || item.pool_item_id} 已入池，后台预制作`
+                : "已入池，后台预制作";
               created.push({
                 material_id: material.material_id,
                 item,
@@ -2216,10 +2163,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           }
           if (created.length) {
             await loadSchedule();
+            void loadPreparationStatus({ quiet: true });
           }
           const previewFailureCount = state.failures.length;
           if (!poolFailures.length && !previewFailureCount) {
-            showToast(`已将 ${created.length} 条素材按顺序加入待发池。`);
+            showToast(`已入池 ${created.length} 条，后台预制作。`);
             resetMaterialPoolForm();
           } else {
             const details = poolFailures
@@ -2229,7 +2177,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             const parts = [
               `已入池 ${created.length} 条`,
               poolFailures.length ? `入池失败 ${poolFailures.length} 条` : "",
-              previewFailureCount ? `读取失败未入池 ${previewFailureCount} 条` : "",
+              previewFailureCount ? `校验失败未入池 ${previewFailureCount} 条` : "",
             ].filter(Boolean);
             state.queueSummary = `${parts.join("，")}。${
               details ? ` ${details}。` : ""
@@ -2242,6 +2190,180 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           byId("createFormFields").inert = false;
           byId("createFormFields").removeAttribute("aria-busy");
           validateForm();
+        }
+      }
+      function preparationStatusMeta(item) {
+        const raw = String(
+          item.preparation_status || item.prepare_status || item.status || "queued"
+        ).trim().toLowerCase();
+        const status = ["available", "reserved", "consumed"].includes(raw) ? "ready" : raw;
+        const map = {
+          queued: ["等待制作", "neutral"],
+          preparing: ["制作中", "progress"],
+          retry_wait: ["等待自动重试", "warning"],
+          ready: ["制作完成", "success"],
+          failed: ["制作失败", "failure"],
+        };
+        const value = map[status] || [status || "未知", "neutral"];
+        return { status, label: value[0], kind: value[1] };
+      }
+      function stopPreparationPolling() {
+        if (state.preparationPollTimer !== null) {
+          window.clearTimeout(state.preparationPollTimer);
+          state.preparationPollTimer = null;
+        }
+      }
+      function schedulePreparationPolling() {
+        stopPreparationPolling();
+        if (!state.preparationHasActive || document.hidden) return;
+        state.preparationPollTimer = window.setTimeout(() => {
+          state.preparationPollTimer = null;
+          void loadPreparationStatus({ quiet: true });
+        }, PREPARATION_POLL_INTERVAL_MS);
+      }
+      function setPreparationEmpty(message) {
+        const body = byId("preparationRows");
+        body.replaceChildren();
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 6;
+        cell.className = "empty";
+        setText(cell, message);
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+      function preparationAccountCopy(item) {
+        const id = cleanId(item.source_account_id || item.account_id);
+        const account = state.accounts.find(candidate => accountId(candidate) === id);
+        return {
+          primary: String(
+            item.account_name_snapshot ||
+            item.account_display_name ||
+            item.creator_nickname_snapshot ||
+            (account ? accountName(account) : `账号 ${id || "—"}`)
+          ),
+          secondary: id ? `账号 ID ${id}` : "",
+        };
+      }
+      function preparationDetail(item, status) {
+        const error = String(
+          item.preparation_error ||
+          item.preparation_error_message ||
+          item.error_message ||
+          item.safe_message ||
+          item.fail_reason ||
+          ""
+        ).trim();
+        if (error) return error;
+        if (status === "queued") return "已入池，等待后台领取";
+        if (status === "preparing") return "正在下载并拼接片尾";
+        if (status === "retry_wait") {
+          const nextRetry = formatTime(
+            item.next_attempt_at_utc || item.next_retry_at || item.retry_at
+          );
+          return nextRetry === "—" ? "后台将自动重试" : `下次重试：${nextRetry}`;
+        }
+        if (status === "ready") {
+          const duration = Number(item.prepared_duration_sec || item.duration_sec || 0);
+          return duration > 0
+            ? `成片已校验，可发布 · ${duration.toFixed(2)} 秒`
+            : "成片已校验，可发布";
+        }
+        if (status === "failed") return "预制作未完成，请查看后台错误";
+        return String(item.preparation_status_label || item.status_label || "状态已更新");
+      }
+      function renderPreparationRows(items) {
+        const body = byId("preparationRows");
+        body.replaceChildren();
+        if (!items.length) {
+          setPreparationEmpty("素材池暂无记录。");
+          return;
+        }
+        items.forEach(item => {
+          const row = document.createElement("tr");
+          appendCell(row, formatTime(item.created_at || item.queued_at));
+          const account = preparationAccountCopy(item);
+          appendCell(row, account.primary, account.secondary);
+          appendCell(
+            row,
+            `素材 ${item.material_id || "—"}`,
+            `Drama ID ${item.content_id || "—"}`
+          );
+          const statusCell = document.createElement("td");
+          const meta = preparationStatusMeta(item);
+          statusCell.appendChild(badge(meta.label, meta.kind));
+          row.appendChild(statusCell);
+          appendCell(
+            row,
+            preparationDetail(item, meta.status),
+            meta.status === "failed" ? "待处理" : "",
+            meta.status === "failed" ? "error-copy" : ""
+          );
+          appendCell(row, formatTime(item.preparation_updated_at || item.updated_at));
+          body.appendChild(row);
+        });
+      }
+      function renderPreparationSummary(result, items) {
+        const visibleCounts = {
+          queued: 0,
+          preparing: 0,
+          retry_wait: 0,
+          ready: 0,
+          failed: 0,
+        };
+        items.forEach(item => {
+          const status = preparationStatusMeta(item).status;
+          if (Object.prototype.hasOwnProperty.call(visibleCounts, status)) {
+            visibleCounts[status] += 1;
+          }
+        });
+        const summary = asObject(result.summary);
+        const counts = {};
+        Object.keys(visibleCounts).forEach(status => {
+          counts[status] = Number(
+            firstDefined(summary[status], visibleCounts[status], 0) || 0
+          );
+        });
+        const pagination = asObject(result.pagination);
+        const total = Number(
+          firstDefined(summary.total, pagination.total, result.total, items.length) || 0
+        );
+        setText(
+          byId("preparationSummary"),
+          `共 ${total} 条 · 等待制作 ${counts.queued} · 制作中 ${counts.preparing} · 等待重试 ${counts.retry_wait} · 制作完成 ${counts.ready} · 制作失败 ${counts.failed}`
+        );
+      }
+      async function loadPreparationStatus({ quiet = false } = {}) {
+        if (state.preparationLoading) return;
+        state.preparationLoading = true;
+        if (!quiet) {
+          setText(byId("preparationSummary"), "正在加载素材池…");
+          setPreparationEmpty("正在加载…");
+        }
+        try {
+          const params = new URLSearchParams({ page: "1", page_size: "100" });
+          const result = await api(`${API_BASE}/material-pool?${params.toString()}`);
+          applyGates(result);
+          const items = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.materials) ? result.materials : []);
+          state.preparationItems = items;
+          const summary = asObject(result.summary);
+          state.preparationHasActive = Array.from(PREPARATION_ACTIVE_STATUSES).some(
+            status => Number(summary[status] || 0) > 0
+          ) || items.some(item => (
+            PREPARATION_ACTIVE_STATUSES.has(preparationStatusMeta(item).status)
+          ));
+          renderPreparationRows(items);
+          renderPreparationSummary(result, items);
+        } catch (error) {
+          if (!quiet || !state.preparationItems.length) {
+            setPreparationEmpty(`制作状态加载失败：${error.message}`);
+            setText(byId("preparationSummary"), "制作状态暂不可用。");
+          }
+        } finally {
+          state.preparationLoading = false;
+          schedulePreparationPolling();
         }
       }
       function statusMeta(item) {
@@ -2617,7 +2739,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return;
         }
         show(byId("pageRoot"));
-        await Promise.all([loadAccounts(), loadQueue()]);
+        await Promise.all([loadAccounts(), loadQueue(), loadPreparationStatus()]);
       }
 
       byId("accountSearch").addEventListener("input", renderAccounts);
@@ -2633,13 +2755,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       });
       byId("refreshAccounts").addEventListener("click", loadAccounts);
       byId("refreshGates").addEventListener("click", async () => {
-        await Promise.all([loadAccounts(), loadQueue(), loadSchedule()]);
+        await Promise.all([loadAccounts(), loadQueue(), loadSchedule(), loadPreparationStatus()]);
         showToast("发布与合规状态已刷新。");
       });
-      byId("previewMaterial").addEventListener("click", previewMaterials);
+      byId("previewMaterial").addEventListener("click", validateMaterials);
       byId("materialIds").addEventListener("input", () => {
         if (state.materials.length || state.failures.length) {
-          resetMaterials("素材 ID 已修改，请重新批量读取并确认最终成片。");
+          resetMaterials("素材 ID 已修改，请重新批量校验素材。");
         } else {
           resetBatchConfirmation();
           validateForm();
@@ -2648,15 +2770,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       byId("materialIds").addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
           event.preventDefault();
-          previewMaterials();
+          validateMaterials();
         }
-      });
-      byId("materialResults").addEventListener("click", event => {
-        const button = event.target.closest("button[data-material-index]");
-        if (!button) return;
-        const index = Number(button.dataset.materialIndex);
-        if (!Number.isInteger(index) || index < 0 || index >= state.materials.length) return;
-        renderMaterial(state.materials[index]);
       });
       byId("caption").addEventListener("input", () => {
         resetBatchConfirmation();
@@ -2672,6 +2787,16 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       byId("saveSchedule").addEventListener("click", saveSchedule);
       byId("runNow").addEventListener("click", runNow);
       byId("addMaterialsToPool").addEventListener("click", addMaterialsToPool);
+      byId("refreshPreparationStatus").addEventListener("click", () => {
+        void loadPreparationStatus();
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          stopPreparationPolling();
+        } else if (state.preparationHasActive) {
+          void loadPreparationStatus({ quiet: true });
+        }
+      });
       byId("queueFilters").addEventListener("submit", event => {
         event.preventDefault();
         state.page = 1;

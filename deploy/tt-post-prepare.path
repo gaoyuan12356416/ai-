@@ -1,0 +1,11 @@
+[Unit]
+Description=Wake the Dramawave TikTok Post preparation runner
+After=tt-post-service.service
+Requires=tt-post-service.service
+
+[Path]
+PathChanged=/run/tt-post/prepare-kick
+Unit=tt-post-prepare.service
+
+[Install]
+WantedBy=multi-user.target

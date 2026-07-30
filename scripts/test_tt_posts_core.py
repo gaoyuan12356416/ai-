@@ -128,7 +128,7 @@ class CoreTestCase(unittest.TestCase):
 
 
 class StorageTests(CoreTestCase):
-    def test_storage_has_legacy_four_plus_exactly_three_recurring_tables(self):
+    def test_storage_has_legacy_four_plus_exactly_four_recurring_tables(self):
         conn = sqlite3.connect(self.db_path)
         try:
             names = {
@@ -148,6 +148,7 @@ class StorageTests(CoreTestCase):
                 "tt_post_account_setting",
                 "tt_post_daily_schedule",
                 "tt_post_recurring_pool",
+                "tt_post_material_intake",
                 "tt_post_schedule_run",
             },
             names,
@@ -157,6 +158,7 @@ class StorageTests(CoreTestCase):
         legacy = self.store.add_material("9001")
         conn = sqlite3.connect(self.db_path)
         try:
+            conn.execute("DROP TABLE tt_post_material_intake")
             conn.execute("DROP TABLE tt_post_schedule_run")
             conn.execute("DROP TABLE tt_post_recurring_pool")
             conn.execute("DROP TABLE tt_post_daily_schedule")
@@ -445,6 +447,391 @@ class StorageTests(CoreTestCase):
         self.assertEqual("tt_post_idempotency_conflict", caught.exception.code)
 
 
+class MaterialIntakeStorageTests(CoreTestCase):
+    def add_intake(
+        self,
+        material_id="7101",
+        account_id="acct-1",
+        *,
+        idempotency_key=None,
+    ):
+        content_id = "CONTENT_%s" % material_id
+        template = "Watch now\nDrama ID: {{contect_id}}"
+        return self.store.add_material_intake(
+            material_id,
+            account_id,
+            content_id,
+            "https://cdn.example.com/source-%s.mp4" % material_id,
+            idempotency_key=(
+                idempotency_key or "tt-post-intake:%s" % material_id
+            ),
+            gpu_job_id="gpu-intake-job-%s" % material_id,
+            source_trim_tail_seconds=4.333333,
+            preparation_profile="tt-post-hevc-720x1280-v2",
+            caption_template=template,
+            caption=render_caption_template(template, content_id),
+            consent_version="tt-post-recurring-v1",
+            consented_at="2026-07-29 10:00:00",
+            is_aigc=False,
+            material_name="material-%s" % material_id,
+            drama_name="Drama %s" % material_id,
+            material_language="English",
+            description="Description %s" % material_id,
+            actor_user_id="operator-1",
+            actor_name="Operator",
+        )
+
+    def complete_intake(self, intake, token):
+        return self.store.complete_material_intake(
+            intake["id"],
+            token,
+            gpu_job_id=intake["gpu_job_id"],
+            prepared_media_url=(
+                "https://gpu.example.com/prepared-%s.mp4"
+                % intake["material_id"]
+            ),
+            prepared_output_sha256="a" * 64,
+            prepared_output_size=123456,
+            prepared_duration_sec=120.25,
+            preparation_profile=intake["preparation_profile"],
+            source_trim_tail_seconds=intake[
+                "source_trim_tail_seconds"
+            ],
+        )
+
+    def test_enqueue_is_fast_state_idempotent_and_globally_exclusive(self):
+        first = self.add_intake()
+        replay = self.add_intake()
+        replay_with_new_key = self.add_intake(
+            idempotency_key="tt-post-intake:new-key"
+        )
+        self.assertEqual(first["id"], replay["id"])
+        self.assertEqual(first["id"], replay_with_new_key["id"])
+        self.assertEqual("queued", first["status"])
+        self.assertEqual(0, first["attempt_count"])
+        self.assertRegex(first["request_sha256"], r"^[a-f0-9]{64}$")
+        self.assertNotIn("claim_token", first)
+        self.assertNotIn("lease_expires_at_utc", first)
+        self.assertEqual(
+            [first],
+            self.store.list_material_intakes(
+                account_id="acct-1",
+                status="queued",
+            ),
+        )
+        self.assertEqual(first, self.store.get_material_intake(first["id"]))
+
+        with self.assertRaises(TTPostError) as key_conflict:
+            self.add_intake(
+                material_id="7102",
+                idempotency_key="tt-post-intake:7101",
+            )
+        self.assertEqual(
+            "tt_post_material_intake_idempotency_conflict",
+            key_conflict.exception.code,
+        )
+        with self.assertRaises(TTPostError) as frozen_conflict:
+            self.add_intake(
+                "7101",
+                account_id="acct-2",
+                idempotency_key="tt-post-intake:different-account",
+            )
+        self.assertEqual(
+            "tt_post_material_intake_conflict",
+            frozen_conflict.exception.code,
+        )
+        with self.assertRaises(TTPostError) as reverse_legacy:
+            self.store.add_material("7101")
+        self.assertEqual(
+            "tt_post_material_already_exists",
+            reverse_legacy.exception.code,
+        )
+
+        self.store.add_material("7201")
+        with self.assertRaises(TTPostError) as used:
+            self.add_intake("7201")
+        self.assertEqual("tt_post_material_already_used", used.exception.code)
+
+    def test_claim_lease_renew_and_expired_owner_fencing(self):
+        intake = self.add_intake()
+        first = self.store.claim_material_intake(
+            "prepare-worker-1",
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(first)
+        first_token = first.reveal_claim_token()
+        self.assertEqual(intake["id"], first.intake_id)
+        self.assertEqual("preparing", first.item["status"])
+        self.assertEqual(1, first.item["attempt_count"])
+        self.assertNotIn("claim_token", first.item)
+        self.assertNotIn("lease_expires_at_utc", first.item)
+        self.assertNotIn(first_token, repr(first))
+        self.assertIsNone(
+            self.store.claim_material_intake(
+                "prepare-worker-2",
+                lease_seconds=60,
+            )
+        )
+
+        self.clock.current += timedelta(seconds=30)
+        renewed = self.store.renew_material_intake(
+            intake["id"],
+            first_token,
+            lease_seconds=60,
+        )
+        self.assertEqual("preparing", renewed["status"])
+        self.clock.current += timedelta(seconds=61)
+        second = self.store.claim_material_intake(
+            "prepare-worker-2",
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(second)
+        second_token = second.reveal_claim_token()
+        self.assertNotEqual(first_token, second_token)
+        self.assertEqual(2, second.item["attempt_count"])
+        with self.assertRaises(TTPostError) as stale:
+            self.store.renew_material_intake(
+                intake["id"],
+                first_token,
+                lease_seconds=60,
+            )
+        self.assertEqual(
+            "tt_post_material_intake_claim_invalid",
+            stale.exception.code,
+        )
+
+    def test_retry_wait_is_due_only_after_backoff_and_failure_is_terminal(self):
+        intake = self.add_intake()
+        claim = self.store.claim_material_intake(
+            "prepare-worker-1",
+            lease_seconds=60,
+        )
+        retry_at = self.clock.current + timedelta(minutes=5)
+        waiting = self.store.fail_material_intake(
+            intake["id"],
+            claim.reveal_claim_token(),
+            error_code="tt_gpu_temporarily_unavailable",
+            error_message="temporary",
+            retry_at=retry_at,
+        )
+        self.assertEqual("retry_wait", waiting["status"])
+        self.assertEqual(
+            retry_at.isoformat().replace("+00:00", "Z"),
+            waiting["next_attempt_at_utc"],
+        )
+        self.assertIsNone(
+            self.store.claim_material_intake(
+                "prepare-worker-2",
+                lease_seconds=60,
+            )
+        )
+
+        self.clock.current = retry_at
+        retried = self.store.claim_material_intake(
+            "prepare-worker-2",
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(retried)
+        failed = self.store.fail_material_intake(
+            intake["id"],
+            retried.reveal_claim_token(),
+            error_code="prepared_media_invalid",
+            error_message="permanent",
+        )
+        self.assertEqual("failed", failed["status"])
+        self.assertTrue(failed["failed_at_utc"])
+        self.assertIsNone(
+            self.store.claim_material_intake(
+                "prepare-worker-3",
+                lease_seconds=60,
+            )
+        )
+        replay = self.store.fail_material_intake(
+            intake["id"],
+            "stale-token",
+            error_code="prepared_media_invalid",
+            error_message="permanent",
+        )
+        self.assertEqual(failed, replay)
+
+    def test_claim_preserves_fifo_per_account_without_blocking_other_accounts(self):
+        first = self.add_intake("7301", "acct-1")
+        second = self.add_intake("7302", "acct-1")
+        other = self.add_intake("8301", "acct-2")
+        first_claim = self.store.claim_material_intake(
+            "prepare-worker-1",
+            lease_seconds=60,
+        )
+        self.assertEqual(first["id"], first_claim.intake_id)
+        retry_at = self.clock.current + timedelta(minutes=5)
+        self.store.fail_material_intake(
+            first["id"],
+            first_claim.reveal_claim_token(),
+            error_code="temporary",
+            error_message="retry later",
+            retry_at=retry_at,
+        )
+
+        other_claim = self.store.claim_material_intake(
+            "prepare-worker-2",
+            lease_seconds=60,
+        )
+        self.assertEqual(other["id"], other_claim.intake_id)
+        self.store.fail_material_intake(
+            other["id"],
+            other_claim.reveal_claim_token(),
+            error_code="permanent",
+            error_message="stop other account",
+        )
+        self.assertIsNone(
+            self.store.claim_material_intake(
+                "prepare-worker-3",
+                lease_seconds=60,
+            )
+        )
+
+        self.clock.current = retry_at
+        retried = self.store.claim_material_intake(
+            "prepare-worker-3",
+            lease_seconds=60,
+        )
+        self.assertEqual(first["id"], retried.intake_id)
+        completed = self.complete_intake(
+            first,
+            retried.reveal_claim_token(),
+        )
+        self.assertEqual("ready", completed["status"])
+        next_claim = self.store.claim_material_intake(
+            "prepare-worker-4",
+            lease_seconds=60,
+        )
+        self.assertEqual(second["id"], next_claim.intake_id)
+
+    def test_completion_is_atomic_ready_idempotent_and_enables_fifo(self):
+        intake = self.add_intake()
+        with self.assertRaises(TTPostError) as empty:
+            self.store.claim_recurring_run(
+                "tt-post:manual:before-ready",
+                "manual",
+                "acct-1",
+                "2026-07-29",
+                "10:00",
+                beijing_to_utc("2026-07-29 10:00:00"),
+                config_version=0,
+                manual_request_key="manual-before-ready",
+            )
+        self.assertEqual("tt_post_recurring_pool_empty", empty.exception.code)
+
+        claim = self.store.claim_material_intake(
+            "prepare-worker-1",
+            lease_seconds=60,
+        )
+        token = claim.reveal_claim_token()
+        with self.assertRaises(TTPostError) as mismatch:
+            self.store.complete_material_intake(
+                intake["id"],
+                token,
+                gpu_job_id="gpu-intake-job-different",
+                prepared_media_url=(
+                    "https://gpu.example.com/prepared-7101.mp4"
+                ),
+                prepared_output_sha256="a" * 64,
+                prepared_output_size=123456,
+                prepared_duration_sec=120.25,
+                preparation_profile=intake["preparation_profile"],
+                source_trim_tail_seconds=4.333333,
+            )
+        self.assertEqual(
+            "tt_post_material_intake_artifact_mismatch",
+            mismatch.exception.code,
+        )
+        self.assertEqual(
+            0,
+            self.store.count_recurring_materials(account_id="acct-1"),
+        )
+        self.assertEqual(
+            "preparing",
+            self.store.get_material_intake(intake["id"])["status"],
+        )
+
+        completed = self.complete_intake(intake, token)
+        self.assertEqual("ready", completed["status"])
+        self.assertGreater(completed["recurring_pool_id"], 0)
+        self.assertEqual(
+            1,
+            self.store.count_recurring_materials(
+                account_id="acct-1",
+                status="available",
+            ),
+        )
+        recurring = self.store.list_recurring_materials(
+            account_id="acct-1",
+            status="available",
+        )[0]
+        self.assertEqual(intake["material_id"], recurring["material_id"])
+        self.assertEqual(intake["created_at"], recurring["created_at"])
+        self.assertEqual(
+            completed,
+            self.complete_intake(intake, "stale-after-success"),
+        )
+        claimed = self.store.claim_recurring_run(
+            "tt-post:manual:after-ready",
+            "manual",
+            "acct-1",
+            "2026-07-29",
+            "10:01",
+            beijing_to_utc("2026-07-29 10:01:00"),
+            config_version=0,
+            manual_request_key="manual-after-ready",
+        )
+        self.assertEqual(
+            completed["recurring_pool_id"],
+            claimed["pool_item_id"],
+        )
+        bridge = self.store.ensure_material_for_recurring(
+            intake["material_id"],
+            completed["recurring_pool_id"],
+        )
+        self.assertEqual("available", bridge["status"])
+        self.assertEqual(
+            bridge,
+            self.store.ensure_material_for_recurring(
+                intake["material_id"],
+                completed["recurring_pool_id"],
+            ),
+        )
+
+    def test_recurring_bridge_requires_ready_link_and_reserved_pool(self):
+        pending = self.add_intake("7401")
+        with self.assertRaises(TTPostError) as pending_error:
+            self.store.ensure_material_for_recurring(
+                pending["material_id"],
+                999,
+            )
+        self.assertEqual(
+            "tt_post_recurring_material_bridge_invalid",
+            pending_error.exception.code,
+        )
+
+        claim = self.store.claim_material_intake(
+            "prepare-worker-1",
+            lease_seconds=60,
+        )
+        ready = self.complete_intake(
+            pending,
+            claim.reveal_claim_token(),
+        )
+        with self.assertRaises(TTPostError) as not_reserved:
+            self.store.ensure_material_for_recurring(
+                pending["material_id"],
+                ready["recurring_pool_id"],
+            )
+        self.assertEqual(
+            "tt_post_recurring_material_bridge_invalid",
+            not_reserved.exception.code,
+        )
+
+
 class RecurringStorageTests(CoreTestCase):
     def add_recurring(self, material_id, account_id="acct-1"):
         content_id = "CONTENT_%s" % material_id
@@ -599,6 +986,23 @@ class RecurringStorageTests(CoreTestCase):
                     status="available",
                 )
             ],
+        )
+
+    def test_legacy_recurring_without_intake_can_create_queue_bridge(self):
+        material = self.add_recurring("1150", "acct-1")
+        run = self.claim_manual("legacy-intake-bridge", "acct-1")
+        bridge = self.store.ensure_material_for_recurring(
+            material["material_id"],
+            run["pool_item_id"],
+        )
+        self.assertEqual(material["material_id"], bridge["material_id"])
+        self.assertEqual("available", bridge["status"])
+        self.assertEqual(
+            bridge,
+            self.store.ensure_material_for_recurring(
+                material["material_id"],
+                run["pool_item_id"],
+            ),
         )
 
     def test_double_claim_is_idempotent_and_account_active_run_is_exclusive(self):

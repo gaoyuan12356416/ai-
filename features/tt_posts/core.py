@@ -18,6 +18,7 @@ TikTok API client so it can be tested without network or production data.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -67,6 +68,9 @@ QUEUE_STATUSES = frozenset(
 POOL_STATUSES = frozenset({"available", "reserved", "published", "canceled"})
 RECURRING_POOL_STATUSES = frozenset(
     {"available", "reserved", "consumed", "canceled"}
+)
+MATERIAL_INTAKE_STATUSES = frozenset(
+    {"queued", "preparing", "retry_wait", "ready", "failed", "canceled"}
 )
 SCHEDULE_RUN_STATUSES = frozenset(
     {
@@ -996,6 +1000,35 @@ class RecurringExecutionClaim:
         ) % self.run_id
 
 
+class MaterialIntakeClaim:
+    """Preparation lease wrapper whose fencing token stays out of public DTOs."""
+
+    __slots__ = ("item", "_claim_token")
+
+    def __init__(self, item: Mapping[str, Any], claim_token: str):
+        self.item = dict(item)
+        self._claim_token = str(claim_token)
+
+    @property
+    def intake_id(self) -> int:
+        return int(self.item["id"])
+
+    def reveal_claim_token(self) -> str:
+        if not self._claim_token:
+            raise TTPostError(
+                "tt_post_material_intake_claim_closed",
+                "素材预制作认领凭据已关闭",
+                409,
+            )
+        return self._claim_token
+
+    def __repr__(self) -> str:
+        return (
+            "MaterialIntakeClaim("
+            "intake_id=%r, claim_token=<redacted>)"
+        ) % self.intake_id
+
+
 def _connect(db_path: Any) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -1187,6 +1220,69 @@ def ensure_storage(db_path: Any) -> None:
                     FOREIGN KEY(queue_id) REFERENCES tt_post_queue(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS tt_post_material_intake (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_sha256 TEXT NOT NULL,
+                    material_id TEXT NOT NULL UNIQUE,
+                    account_id TEXT NOT NULL,
+                    content_id TEXT NOT NULL,
+                    source_media_url TEXT NOT NULL,
+                    material_name TEXT NOT NULL DEFAULT '',
+                    drama_name TEXT NOT NULL DEFAULT '',
+                    material_language TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    gpu_job_id TEXT NOT NULL UNIQUE,
+                    source_trim_tail_seconds REAL NOT NULL DEFAULT 0
+                        CHECK(source_trim_tail_seconds>=0),
+                    preparation_profile TEXT NOT NULL,
+                    caption_template TEXT NOT NULL,
+                    caption TEXT NOT NULL,
+                    consent_version TEXT NOT NULL,
+                    consented_at_utc TEXT NOT NULL,
+                    is_aigc INTEGER NOT NULL DEFAULT 0
+                        CHECK(is_aigc IN (0,1)),
+                    user_consent INTEGER NOT NULL DEFAULT 1
+                        CHECK(user_consent=1),
+                    status TEXT NOT NULL DEFAULT 'queued'
+                        CHECK(status IN (
+                            'queued','preparing','retry_wait','ready',
+                            'failed','canceled'
+                        )),
+                    attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(attempt_count>=0),
+                    next_attempt_at_utc TEXT NOT NULL DEFAULT '',
+                    claim_worker TEXT NOT NULL DEFAULT '',
+                    claim_token TEXT NOT NULL DEFAULT '',
+                    lease_expires_at_utc TEXT NOT NULL DEFAULT '',
+                    prepared_media_url TEXT NOT NULL DEFAULT '',
+                    prepared_output_sha256 TEXT NOT NULL DEFAULT '',
+                    prepared_output_size INTEGER NOT NULL DEFAULT 0
+                        CHECK(prepared_output_size>=0),
+                    prepared_duration_sec REAL NOT NULL DEFAULT 0
+                        CHECK(prepared_duration_sec>=0),
+                    recurring_pool_id INTEGER UNIQUE,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    claimed_at_utc TEXT NOT NULL DEFAULT '',
+                    ready_at_utc TEXT NOT NULL DEFAULT '',
+                    failed_at_utc TEXT NOT NULL DEFAULT '',
+                    canceled_at_utc TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(recurring_pool_id)
+                        REFERENCES tt_post_recurring_pool(id),
+                    CHECK(
+                        (status='ready' AND recurring_pool_id IS NOT NULL)
+                        OR
+                        (status<>'ready' AND recurring_pool_id IS NULL)
+                    )
+                );
+
                 CREATE TABLE IF NOT EXISTS tt_post_schedule_run (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_key TEXT NOT NULL UNIQUE,
@@ -1239,6 +1335,13 @@ def ensure_storage(db_path: Any) -> None:
                     ON tt_post_recurring_pool(queue_id) WHERE queue_id IS NOT NULL;
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_recurring_pool_gpu_job
                     ON tt_post_recurring_pool(gpu_job_id);
+                CREATE INDEX IF NOT EXISTS idx_tt_post_material_intake_due
+                    ON tt_post_material_intake(
+                        status,next_attempt_at_utc,lease_expires_at_utc,
+                        created_at,id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_tt_post_material_intake_account
+                    ON tt_post_material_intake(account_id,status,created_at,id);
                 CREATE INDEX IF NOT EXISTS idx_tt_post_schedule_run_account
                     ON tt_post_schedule_run(account_id,status,scheduled_at_utc,id);
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_schedule_run_manual
@@ -1392,6 +1495,15 @@ def _default_daily_schedule(account_id: str) -> Dict[str, Any]:
 
 def _public_recurring_pool(row: sqlite3.Row) -> Dict[str, Any]:
     result = dict(row)
+    result["is_aigc"] = bool(result.get("is_aigc"))
+    result["user_consent"] = bool(result.get("user_consent"))
+    return result
+
+
+def _public_material_intake(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    result.pop("claim_token", None)
+    result.pop("lease_expires_at_utc", None)
     result["is_aigc"] = bool(result.get("is_aigc"))
     result["user_consent"] = bool(result.get("user_consent"))
     return result
@@ -1845,6 +1957,842 @@ class TTPostStore:
             ).fetchone()
         return _public_daily_schedule(row)
 
+    def add_material_intake(
+        self,
+        material_id: Any,
+        account_id: Any,
+        content_id: Any,
+        source_media_url: Any,
+        *,
+        idempotency_key: Any,
+        gpu_job_id: Any,
+        source_trim_tail_seconds: Any,
+        preparation_profile: Any,
+        caption_template: Any,
+        caption: Any,
+        consent_version: Any,
+        consented_at: Any,
+        is_aigc: Any,
+        material_name: Any = "",
+        drama_name: Any = "",
+        material_language: Any = "",
+        description: Any = "",
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        """Persist one validated material before any remote preparation work."""
+
+        normalized_material_id = _material_id(material_id)
+        normalized_account_id = _account_id(account_id)
+        normalized_content_id = str(content_id or "").strip()
+        if not _CONTENT_ID_RE.fullmatch(normalized_content_id):
+            raise TTPostError(
+                "tt_content_id_invalid",
+                "素材对应的content_id无效",
+                400,
+            )
+        normalized_source_url = _https_url(
+            source_media_url,
+            "素材源视频地址",
+        )
+        normalized_idempotency_key = _required_text(
+            idempotency_key,
+            "素材入池幂等键",
+            255,
+        )
+        normalized_gpu_job_id = str(gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_gpu_job_id):
+            raise TTPostError(
+                "invalid_gpu_job_id",
+                "TT GPU任务ID无效",
+                400,
+            )
+        try:
+            normalized_trim = float(source_trim_tail_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT源视频裁剪参数无效",
+                400,
+            ) from None
+        if (
+            not math.isfinite(normalized_trim)
+            or normalized_trim < 0
+            or normalized_trim >= 86400
+        ):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT源视频裁剪参数无效",
+                400,
+            )
+        normalized_trim = round(normalized_trim, 6)
+        normalized_profile = _required_text(
+            preparation_profile,
+            "TT成片配置版本",
+            128,
+        )
+        normalized_template = str(caption_template or "")
+        normalized_caption = str(caption or "")
+        expected_caption = render_caption_template(
+            normalized_template,
+            normalized_content_id,
+        )
+        if not secrets.compare_digest(
+            normalized_caption.encode("utf-8"),
+            expected_caption.encode("utf-8"),
+        ):
+            raise TTPostError(
+                "tt_post_caption_mismatch",
+                "发布描述与素材content_id不匹配",
+                409,
+            )
+        normalized_consent_version = _required_text(
+            consent_version,
+            "发布确认版本",
+            128,
+        )
+        normalized_consented_at = _iso_utc(
+            consented_at,
+            "发布确认时间",
+        )
+        normalized_is_aigc = _exact_bool(
+            is_aigc,
+            "AI生成内容标记",
+        )
+        normalized_material_name = _optional_text(
+            material_name,
+            "素材名称",
+            500,
+        )
+        normalized_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
+        normalized_language = _optional_text(
+            material_language,
+            "素材语言",
+            32,
+        )
+        normalized_description = _optional_text(
+            description,
+            "素材描述",
+            4096,
+        )
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        frozen_payload = {
+            "account_id": normalized_account_id,
+            "caption": normalized_caption,
+            "caption_template": normalized_template,
+            "consent_version": normalized_consent_version,
+            "consented_at_utc": normalized_consented_at,
+            "content_id": normalized_content_id,
+            "description": normalized_description,
+            "drama_name": normalized_drama_name,
+            "gpu_job_id": normalized_gpu_job_id,
+            "is_aigc": bool(normalized_is_aigc),
+            "material_id": normalized_material_id,
+            "material_language": normalized_language,
+            "material_name": normalized_material_name,
+            "preparation_profile": normalized_profile,
+            "source_media_url": normalized_source_url,
+            "source_trim_tail_seconds": normalized_trim,
+        }
+        request_sha256 = hashlib.sha256(
+            json.dumps(
+                frozen_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            existing_by_key = conn.execute(
+                """
+                SELECT * FROM tt_post_material_intake
+                WHERE idempotency_key=?
+                """,
+                (normalized_idempotency_key,),
+            ).fetchone()
+            if existing_by_key is not None:
+                if secrets.compare_digest(
+                    str(existing_by_key["request_sha256"]),
+                    request_sha256,
+                ):
+                    return _public_material_intake(existing_by_key)
+                raise TTPostError(
+                    "tt_post_material_intake_idempotency_conflict",
+                    "素材入池幂等键已用于不同请求",
+                    409,
+                )
+
+            existing_by_material = conn.execute(
+                """
+                SELECT * FROM tt_post_material_intake
+                WHERE material_id=?
+                """,
+                (normalized_material_id,),
+            ).fetchone()
+            if existing_by_material is not None:
+                if secrets.compare_digest(
+                    str(existing_by_material["request_sha256"]),
+                    request_sha256,
+                ):
+                    return _public_material_intake(existing_by_material)
+                raise TTPostError(
+                    "tt_post_material_intake_conflict",
+                    "素材已入池且冻结信息不同",
+                    409,
+                )
+
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_recurring_pool
+                WHERE material_id=?
+                UNION ALL
+                SELECT 1 FROM tt_post_material_pool
+                WHERE material_id=?
+                UNION ALL
+                SELECT 1 FROM tt_post_queue
+                WHERE material_id=?
+                LIMIT 1
+                """,
+                (
+                    normalized_material_id,
+                    normalized_material_id,
+                    normalized_material_id,
+                ),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_material_already_used",
+                    "素材已存在于排期、发布池或发布历史中",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tt_post_material_intake(
+                        idempotency_key,request_sha256,material_id,account_id,
+                        content_id,source_media_url,material_name,drama_name,
+                        material_language,description,gpu_job_id,
+                        source_trim_tail_seconds,preparation_profile,
+                        caption_template,caption,consent_version,
+                        consented_at_utc,is_aigc,user_consent,status,
+                        created_by_user_id,created_by_name,
+                        updated_by_user_id,updated_by_name,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'queued',
+                        ?,?,?,?,?,?)
+                    """,
+                    (
+                        normalized_idempotency_key,
+                        request_sha256,
+                        normalized_material_id,
+                        normalized_account_id,
+                        normalized_content_id,
+                        normalized_source_url,
+                        normalized_material_name,
+                        normalized_drama_name,
+                        normalized_language,
+                        normalized_description,
+                        normalized_gpu_job_id,
+                        normalized_trim,
+                        normalized_profile,
+                        normalized_template,
+                        normalized_caption,
+                        normalized_consent_version,
+                        normalized_consented_at,
+                        int(normalized_is_aigc),
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_material_intake_conflict",
+                    "素材入池发生唯一性冲突，请刷新后重试",
+                    409,
+                ) from None
+            row = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return _public_material_intake(row)
+
+    def get_material_intake(self, intake_id: Any) -> Dict[str, Any]:
+        normalized_id = _positive_int(intake_id, "素材入池记录ID")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        if row is None:
+            raise TTPostError(
+                "tt_post_material_intake_not_found",
+                "素材入池记录不存在",
+                404,
+            )
+        return _public_material_intake(row)
+
+    def list_material_intakes(
+        self,
+        *,
+        account_id: Any = None,
+        status: Any = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        normalized_limit = _positive_int(
+            limit,
+            "素材入池列表数量",
+            1000,
+        )
+        normalized_offset = _nonnegative_int(
+            offset,
+            "素材入池列表偏移",
+            2**31 - 1,
+        )
+        clauses = []
+        params: List[Any] = []
+        if account_id is not None:
+            clauses.append("account_id=?")
+            params.append(_account_id(account_id))
+        if status is not None:
+            normalized_status = str(status or "").strip()
+            if normalized_status not in MATERIAL_INTAKE_STATUSES:
+                raise TTPostError(
+                    "invalid_material_intake_status",
+                    "素材预制作状态无效",
+                    400,
+                )
+            clauses.append("status=?")
+            params.append(normalized_status)
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.extend((normalized_limit, normalized_offset))
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tt_post_material_intake%s
+                ORDER BY created_at,id LIMIT ? OFFSET ?
+                """
+                % where_sql,
+                params,
+            ).fetchall()
+        return [_public_material_intake(row) for row in rows]
+
+    @staticmethod
+    def _assert_material_intake_claim(
+        row: sqlite3.Row,
+        claim_token: Any,
+        *,
+        now_iso: str,
+    ) -> None:
+        supplied = str(claim_token or "")
+        stored = str(row["claim_token"] or "")
+        lease_expires = str(row["lease_expires_at_utc"] or "")
+        if (
+            not supplied
+            or not stored
+            or not secrets.compare_digest(supplied, stored)
+            or str(row["status"]) != "preparing"
+            or not lease_expires
+            or lease_expires <= now_iso
+        ):
+            raise TTPostError(
+                "tt_post_material_intake_claim_invalid",
+                "素材预制作认领无效或已过期",
+                409,
+            )
+
+    def claim_material_intake(
+        self,
+        worker_id: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 120,
+    ) -> Optional[MaterialIntakeClaim]:
+        worker = str(worker_id or "").strip()
+        if not _WORKER_ID_RE.fullmatch(worker):
+            raise TTPostError(
+                "invalid_worker_id",
+                "素材预制作执行器ID无效",
+                400,
+            )
+        normalized_lease = _positive_int(
+            lease_seconds,
+            "素材预制作认领时长",
+            10800,
+        )
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease)
+        )
+        claim_token = secrets.token_urlsafe(32)
+        with self._transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT candidate.*
+                FROM tt_post_material_intake candidate
+                WHERE (
+                        candidate.status='queued'
+                        OR (
+                            candidate.status='retry_wait'
+                            AND (
+                                candidate.next_attempt_at_utc=''
+                                OR candidate.next_attempt_at_utc<=?
+                            )
+                        )
+                        OR (
+                            candidate.status='preparing'
+                            AND candidate.lease_expires_at_utc<>''
+                            AND candidate.lease_expires_at_utc<=?
+                        )
+                    )
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM tt_post_material_intake prior
+                        WHERE prior.account_id=candidate.account_id
+                          AND prior.status IN (
+                              'queued','preparing','retry_wait'
+                          )
+                          AND (
+                              prior.created_at<candidate.created_at
+                              OR (
+                                  prior.created_at=candidate.created_at
+                                  AND prior.id<candidate.id
+                              )
+                          )
+                  )
+                ORDER BY candidate.created_at,candidate.id
+                LIMIT 1
+                """,
+                (now_iso, now_iso),
+            ).fetchone()
+            if row is None:
+                return None
+            updated = conn.execute(
+                """
+                UPDATE tt_post_material_intake
+                SET status='preparing',attempt_count=attempt_count+1,
+                    next_attempt_at_utc='',claim_worker=?,claim_token=?,
+                    lease_expires_at_utc=?,claimed_at_utc=?,
+                    error_code='',error_message='',updated_at=?
+                WHERE id=?
+                  AND (
+                    status='queued'
+                    OR (
+                        status='retry_wait'
+                        AND (
+                            next_attempt_at_utc=''
+                            OR next_attempt_at_utc<=?
+                        )
+                    )
+                    OR (
+                        status='preparing'
+                        AND lease_expires_at_utc<>''
+                        AND lease_expires_at_utc<=?
+                    )
+                  )
+                """,
+                (
+                    worker,
+                    claim_token,
+                    lease_iso,
+                    now_iso,
+                    now_iso,
+                    int(row["id"]),
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_material_intake_claim_busy",
+                    "素材预制作任务已被其他执行器领取",
+                    409,
+                )
+            claimed = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (int(row["id"]),),
+            ).fetchone()
+            return MaterialIntakeClaim(
+                _public_material_intake(claimed),
+                claim_token,
+            )
+
+    def renew_material_intake(
+        self,
+        intake_id: Any,
+        claim_token: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 120,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(intake_id, "素材入池记录ID")
+        normalized_lease = _positive_int(
+            lease_seconds,
+            "素材预制作认领时长",
+            10800,
+        )
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease)
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_material_intake_not_found",
+                    "素材入池记录不存在",
+                    404,
+                )
+            self._assert_material_intake_claim(
+                row,
+                claim_token,
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_material_intake
+                SET lease_expires_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (lease_iso, now_iso, normalized_id),
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_material_intake(refreshed)
+
+    def complete_material_intake(
+        self,
+        intake_id: Any,
+        claim_token: Any,
+        *,
+        gpu_job_id: Any,
+        prepared_media_url: Any,
+        prepared_output_sha256: Any,
+        prepared_output_size: Any,
+        prepared_duration_sec: Any,
+        preparation_profile: Any,
+        source_trim_tail_seconds: Any,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(intake_id, "素材入池记录ID")
+        normalized_gpu_job_id = str(gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_gpu_job_id):
+            raise TTPostError(
+                "invalid_gpu_job_id",
+                "TT GPU任务ID无效",
+                400,
+            )
+        normalized_url = _https_url(
+            prepared_media_url,
+            "TT最终成片地址",
+        )
+        normalized_sha = str(prepared_output_sha256 or "").strip().lower()
+        if not _SHA256_RE.fullmatch(normalized_sha):
+            raise TTPostError(
+                "invalid_prepared_output_sha",
+                "TT最终成片SHA256无效",
+                400,
+            )
+        normalized_size = _positive_int(
+            prepared_output_size,
+            "TT最终成片大小",
+        )
+        try:
+            normalized_duration = float(prepared_duration_sec)
+            normalized_trim = float(source_trim_tail_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT最终成片时长或裁剪参数无效",
+                400,
+            ) from None
+        if (
+            not math.isfinite(normalized_duration)
+            or normalized_duration <= 0
+            or normalized_duration > 86400
+            or not math.isfinite(normalized_trim)
+            or normalized_trim < 0
+            or normalized_trim >= normalized_duration
+        ):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT最终成片时长或裁剪参数无效",
+                400,
+            )
+        normalized_duration = round(normalized_duration, 6)
+        normalized_trim = round(normalized_trim, 6)
+        normalized_profile = _required_text(
+            preparation_profile,
+            "TT成片配置版本",
+            128,
+        )
+        timestamp = self._now_iso()
+        artifact_values = (
+            normalized_url,
+            normalized_sha,
+            normalized_size,
+            normalized_duration,
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_material_intake_not_found",
+                    "素材入池记录不存在",
+                    404,
+                )
+            frozen_matches = (
+                secrets.compare_digest(
+                    str(row["gpu_job_id"]),
+                    normalized_gpu_job_id,
+                )
+                and secrets.compare_digest(
+                    str(row["preparation_profile"]),
+                    normalized_profile,
+                )
+                and float(row["source_trim_tail_seconds"])
+                == normalized_trim
+            )
+            if not frozen_matches:
+                raise TTPostError(
+                    "tt_post_material_intake_artifact_mismatch",
+                    "预制作结果与已冻结素材身份不一致",
+                    409,
+                )
+            if str(row["status"]) == "ready":
+                stored_values = (
+                    str(row["prepared_media_url"]),
+                    str(row["prepared_output_sha256"]),
+                    int(row["prepared_output_size"]),
+                    float(row["prepared_duration_sec"]),
+                )
+                if stored_values == artifact_values:
+                    return _public_material_intake(row)
+                raise TTPostError(
+                    "tt_post_material_intake_completion_conflict",
+                    "素材已完成且成片信息不同",
+                    409,
+                )
+            self._assert_material_intake_claim(
+                row,
+                claim_token,
+                now_iso=timestamp,
+            )
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_recurring_pool
+                WHERE material_id=?
+                UNION ALL
+                SELECT 1 FROM tt_post_material_pool
+                WHERE material_id=?
+                UNION ALL
+                SELECT 1 FROM tt_post_queue
+                WHERE material_id=?
+                LIMIT 1
+                """,
+                (
+                    str(row["material_id"]),
+                    str(row["material_id"]),
+                    str(row["material_id"]),
+                ),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_material_already_used",
+                    "素材在预制作期间已进入其他排期或发布历史",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tt_post_recurring_pool(
+                        material_id,account_id,content_id,source_media_url,
+                        prepared_media_url,gpu_job_id,prepared_output_sha256,
+                        prepared_output_size,prepared_duration_sec,
+                        source_trim_tail_seconds,preparation_profile,
+                        caption_template,caption,consent_version,
+                        consented_at_utc,is_aigc,user_consent,status,
+                        created_by_user_id,created_by_name,
+                        updated_by_user_id,updated_by_name,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
+                        ?,?,?,?,?,?)
+                    """,
+                    (
+                        str(row["material_id"]),
+                        str(row["account_id"]),
+                        str(row["content_id"]),
+                        str(row["source_media_url"]),
+                        normalized_url,
+                        normalized_gpu_job_id,
+                        normalized_sha,
+                        normalized_size,
+                        normalized_duration,
+                        normalized_trim,
+                        normalized_profile,
+                        str(row["caption_template"]),
+                        str(row["caption"]),
+                        str(row["consent_version"]),
+                        str(row["consented_at_utc"]),
+                        int(row["is_aigc"]),
+                        str(row["created_by_user_id"]),
+                        str(row["created_by_name"]),
+                        str(row["updated_by_user_id"]),
+                        str(row["updated_by_name"]),
+                        str(row["created_at"]),
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_material_intake_completion_conflict",
+                    "素材写入可发布池时发生唯一性冲突",
+                    409,
+                ) from None
+            recurring_pool_id = int(cursor.lastrowid)
+            updated = conn.execute(
+                """
+                UPDATE tt_post_material_intake
+                SET status='ready',prepared_media_url=?,
+                    prepared_output_sha256=?,prepared_output_size=?,
+                    prepared_duration_sec=?,recurring_pool_id=?,
+                    next_attempt_at_utc='',claim_worker='',claim_token='',
+                    lease_expires_at_utc='',error_code='',error_message='',
+                    ready_at_utc=?,failed_at_utc='',updated_at=?
+                WHERE id=? AND status='preparing' AND claim_token=?
+                """,
+                (
+                    normalized_url,
+                    normalized_sha,
+                    normalized_size,
+                    normalized_duration,
+                    recurring_pool_id,
+                    timestamp,
+                    timestamp,
+                    normalized_id,
+                    str(claim_token or ""),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_material_intake_claim_invalid",
+                    "素材预制作认领无效或已变更",
+                    409,
+                )
+            completed = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_material_intake(completed)
+
+    def fail_material_intake(
+        self,
+        intake_id: Any,
+        claim_token: Any,
+        *,
+        error_code: Any,
+        error_message: Any,
+        retry_at: Any = None,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(intake_id, "素材入池记录ID")
+        normalized_error_code = _required_text(
+            error_code,
+            "预制作错误码",
+            96,
+        )
+        normalized_error_message = redact_text(error_message)
+        timestamp = self._now_iso()
+        should_retry = retry_at not in (None, "")
+        normalized_retry_at = (
+            _iso_utc(retry_at, "下次预制作时间")
+            if should_retry
+            else ""
+        )
+        if should_retry and normalized_retry_at <= timestamp:
+            raise TTPostError(
+                "invalid_retry_time",
+                "下次预制作时间必须晚于当前时间",
+                400,
+            )
+        target_status = "retry_wait" if should_retry else "failed"
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_material_intake_not_found",
+                    "素材入池记录不存在",
+                    404,
+                )
+            if (
+                str(row["status"]) == target_status
+                and str(row["error_code"]) == normalized_error_code
+                and str(row["error_message"]) == normalized_error_message
+                and str(row["next_attempt_at_utc"])
+                == normalized_retry_at
+            ):
+                return _public_material_intake(row)
+            self._assert_material_intake_claim(
+                row,
+                claim_token,
+                now_iso=timestamp,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_material_intake
+                SET status=?,next_attempt_at_utc=?,claim_worker='',
+                    claim_token='',lease_expires_at_utc=?,error_code=?,
+                    error_message=?,failed_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    target_status,
+                    normalized_retry_at,
+                    "",
+                    normalized_error_code,
+                    normalized_error_message,
+                    "" if should_retry else timestamp,
+                    timestamp,
+                    normalized_id,
+                ),
+            )
+            failed = conn.execute(
+                "SELECT * FROM tt_post_material_intake WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_material_intake(failed)
+
     def add_recurring_material(
         self,
         material_id: Any,
@@ -2012,6 +2960,9 @@ class TTPostStore:
                 )
             if conn.execute(
                 """
+                SELECT 1 FROM tt_post_material_intake
+                WHERE material_id=?
+                UNION ALL
                 SELECT 1 FROM tt_post_material_pool
                 WHERE material_id=?
                 UNION ALL
@@ -2019,7 +2970,11 @@ class TTPostStore:
                 WHERE material_id=?
                 LIMIT 1
                 """,
-                (normalized_material_id, normalized_material_id),
+                (
+                    normalized_material_id,
+                    normalized_material_id,
+                    normalized_material_id,
+                ),
             ).fetchone():
                 raise TTPostError(
                     "tt_post_material_already_used",
@@ -3035,6 +3990,19 @@ class TTPostStore:
         actor_name = _optional_text(actor_name, "操作人名称", 255)
         timestamp = self._now_iso()
         with self._transaction() as conn:
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_material_intake
+                WHERE material_id=?
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_material_already_exists",
+                    "素材已存在于TikTok发布池或历史中",
+                    409,
+                )
             try:
                 cursor = conn.execute(
                     """
@@ -3065,6 +4033,126 @@ class TTPostStore:
                 created_at=timestamp,
                 to_status="available",
                 details={"material_id": normalized, "actor_user_id": actor_user_id},
+            )
+            row = conn.execute(
+                "SELECT * FROM tt_post_material_pool WHERE id=?",
+                (pool_id,),
+            ).fetchone()
+        return dict(row)
+
+    def ensure_material_for_recurring(
+        self,
+        material_id: Any,
+        recurring_pool_id: Any,
+        *,
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        """Bridge a reserved recurring row, preserving pre-intake legacy rows."""
+
+        normalized_material_id = _material_id(material_id)
+        normalized_recurring_id = _positive_int(
+            recurring_pool_id,
+            "每日发布素材池记录ID",
+        )
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            recurring = conn.execute(
+                """
+                SELECT * FROM tt_post_recurring_pool
+                WHERE id=?
+                """,
+                (normalized_recurring_id,),
+            ).fetchone()
+            if (
+                recurring is None
+                or str(recurring["material_id"]) != normalized_material_id
+                or str(recurring["status"]) != "reserved"
+            ):
+                raise TTPostError(
+                    "tt_post_recurring_material_bridge_invalid",
+                    "每日发布素材尚未被当前运行安全预留",
+                    409,
+                )
+            intake = conn.execute(
+                """
+                SELECT * FROM tt_post_material_intake
+                WHERE material_id=?
+                """,
+                (normalized_material_id,),
+            ).fetchone()
+            if (
+                intake is not None
+                and (
+                    str(intake["status"]) != "ready"
+                    or int(intake["recurring_pool_id"] or 0)
+                    != normalized_recurring_id
+                )
+            ):
+                raise TTPostError(
+                    "tt_post_material_intake_bridge_invalid",
+                    "每日发布素材缺少已完成的预制作入池记录",
+                    409,
+                )
+            existing = conn.execute(
+                """
+                SELECT * FROM tt_post_material_pool
+                WHERE material_id=?
+                """,
+                (normalized_material_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["status"]) == "available":
+                    return dict(existing)
+                raise TTPostError(
+                    "tt_post_material_bridge_conflict",
+                    "每日发布素材的一次性队列桥接状态冲突",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tt_post_material_pool(
+                        material_id,status,created_by_user_id,created_by_name,
+                        created_at,updated_at
+                    ) VALUES(?,'available',?,?,?,?)
+                    """,
+                    (
+                        normalized_material_id,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_material_bridge_conflict",
+                    "每日发布素材的一次性队列桥接发生唯一性冲突",
+                    409,
+                ) from None
+            pool_id = int(cursor.lastrowid)
+            self._event(
+                conn,
+                event_type="recurring_material_bridge_created",
+                pool_item_id=pool_id,
+                created_at=timestamp,
+                to_status="available",
+                details={
+                    "material_id": normalized_material_id,
+                    "recurring_pool_id": normalized_recurring_id,
+                    "actor_user_id": normalized_actor_id,
+                },
             )
             row = conn.execute(
                 "SELECT * FROM tt_post_material_pool WHERE id=?",

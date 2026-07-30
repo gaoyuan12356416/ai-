@@ -1,0 +1,12 @@
+[Unit]
+Description=Check queued Dramawave TikTok Post preparations every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=tt-post-prepare.service
+
+[Install]
+WantedBy=timers.target

@@ -91,8 +91,6 @@ class TtPostPoolUiTest(unittest.TestCase):
             "previewMaterial",
             "materialProgress",
             "materialResults",
-            "mediaPreview",
-            "videoShell",
             "caption",
             "dailyPublishTime",
             "scheduleEnabled",
@@ -111,6 +109,10 @@ class TtPostPoolUiTest(unittest.TestCase):
             "queueSubmitResults",
             "publishConsent",
             "addMaterialsToPool",
+            "preparationPanel",
+            "refreshPreparationStatus",
+            "preparationSummary",
+            "preparationRows",
         }
         for element_id in required_ids:
             self.assertIn(f'id="{element_id}"', PAGE)
@@ -162,31 +164,29 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("Array.from(new Set(", PAGE)
         self.assertIn("if (ids.length > 100)", PAGE)
 
-        preview = source_between(
-            "async function previewMaterials()",
+        validation = source_between(
+            "async function validateMaterials()",
             "function renderCaptionTemplate(",
         )
         self.assertIn(
             "for (let index = 0; index < materialIds.length; index += 1)",
-            preview,
+            validation,
         )
-        self.assertIn("await api(`${API_BASE}/materials/preview`", preview)
-        self.assertIn("state.materials.push(", preview)
-        self.assertIn("state.failures.push(", preview)
-        self.assertIn("renderMaterialResults()", preview)
-        self.assertIn("成功 ${state.materials.length} 个", preview)
-        self.assertIn("失败 ${state.failures.length} 个", preview)
+        self.assertIn("await api(`${API_BASE}/materials/preview`", validation)
+        self.assertIn("state.materials.push(", validation)
+        self.assertIn("state.failures.push(", validation)
+        self.assertIn("renderMaterialResults()", validation)
+        self.assertIn("通过 ${state.materials.length} 个", validation)
+        self.assertIn("失败 ${state.failures.length} 个", validation)
         self.assertLess(
-            preview.index("materialIds = parseMaterialIds()"),
-            preview.index("await api(`${API_BASE}/materials/preview`"),
+            validation.index("materialIds = parseMaterialIds()"),
+            validation.index("await api(`${API_BASE}/materials/preview`"),
         )
-        self.assertNotIn("Promise.all(", preview)
-        self.assertIn(
-            'byId("materialResults").addEventListener("click"',
-            PAGE,
-        )
-        self.assertIn("button[data-material-index]", PAGE)
-        self.assertIn("renderMaterial(state.materials[index])", PAGE)
+        self.assertNotIn("Promise.all(", validation)
+        self.assertIn("批量校验素材", PAGE)
+        self.assertIn("校验通过", PAGE)
+        self.assertNotIn('id="mediaPreview"', PAGE)
+        self.assertNotIn('id="videoShell"', PAGE)
 
     def test_caption_template_is_visible_editable_and_rendered_per_material(self):
         expected = (
@@ -223,6 +223,46 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("if (units > 2200)", PAGE)
         self.assertIn("caption_template: byId(\"caption\").value", PAGE)
         self.assertIn("utf16Units", PAGE)
+
+    def test_material_validation_does_not_wait_for_or_require_final_video(self):
+        validation = source_between(
+            "async function validateMaterials()",
+            "function renderCaptionTemplate(",
+        )
+        form_validation = source_between(
+            "function formValidationError()",
+            "function validateForm()",
+        )
+        self.assertIn(
+            'body: JSON.stringify({ material_id: materialId })',
+            validation,
+        )
+        self.assertIn("const contentId = cleanId(item.content_id)", validation)
+        for forbidden in (
+            "prepared_media_url",
+            "final_media_url",
+            "output_sha256",
+            "duration_sec",
+            "final_duration_sec",
+            "renderVideoPreview",
+            "renderMaterial(",
+        ):
+            self.assertNotIn(forbidden, validation)
+            self.assertNotIn(forbidden, form_validation)
+        self.assertIn(
+            "请先批量校验素材，并至少确认一个真实 Drama ID。",
+            form_validation,
+        )
+        self.assertNotIn("creatorInfo", form_validation)
+        self.assertIn(
+            'if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";',
+            source_between(
+                "function scheduleSaveError()",
+                "function runNowDisabledReason()",
+            ),
+        )
+        self.assertIn("校验通过即可入池", PAGE)
+        self.assertIn("视频将在后台预制作", PAGE)
 
     def test_daily_schedule_uses_time_of_day_versioning_and_account_scope(self):
         publish_time = re.search(
@@ -301,6 +341,55 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("state.queueSummary =", creation)
         self.assertIn("页面已保留", creation)
         self.assertIn("已成功素材不会重复入池", creation)
+        self.assertIn("已入池，后台预制作", creation)
+        self.assertIn("void loadPreparationStatus({ quiet: true })", creation)
+
+    def test_preparation_status_panel_polls_only_active_items_without_form_lock(self):
+        preparation = source_between(
+            "function preparationStatusMeta(item)",
+            "function statusMeta(item)",
+        )
+        self.assertIn(
+            'new Set(["queued", "preparing", "retry_wait"])',
+            PAGE,
+        )
+        self.assertIn("PREPARATION_POLL_INTERVAL_MS = 10000", PAGE)
+        for status in ("queued", "preparing", "retry_wait", "ready", "failed"):
+            self.assertIn(f"{status}:", preparation)
+        self.assertIn("preparation_status", preparation)
+        self.assertIn(
+            "PREPARATION_ACTIVE_STATUSES.has(preparationStatusMeta(item).status)",
+            preparation,
+        )
+        self.assertIn("preparationHasActive: false", PAGE)
+        self.assertIn(
+            "if (!state.preparationHasActive || document.hidden) return;",
+            preparation,
+        )
+        self.assertIn(
+            "status => Number(summary[status] || 0) > 0",
+            preparation,
+        )
+        self.assertIn("window.setTimeout(", preparation)
+        self.assertIn(
+            "void loadPreparationStatus({ quiet: true })",
+            preparation,
+        )
+        self.assertIn(
+            "await api(`${API_BASE}/material-pool?${params.toString()}`)",
+            preparation,
+        )
+        load = source_between(
+            "async function loadPreparationStatus(",
+            "function statusMeta(item)",
+        )
+        self.assertIn("state.preparationLoading = true", load)
+        self.assertIn("state.preparationLoading = false", load)
+        self.assertNotIn("state.busy =", load)
+        self.assertNotIn("createFormFields", load)
+        self.assertNotIn('data-action="retry', PAGE)
+        self.assertIn('meta.status === "failed" ? "待处理" : ""', preparation)
+        self.assertIn("document.addEventListener(\"visibilitychange\"", PAGE)
 
     def test_queue_results_keep_every_material_visible_with_its_own_outcome(self):
         creation = source_between(

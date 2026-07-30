@@ -76,6 +76,9 @@ DEFAULT_GRACE_SECONDS = 600
 DEFAULT_LEASE_SECONDS = 300
 CLAIM_LEASE_BUFFER_SECONDS = 60
 DEFAULT_RECURRING_EXECUTION_LEASE_SECONDS = 120
+DEFAULT_PREPARATION_LEASE_SECONDS = 120
+MAX_PREPARATION_LEASE_SECONDS = 600
+DEFAULT_PREPARATION_MAX_ATTEMPTS = 5
 MAX_ACCOUNT_ROWS = 1000
 MAX_HTTP_BODY_BYTES = 256 * 1024
 MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
@@ -103,6 +106,25 @@ PRIVACY_LEVEL_ORDER = (
 CREATOR_INFO_BATCH_WORKERS = 4
 TT_MAX_MATERIAL_DURATION_SECONDS = 3600
 DEFAULT_RUNNER_KICK_PATH = "/run/tt-post/manual-kick"
+DEFAULT_PREPARATION_KICK_PATH = "/run/tt-post/prepare-kick"
+
+TERMINAL_PREPARATION_ERROR_CODES = frozenset(
+    {
+        "invalid_gpu_job_id",
+        "invalid_prepared_media_metadata",
+        "invalid_prepared_media_metrics",
+        "invalid_prepared_output_sha",
+        "tt_account_not_found",
+        "tt_content_id_mismatch",
+        "tt_interaction_not_allowed",
+        "tt_prepared_media_duration_invalid",
+        "tt_prepared_media_fingerprint_invalid",
+        "tt_prepared_media_identity_mismatch",
+        "tt_prepared_media_metadata_invalid",
+        "tt_prepared_media_profile_mismatch",
+        "tt_privacy_not_allowed",
+    }
+)
 
 
 # This statement is deliberately metadata-only.  Do not add token predicates,
@@ -1511,6 +1533,7 @@ class TTPostService:
         source_trim_tail_seconds: float = 4.333333,
         media_profile_version: str = "tt-post-hevc-720x1280-v2",
         runner_kick_path: str = DEFAULT_RUNNER_KICK_PATH,
+        preparation_kick_path: str = DEFAULT_PREPARATION_KICK_PATH,
     ):
         self.store = store
         self.account_repository = account_repository
@@ -1562,6 +1585,29 @@ class TTPostService:
                     500,
                 )
         self.runner_kick_path = normalized_kick_path
+        normalized_prepare_kick = str(preparation_kick_path or "").strip()
+        if (
+            os.name == "nt"
+            and normalized_prepare_kick == DEFAULT_PREPARATION_KICK_PATH
+        ):
+            normalized_prepare_kick = ""
+        if normalized_prepare_kick:
+            prepare_kick = Path(normalized_prepare_kick)
+            if not prepare_kick.is_absolute():
+                raise TTPostServiceError(
+                    "tt_prepare_kick_path_invalid",
+                    "TT preparation runner wakeup path must be absolute",
+                    500,
+                )
+            if os.name != "nt" and not str(prepare_kick).startswith(
+                "/run/tt-post/"
+            ):
+                raise TTPostServiceError(
+                    "tt_prepare_kick_path_invalid",
+                    "TT preparation runner wakeup path must be under /run/tt-post",
+                    500,
+                )
+        self.preparation_kick_path = normalized_prepare_kick
 
     def _gates(self) -> Dict[str, bool]:
         return self.gates.as_dict()
@@ -1724,23 +1770,20 @@ class TTPostService:
             _batch_account_ids(payload.get("source_account_ids"))
         )
 
-    def _resolve_and_prepare(
+    def _preparation_job_id(
         self,
-        material_id: Any,
-        *,
-        gpu_job_id: str = "",
-    ) -> Dict[str, Any]:
-        resolved = self.material_resolver.resolve(material_id)
-        job_id = gpu_job_id or (
+        resolved: Mapping[str, Any],
+    ) -> str:
+        return (
             "ttpreview-"
             + hashlib.sha256(
                 (
-                    resolved["material_id"]
+                    str(resolved["material_id"])
                     + "|"
-                    + resolved["content_id"]
+                    + str(resolved["content_id"])
                     + "|"
                     + hashlib.sha256(
-                        resolved["source_media_url"].encode("utf-8")
+                        str(resolved["source_media_url"]).encode("utf-8")
                     ).hexdigest()
                     + "|"
                     + self.media_profile_version
@@ -1749,6 +1792,15 @@ class TTPostService:
                 ).encode("utf-8")
             ).hexdigest()[:36]
         )
+
+    def _prepare_resolved(
+        self,
+        resolved: Mapping[str, Any],
+        *,
+        gpu_job_id: str = "",
+    ) -> Dict[str, Any]:
+        resolved = dict(resolved)
+        job_id = gpu_job_id or self._preparation_job_id(resolved)
         prepared = self.gpu_client.prepare(
             job_id=job_id,
             material=resolved,
@@ -1832,10 +1884,30 @@ class TTPostService:
         )
         return result
 
+    def _resolve_and_prepare(
+        self,
+        material_id: Any,
+        *,
+        gpu_job_id: str = "",
+    ) -> Dict[str, Any]:
+        return self._prepare_resolved(
+            self.material_resolver.resolve(material_id),
+            gpu_job_id=gpu_job_id,
+        )
+
     def material_preview(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         material_id = _positive_decimal(payload.get("material_id"), "素材ID", 19)
+        resolved = dict(self.material_resolver.resolve(material_id))
+        resolved.update(
+            {
+                "status": "validated",
+                "status_label": "素材校验通过，可加入素材池",
+                "preparation_status": "not_started",
+                "publish_ready": False,
+            }
+        )
         return {
-            "item": self._resolve_and_prepare(material_id),
+            "item": resolved,
             "gates": self._gates(),
         }
 
@@ -2083,6 +2155,31 @@ class TTPostService:
         result["duration_sec"] = float(
             result.get("prepared_duration_sec") or 0
         )
+        result["preparation_status"] = "ready"
+        result["publish_ready"] = True
+        result["pool_item_type"] = "ready"
+        return result
+
+    @staticmethod
+    def _material_intake_api_item(
+        item: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        result = dict(item)
+        preparation_status = str(
+            result.get("preparation_status")
+            or result.get("status")
+            or "queued"
+        )
+        result["preparation_status"] = preparation_status
+        result["source_account_id"] = str(result.get("account_id") or "")
+        result["caption_text"] = str(result.get("caption") or "")
+        result["duration_sec"] = float(
+            result.get("prepared_duration_sec") or 0
+        )
+        result["publish_ready"] = preparation_status == "ready"
+        result["pool_item_type"] = "intake"
+        result["pool_item_id"] = result.get("recurring_pool_id")
+        result["retryable"] = preparation_status == "failed"
         return result
 
     @staticmethod
@@ -2179,11 +2276,40 @@ class TTPostService:
         account_filter = self._query_first(query, "source_account_id")
         material_filter = self._query_first(query, "material_id")
         status_filter = self._query_first(query, "status")
-        rows = self.store.list_recurring_materials(
+        intake_rows = self.store.list_material_intakes(
             account_id=account_filter or None,
-            status=status_filter or None,
             limit=1000,
             offset=0,
+        )
+        recurring_rows = self.store.list_recurring_materials(
+            account_id=account_filter or None,
+            limit=1000,
+            offset=0,
+        )
+        recurring_by_id = {
+            int(row["id"]): row
+            for row in recurring_rows
+        }
+        linked_pool_ids = {
+            int(row.get("recurring_pool_id") or 0)
+            for row in intake_rows
+            if int(row.get("recurring_pool_id") or 0) > 0
+        }
+        rows = []
+        for intake_row in intake_rows:
+            item = self._material_intake_api_item(intake_row)
+            recurring = recurring_by_id.get(
+                int(intake_row.get("recurring_pool_id") or 0)
+            )
+            if recurring is not None:
+                item["status"] = str(recurring.get("status") or "")
+                item["run_id"] = recurring.get("run_id")
+                item["queue_id"] = recurring.get("queue_id")
+            rows.append(item)
+        rows.extend(
+            self._recurring_pool_api_item(row)
+            for row in recurring_rows
+            if int(row.get("id") or 0) not in linked_pool_ids
         )
         if material_filter:
             material_id = _positive_decimal(
@@ -2195,13 +2321,40 @@ class TTPostService:
                 row for row in rows
                 if str(row.get("material_id") or "") == material_id
             ]
+        if status_filter:
+            rows = [
+                row
+                for row in rows
+                if (
+                    str(row.get("preparation_status") or "") == status_filter
+                    or str(row.get("status") or "") == status_filter
+                )
+            ]
+        rows.sort(
+            key=lambda row: (
+                str(row.get("created_at") or ""),
+                int(row.get("id") or 0),
+            ),
+            reverse=True,
+        )
         total = len(rows)
         start = (page - 1) * page_size
+        preparation_counts = {
+            status: sum(
+                str(row.get("preparation_status") or "") == status
+                for row in rows
+            )
+            for status in (
+                "queued",
+                "preparing",
+                "retry_wait",
+                "ready",
+                "failed",
+                "canceled",
+            )
+        }
         return {
-            "items": [
-                self._recurring_pool_api_item(row)
-                for row in rows[start : start + page_size]
-            ],
+            "items": rows[start : start + page_size],
             "pagination": {
                 "page": page,
                 "page_size": page_size,
@@ -2209,8 +2362,10 @@ class TTPostService:
             },
             "summary": {
                 "total": total,
+                **preparation_counts,
                 "available": sum(
-                    str(row.get("status") or "") == "available"
+                    bool(row.get("publish_ready"))
+                    and str(row.get("status") or "") == "available"
                     for row in rows
                 ),
                 "reserved": sum(
@@ -2246,7 +2401,11 @@ class TTPostService:
                 "素材入池请求包含未知字段",
                 400,
             )
-        _bounded_text(payload.get("idempotency_key"), "幂等键", 255)
+        idempotency_key = _bounded_text(
+            payload.get("idempotency_key"),
+            "幂等键",
+            255,
+        )
         account_id = _positive_decimal(
             payload.get("source_account_id"),
             "TikTok账号ID",
@@ -2281,67 +2440,289 @@ class TTPostService:
                 )
             }
         )
-        creator = self.creator_info(
-            {"source_account_id": account_id}
-        )["item"]
-        self._assert_creator_settings(creator, settings)
-        prepared = self._resolve_and_prepare(material_id)
-        if prepared["content_id"] != requested_content_id:
+        resolved = dict(self.material_resolver.resolve(material_id))
+        if resolved["content_id"] != requested_content_id:
             raise TTPostServiceError(
                 "tt_content_id_mismatch",
                 "页面Drama ID与素材真实映射不一致",
                 409,
             )
-        duration = float(prepared.get("duration_sec") or 0)
-        maximum_duration = int(
-            creator.get("max_video_post_duration_sec") or 0
-        )
-        if duration <= 0 or duration > maximum_duration:
-            raise TTPostServiceError(
-                "tt_prepared_media_duration_invalid",
-                "最终成片时长不满足目标账号实时限制",
-                409,
-            )
         caption_template, caption = _caption_from_submission(
             payload,
-            prepared["content_id"],
+            resolved["content_id"],
         )
-        item = self.store.add_recurring_material(
+        item = self.store.add_material_intake(
             material_id,
             account_id,
-            prepared["content_id"],
-            prepared["source_media_url"],
-            prepared["prepared_media_url"],
-            gpu_job_id=prepared["gpu_job_id"],
-            prepared_output_sha256=prepared["output_sha256"],
-            prepared_output_size=prepared["output_size"],
-            prepared_duration_sec=prepared["duration_sec"],
-            source_trim_tail_seconds=prepared[
-                "source_trim_tail_seconds"
-            ],
-            preparation_profile=(
-                prepared.get("profile") or self.media_profile_version
-            ),
+            resolved["content_id"],
+            resolved["source_media_url"],
+            idempotency_key=idempotency_key,
+            gpu_job_id=self._preparation_job_id(resolved),
+            source_trim_tail_seconds=self.source_trim_tail_seconds,
+            preparation_profile=self.media_profile_version,
             caption_template=caption_template,
             caption=caption,
             consent_version=consent["version"],
             consented_at=consent["accepted_at"],
             is_aigc=settings.is_aigc,
         )
-        result = self._recurring_pool_api_item(item)
+        result = self._material_intake_api_item(item)
         result["account_name_snapshot"] = str(
             account.get("display_name")
             or account.get("account_name")
             or ""
         )
+        kicked = self._kick_preparation_runner()
         return {
             "item": result,
             "available_material_count": self.store.count_recurring_materials(
                 account_id=account_id,
                 status="available",
             ),
+            "preparation_wakeup_requested": kicked,
+            "preparation_timer_fallback_seconds": 60,
             "gates": self._gates(),
         }
+
+    def preparation_claim(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "worker_id",
+            "lease_seconds",
+        }:
+            raise TTPostServiceError(
+                "invalid_request",
+                "后台制作领取请求字段无效",
+                400,
+            )
+        worker_id = _bounded_text(
+            payload.get("worker_id"),
+            "后台制作 worker ID",
+            128,
+        )
+        if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,128}", worker_id):
+            raise TTPostServiceError(
+                "invalid_request",
+                "后台制作 worker ID 无效",
+                400,
+            )
+        lease_seconds = _positive_int(
+            payload.get("lease_seconds"),
+            "后台制作租约",
+            MAX_PREPARATION_LEASE_SECONDS,
+        )
+        claim = self.store.claim_material_intake(
+            worker_id,
+            lease_seconds=lease_seconds,
+        )
+        if claim is None:
+            return {"item": None, "gates": self._gates()}
+        return {
+            "item": self._material_intake_api_item(claim.item),
+            "claim_token": claim.reveal_claim_token(),
+            "gates": self._gates(),
+        }
+
+    def preparation_renew(
+        self,
+        intake_id: Any,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "claim_token",
+            "lease_seconds",
+        }:
+            raise TTPostServiceError(
+                "invalid_request",
+                "后台制作续租请求字段无效",
+                400,
+            )
+        normalized_id = _positive_int(
+            intake_id,
+            "后台制作任务 ID",
+        )
+        claim_token = _bounded_text(
+            payload.get("claim_token"),
+            "后台制作领取凭据",
+            512,
+        )
+        lease_seconds = _positive_int(
+            payload.get("lease_seconds"),
+            "后台制作租约",
+            MAX_PREPARATION_LEASE_SECONDS,
+        )
+        item = self.store.renew_material_intake(
+            normalized_id,
+            claim_token,
+            lease_seconds=lease_seconds,
+        )
+        return {
+            "item": self._material_intake_api_item(item),
+            "gates": self._gates(),
+        }
+
+    def _preparation_retry_at(
+        self,
+        attempt_count: int,
+    ) -> str:
+        exponent = max(0, min(int(attempt_count) - 1, 6))
+        delay_seconds = min(1800, 30 * (2**exponent))
+        digest = hashlib.sha256(
+            ("%s|%s" % (attempt_count, self.media_profile_version)).encode(
+                "utf-8"
+            )
+        ).digest()
+        jitter = int.from_bytes(digest[:2], "big") % max(1, delay_seconds)
+        return (
+            _now_utc(self._now_fn)
+            + timedelta(seconds=delay_seconds + jitter)
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def preparation_process(
+        self,
+        intake_id: Any,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "claim_token"
+        }:
+            raise TTPostServiceError(
+                "invalid_request",
+                "后台制作执行请求字段无效",
+                400,
+            )
+        normalized_id = _positive_int(
+            intake_id,
+            "后台制作任务 ID",
+        )
+        claim_token = _bounded_text(
+            payload.get("claim_token"),
+            "后台制作领取凭据",
+            512,
+        )
+        intake: Optional[Dict[str, Any]] = None
+        try:
+            intake = self.store.renew_material_intake(
+                normalized_id,
+                claim_token,
+                lease_seconds=DEFAULT_PREPARATION_LEASE_SECONDS,
+            )
+            account_id = str(intake["account_id"])
+            self.account_repository.get_public_account(account_id)
+            saved_settings = self.store.get_account_settings(
+                account_id,
+                required=True,
+            )
+            settings = TTPostAccountSettings.from_mapping(
+                {
+                    key: saved_settings[key]
+                    for key in (
+                        "privacy_level",
+                        "allow_comment",
+                        "allow_duet",
+                        "allow_stitch",
+                        "brand_content_toggle",
+                        "brand_organic_toggle",
+                        "is_aigc",
+                    )
+                }
+            )
+            creator = self.creator_info(
+                {"source_account_id": account_id}
+            )["item"]
+            self._assert_creator_settings(creator, settings)
+            prepared = self._prepare_resolved(
+                {
+                    "material_id": str(intake["material_id"]),
+                    "content_id": str(intake["content_id"]),
+                    "source_media_url": str(intake["source_media_url"]),
+                    "media_url": str(intake["source_media_url"]),
+                },
+                gpu_job_id=str(intake["gpu_job_id"]),
+            )
+            duration = float(prepared.get("duration_sec") or 0)
+            maximum_duration = int(
+                creator.get("max_video_post_duration_sec") or 0
+            )
+            if duration <= 0 or duration > maximum_duration:
+                raise TTPostServiceError(
+                    "tt_prepared_media_duration_invalid",
+                    "最终成片时长不满足目标账号实时限制",
+                    409,
+                )
+            item = self.store.complete_material_intake(
+                normalized_id,
+                claim_token,
+                gpu_job_id=prepared["gpu_job_id"],
+                prepared_media_url=prepared["prepared_media_url"],
+                prepared_output_sha256=prepared["output_sha256"],
+                prepared_output_size=prepared["output_size"],
+                prepared_duration_sec=prepared["duration_sec"],
+                source_trim_tail_seconds=prepared[
+                    "source_trim_tail_seconds"
+                ],
+                preparation_profile=(
+                    prepared.get("profile") or self.media_profile_version
+                ),
+            )
+            return {
+                "item": self._material_intake_api_item(item),
+                "gates": self._gates(),
+            }
+        except TTPostError as exc:
+            if intake is None:
+                raise
+            attempt_count = int(intake.get("attempt_count") or 1)
+            retryable = (
+                exc.code not in TERMINAL_PREPARATION_ERROR_CODES
+                and exc.status >= 500
+                and attempt_count < DEFAULT_PREPARATION_MAX_ATTEMPTS
+            )
+            failed = self.store.fail_material_intake(
+                normalized_id,
+                claim_token,
+                error_code=exc.code,
+                error_message=str(exc),
+                retry_at=(
+                    self._preparation_retry_at(attempt_count)
+                    if retryable
+                    else None
+                ),
+            )
+            return {
+                "item": self._material_intake_api_item(failed),
+                "processing_error": {
+                    "code": exc.code,
+                    "retryable": retryable,
+                },
+                "gates": self._gates(),
+            }
+        except Exception as exc:
+            if intake is None:
+                raise
+            attempt_count = int(intake.get("attempt_count") or 1)
+            retryable = attempt_count < DEFAULT_PREPARATION_MAX_ATTEMPTS
+            failed = self.store.fail_material_intake(
+                normalized_id,
+                claim_token,
+                error_code="tt_preparation_unexpected",
+                error_message=type(exc).__name__,
+                retry_at=(
+                    self._preparation_retry_at(attempt_count)
+                    if retryable
+                    else None
+                ),
+            )
+            return {
+                "item": self._material_intake_api_item(failed),
+                "processing_error": {
+                    "code": "tt_preparation_unexpected",
+                    "retryable": retryable,
+                },
+                "gates": self._gates(),
+            }
 
     def schedule_get(
         self,
@@ -2637,7 +3018,8 @@ class TTPostService:
                 microsecond=0
             ).isoformat().replace("+00:00", "Z")
             legacy_pool = self._ensure_pool_item(
-                str(pool_item["material_id"])
+                str(pool_item["material_id"]),
+                recurring_pool_id=pool_item["id"],
             )
             queue = self.store.freeze_queue(
                 legacy_pool["id"],
@@ -3004,6 +3386,15 @@ class TTPostService:
         except OSError:
             return False
 
+    def _kick_preparation_runner(self) -> bool:
+        if not self.preparation_kick_path:
+            return False
+        try:
+            Path(self.preparation_kick_path).touch(exist_ok=True)
+            return True
+        except OSError:
+            return False
+
     def run_now(
         self,
         payload: Mapping[str, Any],
@@ -3056,7 +3447,17 @@ class TTPostService:
             "gates": self._gates(),
         }
 
-    def _ensure_pool_item(self, material_id: str) -> Dict[str, Any]:
+    def _ensure_pool_item(
+        self,
+        material_id: str,
+        *,
+        recurring_pool_id: Any = None,
+    ) -> Dict[str, Any]:
+        if recurring_pool_id not in (None, ""):
+            return self.store.ensure_material_for_recurring(
+                material_id,
+                recurring_pool_id,
+            )
         try:
             return self.store.add_material(material_id)
         except TTPostError as exc:
@@ -3866,6 +4267,12 @@ def build_service_from_env(
                 DEFAULT_RUNNER_KICK_PATH,
             )
         ),
+        preparation_kick_path=str(
+            source.get(
+                "TT_POST_PREPARE_RUNNER_KICK_PATH",
+                DEFAULT_PREPARATION_KICK_PATH,
+            )
+        ),
     )
 
 
@@ -4027,6 +4434,29 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             )
         if self.command == "POST" and path == "/api/admin/tt-posts/material-pool":
             return service.material_pool_add(self._body())
+        if (
+            self.command == "POST"
+            and path == "/internal/tt-posts/preparations/claim"
+        ):
+            return service.preparation_claim(self._body())
+        preparation_renew = re.fullmatch(
+            r"/internal/tt-posts/preparations/([1-9][0-9]*)/renew",
+            path,
+        )
+        if self.command == "POST" and preparation_renew:
+            return service.preparation_renew(
+                preparation_renew.group(1),
+                self._body(),
+            )
+        preparation_process = re.fullmatch(
+            r"/internal/tt-posts/preparations/([1-9][0-9]*)/process",
+            path,
+        )
+        if self.command == "POST" and preparation_process:
+            return service.preparation_process(
+                preparation_process.group(1),
+                self._body(),
+            )
         if self.command == "GET" and path == "/api/admin/tt-posts/schedule":
             return service.schedule_get(
                 urllib.parse.parse_qs(parsed.query)
