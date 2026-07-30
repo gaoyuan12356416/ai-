@@ -2,7 +2,18 @@
 
 ## 测试结论
 
-生产当前精确 commit 为 `622a8caff321dc297871d7cea354ad8d5fed4e52`。仅 X Post selector 已取消 `drama_labels` 色情/暴力内容词拦截，其他渠道、违规历史、素材源/资源危险标签和既有权限边界均未修改。本次本地和服务器均完成 143/143 X 回归；旧 `drama_label_unsafe` 三条记录重校验为可供发布，未手工触发 daily、未调用真实 X。
+2026-07-30 本地变更基于 X 线上代码基线 `934577aadbdea7849e33934cb094efaf0f32ad12`：X 候选不再因 Facebook/TikTok/Twitter/资源审核违规记录，或素材源、资源、短剧 labels 中的色情、裸露、暴力等内容标签被拒绝。计数和历史错误码继续保留审计；Dramawave、必填元数据、剧映射、可投放时间、媒体预检、账号资格和全局排重仍维持原门禁。本地完整 X 回归 362/362 通过，另有 1 项 Windows 目录软链接权限用例按环境跳过；未部署生产、未触发 daily、未调用真实 X。
+
+## 2026-07-30 X 违规与内容标签完全放开
+
+| 项目 | 结果 | 证据 |
+| --- | --- | --- |
+| selector | 通过 | manual/legacy selector 对非 0 违规计数及色情、裸露、暴力等 source/resource/drama 标签均允许候选，`dangerous_tag_count` 和四类违规计数保留 |
+| 队列计划 | 通过 | daily、catch-up、multi-time schedule 均接受非 0 审计计数，不再要求全部为 0 |
+| 历史池记录 | 通过 | `material_has_violation`、`material_source_tag_unsafe`、`material_tag_unsafe` 保留原错误字段但派生为 `available`，进入 FIFO available 集合 |
+| 其他门禁 | 通过 | 缺素材、非 Dramawave、元数据/剧映射/可投放时间/媒体异常、账号异常和重复素材继续拒绝 |
+| 自动回归 | 通过 | 362/362；Python 编译、Node 语法、`git diff --check` 均通过；1 项 Windows 软链接权限用例按环境跳过 |
+| 线上副作用 | 无 | 本次仅本地独立分支验证，未修改生产数据库、服务、timer 或发布记录 |
 
 ## 2026-07-24 X Post 短剧标签增量
 

@@ -122,14 +122,6 @@ QUEUE_LEDGER_FIELDS = (
     "dangerous_tag_count",
 )
 
-COMPLIANCE_COUNT_FIELDS = (
-    "facebook_violation_count",
-    "tiktok_violation_count",
-    "twitter_violation_count",
-    "resource_audit_count",
-    "dangerous_tag_count",
-)
-
 COMPLIANCE_FIELD_ALIASES = {
     "facebook_violation_count": ("facebook_violation_count", "facebook_violations"),
     "tiktok_violation_count": ("tiktok_violation_count", "tiktok_violations"),
@@ -137,6 +129,19 @@ COMPLIANCE_FIELD_ALIASES = {
     "resource_audit_count": ("resource_audit_count", "resource_audit_violations"),
     "dangerous_tag_count": ("dangerous_tag_count", "dangerous_tags"),
 }
+
+# X keeps these historical validation results as audit evidence, but they no
+# longer make a material unavailable or change FIFO ordering.
+NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
+    {
+        "material_has_violation",
+        "material_source_tag_unsafe",
+        "material_tag_unsafe",
+    }
+)
+_NONBLOCKING_MATERIAL_VALIDATION_SQL = "(" + ",".join(
+    "'%s'" % code for code in sorted(NONBLOCKING_MATERIAL_VALIDATION_CODES)
+) + ")"
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -779,7 +784,7 @@ def _nonnegative_float(value, label, default=0.0):
 
 
 def _compliance_counts(payload, require_all=False):
-    """Normalize compliance evidence without treating missing values as clean."""
+    """Normalize audit-only X compliance evidence."""
     if "compliance_counts" in payload:
         compliance = payload.get("compliance_counts")
         if not isinstance(compliance, dict):
@@ -806,6 +811,10 @@ def _compliance_counts(payload, require_all=False):
             raise XPostError("invalid_request", "%s证据冲突" % field, 400)
         result[field] = supplied[0]
     return result
+
+
+def _material_validation_is_blocking(error_code):
+    return bool(error_code) and error_code not in NONBLOCKING_MATERIAL_VALIDATION_CODES
 
 
 def ensure_storage(db_path):
@@ -3219,12 +3228,16 @@ class XPostStore:
             "available_count": sum(
                 1
                 for material_id in created_material_ids
-                if not checks_by_material[material_id][0]
+                if not _material_validation_is_blocking(
+                    checks_by_material[material_id][0]
+                )
             ),
             "validation_failed_count": sum(
                 1
                 for material_id in created_material_ids
-                if checks_by_material[material_id][0]
+                if _material_validation_is_blocking(
+                    checks_by_material[material_id][0]
+                )
             ),
         }
 
@@ -3240,10 +3253,11 @@ class XPostStore:
                 "SELECT p.id,p.material_key,p.material_id,p.created_at "
                 "FROM x_post_material_pool p "
                 "WHERE p.status='unpublished' "
-                "AND p.last_error_code='' "
+                "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                 "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
                 "WHERE q.pool_item_id=p.id OR q.material_key=p.material_key) "
-                "ORDER BY p.created_at ASC,p.id ASC LIMIT ?",
+                "ORDER BY p.created_at ASC,p.id ASC LIMIT ?"
+                % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                 (limit,),
             ).fetchall()
         return [_row_dict(row) for row in rows]
@@ -3314,8 +3328,10 @@ class XPostStore:
             "WHEN q.id IS NOT NULL AND COALESCE(l.status,q.status)='failed' "
             "THEN 'failed' "
             "WHEN q.id IS NOT NULL THEN 'occupied' "
-            "WHEN p.last_error_code<>'' THEN 'validation_failed' "
+            "WHEN p.last_error_code<>'' AND p.last_error_code NOT IN %s "
+            "THEN 'validation_failed' "
             "ELSE 'available' END"
+            % _NONBLOCKING_MATERIAL_VALIDATION_SQL
         )
         clauses = []
         values = []
@@ -3383,10 +3399,11 @@ class XPostStore:
                 "SUM(CASE WHEN p.status='unpublished' THEN 1 ELSE 0 END) AS unpublished,"
                 "SUM(CASE WHEN p.status='published' THEN 1 ELSE 0 END) AS published,"
                 "SUM(CASE WHEN p.status='unpublished' AND q.id IS NULL "
-                "AND p.last_error_code='' "
+                "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                 "THEN 1 ELSE 0 END) AS available,"
                 "SUM(CASE WHEN p.status='unpublished' AND q.id IS NOT NULL "
                 "THEN 1 ELSE 0 END) AS occupied"
+                % _NONBLOCKING_MATERIAL_VALIDATION_SQL
                 + join_sql
             ).fetchone()
         items = []
@@ -5281,13 +5298,14 @@ class XPostStore:
                 expected_pools = conn.execute(
                     "SELECT p.* FROM x_post_material_pool p "
                     "WHERE p.status='unpublished' "
-                    "AND p.last_error_code='' "
+                    "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                     "AND NOT EXISTS("
                     "SELECT 1 FROM x_post_queue q "
                     "WHERE q.pool_item_id=p.id "
                     "OR q.material_key=p.material_key"
                     ") "
-                    "ORDER BY p.created_at,p.id LIMIT ?",
+                    "ORDER BY p.created_at,p.id LIMIT ?"
+                    % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                     (len(prepared),),
                 ).fetchall()
                 expected_pool_ids = [
@@ -5612,8 +5630,6 @@ class XPostStore:
                 if values["pool_item_id"] in pool_item_ids:
                     raise XPostError("invalid_request", "每日计划素材池记录必须互不相同", 400)
                 pool_item_ids.add(values["pool_item_id"])
-            if any(values[field] != 0 for field in COMPLIANCE_COUNT_FIELDS):
-                raise XPostError("invalid_request", "每日计划候选存在违规或危险标签计数", 400)
             account_ids.add(values["account_id"])
             material_keys.add(values["material_key"])
             prepared.append(values)
@@ -6086,15 +6102,6 @@ class XPostStore:
                         400,
                     )
                 pool_item_ids.add(values["pool_item_id"])
-            if any(
-                values[field] != 0
-                for field in COMPLIANCE_COUNT_FIELDS
-            ):
-                raise XPostError(
-                    "invalid_request",
-                    "补发计划候选存在违规或危险标签计数",
-                    400,
-                )
             account_ids.add(values["account_id"])
             material_keys.add(values["material_key"])
             prepared.append(values)

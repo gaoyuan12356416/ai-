@@ -1,8 +1,8 @@
 """Read-only Dramawave candidate selection for the daily X publisher.
 
 The selector deliberately keeps the reporting database outside the publishing
-transaction.  It only returns candidates whose source metadata, four violation
-stores, material tags and drama mapping can all be checked unambiguously.
+transaction. Violation and dangerous-tag evidence is retained for audit, but
+the X channel does not use that evidence to reject an otherwise valid material.
 """
 
 from __future__ import annotations
@@ -163,6 +163,19 @@ def contains_dangerous_tag(value):
     ) or any(
         word in normalized for word in _CJK_DANGER
     )
+
+
+def _dangerous_tag_count(values):
+    """Return informational X safety-tag evidence without making it a gate."""
+    count = 0
+    for value in values:
+        try:
+            count += int(contains_dangerous_tag(value))
+        except CandidateSelectionError:
+            # Tag evidence is audit-only for X. Malformed tag metadata must not
+            # make an otherwise publishable material unavailable.
+            continue
+    return count
 
 
 def _text(value, label, required=True, limit=4096):
@@ -487,41 +500,12 @@ class DramawaveCandidateSelector:
                 "violation_check_invalid",
                 "violation check returned invalid data: %s" % exc,
             ) from None
-        if any(value != 0 for value in normalized_counts.values()):
-            raise PoolCandidateRejection(
-                "material_has_violation",
-                "material has a violation record",
-            )
-
         source_tag = row.get("source_tag_name")
-        if source_tag not in (None, ""):
-            try:
-                source_tag_is_unsafe = contains_dangerous_tag(source_tag)
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "material_source_tag_invalid",
-                    "material source tag cannot be checked safely: %s" % exc,
-                ) from None
-            if source_tag_is_unsafe:
-                raise PoolCandidateRejection(
-                    "material_source_tag_unsafe",
-                    "material source tag is unsafe",
-                )
-
         material_tags = self._material_tags(candidate_id)
-        for tag_value in material_tags:
-            try:
-                tag_is_unsafe = contains_dangerous_tag(tag_value)
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "material_tag_invalid",
-                    "material tag cannot be checked safely: %s" % exc,
-                ) from None
-            if tag_is_unsafe:
-                raise PoolCandidateRejection(
-                    "material_tag_unsafe",
-                    "material tag is unsafe",
-                )
+        dangerous_tag_count = _dangerous_tag_count(
+            ([source_tag] if source_tag not in (None, "") else [])
+            + list(material_tags)
+        )
 
         drama_rows = self._pool_drama_rows(content_id, material_language)
         if not drama_rows:
@@ -615,7 +599,7 @@ class DramawaveCandidateSelector:
             "tiktok_violation_count": normalized_counts["tiktok_count"],
             "twitter_violation_count": normalized_counts["twitter_count"],
             "resource_audit_count": normalized_counts["resource_audit_count"],
-            "dangerous_tag_count": 0,
+            "dangerous_tag_count": dangerous_tag_count,
         }
 
     def _candidate(self, row, source_date):
@@ -654,16 +638,13 @@ class DramawaveCandidateSelector:
             "resource_audit_count",
         ):
             normalized_counts[field] = _integer(violation_counts.get(field), field)
-            if normalized_counts[field] != 0:
-                raise CandidateSelectionError("material has a violation record")
 
         source_tag = row.get("source_tag_name")
-        if source_tag not in (None, "") and contains_dangerous_tag(source_tag):
-            raise CandidateSelectionError("material source tag is unsafe")
         material_tags = self._material_tags(candidate_id)
-        for tag_value in material_tags:
-            if contains_dangerous_tag(tag_value):
-                raise CandidateSelectionError("material tag is unsafe")
+        dangerous_tag_count = _dangerous_tag_count(
+            ([source_tag] if source_tag not in (None, "") else [])
+            + list(material_tags)
+        )
 
         drama_rows = self._drama_rows(content_id, series_code, material_language)
         if not drama_rows:
@@ -724,7 +705,7 @@ class DramawaveCandidateSelector:
             "tiktok_violation_count": normalized_counts["tiktok_count"],
             "twitter_violation_count": normalized_counts["twitter_count"],
             "resource_audit_count": normalized_counts["resource_audit_count"],
-            "dangerous_tag_count": 0,
+            "dangerous_tag_count": dangerous_tag_count,
         }
 
     def select(self, source_date, excluded_material_keys=(), limit=3, scan_limit=1000):
@@ -759,11 +740,12 @@ class DramawaveCandidateSelector:
         return selected
 
     def select_pool(self, pool_items, source_date, limit=3):
-        """Hydrate the oldest safe manual-pool items.
+        """Hydrate the oldest publishable manual-pool items.
 
         Pool order is determined exclusively by ``created_at`` then ``id``.
-        A data-quality or safety rejection is returned per item, while a
-        database query failure aborts the whole operation.
+        A data-quality rejection is returned per item, while violation and
+        dangerous-tag evidence is audit-only for X. A database query failure
+        still aborts the whole operation.
         """
         source_date = normalize_date(source_date)
         try:
