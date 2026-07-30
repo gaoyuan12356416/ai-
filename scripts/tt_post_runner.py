@@ -370,6 +370,13 @@ class TTPostSidecarClient:
             )
         return [dict(item) for item in items]
 
+    def schedules_due(self) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/internal/tt-posts/schedules/due",
+            {},
+        )
+
     def publish(self, queue_id: int, claim_token: str) -> Dict[str, Any]:
         return self._request(
             "POST",
@@ -436,62 +443,118 @@ def execute_runner_tick(
     )
     results: List[Dict[str, Any]] = []
 
-    # Claim the narrow scheduling window first.  Reconciliation is deliberately
-    # the remaining phase so a backlog cannot consume the ten-minute grace.
-    claims = sidecar.claim(
-        worker_id=config.worker_id,
-        grace_seconds=config.grace_seconds,
-        limit=config.claim_limit,
-    )
-    for claim in claims:
-        queue = claim["queue"]
-        try:
-            queue_id = int(queue.get("id") or queue.get("queue_id") or 0)
-        except (TypeError, ValueError, OverflowError):
-            queue_id = 0
-        status = str(queue.get("queue_status") or queue.get("status") or "")
-        if queue_id <= 0:
-            results.append(
-                _safe_publish_request_error(
-                    queue,
-                    RunnerError(
-                        "tt_post_sidecar_invalid_response",
-                        "TT Post领取任务身份无效",
-                        502,
-                    ),
+    def claim_and_publish(limit: int) -> int:
+        claims = sidecar.claim(
+            worker_id=config.worker_id,
+            grace_seconds=config.grace_seconds,
+            limit=limit,
+        )
+        for claim in claims:
+            queue = claim["queue"]
+            try:
+                queue_id = int(
+                    queue.get("id") or queue.get("queue_id") or 0
                 )
+            except (TypeError, ValueError, OverflowError):
+                queue_id = 0
+            status = str(
+                queue.get("queue_status") or queue.get("status") or ""
             )
-            continue
-        if (
-            status in {"unknown", "needs_review"}
-            or bool(queue.get("unknown_outcome"))
-        ):
-            results.append(
-                {
-                    "operation": "skip_unknown",
-                    **_safe_result(queue),
-                }
-            )
-            continue
-        claim_token = str(claim.get("claim_token") or "")
-        if not claim_token:
-            # Compliance-blocked hold rows deliberately have no executable
-            # claim token and therefore can never reach publish init.
-            results.append(
-                {
-                    "operation": "blocked_or_missed",
-                    **_safe_result(queue),
-                }
-            )
-            continue
-        try:
-            result = sidecar.publish(queue_id, claim_token)
-        except RunnerError as exc:
-            results.append(_safe_publish_request_error(queue, exc))
-            continue
-        results.append({"operation": "publish", **_safe_result(result)})
+            if queue_id <= 0:
+                results.append(
+                    _safe_publish_request_error(
+                        queue,
+                        RunnerError(
+                            "tt_post_sidecar_invalid_response",
+                            "TT Post领取任务身份无效",
+                            502,
+                        ),
+                    )
+                )
+                continue
+            if (
+                status in {"unknown", "needs_review"}
+                or bool(queue.get("unknown_outcome"))
+            ):
+                results.append(
+                    {
+                        "operation": "skip_unknown",
+                        **_safe_result(queue),
+                    }
+                )
+                continue
+            claim_token = str(claim.get("claim_token") or "")
+            if not claim_token:
+                # Compliance-blocked hold rows deliberately have no executable
+                # claim token and therefore can never reach publish init.
+                results.append(
+                    {
+                        "operation": "blocked_or_missed",
+                        **_safe_result(queue),
+                    }
+                )
+                continue
+            try:
+                result = sidecar.publish(queue_id, claim_token)
+            except RunnerError as exc:
+                results.append(_safe_publish_request_error(queue, exc))
+                continue
+            results.append({"operation": "publish", **_safe_result(result)})
+        return len(claims)
 
-    # A stored publish ID is reconciled after due claims.  Each row is isolated
+    # Existing absolute/manual queues get the first claim budget so a slow
+    # Creator Info check for a new daily slot cannot make them miss grace.
+    claimed_before_schedule = claim_and_publish(config.claim_limit)
+
+    # Persist and freeze current recurring daily slots next. The sidecar owns
+    # all timezone/FIFO/idempotency and crash-recovery decisions.
+    due_result = sidecar.schedules_due()
+    due_items = due_result.get("items", [])
+    if not isinstance(due_items, list):
+        raise RunnerError(
+            "tt_post_sidecar_invalid_response",
+            "TT Post recurring schedule response is invalid",
+            502,
+        )
+    for item in due_items:
+        if not isinstance(item, Mapping):
+            raise RunnerError(
+                "tt_post_sidecar_invalid_response",
+                "TT Post recurring schedule item is invalid",
+                502,
+            )
+        results.append(
+            {
+                "operation": "schedule_due",
+                "run_id": item.get("run_id") or item.get("id"),
+                "queue_id": item.get("queue_id"),
+                "source_account_id": str(
+                    item.get("source_account_id")
+                    or item.get("account_id")
+                    or ""
+                ),
+                "material_id": str(item.get("material_id") or ""),
+                "status": str(item.get("status") or ""),
+                "error_code": str(item.get("error_code") or "")[:96],
+                "error_message": redact_text(
+                    item.get("error_message") or "",
+                    500,
+                ),
+            }
+        )
+
+    # If due created a queue and the first phase did not exhaust the bounded
+    # budget, claim only the remaining capacity so the new slot can run in the
+    # same tick without doubling the per-tick maximum.
+    created_due_queue = any(
+        isinstance(item, Mapping) and bool(item.get("queue_id"))
+        for item in due_items
+    )
+    remaining_claim_limit = config.claim_limit - claimed_before_schedule
+    if created_due_queue and remaining_claim_limit > 0:
+        claim_and_publish(remaining_claim_limit)
+
+    # A stored publish ID is reconciled after all due claims. Each row is isolated
     # so one remote business error cannot block the rest of the tick.
     for queue in sidecar.reconciling(config.reconcile_limit):
         try:
@@ -519,6 +582,7 @@ def execute_runner_tick(
 
     return {
         "status": "ok",
+        "schedule_due_count": len(due_items),
         "grace_seconds": config.grace_seconds,
         "reconcile_budget": config.reconcile_limit,
         "reconcile_count": sum(

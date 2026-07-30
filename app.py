@@ -41492,7 +41492,10 @@ TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/account-settings/batch/creator-info": {"POST"},
     "/api/admin/tt-posts/creator-info": {"POST"},
     "/api/admin/tt-posts/materials/preview": {"POST"},
-    "/api/admin/tt-posts/queue": {"GET", "POST"},
+    "/api/admin/tt-posts/material-pool": {"GET", "POST"},
+    "/api/admin/tt-posts/schedule": {"GET", "POST"},
+    "/api/admin/tt-posts/run-now": {"POST"},
+    "/api/admin/tt-posts/queue": {"GET"},
     "/api/admin/tt-posts/events": {"GET"},
 }
 TT_POST_SENSITIVE_KEYS = {
@@ -93849,6 +93852,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if parsed.path in {
             "/api/admin/tt-posts/accounts",
             "/api/admin/tt-posts/account-settings",
+            "/api/admin/tt-posts/material-pool",
+            "/api/admin/tt-posts/schedule",
             "/api/admin/tt-posts/queue",
             "/api/admin/tt-posts/events",
         }:
@@ -93870,6 +93875,23 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         parsed.query,
                         {"queue_id"},
                         required={"queue_id"},
+                    )
+                elif parsed.path == "/api/admin/tt-posts/schedule":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {"source_account_id"},
+                        required={"source_account_id"},
+                    )
+                elif parsed.path == "/api/admin/tt-posts/material-pool":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {
+                            "page",
+                            "page_size",
+                            "material_id",
+                            "source_account_id",
+                            "status",
+                        },
                     )
                 else:
                     query = _tt_post_query_params(
@@ -97325,7 +97347,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/api/admin/tt-posts/account-settings/batch/creator-info",
             "/api/admin/tt-posts/creator-info",
             "/api/admin/tt-posts/materials/preview",
-            "/api/admin/tt-posts/queue",
+            "/api/admin/tt-posts/material-pool",
+            "/api/admin/tt-posts/schedule",
+            "/api/admin/tt-posts/run-now",
         }:
             navigation_key = (
                 "ttAccountSettings"
@@ -97355,7 +97379,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 ),
                 "/api/admin/tt-posts/creator-info": "check_tt_post_creator_info",
                 "/api/admin/tt-posts/materials/preview": "prepare_tt_post_material",
-                "/api/admin/tt-posts/queue": "create_tt_post_queue",
+                "/api/admin/tt-posts/material-pool": "add_tt_post_material_pool",
+                "/api/admin/tt-posts/schedule": "save_tt_post_daily_schedule",
+                "/api/admin/tt-posts/run-now": "run_tt_post_now",
             }
             action = action_by_path[parsed.path]
             batch_source_account_ids = []
@@ -97443,6 +97469,14 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         ),
                         "publish_mode": str(
                             item.get("publish_mode") or ""
+                        ),
+                        "publish_time": str(
+                            item.get("publish_time")
+                            or request_payload.get("publish_time")
+                            or ""
+                        ),
+                        "trigger_type": str(
+                            item.get("trigger_type") or ""
                         ),
                     }
                     if parsed.path == "/api/admin/tt-posts/account-settings":

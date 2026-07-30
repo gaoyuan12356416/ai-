@@ -75,7 +75,10 @@ def _client_namespace():
             "/api/admin/tt-posts/account-settings/batch/creator-info": {"POST"},
             "/api/admin/tt-posts/creator-info": {"POST"},
             "/api/admin/tt-posts/materials/preview": {"POST"},
-            "/api/admin/tt-posts/queue": {"GET", "POST"},
+            "/api/admin/tt-posts/material-pool": {"GET", "POST"},
+            "/api/admin/tt-posts/schedule": {"GET", "POST"},
+            "/api/admin/tt-posts/run-now": {"POST"},
+            "/api/admin/tt-posts/queue": {"GET"},
             "/api/admin/tt-posts/events": {"GET"},
         },
         "TT_POST_SENSITIVE_KEYS": {
@@ -196,6 +199,8 @@ class TTPostsAppContractTest(unittest.TestCase):
         self.assertIn('"/api/admin/tt-posts/account-settings"', route)
         self.assertIn('"/api/admin/tt-posts/queue"', route)
         self.assertIn('"/api/admin/tt-posts/events"', route)
+        self.assertIn('"/api/admin/tt-posts/material-pool"', route)
+        self.assertIn('"/api/admin/tt-posts/schedule"', route)
         self.assertIn("_tt_post_query_params(", route)
         self.assertIn("_tt_post_service_request(", route)
         self.assertGreaterEqual(route.count("no_store=True"), 2)
@@ -230,7 +235,10 @@ class TTPostsAppContractTest(unittest.TestCase):
             route,
         )
         self.assertIn('"/api/admin/tt-posts/materials/preview"', route)
-        self.assertIn('"/api/admin/tt-posts/queue"', route)
+        self.assertIn('"/api/admin/tt-posts/material-pool"', route)
+        self.assertIn('"/api/admin/tt-posts/schedule"', route)
+        self.assertIn('"/api/admin/tt-posts/run-now"', route)
+        self.assertNotIn('"/api/admin/tt-posts/queue"', route)
         self.assertIn("_tt_post_service_request(", route)
         self.assertIn("append_audit_log(", route)
         self.assertIn('"save_tt_post_account_settings"', route)
@@ -249,6 +257,26 @@ class TTPostsAppContractTest(unittest.TestCase):
         self.assertIn('"version"', route)
         self.assertNotIn('"caption_text":', route)
         self.assertGreaterEqual(route.count("no_store=True"), 2)
+
+    def test_legacy_exact_queue_creation_is_not_publicly_writable(self):
+        methods = _literal_assignment("TT_POST_ADMIN_ROUTE_METHODS")
+        self.assertEqual(
+            {"GET"},
+            methods["/api/admin/tt-posts/queue"],
+        )
+        start = APP_SOURCE.index(
+            '        if parsed.path in {\n'
+            '            "/api/admin/tt-posts/account-settings",'
+        )
+        end = APP_SOURCE.index(
+            "        x_post_account_verify_match = re.fullmatch(",
+            start,
+        )
+        route = APP_SOURCE[start:end]
+        self.assertNotIn(
+            '"/api/admin/tt-posts/queue": "create_tt_post_queue"',
+            route,
+        )
 
     def test_queue_actions_use_dynamic_sidecar_routes_and_safe_audit(self):
         start = APP_SOURCE.index(

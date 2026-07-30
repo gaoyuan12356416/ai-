@@ -41,3 +41,47 @@
 ## PM 修订确认
 
 2026-07-29 已将初版及本轮增量全部 P0/P1 建议写入需求和验收标准。本轮代码、自动化和生产关闭态验证尚未完成，当前结论不构成部署完成或开放 Direct Post 的证明。
+
+## 2026-07-30 增量架构评审（仅本地）
+
+### 结论
+
+“TT 长素材 + 每日账号素材池 + 手动立即发布”方案在本地架构与自动化层面有条件通过。条件是继续保持 X 的 140 秒合同独立、固定 600 秒安全窗口、账号串行、两段崩溃恢复和三重门禁 fail-close。本结论不表示增量已经部署生产或线上验收通过。
+
+### 增量决策
+
+- TT 使用独立 resolver 接受 `1..3600` 秒素材；不得修改 X selector 的 `1..140` 参数。素材 4665764 的本地回归模型固定为 2087 秒。
+- 每日排期只保存 `Asia/Shanghai` 的 `HH:MM` 和版本；素材池按账号隔离并以 `created_at,id` 为 FIFO 事实，不在页面计算下一条。
+- 每个自然日时点由唯一 run 表示。重复 tick、进程重启和手动/自动竞争均必须回到同一持久化身份。
+- 安全窗口固定为 600 秒。宽限内允许恢复同一 run；超窗只能 `missed`，不能追发。
+- `claim → freeze` 通过 claimed-unbound run 恢复；`freeze → bind` 通过 legacy queue 的稳定幂等键恢复。恢复逻辑不得删除或重建旧 queue 状态机。
+- 手动意图按 `account_id` 保存到 `sessionStorage` 的非敏感映射；成功或明确未发布删除对应 key，`unknown`/未确认保留。页面刷新或切换账号不得生成跨账号重复请求。
+- Runner 先消费旧 queue 的领取预算，再持久化 daily due；仅以剩余 `claim_limit` 领取新建 daily queue。reconcile 始终在领取/发布之后。
+- 三道 Direct Post 门禁在 recurring claim 前检查。门禁关闭必须做到“不消费素材”，而不只是“不调用远端 API”。
+- 同一 run 的执行权使用 120 秒独占 lease 和 fencing token；`freeze/release/bind` 必须在事务内同时核验 run、pool、lease 与 token 身份，防止过期 owner 产生错误释放或孤儿 queue。
+- 账号切换进入未配置或加载态时，发布时间必须先恢复默认 `11:00`，不得复用上一账号的展示值。
+- 主应用公共兼容精确 `/api/admin/tt-posts/queue` 只允许 GET；创建只能走受控的新流程，动态 cancel/reconcile 路由继续保留。
+
+### 增量问题闭环
+
+| 编号 | 级别 | 问题 | 决策 | 本地状态 |
+| --- | --- | --- | --- | --- |
+| SA-014 | P0 | 为 TT 放宽长视频可能连带放宽 X | TT resolver 独立 3600；X selector 参数固定 140 并单独回归 | 自动化通过 |
+| SA-015 | P0 | minute tick 重复可能重复消费 FIFO | 自然日时点唯一 run + 账号级 FIFO + 账号 active-run 串行 | 自动化通过 |
+| SA-016 | P0 | claim 后或 queue 冻结后进程退出可能留下半状态 | 分别持久化 claimed run，并按 queue 幂等键恢复 bind | 自动化通过 |
+| SA-017 | P0 | 手动请求响应丢失、刷新或切号可能重复消费 | sessionStorage 按账号持久化 key；unknown/未确认不换 key | 自动化通过 |
+| SA-018 | P0 | 旧队列与 daily queue 同 tick 可能把 `claim_limit` 翻倍 | 旧队列先 claim，daily 只使用剩余预算 | 自动化通过 |
+| SA-019 | P0 | 门禁关闭后先 reserve 再拒绝会占住素材 | 门禁检查前置到 recurring claim，关闭时 pool 保持 `available` | 自动化通过 |
+| SA-020 | P1 | 可配置宽限会造成多节点语义漂移 | Runner 与 sidecar 仅接受 600 秒 | 自动化通过 |
+| SA-021 | P0 | 同一 run 的并发 owner 在预检异常与 queue 冻结交错时可能错误释放素材或留下孤儿 queue | 每 run 120 秒 execution lease + fencing token；freeze/release/bind 事务内校验完整身份，过期 owner 全部失权 | 自动化通过，本地关闭 |
+| SA-022 | P1 | 切换未配置账号时可能继承上一账号的发布时间 | 未配置/加载态统一先重置默认 `11:00`，只渲染当前账号的有效配置 | 自动化通过，本地关闭 |
+| SA-023 | P1 | 公共兼容 POST `/queue` 在门禁关闭时仍可能 reserve 素材 | 主应用精确 `/queue` 改为 GET-only；保留 GET 与动态 cancel/reconcile | 自动化通过，本地关闭 |
+
+### 生产验收待填写
+
+- 合入提交、不可变 release、备份和回滚点：`待填写`
+- 七表迁移、生产数据完整性和旧四表兼容：`待填写`
+- 生产 Runner timer/path、先旧队列后 due、总 claim 预算：`待填写`
+- 三项门禁值与“不消费素材”的生产证据：`待填写`
+- 素材 4665764 的真实 resolver/GPU/账号时长链路：`待填写`
+- 登录态跨刷新、多账号手动 key 行为及无凭据存储检查：`待填写`

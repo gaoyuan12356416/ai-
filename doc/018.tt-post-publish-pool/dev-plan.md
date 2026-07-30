@@ -6,18 +6,23 @@
 
 2026-07-29 增量范围：在不新增 API 路由、数据库表或 GPU 服务的前提下，将单素材表单扩展为浏览器编排的 1–100 素材批量流程；增加首条时间加可编辑间隔、可编辑描述模板、逐项部分失败隔离、确定性 prepare 复用及旧请求兼容。
 
+2026-07-30 增量范围：素材批量读取成功后只冻结到所选账号的 FIFO
+发布池；账号独立保存一个每日上海时间并由分钟 runner 自动消费下一条；
+新增一次性手动立即发布入口，但不修改或替代每日时间。TT 素材预校验上限独立
+调整为 3600 秒，X 素材池仍保持 140 秒。
+
 ## 任务拆分
 
 | 任务 | 负责人 | 文件/模块 | 状态 |
 | --- | --- | --- | --- |
 | 需求、规则和 API 设计 | PM/SA | `doc/018.tt-post-publish-pool/` | 已完成 |
-| CPU SQLite 状态机与安全账号源 | 开发 | `features/tt_posts/` | 已完成并上线 |
-| GPU 成片与 TikTok sidecar | 开发 | `features/tt_gpu/`、`scripts/tt_gpu_worker.py` | 上一基线已完成；本轮语义不变 |
-| 主后台路由、权限和审计 | 开发 | `app.py` | 上一基线已完成；本轮不新增路由 |
-| 发布池 UI 与导航 | 前端 | `static/tt-post-pool.html`、导航配置 | 已完成并上线 |
-| claim/runner、systemd 与隧道 | 开发 | `scripts/`、`deploy/` | 上一基线已完成；本轮语义不变 |
-| 单元、合同、浏览器与线上关闭态验收 | QA/SA | `scripts/test_tt_*.py` | 已完成，275/275 通过 |
-| GitHub-first CPU/GPU 部署 | 运维 | immutable release | CPU 已上线；GPU 本轮未改 |
+| CPU SQLite 状态机与安全账号源 | 开发 | `features/tt_posts/` | 基线已上线；每日发布增量已完成，待部署 |
+| GPU 成片与 TikTok sidecar | 开发 | `features/tt_gpu/`、`scripts/tt_gpu_worker.py` | 基线已上线；本轮 3600 秒上限已完成，待部署 |
+| 主后台路由、权限和审计 | 开发 | `app.py` | 新增素材池、每日设置和手动发布代理，待部署 |
+| 发布池 UI 与导航 | 前端 | `static/tt-post-pool.html`、导航配置 | 每日发布与手动按钮已完成，待部署 |
+| claim/runner、systemd 与隧道 | 开发 | `scripts/`、`deploy/` | 分钟调度与 path 即时唤醒已完成，待部署 |
+| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | 本地 568/568 通过（TT 189、X 351、素材状态 28） |
+| GitHub-first CPU/GPU 部署 | 运维 | immutable release | 待执行 |
 
 ### 本轮增量任务
 
@@ -32,6 +37,19 @@
 | GitHub-first CPU 部署 | CPU immutable release | 备份、切换、健康检查和公网浏览器验证；不创建真实 Post | 已完成 |
 
 本轮未修改 GPU release 的媒体制作语义，也未新增 TT 批量表。CPU 已切换至 `/opt/tt-post/releases/5cfc657`；GPU 保持 `/opt/tt-post-gpu/releases/18148b2`。
+
+### 2026-07-30 每日发布增量任务
+
+| 任务 | 文件/模块 | 完成条件 | 状态 |
+| --- | --- | --- | --- |
+| 长素材资格修复 | `features/tt_posts/service.py` | 素材 4665764（2087 秒）通过 TT 预校验；X 140 秒条件不变 | 已完成 |
+| 每日配置与 FIFO 账本 | `features/tt_posts/core.py` | 旧四表不改，只增三表；按账号 FIFO、乐观版本、自动/手动 run 幂等 | 已完成 |
+| 每日与手动 API | `features/tt_posts/service.py`、`app.py` | 入池不建 queue；到点/手动才原子领取；关闭门禁不消费素材 | 已完成 |
+| 分钟调度与即时唤醒 | `scripts/tt_post_runner.py`、`deploy/tt-post-runner.path` | timer 每分钟识别当日时点；手动请求用 path 唤醒且 timer 60 秒兜底 | 已完成 |
+| GPU 长度配置 | `features/tt_gpu/worker.py`、GPU 环境 | 全局制作上限 3600 秒；最终仍服从账号实时上限 | 已完成，待生产切换 |
+| 发布池 UI | `static/tt-post-pool.html` | 每日时间、启用开关、保存、下一次时间、待发数量和手动按钮 | 已完成 |
+| 自动化与生产验收 | `scripts/test_tt_*.py`、生产关闭态 | 全回归、数据库迁移、4665764 实测、浏览器与零 init 验收 | 执行中 |
+| GitHub-first CPU/GPU 部署 | immutable releases | 备份、推送、精确 commit 部署、健康检查和回滚点 | 待执行 |
 
 ## 编译 / 构建命令
 

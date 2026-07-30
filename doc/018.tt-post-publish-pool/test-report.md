@@ -127,3 +127,63 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.
 ## 发布建议
 
 当前仅允许继续运行三道 Direct Post 门禁关闭的准备/预检版本。完成 TikTok 平台审核、URL Property 验证与无品牌媒体合规确认之前，不得开启真实 Direct Post。
+
+## 2026-07-30 增量测试报告（仅本地自动化）
+
+本节是对 2026-07-30 增量代码的本地结果，不更新也不继承上文 2026-07-29 的生产 release 结论。当前增量尚未在本报告中记录生产部署、线上页面通过或真实 TikTok 发布通过。
+
+### 执行结果
+
+本地执行以下六个 TT 相关测试集，共 `189/189` 通过，用时 12.772 秒：
+
+| 测试集 | 通过 | 失败 |
+| --- | ---: | ---: |
+| TT Core | 49 | 0 |
+| TT Service + Runner | 70 | 0 |
+| TT GPU | 25 | 0 |
+| TT 发布池 UI | 23 | 0 |
+| TT 个号设置 UI | 11 | 0 |
+| TT App contract | 11 | 0 |
+| **合计** | **189** | **0** |
+
+执行命令：
+
+```text
+python -m unittest scripts.test_tt_posts_core scripts.test_tt_posts_service scripts.test_tt_gpu_worker scripts.test_tt_post_pool_ui scripts.test_tt_account_settings_ui scripts.test_tt_posts_app_contract
+```
+
+### 上线前复审发现并关闭
+
+| 级别 | 复审发现 | 本地关闭方案与证据 | 状态 |
+| --- | --- | --- | --- |
+| P0 | 同一 run 并发执行时，一个执行者预检报错释放素材，另一个执行者仍可能冻结 queue，形成错误释放或孤儿 queue | 增加每个 run 独占的 120 秒 execution lease 与不可外泄的 fencing token；`freeze/release/bind` 均在事务内核验 run、pool、lease 与 token 身份；本地覆盖 release-first、freeze-first、lease 到期接管及过期 owner 拒绝 | 本地关闭 |
+| P1 | 从已配置账号切到未配置/加载中账号时，时间控件可能沿用上一账号时间 | 未配置或加载态先重置为默认 `11:00`，再按当前账号数据渲染；本地页面合同测试通过 | 本地关闭 |
+| P1 | 主应用公共兼容 `POST /queue` 可绕过新入口，在门禁关闭时 reserve 素材 | 主应用精确 `/api/admin/tt-posts/queue` 方法白名单改为仅 `GET`；保留 GET 查询及动态 cancel/reconcile，移除公共兼容写入转发 | 本地关闭 |
+
+### 已由本地自动化证明的增量事实
+
+- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`，但不计入本次 TT `189/189`。
+- 每日设置与待发素材分开持久化；同一自然日时点幂等，账号级 FIFO 和账号隔离成立。
+- 发布宽限固定为 600 秒；非 600 配置被拒绝，宽限内恢复与超窗 `missed` 均有自动化覆盖。
+- `claim → freeze` 中断后可在后续 minute tick 找回 claimed run；`freeze → bind` 中断后按稳定 queue 幂等键找回既有 queue。两类恢复均未创建重复 run/queue 或重复消费素材。
+- 同一 run 的执行权由 120 秒独占 lease 和 fencing token 约束；过期 owner 不能在新 owner 释放后继续冻结，也不能在 queue 已冻结后错误释放素材。
+- 切换到未配置或加载中的账号时，发布时间恢复默认 `11:00`，不会继承上一账号的值。
+- 主应用公共精确 `/queue` 路由只读；门禁关闭时不能通过兼容 POST reserve 素材，GET/cancel/reconcile 能力保持。
+- 手动请求 key 按账号保存到固定、非敏感的 `sessionStorage` 映射；读取时校验账号格式、key 前缀/长度/字符、状态、总长度和账号数量。成功或明确未发布删除对应账号，`unknown` 或未确认结果保留。
+- Runner 先处理既有到期 queue，再执行 recurring due；daily due 新建 queue 后只使用剩余 `claim_limit`，不会把单 tick 领取上限翻倍。
+- 三项门禁任一关闭时，手动发布在领取素材前 fail-close；本地断言素材仍为 `available`、queue 为空且 publish 调用为 0。
+
+### 尚未完成的生产验收
+
+| 验收项 | 结果 |
+| --- | --- |
+| Git 提交、远端分支和不可变 release 对应关系 | 待填写 |
+| CPU/GPU 备份、部署、服务重启与回滚演练 | 待填写 |
+| 生产 SQLite 七表增量迁移、完整性和真实行数 | 待填写 |
+| 生产 timer/path 唤醒、600 秒宽限及 claim 总预算 | 待填写 |
+| 三项门禁关闭时 pool/run/queue 不消费证据 | 待填写 |
+| 素材 4665764 真实 preview、成片时长和目标账号 3600 秒能力 | 待填写 |
+| 登录态页面的每日排期、FIFO 数量、跨刷新/多账号手动幂等 | 待填写 |
+| 公网 no-store、静态资源 hash 和 TikTok 外部请求计数 | 待填写 |
+
+在上述项目填写并复核前，本节不得作为“已生产部署”或“线上通过”的依据。

@@ -1,0 +1,11 @@
+[Unit]
+Description=Wake the Dramawave TikTok Post runner for a manual request
+After=tt-post-service.service
+Requires=tt-post-service.service
+
+[Path]
+PathChanged=/run/tt-post/manual-kick
+Unit=tt-post-runner.service
+
+[Install]
+WantedBy=multi-user.target

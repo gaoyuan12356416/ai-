@@ -6,7 +6,7 @@ Security boundaries:
 * an access token is fetched for one exact account only inside
   ``SnapshotAccountSource.publish_credentials``;
 * credential and claim wrappers redact their secret values from ``repr``;
-* no access token is persisted in the three SQLite tables;
+* no access token is persisted in the SQLite ledger tables;
 * a remote ``publish_id`` moves a queue into reconcile-only state;
 * unknown outcomes are terminal and are never selected by ``claim_due``;
 * all three live gates default to closed.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import secrets
@@ -64,6 +65,33 @@ QUEUE_STATUSES = frozenset(
     }
 )
 POOL_STATUSES = frozenset({"available", "reserved", "published", "canceled"})
+RECURRING_POOL_STATUSES = frozenset(
+    {"available", "reserved", "consumed", "canceled"}
+)
+SCHEDULE_RUN_STATUSES = frozenset(
+    {
+        "claimed",
+        "preflight_failed",
+        "scheduled",
+        "publishing",
+        "reconciling",
+        "published",
+        "failed",
+        "canceled",
+        "missed",
+        "blocked_compliance",
+        "unknown",
+    }
+)
+ACTIVE_QUEUE_STATUSES = frozenset(
+    {"scheduled", "claimed", "publishing", "reconciling", "unknown"}
+)
+ACTIVE_SCHEDULE_RUN_STATUSES = frozenset(
+    {"claimed", "scheduled", "publishing", "reconciling", "unknown"}
+)
+TERMINAL_SCHEDULE_RUN_STATUSES = SCHEDULE_RUN_STATUSES.difference(
+    ACTIVE_SCHEDULE_RUN_STATUSES
+)
 TERMINAL_QUEUE_STATUSES = frozenset(
     {"published", "failed", "canceled", "missed", "blocked_compliance", "unknown"}
 )
@@ -85,6 +113,8 @@ _WORKER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
 _GPU_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{11,127}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
+_PUBLISH_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+_SHANGHAI_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 
 def redact_text(value: Any, limit: int = MAX_EVENT_MESSAGE_CHARS) -> str:
@@ -159,6 +189,99 @@ def _positive_int(value: Any, label: str, maximum: int = 2**63 - 1) -> int:
     if result <= 0 or result > int(maximum):
         raise TTPostError("invalid_request", "%s无效" % label, 400)
     return result
+
+
+def _nonnegative_int(
+    value: Any,
+    label: str,
+    maximum: int = 2**63 - 1,
+) -> int:
+    if (
+        isinstance(value, bool)
+        or (
+            isinstance(value, float)
+            and (not math.isfinite(value) or not value.is_integer())
+        )
+    ):
+        raise TTPostError("invalid_request", "%s无效" % label, 400)
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise TTPostError("invalid_request", "%s无效" % label, 400) from None
+    if result < 0 or result > int(maximum):
+        raise TTPostError("invalid_request", "%s无效" % label, 400)
+    return result
+
+
+def _publish_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not _PUBLISH_TIME_RE.fullmatch(text):
+        raise TTPostError(
+            "invalid_publish_time",
+            "每日发布时间必须是严格的HH:MM格式",
+            400,
+        )
+    return text
+
+
+def _publish_times(value: Any) -> List[str]:
+    if (
+        isinstance(value, (str, bytes, bytearray, Mapping))
+        or not isinstance(value, Iterable)
+    ):
+        raise TTPostError(
+            "invalid_publish_times",
+            "每日发布时间必须是列表",
+            400,
+        )
+    raw_items = list(value)
+    if len(raw_items) > 24:
+        raise TTPostError(
+            "invalid_publish_times",
+            "每日发布时间最多24个",
+            400,
+        )
+    normalized = [_publish_time(item) for item in raw_items]
+    if len(set(normalized)) != len(normalized):
+        raise TTPostError(
+            "invalid_publish_times",
+            "每日发布时间不能重复",
+            400,
+        )
+    return sorted(normalized)
+
+
+def _shanghai_date(value: Any) -> str:
+    text = str(value or "").strip()
+    if not _SHANGHAI_DATE_RE.fullmatch(text):
+        raise TTPostError(
+            "invalid_shanghai_date",
+            "上海日期必须是严格的YYYY-MM-DD格式",
+            400,
+        )
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        raise TTPostError(
+            "invalid_shanghai_date",
+            "上海日期无效",
+            400,
+        ) from None
+    if parsed.strftime("%Y-%m-%d") != text:
+        raise TTPostError(
+            "invalid_shanghai_date",
+            "上海日期无效",
+            400,
+        )
+    return text
+
+
+def _scheduled_slot_utc(shanghai_date: str, publish_time: str) -> str:
+    local_value = datetime.strptime(
+        "%s %s" % (shanghai_date, publish_time),
+        "%Y-%m-%d %H:%M",
+    ).replace(tzinfo=BEIJING_TZ)
+    return _iso_utc(local_value.astimezone(UTC), "排期UTC时间")
 
 
 def _exact_bool(value: Any, label: str) -> bool:
@@ -844,6 +967,35 @@ class QueueClaim:
         return "QueueClaim(queue_id=%r, claim_token=<redacted>)" % self.queue_id
 
 
+class RecurringExecutionClaim:
+    """Per-run execution lease whose fencing token never enters public DTOs."""
+
+    __slots__ = ("run", "_execution_token")
+
+    def __init__(self, run: Mapping[str, Any], execution_token: str):
+        self.run = dict(run)
+        self._execution_token = execution_token
+
+    @property
+    def run_id(self) -> int:
+        return int(self.run["id"])
+
+    def reveal_execution_token(self) -> str:
+        if not self._execution_token:
+            raise TTPostError(
+                "tt_post_recurring_execution_closed",
+                "每日发布运行执行租约已关闭",
+                409,
+            )
+        return self._execution_token
+
+    def __repr__(self) -> str:
+        return (
+            "RecurringExecutionClaim("
+            "run_id=%r, execution_token=<redacted>)"
+        ) % self.run_id
+
+
 def _connect(db_path: Any) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -853,7 +1005,7 @@ def _connect(db_path: Any) -> sqlite3.Connection:
 
 
 def ensure_storage(db_path: Any) -> None:
-    """Create the four-table TikTok Post ledger and account settings."""
+    """Create the legacy ledger plus the additive recurring-publish tables."""
 
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -974,6 +1126,101 @@ def ensure_storage(db_path: Any) -> None:
                     FOREIGN KEY(pool_item_id) REFERENCES tt_post_material_pool(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS tt_post_daily_schedule (
+                    account_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(enabled IN (0,1)),
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(timezone='Asia/Shanghai'),
+                    publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
+                    user_consent INTEGER NOT NULL CHECK(user_consent=1),
+                    consent_version TEXT NOT NULL,
+                    consented_at_utc TEXT NOT NULL,
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS tt_post_recurring_pool (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    material_id TEXT NOT NULL UNIQUE,
+                    account_id TEXT NOT NULL,
+                    content_id TEXT NOT NULL,
+                    source_media_url TEXT NOT NULL,
+                    prepared_media_url TEXT NOT NULL,
+                    gpu_job_id TEXT NOT NULL,
+                    prepared_output_sha256 TEXT NOT NULL,
+                    prepared_output_size INTEGER NOT NULL
+                        CHECK(prepared_output_size>0),
+                    prepared_duration_sec REAL NOT NULL
+                        CHECK(prepared_duration_sec>0),
+                    source_trim_tail_seconds REAL NOT NULL DEFAULT 0
+                        CHECK(source_trim_tail_seconds>=0),
+                    preparation_profile TEXT NOT NULL,
+                    caption_template TEXT NOT NULL,
+                    caption TEXT NOT NULL,
+                    consent_version TEXT NOT NULL,
+                    consented_at_utc TEXT NOT NULL,
+                    is_aigc INTEGER NOT NULL DEFAULT 0
+                        CHECK(is_aigc IN (0,1)),
+                    user_consent INTEGER NOT NULL CHECK(user_consent=1),
+                    status TEXT NOT NULL DEFAULT 'available'
+                        CHECK(status IN (
+                            'available','reserved','consumed','canceled'
+                        )),
+                    run_id INTEGER,
+                    queue_id INTEGER,
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    reserved_at_utc TEXT NOT NULL DEFAULT '',
+                    consumed_at_utc TEXT NOT NULL DEFAULT '',
+                    canceled_at_utc TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(run_id) REFERENCES tt_post_schedule_run(id),
+                    FOREIGN KEY(queue_id) REFERENCES tt_post_queue(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tt_post_schedule_run (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_key TEXT NOT NULL UNIQUE,
+                    trigger_type TEXT NOT NULL
+                        CHECK(trigger_type IN ('auto','manual')),
+                    account_id TEXT NOT NULL,
+                    shanghai_date TEXT NOT NULL,
+                    publish_time TEXT NOT NULL,
+                    scheduled_at_utc TEXT NOT NULL,
+                    config_version INTEGER NOT NULL DEFAULT 0
+                        CHECK(config_version>=0),
+                    manual_request_key TEXT NOT NULL DEFAULT '',
+                    pool_item_id INTEGER NOT NULL,
+                    queue_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'claimed'
+                        CHECK(status IN (
+                            'claimed','preflight_failed','scheduled',
+                            'publishing','reconciling','published','failed',
+                            'canceled','missed','blocked_compliance','unknown'
+                        )),
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    claimed_at_utc TEXT NOT NULL,
+                    bound_at_utc TEXT NOT NULL DEFAULT '',
+                    finished_at_utc TEXT NOT NULL DEFAULT '',
+                    execution_token TEXT NOT NULL DEFAULT '',
+                    execution_lease_expires_at_utc TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(pool_item_id)
+                        REFERENCES tt_post_recurring_pool(id),
+                    FOREIGN KEY(queue_id) REFERENCES tt_post_queue(id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_tt_post_queue_due
                     ON tt_post_queue(status,scheduled_at_utc,id);
                 CREATE INDEX IF NOT EXISTS idx_tt_post_queue_lease
@@ -984,6 +1231,56 @@ def ensure_storage(db_path: Any) -> None:
                     ON tt_post_queue(gpu_job_id) WHERE gpu_job_id<>'';
                 CREATE INDEX IF NOT EXISTS idx_tt_post_event_queue
                     ON tt_post_event(queue_id,id);
+                CREATE INDEX IF NOT EXISTS idx_tt_post_recurring_pool_fifo
+                    ON tt_post_recurring_pool(account_id,status,created_at,id);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_recurring_pool_run
+                    ON tt_post_recurring_pool(run_id) WHERE run_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_recurring_pool_queue
+                    ON tt_post_recurring_pool(queue_id) WHERE queue_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_recurring_pool_gpu_job
+                    ON tt_post_recurring_pool(gpu_job_id);
+                CREATE INDEX IF NOT EXISTS idx_tt_post_schedule_run_account
+                    ON tt_post_schedule_run(account_id,status,scheduled_at_utc,id);
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_schedule_run_manual
+                    ON tt_post_schedule_run(manual_request_key)
+                    WHERE manual_request_key<>'';
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_schedule_run_auto_slot
+                    ON tt_post_schedule_run(
+                        account_id,shanghai_date,publish_time
+                    ) WHERE trigger_type='auto';
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_schedule_run_queue
+                    ON tt_post_schedule_run(queue_id) WHERE queue_id IS NOT NULL;
+                """
+            )
+            schedule_run_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(tt_post_schedule_run)"
+                ).fetchall()
+            }
+            if "execution_token" not in schedule_run_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE tt_post_schedule_run
+                    ADD COLUMN execution_token TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            if "execution_lease_expires_at_utc" not in schedule_run_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE tt_post_schedule_run
+                    ADD COLUMN execution_lease_expires_at_utc
+                        TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                    idx_tt_post_schedule_run_recovery
+                ON tt_post_schedule_run(
+                    status,queue_id,execution_lease_expires_at_utc,
+                    scheduled_at_utc,id
+                )
                 """
             )
             conn.commit()
@@ -1048,6 +1345,62 @@ def _public_account_settings(row: sqlite3.Row) -> Dict[str, Any]:
         or result.get("brand_organic_toggle")
     )
     result["configured"] = True
+    return result
+
+
+def _public_daily_schedule(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    result["enabled"] = bool(result.get("enabled"))
+    result["user_consent"] = bool(result.get("user_consent"))
+    try:
+        result["publish_times"] = json.loads(
+            str(result.pop("publish_times_json", "[]"))
+        )
+    except (TypeError, ValueError):
+        raise TTPostError(
+            "tt_post_schedule_storage_invalid",
+            "每日发布排期存储内容无效",
+            500,
+        ) from None
+    if not isinstance(result["publish_times"], list):
+        raise TTPostError(
+            "tt_post_schedule_storage_invalid",
+            "每日发布排期存储内容无效",
+            500,
+        )
+    return result
+
+
+def _default_daily_schedule(account_id: str) -> Dict[str, Any]:
+    return {
+        "account_id": account_id,
+        "enabled": False,
+        "timezone": "Asia/Shanghai",
+        "publish_times": [],
+        "version": 0,
+        "user_consent": False,
+        "consent_version": "",
+        "consented_at_utc": "",
+        "created_by_user_id": "",
+        "created_by_name": "",
+        "updated_by_user_id": "",
+        "updated_by_name": "",
+        "created_at": "",
+        "updated_at": "",
+    }
+
+
+def _public_recurring_pool(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    result["is_aigc"] = bool(result.get("is_aigc"))
+    result["user_consent"] = bool(result.get("user_consent"))
+    return result
+
+
+def _public_schedule_run(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    result.pop("execution_token", None)
+    result.pop("execution_lease_expires_at_utc", None)
     return result
 
 
@@ -1325,6 +1678,1298 @@ class TTPostStore:
                 rows.append(_public_account_settings(row))
         return rows
 
+    def get_daily_schedule(self, account_id: Any) -> Dict[str, Any]:
+        normalized = _account_id(account_id)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
+                (normalized,),
+            ).fetchone()
+        if row is None:
+            return _default_daily_schedule(normalized)
+        return _public_daily_schedule(row)
+
+    def list_daily_schedules(self) -> List[Dict[str, Any]]:
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT * FROM tt_post_daily_schedule ORDER BY account_id"
+            ).fetchall()
+        return [_public_daily_schedule(row) for row in rows]
+
+    def save_daily_schedule(
+        self,
+        account_id: Any,
+        publish_times: Any,
+        *,
+        enabled: Any,
+        expected_version: Any,
+        consent_version: Any,
+        consented_at: Any,
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        normalized_account_id = _account_id(account_id)
+        normalized_times = _publish_times(publish_times)
+        normalized_enabled = _exact_bool(enabled, "每日排期启用状态")
+        if normalized_enabled and not normalized_times:
+            raise TTPostError(
+                "tt_post_schedule_times_required",
+                "启用每日发布前至少需要设置一个时间点",
+                400,
+            )
+        normalized_version = _nonnegative_int(
+            expected_version,
+            "每日排期版本",
+            2**31 - 1,
+        )
+        normalized_consent_version = _required_text(
+            consent_version,
+            "每日排期确认版本",
+            128,
+        )
+        normalized_consented_at = _iso_utc(
+            consented_at,
+            "每日排期确认时间",
+        )
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        timestamp = self._now_iso()
+        times_json = json.dumps(
+            normalized_times,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with self._transaction() as conn:
+            current = conn.execute(
+                "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
+                (normalized_account_id,),
+            ).fetchone()
+            if current is None:
+                if normalized_version != 0:
+                    raise TTPostError(
+                        "tt_post_schedule_version_conflict",
+                        "每日发布排期已被其他操作更新，请刷新后重试",
+                        409,
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO tt_post_daily_schedule(
+                        account_id,enabled,timezone,publish_times_json,version,
+                        user_consent,consent_version,consented_at_utc,
+                        created_by_user_id,created_by_name,
+                        updated_by_user_id,updated_by_name,created_at,updated_at
+                    ) VALUES(?,?,'Asia/Shanghai',?,1,1,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        normalized_account_id,
+                        int(normalized_enabled),
+                        times_json,
+                        normalized_consent_version,
+                        normalized_consented_at,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                if normalized_version != int(current["version"]):
+                    raise TTPostError(
+                        "tt_post_schedule_version_conflict",
+                        "每日发布排期已被其他操作更新，请刷新后重试",
+                        409,
+                    )
+                conn.execute(
+                    """
+                    UPDATE tt_post_daily_schedule
+                    SET enabled=?,timezone='Asia/Shanghai',
+                        publish_times_json=?,version=?,
+                        user_consent=1,consent_version=?,consented_at_utc=?,
+                        updated_by_user_id=?,updated_by_name=?,updated_at=?
+                    WHERE account_id=?
+                    """,
+                    (
+                        int(normalized_enabled),
+                        times_json,
+                        int(current["version"]) + 1,
+                        normalized_consent_version,
+                        normalized_consented_at,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        normalized_account_id,
+                    ),
+                )
+            row = conn.execute(
+                "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
+                (normalized_account_id,),
+            ).fetchone()
+        return _public_daily_schedule(row)
+
+    def add_recurring_material(
+        self,
+        material_id: Any,
+        account_id: Any,
+        content_id: Any,
+        source_media_url: Any,
+        prepared_media_url: Any,
+        *,
+        gpu_job_id: Any,
+        prepared_output_sha256: Any,
+        prepared_output_size: Any,
+        prepared_duration_sec: Any,
+        source_trim_tail_seconds: Any,
+        preparation_profile: Any,
+        caption_template: Any,
+        caption: Any,
+        consent_version: Any,
+        consented_at: Any,
+        is_aigc: Any,
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        normalized_material_id = _material_id(material_id)
+        normalized_account_id = _account_id(account_id)
+        normalized_content_id = str(content_id or "").strip()
+        if not _CONTENT_ID_RE.fullmatch(normalized_content_id):
+            raise TTPostError(
+                "tt_content_id_invalid",
+                "素材对应的content_id无效",
+                400,
+            )
+        normalized_source_url = _https_url(
+            source_media_url,
+            "素材源视频地址",
+        )
+        normalized_prepared_url = _https_url(
+            prepared_media_url,
+            "最终成片地址",
+        )
+        normalized_gpu_job_id = str(gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_gpu_job_id):
+            raise TTPostError("invalid_gpu_job_id", "TT GPU任务ID无效", 400)
+        normalized_sha = str(prepared_output_sha256 or "").strip().lower()
+        if not _SHA256_RE.fullmatch(normalized_sha):
+            raise TTPostError(
+                "invalid_prepared_output_sha",
+                "TT最终成片SHA256无效",
+                400,
+            )
+        normalized_size = _positive_int(
+            prepared_output_size,
+            "TT最终成片大小",
+        )
+        try:
+            normalized_duration = float(prepared_duration_sec)
+            normalized_trim = float(source_trim_tail_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT最终成片时长或裁剪参数无效",
+                400,
+            ) from None
+        if (
+            not math.isfinite(normalized_duration)
+            or normalized_duration <= 0
+            or normalized_duration > 86400
+            or not math.isfinite(normalized_trim)
+            or normalized_trim < 0
+            or normalized_trim >= normalized_duration
+        ):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT最终成片时长或裁剪参数无效",
+                400,
+            )
+        normalized_duration = round(normalized_duration, 6)
+        normalized_trim = round(normalized_trim, 6)
+        normalized_profile = _required_text(
+            preparation_profile,
+            "TT成片配置版本",
+            128,
+        )
+        normalized_template = str(caption_template or "")
+        normalized_caption = str(caption or "")
+        expected_caption = render_caption_template(
+            normalized_template,
+            normalized_content_id,
+        )
+        if not secrets.compare_digest(
+            normalized_caption.encode("utf-8"),
+            expected_caption.encode("utf-8"),
+        ):
+            raise TTPostError(
+                "tt_post_caption_mismatch",
+                "发布描述与素材content_id不匹配",
+                409,
+            )
+        normalized_consent_version = _required_text(
+            consent_version,
+            "发布确认版本",
+            128,
+        )
+        normalized_consented_at = _iso_utc(
+            consented_at,
+            "发布确认时间",
+        )
+        normalized_is_aigc = _exact_bool(is_aigc, "AI生成内容标记")
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        frozen_values = (
+            normalized_account_id,
+            normalized_content_id,
+            normalized_source_url,
+            normalized_prepared_url,
+            normalized_gpu_job_id,
+            normalized_sha,
+            normalized_size,
+            normalized_duration,
+            normalized_trim,
+            normalized_profile,
+            normalized_template,
+            normalized_caption,
+            normalized_consent_version,
+            normalized_consented_at,
+            int(normalized_is_aigc),
+        )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            existing = conn.execute(
+                "SELECT * FROM tt_post_recurring_pool WHERE material_id=?",
+                (normalized_material_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_values = (
+                    str(existing["account_id"]),
+                    str(existing["content_id"]),
+                    str(existing["source_media_url"]),
+                    str(existing["prepared_media_url"]),
+                    str(existing["gpu_job_id"]),
+                    str(existing["prepared_output_sha256"]),
+                    int(existing["prepared_output_size"]),
+                    float(existing["prepared_duration_sec"]),
+                    float(existing["source_trim_tail_seconds"]),
+                    str(existing["preparation_profile"]),
+                    str(existing["caption_template"]),
+                    str(existing["caption"]),
+                    str(existing["consent_version"]),
+                    str(existing["consented_at_utc"]),
+                    int(existing["is_aigc"]),
+                )
+                if existing_values == frozen_values:
+                    return _public_recurring_pool(existing)
+                raise TTPostError(
+                    "tt_post_recurring_material_conflict",
+                    "该素材已存在于每日发布池且冻结信息不同",
+                    409,
+                )
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_material_pool
+                WHERE material_id=?
+                UNION ALL
+                SELECT 1 FROM tt_post_queue
+                WHERE material_id=?
+                LIMIT 1
+                """,
+                (normalized_material_id, normalized_material_id),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_material_already_used",
+                    "素材已存在于一次性排期或发布历史中",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tt_post_recurring_pool(
+                        material_id,account_id,content_id,source_media_url,
+                        prepared_media_url,gpu_job_id,prepared_output_sha256,
+                        prepared_output_size,prepared_duration_sec,
+                        source_trim_tail_seconds,preparation_profile,
+                        caption_template,caption,consent_version,
+                        consented_at_utc,is_aigc,user_consent,status,
+                        created_by_user_id,created_by_name,
+                        updated_by_user_id,updated_by_name,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
+                        ?,?,?,?,?,?)
+                    """,
+                    (
+                        normalized_material_id,
+                        *frozen_values,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_recurring_material_conflict",
+                    "每日发布素材发生唯一性冲突，请刷新后重试",
+                    409,
+                ) from None
+            row = conn.execute(
+                "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return _public_recurring_pool(row)
+
+    def list_recurring_materials(
+        self,
+        *,
+        account_id: Any = None,
+        status: Any = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        normalized_limit = _positive_int(limit, "每日素材列表数量", 1000)
+        normalized_offset = _nonnegative_int(
+            offset,
+            "每日素材列表偏移",
+            2**31 - 1,
+        )
+        clauses = []
+        params: List[Any] = []
+        if account_id is not None:
+            clauses.append("account_id=?")
+            params.append(_account_id(account_id))
+        if status is not None:
+            normalized_status = str(status or "").strip()
+            if normalized_status not in RECURRING_POOL_STATUSES:
+                raise TTPostError(
+                    "invalid_recurring_pool_status",
+                    "每日素材池状态无效",
+                    400,
+                )
+            clauses.append("status=?")
+            params.append(normalized_status)
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.extend((normalized_limit, normalized_offset))
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tt_post_recurring_pool%s
+                ORDER BY created_at,id LIMIT ? OFFSET ?
+                """
+                % where_sql,
+                params,
+            ).fetchall()
+        return [_public_recurring_pool(row) for row in rows]
+
+    def count_recurring_materials(
+        self,
+        *,
+        account_id: Any = None,
+        status: Any = None,
+    ) -> int:
+        clauses = []
+        params: List[Any] = []
+        if account_id is not None:
+            clauses.append("account_id=?")
+            params.append(_account_id(account_id))
+        if status is not None:
+            normalized_status = str(status or "").strip()
+            if normalized_status not in RECURRING_POOL_STATUSES:
+                raise TTPostError(
+                    "invalid_recurring_pool_status",
+                    "每日素材池状态无效",
+                    400,
+                )
+            clauses.append("status=?")
+            params.append(normalized_status)
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM tt_post_recurring_pool%s"
+                % where_sql,
+                params,
+            ).fetchone()
+        return int(row["count"])
+
+    @staticmethod
+    def _recurring_run_result(
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> Dict[str, Any]:
+        result = _public_schedule_run(row)
+        pool = conn.execute(
+            "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+            (int(row["pool_item_id"]),),
+        ).fetchone()
+        if pool is None:
+            raise TTPostError(
+                "tt_post_recurring_storage_invalid",
+                "每日发布运行记录缺少素材",
+                500,
+            )
+        result["pool_item"] = _public_recurring_pool(pool)
+        return result
+
+    @staticmethod
+    def _assert_same_run_request(
+        row: sqlite3.Row,
+        *,
+        run_key: str,
+        trigger_type: str,
+        account_id: str,
+        shanghai_date: str,
+        publish_time: str,
+        scheduled_at_utc: str,
+        config_version: int,
+        manual_request_key: str,
+    ) -> None:
+        if trigger_type == "manual":
+            if (
+                str(row["trigger_type"]) != "manual"
+                or str(row["account_id"]) != account_id
+                or str(row["manual_request_key"]) != manual_request_key
+                or str(row["run_key"]) != run_key
+            ):
+                raise TTPostError(
+                    "tt_post_schedule_run_idempotency_conflict",
+                    "每日发布运行幂等键已用于不同请求",
+                    409,
+                )
+            # The API assigns a slot from server time. A browser/network retry
+            # may arrive in a later minute, so the stored slot is authoritative
+            # for the same manual request key.
+            return
+        frozen = (
+            str(row["trigger_type"]),
+            str(row["account_id"]),
+            str(row["shanghai_date"]),
+            str(row["publish_time"]),
+            str(row["scheduled_at_utc"]),
+            int(row["config_version"]),
+            str(row["manual_request_key"]),
+        )
+        requested = (
+            trigger_type,
+            account_id,
+            shanghai_date,
+            publish_time,
+            scheduled_at_utc,
+            config_version,
+            manual_request_key,
+        )
+        if frozen != requested:
+            raise TTPostError(
+                "tt_post_schedule_run_idempotency_conflict",
+                "每日发布运行幂等键已用于不同请求",
+                409,
+            )
+        if str(row["run_key"]) != run_key:
+            raise TTPostError(
+                "tt_post_schedule_run_idempotency_conflict",
+                "每日发布运行幂等键已用于不同请求",
+                409,
+            )
+
+    def claim_recurring_run(
+        self,
+        run_key: Any,
+        trigger_type: Any,
+        account_id: Any,
+        shanghai_date: Any,
+        publish_time: Any,
+        scheduled_at_utc: Any,
+        *,
+        config_version: Any,
+        manual_request_key: Any = "",
+    ) -> Dict[str, Any]:
+        normalized_run_key = _required_text(
+            run_key,
+            "每日发布运行键",
+            255,
+        )
+        normalized_trigger = str(trigger_type or "").strip()
+        if normalized_trigger not in {"auto", "manual"}:
+            raise TTPostError(
+                "invalid_schedule_trigger",
+                "每日发布触发类型无效",
+                400,
+            )
+        normalized_account_id = _account_id(account_id)
+        normalized_date = _shanghai_date(shanghai_date)
+        normalized_time = _publish_time(publish_time)
+        normalized_scheduled_at = _iso_utc(
+            scheduled_at_utc,
+            "每日发布排期UTC时间",
+        )
+        if normalized_scheduled_at != _scheduled_slot_utc(
+            normalized_date,
+            normalized_time,
+        ):
+            raise TTPostError(
+                "tt_post_schedule_slot_mismatch",
+                "上海日期时间与排期UTC时间不匹配",
+                400,
+            )
+        normalized_config_version = _nonnegative_int(
+            config_version,
+            "每日排期版本",
+            2**31 - 1,
+        )
+        normalized_manual_key = _optional_text(
+            manual_request_key,
+            "手动发布请求键",
+            255,
+        )
+        if normalized_trigger == "manual" and not normalized_manual_key:
+            raise TTPostError(
+                "tt_post_manual_request_key_required",
+                "手动发布必须提供请求幂等键",
+                400,
+            )
+        if normalized_trigger == "auto" and normalized_manual_key:
+            raise TTPostError(
+                "invalid_schedule_trigger",
+                "自动发布不能携带手动请求键",
+                400,
+            )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            existing = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE run_key=?",
+                (normalized_run_key,),
+            ).fetchone()
+            if existing is None and normalized_manual_key:
+                existing = conn.execute(
+                    """
+                    SELECT * FROM tt_post_schedule_run
+                    WHERE manual_request_key=?
+                    """,
+                    (normalized_manual_key,),
+                ).fetchone()
+            if existing is not None:
+                self._assert_same_run_request(
+                    existing,
+                    run_key=normalized_run_key,
+                    trigger_type=normalized_trigger,
+                    account_id=normalized_account_id,
+                    shanghai_date=normalized_date,
+                    publish_time=normalized_time,
+                    scheduled_at_utc=normalized_scheduled_at,
+                    config_version=normalized_config_version,
+                    manual_request_key=normalized_manual_key,
+                )
+                return self._recurring_run_result(conn, existing)
+
+            if normalized_trigger == "auto":
+                schedule = conn.execute(
+                    """
+                    SELECT * FROM tt_post_daily_schedule
+                    WHERE account_id=?
+                    """,
+                    (normalized_account_id,),
+                ).fetchone()
+                if (
+                    schedule is None
+                    or not bool(schedule["enabled"])
+                    or int(schedule["version"]) != normalized_config_version
+                    or normalized_time
+                    not in json.loads(str(schedule["publish_times_json"]))
+                ):
+                    raise TTPostError(
+                        "tt_post_schedule_not_current",
+                        "每日发布排期未启用或版本已变化",
+                        409,
+                    )
+
+            placeholders = ",".join("?" for _ in ACTIVE_QUEUE_STATUSES)
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_queue
+                WHERE account_id=? AND status IN (%s)
+                LIMIT 1
+                """
+                % placeholders,
+                (normalized_account_id, *sorted(ACTIVE_QUEUE_STATUSES)),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_account_publish_busy",
+                    "该TikTok账号已有活跃发布队列",
+                    409,
+                )
+            placeholders = ",".join(
+                "?" for _ in ACTIVE_SCHEDULE_RUN_STATUSES
+            )
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_schedule_run
+                WHERE account_id=? AND status IN (%s)
+                LIMIT 1
+                """
+                % placeholders,
+                (
+                    normalized_account_id,
+                    *sorted(ACTIVE_SCHEDULE_RUN_STATUSES),
+                ),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_account_publish_busy",
+                    "该TikTok账号已有活跃每日发布运行",
+                    409,
+                )
+            pool = conn.execute(
+                """
+                SELECT * FROM tt_post_recurring_pool
+                WHERE account_id=? AND status='available'
+                ORDER BY created_at,id
+                LIMIT 1
+                """,
+                (normalized_account_id,),
+            ).fetchone()
+            if pool is None:
+                raise TTPostError(
+                    "tt_post_recurring_pool_empty",
+                    "该TikTok账号没有可用的每日发布素材",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tt_post_schedule_run(
+                        run_key,trigger_type,account_id,shanghai_date,
+                        publish_time,scheduled_at_utc,config_version,
+                        manual_request_key,pool_item_id,status,
+                        created_at,updated_at,claimed_at_utc
+                    ) VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,?,?)
+                    """,
+                    (
+                        normalized_run_key,
+                        normalized_trigger,
+                        normalized_account_id,
+                        normalized_date,
+                        normalized_time,
+                        normalized_scheduled_at,
+                        normalized_config_version,
+                        normalized_manual_key,
+                        int(pool["id"]),
+                        timestamp,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_schedule_run_conflict",
+                    "每日发布运行发生唯一性冲突，请刷新后重试",
+                    409,
+                ) from None
+            run_id = int(cursor.lastrowid)
+            updated = conn.execute(
+                """
+                UPDATE tt_post_recurring_pool
+                SET status='reserved',run_id=?,updated_at=?,
+                    reserved_at_utc=?
+                WHERE id=? AND status='available' AND run_id IS NULL
+                """,
+                (run_id, timestamp, timestamp, int(pool["id"])),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_recurring_pool_conflict",
+                    "每日发布素材已被其他运行领取",
+                    409,
+                )
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            return self._recurring_run_result(conn, row)
+
+    def get_recurring_run(self, run_id: Any) -> Dict[str, Any]:
+        normalized_run_id = _positive_int(run_id, "每日发布运行ID")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            return self._recurring_run_result(conn, row)
+
+    def get_recurring_run_by_key(self, run_key: Any) -> Dict[str, Any]:
+        normalized_run_key = _required_text(
+            run_key,
+            "每日发布运行键",
+            255,
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE run_key=?",
+                (normalized_run_key,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            return self._recurring_run_result(conn, row)
+
+    @staticmethod
+    def _assert_recurring_execution(
+        run: sqlite3.Row,
+        execution_token: Any,
+        *,
+        now_iso: str,
+    ) -> None:
+        supplied = str(execution_token or "")
+        stored = str(run["execution_token"] or "")
+        lease_expires = str(
+            run["execution_lease_expires_at_utc"] or ""
+        )
+        if (
+            not supplied
+            or not stored
+            or not secrets.compare_digest(supplied, stored)
+            or str(run["status"]) != "claimed"
+            or run["queue_id"] is not None
+            or not lease_expires
+            or lease_expires <= now_iso
+        ):
+            raise TTPostError(
+                "tt_post_recurring_execution_invalid",
+                "每日发布运行执行租约无效或已过期",
+                409,
+            )
+
+    def acquire_recurring_execution(
+        self,
+        run_id: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 120,
+    ) -> RecurringExecutionClaim:
+        """Atomically lease one claimed/unbound run without locking other runs."""
+
+        normalized_run_id = _positive_int(run_id, "每日发布运行ID")
+        normalized_lease_seconds = _positive_int(
+            lease_seconds,
+            "每日发布执行租约时长",
+            600,
+        )
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease_seconds)
+        )
+        execution_token = secrets.token_urlsafe(32)
+        with self._transaction() as conn:
+            run = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            if run is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            if str(run["status"]) != "claimed" or run["queue_id"] is not None:
+                raise TTPostError(
+                    "tt_post_recurring_execution_not_claimable",
+                    "每日发布运行当前不需要执行租约",
+                    409,
+                )
+            stored_token = str(run["execution_token"] or "")
+            stored_expiry = str(
+                run["execution_lease_expires_at_utc"] or ""
+            )
+            if (
+                stored_token
+                and stored_expiry
+                and stored_expiry > now_iso
+            ):
+                raise TTPostError(
+                    "tt_post_recurring_execution_busy",
+                    "每日发布运行正在由另一执行者处理",
+                    409,
+                )
+            updated = conn.execute(
+                """
+                UPDATE tt_post_schedule_run
+                SET execution_token=?,execution_lease_expires_at_utc=?,
+                    updated_at=?
+                WHERE id=? AND status='claimed' AND queue_id IS NULL
+                  AND (
+                    execution_token=''
+                    OR execution_lease_expires_at_utc=''
+                    OR execution_lease_expires_at_utc<=?
+                  )
+                """,
+                (
+                    execution_token,
+                    lease_iso,
+                    now_iso,
+                    normalized_run_id,
+                    now_iso,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_recurring_execution_busy",
+                    "每日发布运行正在由另一执行者处理",
+                    409,
+                )
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            return RecurringExecutionClaim(
+                self._recurring_run_result(conn, row),
+                execution_token,
+            )
+
+    def renew_recurring_execution(
+        self,
+        run_id: Any,
+        execution_token: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 120,
+    ) -> Dict[str, Any]:
+        normalized_run_id = _positive_int(run_id, "每日发布运行ID")
+        normalized_lease_seconds = _positive_int(
+            lease_seconds,
+            "每日发布执行租约时长",
+            600,
+        )
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease_seconds)
+        )
+        with self._transaction() as conn:
+            run = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            if run is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            self._assert_recurring_execution(
+                run,
+                execution_token,
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_schedule_run
+                SET execution_lease_expires_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (lease_iso, now_iso, normalized_run_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            return self._recurring_run_result(conn, row)
+
+    def yield_recurring_execution(
+        self,
+        run_id: Any,
+        execution_token: Any,
+        *,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Relinquish one owned lease while preserving its durable reservation."""
+
+        normalized_run_id = _positive_int(run_id, "每日发布运行ID")
+        now_iso = _iso_utc(
+            _utc_datetime(
+                now if now is not None else self._now_fn(),
+                "当前时间",
+            )
+        )
+        with self._transaction() as conn:
+            run = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            if run is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            self._assert_recurring_execution(
+                run,
+                execution_token,
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_schedule_run
+                SET execution_token='',execution_lease_expires_at_utc='',
+                    updated_at=?
+                WHERE id=?
+                """,
+                (now_iso, normalized_run_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            return self._recurring_run_result(conn, row)
+
+    def list_claimed_unbound_recurring_runs(
+        self,
+        *,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        normalized_limit = _positive_int(
+            limit,
+            "待恢复每日发布运行数量",
+            100,
+        )
+        now_iso = self._now_iso()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tt_post_schedule_run
+                WHERE status='claimed' AND queue_id IS NULL
+                  AND (
+                    execution_token=''
+                    OR execution_lease_expires_at_utc=''
+                    OR execution_lease_expires_at_utc<=?
+                  )
+                ORDER BY scheduled_at_utc,id
+                LIMIT ?
+                """,
+                (now_iso, normalized_limit),
+            ).fetchall()
+            return [
+                self._recurring_run_result(conn, row)
+                for row in rows
+            ]
+
+    def release_recurring_preflight(
+        self,
+        run_id: Any,
+        *,
+        error_code: Any,
+        error_message: Any,
+        execution_token: Any = "",
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        normalized_run_id = _positive_int(run_id, "每日发布运行ID")
+        normalized_error_code = _required_text(
+            error_code,
+            "预检错误码",
+            96,
+        )
+        normalized_error_message = redact_text(error_message)
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            run = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            if run is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            if run["status"] == "preflight_failed":
+                return self._recurring_run_result(conn, run)
+            self._assert_recurring_execution(
+                run,
+                execution_token,
+                now_iso=timestamp,
+            )
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_queue
+                WHERE idempotency_key=?
+                LIMIT 1
+                """,
+                (str(run["run_key"]),),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_preflight_release_invalid",
+                    "每日发布运行已有持久队列，不能释放预检素材",
+                    409,
+                )
+            updated = conn.execute(
+                """
+                UPDATE tt_post_recurring_pool
+                SET status='available',run_id=NULL,updated_by_user_id=?,
+                    updated_by_name=?,updated_at=?,reserved_at_utc=''
+                WHERE id=? AND status='reserved' AND run_id=?
+                    AND queue_id IS NULL
+                """,
+                (
+                    normalized_actor_id,
+                    normalized_actor_name,
+                    timestamp,
+                    int(run["pool_item_id"]),
+                    normalized_run_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_recurring_pool_conflict",
+                    "每日发布素材预检释放失败",
+                    409,
+                )
+            conn.execute(
+                """
+                UPDATE tt_post_schedule_run
+                SET status='preflight_failed',error_code=?,error_message=?,
+                    updated_at=?,finished_at_utc=?,
+                    execution_token='',execution_lease_expires_at_utc=''
+                WHERE id=?
+                """,
+                (
+                    normalized_error_code,
+                    normalized_error_message,
+                    timestamp,
+                    timestamp,
+                    normalized_run_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            return self._recurring_run_result(conn, row)
+
+    @staticmethod
+    def _sync_recurring_rows(
+        conn: sqlite3.Connection,
+        run: sqlite3.Row,
+        pool: sqlite3.Row,
+        queue: sqlite3.Row,
+        timestamp: str,
+    ) -> None:
+        queue_status = str(queue["status"])
+        if queue_status not in QUEUE_STATUSES:
+            raise TTPostError(
+                "tt_post_queue_status_invalid",
+                "一次性发布队列状态无效",
+                500,
+            )
+        terminal = queue_status in TERMINAL_QUEUE_STATUSES
+        if pool["status"] == "consumed" and not terminal:
+            raise TTPostError(
+                "tt_post_recurring_storage_invalid",
+                "每日发布素材已消费但队列仍处于活跃状态",
+                500,
+            )
+        pool_status = "consumed" if terminal else "reserved"
+        conn.execute(
+            """
+            UPDATE tt_post_recurring_pool
+            SET status=?,queue_id=?,updated_at=?,
+                consumed_at_utc=CASE WHEN ? THEN ? ELSE consumed_at_utc END
+            WHERE id=?
+            """,
+            (
+                pool_status,
+                int(queue["id"]),
+                timestamp,
+                int(terminal),
+                timestamp,
+                int(pool["id"]),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE tt_post_schedule_run
+            SET queue_id=?,status=?,error_code=?,error_message=?,
+                updated_at=?,
+                execution_token='',execution_lease_expires_at_utc='',
+                bound_at_utc=CASE
+                    WHEN bound_at_utc='' THEN ? ELSE bound_at_utc END,
+                finished_at_utc=CASE
+                    WHEN ? THEN ? ELSE '' END
+            WHERE id=?
+            """,
+            (
+                int(queue["id"]),
+                queue_status,
+                str(queue["error_code"] or "")[:96],
+                redact_text(queue["error_message"]),
+                timestamp,
+                timestamp,
+                int(terminal),
+                timestamp,
+                int(run["id"]),
+            ),
+        )
+
+    def bind_recurring_queue(
+        self,
+        run_id: Any,
+        queue_id: Any,
+        *,
+        execution_token: Any = "",
+    ) -> Dict[str, Any]:
+        normalized_run_id = _positive_int(run_id, "每日发布运行ID")
+        normalized_queue_id = _positive_int(queue_id, "一次性发布队列ID")
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            run = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            if run is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "每日发布运行不存在",
+                    404,
+                )
+            queue = conn.execute(
+                "SELECT * FROM tt_post_queue WHERE id=?",
+                (normalized_queue_id,),
+            ).fetchone()
+            if queue is None:
+                raise TTPostError(
+                    "tt_post_queue_not_found",
+                    "TikTok发布队列不存在",
+                    404,
+                )
+            pool = conn.execute(
+                "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+                (int(run["pool_item_id"]),),
+            ).fetchone()
+            if pool is None:
+                raise TTPostError(
+                    "tt_post_recurring_storage_invalid",
+                    "每日发布运行记录缺少素材",
+                    500,
+                )
+            if run["queue_id"] is not None and int(run["queue_id"]) != normalized_queue_id:
+                raise TTPostError(
+                    "tt_post_recurring_queue_conflict",
+                    "每日发布运行已绑定其他队列",
+                    409,
+                )
+            if (
+                str(queue["account_id"]) != str(run["account_id"])
+                or str(queue["material_id"]) != str(pool["material_id"])
+                or str(queue["idempotency_key"]) != str(run["run_key"])
+                or str(queue["scheduled_at_utc"])
+                != str(run["scheduled_at_utc"])
+            ):
+                raise TTPostError(
+                    "tt_post_recurring_queue_mismatch",
+                    "每日发布运行与一次性队列冻结身份不匹配",
+                    409,
+                )
+            if run["queue_id"] is None:
+                self._assert_recurring_execution(
+                    run,
+                    execution_token,
+                    now_iso=timestamp,
+                )
+            if (
+                pool["status"] not in {"reserved", "consumed"}
+                or int(pool["run_id"] or 0) != normalized_run_id
+            ):
+                raise TTPostError(
+                    "tt_post_recurring_pool_conflict",
+                    "每日发布素材与运行绑定关系无效",
+                    409,
+                )
+            self._sync_recurring_rows(conn, run, pool, queue, timestamp)
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (normalized_run_id,),
+            ).fetchone()
+            return self._recurring_run_result(conn, row)
+
+    def sync_recurring_from_queue(self, queue_id: Any) -> Dict[str, Any]:
+        normalized_queue_id = _positive_int(queue_id, "一次性发布队列ID")
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            queue = conn.execute(
+                "SELECT * FROM tt_post_queue WHERE id=?",
+                (normalized_queue_id,),
+            ).fetchone()
+            if queue is None:
+                raise TTPostError(
+                    "tt_post_queue_not_found",
+                    "TikTok发布队列不存在",
+                    404,
+                )
+            run = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE queue_id=?",
+                (normalized_queue_id,),
+            ).fetchone()
+            if run is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "该队列没有每日发布运行记录",
+                    404,
+                )
+            pool = conn.execute(
+                "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+                (int(run["pool_item_id"]),),
+            ).fetchone()
+            if pool is None:
+                raise TTPostError(
+                    "tt_post_recurring_storage_invalid",
+                    "每日发布运行记录缺少素材",
+                    500,
+                )
+            self._sync_recurring_rows(conn, run, pool, queue, timestamp)
+            row = conn.execute(
+                "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                (int(run["id"]),),
+            ).fetchone()
+            return self._recurring_run_result(conn, row)
+
     def add_material(
         self,
         material_id: Any,
@@ -1434,6 +3079,8 @@ class TTPostStore:
         prepared_output_size: int = 0,
         prepared_duration_sec: float = 0.0,
         source_trim_tail_seconds: float = 0.0,
+        recurring_run_id: Any = None,
+        recurring_execution_token: Any = "",
     ) -> Dict[str, Any]:
         """Resolve the material and freeze all mutable publish inputs."""
 
@@ -1547,8 +3194,65 @@ class TTPostStore:
                 scheduled_at_utc,
             )
         normalized_key = _required_text(normalized_key, "幂等键", 255)
+        has_recurring_run = recurring_run_id not in (None, "")
+        normalized_execution_token = str(
+            recurring_execution_token or ""
+        )
+        if has_recurring_run != bool(normalized_execution_token):
+            raise TTPostError(
+                "tt_post_recurring_execution_invalid",
+                "每日发布队列必须同时提供运行ID和执行租约",
+                409,
+            )
+        normalized_recurring_run_id = (
+            _positive_int(recurring_run_id, "每日发布运行ID")
+            if has_recurring_run
+            else None
+        )
 
         with self._transaction() as conn:
+            if normalized_recurring_run_id is not None:
+                recurring_run = conn.execute(
+                    "SELECT * FROM tt_post_schedule_run WHERE id=?",
+                    (normalized_recurring_run_id,),
+                ).fetchone()
+                if recurring_run is None:
+                    raise TTPostError(
+                        "tt_post_schedule_run_not_found",
+                        "每日发布运行不存在",
+                        404,
+                    )
+                self._assert_recurring_execution(
+                    recurring_run,
+                    normalized_execution_token,
+                    now_iso=self._now_iso(),
+                )
+                recurring_pool = conn.execute(
+                    """
+                    SELECT * FROM tt_post_recurring_pool
+                    WHERE id=?
+                    """,
+                    (int(recurring_run["pool_item_id"]),),
+                ).fetchone()
+                if (
+                    recurring_pool is None
+                    or str(recurring_pool["status"]) != "reserved"
+                    or int(recurring_pool["run_id"] or 0)
+                    != normalized_recurring_run_id
+                    or recurring_pool["queue_id"] is not None
+                    or str(recurring_pool["material_id"])
+                    != str(resolution.material_id)
+                    or str(recurring_run["run_key"]) != normalized_key
+                    or str(recurring_run["account_id"])
+                    != str(account.account_id)
+                    or str(recurring_run["scheduled_at_utc"])
+                    != scheduled_at_utc
+                ):
+                    raise TTPostError(
+                        "tt_post_recurring_execution_fence",
+                        "每日发布运行、素材和冻结队列身份不一致",
+                        409,
+                    )
             existing = conn.execute(
                 "SELECT * FROM tt_post_queue WHERE idempotency_key=?",
                 (normalized_key,),

@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -35,14 +36,16 @@ from features.x_posts.selector import (
     CandidateQueryError,
     CandidateSelectionError,
     DEFAULT_SCHEMA as DEFAULT_MATERIAL_SCHEMA,
+    DramawaveCandidateSelector,
+    PoolCandidateRejection,
     connect_read_only,
     material_key,
-    select_pool_candidates,
     shanghai_now,
 )
 
 from .core import (
     AccountSourceError,
+    BEIJING_TZ,
     FIXED_CAPTION_TEMPLATE,
     LiveGates,
     MAX_ACCOUNT_SETTINGS_BATCH,
@@ -71,6 +74,7 @@ DEFAULT_GPU_URL = "http://127.0.0.1:18830"
 DEFAULT_DB_PATH = "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3"
 DEFAULT_GRACE_SECONDS = 600
 DEFAULT_LEASE_SECONDS = 300
+DEFAULT_RECURRING_EXECUTION_LEASE_SECONDS = 120
 MAX_ACCOUNT_ROWS = 1000
 MAX_HTTP_BODY_BYTES = 256 * 1024
 MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
@@ -96,6 +100,8 @@ PRIVACY_LEVEL_ORDER = (
     "SELF_ONLY",
 )
 CREATOR_INFO_BATCH_WORKERS = 4
+TT_MAX_MATERIAL_DURATION_SECONDS = 3600
+DEFAULT_RUNNER_KICK_PATH = "/run/tt-post/manual-kick"
 
 
 # This statement is deliberately metadata-only.  Do not add token predicates,
@@ -701,8 +707,111 @@ class MySQLSnapshotAccountRepository:
         )
 
 
+class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
+    """Keep shared safety checks while applying TikTok's duration ceiling."""
+
+    def _pool_material_rows(self, material_id: str) -> List[Dict[str, Any]]:
+        sql = """
+            SELECT
+                CAST(cs.id AS CHAR) AS material_id,
+                cs.product AS product,
+                cs.type AS material_type,
+                cs.is_delete AS is_delete,
+                cs.url AS material_url,
+                cs.name AS material_name,
+                cs.language AS material_language,
+                cs.data_source_id AS content_id,
+                cs.tag_name AS source_tag_name,
+                cs.video_duration AS video_duration
+             FROM `{schema}`.ads_custom_source cs
+             WHERE cs.id = %s
+             LIMIT 2
+        """.format(schema=self.schema)
+        cursor = None
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(sql, (material_id,))
+            rows = [dict(row) for row in cursor.fetchall()]
+        except Exception:
+            raise CandidateQueryError(
+                "read-only TikTok material query failed"
+            ) from None
+        finally:
+            close = getattr(cursor, "close", None)
+            if callable(close):
+                close()
+
+        if not rows:
+            raise PoolCandidateRejection(
+                "material_not_found",
+                "素材ID不存在",
+            )
+        if len(rows) != 1:
+            raise PoolCandidateRejection(
+                "material_identity_ambiguous",
+                "素材身份数据不唯一",
+            )
+
+        row = rows[0]
+        try:
+            material_type = int(row.get("material_type"))
+        except (TypeError, ValueError, OverflowError):
+            material_type = -1
+        if material_type != 2:
+            raise PoolCandidateRejection(
+                "material_type_not_video",
+                "该素材不是视频",
+            )
+
+        try:
+            is_delete = int(row.get("is_delete"))
+        except (TypeError, ValueError, OverflowError):
+            is_delete = 1
+        if is_delete != 0:
+            raise PoolCandidateRejection(
+                "material_deleted",
+                "该素材已删除",
+            )
+
+        try:
+            duration = float(row.get("video_duration"))
+        except (TypeError, ValueError, OverflowError):
+            duration = float("nan")
+        if (
+            not math.isfinite(duration)
+            or duration <= 0
+            or duration > TT_MAX_MATERIAL_DURATION_SECONDS
+        ):
+            raise PoolCandidateRejection(
+                "material_duration_out_of_range",
+                "TT素材时长必须大于0秒且不超过%d秒"
+                % TT_MAX_MATERIAL_DURATION_SECONDS,
+            )
+        return rows
+
+
+def _select_tt_pool_candidates(
+    connection: Any,
+    pool_items: Iterable[Dict[str, Any]],
+    source_date: str,
+    *,
+    limit: int,
+    schema: str,
+    now: datetime,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    return _TTDramawaveCandidateSelector(
+        connection,
+        schema=schema,
+        now=now,
+    ).select_pool(
+        pool_items,
+        source_date,
+        limit=limit,
+    )
+
+
 class DramawaveMaterialResolver:
-    """Resolve one manual material through the strict X Dramawave validator."""
+    """Resolve one manual material through TikTok's strict Dramawave validator."""
 
     def __init__(
         self,
@@ -733,7 +842,7 @@ class DramawaveMaterialResolver:
         connection = None
         try:
             connection = self._connection_factory()
-            selected, rejections = select_pool_candidates(
+            selected, rejections = _select_tt_pool_candidates(
                 connection,
                 [
                     {
@@ -765,10 +874,13 @@ class DramawaveMaterialResolver:
                 close()
         if rejections or len(selected) != 1:
             rejection = rejections[0] if rejections else {}
+            error_code = str(
+                rejection.get("error_code") or "tt_material_not_eligible"
+            )[:96]
             raise TTPostServiceError(
-                str(rejection.get("error_code") or "tt_material_not_eligible")[:96],
+                error_code,
                 str(rejection.get("error_message") or "素材不满足Dramawave发布条件")[:500],
-                409,
+                404 if error_code == "material_not_found" else 409,
             )
         candidate = dict(selected[0])
         if str(candidate.get("material_id") or "") != normalized:
@@ -1375,6 +1487,7 @@ class TTPostService:
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
         source_trim_tail_seconds: float = 4.333333,
         media_profile_version: str = "tt-post-outro-20260729-v1",
+        runner_kick_path: str = DEFAULT_RUNNER_KICK_PATH,
     ):
         self.store = store
         self.account_repository = account_repository
@@ -1403,6 +1516,29 @@ class TTPostService:
             "TT媒体制作版本",
             128,
         )
+        normalized_kick_path = str(runner_kick_path or "").strip()
+        if (
+            os.name == "nt"
+            and normalized_kick_path == DEFAULT_RUNNER_KICK_PATH
+        ):
+            normalized_kick_path = ""
+        if normalized_kick_path:
+            kick_path = Path(normalized_kick_path)
+            if not kick_path.is_absolute():
+                raise TTPostServiceError(
+                    "tt_runner_kick_path_invalid",
+                    "TT手动发布唤醒路径必须是绝对路径",
+                    500,
+                )
+            if os.name != "nt" and not str(kick_path).startswith(
+                "/run/tt-post/"
+            ):
+                raise TTPostServiceError(
+                    "tt_runner_kick_path_invalid",
+                    "TT手动发布唤醒路径必须位于/run/tt-post",
+                    500,
+                )
+        self.runner_kick_path = normalized_kick_path
 
     def _gates(self) -> Dict[str, bool]:
         return self.gates.as_dict()
@@ -1886,6 +2022,928 @@ class TTPostService:
             "gates": self._gates(),
         }
 
+    @staticmethod
+    def _query_first(
+        query: Mapping[str, Sequence[str]],
+        name: str,
+        default: str = "",
+    ) -> str:
+        values = query.get(name, ())
+        return str(values[0] if values else default).strip()
+
+    @staticmethod
+    def _recurring_pool_api_item(item: Mapping[str, Any]) -> Dict[str, Any]:
+        result = dict(item)
+        result["source_account_id"] = str(result.get("account_id") or "")
+        result["caption_text"] = str(result.get("caption") or "")
+        result["duration_sec"] = float(
+            result.get("prepared_duration_sec") or 0
+        )
+        return result
+
+    @staticmethod
+    def _recurring_run_api_item(item: Mapping[str, Any]) -> Dict[str, Any]:
+        result = dict(item)
+        result.pop("manual_request_key", None)
+        result.pop("execution_token", None)
+        result.pop("execution_lease_expires_at_utc", None)
+        result["run_id"] = result.get("id")
+        result["source_account_id"] = str(result.get("account_id") or "")
+        pool = result.get("pool_item")
+        if isinstance(pool, Mapping):
+            result["pool_item"] = TTPostService._recurring_pool_api_item(pool)
+            result["material_id"] = str(pool.get("material_id") or "")
+            result["content_id"] = str(pool.get("content_id") or "")
+        return result
+
+    def _next_schedule_at(
+        self,
+        schedule: Mapping[str, Any],
+    ) -> str:
+        if not schedule.get("enabled"):
+            return ""
+        publish_times = schedule.get("publish_times")
+        if not isinstance(publish_times, list) or not publish_times:
+            return ""
+        now_shanghai = _now_utc(self._now_fn).astimezone(BEIJING_TZ)
+        for offset in range(0, 3):
+            local_day = (now_shanghai + timedelta(days=offset)).date()
+            for publish_time in sorted(str(item) for item in publish_times):
+                try:
+                    hour, minute = (int(part) for part in publish_time.split(":"))
+                    candidate = datetime(
+                        local_day.year,
+                        local_day.month,
+                        local_day.day,
+                        hour,
+                        minute,
+                        tzinfo=BEIJING_TZ,
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if candidate > now_shanghai:
+                    return candidate.astimezone(UTC).isoformat().replace(
+                        "+00:00",
+                        "Z",
+                    )
+        return ""
+
+    def _schedule_api_item(
+        self,
+        schedule: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        item = dict(schedule)
+        account_id = str(item.get("account_id") or "")
+        item["source_account_id"] = account_id
+        publish_times = (
+            list(item.get("publish_times") or [])
+            if isinstance(item.get("publish_times"), list)
+            else []
+        )
+        item["publish_times"] = publish_times
+        item["publish_time"] = publish_times[0] if publish_times else ""
+        item["configured"] = int(item.get("version") or 0) > 0
+        item["next_run_at"] = self._next_schedule_at(item)
+        item["available_material_count"] = (
+            self.store.count_recurring_materials(
+                account_id=account_id,
+                status="available",
+            )
+            if account_id
+            else 0
+        )
+        item["can_publish_now"] = bool(
+            self.gates.is_open and item["available_material_count"] > 0
+        )
+        return item
+
+    def material_pool_list(
+        self,
+        query: Mapping[str, Sequence[str]],
+    ) -> Dict[str, Any]:
+        try:
+            page = int(self._query_first(query, "page", "1"))
+            page_size = int(self._query_first(query, "page_size", "20"))
+        except ValueError:
+            raise TTPostServiceError(
+                "invalid_request",
+                "分页参数无效",
+                400,
+            ) from None
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise TTPostServiceError("invalid_request", "分页参数无效", 400)
+        account_filter = self._query_first(query, "source_account_id")
+        material_filter = self._query_first(query, "material_id")
+        status_filter = self._query_first(query, "status")
+        rows = self.store.list_recurring_materials(
+            account_id=account_filter or None,
+            status=status_filter or None,
+            limit=1000,
+            offset=0,
+        )
+        if material_filter:
+            material_id = _positive_decimal(
+                material_filter,
+                "素材ID",
+                19,
+            )
+            rows = [
+                row for row in rows
+                if str(row.get("material_id") or "") == material_id
+            ]
+        total = len(rows)
+        start = (page - 1) * page_size
+        return {
+            "items": [
+                self._recurring_pool_api_item(row)
+                for row in rows[start : start + page_size]
+            ],
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+            },
+            "summary": {
+                "total": total,
+                "available": sum(
+                    str(row.get("status") or "") == "available"
+                    for row in rows
+                ),
+                "reserved": sum(
+                    str(row.get("status") or "") == "reserved"
+                    for row in rows
+                ),
+                "consumed": sum(
+                    str(row.get("status") or "") == "consumed"
+                    for row in rows
+                ),
+            },
+            "gates": self._gates(),
+        }
+
+    def material_pool_add(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise TTPostServiceError("invalid_request", "请求体必须是对象", 400)
+        allowed = {
+            "idempotency_key",
+            "source_account_id",
+            "material_id",
+            "content_id",
+            "caption_template",
+            "caption_text",
+            "consent",
+        }
+        if set(payload).difference(allowed):
+            raise TTPostServiceError(
+                "invalid_request",
+                "素材入池请求包含未知字段",
+                400,
+            )
+        _bounded_text(payload.get("idempotency_key"), "幂等键", 255)
+        account_id = _positive_decimal(
+            payload.get("source_account_id"),
+            "TikTok账号ID",
+        )
+        material_id = _positive_decimal(
+            payload.get("material_id"),
+            "素材ID",
+            19,
+        )
+        requested_content_id = _bounded_text(
+            payload.get("content_id"),
+            "Drama ID",
+            128,
+        )
+        consent = self._consent_from_payload(payload)
+        account = self.account_repository.get_public_account(account_id)
+        saved_settings = self.store.get_account_settings(
+            account_id,
+            required=True,
+        )
+        settings = TTPostAccountSettings.from_mapping(
+            {
+                key: saved_settings[key]
+                for key in (
+                    "privacy_level",
+                    "allow_comment",
+                    "allow_duet",
+                    "allow_stitch",
+                    "brand_content_toggle",
+                    "brand_organic_toggle",
+                    "is_aigc",
+                )
+            }
+        )
+        creator = self.creator_info(
+            {"source_account_id": account_id}
+        )["item"]
+        self._assert_creator_settings(creator, settings)
+        prepared = self._resolve_and_prepare(material_id)
+        if prepared["content_id"] != requested_content_id:
+            raise TTPostServiceError(
+                "tt_content_id_mismatch",
+                "页面Drama ID与素材真实映射不一致",
+                409,
+            )
+        duration = float(prepared.get("duration_sec") or 0)
+        maximum_duration = int(
+            creator.get("max_video_post_duration_sec") or 0
+        )
+        if duration <= 0 or duration > maximum_duration:
+            raise TTPostServiceError(
+                "tt_prepared_media_duration_invalid",
+                "最终成片时长不满足目标账号实时限制",
+                409,
+            )
+        caption_template, caption = _caption_from_submission(
+            payload,
+            prepared["content_id"],
+        )
+        item = self.store.add_recurring_material(
+            material_id,
+            account_id,
+            prepared["content_id"],
+            prepared["source_media_url"],
+            prepared["prepared_media_url"],
+            gpu_job_id=prepared["gpu_job_id"],
+            prepared_output_sha256=prepared["output_sha256"],
+            prepared_output_size=prepared["output_size"],
+            prepared_duration_sec=prepared["duration_sec"],
+            source_trim_tail_seconds=prepared[
+                "source_trim_tail_seconds"
+            ],
+            preparation_profile=(
+                prepared.get("profile") or self.media_profile_version
+            ),
+            caption_template=caption_template,
+            caption=caption,
+            consent_version=consent["version"],
+            consented_at=consent["accepted_at"],
+            is_aigc=settings.is_aigc,
+        )
+        result = self._recurring_pool_api_item(item)
+        result["account_name_snapshot"] = str(
+            account.get("display_name")
+            or account.get("account_name")
+            or ""
+        )
+        return {
+            "item": result,
+            "available_material_count": self.store.count_recurring_materials(
+                account_id=account_id,
+                status="available",
+            ),
+            "gates": self._gates(),
+        }
+
+    def schedule_get(
+        self,
+        query: Mapping[str, Sequence[str]],
+    ) -> Dict[str, Any]:
+        account_id = _positive_decimal(
+            self._query_first(query, "source_account_id"),
+            "TikTok账号ID",
+        )
+        self.account_repository.get_public_account(account_id)
+        item = self._schedule_api_item(
+            self.store.get_daily_schedule(account_id)
+        )
+        return {"item": item, "gates": self._gates()}
+
+    def schedule_save(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise TTPostServiceError("invalid_request", "请求体必须是对象", 400)
+        allowed = {
+            "source_account_id",
+            "enabled",
+            "publish_time",
+            "publish_times",
+            "timezone",
+            "expected_version",
+            "consent",
+        }
+        if set(payload).difference(allowed):
+            raise TTPostServiceError(
+                "invalid_request",
+                "每日发布设置包含未知字段",
+                400,
+            )
+        if str(payload.get("timezone") or "") != "Asia/Shanghai":
+            raise TTPostServiceError(
+                "tt_timezone_invalid",
+                "每日发布只接受Asia/Shanghai",
+                400,
+            )
+        account_id = _positive_decimal(
+            payload.get("source_account_id"),
+            "TikTok账号ID",
+        )
+        enabled = _exact_bool(payload.get("enabled"), "每日发布启用状态")
+        if "publish_times" in payload:
+            publish_times = payload.get("publish_times")
+        else:
+            publish_times = [payload.get("publish_time")]
+        if not isinstance(publish_times, list):
+            raise TTPostServiceError(
+                "invalid_publish_times",
+                "每日发布时间必须是列表",
+                400,
+            )
+        if not enabled and all(
+            item in (None, "") for item in publish_times
+        ):
+            publish_times = []
+        expected_version = payload.get("expected_version")
+        if (
+            type(expected_version) is not int
+            or expected_version < 0
+            or expected_version > 2**31 - 1
+        ):
+            raise TTPostServiceError(
+                "tt_post_schedule_version_required",
+                "每日发布设置版本必须是非负整数",
+                400,
+            )
+        consent = self._consent_from_payload(payload)
+        self.account_repository.get_public_account(account_id)
+        saved_settings = self.store.get_account_settings(
+            account_id,
+            required=True,
+        )
+        if enabled:
+            creator = self.creator_info(
+                {"source_account_id": account_id}
+            )["item"]
+            settings = TTPostAccountSettings.from_mapping(
+                {
+                    key: saved_settings[key]
+                    for key in (
+                        "privacy_level",
+                        "allow_comment",
+                        "allow_duet",
+                        "allow_stitch",
+                        "brand_content_toggle",
+                        "brand_organic_toggle",
+                        "is_aigc",
+                    )
+                }
+            )
+            self._assert_creator_settings(creator, settings)
+        saved = self.store.save_daily_schedule(
+            account_id,
+            publish_times,
+            enabled=enabled,
+            expected_version=expected_version,
+            consent_version=consent["version"],
+            consented_at=consent["accepted_at"],
+        )
+        return {
+            "item": self._schedule_api_item(saved),
+            "gates": self._gates(),
+        }
+
+    def _sync_recurring_queue_if_present(
+        self,
+        queue: Mapping[str, Any],
+    ) -> None:
+        try:
+            self.store.sync_recurring_from_queue(queue.get("id"))
+        except TTPostError as exc:
+            if exc.code != "tt_post_schedule_run_not_found":
+                raise
+
+    def _execute_recurring_run(
+        self,
+        *,
+        run_key: str,
+        trigger_type: str,
+        account_id: str,
+        shanghai_date: str,
+        publish_time: str,
+        scheduled_at_utc: str,
+        config_version: int,
+        manual_request_key: str = "",
+    ) -> Dict[str, Any]:
+        claimed: Optional[Dict[str, Any]] = None
+        execution_token = ""
+
+        def terminal_or_bound(
+            run: Mapping[str, Any],
+        ) -> Optional[Dict[str, Any]]:
+            if run.get("queue_id"):
+                queue = self.store.get_queue(run["queue_id"])
+                self._sync_recurring_queue_if_present(queue)
+                return self._recurring_run_api_item(
+                    self.store.get_recurring_run(run["id"])
+                )
+            if run.get("status") != "claimed":
+                return self._recurring_run_api_item(run)
+            return None
+
+        def acquire_and_recover(
+            run: Mapping[str, Any],
+        ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+            nonlocal execution_token
+            execution = self.store.acquire_recurring_execution(
+                run["id"],
+                lease_seconds=DEFAULT_RECURRING_EXECUTION_LEASE_SECONDS,
+            )
+            execution_token = execution.reveal_execution_token()
+            owned_run = dict(execution.run)
+            try:
+                recovered_queue = self.store.get_queue_by_idempotency_key(
+                    str(owned_run["run_key"])
+                )
+            except TTPostError as exc:
+                if exc.code != "tt_post_queue_not_found":
+                    raise
+                return owned_run, None
+            bound = self.store.bind_recurring_queue(
+                owned_run["id"],
+                recovered_queue["id"],
+                execution_token=execution_token,
+            )
+            execution_token = ""
+            return owned_run, self._recurring_run_api_item(bound)
+
+        try:
+            try:
+                existing = self.store.get_recurring_run_by_key(run_key)
+            except TTPostError as exc:
+                if exc.code != "tt_post_schedule_run_not_found":
+                    raise
+                existing = None
+            if existing is not None:
+                # A frozen automatic run keeps its original config version
+                # even if an operator edits the schedule during recovery.
+                existing_version = (
+                    int(existing.get("config_version") or 0)
+                    if trigger_type == "auto"
+                    else config_version
+                )
+                claimed = self.store.claim_recurring_run(
+                    run_key,
+                    trigger_type,
+                    account_id,
+                    shanghai_date,
+                    publish_time,
+                    scheduled_at_utc,
+                    config_version=existing_version,
+                    manual_request_key=manual_request_key,
+                )
+                resumed = terminal_or_bound(claimed)
+                if resumed is not None:
+                    return resumed
+                claimed, resumed = acquire_and_recover(claimed)
+                if resumed is not None:
+                    return resumed
+
+            if not self.gates.is_open:
+                raise TTPostServiceError(
+                    "tt_post_live_gates_closed",
+                    "发布门禁尚未全部开放，本次未消费素材",
+                    409,
+                )
+            account = self.account_repository.get_public_account(account_id)
+            safe_account = SafeAccount.from_mapping(
+                self.account_repository._safe_account_mapping(account)
+            )
+            saved_settings = self.store.get_account_settings(
+                account_id,
+                required=True,
+            )
+            settings = TTPostAccountSettings.from_mapping(
+                {
+                    key: saved_settings[key]
+                    for key in (
+                        "privacy_level",
+                        "allow_comment",
+                        "allow_duet",
+                        "allow_stitch",
+                        "brand_content_toggle",
+                        "brand_organic_toggle",
+                        "is_aigc",
+                    )
+                }
+            )
+            creator = self.creator_info(
+                {"source_account_id": account_id}
+            )["item"]
+            self._assert_creator_settings(creator, settings)
+
+            if claimed is None:
+                claimed = self.store.claim_recurring_run(
+                    run_key,
+                    trigger_type,
+                    account_id,
+                    shanghai_date,
+                    publish_time,
+                    scheduled_at_utc,
+                    config_version=config_version,
+                    manual_request_key=manual_request_key,
+                )
+                resumed = terminal_or_bound(claimed)
+                if resumed is not None:
+                    return resumed
+                claimed, resumed = acquire_and_recover(claimed)
+                if resumed is not None:
+                    return resumed
+            pool_item = claimed["pool_item"]
+            duration = float(pool_item.get("prepared_duration_sec") or 0)
+            maximum_duration = int(
+                creator.get("max_video_post_duration_sec") or 0
+            )
+            if duration <= 0 or duration > maximum_duration:
+                raise TTPostServiceError(
+                    "tt_prepared_media_duration_invalid",
+                    "最终成片时长不满足目标账号实时限制",
+                    409,
+                )
+            consent = {
+                "accepted": True,
+                "version": str(pool_item.get("consent_version") or ""),
+                "accepted_at": str(
+                    pool_item.get("consented_at_utc") or ""
+                ),
+            }
+            policy = self._policy_from_account_settings(settings, consent)
+            self._assert_creator_policy(creator, policy)
+            claimed = self.store.renew_recurring_execution(
+                claimed["id"],
+                execution_token,
+                lease_seconds=DEFAULT_RECURRING_EXECUTION_LEASE_SECONDS,
+            )
+            creator_hash = _creator_info_hash(creator)
+            creator_synced_at = _now_utc(self._now_fn).replace(
+                microsecond=0
+            ).isoformat().replace("+00:00", "Z")
+            legacy_pool = self._ensure_pool_item(
+                str(pool_item["material_id"])
+            )
+            queue = self.store.freeze_queue(
+                legacy_pool["id"],
+                safe_account,
+                str(claimed["scheduled_at_utc"]),
+                str(pool_item["caption_template"]),
+                policy,
+                lambda _material_id: {
+                    "material_id": str(pool_item["material_id"]),
+                    "content_id": str(pool_item["content_id"]),
+                    "media_url": str(pool_item["prepared_media_url"]),
+                },
+                idempotency_key=run_key,
+                is_aigc=bool(pool_item.get("is_aigc")),
+                publish_mode="direct_post",
+                account_display_name=str(
+                    account.get("display_name")
+                    or account.get("account_name")
+                    or ""
+                ),
+                creator_nickname=creator["creator_nickname"],
+                creator_username=creator["creator_username"],
+                creator_info_hash=creator_hash,
+                creator_info_synced_at=creator_synced_at,
+                gpu_job_id=str(pool_item["gpu_job_id"]),
+                source_media_url=str(pool_item["source_media_url"]),
+                prepared_output_sha256=str(
+                    pool_item["prepared_output_sha256"]
+                ),
+                prepared_output_size=int(
+                    pool_item["prepared_output_size"]
+                ),
+                prepared_duration_sec=duration,
+                source_trim_tail_seconds=float(
+                    pool_item["source_trim_tail_seconds"]
+                ),
+                recurring_run_id=claimed["id"],
+                recurring_execution_token=execution_token,
+            )
+            bound = self.store.bind_recurring_queue(
+                claimed["id"],
+                queue["id"],
+                execution_token=execution_token,
+            )
+            execution_token = ""
+            return self._recurring_run_api_item(bound)
+        except TTPostError as exc:
+            if (
+                claimed is not None
+                and claimed.get("status") == "claimed"
+                and execution_token
+            ):
+                try:
+                    self.store.release_recurring_preflight(
+                        claimed["id"],
+                        error_code=exc.code,
+                        error_message=str(exc),
+                        execution_token=execution_token,
+                    )
+                except TTPostError:
+                    try:
+                        self.store.yield_recurring_execution(
+                            claimed["id"],
+                            execution_token,
+                        )
+                    except TTPostError:
+                        pass
+            raise
+
+    def schedules_due(
+        self,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if payload not in (None, {}) and (
+            not isinstance(payload, Mapping) or len(payload) > 0
+        ):
+            raise TTPostServiceError(
+                "invalid_request",
+                "每日发布领取请求不接受业务字段",
+                400,
+            )
+        now_utc = _now_utc(self._now_fn)
+        now_shanghai = now_utc.astimezone(BEIJING_TZ)
+        items = []
+        processed_run_keys = set()
+
+        def skipped_item(
+            *,
+            account_id: str,
+            publish_time: str,
+            exc: TTPostError,
+            run_key: str = "",
+        ) -> Dict[str, Any]:
+            result = {
+                "source_account_id": account_id,
+                "publish_time": publish_time,
+                "status": "skipped",
+                "error_code": exc.code,
+                "error_message": redact_text(str(exc)),
+            }
+            if run_key:
+                result["run_key"] = run_key
+            return result
+
+        # First recover a run that was durably reserved by an earlier process
+        # but not yet bound to its legacy queue. This closes both crash gaps:
+        # claim->freeze and freeze->bind.
+        for pending in self.store.list_claimed_unbound_recurring_runs(
+            limit=100
+        ):
+            run_key = str(pending.get("run_key") or "")
+            processed_run_keys.add(run_key)
+            account_id = str(pending.get("account_id") or "")
+            publish_time = str(pending.get("publish_time") or "")
+            try:
+                scheduled = datetime.fromisoformat(
+                    str(pending.get("scheduled_at_utc") or "").replace(
+                        "Z",
+                        "+00:00",
+                    )
+                ).astimezone(UTC)
+                if (
+                    (now_utc - scheduled).total_seconds()
+                    > DEFAULT_GRACE_SECONDS
+                ):
+                    execution = self.store.acquire_recurring_execution(
+                        pending["id"],
+                        lease_seconds=(
+                            DEFAULT_RECURRING_EXECUTION_LEASE_SECONDS
+                        ),
+                    )
+                    execution_token = (
+                        execution.reveal_execution_token()
+                    )
+                    try:
+                        recovered_queue = (
+                            self.store.get_queue_by_idempotency_key(
+                                run_key
+                            )
+                        )
+                    except TTPostError as exc:
+                        if exc.code != "tt_post_queue_not_found":
+                            raise
+                        released = self.store.release_recurring_preflight(
+                            pending["id"],
+                            error_code="tt_post_recurring_run_expired",
+                            error_message=(
+                                "每日发布运行恢复时已超过600秒安全窗口"
+                            ),
+                            execution_token=execution_token,
+                        )
+                        items.append(
+                            self._recurring_run_api_item(released)
+                        )
+                    else:
+                        bound = self.store.bind_recurring_queue(
+                            pending["id"],
+                            recovered_queue["id"],
+                            execution_token=execution_token,
+                        )
+                        items.append(
+                            self._recurring_run_api_item(bound)
+                        )
+                    continue
+                item = self._execute_recurring_run(
+                    run_key=run_key,
+                    trigger_type=str(pending.get("trigger_type") or ""),
+                    account_id=account_id,
+                    shanghai_date=str(
+                        pending.get("shanghai_date") or ""
+                    ),
+                    publish_time=publish_time,
+                    scheduled_at_utc=str(
+                        pending.get("scheduled_at_utc") or ""
+                    ),
+                    config_version=int(
+                        pending.get("config_version") or 0
+                    ),
+                    manual_request_key=str(
+                        pending.get("manual_request_key") or ""
+                    ),
+                )
+                items.append(item)
+            except (TTPostError, ValueError, TypeError) as exc:
+                if isinstance(exc, TTPostError):
+                    items.append(
+                        skipped_item(
+                            account_id=account_id,
+                            publish_time=publish_time,
+                            exc=exc,
+                            run_key=run_key,
+                        )
+                    )
+                else:
+                    items.append(
+                        {
+                            "source_account_id": account_id,
+                            "publish_time": publish_time,
+                            "status": "skipped",
+                            "error_code": "tt_post_schedule_run_invalid",
+                            "error_message": (
+                                "每日发布运行时间字段无效"
+                            ),
+                            "run_key": run_key,
+                        }
+                    )
+
+        due_slots = []
+        for schedule in self.store.list_daily_schedules():
+            if not schedule.get("enabled"):
+                continue
+            account_id = str(schedule.get("account_id") or "")
+            for day_offset in (0, -1):
+                local_day = (
+                    now_shanghai + timedelta(days=day_offset)
+                ).date()
+                shanghai_date = local_day.isoformat()
+                for publish_time in sorted(
+                    str(value)
+                    for value in schedule.get("publish_times") or []
+                ):
+                    try:
+                        hour, minute = (
+                            int(part)
+                            for part in publish_time.split(":")
+                        )
+                        local_slot = datetime(
+                            local_day.year,
+                            local_day.month,
+                            local_day.day,
+                            hour,
+                            minute,
+                            tzinfo=BEIJING_TZ,
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    slot_utc = local_slot.astimezone(UTC)
+                    age_seconds = (now_utc - slot_utc).total_seconds()
+                    if 0 <= age_seconds <= DEFAULT_GRACE_SECONDS:
+                        due_slots.append(
+                            (
+                                slot_utc,
+                                account_id,
+                                shanghai_date,
+                                publish_time,
+                                int(schedule.get("version") or 0),
+                            )
+                        )
+
+        for (
+            slot_utc,
+            account_id,
+            shanghai_date,
+            publish_time,
+            config_version,
+        ) in sorted(due_slots):
+            scheduled_at_utc = slot_utc.isoformat().replace(
+                "+00:00",
+                "Z",
+            )
+            run_key = "tt-post:auto:v1:%s:%s:%s" % (
+                account_id,
+                shanghai_date,
+                publish_time.replace(":", ""),
+            )
+            if run_key in processed_run_keys:
+                continue
+            try:
+                item = self._execute_recurring_run(
+                    run_key=run_key,
+                    trigger_type="auto",
+                    account_id=account_id,
+                    shanghai_date=shanghai_date,
+                    publish_time=publish_time,
+                    scheduled_at_utc=scheduled_at_utc,
+                    config_version=config_version,
+                )
+                items.append(item)
+            except TTPostError as exc:
+                items.append(
+                    skipped_item(
+                        account_id=account_id,
+                        publish_time=publish_time,
+                        exc=exc,
+                        run_key=run_key,
+                    )
+                )
+        return {
+            "items": items,
+            "current_shanghai_minute": "%s %s"
+            % (
+                now_shanghai.strftime("%Y-%m-%d"),
+                now_shanghai.strftime("%H:%M"),
+            ),
+            "grace_seconds": DEFAULT_GRACE_SECONDS,
+            "gates": self._gates(),
+        }
+
+    def _kick_runner(self) -> bool:
+        if not self.runner_kick_path:
+            return False
+        try:
+            Path(self.runner_kick_path).touch(exist_ok=True)
+            return True
+        except OSError:
+            return False
+
+    def run_now(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "source_account_id",
+            "idempotency_key",
+        }:
+            raise TTPostServiceError(
+                "invalid_request",
+                "立即发布请求字段无效",
+                400,
+            )
+        account_id = _positive_decimal(
+            payload.get("source_account_id"),
+            "TikTok账号ID",
+        )
+        request_key = _bounded_text(
+            payload.get("idempotency_key"),
+            "立即发布幂等键",
+            255,
+        )
+        now_shanghai = _now_utc(self._now_fn).astimezone(BEIJING_TZ)
+        publish_time = now_shanghai.strftime("%H:%M")
+        shanghai_date = now_shanghai.strftime("%Y-%m-%d")
+        scheduled_at_utc = now_shanghai.replace(
+            second=0,
+            microsecond=0,
+        ).astimezone(UTC).isoformat().replace("+00:00", "Z")
+        run_key = "tt-post:manual:v1:%s:%s" % (
+            account_id,
+            hashlib.sha256(request_key.encode("utf-8")).hexdigest()[:32],
+        )
+        schedule = self.store.get_daily_schedule(account_id)
+        item = self._execute_recurring_run(
+            run_key=run_key,
+            trigger_type="manual",
+            account_id=account_id,
+            shanghai_date=shanghai_date,
+            publish_time=publish_time,
+            scheduled_at_utc=scheduled_at_utc,
+            config_version=int(schedule.get("version") or 0),
+            manual_request_key=request_key,
+        )
+        kicked = bool(item.get("queue_id")) and self._kick_runner()
+        return {
+            "item": item,
+            "runner_wakeup_requested": kicked,
+            "runner_timer_fallback_seconds": 60,
+            "gates": self._gates(),
+        }
+
     def _ensure_pool_item(self, material_id: str) -> Dict[str, Any]:
         try:
             return self.store.add_material(material_id)
@@ -2213,6 +3271,7 @@ class TTPostService:
         body = {} if payload is None else payload
         reason = str(body.get("reason") or "由AI后台操作人员取消")[:500]
         queue = self.store.cancel_queue(queue_id, reason=reason)
+        self._sync_recurring_queue_if_present(queue)
         return {
             "item": self._queue_api_item(queue, gates=self.gates),
             "gates": self._gates(),
@@ -2240,6 +3299,16 @@ class TTPostService:
             grace_seconds=DEFAULT_GRACE_SECONDS,
             limit=limit,
         )
+        for stored_queue in self.store.list_queues():
+            if str(stored_queue.get("status") or "") in {
+                "published",
+                "failed",
+                "canceled",
+                "missed",
+                "blocked_compliance",
+                "unknown",
+            }:
+                self._sync_recurring_queue_if_present(stored_queue)
         items = []
         for claim in claims:
             queue = claim.queue
@@ -2248,6 +3317,7 @@ class TTPostService:
                     claim.queue_id,
                     claim.reveal_claim_token(),
                 )
+                self._sync_recurring_queue_if_present(blocked)
                 items.append(
                     {
                         "queue": self._queue_api_item(
@@ -2303,6 +3373,7 @@ class TTPostService:
                 normalized_queue_id,
                 token,
             )
+            self._sync_recurring_queue_if_present(blocked)
             return {
                 "item": self._queue_api_item(blocked, gates=self.gates),
                 "gates": self._gates(),
@@ -2318,6 +3389,7 @@ class TTPostService:
                 error_message="冻结任务缺少稳定TT GPU任务ID",
                 publish_was_not_created=True,
             )
+            self._sync_recurring_queue_if_present(failed)
             return {
                 "item": self._queue_api_item(failed, gates=self.gates),
                 "gates": self._gates(),
@@ -2353,6 +3425,7 @@ class TTPostService:
                 error_message=str(exc),
                 publish_was_not_created=True,
             )
+            self._sync_recurring_queue_if_present(failed)
             return {
                 "item": self._queue_api_item(failed, gates=self.gates),
                 "gates": self._gates(),
@@ -2396,6 +3469,7 @@ class TTPostService:
                     error_message=str(exc),
                     publish_was_not_created=True,
                 )
+            self._sync_recurring_queue_if_present(final)
             return {
                 "item": self._queue_api_item(final, gates=self.gates),
                 "gates": self._gates(),
@@ -2422,6 +3496,7 @@ class TTPostService:
                     publish_id,
                     publish_url=str(result.get("publish_url") or ""),
                 )
+        self._sync_recurring_queue_if_present(final)
         return {
             "item": self._queue_api_item(final, gates=self.gates),
             "gates": self._gates(),
@@ -2442,6 +3517,7 @@ class TTPostService:
         normalized_queue_id = _positive_int(queue_id, "发布队列ID")
         queue = self.store.get_queue(normalized_queue_id)
         if queue.get("status") == "published":
+            self._sync_recurring_queue_if_present(queue)
             return {
                 "item": self._queue_api_item(queue, gates=self.gates),
                 "gates": self._gates(),
@@ -2485,6 +3561,7 @@ class TTPostService:
                 str(queue["publish_id"]),
                 remote_status=remote_status,
             )
+        self._sync_recurring_queue_if_present(queue)
         return {
             "item": self._queue_api_item(queue, gates=self.gates),
             "remote_status": remote_status,
@@ -2507,6 +3584,7 @@ class TTPostService:
                 409,
             )
         if queue.get("status") == "published":
+            self._sync_recurring_queue_if_present(queue)
             return {
                 "item": self._queue_api_item(queue, gates=self.gates),
                 "gates": self._gates(),
@@ -2555,6 +3633,7 @@ class TTPostService:
                 returned_publish_id,
                 remote_status=remote_status,
             )
+        self._sync_recurring_queue_if_present(queue)
         return {
             "item": self._queue_api_item(queue, gates=self.gates),
             "remote_status": remote_status,
@@ -2629,6 +3708,12 @@ def build_service_from_env(
             source.get(
                 "TT_POST_MEDIA_PROFILE_VERSION",
                 "tt-post-outro-20260729-v1",
+            )
+        ),
+        runner_kick_path=str(
+            source.get(
+                "TT_POST_RUNNER_KICK_PATH",
+                DEFAULT_RUNNER_KICK_PATH,
             )
         ),
     )
@@ -2786,6 +3871,20 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             "/api/admin/tt-posts/materials/prepare",
         }:
             return service.material_preview(self._body())
+        if self.command == "GET" and path == "/api/admin/tt-posts/material-pool":
+            return service.material_pool_list(
+                urllib.parse.parse_qs(parsed.query)
+            )
+        if self.command == "POST" and path == "/api/admin/tt-posts/material-pool":
+            return service.material_pool_add(self._body())
+        if self.command == "GET" and path == "/api/admin/tt-posts/schedule":
+            return service.schedule_get(
+                urllib.parse.parse_qs(parsed.query)
+            )
+        if self.command == "POST" and path == "/api/admin/tt-posts/schedule":
+            return service.schedule_save(self._body())
+        if self.command == "POST" and path == "/api/admin/tt-posts/run-now":
+            return service.run_now(self._body())
         if self.command == "GET" and path == "/api/admin/tt-posts/queue":
             return service.queue_list(urllib.parse.parse_qs(parsed.query))
         if self.command == "POST" and path == "/api/admin/tt-posts/queue":
@@ -2815,6 +3914,11 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             return service.events(queue_events.group(1))
         if self.command == "POST" and path == "/internal/tt-posts/claim":
             return service.claim_due(self._body())
+        if (
+            self.command == "POST"
+            and path == "/internal/tt-posts/schedules/due"
+        ):
+            return service.schedules_due(self._body())
         if self.command == "GET" and path == "/internal/tt-posts/reconciling":
             query = urllib.parse.parse_qs(parsed.query)
             values = query.get("limit") or ["100"]

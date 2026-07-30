@@ -58,6 +58,7 @@ TT_POST_GPU_COS_BUCKET=<root-only deployment value>
 TT_POST_GPU_COS_REGION=<root-only deployment value>
 TT_POST_GPU_COS_DOMAIN=<HTTPS public origin>
 TT_POST_GPU_COS_PREFIX=tt-post-prepared
+TT_POST_GPU_MAX_DURATION_SECONDS=3600
 TT_POST_LIVE_ENABLED=0
 TT_POST_DIRECT_AUDIT_APPROVED=0
 TT_POST_URL_PROPERTY_VERIFIED=0
@@ -65,7 +66,13 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 
 ## 数据库变更
 
-不修改 MySQL。CPU 在独立 SQLite 中幂等维护 `tt_post_material_pool`、`tt_post_queue`、`tt_post_event`、`tt_post_account_setting` 四张表。本轮批量素材仍复用单项 preview/queue 路由，不新增批次表。
+不修改 MySQL。CPU 在独立 SQLite 中保留旧四表，并以只增方式新增：
+
+- `tt_post_daily_schedule`
+- `tt_post_recurring_pool`
+- `tt_post_schedule_run`
+
+部署前必须使用 SQLite online backup；在备份副本上连续初始化两次并确认 `PRAGMA integrity_check=ok` 后才允许切换 release。新排期默认没有记录且 `enabled=0`，升级本身不会自动发布。
 
 ## 部署步骤
 
@@ -74,7 +81,7 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 3. 备份 CPU 现有 `app.py`、静态文件、nginx 目标文件和环境；不修改 X SQLite。
 4. GPU 上传并校验固定片尾与圆角 Logo SHA，创建 `/data/tt-post-publisher`。
 5. GPU 安装并启动 loopback sidecar和反向隧道；确认 CPU `127.0.0.1:18830`。
-6. CPU 安装 TT sidecar、claim/runner timer，初始化 SQLite。
+6. CPU 安装 TT sidecar、runner timer 与 `tt-post-runner.path`，初始化 SQLite；path 仅监控 `/run/tt-post/manual-kick`，与 timer 共用同一个 runner/flock。
 7. 合并部署主后台路由和静态页，同时同步服务目录与 `/usr/share/nginx/html`；安装主 API 的 TT EnvironmentFile 和 systemd drop-in。
 8. 仅重启相关新服务和主 API；不重启 X sidecar。
 9. 保持三重 gate 为 0，执行关闭态验收。
@@ -85,17 +92,18 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 2. GPU `/health`、CPU 内部健康和反向隧道均通过。
 3. SQLite `PRAGMA integrity_check=ok`。
 4. 公网 `/tt-post-pool.html` 为 200，登录后账号数与只读快照一致。
-5. 通过素材预览触发 GPU 成片并确认文件位于 `/data`，不创建测试队列。
+5. 通过素材预览触发 GPU 成片并确认文件位于 `/data`；素材 4665764（2087 秒）能通过 TT 预校验，且 X 140 秒回归不变。
 6. 确认三项门禁与品牌媒体门禁均为关闭态，TikTok init 调用计数为 0。
-7. 搜索日志、SQLite、manifest，确认无 Token。
-8. X 发布池页面、timer和最近任务保持正常。
+7. 关闭态保存每日时间与素材池后，手动按钮明确显示阻断，不消费素材、不创建可执行 queue。
+8. 搜索日志、SQLite、manifest，确认无 Token。
+9. X 发布池页面、timer和最近任务保持正常。
 
 ## 回滚方案
 
-1. 停止 TT claim/runner 和 CPU sidecar；本轮 GPU 未改，不停止 GPU sidecar 或 18830 隧道。
+1. 停止并禁用 `tt-post-runner.path`、TT runner timer 和 CPU sidecar；停止 path 前先删除无业务数据的 `/run/tt-post/manual-kick`。
 2. 主 API和静态页恢复部署前备份或切回上一 immutable release。
-3. CPU symlink 切回 `/opt/tt-post/releases/779ac3b`；GPU 未变更，无需回滚。
-4. TT SQLite保留只读审计，不删除；回滚不触碰 X SQLite和快照同步。
+3. CPU/GPU symlink 分别切回部署前记录的 immutable release。
+4. TT SQLite 新三表和已生成 run/queue 保留只读审计，不删除、不降表；回滚不触碰 X SQLite和快照同步。
 5. 验证主 API、X sidecar、X timers和 18820 隧道。
 
 ## 注意事项
@@ -103,6 +111,7 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 - 禁止在命令行、systemd 状态、journal、调试响应中输出真实 Token。
 - 禁止将 `TT_POST_LIVE_ENABLED` 单独打开；三重 gate 必须全部满足且经过独立变更审批。
 - 当前品牌片尾只允许关闭态成片/人工流程验收，不代表 TikTok Direct Post 合规；其 manifest 固定为 `direct_post_eligible=false`，不能靠修改三重 gate 绕过。
+- TT GPU 全局制作上限为 3600 秒，但最终权威仍是所选账号实时 `max_video_post_duration_sec`；不得同步放宽 X 的 140 秒素材合同。
 
 ## 2026-07-29 部署记录
 

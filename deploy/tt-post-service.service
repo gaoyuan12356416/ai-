@@ -35,7 +35,7 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/tt-post/current
-ReadWritePaths=/mnt/data-disk/tt-post-publisher
+ReadWritePaths=/mnt/data-disk/tt-post-publisher /run/tt-post
 UMask=0077
 TimeoutStopSec=30s
 

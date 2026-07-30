@@ -97,6 +97,7 @@ class CoreTestCase(unittest.TestCase):
         self.db_path = Path(self.tempdir.name) / "tt-posts.sqlite3"
         self.clock = MutableClock(datetime(2026, 7, 29, 2, 0, tzinfo=UTC))
         self.store = TTPostStore(self.db_path, now_fn=self.clock)
+        self.recurring_execution_tokens = {}
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -127,7 +128,7 @@ class CoreTestCase(unittest.TestCase):
 
 
 class StorageTests(CoreTestCase):
-    def test_storage_has_exactly_four_feature_tables(self):
+    def test_storage_has_legacy_four_plus_exactly_three_recurring_tables(self):
         conn = sqlite3.connect(self.db_path)
         try:
             names = {
@@ -145,8 +146,71 @@ class StorageTests(CoreTestCase):
                 "tt_post_queue",
                 "tt_post_event",
                 "tt_post_account_setting",
+                "tt_post_daily_schedule",
+                "tt_post_recurring_pool",
+                "tt_post_schedule_run",
             },
             names,
+        )
+
+    def test_additive_migration_is_idempotent_and_preserves_legacy_data(self):
+        legacy = self.store.add_material("9001")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("DROP TABLE tt_post_schedule_run")
+            conn.execute("DROP TABLE tt_post_recurring_pool")
+            conn.execute("DROP TABLE tt_post_daily_schedule")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated = TTPostStore(self.db_path, now_fn=self.clock)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "DROP INDEX idx_tt_post_schedule_run_recovery"
+            )
+            conn.execute(
+                "ALTER TABLE tt_post_schedule_run "
+                "DROP COLUMN execution_token"
+            )
+            conn.execute(
+                "ALTER TABLE tt_post_schedule_run "
+                "DROP COLUMN execution_lease_expires_at_utc"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        replay = TTPostStore(self.db_path, now_fn=self.clock)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            migrated_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(tt_post_schedule_run)"
+                )
+            }
+            migrated_indexes = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA index_list(tt_post_schedule_run)"
+                )
+            }
+        finally:
+            conn.close()
+        self.assertIn("execution_token", migrated_columns)
+        self.assertIn(
+            "execution_lease_expires_at_utc",
+            migrated_columns,
+        )
+        self.assertIn(
+            "idx_tt_post_schedule_run_recovery",
+            migrated_indexes,
+        )
+        self.assertEqual(legacy, migrated.get_material(legacy["id"]))
+        self.assertEqual(
+            migrated.get_daily_schedule("acct-1"),
+            replay.get_daily_schedule("acct-1"),
         )
 
     def test_account_settings_are_required_versioned_and_boolean_safe(self):
@@ -379,6 +443,444 @@ class StorageTests(CoreTestCase):
                 idempotency_key="tt-post:editable-template",
             )
         self.assertEqual("tt_post_idempotency_conflict", caught.exception.code)
+
+
+class RecurringStorageTests(CoreTestCase):
+    def add_recurring(self, material_id, account_id="acct-1"):
+        content_id = "CONTENT_%s" % material_id
+        template = "Watch now\nDrama ID: {{contect_id}}"
+        return self.store.add_recurring_material(
+            material_id,
+            account_id,
+            content_id,
+            "https://cdn.example.com/source-%s.mp4" % material_id,
+            "https://gpu.example.com/prepared-%s.mp4" % material_id,
+            gpu_job_id="gpu-job-recurring-%s" % material_id,
+            prepared_output_sha256=("a" if account_id == "acct-1" else "b") * 64,
+            prepared_output_size=123456,
+            prepared_duration_sec=120.25,
+            source_trim_tail_seconds=4.333333,
+            preparation_profile="tt-post-outro-v1",
+            caption_template=template,
+            caption=render_caption_template(template, content_id),
+            consent_version="tt-post-recurring-v1",
+            consented_at="2026-07-29 10:00:00",
+            is_aigc=False,
+            actor_user_id="operator-1",
+            actor_name="Operator",
+        )
+
+    def claim_manual(
+        self,
+        suffix,
+        account_id="acct-1",
+        publish_time="10:00",
+    ):
+        return self.store.claim_recurring_run(
+            "tt-post:manual:%s" % suffix,
+            "manual",
+            account_id,
+            "2026-07-29",
+            publish_time,
+            beijing_to_utc("2026-07-29 %s:00" % publish_time),
+            config_version=0,
+            manual_request_key="manual-request-%s" % suffix,
+        )
+
+    def acquire_execution(self, run):
+        execution = self.store.acquire_recurring_execution(run["id"])
+        token = execution.reveal_execution_token()
+        self.recurring_execution_tokens[int(run["id"])] = token
+        return token
+
+    def freeze_legacy_queue_for_run(self, run, execution_token=None):
+        pool_item = run["pool_item"]
+        legacy_pool = self.store.add_material(pool_item["material_id"])
+        if execution_token is None:
+            execution_token = self.acquire_execution(run)
+        else:
+            self.recurring_execution_tokens[int(run["id"])] = execution_token
+
+        def recurring_resolver(material_id):
+            return {
+                "material_id": material_id,
+                "content_id": pool_item["content_id"],
+                "media_url": pool_item["prepared_media_url"],
+            }
+
+        return self.store.freeze_queue(
+            legacy_pool["id"],
+            account(run["account_id"]),
+            "%s %s:00" % (run["shanghai_date"], run["publish_time"]),
+            pool_item["caption_template"],
+            policy(),
+            recurring_resolver,
+            idempotency_key=run["run_key"],
+            gpu_job_id=pool_item["gpu_job_id"],
+            source_media_url=pool_item["source_media_url"],
+            prepared_output_sha256=pool_item["prepared_output_sha256"],
+            prepared_output_size=pool_item["prepared_output_size"],
+            prepared_duration_sec=pool_item["prepared_duration_sec"],
+            source_trim_tail_seconds=pool_item["source_trim_tail_seconds"],
+            recurring_run_id=run["id"],
+            recurring_execution_token=execution_token,
+        )
+
+    def test_schedule_defaults_disabled_and_saves_with_optimistic_version(self):
+        default = self.store.get_daily_schedule("acct-1")
+        self.assertFalse(default["enabled"])
+        self.assertEqual([], default["publish_times"])
+        self.assertEqual(0, default["version"])
+        self.assertEqual("Asia/Shanghai", default["timezone"])
+
+        saved = self.store.save_daily_schedule(
+            "acct-1",
+            ["18:30", "09:05"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-recurring-v1",
+            consented_at="2026-07-29 10:00:00",
+            actor_user_id="operator-1",
+            actor_name="Operator",
+        )
+        self.assertTrue(saved["enabled"])
+        self.assertEqual(["09:05", "18:30"], saved["publish_times"])
+        self.assertEqual(1, saved["version"])
+        self.assertTrue(saved["user_consent"])
+        self.assertEqual([saved], self.store.list_daily_schedules())
+
+        with self.assertRaises(TTPostError) as conflict:
+            self.store.save_daily_schedule(
+                "acct-1",
+                ["09:05"],
+                enabled=True,
+                expected_version=0,
+                consent_version="tt-post-recurring-v1",
+                consented_at="2026-07-29 10:01:00",
+            )
+        self.assertEqual(
+            "tt_post_schedule_version_conflict",
+            conflict.exception.code,
+        )
+        with self.assertRaises(TTPostError):
+            self.store.save_daily_schedule(
+                "acct-2",
+                ["9:05"],
+                enabled=True,
+                expected_version=0,
+                consent_version="tt-post-recurring-v1",
+                consented_at="2026-07-29 10:01:00",
+            )
+
+    def test_pool_fifo_is_isolated_per_account(self):
+        first = self.add_recurring("1101", "acct-1")
+        second = self.add_recurring("1102", "acct-1")
+        other = self.add_recurring("2201", "acct-2")
+        self.assertEqual(
+            2,
+            self.store.count_recurring_materials(
+                account_id="acct-1",
+                status="available",
+            ),
+        )
+
+        first_run = self.claim_manual("fifo-a", "acct-1")
+        other_run = self.claim_manual("fifo-b", "acct-2")
+        self.assertEqual(first["id"], first_run["pool_item_id"])
+        self.assertEqual(other["id"], other_run["pool_item_id"])
+        self.assertEqual("reserved", first_run["pool_item"]["status"])
+        self.assertEqual("reserved", other_run["pool_item"]["status"])
+        self.assertEqual(
+            [second["material_id"]],
+            [
+                item["material_id"]
+                for item in self.store.list_recurring_materials(
+                    account_id="acct-1",
+                    status="available",
+                )
+            ],
+        )
+
+    def test_double_claim_is_idempotent_and_account_active_run_is_exclusive(self):
+        self.add_recurring("3101")
+        self.add_recurring("3102")
+        first = self.claim_manual("same")
+        replay = self.claim_manual("same")
+        self.assertEqual(first["id"], replay["id"])
+        self.assertEqual(first["pool_item_id"], replay["pool_item_id"])
+        with self.assertRaises(TTPostError) as busy:
+            self.claim_manual("other", publish_time="10:01")
+        self.assertEqual("tt_post_account_publish_busy", busy.exception.code)
+        self.assertEqual(
+            1,
+            self.store.count_recurring_materials(
+                account_id="acct-1",
+                status="reserved",
+            ),
+        )
+
+    def test_execution_lease_is_per_run_exclusive_and_crash_recoverable(self):
+        self.add_recurring("3103", "acct-1")
+        self.add_recurring("3104", "acct-2")
+        first = self.claim_manual("lease-a", "acct-1")
+        second = self.claim_manual("lease-b", "acct-2")
+
+        first_execution = self.store.acquire_recurring_execution(first["id"])
+        second_execution = self.store.acquire_recurring_execution(second["id"])
+        first_token = first_execution.reveal_execution_token()
+        second_token = second_execution.reveal_execution_token()
+        self.assertNotEqual(first_token, second_token)
+        self.assertNotIn("execution_token", first_execution.run)
+        self.assertNotIn("execution_lease_expires_at_utc", first_execution.run)
+        self.assertNotIn(first_token, repr(first_execution))
+
+        with self.assertRaises(TTPostError) as busy:
+            self.store.acquire_recurring_execution(first["id"])
+        self.assertEqual(
+            "tt_post_recurring_execution_busy",
+            busy.exception.code,
+        )
+        self.assertEqual(
+            [],
+            self.store.list_claimed_unbound_recurring_runs(),
+        )
+
+        self.clock.current += timedelta(seconds=120)
+        pending = self.store.list_claimed_unbound_recurring_runs()
+        self.assertEqual(
+            [first["id"], second["id"]],
+            [item["id"] for item in pending],
+        )
+        replacement = self.store.acquire_recurring_execution(first["id"])
+        replacement_token = replacement.reveal_execution_token()
+        self.assertNotEqual(first_token, replacement_token)
+        with self.assertRaises(TTPostError) as stale:
+            self.store.renew_recurring_execution(
+                first["id"],
+                first_token,
+            )
+        self.assertEqual(
+            "tt_post_recurring_execution_invalid",
+            stale.exception.code,
+        )
+
+    def test_release_first_fences_stale_queue_freeze(self):
+        self.add_recurring("3105")
+        run = self.claim_manual("release-first")
+        execution_token = self.acquire_execution(run)
+        released = self.store.release_recurring_preflight(
+            run["id"],
+            error_code="synthetic_preflight_failure",
+            error_message="synthetic",
+            execution_token=execution_token,
+        )
+        self.assertEqual("preflight_failed", released["status"])
+        with self.assertRaises(TTPostError) as stale:
+            self.freeze_legacy_queue_for_run(
+                run,
+                execution_token=execution_token,
+            )
+        self.assertEqual(
+            "tt_post_recurring_execution_invalid",
+            stale.exception.code,
+        )
+        self.assertEqual([], self.store.list_queues())
+        self.assertEqual(
+            "available",
+            self.store.list_recurring_materials(
+                account_id="acct-1"
+            )[0]["status"],
+        )
+
+    def test_queue_freeze_first_blocks_release_until_owner_binds(self):
+        self.add_recurring("3106")
+        run = self.claim_manual("freeze-first")
+        execution_token = self.acquire_execution(run)
+        queue = self.freeze_legacy_queue_for_run(
+            run,
+            execution_token=execution_token,
+        )
+        with self.assertRaises(TTPostError) as release:
+            self.store.release_recurring_preflight(
+                run["id"],
+                error_code="must-not-release",
+                error_message="must-not-release",
+                execution_token=execution_token,
+            )
+        self.assertEqual(
+            "tt_post_preflight_release_invalid",
+            release.exception.code,
+        )
+        still_claimed = self.store.get_recurring_run(run["id"])
+        self.assertEqual("claimed", still_claimed["status"])
+        self.assertEqual("reserved", still_claimed["pool_item"]["status"])
+        bound = self.store.bind_recurring_queue(
+            run["id"],
+            queue["id"],
+            execution_token=execution_token,
+        )
+        self.assertEqual("scheduled", bound["status"])
+        self.assertEqual(queue["id"], bound["queue_id"])
+
+    def test_claimed_unbound_runs_can_be_found_by_key_and_recovered_in_order(self):
+        self.add_recurring("3111", "acct-1")
+        self.add_recurring("3112", "acct-2")
+        later = self.claim_manual(
+            "recover-later",
+            "acct-1",
+            publish_time="10:01",
+        )
+        earlier = self.claim_manual(
+            "recover-earlier",
+            "acct-2",
+            publish_time="10:00",
+        )
+        fetched = self.store.get_recurring_run_by_key(earlier["run_key"])
+        self.assertEqual(earlier["id"], fetched["id"])
+        pending = self.store.list_claimed_unbound_recurring_runs()
+        self.assertEqual([earlier["id"], later["id"]], [
+            item["id"] for item in pending
+        ])
+
+        queue = self.freeze_legacy_queue_for_run(earlier)
+        self.store.bind_recurring_queue(
+            earlier["id"],
+            queue["id"],
+            execution_token=self.recurring_execution_tokens[earlier["id"]],
+        )
+        self.assertEqual(
+            [later["id"]],
+            [
+                item["id"]
+                for item in self.store.list_claimed_unbound_recurring_runs()
+            ],
+        )
+
+    def test_unknown_queue_or_run_blocks_all_later_account_claims(self):
+        self.add_recurring("3201")
+        run = self.claim_manual("unknown-queue")
+        queue = self.freeze_legacy_queue_for_run(run)
+        self.store.bind_recurring_queue(
+            run["id"],
+            queue["id"],
+            execution_token=self.recurring_execution_tokens[run["id"]],
+        )
+        claims = self.store.claim_due(
+            "worker-unknown",
+            now=datetime(2026, 7, 29, 2, 0, 10, tzinfo=UTC),
+        )
+        self.store.begin_publish(
+            queue["id"],
+            claims[0].reveal_claim_token(),
+            OPEN_GATES,
+            now=datetime(2026, 7, 29, 2, 0, 20, tzinfo=UTC),
+        )
+        self.store.mark_unknown(
+            queue["id"],
+            claims[0].reveal_claim_token(),
+            reason="remote outcome cannot be proven",
+            now=datetime(2026, 7, 29, 2, 0, 30, tzinfo=UTC),
+        )
+        synced = self.store.sync_recurring_from_queue(queue["id"])
+        self.assertEqual("unknown", synced["status"])
+        self.add_recurring("3202")
+        with self.assertRaises(TTPostError) as queue_busy:
+            self.claim_manual("after-unknown-queue", publish_time="10:01")
+        self.assertEqual(
+            "tt_post_account_publish_busy",
+            queue_busy.exception.code,
+        )
+
+        self.add_recurring("3301", "acct-2")
+        self.add_recurring("3302", "acct-2")
+        unknown_run = self.claim_manual("unknown-run", "acct-2")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE tt_post_schedule_run
+                SET status='unknown',finished_at_utc=updated_at
+                WHERE id=?
+                """,
+                (unknown_run["id"],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with self.assertRaises(TTPostError) as run_busy:
+            self.claim_manual(
+                "after-unknown-run",
+                "acct-2",
+                publish_time="10:01",
+            )
+        self.assertEqual(
+            "tt_post_account_publish_busy",
+            run_busy.exception.code,
+        )
+
+    def test_release_preflight_returns_material_to_available_fifo(self):
+        material = self.add_recurring("4101")
+        run = self.claim_manual("preflight")
+        execution_token = self.acquire_execution(run)
+        released = self.store.release_recurring_preflight(
+            run["id"],
+            error_code="creator_info_unavailable",
+            error_message="Authorization: Bearer secret-value",
+            execution_token=execution_token,
+            actor_user_id="runner",
+        )
+        self.assertEqual("preflight_failed", released["status"])
+        self.assertEqual("available", released["pool_item"]["status"])
+        self.assertIsNone(released["pool_item"]["run_id"])
+        self.assertNotIn("secret-value", released["error_message"])
+        replay = self.store.release_recurring_preflight(
+            run["id"],
+            error_code="ignored-on-idempotent-replay",
+            error_message="ignored",
+        )
+        self.assertEqual(released["id"], replay["id"])
+
+        next_run = self.claim_manual("preflight-next", publish_time="10:01")
+        self.assertEqual(material["id"], next_run["pool_item_id"])
+
+    def test_bind_and_sync_follow_legacy_queue_without_changing_its_machine(self):
+        self.add_recurring("5101")
+        run = self.claim_manual("bind")
+        queue = self.freeze_legacy_queue_for_run(run)
+        bound = self.store.bind_recurring_queue(
+            run["id"],
+            queue["id"],
+            execution_token=self.recurring_execution_tokens[run["id"]],
+        )
+        self.assertEqual("scheduled", bound["status"])
+        self.assertEqual(queue["id"], bound["queue_id"])
+        self.assertEqual("reserved", bound["pool_item"]["status"])
+
+        claims = self.store.claim_due(
+            "worker-1",
+            now=datetime(2026, 7, 29, 2, 0, 10, tzinfo=UTC),
+        )
+        self.assertEqual(1, len(claims))
+        synced = self.store.sync_recurring_from_queue(queue["id"])
+        self.assertEqual("claimed", synced["status"])
+        self.assertEqual("claimed", self.store.get_queue(queue["id"])["status"])
+
+        failed_queue = self.store.mark_failed(
+            queue["id"],
+            claims[0].reveal_claim_token(),
+            error_code="known_precommit_failure",
+            error_message="rejected before publish",
+            publish_was_not_created=True,
+            now=datetime(2026, 7, 29, 2, 0, 20, tzinfo=UTC),
+        )
+        self.assertEqual("failed", failed_queue["status"])
+        terminal = self.store.sync_recurring_from_queue(queue["id"])
+        self.assertEqual("failed", terminal["status"])
+        self.assertEqual("consumed", terminal["pool_item"]["status"])
+        self.assertEqual(
+            "failed",
+            self.store.get_queue(queue["id"])["status"],
+        )
 
 
 class AccountSourceTests(unittest.TestCase):

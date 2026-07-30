@@ -63,7 +63,11 @@ DEFAULT_TRANSITION_SECONDS = 0.9
 DEFAULT_COS_PREFIX = "tt-post-prepared"
 DEFAULT_MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024
-DEFAULT_MAX_DURATION_SECONDS = 600
+# TikTok creator_info currently allows up to 3,600 seconds for some accounts.
+# The CPU still enforces the selected account's live creator limit before a
+# queue can be frozen, so the GPU-wide ceiling only needs to be broad enough to
+# prepare a valid long-form candidate.
+DEFAULT_MAX_DURATION_SECONDS = 3600
 DEFAULT_DOWNLOAD_TIMEOUT = 120
 DEFAULT_PROBE_TIMEOUT = 120
 DEFAULT_TRANSCODE_TIMEOUT = 3600

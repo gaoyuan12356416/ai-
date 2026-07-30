@@ -81,7 +81,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('id="loginGate"', PAGE)
         self.assertIn('id="permissionGate"', PAGE)
 
-    def test_create_form_covers_account_material_schedule_and_consent(self):
+    def test_create_form_covers_account_material_daily_schedule_and_consent(self):
         required_ids = {
             "accountSearch",
             "refreshAccounts",
@@ -94,8 +94,15 @@ class TtPostPoolUiTest(unittest.TestCase):
             "mediaPreview",
             "videoShell",
             "caption",
-            "scheduledAt",
-            "scheduleIntervalMinutes",
+            "dailyPublishTime",
+            "scheduleEnabled",
+            "saveSchedule",
+            "scheduleStatus",
+            "scheduleNextRun",
+            "scheduleVersion",
+            "availableMaterialCount",
+            "runNow",
+            "runNowHelp",
             "accountSettingsCard",
             "accountSettingsStatus",
             "accountSettingsSummary",
@@ -103,15 +110,15 @@ class TtPostPoolUiTest(unittest.TestCase):
             "queueSubmitSummary",
             "queueSubmitResults",
             "publishConsent",
-            "createQueue",
+            "addMaterialsToPool",
         }
         for element_id in required_ids:
             self.assertIn(f'id="{element_id}"', PAGE)
 
         self.assertIn('type="search"', PAGE)
-        self.assertIn('type="datetime-local"', PAGE)
+        self.assertIn('type="time"', PAGE)
+        self.assertNotIn('type="datetime-local"', PAGE)
         self.assertIn('timezone: "Asia/Shanghai"', PAGE)
-        self.assertIn("shanghaiInputToUtc", PAGE)
         self.assertIn("source_account_id: state.selectedAccountId", PAGE)
         self.assertNotIn("Number(state.selectedAccountId)", PAGE)
         self.assertIn("material_id: material.material_id", PAGE)
@@ -127,6 +134,10 @@ class TtPostPoolUiTest(unittest.TestCase):
             "${API_BASE}/accounts",
             "${API_BASE}/creator-info",
             "${API_BASE}/materials/preview",
+            "${API_BASE}/schedule?",
+            "${API_BASE}/schedule`",
+            "${API_BASE}/material-pool",
+            "${API_BASE}/run-now",
             "${API_BASE}/queue",
             "${API_BASE}/events?",
         ):
@@ -213,65 +224,86 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("caption_template: byId(\"caption\").value", PAGE)
         self.assertIn("utf16Units", PAGE)
 
-    def test_batch_schedule_uses_first_time_interval_and_stable_material_keys(self):
-        interval = re.search(
-            r'<input id="scheduleIntervalMinutes"(?P<attrs>[^>]*)>',
+    def test_daily_schedule_uses_time_of_day_versioning_and_account_scope(self):
+        publish_time = re.search(
+            r'<input id="dailyPublishTime"(?P<attrs>[^>]*)>',
             PAGE,
         )
-        self.assertIsNotNone(interval)
+        self.assertIsNotNone(publish_time)
         for attribute in (
-            'type="number"',
-            'min="1"',
-            'max="1440"',
-            'step="1"',
-            'value="10"',
+            'type="time"',
+            'step="60"',
+            'value="11:00"',
         ):
-            self.assertIn(attribute, interval.group("attrs"))
-        self.assertIn("首条上海发布时间", PAGE)
-        self.assertIn("function scheduledAtForIndex(index)", PAGE)
-        self.assertIn("index * interval * 60 * 1000", PAGE)
+            self.assertIn(attribute, publish_time.group("attrs"))
+        self.assertIn("每天固定时间自动消费下一条", PAGE)
+        self.assertIn("async function loadSchedule()", PAGE)
+        save = source_between(
+            "async function saveSchedule()",
+            "function pendingRunNowKeyForAccount(accountIdValue)",
+        )
+        self.assertIn("await api(`${API_BASE}/schedule`", save)
+        self.assertIn('const requestedEnabled = byId("scheduleEnabled").checked', save)
+        self.assertIn('const requestedPublishTime = byId("dailyPublishTime").value', save)
+        self.assertIn("enabled: requestedEnabled", save)
+        self.assertIn("publish_time: requestedPublishTime", save)
+        self.assertIn('timezone: "Asia/Shanghai"', save)
+        self.assertIn(
+            "const expectedVersion = Number(state.schedule && state.schedule.version || 0)",
+            save,
+        )
+        self.assertIn("expected_version: expectedVersion", save)
+        self.assertNotIn("scheduled_at:", save)
+        self.assertNotIn("scheduleIntervalMinutes", PAGE)
+        self.assertNotIn("scheduledAtForIndex", PAGE)
 
-        payload = source_between(
-            "function queuePayload(material, index)",
-            "function resetCreateForm()",
+    def test_unconfigured_or_loading_account_cannot_inherit_prior_account_time(self):
+        self.assertIn(
+            'const DEFAULT_DAILY_PUBLISH_TIME = "11:00";',
+            PAGE,
+        )
+        renderer = source_between(
+            "function renderSchedule()",
+            "async function loadSchedule()",
         )
         self.assertIn(
-            'idempotency_key: `${ensureFormKey()}:${material.material_id}`',
-            payload,
+            'byId("dailyPublishTime").value = DEFAULT_DAILY_PUBLISH_TIME;',
+            renderer,
         )
-        self.assertIn("scheduled_at: scheduledAtForIndex(index)", payload)
-        self.assertIn('caption_template: byId("caption").value', payload)
-        self.assertNotIn("caption_text:", payload)
+        self.assertIn(
+            'byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;',
+            renderer,
+        )
 
-    def test_queue_creation_is_sequential_and_keeps_partial_failure_state(self):
+    def test_material_pool_creation_is_sequential_and_keeps_partial_failure_state(self):
         creation = source_between(
-            "async function createQueue()",
+            "async function addMaterialsToPool()",
             "function statusMeta(",
         )
         self.assertIn(
-            "const payloads = materials.map((material, index) => queuePayload(material, index))",
+            "const payloads = materials.map(material => materialPoolPayload(material))",
             creation,
         )
         self.assertIn(
             "for (let index = 0; index < materials.length; index += 1)",
             creation,
         )
-        self.assertIn("await api(`${API_BASE}/queue`", creation)
+        self.assertIn("await api(`${API_BASE}/material-pool`", creation)
         self.assertIn("created.push(", creation)
-        self.assertIn("queueFailures.push(", creation)
+        self.assertIn("poolFailures.push(", creation)
         self.assertNotIn("Promise.all(", creation)
         self.assertIn(
-            "if (!queueFailures.length && !previewFailureCount)",
+            "if (!poolFailures.length && !previewFailureCount)",
             creation,
         )
-        self.assertIn("resetCreateForm()", creation)
+        self.assertIn("resetMaterialPoolForm()", creation)
         self.assertIn("state.queueSummary =", creation)
         self.assertIn("页面已保留", creation)
-        self.assertIn("已成功任务不会重复创建", creation)
+        self.assertIn("已成功素材不会重复入池", creation)
 
     def test_queue_results_keep_every_material_visible_with_its_own_outcome(self):
         creation = source_between(
-            "async function createQueue()",
+            "async function addMaterialsToPool()",
             "function statusMeta(",
         )
         renderer = source_between(
@@ -284,9 +316,9 @@ class TtPostPoolUiTest(unittest.TestCase):
             creation,
         )
         self.assertIn('status: "pending"', creation)
-        self.assertIn('queueResult.status = "saving"', creation)
-        self.assertIn('queueResult.status = "success"', creation)
-        self.assertIn('queueResult.status = "failure"', creation)
+        self.assertIn('poolResult.status = "saving"', creation)
+        self.assertIn('poolResult.status = "success"', creation)
+        self.assertIn('poolResult.status = "failure"', creation)
         self.assertGreaterEqual(
             creation.count("renderQueueSubmitResults()"),
             3,
@@ -297,8 +329,8 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("item.message", renderer)
         self.assertNotIn(".slice(", renderer)
         reset = source_between(
-            "function resetCreateForm()",
-            "async function createQueue()",
+            "function resetMaterialPoolForm()",
+            "async function addMaterialsToPool()",
         )
         self.assertNotIn("state.queueResults =", reset)
         self.assertNotIn('hide(byId("queueSubmitPanel"))', reset)
@@ -317,11 +349,7 @@ class TtPostPoolUiTest(unittest.TestCase):
             PAGE,
         )
         self.assertIn(
-            'byId("scheduleIntervalMinutes").addEventListener("input"',
-            PAGE,
-        )
-        self.assertIn(
-            'if (id !== "publishConsent") resetBatchConfirmation();',
+            '["dailyPublishTime", "scheduleEnabled"].forEach',
             PAGE,
         )
 
@@ -329,8 +357,8 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('consentAcceptedAt: ""', PAGE)
         self.assertIn("function ensureConsentAcceptedAt()", PAGE)
         payload = source_between(
-            "function queuePayload(material, index)",
-            "function resetCreateForm()",
+            "function materialPoolPayload(material)",
+            "function resetMaterialPoolForm()",
         )
         self.assertIn("accepted_at: ensureConsentAcceptedAt()", payload)
         self.assertNotIn("accepted_at: new Date().toISOString()", payload)
@@ -394,9 +422,143 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("liveEnabled: undefined", PAGE)
         self.assertIn("auditApproved: undefined", PAGE)
         self.assertIn("urlVerified: undefined", PAGE)
-        self.assertIn('publish_mode: gatesOpen() ? "direct_post" : "hold"', PAGE)
+        self.assertIn('if (!gatesOpen()) return "发布门禁尚未全部开放，立即发布已禁用。";', PAGE)
         self.assertIn("状态缺失一律按未开放处理", PAGE)
         self.assertIn("当前片尾含 DramaWave 品牌与跳转引导", PAGE)
+        self.assertIn("不会消费待发素材", PAGE)
+
+    def test_manual_publish_is_prominent_confirmed_and_never_replaces_daily_slot(self):
+        run = source_between(
+            "async function runNow()",
+            "async function loadAccounts()",
+        )
+        self.assertIn('id="runNow" class="button run-now"', PAGE)
+        self.assertIn("function runNowDisabledReason()", PAGE)
+        self.assertIn("available_material_count", PAGE)
+        self.assertIn("can_publish_now", PAGE)
+        self.assertIn("window.confirm(", run)
+        self.assertIn("额外消费素材池中的下一条", run)
+        self.assertIn("不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束", run)
+        self.assertIn("await api(`${API_BASE}/run-now`", run)
+        self.assertIn("source_account_id: requestedAccountId", run)
+        self.assertIn("idempotency_key: requestKey", run)
+        self.assertIn("Promise.all([loadSchedule(), loadQueue()])", run)
+
+    def test_manual_publish_reuses_pending_key_until_server_success(self):
+        key_helper = source_between(
+            "function pendingRunNowKeyForAccount(accountIdValue)",
+            "async function runNow()",
+        )
+        run = source_between(
+            "async function runNow()",
+            "async function loadAccounts()",
+        )
+        self.assertIn("pendingRunNowByAccount: Object.create(null)", PAGE)
+        self.assertIn(
+            "const existing = pendingRunNowEntry(normalizedAccountId)",
+            key_helper,
+        )
+        self.assertIn("return existing.key", key_helper)
+        self.assertIn(
+            "state.pendingRunNowByAccount[normalizedAccountId] = {",
+            key_helper,
+        )
+        self.assertIn(
+            "const requestKey = `tt-post:run-now:${normalizedAccountId}:${suffix}`",
+            key_helper,
+        )
+        self.assertIn("persistPendingRunNowState()", key_helper)
+        self.assertLess(
+            run.index("if (!confirmed) return;"),
+            run.index("const requestKey = pendingRunNowKeyForAccount(requestedAccountId)"),
+        )
+        self.assertIn("const outcome = classifyRunNowResponse(run)", run)
+        catch_block = run[run.index("} catch (error) {") :]
+        self.assertNotIn("clearPendingRunNowKey(", catch_block)
+        self.assertIn("复用同一请求标识安全重试", catch_block)
+        self.assertNotIn("不会替代、取消或挪动今天的定时发布", PAGE)
+
+    def test_manual_publish_response_status_controls_operator_message_and_key(self):
+        classifier = source_between(
+            "function classifyRunNowResponse(run)",
+            "async function runNow()",
+        )
+        run = source_between(
+            "async function runNow()",
+            "async function loadAccounts()",
+        )
+        self.assertIn("RUN_NOW_NOT_PUBLISHED_STATUSES", PAGE)
+        for status in (
+            "preflight_failed",
+            "failed",
+            "canceled",
+            "missed",
+            "blocked_compliance",
+        ):
+            self.assertIn(f'"{status}"', PAGE)
+        for status in ("scheduled", "claimed", "publishing", "reconciling"):
+            self.assertIn(f'"{status}"', PAGE)
+        self.assertIn('status === "unknown"', classifier)
+        self.assertIn('status === "published"', classifier)
+        self.assertIn(
+            'RUN_NOW_SUBMITTED_STATUSES.has(status) || cleanId(item.queue_id)',
+            classifier,
+        )
+        self.assertIn('return { kind: "unconfirmed", status }', classifier)
+        self.assertIn('outcome.kind === "not_published"', run)
+        self.assertIn("本次未发布", run)
+        self.assertIn(
+            "clearPendingRunNowKey(requestedAccountId, requestKey)",
+            run,
+        )
+        unknown_block = run[
+            run.index('outcome.kind === "unknown"') :
+            run.index('outcome.kind === "published"')
+        ]
+        self.assertIn("需人工核对", unknown_block)
+        self.assertIn(
+            "markPendingRunNowUnknown(requestedAccountId, requestKey)",
+            unknown_block,
+        )
+        self.assertNotIn("clearPendingRunNowKey(", unknown_block)
+        published_block = run[
+            run.index('outcome.kind === "published"') :
+            run.index('outcome.kind === "submitted"')
+        ]
+        self.assertIn("立即发布已完成", published_block)
+        self.assertIn("clearPendingRunNowKey(", published_block)
+        submitted_block = run[
+            run.index('outcome.kind === "submitted"') :
+            run.index("} else {", run.index('outcome.kind === "submitted"'))
+        ]
+        self.assertIn("立即发布已提交", submitted_block)
+        self.assertIn("clearPendingRunNowKey(", submitted_block)
+        self.assertNotIn("runId) {", run)
+
+    def test_pending_manual_keys_are_session_scoped_validated_and_per_account(self):
+        storage = source_between(
+            "function validPendingRunNowAccountId(value)",
+            "function classifyRunNowResponse(run)",
+        )
+        self.assertIn(
+            'const RUN_NOW_PENDING_STORAGE_KEY = "tt-post:pending-run-now:v1"',
+            PAGE,
+        )
+        self.assertIn("RUN_NOW_PENDING_STORAGE_MAX_BYTES = 32768", PAGE)
+        self.assertIn("RUN_NOW_PENDING_MAX_ACCOUNTS = 100", PAGE)
+        self.assertIn(r"/^[1-9]\d{0,29}$/", storage)
+        self.assertIn("key.length > 255", storage)
+        self.assertIn("key.startsWith(prefix)", storage)
+        self.assertIn(r"/^[A-Za-z0-9:-]{8,180}$/", storage)
+        self.assertIn('value.status === "" || value.status === "unknown"', storage)
+        self.assertIn("window.sessionStorage.getItem(RUN_NOW_PENDING_STORAGE_KEY)", storage)
+        self.assertIn("window.sessionStorage.setItem(", storage)
+        self.assertIn("window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY)", storage)
+        self.assertIn("JSON.parse(raw)", storage)
+        self.assertIn("Object.create(null)", storage)
+        self.assertIn("state.pendingRunNowByAccount[normalizedAccountId]", storage)
+        self.assertIn("delete state.pendingRunNowByAccount[normalizedAccountId]", storage)
+        self.assertIn("loadPendingRunNowState();", PAGE)
 
     def test_queue_and_event_monitor_are_present(self):
         for element_id in (

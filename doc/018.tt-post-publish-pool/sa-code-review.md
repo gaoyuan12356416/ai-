@@ -120,3 +120,65 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
 ## 合入建议
 
 同意本轮 CPU immutable release 上线；上线已于 2026-07-29 18:48:36 CST 完成。继续保持三项 Direct Post 门禁关闭；生产启用 Direct Post 前，仍要求平台审核、URL Property 验证、无品牌媒体策略确认和 TikTok 状态调和链路验收。
+
+## 2026-07-30 增量代码评审（仅本地）
+
+### 评审结论
+
+上线前复审发现的 1 个 P0、2 个 P1 已在当前工作树完成本地关闭，未发现仍阻断“TT 长素材 + 每日素材池 + 手动立即发布”进入生产验收的 P0/P1。此结论仅基于当前工作树和本地 `189/189` TT 相关自动化；上文 2026-07-29 的 release、hash 与线上结果属于上一版本，不能用于证明本增量已经部署或线上通过。
+
+### 关键实现检查
+
+1. **时长合同隔离**
+   - TT `DramawaveMaterialResolver` 使用独立的 3600 秒上限，并对类型、删除状态、URL、违规标记、短剧映射和部署时间继续 fail-close。
+   - X selector 未复用 TT 上限；本地 X 回归仍固定断言查询范围 `1..140`。
+   - GPU 配置样例将最大素材时长设为 3600；正式入池和生成 queue 时仍以目标账号实时 `max_video_post_duration_sec` 做最终限制。
+
+2. **每日排期与 FIFO**
+   - schedule、recurring pool、schedule run 分表保存；旧 queue 状态机不被替换。
+   - run 对自然日时点保持唯一，pool 对账号按 `created_at,id` 领取，账号 active run 保持串行。
+   - 600 秒 grace 为双端固定合同；宽限内恢复，超窗 `missed`。
+
+3. **两段崩溃恢复**
+   - `claim → freeze`：claimed run 与 reserved pool 已持久化，下一 tick 可按原 run key 恢复。
+   - `freeze → bind`：legacy queue 已用 run key 冻结；bind 中断后查询既有 queue 再绑定，不重新 freeze。
+   - 本地故障注入验证两处中断均只产生一个 run、一个 queue 和一个素材归属。
+
+4. **手动幂等**
+   - 浏览器以固定非敏感 `sessionStorage` 名保存 `account_id → {key,status}`，使用 null-prototype 对象并限制原始长度、账号数量、账号格式、key 前缀/长度/字符和状态集合。
+   - 首次确认意图即落 session；成功、已提交或明确未发布只删除对应账号且 key 精确匹配的项。
+   - `unknown` 与未确认响应保留原 key；页面不凭 `run_id` 单独报告成功，并区分未发布、需人工核对、已完成和已提交。
+   - 前端仍不使用 `innerHTML`，映射不包含账号 Token、Authorization 或其他凭据。
+
+5. **Runner 预算与门禁**
+   - 每 tick 先 claim/publish 既有 queue，再执行 recurring due；daily due 新建 queue 后第二次 claim 只取 `claim_limit - claimed_before_schedule`。
+   - reconcile 在两轮领取后执行，不挤占到期发布窗口。
+   - recurring 执行在 claim 素材前检查三道门禁；关闭时不 reserve、不创建可执行 queue、不调用 TikTok init。
+
+6. **上线前复审关闭项**
+   - P0 并发时序：每个 run 增加 120 秒独占 execution lease 和 fencing token；token 不进入公开 DTO/日志，lease 到期后新 owner 获得新 token，旧 owner 的 renew/freeze/release/bind 均被拒绝。`freeze/release/bind` 在事务内核验 run、pool、lease 与 token，覆盖 release-first 和 freeze-first 两种交错。
+   - P1 账号切换：未配置或加载中的账号先将发布时间恢复为 `11:00`，避免沿用上一账号值。
+   - P1 公共兼容写入口：主应用精确 `/api/admin/tt-posts/queue` 方法映射改为仅 GET，删除公共创建转发；动态 cancel/reconcile 仍受同源与权限校验保护。
+
+### 本地验证
+
+| 测试集 | 结果 |
+| --- | ---: |
+| TT Core | 49/49 |
+| TT Service + Runner | 70/70 |
+| TT GPU | 25/25 |
+| TT 发布池 UI | 23/23 |
+| TT 个号设置 UI | 11/11 |
+| TT App contract | 11/11 |
+| **合计** | **189/189** |
+
+### 生产代码验收待填写
+
+- Git 提交、远端分支、review 结论及 immutable release：`待填写`
+- 部署前备份、数据库迁移、服务单元和回滚验证：`待填写`
+- CPU/GPU 实际环境变量中的 3600/600 合同：`待填写`
+- timer/path 唤醒与单 tick 总 `claim_limit` 日志：`待填写`
+- 门禁关闭时 pool/run/queue 与外部请求计数：`待填写`
+- 公网页面与登录态 `sessionStorage` 多账号验证：`待填写`
+
+生产项完成前，本节不提供“同意上线”或“已上线”的结论。

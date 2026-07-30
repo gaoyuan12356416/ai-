@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -516,6 +517,7 @@ class FakeGPU:
         self.creator_info_override = None
         self.creator_info_by_account = {}
         self.creator_info_calls = []
+        self.prepared_duration = 45.5
 
     def creator_info(self, **kwargs):
         account_id = str(kwargs.get("source_account_id") or "")
@@ -542,7 +544,7 @@ class FakeGPU:
             "output_sha256": "a" * 64,
             "output_size": 123456,
             "output_url": "https://cdn.example.com/prepared.mp4",
-            "probe": {"duration": 45.5},
+            "probe": {"duration": self.prepared_duration},
             "profile": "tt-post-v1",
             "status": "ready",
         }
@@ -628,6 +630,478 @@ class ServiceLifecycleTests(unittest.TestCase):
             source_trim_tail_seconds=4.333333,
             media_profile_version="tt-post-outro-20260729-v1",
         )
+
+    def recurring_material_payload(self, key="tt-post-pool:test:9001"):
+        return {
+            "idempotency_key": key,
+            "source_account_id": "101",
+            "material_id": "9001",
+            "content_id": "ABCD1234",
+            "caption_template": (
+                "Watch the full story in the app 🎬\n\n"
+                "Drama ID: {{contect_id}}\n\n"
+                "Visit my profile → Open the link → "
+                "Search the Drama ID → Watch now."
+            ),
+            "consent": {
+                "accepted": True,
+                "version": "tt-recurring-post-consent-20260730",
+                "accepted_at": self.clock.value.isoformat(),
+            },
+        }
+
+    def schedule_payload(self, version=0, enabled=True, publish_time="11:00"):
+        return {
+            "source_account_id": "101",
+            "enabled": enabled,
+            "publish_time": publish_time,
+            "timezone": "Asia/Shanghai",
+            "expected_version": version,
+            "consent": {
+                "accepted": True,
+                "version": "tt-recurring-post-consent-20260730",
+                "accepted_at": self.clock.value.isoformat(),
+            },
+        }
+
+    def test_recurring_material_and_daily_schedule_are_saved_separately(self):
+        service = self.service(CLOSED_GATES)
+        added = service.material_pool_add(
+            self.recurring_material_payload()
+        )["item"]
+        self.assertEqual(added["status"], "available")
+        self.assertEqual(added["source_account_id"], "101")
+        self.assertEqual(added["content_id"], "ABCD1234")
+        self.assertIn("Drama ID: ABCD1234", added["caption_text"])
+        self.assertEqual(
+            service.material_pool_list(
+                {"source_account_id": ["101"]}
+            )["summary"]["available"],
+            1,
+        )
+
+        saved = service.schedule_save(self.schedule_payload())["item"]
+        self.assertTrue(saved["enabled"])
+        self.assertEqual(saved["publish_time"], "11:00")
+        self.assertEqual(saved["version"], 1)
+        self.assertEqual(saved["available_material_count"], 1)
+        fetched = service.schedule_get(
+            {"source_account_id": ["101"]}
+        )["item"]
+        self.assertEqual(fetched["version"], 1)
+        self.assertEqual(fetched["publish_times"], ["11:00"])
+        self.assertTrue(fetched["next_run_at"])
+
+    def test_recurring_pool_exact_retry_is_idempotent(self):
+        service = self.service(CLOSED_GATES)
+        first = service.material_pool_add(
+            self.recurring_material_payload()
+        )["item"]
+        second = service.material_pool_add(
+            self.recurring_material_payload()
+        )["item"]
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(
+            service.store.count_recurring_materials(account_id="101"),
+            1,
+        )
+
+    def test_daily_schedule_version_rejects_fractional_json_number(self):
+        service = self.service(CLOSED_GATES)
+        payload = self.schedule_payload()
+        payload["expected_version"] = 0.9
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.schedule_save(payload)
+        self.assertEqual(
+            caught.exception.code,
+            "tt_post_schedule_version_required",
+        )
+        self.assertEqual(
+            service.store.get_daily_schedule("101")["version"],
+            0,
+        )
+
+    def test_closed_gates_manual_publish_does_not_consume_material(self):
+        service = self.service(CLOSED_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.run_now(
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "tt-post-manual:test-closed",
+                }
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "tt_post_live_gates_closed",
+        )
+        item = service.store.list_recurring_materials(
+            account_id="101"
+        )[0]
+        self.assertEqual(item["status"], "available")
+        self.assertEqual(service.store.list_queues(), [])
+        self.assertEqual(self.gpu.publish_jobs, [])
+
+    def test_manual_publish_is_idempotent_and_does_not_change_daily_schedule(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        saved = service.schedule_save(
+            self.schedule_payload(publish_time="12:00")
+        )["item"]
+        request = {
+            "source_account_id": "101",
+            "idempotency_key": "tt-post-manual:test-open",
+        }
+        first = service.run_now(request)["item"]
+        self.clock.value += timedelta(minutes=2)
+        second = service.run_now(request)["item"]
+        self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual(first["queue_id"], second["queue_id"])
+        self.assertEqual(len(service.store.list_queues()), 1)
+        self.assertEqual(
+            service.store.list_recurring_materials(
+                account_id="101"
+            )[0]["status"],
+            "reserved",
+        )
+        current = service.schedule_get(
+            {"source_account_id": ["101"]}
+        )["item"]
+        self.assertEqual(current["version"], saved["version"])
+        self.assertEqual(current["publish_time"], "12:00")
+
+    def test_daily_due_is_slot_idempotent_and_fifo(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        self.clock.value = datetime(2026, 7, 29, 3, 0, 20, tzinfo=UTC)
+        service.schedule_save(
+            self.schedule_payload(publish_time="11:00")
+        )
+        first = service.schedules_due({})["items"]
+        second = service.schedules_due({})["items"]
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0]["run_id"], second[0]["run_id"])
+        self.assertEqual(first[0]["queue_id"], second[0]["queue_id"])
+        self.assertEqual(len(service.store.list_queues()), 1)
+
+    def test_material_pool_rejects_media_over_current_account_limit(self):
+        service = self.service(OPEN_GATES)
+        self.gpu.prepared_duration = 700
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.material_pool_add(self.recurring_material_payload())
+        self.assertEqual(
+            caught.exception.code,
+            "tt_prepared_media_duration_invalid",
+        )
+        self.assertEqual(
+            service.store.count_recurring_materials(account_id="101"),
+            0,
+        )
+
+    def test_live_creator_duration_failure_releases_fifo_material(self):
+        service = self.service(OPEN_GATES)
+        self.gpu.prepared_duration = 500
+        service.material_pool_add(self.recurring_material_payload())
+        changed = creator_info()
+        changed["creator_info"]["max_video_post_duration_sec"] = 300
+        self.gpu.creator_info_override = changed
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.run_now(
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "tt-post-manual:too-long",
+                }
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "tt_prepared_media_duration_invalid",
+        )
+        item = service.store.list_recurring_materials(
+            account_id="101"
+        )[0]
+        self.assertEqual(item["status"], "available")
+        self.assertEqual(service.store.list_queues(), [])
+
+    def test_manual_retry_recovers_queue_committed_before_run_binding(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        request = {
+            "source_account_id": "101",
+            "idempotency_key": "tt-post-manual:recover-bind-gap",
+        }
+        with mock.patch.object(
+            service.store,
+            "bind_recurring_queue",
+            side_effect=TTPostError(
+                "synthetic_bind_failure",
+                "模拟进程在队列提交后中断",
+                500,
+            ),
+        ):
+            with self.assertRaises(TTPostError) as caught:
+                service.run_now(request)
+        self.assertEqual(caught.exception.code, "synthetic_bind_failure")
+        queues = service.store.list_queues()
+        self.assertEqual(len(queues), 1)
+
+        with mock.patch.object(
+            service.store,
+            "bind_recurring_queue",
+            side_effect=TTPostError(
+                "synthetic_bind_failure_again",
+                "模拟恢复绑定再次中断",
+                500,
+            ),
+        ):
+            with self.assertRaises(TTPostError) as caught_again:
+                service.run_now(request)
+        self.assertEqual(
+            caught_again.exception.code,
+            "synthetic_bind_failure_again",
+        )
+        pending = service.store.get_recurring_run_by_key(
+            service.store.list_claimed_unbound_recurring_runs()[0]["run_key"]
+        )
+        self.assertEqual(pending["status"], "claimed")
+        self.assertEqual(pending["pool_item"]["status"], "reserved")
+
+        recovered = service.run_now(request)["item"]
+        self.assertEqual(recovered["queue_id"], queues[0]["id"])
+        self.assertEqual(
+            service.store.list_recurring_materials(
+                account_id="101"
+            )[0]["status"],
+            "reserved",
+        )
+
+    def test_daily_runner_recovers_claim_before_freeze_across_minutes(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        service.schedule_save(
+            self.schedule_payload(publish_time="11:00")
+        )
+        with mock.patch.object(
+            service.store,
+            "freeze_queue",
+            side_effect=RuntimeError("simulated process exit"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.schedules_due({})
+        pending = service.store.get_recurring_run_by_key(
+            "tt-post:auto:v1:101:2026-07-29:1100"
+        )
+        self.assertEqual(pending["status"], "claimed")
+        self.assertIsNone(pending["queue_id"])
+        self.assertEqual(
+            service.store.list_claimed_unbound_recurring_runs(),
+            [],
+        )
+        self.assertEqual(service.store.list_queues(), [])
+
+        self.clock.value += timedelta(seconds=121)
+        recovered = service.schedules_due({})["items"]
+        self.assertEqual(len(recovered), 1)
+        self.assertTrue(recovered[0]["queue_id"])
+        self.assertEqual(len(service.store.list_queues()), 1)
+        self.assertEqual(
+            service.store.list_claimed_unbound_recurring_runs(),
+            [],
+        )
+
+    def test_claim_before_freeze_recovers_at_exact_600_second_boundary(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        service.schedule_save(
+            self.schedule_payload(publish_time="11:00")
+        )
+        with mock.patch.object(
+            service.store,
+            "freeze_queue",
+            side_effect=RuntimeError("simulated process exit"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.schedules_due({})
+
+        self.clock.value += timedelta(seconds=600)
+        recovered = service.schedules_due({})["items"]
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual("scheduled", recovered[0]["status"])
+        self.assertTrue(recovered[0]["queue_id"])
+        self.assertEqual(len(service.store.list_queues()), 1)
+
+    def test_claim_without_queue_releases_only_after_600_seconds(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        service.schedule_save(
+            self.schedule_payload(publish_time="11:00")
+        )
+        with mock.patch.object(
+            service.store,
+            "freeze_queue",
+            side_effect=RuntimeError("simulated process exit"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.schedules_due({})
+
+        self.clock.value += timedelta(seconds=601)
+        released = service.schedules_due({})["items"]
+        self.assertEqual(len(released), 1)
+        self.assertEqual("preflight_failed", released[0]["status"])
+        self.assertEqual(
+            "tt_post_recurring_run_expired",
+            released[0]["error_code"],
+        )
+        self.assertIsNone(released[0]["queue_id"])
+        self.assertEqual("available", released[0]["pool_item"]["status"])
+        self.assertEqual(service.store.list_queues(), [])
+
+    def test_manual_crash_retry_uses_original_frozen_minute(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        request = {
+            "source_account_id": "101",
+            "idempotency_key": "tt-post-manual:frozen-minute",
+        }
+        with mock.patch.object(
+            service.store,
+            "freeze_queue",
+            side_effect=RuntimeError("simulated process exit"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.run_now(request)
+
+        self.clock.value += timedelta(seconds=121)
+        recovered = service.run_now(request)["item"]
+        queue = service.store.get_queue(recovered["queue_id"])
+        self.assertEqual(
+            "2026-07-29T03:00:00Z",
+            recovered["scheduled_at_utc"],
+        )
+        self.assertEqual(
+            recovered["scheduled_at_utc"],
+            queue["scheduled_at_utc"],
+        )
+        self.assertEqual(len(service.store.list_queues()), 1)
+
+    def test_expired_owner_cannot_freeze_after_new_owner_preflight_release(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        request = {
+            "source_account_id": "101",
+            "idempotency_key": "tt-post-manual:execution-fence-race",
+        }
+        freeze_entered = threading.Event()
+        allow_stale_freeze = threading.Event()
+        results = {}
+        original_freeze = service.store.freeze_queue
+        original_creator_info = service.creator_info
+        creator_calls = {"count": 0}
+        creator_lock = threading.Lock()
+
+        def creator_info(payload):
+            with creator_lock:
+                creator_calls["count"] += 1
+                call_number = creator_calls["count"]
+            if call_number == 2:
+                raise TTPostServiceError(
+                    "synthetic_second_preflight_failure",
+                    "synthetic",
+                    409,
+                )
+            return original_creator_info(payload)
+
+        def blocked_freeze(*args, **kwargs):
+            freeze_entered.set()
+            if not allow_stale_freeze.wait(5):
+                raise RuntimeError("test freeze wait timed out")
+            return original_freeze(*args, **kwargs)
+
+        def first_request():
+            try:
+                results["first"] = service.run_now(request)
+            except Exception as exc:  # noqa: BLE001 - assert exact fence below
+                results["first_error"] = exc
+
+        with (
+            mock.patch.object(
+                service,
+                "creator_info",
+                side_effect=creator_info,
+            ),
+            mock.patch.object(
+                service.store,
+                "freeze_queue",
+                side_effect=blocked_freeze,
+            ),
+        ):
+            worker = threading.Thread(target=first_request)
+            worker.start()
+            self.assertTrue(freeze_entered.wait(5))
+            self.clock.value += timedelta(seconds=121)
+            try:
+                with self.assertRaises(TTPostServiceError) as second:
+                    service.run_now(request)
+                self.assertEqual(
+                    "synthetic_second_preflight_failure",
+                    second.exception.code,
+                )
+            finally:
+                allow_stale_freeze.set()
+                worker.join(5)
+
+        self.assertFalse(worker.is_alive())
+        first_error = results.get("first_error")
+        self.assertIsInstance(first_error, TTPostError)
+        self.assertEqual(
+            "tt_post_recurring_execution_invalid",
+            first_error.code,
+        )
+        run_key = "tt-post:manual:v1:101:%s" % (
+            hashlib.sha256(
+                request["idempotency_key"].encode("utf-8")
+            ).hexdigest()[:32]
+        )
+        run = service.store.get_recurring_run_by_key(run_key)
+        self.assertEqual("preflight_failed", run["status"])
+        self.assertIsNone(run["queue_id"])
+        self.assertEqual("available", run["pool_item"]["status"])
+        self.assertEqual(service.store.list_queues(), [])
+
+    def test_daily_slot_retries_within_grace_after_manual_account_lock(self):
+        service = self.service(OPEN_GATES)
+        service.material_pool_add(self.recurring_material_payload())
+        self.materials.source_url = "https://cdn.example.com/source-b.mp4"
+        second_payload = self.recurring_material_payload(
+            "tt-post-pool:test:9002"
+        )
+        second_payload["material_id"] = "9002"
+        service.material_pool_add(second_payload)
+        service.schedule_save(
+            self.schedule_payload(publish_time="11:01")
+        )
+        manual = service.run_now(
+            {
+                "source_account_id": "101",
+                "idempotency_key": "tt-post-manual:before-daily-slot",
+            }
+        )["item"]
+
+        self.clock.value += timedelta(minutes=1)
+        blocked = service.schedules_due({})["items"]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(
+            blocked[0]["error_code"],
+            "tt_post_account_publish_busy",
+        )
+        service.queue_cancel(manual["queue_id"], {})
+
+        self.clock.value += timedelta(minutes=1)
+        retried = service.schedules_due({})["items"]
+        self.assertEqual(len(retried), 1)
+        self.assertEqual(retried[0]["trigger_type"], "auto")
+        self.assertEqual(retried[0]["material_id"], "9002")
+        self.assertTrue(retried[0]["queue_id"])
 
     def test_accounts_expose_configuration_state_without_credentials(self):
         service = self.service(CLOSED_GATES, configure_settings=False)
@@ -1459,6 +1933,34 @@ class ServiceLifecycleTests(unittest.TestCase):
 
 
 class MaterialResolverTests(unittest.TestCase):
+    @staticmethod
+    def _material_row(**overrides):
+        row = {
+            "material_id": "9001",
+            "product": "Dramawave",
+            "material_type": 2,
+            "is_delete": 0,
+            "material_url": "https://cdn.example.com/source.mp4",
+            "material_name": "Material",
+            "material_language": "English",
+            "content_id": "ABCD1234",
+            "source_tag_name": None,
+            "video_duration": 2087,
+        }
+        row.update(overrides)
+        return row
+
+    @staticmethod
+    def _material_connection(rows):
+        statements = []
+
+        def router(sql, params):
+            if "ads_custom_source cs" not in sql:
+                raise AssertionError("unexpected material query")
+            return rows
+
+        return FakeConnection(router, statements), statements
+
     def test_resolver_reuses_strict_x_selector_and_returns_source_url(self):
         connection = mock.Mock()
         connection.close = mock.Mock()
@@ -1479,7 +1981,7 @@ class MaterialResolverTests(unittest.TestCase):
             }
         ]
         with mock.patch(
-            "features.tt_posts.service.select_pool_candidates",
+            "features.tt_posts.service._select_tt_pool_candidates",
             return_value=(selected, []),
         ) as selector:
             item = resolver.resolve("9001")
@@ -1491,10 +1993,108 @@ class MaterialResolverTests(unittest.TestCase):
         selector.assert_called_once()
         connection.close.assert_called_once()
 
+    def test_resolver_accepts_long_tt_video_and_keeps_shared_safety_checks(self):
+        connection, statements = self._material_connection(
+            [self._material_row(video_duration=2087)]
+        )
+        resolver = DramawaveMaterialResolver(
+            lambda: connection,
+            now_fn=lambda: datetime(2026, 7, 29, tzinfo=UTC),
+        )
+        zero_violations = {
+            "facebook_count": 0,
+            "tiktok_count": 0,
+            "twitter_count": 0,
+            "resource_audit_count": 0,
+        }
+        drama_rows = [
+            {
+                "content_id": "ABCD1234",
+                "series_code": "SERIES1",
+                "language": "English",
+                "drama_name": "Drama",
+                "drama_labels": "romance",
+                "drama_description": "Description",
+            }
+        ]
+        with (
+            mock.patch(
+                "features.tt_posts.service."
+                "_TTDramawaveCandidateSelector._violation_counts",
+                return_value=zero_violations,
+            ) as violations,
+            mock.patch(
+                "features.tt_posts.service."
+                "_TTDramawaveCandidateSelector._material_tags",
+                return_value=[],
+            ) as tags,
+            mock.patch(
+                "features.tt_posts.service."
+                "_TTDramawaveCandidateSelector._pool_drama_rows",
+                return_value=drama_rows,
+            ) as mapping,
+            mock.patch(
+                "features.tt_posts.service."
+                "_TTDramawaveCandidateSelector._validate_drama_deploy_time",
+                return_value=0,
+            ) as deploy_time,
+        ):
+            item = resolver.resolve("9001")
+
+        self.assertEqual(item["content_id"], "ABCD1234")
+        self.assertEqual(
+            item["source_media_url"],
+            "https://cdn.example.com/source.mp4",
+        )
+        self.assertEqual(len(statements), 1)
+        self.assertEqual(statements[0][1], ("9001",))
+        violations.assert_called_once_with("9001")
+        tags.assert_called_once_with("9001")
+        mapping.assert_called_once_with("ABCD1234", "English")
+        deploy_time.assert_called_once_with("ABCD1234", "English")
+
+    def test_resolver_returns_specific_base_eligibility_errors(self):
+        cases = (
+            ("missing", [], "material_not_found", 404),
+            (
+                "not-video",
+                [self._material_row(material_type=1)],
+                "material_type_not_video",
+                409,
+            ),
+            (
+                "deleted",
+                [self._material_row(is_delete=1)],
+                "material_deleted",
+                409,
+            ),
+            (
+                "duration",
+                [self._material_row(video_duration=3601)],
+                "material_duration_out_of_range",
+                409,
+            ),
+        )
+        for label, rows, error_code, status in cases:
+            with self.subTest(label=label):
+                connection, _statements = self._material_connection(rows)
+                resolver = DramawaveMaterialResolver(
+                    lambda connection=connection: connection,
+                    now_fn=lambda: datetime(2026, 7, 29, tzinfo=UTC),
+                )
+                with self.assertRaises(TTPostServiceError) as caught:
+                    resolver.resolve("9001")
+                self.assertEqual(caught.exception.code, error_code)
+                self.assertEqual(caught.exception.status, status)
+
 
 class FakeRunnerSidecar:
     def __init__(self):
         self.calls = []
+
+    def schedules_due(self):
+        self.calls.append(("schedules_due",))
+        return {"items": []}
 
     def reconciling(self, _limit):
         self.calls.append(("reconciling",))
@@ -1688,6 +2288,59 @@ class ReconcileBacklogSidecar(FakeRunnerSidecar):
         }
 
 
+class NewDailyQueueSidecar(FakeRunnerSidecar):
+    def __init__(self):
+        super().__init__()
+        self.claim_calls = 0
+
+    def claim(self, **kwargs):
+        self.calls.append(("claim", kwargs))
+        self.claim_calls += 1
+        if self.claim_calls == 1:
+            return []
+        return [
+            {
+                "queue": {
+                    "id": 41,
+                    "source_account_id": "401",
+                    "material_id": "9401",
+                    "status": "claimed",
+                },
+                "claim_token": "claim-secret-41",
+            }
+        ]
+
+    def schedules_due(self):
+        self.calls.append(("schedules_due",))
+        return {
+            "items": [
+                {
+                    "run_id": 71,
+                    "queue_id": 41,
+                    "source_account_id": "401",
+                    "material_id": "9401",
+                    "status": "scheduled",
+                    "caption": "must-not-enter-runner-output",
+                }
+            ]
+        }
+
+    def publish(self, queue_id, claim_token):
+        self.calls.append(("publish", queue_id, claim_token))
+        return {
+            "item": {
+                "id": queue_id,
+                "source_account_id": "401",
+                "status": "reconciling",
+                "publish_id": "pub-41",
+            }
+        }
+
+    def reconciling(self, _limit):
+        self.calls.append(("reconciling",))
+        return []
+
+
 class RunnerTests(unittest.TestCase):
     def config(self):
         return RunnerConfig(
@@ -1706,7 +2359,7 @@ class RunnerTests(unittest.TestCase):
         result = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["claim", "publish", "reconciling", "reconcile"],
+            ["claim", "publish", "schedules_due", "reconciling", "reconcile"],
         )
         publish = sidecar.calls[1]
         self.assertEqual(publish[1], 4)
@@ -1723,6 +2376,7 @@ class RunnerTests(unittest.TestCase):
             [
                 "claim",
                 "publish",
+                "schedules_due",
                 "reconciling",
                 "reconcile",
                 "reconcile",
@@ -1747,18 +2401,31 @@ class RunnerTests(unittest.TestCase):
         result = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls[:3]],
-            ["claim", "publish", "reconciling"],
+            ["claim", "publish", "schedules_due"],
         )
         self.assertEqual(result["publish_request_count"], 1)
         self.assertEqual(result["reconcile_count"], self.config().reconcile_limit)
         self.assertEqual(result["reconcile_budget"], 5)
+
+    def test_new_daily_queue_uses_remaining_claim_budget_and_safe_result(self):
+        sidecar = NewDailyQueueSidecar()
+        result = execute_runner_tick(self.config(), client=sidecar)
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            ["claim", "schedules_due", "claim", "publish", "reconciling"],
+        )
+        self.assertEqual(result["schedule_due_count"], 1)
+        self.assertEqual(result["publish_request_count"], 1)
+        rendered = json.dumps(result)
+        self.assertNotIn("must-not-enter-runner-output", rendered)
+        self.assertNotIn("claim-secret-41", rendered)
 
     def test_publish_business_error_does_not_block_later_claims(self):
         sidecar = PublishIsolationSidecar()
         result = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["claim", "publish", "publish", "reconciling"],
+            ["claim", "publish", "publish", "schedules_due", "reconciling"],
         )
         self.assertEqual(result["publish_request_count"], 1)
         self.assertEqual(result["publish_request_error_count"], 1)
@@ -1834,6 +2501,24 @@ class HTTPContractTests(unittest.TestCase):
 
         def material_preview(self, payload):
             return {"item": {"marker": "material", **payload}}
+
+        def material_pool_list(self, _query):
+            return {"items": [], "marker": "material-pool-list"}
+
+        def material_pool_add(self, payload):
+            return {"item": {"marker": "material-pool-add", **payload}}
+
+        def schedule_get(self, _query):
+            return {"item": {"marker": "schedule-get"}}
+
+        def schedule_save(self, payload):
+            return {"item": {"marker": "schedule-save", **payload}}
+
+        def run_now(self, payload):
+            return {"item": {"marker": "run-now", **payload}}
+
+        def schedules_due(self, _payload):
+            return {"items": [], "marker": "schedules-due"}
 
         def queue_list(self, _query):
             return {"items": [], "marker": "queue-list"}
@@ -1954,6 +2639,46 @@ class HTTPContractTests(unittest.TestCase):
             "material",
         )
         self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/material-pool"
+                "?source_account_id=101"
+            )["marker"],
+            "material-pool-list",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/material-pool",
+                "POST",
+                {"material_id": "9001"},
+            )["item"]["marker"],
+            "material-pool-add",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/schedule?source_account_id=101"
+            )["item"]["marker"],
+            "schedule-get",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/schedule",
+                "POST",
+                {"source_account_id": "101"},
+            )["item"]["marker"],
+            "schedule-save",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/run-now",
+                "POST",
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "manual-1",
+                },
+            )["item"]["marker"],
+            "run-now",
+        )
+        self.assertEqual(
             self.request("/api/admin/tt-posts/queue")["marker"],
             "queue-list",
         )
@@ -1986,6 +2711,14 @@ class HTTPContractTests(unittest.TestCase):
                 {},
             )["items"],
             [],
+        )
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/schedules/due",
+                "POST",
+                {},
+            )["marker"],
+            "schedules-due",
         )
         self.assertEqual(
             self.request("/internal/tt-posts/reconciling?limit=10")["items"],
@@ -2028,18 +2761,37 @@ class DeployContractTests(unittest.TestCase):
             root / "deploy" / "drama-material-api-tt-post.conf"
         ).read_text("utf-8")
         timer = (root / "deploy" / "tt-post-runner.timer").read_text("utf-8")
+        path_unit = (
+            root / "deploy" / "tt-post-runner.path"
+        ).read_text("utf-8")
         service = (root / "deploy" / "tt-post-service.service").read_text("utf-8")
         runner = (root / "deploy" / "tt-post-runner.service").read_text("utf-8")
+        gpu_env = (
+            root / "deploy" / "tt-post-gpu.env.example"
+        ).read_text("utf-8")
         self.assertIn("TT_POST_LIVE_ENABLED=0", env)
         self.assertIn("TT_POST_DIRECT_AUDIT_APPROVED=0", env)
         self.assertIn("TT_POST_URL_PROPERTY_VERIFIED=0", env)
         self.assertIn("TT_POST_GRACE_SECONDS=600", env)
         self.assertIn("TT_POST_RECONCILE_LIMIT=5", env)
         self.assertIn(
+            "TT_POST_RUNNER_KICK_PATH=/run/tt-post/manual-kick",
+            env,
+        )
+        self.assertIn(
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
             env,
         )
         self.assertIn("OnCalendar=*-*-* *:*:00 Asia/Shanghai", timer)
+        self.assertIn(
+            "PathChanged=/run/tt-post/manual-kick",
+            path_unit,
+        )
+        self.assertIn("Unit=tt-post-runner.service", path_unit)
+        self.assertIn(
+            "TT_POST_GPU_MAX_DURATION_SECONDS=3600",
+            gpu_env,
+        )
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("EnvironmentFile=/etc/tt-post.secrets", service)
         self.assertIn("TimeoutStartSec=3600s", runner)
