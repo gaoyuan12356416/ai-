@@ -398,7 +398,7 @@ class XPostLedgerTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
 
-    def test_account_day_and_compliance_guards_hold_before_insert(self):
+    def test_account_day_guard_holds_and_compliance_counts_are_audit_only(self):
         store = service.XPostStore(self.db_path)
         payload = candidate(2, "ShortsDramhx", 9001)
         payload["run_date"] = "2026-07-23"
@@ -409,12 +409,29 @@ class XPostLedgerTests(unittest.TestCase):
             store.enqueue(other)
         self.assertEqual(caught.exception.code, "x_post_account_day_already_reserved")
 
-        unsafe = plan_candidates((9101, 9102, 9103))
-        unsafe[2]["dangerous_tag_count"] = 1
-        with self.assertRaises(service.XPostError) as caught:
-            store.create_daily_plan("2026-07-24", "2026-07-23", unsafe)
-        self.assertEqual(caught.exception.code, "invalid_request")
-        self.assertIsNone(store.get_run_by_date("2026-07-24"))
+        flagged = plan_candidates((9101, 9102, 9103))
+        for item in flagged:
+            item["source_date"] = "2026-07-23"
+        flagged[0]["compliance_counts"]["facebook_violation_count"] = 2
+        flagged[1]["compliance_counts"]["twitter_violation_count"] = 1
+        flagged[2]["compliance_counts"]["dangerous_tag_count"] = 1
+        created = store.create_daily_plan(
+            "2026-07-24",
+            "2026-07-23",
+            flagged,
+        )
+        self.assertTrue(created["created"])
+        self.assertEqual(
+            [
+                (
+                    item["facebook_violation_count"],
+                    item["twitter_violation_count"],
+                    item["dangerous_tag_count"],
+                )
+                for item in created["queues"]
+            ],
+            [(2, 0, 0), (0, 1, 0), (0, 0, 1)],
+        )
 
     def test_daily_plan_requires_complete_nonconflicting_compliance_evidence(self):
         store = service.XPostStore(self.db_path)

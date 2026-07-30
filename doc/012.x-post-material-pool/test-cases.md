@@ -24,12 +24,12 @@
 | TC-007 | 不使用 insight/spend | 执行 manual selector 并检查 SQL | 无 `ads_custom_source_insight`；spend=0 |
 | TC-008 | Dramawave 产品门禁 | 同结构素材分别为 Dramawave/其他产品 | 仅精确 Dramawave 通过 |
 | TC-009 | 素材基本资格 | 缺失、非视频、删除、时长越界、HTTP URL | 分项安全拒绝，继续扫描 |
-| TC-010 | 违规记录 | 四类违规计数逐一设为非 0 | 均拒绝 |
-| TC-011 | 危险标签 | source tag、resource tag、drama label 分别命中 | source/resource tag 拒绝；drama label 在其他检查通过时允许 |
+| TC-010 | 违规记录 | 四类违规计数逐一设为非 0 | 均允许 X 候选，原值写入 queue 作为审计证据 |
+| TC-011 | 内容标签 | source tag、resource tag、drama label 分别命中色情、裸露、暴力等词 | 均允许 X 候选，`dangerous_tag_count` 记录命中数 |
 | TC-012 | 剧映射 | 缺失、不完整、跨语言、多个不等价映射 | fail closed；规范等价重复允许 |
 | TC-013 | MySQL 查询异常 | fake connection 抛查询错误 | 整批中止，不降级为单素材拒绝 |
 | TC-014 | 校验结果回写 | 对未占用素材写 error，再查询 | 主状态 unpublished，派生 validation_failed |
-| TC-015 | available summary 口径 | 同时存在 available 与 validation_failed | summary.available 等于 available 筛选总数 |
+| TC-015 | available summary 口径 | 同时存在普通 available、历史违规/内容标签错误码与真正 validation_failed | 历史合规错误码按 available 统计，发布数据错误仍为 validation_failed |
 | TC-016 | 空池/不足三条 | 返回 0、1、2 条或仅 2 条合规 | 记录 failed_preflight；queue/Post 均为 0 |
 | TC-017 | 媒体补位 | 前一素材下载/ffprobe 失败，后续合格 | 删除失败临时文件，后续候选补足三条 |
 | TC-018 | 媒体仍不足三条 | 扫描后只有 2 条媒体通过 | 不创建计划、不发布 |

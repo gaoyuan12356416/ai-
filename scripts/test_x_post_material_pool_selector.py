@@ -278,7 +278,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
             ["drama_deploy_time_missing", "drama_deploy_time_invalid"],
         )
 
-    def test_item_level_safety_rejections_are_reported_and_scanning_continues(self):
+    def test_violation_and_explicit_content_tags_are_audit_only_for_x(self):
         connection = PoolConnection(range(1, 7))
         connection.violations["1"] = 1
         connection.materials["2"]["source_tag_name"] = "sexual_content"
@@ -296,16 +296,20 @@ class ManualPoolSelectorTests(unittest.TestCase):
                 for material_id in range(1, 7)
             ],
             "2026-07-22",
-            limit=1,
+            limit=4,
         )
 
-        self.assertEqual([item["material_id"] for item in selected], ["6"])
+        self.assertEqual(
+            [item["material_id"] for item in selected],
+            ["1", "2", "3", "6"],
+        )
+        selected_by_id = {item["material_id"]: item for item in selected}
+        self.assertEqual(selected_by_id["1"]["facebook_violation_count"], 1)
+        self.assertEqual(selected_by_id["2"]["dangerous_tag_count"], 1)
+        self.assertEqual(selected_by_id["3"]["dangerous_tag_count"], 1)
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
-                "material_has_violation",
-                "material_source_tag_unsafe",
-                "material_tag_unsafe",
                 "drama_mapping_ambiguous",
                 "material_url_not_https",
             ],

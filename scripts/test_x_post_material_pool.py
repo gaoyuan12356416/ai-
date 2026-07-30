@@ -204,6 +204,54 @@ class XPostMaterialPoolTests(unittest.TestCase):
             ["102", "103"],
         )
 
+    def test_historical_violation_and_content_tag_errors_remain_selectable(self):
+        result = self.store.add_pool_materials(
+            ["111", "112", "113", "114"],
+            self.actor,
+            validation_checks=[
+                {
+                    "material_id": "111",
+                    "error_code": "material_has_violation",
+                    "error_message": "historical violation evidence",
+                },
+                {
+                    "material_id": "112",
+                    "error_code": "material_source_tag_unsafe",
+                    "error_message": "sexual content tag",
+                },
+                {
+                    "material_id": "113",
+                    "error_code": "material_tag_unsafe",
+                    "error_message": "graphic violence tag",
+                },
+                {
+                    "material_id": "114",
+                    "error_code": "material_metadata_invalid",
+                    "error_message": "missing required metadata",
+                },
+            ],
+        )
+
+        self.assertEqual(result["available_count"], 3)
+        self.assertEqual(result["validation_failed_count"], 1)
+        self.assertEqual(
+            [item["material_id"] for item in self.store.available_pool_items(10)],
+            ["111", "112", "113"],
+        )
+        queried = {
+            item["material_id"]: item
+            for item in self.store.query_pool({})["items"]
+        }
+        self.assertEqual(queried["111"]["availability"], "available")
+        self.assertEqual(queried["112"]["availability"], "available")
+        self.assertEqual(queried["113"]["availability"], "available")
+        self.assertEqual(queried["114"]["availability"], "validation_failed")
+        self.assertEqual(
+            queried["111"]["last_error_code"],
+            "material_has_violation",
+        )
+        self.assertEqual(self.store.query_pool({})["summary"]["available"], 3)
+
     def test_pool_plan_is_atomic_fifo_and_success_only_marks_published(self):
         items = self.add("201", "202", "203", "204")
         reversed_candidates = [

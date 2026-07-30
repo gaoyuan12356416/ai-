@@ -183,19 +183,20 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(CandidateSelectionError):
             contains_dangerous_tag(b"\xff")
 
-    def test_selector_excludes_common_derived_violence_tag(self):
-        unsafe = base_row(21, 200)
-        unsafe["source_tag_name"] = "weapons"
-        connection = FakeConnection([unsafe, base_row(22, 100)])
+    def test_selector_keeps_common_derived_violence_tag_as_audit_evidence(self):
+        tagged = base_row(21, 200)
+        tagged["source_tag_name"] = "weapons"
+        connection = FakeConnection([tagged, base_row(22, 100)])
         selected = select_candidates(
             connection,
             "2026-07-22",
             limit=1,
             scan_limit=10,
         )
-        self.assertEqual([item["material_id"] for item in selected], ["22"])
+        self.assertEqual([item["material_id"] for item in selected], ["21"])
+        self.assertEqual(selected[0]["dangerous_tag_count"], 1)
 
-    def test_selector_excludes_used_violating_unsafe_and_ambiguous_rows(self):
+    def test_selector_excludes_used_and_ambiguous_but_allows_compliance_evidence(self):
         connection = FakeConnection(
             [
                 base_row(1, 600),
@@ -220,8 +221,10 @@ class SelectorTests(unittest.TestCase):
             limit=2,
             scan_limit=100,
         )
-        self.assertEqual([item["material_id"] for item in selected], ["5", "6"])
-        self.assertEqual([item["spend"] for item in selected], [200.0, 100.0])
+        self.assertEqual([item["material_id"] for item in selected], ["2", "3"])
+        self.assertEqual([item["spend"] for item in selected], [500.0, 400.0])
+        self.assertEqual(selected[0]["facebook_violation_count"], 1)
+        self.assertEqual(selected[1]["dangerous_tag_count"], 1)
         self.assertTrue(all(item["material_key"] == item["material_id"] for item in selected))
         statements = [sql for sql, _params in connection.calls]
         self.assertTrue(all(sql.lstrip().upper().startswith("SELECT") for sql in statements))

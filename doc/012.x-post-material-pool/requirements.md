@@ -2,7 +2,7 @@
 
 ## 背景
 
-现有 X 每日发布已改为由管理员在 AI 后台录入自定义素材库 ID，配置中的 X 账号每天从一个全局素材池中按先进先出顺序各取一条安全素材发布，并延续已有短链、发布日志、全局排重和失败审计能力。
+现有 X 每日发布已改为由管理员在 AI 后台录入自定义素材库 ID，配置中的 X 账号每天从一个全局素材池中按先进先出顺序各取一条发布条件完整的素材，并延续已有短链、发布日志、全局排重和失败审计能力。
 
 ## 目标
 
@@ -21,7 +21,7 @@
 - 素材池管理页面、导航配置授权的查询/添加/删除 API、素材源文件预览和后台审计日志。
 - 素材入池前由主后台复用 X selector 做即时只读校验，并将结果与素材池记录原子写入；daily runner 仍会重新检查并回写最新结果。
 - 从 `ads_custom_source` 直接按 ID 加载素材，不再用前一天消耗作为排序或入选条件。
-- 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射、违规记录、素材源/资源色情暴力标签和媒体文件预检；短剧 labels 仅作发布归因元数据，不再据此拒绝素材。
+- 保留 Dramawave 产品、素材类型、删除态、时长、HTTPS、剧映射和媒体文件预检。自 2026-07-30 起，违规记录以及素材源、资源和短剧 labels 中的色情、裸露、暴力等内容标签仅保留为 X 审计证据，不再拒绝素材；其他渠道规则不受影响。
 - queue 创建时的全局素材排重、账号日排重、三条计划原子提交。
 - 已发布、已占用、已失败、结果待核查和校验失败的后台展示。
 
@@ -36,20 +36,20 @@
 
 1. 管理员可一次录入 1 至 100 个正整数素材 ID；前导零统一规范为十进制 `material_key`。
 2. 同一批次重复、已在池中、或已有任意 X queue 历史的素材逐条跳过；同批其余全新素材继续原子写入。
-3. 录入时立即复用 X selector 检查素材源资格、违规记录、素材源/资源危险标签和剧映射；找不到素材或任一检查不通过时仍保留池记录，但派生状态立即显示为 `validation_failed`（页面文案“不可用”）。
+3. 录入时立即复用 X selector 检查素材源资格、记录违规/内容标签审计值并校验剧映射；找不到素材或发布所需数据检查不通过时仍保留池记录，但派生状态立即显示为 `validation_failed`（页面文案“不可用”）。
 4. 正式日更只接受 `ads_custom_source.product = 'Dramawave'`、`type = 2`、`is_delete = 0`、视频时长 1 至 140 秒的素材。
 5. 素材必须有 HTTPS URL、完整名称/语言/content ID，并能唯一解析到同 content ID、同语言的短剧记录。
-6. Facebook、TikTok、Twitter 违规表和资源审核记录必须全部为 0。
-7. `ads_custom_source.tag_name`、`resource_tags.tag_name` 继续执行色情、暴力等危险词检查，任一命中即跳过；自 2026-07-24 起，仅 X Post selector 将短剧 labels 作为必填归因元数据，即使包含这些内容词也允许候选，其他渠道规则不受影响。
+6. Facebook、TikTok、Twitter 违规表和资源审核记录允许非 0；数值继续写入 queue 作为审计证据，但不参与 X 候选淘汰。
+7. `ads_custom_source.tag_name`、`resource_tags.tag_name` 和短剧 labels 命中色情、裸露、暴力等内容词时允许 X 候选，并记录 `dangerous_tag_count`；这些标签不改变素材池可用状态，其他渠道规则不受影响。
 8. 选择顺序仅由池记录的 `created_at`、`id` 决定；`source_date` 仍记录为运行日前一天，但不再查询 `ads_custom_source_insight`，候选 `spend` 固定为 0。
-9. 数据质量或安全不通过是单素材拒绝，可继续扫描后续素材；MySQL 查询异常是批次异常，整批停止。
+9. 发布必需的数据质量检查不通过是单素材拒绝，可继续扫描后续素材；MySQL 查询异常是批次异常，整批停止。
 10. 下载、大小、编码、时长、分辨率等媒体预检在建计划前执行；可用后续候选补位。
 11. 只有恰好三条候选通过全部检查，才以一个 SQLite 事务建立一条 run 和三条 queue。
 12. queue 以 `pool_item_id` 和规范 `material_key` 双重关联素材池。任何同素材 queue 历史都视为永久占用。
 13. known failure 保持池主状态 `unpublished`，派生状态为 `failed`；unknown 或残留 `post_creating` 派生为 `needs_review`，两者均不能再次选择。
 14. X 明确成功后，queue、publish log 和 pool 在同一事务中更新；池主状态变为 `published` 并记录 `published_at`。
 15. 只有未发布且不存在任何同池 ID/同素材 key queue 的记录可以删除；已发布和已占用记录必须保留审计。
-16. runner 按 `X_POST_DAILY_SCAN_LIMIT` 读取最老的池记录，默认和当前生产建议均为 1000、允许 3 至 1000；selector 再按 FIFO 保留最多 `X_POST_DAILY_CANDIDATE_POOL_LIMIT=50` 条合规候选供媒体预检补位。最老 1000 条内不足三条合格素材时整批不发布。
+16. runner 按 `X_POST_DAILY_SCAN_LIMIT` 读取最老的池记录，默认和当前生产建议均为 1000、允许 3 至 1000；selector 再按 FIFO 保留最多 `X_POST_DAILY_CANDIDATE_POOL_LIMIT=50` 条可发布候选供媒体预检补位。最老 1000 条内不足三条合格素材时整批不发布。
 17. selector/媒体拒绝结果按 Sidecar 单次上限 100 条分批回写；例如 205 条必须按 100/100/5 三批提交，避免整批审计丢失。
 18. 素材池明细将“素材预览”和“Post 预览”分列展示。管理员查询列表时，主后台按素材 ID 只读读取 `ads_custom_source.url`；绝对 `http://` 素材地址在内存中升级为 `https://` 后返回安全 `material_preview_url`，不回写源表，页面直接打开源素材，不再经后台 302。发布筛选使用相同规范化结果。素材不合规但源记录和安全 URL 存在时仍可预览；素材不存在、URL 缺失/非法或使用 HTTP(S) 以外协议时显示“无法预览”。预览不修改池、queue 或发布日志。
 19. 入池即时校验覆盖与 X selector 相同的数据库级发布标准；媒体文件下载、大小、编码、真实时长和分辨率校验仍在 daily 任务建计划前执行，不能因入池状态“可供发布”而跳过。
@@ -61,7 +61,7 @@
 2. 主后台验证 Feishu Cookie、导航项配置和同源 JSON，规范化素材 ID，使用只读业务库复用 X selector 完成即时检查。
 3. 主后台将 actor、素材 ID 和逐素材校验结果转发给 loopback Sidecar；Sidecar 在一个事务中完成规范化、池内排重、历史 queue 排重、入池和校验状态落库。校验服务异常时 fail closed 为“不可用”，不先暴露可供发布状态。
 4. daily runner 先验证存储和当前配置的全部自动发布账号，再取得最老的未发布且未占用素材。
-5. selector 直接读取 `ads_custom_source`、安全/剧映射表以及 Dramawave `ads_drama_info.deploy_time`，过滤尚未到可投放时间的短剧并返回合格候选和逐素材拒绝原因。
+5. selector 直接读取 `ads_custom_source`、违规/标签审计表、剧映射表以及 Dramawave `ads_drama_info.deploy_time`，过滤尚未到可投放时间的短剧并返回合格候选和逐素材拒绝原因。
 6. runner 回写校验结果，下载并预检媒体；不足目标账号数时只记录 `failed_preflight` run，不创建 queue。
 7. 全部目标素材均通过后，Sidecar 在一个事务中再次校验 FIFO、池快照、全局排重和账号日排重，再按目标账号数冻结 queue。
 8. runner 按账号顺序发布；成功、known failure、unknown 分别写入 publish log，池状态按本需求规则派生或转换。
@@ -147,11 +147,11 @@
 ## 验收标准
 
 - [x] 管理员可一次添加最多 100 个规范素材 ID；重复/历史占用逐条跳过，其余素材正常入池并返回分类汇总。
-- [x] 入池时立即按 X selector 检查并原子记录结果；素材不存在、不合规或校验服务异常均立即显示“不可用”。
+- [x] 入池时立即按 X selector 检查并原子记录结果；素材不存在、发布数据不完整或校验服务异常均立即显示“不可用”，违规/内容标签证据不影响可用状态。
 - [x] 素材池页面和查询/预览/添加/删除 API 与快速导航栏 `xPostMaterialPool` 的 `adminOnly`、`module`、`enabled` 设置一致；API Token、缺少模块权限和跨源写请求均被拒绝。
 - [x] 正式选择路径不查询 `ads_custom_source_insight`，不使用 spend 排序。
 - [x] 只有 Dramawave 的有效视频素材可以进入候选。
-- [x] 四类违规证据、两处素材危险标签、剧映射和媒体预检全部 fail closed；短剧 labels 内容词不构成拒绝条件。
+- [x] 四类违规证据和素材源/资源/短剧内容标签仅记录审计值，不构成 X 拒绝条件；剧映射、可投放时间和媒体预检继续 fail closed。
 - [x] 合格素材严格按 `created_at,id` 顺序进入三个固定账号队列。
 - [x] 少于三条合格素材时 run 记录失败原因，但 queue、短链和 X Post 均为 0。
 - [x] queue 先于池、池先于 queue 两个方向都无法绕过全局排重。
@@ -160,14 +160,14 @@
 - [x] 已发布或任意 queue 占用素材不可删除；未占用未发布素材可删除。
 - [x] 管理页状态、筛选、分页、预览 URL allowlist 和 no-store 契约通过。
 - [x] 素材预览直接使用 `ads_custom_source.url` 的安全 HTTPS 地址，不合规但可解析的素材仍可预览，并与 Post 预览分列。
-- [x] 全部 X 回归与新增素材池测试 143/143 通过。
+- [x] 当前全部 X 回归 362/362 通过；另有 1 项 Windows 目录软链接权限用例按环境跳过。
 - [x] 生产副本迁移、live composite、精确 release 部署与 timer 恢复通过。
 - [ ] 首轮自然 timer 发布验收待 2026-07-24 10:00 CST；素材池不足三条时应整批不发。
 
 ## 风险与部署待验证
 
 - `ads_custom_source.product = 'Dramawave'` 已同时在 SQL 与行级校验中 fail closed，并有其他产品负例；生产只读 schema/数据抽样已确认。
-- `summary.available` 已排除 `last_error_code`，专项测试验证不再把 `validation_failed` 计为可用。
+- `summary.available` 排除真正阻塞发布的数据校验错误，但把历史 `material_has_violation`、`material_source_tag_unsafe`、`material_tag_unsafe` 错误码按可用统计，原错误字段仍保留审计。
 - 单次安全扫描明确限制为最老 1000 条，而非无界遍历全池；如果这 1000 条长期不足三条合格素材，整批不发并由管理员修复元数据或删除仍未占用的无效池记录。
 - 检查回写已按 100 条分批；205 条 100/100/5 回归通过。Sidecar 整体不可用时仍保持 best effort，不影响发布排重和主状态。
 - 生产 SQLite 的 legacy canary/queue 已在副本与正式迁移中验证兼容，原 queue/log 各 1 条均保留。

@@ -943,6 +943,37 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pool_fifo_conflict",
         )
 
+    def test_material_schedule_accepts_oldest_violation_audit_record(self):
+        self.save_schedule("material", [2], ["09:00"])
+        pool = self.store.add_pool_materials(
+            ["211"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {
+                    "material_id": "211",
+                    "error_code": "material_has_violation",
+                    "error_message": "historical violation evidence",
+                },
+            ],
+        )["items"][0]
+        candidate = self.material_candidate(pool, 2)
+        candidate["facebook_violation_count"] = 2
+
+        created = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [candidate],
+        )
+
+        self.assertTrue(created["created"])
+        self.assertEqual(created["queues"][0]["material_id"], "211")
+        self.assertEqual(
+            created["queues"][0]["facebook_violation_count"],
+            2,
+        )
+
     def test_drama_plan_keeps_each_unfinished_drama_on_one_account(self):
         self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
         first_pool = self.add_drama(free_episode_count=2, labels="")
