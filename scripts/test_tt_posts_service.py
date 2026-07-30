@@ -2682,7 +2682,11 @@ class RunnerTests(unittest.TestCase):
             schedule_timeout=45,
             publish_timeout=60,
             reconcile_timeout=45,
-            lock_path=str(Path(tempfile.gettempdir()) / "tt-post-runner.lock"),
+            lock_path=(
+                str(Path(tempfile.gettempdir()) / "tt-post-runner.lock")
+                if sys.platform == "win32"
+                else "/run/tt-post/tt-post-runner-test.lock"
+            ),
         )
 
     def test_runner_schedules_first_claims_singly_and_never_republishes_unknown(self):
