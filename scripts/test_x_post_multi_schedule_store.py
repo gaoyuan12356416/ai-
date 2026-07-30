@@ -150,7 +150,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         text = service.build_drama_episode_post_text(
             "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
             episode_number,
-            "#Drama_One",
+            "Drama One",
             "A complete short-drama episode description.",
         )
         self.store.prepare_log(
@@ -872,16 +872,16 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         rendered = service.build_drama_episode_post_text(
             "https://ai.yingliangads.com/s2l/1.html",
             2,
-            "#Drama_One #Romance",
+            "Drama One",
             "A complete drama description.",
         )
         self.assertEqual(
             rendered,
-            "https://ai.yingliangads.com/s2l/1.html\n"
-            " 👆Full story continues here:☝️\n"
-            "Episode👉2\n\n"
-            "#Drama_One #Romance\n\n"
-            " A complete drama description.",
+            "Watch now 👉 https://ai.yingliangads.com/s2l/1.html\n\n"
+            "🎬 Drama One\n"
+            "Episode 2\n"
+            "A complete drama description.\n\n"
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave",
         )
 
     def test_one_account_can_run_multiple_material_points_without_reuse(self):

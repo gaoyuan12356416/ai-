@@ -38,20 +38,20 @@
 6. 免费集数 `N` 取该剧所有 Dramawave app 变体记录中 `unlocked_episodes_count` 的最小值；1..N 必须连续。
 7. 同一集的重复资源行仅在 URL 和元数据一致时合并；同集 URL 不一致、元数据漂移或缺集时整剧不可用。
 8. 视频 URL 的 `http` 自动规范为 `https`；格式或尺寸不合规时复用 GPU 修复流程并上传 COS，再使用修复后 URL。
-9. `name_tag` 未提供人工字段，因此按“剧名 hashtag + 最多两个标签 hashtag”确定性生成；无标签时至少保留剧名 hashtag。
+9. `name_tag` 保留为历史归因元数据，不再进入发布正文。
 10. 短剧 Post 文案固定为：
 
 ```text
-{url}
- 👆Full story continues here:☝️
-Episode👉{sub_num}
+Watch now 👉 {{short_link}}
 
-{name_tag}
+🎬 {{drama_name}}
+Episode {{episode_number}}
+{{desc}}
 
- {desc}
+#shortdrama #shortfilms #tvdrama #aidrama #dramawave
 ```
 
-11. X 字数计算保留 URL、CTA、集数和 `name_tag`；仅允许截断末尾 `desc`。
+11. X 字数计算保留 CTA、短链、剧名、集数和固定 hashtags；仅允许截断 `desc`。
 12. 生产数据抽样确认描述可能包含换行；查询入口统一折叠连续空白，NUL 等非法控制字符仍拒绝。
 13. 任一短剧发生预检失败、已知发布失败或结果未知，当前批次停止且该剧标记 `needs_review`，后续短剧暂停，等待人工确认。
 14. 素材池在每次入池校验和排期 worker 发布前，读取 `ads_drama_info.app_id=1479` 中同 `content_id + language` 的 `deploy_time`；多端取最晚值。可投放时间严格晚于当前时间时暂时跳过且不创建 queue，到达边界后由后续排期重新校验并自动恢复；缺失或非法数据 fail closed。

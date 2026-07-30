@@ -355,12 +355,37 @@ class XPostsTests(unittest.TestCase):
 
     def test_post_text_preserves_url_and_conservatively_truncates(self):
         short = "https://ai.yingliangads.com/s2l/12.html"
-        text = service.build_post_text(short, "剧" * 300)
-        first, second = text.split("\n", 1)
-        self.assertEqual(first, short)
-        self.assertTrue(second)
-        self.assertTrue(second.endswith("…"))
-        self.assertLessEqual(23 + 1 + sum(1 if ord(char) <= 0x10FF else 2 for char in second), 280)
+        text = service.build_post_text(short, "My Drama", "剧" * 300)
+        self.assertTrue(
+            text.startswith(
+                "Watch now 👉 %s\n\n🎬 My Drama\n" % short
+            )
+        )
+        self.assertTrue(
+            text.endswith(
+                "…\n\n#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
+            )
+        )
+        without_url = text.replace(short, "", 1)
+        self.assertLessEqual(
+            23 + service._tweet_text_weight(without_url),
+            280,
+        )
+
+    def test_material_post_template_matches_the_requested_copy(self):
+        short = "https://ai.yingliangads.com/s2l/12.html"
+        self.assertEqual(
+            service.build_post_text(
+                short,
+                "My Stepmom and Her Secret Besties",
+                "A complete drama description.",
+            ),
+            "Watch now 👉 %s\n\n"
+            "🎬 My Stepmom and Her Secret Besties\n"
+            "A complete drama description.\n\n"
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
+            % short,
+        )
 
     def test_short_redirect_is_atomic_immutable_and_public_readable(self):
         long_url = service.build_w2a_url(

@@ -181,22 +181,36 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('item.status === "active"', DRAMA)
         self.assertIn("item.publish_eligible === true", DRAMA)
 
-    def test_drama_template_is_rendered_exactly_and_not_merged_into_material_template(self):
-        expected = (
-            "{url}\n"
-            " 👆Full story continues here:☝️\n"
-            "Episode👉{sub_num}\n\n"
-            "{name_tag}\n\n"
-            " {desc}"
+    def test_material_and_drama_templates_are_rendered_exactly(self):
+        material_expected = (
+            "Watch now 👉 {{short_link}}\n\n"
+            "🎬 {{drama_name}}\n"
+            "{{desc}}\n\n"
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
         )
-        match = re.search(
+        material_match = re.search(
+            r'<pre id="materialPostTemplatePreview">(?P<body>.*?)</pre>',
+            MATERIAL,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(material_match)
+        self.assertEqual(material_match.group("body"), material_expected)
+
+        drama_expected = (
+            "Watch now 👉 {{short_link}}\n\n"
+            "🎬 {{drama_name}}\n"
+            "Episode {{episode_number}}\n"
+            "{{desc}}\n\n"
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
+        )
+        drama_match = re.search(
             r'<pre id="postTemplatePreview">(?P<body>.*?)</pre>',
             DRAMA,
             flags=re.DOTALL,
         )
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group("body"), expected)
-        self.assertNotIn("Full story continues here", MATERIAL)
+        self.assertIsNotNone(drama_match)
+        self.assertEqual(drama_match.group("body"), drama_expected)
+        self.assertNotIn("Episode {{episode_number}}", material_expected)
         self.assertIn("短剧 ID（content_id）", DRAMA)
         self.assertIn(r"/^[A-Za-z0-9_-]{1,128}$/", DRAMA)
 

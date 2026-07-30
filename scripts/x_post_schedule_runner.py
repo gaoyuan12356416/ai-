@@ -1037,7 +1037,7 @@ def _drama_candidates(
             build_drama_episode_post_text(
                 "https://ai.yingliangads.com/s2l/1.html",
                 candidate["sub_num"],
-                candidate["name_tag"],
+                candidate["drama_name"],
                 candidate["description"],
             )
             helper_candidate = dict(candidate)

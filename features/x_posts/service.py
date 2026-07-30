@@ -286,45 +286,6 @@ def _build_short_url(short_base_url, log_id):
     return "%s/%s.html" % (base, log_id)
 
 
-def build_post_text(short_url, description):
-    parsed = urllib.parse.urlsplit(str(short_url or ""))
-    if parsed.scheme != "https" or not parsed.hostname or parsed.query or parsed.fragment:
-        raise XPostError("invalid_request", "短链无效", 400)
-    description = str(description or "").strip()
-    if not description or "\x00" in description or len(description) > 10000:
-        raise XPostError("invalid_request", "剧描述无效", 400)
-    # X shortens an HTTPS URL to a fixed t.co length.  The description uses a
-    # conservative subset of twitter-text weighting: common Latin/punctuation
-    # is weight 1 and every other code point is weight 2.  This can under-use a
-    # few characters, but will not knowingly exceed the 280 weighted limit.
-    remaining = 280 - 23 - 1  # complete first-line URL plus newline
-
-    def char_weight(char):
-        value = ord(char)
-        if value <= 0x10FF or 0x2000 <= value <= 0x200D or 0x2010 <= value <= 0x201F or 0x2032 <= value <= 0x2037:
-            return 1
-        return 2
-
-    total = sum(char_weight(char) for char in description)
-    if total <= remaining:
-        rendered = description
-    else:
-        ellipsis = "…"
-        budget = remaining - char_weight(ellipsis)
-        selected = []
-        used = 0
-        for char in description:
-            weight = char_weight(char)
-            if used + weight > budget:
-                break
-            selected.append(char)
-            used += weight
-        rendered = "".join(selected).rstrip() + ellipsis
-    if not rendered.strip():
-        raise XPostError("invalid_request", "剧描述截断后为空", 400)
-    return str(short_url) + "\n" + rendered
-
-
 def _tweet_char_weight(char):
     value = ord(char)
     if (
@@ -337,12 +298,29 @@ def _tweet_char_weight(char):
     return 2
 
 
-def build_drama_episode_post_text(short_url, sub_num, name_tag, description):
-    """Build the fixed episode post template without truncating its identity.
+X_POST_HASHTAGS = "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
 
-    X assigns every HTTPS URL a fixed t.co weight of 23.  The URL, CTA,
-    episode number and name tag are mandatory; only the final description may
-    be shortened.
+
+def _tweet_text_weight(value):
+    return sum(_tweet_char_weight(char) for char in str(value or ""))
+
+
+def _normalize_post_field(value, label, maximum):
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    if (
+        not normalized
+        or len(normalized) > maximum
+        or any(ord(char) < 32 for char in normalized)
+    ):
+        raise XPostError("invalid_request", "%s无效" % label, 400)
+    return normalized
+
+
+def _render_post_text(short_url, drama_name, description, episode_number=None):
+    """Render the shared fixed copy while truncating only the description.
+
+    X assigns every HTTPS URL a fixed t.co weight of 23. The CTA, drama name,
+    optional episode line and fixed hashtags are mandatory.
     """
     parsed = urllib.parse.urlsplit(str(short_url or ""))
     if (
@@ -354,42 +332,33 @@ def build_drama_episode_post_text(short_url, sub_num, name_tag, description):
         or parsed.fragment
     ):
         raise XPostError("invalid_request", "短链无效", 400)
-    episode_number = _positive_int(sub_num, "sub_num")
-    normalized_tag = re.sub(r"\s+", " ", str(name_tag or "")).strip()
-    if (
-        not normalized_tag
-        or len(normalized_tag) > 500
-        or any(ord(char) < 32 for char in normalized_tag)
-    ):
-        raise XPostError("invalid_request", "name_tag无效", 400)
-    normalized_description = re.sub(r"\s+", " ", str(description or "")).strip()
-    if (
-        not normalized_description
-        or "\x00" in normalized_description
-        or len(normalized_description) > 10000
-    ):
-        raise XPostError("invalid_request", "剧描述无效", 400)
-
-    suffix_prefix = (
-        "\n 👆Full story continues here:☝️"
-        "\nEpisode👉%s"
-        "\n\n%s"
-        "\n\n "
-    ) % (episode_number, normalized_tag)
-    mandatory_weight = 23 + sum(_tweet_char_weight(char) for char in suffix_prefix)
+    normalized_name = _normalize_post_field(drama_name, "剧名", 500)
+    normalized_description = _normalize_post_field(description, "剧描述", 10000)
+    before_url = "Watch now 👉 "
+    after_url = "\n\n🎬 %s\n" % normalized_name
+    if episode_number is not None:
+        after_url += "Episode %s\n" % _positive_int(
+            episode_number,
+            "episode_number",
+        )
+    after_description = "\n\n" + X_POST_HASHTAGS
+    mandatory_weight = (
+        _tweet_text_weight(before_url)
+        + 23
+        + _tweet_text_weight(after_url)
+        + _tweet_text_weight(after_description)
+    )
     remaining = 280 - mandatory_weight
     if remaining < 1:
-        raise XPostError("x_post_copy_too_long", "短剧Post固定文案超过X字数限制", 409)
-    description_weight = sum(
-        _tweet_char_weight(char) for char in normalized_description
-    )
+        raise XPostError("x_post_copy_too_long", "X Post固定文案超过字数限制", 409)
+    description_weight = _tweet_text_weight(normalized_description)
     if description_weight <= remaining:
         rendered_description = normalized_description
     else:
         ellipsis = "…"
         budget = remaining - _tweet_char_weight(ellipsis)
         if budget < 1:
-            raise XPostError("x_post_copy_too_long", "短剧Post没有可用的描述空间", 409)
+            raise XPostError("x_post_copy_too_long", "X Post没有可用的描述空间", 409)
         selected = []
         used = 0
         for char in normalized_description:
@@ -400,8 +369,32 @@ def build_drama_episode_post_text(short_url, sub_num, name_tag, description):
             used += weight
         rendered_description = "".join(selected).rstrip() + ellipsis
     if not rendered_description.strip(" …"):
-        raise XPostError("x_post_copy_too_long", "短剧Post描述截断后为空", 409)
-    return str(short_url) + suffix_prefix + rendered_description
+        raise XPostError("x_post_copy_too_long", "X Post描述截断后为空", 409)
+    return (
+        before_url
+        + str(short_url)
+        + after_url
+        + rendered_description
+        + after_description
+    )
+
+
+def build_post_text(short_url, drama_name, description):
+    return _render_post_text(short_url, drama_name, description)
+
+
+def build_drama_episode_post_text(
+    short_url,
+    sub_num,
+    drama_name,
+    description,
+):
+    return _render_post_text(
+        short_url,
+        drama_name,
+        description,
+        episode_number=sub_num,
+    )
 
 
 def _validate_post_storage_layout(
@@ -3534,7 +3527,7 @@ class XPostStore:
         build_drama_episode_post_text(
             "https://ai.yingliangads.com/s2l/1.html",
             1,
-            name_tag,
+            drama_name,
             description,
         )
         return {
@@ -8336,12 +8329,13 @@ def publish_canary(
                 post_text = build_drama_episode_post_text(
                     short_url,
                     queue.get("episode_number"),
-                    queue.get("name_tag"),
+                    queue.get("drama_name"),
                     queue["description"],
                 )
             else:
                 post_text = build_post_text(
                     short_url,
+                    queue.get("drama_name"),
                     queue["description"],
                 )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)

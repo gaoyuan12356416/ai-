@@ -197,6 +197,15 @@
     .schedule-message { min-height: 20px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .schedule-message.error { color: var(--red); }
     .add-actions { display: grid; gap: 8px; min-width: 150px; }
+    .template-box {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px dashed #bfcdea;
+      border-radius: 12px;
+      background: #f7f9fd;
+    }
+    .template-box strong { display: block; margin-bottom: 8px; font-size: 13px; }
+    .template-box pre { margin: 0; overflow: auto; color: #273b58; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
     .filters {
       display: grid;
       grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(160px, 1fr) auto auto;
@@ -362,6 +371,15 @@
               <button id="addMaterials" class="button primary" type="button">加入素材池</button>
               <button id="clearMaterials" class="button" type="button">清空输入</button>
             </div>
+          </div>
+          <div class="template-box">
+            <strong>素材 Post 描述模板</strong>
+            <pre id="materialPostTemplatePreview">Watch now 👉 {{short_link}}
+
+🎬 {{drama_name}}
+{{desc}}
+
+#shortdrama #shortfilms #tvdrama #aidrama #dramawave</pre>
           </div>
         </section>
 
