@@ -2,13 +2,13 @@
 
 ## 测试结论
 
-本地自动化回归已通过，生产关闭态 canary 尚待部署后执行。当前结论为“代码可进入生产关闭态验证”，不把本地通过等同于生产验收完成。
+本地与 CPU 服务器自动化回归均通过，生产关闭态部署和 canary 已完成。素材校验与隔离账本入池均在 5 秒内返回，且入池前 Creator Info/GPU 调用为 0；生产真实发布门禁保持关闭，未产生 TikTok init/post。
 
 发布门槛：
 
 - 全部 P0/P1 自动化通过；
 - SQLite migration 在备份副本与生产均 `integrity_check=ok`；
-- 生产 preview -> queued -> ready canary 成功；
+- 生产真实 preview 与生产环境隔离账本 queued canary 成功；ready 原子迁移由自动化覆盖；
 - 三个发布 gate 始终为 0；
 - canary 期间真实 TikTok init/post 数为 0。
 
@@ -32,9 +32,9 @@
 | UI/路由契约测试 | 37 | 37 | 0 | 0 |
 | GPU/发布链路回归 | 51 | 51 | 0 | 0 |
 | TT Post 自动化合计 | 237 | 237 | 0 | 0 |
-| 生产关闭态 canary | 1 | 待填 | 待填 | 待填 |
+| 生产关闭态 canary | 1 | 1 | 0 | 0 |
 
-## 待执行命令与结果
+## 执行命令与结果
 
 ```powershell
 # 结果：通过
@@ -63,39 +63,39 @@ sqlite3 <db> 'PRAGMA integrity_check;'
 sqlite3 <db> '<仅统计 intake/recurring/queue/publish 的脱敏查询>'
 ```
 
-结果占位：
+生产结果：
 
-- 目标 commit SHA：待填
-- CPU release：待填
-- 部署前 release/备份：待填
-- 静态页三处 SHA256：待填
-- `integrity_check`：待填
-- canary material/intake/recurring pool ID：待填
-- preview 响应耗时：待填
-- queued 入池响应耗时：待填
-- 后台转 ready 总耗时：待填
-- TikTok init 增量：待填（验收要求 0）
-- 真实 TikTok Post 增量：待填（验收要求 0）
+- 目标 commit SHA：`bb9024ba7b7c7f70112b102e821ba48c21292d3c`
+- CPU release：`/opt/tt-post/releases/bb9024ba7b7c`
+- 部署前 release：`/opt/tt-post/releases/2055077`
+- 备份：`/mnt/data-disk/tt-post-publisher/backups/20260730-185822-2055077-to-bb9024ba7b7c-async-prepare`
+- 静态页三处及本机 HTTPS 响应 SHA256：`e53e82314320a5e648255285042093f5c9e354698709b2a86758d546df8cdfcd`
+- 迁移副本与生产 `integrity_check`：`ok`
+- canary：素材 `5391678`、Drama ID `F59JjB15bc`、隔离 intake `1/queued`；生产原有 recurring pool `1/available` 未改写
+- 真实生产 preview：`4.204641s`
+- 生产环境隔离账本 preview：`3.105s`
+- queued 入池：`4.838s`
+- 后台转 ready：未新增真实生产池记录；该素材部署前已是 ready，原子转 ready 由 Core/Service 自动化覆盖
+- TikTok init 增量：`0`
+- 真实 TikTok Post 增量：`0`
 
 ## 缺陷情况
 
 | 缺陷 | 说明 | 状态 |
 | --- | --- | --- |
-| BUG-001 | 素材校验同步等待 GPU，页面卡在“读取中” | 本地 237/237 通过，待生产关闭态 canary |
+| BUG-001 | 素材校验同步等待 GPU，页面卡在“读取中” | 已修复并部署；生产 preview 4.204641s |
 
-新增缺陷：本地自动化未发现。
+新增缺陷：本地、服务器自动化及关闭态 canary 未发现。
 
 ## 验证证据
 
-待附：
-
-1. preview 时 Fake GPU `prepare_jobs=[]` 的测试断言。
-2. material-pool POST 返回 queued 后 runner 才调用 prepare 的测试断言。
-3. FIFO、租约过期 reclaim、旧 token completion 被拒的测试结果。
-4. intake ready 与 recurring pool available 原子一致的 SQLite 查询。
-5. path/timer 与 publish runner 相互独立的 systemd 状态。
-6. 浏览器状态表 queued -> preparing -> ready 截图。
-7. gate 全 0、无 TikTok publish ID/真实帖子增量的只读查询。
+1. preview 时 Fake GPU `prepare_jobs=[]`、Creator Info 调用为空。
+2. 生产环境隔离账本 material-pool POST 返回 queued，替换的远端客户端若被调用会直接令 canary 失败。
+3. FIFO、租约过期 reclaim、旧 token completion 被拒均由 Core 自动化覆盖。
+4. intake ready 与 recurring pool available 原子一致由 Core/Service 自动化覆盖。
+5. `tt-post-prepare.*` 与 `tt-post-runner.*` 同时 active，使用不同 lock/kick。
+6. 线上静态文件与本机 HTTPS 响应 SHA256 一致；浏览器未登录，未代用户执行登录或入池。
+7. 三个 gate 全 0；部署前后 queue/publish-id/recurring 为 `0|0|1`，部署后 intake 为 0。
 
 ## 遗留风险
 
@@ -106,4 +106,4 @@ sqlite3 <db> '<仅统计 intake/recurring/queue/publish 的脱敏查询>'
 
 ## 发布建议
 
-本地结论为“可部署并执行生产关闭态 canary”，尚不能宣告生产验收完成；即使 canary 通过，也必须保持真实 TikTok 发布 gate 关闭。
+建议保持当前生产版本。首条由用户实际加入的新素材应自然观察 `queued -> preparing -> ready`，无需再让校验请求等待；真实 TikTok 发布 gate 继续保持关闭。
