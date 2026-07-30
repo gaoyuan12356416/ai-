@@ -163,7 +163,16 @@ class XAccountsTestCase(unittest.TestCase):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(result["authorization_url"]).query)
         return result, query["state"][0]
 
-    def complete(self, x_user_id="123456789", username="tester", scope=None, expires_in=7200, actor=None, account_fields=None):
+    def complete(
+        self,
+        x_user_id="123456789",
+        username="tester",
+        scope=None,
+        expires_in=7200,
+        actor=None,
+        account_fields=None,
+        publish_approved=True,
+    ):
         _result, state = self.new_state(actor)
         token = {
             "access_token": "access-secret",
@@ -177,6 +186,12 @@ class XAccountsTestCase(unittest.TestCase):
         account = {"data": account_data}
         with mock.patch.object(service, "token_request", return_value=token), mock.patch.object(service, "user_request", return_value=account):
             item = service.complete_authorization("one-time-code", state)
+        if publish_approved:
+            item = service.set_account_publish_approval(
+                item["id"],
+                True,
+                self.admin,
+            )
         return item
 
     def canary_payload(self, item):
@@ -553,15 +568,27 @@ class XAccountsTestCase(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             columns = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
             row = conn.execute(
-                "SELECT owner_tenant_key,owner_user_id,owner_name,owner_email FROM x_authorized_account"
+                "SELECT owner_tenant_key,owner_user_id,owner_name,owner_email,publish_approved "
+                "FROM x_authorized_account"
             ).fetchone()
             indexes = {row[1] for row in conn.execute("PRAGMA index_list(x_authorized_account)")}
-        self.assertTrue({"followers_count", "like_count", "media_count", "profile_synced_at", "disconnected_at"} <= columns)
+        self.assertTrue(
+            {
+                "followers_count",
+                "like_count",
+                "media_count",
+                "profile_synced_at",
+                "disconnected_at",
+                "publish_approved",
+            }
+            <= columns
+        )
         self.assertEqual(dict(row), {
             "owner_tenant_key": "",
             "owner_user_id": "u-1",
             "owner_name": "Legacy Owner",
             "owner_email": "legacy@example.com",
+            "publish_approved": 0,
         })
         self.assertIn("idx_x_account_owner_updated", indexes)
         self.assertEqual(service.list_accounts(self.owner, "mine")["items"], [])
@@ -576,6 +603,63 @@ class XAccountsTestCase(unittest.TestCase):
             with self.assertRaises(service.ServiceError) as legacy_conflict:
                 service.complete_authorization("legacy-code", state)
         self.assertEqual(legacy_conflict.exception.code, "x_account_owned_by_other")
+
+    def test_publish_approval_defaults_off_and_admin_controls_effective_eligibility(self):
+        item = self.complete(
+            username="approval_guard",
+            publish_approved=False,
+        )
+        self.assertEqual(item["status"], "active")
+        self.assertIs(item["credential_publish_eligible"], True)
+        self.assertIs(item["publish_approved"], False)
+        self.assertIs(item["publish_eligible"], False)
+
+        with self.assertRaises(service.ServiceError) as owner_denied:
+            service.set_account_publish_approval(item["id"], True, self.owner)
+        self.assertEqual(owner_denied.exception.code, "x_admin_required")
+
+        with self.assertRaises(service.ServiceError) as publish_denied:
+            with service.publish_credentials(item["id"], self.owner):
+                self.fail("unapproved account must not yield publishing credentials")
+        self.assertEqual(
+            publish_denied.exception.code,
+            "x_account_publish_not_approved",
+        )
+
+        approved = service.set_account_publish_approval(
+            item["id"],
+            True,
+            self.admin,
+        )
+        self.assertIs(approved["publish_approved"], True)
+        self.assertIs(approved["publish_eligible"], True)
+        with service.publish_credentials(item["id"], self.owner) as (
+            account,
+            access_token,
+        ):
+            self.assertIs(account["publish_eligible"], True)
+            self.assertEqual(access_token, "access-secret")
+
+        disabled = service.set_account_publish_approval(
+            item["id"],
+            False,
+            self.admin,
+        )
+        self.assertIs(disabled["publish_approved"], False)
+        self.assertIs(disabled["publish_eligible"], False)
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            events = conn.execute(
+                "SELECT event_type,outcome,actor_user_id "
+                "FROM x_oauth_event "
+                "WHERE event_type LIKE 'publish_approval_%' ORDER BY id"
+            ).fetchall()
+        self.assertEqual(
+            events,
+            [
+                ("publish_approval_enabled", "completed", self.admin["user_id"]),
+                ("publish_approval_disabled", "completed", self.admin["user_id"]),
+            ],
+        )
 
     def test_logout_soft_disables_idempotently_without_touching_token_or_x(self):
         item = self.complete(
@@ -2386,6 +2470,20 @@ class XAccountsTestCase(unittest.TestCase):
             with mock.patch.object(service, "user_request", return_value=account_payload):
                 verified = client.verify_x_account(item["id"], self.owner)
             self.assertEqual(verified["item"]["username"], "via-client")
+            unapproved = client.set_x_account_publish_approval(
+                item["id"],
+                False,
+                self.admin,
+            )
+            self.assertIs(unapproved["item"]["publish_approved"], False)
+            self.assertIs(unapproved["item"]["publish_eligible"], False)
+            approved = client.set_x_account_publish_approval(
+                item["id"],
+                True,
+                self.admin,
+            )
+            self.assertIs(approved["item"]["publish_approved"], True)
+            self.assertIs(approved["item"]["publish_eligible"], True)
             token_before = service.token_path(item["x_user_id"]).read_bytes()
             logged_out = client.logout_x_account(item["id"], self.owner)
             self.assertEqual(logged_out["item"]["status"], "disabled")
@@ -2414,6 +2512,25 @@ class XAccountsTestCase(unittest.TestCase):
                 "scope": "all",
                 "only_refresh_required": True,
                 "preserve_transient_status": True,
+            },
+        )
+
+    def test_publish_approval_client_forwards_admin_scope_and_boolean(self):
+        expected = {"item": {"id": 12, "publish_approved": True}}
+        with mock.patch.object(client, "_request", return_value=expected) as request_mock:
+            result = client.set_x_account_publish_approval(
+                12,
+                True,
+                self.admin,
+            )
+        self.assertEqual(result, expected)
+        request_mock.assert_called_once_with(
+            "/internal/accounts/12/publish-approval",
+            method="POST",
+            payload={
+                "actor": client.normalize_actor(self.admin),
+                "scope": "all",
+                "approved": True,
             },
         )
 

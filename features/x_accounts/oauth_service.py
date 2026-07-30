@@ -256,6 +256,7 @@ def ensure_storage():
                     token_type TEXT NOT NULL DEFAULT 'bearer',
                     scopes_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'active',
+                    publish_approved INTEGER NOT NULL DEFAULT 0,
                     first_authorized_at TEXT NOT NULL,
                     last_authorized_at TEXT NOT NULL,
                     access_expires_at TEXT NOT NULL DEFAULT '',
@@ -336,6 +337,7 @@ def ensure_storage():
                 "disconnected_by_tenant_key": "TEXT NOT NULL DEFAULT ''",
                 "disconnected_by_user_id": "TEXT NOT NULL DEFAULT ''",
                 "disconnected_by_name": "TEXT NOT NULL DEFAULT ''",
+                "publish_approved": "INTEGER NOT NULL DEFAULT 0",
             }
             existing = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
             for column, definition in account_columns.items():
@@ -868,8 +870,11 @@ def row_to_item(row):
     status, missing = status_for(scopes, item.get("access_expires_at", ""), token, stored_status)
     if token is None and stored_status not in terminal_statuses:
         status = "token_missing"
+    publish_approved = bool(int(item.get("publish_approved") or 0))
     item["status"] = status
-    item["publish_eligible"] = status == "active"
+    item["publish_approved"] = publish_approved
+    item["credential_publish_eligible"] = status == "active"
+    item["publish_eligible"] = status == "active" and publish_approved
     item["daily_auto_publish_configured"] = (
         int(item.get("id") or 0) in DAILY_ACCOUNT_IDS
     )
@@ -991,6 +996,42 @@ def find_account_by_x_user_id(x_user_id):
     if not row:
         raise ServiceError("x_account_not_found", "X账号记录不存在", 404)
     return row_to_item(row)
+
+
+def set_account_publish_approval(account_id, approved, actor):
+    if not isinstance(approved, bool):
+        raise ServiceError("invalid_request", "approved必须是布尔值", 400)
+    account_id = int(account_id)
+    actor, _scope = normalize_account_scope(actor, "all")
+    initial_row = find_scoped_account_row(account_id, actor, "all")
+    x_user_id = str(initial_row["x_user_id"])
+    with account_lock("x:" + x_user_id):
+        find_scoped_account_row(account_id, actor, "all")
+        timestamp = iso_utc()
+        with _DB_LOCK:
+            conn = db_connect()
+            try:
+                cursor = conn.execute(
+                    "UPDATE x_authorized_account "
+                    "SET publish_approved=?,updated_at=? WHERE id=?",
+                    (1 if approved else 0, timestamp, account_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ServiceError(
+                        "x_account_not_found",
+                        "X账号记录不存在",
+                        404,
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+    safe_record_event(
+        "publish_approval_enabled" if approved else "publish_approval_disabled",
+        "completed",
+        actor,
+        x_user_id=x_user_id,
+    )
+    return find_account(account_id)
 
 
 def update_account_error(account_id, status, error):
@@ -1127,6 +1168,12 @@ def publish_credentials(account_id, actor, scope="mine"):
             raise ServiceError("x_account_disabled", "X账号已在后台停用，禁止用于发布", 409)
         if item["status"] != "active":
             raise ServiceError("x_account_not_publishable", "X账号当前状态不可用于发布", 409)
+        if item.get("publish_approved") is not True:
+            raise ServiceError(
+                "x_account_publish_not_approved",
+                "该X账号尚未勾选允许发布",
+                409,
+            )
         token = read_token_file(x_user_id)
         access_token = str(token.get("access_token", "") or "")
         if not access_token:
@@ -3431,6 +3478,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(
                     200,
                     list_accounts(payload.get("actor", {}), payload.get("scope", "mine")),
+                )
+                return
+            match = re.fullmatch(
+                r"/internal/accounts/([0-9]+)/publish-approval",
+                parsed.path,
+            )
+            if match:
+                self.send_json(
+                    200,
+                    {
+                        "item": set_account_publish_approval(
+                            match.group(1),
+                            payload.get("approved"),
+                            payload.get("actor", {}),
+                        )
+                    },
                 )
                 return
             match = re.fullmatch(r"/internal/accounts/([0-9]+)/verify", parsed.path)

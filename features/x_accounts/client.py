@@ -12,6 +12,7 @@ SAFE_ERROR_CODES = {
     "invalid_request",
     "x_account_disabled",
     "x_account_not_publishable",
+    "x_account_publish_not_approved",
     "x_account_owned_by_other",
     "x_account_not_found",
     "x_admin_required",
@@ -194,6 +195,23 @@ def verify_x_account(
         "/internal/accounts/%s/verify" % account_id,
         method="POST",
         payload=payload,
+    )
+
+
+def set_x_account_publish_approval(account_id, approved, actor):
+    account_id = str(account_id or "")
+    if not account_id.isdigit():
+        raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
+    if not isinstance(approved, bool):
+        raise XAccountsClientError("invalid_request", "approved必须是布尔值", 400)
+    return _request(
+        "/internal/accounts/%s/publish-approval" % account_id,
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "approved": approved,
+        },
     )
 
 

@@ -43,11 +43,15 @@
     .filters input:focus,.filters select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); }
     .result-count { margin-left:auto; color:var(--muted); font-size:13px; }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:14px; }
-    table { width:100%; min-width:2080px; border-collapse:collapse; background:#fff; }
+    table { width:100%; min-width:2220px; border-collapse:collapse; background:#fff; }
     th,td { padding:13px 14px; border-bottom:1px solid #e8eef6; vertical-align:top; text-align:left; font-size:13px; }
     th { position:sticky; top:0; z-index:1; background:#f7f9fc; color:#5d6d86; font-size:12px; white-space:nowrap; }
     tr:last-child td { border-bottom:0; }
     .account { display:flex; align-items:center; gap:10px; min-width:245px; }
+    .publish-approval-col { min-width:150px; }
+    .publish-toggle { display:inline-flex; align-items:center; gap:8px; min-height:32px; cursor:pointer; font-weight:700; color:var(--ink); }
+    .publish-toggle input { width:18px; height:18px; margin:0; accent-color:var(--blue); cursor:pointer; }
+    .publish-toggle input:disabled { cursor:wait; }
     .auto-publish-col { min-width:120px; white-space:nowrap; }
     .account-avatar { width:42px; height:42px; flex:0 0 auto; display:grid; place-items:center; overflow:hidden; border-radius:50%; background:#12233f; color:#fff; font-weight:800; }
     .account-avatar img { width:100%; height:100%; object-fit:cover; }
@@ -108,7 +112,7 @@
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>全部授权账号</h2><p>列表加载不会逐个请求 X；点击“同步/校验”才会刷新 Token、公众数据和授权状态。</p></div>
+            <div><h2>全部授权账号</h2><p>只有勾选“允许发布”且账号状态有效的账号，才会出现在发布池中；新授权账号默认不勾选。</p></div>
             <button id="reloadAccounts" class="button" type="button">刷新列表</button>
           </div>
           <div class="filters">
@@ -129,8 +133,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th class="auto-publish-col">自动发布 Post</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="12" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th class="auto-publish-col">自动发布 Post</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>账号资料</th><th>后台状态</th><th>授权权限</th><th>授权人</th><th>授权时间</th><th>Token到期/刷新</th><th>最近校验/资料同步</th><th>更新/停用时间</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="13" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -236,7 +240,7 @@
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="12" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="13" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -248,6 +252,8 @@
           const scopes = Array.isArray(item.scopes) ? item.scopes : [];
           const missingScopes = Array.isArray(item.missing_scopes) ? item.missing_scopes : [];
           const meta = statusMeta[item.status] || [item.status || "未知","error"];
+          const publishApproved = item.publish_approved === true;
+          const credentialPublishEligible = item.credential_publish_eligible === true;
           const autoPublishConfigured = item.daily_auto_publish_configured === true;
           const ownerName = item.owner_name || item.authorized_by_name || item.owner_user_id || item.authorized_by_user_id || "—";
           const ownerEmail = item.owner_email || item.authorized_by_email || "";
@@ -259,6 +265,7 @@
           return `<tr>
             <td><div class="account"><div class="account-avatar">${avatar ? `<img src="${escapeHtml(avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy" decoding="async" />` : escapeHtml(String(item.display_name || item.username || "X").slice(0,1))}</div><div>${accountHeading}<span>${escapeHtml(username)} · ID ${escapeHtml(item.x_user_id || "—")}</span>${booleanChips(item)}</div></div></td>
             <td class="auto-publish-col"><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
+            <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? "发布池可选" : (publishApproved ? "账号状态有效后可选" : "发布池不可选")}</div></td>
             <td>${metricsHtml(item)}</td>
             <td><div class="meta-stack"><div>地区：${escapeHtml(item.location || "—")}</div><div class="subtle">加入 X：${escapeHtml(formatTime(xCreatedAt))}</div></div></td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
@@ -274,13 +281,13 @@
       }
 
       async function loadData() {
-        el("accountRows").innerHTML = `<tr><td colspan="12" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="13" class="empty">正在加载…</td></tr>`;
         try {
           const result = await api("/api/admin/x-accounts");
           state.accounts = Array.isArray(result.items) ? result.items : [];
           renderStats(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="12" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="13" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         }
@@ -297,6 +304,22 @@
           await loadData();
         } finally {
           button.disabled = false; button.textContent = "同步/校验";
+        }
+      }
+
+      async function setPublishApproval(id, approved, checkbox) {
+        checkbox.disabled = true;
+        try {
+          await api(`/api/admin/x-accounts/${encodeURIComponent(id)}/publish-approval`, {
+            method:"POST",
+            body:JSON.stringify({ approved }),
+          });
+          toast(approved ? "已允许该账号进入发布池" : "已禁止该账号进入发布池");
+        } catch (error) {
+          checkbox.checked = !approved;
+          toast(`保存失败：${error.message}`);
+        } finally {
+          await loadData();
         }
       }
 
@@ -319,6 +342,10 @@
       el("accountRows").addEventListener("click", event => {
         const button = event.target.closest("[data-verify-id]");
         if (button) verifyAccount(button.dataset.verifyId, button);
+      });
+      el("accountRows").addEventListener("change", event => {
+        const checkbox = event.target.closest("[data-publish-approval-id]");
+        if (checkbox) setPublishApproval(checkbox.dataset.publishApprovalId, checkbox.checked, checkbox);
       });
       init();
     })();

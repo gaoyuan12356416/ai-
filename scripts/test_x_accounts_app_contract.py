@@ -70,9 +70,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             X_ACCOUNTS_SIDECAR_SOURCE,
         )
 
-    def test_x_account_list_displays_daily_auto_publish_status_in_twelve_columns(self):
+    def test_x_account_list_displays_publish_approval_and_daily_status_in_thirteen_columns(self):
         self.assertIn(
-            '<th>X账号</th><th class="auto-publish-col">自动发布 Post</th>',
+            '<th>X账号</th><th class="auto-publish-col">自动发布 Post</th>'
+            '<th class="publish-approval-col">允许发布</th>',
             X_ACCOUNT_LIST_SOURCE,
         )
         self.assertRegex(
@@ -80,6 +81,17 @@ class XAccountsAppContractTest(unittest.TestCase):
             r'\$\{booleanChips\(item\)\}</div></div></td>\s*'
             r'<td class="auto-publish-col">',
         )
+        self.assertIn("item.publish_approved === true", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn(
+            'data-publish-approval-id="${escapeHtml(item.id)}"',
+            X_ACCOUNT_LIST_SOURCE,
+        )
+        self.assertIn(
+            "/api/admin/x-accounts/${encodeURIComponent(id)}/publish-approval",
+            X_ACCOUNT_LIST_SOURCE,
+        )
+        self.assertIn("发布池可选", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn("发布池不可选", X_ACCOUNT_LIST_SOURCE)
         self.assertIn(
             "item.daily_auto_publish_configured === true",
             X_ACCOUNT_LIST_SOURCE,
@@ -87,10 +99,10 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("已配置", X_ACCOUNT_LIST_SOURCE)
         self.assertIn("未配置", X_ACCOUNT_LIST_SOURCE)
         self.assertGreaterEqual(
-            X_ACCOUNT_LIST_SOURCE.count('colspan="12"'),
+            X_ACCOUNT_LIST_SOURCE.count('colspan="13"'),
             4,
         )
-        self.assertNotIn('colspan="11"', X_ACCOUNT_LIST_SOURCE)
+        self.assertNotIn('colspan="12"', X_ACCOUNT_LIST_SOURCE)
         self.assertNotIn("expected_count || 3", X_POST_LOGS_SOURCE)
         self.assertNotIn('id="latestPublished">0 / 3', X_POST_LOGS_SOURCE)
         self.assertIn('item.batch_kind === "catchup"', X_POST_LOGS_SOURCE)
@@ -214,6 +226,18 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn("logout_x_account(account_id, x_accounts_actor(session))", post_routes)
         self.assertIn("_require_cookie_admin()", post_routes)
         self.assertIn('_require_cookie_module("x_accounts")', post_routes)
+
+    def test_publish_approval_route_is_admin_only_same_origin_and_audited(self):
+        route = source_between(
+            'x_admin_publish_approval_match = re.match(',
+            'x_verify_match = re.match(r"^/api/x-accounts/',
+        )
+        self.assertIn("_require_cookie_admin()", route)
+        self.assertIn("_require_same_origin_json()", route)
+        self.assertIn("set_x_account_publish_approval(", route)
+        self.assertIn("x_accounts_actor(session)", route)
+        self.assertIn('"admin_set_x_account_publish_approval"', route)
+        self.assertIn('"admin_set_x_account_publish_approval_failed"', route)
 
     def test_admin_gate_explicitly_rejects_api_tokens(self):
         admin_gate = source_between(
