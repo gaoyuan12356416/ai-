@@ -33,6 +33,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -75,6 +79,11 @@ DEFAULT_MAX_DURATION_SECONDS = 3600
 DEFAULT_DOWNLOAD_TIMEOUT = 120
 DEFAULT_PROBE_TIMEOUT = 120
 DEFAULT_TRANSCODE_TIMEOUT = 3600
+DEFAULT_COS_TIMEOUT = 120
+DEFAULT_PREPARE_TOTAL_TIMEOUT = 8700
+COS_PART_SIZE_BYTES = 8 * 1024 * 1024
+COS_UPLOAD_THREADS = 4
+_COS_UPLOAD_SLOTS = threading.BoundedSemaphore(COS_UPLOAD_THREADS)
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 TIKTOK_API_ORIGIN = "https://open.tiktokapis.com"
@@ -328,6 +337,8 @@ class WorkerConfig:
     download_timeout: int = DEFAULT_DOWNLOAD_TIMEOUT
     probe_timeout: int = DEFAULT_PROBE_TIMEOUT
     transcode_timeout: int = DEFAULT_TRANSCODE_TIMEOUT
+    cos_timeout: int = DEFAULT_COS_TIMEOUT
+    prepare_total_timeout: int = DEFAULT_PREPARE_TOTAL_TIMEOUT
     profile: str = PROFILE
 
     @classmethod
@@ -514,6 +525,18 @@ class WorkerConfig:
                 30,
                 14400,
             ),
+            cos_timeout=_env_int(
+                "TT_POST_GPU_COS_TIMEOUT",
+                DEFAULT_COS_TIMEOUT,
+                60,
+                300,
+            ),
+            prepare_total_timeout=_env_int(
+                "TT_POST_GPU_PREPARE_TOTAL_TIMEOUT",
+                DEFAULT_PREPARE_TOTAL_TIMEOUT,
+                600,
+                8700,
+            ),
         )
 
     def gate_state(self):
@@ -531,6 +554,37 @@ class WorkerConfig:
                 and self.url_property_verified
             ),
         }
+
+
+class PrepareDeadline:
+    """One monotonic budget shared by every stage of a prepare request."""
+
+    def __init__(self, timeout_seconds, monotonic_fn=time.monotonic):
+        self._monotonic_fn = monotonic_fn
+        self._expires_at = (
+            float(monotonic_fn()) + float(timeout_seconds)
+        )
+
+    def remaining(self):
+        return max(0.0, self._expires_at - float(self._monotonic_fn()))
+
+    def check(self):
+        if self.remaining() <= 0:
+            raise TTGPUError(
+                "prepare_timeout",
+                "GPU prepare exceeded the total execution budget",
+                504,
+            )
+
+    def stage_timeout(self, configured_timeout):
+        self.check()
+        return max(
+            1,
+            min(
+                int(configured_timeout),
+                int(math.ceil(self.remaining())),
+            ),
+        )
 
 
 def _ensure_private_directory(path):
@@ -594,30 +648,61 @@ def _read_json(path):
 
 
 @contextmanager
-def _job_lock(path):
+def _job_lock(path, deadline=None):
     path = Path(path)
     _ensure_private_directory(path.parent)
     if fcntl is None:
         key = str(path.resolve())
         with _FALLBACK_LOCKS_GUARD:
             lock = _FALLBACK_LOCKS.setdefault(key, threading.Lock())
-        with lock:
+        if deadline is not None:
+            deadline.check()
+        acquired = (
+            lock.acquire(timeout=deadline.remaining())
+            if deadline is not None
+            else lock.acquire()
+        )
+        if not acquired:
+            raise TTGPUError(
+                "prepare_timeout",
+                "GPU prepare exceeded the total execution budget",
+                504,
+            )
+        try:
+            if deadline is not None:
+                deadline.check()
             yield
+        finally:
+            lock.release()
         return
     with path.open("a+b") as handle:
         os.chmod(path, 0o600)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if deadline is None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                deadline.check()
+                try:
+                    fcntl.flock(
+                        handle.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                    break
+                except BlockingIOError:
+                    time.sleep(min(0.1, deadline.remaining()))
         try:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _file_sha256(path):
+def _file_sha256(path, deadline=None):
     digest = hashlib.sha256()
     size = 0
     with Path(path).open("rb") as handle:
         while True:
+            if deadline is not None:
+                deadline.check()
             chunk = handle.read(4 * 1024 * 1024)
             if not chunk:
                 break
@@ -711,6 +796,7 @@ def download_source(
     expected_sha256,
     expected_size,
     config,
+    deadline=None,
 ):
     url = validate_source_url(url, config.allowed_source_hosts)
     parsed = urllib.parse.urlsplit(url)
@@ -729,7 +815,11 @@ def download_source(
     try:
         with _NO_REDIRECT_OPENER.open(
             request,
-            timeout=config.download_timeout,
+            timeout=(
+                deadline.stage_timeout(config.download_timeout)
+                if deadline is not None
+                else config.download_timeout
+            ),
         ) as response:
             raw_length = response.headers.get("Content-Length")
             if raw_length not in (None, ""):
@@ -750,6 +840,8 @@ def download_source(
             with destination.open("xb") as handle:
                 os.chmod(destination, 0o600)
                 while True:
+                    if deadline is not None:
+                        deadline.check()
                     chunk = response.read(4 * 1024 * 1024)
                     if not chunk:
                         break
@@ -799,7 +891,14 @@ def download_source(
     return {"sha256": actual_sha, "size": size}
 
 
-def _run_command(runner, command, timeout, error_code):
+def _run_command(
+    runner,
+    command,
+    timeout,
+    error_code,
+    *,
+    timeout_error_code=None,
+):
     try:
         completed = runner(
             list(command),
@@ -809,6 +908,12 @@ def _run_command(runner, command, timeout, error_code):
             timeout=int(timeout),
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        raise TTGPUError(
+            timeout_error_code or error_code,
+            "media command exceeded its execution budget",
+            504 if timeout_error_code else 500,
+        ) from None
     except (OSError, subprocess.SubprocessError):
         raise TTGPUError(error_code, "media command failed", 500) from None
     if int(getattr(completed, "returncode", 1) or 0) != 0:
@@ -816,7 +921,7 @@ def _run_command(runner, command, timeout, error_code):
     return completed
 
 
-def probe_media(config, path, runner=subprocess.run):
+def probe_media(config, path, runner=subprocess.run, deadline=None):
     command = [
         config.ffprobe_bin,
         "-v",
@@ -830,8 +935,13 @@ def probe_media(config, path, runner=subprocess.run):
     completed = _run_command(
         runner,
         command,
-        config.probe_timeout,
+        (
+            deadline.stage_timeout(config.probe_timeout)
+            if deadline is not None
+            else config.probe_timeout
+        ),
         "media_probe_failed",
+        timeout_error_code="prepare_timeout" if deadline is not None else None,
     )
     try:
         payload = json.loads(completed.stdout or "")
@@ -1319,17 +1429,48 @@ class CosObjectStore:
             Region=self.config.cos_region,
             SecretId=self.config.cos_secret_id,
             SecretKey=self.config.cos_secret_key,
-            Timeout=max(60, self.config.transcode_timeout),
+            Timeout=max(60, self.config.cos_timeout),
             KeepAlive=False,
         )
-        return CosS3Client(cos_config)
+        # The SDK timeout is per HTTP request. Disable SDK retries so one
+        # stalled part cannot silently multiply the prepare wall-clock budget.
+        return CosS3Client(cos_config, retry=0)
 
-    def head(self, key):
+    @staticmethod
+    def _deadline_call(deadline, callback):
+        if deadline is None:
+            return callback()
+        deadline.check()
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="tt-cos-control",
+        )
+        future = executor.submit(callback)
         try:
-            return self.client.head_object(
-                Bucket=self.config.cos_bucket,
-                Key=key,
+            return future.result(timeout=deadline.remaining())
+        except FutureTimeoutError:
+            future.cancel()
+            raise TTGPUError(
+                "prepare_timeout",
+                "GPU prepare exceeded the total execution budget",
+                504,
+            ) from None
+        finally:
+            # Never use the executor as a context manager here: its implicit
+            # wait=True shutdown would defeat the outer wall-clock deadline.
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def head(self, key, deadline=None):
+        try:
+            return self._deadline_call(
+                deadline,
+                lambda: self.client.head_object(
+                    Bucket=self.config.cos_bucket,
+                    Key=key,
+                ),
             )
+        except TTGPUError:
+            raise
         except Exception as exc:
             if _cos_status_code(exc) == 404:
                 return None
@@ -1353,8 +1494,139 @@ class CosObjectStore:
             sha256_value,
         )
 
-    def upload(self, key, local_path, sha256_value, size):
-        existing = self.head(key)
+    def _upload_part_batch(
+        self,
+        key,
+        upload_id,
+        batch,
+        deadline,
+    ):
+        executor = ThreadPoolExecutor(
+            max_workers=len(batch),
+            thread_name_prefix="tt-cos-part",
+        )
+        futures = [
+            (
+                part_number,
+                executor.submit(
+                    self._upload_part,
+                    key,
+                    upload_id,
+                    part_number,
+                    body,
+                    deadline,
+                ),
+            )
+            for part_number, body in batch
+        ]
+        completed = False
+        try:
+            parts = []
+            for part_number, future in futures:
+                try:
+                    response = future.result(timeout=deadline.remaining())
+                except FutureTimeoutError:
+                    raise TTGPUError(
+                        "prepare_timeout",
+                        "GPU prepare exceeded the total execution budget",
+                        504,
+                    ) from None
+                except TTGPUError:
+                    raise
+                except Exception:
+                    raise TTGPUError(
+                        "cos_upload_failed",
+                        "COS upload failed",
+                        502,
+                    ) from None
+                etag = str(_head_value(response, "ETag", "etag") or "")
+                if not etag or len(etag) > 512:
+                    raise TTGPUError(
+                        "cos_upload_failed",
+                        "COS upload returned an invalid part receipt",
+                        502,
+                    )
+                parts.append(
+                    {
+                        "ETag": etag,
+                        "PartNumber": int(part_number),
+                    }
+                )
+            completed = True
+            return parts
+        finally:
+            for _part_number, future in futures:
+                if not completed:
+                    future.cancel()
+            # A timed-out SDK call may still be unwinding its socket. Returning
+            # without waiting keeps the HTTP handler inside the total deadline;
+            # at most COS_UPLOAD_THREADS calls can remain in flight.
+            executor.shutdown(
+                wait=completed,
+                cancel_futures=not completed,
+            )
+
+    def _upload_part(
+        self,
+        key,
+        upload_id,
+        part_number,
+        body,
+        deadline,
+    ):
+        if deadline is not None:
+            deadline.check()
+            acquired = _COS_UPLOAD_SLOTS.acquire(
+                timeout=deadline.remaining()
+            )
+        else:
+            acquired = _COS_UPLOAD_SLOTS.acquire()
+        if not acquired:
+            raise TTGPUError(
+                "prepare_timeout",
+                "GPU prepare exceeded the total execution budget",
+                504,
+            )
+        try:
+            if deadline is not None:
+                deadline.check()
+            return self.client.upload_part(
+                Bucket=self.config.cos_bucket,
+                Key=key,
+                Body=body,
+                PartNumber=part_number,
+                UploadId=upload_id,
+                EnableMD5=True,
+            )
+        finally:
+            _COS_UPLOAD_SLOTS.release()
+
+    def _abort_async(self, key, upload_id):
+        def abort():
+            try:
+                self.client.abort_multipart_upload(
+                    Bucket=self.config.cos_bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=abort,
+            name="tt-cos-abort",
+            daemon=True,
+        ).start()
+
+    def upload(
+        self,
+        key,
+        local_path,
+        sha256_value,
+        size,
+        deadline=None,
+    ):
+        existing = self.head(key, deadline=deadline)
         if existing is not None:
             if self._head_matches(existing, size, sha256_value):
                 return True
@@ -1363,24 +1635,114 @@ class CosObjectStore:
                 "existing prepared object failed integrity verification",
                 409,
             )
+        upload_id = ""
+        complete_started = False
         try:
-            self.client.upload_file(
-                Bucket=self.config.cos_bucket,
-                Key=key,
-                LocalFilePath=str(local_path),
-                PartSize=8,
-                MAXThread=4,
-                EnableMD5=True,
-                ACL="public-read",
-                ContentType="video/mp4",
-                Metadata={
-                    "x-cos-meta-sha256": sha256_value,
-                    "x-cos-meta-profile": self.config.profile,
-                },
+            created = self._deadline_call(
+                deadline,
+                lambda: self.client.create_multipart_upload(
+                    Bucket=self.config.cos_bucket,
+                    Key=key,
+                    ACL="public-read",
+                    ContentType="video/mp4",
+                    Metadata={
+                        "x-cos-meta-sha256": sha256_value,
+                        "x-cos-meta-profile": self.config.profile,
+                    },
+                ),
             )
+            upload_id = str(
+                _head_value(created, "UploadId", "upload_id") or ""
+            )
+            if not upload_id or len(upload_id) > 2048:
+                raise TTGPUError(
+                    "cos_upload_failed",
+                    "COS upload did not return a valid multipart ID",
+                    502,
+                )
+            completed_parts = []
+            part_number = 1
+            with Path(local_path).open("rb") as handle:
+                while True:
+                    if deadline is not None:
+                        deadline.check()
+                    batch = []
+                    for _index in range(COS_UPLOAD_THREADS):
+                        body = handle.read(COS_PART_SIZE_BYTES)
+                        if not body:
+                            break
+                        batch.append((part_number, body))
+                        part_number += 1
+                    if not batch:
+                        break
+                    completed_parts.extend(
+                        self._upload_part_batch(
+                            key,
+                            upload_id,
+                            batch,
+                            deadline or PrepareDeadline(
+                                max(60, self.config.cos_timeout)
+                            ),
+                        )
+                    )
+            if not completed_parts:
+                raise TTGPUError(
+                    "cos_upload_failed",
+                    "COS upload source was empty",
+                    502,
+                )
+            complete_started = True
+            try:
+                self._deadline_call(
+                    deadline,
+                    lambda: self.client.complete_multipart_upload(
+                        Bucket=self.config.cos_bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        MultipartUpload={
+                            "Part": sorted(
+                                completed_parts,
+                                key=lambda item: item["PartNumber"],
+                            )
+                        },
+                    ),
+                )
+            except TTGPUError:
+                # A timed-out Future cannot stop an in-flight complete call.
+                # Its result is unknown, so aborting here could delete an
+                # object that is about to become durable. The next idempotent
+                # retry recovers through the content-addressed HEAD check.
+                raise
+            except Exception:
+                recovered = None
+                try:
+                    recovered = self.head(key, deadline=deadline)
+                except TTGPUError:
+                    pass
+                if not self._head_matches(
+                    recovered,
+                    size,
+                    sha256_value,
+                ):
+                    raise TTGPUError(
+                        "cos_complete_outcome_unknown",
+                        "COS multipart completion outcome is unknown",
+                        502,
+                    ) from None
+            upload_id = ""
+        except TTGPUError:
+            if upload_id and not complete_started:
+                self._abort_async(key, upload_id)
+            raise
         except Exception:
+            if upload_id and not complete_started:
+                self._abort_async(key, upload_id)
             raise TTGPUError("cos_upload_failed", "COS upload failed", 502) from None
-        if not self._head_matches(self.head(key), size, sha256_value):
+        if not self._head_matches(
+            self.head(key, deadline=deadline),
+            size,
+            sha256_value,
+        ):
             raise TTGPUError(
                 "cos_verification_failed",
                 "uploaded prepared object failed integrity verification",
@@ -1872,12 +2234,14 @@ class TTPostGPUProcessor:
         downloader=None,
         object_store=None,
         tiktok_api=None,
+        monotonic_fn=None,
     ):
         self.config = config
         self.runner = runner or subprocess.run
         self.downloader = downloader or download_source
         self._object_store_instance = object_store
         self.tiktok_api = tiktok_api or TikTokContentPostingAPI()
+        self._monotonic_fn = monotonic_fn or time.monotonic
         self._gpu_slot = threading.Lock()
         self.manifest_root = _ensure_private_directory(config.work_root / "manifests")
         self.publish_root = _ensure_private_directory(config.work_root / "publishes")
@@ -1929,10 +2293,14 @@ class TTPostGPUProcessor:
     def prepare(self, payload):
         request = validate_prepare_request(payload, self.config)
         job_id = request["job_id"]
-        with _job_lock(self._lock_path(job_id)):
-            return self._prepare_locked(request)
+        deadline = PrepareDeadline(
+            self.config.prepare_total_timeout,
+            self._monotonic_fn,
+        )
+        with _job_lock(self._lock_path(job_id), deadline=deadline):
+            return self._prepare_locked(request, deadline)
 
-    def _prepare_locked(self, request):
+    def _prepare_locked(self, request, deadline):
         job_id = request["job_id"]
         manifest_path = self._prepare_manifest_path(job_id)
         reuse_contract = {
@@ -1956,6 +2324,7 @@ class TTPostGPUProcessor:
                     for key, value in reuse_contract.items()
                 )
             ):
+                deadline.check()
                 return _prepare_response(
                     existing,
                     True,
@@ -1967,8 +2336,14 @@ class TTPostGPUProcessor:
                 "job_id already belongs to a different prepared artifact",
                 409,
             )
-        outro_sha, outro_size = _file_sha256(self.config.fixed_outro_path)
-        logo_sha, logo_size = _file_sha256(self.config.logo_path)
+        outro_sha, outro_size = _file_sha256(
+            self.config.fixed_outro_path,
+            deadline=deadline,
+        )
+        logo_sha, logo_size = _file_sha256(
+            self.config.logo_path,
+            deadline=deadline,
+        )
         job_dir = Path(
             tempfile.mkdtemp(prefix=job_id + ".", dir=str(self.jobs_root))
         )
@@ -1996,9 +2371,13 @@ class TTPostGPUProcessor:
                 request.get("source_sha256"),
                 request.get("source_size"),
                 self.config,
+                deadline,
             )
             if not isinstance(source_actual, dict):
-                source_sha, source_size = _file_sha256(source_path)
+                source_sha, source_size = _file_sha256(
+                    source_path,
+                    deadline=deadline,
+                )
                 source_actual = {"sha256": source_sha, "size": source_size}
             source_sha = str(source_actual.get("sha256") or "").lower()
             try:
@@ -2025,7 +2404,12 @@ class TTPostGPUProcessor:
                 "source_size": source_size,
                 "transition": "phone-match-0.9s",
             }
-            source_probe = probe_media(self.config, source_path, self.runner)
+            source_probe = probe_media(
+                self.config,
+                source_path,
+                self.runner,
+                deadline=deadline,
+            )
             source_info = inspect_input(
                 source_probe,
                 self.config.max_duration_seconds,
@@ -2044,6 +2428,7 @@ class TTPostGPUProcessor:
                 self.config,
                 self.config.fixed_outro_path,
                 self.runner,
+                deadline=deadline,
             )
             outro_info = inspect_input(
                 outro_probe,
@@ -2060,7 +2445,18 @@ class TTPostGPUProcessor:
                     "source plus fixed outro exceeds the configured duration",
                     400,
                 )
-            with self._gpu_slot:
+            deadline.check()
+            acquired_gpu = self._gpu_slot.acquire(
+                timeout=deadline.remaining()
+            )
+            if not acquired_gpu:
+                raise TTGPUError(
+                    "prepare_timeout",
+                    "GPU prepare exceeded the total execution budget",
+                    504,
+                )
+            try:
+                deadline.check()
                 _run_command(
                     self.runner,
                     build_normalize_command(
@@ -2072,8 +2468,9 @@ class TTPostGPUProcessor:
                         logo_path=self.config.logo_path,
                         output_duration=effective_source_duration,
                     ),
-                    self.config.transcode_timeout,
+                    deadline.stage_timeout(self.config.transcode_timeout),
                     "source_transcode_failed",
+                    timeout_error_code="prepare_timeout",
                 )
                 _run_command(
                     self.runner,
@@ -2088,8 +2485,9 @@ class TTPostGPUProcessor:
                             tutorial_text_path,
                         ),
                     ),
-                    self.config.transcode_timeout,
+                    deadline.stage_timeout(self.config.transcode_timeout),
                     "outro_transcode_failed",
+                    timeout_error_code="prepare_timeout",
                 )
                 _run_command(
                     self.runner,
@@ -2101,17 +2499,28 @@ class TTPostGPUProcessor:
                         effective_source_duration,
                         outro_info["duration"],
                     ),
-                    self.config.transcode_timeout,
+                    deadline.stage_timeout(self.config.transcode_timeout),
                     "phone_match_transition_failed",
+                    timeout_error_code="prepare_timeout",
                 )
-            output_sha, output_size = _file_sha256(output_path)
+            finally:
+                self._gpu_slot.release()
+            output_sha, output_size = _file_sha256(
+                output_path,
+                deadline=deadline,
+            )
             if output_size <= 0 or output_size > int(self.config.max_output_bytes):
                 raise TTGPUError(
                     "prepared_media_invalid",
                     "prepared output size is outside the contract",
                     500,
                 )
-            output_probe = probe_media(self.config, output_path, self.runner)
+            output_probe = probe_media(
+                self.config,
+                output_path,
+                self.runner,
+                deadline=deadline,
+            )
             safe_probe = validate_prepared_output(
                 output_probe,
                 output_path,
@@ -2124,6 +2533,7 @@ class TTPostGPUProcessor:
                 output_path,
                 output_sha,
                 output_size,
+                deadline=deadline,
             )
             output_url = self._object_store().url(cos_key)
             if not output_url.startswith(self.config.cos_domain.rstrip("/") + "/"):
@@ -2152,6 +2562,7 @@ class TTPostGPUProcessor:
                 "status": "ready",
                 "version": 1,
             }
+            deadline.check()
             _atomic_write_json(manifest_path, manifest)
             return _prepare_response(
                 manifest,

@@ -67,7 +67,7 @@ def _client_namespace():
         "TT_POST_ADMIN_SERVICE_URL": "http://127.0.0.1:18829",
         "TT_POST_ADMIN_INTERNAL_TOKEN": "i" * 48,
         "TT_POST_ADMIN_TIMEOUT": 360,
-        "TT_POST_ADMIN_PREVIEW_TIMEOUT": 3660,
+        "TT_POST_ADMIN_PREVIEW_TIMEOUT": 9060,
         "TT_POST_ADMIN_ROUTE_METHODS": {
             "/api/admin/tt-posts/accounts": {"GET"},
             "/api/admin/tt-posts/account-settings": {"GET", "POST"},
@@ -441,7 +441,7 @@ class TTPostsAppContractTest(unittest.TestCase):
             "/api/admin/tt-posts/accounts",
         )
         calls = fake_requests.request.call_args_list
-        self.assertEqual(calls[0].kwargs["timeout"], 3660)
+        self.assertEqual(calls[0].kwargs["timeout"], 9060)
         self.assertEqual(calls[1].kwargs["timeout"], 360)
 
     def test_query_parser_rejects_duplicates_and_secret_names(self):

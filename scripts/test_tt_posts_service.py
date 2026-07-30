@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -49,6 +50,7 @@ from features.tt_posts.service import (
 from scripts.tt_post_runner import (
     RunnerConfig,
     RunnerError,
+    TTPostSidecarClient,
     execute_runner_tick,
 )
 
@@ -267,6 +269,7 @@ class GPUClientTests(unittest.TestCase):
     def test_creator_info_sends_envelope_and_never_raw_token(self):
         connection = CaptureConnection({"item": {"status": "ok"}})
         client = self.client(connection)
+        self.assertEqual((client.timeout, client.prepare_timeout), (10, 10))
         raw_token = "raw-tiktok-secret"
         job_id = "ttcreator-101-abcdef123456"
         client.creator_info(
@@ -296,7 +299,17 @@ class GPUClientTests(unittest.TestCase):
 
     def test_prepare_contract_has_gpu_download_and_trim_only(self):
         connection = CaptureConnection({"item": {"status": "ready"}})
-        client = self.client(connection)
+        connection_timeouts = []
+        client = GPUClient(
+            "http://127.0.0.1:18830",
+            GPU_TOKEN,
+            SEAL_KEY,
+            timeout=10,
+            prepare_timeout=9000,
+            connection_factory=lambda _host, _port, timeout: (
+                connection_timeouts.append(timeout) or connection
+            ),
+        )
         client.prepare(
             job_id="ttpost-abcdef1234567890",
             material={
@@ -318,6 +331,7 @@ class GPUClientTests(unittest.TestCase):
         self.assertNotIn("source_sha256", payload)
         self.assertNotIn("source_size", payload)
         self.assertNotIn("material_id", payload)
+        self.assertEqual(connection_timeouts, [9000])
 
     def test_publish_is_flat_and_inverts_allow_flags(self):
         connection = CaptureConnection({"item": {"publish_id": "pub-1"}})
@@ -504,6 +518,7 @@ def creator_info():
 
 class FakeGPU:
     def __init__(self):
+        self.timeout = 900
         self.prepare_jobs = []
         self.prepare_job_id_override = ""
         self.publish_jobs = []
@@ -721,6 +736,106 @@ class ServiceLifecycleTests(unittest.TestCase):
             0,
         )
 
+    def test_daily_schedule_time_is_unique_and_released_on_change_or_disable(self):
+        service = self.service(CLOSED_GATES)
+        self.accounts.add_account("102")
+        service.store.save_account_settings(
+            "102",
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": True,
+                }
+            ),
+            expected_version=0,
+        )
+        first = service.schedule_save(self.schedule_payload())["item"]
+        replay = self.schedule_payload(version=first["version"])
+        replayed = service.schedule_save(replay)["item"]
+        self.assertEqual(replayed["publish_time"], "11:00")
+
+        second = self.schedule_payload()
+        second["source_account_id"] = "102"
+        with self.assertRaises(TTPostError) as conflict:
+            service.schedule_save(second)
+        self.assertEqual(
+            conflict.exception.code,
+            "tt_post_schedule_time_conflict",
+        )
+
+        changed = self.schedule_payload(
+            version=replayed["version"],
+            publish_time="11:01",
+        )
+        service.schedule_save(changed)
+        second_saved = service.schedule_save(second)["item"]
+        self.assertEqual(second_saved["publish_time"], "11:00")
+
+        second_disabled = dict(second)
+        second_disabled.update(
+            {
+                "enabled": False,
+                "expected_version": second_saved["version"],
+            }
+        )
+        service.schedule_save(second_disabled)
+        changed_back = self.schedule_payload(
+            version=changed["expected_version"] + 1,
+            publish_time="11:00",
+        )
+        self.assertEqual(
+            service.schedule_save(changed_back)["item"]["publish_time"],
+            "11:00",
+        )
+
+    def test_daily_schedule_time_conflict_is_atomic_across_store_instances(self):
+        db_path = Path(self.temp.name) / "concurrent-schedule.sqlite3"
+        stores = [
+            TTPostStore(db_path, now_fn=self.clock),
+            TTPostStore(db_path, now_fn=self.clock),
+        ]
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def save(index, account_id):
+            barrier.wait()
+            try:
+                stores[index].save_daily_schedule(
+                    account_id,
+                    ["11:00"],
+                    enabled=True,
+                    expected_version=0,
+                    consent_version="tt-recurring-post-consent-20260730",
+                    consented_at=self.clock.value.isoformat(),
+                )
+            except TTPostError as exc:
+                outcomes.append(("error", exc.code))
+            else:
+                outcomes.append(("saved", account_id))
+
+        workers = [
+            threading.Thread(target=save, args=(0, "101")),
+            threading.Thread(target=save, args=(1, "102")),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(5)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(
+            sorted(kind for kind, _value in outcomes),
+            ["error", "saved"],
+        )
+        self.assertIn(
+            ("error", "tt_post_schedule_time_conflict"),
+            outcomes,
+        )
+
     def test_closed_gates_manual_publish_does_not_consume_material(self):
         service = self.service(CLOSED_GATES)
         service.material_pool_add(self.recurring_material_payload())
@@ -780,10 +895,63 @@ class ServiceLifecycleTests(unittest.TestCase):
         first = service.schedules_due({})["items"]
         second = service.schedules_due({})["items"]
         self.assertEqual(len(first), 1)
-        self.assertEqual(len(second), 1)
-        self.assertEqual(first[0]["run_id"], second[0]["run_id"])
-        self.assertEqual(first[0]["queue_id"], second[0]["queue_id"])
+        self.assertEqual(second, [])
         self.assertEqual(len(service.store.list_queues()), 1)
+
+    def test_daily_due_limit_processes_only_one_new_account_per_call(self):
+        service = self.service(OPEN_GATES)
+        self.accounts.add_account("102")
+        service.store.save_account_settings(
+            "102",
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": True,
+                }
+            ),
+            expected_version=0,
+        )
+        service.material_pool_add(self.recurring_material_payload())
+        second_material = self.recurring_material_payload(
+            "tt-post-pool:test:9002"
+        )
+        second_material.update(
+            {
+                "source_account_id": "102",
+                "material_id": "9002",
+            }
+        )
+        service.material_pool_add(second_material)
+        self.clock.value = datetime(2026, 7, 29, 3, 0, 20, tzinfo=UTC)
+        service.schedule_save(self.schedule_payload(publish_time="11:00"))
+        second_schedule = self.schedule_payload(publish_time="10:59")
+        second_schedule["source_account_id"] = "102"
+        service.schedule_save(second_schedule)
+
+        first_result = service.schedules_due({"limit": 1})
+        first = first_result["items"]
+        second_result = service.schedules_due({"limit": 1})
+        second = second_result["items"]
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(
+            {first[0]["source_account_id"], second[0]["source_account_id"]},
+            {"101", "102"},
+        )
+        self.assertEqual(first_result["deferred_count"], 1)
+        self.assertEqual(
+            first_result["oldest_deferred_at_utc"],
+            "2026-07-29T03:00:00Z",
+        )
+        self.assertEqual(second_result["deferred_count"], 0)
+        self.assertEqual(second_result["oldest_deferred_at_utc"], "")
+        self.assertEqual(len(service.store.list_queues()), 2)
 
     def test_material_pool_rejects_media_over_current_account_limit(self):
         service = self.service(OPEN_GATES)
@@ -972,6 +1140,13 @@ class ServiceLifecycleTests(unittest.TestCase):
                 service.run_now(request)
 
         self.clock.value += timedelta(seconds=121)
+        original_creator_info = service.creator_info
+
+        def slow_creator_info(payload):
+            self.clock.value += timedelta(seconds=900)
+            return original_creator_info(payload)
+
+        service.creator_info = slow_creator_info
         recovered = service.run_now(request)["item"]
         queue = service.store.get_queue(recovered["queue_id"])
         self.assertEqual(
@@ -1720,6 +1895,48 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertNotEqual(first["claim_token"], second["claim_token"])
         self.assertEqual(second["queue"]["attempt_count"], 2)
 
+    def test_publish_renews_claim_across_slow_credentials_and_gpu_calls(self):
+        service = self.service(OPEN_GATES)
+        created = service.queue_create(
+            queue_payload(self.clock, publish_mode="direct_post")
+        )["item"]
+        self.clock.value += timedelta(minutes=30)
+        claim = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": DEFAULT_GRACE_SECONDS,
+                "limit": 1,
+            }
+        )["items"][0]
+        original_creator_info = self.gpu.creator_info
+        original_publish = self.gpu.publish
+        original_credentials = service.account_source.publish_credentials
+
+        @contextlib.contextmanager
+        def slow_credentials(account_id):
+            self.clock.value += timedelta(seconds=100)
+            with original_credentials(account_id) as credentials:
+                yield credentials
+
+        def slow_creator_info(**kwargs):
+            self.clock.value += timedelta(seconds=900)
+            return original_creator_info(**kwargs)
+
+        def slow_publish(**kwargs):
+            self.clock.value += timedelta(seconds=900)
+            return original_publish(**kwargs)
+
+        service.account_source.publish_credentials = slow_credentials
+        self.gpu.creator_info = slow_creator_info
+        self.gpu.publish = slow_publish
+        published = service.publish_claimed(
+            created["id"],
+            claim["claim_token"],
+        )["item"]
+
+        self.assertEqual(published["status"], "reconciling")
+        self.assertEqual(self.gpu.publish_jobs, [created["gpu_job_id"]])
+
     def test_open_gate_uses_one_stable_job_then_reconciles_only(self):
         service = self.service(OPEN_GATES)
         created = service.queue_create(
@@ -2091,9 +2308,19 @@ class MaterialResolverTests(unittest.TestCase):
 class FakeRunnerSidecar:
     def __init__(self):
         self.calls = []
+        self.pending_claims = [
+            {
+                "queue": {
+                    "id": 4,
+                    "source_account_id": "103",
+                    "status": "claimed",
+                },
+                "claim_token": "claim-secret",
+            },
+        ]
 
-    def schedules_due(self):
-        self.calls.append(("schedules_due",))
+    def schedules_due(self, limit):
+        self.calls.append(("schedules_due", limit))
         return {"items": []}
 
     def reconciling(self, _limit):
@@ -2120,33 +2347,9 @@ class FakeRunnerSidecar:
 
     def claim(self, **kwargs):
         self.calls.append(("claim", kwargs))
-        return [
-            {
-                "queue": {
-                    "id": 2,
-                    "source_account_id": "101",
-                    "status": "hold",
-                    "queue_status": "blocked_compliance",
-                }
-            },
-            {
-                "queue": {
-                    "id": 3,
-                    "source_account_id": "102",
-                    "status": "unknown",
-                    "unknown_outcome": True,
-                },
-                "claim_token": "must-not-be-used",
-            },
-            {
-                "queue": {
-                    "id": 4,
-                    "source_account_id": "103",
-                    "status": "claimed",
-                },
-                "claim_token": "claim-secret",
-            },
-        ]
+        if not self.pending_claims:
+            return []
+        return [self.pending_claims.pop(0)]
 
     def publish(self, queue_id, claim_token):
         self.calls.append(("publish", queue_id, claim_token))
@@ -2161,9 +2364,9 @@ class FakeRunnerSidecar:
 
 
 class ReconcileIsolationSidecar(FakeRunnerSidecar):
-    def reconciling(self, _limit):
-        self.calls.append(("reconciling",))
-        return [
+    def __init__(self):
+        super().__init__()
+        self.pending_reconcile = [
             {
                 "id": 11,
                 "source_account_id": "101",
@@ -2177,6 +2380,12 @@ class ReconcileIsolationSidecar(FakeRunnerSidecar):
                 "publish_id": "pub-12",
             },
         ]
+
+    def reconciling(self, _limit):
+        self.calls.append(("reconciling",))
+        if not self.pending_reconcile:
+            return []
+        return [self.pending_reconcile.pop(0)]
 
     def reconcile(self, queue_id):
         self.calls.append(("reconcile", queue_id))
@@ -2196,14 +2405,30 @@ class ReconcileIsolationSidecar(FakeRunnerSidecar):
         }
 
 
-class PublishIsolationSidecar(FakeRunnerSidecar):
+class UnknownRunnerSidecar(FakeRunnerSidecar):
+    def __init__(self):
+        super().__init__()
+        self.pending_claims = [
+            {
+                "queue": {
+                    "id": 3,
+                    "source_account_id": "102",
+                    "status": "unknown",
+                    "unknown_outcome": True,
+                },
+                "claim_token": "must-not-be-used",
+            }
+        ]
+
     def reconciling(self, _limit):
         self.calls.append(("reconciling",))
         return []
 
-    def claim(self, **kwargs):
-        self.calls.append(("claim", kwargs))
-        return [
+
+class PublishIsolationSidecar(FakeRunnerSidecar):
+    def __init__(self):
+        super().__init__()
+        self.pending_claims = [
             {
                 "queue": {
                     "id": 21,
@@ -2221,6 +2446,10 @@ class PublishIsolationSidecar(FakeRunnerSidecar):
                 "claim_token": "claim-secret-22",
             },
         ]
+
+    def reconciling(self, _limit):
+        self.calls.append(("reconciling",))
+        return []
 
     def publish(self, queue_id, claim_token):
         self.calls.append(("publish", queue_id, claim_token))
@@ -2241,9 +2470,9 @@ class PublishIsolationSidecar(FakeRunnerSidecar):
 
 
 class ReconcileBacklogSidecar(FakeRunnerSidecar):
-    def claim(self, **kwargs):
-        self.calls.append(("claim", kwargs))
-        return [
+    def __init__(self):
+        super().__init__()
+        self.pending_claims = [
             {
                 "queue": {
                     "id": 31,
@@ -2291,14 +2520,7 @@ class ReconcileBacklogSidecar(FakeRunnerSidecar):
 class NewDailyQueueSidecar(FakeRunnerSidecar):
     def __init__(self):
         super().__init__()
-        self.claim_calls = 0
-
-    def claim(self, **kwargs):
-        self.calls.append(("claim", kwargs))
-        self.claim_calls += 1
-        if self.claim_calls == 1:
-            return []
-        return [
+        self.pending_claims = [
             {
                 "queue": {
                     "id": 41,
@@ -2310,8 +2532,8 @@ class NewDailyQueueSidecar(FakeRunnerSidecar):
             }
         ]
 
-    def schedules_due(self):
-        self.calls.append(("schedules_due",))
+    def schedules_due(self, limit):
+        self.calls.append(("schedules_due", limit))
         return {
             "items": [
                 {
@@ -2322,7 +2544,9 @@ class NewDailyQueueSidecar(FakeRunnerSidecar):
                     "status": "scheduled",
                     "caption": "must-not-enter-runner-output",
                 }
-            ]
+            ],
+            "deferred_count": 2,
+            "oldest_deferred_at_utc": "2026-07-29T03:00:00Z",
         }
 
     def publish(self, queue_id, claim_token):
@@ -2348,90 +2572,150 @@ class RunnerTests(unittest.TestCase):
             internal_token=INTERNAL_TOKEN,
             worker_id="tt-post-runner-primary",
             grace_seconds=600,
-            claim_limit=20,
-            reconcile_limit=5,
+            claim_limit=1,
+            reconcile_limit=1,
             timeout=30,
+            schedule_timeout=45,
+            publish_timeout=60,
+            reconcile_timeout=45,
             lock_path=str(Path(tempfile.gettempdir()) / "tt-post-runner.lock"),
         )
 
-    def test_runner_claims_first_and_never_republishes_unknown(self):
+    def test_runner_schedules_first_claims_singly_and_never_republishes_unknown(self):
         sidecar = FakeRunnerSidecar()
         result = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["claim", "publish", "schedules_due", "reconciling", "reconcile"],
+            [
+                "schedules_due",
+                "claim",
+                "publish",
+                "reconciling",
+                "reconcile",
+            ],
         )
-        publish = sidecar.calls[1]
+        publish = sidecar.calls[2]
         self.assertEqual(publish[1], 4)
+        self.assertTrue(
+            all(
+                call[1]["limit"] == 1
+                for call in sidecar.calls
+                if call[0] == "claim"
+            )
+        )
         rendered = json.dumps(result)
         self.assertNotIn("claim-secret", rendered)
         self.assertNotIn("must-not-be-used", rendered)
         self.assertEqual(result["publish_request_count"], 1)
 
+    def test_runner_never_republishes_unknown(self):
+        sidecar = UnknownRunnerSidecar()
+        result = execute_runner_tick(self.config(), client=sidecar)
+        self.assertNotIn(
+            "publish",
+            [call[0] for call in sidecar.calls],
+        )
+        self.assertEqual(result["publish_request_count"], 0)
+        self.assertNotIn("must-not-be-used", json.dumps(result))
+
     def test_reconcile_business_error_does_not_block_other_items_or_claims(self):
         sidecar = ReconcileIsolationSidecar()
-        result = execute_runner_tick(self.config(), client=sidecar)
-        self.assertEqual(
-            [call[0] for call in sidecar.calls],
-            [
-                "claim",
-                "publish",
-                "schedules_due",
-                "reconciling",
-                "reconcile",
-                "reconcile",
-            ],
-        )
-        self.assertEqual(result["reconcile_count"], 1)
-        self.assertEqual(result["reconcile_error_count"], 1)
-        self.assertEqual(result["publish_request_count"], 1)
+        first = execute_runner_tick(self.config(), client=sidecar)
+        second = execute_runner_tick(self.config(), client=sidecar)
+        self.assertEqual(first["reconcile_count"], 0)
+        self.assertEqual(first["reconcile_error_count"], 1)
+        self.assertEqual(first["publish_request_count"], 1)
+        self.assertEqual(second["reconcile_count"], 1)
+        self.assertEqual(second["reconcile_error_count"], 0)
         error = next(
             item
-            for item in result["results"]
+            for item in first["results"]
             if item["operation"] == "reconcile_error"
         )
         self.assertEqual(error["queue_id"], 11)
         self.assertEqual(error["error_code"], "tt_post_publish_id_conflict")
-        rendered = json.dumps(result)
+        rendered = json.dumps({"first": first, "second": second})
         self.assertNotIn("must-not-render", rendered)
         self.assertNotIn("claim-secret", rendered)
+
+    def test_reconcile_response_cannot_exceed_per_tick_budget(self):
+        class OversizedReconcileSidecar(FakeRunnerSidecar):
+            def reconciling(self, _limit):
+                return [
+                    {
+                        "id": 51,
+                        "status": "reconciling",
+                        "publish_id": "pub-51",
+                    },
+                    {
+                        "id": 52,
+                        "status": "reconciling",
+                        "publish_id": "pub-52",
+                    },
+                ]
+
+        with self.assertRaises(RunnerError) as caught:
+            execute_runner_tick(
+                self.config(),
+                client=OversizedReconcileSidecar(),
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "tt_post_sidecar_invalid_response",
+        )
 
     def test_reconcile_backlog_starts_only_after_due_claim_publish(self):
         sidecar = ReconcileBacklogSidecar()
         result = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls[:3]],
-            ["claim", "publish", "schedules_due"],
+            ["schedules_due", "claim", "publish"],
         )
         self.assertEqual(result["publish_request_count"], 1)
         self.assertEqual(result["reconcile_count"], self.config().reconcile_limit)
-        self.assertEqual(result["reconcile_budget"], 5)
+        self.assertEqual(result["reconcile_budget"], 1)
 
     def test_new_daily_queue_uses_remaining_claim_budget_and_safe_result(self):
         sidecar = NewDailyQueueSidecar()
         result = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["claim", "schedules_due", "claim", "publish", "reconciling"],
+            ["schedules_due", "claim", "publish", "reconciling"],
         )
         self.assertEqual(result["schedule_due_count"], 1)
+        self.assertEqual(result["schedule_deferred_count"], 2)
+        self.assertEqual(
+            result["oldest_deferred_at_utc"],
+            "2026-07-29T03:00:00Z",
+        )
         self.assertEqual(result["publish_request_count"], 1)
         rendered = json.dumps(result)
         self.assertNotIn("must-not-enter-runner-output", rendered)
         self.assertNotIn("claim-secret-41", rendered)
 
-    def test_publish_business_error_does_not_block_later_claims(self):
+    def test_publish_business_error_defers_later_claim_to_next_tick(self):
         sidecar = PublishIsolationSidecar()
-        result = execute_runner_tick(self.config(), client=sidecar)
+        first = execute_runner_tick(self.config(), client=sidecar)
+        second = execute_runner_tick(self.config(), client=sidecar)
         self.assertEqual(
             [call[0] for call in sidecar.calls],
-            ["claim", "publish", "publish", "schedules_due", "reconciling"],
+            [
+                "schedules_due",
+                "claim",
+                "publish",
+                "reconciling",
+                "schedules_due",
+                "claim",
+                "publish",
+                "reconciling",
+            ],
         )
-        self.assertEqual(result["publish_request_count"], 1)
-        self.assertEqual(result["publish_request_error_count"], 1)
+        self.assertEqual(first["publish_request_count"], 0)
+        self.assertEqual(first["publish_request_error_count"], 1)
+        self.assertEqual(second["publish_request_count"], 1)
         error = next(
             item
-            for item in result["results"]
+            for item in first["results"]
             if item["operation"] == "publish_request_error"
         )
         self.assertEqual(error["queue_id"], 21)
@@ -2439,7 +2723,7 @@ class RunnerTests(unittest.TestCase):
             error["error_code"],
             "tt_post_publish_preflight_failed",
         )
-        rendered = json.dumps(result)
+        rendered = json.dumps({"first": first, "second": second})
         self.assertNotIn("must-not-render-publish", rendered)
         self.assertNotIn("claim-secret-21", rendered)
         self.assertNotIn("claim-secret-22", rendered)
@@ -2458,6 +2742,16 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "tt_post_sidecar_unreachable")
 
     def test_runner_rejects_any_grace_other_than_ten_minutes(self):
+        defaults = RunnerConfig.from_env()
+        self.assertEqual(
+            (
+                defaults.timeout,
+                defaults.schedule_timeout,
+                defaults.publish_timeout,
+                defaults.reconcile_timeout,
+            ),
+            (60, 1500, 2400, 1500),
+        )
         bad = RunnerConfig(
             **{
                 **self.config().__dict__,
@@ -2466,6 +2760,38 @@ class RunnerTests(unittest.TestCase):
         )
         with self.assertRaises(RunnerError):
             bad.validate()
+
+    def test_publish_route_alone_uses_the_longer_sidecar_timeout(self):
+        timeouts = []
+        connections = [
+            CaptureConnection({"items": []}),
+            CaptureConnection({"items": []}),
+            CaptureConnection({"item": {"id": 7, "status": "reconciling"}}),
+            CaptureConnection({"item": {"id": 7, "status": "published"}}),
+        ]
+
+        def factory(_host, _port, timeout):
+            timeouts.append(timeout)
+            return connections.pop(0)
+
+        client = TTPostSidecarClient(
+            "http://127.0.0.1:18829",
+            INTERNAL_TOKEN,
+            timeout=60,
+            schedule_timeout=1500,
+            publish_timeout=2400,
+            reconcile_timeout=1500,
+            connection_factory=factory,
+        )
+        client.schedules_due(1)
+        client.claim(
+            worker_id="runner",
+            grace_seconds=600,
+            limit=1,
+        )
+        client.publish(7, "claim-token")
+        client.reconcile(7)
+        self.assertEqual(timeouts, [1500, 60, 2400, 1500])
 
 
 class HTTPContractTests(unittest.TestCase):
@@ -2774,7 +3100,7 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn("TT_POST_DIRECT_AUDIT_APPROVED=0", env)
         self.assertIn("TT_POST_URL_PROPERTY_VERIFIED=0", env)
         self.assertIn("TT_POST_GRACE_SECONDS=600", env)
-        self.assertIn("TT_POST_RECONCILE_LIMIT=5", env)
+        self.assertIn("TT_POST_RECONCILE_LIMIT=1", env)
         self.assertIn(
             "TT_POST_RUNNER_KICK_PATH=/run/tt-post/manual-kick",
             env,
@@ -2783,13 +3109,20 @@ class DeployContractTests(unittest.TestCase):
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
             env,
         )
-        self.assertIn("TT_POST_GPU_TIMEOUT=3600", env)
+        self.assertIn("TT_POST_CLAIM_LIMIT=1", env)
+        self.assertIn("TT_POST_RECONCILE_LIMIT=1", env)
+        self.assertIn("TT_POST_INTERNAL_TIMEOUT=60", env)
+        self.assertIn("TT_POST_SCHEDULE_TIMEOUT=1500", env)
+        self.assertIn("TT_POST_PUBLISH_TIMEOUT=2400", env)
+        self.assertIn("TT_POST_RECONCILE_TIMEOUT=1500", env)
+        self.assertIn("TT_POST_GPU_TIMEOUT=900", env)
+        self.assertIn("TT_POST_GPU_PREPARE_TIMEOUT=9000", env)
         self.assertIn(
             "location = /api/admin/tt-posts/materials/preview",
             nginx,
         )
-        self.assertIn("proxy_read_timeout 3720s;", nginx)
-        self.assertIn("proxy_send_timeout 3720s;", nginx)
+        self.assertIn("proxy_read_timeout 9120s;", nginx)
+        self.assertIn("proxy_send_timeout 9120s;", nginx)
         self.assertIn("OnCalendar=*-*-* *:*:00 Asia/Shanghai", timer)
         self.assertIn(
             "PathChanged=/run/tt-post/manual-kick",
@@ -2808,14 +3141,14 @@ class DeployContractTests(unittest.TestCase):
         )
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("EnvironmentFile=/etc/tt-post.secrets", service)
-        self.assertIn("TimeoutStartSec=3600s", runner)
+        self.assertIn("TimeoutStartSec=5700s", runner)
         self.assertNotIn("TimeoutStartSec=55s", runner)
         self.assertIn(
             "TT_POST_ADMIN_SERVICE_URL=http://127.0.0.1:18829",
             app_env,
         )
         self.assertIn("TT_POST_ADMIN_TIMEOUT=600", app_env)
-        self.assertIn("TT_POST_ADMIN_PREVIEW_TIMEOUT=3660", app_env)
+        self.assertIn("TT_POST_ADMIN_PREVIEW_TIMEOUT=9060", app_env)
         self.assertIn("TT_POST_INTERNAL_TOKEN=", app_env)
         self.assertIn(
             "EnvironmentFile=-/etc/tt-post-app.env",

@@ -236,6 +236,7 @@ class TtPostPoolUiTest(unittest.TestCase):
             'value="11:00"',
         ):
             self.assertIn(attribute, publish_time.group("attrs"))
+        self.assertIn("不同账号需选择不同的分钟", PAGE)
         self.assertIn("每天固定时间自动消费下一条", PAGE)
         self.assertIn("async function loadSchedule()", PAGE)
         save = source_between(

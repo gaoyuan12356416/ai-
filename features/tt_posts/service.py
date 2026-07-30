@@ -74,6 +74,7 @@ DEFAULT_GPU_URL = "http://127.0.0.1:18830"
 DEFAULT_DB_PATH = "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3"
 DEFAULT_GRACE_SECONDS = 600
 DEFAULT_LEASE_SECONDS = 300
+CLAIM_LEASE_BUFFER_SECONDS = 60
 DEFAULT_RECURRING_EXECUTION_LEASE_SECONDS = 120
 MAX_ACCOUNT_ROWS = 1000
 MAX_HTTP_BODY_BYTES = 256 * 1024
@@ -942,6 +943,7 @@ class GPUClient:
         "_internal_token",
         "_seal_key",
         "timeout",
+        "prepare_timeout",
         "_connection_factory",
     )
 
@@ -952,6 +954,7 @@ class GPUClient:
         seal_key: Any,
         *,
         timeout: int = 120,
+        prepare_timeout: Optional[int] = None,
         connection_factory: Optional[Callable[[str, int, int], Any]] = None,
     ):
         parsed = urllib.parse.urlsplit(str(base_url or "").rstrip("/"))
@@ -991,23 +994,36 @@ class GPUClient:
                 "TT GPU超时配置无效",
                 500,
             )
+        try:
+            prepare_timeout = int(
+                timeout if prepare_timeout is None else prepare_timeout
+            )
+        except (TypeError, ValueError, OverflowError):
+            prepare_timeout = 0
+        if prepare_timeout < timeout or prepare_timeout > 10800:
+            raise TTPostServiceError(
+                "tt_gpu_prepare_timeout_invalid",
+                "TT GPU prepare timeout is invalid",
+                500,
+            )
         self.base_url = "http://127.0.0.1:18830"
         self._internal_token = token
         self._seal_key = seal_key
         self.timeout = timeout
+        self.prepare_timeout = prepare_timeout
         self._connection_factory = connection_factory
 
     def __repr__(self) -> str:
         return (
             "GPUClient(base_url=%r, internal_token=<redacted>, "
-            "seal_key=<redacted>, timeout=%r)"
-            % (self.base_url, self.timeout)
+            "seal_key=<redacted>, timeout=%r, prepare_timeout=%r)"
+            % (self.base_url, self.timeout, self.prepare_timeout)
         )
 
-    def _connection(self) -> Any:
+    def _connection(self, timeout: int) -> Any:
         if self._connection_factory is not None:
-            return self._connection_factory("127.0.0.1", 18830, self.timeout)
-        return http.client.HTTPConnection("127.0.0.1", 18830, timeout=self.timeout)
+            return self._connection_factory("127.0.0.1", 18830, timeout)
+        return http.client.HTTPConnection("127.0.0.1", 18830, timeout=timeout)
 
     def _post(
         self,
@@ -1040,7 +1056,12 @@ class GPUClient:
                 500,
                 publish_was_not_created=True,
             )
-        connection = self._connection()
+        request_timeout = (
+            self.prepare_timeout
+            if path == "/internal/tt-post/prepare"
+            else self.timeout
+        )
+        connection = self._connection(request_timeout)
         response = None
         try:
             connection.request(
@@ -1542,6 +1563,16 @@ class TTPostService:
 
     def _gates(self) -> Dict[str, bool]:
         return self.gates.as_dict()
+
+    def _claim_lease_seconds(self) -> int:
+        try:
+            gpu_timeout = int(self.gpu_client.timeout)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            gpu_timeout = DEFAULT_LEASE_SECONDS
+        return max(
+            DEFAULT_LEASE_SECONDS,
+            min(gpu_timeout, 3600) + CLAIM_LEASE_BUFFER_SECONDS,
+        )
 
     def accounts(self) -> Dict[str, Any]:
         items = []
@@ -2500,9 +2531,17 @@ class TTPostService:
                 resumed = terminal_or_bound(claimed)
                 if resumed is not None:
                     return resumed
-                claimed, resumed = acquire_and_recover(claimed)
-                if resumed is not None:
-                    return resumed
+                try:
+                    self.store.get_queue_by_idempotency_key(
+                        str(claimed["run_key"])
+                    )
+                except TTPostError as exc:
+                    if exc.code != "tt_post_queue_not_found":
+                        raise
+                else:
+                    claimed, resumed = acquire_and_recover(claimed)
+                    if resumed is not None:
+                        return resumed
 
             if not self.gates.is_open:
                 raise TTPostServiceError(
@@ -2551,6 +2590,7 @@ class TTPostService:
                 resumed = terminal_or_bound(claimed)
                 if resumed is not None:
                     return resumed
+            if not execution_token:
                 claimed, resumed = acquire_and_recover(claimed)
                 if resumed is not None:
                     return resumed
@@ -2635,6 +2675,19 @@ class TTPostService:
             if (
                 claimed is not None
                 and claimed.get("status") == "claimed"
+                and not execution_token
+            ):
+                try:
+                    claimed, resumed = acquire_and_recover(claimed)
+                    if resumed is not None:
+                        return resumed
+                except TTPostError:
+                    # Another live owner must keep its fencing lease. The
+                    # retry path will revisit the durable reservation.
+                    pass
+            if (
+                claimed is not None
+                and claimed.get("status") == "claimed"
                 and execution_token
             ):
                 try:
@@ -2658,14 +2711,18 @@ class TTPostService:
         self,
         payload: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        if payload not in (None, {}) and (
-            not isinstance(payload, Mapping) or len(payload) > 0
-        ):
+        body = {} if payload is None else payload
+        if not isinstance(body, Mapping) or not set(body).issubset({"limit"}):
             raise TTPostServiceError(
                 "invalid_request",
                 "每日发布领取请求不接受业务字段",
                 400,
             )
+        limit = _positive_int(
+            body.get("limit", 100),
+            "每日任务上限",
+            100,
+        )
         now_utc = _now_utc(self._now_fn)
         now_shanghai = now_utc.astimezone(BEIJING_TZ)
         items = []
@@ -2693,8 +2750,10 @@ class TTPostService:
         # but not yet bound to its legacy queue. This closes both crash gaps:
         # claim->freeze and freeze->bind.
         for pending in self.store.list_claimed_unbound_recurring_runs(
-            limit=100
+            limit=limit
         ):
+            if len(items) >= limit:
+                break
             run_key = str(pending.get("run_key") or "")
             processed_run_keys.add(run_key)
             account_id = str(pending.get("account_id") or "")
@@ -2841,6 +2900,8 @@ class TTPostService:
             publish_time,
             config_version,
         ) in sorted(due_slots):
+            if len(items) >= limit:
+                break
             scheduled_at_utc = slot_utc.isoformat().replace(
                 "+00:00",
                 "Z",
@@ -2851,6 +2912,13 @@ class TTPostService:
                 publish_time.replace(":", ""),
             )
             if run_key in processed_run_keys:
+                continue
+            try:
+                self.store.get_recurring_run_by_key(run_key)
+            except TTPostError as exc:
+                if exc.code != "tt_post_schedule_run_not_found":
+                    raise
+            else:
                 continue
             try:
                 item = self._execute_recurring_run(
@@ -2872,6 +2940,35 @@ class TTPostService:
                         run_key=run_key,
                     )
                 )
+        backlog = self.store.recurring_recovery_backlog()
+        deferred_count = int(backlog["deferred_count"])
+        oldest_deferred_at_utc = str(
+            backlog["oldest_deferred_at_utc"] or ""
+        )
+        for (
+            slot_utc,
+            account_id,
+            shanghai_date,
+            publish_time,
+            _config_version,
+        ) in due_slots:
+            run_key = "tt-post:auto:v1:%s:%s:%s" % (
+                account_id,
+                shanghai_date,
+                publish_time.replace(":", ""),
+            )
+            try:
+                self.store.get_recurring_run_by_key(run_key)
+            except TTPostError as exc:
+                if exc.code != "tt_post_schedule_run_not_found":
+                    raise
+                deferred_count += 1
+                candidate = slot_utc.isoformat().replace("+00:00", "Z")
+                if (
+                    not oldest_deferred_at_utc
+                    or candidate < oldest_deferred_at_utc
+                ):
+                    oldest_deferred_at_utc = candidate
         return {
             "items": items,
             "current_shanghai_minute": "%s %s"
@@ -2880,6 +2977,8 @@ class TTPostService:
                 now_shanghai.strftime("%H:%M"),
             ),
             "grace_seconds": DEFAULT_GRACE_SECONDS,
+            "deferred_count": deferred_count,
+            "oldest_deferred_at_utc": oldest_deferred_at_utc,
             "gates": self._gates(),
         }
 
@@ -3339,8 +3438,15 @@ class TTPostService:
         self,
         account_id: str,
         gpu_job_id: str,
+        queue_id: int,
+        claim_token: str,
     ) -> Dict[str, Any]:
         with self.account_source.publish_credentials(account_id) as credentials:
+            self.store.renew_claim(
+                queue_id,
+                claim_token,
+                lease_seconds=self._claim_lease_seconds(),
+            )
             raw = self.gpu_client.creator_info(
                 job_id=gpu_job_id,
                 source_account_id=account_id,
@@ -3395,7 +3501,12 @@ class TTPostService:
                 "gates": self._gates(),
             }
         try:
-            creator = self._creator_recheck(account_id, gpu_job_id)
+            creator = self._creator_recheck(
+                account_id,
+                gpu_job_id,
+                normalized_queue_id,
+                token,
+            )
             policy = TTPostPolicy(
                 privacy_level=str(queue["privacy_level"]),
                 allow_comment=bool(queue["allow_comment"]),
@@ -3417,6 +3528,11 @@ class TTPostService:
                     "TikTok账号实时能力与排期冻结快照不一致",
                     409,
                 )
+            self.store.renew_claim(
+                normalized_queue_id,
+                token,
+                lease_seconds=self._claim_lease_seconds(),
+            )
         except TTPostError as exc:
             failed = self.store.mark_failed(
                 normalized_queue_id,
@@ -3431,13 +3547,18 @@ class TTPostService:
                 "gates": self._gates(),
             }
 
-        publishing = self.store.begin_publish(
-            normalized_queue_id,
-            token,
-            self.gates,
-        )
         try:
             with self.account_source.publish_credentials(account_id) as credentials:
+                self.store.renew_claim(
+                    normalized_queue_id,
+                    token,
+                    lease_seconds=self._claim_lease_seconds(),
+                )
+                publishing = self.store.begin_publish(
+                    normalized_queue_id,
+                    token,
+                    self.gates,
+                )
                 result = self.gpu_client.publish(
                     job_id=gpu_job_id,
                     source_account_id=account_id,
@@ -3472,6 +3593,19 @@ class TTPostService:
             self._sync_recurring_queue_if_present(final)
             return {
                 "item": self._queue_api_item(final, gates=self.gates),
+                "gates": self._gates(),
+            }
+        except TTPostError as exc:
+            failed = self.store.mark_failed(
+                normalized_queue_id,
+                token,
+                error_code=exc.code,
+                error_message=str(exc),
+                publish_was_not_created=True,
+            )
+            self._sync_recurring_queue_if_present(failed)
+            return {
+                "item": self._queue_api_item(failed, gates=self.gates),
                 "gates": self._gates(),
             }
         publish_id = str(result.get("publish_id") or "").strip()
@@ -3686,6 +3820,9 @@ def build_service_from_env(
         gpu_token,
         _required_env(source, "TT_POST_GPU_CREDENTIAL_SEAL_KEY_B64"),
         timeout=int(source.get("TT_POST_GPU_TIMEOUT", "300")),
+        prepare_timeout=int(
+            source.get("TT_POST_GPU_PREPARE_TIMEOUT", "9000")
+        ),
     )
     db_path = str(source.get("TT_POST_DB_PATH", DEFAULT_DB_PATH)).strip()
     if not Path(db_path).is_absolute():

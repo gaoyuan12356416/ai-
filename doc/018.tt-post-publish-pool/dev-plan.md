@@ -17,11 +17,11 @@
 | --- | --- | --- | --- |
 | 需求、规则和 API 设计 | PM/SA | `doc/018.tt-post-publish-pool/` | 已完成 |
 | CPU SQLite 状态机与安全账号源 | 开发 | `features/tt_posts/` | 基线已上线；每日发布增量已完成，待部署 |
-| GPU 成片与 TikTok sidecar | 开发 | `features/tt_gpu/`、`scripts/tt_gpu_worker.py` | 基线已上线；本轮 3600 秒上限已完成，待部署 |
+| GPU 成片与 TikTok sidecar | 开发 | `features/tt_gpu/`、`scripts/tt_gpu_worker.py` | 3600 秒素材上限、COS 单请求 120 秒/零重试/4×8MiB 分片、进程共享 4 槽 semaphore、complete unknown 不 abort 及共享 prepare 8700 秒 deadline 已完成；2.36GB 生产成片上传待重跑验证 |
 | 主后台路由、权限和审计 | 开发 | `app.py` | 新增素材池、每日设置和手动发布代理，待部署 |
-| 发布池 UI 与导航 | 前端 | `static/tt-post-pool.html`、导航配置 | 每日发布与手动按钮已完成，待部署 |
-| claim/runner、systemd 与隧道 | 开发 | `scripts/`、`deploy/` | 分钟调度与 path 即时唤醒已完成，待部署 |
-| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | 本地 571/571 通过（TT 192、X 351、素材状态 28） |
+| 发布池 UI 与导航 | 前端 | `static/tt-post-pool.html`、导航配置 | 每日发布、手动按钮及“不同账号需选择不同的分钟”错峰提示已完成，待部署 |
+| claim/runner、systemd 与隧道 | 开发 | `scripts/`、`deploy/` | 单任务 tick、分路由超时、凭据后续租、积压可观测字段、分钟调度与 path 唤醒已完成，待部署 |
+| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | TT 205/205、X 351/351（skipped 1）、素材状态 28/28，总计 584/584 |
 | GitHub-first CPU/GPU 部署 | 运维 | immutable release | 待执行 |
 
 ### 本轮增量任务
@@ -43,12 +43,12 @@
 | 任务 | 文件/模块 | 完成条件 | 状态 |
 | --- | --- | --- | --- |
 | 长素材资格修复 | `features/tt_posts/service.py`、`features/tt_gpu/worker.py` | 素材 4665764（2087 秒）通过 TT 预校验；最终成片允许至 TikTok 4 GiB 边界；X 140 秒条件不变 | 已完成 |
-| 每日配置与 FIFO 账本 | `features/tt_posts/core.py` | 旧四表不改，只增三表；按账号 FIFO、乐观版本、自动/手动 run 幂等 | 已完成 |
+| 每日配置与 FIFO 账本 | `features/tt_posts/core.py` | 旧四表不改，只增三表；按账号 FIFO、乐观版本、自动/手动 run 幂等；所有启用账号的上海 `HH:MM` 全局唯一 | 已完成 |
 | 每日与手动 API | `features/tt_posts/service.py`、`app.py` | 入池不建 queue；到点/手动才原子领取；关闭门禁不消费素材 | 已完成 |
-| 分钟调度与即时唤醒 | `scripts/tt_post_runner.py`、`deploy/tt-post-runner.path` | timer 每分钟识别当日时点；手动请求用 path 唤醒且 timer 60 秒兜底 | 已完成 |
-| GPU 长度配置 | `features/tt_gpu/worker.py`、GPU 环境 | 全局制作上限 3600 秒；最终仍服从账号实时上限 | 已完成，待生产切换 |
-| 发布池 UI | `static/tt-post-pool.html` | 每日时间、启用开关、保存、下一次时间、待发数量和手动按钮 | 已完成 |
-| 自动化与生产验收 | `scripts/test_tt_*.py`、生产关闭态 | 全回归、数据库迁移、4665764 实测、浏览器与零 init 验收 | 执行中 |
+| 分钟调度与即时唤醒 | `scripts/tt_post_runner.py`、`deploy/tt-post-runner.path` | 每 tick 的 `schedules_due`、claim、reconcile 均限 1；service 返回并由 runner 日志透出 `deferred_count`、`oldest_deferred_at_utc`；reconcile 超量响应 fail-closed；分路由预算上界 5520 秒，systemd 5700 秒留 180 秒收尾；手动请求用 path 唤醒且 timer 兜底 | 已完成 |
+| GPU 长度与 COS 上传配置 | `features/tt_gpu/worker.py`、GPU 环境 | 全局制作上限 3600 秒；COS 每请求 `TT_POST_GPU_COS_TIMEOUT=120`、SDK `retry=0`，每批最多 4 个 8MiB 分片且模块级共享 4 槽 semaphore；整个 prepare 共用 `TT_POST_GPU_PREPARE_TOTAL_TIMEOUT=8700`，future 超时路径不做 executor 等待并异步 abort；complete 结果未知时不 abort、重试以 HEAD 恢复；CPU 9000 外层兜底的 300 秒余量覆盖单次读/清理，App/nginx 为 9060/9120 | 代码与自动化完成，生产重跑待验证 |
+| 发布池 UI | `static/tt-post-pool.html` | 每日时间、启用开关、保存、下一次时间、待发数量、手动按钮及“不同账号需选择不同的分钟”提示 | 已完成 |
+| 自动化与生产验收 | `scripts/test_tt_*.py`、生产关闭态 | 本地全回归 584/584（X skipped 1）；关闭态实跑已生成 2.36GB 成片，但新 COS 对象/ready job 未形成，约 5100 秒失败根因仍属推断，须按正式 COS/deadline 合同重跑 | 本地完成，生产待验收 |
 | GitHub-first CPU/GPU 部署 | immutable releases | 备份、推送、精确 commit 部署、健康检查和回滚点 | 待执行 |
 
 ## 编译 / 构建命令

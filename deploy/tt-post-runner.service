@@ -31,4 +31,4 @@ SystemCallArchitectures=native
 ReadOnlyPaths=/opt/tt-post/current
 ReadWritePaths=/run/tt-post
 UMask=0077
-TimeoutStartSec=3600s
+TimeoutStartSec=5700s

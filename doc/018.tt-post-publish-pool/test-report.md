@@ -134,22 +134,27 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.
 
 ### 执行结果
 
-本地执行以下六个 TT 相关测试集，共 `192/192` 通过：
+本轮本地自动化 TT 205/205、X 351/351（skipped 1）、素材状态 28/28，总计 584/584：
 
-| 测试集 | 通过 | 失败 |
-| --- | ---: | ---: |
-| TT Core | 49 | 0 |
-| TT Service + Runner | 70 | 0 |
-| TT GPU | 27 | 0 |
-| TT 发布池 UI | 23 | 0 |
-| TT 个号设置 UI | 11 | 0 |
-| TT App contract | 12 | 0 |
-| **合计** | **192** | **0** |
+| 测试集 | 结果 |
+| --- | --- |
+| TT Core | 49/49 |
+| TT Service + Runner | 77/77 |
+| TT GPU | 33/33 |
+| TT 发布池 UI | 23/23 |
+| TT 个号设置 UI | 11/11 |
+| TT App contract | 12/12 |
+| **TT 小计** | **205/205** |
+| X 回归 | 351/351（skipped 1） |
+| 素材状态回归 | 28/28 |
+| **完整回归合计** | **584/584（skipped 1）** |
 
 执行命令：
 
 ```text
 python -m unittest scripts.test_tt_posts_core scripts.test_tt_posts_service scripts.test_tt_gpu_worker scripts.test_tt_post_pool_ui scripts.test_tt_account_settings_ui scripts.test_tt_posts_app_contract
+python -m unittest discover -s scripts -p "test_x*.py"
+python -m unittest scripts.test_material_status_broadcast scripts.test_material_status_webhook_app
 ```
 
 ### 上线前复审发现并关闭
@@ -162,24 +167,39 @@ python -m unittest scripts.test_tt_posts_core scripts.test_tt_posts_service scri
 | P0 | 4665764 通过 3600 秒校验后，1080x1920 最终成片超过旧 2 GiB GPU 合同 | 最终成片上限按 TikTok Content Posting 官方边界调整为 4 GiB；源下载仍保持 2 GiB；默认值和部署样例均由自动化固定 | 本地关闭，生产复测中 |
 | P1 | sidecar 与 oneshot runner 同时声明 `/run/tt-post`，runner 退出后可能清理手动 kick 目录 | 运行目录只由常驻 sidecar 持有，runner 复用目录但不声明所有权；部署合同测试固定该约束 | 本地关闭，生产复测中 |
 | P1 | ready manifest 生成后配置收紧或媒体身份漂移时，旧缓存可能绕过当前输出合同 | prepare/publish 共用当前合同复验；同一测试以 subtests 实际篡改 content/job/SHA/精确 URL/probe/profile，并验证 publish 在 TikTok init 前返回 `prepared_media_invalid` | 本地关闭 |
-| P1 | 公网通用 `/api/admin/` 旧 300 秒、主应用通用 600 秒和 CPU 侧旧 GPU 900 秒均覆盖不了 4665764 首次转码与 2.36 GB COS 分片上传，上游会先超时而 GPU 继续安全完成同一 job | 由内向外留余量：CPU 到 GPU 3600 秒，主应用 exact preview 3660 秒、其他路由 600，nginx exact preview 3720 秒；其他 admin API和三项门禁均不变 | 本地关闭，生产复测中 |
+| P1 | prepare 共用普通 GPU 900 秒窗口会提前超时；长素材准备需要端到端总预算而不能把单个 COS 请求无限放大 | prepare 全流程共享 8700 秒内部 deadline 预算，外层 CPU/App/nginx 为 9000/9060/9120；COS 单请求 120 秒、SDK retry=0；GPU 普通 900。runner 预算保持不变 | 本地关闭，生产复测中 |
+| P1 | 批量预领使后续 queue 的 300 秒 lease 在前一条慢发布期间过期；慢凭据读取与 Creator Info 也可能耗尽已有 lease | 每个 tick 对 schedule、claim 和 reconcile 均只取 1 条；`publish_claimed` 在每次读取凭据后续租到 GPU 普通超时 + 60 秒，第一段覆盖 Creator Info，第二段衔接 TikTok init/GPU publish | 本地关闭 |
+| P0 | recurring 慢 Creator 预检若占用 120 秒 execution lease，预检返回时可能已失权；失败分支若沿用旧 token 释放，还可能释放新 owner 的素材 | recurring Creator 预检不持有 execution lease；成功后原子取得当前 fencing lease，失败释放前也必须重新取得并核验当前 owner；若已有其他 live owner 则不释放，旧 owner 无法 freeze | 本地关闭 |
+| P1 | 多个启用账号配置相同每日时点会在同一分钟竞争 Runner 预算，无法保证既定发布时间 | 所有启用账号的 Asia/Shanghai `HH:MM` 在保存的 `BEGIN IMMEDIATE` 事务中全局唯一；冲突返回 `tt_post_schedule_time_conflict` / HTTP 409，页面明确提示“不同账号需选择不同的分钟”，改时或停用释放旧时点 | 本地关闭 |
+| P0 | sidecar 若返回超过请求上限的 reconcile 列表，会突破单 tick 预算；`limit=1` 若无积压字段又会让等待任务静默 | reconcile 超量响应直接 fail-closed；service 返回并由 runner 日志透出 `deferred_count`、`oldest_deferred_at_utc`，5520 秒远端等待上界不变 | 本地关闭 |
+| P1 | 生产关闭态约 5100 秒后已生成本地 2.36GB 成片，但 manifest 仍为 1、job 为 0，COS 近期对象仅旧约 45MB 文件 | 失败根因仍是推断；正式方案改为单请求 120 秒、SDK retry=0、每批最多 4 个 8MiB 分片及共享 prepare 8700 秒 deadline，必须生产重跑后再确认根因和关闭状态 | 本地代码关闭，生产待验证 |
+| P0 | future 超时后若等待线程池退出，或同步等待 multipart abort，会让 HTTP 请求突破 9000/9060/9120 外层预算 | 超时路径 `shutdown(wait=false)`，不等待 SDK 线程退出；multipart 通过 daemon 线程异步 abort。8700 是内部预算，CPU 9000 的 300 秒余量覆盖单次读/清理，不承诺严格在第 8700 秒返回 | 本地关闭，生产待验证 |
+| P0 | complete future 超时后远端结果未知，此时 abort 可能删除正在持久化的对象 | complete 一旦开始便不 abort；稍后完成时，同内容重试通过 HEAD 恢复且不创建第二次 multipart | 本地关闭 |
+| P1 | 每批最多 4 片仍不能约束并发 prepare 或多个 Store 的进程内 part 总量 | 模块级共享 4 槽 `BoundedSemaphore`，跨 Store、批次与并发任务统一限流 | 本地关闭 |
 
 ### 已由本地自动化证明的增量事实
 
-- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`，但不计入本次 TT `192/192`。
+- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`。
 - GPU 源文件默认上限保持 2 GiB，最终成片默认/部署上限固定为 4 GiB，以承接长素材规范化后文件膨胀。
 - ready manifest 命中时仍按当前合同重新核验输出上限与 profile、job/content 身份、规范化 probe、SHA 和精确 COS 对象 URL；篡改任一字段均失败，publish 不会在校验失败后调用 TikTok init。
-- 公网入口到 GPU 的首次长任务窗口由内向外保留余量：CPU 到 GPU 为 3600 秒，主应用仅 exact preview 为 `TT_POST_ADMIN_PREVIEW_TIMEOUT=3660`、其他路由仍为 600 秒，nginx 仅 exact preview read/send 为 3720 秒；调用方异常中断不取消 GPU 侧确定性 job，后续同身份重试复用已完成成片，且不改变其他 admin API或三项 Direct Post 门禁。
+- prepare 全流程共享 8700 秒内部 deadline 预算；CPU prepare 9000 是外层兜底，300 秒余量覆盖单次读/清理，主应用 exact preview 9060、nginx exact preview 9120。COS 每请求 120 秒、SDK retry=0、每片 8MiB、每批最多 4 片，并由模块级共享 4 槽 semaphore 限制进程内 part 总并发；future 超时路径不等待 executor 并异步 abort，但 complete outcome unknown 不 abort、重试经 HEAD 恢复。GPU 普通 900，runner 通用 60/schedule 1500/publish 2400/reconcile 1500，systemd runner 5700；每个 tick 最坏远端等待仍为 5520 秒。
 - `/run/tt-post` 只由常驻 sidecar 的 systemd `RuntimeDirectory` 持有，oneshot runner 不再重复声明同名目录。
-- 每日设置与待发素材分开持久化；同一自然日时点幂等，账号级 FIFO 和账号隔离成立。
+- 每日设置与待发素材分开持久化；同一自然日时点幂等，账号级 FIFO 和账号隔离成立。所有启用账号的 Asia/Shanghai `HH:MM` 在保存的 `BEGIN IMMEDIATE` 事务中全局唯一，冲突返回 `tt_post_schedule_time_conflict` / HTTP 409，页面明确提示“不同账号需选择不同的分钟”，改时或停用会释放旧时点。
 - 发布宽限固定为 600 秒；非 600 配置被拒绝，宽限内恢复与超窗 `missed` 均有自动化覆盖。
 - `claim → freeze` 中断后可在后续 minute tick 找回 claimed run；`freeze → bind` 中断后按稳定 queue 幂等键找回既有 queue。两类恢复均未创建重复 run/queue 或重复消费素材。
-- 同一 run 的执行权由 120 秒独占 lease 和 fencing token 约束；过期 owner 不能在新 owner 释放后继续冻结，也不能在 queue 已冻结后错误释放素材。
+- 同一 run 的执行权由 120 秒独占 lease 和 fencing token 约束；recurring 慢 Creator 预检不占用该 lease，成功后才原子取得当前 fencing lease，失败释放前也须重新取得并核验 owner；过期 owner 不能 freeze，也不能释放新 owner 的素材。
 - 切换到未配置或加载中的账号时，发布时间恢复默认 `11:00`，不会继承上一账号的值。
 - 主应用公共精确 `/queue` 路由只读；门禁关闭时不能通过兼容 POST reserve 素材，GET/cancel/reconcile 能力保持。
 - 手动请求 key 按账号保存到固定、非敏感的 `sessionStorage` 映射；读取时校验账号格式、key 前缀/长度/字符、状态、总长度和账号数量。成功或明确未发布删除对应账号，`unknown` 或未确认结果保留。
-- Runner 先处理既有到期 queue，再执行 recurring due；daily due 新建 queue 后只使用剩余 `claim_limit`，不会把单 tick 领取上限翻倍。
+- Runner 每个 tick 依次执行 `schedules_due(limit=1)`、`claim(limit=1)`、`reconciling/reconcile limit=1`；service 返回并由 runner 日志透出 `deferred_count` 与 `oldest_deferred_at_utc`，避免限流积压静默；reconcile 多返回时 fail-closed，慢任务不会让后续 queue 提前持有 lease，5520 秒远端等待上界不变。
+- queue 初始 claim lease 仍为 300 秒（小于 600 秒 grace）；`publish_claimed` 每次读取凭据后续租到 GPU 普通超时 + 60 秒，第一段覆盖 Creator Info，第二段衔接 TikTok init/GPU publish。
 - 三项门禁任一关闭时，手动发布在领取素材前 fail-close；本地断言素材仍为 `available`、queue 为空且 publish 调用为 0。
+
+### 生产关闭态长素材实跑发现
+
+- 已确认事实：本地 2.36GB 成片制作完成；一次运行总时长约 5100 秒；进程结束后 manifest 仍为 1、job 为 0，COS 近期对象仅见旧约 45MB 文件。
+- 当前推断：旧上传路径可能在大文件上传尾段超时。该推断尚未由成功重跑证明。
+- 待验证：按 COS 单请求 120 秒、SDK retry=0、4×8MiB 分片、共享 4 槽 semaphore、complete unknown 不 abort、prepare 8700 秒内部预算及 CPU 9000 外层兜底重跑，确认新 COS 对象、ready manifest/job、完整耗时及错误日志后，才能更新生产验收结论。
 
 ### 尚未完成的生产验收
 
@@ -188,9 +208,12 @@ python -m unittest scripts.test_tt_posts_core scripts.test_tt_posts_service scri
 | Git 提交、远端分支和不可变 release 对应关系 | 待填写 |
 | CPU/GPU 备份、部署、服务重启与回滚演练 | 待填写 |
 | 生产 SQLite 七表增量迁移、完整性和真实行数 | 待填写 |
-| 生产 timer/path 唤醒、600 秒宽限及 claim 总预算 | 待填写 |
+| 生产 timer/path 唤醒、600 秒宽限、schedule/claim/reconcile 各限 1 条、积压日志、reconcile 超量 fail-closed、5520 秒远端等待上界及 5700 秒总预算 | 待填写 |
+| 慢凭据续租、recurring 慢 Creator fencing 接管与旧 owner 拒绝 | 待填写 |
+| 启用账号 Asia/Shanghai `HH:MM` 全局唯一、409 冲突与改时/停用释放 | 待填写 |
 | 三项门禁关闭时 pool/run/queue 不消费证据 | 待填写 |
 | 素材 4665764 真实 preview、成片时长和目标账号 3600 秒能力 | 待填写 |
+| 正式 COS 120 秒/零重试/4×8MiB/共享 4 槽 semaphore/complete unknown 不 abort/prepare 8700 秒内部预算合同下的 2.36GB 新对象、ready manifest/job 与失败根因 | 待重跑验证 |
 | 登录态页面的每日排期、FIFO 数量、跨刷新/多账号手动幂等 | 待填写 |
 | 公网 no-store、静态资源 hash 和 TikTok 外部请求计数 | 待填写 |
 

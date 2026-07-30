@@ -1752,6 +1752,35 @@ class TTPostStore:
                 "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
                 (normalized_account_id,),
             ).fetchone()
+            if normalized_enabled:
+                occupied_rows = conn.execute(
+                    """
+                    SELECT account_id,publish_times_json
+                    FROM tt_post_daily_schedule
+                    WHERE enabled=1 AND account_id<>?
+                    """,
+                    (normalized_account_id,),
+                ).fetchall()
+                requested_times = set(normalized_times)
+                for occupied in occupied_rows:
+                    try:
+                        occupied_times = set(
+                            json.loads(
+                                str(occupied["publish_times_json"] or "[]")
+                            )
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        raise TTPostError(
+                            "tt_post_schedule_storage_invalid",
+                            "每日发布时间配置损坏，请先修复现有排期",
+                            500,
+                        ) from None
+                    if requested_times.intersection(occupied_times):
+                        raise TTPostError(
+                            "tt_post_schedule_time_conflict",
+                            "该发布时间已被其他 TikTok 个号占用，请选择其他时间",
+                            409,
+                        )
             if current is None:
                 if normalized_version != 0:
                     raise TTPostError(
@@ -2680,6 +2709,30 @@ class TTPostStore:
                 self._recurring_run_result(conn, row)
                 for row in rows
             ]
+
+    def recurring_recovery_backlog(self) -> Dict[str, Any]:
+        now_iso = self._now_iso()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS deferred_count,
+                    MIN(scheduled_at_utc) AS oldest_deferred_at_utc
+                FROM tt_post_schedule_run
+                WHERE status='claimed' AND queue_id IS NULL
+                  AND (
+                    execution_token=''
+                    OR execution_lease_expires_at_utc=''
+                    OR execution_lease_expires_at_utc<=?
+                  )
+                """,
+                (now_iso,),
+            ).fetchone()
+        return {
+            "deferred_count": int(row["deferred_count"] or 0),
+            "oldest_deferred_at_utc": str(
+                row["oldest_deferred_at_utc"] or ""
+            ),
+        }
 
     def release_recurring_preflight(
         self,

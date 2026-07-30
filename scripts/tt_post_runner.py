@@ -36,8 +36,8 @@ from features.tt_posts.service import (  # noqa: E402
 
 DEFAULT_INTERNAL_URL = "http://127.0.0.1:%s" % DEFAULT_CPU_PORT
 DEFAULT_LOCK_PATH = "/run/tt-post/runner.lock"
-DEFAULT_RECONCILE_LIMIT = 5
-MAX_RECONCILE_LIMIT = 10
+DEFAULT_RECONCILE_LIMIT = 1
+MAX_RECONCILE_LIMIT = 1
 SAFE_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -79,9 +79,12 @@ class RunnerConfig:
     internal_token: str
     worker_id: str
     grace_seconds: int = DEFAULT_GRACE_SECONDS
-    claim_limit: int = 20
+    claim_limit: int = 1
     reconcile_limit: int = DEFAULT_RECONCILE_LIMIT
-    timeout: int = 900
+    timeout: int = 60
+    schedule_timeout: int = 1500
+    publish_timeout: int = 2400
+    reconcile_timeout: int = 1500
     lock_path: str = DEFAULT_LOCK_PATH
 
     @classmethod
@@ -108,9 +111,9 @@ class RunnerConfig:
             claim_limit=_env_int(
                 source,
                 "TT_POST_CLAIM_LIMIT",
-                20,
                 1,
-                100,
+                1,
+                1,
             ),
             reconcile_limit=_env_int(
                 source,
@@ -122,9 +125,30 @@ class RunnerConfig:
             timeout=_env_int(
                 source,
                 "TT_POST_INTERNAL_TIMEOUT",
-                900,
+                60,
                 5,
                 3600,
+            ),
+            schedule_timeout=_env_int(
+                source,
+                "TT_POST_SCHEDULE_TIMEOUT",
+                1500,
+                5,
+                10800,
+            ),
+            publish_timeout=_env_int(
+                source,
+                "TT_POST_PUBLISH_TIMEOUT",
+                2400,
+                5,
+                10800,
+            ),
+            reconcile_timeout=_env_int(
+                source,
+                "TT_POST_RECONCILE_TIMEOUT",
+                1500,
+                5,
+                10800,
             ),
             lock_path=str(
                 source.get("TT_POST_RUNNER_LOCK_PATH", DEFAULT_LOCK_PATH)
@@ -174,10 +198,26 @@ class RunnerConfig:
                 "TT Post宽限窗口必须固定为600秒",
                 500,
             )
+        if self.claim_limit != 1:
+            raise RunnerError(
+                "tt_post_runner_config_invalid",
+                "TT Post publish budget must be exactly one item per tick",
+                500,
+            )
         if self.reconcile_limit < 1 or self.reconcile_limit > MAX_RECONCILE_LIMIT:
             raise RunnerError(
                 "tt_post_runner_config_invalid",
                 "TT Post核对预算必须保持在安全上限内",
+                500,
+            )
+        if (
+            self.schedule_timeout < self.timeout
+            or self.publish_timeout < self.timeout
+            or self.reconcile_timeout < self.timeout
+        ):
+            raise RunnerError(
+                "tt_post_runner_config_invalid",
+                "TT Post operation timeout must cover the local sidecar timeout",
                 500,
             )
         lock = Path(self.lock_path)
@@ -215,30 +255,44 @@ class TTPostSidecarClient:
         token: str,
         *,
         timeout: int,
+        schedule_timeout: int,
+        publish_timeout: int,
+        reconcile_timeout: int,
         connection_factory=None,
     ):
         self.base_url = str(base_url).rstrip("/")
         self._token = str(token)
         self.timeout = int(timeout)
+        self.schedule_timeout = int(schedule_timeout)
+        self.publish_timeout = int(publish_timeout)
+        self.reconcile_timeout = int(reconcile_timeout)
         self._connection_factory = connection_factory
 
     def __repr__(self) -> str:
         return (
-            "TTPostSidecarClient(base_url=%r, token=<redacted>, timeout=%r)"
-            % (self.base_url, self.timeout)
+            "TTPostSidecarClient(base_url=%r, token=<redacted>, "
+            "timeout=%r, schedule_timeout=%r, publish_timeout=%r, "
+            "reconcile_timeout=%r)"
+            % (
+                self.base_url,
+                self.timeout,
+                self.schedule_timeout,
+                self.publish_timeout,
+                self.reconcile_timeout,
+            )
         )
 
-    def _connection(self):
+    def _connection(self, timeout: int):
         if self._connection_factory is not None:
             return self._connection_factory(
                 "127.0.0.1",
                 DEFAULT_CPU_PORT,
-                self.timeout,
+                timeout,
             )
         return http.client.HTTPConnection(
             "127.0.0.1",
             DEFAULT_CPU_PORT,
-            timeout=self.timeout,
+            timeout=timeout,
         )
 
     def _request(
@@ -246,6 +300,8 @@ class TTPostSidecarClient:
         method: str,
         path: str,
         payload: Optional[Mapping[str, Any]] = None,
+        *,
+        timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         if (
             method not in {"GET", "POST"}
@@ -272,7 +328,9 @@ class TTPostSidecarClient:
                 separators=(",", ":"),
             ).encode("utf-8")
             headers["Content-Type"] = "application/json; charset=UTF-8"
-        connection = self._connection()
+        connection = self._connection(
+            self.timeout if timeout is None else int(timeout)
+        )
         try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
@@ -339,6 +397,7 @@ class TTPostSidecarClient:
             "POST",
             "/internal/tt-posts/queue/%s/reconcile" % int(queue_id),
             {},
+            timeout=self.reconcile_timeout,
         )
 
     def claim(
@@ -370,11 +429,12 @@ class TTPostSidecarClient:
             )
         return [dict(item) for item in items]
 
-    def schedules_due(self) -> Dict[str, Any]:
+    def schedules_due(self, limit: int) -> Dict[str, Any]:
         return self._request(
             "POST",
             "/internal/tt-posts/schedules/due",
-            {},
+            {"limit": int(limit)},
+            timeout=self.schedule_timeout,
         )
 
     def publish(self, queue_id: int, claim_token: str) -> Dict[str, Any]:
@@ -382,6 +442,7 @@ class TTPostSidecarClient:
             "POST",
             "/internal/tt-posts/queue/%s/publish" % int(queue_id),
             {"claim_token": str(claim_token)},
+            timeout=self.publish_timeout,
         )
 
 
@@ -440,16 +501,30 @@ def execute_runner_tick(
         config.internal_url,
         config.internal_token,
         timeout=config.timeout,
+        schedule_timeout=config.schedule_timeout,
+        publish_timeout=config.publish_timeout,
+        reconcile_timeout=config.reconcile_timeout,
     )
     results: List[Dict[str, Any]] = []
 
     def claim_and_publish(limit: int) -> int:
-        claims = sidecar.claim(
-            worker_id=config.worker_id,
-            grace_seconds=config.grace_seconds,
-            limit=limit,
-        )
-        for claim in claims:
+        processed = 0
+        while processed < limit:
+            claims = sidecar.claim(
+                worker_id=config.worker_id,
+                grace_seconds=config.grace_seconds,
+                limit=1,
+            )
+            if not claims:
+                break
+            if len(claims) != 1:
+                raise RunnerError(
+                    "tt_post_sidecar_invalid_response",
+                    "TT Post claim response exceeded the single-item contract",
+                    502,
+                )
+            claim = claims[0]
+            processed += 1
             queue = claim["queue"]
             try:
                 queue_id = int(
@@ -500,15 +575,12 @@ def execute_runner_tick(
                 results.append(_safe_publish_request_error(queue, exc))
                 continue
             results.append({"operation": "publish", **_safe_result(result)})
-        return len(claims)
+        return processed
 
-    # Existing absolute/manual queues get the first claim budget so a slow
-    # Creator Info check for a new daily slot cannot make them miss grace.
-    claimed_before_schedule = claim_and_publish(config.claim_limit)
-
-    # Persist and freeze current recurring daily slots next. The sidecar owns
-    # all timezone/FIFO/idempotency and crash-recovery decisions.
-    due_result = sidecar.schedules_due()
+    # Persist and freeze recurring daily slots before any potentially slow
+    # remote publish call. The sidecar owns all timezone/FIFO/idempotency and
+    # crash-recovery decisions.
+    due_result = sidecar.schedules_due(1)
     due_items = due_result.get("items", [])
     if not isinstance(due_items, list):
         raise RunnerError(
@@ -516,6 +588,21 @@ def execute_runner_tick(
             "TT Post recurring schedule response is invalid",
             502,
         )
+    try:
+        schedule_deferred_count = int(
+            due_result.get("deferred_count", 0)
+        )
+    except (TypeError, ValueError, OverflowError):
+        schedule_deferred_count = -1
+    if schedule_deferred_count < 0:
+        raise RunnerError(
+            "tt_post_sidecar_invalid_response",
+            "TT Post recurring schedule deferred count is invalid",
+            502,
+        )
+    oldest_deferred_at_utc = str(
+        due_result.get("oldest_deferred_at_utc") or ""
+    )[:32]
     for item in due_items:
         if not isinstance(item, Mapping):
             raise RunnerError(
@@ -543,20 +630,20 @@ def execute_runner_tick(
             }
         )
 
-    # If due created a queue and the first phase did not exhaust the bounded
-    # budget, claim only the remaining capacity so the new slot can run in the
-    # same tick without doubling the per-tick maximum.
-    created_due_queue = any(
-        isinstance(item, Mapping) and bool(item.get("queue_id"))
-        for item in due_items
-    )
-    remaining_claim_limit = config.claim_limit - claimed_before_schedule
-    if created_due_queue and remaining_claim_limit > 0:
-        claim_and_publish(remaining_claim_limit)
+    # Claim immediately before each publish. This prevents later FIFO items
+    # from losing their lease while an earlier TikTok request is still active.
+    claim_and_publish(config.claim_limit)
 
     # A stored publish ID is reconciled after all due claims. Each row is isolated
     # so one remote business error cannot block the rest of the tick.
-    for queue in sidecar.reconciling(config.reconcile_limit):
+    reconciling_items = sidecar.reconciling(config.reconcile_limit)
+    if len(reconciling_items) > config.reconcile_limit:
+        raise RunnerError(
+            "tt_post_sidecar_invalid_response",
+            "TT Post reconcile response exceeded the per-tick budget",
+            502,
+        )
+    for queue in reconciling_items:
         try:
             queue_id = int(queue.get("id") or queue.get("queue_id") or 0)
         except (TypeError, ValueError, OverflowError):
@@ -583,6 +670,8 @@ def execute_runner_tick(
     return {
         "status": "ok",
         "schedule_due_count": len(due_items),
+        "schedule_deferred_count": schedule_deferred_count,
+        "oldest_deferred_at_utc": oldest_deferred_at_utc,
         "grace_seconds": config.grace_seconds,
         "reconcile_budget": config.reconcile_limit,
         "reconcile_count": sum(

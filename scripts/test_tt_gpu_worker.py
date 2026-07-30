@@ -11,9 +11,11 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,9 +146,17 @@ class FakeObjectStore:
     def __init__(self):
         self.upload_calls = []
 
-    def upload(self, key, path, sha256_value, size):
+    def upload(
+        self,
+        key,
+        path,
+        sha256_value,
+        size,
+        deadline=None,
+    ):
         self.upload_calls.append(
             {
+                "deadline": deadline,
                 "key": key,
                 "path": str(path),
                 "sha256": sha256_value,
@@ -283,7 +293,14 @@ def make_prepare(**overrides):
 
 
 def make_downloader(calls):
-    def download(url, destination, expected_sha, expected_size, _config):
+    def download(
+        url,
+        destination,
+        expected_sha,
+        expected_size,
+        _config,
+        _deadline=None,
+    ):
         calls.append(
             {
                 "expected_sha": expected_sha,
@@ -480,14 +497,23 @@ class TTGPUWorkerTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def processor(self, config=None, runner=None, downloader=None, api=None):
+    def processor(
+        self,
+        config=None,
+        runner=None,
+        downloader=None,
+        api=None,
+        monotonic_fn=None,
+        object_store=None,
+    ):
         config = config or make_config(self.root)
         return worker.TTPostGPUProcessor(
             config,
             runner=runner or FakeRunner(),
             downloader=downloader or make_downloader([]),
-            object_store=FakeObjectStore(),
+            object_store=object_store or FakeObjectStore(),
             tiktok_api=api or FakeTikTokAPI(),
+            monotonic_fn=monotonic_fn,
         )
 
     def test_pycryptodome_fallback_uses_ciphertext_plus_tag_contract(self):
@@ -585,6 +611,8 @@ class TTGPUWorkerTests(unittest.TestCase):
             },
         )
         self.assertEqual(loaded.default_source_trim_tail_seconds, 4.333333)
+        self.assertEqual(loaded.cos_timeout, 120)
+        self.assertEqual(loaded.prepare_total_timeout, 8700)
         with mock.patch.dict(
             os.environ,
             dict(env, TT_POST_GPU_HOST="0.0.0.0"),
@@ -593,6 +621,332 @@ class TTGPUWorkerTests(unittest.TestCase):
             with self.assertRaises(worker.TTGPUError) as caught:
                 worker.WorkerConfig.from_env()
         self.assertEqual(caught.exception.code, "invalid_configuration")
+
+    def test_cos_upload_request_timeout_disables_sdk_retries(self):
+        captured = {}
+
+        class FakeCosConfig:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake_client = object()
+        client_args = {}
+
+        def make_client(config, retry):
+            client_args.update({"config": config, "retry": retry})
+            return fake_client
+
+        qcloud_cos = SimpleNamespace(
+            CosConfig=FakeCosConfig,
+            CosS3Client=make_client,
+        )
+        config = replace(
+            make_config(self.root),
+            transcode_timeout=60,
+            cos_timeout=120,
+        )
+        with mock.patch.dict(sys.modules, {"qcloud_cos": qcloud_cos}):
+            store = worker.CosObjectStore(config)
+        self.assertIs(store.client, fake_client)
+        self.assertEqual(captured["Timeout"], 120)
+        self.assertFalse(captured["KeepAlive"])
+        self.assertEqual(client_args["retry"], 0)
+
+    def test_cos_upload_uses_bounded_manual_multipart_and_verifies_object(self):
+        class NotFound(Exception):
+            @staticmethod
+            def get_status_code():
+                return 404
+
+        class FakeCosClient:
+            def __init__(self):
+                self.abort_calls = []
+                self.completed = False
+                self.complete_payload = None
+                self.create_payload = None
+                self.parts = []
+
+            def head_object(self, **_kwargs):
+                if not self.completed:
+                    raise NotFound()
+                return {
+                    "Content-Length": len(payload),
+                    "x-cos-meta-sha256": digest,
+                }
+
+            def create_multipart_upload(self, **kwargs):
+                self.create_payload = kwargs
+                return {"UploadId": "upload-1"}
+
+            def upload_part(self, **kwargs):
+                body = kwargs["Body"]
+                self.parts.append(
+                    (kwargs["PartNumber"], len(body), kwargs["EnableMD5"])
+                )
+                return {"ETag": '"part-%s"' % kwargs["PartNumber"]}
+
+            def complete_multipart_upload(self, **kwargs):
+                self.complete_payload = kwargs
+                self.completed = True
+                return {}
+
+            def abort_multipart_upload(self, **kwargs):
+                self.abort_calls.append(kwargs)
+
+        payload = b"x" * (worker.COS_PART_SIZE_BYTES + 17)
+        digest = hashlib.sha256(payload).hexdigest()
+        source = self.root / "multipart.mp4"
+        source.write_bytes(payload)
+        client = FakeCosClient()
+        store = worker.CosObjectStore(make_config(self.root), client=client)
+        reused = store.upload(
+            "tt-post-prepared/aa/test.mp4",
+            source,
+            digest,
+            len(payload),
+            deadline=worker.PrepareDeadline(10),
+        )
+        self.assertFalse(reused)
+        self.assertEqual(
+            client.parts,
+            [
+                (1, worker.COS_PART_SIZE_BYTES, True),
+                (2, 17, True),
+            ],
+        )
+        self.assertEqual(
+            client.complete_payload["MultipartUpload"]["Part"],
+            [
+                {"ETag": '"part-1"', "PartNumber": 1},
+                {"ETag": '"part-2"', "PartNumber": 2},
+            ],
+        )
+        self.assertEqual(client.create_payload["ACL"], "public-read")
+        self.assertEqual(
+            client.create_payload["Metadata"]["x-cos-meta-sha256"],
+            digest,
+        )
+        self.assertEqual(client.abort_calls, [])
+
+    def test_cos_part_concurrency_is_bounded_across_store_instances(self):
+        state_lock = threading.Lock()
+        first_wave = threading.Event()
+        release = threading.Event()
+        state = {"active": 0, "maximum": 0}
+
+        class BlockingCosClient:
+            @staticmethod
+            def upload_part(**kwargs):
+                with state_lock:
+                    state["active"] += 1
+                    state["maximum"] = max(
+                        state["maximum"],
+                        state["active"],
+                    )
+                    if state["active"] == worker.COS_UPLOAD_THREADS:
+                        first_wave.set()
+                release.wait(timeout=2)
+                with state_lock:
+                    state["active"] -= 1
+                return {"ETag": '"part-%s"' % kwargs["PartNumber"]}
+
+        stores = [
+            worker.CosObjectStore(
+                make_config(self.root),
+                client=BlockingCosClient(),
+            )
+            for _index in range(2)
+        ]
+        deadline = worker.PrepareDeadline(2)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(
+                    stores[part_number % 2]._upload_part,
+                    "key",
+                    "upload",
+                    part_number,
+                    b"x",
+                    deadline,
+                )
+                for part_number in range(1, 9)
+            ]
+            self.assertTrue(first_wave.wait(timeout=1))
+            time.sleep(0.05)
+            self.assertEqual(state["maximum"], worker.COS_UPLOAD_THREADS)
+            release.set()
+            for future in futures:
+                self.assertIn("ETag", future.result(timeout=1))
+        self.assertEqual(state["active"], 0)
+        self.assertEqual(state["maximum"], worker.COS_UPLOAD_THREADS)
+
+    def test_cos_part_deadline_does_not_wait_for_executor_shutdown(self):
+        release = threading.Event()
+        aborted = threading.Event()
+
+        class NotFound(Exception):
+            @staticmethod
+            def get_status_code():
+                return 404
+
+        class SlowCosClient:
+            @staticmethod
+            def head_object(**_kwargs):
+                raise NotFound()
+
+            @staticmethod
+            def create_multipart_upload(**_kwargs):
+                return {"UploadId": "slow-upload"}
+
+            @staticmethod
+            def upload_part(**_kwargs):
+                release.wait(timeout=2)
+                return {"ETag": '"slow-part"'}
+
+            @staticmethod
+            def abort_multipart_upload(**_kwargs):
+                aborted.set()
+                release.set()
+
+        payload = b"slow-part-body"
+        digest = hashlib.sha256(payload).hexdigest()
+        source = self.root / "slow-multipart.mp4"
+        source.write_bytes(payload)
+        store = worker.CosObjectStore(
+            make_config(self.root),
+            client=SlowCosClient(),
+        )
+        started = time.monotonic()
+        with self.assertRaises(worker.TTGPUError) as caught:
+            store.upload(
+                "tt-post-prepared/aa/slow.mp4",
+                source,
+                digest,
+                len(payload),
+                deadline=worker.PrepareDeadline(0.05),
+            )
+        elapsed = time.monotonic() - started
+        self.assertEqual(caught.exception.code, "prepare_timeout")
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(aborted.wait(timeout=1))
+
+    def test_cos_complete_timeout_is_not_aborted_and_retry_recovers_head(self):
+        completed = threading.Event()
+
+        class NotFound(Exception):
+            @staticmethod
+            def get_status_code():
+                return 404
+
+        class SlowCompleteClient:
+            def __init__(self):
+                self.abort_calls = []
+                self.create_calls = 0
+
+            def head_object(self, **_kwargs):
+                if not completed.is_set():
+                    raise NotFound()
+                return {
+                    "Content-Length": len(payload),
+                    "x-cos-meta-sha256": digest,
+                }
+
+            def create_multipart_upload(self, **_kwargs):
+                self.create_calls += 1
+                return {"UploadId": "complete-unknown"}
+
+            @staticmethod
+            def upload_part(**_kwargs):
+                return {"ETag": '"part-1"'}
+
+            @staticmethod
+            def complete_multipart_upload(**_kwargs):
+                time.sleep(0.15)
+                completed.set()
+                return {}
+
+            def abort_multipart_upload(self, **kwargs):
+                self.abort_calls.append(kwargs)
+
+        payload = b"complete-outcome-unknown"
+        digest = hashlib.sha256(payload).hexdigest()
+        source = self.root / "complete-unknown.mp4"
+        source.write_bytes(payload)
+        client = SlowCompleteClient()
+        store = worker.CosObjectStore(
+            make_config(self.root),
+            client=client,
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            store.upload(
+                "tt-post-prepared/aa/complete.mp4",
+                source,
+                digest,
+                len(payload),
+                deadline=worker.PrepareDeadline(0.05),
+            )
+        self.assertEqual(caught.exception.code, "prepare_timeout")
+        self.assertEqual(client.abort_calls, [])
+        self.assertTrue(completed.wait(timeout=1))
+        self.assertTrue(
+            store.upload(
+                "tt-post-prepared/aa/complete.mp4",
+                source,
+                digest,
+                len(payload),
+                deadline=worker.PrepareDeadline(1),
+            )
+        )
+        self.assertEqual(client.create_calls, 1)
+        self.assertEqual(client.abort_calls, [])
+
+    def test_prepare_total_deadline_is_shared_across_pipeline_stages(self):
+        class FakeClock:
+            def __init__(self):
+                self.value = 100.0
+
+            def __call__(self):
+                return self.value
+
+        clock = FakeClock()
+        calls = []
+        store = FakeObjectStore()
+
+        def slow_download(
+            url,
+            destination,
+            expected_sha,
+            expected_size,
+            _config,
+            deadline,
+        ):
+            calls.append((url, expected_sha, expected_size, deadline))
+            Path(destination).write_bytes(SOURCE_BYTES)
+            clock.value += 11.0
+            return {
+                "sha256": hashlib.sha256(SOURCE_BYTES).hexdigest(),
+                "size": len(SOURCE_BYTES),
+            }
+
+        config = replace(
+            make_config(self.root),
+            prepare_total_timeout=10,
+        )
+        processor = self.processor(
+            config,
+            downloader=slow_download,
+            monotonic_fn=clock,
+            object_store=store,
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.prepare(make_prepare())
+        self.assertEqual(caught.exception.code, "prepare_timeout")
+        self.assertEqual(len(calls), 1)
+        self.assertIsInstance(calls[0][3], worker.PrepareDeadline)
+        self.assertEqual(store.upload_calls, [])
+        self.assertIsNone(
+            worker._read_json(processor._prepare_manifest_path(JOB_ID))
+        )
+        self.assertEqual(list(processor.jobs_root.iterdir()), [])
 
     def test_prepare_downloads_only_on_gpu_freezes_actual_content_and_reuses_job(self):
         config = make_config(self.root)
@@ -1045,6 +1399,8 @@ class TTGPUWorkerTests(unittest.TestCase):
             "TT_POST_GPU_FONT_FILE=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
             "TT_POST_GPU_LOGO_PATH=",
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
+            "TT_POST_GPU_COS_TIMEOUT=120",
+            "TT_POST_GPU_PREPARE_TOTAL_TIMEOUT=8700",
         ):
             self.assertIn(name, env)
         self.assertNotIn("TT_POST_GPU_LIVE_API_ENABLED", env)
