@@ -169,16 +169,29 @@ class StorageTests(CoreTestCase):
         migrated = TTPostStore(self.db_path, now_fn=self.clock)
         conn = sqlite3.connect(self.db_path)
         try:
-            conn.execute(
-                "DROP INDEX idx_tt_post_schedule_run_recovery"
+            legacy_columns = [
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(tt_post_schedule_run)"
+                )
+                if row[1]
+                not in {
+                    "execution_token",
+                    "execution_lease_expires_at_utc",
+                }
+            ]
+            selected_columns = ",".join(
+                '"%s"' % name.replace('"', '""')
+                for name in legacy_columns
             )
             conn.execute(
-                "ALTER TABLE tt_post_schedule_run "
-                "DROP COLUMN execution_token"
+                "CREATE TABLE tt_post_schedule_run_legacy AS "
+                "SELECT %s FROM tt_post_schedule_run" % selected_columns
             )
+            conn.execute("DROP TABLE tt_post_schedule_run")
             conn.execute(
-                "ALTER TABLE tt_post_schedule_run "
-                "DROP COLUMN execution_lease_expires_at_utc"
+                "ALTER TABLE tt_post_schedule_run_legacy "
+                "RENAME TO tt_post_schedule_run"
             )
             conn.commit()
         finally:
