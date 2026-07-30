@@ -41856,6 +41856,7 @@ from features.x_accounts.client import (
     query_x_accounts as query_x_authorized_accounts,
     logout_x_account,
     save_x_post_schedule,
+    set_x_account_publish_approval,
     start_x_authorization,
     verify_x_account,
 )
@@ -98277,6 +98278,60 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     {"error": payload["error"]},
                 )
                 json_response(self, status, payload, no_store=True)
+            return
+
+        x_admin_publish_approval_match = re.match(
+            r"^/api/admin/x-accounts/(\d+)/publish-approval$",
+            parsed.path,
+        )
+        if x_admin_publish_approval_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_admin_publish_approval_match.group(1)
+            try:
+                payload = self._read_json()
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON请求体必须是对象")
+                approved = payload.get("approved")
+                if not isinstance(approved, bool):
+                    raise ValueError("approved必须是布尔值")
+                result = set_x_account_publish_approval(
+                    account_id,
+                    approved,
+                    x_accounts_actor(session),
+                )
+                item = result.get("item", result) if isinstance(result, dict) else {}
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_publish_approval",
+                    "x_account",
+                    str(item.get("x_user_id", account_id) or account_id),
+                    {
+                        "account_id": int(account_id),
+                        "publish_approved": approved,
+                    },
+                )
+                json_response(self, 200, result, no_store=True)
+            except ValueError as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                append_audit_log(
+                    session,
+                    "admin_set_x_account_publish_approval_failed",
+                    "x_account",
+                    account_id,
+                    {"error": error_payload["error"]},
+                )
+                json_response(self, status, error_payload, no_store=True)
             return
 
         x_verify_match = re.match(r"^/api/x-accounts/(\d+)/verify$", parsed.path)
