@@ -81,7 +81,7 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 3. 备份 CPU 现有 `app.py`、静态文件、nginx 目标文件和环境；不修改 X SQLite。
 4. GPU 上传并校验固定片尾与圆角 Logo SHA，创建 `/data/tt-post-publisher`。
 5. GPU 安装并启动 loopback sidecar和反向隧道；确认 CPU `127.0.0.1:18830`。
-6. CPU 安装 TT sidecar、runner timer 与 `tt-post-runner.path`，初始化 SQLite；path 仅监控 `/run/tt-post/manual-kick`，与 timer 共用同一个 runner/flock。
+6. CPU 安装 TT sidecar、runner timer 与 `tt-post-runner.path`，初始化 SQLite；path 仅监控 `/run/tt-post/manual-kick`，与 timer 共用同一个 runner/flock。`/run/tt-post` 只由常驻 sidecar 的 `RuntimeDirectory` 持有，oneshot runner 不得再次声明同名目录，避免 runner 退出时清理手动唤醒路径。
 7. 合并部署主后台路由和静态页，同时同步服务目录与 `/usr/share/nginx/html`；安装主 API 的 TT EnvironmentFile 和 systemd drop-in。
 8. 仅重启相关新服务和主 API；不重启 X sidecar。
 9. 保持三重 gate 为 0，执行关闭态验收。

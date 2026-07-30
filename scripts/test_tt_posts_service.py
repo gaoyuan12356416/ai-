@@ -2788,6 +2788,8 @@ class DeployContractTests(unittest.TestCase):
             path_unit,
         )
         self.assertIn("Unit=tt-post-runner.service", path_unit)
+        self.assertIn("RuntimeDirectory=tt-post", service)
+        self.assertNotIn("RuntimeDirectory=tt-post\n", runner)
         self.assertIn(
             "TT_POST_GPU_MAX_DURATION_SECONDS=3600",
             gpu_env,
