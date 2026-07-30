@@ -31,3 +31,72 @@
 | 回填报告 | canary 1/1 成功；remaining 8/8 成功；失败 0 |
 
 生产验收时间：2026-07-24 16:28-16:56 CST。
+
+## 2026-07-29 超长裁尾增量
+
+### 本地结论
+
+- `invalid_media_duration` 已进入 CPU/GPU 修复合同；worker 二次 probe 只对
+  `>140s` 固定裁到 139 秒，过短、NaN/Inf、损坏、异常 FPS/scan 继续失败。
+- codec/dimensions 首错同时掩盖超长时，同次规范化会裁尾；正常时长修复不带
+  `-t` 并继续校验源时长保持。
+- profile/job/COS/manifest 已升 v2；v1 manifest 不会复用。
+- 短剧成功重验要求精确旧错误/集数、未绑定、无历史；恢复脚本先 dry guard，
+  所有项全链成功后一次事务清错，不包含 plan/publish。
+
+验证：
+
+| 类型 | 数量 | 通过 | 失败 | 阻塞 |
+| --- | ---: | ---: | ---: | ---: |
+| 聚焦 unittest | 135 | 135 | 0 | 0 |
+| 全量 `test_x*.py` | 351 | 350 | 0 | 0 |
+| Python 编译 / diff check | 2 | 2 | 0 | 0 |
+
+Windows 本地因无创建目录符号链接权限跳过 1 项；同一符号链接祖先拒绝测试已在
+生产 Linux release 上通过，因此功能覆盖结果为 351/351。
+
+### 生产验证
+
+| 项目 | 结果 |
+| --- | --- |
+| GPU | `b6f95f3874a9bb187aa7e8c7faac6254893ba787`，worker/CPU tunnel 均为 v2 health |
+| CPU | `7a20f05ecc760a79f3776fded08d47ccfa76d5d8`，sidecar/main API active |
+| Linux | b6f95f3 直接相关 185/185、完整 342/342；7a20f05 新增配置/脱敏聚焦测试通过 |
+| 池 53 | 源 `182.791667s` -> 输出 `139.0s`，H264/yuv420p、AAC、720x1280，CPU 复检通过 |
+| 池 54 | 源 `171.52s` -> 输出 `139.0s`，H264/yuv420p、AAC、720x1280，CPU 复检通过 |
+| 恢复 | requested/ready/restored 均为 2；两项原地 `pending`、未绑定、Episode 1、零历史 |
+| 历史安全 | 10:06 run 14 保持 `failed_preflight`，queue/log=0；账号 10 粘性绑定未变 |
+| 数据库 | integrity `ok`；剧集重复组、`post_creating`、`unknown_outcome` 均为 0 |
+| timer | 16:12 CST 恢复 schedule/claim timer；旧 daily timer 保持 masked |
+
+第一次 canary 因 standalone 脚本未读取既有 schedule env 而在下载前返回
+`media_host_not_allowed`；未调用 GPU、未恢复池状态。修复提交只增加严格的
+schedule 非秘密白名单和异常脱敏，material backfill 合同未改；本地全量由
+342 增至 344 项且全部通过。成功报告 SHA-256：
+`e908d9d4eb50f1310d9e5189e15b767fcf622f452f6a00892d2cddfdee502471`。
+
+16:20 自然 run 17 的全部媒体预检通过，并新增 pool 2/57/60/131 四份 ready
+manifest；pool 131 在自然流程中由 `212.666667s` 裁为 `139.0s`。随后首队列
+在任何 X 请求前因磁盘短链域名漂移停止；attempt=0、unknown=0，其余五条没有
+publish log。受保护恢复的真实写入强制使用专用 root-owned 审计目录下的新
+JSON 报告，拒绝越界、符号链接祖先和覆盖既有文件；最终 queue/log/Post 结果
+完成后追加，不新建计划或直接发布。
+
+### 最终恢复与发布验收
+
+| 项目 | 结果 |
+| --- | --- |
+| CPU 运行 release | `073d3f5523c5f8dba8e1babc9ce1447bcb1926fd` |
+| Linux 聚焦回归 | store 36/36、恢复 CLI 5/5；符号链接祖先拒绝通过 |
+| 配置 | 磁盘与 sidecar 进程均为 `https://ai.yingliangads.com/s2l` |
+| 恢复证据 | validate-only/apply 均成功写入专用 root-owned 目录；SHA 分别为 `afa8aa5e...`、`ff2a491d...` |
+| run 17 | `completed`，expected/queued/published=`6/6/6`，failed/unknown=`0/0` |
+| Post | queues 45-50 全部 `published`，attempt 均为 1，X media/Post ID 与 URL 完整 |
+| 短链 | `/s2l/45.html` 到 `/s2l/50.html` 全部无缓存 HTTP 200 |
+| 粘性 | pool 2 仍绑定账号 10 并推进到 Episode 9；其余五池绑定各自新账号并推进到 Episode 2 |
+| 旧批次 | run 14 仍为 `failed_preflight`，queue/log 均为 0 |
+| 数据库 | integrity `ok`；重复剧集、`post_creating`、`unknown_outcome` 均为 0 |
+| 运行态 | sidecar/main API/GPU v2/schedule timers/claim timers 正常；daily timer masked |
+
+scheduler 日志明确为 `resumed_existing_plan=true`，证明继续的是原 run 17，
+并未新建计划或绕过正常发布链路。

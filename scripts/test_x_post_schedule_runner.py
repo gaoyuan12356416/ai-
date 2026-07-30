@@ -331,6 +331,47 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertEqual(payload["checks"][0]["pool_item_id"], 53)
         self.assertTrue(write_flag)
 
+    def test_drama_pool_check_client_dry_guards_exact_success_revalidation(self):
+        client = StubScheduleClient(
+            [
+                {
+                    "item": {
+                        "updated_count": 0,
+                        "validated_count": 1,
+                        "validate_only": True,
+                    }
+                }
+            ]
+        )
+        result = client.record_drama_pool_checks(
+            "/internal/posts/drama-pool/check",
+            [
+                {
+                    "pool_item_id": 53,
+                    "content_id": "DRAMA-BAD",
+                    "error_code": "",
+                    "error_message": "",
+                    "expected_error_code": "source_not_repairable",
+                    "expected_episode_number": 1,
+                }
+            ],
+            validate_only=True,
+        )
+        self.assertEqual(result["updated_count"], 0)
+        self.assertEqual(result["validated_count"], 1)
+        path, payload, write_flag = client.requests[0]
+        self.assertEqual(path, "/internal/posts/drama-pool/check")
+        self.assertTrue(payload["validate_only"])
+        self.assertEqual(
+            payload["checks"][0]["expected_error_code"],
+            "source_not_repairable",
+        )
+        self.assertEqual(
+            payload["checks"][0]["expected_episode_number"],
+            1,
+        )
+        self.assertFalse(write_flag)
+
     def test_unassigned_drama_preflight_failure_falls_forward_fifo(self):
         class Connection:
             def close(self):

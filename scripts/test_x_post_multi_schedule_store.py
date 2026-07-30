@@ -783,6 +783,43 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )["items"][0]
         self.assertEqual(historical_pool["status"], "active")
 
+        success_check = {
+            "pool_item_id": rejected_pool["id"],
+            "content_id": rejected_pool["content_id"],
+            "error_code": "",
+            "error_message": "",
+            "expected_error_code": "source_not_repairable",
+            "expected_episode_number": 1,
+        }
+        guarded = self.store.record_drama_pool_checks(
+            [success_check],
+            validate_only=True,
+        )
+        self.assertEqual(guarded["updated_count"], 0)
+        self.assertEqual(guarded["validated_count"], 1)
+        self.assertTrue(guarded["validate_only"])
+        still_failed = self.store.query_drama_pool(
+            {"content_id": rejected_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(still_failed["status"], "validation_failed")
+
+        restored = self.store.record_drama_pool_checks([success_check])
+        self.assertEqual(restored["updated_count"], 1)
+        self.assertEqual(restored["validated_count"], 1)
+        recovered = self.store.query_drama_pool(
+            {"content_id": rejected_pool["content_id"]}
+        )["items"][0]
+        self.assertEqual(recovered["status"], "pending")
+        self.assertEqual(recovered["last_error_code"], "")
+        self.assertEqual(recovered["last_error_message"], "")
+
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.record_drama_pool_checks([success_check])
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_drama_pool_revalidation_conflict",
+        )
+
     def test_drama_pool_accepts_large_batch_and_returns_compact_items(self):
         drama_ids = ["D%03d" % index for index in range(100)]
         validation_checks = [
@@ -1706,6 +1743,153 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(
             [item["status"] for item in frozen["queues"]],
             ["failed", "queued"],
+        )
+
+    def test_exact_pre_x_config_failure_can_restore_the_frozen_batch(self):
+        self.save_schedule("drama", [2, 3], ["07:00", "09:00"])
+        first_pool = self.add_drama(
+            content_id="FIRST",
+            free_episode_count=2,
+        )
+        second_pool = self.add_drama(
+            content_id="SECOND",
+            free_episode_count=2,
+        )
+        published_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "07:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 1),
+                self.drama_candidate(second_pool, 3, 1),
+            ],
+        )
+        self.publish_queue(published_plan["queues"][0], 1)
+        self.publish_queue(published_plan["queues"][1], 1)
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(first_pool, 2, 2),
+                self.drama_candidate(second_pool, 3, 2),
+            ],
+        )
+        first_queue = plan["queues"][0]
+        log = self.store.reserve_log(first_queue["id"])
+        self.store.mark_failed_if_reserved(
+            log["id"],
+            "invalid_short_base_url",
+            "short base URL is invalid",
+        )
+
+        validated = self.store.recover_pre_x_schedule_failure(
+            first_queue["id"],
+            "invalid_short_base_url",
+            validate_only=True,
+        )
+        self.assertEqual(validated["validated_count"], 1)
+        self.assertEqual(validated["updated_count"], 0)
+        self.assertTrue(validated["validate_only"])
+        self.assertEqual(
+            self.store.query_schedule_plan(
+                "drama",
+                "2026-07-27",
+                "09:00",
+            )["run"]["status"],
+            "stopped",
+        )
+
+        recovered = self.store.recover_pre_x_schedule_failure(
+            first_queue["id"],
+            "invalid_short_base_url",
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertFalse(recovered["validate_only"])
+        frozen = self.store.query_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+        )
+        self.assertEqual(frozen["run"]["status"], "queued")
+        self.assertEqual(frozen["run"]["failed_count"], 0)
+        self.assertEqual(
+            [item["status"] for item in frozen["queues"]],
+            ["queued", "queued"],
+        )
+        restored_log = self.store.get_log(log["id"])
+        self.assertEqual(restored_log["status"], "reserved")
+        self.assertEqual(restored_log["attempt_count"], 0)
+        self.assertEqual(restored_log["error_code"], "")
+        restored_pool = self.store.query_drama_pool(
+            {"drama_id": "FIRST"}
+        )["items"][0]
+        self.assertEqual(restored_pool["status"], "active")
+        self.assertEqual(restored_pool["assigned_account_id"], 2)
+        self.assertEqual(restored_pool["next_sub_number"], 2)
+        self.assertEqual(restored_pool["last_error_code"], "")
+
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_pre_x_schedule_failure(
+                first_queue["id"],
+                "invalid_short_base_url",
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_pre_x_recovery_conflict",
+        )
+
+    def test_pre_x_recovery_rejects_started_or_unknown_failures(self):
+        self.save_schedule("drama", [2], ["07:00", "09:00"])
+        pool = self.add_drama(content_id="FIRST")
+        published_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "07:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+        self.publish_queue(published_plan["queues"][0], 1)
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(pool, 2, 2)],
+        )
+        queue = plan["queues"][0]
+        log = self.store.reserve_log(queue["id"])
+        self.store.mark_failed_if_reserved(
+            log["id"],
+            "invalid_short_base_url",
+            "short base URL is invalid",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE x_post_publish_log SET attempt_count=1 "
+                "WHERE id=?",
+                (log["id"],),
+            )
+            conn.commit()
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_pre_x_schedule_failure(
+                queue["id"],
+                "invalid_short_base_url",
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_pre_x_recovery_conflict",
+        )
+        with self.assertRaises(service.XPostError) as disallowed:
+            self.store.recover_pre_x_schedule_failure(
+                queue["id"],
+                "x_upstream_error",
+            )
+        self.assertEqual(
+            disallowed.exception.code,
+            "x_post_pre_x_recovery_not_allowed",
         )
 
     def test_schema_is_additive_and_integrity_check_passes(self):

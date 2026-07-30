@@ -32,6 +32,7 @@ def source_probe(
     rotation=0,
     frame_rate="25/1",
     field_order="progressive",
+    duration="12.5",
 ):
     video = {
         "codec_type": "video",
@@ -47,10 +48,10 @@ def source_probe(
     streams = [video]
     if audio:
         streams.append({"codec_type": "audio", "codec_name": "mp3"})
-    return {"streams": streams, "format": {"duration": "12.5"}}
+    return {"streams": streams, "format": {"duration": str(duration)}}
 
 
-def repaired_probe(width=720, height=1280):
+def repaired_probe(width=720, height=1280, duration="12.5"):
     return {
         "streams": [
             {
@@ -73,7 +74,7 @@ def repaired_probe(width=720, height=1280):
                 "channel_layout": "stereo",
             },
         ],
-        "format": {"duration": "12.5"},
+        "format": {"duration": str(duration)},
     }
 
 
@@ -196,7 +197,7 @@ class MediaRepairTests(unittest.TestCase):
                 media_repair.WorkerConfig.from_env()
         self.assertEqual(caught.exception.code, "invalid_configuration")
 
-    def test_request_contract_is_exact_and_only_two_triggers_are_repairable(self):
+    def test_request_contract_is_exact_and_only_three_triggers_are_repairable(self):
         request = media_repair.validate_request(make_request())
         self.assertEqual(request["profile"], media_repair.REPAIR_PROFILE)
         self.assertEqual(request["pool_item_id"], "8")
@@ -206,7 +207,11 @@ class MediaRepairTests(unittest.TestCase):
         )
         self.assertEqual(resource_request["material_id"], resource_id)
 
-        for trigger in ("invalid_media_codec", "invalid_media_dimensions"):
+        for trigger in (
+            "invalid_media_codec",
+            "invalid_media_dimensions",
+            "invalid_media_duration",
+        ):
             request = media_repair.validate_request(make_request(trigger_code=trigger))
             self.assertEqual(request["trigger_code"], trigger)
         for invalid_material_id in (
@@ -230,7 +235,7 @@ class MediaRepairTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "invalid_request")
         with self.assertRaises(media_repair.MediaRepairError) as caught:
-            media_repair.validate_request(make_request(trigger_code="invalid_media_duration"))
+            media_repair.validate_request(make_request(trigger_code="media_download_failed"))
         self.assertEqual(caught.exception.code, "trigger_not_repairable")
         with self.assertRaises(media_repair.MediaRepairError) as caught:
             media_repair.validate_request(make_request(unexpected=True))
@@ -267,6 +272,31 @@ class MediaRepairTests(unittest.TestCase):
                     media_repair.inspect_source(payload)
                 self.assertEqual(caught.exception.code, "source_not_repairable")
 
+    def test_only_over_limit_duration_is_trim_eligible(self):
+        over_limit = media_repair.inspect_source(
+            source_probe(duration="140.001"),
+            "invalid_media_duration",
+        )
+        self.assertTrue(over_limit["trim_applied"])
+        self.assertEqual(
+            over_limit["output_duration"],
+            media_repair.TRIM_TARGET_SECONDS,
+        )
+        for duration in ("0.49", "nan", "inf"):
+            with self.subTest(duration=duration):
+                with self.assertRaises(media_repair.MediaRepairError) as caught:
+                    media_repair.inspect_source(
+                        source_probe(duration=duration),
+                        "invalid_media_duration",
+                    )
+                self.assertEqual(caught.exception.code, "source_not_repairable")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.inspect_source(
+                source_probe(duration="140"),
+                "invalid_media_duration",
+            )
+        self.assertEqual(caught.exception.code, "source_not_repairable")
+
     def test_ffmpeg_command_is_nvenc_cfr30_gop60_pad_without_crop_and_adds_silence(self):
         config = make_config(self.root)
         source_info = media_repair.inspect_source(source_probe(audio=False))
@@ -302,6 +332,7 @@ class MediaRepairTests(unittest.TestCase):
         self.assertIn("pad=720:1280", video_filter)
         self.assertNotIn("crop=", video_filter)
         self.assertIn("yadif=", video_filter)
+        self.assertNotIn("-t", command)
 
         with_audio = media_repair.build_ffmpeg_command(
             config,
@@ -314,6 +345,86 @@ class MediaRepairTests(unittest.TestCase):
         self.assertEqual(with_audio[with_audio.index("-map") + 1], "0:v:0")
         second_map = with_audio.index("-map", with_audio.index("-map") + 1)
         self.assertEqual(with_audio[second_map + 1], "0:a:0")
+
+        trimmed = media_repair.build_ffmpeg_command(
+            config,
+            self.root / "source.mp4",
+            self.root / "output.mp4",
+            media_repair.inspect_source(
+                source_probe(audio=True, duration="180"),
+                "invalid_media_codec",
+            ),
+        )
+        self.assertEqual(
+            trimmed[trimmed.index("-t") + 1],
+            "139.000",
+        )
+        self.assertEqual(trimmed[-1], str(self.root / "output.mp4"))
+
+    def test_over_limit_repair_trims_to_target_and_records_manifest_evidence(self):
+        source = b"over-limit-source"
+        request = make_request(
+            source,
+            trigger_code="invalid_media_duration",
+        )
+        config = make_config(self.root)
+        cos = FakeCosClient()
+        runner = FakeRunner(
+            source_payload=source_probe(duration="180"),
+            output_payload=repaired_probe(duration="139.0"),
+        )
+
+        def downloader(_url, destination, _hosts, **_kwargs):
+            Path(destination).write_bytes(source)
+            return {
+                "path": Path(destination),
+                "size": len(source),
+                "sha256": hashlib.sha256(source).hexdigest(),
+                "media_type": "video/mp4",
+            }
+
+        processor = media_repair.MediaRepairProcessor(
+            config,
+            runner=runner,
+            cos_client=cos,
+            downloader=downloader,
+        )
+        result = processor.repair(request)
+        self.assertEqual(result["probe"]["duration"], 139.0)
+        command = next(
+            item for item in runner.commands if "ffmpeg" in Path(item[0]).name
+        )
+        self.assertEqual(command[command.index("-t") + 1], "139.000")
+        manifest = json.loads(
+            (
+                self.root
+                / "manifests"
+                / (request["job_key"] + ".json")
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(
+            manifest["repair"],
+            {
+                "source_duration": 180.0,
+                "target_duration": 139.0,
+                "trim_applied": True,
+            },
+        )
+
+    def test_trimmed_output_must_remain_close_to_fixed_target(self):
+        output = self.root / "trimmed.mp4"
+        output.write_bytes(b"output")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.validate_output(
+                repaired_probe(duration="138.4"),
+                output,
+                (720, 1280),
+                1024,
+                expected_duration=139.0,
+                trim_applied=True,
+            )
+        self.assertEqual(caught.exception.code, "repaired_media_invalid")
 
     def test_end_to_end_repair_uploads_verifies_manifests_and_reuses(self):
         source = b"source-video"

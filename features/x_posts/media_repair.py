@@ -1,9 +1,10 @@
 """Fail-closed GPU media repair for the Dramawave X post workflow.
 
 The worker is intentionally independent from the X publisher.  It accepts only
-the two media failures that can be repaired without changing editorial content,
-downloads the exact caller-preflighted object, normalizes it with NVENC, uploads
-the immutable result to COS, and returns only after a COS HEAD verification.
+the deterministic codec, dimension, and over-limit-duration failures covered by
+the repair contract, downloads the exact caller-preflighted object, normalizes
+it with NVENC, trims only an over-limit tail, uploads the immutable result to
+COS, and returns only after a COS HEAD verification.
 
 Production callers use the loopback HTTP wrapper in
 ``scripts/x_post_media_repair_worker.py``.  Collaborators are injectable so the
@@ -16,6 +17,7 @@ import contextlib
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -37,12 +39,20 @@ except ImportError:  # pragma: no cover - exercised only outside Linux.
     fcntl = None
 
 
-REPAIR_PROFILE = "x-h264-nvenc-720-v1"
+REPAIR_PROFILE = "x-h264-nvenc-720-trim139-v2"
 REPAIR_PATH = "/internal/x-post-media-repair"
 HEALTH_PATH = "/health"
 REPAIRABLE_TRIGGER_CODES = frozenset(
-    {"invalid_media_codec", "invalid_media_dimensions"}
+    {
+        "invalid_media_codec",
+        "invalid_media_dimensions",
+        "invalid_media_duration",
+    }
 )
+MIN_DURATION_SECONDS = 0.5
+MAX_DURATION_SECONDS = 140.0
+TRIM_TARGET_SECONDS = 139.0
+TRIM_DURATION_TOLERANCE_SECONDS = 0.5
 REQUEST_FIELDS = frozenset(
     {
         "job_key",
@@ -570,7 +580,7 @@ def _positive_number(value):
         value = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0
-    return value if value > 0 else 0.0
+    return value if math.isfinite(value) and value > 0 else 0.0
 
 
 def _frame_rate(value):
@@ -603,7 +613,7 @@ def _rotation(video):
     return 0
 
 
-def inspect_source(payload):
+def inspect_source(payload, trigger_code=""):
     videos = _streams(payload, "video")
     if len(videos) != 1:
         raise MediaRepairError(
@@ -651,10 +661,20 @@ def inspect_source(payload):
         canvas = (720, 1280)
     format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
     duration = _positive_number(format_data.get("duration") or video.get("duration"))
-    if duration < 0.5 or duration > 140.0:
+    if duration < MIN_DURATION_SECONDS:
         raise MediaRepairError(
             "source_not_repairable",
             "source duration is outside the X post contract",
+            422,
+        )
+    trim_applied = duration > MAX_DURATION_SECONDS
+    if (
+        str(trigger_code or "") == "invalid_media_duration"
+        and not trim_applied
+    ):
+        raise MediaRepairError(
+            "source_not_repairable",
+            "source does not have an over-limit duration",
             422,
         )
     return {
@@ -664,6 +684,10 @@ def inspect_source(payload):
         "display_height": display_height,
         "rotation": rotation,
         "duration": duration,
+        "output_duration": (
+            TRIM_TARGET_SECONDS if trim_applied else duration
+        ),
+        "trim_applied": trim_applied,
         "frame_rate": frame_rate,
         "has_audio": bool(_streams(payload, "audio")),
         "canvas": canvas,
@@ -753,6 +777,8 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
     )
     if not source_info["has_audio"]:
         command.append("-shortest")
+    if source_info.get("trim_applied"):
+        command.extend(["-t", "%.3f" % TRIM_TARGET_SECONDS])
     command.append(str(output_path))
     return command
 
@@ -776,6 +802,7 @@ def validate_output(
     expected_canvas,
     max_output_bytes,
     expected_duration=None,
+    trim_applied=False,
 ):
     videos = _streams(payload, "video")
     audios = _streams(payload, "audio")
@@ -831,14 +858,18 @@ def validate_output(
         )
     format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
     duration = _positive_number(format_data.get("duration") or video.get("duration"))
-    if duration < 0.5 or duration > 140.0:
+    if duration < MIN_DURATION_SECONDS or duration > MAX_DURATION_SECONDS:
         raise MediaRepairError(
             "repaired_media_invalid",
             "repaired media duration is outside the X post contract",
             500,
         )
     source_duration = _positive_number(expected_duration)
-    duration_tolerance = max(0.5, source_duration * 0.02)
+    duration_tolerance = (
+        TRIM_DURATION_TOLERANCE_SECONDS
+        if trim_applied
+        else max(0.5, source_duration * 0.02)
+    )
     if source_duration and abs(duration - source_duration) > duration_tolerance:
         raise MediaRepairError(
             "repaired_media_invalid",
@@ -1198,7 +1229,10 @@ class MediaRepairProcessor:
                     409,
                 )
             source_probe = _probe_payload(self.config, source_path, self.runner)
-            source_info = inspect_source(source_probe)
+            source_info = inspect_source(
+                source_probe,
+                request["trigger_code"],
+            )
             command = build_ffmpeg_command(
                 self.config,
                 source_path,
@@ -1224,7 +1258,8 @@ class MediaRepairProcessor:
                 output_path,
                 source_info["canvas"],
                 self.config.max_output_bytes,
-                expected_duration=source_info["duration"],
+                expected_duration=source_info["output_duration"],
+                trim_applied=source_info["trim_applied"],
             )
             if probe["size"] != output_size:
                 raise MediaRepairError(
@@ -1244,11 +1279,16 @@ class MediaRepairProcessor:
                 "probe": probe,
             }
             manifest = {
-                "version": 1,
+                "version": 2,
                 "status": "ready",
                 "request": request,
                 "cos_key": cos_key,
                 "result": result,
+                "repair": {
+                    "source_duration": source_info["duration"],
+                    "target_duration": source_info["output_duration"],
+                    "trim_applied": source_info["trim_applied"],
+                },
                 "completed_at": _utc_now(),
             }
             _atomic_write_manifest(manifest_path, manifest)

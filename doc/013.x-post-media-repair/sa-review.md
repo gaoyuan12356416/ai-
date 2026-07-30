@@ -24,5 +24,11 @@
 ## 边界确认
 
 - 合规、违规、素材身份和危险标签仍由 selector 负责，GPU 不重新判定业务合规。
-- 只有 codec/dimensions 可修复；duration/frame-rate/scan/download 等错误保持不可用。
+- codec/dimensions/超长 duration 可修复；仅超长 duration 固定裁尾至 139 秒。过短、非有限 duration、frame-rate、scan、download 等错误保持不可用。
 - 当前九条均未绑定 queue，可安全修复；今日账号已有真实发布记录，禁止再次发帖。
+
+## 2026-07-29 增量评审
+
+- profile 升级为 `x-h264-nvenc-720-trim139-v2`，job key namespace、COS 路径和 manifest 同步升版，禁止复用 v1 产物。
+- 短剧 `validation_failed -> pending` 只允许精确旧错误、集数、未绑定、无历史的成功重验；先 dry guard，后 GPU 修复、COS HEAD、CPU 重下载/SHA/size/probe，最后同事务清错。
+- 恢复命令不包含建计划或发布调用；10:06 `failed_preflight` 保持终态，账号粘性、FIFO、全量候选原子建队列规则不变。

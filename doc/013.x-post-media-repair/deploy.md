@@ -89,3 +89,132 @@ CPU daily runner
   `/opt/x-post-media-repair/releases/1f607dff4e4fde1c11931f32ab1d477adf5b610f`
   并使用上述配置备份；本次已经产生真实 Post、queue、log、短链和剧集进度，
   禁止用部署前 SQLite 覆盖当前审计事实。
+
+## 2026-07-29 超长剧集裁尾部署方案
+
+1. 以 GitHub 精确提交同时构建 CPU `/opt/x-post-automation/releases/<commit>`
+   与 GPU `/opt/x-post-media-repair/releases/<commit>`。
+2. 备份 CPU 在线 SQLite、Token 非秘密哈希/权限、daily env、release 指针及
+   受影响源码；备份 GPU worker env/unit、manifest 统计和 release 指针。
+3. 暂停 `x-post-schedule.timer` 与 `x-post-schedule-claim.timer`，等待正在运行的
+   oneshot 结束；不得启动或恢复 10:06 失败批次。
+4. 先切 GPU v2 worker，再把 CPU
+   `X_POST_DAILY_REPAIR_PROFILE` 改为
+   `x-h264-nvenc-720-trim139-v2` 并切 CPU release；在 timer 暂停期间完成。
+5. 核对 GPU 本机 `127.0.0.1:8820/health`、CPU 隧道
+   `127.0.0.1:18820/health` 和 CPU 实际配置 profile 三者一致。
+6. 在共享调度锁下运行 `scripts/x_post_drama_media_repair_backfill.py`，精确指定
+   池 53/54、各自 content ID、Episode 1 和旧错误
+   `source_not_repairable`。命令先 dry guard，再真实 GPU/COS/CPU 复验，全部
+   成功后才一次事务恢复 `pending`；报告写入 data disk。
+7. 只读核对原 URL、池 ID/FIFO/进度、账号粘性、10:06 旧 run/queue/log、
+   SQLite integrity 和重复组均未改变；恢复 timers。
+8. 不手工启动 schedule oneshot。由下一个自然发布点完成全账号原子建队列与
+   顺序发布，并核对 queue/log/Post。
+
+回滚：在自然发布前重新暂停 timers，CPU/GPU 分别切回部署前 release，并恢复
+CPU profile v1；保留 v2 COS/manifest 与 SQLite 事实。若池 53/54 已通过复验
+恢复但尚未发布，代码回滚后应暂停短剧 timer并人工评审，禁止直接用旧备份覆盖
+SQLite。若已产生 Post，任何回滚都不得删除 queue/log/绑定或回退剧集进度。
+
+## 2026-07-29 超长剧集裁尾生产记录
+
+- 15:32 CST 确认 `x-post-schedule.timer`、
+  `x-post-schedule-claim.timer` 及两个 oneshot 均为 inactive 后开始部署；
+  部署和 backfill 期间未启动旧批次。
+- GPU 使用提交
+  `b6f95f3874a9bb187aa7e8c7faac6254893ba787`，release 为
+  `/opt/x-post-media-repair/releases/b6f95f3874a9bb187aa7e8c7faac6254893ba787`，
+  备份为
+  `/data/x-post-media-repair/backups/20260729T153604+0800-prep-b6f95f3`。
+  本机及 CPU 隧道 health 均返回
+  `x-h264-nvenc-720-trim139-v2`。
+- CPU 首次使用同一提交，release 为
+  `/mnt/data-disk/x-post-automation/releases/b6f95f3874a9bb187aa7e8c7faac6254893ba787`，
+  全量备份为
+  `/mnt/data-disk/x-post-automation/backups/20260729T153641+0800-duration-trim-prep-b6f95f3`；
+  SQLite 在线备份 `integrity_check=ok`。
+- 首次生产 backfill 在 GPU 前按门禁失败，错误为
+  `media_host_not_allowed`。原因是 standalone 恢复脚本只安全读取 daily/token，
+  未读取正常 schedule unit 已使用的 `/etc/x-post-schedule.env`，因此遗漏
+  `img.tianmai.cn`。失败报告保留在
+  `/mnt/data-disk/x-post-automation/backfills/20260729T1547+0800-duration-trim/pool-53-54.json`；
+  当时池 53/54、队列、日志和 GPU manifest 均未改变。
+- 只在短剧恢复脚本增加严格三层配置解析
+  `daily -> 独立 repair token -> schedule`；schedule 文件只允许现有非秘密键，
+  明确拒绝 internal token、MySQL password 和 repair token，并将异常输出改为
+  脱敏。修复提交为
+  `7a20f05ecc760a79f3776fded08d47ccfa76d5d8`，CPU release 为
+  `/mnt/data-disk/x-post-automation/releases/7a20f05ecc760a79f3776fded08d47ccfa76d5d8`；
+  第二恢复点为
+  `/mnt/data-disk/x-post-automation/backups/20260729T1557+0800-schedule-loader-predeploy-7a20f05`。
+  GPU 业务代码未变化，继续使用 `b6f95f3` release。
+- 成功报告为
+  `/mnt/data-disk/x-post-automation/backfills/20260729T1602+0800-duration-trim-7a20f05/pool-53-54.json`，
+  SHA-256 为
+  `e908d9d4eb50f1310d9e5189e15b767fcf622f452f6a00892d2cddfdee502471`。
+  池 53 源时长 `182.791667s`、池 54 源时长 `171.52s`；两者均固定输出
+  `139.0s`，H264/yuv420p、AAC、720x1280，GPU manifest v2 为 ready，
+  CPU 二次下载 SHA/大小/probe 全部匹配。
+- 两项全链成功后于 16:09:38 CST 一次恢复为 `pending`；池 ID、FIFO、
+  Episode 1、未绑定状态和零队列历史保持不变。10:06 run `14` 仍为
+  `failed_preflight`，queue/log 均为 0；账号 10 仍绑定池 2、下一集 Episode 8。
+- 16:12 CST 只读候选预演为 6/6：账号 10 续发池 2 Episode 8；账号 9/8
+  分别领取池 53/54 Episode 1；账号 7/6/5 领取池 57/60/131 Episode 1。
+  SQLite `integrity_check=ok`，重复剧集组、`post_creating`、
+  `unknown_outcome` 均为 0。
+- 16:12 CST 恢复两个 timer；旧 daily timer 继续 masked。下一自然
+  16:20 批次的 queue/log/Post 结果完成后追加，不手工启动或重放。
+- 16:20 自然 run 17 完成全部媒体预检并原子建出 6 条队列；自然新增的
+  pool 2/57/60/131 四份 v2 manifest 全部 ready，其中 pool 131
+  `212.666667s -> 139.0s`，证明自然调度已实际执行超长裁尾。
+- 首队列 45 在 X 前因 `invalid_short_base_url` 停止；attempt=0、
+  unknown=0、X ID/URL 和短链/文案均为空，其余五条无 log。磁盘
+  `/etc/x-post-automation.env` 在 14:44 已被改为代码不允许的
+  `https://gy.g2flow.com/s2l`，15:46 sidecar 重启后才激活该漂移。
+  16:40 再次暂停 timer；按 `BUG-002.md` 修复配置并执行严格零尝试恢复后，
+  才允许 frozen run 继续，禁止新建计划或直接发布。真实恢复的报告必须是
+  `/mnt/data-disk/x-post-automation/recoveries/` 下的全新 JSON 文件；路径
+  越界、符号链接祖先、既有目标或缺少报告均失败关闭。
+- 最终 CPU 运行 release 为
+  `/mnt/data-disk/x-post-automation/releases/073d3f5523c5f8dba8e1babc9ce1447bcb1926fd`；
+  GitHub 远端精确提交已核对。Linux 恢复聚焦测试 41/41 通过，其中符号链接
+  祖先拒绝实测通过。GPU 继续使用 `b6f95f3` v2 release。
+- 17:05 CST 创建 root-only 备份
+  `/mnt/data-disk/x-post-automation/backups/20260729T170524+0800-pre-x-recovery-073d3f5`；
+  SQLite 在线备份 integrity 为 `ok`，manifest SHA-256 为
+  `d33cd170550b7123d76cdaef7eaef9e4f3d958b5443905826c637b8eeb42787e`。
+- 磁盘和 sidecar 进程的短链基础地址均精确恢复为
+  `https://ai.yingliangads.com/s2l`；sidecar/main API/public health 正常。
+  validate-only 报告 SHA-256 为
+  `afa8aa5e92ab866c39dbe7fe18854aeda64dc75cd02d8a79d6091c99f5e7f6e7`，
+  apply 报告 SHA-256 为
+  `ff2a491dc6237d87369293bd4f4e9752841b487740b4ce1185384bc0149a9c96`。
+  两份报告位于
+  `/mnt/data-disk/x-post-automation/recoveries/20260729T170702+0800-run17-q45/`。
+- 17:08 CST 恢复两个 timer 后，正常 scheduler 以
+  `resumed_existing_plan=true` 继续 run 17，没有新建批次。17:14:44 CST
+  完成 6/6，failed/unknown 均为 0：
+  - queue 45，账号 10，池 2 Episode 8：
+    `https://x.com/SecretAffa6ann/status/2082392814810214451`
+  - queue 46，账号 9，池 53 Episode 1：
+    `https://x.com/StorySnapj4ie/status/2082393104133304715`
+  - queue 47，账号 8，池 54 Episode 1：
+    `https://x.com/NaughtyLovm57c/status/2082393439207883000`
+  - queue 48，账号 7，池 57 Episode 1：
+    `https://x.com/ReelDramaves4/status/2082393766518743120`
+  - queue 49，账号 6，池 60 Episode 1：
+    `https://x.com/debil0j3/status/2082394043690958971`
+  - queue 50，账号 5，池 131 Episode 1：
+    `https://x.com/Kkkkkk2016911/status/2082394380652990480`
+- 六条 `https://ai.yingliangads.com/s2l/<queue>.html` 均无缓存实测 HTTP 200。
+  池 2 保持账号 10 粘性绑定并推进到 Episode 9；池 53/54/57/60/131 分别固定
+  到账号 9/8/7/6/5 并推进到 Episode 2。10:06 旧 run 14 继续保持
+  `failed_preflight`，queue/log 为 0。SQLite integrity 为 `ok`，重复剧集组、
+  `post_creating`、`unknown_outcome` 均为 0；schedule/claim timers active，
+  旧 daily timer 保持 masked。
+
+最终回滚边界：运行代码可切回
+`/mnt/data-disk/x-post-automation/releases/7a20f05ecc760a79f3776fded08d47ccfa76d5d8`，
+但应保留已修正的 `ai.yingliangads.com` 短链配置。由于 6 条 Post 已真实产生，
+禁止恢复部署前 SQLite、删除 queue/log/绑定或回退剧集进度。
