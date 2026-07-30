@@ -41,8 +41,10 @@ SQLITE_QUERY_BATCH_SIZE = 900
 MAX_DAILY_BATCH_SIZE = 50
 MAX_SCHEDULE_ACCOUNTS = 50
 MAX_DRAMA_POOL_BATCH_DELETE_SIZE = 100
+MAX_DRAMA_POOL_REPLAY_SIZE = 100
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
+DRAMA_REPLAY_REASON = "operator_full_replay_v1"
 DRAMA_POOL_DELETABLE_STATUSES = frozenset(
     {"pending", "validation_failed"}
 )
@@ -97,6 +99,7 @@ QUEUE_LEDGER_FIELDS = (
     "source_type",
     "material_key",
     "episode_key",
+    "drama_replay_generation",
     "pool_item_id",
     "drama_pool_item_id",
     "pool_created_at",
@@ -1022,6 +1025,8 @@ def ensure_storage(db_path):
                     free_episode_count INTEGER NOT NULL DEFAULT 0,
                     next_sub_number INTEGER NOT NULL DEFAULT 1,
                     published_episode_count INTEGER NOT NULL DEFAULT 0,
+                    replay_generation INTEGER NOT NULL DEFAULT 1
+                        CHECK(replay_generation>0),
                     assigned_account_id INTEGER NOT NULL DEFAULT 0
                         CHECK(assigned_account_id>=0),
                     assigned_at TEXT NOT NULL DEFAULT '',
@@ -1037,6 +1042,38 @@ def ensure_storage(db_path):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_drama_replay_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_item_id INTEGER NOT NULL,
+                    content_id TEXT NOT NULL,
+                    from_generation INTEGER NOT NULL
+                        CHECK(from_generation>0),
+                    to_generation INTEGER NOT NULL
+                        CHECK(to_generation=from_generation+1),
+                    from_status TEXT NOT NULL,
+                    from_free_episode_count INTEGER NOT NULL
+                        CHECK(from_free_episode_count>0),
+                    from_next_sub_number INTEGER NOT NULL
+                        CHECK(from_next_sub_number>1),
+                    from_published_episode_count INTEGER NOT NULL
+                        CHECK(from_published_episode_count>0),
+                    from_assigned_account_id INTEGER NOT NULL
+                        CHECK(from_assigned_account_id>0),
+                    from_assigned_at TEXT NOT NULL DEFAULT '',
+                    from_assigned_source_queue_id INTEGER,
+                    actor_user_id TEXT NOT NULL,
+                    actor_name TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                        CHECK(reason='operator_full_replay_v1'),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(pool_item_id,to_generation),
+                    FOREIGN KEY(pool_item_id)
+                        REFERENCES x_post_drama_pool(id)
+                )
+                """
+            )
             queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
             additive_columns = {
                 "account_username": "TEXT NOT NULL DEFAULT ''",
@@ -1047,6 +1084,10 @@ def ensure_storage(db_path):
                 "source_type": "TEXT NOT NULL DEFAULT 'material'",
                 "material_key": "TEXT NOT NULL DEFAULT ''",
                 "episode_key": "TEXT NOT NULL DEFAULT ''",
+                "drama_replay_generation": (
+                    "INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(drama_replay_generation>=0)"
+                ),
                 "pool_item_id": "INTEGER",
                 "drama_pool_item_id": "INTEGER",
                 "pool_created_at": "TEXT NOT NULL DEFAULT ''",
@@ -1085,6 +1126,10 @@ def ensure_storage(db_path):
                 ),
                 "assigned_at": "TEXT NOT NULL DEFAULT ''",
                 "assigned_source_queue_id": "INTEGER",
+                "replay_generation": (
+                    "INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK(replay_generation>0)"
+                ),
             }
             for name, definition in drama_pool_additive_columns.items():
                 if name not in drama_pool_columns:
@@ -1093,6 +1138,11 @@ def ensure_storage(db_path):
                         % (name, definition)
                     )
 
+            conn.execute(
+                "UPDATE x_post_queue SET drama_replay_generation=1 "
+                "WHERE source_type='drama' "
+                "AND drama_replay_generation=0"
+            )
             migration_timestamp = utc_now()
             for source_type in sorted(SCHEDULE_SOURCE_TYPES):
                 conn.execute(
@@ -1110,7 +1160,8 @@ def ensure_storage(db_path):
 
             legacy_rows = conn.execute(
                 "SELECT id,source_type,material_id,material_key,episode_key,"
-                "content_id,episode_number,run_date,created_at "
+                "content_id,episode_number,drama_replay_generation,"
+                "run_date,created_at "
                 "FROM x_post_queue ORDER BY id"
             ).fetchall()
             for row in legacy_rows:
@@ -1122,9 +1173,14 @@ def ensure_storage(db_path):
                     episode_number = _positive_int(
                         row["episode_number"], "episode_number"
                     )
-                    expected_episode_key = "%s:%s" % (
+                    replay_generation = _positive_int(
+                        row["drama_replay_generation"],
+                        "drama_replay_generation",
+                    )
+                    expected_episode_key = _drama_episode_key(
                         content_id,
                         episode_number,
+                        replay_generation,
                     )
                     if str(row["episode_key"] or "") != expected_episode_key:
                         raise XPostError(
@@ -1183,7 +1239,8 @@ def ensure_storage(db_path):
             # episode.  If no episode was confirmed, the earliest reservation
             # remains the fail-closed owner.
             drama_rows = conn.execute(
-                "SELECT id,content_id,assigned_account_id,assigned_at,"
+                "SELECT id,content_id,replay_generation,"
+                "assigned_account_id,assigned_at,"
                 "assigned_source_queue_id FROM x_post_drama_pool "
                 "ORDER BY created_at,id"
             ).fetchall()
@@ -1195,13 +1252,17 @@ def ensure_storage(db_path):
                     "WHERE q.source_type='drama' AND ("
                     "q.drama_pool_item_id=? OR "
                     "(q.drama_pool_item_id IS NULL AND q.content_id=?)"
-                    ") "
+                    ") AND q.drama_replay_generation=? "
                     "ORDER BY CASE WHEN q.status='published' "
                     "AND COALESCE(l.status,'')='published' "
                     "AND COALESCE(l.unknown_outcome,0)=0 "
                     "THEN 0 ELSE 1 END,"
                     "q.episode_number,q.created_at,q.id LIMIT 1",
-                    (pool["id"], pool["content_id"]),
+                    (
+                        pool["id"],
+                        pool["content_id"],
+                        pool["replay_generation"],
+                    ),
                 ).fetchone()
                 current_owner = int(pool["assigned_account_id"] or 0)
                 if canonical is None:
@@ -1333,6 +1394,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_assignment "
                 "ON x_post_drama_pool(assigned_account_id,status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_drama_replay_audit_pool "
+                "ON x_post_drama_replay_audit(pool_item_id,to_generation,id)"
             )
             # SQLite cannot add a FOREIGN KEY to a legacy table with ALTER
             # TABLE. These triggers preserve the same run_id integrity for
@@ -1473,6 +1538,8 @@ def ensure_storage(db_path):
                           SELECT 1 FROM x_post_drama_pool
                            WHERE id=NEW.drama_pool_item_id
                              AND content_id=NEW.content_id
+                             AND replay_generation=
+                                 NEW.drama_replay_generation
                              AND assigned_account_id IN (0,NEW.account_id)
                       )
                   )
@@ -1486,7 +1553,8 @@ def ensure_storage(db_path):
                 """
                 CREATE TRIGGER trg_x_post_queue_drama_update
                 BEFORE UPDATE OF source_type,drama_pool_item_id,content_id,
-                    episode_number,episode_key,account_id ON x_post_queue
+                    episode_number,episode_key,drama_replay_generation,
+                    account_id ON x_post_queue
                 WHEN (OLD.source_type='drama' OR NEW.source_type='drama')
                   AND (
                       NEW.source_type<>'drama'
@@ -1498,6 +1566,8 @@ def ensure_storage(db_path):
                           SELECT 1 FROM x_post_drama_pool
                            WHERE id=NEW.drama_pool_item_id
                              AND content_id=NEW.content_id
+                             AND replay_generation=
+                                 NEW.drama_replay_generation
                              AND assigned_account_id IN (0,NEW.account_id)
                       )
                   )
@@ -1543,10 +1613,124 @@ def ensure_storage(db_path):
                       OR NEW.assigned_source_queue_id
                          IS NOT OLD.assigned_source_queue_id
                   )
+                  AND NOT (
+                      NEW.replay_generation=OLD.replay_generation+1
+                      AND NEW.assigned_account_id=0
+                      AND NEW.assigned_at=''
+                      AND NEW.assigned_source_queue_id IS NULL
+                      AND EXISTS(
+                          SELECT 1 FROM x_post_drama_replay_audit a
+                           WHERE a.pool_item_id=OLD.id
+                             AND a.content_id=OLD.content_id
+                             AND a.from_generation=
+                                 OLD.replay_generation
+                             AND a.to_generation=
+                                 NEW.replay_generation
+                             AND a.from_status=OLD.status
+                             AND a.from_free_episode_count=
+                                 OLD.free_episode_count
+                             AND a.from_next_sub_number=
+                                 OLD.next_sub_number
+                             AND a.from_published_episode_count=
+                                 OLD.published_episode_count
+                             AND a.from_assigned_account_id=
+                                 OLD.assigned_account_id
+                             AND a.from_assigned_at=OLD.assigned_at
+                             AND a.from_assigned_source_queue_id
+                                 IS OLD.assigned_source_queue_id
+                             AND a.reason='operator_full_replay_v1'
+                      )
+                  )
                 BEGIN
                     SELECT RAISE(
                         ABORT,
                         'x_post_drama_pool assignment immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_pool_replay_generation_guard"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_drama_pool_replay_generation_guard
+                BEFORE UPDATE OF replay_generation ON x_post_drama_pool
+                WHEN NEW.replay_generation<>OLD.replay_generation
+                  AND NOT (
+                      NEW.replay_generation=OLD.replay_generation+1
+                      AND NEW.status='pending'
+                      AND NEW.next_sub_number=1
+                      AND NEW.published_episode_count=0
+                      AND NEW.assigned_account_id=0
+                      AND NEW.assigned_at=''
+                      AND NEW.assigned_source_queue_id IS NULL
+                      AND NEW.completed_at=''
+                      AND NEW.last_error_code=''
+                      AND NEW.last_error_message=''
+                      AND EXISTS(
+                          SELECT 1 FROM x_post_drama_replay_audit a
+                           WHERE a.pool_item_id=OLD.id
+                             AND a.content_id=OLD.content_id
+                             AND a.from_generation=
+                                 OLD.replay_generation
+                             AND a.to_generation=
+                                 NEW.replay_generation
+                             AND a.from_status=OLD.status
+                             AND a.from_free_episode_count=
+                                 OLD.free_episode_count
+                             AND a.from_next_sub_number=
+                                 OLD.next_sub_number
+                             AND a.from_published_episode_count=
+                                 OLD.published_episode_count
+                             AND a.from_assigned_account_id=
+                                 OLD.assigned_account_id
+                             AND a.from_assigned_at=OLD.assigned_at
+                             AND a.from_assigned_source_queue_id
+                                 IS OLD.assigned_source_queue_id
+                             AND a.reason='operator_full_replay_v1'
+                      )
+                  )
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_pool replay generation invalid'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_replay_audit_immutable_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_drama_replay_audit_immutable_update
+                BEFORE UPDATE ON x_post_drama_replay_audit
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_replay_audit immutable'
+                    );
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS "
+                "trg_x_post_drama_replay_audit_immutable_delete"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER
+                    trg_x_post_drama_replay_audit_immutable_delete
+                BEFORE DELETE ON x_post_drama_replay_audit
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'x_post_drama_replay_audit immutable'
                     );
                 END
                 """
@@ -1576,6 +1760,8 @@ def ensure_storage(db_path):
                              WHERE q.id=NEW.assigned_source_queue_id
                                AND q.source_type='drama'
                                AND q.account_id=NEW.assigned_account_id
+                               AND q.drama_replay_generation=
+                                   NEW.replay_generation
                                AND (
                                    q.drama_pool_item_id=NEW.id
                                    OR (
@@ -1812,6 +1998,22 @@ def _drama_content_id(value):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", content_id):
         raise XPostError("invalid_request", "短剧ID无效", 400)
     return content_id
+
+
+def _drama_episode_key(content_id, episode_number, replay_generation=1):
+    content_id = _drama_content_id(content_id)
+    episode_number = _positive_int(episode_number, "episode_number")
+    replay_generation = _positive_int(
+        replay_generation,
+        "drama_replay_generation",
+    )
+    if replay_generation == 1:
+        return "%s:%s" % (content_id, episode_number)
+    return "%s:replay%s:%s" % (
+        content_id,
+        replay_generation,
+        episode_number,
+    )
 
 
 def _drama_pool_item_ids(values):
@@ -2497,6 +2699,7 @@ class XPostStore:
             result["material_key"] = material_key
             result["episode_key"] = ""
             result["episode_number"] = 0
+            result["drama_replay_generation"] = 0
             result["name_tag"] = ""
         else:
             try:
@@ -2517,7 +2720,15 @@ class XPostStore:
             episode_number = _positive_int(
                 payload.get("episode_number"), "episode_number"
             )
-            expected_episode_key = "%s:%s" % (content_id, episode_number)
+            replay_generation = _positive_int(
+                payload.get("drama_replay_generation", 1),
+                "drama_replay_generation",
+            )
+            expected_episode_key = _drama_episode_key(
+                content_id,
+                episode_number,
+                replay_generation,
+            )
             supplied_episode_key = str(
                 payload.get("episode_key", expected_episode_key) or ""
             ).strip()
@@ -2530,6 +2741,7 @@ class XPostStore:
             result["material_key"] = ""
             result["episode_key"] = supplied_episode_key
             result["episode_number"] = episode_number
+            result["drama_replay_generation"] = replay_generation
             result["name_tag"] = _clean_text(
                 payload.get("name_tag"), "name_tag", 500
             )
@@ -2672,6 +2884,7 @@ class XPostStore:
                         "source_type",
                         "material_key",
                         "episode_key",
+                        "drama_replay_generation",
                     )
                     + QUEUE_FIELDS
                 )
@@ -2757,6 +2970,8 @@ class XPostStore:
                     not drama
                     or str(drama["content_id"]) != values["content_id"]
                     or str(drama["created_at"]) != values["drama_pool_created_at"]
+                    or int(drama["replay_generation"])
+                    != int(values["drama_replay_generation"])
                     or drama["status"] in {
                         "completed",
                         "validation_failed",
@@ -3883,6 +4098,7 @@ class XPostStore:
             "LEFT JOIN x_post_queue q ON q.id=("
             "SELECT q2.id FROM x_post_queue q2 "
             "WHERE q2.drama_pool_item_id=p.id "
+            "AND q2.drama_replay_generation=p.replay_generation "
             "ORDER BY q2.episode_number DESC,q2.id DESC LIMIT 1"
             ") "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
@@ -3972,6 +4188,7 @@ class XPostStore:
             rows = conn.execute(
                 "SELECT q.id AS queue_id,q.episode_number,q.account_id,"
                 "q.account_username,q.status AS queue_status,"
+                "q.drama_replay_generation,"
                 "COALESCE(r.run_date,'') AS run_date,"
                 "COALESCE(r.publish_time,'') AS publish_time,"
                 "COALESCE(l.status,'') AS publish_status,"
@@ -3983,8 +4200,9 @@ class XPostStore:
                 "LEFT JOIN x_post_schedule_run r ON r.id=q.schedule_run_id "
                 "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
                 "WHERE q.drama_pool_item_id=? "
+                "AND q.drama_replay_generation=? "
                 "ORDER BY q.episode_number,q.id",
-                (pool_item_id,),
+                (pool_item_id, pool["replay_generation"]),
             ).fetchall()
         by_episode = {int(row["episode_number"]): _row_dict(row) for row in rows}
         total = int(pool["free_episode_count"] or 0)
@@ -3997,6 +4215,9 @@ class XPostStore:
                 item = {
                     "queue_id": None,
                     "episode_number": episode_number,
+                    "drama_replay_generation": int(
+                        pool["replay_generation"]
+                    ),
                     "account_id": 0,
                     "account_username": "",
                     "queue_status": "pending",
@@ -4129,6 +4350,334 @@ class XPostStore:
         item = _row_dict(row)
         item["deleted"] = True
         return item
+
+    def reset_drama_pool_for_replay(
+        self,
+        pool_item_ids,
+        *,
+        actor,
+        reason,
+        expected_snapshots,
+        validate_only=True,
+    ):
+        pool_item_ids = _drama_pool_item_ids(pool_item_ids)
+        if len(pool_item_ids) > MAX_DRAMA_POOL_REPLAY_SIZE:
+            raise XPostError(
+                "invalid_request",
+                "Too many drama pool items were requested for replay",
+                400,
+            )
+        if reason != DRAMA_REPLAY_REASON:
+            raise XPostError(
+                "invalid_request",
+                "Drama replay reason is not the approved policy version",
+                400,
+            )
+        if not isinstance(validate_only, bool):
+            raise XPostError(
+                "invalid_request",
+                "validate_only must be a boolean",
+                400,
+            )
+        actor = actor if isinstance(actor, dict) else {}
+        actor_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        actor_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        if (
+            not actor_user_id
+            or not actor_name
+            or any(
+                ord(char) < 32
+                for value in (actor_user_id, actor_name)
+                for char in value
+            )
+        ):
+            raise XPostError(
+                "invalid_request",
+                "Drama replay actor is incomplete",
+                400,
+            )
+        if not isinstance(expected_snapshots, list):
+            raise XPostError(
+                "invalid_request",
+                "expected_snapshots must be a list",
+                400,
+            )
+        expected_by_id = {}
+        for raw in expected_snapshots:
+            if not isinstance(raw, dict):
+                raise XPostError(
+                    "invalid_request",
+                    "Replay snapshot must be an object",
+                    400,
+                )
+            pool_item_id = _positive_int(
+                raw.get("pool_item_id"),
+                "pool_item_id",
+            )
+            if pool_item_id in expected_by_id:
+                raise XPostError(
+                    "invalid_request",
+                    "Replay snapshots must be unique",
+                    400,
+                )
+            expected_by_id[pool_item_id] = {
+                "content_id": _drama_content_id(
+                    raw.get("content_id")
+                ),
+                "status": str(raw.get("status", "") or "").strip(),
+                "replay_generation": _positive_int(
+                    raw.get("replay_generation"),
+                    "replay_generation",
+                ),
+                "free_episode_count": _positive_int(
+                    raw.get("free_episode_count"),
+                    "free_episode_count",
+                ),
+                "published_episode_count": _nonnegative_int(
+                    raw.get("published_episode_count"),
+                    "published_episode_count",
+                ),
+                "next_sub_number": _positive_int(
+                    raw.get("next_sub_number"),
+                    "next_sub_number",
+                ),
+                "assigned_account_id": _positive_int(
+                    raw.get("assigned_account_id"),
+                    "assigned_account_id",
+                ),
+            }
+        if set(expected_by_id) != set(pool_item_ids):
+            raise XPostError(
+                "invalid_request",
+                "Replay snapshots do not match the selected drama rows",
+                400,
+            )
+
+        timestamp = utc_now()
+        placeholders = ",".join("?" for _item in pool_item_ids)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            running = conn.execute(
+                "SELECT id,status FROM x_post_schedule_run "
+                "WHERE source_type='drama' "
+                "AND status IN ('claimed','queued','running') "
+                "ORDER BY id LIMIT 1"
+            ).fetchone()
+            if running:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_replay_run_in_progress",
+                    "A drama schedule run is still active",
+                    409,
+                )
+            unsettled = conn.execute(
+                "SELECT q.id FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.source_type='drama' AND ("
+                "q.status IN ('queued','reserved','publishing') "
+                "OR COALESCE(l.unknown_outcome,0)=1"
+                ") ORDER BY q.id LIMIT 1"
+            ).fetchone()
+            if unsettled:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_replay_queue_in_progress",
+                    "A drama queue is unsettled",
+                    409,
+                )
+            rows = conn.execute(
+                "SELECT * FROM x_post_drama_pool WHERE id IN (%s)"
+                % placeholders,
+                tuple(pool_item_ids),
+            ).fetchall()
+            rows_by_id = {int(row["id"]): row for row in rows}
+            if set(rows_by_id) != set(pool_item_ids):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_not_found",
+                    "A selected drama pool row does not exist",
+                    404,
+                )
+
+            results = []
+            for pool_item_id in pool_item_ids:
+                row = rows_by_id[pool_item_id]
+                expected = expected_by_id[pool_item_id]
+                actual = {
+                    "content_id": str(row["content_id"]),
+                    "status": str(row["status"]),
+                    "replay_generation": int(
+                        row["replay_generation"]
+                    ),
+                    "free_episode_count": int(
+                        row["free_episode_count"]
+                    ),
+                    "published_episode_count": int(
+                        row["published_episode_count"]
+                    ),
+                    "next_sub_number": int(row["next_sub_number"]),
+                    "assigned_account_id": int(
+                        row["assigned_account_id"]
+                    ),
+                }
+                if actual != expected:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_replay_snapshot_conflict",
+                        "Drama replay state changed after operator review",
+                        409,
+                    )
+                if (
+                    actual["published_episode_count"] <= 0
+                    or actual["assigned_account_id"] <= 0
+                    or str(row["status"]) not in {
+                        "active",
+                        "completed",
+                    }
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_replay_not_eligible",
+                        "Only confirmed previously published dramas can "
+                        "start a replay generation",
+                        409,
+                    )
+                queue_rows = conn.execute(
+                    "SELECT q.id,q.status,l.status AS log_status,"
+                    "q.episode_number,"
+                    "COALESCE(l.unknown_outcome,0) AS unknown_outcome,"
+                    "COALESCE(l.x_post_id,'') AS x_post_id,"
+                    "COALESCE(l.x_post_url,'') AS x_post_url "
+                    "FROM x_post_queue q "
+                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "WHERE q.source_type='drama' "
+                    "AND q.drama_pool_item_id=? "
+                    "AND q.drama_replay_generation=? "
+                    "ORDER BY q.episode_number,q.id",
+                    (
+                        pool_item_id,
+                        actual["replay_generation"],
+                    ),
+                ).fetchall()
+                if (
+                    len(queue_rows)
+                    != actual["published_episode_count"]
+                    or [
+                        int(queue["episode_number"])
+                        for queue in queue_rows
+                    ]
+                    != list(
+                        range(
+                            1,
+                            actual["published_episode_count"] + 1,
+                        )
+                    )
+                    or actual["next_sub_number"]
+                    != actual["published_episode_count"] + 1
+                    or actual["published_episode_count"]
+                    > actual["free_episode_count"]
+                    or any(
+                        str(queue["status"]) != "published"
+                        or str(queue["log_status"] or "") != "published"
+                        or int(queue["unknown_outcome"] or 0) != 0
+                        or not str(queue["x_post_id"] or "")
+                        or not str(queue["x_post_url"] or "")
+                        for queue in queue_rows
+                    )
+                ):
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_replay_history_conflict",
+                        "Drama replay requires complete confirmed history "
+                        "with no failed or ambiguous queue",
+                        409,
+                    )
+                to_generation = actual["replay_generation"] + 1
+                results.append(
+                    {
+                        "pool_item_id": pool_item_id,
+                        "content_id": str(row["content_id"]),
+                        "from_generation": actual[
+                            "replay_generation"
+                        ],
+                        "to_generation": to_generation,
+                        "previous_published_episode_count": actual[
+                            "published_episode_count"
+                        ],
+                        "previous_assigned_account_id": actual[
+                            "assigned_account_id"
+                        ],
+                    }
+                )
+                if validate_only:
+                    continue
+                conn.execute(
+                    "INSERT INTO x_post_drama_replay_audit("
+                    "pool_item_id,content_id,from_generation,to_generation,"
+                    "from_status,from_free_episode_count,"
+                    "from_next_sub_number,"
+                    "from_published_episode_count,"
+                    "from_assigned_account_id,from_assigned_at,"
+                    "from_assigned_source_queue_id,actor_user_id,"
+                    "actor_name,reason,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        pool_item_id,
+                        str(row["content_id"]),
+                        actual["replay_generation"],
+                        to_generation,
+                        str(row["status"]),
+                        actual["free_episode_count"],
+                        actual["next_sub_number"],
+                        actual["published_episode_count"],
+                        actual["assigned_account_id"],
+                        str(row["assigned_at"] or ""),
+                        row["assigned_source_queue_id"],
+                        actor_user_id,
+                        actor_name,
+                        reason,
+                        timestamp,
+                    ),
+                )
+                cursor = conn.execute(
+                    "UPDATE x_post_drama_pool SET "
+                    "replay_generation=?,status='pending',"
+                    "next_sub_number=1,published_episode_count=0,"
+                    "assigned_account_id=0,assigned_at='',"
+                    "assigned_source_queue_id=NULL,completed_at='',"
+                    "last_checked_at=?,last_error_code='',"
+                    "last_error_message='',updated_at=? "
+                    "WHERE id=? AND replay_generation=? "
+                    "AND assigned_account_id=?",
+                    (
+                        to_generation,
+                        timestamp,
+                        timestamp,
+                        pool_item_id,
+                        actual["replay_generation"],
+                        actual["assigned_account_id"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_drama_replay_snapshot_conflict",
+                        "Drama replay state changed during reset",
+                        409,
+                    )
+            if validate_only:
+                conn.rollback()
+            else:
+                conn.commit()
+        return {
+            "items": results,
+            "reset_count": 0 if validate_only else len(results),
+            "validated_count": len(results),
+            "validate_only": validate_only,
+            "reason": reason,
+        }
 
     def get_schedule_run(self, run_id):
         run_id = _positive_int(run_id, "run_id")
@@ -4857,6 +5406,8 @@ class XPostStore:
                         or str(pool["content_id"]) != values["content_id"]
                         or str(pool["created_at"])
                         != values["drama_pool_created_at"]
+                        or int(pool["replay_generation"])
+                        != int(values["drama_replay_generation"])
                         or int(values["episode_number"])
                         > int(pool["free_episode_count"])
                         or int(pool["assigned_account_id"] or 0)
@@ -4960,7 +5511,8 @@ class XPostStore:
                                 "description=?,language=?,labels=?,name_tag=?,"
                                 "last_checked_at=?,last_error_code='',"
                                 "last_error_message='',updated_at=? "
-                                "WHERE id=? AND assigned_account_id=0",
+                                "WHERE id=? AND assigned_account_id=0 "
+                                "AND replay_generation=?",
                                 (
                                     values["account_id"],
                                     timestamp,
@@ -4973,6 +5525,7 @@ class XPostStore:
                                     timestamp,
                                     timestamp,
                                     values["drama_pool_item_id"],
+                                    values["drama_replay_generation"],
                                 ),
                             )
                             if assignment_cursor.rowcount != 1:
@@ -6502,7 +7055,8 @@ class XPostStore:
     def _mark_drama_episode_published(conn, queue_id, timestamp):
         queue = conn.execute(
             "SELECT source_type,drama_pool_item_id,content_id,"
-            "episode_number,episode_key,account_id "
+            "episode_number,episode_key,drama_replay_generation,"
+            "account_id "
             "FROM x_post_queue WHERE id=?",
             (queue_id,),
         ).fetchone()
@@ -6512,14 +7066,17 @@ class XPostStore:
             "SELECT * FROM x_post_drama_pool WHERE id=?",
             (queue["drama_pool_item_id"],),
         ).fetchone()
-        expected_key = "%s:%s" % (
+        expected_key = _drama_episode_key(
             queue["content_id"],
             queue["episode_number"],
+            queue["drama_replay_generation"],
         )
         if (
             not pool
             or str(pool["content_id"]) != str(queue["content_id"])
             or str(queue["episode_key"]) != expected_key
+            or int(pool["replay_generation"])
+            != int(queue["drama_replay_generation"])
             or int(pool["assigned_account_id"] or 0)
             != int(queue["account_id"])
         ):
@@ -6547,7 +7104,8 @@ class XPostStore:
             "UPDATE x_post_drama_pool SET status=?,next_sub_number=?,"
             "published_episode_count=?,completed_at=?,last_checked_at=?,"
             "last_error_code='',last_error_message='',updated_at=? "
-            "WHERE id=? AND next_sub_number=?",
+            "WHERE id=? AND replay_generation=? "
+            "AND next_sub_number=?",
             (
                 "completed" if completed else "active",
                 next_number,
@@ -6556,6 +7114,7 @@ class XPostStore:
                 timestamp,
                 timestamp,
                 pool["id"],
+                queue["drama_replay_generation"],
                 episode_number,
             ),
         )
@@ -6648,19 +7207,23 @@ class XPostStore:
         pool = None
         if queue["drama_pool_item_id"] is not None:
             pool = conn.execute(
-                "SELECT id,content_id,assigned_account_id "
+                "SELECT id,content_id,replay_generation,"
+                "assigned_account_id "
                 "FROM x_post_drama_pool WHERE id=?",
                 (queue["drama_pool_item_id"],),
             ).fetchone()
         if pool is None:
             pool = conn.execute(
-                "SELECT id,content_id,assigned_account_id "
+                "SELECT id,content_id,replay_generation,"
+                "assigned_account_id "
                 "FROM x_post_drama_pool WHERE content_id=?",
                 (queue["content_id"],),
             ).fetchone()
         if (
             not pool
             or str(pool["content_id"]) != str(queue["content_id"])
+            or int(pool["replay_generation"])
+            != int(queue["drama_replay_generation"])
             or int(pool["assigned_account_id"] or 0) <= 0
             or int(pool["assigned_account_id"]) != int(queue["account_id"])
         ):
@@ -7002,7 +7565,8 @@ class XPostStore:
             binding_queue = (
                 conn.execute(
                     "SELECT id,source_type,drama_pool_item_id,content_id,"
-                    "account_id,episode_number,status "
+                    "drama_replay_generation,account_id,episode_number,"
+                    "status "
                     "FROM x_post_queue WHERE id=?",
                     (pool["assigned_source_queue_id"],),
                 ).fetchone()
@@ -7087,6 +7651,10 @@ class XPostStore:
                 >= int(queue["episode_number"] or 0)
                 or str(pool["content_id"])
                 != str(queue["content_id"])
+                or int(pool["replay_generation"] or 0)
+                != int(queue["drama_replay_generation"] or 0)
+                or int(binding_queue["drama_replay_generation"] or 0)
+                != int(queue["drama_replay_generation"] or 0)
                 or int(pool["next_sub_number"] or 0)
                 != int(queue["episode_number"] or 0)
             )

@@ -57,12 +57,14 @@ def pool_row(
     *,
     assigned_account_id=0,
     next_sub_number=1,
+    replay_generation=1,
 ):
     return {
         "id": pool_id,
         "content_id": content_id,
         "created_at": created_at,
         "next_sub_number": next_sub_number,
+        "replay_generation": replay_generation,
         "assigned_account_id": assigned_account_id,
         "assigned_at": (
             "2026-07-27T00:30:00Z" if assigned_account_id else ""
@@ -350,6 +352,23 @@ class DramaSelectorTests(unittest.TestCase):
                 ],
                 account_ids=[2],
             )
+
+    def test_replay_generation_has_a_distinct_episode_identity(self):
+        selected = select_drama_pool_episodes(
+            FakeConnection([episode_row(1, unlocked=1)]),
+            [
+                pool_row(
+                    10,
+                    "DRAMA-A",
+                    "2026-07-27T01:00:00Z",
+                    2,
+                    replay_generation=2,
+                )
+            ],
+            account_ids=[2],
+        )
+        self.assertEqual(selected[0]["episode_key"], "DRAMA-A:replay2:1")
+        self.assertEqual(selected[0]["drama_replay_generation"], 2)
 
     def test_query_error_stops_the_complete_selection(self):
         connection = FakeConnection([episode_row(1, unlocked=1)])
