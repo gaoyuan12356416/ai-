@@ -21,7 +21,7 @@
 | 主后台路由、权限和审计 | 开发 | `app.py` | 新增素材池、每日设置和手动发布代理，待部署 |
 | 发布池 UI 与导航 | 前端 | `static/tt-post-pool.html`、导航配置 | 每日发布与手动按钮已完成，待部署 |
 | claim/runner、systemd 与隧道 | 开发 | `scripts/`、`deploy/` | 分钟调度与 path 即时唤醒已完成，待部署 |
-| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | 本地 569/569 通过（TT 190、X 351、素材状态 28） |
+| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | 本地 571/571 通过（TT 192、X 351、素材状态 28） |
 | GitHub-first CPU/GPU 部署 | 运维 | immutable release | 待执行 |
 
 ### 本轮增量任务

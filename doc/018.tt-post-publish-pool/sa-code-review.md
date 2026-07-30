@@ -125,7 +125,7 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
 
 ### 评审结论
 
-上线与关闭态实测发现的 2 个 P0、3 个 P1 已在当前工作树完成关闭，未发现仍阻断“TT 长素材 + 每日素材池 + 手动立即发布”继续生产验收的 P0/P1。当前结论基于本地 `190/190` TT 相关自动化；最终生产通过仍以 4665764 复测、七表行数和零 Direct Post 证据为准。
+上线与关闭态实测发现的 2 个 P0、5 个 P1 已在当前工作树完成关闭，未发现仍阻断“TT 长素材 + 每日素材池 + 手动立即发布”继续生产验收的 P0/P1。当前结论基于本地 `192/192` TT 相关自动化；最终生产通过仍以 4665764 复测、七表行数和零 Direct Post 证据为准。
 
 ### 关键实现检查
 
@@ -161,6 +161,8 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
    - P1 公共兼容写入口：主应用精确 `/api/admin/tt-posts/queue` 方法映射改为仅 GET，删除公共创建转发；动态 cancel/reconcile 仍受同源与权限校验保护。
    - P0 长素材成片大小：TT 官方视频媒体边界为 4 GiB；源下载仍限制 2 GiB，规范化后的最终成片默认/部署上限调整为 4 GiB。
    - P1 手动 path 生命周期：`/run/tt-post` 只由常驻 sidecar 持有，oneshot runner 不再声明同名 `RuntimeDirectory`，避免退出时清理 kick 文件。
+   - P1 ready manifest 当前合同：prepare 与 publish 读取 ready manifest 时均重新核验当前 `max_output_bytes` 与 profile、期望 job、已冻结 content、规范化 probe、SHA 以及由当前 COS 域名/前缀和 SHA 推导出的精确对象 URL。同一测试用 subtests 分别篡改 content/job/SHA/URL/probe/profile，并验证 publish 在 TikTok init 前 fail-close；配置收紧、身份漂移或元数据异常均不能复用旧合同结果。
+   - P1 公网入口到 GPU 端到端长任务窗口：4665764 首次转码和 2.36 GB COS 分片上传同时超过公网通用 admin 旧 300 秒、主应用通用 600 秒和 CPU 到 GPU 旧 900 秒窗口。按由内向外留余量：CPU `TT_POST_GPU_TIMEOUT=3600`，主应用仅 exact preview 使用 `TT_POST_ADMIN_PREVIEW_TIMEOUT=3660`、其他路由仍为 600，nginx 仅 exact preview read/send 为 3720 秒。其他 admin API 不放宽、三项门禁值不变，同身份重试复用 ready 成片。
 
 ### 本地验证
 
@@ -168,11 +170,11 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
 | --- | ---: |
 | TT Core | 49/49 |
 | TT Service + Runner | 70/70 |
-| TT GPU | 26/26 |
+| TT GPU | 27/27 |
 | TT 发布池 UI | 23/23 |
 | TT 个号设置 UI | 11/11 |
-| TT App contract | 11/11 |
-| **合计** | **190/190** |
+| TT App contract | 12/12 |
+| **合计** | **192/192** |
 
 ### 生产代码验收待填写
 

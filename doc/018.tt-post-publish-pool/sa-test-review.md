@@ -38,7 +38,7 @@
 
 ### 结论
 
-TC-057–TC-069 的本地自动化覆盖完整，所选六个 TT 相关测试集共 `190/190` 通过（Core 49、Service + Runner 70、GPU 26、发布池 UI 23、个号设置 UI 11、App contract 11）。该结果证明仓库内状态机、接口和页面合同满足本轮增量要求，但不证明生产部署、线上定时执行或真实 TikTok 发布已经通过。
+TC-057–TC-071 的本地自动化覆盖完整，所选六个 TT 相关测试集共 `192/192` 通过（Core 49、Service + Runner 70、GPU 27、发布池 UI 23、个号设置 UI 11、App contract 12）。TC-071 同时由部署合同断言和独立 App exact-preview 超时测试覆盖。该结果证明仓库内状态机、接口和页面合同满足本轮增量要求，但不证明生产部署、线上定时执行或真实 TikTok 发布已经通过。
 
 ### 用例与自动化证据
 
@@ -57,6 +57,8 @@ TC-057–TC-069 的本地自动化覆盖完整，所选六个 TT 相关测试集
 | TC-067 | `test_legacy_exact_queue_creation_is_not_publicly_writable`、`test_queue_actions_use_dynamic_sidecar_routes_and_safe_audit` | 通过 |
 | TC-068 | `test_default_prepared_output_ceiling_matches_tiktok_four_gib`、部署样例 `TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296` 断言 | 通过 |
 | TC-069 | 部署合同断言 sidecar 持有 `RuntimeDirectory=tt-post` 且 oneshot runner 不声明同名目录 | 通过 |
+| TC-070 | `test_ready_manifest_is_revalidated_against_current_output_limit` 用 subtests 篡改 content/job/SHA/精确 URL/probe/profile；另从 publish 验证 `prepared_media_invalid` 发生在 TikTok init 前 | 通过 |
+| TC-071 | `DeployContractTests` 断言 nginx exact preview 3720 秒、主应用 preview 3660/其他路由 600、CPU 到 GPU 3600 且三项门禁关闭；`test_material_preview_uses_long_timeout_without_widening_other_routes` 独立验证主应用精确路由 | 通过 |
 
 ### 覆盖性复核
 
@@ -69,6 +71,8 @@ TC-057–TC-069 的本地自动化覆盖完整，所选六个 TT 相关测试集
 - 并发竞态覆盖 120 秒 per-run lease、token 轮换、release-first、freeze-first 和旧 owner 失权；结果同时核对 queue 唯一性、run 状态与 pool 归属。
 - 账号切换用例固定检查未配置/加载态恢复 `11:00`，避免跨账号 UI 状态泄漏。
 - 主应用合同用例固定精确 `/queue` 为 GET-only，同时检查动态 cancel/reconcile 路由仍存在且不暴露 claim token/caption。
+- ready manifest 不是永久可信缓存；同一测试除“先按宽合同生成、再收紧配置”外，还以 subtests 实际篡改 content、job、SHA、精确 COS URL、probe 和 profile，prepare 全部 fail-close，并证明 publish 在 TikTok init 前拒绝篡改 manifest。
+- 公网入口到 GPU 的长任务窗口按由内向外留出余量：CPU 使用 `TT_POST_GPU_TIMEOUT=3600`；主应用只给 exact preview 使用 `TT_POST_ADMIN_PREVIEW_TIMEOUT=3660`，其他路由保持 600；nginx 只给 exact preview location 设置 read/send 3720 秒。独立 App contract 测试使 TT 总数更新为 `192/192`，其他 admin API 和三项 Direct Post 门禁均未放宽。
 
 ### 生产测试待填写
 

@@ -101,6 +101,8 @@ CPU 状态机、账号安全边界、GPU 成片、发布门禁、主后台权限
 | TC-067 | 公共兼容 `/queue` 禁止写入 | 在三道门禁关闭状态下，通过主应用公共兼容入口尝试 `POST /api/admin/tt-posts/queue`，并检查查询、取消和手动调和入口 | 主应用精确 `/queue` 白名单仅允许 `GET`，POST 不转发且不能 reserve 素材；既有 GET 查询及动态 `cancel/reconcile` 路由保留 | P1 | 本地自动化通过 |
 | TC-068 | 长素材规范化后成片大小合同 | 检查 GPU 默认/部署配置，并以最终成片超过 2 GiB、未超过 4 GiB 的长素材做生产预览 | 源文件下载仍限制 2 GiB；最终成片允许至 TikTok 4 GiB 边界，超过 4 GiB 才 fail-close | P0 | 本地自动化通过，生产复测中 |
 | TC-069 | 手动 path 唤醒目录生命周期 | 启动常驻 sidecar 与 path，触发一次 oneshot runner，再检查 invocation、结果和 `/run/tt-post` | `/run/tt-post` 只由 sidecar 持有；runner 退出后目录和 kick 文件仍存在，path 立即触发成功，timer 继续兜底 | P1 | 本地自动化通过，生产复测中 |
+| TC-070 | ready manifest 按当前合同复验 | 同一 GPU 测试先按较宽上限生成 manifest，再收紧 `max_output_bytes`；随后以 subtests 分别篡改 content、job、SHA、精确 COS URL、probe 和 profile，最后从 publish 路径注入篡改 manifest | prepare/publish 共用当前合同复验；任一篡改均以 `prepared_media_invalid` fail-close，publish 必须在 TikTok init 前拒绝且 init 调用为 0 | P1 | 本地自动化通过 |
+| TC-071 | 公网入口到 GPU 端到端长任务窗口 | 在 `DeployContractTests` 校验 nginx、主应用/CPU 部署环境与三项门禁，并以独立 App contract 测试精确 preview 的代理超时；结合 4665764 首次真实制作超过旧公网 300 秒/CPU 900 秒窗口的时序复核幂等 job | 由内向外保留超时余量：CPU 到 GPU `TT_POST_GPU_TIMEOUT=3600`，主应用仅 exact preview 使用 `TT_POST_ADMIN_PREVIEW_TIMEOUT=3660`、其他路由保持 600，nginx 仅 exact preview read/send 为 3720 秒。不放宽其他 admin API、不改变三项门禁，重试复用 ready 成片 | P1 | 本地自动化通过，生产复测中 |
 
 ### 生产验收待填写
 

@@ -41483,6 +41483,16 @@ try:
 except (TypeError, ValueError):
     TT_POST_ADMIN_TIMEOUT = 360
 TT_POST_ADMIN_TIMEOUT = max(1, min(TT_POST_ADMIN_TIMEOUT, 600))
+try:
+    TT_POST_ADMIN_PREVIEW_TIMEOUT = int(
+        os.environ.get("TT_POST_ADMIN_PREVIEW_TIMEOUT", "3660") or "3660"
+    )
+except (TypeError, ValueError):
+    TT_POST_ADMIN_PREVIEW_TIMEOUT = 3660
+TT_POST_ADMIN_PREVIEW_TIMEOUT = max(
+    1,
+    min(TT_POST_ADMIN_PREVIEW_TIMEOUT, 3660),
+)
 
 TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/accounts": {"GET"},
@@ -41679,6 +41689,11 @@ def _tt_post_service_request(method, path, payload=None, query=None):
                     400,
                 )
             safe_query[normalized_key] = str(value)
+    request_timeout = (
+        TT_POST_ADMIN_PREVIEW_TIMEOUT
+        if path == "/api/admin/tt-posts/materials/preview"
+        else TT_POST_ADMIN_TIMEOUT
+    )
     try:
         response = requests.request(
             method,
@@ -41691,7 +41706,7 @@ def _tt_post_service_request(method, path, payload=None, query=None):
             },
             params=safe_query or None,
             json=payload,
-            timeout=TT_POST_ADMIN_TIMEOUT,
+            timeout=request_timeout,
         )
     except requests.RequestException:
         raise TTPostAdminClientError(

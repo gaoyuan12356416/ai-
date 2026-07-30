@@ -78,6 +78,8 @@
 | SA-023 | P1 | 公共兼容 POST `/queue` 在门禁关闭时仍可能 reserve 素材 | 主应用精确 `/queue` 改为 GET-only；保留 GET 与动态 cancel/reconcile | 自动化通过，本地关闭 |
 | SA-024 | P0 | 4665764 通过时长校验后，规范化成片超过旧 2 GiB 合同 | 源下载继续限制 2 GiB；最终成片按 TikTok Content Posting 官方上限调整为 4 GiB | 自动化通过，生产复测中 |
 | SA-025 | P1 | oneshot runner 与 sidecar 共用 `RuntimeDirectory` 时可能删除手动 kick 目录 | `/run/tt-post` 只由常驻 sidecar 持有；runner 复用但不声明所有权 | 自动化通过，生产复测中 |
+| SA-026 | P1 | ready manifest 在生成后若运行配置收紧或 profile/对象身份变化，旧缓存可能绕过当前媒体合同 | prepare 与 publish 共用响应校验；每次复用都按当前 `max_output_bytes`、profile、job/content 身份、规范化 probe、SHA 和精确 COS URL 全量复验，任一不符 fail-close | 自动化通过，本地关闭 |
+| SA-027 | P1 | 公网通用 `/api/admin/` 旧 300 秒、主应用通用 600 秒及 CPU 侧旧 GPU 900 秒窗口均小于 4665764 首次转码加 2.36 GB COS 分片上传耗时，上游可能先超时而 GPU 仍在完成同一 job | 按调用层级留余量：CPU 到 GPU 3600 秒，主应用 exact preview `TT_POST_ADMIN_PREVIEW_TIMEOUT=3660`，nginx exact preview read/send 3720 秒；其他主应用路由仍为 600 秒，其他 admin API 不变、三项门禁不变，确定性 job 重试复用 ready 成片 | 自动化通过，生产复测中 |
 
 ### 生产验收待填写
 

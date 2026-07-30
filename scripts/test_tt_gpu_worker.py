@@ -121,6 +121,25 @@ class FakeRunner:
         raise AssertionError("unexpected command: %r" % command)
 
 
+class LargeOutputFakeRunner(FakeRunner):
+    def __call__(self, command, **_kwargs):
+        command = list(command)
+        self.commands.append(command)
+        executable = Path(command[0]).name.lower()
+        if "ffprobe" in executable:
+            if not self.probes:
+                raise AssertionError("unexpected ffprobe")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(self.probes.pop(0)),
+                stderr="",
+            )
+        if "ffmpeg" in executable:
+            Path(command[-1]).write_bytes(b"x" * (2 * 1024 * 1024))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError("unexpected command: %r" % command)
+
+
 class FakeObjectStore:
     def __init__(self):
         self.upload_calls = []
@@ -300,7 +319,7 @@ def seed_prepared(
 ):
     manifest = {
         "completed_at": "2026-07-29T00:00:00Z",
-        "request": {},
+        "request": {"content_id": CONTENT_ID},
         "result": {
             "brand_overlay_review_required": True,
             "content_id": CONTENT_ID,
@@ -310,7 +329,20 @@ def seed_prepared(
             "output_size": 1234,
             "output_url": "https://pull.example.com/tt-post-prepared/aa/%s.mp4"
             % ("a" * 64),
-            "probe": prepared_probe(45.8),
+            "probe": {
+                "audio_channels": 2,
+                "audio_codec": "aac",
+                "audio_profile": "lc",
+                "audio_sample_rate": 48000,
+                "duration": 45.8,
+                "frame_rate": 30.0,
+                "height": 1920,
+                "pixel_format": "yuv420p",
+                "profile": "high",
+                "size": 1234,
+                "video_codec": "h264",
+                "width": 1080,
+            },
             "profile": worker.PROFILE,
         },
         "status": "ready",
@@ -345,6 +377,83 @@ class TTGPUWorkerTests(unittest.TestCase):
             worker.DEFAULT_MAX_SOURCE_BYTES,
             2 * 1024 * 1024 * 1024,
         )
+
+    def test_ready_manifest_is_revalidated_against_current_output_limit(self):
+        broad = replace(
+            make_config(self.root),
+            max_output_bytes=4 * 1024 * 1024,
+        )
+        processor = self.processor(
+            config=broad,
+            runner=LargeOutputFakeRunner(),
+        )
+        created = processor.prepare(make_prepare())
+        self.assertEqual(created["output_size"], 2 * 1024 * 1024)
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        valid_manifest = worker._read_json(manifest_path)
+
+        tightened = replace(broad, max_output_bytes=1024 * 1024)
+        tightened_processor = self.processor(config=tightened)
+        with self.assertRaises(worker.TTGPUError) as caught:
+            tightened_processor.prepare(make_prepare())
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+
+        mutations = {
+            "content_id": lambda item: item["result"].__setitem__(
+                "content_id",
+                "DifferentContent",
+            ),
+            "job_id": lambda item: item["result"].__setitem__(
+                "job_id",
+                "ttpreview-different",
+            ),
+            "output_sha256": lambda item: item["result"].__setitem__(
+                "output_sha256",
+                "b" * 64,
+            ),
+            "output_url": lambda item: item["result"].__setitem__(
+                "output_url",
+                "https://pull.example.com/tt-post-prepared/evil.mp4",
+            ),
+            "probe": lambda item: item["result"]["probe"].__setitem__(
+                "width",
+                720,
+            ),
+            "profile": lambda item: item["result"].__setitem__(
+                "profile",
+                "legacy-profile",
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(field=label):
+                broken = json.loads(json.dumps(valid_manifest))
+                mutate(broken)
+                worker._atomic_write_json(manifest_path, broken)
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    processor.prepare(make_prepare())
+                self.assertEqual(
+                    caught.exception.code,
+                    "prepared_media_invalid",
+                )
+
+        broken = json.loads(json.dumps(valid_manifest))
+        broken["result"]["direct_post_eligible"] = True
+        broken["result"]["output_url"] = (
+            "https://pull.example.com/tt-post-prepared/evil.mp4"
+        )
+        worker._atomic_write_json(manifest_path, broken)
+        gated = replace(
+            broad,
+            live_enabled=True,
+            direct_audit_approved=True,
+            url_property_verified=True,
+        )
+        api = FakeTikTokAPI()
+        publish_processor = self.processor(config=gated, api=api)
+        with self.assertRaises(worker.TTGPUError) as caught:
+            publish_processor.publish(make_publish(gated))
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+        self.assertEqual(api.init_calls, [])
 
     def test_creator_avatar_signed_query_is_not_returned(self):
         normalized = worker.normalize_creator_info(

@@ -2764,6 +2764,7 @@ class DeployContractTests(unittest.TestCase):
         path_unit = (
             root / "deploy" / "tt-post-runner.path"
         ).read_text("utf-8")
+        nginx = (root / "deploy" / "nginx-x-oauth.conf").read_text("utf-8")
         service = (root / "deploy" / "tt-post-service.service").read_text("utf-8")
         runner = (root / "deploy" / "tt-post-runner.service").read_text("utf-8")
         gpu_env = (
@@ -2782,6 +2783,13 @@ class DeployContractTests(unittest.TestCase):
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
             env,
         )
+        self.assertIn("TT_POST_GPU_TIMEOUT=3600", env)
+        self.assertIn(
+            "location = /api/admin/tt-posts/materials/preview",
+            nginx,
+        )
+        self.assertIn("proxy_read_timeout 3720s;", nginx)
+        self.assertIn("proxy_send_timeout 3720s;", nginx)
         self.assertIn("OnCalendar=*-*-* *:*:00 Asia/Shanghai", timer)
         self.assertIn(
             "PathChanged=/run/tt-post/manual-kick",
@@ -2806,6 +2814,8 @@ class DeployContractTests(unittest.TestCase):
             "TT_POST_ADMIN_SERVICE_URL=http://127.0.0.1:18829",
             app_env,
         )
+        self.assertIn("TT_POST_ADMIN_TIMEOUT=600", app_env)
+        self.assertIn("TT_POST_ADMIN_PREVIEW_TIMEOUT=3660", app_env)
         self.assertIn("TT_POST_INTERNAL_TOKEN=", app_env)
         self.assertIn(
             "EnvironmentFile=-/etc/tt-post-app.env",

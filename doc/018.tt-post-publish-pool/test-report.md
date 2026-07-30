@@ -134,17 +134,17 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.
 
 ### 执行结果
 
-本地执行以下六个 TT 相关测试集，共 `190/190` 通过：
+本地执行以下六个 TT 相关测试集，共 `192/192` 通过：
 
 | 测试集 | 通过 | 失败 |
 | --- | ---: | ---: |
 | TT Core | 49 | 0 |
 | TT Service + Runner | 70 | 0 |
-| TT GPU | 26 | 0 |
+| TT GPU | 27 | 0 |
 | TT 发布池 UI | 23 | 0 |
 | TT 个号设置 UI | 11 | 0 |
-| TT App contract | 11 | 0 |
-| **合计** | **190** | **0** |
+| TT App contract | 12 | 0 |
+| **合计** | **192** | **0** |
 
 执行命令：
 
@@ -161,11 +161,15 @@ python -m unittest scripts.test_tt_posts_core scripts.test_tt_posts_service scri
 | P1 | 主应用公共兼容 `POST /queue` 可绕过新入口，在门禁关闭时 reserve 素材 | 主应用精确 `/api/admin/tt-posts/queue` 方法白名单改为仅 `GET`；保留 GET 查询及动态 cancel/reconcile，移除公共兼容写入转发 | 本地关闭 |
 | P0 | 4665764 通过 3600 秒校验后，1080x1920 最终成片超过旧 2 GiB GPU 合同 | 最终成片上限按 TikTok Content Posting 官方边界调整为 4 GiB；源下载仍保持 2 GiB；默认值和部署样例均由自动化固定 | 本地关闭，生产复测中 |
 | P1 | sidecar 与 oneshot runner 同时声明 `/run/tt-post`，runner 退出后可能清理手动 kick 目录 | 运行目录只由常驻 sidecar 持有，runner 复用目录但不声明所有权；部署合同测试固定该约束 | 本地关闭，生产复测中 |
+| P1 | ready manifest 生成后配置收紧或媒体身份漂移时，旧缓存可能绕过当前输出合同 | prepare/publish 共用当前合同复验；同一测试以 subtests 实际篡改 content/job/SHA/精确 URL/probe/profile，并验证 publish 在 TikTok init 前返回 `prepared_media_invalid` | 本地关闭 |
+| P1 | 公网通用 `/api/admin/` 旧 300 秒、主应用通用 600 秒和 CPU 侧旧 GPU 900 秒均覆盖不了 4665764 首次转码与 2.36 GB COS 分片上传，上游会先超时而 GPU 继续安全完成同一 job | 由内向外留余量：CPU 到 GPU 3600 秒，主应用 exact preview 3660 秒、其他路由 600，nginx exact preview 3720 秒；其他 admin API和三项门禁均不变 | 本地关闭，生产复测中 |
 
 ### 已由本地自动化证明的增量事实
 
-- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`，但不计入本次 TT `190/190`。
+- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`，但不计入本次 TT `192/192`。
 - GPU 源文件默认上限保持 2 GiB，最终成片默认/部署上限固定为 4 GiB，以承接长素材规范化后文件膨胀。
+- ready manifest 命中时仍按当前合同重新核验输出上限与 profile、job/content 身份、规范化 probe、SHA 和精确 COS 对象 URL；篡改任一字段均失败，publish 不会在校验失败后调用 TikTok init。
+- 公网入口到 GPU 的首次长任务窗口由内向外保留余量：CPU 到 GPU 为 3600 秒，主应用仅 exact preview 为 `TT_POST_ADMIN_PREVIEW_TIMEOUT=3660`、其他路由仍为 600 秒，nginx 仅 exact preview read/send 为 3720 秒；调用方异常中断不取消 GPU 侧确定性 job，后续同身份重试复用已完成成片，且不改变其他 admin API或三项 Direct Post 门禁。
 - `/run/tt-post` 只由常驻 sidecar 的 systemd `RuntimeDirectory` 持有，oneshot runner 不再重复声明同名目录。
 - 每日设置与待发素材分开持久化；同一自然日时点幂等，账号级 FIFO 和账号隔离成立。
 - 发布宽限固定为 600 秒；非 600 配置被拒绝，宽限内恢复与超窗 `missed` 均有自动化覆盖。

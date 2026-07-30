@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -1754,7 +1755,7 @@ def _stable_hash(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _prepare_response(manifest, reused):
+def _prepare_response(manifest, reused, config, expected_job_id):
     result = manifest.get("result") if isinstance(manifest, dict) else None
     if not isinstance(result, dict):
         raise TTGPUError("manifest_invalid", "prepare manifest is invalid", 500)
@@ -1769,6 +1770,80 @@ def _prepare_response(manifest, reused):
     }
     if not required.issubset(result):
         raise TTGPUError("manifest_invalid", "prepare manifest is incomplete", 500)
+    probe = result.get("probe")
+    stored_request = manifest.get("request")
+    try:
+        output_size = int(result.get("output_size"))
+        probe_size = int(probe.get("size")) if isinstance(probe, dict) else 0
+        duration = (
+            float(probe.get("duration")) if isinstance(probe, dict) else 0.0
+        )
+        frame_rate = (
+            float(probe.get("frame_rate")) if isinstance(probe, dict) else 0.0
+        )
+        width = int(probe.get("width")) if isinstance(probe, dict) else 0
+        height = int(probe.get("height")) if isinstance(probe, dict) else 0
+        audio_channels = (
+            int(probe.get("audio_channels"))
+            if isinstance(probe, dict)
+            else 0
+        )
+        audio_sample_rate = (
+            int(probe.get("audio_sample_rate"))
+            if isinstance(probe, dict)
+            else 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        raise TTGPUError(
+            "prepared_media_invalid",
+            "stored prepared media metadata is invalid",
+            500,
+        ) from None
+    output_sha_raw = str(result.get("output_sha256") or "").strip()
+    output_sha = output_sha_raw.lower()
+    output_url = str(result.get("output_url") or "").strip()
+    expected_output_url = "%s/%s/%s/%s.mp4" % (
+        config.cos_domain.rstrip("/"),
+        config.cos_prefix.strip("/"),
+        output_sha[:2],
+        output_sha,
+    )
+    request_content_id = (
+        str(stored_request.get("content_id") or "")
+        if isinstance(stored_request, dict)
+        else ""
+    )
+    if (
+        str(result.get("job_id") or "") != str(expected_job_id or "")
+        or not CONTENT_ID_RE.fullmatch(request_content_id)
+        or str(result.get("content_id") or "") != request_content_id
+        or not CONTENT_ID_RE.fullmatch(str(result.get("content_id") or ""))
+        or str(result.get("profile") or "") != str(config.profile)
+        or not HEX_64_RE.fullmatch(output_sha)
+        or output_sha_raw != output_sha
+        or output_size <= 0
+        or output_size > int(config.max_output_bytes)
+        or probe_size != output_size
+        or not math.isfinite(duration)
+        or duration <= 0
+        or duration > float(config.max_duration_seconds)
+        or not math.isfinite(frame_rate)
+        or abs(frame_rate - 30.0) > 0.01
+        or (width, height) != (1080, 1920)
+        or str(probe.get("video_codec") or "").lower() != "h264"
+        or str(probe.get("profile") or "").lower() != "high"
+        or str(probe.get("pixel_format") or "").lower() != "yuv420p"
+        or str(probe.get("audio_codec") or "").lower() != "aac"
+        or str(probe.get("audio_profile") or "").lower() != "lc"
+        or audio_channels != 2
+        or audio_sample_rate != 48000
+        or output_url != expected_output_url
+    ):
+        raise TTGPUError(
+            "prepared_media_invalid",
+            "stored prepared media does not match the current contract",
+            500,
+        )
     return {
         "brand_overlay_review_required": bool(
             result.get("brand_overlay_review_required", True)
@@ -1881,7 +1956,12 @@ class TTPostGPUProcessor:
                     for key, value in reuse_contract.items()
                 )
             ):
-                return _prepare_response(existing, True)
+                return _prepare_response(
+                    existing,
+                    True,
+                    self.config,
+                    job_id,
+                )
             raise TTGPUError(
                 "prepare_idempotency_conflict",
                 "job_id already belongs to a different prepared artifact",
@@ -2073,7 +2153,12 @@ class TTPostGPUProcessor:
                 "version": 1,
             }
             _atomic_write_json(manifest_path, manifest)
-            return _prepare_response(manifest, False)
+            return _prepare_response(
+                manifest,
+                False,
+                self.config,
+                job_id,
+            )
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -2100,7 +2185,12 @@ class TTPostGPUProcessor:
                 "prepare must complete before publish",
                 409,
             )
-        prepared = _prepare_response(prepare_manifest, True)
+        prepared = _prepare_response(
+            prepare_manifest,
+            True,
+            self.config,
+            job_id,
+        )
         if not prepared["direct_post_eligible"]:
             raise TTGPUError(
                 "tt_media_profile_not_direct_post_eligible",
