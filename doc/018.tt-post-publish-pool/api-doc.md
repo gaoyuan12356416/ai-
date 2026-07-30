@@ -50,7 +50,7 @@
 }
 ```
 
-预览与随后入池基于素材 ID、真实 `content_id`、源地址/指纹、裁剪秒数和媒体 profile 生成同一确定性 prepare job 身份。源或 profile 未变化时，GPU 复用既有完成产物；任一身份字段变化时生成新 job。
+预览与随后入池基于素材 ID、真实 `content_id`、源地址/指纹、裁剪秒数、媒体 profile、当前 Logo SHA 和固定片尾 SHA 生成同一确定性 prepare job 身份。默认 profile 为 `tt-post-hevc-720x1280-v2`，兼容回退 profile 为 `tt-post-h264-720x1280-v2`；两者及任何旧 profile 的产物都不得跨 profile 作为 ready 缓存复用。CPU prepare 请求强制携带 `expected_profile`，GPU 在下载与制作前完成握手；GPU 返回后 CPU 再复验响应 profile。ready 复用时 GPU 重新读取并哈希当前 Logo/片尾；源、profile 或品牌资产身份任一变化时不得复用旧完成产物。
 
 冻结一条账号池素材：
 
@@ -178,9 +178,14 @@ GPU publish 请求中的敏感账号凭证只存在于 AES-GCM 短时任务信�
 | 409 | `tt_post_recurring_pool_empty` | 当前账号没有待发布素材 |
 | 409 | `tt_post_account_publish_busy` | 当前账号已有执行中或待核对任务 |
 | 409 | `tt_post_live_gates_closed` | 发布门禁未全部开放，未消费素材 |
+| 409 | `prepare_profile_mismatch` | prepare 请求的 `expected_profile` 与 GPU 当前 profile 不一致，已在下载前拒绝 |
+| 409 | `tt_prepared_media_profile_mismatch` | GPU 返回的成片 profile 与 CPU 当前预期不一致 |
+| 409 | `prepare_idempotency_conflict` | 同一 prepare job 的源、profile、Logo 或固定片尾身份发生变化 |
 | 500 | `prepared_media_invalid` | GPU 最终成片为空或超过 4 GiB 合同 |
 | 502 | `tt_upstream_rejected` | TikTok 返回已脱敏错误 |
 | 503 | `tt_post_service_unavailable` | CPU sidecar 或其依赖暂不可用 |
+
+4 GiB 是 API 的硬安全上限，不代表交付合格。当前 34.8 分钟素材的交付验收要求低于 500 MB；默认 HEVC 方案按 60 秒样片预计约 295 MB，H.264 兼容回退预计约 433 MB。两者都不是完整生产实测，实际结果须以新 profile 生产重跑为准。
 
 ## 兼容性说明
 

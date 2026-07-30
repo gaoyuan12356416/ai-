@@ -176,7 +176,9 @@ TikTok 当前官方规则同时构成本需求的强制发布门禁：
 - 批量预览和建队均按顺序逐条执行。素材不存在、真实 Drama ID 无效、GPU 制作失败、素材已有历史或时间冲突只影响当前项，必须继续处理后续项并返回安全明细。
 - 每日时间必须为严格 `HH:MM`，固定 `Asia/Shanghai`；自动 run 以对应上海日期换算 UTC 后落库。
 - TT 素材时长预校验为 `0 < duration <= 3600`；不得修改 X 渠道的 140 秒合同。最终成片仍必须不超过目标账号实时 `max_video_post_duration_sec`。
-- GPU 源文件下载上限保持 2 GiB；1080x1920 规范化后的最终成片上限为 4 GiB，与 TikTok Content Posting 视频媒体限制一致，超过时仍 fail-close。
+- GPU 源文件下载上限保持 2 GiB。默认最终成片 profile 固定为 `tt-post-hevc-720x1280-v2`：原生 720 × 1280、HEVC/H.265、受控 VBR `900k`（`maxrate=1350k`、`bufsize=1800k`）和 AAC `128k`，正片主时长只完整编码一次。60 秒样片实测 VMAF 89.79，并已在当前后台链路与 Chrome 151 完整播放；TikTok 官方媒体规格支持 H.265，但这不等于目标账号 Direct Post 已通过。`tt-post-h264-720x1280-v2` 仅作为受控兼容回退：H.264 `1500k/maxrate 2200k/bufsize 3000k`、AAC `128k`，60 秒样片 VMAF 90.24。4 GiB 仅是不可突破的硬安全上限，超过仍 fail-close；它不是正常成片目标。交付验收要求最终文件低于 500 MB；34.8 分钟默认 HEVC 方案预计约 295 MB，H.264 回退方案预计约 433 MB，均为样片推算，完整生产成片仍必须标记“待重跑”。
+- CPU 发起 prepare 时必须显式携带当前 `expected_profile`；GPU 必须在源下载和制作前完成 profile 握手，不一致时以 `prepare_profile_mismatch` fail-close。GPU 返回后 CPU 仍须独立复验响应 profile，不一致时以 `tt_prepared_media_profile_mismatch` 拒绝，不能冻结素材或继续发布链路。
+- Logo 与固定片尾的当前 SHA 属于 prepare 幂等身份。每次 ready 复用都必须重新读取并哈希这两个本地文件；任一文件变化均以 `prepare_idempotency_conflict` 拒绝旧 job，不能静默复用带旧品牌资产的成片。
 - 服务端始终以素材真实映射渲染 `caption_template`；模板必须包含 `{{contect_id}}` 或 `{{content_id}}`，未知占位符 fail-close，渲染结果以 UTF-16 单位计算且不得超过 2200。
 - 旧客户端仍可只提交已经渲染的 `caption_text`；两字段均省略时继续使用当前默认模板。若同时提交 `caption_template` 和 `caption_text`，两者按真实 Drama ID 渲染后必须逐字一致。
 - 精确重放旧任务即使发布时间已临近/已过，也必须在新任务时间校验和 GPU 之前返回原任务，不得改写历史模板或描述。相同幂等键只要请求中的素材、账号、时间、模板、渲染文案或确认信息任一改变，就返回幂等冲突；之后修改账号级设置不得改写或阻断历史任务重放。
@@ -185,7 +187,8 @@ TikTok 当前官方规则同时构成本需求的强制发布门禁：
 - GPU 接口不接受 raw Token，只接受 AES-GCM 短时信封；AAD 绑定任务、账号和操作。
 - GPU 接口不记录请求头/请求体；Token 不进入持久化对象的 `repr` 和异常。
 - 正片使用用户已确认的圆角 DramaWave Logo 规格；Logo 文件 SHA 纳入成片幂等指纹。
-- 正片末尾使用已确认的 0.9 秒 phone-match 过渡：裁剪后的最后净帧缩至约 `760x1352`，新版片尾在底层开始播放，正片音频淡出；不得硬切。
+- 正片末尾使用已确认的 0.9 秒 phone-match 过渡：在 720 × 1280 输出画布内缩放最后净帧，新版片尾在底层开始播放，正片音频淡出；不得硬切。
+- 正片主时长只允许完整编码一次。不得先把 720P 正片完整编码成 1080P，再在 phone-match 阶段对整条正片做第二次完整编码；Logo、真实 Drama ID、过渡和片尾必须纳入单次完整输出编码流程，或只对短过渡/片尾区间做受控处理。
 - 新版片尾含示例剧信息。GPU 必须明显叠加当前真实 Drama ID，并将固定画面标注为教程示例，避免把示例 ID 当成真实 ID。
 - 当前制作 profile 明确包含品牌 Logo 和推广引导，只用于关闭态预览/人工工作流；GPU publish 必须读取 prepare manifest 的 `direct_post_eligible`，缺失或为 false 时在创建 publish ledger 之前拒绝。
 - 服务器已有成片必须使用 `PULL_FROM_URL`，禁止以 `FILE_UPLOAD` 规避 URL Property。

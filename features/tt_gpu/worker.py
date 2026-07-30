@@ -52,7 +52,18 @@ except ImportError:  # pragma: no cover - Windows-only branch.
     fcntl = None
 
 
-PROFILE = "tt-post-h264-1080x1920-v1"
+OUTPUT_WIDTH = 720
+OUTPUT_HEIGHT = 1280
+HEVC_VIDEO_BITRATE = "900k"
+HEVC_VIDEO_MAXRATE = "1350k"
+HEVC_VIDEO_BUFSIZE = "1800k"
+H264_VIDEO_BITRATE = "1500k"
+H264_VIDEO_MAXRATE = "2200k"
+H264_VIDEO_BUFSIZE = "3000k"
+AUDIO_BITRATE = "128k"
+MAX_DELIVERY_AVERAGE_BITRATE_BPS = 1_900_000
+PROFILE = "tt-post-hevc-720x1280-v2"
+H264_FALLBACK_PROFILE = "tt-post-h264-720x1280-v2"
 HEALTH_PATH = "/health"
 CREATOR_INFO_PATH = "/internal/tt-post/creator-info"
 PREPARE_PATH = "/internal/tt-post/prepare"
@@ -68,7 +79,7 @@ DEFAULT_TRANSITION_SECONDS = 0.9
 DEFAULT_COS_PREFIX = "tt-post-prepared"
 DEFAULT_MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 # TikTok Content Posting accepts video media up to 4 GiB. Long sources can
-# expand after the fixed 1080x1920 normalization, so the prepared artifact
+# expand after normalization, so the prepared artifact
 # ceiling follows that platform boundary while source downloads stay at 2 GiB.
 DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024 * 1024
 # TikTok creator_info currently allows up to 3,600 seconds for some accounts.
@@ -106,7 +117,9 @@ PRIVACY_LEVELS = frozenset(
         "SELF_ONLY",
     }
 )
-PREPARE_REQUIRED_FIELDS = frozenset({"job_id", "content_id", "source_url"})
+PREPARE_REQUIRED_FIELDS = frozenset(
+    {"job_id", "content_id", "source_url", "expected_profile"}
+)
 PREPARE_OPTIONAL_FIELDS = frozenset(
     {"source_sha256", "source_size", "source_trim_tail_seconds"}
 )
@@ -423,12 +436,15 @@ class WorkerConfig:
             )
         )
         encoder = str(
-            os.environ.get("TT_POST_GPU_VIDEO_ENCODER", "h264_nvenc") or ""
+            os.environ.get("TT_POST_GPU_VIDEO_ENCODER", "hevc_nvenc") or ""
         ).strip()
-        if encoder not in {"h264_nvenc", "libx264"}:
+        if encoder not in {"hevc_nvenc", "h264_nvenc", "libx264"}:
             raise TTGPUError(
                 "invalid_configuration",
-                "TT_POST_GPU_VIDEO_ENCODER must be h264_nvenc or libx264",
+                (
+                    "TT_POST_GPU_VIDEO_ENCODER must be hevc_nvenc, "
+                    "h264_nvenc, or libx264"
+                ),
                 500,
             )
         secret_id = str(os.environ.get("TT_POST_GPU_COS_SECRET_ID", "") or "").strip()
@@ -463,6 +479,11 @@ class WorkerConfig:
             ffmpeg_bin=ffmpeg,
             ffprobe_bin=ffprobe,
             video_encoder=encoder,
+            profile=(
+                PROFILE
+                if encoder == "hevc_nvenc"
+                else H264_FALLBACK_PROFILE
+            ),
             cos_secret_id=secret_id,
             cos_secret_key=secret_key,
             cos_bucket=bucket,
@@ -1028,7 +1049,8 @@ def _frame_rate(value):
     return result if result > 0 else 0.0
 
 
-def validate_prepared_output(payload, path, max_size, expected_duration):
+def validate_prepared_output(config, payload, path, max_size, expected_duration):
+    video_contract = _delivery_video_contract(config)
     videos = _stream_items(payload, "video")
     audios = _stream_items(payload, "audio")
     if len(videos) != 1 or len(audios) != 1:
@@ -1059,12 +1081,15 @@ def validate_prepared_output(payload, path, max_size, expected_duration):
     except OSError:
         size = 0
     profile = str(video.get("profile") or "").strip().lower()
+    codec_tag = str(video.get("codec_tag_string") or "").strip().lower()
     audio_profile = str(audio.get("profile") or "").strip().lower()
+    average_bitrate = size * 8.0 / duration if duration > 0 else math.inf
     if (
-        str(video.get("codec_name") or "").lower() != "h264"
-        or profile != "high"
+        str(video.get("codec_name") or "").lower() != video_contract["codec"]
+        or profile != video_contract["profile"]
+        or codec_tag != video_contract["codec_tag"]
         or str(video.get("pix_fmt") or "").lower() != "yuv420p"
-        or (width, height) != (1080, 1920)
+        or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
         or abs(rate - 30.0) > 0.01
         or str(audio.get("codec_name") or "").lower() != "aac"
         or audio_profile != "lc"
@@ -1073,6 +1098,7 @@ def validate_prepared_output(payload, path, max_size, expected_duration):
         or size <= 0
         or size > int(max_size)
         or duration <= 0
+        or average_bitrate > MAX_DELIVERY_AVERAGE_BITRATE_BPS
         or abs(duration - float(expected_duration)) > max(
             1.0,
             float(expected_duration) * 0.02,
@@ -1092,9 +1118,10 @@ def validate_prepared_output(payload, path, max_size, expected_duration):
         "frame_rate": 30.0,
         "height": height,
         "pixel_format": "yuv420p",
-        "profile": "high",
+        "profile": video_contract["profile"],
         "size": size,
-        "video_codec": "h264",
+        "video_codec": video_contract["codec"],
+        "video_codec_tag": video_contract["codec_tag"],
         "width": width,
     }
 
@@ -1111,11 +1138,11 @@ def _ffmpeg_filter_path(path):
 
 def _base_video_filter():
     return (
-        "scale=w=1080:h=1920:force_original_aspect_ratio=decrease:"
+        "scale=w=%d:h=%d:force_original_aspect_ratio=decrease:"
         "force_divisible_by=2,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
+        "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,"
         "setsar=1,fps=30,format=yuv420p"
-    )
+    ) % (OUTPUT_WIDTH, OUTPUT_HEIGHT, OUTPUT_WIDTH, OUTPUT_HEIGHT)
 
 
 def build_outro_filter(config, drama_id_text_path, tutorial_text_path):
@@ -1125,57 +1152,113 @@ def build_outro_filter(config, drama_id_text_path, tutorial_text_path):
     return ",".join(
         [
             _base_video_filter(),
-            "drawbox=x=42:y=60:w=996:h=170:color=black@0.78:t=fill",
-            "drawbox=x=42:y=60:w=14:h=170:color=0xFF2E88@1.0:t=fill",
+            "drawbox=x=28:y=40:w=664:h=114:color=black@0.78:t=fill",
+            "drawbox=x=28:y=40:w=10:h=114:color=0xFF2E88@1.0:t=fill",
             (
                 "drawtext=fontfile='%s':textfile='%s':"
-                "fontcolor=white:fontsize=64:x=80:y=88"
+                "fontcolor=white:fontsize=43:x=53:y=59"
             )
             % (font, drama_text),
             (
                 "drawtext=fontfile='%s':textfile='%s':"
-                "fontcolor=white:fontsize=30:x=(w-text_w)/2:y=h-142:"
-                "box=1:boxcolor=black@0.72:boxborderw=18"
+                "fontcolor=white:fontsize=20:x=(w-text_w)/2:y=h-95:"
+                "box=1:boxcolor=black@0.72:boxborderw=12"
             )
             % (font, tutorial_text),
         ]
     )
 
 
+def _delivery_video_contract(config):
+    if config.video_encoder == "hevc_nvenc":
+        if config.profile != PROFILE:
+            raise TTGPUError(
+                "invalid_configuration",
+                "HEVC encoder requires the HEVC media profile",
+                500,
+            )
+        return {
+            "codec": "hevc",
+            "codec_tag": "hvc1",
+            "profile": "main",
+        }
+    if config.video_encoder in {"h264_nvenc", "libx264"}:
+        if config.profile != H264_FALLBACK_PROFILE:
+            raise TTGPUError(
+                "invalid_configuration",
+                "H.264 encoder requires the H.264 fallback media profile",
+                500,
+            )
+        return {
+            "codec": "h264",
+            "codec_tag": "avc1",
+            "profile": "high",
+        }
+    raise TTGPUError(
+        "invalid_configuration",
+        "unsupported TikTok delivery encoder",
+        500,
+    )
+
+
 def _encoder_arguments(config):
-    if config.video_encoder == "h264_nvenc":
+    if config.video_encoder in {"hevc_nvenc", "h264_nvenc"}:
+        is_hevc = config.video_encoder == "hevc_nvenc"
         return [
             "-c:v",
-            "h264_nvenc",
+            config.video_encoder,
             "-preset",
-            "p5",
+            "p6",
             "-tune",
             "hq",
             "-profile:v",
-            "high",
+            "main" if is_hevc else "high",
             "-rc",
             "vbr",
-            "-cq",
-            "20",
             "-b:v",
-            "8M",
+            HEVC_VIDEO_BITRATE if is_hevc else H264_VIDEO_BITRATE,
             "-maxrate",
-            "10M",
+            HEVC_VIDEO_MAXRATE if is_hevc else H264_VIDEO_MAXRATE,
             "-bufsize",
-            "16M",
+            HEVC_VIDEO_BUFSIZE if is_hevc else H264_VIDEO_BUFSIZE,
+            "-multipass",
+            "fullres",
+            "-rc-lookahead",
+            "32",
+            "-spatial-aq",
+            "1",
+            "-temporal-aq",
+            "1",
+            "-aq-strength",
+            "8",
+            "-bf",
+            "3",
+            "-b_ref_mode",
+            "middle",
+            "-tag:v",
+            "hvc1" if is_hevc else "avc1",
         ]
-    return [
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "19",
-        "-profile:v",
-        "high",
-        "-level:v",
-        "4.1",
-    ]
+    if config.video_encoder == "libx264":
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-profile:v",
+            "high",
+            "-level:v",
+            "4.1",
+            "-b:v",
+            H264_VIDEO_BITRATE,
+            "-maxrate",
+            H264_VIDEO_MAXRATE,
+            "-bufsize",
+            H264_VIDEO_BUFSIZE,
+            "-tag:v",
+            "avc1",
+        ]
+    _delivery_video_contract(config)
+    raise AssertionError("unreachable")
 
 
 def build_normalize_command(
@@ -1214,8 +1297,8 @@ def build_normalize_command(
             [
                 "-filter_complex",
                 (
-                    "[0:v]%s[base];[%s:v]scale=198:198:flags=lanczos[logo];"
-                    "[base][logo]overlay=72:108:format=auto[v]"
+                    "[0:v]%s[base];[%s:v]scale=132:132:flags=lanczos[logo];"
+                    "[base][logo]overlay=48:72:format=auto[v]"
                 )
                 % (video_filter, logo_input_index),
                 "-map",
@@ -1255,7 +1338,7 @@ def build_normalize_command(
             "-ac",
             "2",
             "-b:a",
-            "160k",
+            AUDIO_BITRATE,
             "-map_metadata",
             "-1",
             "-map_chapters",
@@ -1280,8 +1363,10 @@ def build_phone_match_command(
     source_duration,
     outro_duration,
     transition_seconds=DEFAULT_TRANSITION_SECONDS,
+    source_has_audio=True,
+    logo_path=None,
 ):
-    """Overlap the last source frame into the playing outro with a phone match."""
+    """Normalize the source once and overlap its ending into the playing outro."""
 
     transition = min(
         float(transition_seconds),
@@ -1296,21 +1381,48 @@ def build_phone_match_command(
     transition_start_text = "%.6f" % transition_start
     fade_start_text = "%.6f" % fade_start
     scale_progress = "min(t/%s\\,1)" % transition_text
+    source_audio_values = {
+        "source_end": source_duration_text,
+        "start": transition_start_text,
+        "transition": transition_text,
+    }
+    if source_has_audio:
+        source_audio = (
+            "[0:a]aresample=48000:async=1:first_pts=0,apad,"
+            "atrim=start=0:end=%(source_end)s,asetpts=PTS-STARTPTS,"
+            "afade=t=out:st=%(start)s:d=%(transition)s[sa];"
+        ) % source_audio_values
+    else:
+        source_audio = (
+            "anullsrc=channel_layout=stereo:sample_rate=48000,"
+            "atrim=start=0:end=%(source_end)s,asetpts=PTS-STARTPTS,"
+            "afade=t=out:st=%(start)s:d=%(transition)s[sa];"
+        ) % source_audio_values
+    logo_path = Path(logo_path or config.logo_path)
     video_graph = (
-        "[0:v]trim=start=0:end=%(start)s,setpts=PTS-STARTPTS[pre];"
-        "[0:v]trim=start=%(start)s:end=%(source_end)s,setpts=PTS-STARTPTS,"
-        "scale=w='trunc((1080-320*%(progress)s)/2)*2':"
-        "h='trunc((1920-568*%(progress)s)/2)*2':"
+        "[0:v]trim=start=0:end=%(source_end)s,setpts=PTS-STARTPTS,"
+        "%(source_filter)s[base];"
+        "[2:v]scale=132:132:flags=lanczos[logo];"
+        "[base][logo]overlay=48:72:shortest=1:format=auto,"
+        "format=yuv420p[source];"
+        "[source]split=2[source_pre][source_bridge];"
+        "[source_pre]trim=start=0:end=%(start)s,"
+        "setpts=PTS-STARTPTS[pre];"
+        "[source_bridge]trim=start=%(start)s:end=%(source_end)s,"
+        "setpts=PTS-STARTPTS,"
+        "scale=w='trunc((720-214*%(progress)s)/2)*2':"
+        "h='trunc((1280-378*%(progress)s)/2)*2':"
         "eval=frame,format=rgba,"
         "fade=t=out:st=%(fade_start)s:d=0.250000:alpha=1[foreground];"
         "[1:v]trim=start=0:end=%(transition)s,setpts=PTS-STARTPTS[background];"
         "[background][foreground]overlay=x=(W-w)/2:y=(H-h)/2:"
-        "shortest=1:format=auto[bridge];"
+        "shortest=1:format=auto,format=yuv420p[bridge];"
         "[1:v]trim=start=%(transition)s:end=%(outro_end)s,"
         "setpts=PTS-STARTPTS[post];"
         "[pre][bridge][post]concat=n=3:v=1:a=0[outv];"
-        "[0:a]afade=t=out:st=%(start)s:d=%(transition)s[sa];"
-        "[1:a]adelay=%(delay)d|%(delay)d[oa];"
+        "%(source_audio)s"
+        "[1:a]atrim=start=0:end=%(outro_end)s,asetpts=PTS-STARTPTS,"
+        "adelay=%(delay)d|%(delay)d[oa];"
         "[sa][oa]amix=inputs=2:duration=longest:normalize=0,"
         "alimiter=limit=0.95[outa]"
     ) % {
@@ -1318,7 +1430,9 @@ def build_phone_match_command(
         "fade_start": fade_start_text,
         "outro_end": outro_duration_text,
         "progress": scale_progress,
+        "source_audio": source_audio,
         "source_end": source_duration_text,
+        "source_filter": _base_video_filter(),
         "start": transition_start_text,
         "transition": transition_text,
     }
@@ -1333,6 +1447,10 @@ def build_phone_match_command(
         str(source_path),
         "-i",
         str(outro_path),
+        "-loop",
+        "1",
+        "-i",
+        str(logo_path),
         "-filter_complex",
         video_graph,
         "-map",
@@ -1362,7 +1480,7 @@ def build_phone_match_command(
             "-ac",
             "2",
             "-b:a",
-            "160k",
+            AUDIO_BITRATE,
             "-map_metadata",
             "-1",
             "-map_chapters",
@@ -1998,8 +2116,16 @@ def validate_prepare_request(payload, config):
     content_id = str(payload.get("content_id") or "").strip()
     if not CONTENT_ID_RE.fullmatch(content_id):
         raise TTGPUError("invalid_request", "content_id is invalid")
+    expected_profile = str(payload.get("expected_profile") or "").strip()
+    if not secrets.compare_digest(expected_profile, config.profile):
+        raise TTGPUError(
+            "prepare_profile_mismatch",
+            "requested media profile does not match the GPU worker",
+            409,
+        )
     result = {
         "content_id": content_id,
+        "expected_profile": expected_profile,
         "job_id": _job_id(payload.get("job_id")),
         "source_url": validate_source_url(
             payload.get("source_url"),
@@ -2118,6 +2244,7 @@ def _stable_hash(payload):
 
 
 def _prepare_response(manifest, reused, config, expected_job_id):
+    video_contract = _delivery_video_contract(config)
     result = manifest.get("result") if isinstance(manifest, dict) else None
     if not isinstance(result, dict):
         raise TTGPUError("manifest_invalid", "prepare manifest is invalid", 500)
@@ -2188,12 +2315,26 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         or probe_size != output_size
         or not math.isfinite(duration)
         or duration <= 0
+        or (
+            output_size * 8.0 / duration
+            > MAX_DELIVERY_AVERAGE_BITRATE_BPS
+        )
         or duration > float(config.max_duration_seconds)
         or not math.isfinite(frame_rate)
         or abs(frame_rate - 30.0) > 0.01
-        or (width, height) != (1080, 1920)
-        or str(probe.get("video_codec") or "").lower() != "h264"
-        or str(probe.get("profile") or "").lower() != "high"
+        or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+        or (
+            str(probe.get("video_codec") or "").lower()
+            != video_contract["codec"]
+        )
+        or (
+            str(probe.get("video_codec_tag") or "").lower()
+            != video_contract["codec_tag"]
+        )
+        or (
+            str(probe.get("profile") or "").lower()
+            != video_contract["profile"]
+        )
         or str(probe.get("pixel_format") or "").lower() != "yuv420p"
         or str(probe.get("audio_codec") or "").lower() != "aac"
         or str(probe.get("audio_profile") or "").lower() != "lc"
@@ -2303,8 +2444,20 @@ class TTPostGPUProcessor:
     def _prepare_locked(self, request, deadline):
         job_id = request["job_id"]
         manifest_path = self._prepare_manifest_path(job_id)
+        outro_sha, outro_size = _file_sha256(
+            self.config.fixed_outro_path,
+            deadline=deadline,
+        )
+        logo_sha, logo_size = _file_sha256(
+            self.config.logo_path,
+            deadline=deadline,
+        )
         reuse_contract = {
             "content_id": request["content_id"],
+            "logo_sha256": logo_sha,
+            "logo_size": logo_size,
+            "outro_sha256": outro_sha,
+            "outro_size": outro_size,
             "profile": self.config.profile,
             "source_trim_tail_seconds": request[
                 "source_trim_tail_seconds"
@@ -2336,20 +2489,11 @@ class TTPostGPUProcessor:
                 "job_id already belongs to a different prepared artifact",
                 409,
             )
-        outro_sha, outro_size = _file_sha256(
-            self.config.fixed_outro_path,
-            deadline=deadline,
-        )
-        logo_sha, logo_size = _file_sha256(
-            self.config.logo_path,
-            deadline=deadline,
-        )
         job_dir = Path(
             tempfile.mkdtemp(prefix=job_id + ".", dir=str(self.jobs_root))
         )
         os.chmod(job_dir, 0o700)
         source_path = job_dir / "source.mp4"
-        source_normalized = job_dir / "source-normalized.mp4"
         outro_normalized = job_dir / "outro-normalized.mp4"
         output_path = job_dir / "prepared.mp4"
         drama_text_path = job_dir / "drama-id.txt"
@@ -2396,10 +2540,6 @@ class TTPostGPUProcessor:
                 )
             request_fingerprint = {
                 **reuse_contract,
-                "logo_sha256": logo_sha,
-                "logo_size": logo_size,
-                "outro_sha256": outro_sha,
-                "outro_size": outro_size,
                 "source_sha256": source_sha,
                 "source_size": source_size,
                 "transition": "phone-match-0.9s",
@@ -2461,21 +2601,6 @@ class TTPostGPUProcessor:
                     self.runner,
                     build_normalize_command(
                         self.config,
-                        source_path,
-                        source_normalized,
-                        source_info,
-                        _base_video_filter(),
-                        logo_path=self.config.logo_path,
-                        output_duration=effective_source_duration,
-                    ),
-                    deadline.stage_timeout(self.config.transcode_timeout),
-                    "source_transcode_failed",
-                    timeout_error_code="prepare_timeout",
-                )
-                _run_command(
-                    self.runner,
-                    build_normalize_command(
-                        self.config,
                         self.config.fixed_outro_path,
                         outro_normalized,
                         outro_info,
@@ -2493,11 +2618,13 @@ class TTPostGPUProcessor:
                     self.runner,
                     build_phone_match_command(
                         self.config,
-                        source_normalized,
+                        source_path,
                         outro_normalized,
                         output_path,
                         effective_source_duration,
                         outro_info["duration"],
+                        source_has_audio=source_info["has_audio"],
+                        logo_path=self.config.logo_path,
                     ),
                     deadline.stage_timeout(self.config.transcode_timeout),
                     "phone_match_transition_failed",
@@ -2522,6 +2649,7 @@ class TTPostGPUProcessor:
                 deadline=deadline,
             )
             safe_probe = validate_prepared_output(
+                self.config,
                 output_probe,
                 output_path,
                 self.config.max_output_bytes,

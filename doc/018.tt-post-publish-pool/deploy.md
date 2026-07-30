@@ -59,10 +59,17 @@ TT_POST_GPU_COS_REGION=<root-only deployment value>
 TT_POST_GPU_COS_DOMAIN=<HTTPS public origin>
 TT_POST_GPU_COS_PREFIX=tt-post-prepared
 TT_POST_GPU_MAX_DURATION_SECONDS=3600
+TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296
+TT_POST_GPU_COS_TIMEOUT=120
+TT_POST_GPU_PREPARE_TOTAL_TIMEOUT=8700
 TT_POST_LIVE_ENABLED=0
 TT_POST_DIRECT_AUDIT_APPROVED=0
 TT_POST_URL_PROPERTY_VERIFIED=0
 ```
+
+媒体编码是版本化代码合同，不通过生产环境自由调参：默认 profile 必须为 `tt-post-hevc-720x1280-v2`，输出保持 720 × 1280 HEVC/H.265，受控 VBR 为 `900k/maxrate 1350k/bufsize 1800k`，AAC 为 `128k`。兼容回退 profile 为 `tt-post-h264-720x1280-v2`，使用 H.264 `1500k/maxrate 2200k/bufsize 3000k`、AAC `128k`；只有兼容性门禁命中时才允许回退，并必须生成不同 job/manifest 身份。两种方案的正片主时长都只完整编码一次。4 GiB 是硬安全上限，不是交付目标。
+
+CPU 与 GPU release 必须同时支持 `expected_profile` prepare 握手：GPU 在源下载/制作前拒绝 profile 漂移，CPU 对返回 profile 再次复验。ready 复用必须重新哈希部署后的当前 Logo 与固定片尾；任一品牌资产变化都应触发 `prepare_idempotency_conflict`，不能沿用旧 ready 成片。
 
 ## 数据库变更
 
@@ -93,10 +100,11 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 3. SQLite `PRAGMA integrity_check=ok`。
 4. 公网 `/tt-post-pool.html` 为 200，登录后账号数与只读快照一致。
 5. 通过素材预览触发 GPU 成片并确认文件位于 `/data`；素材 4665764（2087 秒）能通过 TT 预校验，且 X 140 秒回归不变。
-6. 确认三项门禁与品牌媒体门禁均为关闭态，TikTok init 调用计数为 0。
-7. 关闭态保存每日时间与素材池后，手动按钮明确显示阻断，不消费素材、不创建可执行 queue。
-8. 搜索日志、SQLite、manifest，确认无 Token。
-9. X 发布池页面、timer和最近任务保持正常。
+6. 先核验 60 秒样片证据：默认 `tt-post-hevc-720x1280-v2` 为 720 × 1280 HEVC/H.265、VBR `900k/maxrate 1350k/bufsize 1800k`、AAC `128k`、VMAF 89.79，并在当前后台链路与 Chrome 151 完整播放；兼容回退 `tt-post-h264-720x1280-v2` 为 H.264 `1500k/maxrate 2200k/bufsize 3000k`、AAC `128k`、VMAF 90.24。TikTok 官方媒体规格支持 H.265，但仍需对 34.8 分钟默认 HEVC 成片核验正片仅一次完整编码、最终文件低于 500 MB且约 295 MB；H.264 回退预计约 433 MB。未取得完整生产成片、新 COS 对象和 ready manifest/job 前记录为“待重跑”，不得写成通过。
+7. 确认三项门禁与品牌媒体门禁均为关闭态，TikTok init 调用计数为 0。
+8. 关闭态保存每日时间与素材池后，手动按钮明确显示阻断，不消费素材、不创建可执行 queue。
+9. 搜索日志、SQLite、manifest，确认无 Token。
+10. X 发布池页面、timer和最近任务保持正常。
 
 ## 回滚方案
 
@@ -112,6 +120,7 @@ TT_POST_URL_PROPERTY_VERIFIED=0
 - 禁止将 `TT_POST_LIVE_ENABLED` 单独打开；三重 gate 必须全部满足且经过独立变更审批。
 - 当前品牌片尾只允许关闭态成片/人工流程验收，不代表 TikTok Direct Post 合规；其 manifest 固定为 `direct_post_eligible=false`，不能靠修改三重 gate 绕过。
 - TT GPU 全局制作上限为 3600 秒，但最终权威仍是所选账号实时 `max_video_post_duration_sec`；不得同步放宽 X 的 140 秒素材合同。
+- 旧约 2.36GB/2.2GB 成片是 `CQ20 + 8M/10M`、720P 放大到 1080P并对正片做两次完整编码造成的异常产物，不得作为合理交付物或待上传成片继续使用。切换新 profile 后必须生成新 job，旧 ready manifest 不得复用。
 
 ## 2026-07-29 部署记录
 

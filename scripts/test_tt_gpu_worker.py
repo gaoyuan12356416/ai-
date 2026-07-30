@@ -67,19 +67,21 @@ def input_probe(duration, audio=True):
     return {"format": {"duration": str(duration)}, "streams": streams}
 
 
-def prepared_probe(duration):
+def prepared_probe(duration, video_encoder="hevc_nvenc"):
+    is_hevc = video_encoder == "hevc_nvenc"
     return {
         "format": {"duration": str(duration)},
         "streams": [
             {
                 "avg_frame_rate": "30/1",
-                "codec_name": "h264",
+                "codec_name": "hevc" if is_hevc else "h264",
+                "codec_tag_string": "hvc1" if is_hevc else "avc1",
                 "codec_type": "video",
-                "height": 1920,
+                "height": 1280,
                 "pix_fmt": "yuv420p",
-                "profile": "High",
+                "profile": "Main" if is_hevc else "High",
                 "r_frame_rate": "30/1",
-                "width": 1080,
+                "width": 720,
             },
             {
                 "channel_layout": "stereo",
@@ -262,7 +264,7 @@ def make_config(root, gates=False):
         allowed_source_hosts=("media.example.com",),
         ffmpeg_bin=str((root / "ffmpeg").resolve()),
         ffprobe_bin=str((root / "ffprobe").resolve()),
-        video_encoder="h264_nvenc",
+        video_encoder="hevc_nvenc",
         cos_secret_id="fixture-id",
         cos_secret_key="fixture-key",
         cos_bucket="fixture-bucket",
@@ -285,6 +287,7 @@ def make_config(root, gates=False):
 def make_prepare(**overrides):
     payload = {
         "content_id": CONTENT_ID,
+        "expected_profile": worker.PROFILE,
         "job_id": JOB_ID,
         "source_url": "https://media.example.com/material.mp4",
     }
@@ -353,12 +356,13 @@ def seed_prepared(
                 "audio_sample_rate": 48000,
                 "duration": 45.8,
                 "frame_rate": 30.0,
-                "height": 1920,
+                "height": 1280,
                 "pixel_format": "yuv420p",
-                "profile": "high",
+                "profile": "main",
                 "size": 1234,
-                "video_codec": "h264",
-                "width": 1080,
+                "video_codec": "hevc",
+                "video_codec_tag": "hvc1",
+                "width": 720,
             },
             "profile": worker.PROFILE,
         },
@@ -394,6 +398,132 @@ class TTGPUWorkerTests(unittest.TestCase):
             worker.DEFAULT_MAX_SOURCE_BYTES,
             2 * 1024 * 1024 * 1024,
         )
+
+    def test_delivery_profile_is_720p_hevc_with_bounded_nvenc_vbr(self):
+        config = make_config(self.root)
+        arguments = worker._encoder_arguments(config)
+        self.assertEqual(worker.PROFILE, "tt-post-hevc-720x1280-v2")
+        self.assertIn("scale=w=720:h=1280", worker._base_video_filter())
+        self.assertNotIn("1080", worker._base_video_filter())
+        self.assertEqual(arguments[arguments.index("-c:v") + 1], "hevc_nvenc")
+        self.assertEqual(arguments[arguments.index("-preset") + 1], "p6")
+        self.assertEqual(arguments[arguments.index("-rc") + 1], "vbr")
+        self.assertEqual(arguments[arguments.index("-b:v") + 1], "900k")
+        self.assertEqual(arguments[arguments.index("-maxrate") + 1], "1350k")
+        self.assertEqual(arguments[arguments.index("-bufsize") + 1], "1800k")
+        self.assertEqual(
+            arguments[arguments.index("-multipass") + 1],
+            "fullres",
+        )
+        self.assertEqual(arguments[arguments.index("-tag:v") + 1], "hvc1")
+        self.assertNotIn("-cq", arguments)
+        self.assertNotIn("8M", arguments)
+
+    def test_delivery_average_bitrate_cap_accepts_profiles_and_rejects_nine_mbps(
+        self,
+    ):
+        self.assertEqual(
+            worker.MAX_DELIVERY_AVERAGE_BITRATE_BPS,
+            1_900_000,
+        )
+        duration = 10.0
+        cases = (
+            ("hevc_nvenc", 1_129_000),
+            ("h264_nvenc", 1_656_000),
+        )
+        for encoder, bitrate in cases:
+            with self.subTest(encoder=encoder):
+                config = replace(
+                    make_config(self.root),
+                    video_encoder=encoder,
+                    profile=(
+                        worker.PROFILE
+                        if encoder == "hevc_nvenc"
+                        else worker.H264_FALLBACK_PROFILE
+                    ),
+                )
+                path = self.root / ("%s-valid.mp4" % encoder)
+                with path.open("wb") as handle:
+                    handle.truncate(int(bitrate * duration / 8))
+                result = worker.validate_prepared_output(
+                    config,
+                    prepared_probe(duration, encoder),
+                    path,
+                    20 * 1024 * 1024,
+                    duration,
+                )
+                self.assertEqual(
+                    result["video_codec_tag"],
+                    "hvc1" if encoder == "hevc_nvenc" else "avc1",
+                )
+
+        config = make_config(self.root)
+        oversized = self.root / "nine-mbps.mp4"
+        with oversized.open("wb") as handle:
+            handle.truncate(int(9_000_000 * duration / 8))
+        with self.assertRaises(worker.TTGPUError) as caught:
+            worker.validate_prepared_output(
+                config,
+                prepared_probe(duration),
+                oversized,
+                20 * 1024 * 1024,
+                duration,
+            )
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+        cached_config = replace(
+            config,
+            max_output_bytes=20 * 1024 * 1024,
+        )
+        processor = self.processor(config=cached_config)
+        seed_prepared(processor)
+        manifest = worker._read_json(processor._prepare_manifest_path(JOB_ID))
+        nine_mbps_size = int(9_000_000 * duration / 8)
+        manifest["result"]["output_size"] = nine_mbps_size
+        manifest["result"]["probe"]["duration"] = duration
+        manifest["result"]["probe"]["size"] = nine_mbps_size
+        with self.assertRaises(worker.TTGPUError) as cached:
+            worker._prepare_response(
+                manifest,
+                True,
+                cached_config,
+                JOB_ID,
+            )
+        self.assertEqual(cached.exception.code, "prepared_media_invalid")
+
+    def test_h264_nvenc_fallback_stays_gpu_accelerated_and_bounded(self):
+        config = replace(
+            make_config(self.root),
+            video_encoder="h264_nvenc",
+            profile=worker.H264_FALLBACK_PROFILE,
+        )
+        arguments = worker._encoder_arguments(config)
+        self.assertEqual(arguments[arguments.index("-c:v") + 1], "h264_nvenc")
+        self.assertEqual(arguments[arguments.index("-preset") + 1], "p6")
+        self.assertEqual(arguments[arguments.index("-b:v") + 1], "1500k")
+        self.assertEqual(arguments[arguments.index("-maxrate") + 1], "2200k")
+        self.assertEqual(arguments[arguments.index("-bufsize") + 1], "3000k")
+        self.assertEqual(arguments[arguments.index("-tag:v") + 1], "avc1")
+        self.assertIn("-spatial-aq", arguments)
+        self.assertIn("-temporal-aq", arguments)
+
+    def test_libx264_software_fallback_is_h264_avc1_and_bounded(self):
+        config = replace(
+            make_config(self.root),
+            video_encoder="libx264",
+            profile=worker.H264_FALLBACK_PROFILE,
+        )
+        arguments = worker._encoder_arguments(config)
+        contract = worker._delivery_video_contract(config)
+        self.assertEqual(
+            contract,
+            {"codec": "h264", "codec_tag": "avc1", "profile": "high"},
+        )
+        self.assertEqual(arguments[arguments.index("-c:v") + 1], "libx264")
+        self.assertEqual(arguments[arguments.index("-b:v") + 1], "1500k")
+        self.assertEqual(arguments[arguments.index("-maxrate") + 1], "2200k")
+        self.assertEqual(arguments[arguments.index("-bufsize") + 1], "3000k")
+        self.assertEqual(arguments[arguments.index("-tag:v") + 1], "avc1")
+        self.assertNotIn("-crf", arguments)
 
     def test_ready_manifest_is_revalidated_against_current_output_limit(self):
         broad = replace(
@@ -434,7 +564,11 @@ class TTGPUWorkerTests(unittest.TestCase):
             ),
             "probe": lambda item: item["result"]["probe"].__setitem__(
                 "width",
-                720,
+                1080,
+            ),
+            "video_codec_tag": lambda item: item["result"]["probe"].__setitem__(
+                "video_codec_tag",
+                "avc1",
             ),
             "profile": lambda item: item["result"].__setitem__(
                 "profile",
@@ -611,8 +745,18 @@ class TTGPUWorkerTests(unittest.TestCase):
             },
         )
         self.assertEqual(loaded.default_source_trim_tail_seconds, 4.333333)
+        self.assertEqual(loaded.video_encoder, "hevc_nvenc")
+        self.assertEqual(loaded.profile, worker.PROFILE)
         self.assertEqual(loaded.cos_timeout, 120)
         self.assertEqual(loaded.prepare_total_timeout, 8700)
+        with mock.patch.dict(
+            os.environ,
+            dict(env, TT_POST_GPU_VIDEO_ENCODER="h264_nvenc"),
+            clear=True,
+        ):
+            loaded_h264 = worker.WorkerConfig.from_env()
+        self.assertEqual(loaded_h264.video_encoder, "h264_nvenc")
+        self.assertEqual(loaded_h264.profile, worker.H264_FALLBACK_PROFILE)
         with mock.patch.dict(
             os.environ,
             dict(env, TT_POST_GPU_HOST="0.0.0.0"),
@@ -1009,6 +1153,52 @@ class TTGPUWorkerTests(unittest.TestCase):
                     "prepare_idempotency_conflict",
                 )
 
+    def test_prepare_rejects_profile_mismatch_before_download(self):
+        calls = []
+        processor = self.processor(
+            downloader=make_downloader(calls),
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.prepare(
+                make_prepare(
+                    expected_profile=worker.H264_FALLBACK_PROFILE,
+                )
+            )
+        self.assertEqual(caught.exception.code, "prepare_profile_mismatch")
+        self.assertEqual(calls, [])
+        self.assertIsNone(
+            worker._read_json(processor._prepare_manifest_path(JOB_ID))
+        )
+
+    def test_prepare_reuse_rejects_changed_logo_or_outro_assets(self):
+        config = make_config(self.root)
+        calls = []
+        processor = self.processor(
+            config,
+            downloader=make_downloader(calls),
+        )
+        processor.prepare(make_prepare())
+        original_logo = config.logo_path.read_bytes()
+        original_outro = config.fixed_outro_path.read_bytes()
+
+        config.logo_path.write_bytes(original_logo + b"-changed")
+        with self.assertRaises(worker.TTGPUError) as changed_logo:
+            processor.prepare(make_prepare())
+        self.assertEqual(
+            changed_logo.exception.code,
+            "prepare_idempotency_conflict",
+        )
+
+        config.logo_path.write_bytes(original_logo)
+        config.fixed_outro_path.write_bytes(original_outro + b"-changed")
+        with self.assertRaises(worker.TTGPUError) as changed_outro:
+            processor.prepare(make_prepare())
+        self.assertEqual(
+            changed_outro.exception.code,
+            "prepare_idempotency_conflict",
+        )
+        self.assertEqual(len(calls), 1)
+
     def test_prepare_conflicts_when_same_job_changes_content_id(self):
         processor = self.processor()
         processor.prepare(make_prepare())
@@ -1053,29 +1243,36 @@ class TTGPUWorkerTests(unittest.TestCase):
             11.933333,
         )
         graph = command[command.index("-filter_complex") + 1]
-        self.assertIn("1080-320*", graph)
-        self.assertIn("1920-568*", graph)
+        self.assertIn("scale=w=720:h=1280", graph)
+        self.assertIn("720-214*", graph)
+        self.assertIn("1280-378*", graph)
+        self.assertIn("scale=132:132", graph)
+        self.assertIn("overlay=48:72", graph)
         self.assertIn("overlay=x=(W-w)/2:y=(H-h)/2", graph)
         self.assertIn("d=0.900000", graph)
         self.assertIn("afade=t=out", graph)
         self.assertIn("adelay=33867|33867", graph)
+        self.assertEqual(command[command.index("-b:a") + 1], "128k")
+        self.assertNotIn("1080", graph)
         self.assertNotIn("-f concat", " ".join(command))
 
-    def test_source_command_places_198_logo_and_applies_clean_cut(self):
+    def test_phone_match_synthesizes_audio_when_source_is_silent(self):
         config = make_config(self.root)
-        command = worker.build_normalize_command(
+        command = worker.build_phone_match_command(
             config,
             self.root / "source.mp4",
+            self.root / "outro.mp4",
             self.root / "out.mp4",
-            {"has_audio": True},
-            worker._base_video_filter(),
-            logo_path=config.logo_path,
-            output_duration=34.766667,
+            34.766667,
+            11.933333,
+            source_has_audio=False,
         )
         graph = command[command.index("-filter_complex") + 1]
-        self.assertIn("scale=198:198", graph)
-        self.assertIn("overlay=72:108", graph)
-        self.assertEqual(command[command.index("-t") + 1], "34.766667")
+        self.assertIn(
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            graph,
+        )
+        self.assertNotIn("[0:a]aresample", graph)
 
     def test_outro_filter_reads_dynamic_drama_id_and_marks_tutorial(self):
         config = make_config(self.root)
@@ -1099,10 +1296,31 @@ class TTGPUWorkerTests(unittest.TestCase):
             for command in runner.commands
             if "ffmpeg" in Path(command[0]).name.lower()
         ]
-        self.assertEqual(len(ffmpeg_commands), 3)
+        self.assertEqual(len(ffmpeg_commands), 2)
+        source_commands = [
+            command
+            for command in ffmpeg_commands
+            if any(Path(value).name == "source.mp4" for value in command)
+        ]
+        self.assertEqual(len(source_commands), 1)
+        all_arguments = " ".join(
+            value for command in ffmpeg_commands for value in command
+        )
+        self.assertNotIn("source-normalized.mp4", all_arguments)
+        self.assertNotIn("8M", all_arguments)
+        self.assertNotIn("-cq", all_arguments)
+        for command in ffmpeg_commands:
+            self.assertEqual(command[command.index("-c:v") + 1], "hevc_nvenc")
+            self.assertEqual(command[command.index("-b:v") + 1], "900k")
+            self.assertEqual(command[command.index("-maxrate") + 1], "1350k")
+            self.assertEqual(command[command.index("-bufsize") + 1], "1800k")
+            self.assertEqual(command[command.index("-tag:v") + 1], "hvc1")
+            self.assertEqual(command[command.index("-b:a") + 1], "128k")
         final_graph = ffmpeg_commands[-1][
             ffmpeg_commands[-1].index("-filter_complex") + 1
         ]
+        self.assertIn("scale=w=720:h=1280", final_graph)
+        self.assertIn("overlay=48:72", final_graph)
         self.assertIn("trim=start=33.866667:end=34.766667", final_graph)
         self.assertIn("concat=n=3:v=1:a=0", final_graph)
 
@@ -1399,6 +1617,7 @@ class TTGPUWorkerTests(unittest.TestCase):
             "TT_POST_GPU_FONT_FILE=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
             "TT_POST_GPU_LOGO_PATH=",
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
+            "TT_POST_GPU_VIDEO_ENCODER=hevc_nvenc",
             "TT_POST_GPU_COS_TIMEOUT=120",
             "TT_POST_GPU_PREPARE_TOTAL_TIMEOUT=8700",
         ):

@@ -317,6 +317,7 @@ class GPUClientTests(unittest.TestCase):
                 "source_media_url": "https://cdn.example.com/source.mp4",
             },
             source_trim_tail_seconds=4.333333,
+            expected_profile="tt-post-hevc-720x1280-v2",
         )
         payload = json.loads(connection.requests[0]["body"].decode("utf-8"))
         self.assertEqual(
@@ -324,9 +325,14 @@ class GPUClientTests(unittest.TestCase):
             {
                 "job_id",
                 "content_id",
+                "expected_profile",
                 "source_url",
                 "source_trim_tail_seconds",
             },
+        )
+        self.assertEqual(
+            payload["expected_profile"],
+            "tt-post-hevc-720x1280-v2",
         )
         self.assertNotIn("source_sha256", payload)
         self.assertNotIn("source_size", payload)
@@ -521,6 +527,7 @@ class FakeGPU:
         self.timeout = 900
         self.prepare_jobs = []
         self.prepare_job_id_override = ""
+        self.prepared_profile = "tt-post-hevc-720x1280-v2"
         self.publish_jobs = []
         self.reconcile_jobs = []
         self.publish_error = None
@@ -549,9 +556,21 @@ class FakeGPU:
         }
         return result
 
-    def prepare(self, *, job_id, material, source_trim_tail_seconds):
+    def prepare(
+        self,
+        *,
+        job_id,
+        material,
+        source_trim_tail_seconds,
+        expected_profile,
+    ):
         self.prepare_jobs.append(
-            (job_id, material["source_media_url"], source_trim_tail_seconds)
+            (
+                job_id,
+                material["source_media_url"],
+                source_trim_tail_seconds,
+                expected_profile,
+            )
         )
         return {
             "job_id": self.prepare_job_id_override or job_id,
@@ -560,7 +579,7 @@ class FakeGPU:
             "output_size": 123456,
             "output_url": "https://cdn.example.com/prepared.mp4",
             "probe": {"duration": self.prepared_duration},
-            "profile": "tt-post-v1",
+            "profile": self.prepared_profile,
             "status": "ready",
         }
 
@@ -643,7 +662,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             gates=gates,
             now_fn=self.clock,
             source_trim_tail_seconds=4.333333,
-            media_profile_version="tt-post-outro-20260729-v1",
+            media_profile_version="tt-post-hevc-720x1280-v2",
         )
 
     def recurring_material_payload(self, key="tt-post-pool:test:9001"):
@@ -1659,6 +1678,16 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(
             caught.exception.code,
             "tt_prepared_media_identity_mismatch",
+        )
+
+    def test_prepare_rejects_gpu_profile_drift(self):
+        service = self.service(CLOSED_GATES)
+        self.gpu.prepared_profile = "tt-post-h264-720x1280-v2"
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.material_preview({"material_id": "9001"})
+        self.assertEqual(
+            caught.exception.code,
+            "tt_prepared_media_profile_mismatch",
         )
 
     def test_closed_gate_hold_becomes_blocked_without_publish_init(self):
@@ -3109,6 +3138,10 @@ class DeployContractTests(unittest.TestCase):
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
             env,
         )
+        self.assertIn(
+            "TT_POST_MEDIA_PROFILE_VERSION=tt-post-hevc-720x1280-v2",
+            env,
+        )
         self.assertIn("TT_POST_CLAIM_LIMIT=1", env)
         self.assertIn("TT_POST_RECONCILE_LIMIT=1", env)
         self.assertIn("TT_POST_INTERNAL_TIMEOUT=60", env)
@@ -3139,6 +3172,7 @@ class DeployContractTests(unittest.TestCase):
             "TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296",
             gpu_env,
         )
+        self.assertIn("TT_POST_GPU_VIDEO_ENCODER=hevc_nvenc", gpu_env)
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("EnvironmentFile=/etc/tt-post.secrets", service)
         self.assertIn("TimeoutStartSec=5700s", runner)

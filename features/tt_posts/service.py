@@ -1230,12 +1230,14 @@ class GPUClient:
         job_id: str,
         material: Mapping[str, Any],
         source_trim_tail_seconds: float,
+        expected_profile: str,
     ) -> Dict[str, Any]:
         return self._post(
             "/internal/tt-post/prepare",
             {
                 "job_id": job_id,
                 "content_id": material.get("content_id"),
+                "expected_profile": expected_profile,
                 "source_url": material.get("source_media_url")
                 or material.get("media_url"),
                 "source_trim_tail_seconds": source_trim_tail_seconds,
@@ -1507,7 +1509,7 @@ class TTPostService:
         gates: Optional[LiveGates] = None,
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
         source_trim_tail_seconds: float = 4.333333,
-        media_profile_version: str = "tt-post-outro-20260729-v1",
+        media_profile_version: str = "tt-post-hevc-720x1280-v2",
         runner_kick_path: str = DEFAULT_RUNNER_KICK_PATH,
     ):
         self.store = store
@@ -1751,6 +1753,7 @@ class TTPostService:
             job_id=job_id,
             material=resolved,
             source_trim_tail_seconds=self.source_trim_tail_seconds,
+            expected_profile=self.media_profile_version,
         )
         returned_job_id = str(prepared.get("job_id") or "").strip()
         returned_content = str(prepared.get("content_id") or "").strip()
@@ -1761,6 +1764,16 @@ class TTPostService:
             raise TTPostServiceError(
                 "tt_prepared_media_identity_mismatch",
                 "TT最终成片身份与源素材不一致",
+                409,
+            )
+        returned_profile = str(prepared.get("profile") or "").strip()
+        if not secrets.compare_digest(
+            returned_profile,
+            self.media_profile_version,
+        ):
+            raise TTPostServiceError(
+                "tt_prepared_media_profile_mismatch",
+                "TT最终成片制作版本与当前任务版本不一致",
                 409,
             )
         final_url = _safe_https_url(
@@ -1809,7 +1822,7 @@ class TTPostService:
                 "duration_sec": duration,
                 "final_duration_sec": duration,
                 "source_trim_tail_seconds": self.source_trim_tail_seconds,
-                "profile": str(prepared.get("profile") or "")[:128],
+                "profile": returned_profile[:128],
                 "media_profile_version": self.media_profile_version,
                 "status": str(prepared.get("status") or "ready")[:64],
                 "status_label": str(
@@ -3844,7 +3857,7 @@ def build_service_from_env(
         media_profile_version=str(
             source.get(
                 "TT_POST_MEDIA_PROFILE_VERSION",
-                "tt-post-outro-20260729-v1",
+                "tt-post-hevc-720x1280-v2",
             )
         ),
         runner_kick_path=str(

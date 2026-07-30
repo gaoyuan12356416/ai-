@@ -38,7 +38,7 @@
 
 ### 结论
 
-TC-057–TC-079 已补齐本轮增量自动化覆盖。本轮本地自动化 TT 205/205（Core 49、Service + Runner 77、GPU 33、发布池 UI 23、个号设置 UI 11、App contract 12），X 351/351（skipped 1），素材状态 28/28，总计 584/584。该结果证明仓库内状态机、接口、页面合同及既有回归通过，但不证明生产部署、2.36GB COS 上传重跑、线上定时执行或真实 TikTok 发布已经通过。
+TC-057–TC-087 的新 profile 全量本地自动化结果为 TT 212/212、X 351/351（skipped 1）、素材状态 28/28，总计 591/591（skipped 1），Python 编译检查与 Git diff check 均通过。TC-080–TC-082 已覆盖 720P HEVC 默认 profile、H.264 兼容回退、异常大文件根因和单次完整编码；TC-085–TC-087 已覆盖 CPU 响应复验、GPU 下载前 `expected_profile` 握手以及 ready 复用重算 Logo/片尾哈希。TC-083 的 34.8 分钟完整生产成片/COS/manifest/job 仍待重跑，TC-084 为样片与规格证据；本地通过不代表真实 TikTok 发布已执行。
 
 ### 用例与自动化证据
 
@@ -55,7 +55,7 @@ TC-057–TC-079 已补齐本轮增量自动化覆盖。本轮本地自动化 TT 
 | TC-065 | `test_execution_lease_is_per_run_exclusive_and_crash_recoverable`、`test_release_first_fences_stale_queue_freeze`、`test_queue_freeze_first_blocks_release_until_owner_binds`、`test_claim_without_queue_releases_only_after_600_seconds`、`test_expired_owner_cannot_freeze_after_new_owner_preflight_release` | 通过 |
 | TC-066 | `test_unconfigured_or_loading_account_cannot_inherit_prior_account_time` | 通过 |
 | TC-067 | `test_legacy_exact_queue_creation_is_not_publicly_writable`、`test_queue_actions_use_dynamic_sidecar_routes_and_safe_audit` | 通过 |
-| TC-068 | `test_default_prepared_output_ceiling_matches_tiktok_four_gib`、部署样例 `TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296` 断言 | 通过 |
+| TC-068 | `test_default_prepared_output_ceiling_matches_tiktok_four_gib`、部署样例 `TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296` 只证明 4 GiB 硬上限；低于 500 MB交付须由新 profile 实片验证 | 硬上限通过，交付待重跑 |
 | TC-069 | 部署合同断言 sidecar 持有 `RuntimeDirectory=tt-post` 且 oneshot runner 不声明同名目录 | 通过 |
 | TC-070 | `test_ready_manifest_is_revalidated_against_current_output_limit` 用 subtests 篡改 content/job/SHA/精确 URL/probe/profile；另从 publish 验证 `prepared_media_invalid` 发生在 TikTok init 前 | 通过 |
 | TC-071 | GPU `test_configuration_defaults_to_exact_closed_gates_and_loopback`、`test_deploy_units_are_sandboxed_and_gate_names_have_no_aliases` 固定内部 8700；Service `DeployContractTests` 与 App contract 固定外层 CPU prepare 9000、主应用 exact preview 9060、nginx exact preview 9120，以及 runner 60/1500/2400/1500、systemd 5700 和关闭门禁 | 通过 |
@@ -67,6 +67,14 @@ TC-057–TC-079 已补齐本轮增量自动化覆盖。本轮本地自动化 TT 
 | TC-077 | `test_cos_part_deadline_does_not_wait_for_executor_shutdown` 验证 future 超时路径不执行 executor wait 并异步 abort；`test_prepare_total_deadline_is_shared_across_pipeline_stages` 验证全流程共享 8700 秒内部预算 | 本地通过，生产待验证 |
 | TC-078 | `test_cos_complete_timeout_is_not_aborted_and_retry_recovers_head` 验证 complete outcome unknown 不 abort，稍后完成后同内容重试经 HEAD 恢复且不创建第二次 multipart | 通过 |
 | TC-079 | `test_cos_part_concurrency_is_bounded_across_store_instances` 以两个 Store、8 个并发 part 验证进程级共享 4 槽 semaphore，峰值不超过 4 且结束后槽位释放 | 通过 |
+| TC-080 | `test_end_to_end_duration_is_trimmed_source_plus_outro_minus_overlap` 断言无 `source-normalized.mp4`、无 8M/CQ，且源正片只进入一条完整编码命令 | 通过 |
+| TC-081 | `test_delivery_profile_is_720p_hevc_with_bounded_nvenc_vbr`、`test_delivery_average_bitrate_cap_accepts_profiles_and_rejects_nine_mbps`、`test_h264_nvenc_fallback_stays_gpu_accelerated_and_bounded`、`test_libx264_software_fallback_is_h264_avc1_and_bounded` 固定默认 HEVC 与 H.264 兼容回退参数、codec tag、码率上限及旧/异 profile 隔离 | 通过 |
+| TC-082 | `test_end_to_end_duration_is_trimmed_source_plus_outro_minus_overlap` 断言正片源只完整编码一次，Logo、Drama ID、phone-match 与片尾进入最终受控流程 | 通过 |
+| TC-083 | 34.8 分钟关闭态默认 HEVC 实片：预计约 295 MB且必须低于 500 MB，新 COS 对象/manifest/job 与默认 profile 一致；H.264 回退约 433 MB仅作比较 | 生产待重跑 |
+| TC-084 | 同一 60 秒样片对比：HEVC VMAF 89.79、H.264 VMAF 90.24；默认 HEVC 样片在当前后台链路与 Chrome 151 完整播放；核对 TikTok 官方媒体规格支持 H.265 | 样片与规格证据已确认 |
+| TC-085 | `test_prepare_rejects_gpu_profile_drift` 让 GPU 返回 H.264 回退 profile、CPU 期望默认 HEVC，断言返回 `tt_prepared_media_profile_mismatch` | 通过 |
+| TC-086 | `test_prepare_contract_has_gpu_download_and_trim_only` 断言 CPU 请求必带 `expected_profile`；`test_prepare_rejects_profile_mismatch_before_download` 断言 GPU 在下载前返回 `prepare_profile_mismatch`、下载调用为 0且不写 manifest | 通过 |
+| TC-087 | `test_prepare_reuse_rejects_changed_logo_or_outro_assets` 分别修改当前 Logo/固定片尾，断言 ready 复用返回 `prepare_idempotency_conflict` | 通过 |
 
 ### 覆盖性复核
 
@@ -80,11 +88,15 @@ TC-057–TC-079 已补齐本轮增量自动化覆盖。本轮本地自动化 TT 
 - 账号切换用例固定检查未配置/加载态恢复 `11:00`，避免跨账号 UI 状态泄漏。
 - 主应用合同用例固定精确 `/queue` 为 GET-only，同时检查动态 cancel/reconcile 路由仍存在且不暴露 claim token/caption。
 - ready manifest 不是永久可信缓存；同一测试除“先按宽合同生成、再收紧配置”外，还以 subtests 实际篡改 content、job、SHA、精确 COS URL、probe 和 profile，prepare 全部 fail-close，并证明 publish 在 TikTok init 前拒绝篡改 manifest。
+- CPU 不信任 GPU 返回的 profile 字段；prepare 响应 profile 与 CPU 当前期望不一致时返回 `tt_prepared_media_profile_mismatch`，不会冻结素材或继续创建可执行发布链路。
+- CPU 发往 GPU 的 prepare 请求必须携带 `expected_profile`；GPU 在源下载与制作前完成常量时间 profile 握手，不一致时返回 `prepare_profile_mismatch`，下载调用和 manifest 均为 0。
+- ready manifest 复用时重新读取并哈希当前 Logo 和固定片尾；任一文件变化都会触发 `prepare_idempotency_conflict`，旧品牌资产成片不会被静默复用。
 - 超时按操作和路由分离：COS 单请求 120 且 SDK retry=0；prepare 全流程共享 8700 秒内部 deadline 预算；外层 CPU prepare 9000、主应用 exact preview 9060、nginx exact preview 9120；GPU 普通 900；runner 通用 60/schedule 1500/publish 2400/reconcile 1500；systemd runner 5700。内部到 CPU 的 300 秒余量覆盖单次读/清理，不声称严格在第 8700 秒返回。
 - COS 使用每片 8MiB、每批最多 4 片的有界手工 multipart；模块级共享 4 槽 semaphore 跨 Store 约束进程内 part 并发。future 超时路径不等待 executor，multipart 由 daemon 线程异步 abort；complete 已开始且结果未知时例外，不 abort，后续经 HEAD 恢复。
+- 旧约 2.36GB/2.2GB 成片已确认是 CQ20+8M/10M、720→1080 和两次完整编码造成的配置异常，不得继续作为“合理但待上传”的样本。默认新 profile 保持原生 720P HEVC/H.265、VBR900k/max1350k/buf1800k、AAC128k；H.264 1500k/max2200k/buf3000k、AAC128k仅作为兼容回退，两者都要求正片只完整编码一次。
 - queue 初始 claim lease 仍为 300 秒且小于 600 秒 grace；`publish_claimed` 每次读取凭据后续租到 GPU 普通超时 + 60 秒，第一段覆盖 Creator Info，第二段衔接 TikTok init/GPU publish，与单条 claim 共同避免慢凭据、慢预检和后续任务提前持有 lease。
 - 所有启用账号的 Asia/Shanghai `HH:MM` 在保存的 `BEGIN IMMEDIATE` 事务中全局唯一；冲突返回 `tt_post_schedule_time_conflict` / HTTP 409，页面明确提示“不同账号需选择不同的分钟”，改时或停用会释放旧时点。
-- 生产关闭态已确认约 5100 秒后本地 2.36GB 成片完成，但 manifest 仍为 1、job 为 0，COS 近期只有旧约 45MB 对象；失败根因仍为推断，须按正式 COS/deadline 合同重跑验证。
+- 60 秒样片已经给出默认 HEVC VMAF 89.79、H.264 回退 VMAF 90.24，并验证当前后台链路与 Chrome 151 可完整播放 HEVC 样片；TikTok 官方媒体规格支持 H.265。完整生产输出仍未知；34.8 分钟默认 HEVC 约 295 MB、H.264 回退约 433 MB均为推算，低于 500 MB才算交付通过，当前完整生产状态必须保持“待重跑”。
 
 ### 生产测试待填写
 
@@ -93,7 +105,8 @@ TC-057–TC-079 已补齐本轮增量自动化覆盖。本轮本地自动化 TT 
 | 生产 release/commit、备份和回滚 | 待填写 |
 | 七表迁移与 SQLite integrity | 待填写 |
 | 4665764 真实 preview、GPU 成片与目标账号时长 | 待填写 |
-| 正式 COS 120 秒/零重试/4×8MiB/共享 4 槽 semaphore/complete unknown 不 abort/prepare 8700 秒内部预算合同下的 2.36GB 新对象、ready manifest/job 与失败根因 | 待重跑验证 |
+| 默认 `tt-post-hevc-720x1280-v2`、H.264 兼容回退、正片单次完整编码、跨 profile job 隔离、双向 profile 校验及品牌资产哈希复验 | 本地自动化通过；完整生产成片仍由下一项待重跑 |
+| 34.8 分钟默认 HEVC 约 295 MB预计值、低于 500 MB交付、新 COS 对象及 ready manifest/job | 待重跑验证；H.264 回退约 433 MB仅为样片推算 |
 | timer/path、600 秒宽限、schedule/claim/reconcile 各限 1 条、积压日志、reconcile 超量 fail-closed、5520 秒远端等待上界与 5700 秒总预算 | 待填写 |
 | 慢凭据续租、recurring 慢 Creator fencing 接管与旧 owner 拒绝 | 待填写 |
 | 启用账号 Asia/Shanghai `HH:MM` 全局唯一、409 冲突与改时/停用释放 | 待填写 |
@@ -101,4 +114,4 @@ TC-057–TC-079 已补齐本轮增量自动化覆盖。本轮本地自动化 TT 
 | 登录态每日排期、FIFO、跨刷新和多账号手动幂等 | 待填写 |
 | 公网 no-store、静态 hash 和外部请求计数 | 待填写 |
 
-生产表格未填写前，测试评审结论保持“本地通过、生产待验收”。
+新 profile 用例和生产表格未填写前，测试评审结论保持“旧基线通过、新 profile 与生产待验收”。
