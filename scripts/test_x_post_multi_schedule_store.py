@@ -102,6 +102,14 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         return result["items"][0]
 
     def drama_candidate(self, pool, account_id, episode_number):
+        replay_generation = int(pool.get("replay_generation", 1))
+        episode_key = "%s:%s" % (pool["content_id"], episode_number)
+        if replay_generation > 1:
+            episode_key = "%s:replay%s:%s" % (
+                pool["content_id"],
+                replay_generation,
+                episode_number,
+            )
         item = base_candidate(
             account_id,
             "DramaAccount%s" % account_id,
@@ -114,8 +122,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 "drama_pool_item_id": pool["id"],
                 "drama_pool_created_at": pool["created_at"],
                 "episode_number": episode_number,
-                "episode_key": "%s:%s"
-                % (pool["content_id"], episode_number),
+                "episode_key": episode_key,
+                "drama_replay_generation": replay_generation,
                 "name_tag": "#Drama_One",
             }
         )
@@ -137,7 +145,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         return item
 
-    def publish_queue(self, queue, episode_number):
+    def publish_queue(self, queue, episode_number, post_id=None):
         log = self.store.reserve_log(queue["id"])
         text = service.build_drama_episode_post_text(
             "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
@@ -153,11 +161,12 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         self.store.mark_publishing(log["id"])
         self.store.mark_media_uploaded(log["id"], "media%s" % episode_number)
+        post_id = post_id or "post%s" % episode_number
         return self.store.mark_published(
             log["id"],
             "media%s" % episode_number,
-            "post%s" % episode_number,
-            "https://x.com/DramaAccount/status/post%s" % episode_number,
+            post_id,
+            "https://x.com/DramaAccount/status/%s" % post_id,
         )
 
     def test_schedule_config_is_versioned_due_and_cross_source_collision_safe(self):
@@ -1065,6 +1074,112 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ],
             [(3, "D2:2"), (2, "D1:2")],
         )
+
+    def test_full_replay_preserves_history_and_starts_a_new_generation(self):
+        self.save_schedule("drama", [2], ["09:00", "10:00"])
+        pool = self.add_drama(content_id="D1", free_episode_count=2)
+        first_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [self.drama_candidate(pool, 2, 1)],
+        )
+        first_queue = first_plan["queues"][0]
+        self.publish_queue(first_queue, 1, post_id="original-post")
+        current = self.store.query_drama_pool()["items"][0]
+        snapshot = {
+            "pool_item_id": current["id"],
+            "content_id": current["content_id"],
+            "status": current["status"],
+            "replay_generation": current["replay_generation"],
+            "free_episode_count": current["free_episode_count"],
+            "published_episode_count": current[
+                "published_episode_count"
+            ],
+            "next_sub_number": current["next_sub_number"],
+            "assigned_account_id": current["assigned_account_id"],
+        }
+        actor = {"user_id": "admin-1", "name": "Admin"}
+
+        dry_run = self.store.reset_drama_pool_for_replay(
+            [pool["id"]],
+            actor=actor,
+            reason=service.DRAMA_REPLAY_REASON,
+            expected_snapshots=[snapshot],
+        )
+        self.assertTrue(dry_run["validate_only"])
+        self.assertEqual(dry_run["reset_count"], 0)
+        unchanged = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(unchanged["replay_generation"], 1)
+        self.assertEqual(unchanged["published_episode_count"], 1)
+
+        applied = self.store.reset_drama_pool_for_replay(
+            [pool["id"]],
+            actor=actor,
+            reason=service.DRAMA_REPLAY_REASON,
+            expected_snapshots=[snapshot],
+            validate_only=False,
+        )
+        self.assertEqual(applied["reset_count"], 1)
+        replay_pool = self.store.query_drama_pool()["items"][0]
+        self.assertEqual(replay_pool["replay_generation"], 2)
+        self.assertEqual(replay_pool["status"], "pending")
+        self.assertEqual(replay_pool["published_episode_count"], 0)
+        self.assertEqual(replay_pool["next_sub_number"], 1)
+        self.assertEqual(replay_pool["assigned_account_id"], 0)
+        self.assertEqual(replay_pool["queue_count"], 1)
+
+        replay_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "10:00",
+            2,
+            [self.drama_candidate(replay_pool, 2, 1)],
+        )
+        replay_queue = replay_plan["queues"][0]
+        self.assertEqual(replay_queue["drama_replay_generation"], 2)
+        self.assertEqual(replay_queue["episode_key"], "D1:replay2:1")
+        self.publish_queue(replay_queue, 1, post_id="replay-post")
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            queues = conn.execute(
+                "SELECT id,episode_key,drama_replay_generation,status "
+                "FROM x_post_queue ORDER BY id"
+            ).fetchall()
+            self.assertEqual(
+                [
+                    (
+                        row["episode_key"],
+                        row["drama_replay_generation"],
+                        row["status"],
+                    )
+                    for row in queues
+                ],
+                [
+                    ("D1:1", 1, "published"),
+                    ("D1:replay2:1", 2, "published"),
+                ],
+            )
+            audit = conn.execute(
+                "SELECT * FROM x_post_drama_replay_audit"
+            ).fetchone()
+            self.assertEqual(audit["from_generation"], 1)
+            self.assertEqual(audit["to_generation"], 2)
+            self.assertEqual(audit["from_published_episode_count"], 1)
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_drama_replay_audit SET actor_name='Other' "
+                    "WHERE id=?",
+                    (audit["id"],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE x_post_drama_pool SET replay_generation=3 "
+                    "WHERE id=?",
+                    (pool["id"],),
+                )
 
     def test_new_account_receives_oldest_unassigned_drama(self):
         self.save_schedule("drama", [2], ["09:00"])

@@ -104,6 +104,20 @@ def _nonnegative_int(value, label, *, maximum=9223372036854775807):
     return parsed
 
 
+def _replay_episode_key(content_id, sub_number, replay_generation):
+    replay_generation = _positive_int(
+        replay_generation,
+        "replay_generation",
+    )
+    if replay_generation == 1:
+        return "%s:%s" % (content_id, sub_number)
+    return "%s:replay%s:%s" % (
+        content_id,
+        replay_generation,
+        sub_number,
+    )
+
+
 def _cursor_rows(connection, sql, params):
     if not re.match(r"(?i)^SELECT\b", str(sql or "").lstrip()):
         raise DramaSelectionError("selector attempted a non-read-only statement")
@@ -487,6 +501,10 @@ class DramawaveDramaSelector:
                 raw.get("next_sub_number", 1),
                 "next_sub_number",
             )
+            replay_generation = _positive_int(
+                raw.get("replay_generation", 1),
+                "replay_generation",
+            )
             assigned_account_id = _nonnegative_int(
                 raw.get("assigned_account_id"),
                 "assigned_account_id",
@@ -534,6 +552,7 @@ class DramawaveDramaSelector:
                     "content_id": content_id,
                     "created_at": created_at,
                     "next_sub_number": next_sub_number,
+                    "replay_generation": replay_generation,
                     "assigned_account_id": assigned_account_id,
                     "candidate_account_id": candidate_account_id,
                 }
@@ -576,7 +595,14 @@ class DramawaveDramaSelector:
                     "pool_created_at": "",
                     "episode_number": sub_number,
                     "sub_num": sub_number,
-                    "episode_key": "%s:%s" % (audit["content_id"], sub_number),
+                    "episode_key": _replay_episode_key(
+                        audit["content_id"],
+                        sub_number,
+                        pool["replay_generation"],
+                    ),
+                    "drama_replay_generation": pool[
+                        "replay_generation"
+                    ],
                     "material_key": "",
                     "material_id": episode["resource_id"],
                     "content_id": audit["content_id"],
