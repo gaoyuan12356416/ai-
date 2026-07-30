@@ -76,6 +76,8 @@
 | SA-021 | P0 | 同一 run 的并发 owner 在预检异常与 queue 冻结交错时可能错误释放素材或留下孤儿 queue | 每 run 120 秒 execution lease + fencing token；freeze/release/bind 事务内校验完整身份，过期 owner 全部失权 | 自动化通过，本地关闭 |
 | SA-022 | P1 | 切换未配置账号时可能继承上一账号的发布时间 | 未配置/加载态统一先重置默认 `11:00`，只渲染当前账号的有效配置 | 自动化通过，本地关闭 |
 | SA-023 | P1 | 公共兼容 POST `/queue` 在门禁关闭时仍可能 reserve 素材 | 主应用精确 `/queue` 改为 GET-only；保留 GET 与动态 cancel/reconcile | 自动化通过，本地关闭 |
+| SA-024 | P0 | 4665764 通过时长校验后，规范化成片超过旧 2 GiB 合同 | 源下载继续限制 2 GiB；最终成片按 TikTok Content Posting 官方上限调整为 4 GiB | 自动化通过，生产复测中 |
+| SA-025 | P1 | oneshot runner 与 sidecar 共用 `RuntimeDirectory` 时可能删除手动 kick 目录 | `/run/tt-post` 只由常驻 sidecar 持有；runner 复用但不声明所有权 | 自动化通过，生产复测中 |
 
 ### 生产验收待填写
 

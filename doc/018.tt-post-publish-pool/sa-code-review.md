@@ -125,7 +125,7 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
 
 ### 评审结论
 
-上线前复审发现的 1 个 P0、2 个 P1 已在当前工作树完成本地关闭，未发现仍阻断“TT 长素材 + 每日素材池 + 手动立即发布”进入生产验收的 P0/P1。此结论仅基于当前工作树和本地 `189/189` TT 相关自动化；上文 2026-07-29 的 release、hash 与线上结果属于上一版本，不能用于证明本增量已经部署或线上通过。
+上线与关闭态实测发现的 2 个 P0、3 个 P1 已在当前工作树完成关闭，未发现仍阻断“TT 长素材 + 每日素材池 + 手动立即发布”继续生产验收的 P0/P1。当前结论基于本地 `190/190` TT 相关自动化；最终生产通过仍以 4665764 复测、七表行数和零 Direct Post 证据为准。
 
 ### 关键实现检查
 
@@ -159,6 +159,8 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
    - P0 并发时序：每个 run 增加 120 秒独占 execution lease 和 fencing token；token 不进入公开 DTO/日志，lease 到期后新 owner 获得新 token，旧 owner 的 renew/freeze/release/bind 均被拒绝。`freeze/release/bind` 在事务内核验 run、pool、lease 与 token，覆盖 release-first 和 freeze-first 两种交错。
    - P1 账号切换：未配置或加载中的账号先将发布时间恢复为 `11:00`，避免沿用上一账号值。
    - P1 公共兼容写入口：主应用精确 `/api/admin/tt-posts/queue` 方法映射改为仅 GET，删除公共创建转发；动态 cancel/reconcile 仍受同源与权限校验保护。
+   - P0 长素材成片大小：TT 官方视频媒体边界为 4 GiB；源下载仍限制 2 GiB，规范化后的最终成片默认/部署上限调整为 4 GiB。
+   - P1 手动 path 生命周期：`/run/tt-post` 只由常驻 sidecar 持有，oneshot runner 不再声明同名 `RuntimeDirectory`，避免退出时清理 kick 文件。
 
 ### 本地验证
 
@@ -166,11 +168,11 @@ Chrome 登录态页面验收通过；TikTok Direct Post 三项门禁始终为 0�
 | --- | ---: |
 | TT Core | 49/49 |
 | TT Service + Runner | 70/70 |
-| TT GPU | 25/25 |
+| TT GPU | 26/26 |
 | TT 发布池 UI | 23/23 |
 | TT 个号设置 UI | 11/11 |
 | TT App contract | 11/11 |
-| **合计** | **189/189** |
+| **合计** | **190/190** |
 
 ### 生产代码验收待填写
 

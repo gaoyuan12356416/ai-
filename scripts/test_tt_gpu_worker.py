@@ -336,6 +336,16 @@ def make_publish(config, title="Watch now", **overrides):
 
 
 class TTGPUWorkerTests(unittest.TestCase):
+    def test_default_prepared_output_ceiling_matches_tiktok_four_gib(self):
+        self.assertEqual(
+            worker.DEFAULT_MAX_OUTPUT_BYTES,
+            4 * 1024 * 1024 * 1024,
+        )
+        self.assertEqual(
+            worker.DEFAULT_MAX_SOURCE_BYTES,
+            2 * 1024 * 1024 * 1024,
+        )
+
     def test_creator_avatar_signed_query_is_not_returned(self):
         normalized = worker.normalize_creator_info(
             {

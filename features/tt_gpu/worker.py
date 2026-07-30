@@ -62,7 +62,10 @@ DEFAULT_FONT_FILE = "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
 DEFAULT_TRANSITION_SECONDS = 0.9
 DEFAULT_COS_PREFIX = "tt-post-prepared"
 DEFAULT_MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
-DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024
+# TikTok Content Posting accepts video media up to 4 GiB. Long sources can
+# expand after the fixed 1080x1920 normalization, so the prepared artifact
+# ceiling follows that platform boundary while source downloads stay at 2 GiB.
+DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024 * 1024
 # TikTok creator_info currently allows up to 3,600 seconds for some accounts.
 # The CPU still enforces the selected account's live creator limit before a
 # queue can be frozen, so the GPU-wide ceiling only needs to be broad enough to

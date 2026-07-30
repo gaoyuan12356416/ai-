@@ -2794,6 +2794,10 @@ class DeployContractTests(unittest.TestCase):
             "TT_POST_GPU_MAX_DURATION_SECONDS=3600",
             gpu_env,
         )
+        self.assertIn(
+            "TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296",
+            gpu_env,
+        )
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("EnvironmentFile=/etc/tt-post.secrets", service)
         self.assertIn("TimeoutStartSec=3600s", runner)

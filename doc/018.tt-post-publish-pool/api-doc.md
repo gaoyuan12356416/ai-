@@ -178,6 +178,7 @@ GPU publish 请求中的敏感账号凭证只存在于 AES-GCM 短时任务信�
 | 409 | `tt_post_recurring_pool_empty` | 当前账号没有待发布素材 |
 | 409 | `tt_post_account_publish_busy` | 当前账号已有执行中或待核对任务 |
 | 409 | `tt_post_live_gates_closed` | 发布门禁未全部开放，未消费素材 |
+| 500 | `prepared_media_invalid` | GPU 最终成片为空或超过 4 GiB 合同 |
 | 502 | `tt_upstream_rejected` | TikTok 返回已脱敏错误 |
 | 503 | `tt_post_service_unavailable` | CPU sidecar 或其依赖暂不可用 |
 

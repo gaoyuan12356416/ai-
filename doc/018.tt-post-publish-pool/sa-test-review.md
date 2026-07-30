@@ -38,7 +38,7 @@
 
 ### 结论
 
-TC-057–TC-067 的本地自动化覆盖完整，所选六个 TT 相关测试集共 `189/189` 通过（Core 49、Service + Runner 70、GPU 25、发布池 UI 23、个号设置 UI 11、App contract 11）。该结果证明仓库内状态机、接口和页面合同满足本轮增量要求，但不证明生产部署、线上定时执行或真实 TikTok 发布已经通过。
+TC-057–TC-069 的本地自动化覆盖完整，所选六个 TT 相关测试集共 `190/190` 通过（Core 49、Service + Runner 70、GPU 26、发布池 UI 23、个号设置 UI 11、App contract 11）。该结果证明仓库内状态机、接口和页面合同满足本轮增量要求，但不证明生产部署、线上定时执行或真实 TikTok 发布已经通过。
 
 ### 用例与自动化证据
 
@@ -55,6 +55,8 @@ TC-057–TC-067 的本地自动化覆盖完整，所选六个 TT 相关测试集
 | TC-065 | `test_execution_lease_is_per_run_exclusive_and_crash_recoverable`、`test_release_first_fences_stale_queue_freeze`、`test_queue_freeze_first_blocks_release_until_owner_binds`、`test_claim_without_queue_releases_only_after_600_seconds`、`test_expired_owner_cannot_freeze_after_new_owner_preflight_release` | 通过 |
 | TC-066 | `test_unconfigured_or_loading_account_cannot_inherit_prior_account_time` | 通过 |
 | TC-067 | `test_legacy_exact_queue_creation_is_not_publicly_writable`、`test_queue_actions_use_dynamic_sidecar_routes_and_safe_audit` | 通过 |
+| TC-068 | `test_default_prepared_output_ceiling_matches_tiktok_four_gib`、部署样例 `TT_POST_GPU_MAX_OUTPUT_BYTES=4294967296` 断言 | 通过 |
+| TC-069 | 部署合同断言 sidecar 持有 `RuntimeDirectory=tt-post` 且 oneshot runner 不声明同名目录 | 通过 |
 
 ### 覆盖性复核
 

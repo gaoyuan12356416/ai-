@@ -99,6 +99,8 @@ CPU 状态机、账号安全边界、GPU 成片、发布门禁、主后台权限
 | TC-065 | 同一 run 并发错误释放与孤儿 queue 防护 | 两个执行者竞争同一 run，覆盖“旧 owner 先释放、后冻结”和“先冻结 queue、后尝试释放”两种时序，并在 120 秒后模拟新 owner 接管 | 每个 run 同时只有一个 120 秒 execution lease；每次接管签发不同 fencing token；`freeze/release/bind` 在事务内核验 run、pool、lease 与 token 身份；过期 owner 不能再冻结、释放或绑定；最终只能是安全释放且无 queue，或唯一 queue 成功绑定，不产生孤儿 queue | P0 | 本地自动化通过 |
 | TC-066 | 切换未配置账号不继承上一账号时间 | 先加载已配置且非默认时间的账号，再切换到未配置或仍在加载的账号 | 时间立即恢复默认 `11:00`，不得显示、保存或继承上一账号的时间；加载/未配置状态按页面合同处理 | P1 | 本地自动化通过 |
 | TC-067 | 公共兼容 `/queue` 禁止写入 | 在三道门禁关闭状态下，通过主应用公共兼容入口尝试 `POST /api/admin/tt-posts/queue`，并检查查询、取消和手动调和入口 | 主应用精确 `/queue` 白名单仅允许 `GET`，POST 不转发且不能 reserve 素材；既有 GET 查询及动态 `cancel/reconcile` 路由保留 | P1 | 本地自动化通过 |
+| TC-068 | 长素材规范化后成片大小合同 | 检查 GPU 默认/部署配置，并以最终成片超过 2 GiB、未超过 4 GiB 的长素材做生产预览 | 源文件下载仍限制 2 GiB；最终成片允许至 TikTok 4 GiB 边界，超过 4 GiB 才 fail-close | P0 | 本地自动化通过，生产复测中 |
+| TC-069 | 手动 path 唤醒目录生命周期 | 启动常驻 sidecar 与 path，触发一次 oneshot runner，再检查 invocation、结果和 `/run/tt-post` | `/run/tt-post` 只由 sidecar 持有；runner 退出后目录和 kick 文件仍存在，path 立即触发成功，timer 继续兜底 | P1 | 本地自动化通过，生产复测中 |
 
 ### 生产验收待填写
 

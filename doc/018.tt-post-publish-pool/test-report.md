@@ -134,17 +134,17 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.
 
 ### 执行结果
 
-本地执行以下六个 TT 相关测试集，共 `189/189` 通过，用时 12.772 秒：
+本地执行以下六个 TT 相关测试集，共 `190/190` 通过：
 
 | 测试集 | 通过 | 失败 |
 | --- | ---: | ---: |
 | TT Core | 49 | 0 |
 | TT Service + Runner | 70 | 0 |
-| TT GPU | 25 | 0 |
+| TT GPU | 26 | 0 |
 | TT 发布池 UI | 23 | 0 |
 | TT 个号设置 UI | 11 | 0 |
 | TT App contract | 11 | 0 |
-| **合计** | **189** | **0** |
+| **合计** | **190** | **0** |
 
 执行命令：
 
@@ -159,10 +159,14 @@ python -m unittest scripts.test_tt_posts_core scripts.test_tt_posts_service scri
 | P0 | 同一 run 并发执行时，一个执行者预检报错释放素材，另一个执行者仍可能冻结 queue，形成错误释放或孤儿 queue | 增加每个 run 独占的 120 秒 execution lease 与不可外泄的 fencing token；`freeze/release/bind` 均在事务内核验 run、pool、lease 与 token 身份；本地覆盖 release-first、freeze-first、lease 到期接管及过期 owner 拒绝 | 本地关闭 |
 | P1 | 从已配置账号切到未配置/加载中账号时，时间控件可能沿用上一账号时间 | 未配置或加载态先重置为默认 `11:00`，再按当前账号数据渲染；本地页面合同测试通过 | 本地关闭 |
 | P1 | 主应用公共兼容 `POST /queue` 可绕过新入口，在门禁关闭时 reserve 素材 | 主应用精确 `/api/admin/tt-posts/queue` 方法白名单改为仅 `GET`；保留 GET 查询及动态 cancel/reconcile，移除公共兼容写入转发 | 本地关闭 |
+| P0 | 4665764 通过 3600 秒校验后，1080x1920 最终成片超过旧 2 GiB GPU 合同 | 最终成片上限按 TikTok Content Posting 官方边界调整为 4 GiB；源下载仍保持 2 GiB；默认值和部署样例均由自动化固定 | 本地关闭，生产复测中 |
+| P1 | sidecar 与 oneshot runner 同时声明 `/run/tt-post`，runner 退出后可能清理手动 kick 目录 | 运行目录只由常驻 sidecar 持有，runner 复用目录但不声明所有权；部署合同测试固定该约束 | 本地关闭，生产复测中 |
 
 ### 已由本地自动化证明的增量事实
 
-- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`，但不计入本次 TT `189/189`。
+- 以素材 4665764 的 2087 秒属性构造的本地 fixture 可通过 TT `1..3600` 秒 resolver 合同；X selector 隔离合同另有本地回归固定 SQL 参数为 `1,140`，但不计入本次 TT `190/190`。
+- GPU 源文件默认上限保持 2 GiB，最终成片默认/部署上限固定为 4 GiB，以承接长素材规范化后文件膨胀。
+- `/run/tt-post` 只由常驻 sidecar 的 systemd `RuntimeDirectory` 持有，oneshot runner 不再重复声明同名目录。
 - 每日设置与待发素材分开持久化；同一自然日时点幂等，账号级 FIFO 和账号隔离成立。
 - 发布宽限固定为 600 秒；非 600 配置被拒绝，宽限内恢复与超窗 `missed` 均有自动化覆盖。
 - `claim → freeze` 中断后可在后续 minute tick 找回 claimed run；`freeze → bind` 中断后按稳定 queue 幂等键找回既有 queue。两类恢复均未创建重复 run/queue 或重复消费素材。

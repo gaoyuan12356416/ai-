@@ -21,7 +21,7 @@
 | 主后台路由、权限和审计 | 开发 | `app.py` | 新增素材池、每日设置和手动发布代理，待部署 |
 | 发布池 UI 与导航 | 前端 | `static/tt-post-pool.html`、导航配置 | 每日发布与手动按钮已完成，待部署 |
 | claim/runner、systemd 与隧道 | 开发 | `scripts/`、`deploy/` | 分钟调度与 path 即时唤醒已完成，待部署 |
-| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | 本地 568/568 通过（TT 189、X 351、素材状态 28） |
+| 单元、合同与回归 | QA/SA | `scripts/test_tt_*.py` | 本地 569/569 通过（TT 190、X 351、素材状态 28） |
 | GitHub-first CPU/GPU 部署 | 运维 | immutable release | 待执行 |
 
 ### 本轮增量任务
@@ -42,7 +42,7 @@
 
 | 任务 | 文件/模块 | 完成条件 | 状态 |
 | --- | --- | --- | --- |
-| 长素材资格修复 | `features/tt_posts/service.py` | 素材 4665764（2087 秒）通过 TT 预校验；X 140 秒条件不变 | 已完成 |
+| 长素材资格修复 | `features/tt_posts/service.py`、`features/tt_gpu/worker.py` | 素材 4665764（2087 秒）通过 TT 预校验；最终成片允许至 TikTok 4 GiB 边界；X 140 秒条件不变 | 已完成 |
 | 每日配置与 FIFO 账本 | `features/tt_posts/core.py` | 旧四表不改，只增三表；按账号 FIFO、乐观版本、自动/手动 run 幂等 | 已完成 |
 | 每日与手动 API | `features/tt_posts/service.py`、`app.py` | 入池不建 queue；到点/手动才原子领取；关闭门禁不消费素材 | 已完成 |
 | 分钟调度与即时唤醒 | `scripts/tt_post_runner.py`、`deploy/tt-post-runner.path` | timer 每分钟识别当日时点；手动请求用 path 唤醒且 timer 60 秒兜底 | 已完成 |
