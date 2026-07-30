@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import http.client
+import io
 import json
 import os
 import sys
@@ -14,6 +15,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -238,6 +240,25 @@ class FakeTikTokOpener:
         )
 
 
+class HTTP500TikTokOpener:
+    def open(self, request, timeout):
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "internal_error",
+                    "log_id": "log-http-500",
+                }
+            }
+        ).encode("utf-8")
+        raise urllib.error.HTTPError(
+            request.full_url,
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(body),
+        )
+
+
 def make_config(root, gates=False):
     root = Path(root)
     outro = root / "fixed-outro.mp4"
@@ -271,6 +292,9 @@ def make_config(root, gates=False):
         cos_region="ap-fixture",
         cos_domain="https://pull.example.com",
         cos_prefix="tt-post-prepared",
+        url_property_verified_origin=(
+            "https://pull.example.com" if gates else ""
+        ),
         live_enabled=bool(gates),
         direct_audit_approved=bool(gates),
         url_property_verified=bool(gates),
@@ -282,6 +306,24 @@ def make_config(root, gates=False):
         probe_timeout=30,
         transcode_timeout=60,
     )
+
+
+def make_local_config(root, gates=False, **overrides):
+    config = replace(
+        make_config(root, gates=gates),
+        storage_backend="local",
+        media_host="127.0.0.1",
+        media_port=0,
+        local_media_origin="https://tt-media.example.com",
+        local_media_prefix="tt-post-media/v1",
+        local_media_signing_key=b"s" * 32,
+        url_property_verified_origin=(
+            "https://tt-media.example.com" if gates else ""
+        ),
+        terminal_media_grace_seconds=0,
+        local_min_free_bytes=0,
+    )
+    return replace(config, **overrides) if overrides else config
 
 
 def make_prepare(**overrides):
@@ -337,8 +379,10 @@ def seed_prepared(
     *,
     direct_post_eligible=False,
 ):
+    cos_key = "tt-post-prepared/aa/%s.mp4" % ("a" * 64)
     manifest = {
         "completed_at": "2026-07-29T00:00:00Z",
+        "cos_key": cos_key,
         "request": {"content_id": CONTENT_ID},
         "result": {
             "brand_overlay_review_required": True,
@@ -347,8 +391,7 @@ def seed_prepared(
             "job_id": job_id,
             "output_sha256": "a" * 64,
             "output_size": 1234,
-            "output_url": "https://pull.example.com/tt-post-prepared/aa/%s.mp4"
-            % ("a" * 64),
+            "output_url": "https://pull.example.com/" + cos_key,
             "probe": {
                 "audio_channels": 2,
                 "audio_codec": "aac",
@@ -366,8 +409,9 @@ def seed_prepared(
             },
             "profile": worker.PROFILE,
         },
+        "storage": {"backend": "cos", "key": cos_key},
         "status": "ready",
-        "version": 1,
+        "version": 2,
     }
     worker._atomic_write_json(processor._prepare_manifest_path(job_id), manifest)
 
@@ -598,6 +642,7 @@ class TTGPUWorkerTests(unittest.TestCase):
             live_enabled=True,
             direct_audit_approved=True,
             url_property_verified=True,
+            url_property_verified_origin="https://pull.example.com",
         )
         api = FakeTikTokAPI()
         publish_processor = self.processor(config=gated, api=api)
@@ -765,6 +810,82 @@ class TTGPUWorkerTests(unittest.TestCase):
             with self.assertRaises(worker.TTGPUError) as caught:
                 worker.WorkerConfig.from_env()
         self.assertEqual(caught.exception.code, "invalid_configuration")
+
+    def test_local_configuration_does_not_require_cos_credentials(self):
+        config = make_config(self.root)
+        signing_key = base64.urlsafe_b64encode(b"s" * 32).decode("ascii")
+        seal_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
+        env = {
+            "TT_POST_GPU_ALLOWED_SOURCE_HOSTS": "media.example.com",
+            "TT_POST_GPU_CREDENTIAL_SEAL_KEY_B64": seal_key,
+            "TT_POST_GPU_ENABLED": "1",
+            "TT_POST_GPU_FIXED_OUTRO_PATH": str(config.fixed_outro_path),
+            "TT_POST_GPU_FFMPEG_BIN": str((self.root / "ffmpeg").resolve()),
+            "TT_POST_GPU_FFPROBE_BIN": str((self.root / "ffprobe").resolve()),
+            "TT_POST_GPU_FONT_FILE": str(config.font_file),
+            "TT_POST_GPU_INTERNAL_TOKEN": "i" * 40,
+            "TT_POST_GPU_LOCAL_MEDIA_ORIGIN": "https://tt-media.example.com",
+            "TT_POST_GPU_LOCAL_URL_SIGNING_KEY_B64": signing_key,
+            "TT_POST_GPU_LOGO_PATH": str(config.logo_path),
+            "TT_POST_GPU_MEDIA_PORT": "8831",
+            "TT_POST_GPU_STORAGE_BACKEND": "local",
+            "TT_POST_GPU_WORK_ROOT": str((self.root / "local-work").resolve()),
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            loaded = worker.WorkerConfig.from_env()
+        self.assertEqual(loaded.storage_backend, "local")
+        self.assertEqual(
+            loaded.local_media_origin,
+            "https://tt-media.example.com",
+        )
+        self.assertEqual(loaded.local_media_signing_key, b"s" * 32)
+        self.assertEqual(loaded.cos_secret_id, "")
+        self.assertFalse(loaded.gate_state()["ready"])
+        rollback_env = dict(
+            env,
+            TT_POST_GPU_STORAGE_BACKEND="cos",
+            TT_POST_GPU_COS_BUCKET="bucket",
+            TT_POST_GPU_COS_DOMAIN="https://pull.example.com",
+            TT_POST_GPU_COS_REGION="ap-test",
+            TT_POST_GPU_COS_SECRET_ID="secret-id",
+            TT_POST_GPU_COS_SECRET_KEY="secret-key",
+        )
+        with mock.patch.dict(os.environ, rollback_env, clear=True):
+            rollback = worker.WorkerConfig.from_env()
+        self.assertEqual(rollback.storage_backend, "cos")
+        self.assertEqual(
+            rollback.local_media_origin,
+            "https://tt-media.example.com",
+        )
+        self.assertEqual(rollback.local_media_signing_key, b"s" * 32)
+        with mock.patch.dict(
+            os.environ,
+            dict(env, TT_POST_GPU_TERMINAL_MEDIA_GRACE_SECONDS="0"),
+            clear=True,
+        ):
+            with self.assertRaises(worker.TTGPUError) as unsafe_grace:
+                worker.WorkerConfig.from_env()
+        self.assertEqual(
+            unsafe_grace.exception.code,
+            "invalid_configuration",
+        )
+        for field, value in (
+            ("TT_POST_GPU_LOCAL_MEDIA_ORIGIN", "https://example.com:bad"),
+            ("TT_POST_GPU_LOCAL_MEDIA_PREFIX", "tt//media"),
+            ("TT_POST_GPU_LOCAL_MEDIA_PREFIX", "tt/./media"),
+        ):
+            with self.subTest(field=field, value=value):
+                with mock.patch.dict(
+                    os.environ,
+                    dict(env, **{field: value}),
+                    clear=True,
+                ):
+                    with self.assertRaises(worker.TTGPUError) as invalid:
+                        worker.WorkerConfig.from_env()
+                self.assertEqual(
+                    invalid.exception.code,
+                    "invalid_configuration",
+                )
 
     def test_cos_upload_request_timeout_disables_sdk_retries(self):
         captured = {}
@@ -1232,6 +1353,449 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertEqual(calls[0]["expected_size"], len(SOURCE_BYTES))
 
+    def test_local_prepare_persists_blob_and_reuses_without_cos(self):
+        config = make_local_config(self.root)
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        created = processor.prepare(make_prepare())
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(created["storage_backend"], "local")
+        self.assertTrue(
+            created["output_url"].startswith(
+                "https://tt-media.example.com/tt-post-media/v1/"
+            )
+        )
+        self.assertEqual(manifest["storage"]["backend"], "local")
+        key = manifest["storage"]["key"]
+        blob = processor._object_store()._path(key)
+        self.assertTrue(blob.is_file())
+        self.assertEqual(blob.read_bytes(), b"prepared-video")
+        self.assertEqual(list(processor.jobs_root.iterdir()), [])
+        with mock.patch.object(
+            worker.shutil,
+            "disk_usage",
+            return_value=SimpleNamespace(free=0),
+        ):
+            reused = processor.prepare(make_prepare())
+        self.assertTrue(reused["reused"])
+        self.assertEqual(reused["output_url"], created["output_url"])
+
+    def test_local_prepare_rejects_tampered_persisted_blob(self):
+        config = make_local_config(self.root)
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        processor.prepare(make_prepare())
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        blob = processor._object_store()._path(manifest["storage"]["key"])
+        blob.write_bytes(b"x" * blob.stat().st_size)
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.prepare(make_prepare())
+        self.assertEqual(
+            caught.exception.code,
+            "local_media_verification_failed",
+        )
+
+    def test_local_prepare_fails_closed_below_disk_reserve(self):
+        config = make_local_config(
+            self.root,
+            local_min_free_bytes=1024,
+        )
+        downloads = []
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader(downloads),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        with mock.patch.object(
+            worker.shutil,
+            "disk_usage",
+            return_value=SimpleNamespace(free=1023),
+        ):
+            with self.assertRaises(worker.TTGPUError) as caught:
+                processor.prepare(make_prepare())
+        self.assertEqual(caught.exception.code, "local_media_storage_full")
+        self.assertEqual(downloads, [])
+
+    def test_local_storage_health_exposes_capacity_without_secrets(self):
+        config = make_local_config(
+            self.root,
+            local_min_free_bytes=1024,
+            max_source_bytes=2048,
+            max_output_bytes=4096,
+        )
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        required = (
+            1024
+            + 2048
+            + 4096
+            + worker.LOCAL_PREPARE_OVERHEAD_BYTES
+        )
+        with mock.patch.object(
+            worker.shutil,
+            "disk_usage",
+            return_value=SimpleNamespace(
+                free=required,
+                total=required * 2,
+            ),
+        ):
+            state = processor.storage_health()
+        self.assertTrue(state["local_prepare_admission_ready"])
+        self.assertEqual(
+            state["next_prepare_required_free_bytes"],
+            required,
+        )
+        serialized = json.dumps(state)
+        self.assertNotIn(
+            base64.urlsafe_b64encode(
+                config.local_media_signing_key
+            ).decode("ascii"),
+            serialized,
+        )
+        processor.record_cleanup_state(
+            {"failed": 0, "released": 1, "scanned": 2}
+        )
+        self.assertEqual(
+            processor.storage_health()["cleanup"]["status"],
+            "ok",
+        )
+
+    def test_prepare_admission_is_serialized_across_different_jobs(self):
+        processor = self.processor()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        guard = threading.Lock()
+        calls = []
+        active = 0
+        maximum_active = 0
+
+        def fake_prepare_new_locked(
+            request,
+            _deadline,
+            _reuse_contract,
+            _manifest_path,
+        ):
+            nonlocal active, maximum_active
+            with guard:
+                calls.append(request["job_id"])
+                active += 1
+                maximum_active = max(maximum_active, active)
+                call_number = len(calls)
+            if call_number == 1:
+                first_started.set()
+                self.assertTrue(release_first.wait(timeout=5))
+            with guard:
+                active -= 1
+            return {"job_id": request["job_id"]}
+
+        processor._prepare_new_locked = fake_prepare_new_locked
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(
+                processor.prepare,
+                make_prepare(job_id="ttjob_20260729_000001"),
+            )
+            self.assertTrue(first_started.wait(timeout=5))
+            second = executor.submit(
+                processor.prepare,
+                make_prepare(job_id="ttjob_20260729_000002"),
+            )
+            time.sleep(0.1)
+            with guard:
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(maximum_active, 1)
+            release_first.set()
+            self.assertEqual(
+                first.result(timeout=5)["job_id"],
+                "ttjob_20260729_000001",
+            )
+            self.assertEqual(
+                second.result(timeout=5)["job_id"],
+                "ttjob_20260729_000002",
+            )
+        self.assertEqual(maximum_active, 1)
+
+    def test_ready_reuse_bypasses_another_jobs_long_prepare_slot(self):
+        processor = self.processor()
+        processor.prepare(make_prepare())
+        long_started = threading.Event()
+        release_long = threading.Event()
+
+        def blocking_prepare(
+            request,
+            _deadline,
+            _reuse_contract,
+            _manifest_path,
+        ):
+            long_started.set()
+            self.assertTrue(release_long.wait(timeout=5))
+            return {"job_id": request["job_id"], "status": "ready"}
+
+        processor._prepare_new_locked = blocking_prepare
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            long_job = executor.submit(
+                processor.prepare,
+                make_prepare(job_id="ttjob_20260729_000002"),
+            )
+            self.assertTrue(long_started.wait(timeout=5))
+            cached = executor.submit(
+                processor.prepare,
+                make_prepare(),
+            )
+            cached_result = cached.result(timeout=1)
+            self.assertTrue(cached_result["reused"])
+            self.assertEqual(cached_result["job_id"], JOB_ID)
+            release_long.set()
+            self.assertEqual(
+                long_job.result(timeout=5)["job_id"],
+                "ttjob_20260729_000002",
+            )
+
+    def test_local_media_origin_supports_head_get_and_single_ranges(self):
+        config = make_local_config(self.root)
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        prepared = processor.prepare(make_prepare())
+        request_path = urllib.parse.urlsplit(prepared["output_url"]).path
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        blob = processor._object_store()._path(manifest["storage"]["key"])
+        rollback_processor = worker.TTPostGPUProcessor(
+            replace(config, storage_backend="cos"),
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        server = worker.TTPostGPUMediaHTTPServer(
+            ("127.0.0.1", 0),
+            rollback_processor,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+
+        def request(method, path, headers=None):
+            connection = http.client.HTTPConnection(host, port, timeout=5)
+            connection.request(method, path, headers=headers or {})
+            response = connection.getresponse()
+            body = response.read()
+            result = (
+                response.status,
+                dict(response.getheaders()),
+                body,
+            )
+            connection.close()
+            return result
+
+        try:
+            status, headers, body = request("HEAD", request_path)
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b"")
+            self.assertEqual(headers["Content-Type"], "video/mp4")
+            self.assertEqual(headers["Accept-Ranges"], "bytes")
+            self.assertEqual(int(headers["Content-Length"]), 14)
+            etag = headers["ETag"]
+
+            status, headers, body = request("GET", request_path)
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b"prepared-video")
+            self.assertNotIn("Location", headers)
+
+            status, headers, body = request(
+                "GET",
+                request_path,
+                {"Range": "bytes=2-5"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"epar")
+            self.assertEqual(headers["Content-Range"], "bytes 2-5/14")
+
+            status, headers, body = request(
+                "HEAD",
+                request_path,
+                {"Range": "bytes=2-5"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"")
+            self.assertEqual(headers["Content-Range"], "bytes 2-5/14")
+            self.assertEqual(headers["Content-Length"], "4")
+
+            status, headers, body = request(
+                "GET",
+                request_path,
+                {"Range": "bytes=4-"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"ared-video")
+            self.assertEqual(headers["Content-Range"], "bytes 4-13/14")
+
+            status, headers, body = request(
+                "GET",
+                request_path,
+                {"Range": "bytes=-5"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"video")
+
+            status, _headers, body = request(
+                "GET",
+                request_path,
+                {
+                    "If-Range": etag,
+                    "Range": "bytes=0-3",
+                },
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"prep")
+
+            status, _headers, body = request(
+                "GET",
+                request_path,
+                {
+                    "If-Range": '"different-etag"',
+                    "Range": "bytes=0-3",
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b"prepared-video")
+
+            status, headers, body = request(
+                "GET",
+                request_path,
+                {"Range": "bytes=999-"},
+            )
+            self.assertEqual(status, 416)
+            self.assertEqual(headers["Content-Range"], "bytes */14")
+            self.assertEqual(body, b"")
+
+            for invalid_range in ("bytes=5-2", "bytes=0-1,3-4"):
+                status, headers, body = request(
+                    "GET",
+                    request_path,
+                    {"Range": invalid_range},
+                )
+                self.assertEqual(status, 416)
+                self.assertEqual(headers["Content-Range"], "bytes */14")
+                self.assertEqual(body, b"")
+
+            status, _headers, _body = request(
+                "GET",
+                request_path + "?probe=1",
+            )
+            self.assertEqual(status, 404)
+            bad_signature = request_path[:-5] + "0.mp4"
+            status, _headers, _body = request("GET", bad_signature)
+            self.assertEqual(status, 404)
+
+            with blob.open("ab") as handle:
+                handle.write(b"-tampered")
+            status, _headers, _body = request("GET", request_path)
+            self.assertEqual(status, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_terminal_cleanup_releases_local_media_but_processing_does_not(self):
+        config = make_local_config(self.root)
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        processor.prepare(make_prepare())
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        blob = processor._object_store()._path(manifest["storage"]["key"])
+        ledger_path = processor._publish_ledger_path(JOB_ID)
+        worker._atomic_write_json(
+            ledger_path,
+            {
+                "job_id": JOB_ID,
+                "state": "processing",
+                "version": 1,
+            },
+        )
+        processing = processor.cleanup_due_media()
+        self.assertEqual(processing["released"], 0)
+        self.assertTrue(blob.exists())
+        worker._atomic_write_json(
+            ledger_path,
+            {
+                "job_id": JOB_ID,
+                "state": "init_outcome_unknown",
+                "version": 1,
+            },
+        )
+        unknown = processor.cleanup_due_media()
+        self.assertEqual(unknown["released"], 0)
+        self.assertTrue(blob.exists())
+        tampered_manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        tampered_manifest["result"]["job_id"] = "ttjob_20260729_999999"
+        worker._atomic_write_json(
+            processor._prepare_manifest_path(JOB_ID),
+            tampered_manifest,
+        )
+        worker._atomic_write_json(
+            ledger_path,
+            {
+                "job_id": "ttjob_20260729_999999",
+                "state": "published",
+                "version": 1,
+            },
+        )
+        wrong_ledger = processor.cleanup_due_media()
+        self.assertEqual(wrong_ledger["failed"], 1)
+        self.assertTrue(blob.exists())
+        worker._atomic_write_json(
+            ledger_path,
+            {
+                "job_id": JOB_ID,
+                "state": "published",
+                "version": 1,
+            },
+        )
+        blocked = processor.cleanup_due_media()
+        self.assertEqual(blocked["failed"], 1)
+        self.assertTrue(blob.exists())
+        tampered_manifest["result"]["job_id"] = JOB_ID
+        worker._atomic_write_json(
+            processor._prepare_manifest_path(JOB_ID),
+            tampered_manifest,
+        )
+        terminal = processor.cleanup_due_media()
+        self.assertEqual(terminal["released"], 1)
+        self.assertFalse(blob.exists())
+        ledger = worker._read_json(ledger_path)
+        self.assertEqual(ledger["media_release"]["state"], "released")
+        repeated = processor.cleanup_due_media()
+        self.assertEqual(repeated["released"], 0)
+
     def test_phone_match_filter_overlaps_point_nine_and_shrinks_to_phone_size(self):
         config = make_config(self.root)
         command = worker.build_phone_match_command(
@@ -1356,6 +1920,81 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(api.init_calls, [])
         self.assertFalse(processor._publish_ledger_path(JOB_ID).exists())
 
+    def test_verified_property_is_bound_to_selected_storage_origin(self):
+        config = replace(
+            make_config(self.root, gates=True),
+            url_property_verified_origin="https://different.example.com",
+        )
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor)
+        self.assertFalse(config.gate_state()["ready"])
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.publish(make_publish(config))
+        self.assertEqual(
+            caught.exception.code,
+            "tt_publish_compliance_gate_closed",
+        )
+        self.assertEqual(api.init_calls, [])
+
+    def test_publish_binds_property_to_frozen_manifest_origin_after_backend_switch(
+        self,
+    ):
+        local_config = make_local_config(self.root)
+        local_processor = worker.TTPostGPUProcessor(
+            local_config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=FakeTikTokAPI(),
+        )
+        local_processor.prepare(make_prepare())
+        local_manifest_path = local_processor._prepare_manifest_path(JOB_ID)
+        local_manifest = worker._read_json(local_manifest_path)
+        local_manifest["result"]["direct_post_eligible"] = True
+        worker._atomic_write_json(local_manifest_path, local_manifest)
+        switched_to_cos = replace(
+            local_config,
+            storage_backend="cos",
+            live_enabled=True,
+            direct_audit_approved=True,
+            url_property_verified=True,
+            url_property_verified_origin="https://pull.example.com",
+        )
+        cos_api = FakeTikTokAPI()
+        cos_processor = self.processor(
+            config=switched_to_cos,
+            api=cos_api,
+        )
+        self.assertTrue(switched_to_cos.gate_state()["ready"])
+        with self.assertRaises(worker.TTGPUError) as local_mismatch:
+            cos_processor.publish(make_publish(switched_to_cos))
+        self.assertEqual(
+            local_mismatch.exception.code,
+            "tt_publish_url_property_mismatch",
+        )
+        self.assertEqual(cos_api.init_calls, [])
+
+        second_root = self.root / "reverse"
+        second_root.mkdir()
+        switched_to_local = make_local_config(second_root, gates=True)
+        local_api = FakeTikTokAPI()
+        reverse_processor = self.processor(
+            config=switched_to_local,
+            api=local_api,
+        )
+        seed_prepared(
+            reverse_processor,
+            direct_post_eligible=True,
+        )
+        self.assertTrue(switched_to_local.gate_state()["ready"])
+        with self.assertRaises(worker.TTGPUError) as cos_mismatch:
+            reverse_processor.publish(make_publish(switched_to_local))
+        self.assertEqual(
+            cos_mismatch.exception.code,
+            "tt_publish_url_property_mismatch",
+        )
+        self.assertEqual(local_api.init_calls, [])
+
     def test_branded_manifest_is_blocked_even_when_global_gates_open(self):
         config = make_config(self.root, gates=True)
         api = FakeTikTokAPI()
@@ -1460,6 +2099,39 @@ class TTGPUWorkerTests(unittest.TestCase):
             processor.publish(make_publish(config))
         self.assertEqual(repeated.exception.code, "tt_publish_retry_blocked")
         self.assertEqual(len(api.init_calls), 1)
+
+    def test_http_500_init_is_unknown_and_local_media_is_never_cleaned(self):
+        config = make_local_config(self.root, gates=True)
+        api = worker.TikTokContentPostingAPI(
+            opener=HTTP500TikTokOpener(),
+        )
+        processor = worker.TTPostGPUProcessor(
+            config,
+            runner=FakeRunner(),
+            downloader=make_downloader([]),
+            tiktok_api=api,
+        )
+        processor.prepare(make_prepare())
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        manifest = worker._read_json(manifest_path)
+        manifest["result"]["direct_post_eligible"] = True
+        worker._atomic_write_json(manifest_path, manifest)
+        blob = processor._local_media_store()._path(
+            manifest["storage"]["key"]
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.publish(make_publish(config))
+        self.assertEqual(
+            caught.exception.code,
+            "tt_upstream_unavailable",
+        )
+        ledger = worker._read_json(
+            processor._publish_ledger_path(JOB_ID)
+        )
+        self.assertEqual(ledger["state"], "init_outcome_unknown")
+        cleanup = processor.cleanup_due_media()
+        self.assertEqual(cleanup["released"], 0)
+        self.assertTrue(blob.exists())
 
     def test_caption_limit_uses_utf16_units_and_is_aigc_is_boolean(self):
         config = make_config(self.root, gates=True)
@@ -1614,16 +2286,30 @@ class TTGPUWorkerTests(unittest.TestCase):
             "TT_POST_LIVE_ENABLED=0",
             "TT_POST_DIRECT_AUDIT_APPROVED=0",
             "TT_POST_URL_PROPERTY_VERIFIED=0",
+            "TT_POST_URL_PROPERTY_VERIFIED_ORIGIN=",
             "TT_POST_GPU_FONT_FILE=/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
             "TT_POST_GPU_LOGO_PATH=",
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
             "TT_POST_GPU_VIDEO_ENCODER=hevc_nvenc",
+            "TT_POST_GPU_STORAGE_BACKEND=cos",
+            "TT_POST_GPU_MEDIA_HOST=127.0.0.1",
+            "TT_POST_GPU_MEDIA_PORT=8831",
+            "TT_POST_GPU_LOCAL_MEDIA_ORIGIN=",
+            "TT_POST_GPU_LOCAL_MEDIA_PREFIX=tt-post-media/v1",
+            "TT_POST_GPU_TERMINAL_MEDIA_GRACE_SECONDS=3600",
             "TT_POST_GPU_COS_TIMEOUT=120",
             "TT_POST_GPU_PREPARE_TOTAL_TIMEOUT=8700",
         ):
             self.assertIn(name, env)
         self.assertNotIn("TT_POST_GPU_LIVE_API_ENABLED", env)
         self.assertNotIn("TT_POST_GPU_PUBLISH_ENABLED", env)
+        nginx = (
+            REPO_ROOT / "deploy" / "tt-post-gpu-media-nginx.conf.example"
+        ).read_text(encoding="utf-8")
+        self.assertIn("server_name tt-media.ai.yingliangads.com;", nginx)
+        self.assertIn("proxy_pass http://127.0.0.1:8831;", nginx)
+        self.assertIn("proxy_set_header Range $http_range;", nginx)
+        self.assertIn("proxy_buffering off;", nginx)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,9 @@ messages.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import math
@@ -26,6 +28,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -71,12 +74,19 @@ PUBLISH_PATH = "/internal/tt-post/publish"
 RECONCILE_PATH = "/internal/tt-post/reconcile"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8830
+DEFAULT_MEDIA_HOST = "127.0.0.1"
+DEFAULT_MEDIA_PORT = 8831
 DEFAULT_WORK_ROOT = Path("/data/tt-post-publisher")
 DEFAULT_FFMPEG_BIN = "/opt/ffmpeg-nvenc/ffmpeg"
 DEFAULT_FFPROBE_BIN = "/opt/ffmpeg-nvenc/ffprobe"
 DEFAULT_FONT_FILE = "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
 DEFAULT_TRANSITION_SECONDS = 0.9
 DEFAULT_COS_PREFIX = "tt-post-prepared"
+DEFAULT_LOCAL_MEDIA_PREFIX = "tt-post-media/v1"
+DEFAULT_STORAGE_BACKEND = "cos"
+DEFAULT_TERMINAL_MEDIA_GRACE_SECONDS = 3600
+DEFAULT_LOCAL_MIN_FREE_BYTES = 10 * 1024 * 1024 * 1024
+LOCAL_PREPARE_OVERHEAD_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 # TikTok Content Posting accepts video media up to 4 GiB. Long sources can
 # expand after normalization, so the prepared artifact
@@ -283,12 +293,16 @@ def _normalize_https_origin(value, name):
     if "://" not in text:
         text = "https://" + text
     parsed = urllib.parse.urlsplit(text)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
     if (
         parsed.scheme != "https"
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.port not in {None, 443}
+        or port not in {None, 443}
         or parsed.path not in {"", "/"}
         or parsed.query
         or parsed.fragment
@@ -301,19 +315,56 @@ def _normalize_https_origin(value, name):
     return "https://" + parsed.hostname.lower()
 
 
-def _normalize_prefix(value):
-    text = str(value or DEFAULT_COS_PREFIX).strip().strip("/")
+def _normalize_prefix(value, name, default):
+    text = str(value or default).strip().strip("/")
+    parts = text.split("/")
     if (
         not text
-        or ".." in text.split("/")
+        or any(part in {"", ".", ".."} for part in parts)
         or not SAFE_PREFIX_RE.fullmatch(text)
     ):
         raise TTGPUError(
             "invalid_configuration",
-            "TT_POST_GPU_COS_PREFIX is invalid",
+            "%s is invalid" % name,
             500,
         )
     return text
+
+
+def _decode_local_signing_key(value):
+    text = str(value or "").strip()
+    if not text or len(text) > 512 or re.search(r"\s", text):
+        raise TTGPUError(
+            "invalid_configuration",
+            "TT_POST_GPU_LOCAL_URL_SIGNING_KEY_B64 is required",
+            500,
+        )
+    try:
+        padding = "=" * ((4 - len(text) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(text + padding)
+    except Exception:
+        decoded = b""
+    if len(decoded) != 32:
+        raise TTGPUError(
+            "invalid_configuration",
+            "TT_POST_GPU_LOCAL_URL_SIGNING_KEY_B64 must encode exactly 32 bytes",
+            500,
+        )
+    return decoded
+
+
+def _loopback_host(value, name):
+    host = str(value or "").strip()
+    try:
+        if not ipaddress.ip_address(host).is_loopback:
+            raise ValueError("not loopback")
+    except ValueError:
+        raise TTGPUError(
+            "invalid_configuration",
+            "%s must be a loopback address" % name,
+            500,
+        ) from None
+    return host
 
 
 @dataclass(frozen=True)
@@ -340,6 +391,15 @@ class WorkerConfig:
     cos_region: str
     cos_domain: str
     cos_prefix: str
+    storage_backend: str = DEFAULT_STORAGE_BACKEND
+    media_host: str = DEFAULT_MEDIA_HOST
+    media_port: int = DEFAULT_MEDIA_PORT
+    local_media_origin: str = ""
+    local_media_prefix: str = DEFAULT_LOCAL_MEDIA_PREFIX
+    local_media_signing_key: bytes = field(default=b"", repr=False)
+    terminal_media_grace_seconds: int = DEFAULT_TERMINAL_MEDIA_GRACE_SECONDS
+    local_min_free_bytes: int = DEFAULT_LOCAL_MIN_FREE_BYTES
+    url_property_verified_origin: str = ""
     live_enabled: bool = False
     direct_audit_approved: bool = False
     url_property_verified: bool = False
@@ -362,16 +422,10 @@ class WorkerConfig:
                 "TikTok GPU publisher is disabled",
                 503,
             )
-        host = str(os.environ.get("TT_POST_GPU_HOST", DEFAULT_HOST) or "").strip()
-        try:
-            if not ipaddress.ip_address(host).is_loopback:
-                raise ValueError("not loopback")
-        except ValueError:
-            raise TTGPUError(
-                "invalid_configuration",
-                "TT_POST_GPU_HOST must be a loopback address",
-                500,
-            ) from None
+        host = _loopback_host(
+            os.environ.get("TT_POST_GPU_HOST", DEFAULT_HOST),
+            "TT_POST_GPU_HOST",
+        )
         internal_token = str(os.environ.get("TT_POST_GPU_INTERNAL_TOKEN", "") or "")
         if (
             len(internal_token) < 32
@@ -451,16 +505,112 @@ class WorkerConfig:
         secret_key = str(os.environ.get("TT_POST_GPU_COS_SECRET_KEY", "") or "").strip()
         bucket = str(os.environ.get("TT_POST_GPU_COS_BUCKET", "") or "").strip()
         region = str(os.environ.get("TT_POST_GPU_COS_REGION", "") or "").strip()
-        if not all((secret_id, secret_key, bucket, region)):
+        storage_backend = str(
+            os.environ.get(
+                "TT_POST_GPU_STORAGE_BACKEND",
+                DEFAULT_STORAGE_BACKEND,
+            )
+            or ""
+        ).strip().lower()
+        if storage_backend not in {"cos", "local"}:
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_STORAGE_BACKEND must be cos or local",
+                500,
+            )
+        if storage_backend == "cos" and not all(
+            (secret_id, secret_key, bucket, region)
+        ):
             raise TTGPUError(
                 "invalid_configuration",
                 "dedicated TT GPU COS configuration is required",
                 500,
             )
+        cos_domain_raw = str(
+            os.environ.get("TT_POST_GPU_COS_DOMAIN", "") or ""
+        ).strip()
+        cos_domain = (
+            _normalize_https_origin(
+                cos_domain_raw,
+                "TT_POST_GPU_COS_DOMAIN",
+            )
+            if cos_domain_raw
+            else ""
+        )
+        if storage_backend == "cos" and not cos_domain:
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_COS_DOMAIN is required for COS storage",
+                500,
+            )
+        local_media_origin = ""
+        local_media_signing_key = b""
+        local_media_origin_raw = str(
+            os.environ.get("TT_POST_GPU_LOCAL_MEDIA_ORIGIN", "") or ""
+        ).strip()
+        local_signing_key_raw = str(
+            os.environ.get(
+                "TT_POST_GPU_LOCAL_URL_SIGNING_KEY_B64",
+                "",
+            )
+            or ""
+        ).strip()
+        control_port = _env_int(
+            "TT_POST_GPU_PORT",
+            DEFAULT_PORT,
+            1,
+            65535,
+        )
+        media_host = _loopback_host(
+            os.environ.get("TT_POST_GPU_MEDIA_HOST", DEFAULT_MEDIA_HOST),
+            "TT_POST_GPU_MEDIA_HOST",
+        )
+        media_port = _env_int(
+            "TT_POST_GPU_MEDIA_PORT",
+            DEFAULT_MEDIA_PORT,
+            1,
+            65535,
+        )
+        local_origin_requested = bool(
+            storage_backend == "local"
+            or local_media_origin_raw
+            or local_signing_key_raw
+        )
+        if local_origin_requested and (
+            media_host == host and media_port == control_port
+        ):
+            raise TTGPUError(
+                "invalid_configuration",
+                "TT_POST_GPU_MEDIA_PORT must differ from TT_POST_GPU_PORT",
+                500,
+            )
+        if local_origin_requested:
+            local_media_origin = _normalize_https_origin(
+                local_media_origin_raw,
+                "TT_POST_GPU_LOCAL_MEDIA_ORIGIN",
+            )
+            local_media_signing_key = _decode_local_signing_key(
+                local_signing_key_raw
+            )
+        url_property_verified_origin_raw = str(
+            os.environ.get(
+                "TT_POST_URL_PROPERTY_VERIFIED_ORIGIN",
+                "",
+            )
+            or ""
+        ).strip()
+        url_property_verified_origin = (
+            _normalize_https_origin(
+                url_property_verified_origin_raw,
+                "TT_POST_URL_PROPERTY_VERIFIED_ORIGIN",
+            )
+            if url_property_verified_origin_raw
+            else ""
+        )
         return cls(
             enabled=True,
             host=host,
-            port=_env_int("TT_POST_GPU_PORT", DEFAULT_PORT, 1, 65535),
+            port=control_port,
             internal_token=internal_token,
             credential_seal_key=seal_key,
             credential_max_ttl_seconds=_env_int(
@@ -488,13 +638,38 @@ class WorkerConfig:
             cos_secret_key=secret_key,
             cos_bucket=bucket,
             cos_region=region,
-            cos_domain=_normalize_https_origin(
-                os.environ.get("TT_POST_GPU_COS_DOMAIN", ""),
-                "TT_POST_GPU_COS_DOMAIN",
-            ),
+            cos_domain=cos_domain,
             cos_prefix=_normalize_prefix(
-                os.environ.get("TT_POST_GPU_COS_PREFIX", DEFAULT_COS_PREFIX)
+                os.environ.get("TT_POST_GPU_COS_PREFIX", DEFAULT_COS_PREFIX),
+                "TT_POST_GPU_COS_PREFIX",
+                DEFAULT_COS_PREFIX,
             ),
+            storage_backend=storage_backend,
+            media_host=media_host,
+            media_port=media_port,
+            local_media_origin=local_media_origin,
+            local_media_prefix=_normalize_prefix(
+                os.environ.get(
+                    "TT_POST_GPU_LOCAL_MEDIA_PREFIX",
+                    DEFAULT_LOCAL_MEDIA_PREFIX,
+                ),
+                "TT_POST_GPU_LOCAL_MEDIA_PREFIX",
+                DEFAULT_LOCAL_MEDIA_PREFIX,
+            ),
+            local_media_signing_key=local_media_signing_key,
+            terminal_media_grace_seconds=_env_int(
+                "TT_POST_GPU_TERMINAL_MEDIA_GRACE_SECONDS",
+                DEFAULT_TERMINAL_MEDIA_GRACE_SECONDS,
+                3600,
+                86400,
+            ),
+            local_min_free_bytes=_env_int(
+                "TT_POST_GPU_LOCAL_MIN_FREE_BYTES",
+                DEFAULT_LOCAL_MIN_FREE_BYTES,
+                1024 * 1024 * 1024,
+                1024 * 1024 * 1024 * 1024,
+            ),
+            url_property_verified_origin=url_property_verified_origin,
             live_enabled=_env_bool("TT_POST_LIVE_ENABLED", False),
             direct_audit_approved=_env_bool(
                 "TT_POST_DIRECT_AUDIT_APPROVED",
@@ -561,6 +736,19 @@ class WorkerConfig:
         )
 
     def gate_state(self):
+        expected_origin = (
+            self.local_media_origin
+            if self.storage_backend == "local"
+            else self.cos_domain
+        )
+        verified_origin_matches = bool(
+            expected_origin
+            and self.url_property_verified_origin
+            and secrets.compare_digest(
+                expected_origin,
+                self.url_property_verified_origin,
+            )
+        )
         return {
             "TT_POST_LIVE_ENABLED": bool(self.live_enabled),
             "TT_POST_DIRECT_AUDIT_APPROVED": bool(
@@ -573,6 +761,7 @@ class WorkerConfig:
                 self.live_enabled
                 and self.direct_audit_approved
                 and self.url_property_verified
+                and verified_origin_matches
             ),
         }
 
@@ -625,6 +814,44 @@ def _fsync_directory(path):
         return
     descriptor = os.open(str(path), os.O_RDONLY)
     try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _open_regular_readonly(path, expected_size=None):
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (
+                expected_size is not None
+                and int(metadata.st_size) != int(expected_size)
+            )
+        ):
+            raise OSError("not a regular file with the expected size")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _fsync_regular_file(path, expected_size):
+    flags = os.O_RDWR
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or int(metadata.st_size) != int(expected_size)
+        ):
+            raise OSError("not a regular file with the expected size")
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -1875,6 +2102,290 @@ class CosObjectStore:
         return self.config.cos_domain.rstrip("/") + "/" + quoted
 
 
+class LocalMediaStore:
+    """Private GPU blob store exposed only through the loopback media server."""
+
+    backend = "local"
+
+    def __init__(self, config):
+        self.config = config
+        self.root = _ensure_private_directory(config.work_root / "media")
+
+    @staticmethod
+    def key(job_id, sha256_value):
+        if not JOB_ID_RE.fullmatch(str(job_id or "")):
+            raise TTGPUError(
+                "local_media_invalid",
+                "local media job identity is invalid",
+                500,
+            )
+        sha256_value = str(sha256_value or "").lower()
+        if not HEX_64_RE.fullmatch(sha256_value):
+            raise TTGPUError(
+                "local_media_invalid",
+                "local media fingerprint is invalid",
+                500,
+            )
+        return "%s/%s.mp4" % (job_id, sha256_value)
+
+    @staticmethod
+    def _split_key(key):
+        parts = str(key or "").split("/")
+        if (
+            len(parts) != 2
+            or not JOB_ID_RE.fullmatch(parts[0])
+            or not parts[1].endswith(".mp4")
+            or not HEX_64_RE.fullmatch(parts[1][:-4])
+        ):
+            raise TTGPUError(
+                "local_media_invalid",
+                "local media key is invalid",
+                500,
+            )
+        return parts[0], parts[1][:-4]
+
+    def _path(self, key):
+        job_id, sha256_value = self._split_key(key)
+        return self.root / job_id / ("%s.mp4" % sha256_value)
+
+    def _signature(self, job_id, sha256_value):
+        if len(self.config.local_media_signing_key) != 32:
+            raise TTGPUError(
+                "invalid_configuration",
+                "local media URL signing key is unavailable",
+                500,
+            )
+        message = ("v1\n%s\n%s" % (job_id, sha256_value)).encode("ascii")
+        return hmac.new(
+            self.config.local_media_signing_key,
+            message,
+            hashlib.sha256,
+        ).hexdigest()
+
+    def url(self, key):
+        job_id, sha256_value = self._split_key(key)
+        signature = self._signature(job_id, sha256_value)
+        components = (
+            self.config.local_media_prefix.strip("/").split("/")
+            + [job_id, sha256_value, signature + ".mp4"]
+        )
+        quoted = "/".join(
+            urllib.parse.quote(part, safe="") for part in components
+        )
+        return self.config.local_media_origin.rstrip("/") + "/" + quoted
+
+    def admit_prepare(self, required_bytes):
+        try:
+            free_bytes = int(shutil.disk_usage(self.root).free)
+        except OSError:
+            raise TTGPUError(
+                "local_media_storage_unavailable",
+                "GPU local media storage is unavailable",
+                503,
+            ) from None
+        required_free = (
+            int(self.config.local_min_free_bytes)
+            + max(0, int(required_bytes))
+        )
+        if free_bytes < required_free:
+            raise TTGPUError(
+                "local_media_storage_full",
+                "GPU local media storage cannot preserve the configured free-space reserve",
+                507,
+            )
+
+    def verify(self, key, sha256_value, size, *, full_hash):
+        path = self._path(key)
+        try:
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or int(metadata.st_size) != int(size)
+            ):
+                raise OSError("unsafe local media")
+            descriptor = _open_regular_readonly(path, size)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise TTGPUError(
+                "local_media_verification_failed",
+                "GPU local media could not be verified",
+                500,
+            ) from None
+        try:
+            if full_hash:
+                digest = hashlib.sha256()
+                actual_size = 0
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        actual_size += len(chunk)
+                actual_sha = digest.hexdigest()
+            else:
+                actual_sha = sha256_value
+                actual_size = int(size)
+        finally:
+            os.close(descriptor)
+        if full_hash:
+            if (
+                actual_size != int(size)
+                or not secrets.compare_digest(actual_sha, sha256_value)
+            ):
+                raise TTGPUError(
+                    "local_media_verification_failed",
+                    "GPU local media failed integrity verification",
+                    500,
+                )
+        return path
+
+    def upload(
+        self,
+        key,
+        local_path,
+        sha256_value,
+        size,
+        deadline=None,
+    ):
+        if deadline is not None:
+            deadline.check()
+        target = self.verify(
+            key,
+            sha256_value,
+            size,
+            full_hash=True,
+        )
+        if target is not None:
+            return True
+        source = Path(local_path)
+        try:
+            source_metadata = source.lstat()
+        except OSError:
+            raise TTGPUError(
+                "local_media_persist_failed",
+                "prepared media is unavailable for local persistence",
+                500,
+            ) from None
+        if (
+            stat.S_ISLNK(source_metadata.st_mode)
+            or not stat.S_ISREG(source_metadata.st_mode)
+            or int(source_metadata.st_size) != int(size)
+        ):
+            raise TTGPUError(
+                "local_media_persist_failed",
+                "prepared media is unsafe for local persistence",
+                500,
+            )
+        target = self._path(key)
+        target_parent_existed = target.parent.exists()
+        _ensure_private_directory(target.parent)
+        if not target_parent_existed:
+            _fsync_directory(self.root)
+        try:
+            os.replace(str(source), str(target))
+            os.chmod(target, 0o600)
+            _fsync_regular_file(target, size)
+            _fsync_directory(target.parent)
+        except OSError:
+            raise TTGPUError(
+                "local_media_persist_failed",
+                "prepared media could not be persisted on GPU storage",
+                500,
+            ) from None
+        if deadline is not None:
+            deadline.check()
+        if self.verify(
+            key,
+            sha256_value,
+            size,
+            full_hash=True,
+        ) is None:
+            raise TTGPUError(
+                "local_media_verification_failed",
+                "GPU local media failed integrity verification",
+                500,
+            )
+        return False
+
+    def resolve_request_path(self, request_path, manifests_root):
+        expected_prefix = self.config.local_media_prefix.strip("/").split("/")
+        parts = str(request_path or "").strip("/").split("/")
+        if len(parts) != len(expected_prefix) + 3:
+            return None
+        if parts[: len(expected_prefix)] != expected_prefix:
+            return None
+        job_id, sha256_value, signed_name = parts[-3:]
+        if (
+            not JOB_ID_RE.fullmatch(job_id)
+            or not HEX_64_RE.fullmatch(sha256_value)
+            or not signed_name.endswith(".mp4")
+        ):
+            return None
+        signature = signed_name[:-4]
+        if not re.fullmatch(r"[0-9a-f]{64}", signature):
+            return None
+        expected = self._signature(job_id, sha256_value)
+        if not secrets.compare_digest(signature, expected):
+            return None
+        manifest = _read_json(Path(manifests_root) / ("%s.json" % job_id))
+        result = manifest.get("result") if isinstance(manifest, dict) else None
+        storage = manifest.get("storage") if isinstance(manifest, dict) else None
+        key = self.key(job_id, sha256_value)
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("status") != "ready"
+            or not isinstance(result, dict)
+            or not isinstance(storage, dict)
+            or storage.get("backend") != "local"
+            or storage.get("key") != key
+            or result.get("job_id") != job_id
+            or result.get("output_sha256") != sha256_value
+            or result.get("output_url") != self.url(key)
+        ):
+            return None
+        try:
+            size = int(result.get("output_size"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        path = self.verify(key, sha256_value, size, full_hash=False)
+        if path is None:
+            return None
+        return {
+            "path": path,
+            "sha256": sha256_value,
+            "size": size,
+        }
+
+    def release(self, key, sha256_value, size):
+        path = self.verify(
+            key,
+            sha256_value,
+            size,
+            full_hash=True,
+        )
+        if path is None:
+            return True
+        try:
+            path.unlink()
+            _fsync_directory(path.parent)
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+            else:
+                _fsync_directory(self.root)
+        except OSError:
+            raise TTGPUError(
+                "local_media_release_failed",
+                "GPU local media could not be released",
+                500,
+            ) from None
+        return False
+
+
 class TikTokContentPostingAPI:
     """Minimal no-redirect client for TikTok Content Posting API v2."""
 
@@ -1908,6 +2419,7 @@ class TikTokContentPostingAPI:
                         502,
                     )
         except urllib.error.HTTPError as exc:
+            http_status = int(getattr(exc, "code", 0) or 0)
             try:
                 raw = exc.read(MAX_RESPONSE_BYTES)
                 data = json.loads(raw.decode("utf-8")) if raw else {}
@@ -1917,6 +2429,16 @@ class TikTokContentPostingAPI:
                 exc.close()
             code = _upstream_error_code(data)
             log_id = _upstream_log_id(data)
+            if (
+                http_status >= 500
+                or http_status in {408, 409, 425, 429}
+            ):
+                raise TTGPUError(
+                    "tt_upstream_unavailable",
+                    "TikTok API request outcome is unavailable",
+                    503,
+                    {"log_id": log_id} if log_id else None,
+                ) from None
             raise TTGPUError(
                 "tt_upstream_rejected",
                 "TikTok API rejected the request (%s)" % code,
@@ -2291,12 +2813,34 @@ def _prepare_response(manifest, reused, config, expected_job_id):
     output_sha_raw = str(result.get("output_sha256") or "").strip()
     output_sha = output_sha_raw.lower()
     output_url = str(result.get("output_url") or "").strip()
-    expected_output_url = "%s/%s/%s/%s.mp4" % (
-        config.cos_domain.rstrip("/"),
-        config.cos_prefix.strip("/"),
-        output_sha[:2],
-        output_sha,
-    )
+    storage = manifest.get("storage")
+    if isinstance(storage, dict):
+        storage_backend = str(storage.get("backend") or "")
+        storage_key = str(storage.get("key") or "")
+    else:
+        # Version 1 manifests predate the backend discriminator and are COS.
+        storage_backend = "cos"
+        storage_key = str(manifest.get("cos_key") or "")
+    if storage_backend == "local":
+        expected_storage_key = LocalMediaStore.key(
+            expected_job_id,
+            output_sha,
+        )
+        local_store = LocalMediaStore(config)
+        expected_output_url = local_store.url(expected_storage_key)
+    elif storage_backend == "cos":
+        expected_storage_key = "%s/%s/%s.mp4" % (
+            config.cos_prefix.strip("/"),
+            output_sha[:2],
+            output_sha,
+        )
+        expected_output_url = "%s/%s" % (
+            config.cos_domain.rstrip("/"),
+            expected_storage_key,
+        )
+    else:
+        expected_storage_key = ""
+        expected_output_url = ""
     request_content_id = (
         str(stored_request.get("content_id") or "")
         if isinstance(stored_request, dict)
@@ -2340,6 +2884,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         or str(probe.get("audio_profile") or "").lower() != "lc"
         or audio_channels != 2
         or audio_sample_rate != 48000
+        or storage_key != expected_storage_key
         or output_url != expected_output_url
     ):
         raise TTGPUError(
@@ -2347,6 +2892,21 @@ def _prepare_response(manifest, reused, config, expected_job_id):
             "stored prepared media does not match the current contract",
             500,
         )
+    if storage_backend == "local":
+        if (
+            local_store.verify(
+                storage_key,
+                output_sha,
+                output_size,
+                full_hash=True,
+            )
+            is None
+        ):
+            raise TTGPUError(
+                "prepared_artifact_not_found",
+                "prepared GPU media is no longer available",
+                409,
+            )
     return {
         "brand_overlay_review_required": bool(
             result.get("brand_overlay_review_required", True)
@@ -2360,6 +2920,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         "probe": result["probe"],
         "profile": result["profile"],
         "reused": bool(reused),
+        "storage_backend": storage_backend,
         "status": "ready",
     }
 
@@ -2381,18 +2942,82 @@ class TTPostGPUProcessor:
         self.runner = runner or subprocess.run
         self.downloader = downloader or download_source
         self._object_store_instance = object_store
+        self._local_media_store_instance = (
+            object_store if isinstance(object_store, LocalMediaStore) else None
+        )
         self.tiktok_api = tiktok_api or TikTokContentPostingAPI()
         self._monotonic_fn = monotonic_fn or time.monotonic
+        self._prepare_slot = threading.Lock()
         self._gpu_slot = threading.Lock()
+        self._cleanup_state_lock = threading.Lock()
+        self._cleanup_state = {"status": "not_started"}
         self.manifest_root = _ensure_private_directory(config.work_root / "manifests")
         self.publish_root = _ensure_private_directory(config.work_root / "publishes")
         self.lock_root = _ensure_private_directory(config.work_root / "locks")
         self.jobs_root = _ensure_private_directory(config.work_root / "jobs")
 
+    def record_cleanup_state(self, result=None, failed=False):
+        state = {
+            "last_run_at": _utc_now(),
+            "status": "failed" if failed else "ok",
+        }
+        if isinstance(result, dict):
+            for key in ("failed", "released", "scanned"):
+                try:
+                    state[key] = max(0, int(result.get(key, 0)))
+                except (TypeError, ValueError, OverflowError):
+                    state[key] = 0
+        with self._cleanup_state_lock:
+            self._cleanup_state = state
+
+    def storage_health(self):
+        state = {
+            "backend": self.config.storage_backend,
+            "local_origin_enabled": bool(
+                self.config.local_media_origin
+                and len(self.config.local_media_signing_key) == 32
+            ),
+        }
+        if state["local_origin_enabled"] or self.config.storage_backend == "local":
+            try:
+                usage = shutil.disk_usage(self.config.work_root)
+                required = (
+                    int(self.config.local_min_free_bytes)
+                    + int(self.config.max_source_bytes)
+                    + int(self.config.max_output_bytes)
+                    + LOCAL_PREPARE_OVERHEAD_BYTES
+                )
+                state.update(
+                    {
+                        "free_bytes": int(usage.free),
+                        "local_prepare_admission_ready": bool(
+                            int(usage.free) >= required
+                        ),
+                        "next_prepare_required_free_bytes": required,
+                        "reserve_bytes": int(
+                            self.config.local_min_free_bytes
+                        ),
+                        "total_bytes": int(usage.total),
+                    }
+                )
+            except OSError:
+                state["local_prepare_admission_ready"] = False
+        with self._cleanup_state_lock:
+            state["cleanup"] = dict(self._cleanup_state)
+        return state
+
     def _object_store(self):
         if self._object_store_instance is None:
-            self._object_store_instance = CosObjectStore(self.config)
+            if self.config.storage_backend == "local":
+                self._object_store_instance = self._local_media_store()
+            else:
+                self._object_store_instance = CosObjectStore(self.config)
         return self._object_store_instance
+
+    def _local_media_store(self):
+        if self._local_media_store_instance is None:
+            self._local_media_store_instance = LocalMediaStore(self.config)
+        return self._local_media_store_instance
 
     def _prepare_manifest_path(self, job_id):
         return self.manifest_root / ("%s.json" % job_id)
@@ -2403,12 +3028,131 @@ class TTPostGPUProcessor:
     def _lock_path(self, job_id):
         return self.lock_root / ("%s.lock" % job_id)
 
-    def _cos_key(self, output_sha):
+    def _storage_key(self, job_id, output_sha):
+        if self.config.storage_backend == "local":
+            return LocalMediaStore.key(job_id, output_sha)
         return "%s/%s/%s.mp4" % (
             self.config.cos_prefix,
             output_sha[:2],
             output_sha,
         )
+
+    def _release_terminal_media_locked(self, job_id, ledger, ledger_path):
+        if str(ledger.get("state") or "") not in {"published", "failed"}:
+            return None
+        manifest = _read_json(self._prepare_manifest_path(job_id))
+        storage = manifest.get("storage") if isinstance(manifest, dict) else None
+        result = manifest.get("result") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(storage, dict)
+            or storage.get("backend") != "local"
+            or not isinstance(result, dict)
+        ):
+            return None
+        output_sha = str(result.get("output_sha256") or "")
+        try:
+            output_size = int(result.get("output_size"))
+            expected_key = LocalMediaStore.key(job_id, output_sha)
+        except (TTGPUError, TypeError, ValueError, OverflowError):
+            expected_key = ""
+            output_size = 0
+        if (
+            ledger.get("job_id") != job_id
+            or result.get("job_id") != job_id
+            or storage.get("key") != expected_key
+            or output_size <= 0
+        ):
+            release = {
+                "error": "manifest_invalid",
+                "last_attempt_at": _utc_now(),
+                "reason": str(ledger.get("state") or ""),
+                "state": "release_failed",
+            }
+            ledger["media_release"] = release
+            _atomic_write_json(ledger_path, ledger)
+            return dict(release)
+        release = ledger.get("media_release")
+        if not isinstance(release, dict):
+            release = {
+                "reason": str(ledger.get("state") or ""),
+                "release_after_epoch": int(time.time())
+                + int(self.config.terminal_media_grace_seconds),
+                "state": "pending",
+            }
+            ledger["media_release"] = release
+            _atomic_write_json(ledger_path, ledger)
+        if release.get("state") == "released":
+            return dict(release)
+        try:
+            release_after = int(release.get("release_after_epoch"))
+        except (TypeError, ValueError, OverflowError):
+            release_after = int(time.time()) + int(
+                self.config.terminal_media_grace_seconds
+            )
+            release["release_after_epoch"] = release_after
+            release["state"] = "pending"
+            _atomic_write_json(ledger_path, ledger)
+        if int(time.time()) < release_after:
+            return dict(release)
+        try:
+            storage_key = str(storage.get("key") or "")
+            self._local_media_store().release(
+                storage_key,
+                output_sha,
+                output_size,
+            )
+        except TTGPUError as exc:
+            release.update(
+                {
+                    "error": exc.code,
+                    "last_attempt_at": _utc_now(),
+                    "state": "release_failed",
+                }
+            )
+            _atomic_write_json(ledger_path, ledger)
+            return dict(release)
+        release.update(
+            {
+                "released_at": _utc_now(),
+                "state": "released",
+            }
+        )
+        release.pop("error", None)
+        _atomic_write_json(ledger_path, ledger)
+        return dict(release)
+
+    def cleanup_due_media(self):
+        if (
+            not self.config.local_media_origin
+            or len(self.config.local_media_signing_key) != 32
+        ):
+            return {"failed": 0, "released": 0, "scanned": 0}
+        counts = {"failed": 0, "released": 0, "scanned": 0}
+        for ledger_path in sorted(self.publish_root.glob("*.json")):
+            job_id = ledger_path.stem
+            if not JOB_ID_RE.fullmatch(job_id):
+                continue
+            counts["scanned"] += 1
+            with _job_lock(self._lock_path(job_id)):
+                ledger = _read_json(ledger_path)
+                if not isinstance(ledger, dict):
+                    continue
+                before = (
+                    dict(ledger.get("media_release"))
+                    if isinstance(ledger.get("media_release"), dict)
+                    else None
+                )
+                release = self._release_terminal_media_locked(
+                    job_id,
+                    ledger,
+                    ledger_path,
+                )
+                if release and release.get("state") == "released":
+                    if not before or before.get("state") != "released":
+                        counts["released"] += 1
+                elif release and release.get("state") == "release_failed":
+                    counts["failed"] += 1
+        return counts
 
     def creator_info(self, payload):
         request = validate_credential_request(payload)
@@ -2441,6 +3185,38 @@ class TTPostGPUProcessor:
         with _job_lock(self._lock_path(job_id), deadline=deadline):
             return self._prepare_locked(request, deadline)
 
+    def _prepared_reuse(
+        self,
+        manifest_path,
+        reuse_contract,
+        job_id,
+        deadline,
+    ):
+        existing = _read_json(manifest_path)
+        if existing is None:
+            return None
+        stored_request = existing.get("request")
+        if (
+            existing.get("status") == "ready"
+            and isinstance(stored_request, dict)
+            and all(
+                stored_request.get(key) == value
+                for key, value in reuse_contract.items()
+            )
+        ):
+            deadline.check()
+            return _prepare_response(
+                existing,
+                True,
+                self.config,
+                job_id,
+            )
+        raise TTGPUError(
+            "prepare_idempotency_conflict",
+            "job_id already belongs to a different prepared artifact",
+            409,
+        )
+
     def _prepare_locked(self, request, deadline):
         job_id = request["job_id"]
         manifest_path = self._prepare_manifest_path(job_id)
@@ -2466,28 +3242,54 @@ class TTPostGPUProcessor:
                 request["source_url"].encode("utf-8")
             ).hexdigest(),
         }
-        existing = _read_json(manifest_path)
-        if existing is not None:
-            stored_request = existing.get("request")
-            if (
-                existing.get("status") == "ready"
-                and isinstance(stored_request, dict)
-                and all(
-                    stored_request.get(key) == value
-                    for key, value in reuse_contract.items()
-                )
-            ):
-                deadline.check()
-                return _prepare_response(
-                    existing,
-                    True,
-                    self.config,
-                    job_id,
-                )
+        reused = self._prepared_reuse(
+            manifest_path,
+            reuse_contract,
+            job_id,
+            deadline,
+        )
+        if reused is not None:
+            return reused
+        acquired_prepare = self._prepare_slot.acquire(
+            timeout=deadline.remaining()
+        )
+        if not acquired_prepare:
             raise TTGPUError(
-                "prepare_idempotency_conflict",
-                "job_id already belongs to a different prepared artifact",
-                409,
+                "prepare_timeout",
+                "GPU prepare exceeded the total execution budget",
+                504,
+            )
+        try:
+            reused = self._prepared_reuse(
+                manifest_path,
+                reuse_contract,
+                job_id,
+                deadline,
+            )
+            if reused is not None:
+                return reused
+            return self._prepare_new_locked(
+                request,
+                deadline,
+                reuse_contract,
+                manifest_path,
+            )
+        finally:
+            self._prepare_slot.release()
+
+    def _prepare_new_locked(
+        self,
+        request,
+        deadline,
+        reuse_contract,
+        manifest_path,
+    ):
+        job_id = request["job_id"]
+        if self.config.storage_backend == "local":
+            self._object_store().admit_prepare(
+                int(self.config.max_source_bytes)
+                + int(self.config.max_output_bytes)
+                + LOCAL_PREPARE_OVERHEAD_BYTES
             )
         job_dir = Path(
             tempfile.mkdtemp(prefix=job_id + ".", dir=str(self.jobs_root))
@@ -2498,6 +3300,7 @@ class TTPostGPUProcessor:
         output_path = job_dir / "prepared.mp4"
         drama_text_path = job_dir / "drama-id.txt"
         tutorial_text_path = job_dir / "tutorial-label.txt"
+        local_orphan = None
         try:
             drama_text_path.write_text(
                 "DRAMA ID: %s" % request["content_id"],
@@ -2655,18 +3458,29 @@ class TTPostGPUProcessor:
                 self.config.max_output_bytes,
                 expected_duration,
             )
-            cos_key = self._cos_key(output_sha)
+            storage_key = self._storage_key(job_id, output_sha)
             reused = self._object_store().upload(
-                cos_key,
+                storage_key,
                 output_path,
                 output_sha,
                 output_size,
                 deadline=deadline,
             )
-            output_url = self._object_store().url(cos_key)
-            if not output_url.startswith(self.config.cos_domain.rstrip("/") + "/"):
+            if self.config.storage_backend == "local" and not reused:
+                local_orphan = (
+                    storage_key,
+                    output_sha,
+                    output_size,
+                )
+            output_url = self._object_store().url(storage_key)
+            expected_origin = (
+                self.config.local_media_origin
+                if self.config.storage_backend == "local"
+                else self.config.cos_domain
+            )
+            if not output_url.startswith(expected_origin.rstrip("/") + "/"):
                 raise TTGPUError(
-                    "cos_verification_failed",
+                    "prepared_origin_verification_failed",
                     "prepared URL is outside the configured pull origin",
                     500,
                 )
@@ -2683,15 +3497,21 @@ class TTPostGPUProcessor:
             }
             manifest = {
                 "completed_at": _utc_now(),
-                "cos_key": cos_key,
                 "object_reused": bool(reused),
                 "request": request_fingerprint,
                 "result": result,
                 "status": "ready",
-                "version": 1,
+                "storage": {
+                    "backend": self.config.storage_backend,
+                    "key": storage_key,
+                },
+                "version": 2,
             }
+            if self.config.storage_backend == "cos":
+                manifest["cos_key"] = storage_key
             deadline.check()
             _atomic_write_json(manifest_path, manifest)
+            local_orphan = None
             return _prepare_response(
                 manifest,
                 False,
@@ -2699,6 +3519,11 @@ class TTPostGPUProcessor:
                 job_id,
             )
         finally:
+            if local_orphan is not None:
+                try:
+                    self._local_media_store().release(*local_orphan)
+                except TTGPUError:
+                    pass
             shutil.rmtree(job_dir, ignore_errors=True)
 
     def publish(self, payload):
@@ -2736,6 +3561,32 @@ class TTPostGPUProcessor:
                 "prepared media profile is not eligible for TikTok Direct Post",
                 403,
                 {"profile": prepared["profile"]},
+            )
+        parsed_output = urllib.parse.urlsplit(prepared["output_url"])
+        actual_origin = (
+            "https://" + parsed_output.hostname.lower()
+            if (
+                parsed_output.scheme == "https"
+                and parsed_output.hostname
+                and parsed_output.username is None
+                and parsed_output.password is None
+                and parsed_output.port in {None, 443}
+            )
+            else ""
+        )
+        if (
+            not actual_origin
+            or not self.config.url_property_verified_origin
+            or not secrets.compare_digest(
+                actual_origin,
+                self.config.url_property_verified_origin,
+            )
+        ):
+            raise TTGPUError(
+                "tt_publish_url_property_mismatch",
+                "prepared media origin is not the verified TikTok URL Property",
+                403,
+                {"state": "url_property_mismatch"},
             )
         post_info = {
             "disable_comment": request["disable_comment"],
@@ -2929,12 +3780,20 @@ class TTPostGPUProcessor:
                 }
             )
             _atomic_write_json(ledger_path, ledger)
-            return {
+            response = {
                 "job_id": job_id,
                 "publish_id": publish_id,
                 "state": state,
                 "status": upstream,
             }
+            media_release = self._release_terminal_media_locked(
+                job_id,
+                ledger,
+                ledger_path,
+            )
+            if media_release is not None:
+                response["media_release"] = media_release
+            return response
 
 
 def _is_loopback_client(value):
@@ -3005,7 +3864,16 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
                 "brand_overlay_review_required": True,
                 "direct_post_eligible": False,
                 "gates": self.server.processor.config.gate_state(),
+                "local_origin_enabled": bool(
+                    self.server.processor.config.local_media_origin
+                    and len(
+                        self.server.processor.config.local_media_signing_key
+                    )
+                    == 32
+                ),
                 "profile": self.server.processor.config.profile,
+                "storage_backend": self.server.processor.config.storage_backend,
+                "storage": self.server.processor.storage_health(),
                 "status": "ok",
                 "transition": "phone-match-0.9s",
             },
@@ -3090,15 +3958,227 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"item": result})
 
 
+def _single_byte_range(value, size):
+    text = str(value or "").strip()
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", text)
+    if not match or "," in text:
+        return None
+    first, last = match.groups()
+    if not first and not last:
+        return None
+    try:
+        if not first:
+            suffix = int(last)
+            if suffix <= 0:
+                return None
+            start = max(0, int(size) - suffix)
+            end = int(size) - 1
+        else:
+            start = int(first)
+            if start < 0 or start >= int(size):
+                return None
+            end = int(last) if last else int(size) - 1
+            if end < start:
+                return None
+            end = min(end, int(size) - 1)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return start, end
+
+
+class TTPostGPUMediaHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, processor):
+        super().__init__(address, TTPostGPUMediaRequestHandler)
+        self.processor = processor
+
+
+class TTPostGPUMediaRequestHandler(BaseHTTPRequestHandler):
+    """Loopback origin used behind the dedicated public HTTPS reverse proxy."""
+
+    protocol_version = "HTTP/1.1"
+    server_version = "DramawaveTTPostMedia/1"
+    sys_version = ""
+
+    def log_message(self, _format, *_args):
+        return
+
+    def _not_found(self):
+        self.send_response(404)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _range_not_satisfiable(self, size):
+        self.send_response(416)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Range", "bytes */%s" % int(size))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _serve_media(self, include_body):
+        if not _is_loopback_client(
+            self.client_address[0] if self.client_address else ""
+        ):
+            self._not_found()
+            return
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.query or parsed.fragment:
+            self._not_found()
+            return
+        try:
+            store = self.server.processor._local_media_store()
+        except TTGPUError:
+            self._not_found()
+            return
+        try:
+            resolved = store.resolve_request_path(
+                parsed.path,
+                self.server.processor.manifest_root,
+            )
+        except TTGPUError:
+            self._not_found()
+            return
+        if not resolved:
+            self._not_found()
+            return
+        size = int(resolved["size"])
+        try:
+            descriptor = _open_regular_readonly(
+                resolved["path"],
+                size,
+            )
+        except OSError:
+            self._not_found()
+            return
+        try:
+            range_header = self.headers.get("Range")
+            etag = '"sha256-%s"' % resolved["sha256"]
+            if_range = self.headers.get("If-Range")
+            if (
+                range_header is not None
+                and if_range is not None
+                and not secrets.compare_digest(
+                    str(if_range).strip(),
+                    etag,
+                )
+            ):
+                range_header = None
+            if range_header is None:
+                start, end = 0, size - 1
+                status = 200
+            else:
+                byte_range = _single_byte_range(range_header, size)
+                if byte_range is None:
+                    self._range_not_satisfiable(size)
+                    return
+                start, end = byte_range
+                status = 206
+            length = end - start + 1
+            self.send_response(status)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "private, no-store")
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(length))
+            self.send_header(
+                "ETag",
+                etag,
+            )
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if status == 206:
+                self.send_header(
+                    "Content-Range",
+                    "bytes %s-%s/%s" % (start, end, size),
+                )
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if include_body:
+                with os.fdopen(descriptor, "rb") as handle:
+                    descriptor = None
+                    handle.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = handle.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            self.close_connection = True
+
+    def do_HEAD(self):  # noqa: N802
+        self._serve_media(False)
+
+    def do_GET(self):  # noqa: N802
+        self._serve_media(True)
+
+    def do_POST(self):  # noqa: N802
+        self._not_found()
+
+
+def _media_cleanup_loop(processor, stop_event):
+    while not stop_event.is_set():
+        try:
+            result = processor.cleanup_due_media()
+            processor.record_cleanup_state(result=result)
+        except Exception:
+            processor.record_cleanup_state(failed=True)
+        stop_event.wait(60)
+
+
 def serve():
     config = WorkerConfig.from_env()
     processor = TTPostGPUProcessor(config)
-    server = TTPostGPUHTTPServer(
+    control_server = TTPostGPUHTTPServer(
         (config.host, config.port),
         processor,
         config.internal_token,
     )
+    media_server = None
+    media_thread = None
+    cleanup_thread = None
+    cleanup_stop = threading.Event()
+    if (
+        config.local_media_origin
+        and len(config.local_media_signing_key) == 32
+    ):
+        media_server = TTPostGPUMediaHTTPServer(
+            (config.media_host, config.media_port),
+            processor,
+        )
+        media_thread = threading.Thread(
+            target=media_server.serve_forever,
+            kwargs={"poll_interval": 0.5},
+            name="tt-post-media-origin",
+            daemon=True,
+        )
+        media_thread.start()
+        cleanup_thread = threading.Thread(
+            target=_media_cleanup_loop,
+            args=(processor, cleanup_stop),
+            name="tt-post-media-cleanup",
+            daemon=True,
+        )
+        cleanup_thread.start()
     try:
-        server.serve_forever(poll_interval=0.5)
+        control_server.serve_forever(poll_interval=0.5)
     finally:
-        server.server_close()
+        control_server.server_close()
+        cleanup_stop.set()
+        if media_server is not None:
+            media_server.shutdown()
+            media_server.server_close()
+        if media_thread is not None:
+            media_thread.join(timeout=5)
+        if cleanup_thread is not None:
+            cleanup_thread.join(timeout=5)

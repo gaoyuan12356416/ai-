@@ -1,0 +1,54 @@
+# Dedicated GPU media origin. Do not enable until DNS points this hostname to
+# the GPU, cloud security rules expose 80/443, and a matching certificate is
+# installed. The HTTPS media path itself must never redirect.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name tt-media.ai.yingliangads.com;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name tt-media.ai.yingliangads.com;
+
+    ssl_certificate /etc/letsencrypt/live/tt-media.ai.yingliangads.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tt-media.ai.yingliangads.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    access_log off;
+    # Keep this file root-controlled with short retention. Request-level
+    # upstream errors can contain the signed capability URL, so do not log at
+    # warn/error for this virtual host.
+    error_log /var/log/nginx/tt-post-media-error.log crit;
+
+    location ^~ /tt-post-media/v1/ {
+        limit_except GET {
+            deny all;
+        }
+
+        proxy_pass http://127.0.0.1:8831;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        return 404;
+    }
+}
