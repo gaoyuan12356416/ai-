@@ -112,7 +112,11 @@ SENSITIVE_KEY_FRAGMENTS = (
 _MATERIAL_ID_RE = re.compile(r"^[1-9][0-9]{0,18}$")
 _CONTENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
-_PUBLISH_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,256}$")
+# TikTok currently returns Direct Post IDs such as
+# ``v_pub_url~v2-1.7668584571734657042``. Keep this contract aligned with
+# the GPU worker so a successfully initialized post is never stranded only
+# because the CPU ledger rejects an upstream-safe identifier.
+_PUBLISH_ID_RE = re.compile(r"\A[A-Za-z0-9._~:+/-]{1,512}\Z")
 _WORKER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
 _GPU_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{11,127}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -5290,9 +5294,10 @@ class TTPostStore:
     ) -> Dict[str, Any]:
         """Recover a lost remote ID without invoking Direct Post init again.
 
-        This transition is intentionally limited to a manual reconcile path:
-        only an unknown/review row with no stored publish ID can move back to
-        reconcile-only state.
+        This transition is intentionally limited to a manual reconcile path.
+        An unknown/review row, or a publishing row whose GPU ledger already
+        contains the remote ID, can move to reconcile-only state without
+        invoking Direct Post init again.
         """
 
         normalized = _positive_int(queue_id, "发布队列ID")
@@ -5318,10 +5323,14 @@ class TTPostStore:
                     "TikTok publish_id与已冻结结果不一致",
                     409,
                 )
-            if row["status"] not in {"unknown", "needs_review"}:
+            if row["status"] not in {
+                "unknown",
+                "needs_review",
+                "publishing",
+            }:
                 raise TTPostError(
                     "tt_post_manual_recovery_only",
-                    "只有结果未知任务允许从GPU账本恢复publish_id",
+                    "只有结果未知或发布中任务允许从GPU账本恢复publish_id",
                     409,
                 )
             try:

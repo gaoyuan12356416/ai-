@@ -1622,10 +1622,14 @@ class LifecycleTests(CoreTestCase):
         pending = self.store.record_publish_id(
             queue["id"],
             claim.reveal_claim_token(),
-            "publish-123",
+            "v_pub_url~v2-1.7668584571734657042",
             now=datetime(2026, 7, 29, 2, 0, 30, tzinfo=UTC),
         )
         self.assertEqual("reconciling", pending["status"])
+        self.assertEqual(
+            "v_pub_url~v2-1.7668584571734657042",
+            pending["publish_id"],
+        )
         self.assertEqual(
             [],
             self.store.claim_due(
@@ -1642,12 +1646,12 @@ class LifecycleTests(CoreTestCase):
             )
         published = self.store.reconcile_published(
             queue["id"],
-            "publish-123",
+            "v_pub_url~v2-1.7668584571734657042",
             publish_url="https://www.tiktok.com/@dramawave/video/123",
         )
         replay = self.store.reconcile_published(
             queue["id"],
-            "publish-123",
+            "v_pub_url~v2-1.7668584571734657042",
             publish_url="https://www.tiktok.com/@dramawave/video/123",
         )
         self.assertEqual("published", published["status"])

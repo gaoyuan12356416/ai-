@@ -2419,15 +2419,155 @@ class ServiceLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(self.gpu.publish_jobs, [stable_job])
         self.gpu.reconcile_result = {
-            "publish_id": "pub-recovered",
+            "publish_id": "v_pub_url~v2-1.7668584571734657042",
             "state": "processing",
             "status": {"status": "PROCESSING_DOWNLOAD"},
         }
         recovered = service.manual_reconcile(created["id"])["item"]
         self.assertEqual(recovered["status"], "reconciling")
-        self.assertEqual(recovered["publish_id"], "pub-recovered")
+        self.assertEqual(
+            recovered["publish_id"],
+            "v_pub_url~v2-1.7668584571734657042",
+        )
         self.assertEqual(self.gpu.publish_jobs, [stable_job])
         self.assertEqual(self.gpu.reconcile_jobs, [stable_job])
+        events = service.events(created["id"])["items"]
+        self.assertIn(
+            "publish_id_recovered_from_gpu_ledger",
+            [item["event_type"] for item in events],
+        )
+
+    def test_publish_id_persistence_failure_becomes_unknown_not_publishing(self):
+        service = self.service(OPEN_GATES)
+        created = service.queue_create(
+            queue_payload(self.clock, publish_mode="direct_post")
+        )["item"]
+        stable_job = created["gpu_job_id"]
+        self.clock.value += timedelta(minutes=30)
+        claim = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": 600,
+                "limit": 20,
+            }
+        )["items"][0]
+
+        def fail_record_publish_id(*_args, **_kwargs):
+            raise sqlite3.OperationalError(
+                "injected publish ID persistence failure"
+            )
+
+        service.store.record_publish_id = fail_record_publish_id
+        unknown = service.publish_claimed(
+            created["id"],
+            claim["claim_token"],
+        )["item"]
+
+        self.assertEqual("unknown", unknown["status"])
+        self.assertTrue(unknown["unknown_outcome"])
+        self.assertFalse(unknown["publish_id"])
+        self.assertEqual(self.gpu.publish_jobs, [stable_job])
+        self.assertEqual(
+            [],
+            service.claim_due(
+                {
+                    "worker_id": "tt-post-runner-secondary",
+                    "grace_seconds": 600,
+                    "limit": 20,
+                }
+            )["items"],
+        )
+        events = service.events(created["id"])["items"]
+        self.assertIn(
+            "publish_outcome_unknown",
+            [item["event_type"] for item in events],
+        )
+
+    def test_reconcile_required_id_persistence_failure_becomes_unknown(self):
+        service = self.service(OPEN_GATES)
+        created = service.queue_create(
+            queue_payload(self.clock, publish_mode="direct_post")
+        )["item"]
+        stable_job = created["gpu_job_id"]
+        self.clock.value += timedelta(minutes=30)
+        claim = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": 600,
+                "limit": 20,
+            }
+        )["items"][0]
+        self.gpu.publish_error = GPUClientError(
+            "tt_publish_reconcile_required",
+            "GPU ledger already has a publish ID",
+            409,
+            details={
+                "publish_id": "v_pub_url~v2-1.7668584571734657042",
+            },
+        )
+
+        def fail_record_publish_id(*_args, **_kwargs):
+            raise sqlite3.OperationalError(
+                "injected recovered ID persistence failure"
+            )
+
+        service.store.record_publish_id = fail_record_publish_id
+        unknown = service.publish_claimed(
+            created["id"],
+            claim["claim_token"],
+        )["item"]
+
+        self.assertEqual("unknown", unknown["status"])
+        self.assertTrue(unknown["unknown_outcome"])
+        self.assertFalse(unknown["publish_id"])
+        self.assertEqual([stable_job], self.gpu.publish_jobs)
+        self.assertEqual([], self.gpu.reconcile_jobs)
+
+    def test_manual_reconcile_recovers_initialized_publishing_row_without_init(self):
+        service = self.service(OPEN_GATES)
+        created = service.queue_create(
+            queue_payload(self.clock, publish_mode="direct_post")
+        )["item"]
+        stable_job = created["gpu_job_id"]
+        self.clock.value += timedelta(minutes=30)
+        claim = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": 600,
+                "limit": 20,
+            }
+        )["items"][0]
+        service.store.begin_publish(
+            created["id"],
+            claim["claim_token"],
+            OPEN_GATES,
+        )
+        self.gpu.reconcile_result = {
+            "publish_id": "v_pub_url~v2-1.7668584571734657042",
+            "state": "processing",
+            "status": {"status": "PROCESSING_DOWNLOAD"},
+        }
+
+        recovered = service.manual_reconcile(created["id"])["item"]
+
+        self.assertEqual("reconciling", recovered["status"])
+        self.assertEqual(
+            "v_pub_url~v2-1.7668584571734657042",
+            recovered["publish_id"],
+        )
+        self.assertEqual([], self.gpu.publish_jobs)
+        self.assertEqual([stable_job], self.gpu.reconcile_jobs)
+        replay = service.store.record_publish_id(
+            created["id"],
+            claim["claim_token"],
+            "v_pub_url~v2-1.7668584571734657042",
+        )
+        self.assertEqual("reconciling", replay["status"])
+        self.assertEqual(
+            "v_pub_url~v2-1.7668584571734657042",
+            replay["publish_id"],
+        )
+        self.assertEqual([], self.gpu.publish_jobs)
         events = service.events(created["id"])["items"]
         self.assertIn(
             "publish_id_recovered_from_gpu_ledger",

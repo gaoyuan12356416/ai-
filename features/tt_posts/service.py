@@ -4358,6 +4358,41 @@ class TTPostService:
             )
         return _normalized_creator_info(raw.get("creator_info", raw))
 
+    def _record_remote_publish_id_or_unknown(
+        self,
+        queue_id: int,
+        claim_token: str,
+        publish_id: str,
+    ) -> Dict[str, Any]:
+        """Persist an initialized remote ID or fail closed to reconciliation."""
+
+        try:
+            return self.store.record_publish_id(
+                queue_id,
+                claim_token,
+                publish_id,
+            )
+        except Exception as exc:
+            # Once the GPU reports a publish ID, Direct Post may already exist.
+            # Any CPU-side validation or storage failure must prevent another
+            # init, including unexpected database/runtime failures.
+            error_code = str(
+                getattr(
+                    exc,
+                    "code",
+                    "tt_post_publish_id_persistence_failed",
+                )
+                or "tt_post_publish_id_persistence_failed"
+            )[:128]
+            return self.store.mark_unknown(
+                queue_id,
+                claim_token,
+                reason=(
+                    "TT GPU publish_id could not be persisted; "
+                    "manual reconcile is required (%s)" % error_code
+                ),
+            )
+
     def publish_claimed(
         self,
         queue_id: Any,
@@ -4493,7 +4528,7 @@ class TTPostService:
                 exc.code == "tt_publish_reconcile_required"
                 and recovered_publish_id
             ):
-                final = self.store.record_publish_id(
+                final = self._record_remote_publish_id_or_unknown(
                     normalized_queue_id,
                     token,
                     recovered_publish_id,
@@ -4538,20 +4573,23 @@ class TTPostService:
                 reason="TT GPU返回结果缺少publish_id",
             )
         else:
-            final = self.store.record_publish_id(
+            final = self._record_remote_publish_id_or_unknown(
                 normalized_queue_id,
                 token,
                 publish_id,
             )
-            remote_status = str(
-                result.get("state") or result.get("remote_status") or ""
-            ).lower()
-            if remote_status in {"published", "publish_complete"}:
-                final = self.store.reconcile_published(
-                    normalized_queue_id,
-                    publish_id,
-                    publish_url=str(result.get("publish_url") or ""),
-                )
+            if final.get("status") == "reconciling":
+                remote_status = str(
+                    result.get("state")
+                    or result.get("remote_status")
+                    or ""
+                ).lower()
+                if remote_status in {"published", "publish_complete"}:
+                    final = self.store.reconcile_published(
+                        normalized_queue_id,
+                        publish_id,
+                        publish_url=str(result.get("publish_url") or ""),
+                    )
         self._sync_recurring_queue_if_present(final)
         return {
             "item": self._queue_api_item(final, gates=self.gates),
@@ -4631,6 +4669,7 @@ class TTPostService:
         queue = self.store.get_queue(normalized_queue_id)
         if queue.get("status") not in {
             "unknown",
+            "publishing",
             "reconciling",
             "published",
         }:
@@ -4660,7 +4699,7 @@ class TTPostService:
                 "GPU账本没有可恢复的TikTok publish_id",
                 409,
             )
-        if queue.get("status") == "unknown":
+        if queue.get("status") in {"unknown", "publishing"}:
             queue = self.store.recover_publish_id_from_gpu_ledger(
                 normalized_queue_id,
                 returned_publish_id,
