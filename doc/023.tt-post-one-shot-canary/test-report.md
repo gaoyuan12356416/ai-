@@ -44,3 +44,17 @@
 ## 发布建议
 
 先部署 GPU，再部署 CPU；两端设置相同的短时目标许可，保持三重正式门禁为 0。部署后只读确认页面按钮与队列基线，由用户亲自点击。
+
+## 生产验收结果
+
+2026-07-31 已从 GitHub 精确 commit
+`339becc54893529fbec05e93ac25f727aea0f25f` 部署 CPU/GPU。
+
+- CPU/GPU 服务器候选 release 各自 220/220 通过。
+- 账号 640 实时支持 `SELF_ONLY`，最长视频 3600 秒。
+- 目标页面 API 返回 `manual_canary_ready=true`、
+  `can_publish_now=true`；其他账号保持 false。
+- 自动排期、队列、运行、事件、publish ID 和 GPU ledger 均为 0。
+- 四次自然 runner 均未发现到期排期，未生成发布请求。
+- 三个正式 gate 全程保持 false，正式 GPU ready 仍为 false。
+- 未替用户点击，真实 TikTok canary 结果继续等待用户操作。
