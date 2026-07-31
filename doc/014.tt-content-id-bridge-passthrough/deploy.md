@@ -5,6 +5,7 @@
 - 新增公开移动端中间页 `tt-drama-search.html`。
 - 新增参数拼接脚本 `tt-drama-search.js`。
 - 新增 Nginx 精确短路径 `/tt`。
+- 2026-07-31 将固定 W2A 跳转目标从 `/ads/0/2049/view` 切换为 `/ads/101/2250/view`，参数规则不变。
 
 ## 配置项
 
@@ -27,7 +28,7 @@
 4. 执行 `nginx -t`；仅在成功后执行 `systemctl reload nginx`。
 5. reload 后轮询 `/tt` 至返回 200，再判断发布结果；不要在旧 worker 切换完成前立即失败回滚。
 
-实际发布：
+2026-07-24 首次发布：
 
 - GitHub 分支：`codex/tt-content-id-bridge-passthrough-20260724`
 - 生产提交：`4328ac02024e19ba661926ee4beb4490eb5a576f`
@@ -44,7 +45,7 @@
 4. 用覆盖参数尝试验证 `af_dp/c/af_c_id` 仍为固定值。
 5. 检查 Nginx 与 `drama-material-api.service` 健康。
 
-实际结果：
+2026-07-24 首次发布结果：
 
 - `/tt?af_adset_id=XXX`：HTTP 200、`text/html`、无 Location、`Cache-Control: no-store`。
 - `/tt-drama-search.js`：HTTP 200、`application/javascript`。
@@ -55,21 +56,33 @@
 - 入口伪造 `af_dp=evil&c=evil&af_c_id=evil` 时，生成链接仍使用固定核心值。
 - 2026-07-27 再次验证：Nginx、`drama-material-api.service` 均为 active，公开状态和文件哈希未漂移。
 
+### 2026-07-31 跳转目标切换
+
+- GitHub 分支：`codex/tt-w2a-2250-20260731`
+- 生产代码提交：`85d9e8e3d8e3500e370e16df7dcc46ee5b93487a`
+- 发布目录：`/mnt/data-disk/tt-bridge-releases/ai-tt-bridge-85d9e8e3d8e3`
+- 回滚点：`/mnt/data-disk/tt-bridge-backups/20260731T165543+0800-85d9e8e3d8e3`
+- 仅替换应用静态副本和 Nginx 公开副本中的 `tt-drama-search.js`；未修改 resolver、W2A 资源缓存来源、HTML 或 Nginx 配置。
+- 两份线上 JS 的 SHA-256 均由 `a3529f7d72cfd7bb9b4b8ed5eb8b8ffcaf294c8ad66c2fd8d4938774946e35cd` 变为 `635d50a21aa69fcf68f84611e08ac4e9195957476739fcd40a5bf75a957e1a80`。
+- `nginx -t`、Nginx reload、`nginx` 与 `drama-material-api.service` 健康检查均通过；主 API 未重启。
+- 真实浏览器输入 `l9rP6ey2CB` 并点击后进入：
+  `https://www.dramawavew2a.com/ads/101/2250/view?af_dp=l9rP6ey2CB&c=TTpost&af_c_id=0001&af_adset_id=XXX`
+- 目标页返回对应剧集，最终地址完整保留 `af_dp`、`c`、`af_c_id` 和 `af_adset_id`。
+
 ## 回滚方案
 
-本次五个目标在部署前均不存在。回滚时精确删除：
+当前版本回滚时，从 2026-07-31 回滚点恢复两份 JS：
 
 ```bash
-rm -f \
-  /root/drama_material_service/static/tt-drama-search.html \
-  /root/drama_material_service/static/tt-drama-search.js \
-  /usr/share/nginx/html/tt-drama-search.html \
-  /usr/share/nginx/html/tt-drama-search.js \
-  /etc/nginx/default.d/tt-drama-search.conf
+backup=/mnt/data-disk/tt-bridge-backups/20260731T165543+0800-85d9e8e3d8e3
+install -m 0644 "$backup/source-tt-drama-search.js" \
+  /root/drama_material_service/static/tt-drama-search.js
+install -m 0644 "$backup/public-tt-drama-search.js" \
+  /usr/share/nginx/html/tt-drama-search.js
 nginx -t && systemctl reload nginx
 ```
 
-若未来这些目标已有旧版本，则应改为从本次或后续备份目录恢复。主 API 无需重启。
+恢复后核对两份 JS 的 SHA-256 均为 `a3529f7d72cfd7bb9b4b8ed5eb8b8ffcaf294c8ad66c2fd8d4938774946e35cd`。主 API 无需重启。
 
 ## 注意事项
 

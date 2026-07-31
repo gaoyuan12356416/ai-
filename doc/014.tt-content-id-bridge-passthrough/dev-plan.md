@@ -36,3 +36,4 @@ node scripts/test_tt_drama_bridge.js
 - 2026-07-24：从本地中间页实际进入 W2A，最终 URL 保留 `af_adset_id=XXX`，页面解析出对应日语剧集。
 - 2026-07-24：GitHub 提交 `4328ac02024e19ba661926ee4beb4490eb5a576f` 已发布到 CPU 生产机；仅 reload Nginx，主 API 未重启。
 - 2026-07-27：再次核对公开 URL、线上哈希、Nginx 配置及真实 W2A 点击，状态未漂移。
+- 2026-07-31：提交 `85d9e8e3d8e3500e370e16df7dcc46ee5b93487a` 将固定目标切换为 landing `2250`；生产真实浏览器与参数透传验收通过。
