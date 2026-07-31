@@ -31,7 +31,7 @@ TikTok 主页只能稳定维护一个链接。现有移动端中间页支持用�
 
 1. 用户从带追踪参数的 TikTok 主页链接进入中间页。
 2. 用户输入视频结尾展示的 DramaWave `content_id`。
-3. 页面生成固定目标：`https://www.dramawavew2a.com/ads/0/2049/view`。
+3. 页面生成固定目标：`https://www.dramawavew2a.com/ads/101/2250/view`。
 4. `af_dp` 取用户输入值，`c` 固定为 `TTpost`，`af_c_id` 固定为 `0001`。
 5. 入口 URL 中其余合法参数按原顺序追加；同名重复参数保留。
 6. 入口 URL 中大小写任意的核心参数或页面控制参数均不得透传。
@@ -71,7 +71,7 @@ TikTok 主页只能稳定维护一个链接。现有移动端中间页支持用�
 ## 验收标准
 
 - `?af_adset_id=XXX` + `l9rP6ey2CB` 精确生成：
-  `https://www.dramawavew2a.com/ads/0/2049/view?af_dp=l9rP6ey2CB&c=TTpost&af_c_id=0001&af_adset_id=XXX`
+  `https://www.dramawavew2a.com/ads/101/2250/view?af_dp=l9rP6ey2CB&c=TTpost&af_c_id=0001&af_adset_id=XXX`
 - 多个附加参数和重复参数按顺序保留。
 - 外部传入的 `af_dp`、`c`、`af_c_id` 无法覆盖固定值。
 - 公开 URL 无需登录，可在 390×844 移动端视口正常使用。
@@ -87,3 +87,4 @@ TikTok 主页只能稳定维护一个链接。现有移动端中间页支持用�
 - 2026-07-24：创建需求，确认固定核心参数、附加参数透传及 `/tt` 公开短路径方案。
 - 2026-07-24：提交 `4328ac02024e19ba661926ee4beb4490eb5a576f` 发布生产并完成公网验收。
 - 2026-07-27：线上服务、文件哈希和真实 W2A 点击回归复测通过。
+- 2026-07-31：固定跳转目标切换到 `/ads/101/2250/view`；核心参数和附加参数透传规则不变。

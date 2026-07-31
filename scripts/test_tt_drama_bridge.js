@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const bridge = require("../static/tt-drama-search.js");
 
 const expectedExample =
-  "https://www.dramawavew2a.com/ads/0/2049/view?af_dp=l9rP6ey2CB&c=TTpost&af_c_id=0001&af_adset_id=XXX";
+  "https://www.dramawavew2a.com/ads/101/2250/view?af_dp=l9rP6ey2CB&c=TTpost&af_c_id=0001&af_adset_id=XXX";
 
 assert.equal(
   bridge.buildW2AUrl("l9rP6ey2CB", "?af_adset_id=XXX"),
@@ -54,7 +54,7 @@ assert.equal(
     normalizedFeatured.items[0].content_id,
     "?af_adset_id=XXX"
   ),
-  "https://www.dramawavew2a.com/ads/0/2049/view?af_dp=DRAMA00001&c=TTpost&af_c_id=0001&af_adset_id=XXX"
+  "https://www.dramawavew2a.com/ads/101/2250/view?af_dp=DRAMA00001&c=TTpost&af_c_id=0001&af_adset_id=XXX"
 );
 assert.equal(
   bridge.shanghaiYesterday(Date.parse("2026-07-27T00:30:00+08:00")),
@@ -119,7 +119,7 @@ const protectedTarget = new URL(
   )
 );
 assert.equal(protectedTarget.origin, "https://www.dramawavew2a.com");
-assert.equal(protectedTarget.pathname, "/ads/0/2049/view");
+assert.equal(protectedTarget.pathname, "/ads/101/2250/view");
 assert.equal(protectedTarget.searchParams.get("af_dp"), "l9rP6ey2CB");
 assert.equal(protectedTarget.searchParams.get("c"), "TTpost");
 assert.equal(protectedTarget.searchParams.get("af_c_id"), "0001");

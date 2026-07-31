@@ -12,7 +12,7 @@
 
 页面在浏览器内生成：
 
-`GET https://www.dramawavew2a.com/ads/0/2049/view?af_dp=<content_id>&c=TTpost&af_c_id=0001&<附加查询参数>`
+`GET https://www.dramawavew2a.com/ads/101/2250/view?af_dp=<content_id>&c=TTpost&af_c_id=0001&<附加查询参数>`
 
 ## 错误码
 

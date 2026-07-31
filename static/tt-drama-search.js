@@ -1,7 +1,7 @@
 (function (root) {
   "use strict";
 
-  const W2A_BASE = "https://www.dramawavew2a.com/ads/0/2049/view";
+  const W2A_BASE = "https://www.dramawavew2a.com/ads/101/2250/view";
   const RESOLVER_PATH = "/api/public/tt-drama/resolve";
   const FEATURED_PATH = "/api/public/tt-drama/featured";
   const REQUEST_TIMEOUT_MS = 6000;
