@@ -2000,19 +2000,65 @@ class TTPostService:
             min(gpu_timeout, 3600) + CLAIM_LEASE_BUFFER_SECONDS,
         )
 
+    @staticmethod
+    def _scheduled_account_placeholder(account_id: str) -> Dict[str, Any]:
+        """Return a credential-free management row for an unavailable account."""
+
+        return {
+            "source_account_id": account_id,
+            "account_id": account_id,
+            "status": "unavailable",
+            "publish_eligible": False,
+            "management_only": True,
+            "eligibility_reason": (
+                "该账号已不在当前安全发布候选列表中；"
+                "只能查看并停用已有每日排期"
+            ),
+        }
+
     def accounts(self) -> Dict[str, Any]:
         items = []
-        for account in self.account_repository.list_public_accounts():
+        listed_account_ids = set()
+        account_source_available = True
+        try:
+            source_accounts = self.account_repository.list_public_accounts()
+        except AccountSourceError:
+            # Fail closed: source failure must never make an account look
+            # publishable, but local schedules must remain visible so an
+            # operator can stop them.
+            account_source_available = False
+            source_accounts = []
+        for account in source_accounts:
             item = dict(account)
+            account_id = str(account["source_account_id"])
             item["account_settings"] = (
-                self.store.get_account_settings(account["source_account_id"])
+                self.store.get_account_settings(account_id)
                 or {"configured": False}
             )
             items.append(item)
-        return {
+            listed_account_ids.add(account_id)
+        for schedule in self.store.list_daily_schedules():
+            account_id = str(schedule.get("account_id") or "")
+            if not account_id or account_id in listed_account_ids:
+                continue
+            item = self._scheduled_account_placeholder(account_id)
+            item["account_settings"] = (
+                self.store.get_account_settings(account_id)
+                or {"configured": False}
+            )
+            items.append(item)
+            listed_account_ids.add(account_id)
+        result = {
             "items": items,
             "gates": self._gates(),
+            "account_source_available": account_source_available,
         }
+        if not account_source_available:
+            result["warning"] = (
+                "TikTok账号数据源暂不可用；仅显示本地已有排期，"
+                "所有账号均不可发布"
+            )
+        return result
 
     def account_settings(self) -> Dict[str, Any]:
         return self.accounts()
@@ -3134,7 +3180,6 @@ class TTPostService:
             self._query_first(query, "source_account_id"),
             "TikTok账号ID",
         )
-        self.account_repository.get_public_account(account_id)
         item = self._schedule_api_item(
             self.store.get_daily_schedule(account_id)
         )
@@ -3161,31 +3206,11 @@ class TTPostService:
                 "每日发布设置包含未知字段",
                 400,
             )
-        if str(payload.get("timezone") or "") != "Asia/Shanghai":
-            raise TTPostServiceError(
-                "tt_timezone_invalid",
-                "每日发布只接受Asia/Shanghai",
-                400,
-            )
         account_id = _positive_decimal(
             payload.get("source_account_id"),
             "TikTok账号ID",
         )
         enabled = _exact_bool(payload.get("enabled"), "每日发布启用状态")
-        if "publish_times" in payload:
-            publish_times = payload.get("publish_times")
-        else:
-            publish_times = [payload.get("publish_time")]
-        if not isinstance(publish_times, list):
-            raise TTPostServiceError(
-                "invalid_publish_times",
-                "每日发布时间必须是列表",
-                400,
-            )
-        if not enabled and all(
-            item in (None, "") for item in publish_times
-        ):
-            publish_times = []
         expected_version = payload.get("expected_version")
         if (
             type(expected_version) is not int
@@ -3197,15 +3222,37 @@ class TTPostService:
                 "每日发布设置版本必须是非负整数",
                 400,
             )
+        if not enabled:
+            saved = self.store.disable_daily_schedule(
+                account_id,
+                expected_version=expected_version,
+            )
+            return {
+                "item": self._schedule_api_item(saved),
+                "gates": self._gates(),
+            }
+        if str(payload.get("timezone") or "") != "Asia/Shanghai":
+            raise TTPostServiceError(
+                "tt_timezone_invalid",
+                "每日发布只接受Asia/Shanghai",
+                400,
+            )
+        if "publish_times" in payload:
+            publish_times = payload.get("publish_times")
+        else:
+            publish_times = [payload.get("publish_time")]
+        if not isinstance(publish_times, list):
+            raise TTPostServiceError(
+                "invalid_publish_times",
+                "每日发布时间必须是列表",
+                400,
+            )
         consent = self._consent_from_payload(payload)
         self.account_repository.get_public_account(account_id)
-        if (
-            enabled
-            and self.manual_canary.allows_manual_account(
-                "manual",
-                account_id,
-                now=_now_utc(self._now_fn),
-            )
+        if self.manual_canary.allows_manual_account(
+            "manual",
+            account_id,
+            now=_now_utc(self._now_fn),
         ):
             raise TTPostServiceError(
                 "tt_post_manual_canary_schedule_locked",
@@ -3216,29 +3263,28 @@ class TTPostService:
             account_id,
             required=True,
         )
-        if enabled:
-            creator = self.creator_info(
-                {"source_account_id": account_id}
-            )["item"]
-            settings = TTPostAccountSettings.from_mapping(
-                {
-                    key: saved_settings[key]
-                    for key in (
-                        "privacy_level",
-                        "allow_comment",
-                        "allow_duet",
-                        "allow_stitch",
-                        "brand_content_toggle",
-                        "brand_organic_toggle",
-                        "is_aigc",
-                    )
-                }
-            )
-            self._assert_creator_settings(creator, settings)
+        creator = self.creator_info(
+            {"source_account_id": account_id}
+        )["item"]
+        settings = TTPostAccountSettings.from_mapping(
+            {
+                key: saved_settings[key]
+                for key in (
+                    "privacy_level",
+                    "allow_comment",
+                    "allow_duet",
+                    "allow_stitch",
+                    "brand_content_toggle",
+                    "brand_organic_toggle",
+                    "is_aigc",
+                )
+            }
+        )
+        self._assert_creator_settings(creator, settings)
         saved = self.store.save_daily_schedule(
             account_id,
             publish_times,
-            enabled=enabled,
+            enabled=True,
             expected_version=expected_version,
             consent_version=consent["version"],
             consented_at=consent["accepted_at"],

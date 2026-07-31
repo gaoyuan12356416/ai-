@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from features.tt_gpu.credentials import open_access_token
 from features.tt_posts.core import (
+    AccountSourceError,
     LiveGates,
     SnapshotAccountSource,
     TTPostAccountSettings,
@@ -899,6 +900,90 @@ class ServiceLifecycleTests(unittest.TestCase):
             0,
         )
 
+    def test_disable_schedule_skips_all_publish_dependencies(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        saved = service.store.save_daily_schedule(
+            "101",
+            ["11:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-recurring-post-consent-20260730",
+            consented_at=self.clock.value.isoformat(),
+        )
+        request = {
+            "source_account_id": "101",
+            "enabled": False,
+            "expected_version": saved["version"],
+            # Known activation-only fields remain wire-compatible with old
+            # clients, but the stop lane must not inspect or depend on them.
+            "timezone": "Not/A-Timezone",
+            "publish_time": "not-a-time",
+            "publish_times": {"not": "a-list"},
+            "consent": {"accepted": False},
+        }
+
+        with (
+            mock.patch.object(
+                self.accounts,
+                "get_public_account",
+                side_effect=AssertionError("account repository must not run"),
+            ),
+            mock.patch.object(
+                service,
+                "creator_info",
+                side_effect=AssertionError("creator_info must not run"),
+            ),
+        ):
+            disabled = service.schedule_save(request)["item"]
+
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(saved["version"] + 1, disabled["version"])
+        self.assertEqual(saved["publish_times"], disabled["publish_times"])
+        self.assertEqual(
+            saved["consent_version"],
+            disabled["consent_version"],
+        )
+        self.assertEqual(0, disabled["available_material_count"])
+        self.assertEqual([], self.gpu.creator_info_calls)
+
+    def test_disable_missing_schedule_is_dependency_free_noop(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        with (
+            mock.patch.object(
+                self.accounts,
+                "get_public_account",
+                side_effect=AssertionError("account repository must not run"),
+            ),
+            mock.patch.object(
+                service,
+                "creator_info",
+                side_effect=AssertionError("creator_info must not run"),
+            ),
+        ):
+            disabled = service.schedule_save(
+                {
+                    "source_account_id": "101",
+                    "enabled": False,
+                    "expected_version": 0,
+                }
+            )["item"]
+
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(0, disabled["version"])
+        self.assertFalse(disabled["user_consent"])
+        self.assertEqual([], service.store.list_daily_schedules())
+
+    def test_enable_schedule_still_requires_explicit_consent(self):
+        service = self.service(CLOSED_GATES)
+        payload = self.schedule_payload()
+        payload.pop("consent")
+
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.schedule_save(payload)
+
+        self.assertEqual("tt_post_consent_required", caught.exception.code)
+        self.assertEqual(0, service.store.get_daily_schedule("101")["version"])
+
     def test_daily_schedule_time_is_unique_and_released_on_change_or_disable(self):
         service = self.service(CLOSED_GATES)
         self.accounts.add_account("102")
@@ -1019,6 +1104,41 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(item["status"], "available")
         self.assertEqual(service.store.list_queues(), [])
         self.assertEqual(self.gpu.publish_jobs, [])
+
+    def test_manual_publish_waits_for_ready_and_same_key_then_succeeds_once(self):
+        service = self.service(OPEN_GATES)
+        queued = service.material_pool_add(
+            self.recurring_material_payload()
+        )["item"]
+        request = {
+            "source_account_id": "101",
+            "idempotency_key": "tt-post-manual:wait-for-ready",
+        }
+
+        with self.assertRaises(TTPostError) as not_ready:
+            service.run_now(request)
+        self.assertEqual(
+            "tt_post_recurring_pool_empty",
+            not_ready.exception.code,
+        )
+        self.assertEqual("queued", service.store.get_material_intake(queued["id"])["status"])
+        self.assertEqual([], service.store.list_queues())
+        run_key = "tt-post:manual:v1:101:%s" % hashlib.sha256(
+            request["idempotency_key"].encode("utf-8")
+        ).hexdigest()[:32]
+        with self.assertRaises(TTPostError) as missing_run:
+            service.store.get_recurring_run_by_key(run_key)
+        self.assertEqual(
+            "tt_post_schedule_run_not_found",
+            missing_run.exception.code,
+        )
+
+        self.process_one_preparation(service)
+        submitted = service.run_now(request)["item"]
+
+        self.assertTrue(submitted["queue_id"])
+        self.assertEqual(1, len(service.store.list_queues()))
+        self.assertEqual("reserved", submitted["pool_item"]["status"])
 
     def test_manual_canary_forces_private_one_shot_with_global_gates_closed(self):
         service = self.service(CLOSED_GATES)
@@ -1605,7 +1725,10 @@ class ServiceLifecycleTests(unittest.TestCase):
 
     def test_accounts_expose_configuration_state_without_credentials(self):
         service = self.service(CLOSED_GATES, configure_settings=False)
-        initial = service.accounts()["items"][0]
+        initial_result = service.accounts()
+        self.assertTrue(initial_result["account_source_available"])
+        self.assertNotIn("warning", initial_result)
+        initial = initial_result["items"][0]
         self.assertEqual(initial["account_settings"], {"configured": False})
         rendered = json.dumps(initial)
         self.assertNotIn("access_token", rendered)
@@ -1633,6 +1756,205 @@ class ServiceLifecycleTests(unittest.TestCase):
         listed = service.account_settings()["items"][0]
         self.assertTrue(listed["account_settings"]["configured"])
         self.assertEqual(listed["account_settings"]["version"], 1)
+
+    def test_accounts_add_generic_placeholders_for_unavailable_schedules(self):
+        service = self.service(CLOSED_GATES)
+        disabled_account = self.accounts.add_account("202")
+        disabled_account["disable_publish"] = 1
+        disabled_account["publish_eligible"] = False
+        expired_account = self.accounts.add_account("203")
+        expired_account["token_status"] = 1
+        expired_account["publish_eligible"] = False
+        for index, account_id in enumerate(("201", "202", "203"), start=1):
+            service.store.save_daily_schedule(
+                account_id,
+                ["12:%02d" % index],
+                enabled=True,
+                expected_version=0,
+                consent_version="tt-recurring-post-consent-20260730",
+                consented_at=self.clock.value.isoformat(),
+            )
+
+        with mock.patch.object(
+            self.accounts,
+            "list_public_accounts",
+            return_value=[dict(self.accounts.account)],
+        ):
+            items = service.accounts()["items"]
+
+        placeholders = {
+            item["source_account_id"]: item
+            for item in items
+            if item.get("management_only")
+        }
+        self.assertEqual({"201", "202", "203"}, set(placeholders))
+        for account_id, item in placeholders.items():
+            self.assertEqual(account_id, item["account_id"])
+            self.assertFalse(item["publish_eligible"])
+            self.assertEqual("unavailable", item["status"])
+            self.assertIn("只能查看并停用", item["eligibility_reason"])
+            self.assertEqual(
+                {"configured": False},
+                item["account_settings"],
+            )
+            for forbidden in (
+                "username",
+                "display_name",
+                "account_name",
+                "account_link",
+                "external_account_id",
+                "main_account_id",
+                "token_status",
+                "account_status",
+                "access_token",
+            ):
+                self.assertNotIn(forbidden, item)
+        rendered = json.dumps(placeholders, ensure_ascii=False)
+        self.assertNotIn("creator_202", rendered)
+        self.assertNotIn("creator_203", rendered)
+
+    def test_unavailable_scheduled_account_can_read_and_disable_but_not_enable(self):
+        service = self.service(CLOSED_GATES)
+        saved = service.schedule_save(
+            self.schedule_payload(publish_time="12:10")
+        )["item"]
+        self.accounts.accounts.pop("101")
+        self.gpu.creator_info_calls.clear()
+
+        placeholder = service.accounts()["items"][0]
+        self.assertEqual("101", placeholder["source_account_id"])
+        self.assertFalse(placeholder["publish_eligible"])
+        self.assertTrue(placeholder["management_only"])
+        fetched = service.schedule_get(
+            {"source_account_id": ["101"]}
+        )["item"]
+        self.assertEqual(saved["version"], fetched["version"])
+        self.assertTrue(fetched["enabled"])
+
+        disabled = service.schedule_save(
+            {
+                "source_account_id": "101",
+                "enabled": False,
+                "expected_version": fetched["version"],
+            }
+        )["item"]
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(saved["version"] + 1, disabled["version"])
+
+        enable_request = self.schedule_payload(
+            version=disabled["version"],
+            publish_time="12:10",
+        )
+        with self.assertRaises(TTPostServiceError) as unavailable:
+            service.schedule_save(enable_request)
+        self.assertEqual("tt_account_not_found", unavailable.exception.code)
+        self.assertEqual([], self.gpu.creator_info_calls)
+        unchanged = service.store.get_daily_schedule("101")
+        self.assertFalse(unchanged["enabled"])
+        self.assertEqual(disabled["version"], unchanged["version"])
+
+    def test_schedule_get_default_does_not_require_a_publishable_account(self):
+        service = self.service(CLOSED_GATES, configure_settings=False)
+        with mock.patch.object(
+            self.accounts,
+            "get_public_account",
+            side_effect=AssertionError("schedule read must remain local"),
+        ):
+            item = service.schedule_get(
+                {"source_account_id": ["999"]}
+            )["item"]
+
+        self.assertEqual("999", item["source_account_id"])
+        self.assertFalse(item["enabled"])
+        self.assertEqual(0, item["version"])
+        self.assertEqual([], item["publish_times"])
+
+    def test_account_source_failure_returns_only_local_schedules_and_can_stop(self):
+        service = self.service(CLOSED_GATES)
+        saved = service.schedule_save(
+            self.schedule_payload(publish_time="12:20")
+        )["item"]
+        source_error = AccountSourceError(
+            "tt_account_source_unavailable",
+            "sensitive upstream detail token=must-not-leak",
+            503,
+        )
+
+        with (
+            mock.patch.object(
+                self.accounts,
+                "list_public_accounts",
+                side_effect=source_error,
+            ),
+            mock.patch.object(
+                self.accounts,
+                "get_public_account",
+                side_effect=source_error,
+            ),
+        ):
+            result = service.accounts()
+            fetched = service.schedule_get(
+                {"source_account_id": ["101"]}
+            )["item"]
+            disabled = service.schedule_save(
+                {
+                    "source_account_id": "101",
+                    "enabled": False,
+                    "expected_version": fetched["version"],
+                }
+            )["item"]
+
+        self.assertFalse(result["account_source_available"])
+        self.assertIn("仅显示本地已有排期", result["warning"])
+        self.assertEqual(1, len(result["items"]))
+        placeholder = result["items"][0]
+        self.assertEqual("101", placeholder["source_account_id"])
+        self.assertFalse(placeholder["publish_eligible"])
+        self.assertTrue(placeholder["management_only"])
+        rendered = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("sensitive upstream detail", rendered)
+        self.assertNotIn("must-not-leak", rendered)
+        self.assertTrue(fetched["enabled"])
+        self.assertEqual(saved["version"], fetched["version"])
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(saved["version"] + 1, disabled["version"])
+
+    def test_account_source_failure_without_schedule_is_empty_and_cannot_enable(self):
+        service = self.service(CLOSED_GATES)
+        source_error = AccountSourceError(
+            "tt_account_source_unavailable",
+            "sensitive database exception",
+            503,
+        )
+
+        with (
+            mock.patch.object(
+                self.accounts,
+                "list_public_accounts",
+                side_effect=source_error,
+            ),
+            mock.patch.object(
+                self.accounts,
+                "get_public_account",
+                side_effect=source_error,
+            ),
+        ):
+            result = service.accounts()
+            with self.assertRaises(AccountSourceError) as unavailable:
+                service.schedule_save(
+                    self.schedule_payload(publish_time="12:30")
+                )
+
+        self.assertFalse(result["account_source_available"])
+        self.assertEqual([], result["items"])
+        self.assertIn("所有账号均不可发布", result["warning"])
+        self.assertEqual(
+            "tt_account_source_unavailable",
+            unavailable.exception.code,
+        )
+        self.assertEqual([], self.gpu.creator_info_calls)
+        self.assertEqual([], service.store.list_daily_schedules())
+        self.assertEqual(0, service.store.get_daily_schedule("101")["version"])
 
     def test_account_settings_save_revalidates_live_tiktok_capability(self):
         service = self.service(CLOSED_GATES, configure_settings=False)

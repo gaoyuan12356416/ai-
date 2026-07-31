@@ -177,6 +177,7 @@
     .helper { color: var(--muted); font-size: 12px; line-height: 1.5; }
     .helper.error { color: var(--red); }
     .helper.success { color: var(--green); }
+    .helper.warning { color: var(--amber); }
     .search-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
     .account-list {
       max-height: 272px;
@@ -197,7 +198,7 @@
     }
     .account-option:last-child { border-bottom: 0; }
     .account-option:hover { background: #f7faff; }
-    .account-option.disabled { cursor: not-allowed; opacity: .62; background: #fafbfc; }
+    .account-option.ineligible { opacity: .72; background: #fafbfc; }
     .account-option input { width: 17px; height: 17px; accent-color: var(--blue); }
     .account-copy { min-width: 0; }
     .account-copy strong, .account-copy span {
@@ -208,7 +209,7 @@
     }
     .account-copy span { margin-top: 3px; color: var(--muted); font-size: 12px; }
     .account-state { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
-    .account-option.disabled .account-state { color: var(--red); }
+    .account-option.ineligible .account-state { color: var(--red); }
     .info-card {
       min-height: 82px;
       padding: 14px;
@@ -374,7 +375,7 @@
     .schedule-toggle input { width: 17px; height: 17px; accent-color: var(--blue); }
     .schedule-facts {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 8px;
     }
     .schedule-fact {
@@ -675,10 +676,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 <div class="schedule-panel">
                   <div class="schedule-panel-head">
                     <div>
-                      <strong><span class="step">4</span>每日自动发布</strong>
-                      <p>仅设置上海时间点；启用后每天到点自动消费该账号素材池中的下一条。不同账号需选择不同的分钟。</p>
+                      <strong><span class="step">4</span>自动发布设置</strong>
+                      <p>自动发布设置独立保存；启用后每天到点消费该账号素材池中的下一条，关闭后池内素材仍保留。不同账号需选择不同的分钟。</p>
                     </div>
-                    <button id="saveSchedule" class="button primary" type="button" disabled>保存每日排期</button>
+                    <button id="saveSchedule" class="button primary" type="button" aria-describedby="scheduleState">保存发布设置</button>
                   </div>
                   <div class="schedule-controls">
                     <div class="field">
@@ -687,7 +688,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                     </div>
                     <label class="schedule-toggle">
                       <input id="scheduleEnabled" type="checkbox" />
-                      <span>启用每日自动发布</span>
+                      <span>启用素材池自动发布</span>
                     </label>
                     <span id="scheduleState" class="helper">请选择账号后加载排期。</span>
                   </div>
@@ -695,7 +696,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                     <div class="schedule-fact"><span>排期状态</span><strong id="scheduleStatus">未加载</strong></div>
                     <div class="schedule-fact"><span>下一次自动发布</span><strong id="scheduleNextRun">—</strong></div>
                     <div class="schedule-fact"><span>排期版本</span><strong id="scheduleVersion">—</strong></div>
-                    <div class="schedule-fact"><span>待发素材</span><strong id="availableMaterialCount">—</strong></div>
+                    <div class="schedule-fact"><span>可立即发布</span><strong id="availableMaterialCount">—</strong></div>
+                    <div class="schedule-fact"><span>制作中</span><strong id="preparingMaterialCount">—</strong></div>
                   </div>
                   <div class="run-now-row">
                     <button id="runNow" class="button run-now" type="button" disabled>立即发布一条</button>
@@ -874,11 +876,15 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         queueSummaryIsError: false,
         queueResults: [],
         preparationItems: [],
+        preparationSummary: {},
         preparationHasActive: false,
         preparationLoading: false,
+        preparationReloadPending: false,
         preparationPollTimer: null,
+        preparationScheduleRefreshPendingByAccount: Object.create(null),
         schedule: null,
         scheduleRequestVersion: 0,
+        scheduleDraftDirty: false,
         scheduleBusy: false,
         runNowBusy: false,
         pendingRunNowByAccount: Object.create(null),
@@ -1078,7 +1084,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           );
         }
         validateForm();
-        renderSchedule();
       }
       function accountEligible(item) {
         if (!item) return false;
@@ -1202,7 +1207,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           const id = accountId(item);
           const eligible = accountEligible(item);
           const label = document.createElement("label");
-          label.className = `account-option${eligible ? "" : " disabled"}`;
+          label.className = `account-option${eligible ? "" : " ineligible"}`;
 
           const radio = document.createElement("input");
           radio.type = "radio";
@@ -1210,7 +1215,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           radio.value = id;
           radio.dataset.accountId = id;
           radio.checked = id === state.selectedAccountId;
-          radio.disabled = !eligible;
+          radio.disabled = state.scheduleBusy;
           label.appendChild(radio);
 
           const copy = document.createElement("div");
@@ -1225,7 +1230,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
 
           const status = document.createElement("span");
           status.className = "account-state";
-          setText(status, eligible ? "可确认" : "不可发布");
+          setText(status, eligible ? "可确认" : "不可发布，可管理");
           status.title = accountReason(item);
           label.appendChild(status);
 
@@ -1339,13 +1344,72 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         ) || "").trim();
         return /^\d{2}:\d{2}$/.test(raw) ? raw : "";
       }
+      function preparationItemAccountId(item) {
+        return cleanId(firstDefined(
+          item && item.source_account_id,
+          item && item.account_id
+        ));
+      }
+      function preparationItemIdentity(item) {
+        return cleanId(firstDefined(
+          item && item.intake_id,
+          item && item.id,
+          item && item.pool_item_id,
+          item && item.material_id
+        ));
+      }
+      function preparationStatusFingerprint(items, sourceAccountId, summary = {}) {
+        const normalizedAccountId = cleanId(sourceAccountId);
+        if (!normalizedAccountId) return "";
+        const counts = asObject(summary);
+        const activeCount = Number(firstDefined(
+          counts.active,
+          Number(counts.queued || 0) +
+            Number(counts.preparing || 0) +
+            Number(counts.retry_wait || 0),
+          0
+        ) || 0);
+        const summaryFingerprint = [
+          `active:${activeCount}`,
+          `ready:${Number(counts.ready || 0)}`,
+          `available:${Number(counts.available || 0)}`,
+          `total:${Number(counts.total || 0)}`,
+        ].join(",");
+        const itemFingerprint = (Array.isArray(items) ? items : [])
+          .filter(item => preparationItemAccountId(item) === normalizedAccountId)
+          .map(item => `${preparationItemIdentity(item)}:${preparationStatusMeta(item).status}`)
+          .sort()
+          .join("|");
+        return `${summaryFingerprint}|${itemFingerprint}`;
+      }
+      function selectedPreparationState() {
+        const selectedId = cleanId(state.selectedAccountId);
+        const items = state.preparationItems.filter(
+          item => preparationItemAccountId(item) === selectedId
+        );
+        const activeItems = items.filter(item => (
+          PREPARATION_ACTIVE_STATUSES.has(preparationStatusMeta(item).status)
+        ));
+        return {
+          activeCount: activeItems.length,
+          activeMaterialIds: activeItems
+            .map(item => cleanId(item.material_id))
+            .filter(Boolean),
+        };
+      }
+      function scheduleWantsDisable() {
+        return !!state.schedule &&
+          boolValue(state.schedule.enabled) === true &&
+          byId("scheduleEnabled").checked === false;
+      }
       function scheduleSaveError() {
         const item = selectedAccount();
         if (!item) return "请先选择一个 TikTok 个号。";
+        if (!state.schedule) return "请等待该账号每日排期加载完成。";
+        if (!byId("scheduleEnabled").checked) return "";
         if (!accountEligible(item)) return "所选账号当前不可用于发布。";
         if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
         if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";
-        if (!state.schedule) return "请等待该账号每日排期加载完成。";
         if (manualCanaryReady()) return "一次性私密测试有效期间，每日自动排期保持关闭。";
         if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(byId("dailyPublishTime").value)) {
           return "请选择有效的每日上海发布时间。";
@@ -1364,7 +1428,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return "发布门禁尚未全部开放，立即发布已禁用。";
         }
         if (Number(state.schedule.available_material_count || 0) < 1) {
-          return "该账号素材池没有待发素材。";
+          const preparation = selectedPreparationState();
+          if (preparation.activeCount > 0) {
+            const materialLabel = preparation.activeMaterialIds.length
+              ? `素材 ${preparation.activeMaterialIds.slice(0, 3).join("、")}`
+              : `${preparation.activeCount} 条素材`;
+            return `${materialLabel} 正在制作，完成后会自动开放立即发布。`;
+          }
+          return "该账号素材池没有可立即发布素材。";
         }
         if (boolValue(state.schedule.can_publish_now) !== true) {
           return "服务端当前不允许立即发布，请刷新状态后重试。";
@@ -1372,9 +1443,31 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         return "";
       }
       function updateScheduleActions() {
+        const scheduleControlsLocked = state.scheduleBusy || (
+          manualCanaryReady() &&
+          boolValue(state.schedule && state.schedule.enabled) !== true
+        );
+        byId("dailyPublishTime").disabled = scheduleControlsLocked;
+        byId("scheduleEnabled").disabled = scheduleControlsLocked;
+        byId("refreshAccounts").disabled = state.scheduleBusy;
+        byId("accountList")
+          .querySelectorAll("input[data-account-id]")
+          .forEach(radio => { radio.disabled = state.scheduleBusy; });
         const saveButton = byId("saveSchedule");
         const saveError = scheduleSaveError();
-        saveButton.disabled = !!saveError || state.scheduleBusy || state.runNowBusy || state.busy;
+        saveButton.disabled = state.scheduleBusy;
+        saveButton.title = saveError;
+        if (!state.scheduleBusy) {
+          setText(
+            saveButton,
+            scheduleWantsDisable()
+              ? "关闭自动发布"
+              : boolValue(state.schedule && state.schedule.enabled) !== true &&
+                byId("scheduleEnabled").checked
+              ? "启用自动发布"
+              : "保存发布设置"
+          );
+        }
         const runButton = byId("runNow");
         const runError = runNowDisabledReason();
         runButton.disabled = !!runError || state.scheduleBusy || state.runNowBusy || state.busy;
@@ -1397,22 +1490,36 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           )
         );
       }
-      function renderSchedule() {
+      function renderSchedule({ hydrateDraft = true } = {}) {
         const item = state.schedule;
+        const preparation = selectedPreparationState();
         if (!item) {
-          byId("dailyPublishTime").value = DEFAULT_DAILY_PUBLISH_TIME;
+          if (hydrateDraft) {
+            byId("dailyPublishTime").value = DEFAULT_DAILY_PUBLISH_TIME;
+            byId("scheduleEnabled").checked = false;
+          }
+          byId("dailyPublishTime").disabled = false;
+          byId("scheduleEnabled").disabled = false;
           setText(byId("scheduleStatus"), state.selectedAccountId ? "正在加载" : "未加载");
           setText(byId("scheduleNextRun"), "—");
           setText(byId("scheduleVersion"), "—");
           setText(byId("availableMaterialCount"), "—");
+          setText(
+            byId("preparingMaterialCount"),
+            state.selectedAccountId ? `${preparation.activeCount} 条` : "—"
+          );
           updateScheduleActions();
           return;
         }
         const publishTime = schedulePublishTime(item);
-        byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;
-        byId("scheduleEnabled").checked = boolValue(item.enabled) === true;
-        byId("dailyPublishTime").disabled = manualCanaryReady();
-        byId("scheduleEnabled").disabled = manualCanaryReady();
+        if (hydrateDraft) {
+          byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;
+          byId("scheduleEnabled").checked = boolValue(item.enabled) === true;
+        }
+        const canaryLocksInactiveSchedule = manualCanaryReady() &&
+          boolValue(item.enabled) !== true;
+        byId("dailyPublishTime").disabled = canaryLocksInactiveSchedule;
+        byId("scheduleEnabled").disabled = canaryLocksInactiveSchedule;
         setText(
           byId("scheduleStatus"),
           boolValue(item.enabled) === true
@@ -1428,13 +1535,18 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const version = Number(item.version || 0);
         setText(byId("scheduleVersion"), version > 0 ? `版本 ${version}` : "尚未保存");
         setText(byId("availableMaterialCount"), `${Number(item.available_material_count || 0)} 条`);
+        setText(byId("preparingMaterialCount"), `${preparation.activeCount} 条`);
         setText(
           byId("scheduleState"),
-          manualCanaryReady()
+          state.scheduleDraftDirty && scheduleWantsDisable()
+            ? "自动发布将关闭；关闭不需要发布确认，点击“关闭自动发布”后生效。"
+            : state.scheduleDraftDirty
+            ? "每日排期已修改；保存后生效。"
+            : manualCanaryReady()
             ? "一次性私密测试已开放；每日自动排期锁定为关闭。"
             : boolValue(item.enabled) === true
-            ? "每日排期已启用。"
-            : "每日排期已停用。"
+            ? "发布设置已加载；自动发布已启用。"
+            : "发布设置已加载；自动发布已关闭。"
         );
         byId("scheduleState").className = "helper";
         if (manualCanaryReady()) {
@@ -1445,71 +1557,94 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         }
         updateScheduleActions();
       }
-      async function loadSchedule() {
+      async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {}) {
+        if (state.scheduleBusy && !allowWhileSaving) return false;
         const requestVersion = ++state.scheduleRequestVersion;
         const requestedAccountId = state.selectedAccountId;
-        state.schedule = null;
-        renderSchedule();
-        if (!requestedAccountId) return;
-        setText(byId("scheduleState"), "正在加载该账号的每日排期与素材池数量…");
+        if (!preserveDraft) {
+          state.scheduleDraftDirty = false;
+          state.schedule = null;
+          renderSchedule();
+        }
+        if (!requestedAccountId) return false;
+        if (!preserveDraft) {
+          setText(byId("scheduleState"), "正在加载该账号的每日排期与素材池数量…");
+        }
         try {
           const params = new URLSearchParams({ source_account_id: requestedAccountId });
           const result = await api(`${API_BASE}/schedule?${params.toString()}`);
           if (
             requestVersion !== state.scheduleRequestVersion ||
-            requestedAccountId !== state.selectedAccountId
-          ) return;
+            requestedAccountId !== state.selectedAccountId ||
+            (state.scheduleBusy && !allowWhileSaving)
+          ) return false;
           applyGates(result);
           state.schedule = Object.assign(emptySchedule(), readPayloadItem(result, ["item", "schedule"]));
-          renderSchedule();
+          renderSchedule({ hydrateDraft: !preserveDraft || !state.scheduleDraftDirty });
+          delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId];
+          return true;
         } catch (error) {
           if (
             requestVersion !== state.scheduleRequestVersion ||
-            requestedAccountId !== state.selectedAccountId
-          ) return;
-          state.schedule = null;
-          renderSchedule();
+            requestedAccountId !== state.selectedAccountId ||
+            (state.scheduleBusy && !allowWhileSaving)
+          ) return false;
+          if (!preserveDraft) {
+            state.schedule = null;
+            renderSchedule();
+          }
           setText(byId("scheduleState"), `排期加载失败：${error.message}`);
           byId("scheduleState").className = "helper error";
+          return false;
         }
       }
       async function saveSchedule() {
         const error = scheduleSaveError();
         if (error || state.scheduleBusy) {
-          if (error) showToast(error, true);
+          if (error) {
+            setText(byId("scheduleState"), error);
+            byId("scheduleState").className = "helper error";
+            showToast(error, true);
+          }
           return;
         }
         state.scheduleBusy = true;
+        state.scheduleRequestVersion += 1;
         updateScheduleActions();
         const button = byId("saveSchedule");
         const requestedAccountId = state.selectedAccountId;
         const requestedEnabled = byId("scheduleEnabled").checked;
         const requestedPublishTime = byId("dailyPublishTime").value;
         const expectedVersion = Number(state.schedule && state.schedule.version || 0);
+        const schedulePayload = {
+          source_account_id: requestedAccountId,
+          enabled: requestedEnabled,
+          expected_version: expectedVersion,
+        };
+        if (requestedEnabled) {
+          schedulePayload.publish_time = requestedPublishTime;
+          schedulePayload.timezone = "Asia/Shanghai";
+          schedulePayload.consent = {
+            accepted: true,
+            version: CONSENT_VERSION,
+            accepted_at: ensureConsentAcceptedAt(),
+          };
+        }
         setText(button, "正在保存…");
         try {
           const result = await api(`${API_BASE}/schedule`, {
             method: "POST",
-            body: JSON.stringify({
-              source_account_id: requestedAccountId,
-              enabled: requestedEnabled,
-              publish_time: requestedPublishTime,
-              timezone: "Asia/Shanghai",
-              expected_version: expectedVersion,
-              consent: {
-                accepted: true,
-                version: CONSENT_VERSION,
-                accepted_at: ensureConsentAcceptedAt(),
-              },
-            }),
+            body: JSON.stringify(schedulePayload),
           });
+          state.scheduleRequestVersion += 1;
           applyGates(result);
           if (requestedAccountId !== state.selectedAccountId) {
             showToast("原账号的每日排期已保存；当前账号已切换，正在加载当前账号设置。");
-            await loadSchedule();
+            await loadSchedule({ preserveDraft: true, allowWhileSaving: true });
             return;
           }
           state.schedule = Object.assign(emptySchedule(), readPayloadItem(result, ["item", "schedule"]));
+          state.scheduleDraftDirty = false;
           byId("publishConsent").checked = false;
           state.consentAcceptedAt = "";
           renderSchedule();
@@ -1519,11 +1654,37 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               : "每日自动发布已停用；素材仍保留在池中。"
           );
         } catch (error) {
-          showToast(`每日排期保存失败：${error.message}`, true);
-          await loadSchedule();
+          if (error.code === "tt_post_schedule_version_conflict") {
+            const accountChanged = requestedAccountId !== state.selectedAccountId;
+            if (!accountChanged) state.scheduleDraftDirty = false;
+            const refreshed = await loadSchedule({
+              preserveDraft: accountChanged,
+              allowWhileSaving: true,
+            });
+            const message = accountChanged
+              ? "原账号的每日排期已被其他操作更新；当前账号设置已保留。"
+              : refreshed
+              ? "每日排期已被其他操作更新；已加载最新设置，请重新修改后再保存。"
+              : "每日排期已被其他操作更新，且最新设置加载失败；请刷新状态后重新修改。";
+            setText(byId("scheduleState"), message);
+            byId("scheduleState").className = "helper error";
+            showToast(message, true);
+          } else {
+            const accountChanged = requestedAccountId !== state.selectedAccountId;
+            const refreshed = accountChanged
+              ? await loadSchedule({ preserveDraft: false, allowWhileSaving: true })
+              : false;
+            const message = accountChanged
+              ? refreshed
+                ? `原账号的每日排期保存失败：${error.message}；已加载当前账号最新设置。`
+                : `原账号的每日排期保存失败：${error.message}；当前账号设置加载失败，请刷新状态。`
+              : `每日排期保存失败：${error.message}`;
+            setText(byId("scheduleState"), message);
+            byId("scheduleState").className = "helper error";
+            showToast(message, true);
+          }
         } finally {
           state.scheduleBusy = false;
-          setText(button, "保存每日排期");
           validateForm();
         }
       }
@@ -1747,7 +1908,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 : "服务端未返回可确认的立即发布状态"
             );
           }
-          await Promise.all([loadSchedule(), loadQueue()]);
+          await Promise.all([loadSchedule({ preserveDraft: true }), loadQueue()]);
         } catch (error) {
           showToast(
             `立即发布结果未确认：${error.message}。可再次点击，系统会复用同一请求标识安全重试。`,
@@ -1771,6 +1932,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           if (state.selectedAccountId && !state.accounts.some(item => accountId(item) === state.selectedAccountId)) {
             state.selectedAccountId = "";
             state.schedule = null;
+            state.scheduleDraftDirty = false;
             state.scheduleRequestVersion += 1;
             resetCreatorInfo();
             renderSchedule();
@@ -1778,8 +1940,16 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           renderAccounts();
           renderAccountSettings();
           renderAccountFilters();
-          setText(byId("accountHelp"), `已加载 ${state.accounts.length} 个账号；列表不包含任何凭证。`);
-          byId("accountHelp").className = "helper";
+          if (boolValue(result.account_source_available) === false) {
+            setText(
+              byId("accountHelp"),
+              String(result.warning || "账号来源暂不可用；当前仅显示可管理的匿名排期占位。")
+            );
+            byId("accountHelp").className = "helper warning";
+          } else {
+            setText(byId("accountHelp"), `已加载 ${state.accounts.length} 个账号；列表不包含任何凭证。`);
+            byId("accountHelp").className = "helper";
+          }
         } catch (error) {
           state.accounts = [];
           setAccountListEmpty(`账号加载失败：${error.message}`);
@@ -2197,7 +2367,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             renderQueueSubmitResults();
           }
           if (created.length) {
-            await loadSchedule();
+            await loadSchedule({ preserveDraft: true });
             void loadPreparationStatus({ quiet: true });
           }
           const previewFailureCount = state.failures.length;
@@ -2248,9 +2418,19 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           state.preparationPollTimer = null;
         }
       }
+      function selectedPreparationScheduleRefreshPending() {
+        const accountIdValue = cleanId(state.selectedAccountId);
+        return !!(
+          accountIdValue &&
+          state.preparationScheduleRefreshPendingByAccount[accountIdValue]
+        );
+      }
+      function preparationPollingNeeded() {
+        return state.preparationHasActive || selectedPreparationScheduleRefreshPending();
+      }
       function schedulePreparationPolling() {
         stopPreparationPolling();
-        if (!state.preparationHasActive || document.hidden) return;
+        if (!preparationPollingNeeded() || document.hidden) return;
         state.preparationPollTimer = window.setTimeout(() => {
           state.preparationPollTimer = null;
           void loadPreparationStatus({ quiet: true });
@@ -2368,22 +2548,40 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           `共 ${total} 条 · 等待制作 ${counts.queued} · 制作中 ${counts.preparing} · 等待重试 ${counts.retry_wait} · 制作完成 ${counts.ready} · 制作失败 ${counts.failed}`
         );
       }
-      async function loadPreparationStatus({ quiet = false } = {}) {
-        if (state.preparationLoading) return;
+      async function loadPreparationStatus({ quiet = false, force = false } = {}) {
+        if (state.preparationLoading) {
+          if (force) state.preparationReloadPending = true;
+          return false;
+        }
         state.preparationLoading = true;
+        state.preparationReloadPending = false;
+        const requestedAccountId = cleanId(state.selectedAccountId);
+        const previousFingerprint = preparationStatusFingerprint(
+          state.preparationItems,
+          requestedAccountId,
+          state.preparationSummary
+        );
         if (!quiet) {
           setText(byId("preparationSummary"), "正在加载素材池…");
           setPreparationEmpty("正在加载…");
         }
         try {
           const params = new URLSearchParams({ page: "1", page_size: "100" });
+          if (requestedAccountId) {
+            params.set("source_account_id", requestedAccountId);
+          }
           const result = await api(`${API_BASE}/material-pool?${params.toString()}`);
+          if (requestedAccountId !== cleanId(state.selectedAccountId)) {
+            state.preparationReloadPending = true;
+            return false;
+          }
           applyGates(result);
           const items = Array.isArray(result.items)
             ? result.items
             : (Array.isArray(result.materials) ? result.materials : []);
-          state.preparationItems = items;
           const summary = asObject(result.summary);
+          state.preparationItems = items;
+          state.preparationSummary = summary;
           state.preparationHasActive = Array.from(PREPARATION_ACTIVE_STATUSES).some(
             status => Number(summary[status] || 0) > 0
           ) || items.some(item => (
@@ -2391,14 +2589,48 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           ));
           renderPreparationRows(items);
           renderPreparationSummary(result, items);
+          renderSchedule({ hydrateDraft: false });
+          const currentFingerprint = preparationStatusFingerprint(
+            items,
+            requestedAccountId,
+            summary
+          );
+          if (
+            requestedAccountId &&
+            currentFingerprint !== previousFingerprint
+          ) {
+            state.preparationScheduleRefreshPendingByAccount[requestedAccountId] = true;
+          }
+          if (
+            requestedAccountId &&
+            requestedAccountId === cleanId(state.selectedAccountId) &&
+            state.preparationScheduleRefreshPendingByAccount[requestedAccountId]
+          ) {
+            const scheduleRefreshed = await loadSchedule({ preserveDraft: true });
+            if (scheduleRefreshed) {
+              delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId];
+            }
+          }
+          return true;
         } catch (error) {
-          if (!quiet || !state.preparationItems.length) {
+          if (
+            requestedAccountId === cleanId(state.selectedAccountId) &&
+            (!quiet || !state.preparationItems.length)
+          ) {
             setPreparationEmpty(`制作状态加载失败：${error.message}`);
             setText(byId("preparationSummary"), "制作状态暂不可用。");
           }
+          return false;
         } finally {
           state.preparationLoading = false;
-          schedulePreparationPolling();
+          const reloadRequested = state.preparationReloadPending;
+          state.preparationReloadPending = false;
+          if (reloadRequested) {
+            stopPreparationPolling();
+            void loadPreparationStatus({ quiet: true, force: true });
+          } else {
+            schedulePreparationPolling();
+          }
         }
       }
       function statusMeta(item) {
@@ -2783,14 +3015,21 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (!radio || radio.disabled) return;
         state.selectedAccountId = cleanId(radio.dataset.accountId);
         state.schedule = null;
+        state.scheduleDraftDirty = false;
         resetBatchConfirmation();
         renderAccounts();
         loadCreatorInfo();
         loadSchedule();
+        void loadPreparationStatus({ quiet: true, force: true });
       });
       byId("refreshAccounts").addEventListener("click", loadAccounts);
       byId("refreshGates").addEventListener("click", async () => {
-        await Promise.all([loadAccounts(), loadQueue(), loadSchedule(), loadPreparationStatus()]);
+        await Promise.all([
+          loadAccounts(),
+          loadQueue(),
+          loadSchedule({ preserveDraft: true }),
+          loadPreparationStatus(),
+        ]);
         showToast("发布与合规状态已刷新。");
       });
       byId("previewMaterial").addEventListener("click", validateMaterials);
@@ -2813,7 +3052,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         updateCaptionState();
       });
       ["dailyPublishTime", "scheduleEnabled"].forEach(id => byId(id).addEventListener("change", () => {
-        resetBatchConfirmation();
+        state.scheduleDraftDirty = true;
+        state.consentAcceptedAt = "";
+        renderSchedule({ hydrateDraft: false });
         validateForm();
       }));
       byId("publishConsent").addEventListener("change", () => {
@@ -2828,7 +3069,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
           stopPreparationPolling();
-        } else if (state.preparationHasActive) {
+        } else if (preparationPollingNeeded()) {
           void loadPreparationStatus({ quiet: true });
         }
       });

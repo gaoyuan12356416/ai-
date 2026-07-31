@@ -972,6 +972,120 @@ class RecurringStorageTests(CoreTestCase):
                 consented_at="2026-07-29 10:01:00",
             )
 
+    def test_disable_schedule_is_atomic_idempotent_and_preserves_history(self):
+        saved = self.store.save_daily_schedule(
+            "acct-1",
+            ["18:30", "09:05"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-recurring-v1",
+            consented_at="2026-07-29 10:00:00",
+            actor_user_id="operator-1",
+            actor_name="Operator One",
+        )
+        self.clock.current += timedelta(minutes=1)
+
+        disabled = self.store.disable_daily_schedule(
+            "acct-1",
+            expected_version=saved["version"],
+            actor_user_id="operator-2",
+            actor_name="Operator Two",
+        )
+
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(saved["version"] + 1, disabled["version"])
+        self.assertEqual(saved["publish_times"], disabled["publish_times"])
+        self.assertEqual(saved["user_consent"], disabled["user_consent"])
+        self.assertEqual(
+            saved["consent_version"],
+            disabled["consent_version"],
+        )
+        self.assertEqual(
+            saved["consented_at_utc"],
+            disabled["consented_at_utc"],
+        )
+        self.assertEqual("operator-2", disabled["updated_by_user_id"])
+        self.assertEqual("Operator Two", disabled["updated_by_name"])
+
+        replay = self.store.disable_daily_schedule(
+            "acct-1",
+            expected_version=disabled["version"],
+            actor_user_id="operator-3",
+            actor_name="Operator Three",
+        )
+        self.assertEqual(disabled, replay)
+        with self.assertRaises(TTPostError) as stale:
+            self.store.disable_daily_schedule(
+                "acct-1",
+                expected_version=saved["version"],
+            )
+        self.assertEqual(
+            "tt_post_schedule_version_conflict",
+            stale.exception.code,
+        )
+
+    def test_disable_missing_schedule_is_noop_without_fabricated_consent(self):
+        disabled = self.store.disable_daily_schedule(
+            "acct-1",
+            expected_version=0,
+        )
+        self.assertEqual(
+            self.store.get_daily_schedule("acct-1"),
+            disabled,
+        )
+        self.assertEqual([], self.store.list_daily_schedules())
+
+        with self.assertRaises(TTPostError) as stale:
+            self.store.disable_daily_schedule(
+                "acct-1",
+                expected_version=1,
+            )
+        self.assertEqual(
+            "tt_post_schedule_version_conflict",
+            stale.exception.code,
+        )
+
+    def test_disable_blocks_a_new_auto_claim_without_consuming_material(self):
+        material = self.add_recurring("1099", "acct-1")
+        saved = self.store.save_daily_schedule(
+            "acct-1",
+            ["10:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-recurring-v1",
+            consented_at="2026-07-29 09:00:00",
+        )
+        disabled = self.store.disable_daily_schedule(
+            "acct-1",
+            expected_version=saved["version"],
+        )
+
+        with self.assertRaises(TTPostError) as stopped:
+            self.store.claim_recurring_run(
+                "tt-post:auto:v1:acct-1:2026-07-29:1000",
+                "auto",
+                "acct-1",
+                "2026-07-29",
+                "10:00",
+                beijing_to_utc("2026-07-29 10:00:00"),
+                config_version=disabled["version"],
+            )
+        self.assertEqual("tt_post_schedule_not_current", stopped.exception.code)
+        self.assertEqual(
+            "available",
+            self.store.list_recurring_materials(
+                account_id="acct-1",
+                status="available",
+            )[0]["status"],
+        )
+        self.assertEqual(
+            material["id"],
+            self.store.list_recurring_materials(
+                account_id="acct-1",
+                status="available",
+            )[0]["id"],
+        )
+
     def test_pool_fifo_is_isolated_per_account(self):
         first = self.add_recurring("1101", "acct-1")
         second = self.add_recurring("1102", "acct-1")

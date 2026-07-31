@@ -32,6 +32,12 @@ def source_between(start: str, end: str) -> str:
     return PAGE[start_index:end_index]
 
 
+def source_between_text(source: str, start: str, end: str) -> str:
+    start_index = source.index(start)
+    end_index = source.index(end, start_index)
+    return source[start_index:end_index]
+
+
 class TtPostPoolUiTest(unittest.TestCase):
     def test_navigation_registers_tt_pool_with_standalone_permission(self):
         group = next(item for item in NAVIGATION if item.get("key") == "tiktok_platform")
@@ -99,6 +105,7 @@ class TtPostPoolUiTest(unittest.TestCase):
             "scheduleNextRun",
             "scheduleVersion",
             "availableMaterialCount",
+            "preparingMaterialCount",
             "runNow",
             "runNowHelp",
             "accountSettingsCard",
@@ -120,7 +127,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('type="search"', PAGE)
         self.assertIn('type="time"', PAGE)
         self.assertNotIn('type="datetime-local"', PAGE)
-        self.assertIn('timezone: "Asia/Shanghai"', PAGE)
+        self.assertIn('schedulePayload.timezone = "Asia/Shanghai"', PAGE)
         self.assertIn("source_account_id: state.selectedAccountId", PAGE)
         self.assertNotIn("Number(state.selectedAccountId)", PAGE)
         self.assertIn("material_id: material.material_id", PAGE)
@@ -276,9 +283,15 @@ class TtPostPoolUiTest(unittest.TestCase):
             'value="11:00"',
         ):
             self.assertIn(attribute, publish_time.group("attrs"))
+        self.assertIn("自动发布设置", PAGE)
+        self.assertIn("启用素材池自动发布", PAGE)
+        self.assertIn("保存发布设置", PAGE)
         self.assertIn("不同账号需选择不同的分钟", PAGE)
         self.assertIn("每天固定时间自动消费下一条", PAGE)
-        self.assertIn("async function loadSchedule()", PAGE)
+        self.assertIn(
+            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
+            PAGE,
+        )
         save = source_between(
             "async function saveSchedule()",
             "function pendingRunNowKeyForAccount(accountIdValue)",
@@ -287,8 +300,8 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('const requestedEnabled = byId("scheduleEnabled").checked', save)
         self.assertIn('const requestedPublishTime = byId("dailyPublishTime").value', save)
         self.assertIn("enabled: requestedEnabled", save)
-        self.assertIn("publish_time: requestedPublishTime", save)
-        self.assertIn('timezone: "Asia/Shanghai"', save)
+        self.assertIn("schedulePayload.publish_time = requestedPublishTime", save)
+        self.assertIn('schedulePayload.timezone = "Asia/Shanghai"', save)
         self.assertIn(
             "const expectedVersion = Number(state.schedule && state.schedule.version || 0)",
             save,
@@ -304,8 +317,8 @@ class TtPostPoolUiTest(unittest.TestCase):
             PAGE,
         )
         renderer = source_between(
-            "function renderSchedule()",
-            "async function loadSchedule()",
+            "function renderSchedule({ hydrateDraft = true } = {})",
+            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
         )
         self.assertIn(
             'byId("dailyPublishTime").value = DEFAULT_DAILY_PUBLISH_TIME;',
@@ -315,6 +328,209 @@ class TtPostPoolUiTest(unittest.TestCase):
             'byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;',
             renderer,
         )
+
+    def test_disabling_schedule_is_actionable_without_new_publish_consent(self):
+        validation = source_between(
+            "function scheduleSaveError()",
+            "function runNowDisabledReason()",
+        )
+        disable_guard = 'if (!byId("scheduleEnabled").checked) return "";'
+        self.assertIn(disable_guard, validation)
+        self.assertLess(
+            validation.index(disable_guard),
+            validation.index("if (!accountEligible(item))"),
+        )
+        for publish_only_check in (
+            "selectedAccountSettings()",
+            "state.creatorInfo",
+            "manualCanaryReady()",
+            "dailyPublishTime",
+            "publishConsent",
+        ):
+            self.assertGreater(
+                validation.index(publish_only_check),
+                validation.index(disable_guard),
+            )
+
+        save = source_between(
+            "async function saveSchedule()",
+            "function validPendingRunNowAccountId(value)",
+        )
+        base_payload = source_between_text(
+            save,
+            "const schedulePayload = {",
+            "if (requestedEnabled) {",
+        )
+        for forbidden in ("publish_time", "timezone", "consent"):
+            self.assertNotIn(forbidden, base_payload)
+        enabled_payload = source_between_text(
+            save,
+            "if (requestedEnabled) {",
+            'setText(button, "正在保存…")',
+        )
+        self.assertIn("schedulePayload.publish_time", enabled_payload)
+        self.assertIn("schedulePayload.timezone", enabled_payload)
+        self.assertIn("schedulePayload.consent", enabled_payload)
+        self.assertIn("body: JSON.stringify(schedulePayload)", save)
+        self.assertIn('setText(byId("scheduleState"), error)', save)
+
+        save_button = re.search(
+            r'<button id="saveSchedule"(?P<attrs>[^>]*)>',
+            PAGE,
+        )
+        self.assertIsNotNone(save_button)
+        self.assertNotIn("disabled", save_button.group("attrs"))
+        actions = source_between(
+            "function updateScheduleActions()",
+            "function renderSchedule(",
+        )
+        self.assertIn("const scheduleControlsLocked = state.scheduleBusy", actions)
+        self.assertIn('byId("dailyPublishTime").disabled = scheduleControlsLocked', actions)
+        self.assertIn('byId("scheduleEnabled").disabled = scheduleControlsLocked', actions)
+        self.assertIn('byId("refreshAccounts").disabled = state.scheduleBusy', actions)
+        self.assertIn('.querySelectorAll("input[data-account-id]")', actions)
+        self.assertIn("radio.disabled = state.scheduleBusy", actions)
+        self.assertIn("saveButton.disabled = state.scheduleBusy", actions)
+        self.assertIn('saveButton.title = saveError', actions)
+        self.assertIn('"关闭自动发布"', actions)
+
+    def test_schedule_draft_survives_gate_and_background_refreshes(self):
+        gates = source_between(
+            "function renderGates()",
+            "function accountEligible(item)",
+        )
+        self.assertNotIn("renderSchedule(", gates)
+        self.assertIn("scheduleDraftDirty: false", PAGE)
+
+        load = source_between(
+            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
+            "async function saveSchedule()",
+        )
+        self.assertIn("if (!preserveDraft)", load)
+        self.assertIn(
+            "renderSchedule({ hydrateDraft: !preserveDraft || !state.scheduleDraftDirty })",
+            load,
+        )
+        self.assertIn("state.scheduleDraftDirty = false", load)
+
+        change = source_between(
+            '["dailyPublishTime", "scheduleEnabled"].forEach',
+            'byId("publishConsent").addEventListener',
+        )
+        self.assertIn("state.scheduleDraftDirty = true", change)
+        self.assertIn("renderSchedule({ hydrateDraft: false })", change)
+        self.assertNotIn("resetBatchConfirmation()", change)
+        refresh = source_between(
+            'byId("refreshGates").addEventListener',
+            'byId("previewMaterial").addEventListener',
+        )
+        self.assertIn("loadSchedule({ preserveDraft: true })", refresh)
+
+    def test_schedule_save_rejects_stale_gets_and_rehydrates_version_conflicts(self):
+        load = source_between(
+            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
+            "async function saveSchedule()",
+        )
+        self.assertIn(
+            "if (state.scheduleBusy && !allowWhileSaving) return false;",
+            load,
+        )
+        self.assertEqual(load.count("(state.scheduleBusy && !allowWhileSaving)"), 3)
+        self.assertIn("return true;", load)
+        self.assertGreaterEqual(load.count("return false;"), 4)
+        self.assertLess(
+            load.index("delete state.preparationScheduleRefreshPendingByAccount"),
+            load.index("return true;"),
+        )
+
+        save = source_between(
+            "async function saveSchedule()",
+            "function validPendingRunNowAccountId(value)",
+        )
+        bump = "state.scheduleRequestVersion += 1"
+        self.assertEqual(save.count(bump), 2)
+        bumps = [save.index(bump), save.index(bump, save.index(bump) + 1)]
+        api_call = save.index("const result = await api(`${API_BASE}/schedule`")
+        apply_result = save.index("applyGates(result)", api_call)
+        self.assertLess(bumps[0], api_call)
+        self.assertGreater(bumps[1], api_call)
+        self.assertLess(bumps[1], apply_result)
+
+        conflict = source_between_text(
+            save,
+            'if (error.code === "tt_post_schedule_version_conflict")',
+            "} else {",
+        )
+        self.assertIn("requestedAccountId !== state.selectedAccountId", conflict)
+        self.assertIn("if (!accountChanged) state.scheduleDraftDirty = false", conflict)
+        self.assertIn("preserveDraft: accountChanged", conflict)
+        self.assertIn("allowWhileSaving: true", conflict)
+        self.assertIn("已加载最新设置，请重新修改后再保存", conflict)
+        non_conflict = source_between_text(save, "} else {", "} finally {")
+        self.assertIn("requestedAccountId !== state.selectedAccountId", non_conflict)
+        self.assertIn(
+            "await loadSchedule({ preserveDraft: false, allowWhileSaving: true })",
+            non_conflict,
+        )
+        self.assertIn(": false;", non_conflict)
+        self.assertIn("每日排期保存失败", non_conflict)
+
+    def test_ineligible_account_remains_selectable_for_schedule_stop(self):
+        renderer = source_between(
+            "function renderAccounts()",
+            "function resetCreatorInfo(",
+        )
+        self.assertIn('label.className = `account-option${eligible ? "" : " ineligible"}`', renderer)
+        self.assertIn('setText(status, eligible ? "可确认" : "不可发布，可管理")', renderer)
+        self.assertIn("radio.disabled = state.scheduleBusy", renderer)
+        self.assertNotIn("radio.disabled = !eligible", renderer)
+        self.assertNotIn("account-option.disabled", PAGE)
+
+    def test_account_source_degradation_shows_backend_warning_not_success_copy(self):
+        loader = source_between(
+            "async function loadAccounts()",
+            "function resetBatchConfirmation()",
+        )
+        degraded = source_between_text(
+            loader,
+            "if (boolValue(result.account_source_available) === false)",
+            "} else {",
+        )
+        self.assertIn("result.warning", degraded)
+        self.assertIn('className = "helper warning"', degraded)
+        self.assertNotIn("已加载 ${state.accounts.length} 个账号", degraded)
+        self.assertIn("已加载 ${state.accounts.length} 个账号", loader)
+        self.assertIn(".helper.warning { color: var(--amber); }", PAGE)
+
+    def test_preparation_change_refreshes_selected_schedule_and_run_now_reason(self):
+        preparation = source_between(
+            "async function loadPreparationStatus(",
+            "function statusMeta(item)",
+        )
+        self.assertIn("previousFingerprint = preparationStatusFingerprint", preparation)
+        self.assertIn("currentFingerprint = preparationStatusFingerprint", preparation)
+        self.assertIn("currentFingerprint !== previousFingerprint", preparation)
+        self.assertIn("renderSchedule({ hydrateDraft: false })", preparation)
+        self.assertIn("await loadSchedule({ preserveDraft: true })", preparation)
+        self.assertIn(
+            "state.preparationScheduleRefreshPendingByAccount[requestedAccountId] = true",
+            preparation,
+        )
+        self.assertIn("if (scheduleRefreshed)", preparation)
+        self.assertIn(
+            "delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId]",
+            preparation,
+        )
+
+        reason = source_between(
+            "function runNowDisabledReason()",
+            "function updateScheduleActions()",
+        )
+        self.assertIn("selectedPreparationState()", reason)
+        self.assertIn("正在制作，完成后会自动开放立即发布", reason)
+        self.assertIn("没有可立即发布素材", reason)
+        self.assertIn('id="preparingMaterialCount"', PAGE)
+        self.assertIn('setText(byId("preparingMaterialCount")', PAGE)
 
     def test_material_pool_creation_is_sequential_and_keeps_partial_failure_state(self):
         creation = source_between(
@@ -344,7 +560,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("已入池，后台预制作", creation)
         self.assertIn("void loadPreparationStatus({ quiet: true })", creation)
 
-    def test_preparation_status_panel_polls_only_active_items_without_form_lock(self):
+    def test_preparation_status_panel_polls_active_or_pending_refresh_without_form_lock(self):
         preparation = source_between(
             "function preparationStatusMeta(item)",
             "function statusMeta(item)",
@@ -363,7 +579,11 @@ class TtPostPoolUiTest(unittest.TestCase):
         )
         self.assertIn("preparationHasActive: false", PAGE)
         self.assertIn(
-            "if (!state.preparationHasActive || document.hidden) return;",
+            "if (!preparationPollingNeeded() || document.hidden) return;",
+            preparation,
+        )
+        self.assertIn(
+            "return state.preparationHasActive || selectedPreparationScheduleRefreshPending()",
             preparation,
         )
         self.assertIn(
@@ -390,6 +610,47 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertNotIn('data-action="retry', PAGE)
         self.assertIn('meta.status === "failed" ? "待处理" : ""', preparation)
         self.assertIn("document.addEventListener(\"visibilitychange\"", PAGE)
+
+    def test_preparation_refresh_is_account_scoped_and_retries_failed_schedule_get(self):
+        fingerprint = source_between(
+            "function preparationStatusFingerprint(",
+            "function selectedPreparationState()",
+        )
+        for summary_count in ("active", "ready", "available", "total"):
+            self.assertIn(f"`{summary_count}:$", fingerprint)
+        self.assertIn("preparationSummary: {}", PAGE)
+        self.assertIn("preparationReloadPending: false", PAGE)
+
+        preparation = source_between(
+            "async function loadPreparationStatus(",
+            "function statusMeta(item)",
+        )
+        self.assertIn('params.set("source_account_id", requestedAccountId)', preparation)
+        self.assertIn("state.preparationSummary = summary", preparation)
+        self.assertIn("state.preparationReloadPending = true", preparation)
+        self.assertIn(
+            "void loadPreparationStatus({ quiet: true, force: true })",
+            preparation,
+        )
+        refresh_call = preparation.index(
+            "const scheduleRefreshed = await loadSchedule({ preserveDraft: true })"
+        )
+        conditional_clear = preparation.index("if (scheduleRefreshed)", refresh_call)
+        pending_clear = preparation.index(
+            "delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId]",
+            conditional_clear,
+        )
+        self.assertLess(refresh_call, conditional_clear)
+        self.assertLess(conditional_clear, pending_clear)
+
+        account_change = source_between(
+            'byId("accountList").addEventListener("change"',
+            'byId("refreshAccounts").addEventListener',
+        )
+        self.assertIn(
+            "void loadPreparationStatus({ quiet: true, force: true })",
+            account_change,
+        )
 
     def test_queue_results_keep_every_material_visible_with_its_own_outcome(self):
         creation = source_between(
@@ -425,7 +686,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertNotIn("state.queueResults =", reset)
         self.assertNotIn('hide(byId("queueSubmitPanel"))', reset)
 
-    def test_task_setting_changes_reset_batch_key_and_consent(self):
+    def test_material_changes_reset_batch_confirmation_but_schedule_draft_does_not(self):
         self.assertIn("function resetBatchConfirmation()", PAGE)
         self.assertIn('state.formKey = "";', PAGE)
         self.assertIn('state.consentAcceptedAt = "";', PAGE)
@@ -442,6 +703,14 @@ class TtPostPoolUiTest(unittest.TestCase):
             '["dailyPublishTime", "scheduleEnabled"].forEach',
             PAGE,
         )
+        schedule_change = source_between(
+            '["dailyPublishTime", "scheduleEnabled"].forEach',
+            'byId("publishConsent").addEventListener',
+        )
+        self.assertIn("state.scheduleDraftDirty = true", schedule_change)
+        self.assertIn('state.consentAcceptedAt = "";', schedule_change)
+        self.assertNotIn("resetBatchConfirmation()", schedule_change)
+        self.assertNotIn('byId("publishConsent").checked = false', schedule_change)
 
     def test_partial_retry_reuses_frozen_batch_consent_timestamp(self):
         self.assertIn('consentAcceptedAt: ""', PAGE)
@@ -535,7 +804,10 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("await api(`${API_BASE}/run-now`", run)
         self.assertIn("source_account_id: requestedAccountId", run)
         self.assertIn("idempotency_key: requestKey", run)
-        self.assertIn("Promise.all([loadSchedule(), loadQueue()])", run)
+        self.assertIn(
+            "Promise.all([loadSchedule({ preserveDraft: true }), loadQueue()])",
+            run,
+        )
         self.assertIn("仅一次私密测试", PAGE)
         self.assertIn("manual_canary_ready", PAGE)
         self.assertIn("强制 SELF_ONLY", PAGE)

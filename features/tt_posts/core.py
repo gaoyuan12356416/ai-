@@ -1812,6 +1812,84 @@ class TTPostStore:
             ).fetchall()
         return [_public_daily_schedule(row) for row in rows]
 
+    def disable_daily_schedule(
+        self,
+        account_id: Any,
+        *,
+        expected_version: Any,
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        """Disable one schedule without inventing a new publishing consent."""
+
+        normalized_account_id = _account_id(account_id)
+        normalized_version = _nonnegative_int(
+            expected_version,
+            "每日排期版本",
+            2**31 - 1,
+        )
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            current = conn.execute(
+                "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
+                (normalized_account_id,),
+            ).fetchone()
+            if current is None:
+                if normalized_version != 0:
+                    raise TTPostError(
+                        "tt_post_schedule_version_conflict",
+                        "每日发布排期已被其他操作更新，请刷新后重试",
+                        409,
+                    )
+                # There is nothing to stop. Do not fabricate a consent-bearing
+                # row merely to represent the already-disabled default state.
+                return _default_daily_schedule(normalized_account_id)
+            if normalized_version != int(current["version"]):
+                raise TTPostError(
+                    "tt_post_schedule_version_conflict",
+                    "每日发布排期已被其他操作更新，请刷新后重试",
+                    409,
+                )
+            if not bool(current["enabled"]):
+                return _public_daily_schedule(current)
+            updated = conn.execute(
+                """
+                UPDATE tt_post_daily_schedule
+                SET enabled=0,version=?,updated_by_user_id=?,
+                    updated_by_name=?,updated_at=?
+                WHERE account_id=? AND enabled=1 AND version=?
+                """,
+                (
+                    int(current["version"]) + 1,
+                    normalized_actor_id,
+                    normalized_actor_name,
+                    timestamp,
+                    normalized_account_id,
+                    int(current["version"]),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_schedule_version_conflict",
+                    "每日发布排期已被其他操作更新，请刷新后重试",
+                    409,
+                )
+            row = conn.execute(
+                "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
+                (normalized_account_id,),
+            ).fetchone()
+        return _public_daily_schedule(row)
+
     def save_daily_schedule(
         self,
         account_id: Any,
