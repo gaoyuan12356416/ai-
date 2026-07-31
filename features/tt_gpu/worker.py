@@ -9,6 +9,10 @@ The service has four responsibilities:
 * query TikTok creator capabilities using a short-lived encrypted credential;
 * initialize and reconcile a TikTok Direct Post using ``PULL_FROM_URL``.
 
+The normal publish path remains fail-closed behind all compliance gates.  A
+separate expiring SELF_ONLY canary route can authorize one immutable target
+without changing those production gate assertions.
+
 The worker listens on loopback only.  Its transport bearer is distinct from
 the AES-GCM credential-seal key.  Plaintext TikTok tokens are never accepted as
 normal fields and are never written to disk, logs, manifests, or exception
@@ -42,7 +46,7 @@ from concurrent.futures import (
 )
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -71,6 +75,7 @@ HEALTH_PATH = "/health"
 CREATOR_INFO_PATH = "/internal/tt-post/creator-info"
 PREPARE_PATH = "/internal/tt-post/prepare"
 PUBLISH_PATH = "/internal/tt-post/publish"
+CANARY_PUBLISH_PATH = "/internal/tt-post/canary-publish"
 RECONCILE_PATH = "/internal/tt-post/reconcile"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8830
@@ -111,6 +116,9 @@ TIKTOK_API_ORIGIN = "https://open.tiktokapis.com"
 TIKTOK_CREATOR_INFO_PATH = "/v2/post/publish/creator_info/query/"
 TIKTOK_VIDEO_INIT_PATH = "/v2/post/publish/video/init/"
 TIKTOK_STATUS_FETCH_PATH = "/v2/post/publish/status/fetch/"
+MANUAL_CANARY_ACKNOWLEDGEMENT = (
+    "I_ACCEPT_ONE_SHOT_PRIVATE_TIKTOK_CANARY_20260731"
+)
 JOB_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{11,127}\Z")
 CONTENT_ID_RE = re.compile(r"\A[A-Za-z0-9]{4,64}\Z")
 ACCOUNT_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
@@ -154,6 +162,8 @@ PUBLISH_OPTIONAL_FIELDS = frozenset(
         "brand_content_toggle",
         "brand_organic_toggle",
         "is_aigc",
+        "manual_canary_id",
+        "material_id",
     }
 )
 RECONCILE_FIELDS = CREATOR_INFO_FIELDS
@@ -189,10 +199,27 @@ def _safe_error_details(value):
     if not isinstance(value, dict):
         return {}
     result = {}
-    for key in ("log_id", "publish_id", "state"):
+    for key in (
+        "log_id",
+        "publish_id",
+        "state",
+        "upstream_code",
+        "received_at",
+    ):
         item = value.get(key)
         if isinstance(item, str) and len(item) <= 512 and "\x00" not in item:
             result[key] = item
+    upstream_message = value.get("upstream_message")
+    if isinstance(upstream_message, str):
+        result["upstream_message"] = _clean_message(
+            upstream_message,
+            300,
+        )
+    http_status = value.get("upstream_http_status")
+    if isinstance(http_status, int) and 100 <= http_status <= 599:
+        result["upstream_http_status"] = http_status
+    if type(value.get("message_redacted")) is bool:
+        result["message_redacted"] = value["message_redacted"]
     return result
 
 
@@ -403,6 +430,18 @@ class WorkerConfig:
     live_enabled: bool = False
     direct_audit_approved: bool = False
     url_property_verified: bool = False
+    manual_canary_enabled: bool = False
+    manual_canary_acknowledged: bool = False
+    manual_canary_id: str = ""
+    manual_canary_expires_at_utc: str = ""
+    manual_canary_account_id: str = ""
+    manual_canary_material_id: str = ""
+    manual_canary_content_id: str = ""
+    manual_canary_gpu_job_id: str = ""
+    manual_canary_output_sha256: str = ""
+    manual_canary_output_size: int = 0
+    manual_canary_profile: str = ""
+    manual_canary_origin: str = ""
     max_source_bytes: int = DEFAULT_MAX_SOURCE_BYTES
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
     max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS
@@ -607,6 +646,161 @@ class WorkerConfig:
             if url_property_verified_origin_raw
             else ""
         )
+        manual_canary_enabled = _env_bool(
+            "TT_POST_MANUAL_CANARY_ENABLED",
+            False,
+        )
+        manual_canary_values = {
+            "manual_canary_enabled": False,
+            "manual_canary_acknowledged": False,
+            "manual_canary_id": "",
+            "manual_canary_expires_at_utc": "",
+            "manual_canary_account_id": "",
+            "manual_canary_material_id": "",
+            "manual_canary_content_id": "",
+            "manual_canary_gpu_job_id": "",
+            "manual_canary_output_sha256": "",
+            "manual_canary_output_size": 0,
+            "manual_canary_profile": "",
+            "manual_canary_origin": "",
+        }
+        if manual_canary_enabled:
+            acknowledgement = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_ACKNOWLEDGEMENT",
+                    "",
+                )
+                or ""
+            )
+            if not secrets.compare_digest(
+                acknowledgement,
+                MANUAL_CANARY_ACKNOWLEDGEMENT,
+            ):
+                raise TTGPUError(
+                    "invalid_configuration",
+                    "TT manual canary acknowledgement is invalid",
+                    500,
+                )
+            canary_id = str(
+                os.environ.get("TT_POST_MANUAL_CANARY_ID", "") or ""
+            ).strip()
+            account_id = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_ACCOUNT_ID",
+                    "",
+                )
+                or ""
+            ).strip()
+            material_id = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_MATERIAL_ID",
+                    "",
+                )
+                or ""
+            ).strip()
+            content_id = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_CONTENT_ID",
+                    "",
+                )
+                or ""
+            ).strip()
+            gpu_job_id = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_GPU_JOB_ID",
+                    "",
+                )
+                or ""
+            ).strip()
+            output_sha256 = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_OUTPUT_SHA256",
+                    "",
+                )
+                or ""
+            ).strip().lower()
+            profile = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_PROFILE",
+                    "",
+                )
+                or ""
+            ).strip()
+            origin = _normalize_https_origin(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_ORIGIN",
+                    "",
+                ),
+                "TT_POST_MANUAL_CANARY_ORIGIN",
+            )
+            expiry_raw = str(
+                os.environ.get(
+                    "TT_POST_MANUAL_CANARY_EXPIRES_AT_UTC",
+                    "",
+                )
+                or ""
+            ).strip()
+            try:
+                expiry = datetime.fromisoformat(
+                    expiry_raw.replace("Z", "+00:00")
+                )
+                if expiry.tzinfo is None:
+                    raise ValueError("naive expiry")
+                expiry = expiry.astimezone(timezone.utc)
+            except (TypeError, ValueError, OverflowError):
+                raise TTGPUError(
+                    "invalid_configuration",
+                    "TT manual canary expiry is invalid",
+                    500,
+                ) from None
+            now = datetime.now(timezone.utc)
+            selected_profile = (
+                PROFILE
+                if encoder == "hevc_nvenc"
+                else H264_FALLBACK_PROFILE
+            )
+            expected_origin = (
+                local_media_origin
+                if storage_backend == "local"
+                else cos_domain
+            )
+            if (
+                not re.fullmatch(r"[A-Za-z0-9._-]{8,80}", canary_id)
+                or not ACCOUNT_ID_RE.fullmatch(account_id)
+                or not re.fullmatch(r"[1-9][0-9]{0,18}", material_id)
+                or not CONTENT_ID_RE.fullmatch(content_id)
+                or not JOB_ID_RE.fullmatch(gpu_job_id)
+                or not HEX_64_RE.fullmatch(output_sha256)
+                or profile != selected_profile
+                or origin != expected_origin
+                or expiry > now + timedelta(hours=24)
+            ):
+                raise TTGPUError(
+                    "invalid_configuration",
+                    "TT manual canary target configuration is invalid",
+                    500,
+                )
+            manual_canary_values = {
+                "manual_canary_enabled": True,
+                "manual_canary_acknowledged": True,
+                "manual_canary_id": canary_id,
+                "manual_canary_expires_at_utc": (
+                    expiry.isoformat().replace("+00:00", "Z")
+                ),
+                "manual_canary_account_id": account_id,
+                "manual_canary_material_id": material_id,
+                "manual_canary_content_id": content_id,
+                "manual_canary_gpu_job_id": gpu_job_id,
+                "manual_canary_output_sha256": output_sha256,
+                "manual_canary_output_size": _env_int(
+                    "TT_POST_MANUAL_CANARY_OUTPUT_SIZE",
+                    0,
+                    1,
+                    DEFAULT_MAX_OUTPUT_BYTES,
+                ),
+                "manual_canary_profile": profile,
+                "manual_canary_origin": origin,
+            }
         return cls(
             enabled=True,
             host=host,
@@ -679,6 +873,7 @@ class WorkerConfig:
                 "TT_POST_URL_PROPERTY_VERIFIED",
                 False,
             ),
+            **manual_canary_values,
             max_source_bytes=_env_int(
                 "TT_POST_GPU_MAX_SOURCE_BYTES",
                 DEFAULT_MAX_SOURCE_BYTES,
@@ -763,6 +958,30 @@ class WorkerConfig:
                 and self.url_property_verified
                 and verified_origin_matches
             ),
+        }
+
+    def manual_canary_state(self):
+        active = False
+        if (
+            self.manual_canary_enabled
+            and self.manual_canary_acknowledged
+            and self.manual_canary_expires_at_utc
+        ):
+            try:
+                expires_at = datetime.fromisoformat(
+                    self.manual_canary_expires_at_utc.replace(
+                        "Z",
+                        "+00:00",
+                    )
+                ).astimezone(timezone.utc)
+                active = datetime.now(timezone.utc) < expires_at
+            except (TypeError, ValueError, OverflowError):
+                active = False
+        return {
+            "active": bool(active),
+            "enabled": bool(self.manual_canary_enabled),
+            "privacy_level": "SELF_ONLY",
+            "test_bypass": bool(active),
         }
 
 
@@ -2427,23 +2646,25 @@ class TikTokContentPostingAPI:
                 data = {}
             finally:
                 exc.close()
-            code = _upstream_error_code(data)
-            log_id = _upstream_log_id(data)
+            details = _upstream_error_details(data, http_status)
             if (
                 http_status >= 500
                 or http_status in {408, 409, 425, 429}
             ):
                 raise TTGPUError(
                     "tt_upstream_unavailable",
-                    "TikTok API request outcome is unavailable",
+                    _upstream_error_summary(
+                        details,
+                        unavailable=True,
+                    ),
                     503,
-                    {"log_id": log_id} if log_id else None,
+                    details,
                 ) from None
             raise TTGPUError(
                 "tt_upstream_rejected",
-                "TikTok API rejected the request (%s)" % code,
+                _upstream_error_summary(details),
                 502,
-                {"log_id": log_id} if log_id else None,
+                details,
             ) from None
         except TTGPUError:
             raise
@@ -2472,12 +2693,12 @@ class TikTokContentPostingAPI:
         if isinstance(error, dict):
             code = str(error.get("code") or "")
             if code and code.lower() != "ok":
-                safe_code = code if SAFE_UPSTREAM_CODE_RE.fullmatch(code) else "rejected"
+                details = _upstream_error_details(data, 200)
                 raise TTGPUError(
                     "tt_upstream_rejected",
-                    "TikTok API rejected the request (%s)" % safe_code,
+                    _upstream_error_summary(details),
                     502,
-                    {"log_id": log_id} if log_id else None,
+                    details,
                 )
         result = data.get("data") if isinstance(data.get("data"), dict) else {}
         return result, log_id
@@ -2524,6 +2745,53 @@ def _upstream_error_code(payload):
     error = payload.get("error") if isinstance(payload, dict) else None
     code = str(error.get("code") or "") if isinstance(error, dict) else ""
     return code if SAFE_UPSTREAM_CODE_RE.fullmatch(code) else "http_error"
+
+
+def _upstream_error_details(payload, http_status=0):
+    error = payload.get("error") if isinstance(payload, dict) else None
+    raw_message = (
+        str(error.get("message") or "")
+        if isinstance(error, dict)
+        else ""
+    )
+    safe_message = _clean_message(raw_message, 300)
+    details = {
+        "upstream_code": _upstream_error_code(payload),
+        "upstream_message": safe_message,
+        "log_id": _upstream_log_id(payload),
+        "message_redacted": bool(safe_message != raw_message[:300]),
+        "received_at": _utc_now(),
+    }
+    try:
+        normalized_status = int(http_status)
+    except (TypeError, ValueError, OverflowError):
+        normalized_status = 0
+    if 100 <= normalized_status <= 599:
+        details["upstream_http_status"] = normalized_status
+    return details
+
+
+def _upstream_error_summary(details, *, unavailable=False):
+    prefix = (
+        "TikTok API request outcome is unavailable"
+        if unavailable
+        else "TikTok API rejected the request"
+    )
+    parts = []
+    http_status = details.get("upstream_http_status")
+    if http_status:
+        parts.append("HTTP %s" % http_status)
+    code = str(details.get("upstream_code") or "")
+    if code:
+        parts.append("code=%s" % code)
+    log_id = str(details.get("log_id") or "")
+    if log_id:
+        parts.append("log_id=%s" % log_id)
+    message = str(details.get("upstream_message") or "")
+    summary = prefix + ((" [" + ", ".join(parts) + "]") if parts else "")
+    if message:
+        summary += ": " + message
+    return _clean_message(summary, 300)
 
 
 def _upstream_log_id(payload):
@@ -2734,6 +3002,22 @@ def validate_publish_request(payload):
     for field in ("brand_content_toggle", "brand_organic_toggle", "is_aigc"):
         if field in payload:
             result[field] = _required_bool(payload, field)
+    if "manual_canary_id" in payload:
+        canary_id = str(payload.get("manual_canary_id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{8,80}", canary_id):
+            raise TTGPUError(
+                "invalid_request",
+                "manual_canary_id is invalid",
+            )
+        result["manual_canary_id"] = canary_id
+    if "material_id" in payload:
+        material_id = str(payload.get("material_id") or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", material_id):
+            raise TTGPUError(
+                "invalid_request",
+                "material_id is invalid",
+            )
+        result["material_id"] = material_id
     if "video_cover_timestamp_ms" in payload:
         try:
             cover = int(payload["video_cover_timestamp_ms"])
@@ -3538,9 +3822,107 @@ class TTPostGPUProcessor:
             )
         job_id = request["job_id"]
         with _job_lock(self._lock_path(job_id)):
-            return self._publish_locked(request)
+            return self._publish_locked(request, manual_canary=False)
 
-    def _publish_locked(self, request):
+    def canary_publish(self, payload):
+        request = validate_publish_request(payload)
+        self._assert_manual_canary_request(request)
+        job_id = request["job_id"]
+        with _job_lock(self._lock_path(job_id)):
+            return self._publish_locked(request, manual_canary=True)
+
+    def _assert_manual_canary_request(
+        self,
+        request,
+        prepare_manifest=None,
+        prepared=None,
+    ):
+        config = self.config
+        if not config.manual_canary_state()["active"]:
+            raise TTGPUError(
+                "tt_manual_canary_closed",
+                "TT manual canary is disabled or expired",
+                403,
+            )
+        exact_request = bool(
+            secrets.compare_digest(
+                str(request.get("manual_canary_id") or ""),
+                config.manual_canary_id,
+            )
+            and secrets.compare_digest(
+                str(request.get("source_account_id") or ""),
+                config.manual_canary_account_id,
+            )
+            and secrets.compare_digest(
+                str(request.get("material_id") or ""),
+                config.manual_canary_material_id,
+            )
+            and secrets.compare_digest(
+                str(request.get("job_id") or ""),
+                config.manual_canary_gpu_job_id,
+            )
+            and request.get("privacy_level") == "SELF_ONLY"
+            and request.get("disable_comment") is True
+            and request.get("disable_duet") is True
+            and request.get("disable_stitch") is True
+            and request.get("brand_content_toggle") is False
+            and request.get("brand_organic_toggle") is False
+        )
+        if not exact_request:
+            raise TTGPUError(
+                "tt_manual_canary_target_mismatch",
+                "TT manual canary request does not match the configured private target",
+                403,
+            )
+        if prepare_manifest is None or prepared is None:
+            return
+        storage = (
+            prepare_manifest.get("storage")
+            if isinstance(prepare_manifest, dict)
+            else None
+        )
+        expected_key = self._storage_key(
+            config.manual_canary_gpu_job_id,
+            config.manual_canary_output_sha256,
+        )
+        parsed = urllib.parse.urlsplit(
+            str(prepared.get("output_url") or "")
+        )
+        actual_origin = (
+            "https://" + parsed.hostname.lower()
+            if (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.port in {None, 443}
+            )
+            else ""
+        )
+        exact_artifact = bool(
+            prepared.get("content_id") == config.manual_canary_content_id
+            and prepared.get("job_id") == config.manual_canary_gpu_job_id
+            and prepared.get("output_sha256")
+            == config.manual_canary_output_sha256
+            and int(prepared.get("output_size") or 0)
+            == config.manual_canary_output_size
+            and prepared.get("profile") == config.manual_canary_profile
+            and actual_origin == config.manual_canary_origin
+            and parsed.query == ""
+            and parsed.fragment == ""
+            and parsed.path == "/" + expected_key
+            and isinstance(storage, dict)
+            and storage.get("backend") == config.storage_backend
+            and storage.get("key") == expected_key
+        )
+        if not exact_artifact:
+            raise TTGPUError(
+                "tt_manual_canary_artifact_mismatch",
+                "TT manual canary artifact does not match the configured immutable target",
+                403,
+            )
+
+    def _publish_locked(self, request, *, manual_canary=False):
         job_id = request["job_id"]
         prepare_manifest = _read_json(self._prepare_manifest_path(job_id))
         if not prepare_manifest or prepare_manifest.get("status") != "ready":
@@ -3555,7 +3937,13 @@ class TTPostGPUProcessor:
             self.config,
             job_id,
         )
-        if not prepared["direct_post_eligible"]:
+        if manual_canary:
+            self._assert_manual_canary_request(
+                request,
+                prepare_manifest,
+                prepared,
+            )
+        if not manual_canary and not prepared["direct_post_eligible"]:
             raise TTGPUError(
                 "tt_media_profile_not_direct_post_eligible",
                 "prepared media profile is not eligible for TikTok Direct Post",
@@ -3574,7 +3962,7 @@ class TTPostGPUProcessor:
             )
             else ""
         )
-        if (
+        if not manual_canary and (
             not actual_origin
             or not self.config.url_property_verified_origin
             or not secrets.compare_digest(
@@ -3617,6 +4005,11 @@ class TTPostGPUProcessor:
             },
             "source_account_id": request["source_account_id"],
         }
+        if manual_canary:
+            fingerprint_payload["manual_canary_id"] = request[
+                "manual_canary_id"
+            ]
+            fingerprint_payload["material_id"] = request["material_id"]
         request_hash = _stable_hash(fingerprint_payload)
         ledger_path = self._publish_ledger_path(job_id)
         existing = _read_json(ledger_path)
@@ -3647,6 +4040,7 @@ class TTPostGPUProcessor:
             "request_sha256": request_hash,
             "source_account_id": request["source_account_id"],
             "state": "init_inflight",
+            "test_bypass": bool(manual_canary),
             "updated_at": _utc_now(),
             "version": 1,
         }
@@ -3656,7 +4050,11 @@ class TTPostGPUProcessor:
                 self.config.credential_seal_key,
                 job_id=job_id,
                 source_account_id=request["source_account_id"],
-                operation="publish",
+                operation=(
+                    "canary_publish"
+                    if manual_canary
+                    else "publish"
+                ),
                 max_ttl_seconds=self.config.credential_max_ttl_seconds,
             ) as token:
                 _atomic_write_json(ledger_path, ledger)
@@ -3677,6 +4075,22 @@ class TTPostGPUProcessor:
                             "upstream_error_code": exc.code,
                             "upstream_log_id": str(
                                 exc.details.get("log_id") or ""
+                            ),
+                            "upstream_code": str(
+                                exc.details.get("upstream_code") or ""
+                            ),
+                            "upstream_message": str(
+                                exc.details.get("upstream_message") or ""
+                            ),
+                            "upstream_http_status": (
+                                exc.details.get("upstream_http_status")
+                                or 0
+                            ),
+                            "message_redacted": bool(
+                                exc.details.get("message_redacted")
+                            ),
+                            "received_at": str(
+                                exc.details.get("received_at") or _utc_now()
                             ),
                             "updated_at": _utc_now(),
                         }
@@ -3724,6 +4138,7 @@ class TTPostGPUProcessor:
             "source": "PULL_FROM_URL",
             "state": "initialized",
             "status": "ok",
+            "test_bypass": bool(manual_canary),
         }
 
     def reconcile(self, payload):
@@ -3864,6 +4279,9 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
                 "brand_overlay_review_required": True,
                 "direct_post_eligible": False,
                 "gates": self.server.processor.config.gate_state(),
+                "manual_canary": (
+                    self.server.processor.config.manual_canary_state()
+                ),
                 "local_origin_enabled": bool(
                     self.server.processor.config.local_media_origin
                     and len(
@@ -3888,6 +4306,7 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
             CREATOR_INFO_PATH: self.server.processor.creator_info,
             PREPARE_PATH: self.server.processor.prepare,
             PUBLISH_PATH: self.server.processor.publish,
+            CANARY_PUBLISH_PATH: self.server.processor.canary_publish,
             RECONCILE_PATH: self.server.processor.reconcile,
         }
         handler = handlers.get(parsed.path)

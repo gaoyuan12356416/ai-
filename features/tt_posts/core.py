@@ -3418,6 +3418,29 @@ class TTPostStore:
                 )
             return self._recurring_run_result(conn, row)
 
+    def get_recurring_run_by_queue_id(self, queue_id: Any) -> Dict[str, Any]:
+        """Return the durable recurring run bound to one exact queue."""
+
+        normalized_queue_id = _positive_int(
+            queue_id,
+            "一次性发布队列ID",
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM tt_post_schedule_run
+                WHERE queue_id=?
+                """,
+                (normalized_queue_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_schedule_run_not_found",
+                    "该队列没有每日发布运行记录",
+                    404,
+                )
+            return self._recurring_run_result(conn, row)
+
     @staticmethod
     def _assert_recurring_execution(
         run: sqlite3.Row,
@@ -4914,6 +4937,54 @@ class TTPostStore:
         if not isinstance(live_gates, LiveGates):
             raise TTPostError("invalid_live_gates", "正式发布门禁无效", 500)
         live_gates.assert_open()
+        return self._begin_publish_authorized(
+            queue_id,
+            claim_token,
+            now=now,
+        )
+
+    def begin_manual_canary_publish(
+        self,
+        queue_id: Any,
+        claim_token: Any,
+        identity: Mapping[str, Any],
+        *,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Cross the network boundary for one explicitly bound private canary."""
+
+        required = {
+            "canary_id",
+            "account_id",
+            "pool_id",
+            "material_id",
+            "content_id",
+            "gpu_job_id",
+            "output_sha256",
+            "output_size",
+            "profile",
+        }
+        if not isinstance(identity, Mapping) or set(identity) != required:
+            raise TTPostError(
+                "tt_post_manual_canary_identity_invalid",
+                "一次性私密测试身份无效",
+                500,
+            )
+        return self._begin_publish_authorized(
+            queue_id,
+            claim_token,
+            now=now,
+            manual_canary_identity=dict(identity),
+        )
+
+    def _begin_publish_authorized(
+        self,
+        queue_id: Any,
+        claim_token: Any,
+        *,
+        now: Optional[Any] = None,
+        manual_canary_identity: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         normalized = _positive_int(queue_id, "发布队列ID")
         now_iso = _iso_utc(now if now is not None else self._now_fn(), "当前时间")
         with self._transaction() as conn:
@@ -4929,6 +5000,77 @@ class TTPostStore:
                 allowed_statuses=("claimed",),
                 now_iso=now_iso,
             )
+            if manual_canary_identity is not None:
+                identity = manual_canary_identity
+                run = conn.execute(
+                    """
+                    SELECT * FROM tt_post_schedule_run
+                    WHERE queue_id=?
+                    """,
+                    (normalized,),
+                ).fetchone()
+                pool = (
+                    conn.execute(
+                        "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+                        (int(run["pool_item_id"]),),
+                    ).fetchone()
+                    if run is not None
+                    else None
+                )
+                enabled_schedule = conn.execute(
+                    """
+                    SELECT 1 FROM tt_post_daily_schedule
+                    WHERE account_id=? AND enabled=1
+                    LIMIT 1
+                    """,
+                    (str(identity.get("account_id") or ""),),
+                ).fetchone()
+                canary_id = str(identity.get("canary_id") or "")
+                expected_prefix = "tt-post:manual-canary:v1:%s:%s:" % (
+                    canary_id,
+                    str(identity.get("account_id") or ""),
+                )
+                try:
+                    exact_match = bool(
+                        run is not None
+                        and pool is not None
+                        and enabled_schedule is None
+                        and str(run["trigger_type"]) == "manual"
+                        and str(run["run_key"]).startswith(expected_prefix)
+                        and str(row["publish_mode"]) == "direct_post"
+                        and str(row["privacy_level"]) == "SELF_ONLY"
+                        and not bool(row["allow_comment"])
+                        and not bool(row["allow_duet"])
+                        and not bool(row["allow_stitch"])
+                        and not bool(row["brand_content_toggle"])
+                        and not bool(row["brand_organic_toggle"])
+                        and str(row["account_id"])
+                        == str(identity.get("account_id") or "")
+                        and int(pool["id"])
+                        == int(identity.get("pool_id") or 0)
+                        and str(pool["material_id"])
+                        == str(identity.get("material_id") or "")
+                        and str(pool["content_id"])
+                        == str(identity.get("content_id") or "")
+                        and str(pool["gpu_job_id"])
+                        == str(identity.get("gpu_job_id") or "")
+                        and str(pool["prepared_output_sha256"]).lower()
+                        == str(
+                            identity.get("output_sha256") or ""
+                        ).lower()
+                        and int(pool["prepared_output_size"])
+                        == int(identity.get("output_size") or 0)
+                        and str(pool["preparation_profile"])
+                        == str(identity.get("profile") or "")
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    exact_match = False
+                if not exact_match:
+                    raise TTPostError(
+                        "tt_post_manual_canary_identity_mismatch",
+                        "一次性私密测试身份与冻结队列不一致",
+                        409,
+                    )
             conn.execute(
                 """
                 UPDATE tt_post_queue

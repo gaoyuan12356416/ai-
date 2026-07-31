@@ -1037,6 +1037,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         state.gates.auditApproved === true &&
         state.gates.urlVerified === true
       );
+      const manualCanaryReady = () => boolValue(firstDefined(
+        state.schedule && state.schedule.manual_canary_ready,
+        state.schedule && state.schedule.manual_canary && state.schedule.manual_canary.ready,
+        false
+      )) === true;
       function renderGate(cardId, textId, value, readyText, blockedText) {
         const card = byId(cardId);
         card.classList.remove("ready", "blocked", "unknown");
@@ -1317,6 +1322,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           next_run_at: "",
           available_material_count: 0,
           can_publish_now: false,
+          manual_canary_ready: false,
+          manual_canary: {
+            enabled: false,
+            ready: false,
+            privacy_level: "SELF_ONLY",
+            test_bypass: false,
+          },
         };
       }
       function schedulePublishTime(item) {
@@ -1334,6 +1346,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
         if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";
         if (!state.schedule) return "请等待该账号每日排期加载完成。";
+        if (manualCanaryReady()) return "一次性私密测试有效期间，每日自动排期保持关闭。";
         if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(byId("dailyPublishTime").value)) {
           return "请选择有效的每日上海发布时间。";
         }
@@ -1346,8 +1359,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (!accountEligible(item) || !selectedAccountSettings() || !state.creatorInfo) {
           return "该账号尚未完成可发布配置或实时确认。";
         }
-        if (!gatesOpen()) return "发布门禁尚未全部开放，立即发布已禁用。";
         if (!state.schedule) return "正在加载该账号的素材池状态。";
+        if (!gatesOpen() && !manualCanaryReady()) {
+          return "发布门禁尚未全部开放，立即发布已禁用。";
+        }
         if (Number(state.schedule.available_material_count || 0) < 1) {
           return "该账号素材池没有待发素材。";
         }
@@ -1363,6 +1378,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const runButton = byId("runNow");
         const runError = runNowDisabledReason();
         runButton.disabled = !!runError || state.scheduleBusy || state.runNowBusy || state.busy;
+        if (!state.runNowBusy) {
+          setText(runButton, manualCanaryReady() ? "仅一次私密测试" : "立即发布一条");
+        }
         const pendingRun = pendingRunNowEntry(state.selectedAccountId);
         const hasPendingRetry = !!pendingRun;
         const pendingNeedsReview = hasPendingRetry && pendingRun.status === "unknown";
@@ -1373,6 +1391,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               ? "上次立即发布结果未知，需人工核对；系统已保留同一请求标识，不会生成新的重复请求。"
               : hasPendingRetry
               ? "上次立即发布结果尚未确认；再次点击会复用同一请求标识安全重试，不会额外创建第二次请求。"
+              : manualCanaryReady()
+              ? "一次性测试已精确绑定当前账号与素材；仅由你点击触发，强制 SELF_ONLY，关闭评论、Duet、Stitch，自动排期保持关闭。"
               : "会额外消费素材池中的下一条并立即执行，不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束。"
           )
         );
@@ -1391,6 +1411,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const publishTime = schedulePublishTime(item);
         byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;
         byId("scheduleEnabled").checked = boolValue(item.enabled) === true;
+        byId("dailyPublishTime").disabled = manualCanaryReady();
+        byId("scheduleEnabled").disabled = manualCanaryReady();
         setText(
           byId("scheduleStatus"),
           boolValue(item.enabled) === true
@@ -1408,9 +1430,19 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         setText(byId("availableMaterialCount"), `${Number(item.available_material_count || 0)} 条`);
         setText(
           byId("scheduleState"),
-          boolValue(item.enabled) === true ? "每日排期已启用。" : "每日排期已停用。"
+          manualCanaryReady()
+            ? "一次性私密测试已开放；每日自动排期锁定为关闭。"
+            : boolValue(item.enabled) === true
+            ? "每日排期已启用。"
+            : "每日排期已停用。"
         );
         byId("scheduleState").className = "helper";
+        if (manualCanaryReady()) {
+          setText(
+            byId("consentText"),
+            "我已核对当前账号与绑定素材，并同意 TikTok Music Usage Confirmation。此次仅由我手动触发一次，服务端强制 SELF_ONLY 并关闭评论、Duet、Stitch；每日自动排期保持关闭。"
+          );
+        }
         updateScheduleActions();
       }
       async function loadSchedule() {
@@ -1655,8 +1687,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return;
         }
         const item = selectedAccount();
+        const privateCanary = manualCanaryReady();
         const confirmed = window.confirm(
-          `确定为“${accountName(item)}”立即发布一条？这会额外消费素材池中的下一条，不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束。`
+          privateCanary
+            ? `确定为“${accountName(item)}”执行仅一次私密测试？系统会使用绑定素材，强制 SELF_ONLY 并关闭评论、Duet、Stitch；本次提交后不能自动重试。`
+            : `确定为“${accountName(item)}”立即发布一条？这会额外消费素材池中的下一条，不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束。`
         );
         if (!confirmed) return;
         const requestedAccountId = state.selectedAccountId;

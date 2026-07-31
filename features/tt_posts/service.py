@@ -5,7 +5,8 @@ The module keeps four boundaries explicit:
 * account-list SQL projects metadata only and never names ``access_token``;
 * one exact token row is read only inside ``publish_credentials``;
 * the GPU receives an AES-GCM credential envelope, never a raw token;
-* Direct Post init is unreachable unless all three production gates are open.
+* Direct Post init is unreachable unless all three production gates are open,
+  except for one exact expiring SELF_ONLY canary target.
 
 The HTTP surface is loopback-only and is intended to sit behind the authenticated
 AI backend.  It never writes to the source MySQL databases.
@@ -107,6 +108,9 @@ CREATOR_INFO_BATCH_WORKERS = 4
 TT_MAX_MATERIAL_DURATION_SECONDS = 3600
 DEFAULT_RUNNER_KICK_PATH = "/run/tt-post/manual-kick"
 DEFAULT_PREPARATION_KICK_PATH = "/run/tt-post/prepare-kick"
+MANUAL_CANARY_ACKNOWLEDGEMENT = (
+    "I_ACCEPT_ONE_SHOT_PRIVATE_TIKTOK_CANARY_20260731"
+)
 
 TERMINAL_PREPARATION_ERROR_CODES = frozenset(
     {
@@ -223,11 +227,26 @@ class GPUClientError(TTPostServiceError):
         self.unknown_outcome = bool(unknown_outcome)
         self.publish_was_not_created = bool(publish_was_not_created)
         raw_details = details if isinstance(details, Mapping) else {}
-        self.details = {
-            key: str(raw_details.get(key) or "")[:512]
-            for key in ("publish_id", "state", "log_id")
-            if raw_details.get(key) not in (None, "")
-        }
+        self.details = {}
+        for key in (
+            "publish_id",
+            "state",
+            "log_id",
+            "upstream_code",
+            "upstream_message",
+            "received_at",
+        ):
+            if raw_details.get(key) not in (None, ""):
+                self.details[key] = str(
+                    raw_details.get(key) or ""
+                )[:512]
+        http_status = raw_details.get("upstream_http_status")
+        if isinstance(http_status, int) and 100 <= http_status <= 599:
+            self.details["upstream_http_status"] = http_status
+        if type(raw_details.get("message_redacted")) is bool:
+            self.details["message_redacted"] = raw_details[
+                "message_redacted"
+            ]
         super().__init__(code, message, status)
 
     def __repr__(self) -> str:
@@ -1055,7 +1074,10 @@ class GPUClient:
         write_may_have_happened: bool = False,
     ) -> Dict[str, Any]:
         if (
-            not re.fullmatch(r"/internal/tt-post/(?:creator-info|prepare|publish|reconcile)", path)
+            not re.fullmatch(
+                r"/internal/tt-post/(?:creator-info|prepare|publish|canary-publish|reconcile)",
+                path,
+            )
             or not isinstance(payload, Mapping)
             or _contains_sensitive_key(payload)
         ):
@@ -1142,6 +1164,10 @@ class GPUClient:
                     "publish_idempotency_conflict",
                     "tt_media_profile_not_direct_post_eligible",
                     "tt_publish_compliance_gate_closed",
+                    "tt_publish_url_property_mismatch",
+                    "tt_manual_canary_closed",
+                    "tt_manual_canary_target_mismatch",
+                    "tt_manual_canary_artifact_mismatch",
                     "tt_upstream_rejected",
                     "credential_envelope_invalid",
                     "credential_envelope_expired",
@@ -1273,32 +1299,46 @@ class GPUClient:
         source_account_id: str,
         access_token: str,
         queue: Mapping[str, Any],
+        manual_canary: bool = False,
+        manual_canary_id: str = "",
     ) -> Dict[str, Any]:
         envelope = self._envelope(
             access_token,
             job_id=job_id,
             source_account_id=source_account_id,
-            operation="publish",
+            operation=(
+                "canary_publish"
+                if manual_canary
+                else "publish"
+            ),
         )
+        payload = {
+            "job_id": job_id,
+            "source_account_id": source_account_id,
+            "credential_envelope": envelope,
+            "title": queue.get("caption"),
+            "privacy_level": queue.get("privacy_level"),
+            "disable_comment": not bool(queue.get("allow_comment")),
+            "disable_duet": not bool(queue.get("allow_duet")),
+            "disable_stitch": not bool(queue.get("allow_stitch")),
+            "brand_content_toggle": bool(
+                queue.get("brand_content_toggle")
+            ),
+            "brand_organic_toggle": bool(
+                queue.get("brand_organic_toggle")
+            ),
+            "is_aigc": bool(queue.get("is_aigc")),
+        }
+        if manual_canary:
+            payload["manual_canary_id"] = str(manual_canary_id or "")
+            payload["material_id"] = str(queue.get("material_id") or "")
         return self._post(
-            "/internal/tt-post/publish",
-            {
-                "job_id": job_id,
-                "source_account_id": source_account_id,
-                "credential_envelope": envelope,
-                "title": queue.get("caption"),
-                "privacy_level": queue.get("privacy_level"),
-                "disable_comment": not bool(queue.get("allow_comment")),
-                "disable_duet": not bool(queue.get("allow_duet")),
-                "disable_stitch": not bool(queue.get("allow_stitch")),
-                "brand_content_toggle": bool(
-                    queue.get("brand_content_toggle")
-                ),
-                "brand_organic_toggle": bool(
-                    queue.get("brand_organic_toggle")
-                ),
-                "is_aigc": bool(queue.get("is_aigc")),
-            },
+            (
+                "/internal/tt-post/canary-publish"
+                if manual_canary
+                else "/internal/tt-post/publish"
+            ),
+            payload,
             write_may_have_happened=True,
         )
 
@@ -1339,6 +1379,257 @@ def _required_gpu_job_id(value: Any) -> str:
             409,
         )
     return job_id
+
+
+def _strict_env_bool(source: Mapping[str, str], name: str) -> bool:
+    raw = str(source.get(name, "0") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off", ""}:
+        return False
+    raise TTPostServiceError(
+        "tt_post_manual_canary_config_invalid",
+        "%s must be 0 or 1" % name,
+        500,
+    )
+
+
+@dataclass(frozen=True)
+class ManualPublishCanary:
+    """Fail-closed permit for one exact operator-triggered private post."""
+
+    enabled: bool = False
+    acknowledged: bool = False
+    canary_id: str = ""
+    expires_at_utc: str = ""
+    account_id: str = ""
+    pool_id: int = 0
+    material_id: str = ""
+    content_id: str = ""
+    gpu_job_id: str = ""
+    output_sha256: str = ""
+    output_size: int = 0
+    profile: str = ""
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Optional[Mapping[str, str]] = None,
+    ) -> "ManualPublishCanary":
+        source = os.environ if environ is None else environ
+        enabled = _strict_env_bool(
+            source,
+            "TT_POST_MANUAL_CANARY_ENABLED",
+        )
+        if not enabled:
+            return cls()
+        acknowledgement = str(
+            source.get("TT_POST_MANUAL_CANARY_ACKNOWLEDGEMENT", "")
+            or ""
+        )
+        acknowledged = secrets.compare_digest(
+            acknowledgement,
+            MANUAL_CANARY_ACKNOWLEDGEMENT,
+        )
+        try:
+            canary_id = str(
+                source.get("TT_POST_MANUAL_CANARY_ID", "") or ""
+            ).strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]{8,80}", canary_id):
+                raise ValueError("canary ID")
+            expires_at_raw = str(
+                source.get(
+                    "TT_POST_MANUAL_CANARY_EXPIRES_AT_UTC",
+                    "",
+                )
+                or ""
+            ).strip()
+            expires_at = datetime.fromisoformat(
+                expires_at_raw.replace("Z", "+00:00")
+            )
+            if expires_at.tzinfo is None:
+                raise ValueError("expiry")
+            expires_at = expires_at.astimezone(UTC)
+            now = datetime.now(UTC)
+            if expires_at > now + timedelta(hours=24):
+                raise ValueError("expiry")
+            account_id = _positive_decimal(
+                source.get("TT_POST_MANUAL_CANARY_ACCOUNT_ID"),
+                "TT manual canary account ID",
+            )
+            pool_id = _positive_int(
+                source.get("TT_POST_MANUAL_CANARY_POOL_ID"),
+                "TT manual canary pool ID",
+            )
+            material_id = _positive_decimal(
+                source.get("TT_POST_MANUAL_CANARY_MATERIAL_ID"),
+                "TT manual canary material ID",
+                19,
+            )
+            content_id = str(
+                source.get("TT_POST_MANUAL_CANARY_CONTENT_ID", "") or ""
+            ).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", content_id):
+                raise ValueError("content ID")
+            gpu_job_id = _required_gpu_job_id(
+                source.get("TT_POST_MANUAL_CANARY_GPU_JOB_ID")
+            )
+            output_sha256 = str(
+                source.get("TT_POST_MANUAL_CANARY_OUTPUT_SHA256", "") or ""
+            ).strip().lower()
+            if not re.fullmatch(r"[a-f0-9]{64}", output_sha256):
+                raise ValueError("output SHA-256")
+            output_size = _positive_int(
+                source.get("TT_POST_MANUAL_CANARY_OUTPUT_SIZE"),
+                "TT manual canary output size",
+                4 * 1024 * 1024 * 1024,
+            )
+            profile = str(
+                source.get("TT_POST_MANUAL_CANARY_PROFILE", "") or ""
+            ).strip()
+            if (
+                not profile
+                or len(profile) > 128
+                or not re.fullmatch(r"[A-Za-z0-9._-]+", profile)
+            ):
+                raise ValueError("profile")
+        except (TTPostError, ValueError):
+            raise TTPostServiceError(
+                "tt_post_manual_canary_config_invalid",
+                "TT manual canary target configuration is invalid",
+                500,
+            ) from None
+        if not acknowledged:
+            raise TTPostServiceError(
+                "tt_post_manual_canary_config_invalid",
+                "TT manual canary acknowledgement is invalid",
+                500,
+            )
+        return cls(
+            enabled=True,
+            acknowledged=True,
+            canary_id=canary_id,
+            expires_at_utc=expires_at.isoformat().replace("+00:00", "Z"),
+            account_id=account_id,
+            pool_id=pool_id,
+            material_id=material_id,
+            content_id=content_id,
+            gpu_job_id=gpu_job_id,
+            output_sha256=output_sha256,
+            output_size=output_size,
+            profile=profile,
+        )
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.enabled and self.acknowledged)
+
+    def is_active(self, now: Optional[datetime] = None) -> bool:
+        if not self.ready or not self.expires_at_utc:
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                self.expires_at_utc.replace("Z", "+00:00")
+            ).astimezone(UTC)
+            current = (
+                datetime.now(UTC)
+                if now is None
+                else _now_utc(lambda: now)
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return bool(current < expires_at)
+
+    def allows_manual_account(
+        self,
+        trigger_type: Any,
+        account_id: Any,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        return bool(
+            self.is_active(now)
+            and str(trigger_type or "") == "manual"
+            and secrets.compare_digest(
+                self.account_id,
+                str(account_id or ""),
+            )
+        )
+
+    def matches_pool(
+        self,
+        account_id: Any,
+        pool: Mapping[str, Any],
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        if not self.is_active(now) or not isinstance(pool, Mapping):
+            return False
+        try:
+            return bool(
+                secrets.compare_digest(
+                    self.account_id,
+                    str(account_id or ""),
+                )
+                and int(pool.get("id") or 0) == self.pool_id
+                and secrets.compare_digest(
+                    self.material_id,
+                    str(pool.get("material_id") or ""),
+                )
+                and secrets.compare_digest(
+                    self.content_id,
+                    str(pool.get("content_id") or ""),
+                )
+                and secrets.compare_digest(
+                    self.gpu_job_id,
+                    str(pool.get("gpu_job_id") or ""),
+                )
+                and secrets.compare_digest(
+                    self.output_sha256,
+                    str(pool.get("prepared_output_sha256") or "").lower(),
+                )
+                and int(pool.get("prepared_output_size") or 0)
+                == self.output_size
+                and secrets.compare_digest(
+                    self.profile,
+                    str(pool.get("preparation_profile") or ""),
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    def public_state(
+        self,
+        *,
+        ready: bool = False,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        active = self.is_active(now)
+        return {
+            "enabled": bool(active),
+            "ready": bool(active and ready),
+            "privacy_level": "SELF_ONLY",
+            "test_bypass": bool(active),
+        }
+
+    def identity(self) -> Dict[str, Any]:
+        if not self.ready:
+            raise TTPostServiceError(
+                "tt_post_manual_canary_config_invalid",
+                "TT manual canary configuration is invalid",
+                500,
+            )
+        return {
+            "canary_id": self.canary_id,
+            "account_id": self.account_id,
+            "pool_id": self.pool_id,
+            "material_id": self.material_id,
+            "content_id": self.content_id,
+            "gpu_job_id": self.gpu_job_id,
+            "output_sha256": self.output_sha256,
+            "output_size": self.output_size,
+            "profile": self.profile,
+        }
 
 
 def _creator_info_hash(creator: Mapping[str, Any]) -> str:
@@ -1529,6 +1820,7 @@ class TTPostService:
         gpu_client: GPUClient,
         *,
         gates: Optional[LiveGates] = None,
+        manual_canary: Optional[ManualPublishCanary] = None,
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
         source_trim_tail_seconds: float = 4.333333,
         media_profile_version: str = "tt-post-hevc-720x1280-v2",
@@ -1541,6 +1833,17 @@ class TTPostService:
         self.material_resolver = material_resolver
         self.gpu_client = gpu_client
         self.gates = LiveGates.from_env() if gates is None else gates
+        self.manual_canary = (
+            ManualPublishCanary.from_env()
+            if manual_canary is None
+            else manual_canary
+        )
+        if not isinstance(self.manual_canary, ManualPublishCanary):
+            raise TTPostServiceError(
+                "tt_post_manual_canary_config_invalid",
+                "TT manual canary configuration is invalid",
+                500,
+            )
         self._now_fn = now_fn
         try:
             trim_seconds = float(source_trim_tail_seconds)
@@ -1611,6 +1914,81 @@ class TTPostService:
 
     def _gates(self) -> Dict[str, bool]:
         return self.gates.as_dict()
+
+    def _is_manual_canary_queue(
+        self,
+        queue: Mapping[str, Any],
+    ) -> bool:
+        if (
+            not self.manual_canary.is_active(_now_utc(self._now_fn))
+            or not isinstance(queue, Mapping)
+            or str(queue.get("publish_mode") or "") != "direct_post"
+            or str(queue.get("privacy_level") or "") != "SELF_ONLY"
+            or bool(queue.get("allow_comment"))
+            or bool(queue.get("allow_duet"))
+            or bool(queue.get("allow_stitch"))
+            or bool(queue.get("brand_content_toggle"))
+            or bool(queue.get("brand_organic_toggle"))
+        ):
+            return False
+        try:
+            schedule = self.store.get_daily_schedule(
+                queue.get("account_id")
+            )
+            if bool(schedule.get("enabled")):
+                return False
+            run = self.store.get_recurring_run_by_queue_id(queue.get("id"))
+        except TTPostError:
+            return False
+        return bool(
+            str(run.get("trigger_type") or "") == "manual"
+            and str(run.get("run_key") or "").startswith(
+                "tt-post:manual-canary:v1:%s:%s:"
+                % (
+                    self.manual_canary.canary_id,
+                    self.manual_canary.account_id,
+                )
+            )
+            and self.manual_canary.matches_pool(
+                queue.get("account_id"),
+                run.get("pool_item") or {},
+                now=_now_utc(self._now_fn),
+            )
+            and secrets.compare_digest(
+                str(queue.get("material_id") or ""),
+                self.manual_canary.material_id,
+            )
+            and secrets.compare_digest(
+                str(queue.get("content_id") or ""),
+                self.manual_canary.content_id,
+            )
+            and secrets.compare_digest(
+                str(queue.get("gpu_job_id") or ""),
+                self.manual_canary.gpu_job_id,
+            )
+            and secrets.compare_digest(
+                str(queue.get("prepared_output_sha256") or "").lower(),
+                self.manual_canary.output_sha256,
+            )
+            and int(queue.get("prepared_output_size") or 0)
+            == self.manual_canary.output_size
+        )
+
+    @staticmethod
+    def _manual_canary_policy(
+        pool_item: Mapping[str, Any],
+    ) -> TTPostPolicy:
+        return TTPostPolicy(
+            privacy_level="SELF_ONLY",
+            allow_comment=False,
+            allow_duet=False,
+            allow_stitch=False,
+            brand_content_toggle=False,
+            brand_organic_toggle=False,
+            user_consent=True,
+            consent_version=str(pool_item.get("consent_version") or ""),
+            consented_at_utc=str(pool_item.get("consented_at_utc") or ""),
+        )
 
     def _claim_lease_seconds(self) -> int:
         try:
@@ -2253,8 +2631,32 @@ class TTPostService:
             if account_id
             else 0
         )
+        next_available = (
+            self.store.list_recurring_materials(
+                account_id=account_id,
+                status="available",
+                limit=1,
+            )
+            if account_id and item["available_material_count"] > 0
+            else []
+        )
+        manual_canary_ready = bool(
+            not item.get("enabled")
+            and next_available
+            and self.manual_canary.matches_pool(
+                account_id,
+                next_available[0],
+                now=_now_utc(self._now_fn),
+            )
+        )
+        item["manual_canary"] = self.manual_canary.public_state(
+            ready=manual_canary_ready,
+            now=_now_utc(self._now_fn),
+        )
+        item["manual_canary_ready"] = manual_canary_ready
         item["can_publish_now"] = bool(
-            self.gates.is_open and item["available_material_count"] > 0
+            item["available_material_count"] > 0
+            and (self.gates.is_open or manual_canary_ready)
         )
         return item
 
@@ -2797,6 +3199,19 @@ class TTPostService:
             )
         consent = self._consent_from_payload(payload)
         self.account_repository.get_public_account(account_id)
+        if (
+            enabled
+            and self.manual_canary.allows_manual_account(
+                "manual",
+                account_id,
+                now=_now_utc(self._now_fn),
+            )
+        ):
+            raise TTPostServiceError(
+                "tt_post_manual_canary_schedule_locked",
+                "一次性私密测试有效期间不能启用每日自动发布",
+                409,
+            )
         saved_settings = self.store.get_account_settings(
             account_id,
             required=True,
@@ -2857,6 +3272,17 @@ class TTPostService:
     ) -> Dict[str, Any]:
         claimed: Optional[Dict[str, Any]] = None
         execution_token = ""
+        manual_canary_account = self.manual_canary.allows_manual_account(
+            trigger_type,
+            account_id,
+            now=_now_utc(self._now_fn),
+        ) and str(run_key or "").startswith(
+            "tt-post:manual-canary:v1:%s:%s:"
+            % (
+                self.manual_canary.canary_id,
+                self.manual_canary.account_id,
+            )
+        )
 
         def terminal_or_bound(
             run: Mapping[str, Any],
@@ -2937,10 +3363,21 @@ class TTPostService:
                     if resumed is not None:
                         return resumed
 
-            if not self.gates.is_open:
+            if not self.gates.is_open and not manual_canary_account:
                 raise TTPostServiceError(
                     "tt_post_live_gates_closed",
                     "发布门禁尚未全部开放，本次未消费素材",
+                    409,
+                )
+            if (
+                manual_canary_account
+                and self.store.get_daily_schedule(account_id).get(
+                    "enabled"
+                )
+            ):
+                raise TTPostServiceError(
+                    "tt_post_manual_canary_schedule_locked",
+                    "一次性私密测试要求每日自动排期保持关闭",
                     409,
                 )
             account = self.account_repository.get_public_account(account_id)
@@ -2968,7 +3405,8 @@ class TTPostService:
             creator = self.creator_info(
                 {"source_account_id": account_id}
             )["item"]
-            self._assert_creator_settings(creator, settings)
+            if not manual_canary_account:
+                self._assert_creator_settings(creator, settings)
 
             if claimed is None:
                 claimed = self.store.claim_recurring_run(
@@ -2989,6 +3427,26 @@ class TTPostService:
                 if resumed is not None:
                     return resumed
             pool_item = claimed["pool_item"]
+            manual_canary_run = bool(
+                manual_canary_account
+                and self.manual_canary.matches_pool(
+                    account_id,
+                    pool_item,
+                    now=_now_utc(self._now_fn),
+                )
+            )
+            if manual_canary_account and not manual_canary_run:
+                raise TTPostServiceError(
+                    "tt_post_manual_canary_target_mismatch",
+                    "下一条素材与一次性私密测试目标不一致",
+                    409,
+                )
+            if not self.gates.is_open and not manual_canary_run:
+                raise TTPostServiceError(
+                    "tt_post_live_gates_closed",
+                    "发布门禁尚未全部开放，本次未消费素材",
+                    409,
+                )
             duration = float(pool_item.get("prepared_duration_sec") or 0)
             maximum_duration = int(
                 creator.get("max_video_post_duration_sec") or 0
@@ -3006,7 +3464,11 @@ class TTPostService:
                     pool_item.get("consented_at_utc") or ""
                 ),
             }
-            policy = self._policy_from_account_settings(settings, consent)
+            policy = (
+                self._manual_canary_policy(pool_item)
+                if manual_canary_run
+                else self._policy_from_account_settings(settings, consent)
+            )
             self._assert_creator_policy(creator, policy)
             claimed = self.store.renew_recurring_execution(
                 claimed["id"],
@@ -3424,9 +3886,28 @@ class TTPostService:
             second=0,
             microsecond=0,
         ).astimezone(UTC).isoformat().replace("+00:00", "Z")
-        run_key = "tt-post:manual:v1:%s:%s" % (
+        manual_canary_account = self.manual_canary.allows_manual_account(
+            "manual",
             account_id,
-            hashlib.sha256(request_key.encode("utf-8")).hexdigest()[:32],
+            now=_now_utc(self._now_fn),
+        )
+        run_key = (
+            "tt-post:manual-canary:v1:%s:%s:%s"
+            % (
+                self.manual_canary.canary_id,
+                account_id,
+                hashlib.sha256(
+                    request_key.encode("utf-8")
+                ).hexdigest()[:32],
+            )
+            if manual_canary_account
+            else "tt-post:manual:v1:%s:%s"
+            % (
+                account_id,
+                hashlib.sha256(
+                    request_key.encode("utf-8")
+                ).hexdigest()[:32],
+            )
         )
         schedule = self.store.get_daily_schedule(account_id)
         item = self._execute_recurring_run(
@@ -3472,8 +3953,8 @@ class TTPostService:
             )
         return item
 
-    @staticmethod
     def _queue_api_item(
+        self,
         queue: Mapping[str, Any],
         *,
         gates: LiveGates,
@@ -3503,7 +3984,12 @@ class TTPostService:
             item["queue_status"] = "blocked_compliance"
             item["status"] = "hold"
         item["publish_mode"] = str(item.get("publish_mode") or "hold")
-        if item["publish_mode"] != "direct_post" or not gates.is_open:
+        manual_canary = self._is_manual_canary_queue(queue)
+        item["manual_canary"] = manual_canary
+        if (
+            item["publish_mode"] != "direct_post"
+            or (not gates.is_open and not manual_canary)
+        ):
             item["publish_mode"] = "hold"
         return item
 
@@ -3825,7 +4311,11 @@ class TTPostService:
         items = []
         for claim in claims:
             queue = claim.queue
-            if queue.get("publish_mode") != "direct_post" or not self.gates.is_open:
+            manual_canary = self._is_manual_canary_queue(queue)
+            if (
+                queue.get("publish_mode") != "direct_post"
+                or (not self.gates.is_open and not manual_canary)
+            ):
                 blocked = self.store.block_compliance(
                     claim.queue_id,
                     claim.reveal_claim_token(),
@@ -3888,7 +4378,11 @@ class TTPostService:
                 "已取得publish_id的任务只能核对",
                 409,
             )
-        if queue.get("publish_mode") != "direct_post" or not self.gates.is_open:
+        manual_canary = self._is_manual_canary_queue(queue)
+        if (
+            queue.get("publish_mode") != "direct_post"
+            or (not self.gates.is_open and not manual_canary)
+        ):
             blocked = self.store.block_compliance(
                 normalized_queue_id,
                 token,
@@ -3968,16 +4462,30 @@ class TTPostService:
                     token,
                     lease_seconds=self._claim_lease_seconds(),
                 )
-                publishing = self.store.begin_publish(
-                    normalized_queue_id,
-                    token,
-                    self.gates,
+                publishing = (
+                    self.store.begin_manual_canary_publish(
+                        normalized_queue_id,
+                        token,
+                        self.manual_canary.identity(),
+                    )
+                    if manual_canary
+                    else self.store.begin_publish(
+                        normalized_queue_id,
+                        token,
+                        self.gates,
+                    )
                 )
                 result = self.gpu_client.publish(
                     job_id=gpu_job_id,
                     source_account_id=account_id,
                     access_token=credentials.reveal_access_token(),
                     queue=publishing,
+                    manual_canary=manual_canary,
+                    manual_canary_id=(
+                        self.manual_canary.canary_id
+                        if manual_canary
+                        else ""
+                    ),
                 )
         except GPUClientError as exc:
             recovered_publish_id = str(exc.details.get("publish_id") or "")
@@ -4251,6 +4759,7 @@ def build_service_from_env(
         material_resolver,
         gpu,
         gates=LiveGates.from_env(source),
+        manual_canary=ManualPublishCanary.from_env(source),
         source_trim_tail_seconds=source.get(
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS",
             "4.333333",

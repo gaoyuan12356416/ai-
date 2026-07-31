@@ -512,7 +512,10 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("liveEnabled: undefined", PAGE)
         self.assertIn("auditApproved: undefined", PAGE)
         self.assertIn("urlVerified: undefined", PAGE)
-        self.assertIn('if (!gatesOpen()) return "发布门禁尚未全部开放，立即发布已禁用。";', PAGE)
+        self.assertIn(
+            "if (!gatesOpen() && !manualCanaryReady())",
+            PAGE,
+        )
         self.assertIn("状态缺失一律按未开放处理", PAGE)
         self.assertIn("当前片尾含 DramaWave 品牌与跳转引导", PAGE)
         self.assertIn("不会消费待发素材", PAGE)
@@ -533,6 +536,10 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("source_account_id: requestedAccountId", run)
         self.assertIn("idempotency_key: requestKey", run)
         self.assertIn("Promise.all([loadSchedule(), loadQueue()])", run)
+        self.assertIn("仅一次私密测试", PAGE)
+        self.assertIn("manual_canary_ready", PAGE)
+        self.assertIn("强制 SELF_ONLY", PAGE)
+        self.assertIn("每日自动排期锁定为关闭", PAGE)
 
     def test_manual_publish_reuses_pending_key_until_server_success(self):
         key_helper = source_between(

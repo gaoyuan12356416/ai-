@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -259,6 +260,26 @@ class HTTP500TikTokOpener:
         )
 
 
+class HTTP400TikTokOpener:
+    def open(self, request, timeout):
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "url_ownership_unverified",
+                    "message": "The video URL property is not verified.",
+                    "log_id": "log-canary-400",
+                }
+            }
+        ).encode("utf-8")
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(body),
+        )
+
+
 def make_config(root, gates=False):
     root = Path(root)
     outro = root / "fixed-outro.mp4"
@@ -305,6 +326,26 @@ def make_config(root, gates=False):
         download_timeout=30,
         probe_timeout=30,
         transcode_timeout=60,
+    )
+
+
+def make_manual_canary_config(root):
+    return replace(
+        make_config(root, gates=False),
+        manual_canary_enabled=True,
+        manual_canary_acknowledged=True,
+        manual_canary_id="test-canary-001",
+        manual_canary_expires_at_utc=(
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat().replace("+00:00", "Z"),
+        manual_canary_account_id=ACCOUNT_ID,
+        manual_canary_material_id="9001",
+        manual_canary_content_id=CONTENT_ID,
+        manual_canary_gpu_job_id=JOB_ID,
+        manual_canary_output_sha256="a" * 64,
+        manual_canary_output_size=1234,
+        manual_canary_profile=worker.PROFILE,
+        manual_canary_origin="https://pull.example.com",
     )
 
 
@@ -428,6 +469,25 @@ def make_publish(config, title="Watch now", **overrides):
         "source_account_id": ACCOUNT_ID,
         "title": title,
     }
+    payload.update(overrides)
+    return payload
+
+
+def make_manual_canary_publish(config, **overrides):
+    payload = make_publish(
+        config,
+        credential_envelope=envelope(
+            config,
+            "canary_publish",
+        ),
+        disable_comment=True,
+        disable_duet=True,
+        disable_stitch=True,
+        brand_content_toggle=False,
+        brand_organic_toggle=False,
+        manual_canary_id="test-canary-001",
+        material_id="9001",
+    )
     payload.update(overrides)
     return payload
 
@@ -753,6 +813,36 @@ class TTGPUWorkerTests(unittest.TestCase):
                 pass
         self.assertEqual(expired.exception.code, "credential_envelope_expired")
 
+    def test_manual_canary_credential_cannot_be_replayed_as_normal_publish(self):
+        value = seal_access_token(
+            b"k" * 32,
+            TOKEN,
+            job_id=JOB_ID,
+            source_account_id=ACCOUNT_ID,
+            operation="canary_publish",
+            ttl_seconds=60,
+            now=1000,
+        )
+        with open_access_token(
+            value,
+            b"k" * 32,
+            job_id=JOB_ID,
+            source_account_id=ACCOUNT_ID,
+            operation="canary_publish",
+            now=1020,
+        ) as token:
+            self.assertEqual(token, TOKEN)
+        with self.assertRaises(CredentialEnvelopeError):
+            with open_access_token(
+                value,
+                b"k" * 32,
+                job_id=JOB_ID,
+                source_account_id=ACCOUNT_ID,
+                operation="publish",
+                now=1020,
+            ):
+                pass
+
     def test_configuration_defaults_to_exact_closed_gates_and_loopback(self):
         config = make_config(self.root)
         self.assertEqual(
@@ -794,6 +884,35 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.profile, worker.PROFILE)
         self.assertEqual(loaded.cos_timeout, 120)
         self.assertEqual(loaded.prepare_total_timeout, 8700)
+        expired_canary_env = dict(
+            env,
+            TT_POST_MANUAL_CANARY_ENABLED="1",
+            TT_POST_MANUAL_CANARY_ACKNOWLEDGEMENT=(
+                worker.MANUAL_CANARY_ACKNOWLEDGEMENT
+            ),
+            TT_POST_MANUAL_CANARY_ID="expired-canary-001",
+            TT_POST_MANUAL_CANARY_EXPIRES_AT_UTC=(
+                "2020-01-01T00:00:00Z"
+            ),
+            TT_POST_MANUAL_CANARY_ACCOUNT_ID=ACCOUNT_ID,
+            TT_POST_MANUAL_CANARY_MATERIAL_ID="9001",
+            TT_POST_MANUAL_CANARY_CONTENT_ID=CONTENT_ID,
+            TT_POST_MANUAL_CANARY_GPU_JOB_ID=JOB_ID,
+            TT_POST_MANUAL_CANARY_OUTPUT_SHA256="a" * 64,
+            TT_POST_MANUAL_CANARY_OUTPUT_SIZE="1234",
+            TT_POST_MANUAL_CANARY_PROFILE=worker.PROFILE,
+            TT_POST_MANUAL_CANARY_ORIGIN="https://pull.example.com",
+        )
+        with mock.patch.dict(
+            os.environ,
+            expired_canary_env,
+            clear=True,
+        ):
+            expired_canary = worker.WorkerConfig.from_env()
+        self.assertTrue(expired_canary.manual_canary_enabled)
+        self.assertFalse(
+            expired_canary.manual_canary_state()["active"]
+        )
         with mock.patch.dict(
             os.environ,
             dict(env, TT_POST_GPU_VIDEO_ENCODER="h264_nvenc"),
@@ -1919,6 +2038,121 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "tt_publish_compliance_gate_closed")
         self.assertEqual(api.init_calls, [])
         self.assertFalse(processor._publish_ledger_path(JOB_ID).exists())
+
+    def test_manual_canary_reaches_one_private_init_with_global_gates_closed(self):
+        config = make_manual_canary_config(self.root)
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor, direct_post_eligible=False)
+        result = processor.canary_publish(
+            make_manual_canary_publish(config)
+        )
+        self.assertEqual(result["publish_id"], "v_pub_url~v2.123")
+        self.assertTrue(result["test_bypass"])
+        self.assertFalse(config.gate_state()["ready"])
+        self.assertEqual(len(api.init_calls), 1)
+        _token, post_info, video_url = api.init_calls[0]
+        self.assertEqual(post_info["privacy_level"], "SELF_ONLY")
+        self.assertTrue(post_info["disable_comment"])
+        self.assertTrue(post_info["disable_duet"])
+        self.assertTrue(post_info["disable_stitch"])
+        self.assertFalse(post_info["brand_content_toggle"])
+        self.assertFalse(post_info["brand_organic_toggle"])
+        self.assertEqual(
+            video_url,
+            "https://pull.example.com/tt-post-prepared/aa/%s.mp4"
+            % ("a" * 64),
+        )
+        ledger = worker._read_json(
+            processor._publish_ledger_path(JOB_ID)
+        )
+        self.assertTrue(ledger["test_bypass"])
+        with self.assertRaises(worker.TTGPUError) as repeated:
+            processor.canary_publish(
+                make_manual_canary_publish(config)
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "tt_publish_reconcile_required",
+        )
+        self.assertEqual(len(api.init_calls), 1)
+
+    def test_manual_canary_wrong_request_or_artifact_never_opens_api(self):
+        config = make_manual_canary_config(self.root)
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor, direct_post_eligible=False)
+        with self.assertRaises(worker.TTGPUError) as wrong_request:
+            processor.canary_publish(
+                make_manual_canary_publish(
+                    config,
+                    material_id="9002",
+                )
+            )
+        self.assertEqual(
+            wrong_request.exception.code,
+            "tt_manual_canary_target_mismatch",
+        )
+        self.assertFalse(processor._publish_ledger_path(JOB_ID).exists())
+
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        manifest = worker._read_json(manifest_path)
+        manifest["result"]["output_size"] = 1235
+        manifest["result"]["probe"]["size"] = 1235
+        worker._atomic_write_json(manifest_path, manifest)
+        with self.assertRaises(worker.TTGPUError) as wrong_artifact:
+            processor.canary_publish(
+                make_manual_canary_publish(config)
+            )
+        self.assertEqual(
+            wrong_artifact.exception.code,
+            "tt_manual_canary_artifact_mismatch",
+        )
+        self.assertEqual(api.init_calls, [])
+        self.assertFalse(processor._publish_ledger_path(JOB_ID).exists())
+
+    def test_manual_canary_preserves_safe_tiktok_rejection_details_and_blocks_retry(self):
+        config = make_manual_canary_config(self.root)
+        api = worker.TikTokContentPostingAPI(
+            opener=HTTP400TikTokOpener(),
+        )
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor, direct_post_eligible=False)
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.canary_publish(
+                make_manual_canary_publish(config)
+            )
+        error = caught.exception
+        self.assertEqual(error.code, "tt_upstream_rejected")
+        self.assertEqual(
+            error.details["upstream_code"],
+            "url_ownership_unverified",
+        )
+        self.assertEqual(error.details["upstream_http_status"], 400)
+        self.assertEqual(error.details["log_id"], "log-canary-400")
+        self.assertIn(
+            "The video URL property is not verified.",
+            error.details["upstream_message"],
+        )
+        self.assertIn("HTTP 400", str(error))
+        self.assertIn("url_ownership_unverified", str(error))
+        ledger = worker._read_json(
+            processor._publish_ledger_path(JOB_ID)
+        )
+        self.assertEqual(ledger["state"], "init_rejected")
+        self.assertEqual(
+            ledger["upstream_code"],
+            "url_ownership_unverified",
+        )
+        self.assertEqual(ledger["upstream_http_status"], 400)
+        with self.assertRaises(worker.TTGPUError) as repeated:
+            processor.canary_publish(
+                make_manual_canary_publish(config)
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "tt_publish_retry_blocked",
+        )
 
     def test_verified_property_is_bound_to_selected_storage_origin(self):
         config = replace(

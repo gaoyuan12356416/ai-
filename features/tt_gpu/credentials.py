@@ -17,7 +17,9 @@ import time
 
 
 ENVELOPE_VERSION = "v1"
-ALLOWED_OPERATIONS = frozenset({"creator_info", "publish", "reconcile"})
+ALLOWED_OPERATIONS = frozenset(
+    {"creator_info", "publish", "canary_publish", "reconcile"}
+)
 JOB_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{11,127}\Z")
 ACCOUNT_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
 MAX_ENVELOPE_BYTES = 16 * 1024

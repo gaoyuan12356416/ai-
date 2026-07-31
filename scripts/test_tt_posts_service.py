@@ -13,6 +13,7 @@ import threading
 import unittest
 import urllib.request
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -39,6 +40,7 @@ from features.tt_posts.service import (
     DEFAULT_LEASE_SECONDS,
     GPUClient,
     GPUClientError,
+    ManualPublishCanary,
     MySQLSnapshotAccountRepository,
     SnapshotMySQLConfig,
     TTPostHTTPServer,
@@ -365,6 +367,45 @@ class GPUClientTests(unittest.TestCase):
         self.assertTrue(payload["is_aigc"])
         self.assertNotIn("media_url", payload)
 
+    def test_manual_canary_uses_dedicated_gpu_route_and_envelope_operation(self):
+        connection = CaptureConnection({"item": {"publish_id": "pub-1"}})
+        client = self.client(connection)
+        job_id = "ttpost-abcdef1234567890"
+        client.publish(
+            job_id=job_id,
+            source_account_id="101",
+            access_token="token",
+            queue={
+                "material_id": "9001",
+                "caption": "private test",
+                "privacy_level": "SELF_ONLY",
+                "allow_comment": False,
+                "allow_duet": False,
+                "allow_stitch": False,
+                "brand_content_toggle": False,
+                "brand_organic_toggle": False,
+                "is_aigc": True,
+            },
+            manual_canary=True,
+            manual_canary_id="test-canary-001",
+        )
+        request = connection.requests[0]
+        self.assertEqual(
+            request["path"],
+            "/internal/tt-post/canary-publish",
+        )
+        payload = json.loads(request["body"].decode("utf-8"))
+        self.assertEqual(payload["manual_canary_id"], "test-canary-001")
+        self.assertEqual(payload["material_id"], "9001")
+        with open_access_token(
+            payload["credential_envelope"],
+            SEAL_KEY,
+            job_id=job_id,
+            source_account_id="101",
+            operation="canary_publish",
+        ) as decrypted:
+            self.assertEqual(decrypted, "token")
+
     def test_ineligible_media_profile_is_known_not_created(self):
         connection = CaptureConnection(
             {
@@ -415,6 +456,36 @@ class GPUClientTests(unittest.TestCase):
                 GPU_TOKEN,
                 SEAL_KEY,
             )
+
+
+class ManualCanaryConfigTests(unittest.TestCase):
+    def test_expired_well_formed_canary_boots_inactive(self):
+        config = ManualPublishCanary.from_env(
+            {
+                "TT_POST_MANUAL_CANARY_ENABLED": "1",
+                "TT_POST_MANUAL_CANARY_ACKNOWLEDGEMENT": (
+                    "I_ACCEPT_ONE_SHOT_PRIVATE_TIKTOK_CANARY_20260731"
+                ),
+                "TT_POST_MANUAL_CANARY_ID": "expired-canary-001",
+                "TT_POST_MANUAL_CANARY_EXPIRES_AT_UTC": (
+                    "2020-01-01T00:00:00Z"
+                ),
+                "TT_POST_MANUAL_CANARY_ACCOUNT_ID": "101",
+                "TT_POST_MANUAL_CANARY_POOL_ID": "1",
+                "TT_POST_MANUAL_CANARY_MATERIAL_ID": "9001",
+                "TT_POST_MANUAL_CANARY_CONTENT_ID": "ABCD1234",
+                "TT_POST_MANUAL_CANARY_GPU_JOB_ID": (
+                    "ttpost-abcdef1234567890"
+                ),
+                "TT_POST_MANUAL_CANARY_OUTPUT_SHA256": "a" * 64,
+                "TT_POST_MANUAL_CANARY_OUTPUT_SIZE": "123456",
+                "TT_POST_MANUAL_CANARY_PROFILE": (
+                    "tt-post-hevc-720x1280-v2"
+                ),
+            }
+        )
+        self.assertTrue(config.ready)
+        self.assertFalse(config.is_active())
 
 
 class FakeAccountRepository:
@@ -530,6 +601,7 @@ class FakeGPU:
         self.prepare_job_id_override = ""
         self.prepared_profile = "tt-post-hevc-720x1280-v2"
         self.publish_jobs = []
+        self.publish_requests = []
         self.reconcile_jobs = []
         self.publish_error = None
         self.reconcile_result = {
@@ -586,8 +658,11 @@ class FakeGPU:
             "status": "ready",
         }
 
-    def publish(self, *, job_id, **_kwargs):
+    def publish(self, *, job_id, **kwargs):
         self.publish_jobs.append(job_id)
+        self.publish_requests.append(
+            {"job_id": job_id, **dict(kwargs)}
+        )
         if self.publish_error:
             raise self.publish_error
         return {
@@ -636,7 +711,13 @@ class ServiceLifecycleTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def service(self, gates, *, configure_settings=True):
+    def service(
+        self,
+        gates,
+        *,
+        configure_settings=True,
+        manual_canary=None,
+    ):
         store = TTPostStore(
             Path(self.temp.name) / "tt.sqlite3",
             now_fn=self.clock,
@@ -663,10 +744,35 @@ class ServiceLifecycleTests(unittest.TestCase):
             self.materials,
             self.gpu,
             gates=gates,
+            manual_canary=manual_canary,
             now_fn=self.clock,
             source_trim_tail_seconds=4.333333,
             media_profile_version="tt-post-hevc-720x1280-v2",
         )
+
+    def arm_manual_canary(self, service):
+        pool = service.store.list_recurring_materials(
+            account_id="101",
+            status="available",
+            limit=1,
+        )[0]
+        service.manual_canary = ManualPublishCanary(
+            enabled=True,
+            acknowledged=True,
+            canary_id="test-canary-001",
+            expires_at_utc=(
+                self.clock.value + timedelta(hours=1)
+            ).isoformat().replace("+00:00", "Z"),
+            account_id="101",
+            pool_id=int(pool["id"]),
+            material_id=str(pool["material_id"]),
+            content_id=str(pool["content_id"]),
+            gpu_job_id=str(pool["gpu_job_id"]),
+            output_sha256=str(pool["prepared_output_sha256"]),
+            output_size=int(pool["prepared_output_size"]),
+            profile=str(pool["preparation_profile"]),
+        )
+        return pool
 
     def recurring_material_payload(self, key="tt-post-pool:test:9001"):
         return {
@@ -912,6 +1018,137 @@ class ServiceLifecycleTests(unittest.TestCase):
         )[0]
         self.assertEqual(item["status"], "available")
         self.assertEqual(service.store.list_queues(), [])
+        self.assertEqual(self.gpu.publish_jobs, [])
+
+    def test_manual_canary_forces_private_one_shot_with_global_gates_closed(self):
+        service = self.service(CLOSED_GATES)
+        self.add_ready(service)
+        current_settings = service.store.get_account_settings("101")
+        service.store.save_account_settings(
+            "101",
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": "PUBLIC_TO_EVERYONE",
+                    "allow_comment": True,
+                    "allow_duet": True,
+                    "allow_stitch": True,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": True,
+                }
+            ),
+            expected_version=current_settings["version"],
+        )
+        self.gpu.creator_info_override = creator_info()
+        self.gpu.creator_info_override["creator_info"][
+            "privacy_level_options"
+        ] = ["SELF_ONLY"]
+        self.arm_manual_canary(service)
+        before = service.schedule_get(
+            {"source_account_id": ["101"]}
+        )["item"]
+        self.assertTrue(before["manual_canary_ready"])
+        self.assertTrue(before["can_publish_now"])
+        self.assertFalse(service.gates.is_open)
+
+        run = service.run_now(
+            {
+                "source_account_id": "101",
+                "idempotency_key": "tt-post-manual:test-canary",
+            }
+        )["item"]
+        queue = service.store.get_queue(run["queue_id"])
+        self.assertEqual(queue["privacy_level"], "SELF_ONLY")
+        self.assertFalse(queue["allow_comment"])
+        self.assertFalse(queue["allow_duet"])
+        self.assertFalse(queue["allow_stitch"])
+        self.assertFalse(queue["brand_content_toggle"])
+        self.assertFalse(queue["brand_organic_toggle"])
+        self.assertIn(
+            "tt-post:manual-canary:v1:test-canary-001:101:",
+            queue["idempotency_key"],
+        )
+
+        claimed = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": DEFAULT_GRACE_SECONDS,
+                "limit": 1,
+            }
+        )["items"][0]
+        self.assertIn("claim_token", claimed)
+        self.assertTrue(claimed["queue"]["manual_canary"])
+        result = service.publish_claimed(
+            queue["id"],
+            claimed["claim_token"],
+        )["item"]
+        self.assertEqual(result["status"], "reconciling")
+        self.assertEqual(len(self.gpu.publish_requests), 1)
+        request = self.gpu.publish_requests[0]
+        self.assertTrue(request["manual_canary"])
+        self.assertEqual(
+            request["manual_canary_id"],
+            "test-canary-001",
+        )
+        self.assertEqual(request["queue"]["privacy_level"], "SELF_ONLY")
+        self.assertFalse(
+            service.schedule_get(
+                {"source_account_id": ["101"]}
+            )["item"]["manual_canary_ready"]
+        )
+
+    def test_manual_canary_never_authorizes_an_automatic_due_slot(self):
+        service = self.service(CLOSED_GATES)
+        self.add_ready(service)
+        service.schedule_save(
+            self.schedule_payload(publish_time="11:00")
+        )
+        self.arm_manual_canary(service)
+        schedule = service.schedule_get(
+            {"source_account_id": ["101"]}
+        )["item"]
+        self.assertFalse(schedule["manual_canary_ready"])
+        self.assertFalse(schedule["can_publish_now"])
+        due = service.schedules_due({})["items"]
+        self.assertEqual(len(due), 1)
+        self.assertEqual(
+            due[0]["error_code"],
+            "tt_post_live_gates_closed",
+        )
+        self.assertEqual(service.store.list_queues(), [])
+        self.assertEqual(
+            service.store.list_recurring_materials(
+                account_id="101"
+            )[0]["status"],
+            "available",
+        )
+
+    def test_manual_canary_target_mismatch_releases_preflight_material(self):
+        service = self.service(CLOSED_GATES)
+        self.add_ready(service)
+        self.arm_manual_canary(service)
+        service.manual_canary = replace(
+            service.manual_canary,
+            material_id="9999",
+        )
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.run_now(
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "tt-post-manual:test-wrong-target",
+                }
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "tt_post_manual_canary_target_mismatch",
+        )
+        self.assertEqual(service.store.list_queues(), [])
+        self.assertEqual(
+            service.store.list_recurring_materials(
+                account_id="101"
+            )[0]["status"],
+            "available",
+        )
         self.assertEqual(self.gpu.publish_jobs, [])
 
     def test_manual_publish_is_idempotent_and_does_not_change_daily_schedule(self):
