@@ -2,10 +2,11 @@
 
 The service has four responsibilities:
 
-* prepare an immutable vertical video by normalizing a source material and
-  appending the configured fixed tutorial outro;
-* render the real ``content_id`` as a prominent ``DRAMA ID`` throughout that
-  outro while marking the underlying fixed recording as a tutorial example;
+* prepare an immutable vertical video with one explicit, versioned media mode:
+  the legacy branded-preview compositor or a clean Direct Post normalizer;
+* keep the branded-preview Logo/tutorial-outro profile permanently ineligible
+  for formal Direct Post while allowing the clean profile to carry a separate
+  auditable identity;
 * query TikTok creator capabilities using a short-lived encrypted credential;
 * initialize and reconcile a TikTok Direct Post using ``PULL_FROM_URL``.
 
@@ -71,6 +72,11 @@ AUDIO_BITRATE = "128k"
 MAX_DELIVERY_AVERAGE_BITRATE_BPS = 1_900_000
 PROFILE = "tt-post-hevc-720x1280-v2"
 H264_FALLBACK_PROFILE = "tt-post-h264-720x1280-v2"
+DIRECT_CLEAN_PROFILE = "tt-post-direct-clean-hevc-720x1280-v1"
+DIRECT_CLEAN_H264_PROFILE = "tt-post-direct-clean-h264-720x1280-v1"
+BRANDED_PREVIEW_MEDIA_MODE = "branded_preview"
+DIRECT_CLEAN_MEDIA_MODE = "direct_clean"
+DEFAULT_MEDIA_MODE = BRANDED_PREVIEW_MEDIA_MODE
 HEALTH_PATH = "/health"
 CREATOR_INFO_PATH = "/internal/tt-post/creator-info"
 PREPARE_PATH = "/internal/tt-post/prepare"
@@ -394,6 +400,26 @@ def _loopback_host(value, name):
     return host
 
 
+def _selected_media_profile(video_encoder, media_mode):
+    if media_mode == BRANDED_PREVIEW_MEDIA_MODE:
+        return (
+            PROFILE
+            if video_encoder == "hevc_nvenc"
+            else H264_FALLBACK_PROFILE
+        )
+    if media_mode == DIRECT_CLEAN_MEDIA_MODE:
+        return (
+            DIRECT_CLEAN_PROFILE
+            if video_encoder == "hevc_nvenc"
+            else DIRECT_CLEAN_H264_PROFILE
+        )
+    raise TTGPUError(
+        "invalid_configuration",
+        "TT_POST_GPU_MEDIA_MODE is not supported",
+        500,
+    )
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     """Validated runtime configuration with secrets excluded from repr."""
@@ -451,6 +477,7 @@ class WorkerConfig:
     transcode_timeout: int = DEFAULT_TRANSCODE_TIMEOUT
     cos_timeout: int = DEFAULT_COS_TIMEOUT
     prepare_total_timeout: int = DEFAULT_PREPARE_TOTAL_TIMEOUT
+    media_mode: str = DEFAULT_MEDIA_MODE
     profile: str = PROFILE
 
     @classmethod
@@ -540,6 +567,23 @@ class WorkerConfig:
                 ),
                 500,
             )
+        media_mode = str(
+            os.environ.get("TT_POST_GPU_MEDIA_MODE", DEFAULT_MEDIA_MODE)
+            or ""
+        ).strip().lower()
+        if media_mode not in {
+            BRANDED_PREVIEW_MEDIA_MODE,
+            DIRECT_CLEAN_MEDIA_MODE,
+        }:
+            raise TTGPUError(
+                "invalid_configuration",
+                (
+                    "TT_POST_GPU_MEDIA_MODE must be branded_preview "
+                    "or direct_clean"
+                ),
+                500,
+            )
+        selected_profile = _selected_media_profile(encoder, media_mode)
         secret_id = str(os.environ.get("TT_POST_GPU_COS_SECRET_ID", "") or "").strip()
         secret_key = str(os.environ.get("TT_POST_GPU_COS_SECRET_KEY", "") or "").strip()
         bucket = str(os.environ.get("TT_POST_GPU_COS_BUCKET", "") or "").strip()
@@ -754,11 +798,6 @@ class WorkerConfig:
                     500,
                 ) from None
             now = datetime.now(timezone.utc)
-            selected_profile = (
-                PROFILE
-                if encoder == "hevc_nvenc"
-                else H264_FALLBACK_PROFILE
-            )
             expected_origin = (
                 local_media_origin
                 if storage_backend == "local"
@@ -823,11 +862,8 @@ class WorkerConfig:
             ffmpeg_bin=ffmpeg,
             ffprobe_bin=ffprobe,
             video_encoder=encoder,
-            profile=(
-                PROFILE
-                if encoder == "hevc_nvenc"
-                else H264_FALLBACK_PROFILE
-            ),
+            media_mode=media_mode,
+            profile=selected_profile,
             cos_secret_id=secret_id,
             cos_secret_key=secret_key,
             cos_bucket=bucket,
@@ -928,6 +964,19 @@ class WorkerConfig:
                 600,
                 8700,
             ),
+        )
+
+    def brand_overlay_review_required(self):
+        return self.media_mode == BRANDED_PREVIEW_MEDIA_MODE
+
+    def direct_post_eligible(self):
+        return self.media_mode == DIRECT_CLEAN_MEDIA_MODE
+
+    def preparation_transition(self):
+        return (
+            "none"
+            if self.direct_post_eligible()
+            else "phone-match-0.9s"
         )
 
     def gate_state(self):
@@ -1616,25 +1665,23 @@ def build_outro_filter(config, drama_id_text_path, tutorial_text_path):
 
 
 def _delivery_video_contract(config):
+    expected_profile = _selected_media_profile(
+        config.video_encoder,
+        config.media_mode,
+    )
+    if config.profile != expected_profile:
+        raise TTGPUError(
+            "invalid_configuration",
+            "video encoder and media mode require their exact media profile",
+            500,
+        )
     if config.video_encoder == "hevc_nvenc":
-        if config.profile != PROFILE:
-            raise TTGPUError(
-                "invalid_configuration",
-                "HEVC encoder requires the HEVC media profile",
-                500,
-            )
         return {
             "codec": "hevc",
             "codec_tag": "hvc1",
             "profile": "main",
         }
     if config.video_encoder in {"h264_nvenc", "libx264"}:
-        if config.profile != H264_FALLBACK_PROFILE:
-            raise TTGPUError(
-                "invalid_configuration",
-                "H.264 encoder requires the H.264 fallback media profile",
-                500,
-            )
         return {
             "codec": "h264",
             "codec_tag": "avc1",
@@ -3130,12 +3177,36 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         if isinstance(stored_request, dict)
         else ""
     )
+    request_media_mode = (
+        str(stored_request.get("media_mode") or "")
+        if isinstance(stored_request, dict)
+        else ""
+    )
+    expected_brand_review = config.brand_overlay_review_required()
+    expected_direct_eligible = config.direct_post_eligible()
     if (
         str(result.get("job_id") or "") != str(expected_job_id or "")
         or not CONTENT_ID_RE.fullmatch(request_content_id)
         or str(result.get("content_id") or "") != request_content_id
         or not CONTENT_ID_RE.fullmatch(str(result.get("content_id") or ""))
+        or (
+            expected_direct_eligible
+            and request_media_mode != DIRECT_CLEAN_MEDIA_MODE
+        )
+        or (
+            not expected_direct_eligible
+            and request_media_mode
+            not in {"", BRANDED_PREVIEW_MEDIA_MODE}
+        )
         or str(result.get("profile") or "") != str(config.profile)
+        or (
+            result.get("brand_overlay_review_required")
+            is not expected_brand_review
+        )
+        or (
+            result.get("direct_post_eligible")
+            is not expected_direct_eligible
+        )
         or not HEX_64_RE.fullmatch(output_sha)
         or output_sha_raw != output_sha
         or output_size <= 0
@@ -3192,11 +3263,9 @@ def _prepare_response(manifest, reused, config, expected_job_id):
                 409,
             )
     return {
-        "brand_overlay_review_required": bool(
-            result.get("brand_overlay_review_required", True)
-        ),
+        "brand_overlay_review_required": expected_brand_review,
         "content_id": result["content_id"],
-        "direct_post_eligible": result.get("direct_post_eligible") is True,
+        "direct_post_eligible": expected_direct_eligible,
         "job_id": result["job_id"],
         "output_sha256": result["output_sha256"],
         "output_size": result["output_size"],
@@ -3504,20 +3573,8 @@ class TTPostGPUProcessor:
     def _prepare_locked(self, request, deadline):
         job_id = request["job_id"]
         manifest_path = self._prepare_manifest_path(job_id)
-        outro_sha, outro_size = _file_sha256(
-            self.config.fixed_outro_path,
-            deadline=deadline,
-        )
-        logo_sha, logo_size = _file_sha256(
-            self.config.logo_path,
-            deadline=deadline,
-        )
         reuse_contract = {
             "content_id": request["content_id"],
-            "logo_sha256": logo_sha,
-            "logo_size": logo_size,
-            "outro_sha256": outro_sha,
-            "outro_size": outro_size,
             "profile": self.config.profile,
             "source_trim_tail_seconds": request[
                 "source_trim_tail_seconds"
@@ -3526,6 +3583,25 @@ class TTPostGPUProcessor:
                 request["source_url"].encode("utf-8")
             ).hexdigest(),
         }
+        if self.config.direct_post_eligible():
+            reuse_contract["media_mode"] = self.config.media_mode
+        else:
+            outro_sha, outro_size = _file_sha256(
+                self.config.fixed_outro_path,
+                deadline=deadline,
+            )
+            logo_sha, logo_size = _file_sha256(
+                self.config.logo_path,
+                deadline=deadline,
+            )
+            reuse_contract.update(
+                {
+                    "logo_sha256": logo_sha,
+                    "logo_size": logo_size,
+                    "outro_sha256": outro_sha,
+                    "outro_size": outro_size,
+                }
+            )
         reused = self._prepared_reuse(
             manifest_path,
             reuse_contract,
@@ -3586,16 +3662,17 @@ class TTPostGPUProcessor:
         tutorial_text_path = job_dir / "tutorial-label.txt"
         local_orphan = None
         try:
-            drama_text_path.write_text(
-                "DRAMA ID: %s" % request["content_id"],
-                encoding="utf-8",
-            )
-            tutorial_text_path.write_text(
-                "TUTORIAL EXAMPLE  -  Follow the Drama ID shown above",
-                encoding="utf-8",
-            )
-            os.chmod(drama_text_path, 0o600)
-            os.chmod(tutorial_text_path, 0o600)
+            if self.config.brand_overlay_review_required():
+                drama_text_path.write_text(
+                    "DRAMA ID: %s" % request["content_id"],
+                    encoding="utf-8",
+                )
+                tutorial_text_path.write_text(
+                    "TUTORIAL EXAMPLE  -  Follow the Drama ID shown above",
+                    encoding="utf-8",
+                )
+                os.chmod(drama_text_path, 0o600)
+                os.chmod(tutorial_text_path, 0o600)
             source_actual = self.downloader(
                 request["source_url"],
                 source_path,
@@ -3629,7 +3706,7 @@ class TTPostGPUProcessor:
                 **reuse_contract,
                 "source_sha256": source_sha,
                 "source_size": source_size,
-                "transition": "phone-match-0.9s",
+                "transition": self.config.preparation_transition(),
             }
             source_probe = probe_media(
                 self.config,
@@ -3651,25 +3728,29 @@ class TTPostGPUProcessor:
                     "source trim would remove the complete usable material",
                     400,
                 )
-            outro_probe = probe_media(
-                self.config,
-                self.config.fixed_outro_path,
-                self.runner,
-                deadline=deadline,
-            )
-            outro_info = inspect_input(
-                outro_probe,
-                min(self.config.max_duration_seconds, 120),
-            )
-            expected_duration = (
-                effective_source_duration
-                + outro_info["duration"]
-                - DEFAULT_TRANSITION_SECONDS
-            )
+            if self.config.direct_post_eligible():
+                outro_info = None
+                expected_duration = effective_source_duration
+            else:
+                outro_probe = probe_media(
+                    self.config,
+                    self.config.fixed_outro_path,
+                    self.runner,
+                    deadline=deadline,
+                )
+                outro_info = inspect_input(
+                    outro_probe,
+                    min(self.config.max_duration_seconds, 120),
+                )
+                expected_duration = (
+                    effective_source_duration
+                    + outro_info["duration"]
+                    - DEFAULT_TRANSITION_SECONDS
+                )
             if expected_duration > float(self.config.max_duration_seconds):
                 raise TTGPUError(
                     "prepared_duration_exceeded",
-                    "source plus fixed outro exceeds the configured duration",
+                    "prepared media exceeds the configured duration",
                     400,
                 )
             deadline.check()
@@ -3684,39 +3765,61 @@ class TTPostGPUProcessor:
                 )
             try:
                 deadline.check()
-                _run_command(
-                    self.runner,
-                    build_normalize_command(
-                        self.config,
-                        self.config.fixed_outro_path,
-                        outro_normalized,
-                        outro_info,
-                        build_outro_filter(
+                if self.config.direct_post_eligible():
+                    _run_command(
+                        self.runner,
+                        build_normalize_command(
                             self.config,
-                            drama_text_path,
-                            tutorial_text_path,
+                            source_path,
+                            output_path,
+                            source_info,
+                            _base_video_filter(),
+                            output_duration=effective_source_duration,
                         ),
-                    ),
-                    deadline.stage_timeout(self.config.transcode_timeout),
-                    "outro_transcode_failed",
-                    timeout_error_code="prepare_timeout",
-                )
-                _run_command(
-                    self.runner,
-                    build_phone_match_command(
-                        self.config,
-                        source_path,
-                        outro_normalized,
-                        output_path,
-                        effective_source_duration,
-                        outro_info["duration"],
-                        source_has_audio=source_info["has_audio"],
-                        logo_path=self.config.logo_path,
-                    ),
-                    deadline.stage_timeout(self.config.transcode_timeout),
-                    "phone_match_transition_failed",
-                    timeout_error_code="prepare_timeout",
-                )
+                        deadline.stage_timeout(
+                            self.config.transcode_timeout
+                        ),
+                        "direct_clean_transcode_failed",
+                        timeout_error_code="prepare_timeout",
+                    )
+                else:
+                    _run_command(
+                        self.runner,
+                        build_normalize_command(
+                            self.config,
+                            self.config.fixed_outro_path,
+                            outro_normalized,
+                            outro_info,
+                            build_outro_filter(
+                                self.config,
+                                drama_text_path,
+                                tutorial_text_path,
+                            ),
+                        ),
+                        deadline.stage_timeout(
+                            self.config.transcode_timeout
+                        ),
+                        "outro_transcode_failed",
+                        timeout_error_code="prepare_timeout",
+                    )
+                    _run_command(
+                        self.runner,
+                        build_phone_match_command(
+                            self.config,
+                            source_path,
+                            outro_normalized,
+                            output_path,
+                            effective_source_duration,
+                            outro_info["duration"],
+                            source_has_audio=source_info["has_audio"],
+                            logo_path=self.config.logo_path,
+                        ),
+                        deadline.stage_timeout(
+                            self.config.transcode_timeout
+                        ),
+                        "phone_match_transition_failed",
+                        timeout_error_code="prepare_timeout",
+                    )
             finally:
                 self._gpu_slot.release()
             output_sha, output_size = _file_sha256(
@@ -3769,9 +3872,13 @@ class TTPostGPUProcessor:
                     500,
                 )
             result = {
-                "brand_overlay_review_required": True,
+                "brand_overlay_review_required": (
+                    self.config.brand_overlay_review_required()
+                ),
                 "content_id": request["content_id"],
-                "direct_post_eligible": False,
+                "direct_post_eligible": (
+                    self.config.direct_post_eligible()
+                ),
                 "job_id": job_id,
                 "output_sha256": output_sha,
                 "output_size": output_size,
@@ -3789,7 +3896,9 @@ class TTPostGPUProcessor:
                     "backend": self.config.storage_backend,
                     "key": storage_key,
                 },
-                "version": 2,
+                "version": (
+                    3 if self.config.direct_post_eligible() else 2
+                ),
             }
             if self.config.storage_backend == "cos":
                 manifest["cos_key"] = storage_key
@@ -4276,8 +4385,13 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
         self._send_json(
             200,
             {
-                "brand_overlay_review_required": True,
-                "direct_post_eligible": False,
+                "brand_overlay_review_required": (
+                    self.server.processor.config
+                    .brand_overlay_review_required()
+                ),
+                "direct_post_eligible": (
+                    self.server.processor.config.direct_post_eligible()
+                ),
                 "gates": self.server.processor.config.gate_state(),
                 "manual_canary": (
                     self.server.processor.config.manual_canary_state()
@@ -4289,11 +4403,14 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
                     )
                     == 32
                 ),
+                "media_mode": self.server.processor.config.media_mode,
                 "profile": self.server.processor.config.profile,
                 "storage_backend": self.server.processor.config.storage_backend,
                 "storage": self.server.processor.storage_health(),
                 "status": "ok",
-                "transition": "phone-match-0.9s",
+                "transition": (
+                    self.server.processor.config.preparation_transition()
+                ),
             },
         )
 

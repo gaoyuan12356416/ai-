@@ -329,6 +329,16 @@ def make_config(root, gates=False):
     )
 
 
+def make_direct_clean_config(root, gates=False, **overrides):
+    config = replace(
+        make_config(root, gates=gates),
+        default_source_trim_tail_seconds=0,
+        media_mode=worker.DIRECT_CLEAN_MEDIA_MODE,
+        profile=worker.DIRECT_CLEAN_PROFILE,
+    )
+    return replace(config, **overrides) if overrides else config
+
+
 def make_manual_canary_config(root):
     return replace(
         make_config(root, gates=False),
@@ -365,6 +375,17 @@ def make_local_config(root, gates=False, **overrides):
         local_min_free_bytes=0,
     )
     return replace(config, **overrides) if overrides else config
+
+
+def make_direct_clean_local_config(root, gates=False, **overrides):
+    return make_local_config(
+        root,
+        gates=gates,
+        default_source_trim_tail_seconds=0,
+        media_mode=worker.DIRECT_CLEAN_MEDIA_MODE,
+        profile=worker.DIRECT_CLEAN_PROFILE,
+        **overrides,
+    )
 
 
 def make_prepare(**overrides):
@@ -420,13 +441,19 @@ def seed_prepared(
     *,
     direct_post_eligible=False,
 ):
+    config = processor.config
     cos_key = "tt-post-prepared/aa/%s.mp4" % ("a" * 64)
     manifest = {
         "completed_at": "2026-07-29T00:00:00Z",
         "cos_key": cos_key,
-        "request": {"content_id": CONTENT_ID},
+        "request": {
+            "content_id": CONTENT_ID,
+            "media_mode": config.media_mode,
+        },
         "result": {
-            "brand_overlay_review_required": True,
+            "brand_overlay_review_required": (
+                config.brand_overlay_review_required()
+            ),
             "content_id": CONTENT_ID,
             "direct_post_eligible": direct_post_eligible,
             "job_id": job_id,
@@ -448,7 +475,7 @@ def seed_prepared(
                 "video_codec_tag": "hvc1",
                 "width": 720,
             },
-            "profile": worker.PROFILE,
+            "profile": config.profile,
         },
         "storage": {"backend": "cos", "key": cos_key},
         "status": "ready",
@@ -881,6 +908,10 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertEqual(loaded.default_source_trim_tail_seconds, 4.333333)
         self.assertEqual(loaded.video_encoder, "hevc_nvenc")
+        self.assertEqual(
+            loaded.media_mode,
+            worker.BRANDED_PREVIEW_MEDIA_MODE,
+        )
         self.assertEqual(loaded.profile, worker.PROFILE)
         self.assertEqual(loaded.cos_timeout, 120)
         self.assertEqual(loaded.prepare_total_timeout, 8700)
@@ -921,6 +952,37 @@ class TTGPUWorkerTests(unittest.TestCase):
             loaded_h264 = worker.WorkerConfig.from_env()
         self.assertEqual(loaded_h264.video_encoder, "h264_nvenc")
         self.assertEqual(loaded_h264.profile, worker.H264_FALLBACK_PROFILE)
+        with mock.patch.dict(
+            os.environ,
+            dict(
+                env,
+                TT_POST_GPU_MEDIA_MODE="direct_clean",
+                TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS="0",
+            ),
+            clear=True,
+        ):
+            loaded_clean = worker.WorkerConfig.from_env()
+        self.assertEqual(
+            loaded_clean.media_mode,
+            worker.DIRECT_CLEAN_MEDIA_MODE,
+        )
+        self.assertEqual(
+            loaded_clean.profile,
+            worker.DIRECT_CLEAN_PROFILE,
+        )
+        self.assertTrue(loaded_clean.direct_post_eligible())
+        self.assertFalse(loaded_clean.brand_overlay_review_required())
+        with mock.patch.dict(
+            os.environ,
+            dict(env, TT_POST_GPU_MEDIA_MODE="unsafe_bypass"),
+            clear=True,
+        ):
+            with self.assertRaises(worker.TTGPUError) as invalid_mode:
+                worker.WorkerConfig.from_env()
+        self.assertEqual(
+            invalid_mode.exception.code,
+            "invalid_configuration",
+        )
         with mock.patch.dict(
             os.environ,
             dict(env, TT_POST_GPU_HOST="0.0.0.0"),
@@ -1350,6 +1412,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertIsNone(calls[0]["expected_size"])
         manifest = worker._read_json(processor._prepare_manifest_path(JOB_ID))
         self.assertIs(manifest["result"]["direct_post_eligible"], False)
+        self.assertNotIn("media_mode", manifest["request"])
         self.assertEqual(
             manifest["request"]["source_sha256"],
             hashlib.sha256(SOURCE_BYTES).hexdigest(),
@@ -1377,6 +1440,93 @@ class TTGPUWorkerTests(unittest.TestCase):
                 make_prepare()["source_url"].encode("utf-8")
             ).hexdigest(),
         )
+
+    def test_direct_clean_prepare_normalizes_source_without_brand_assets(self):
+        config = make_direct_clean_config(self.root)
+        runner = FakeRunner(
+            [
+                input_probe(91.208),
+                prepared_probe(91.208),
+            ]
+        )
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+        )
+        result = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_CLEAN_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertEqual(result["status"], "ready")
+        self.assertFalse(result["brand_overlay_review_required"])
+        self.assertTrue(result["direct_post_eligible"])
+        self.assertEqual(result["profile"], worker.DIRECT_CLEAN_PROFILE)
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(manifest["version"], 3)
+        self.assertEqual(
+            manifest["request"]["media_mode"],
+            worker.DIRECT_CLEAN_MEDIA_MODE,
+        )
+        self.assertEqual(manifest["request"]["transition"], "none")
+        self.assertNotIn("logo_sha256", manifest["request"])
+        self.assertNotIn("outro_sha256", manifest["request"])
+        ffmpeg_commands = [
+            command
+            for command in runner.commands
+            if "ffmpeg" in Path(command[0]).name.lower()
+        ]
+        self.assertEqual(len(ffmpeg_commands), 1)
+        command = ffmpeg_commands[0]
+        all_arguments = " ".join(command)
+        self.assertIn("source.mp4", all_arguments)
+        self.assertNotIn(str(config.logo_path), all_arguments)
+        self.assertNotIn(str(config.fixed_outro_path), all_arguments)
+        self.assertNotIn("-filter_complex", command)
+        self.assertIn("scale=w=720:h=1280", command[command.index("-vf") + 1])
+        self.assertEqual(command[command.index("-t") + 1], "91.208000")
+        original_logo = config.logo_path.read_bytes()
+        original_outro = config.fixed_outro_path.read_bytes()
+        config.logo_path.write_bytes(original_logo + b"-changed")
+        config.fixed_outro_path.write_bytes(original_outro + b"-changed")
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_CLEAN_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        self.assertEqual(len(calls), 1)
+
+    def test_direct_clean_prepared_manifest_reaches_formal_publish(self):
+        config = make_direct_clean_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner(
+                [
+                    input_probe(39.1),
+                    prepared_probe(39.1),
+                ]
+            ),
+            api=api,
+        )
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_CLEAN_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(prepared["direct_post_eligible"])
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(published["publish_id"], "v_pub_url~v2.123")
+        self.assertEqual(len(api.init_calls), 1)
 
     def test_prepare_reuse_rejects_changed_url_hash_or_trim_contract(self):
         processor = self.processor()
@@ -2174,18 +2324,26 @@ class TTGPUWorkerTests(unittest.TestCase):
     def test_publish_binds_property_to_frozen_manifest_origin_after_backend_switch(
         self,
     ):
-        local_config = make_local_config(self.root)
+        local_config = make_direct_clean_local_config(self.root)
         local_processor = worker.TTPostGPUProcessor(
             local_config,
-            runner=FakeRunner(),
+            runner=FakeRunner(
+                [
+                    input_probe(39.1),
+                    prepared_probe(39.1),
+                ]
+            ),
             downloader=make_downloader([]),
             tiktok_api=FakeTikTokAPI(),
         )
-        local_processor.prepare(make_prepare())
+        local_processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_CLEAN_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
         local_manifest_path = local_processor._prepare_manifest_path(JOB_ID)
         local_manifest = worker._read_json(local_manifest_path)
-        local_manifest["result"]["direct_post_eligible"] = True
-        worker._atomic_write_json(local_manifest_path, local_manifest)
         switched_to_cos = replace(
             local_config,
             storage_backend="cos",
@@ -2210,7 +2368,10 @@ class TTGPUWorkerTests(unittest.TestCase):
 
         second_root = self.root / "reverse"
         second_root.mkdir()
-        switched_to_local = make_local_config(second_root, gates=True)
+        switched_to_local = make_direct_clean_local_config(
+            second_root,
+            gates=True,
+        )
         local_api = FakeTikTokAPI()
         reverse_processor = self.processor(
             config=switched_to_local,
@@ -2242,9 +2403,17 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertEqual(api.init_calls, [])
         self.assertFalse(processor._publish_ledger_path(JOB_ID).exists())
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        manifest = worker._read_json(manifest_path)
+        manifest["result"]["direct_post_eligible"] = True
+        worker._atomic_write_json(manifest_path, manifest)
+        with self.assertRaises(worker.TTGPUError) as tampered:
+            processor.publish(make_publish(config))
+        self.assertEqual(tampered.exception.code, "prepared_media_invalid")
+        self.assertEqual(api.init_calls, [])
 
     def test_expired_credential_does_not_create_ledger_and_fresh_one_can_retry(self):
-        config = make_config(self.root, gates=True)
+        config = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
         processor = self.processor(config=config, api=api)
         seed_prepared(processor, direct_post_eligible=True)
@@ -2267,7 +2436,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(len(api.init_calls), 1)
 
     def test_publish_uses_pull_url_is_aigc_and_never_repeats_init(self):
-        config = make_config(self.root, gates=True)
+        config = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
         processor = self.processor(config=config, api=api)
         seed_prepared(processor, direct_post_eligible=True)
@@ -2288,7 +2457,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(len(api.init_calls), 1)
 
     def test_reconcile_remains_available_after_gates_close_and_returns_publish_id(self):
-        enabled = make_config(self.root, gates=True)
+        enabled = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
         processor = self.processor(config=enabled, api=api)
         seed_prepared(processor, direct_post_eligible=True)
@@ -2314,7 +2483,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(len(api.status_calls), 1)
 
     def test_unknown_init_outcome_is_ledgered_and_retry_is_blocked(self):
-        config = make_config(self.root, gates=True)
+        config = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
         api.init_error = worker.TTGPUError(
             "tt_upstream_unavailable",
@@ -2335,21 +2504,29 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(len(api.init_calls), 1)
 
     def test_http_500_init_is_unknown_and_local_media_is_never_cleaned(self):
-        config = make_local_config(self.root, gates=True)
+        config = make_direct_clean_local_config(self.root, gates=True)
         api = worker.TikTokContentPostingAPI(
             opener=HTTP500TikTokOpener(),
         )
         processor = worker.TTPostGPUProcessor(
             config,
-            runner=FakeRunner(),
+            runner=FakeRunner(
+                [
+                    input_probe(39.1),
+                    prepared_probe(39.1),
+                ]
+            ),
             downloader=make_downloader([]),
             tiktok_api=api,
         )
-        processor.prepare(make_prepare())
+        processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_CLEAN_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
         manifest_path = processor._prepare_manifest_path(JOB_ID)
         manifest = worker._read_json(manifest_path)
-        manifest["result"]["direct_post_eligible"] = True
-        worker._atomic_write_json(manifest_path, manifest)
         blob = processor._local_media_store()._path(
             manifest["storage"]["key"]
         )
@@ -2479,7 +2656,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
 
     def test_manifests_ledgers_and_config_repr_never_contain_token(self):
-        config = make_config(self.root, gates=True)
+        config = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
         processor = self.processor(config=config, api=api)
         seed_prepared(processor, direct_post_eligible=True)
@@ -2525,6 +2702,7 @@ class TTGPUWorkerTests(unittest.TestCase):
             "TT_POST_GPU_LOGO_PATH=",
             "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333",
             "TT_POST_GPU_VIDEO_ENCODER=hevc_nvenc",
+            "TT_POST_GPU_MEDIA_MODE=branded_preview",
             "TT_POST_GPU_STORAGE_BACKEND=cos",
             "TT_POST_GPU_MEDIA_HOST=127.0.0.1",
             "TT_POST_GPU_MEDIA_PORT=8831",
