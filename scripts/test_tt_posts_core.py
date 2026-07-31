@@ -29,6 +29,7 @@ from features.tt_posts import (  # noqa: E402
     render_fixed_caption,
     render_caption_template,
 )
+from features.tt_posts.links import build_w2a_url  # noqa: E402
 
 
 UTC = timezone.utc
@@ -433,6 +434,100 @@ class StorageTests(CoreTestCase):
         self.assertEqual(
             "Custom copy\n\nDrama ID: Y9v1yQcFqM",
             queue["caption"],
+        )
+        self.assertEqual(0, queue["short_link_id"])
+        self.assertEqual("", queue["short_url"])
+        self.assertEqual("", queue["long_url"])
+
+    def test_queue_freezes_url_macro_and_exact_internal_line_breaks(self):
+        template = (
+            "Watch the full story\n\n"
+            "Drama ID: {{content_id}}\n\n"
+            "{url}"
+        )
+        pool = self.store.add_material("1001")
+        queue = self.store.freeze_queue(
+            pool["id"],
+            account(),
+            "2026-07-29 10:00:00",
+            template,
+            policy(),
+            resolver,
+            material_name="Material 1001",
+            drama_name="The Contract Bride",
+            material_language="en",
+            material_tag="romance",
+        )
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: Y9v1yQcFqM\n\n"
+                + queue["short_url"]
+            ),
+            queue["caption"],
+        )
+        self.assertEqual(
+            8_000_000_000_000_000_000 + int(pool["id"]),
+            queue["short_link_id"],
+        )
+        self.assertEqual("", queue["long_url"])
+
+        claim = self.claim_one(queue)
+        tracking = {
+            "username": queue["account_username"],
+            "timestamp": 1784736000,
+            "material_language": queue["material_language"],
+            "drama_name": queue["drama_name"],
+            "tag": queue["material_tag"],
+            "link_id": queue["short_link_id"],
+            "page_name": queue["account_display_name"],
+            "page_id": queue["account_id"],
+            "material_name": queue["material_name"],
+            "material_id": queue["material_id"],
+            "queue_id": queue["id"],
+            "content_id": queue["content_id"],
+        }
+        target = build_w2a_url(tracking)
+        prepared = self.store.prepare_short_link(
+            queue["id"],
+            claim.reveal_claim_token(),
+            target,
+        )
+        self.assertEqual(target, prepared["long_url"])
+        replay = self.store.prepare_short_link(
+            queue["id"],
+            claim.reveal_claim_token(),
+            target,
+        )
+        self.assertEqual(target, replay["long_url"])
+        conflict = build_w2a_url(
+            {**tracking, "timestamp": 1784736001}
+        )
+        with self.assertRaises(TTPostError) as caught:
+            self.store.prepare_short_link(
+                queue["id"],
+                claim.reveal_claim_token(),
+                conflict,
+            )
+        self.assertEqual(
+            "tt_short_link_target_conflict",
+            caught.exception.code,
+        )
+
+    def test_queue_url_macro_requires_frozen_attribution_metadata(self):
+        pool = self.store.add_material("1001")
+        with self.assertRaises(TTPostError) as caught:
+            self.store.freeze_queue(
+                pool["id"],
+                account(),
+                "2026-07-29 10:00:00",
+                "Drama ID: {{content_id}}\n\n{url}",
+                policy(),
+                resolver,
+            )
+        self.assertEqual(
+            "tt_post_link_metadata_incomplete",
+            caught.exception.code,
         )
 
     def test_same_idempotency_key_with_changed_template_conflicts(self):
@@ -1409,6 +1504,69 @@ class CaptionPolicyAndTimeTests(unittest.TestCase):
         self.assertEqual(
             "Drama ID: ABC_123",
             render_caption_template("Drama ID: {{content_id}}", "ABC_123"),
+        )
+
+    def test_caption_url_macro_preserves_exact_line_breaks(self):
+        short_url = (
+            "https://gy.g2flow.com/s2l/"
+            "8000000000000000009.html"
+        )
+        template = (
+            "Watch the full story\n\n"
+            "Drama ID: {{content_id}}\n\n"
+            "{url}"
+        )
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: ABC_123\n\n"
+                + short_url
+            ),
+            render_caption_template(
+                template,
+                "ABC_123",
+                url=short_url,
+            ),
+        )
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: ABC_123\n\n"
+                "{url}"
+            ),
+            render_caption_template(
+                template,
+                "ABC_123",
+                defer_url=True,
+            ),
+        )
+
+    def test_caption_url_macro_fails_closed(self):
+        with self.assertRaises(TTPostError) as missing:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n\n{url}",
+                "ABC_123",
+            )
+        self.assertEqual("caption_url_required", missing.exception.code)
+        with self.assertRaises(TTPostError) as unknown:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n\n{landing_url}",
+                "ABC_123",
+                defer_url=True,
+            )
+        self.assertEqual(
+            "caption_placeholder_invalid",
+            unknown.exception.code,
+        )
+        with self.assertRaises(TTPostError) as spaced:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n\n{ url }",
+                "ABC_123",
+                defer_url=True,
+            )
+        self.assertEqual(
+            "caption_placeholder_invalid",
+            spaced.exception.code,
         )
 
     def test_caption_requires_content_id_placeholder(self):

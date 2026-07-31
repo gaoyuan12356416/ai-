@@ -215,7 +215,25 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("function captionTemplateValidation()", PAGE)
         self.assertIn("发布描述模板包含未知占位符", PAGE)
         self.assertIn("发布描述模板包含不完整占位符", PAGE)
-        self.assertIn('remainder.includes("{{") || remainder.includes("}}")', PAGE)
+        self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}";', PAGE)
+        self.assertIn(
+            "https://gy.g2flow.com/s2l/8999999999999999999.html",
+            PAGE,
+        )
+        self.assertIn("CAPTION_SINGLE_PLACEHOLDER_PATTERN", PAGE)
+        self.assertIn(
+            'singlePlaceholders.filter(name => name !== "url")',
+            PAGE,
+        )
+        self.assertIn(
+            "braceRemainder.includes(\"{\") ||",
+            PAGE,
+        )
+        self.assertIn(
+            ".split(CAPTION_URL_PLACEHOLDER).join(CAPTION_URL_PREVIEW)",
+            PAGE,
+        )
+        self.assertIn("模板中的换行会原样提交给 TikTok", PAGE)
         self.assertIn(
             "renderCaptionTemplate(template, material.content_id)",
             PAGE,

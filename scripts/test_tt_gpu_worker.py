@@ -2456,6 +2456,21 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertEqual(len(api.init_calls), 1)
 
+    def test_publish_sends_caption_line_breaks_to_tiktok_unchanged(self):
+        config = make_direct_clean_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor, direct_post_eligible=True)
+        caption = (
+            "Watch the full story\n\n"
+            "Drama ID: ABCD1234\n\n"
+            "https://gy.g2flow.com/s2l/8000000000000000009.html"
+        )
+        processor.publish(make_publish(config, title=caption))
+        _token, post_info, _video_url = api.init_calls[0]
+        self.assertEqual(caption, post_info["title"])
+        self.assertIn("\n\nDrama ID: ABCD1234\n\n", post_info["title"])
+
     def test_reconcile_remains_available_after_gates_close_and_returns_publish_id(self):
         enabled = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()

@@ -666,7 +666,7 @@ Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">可编辑文案，但必须保留 {{contect_id}} 或 {{content_id}}；入池时会按每个素材的真实 Drama ID 分别替换。</span>
+                  <span id="captionHelp">必须保留 {{contect_id}} 或 {{content_id}}；可使用 {url}，发布前会替换为 gy.g2flow.com 的专属追踪短链。模板中的换行会原样提交给 TikTok。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -844,6 +844,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       const CAPTION_TEMPLATE = "Watch the full story in the app 🎬\n\nDrama ID: {{contect_id}}\n\nVisit my profile → Open the link → Search the Drama ID → Watch now.";
       const CAPTION_PLACEHOLDER_PATTERN = /\{\{([^{}]*)\}\}/g;
       const CAPTION_PLACEHOLDERS = new Set(["contect_id", "content_id"]);
+      const CAPTION_SINGLE_PLACEHOLDER_PATTERN = /\{([^{}]*)\}/g;
+      const CAPTION_URL_PLACEHOLDER = "{url}";
+      const CAPTION_URL_PREVIEW = "https://gy.g2flow.com/s2l/8999999999999999999.html";
       const CONSENT_VERSION = "tt-direct-post-consent-20260729";
       const PROCESSING_STATUSES = new Set([
         "claimed", "creator_recheck", "initializing", "processing_download", "reconciling",
@@ -1998,7 +2001,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           (match, name) => CAPTION_PLACEHOLDERS.has(String(name || "").trim())
             ? cleanId(contentId)
             : match
-        ).trim();
+        ).split(CAPTION_URL_PLACEHOLDER).join(CAPTION_URL_PREVIEW).trim();
       }
       function captionTemplateValidation() {
         const template = byId("caption").value;
@@ -2013,7 +2016,22 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           new RegExp(CAPTION_PLACEHOLDER_PATTERN.source, "g"),
           ""
         );
-        if (remainder.includes("{{") || remainder.includes("}}")) {
+        const singlePlaceholderPattern = new RegExp(
+          CAPTION_SINGLE_PLACEHOLDER_PATTERN.source,
+          "g"
+        );
+        const singlePlaceholders = Array.from(
+          remainder.matchAll(singlePlaceholderPattern),
+          match => String(match[1] || "")
+        );
+        const braceRemainder = remainder.replace(
+          new RegExp(CAPTION_SINGLE_PLACEHOLDER_PATTERN.source, "g"),
+          ""
+        );
+        if (
+          braceRemainder.includes("{") ||
+          braceRemainder.includes("}")
+        ) {
           return {
             error: "发布描述模板包含不完整占位符。",
             maxRenderedUnits: 0,
@@ -2025,6 +2043,15 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (unknown.length) {
           return {
             error: `发布描述模板包含未知占位符：${unknown.slice(0, 5).join("、")}`,
+            maxRenderedUnits: 0,
+          };
+        }
+        const unknownSingle = Array.from(new Set(
+          singlePlaceholders.filter(name => name !== "url")
+        ));
+        if (unknownSingle.length) {
+          return {
+            error: `发布描述模板包含未知占位符：${unknownSingle.slice(0, 5).join("、")}`,
             maxRenderedUnits: 0,
           };
         }
