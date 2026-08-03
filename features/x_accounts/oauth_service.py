@@ -138,7 +138,7 @@ POST_PUBLIC_ROOT = Path(
     or "/mnt/data-disk/x-post-automation/s2l"
 )
 POST_SHORT_BASE_URL = os.environ.get(
-    "X_POST_SHORT_BASE_URL", "https://ai.yingliangads.com/s2l"
+    "X_POST_SHORT_BASE_URL", "https://gy.g2flow.com/s2l"
 ).strip().rstrip("/")
 POST_STORAGE_MOUNT_ROOT = Path(
     os.environ.get("X_POST_STORAGE_MOUNT_ROOT", "/mnt/data-disk").strip()

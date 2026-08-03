@@ -206,6 +206,28 @@ class XPostLedgerTests(unittest.TestCase):
         self.assertNotIn("original_material_url", item)
         self.assertNotIn("media_repair_source_sha256", item)
 
+    def test_duration_repair_audit_is_accepted(self):
+        store = service.XPostStore(self.db_path)
+        values = plan_candidates((6151, 6152, 6153))
+        repaired = values[0]
+        repaired["original_material_url"] = repaired["material_url"]
+        repaired["material_url"] = (
+            "https://media.example.com/x-post-repair/6151-output.mp4"
+        )
+        repaired["media_repair_trigger_code"] = "invalid_media_duration"
+        repaired["media_repair_job_key"] = "xpost-repair:x-video-v1:6151:" + (
+            "e" * 64
+        )
+        repaired["media_repair_profile"] = "x-video-v1"
+        repaired["media_repair_source_sha256"] = "f" * 64
+
+        plan = store.create_daily_plan("2026-07-23", "2026-07-22", values)
+
+        self.assertEqual(
+            plan["queues"][0]["media_repair_trigger_code"],
+            "invalid_media_duration",
+        )
+
     def test_partial_or_nonrepairable_media_audit_is_rejected(self):
         store = service.XPostStore(self.db_path)
         cases = []
@@ -219,7 +241,7 @@ class XPostLedgerTests(unittest.TestCase):
         repaired["material_url"] = (
             "https://media.example.com/x-post-repair/6301-output.mp4"
         )
-        repaired["media_repair_trigger_code"] = "invalid_media_duration"
+        repaired["media_repair_trigger_code"] = "invalid_media_frame_rate"
         repaired["media_repair_job_key"] = "xpost-repair:x-video-v1:6301:" + (
             "c" * 64
         )
@@ -254,8 +276,8 @@ class XPostLedgerTests(unittest.TestCase):
                     queue_id,account_id,status,attempt_count,long_url,short_url,
                     post_text,x_media_id,x_post_id,x_post_url,published_at,created_at,updated_at
                 ) VALUES(1,2,'published',1,'https://example.invalid/frozen',
-                    'https://ai.yingliangads.com/s2l/1.html',
-                    'https://ai.yingliangads.com/s2l/1.html\ndescription',
+                    'https://gy.g2flow.com/s2l/1.html',
+                    'https://gy.g2flow.com/s2l/1.html\ndescription',
                     'media1','2080128600917905497',
                     'https://x.com/legacy2/status/2080128600917905497',
                     '2026-07-23T02:11:00Z','2026-07-23T02:10:00Z',
@@ -289,7 +311,7 @@ class XPostLedgerTests(unittest.TestCase):
             account={"id": 2, "username": "legacy2"},
             access_token="unused-but-required",
             public_root=Path(self.temp.name) / "s2l",
-            short_base_url="https://ai.yingliangads.com/s2l",
+            short_base_url="https://gy.g2flow.com/s2l",
             allowed_media_hosts=["media.example.com"],
         )
         self.assertEqual(result["post_id"], "2080128600917905497")
@@ -538,8 +560,8 @@ class XPostLedgerTests(unittest.TestCase):
                     "content_id": queue["content_id"],
                 }
             ),
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\ndescription" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\ndescription" % log["id"],
         )
         store.mark_publishing(log["id"])
         store.mark_media_uploaded(log["id"], "media1")
@@ -551,7 +573,7 @@ class XPostLedgerTests(unittest.TestCase):
                 account={"id": queue["account_id"], "username": queue["account_username"]},
                 access_token="secret",
                 public_root=Path(self.temp.name) / "s2l",
-                short_base_url="https://ai.yingliangads.com/s2l",
+                short_base_url="https://gy.g2flow.com/s2l",
                 allowed_media_hosts=["media.example.com"],
             )
         self.assertEqual(caught.exception.code, "x_post_unknown_outcome")

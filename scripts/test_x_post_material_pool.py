@@ -294,8 +294,8 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.store.prepare_log(
             log["id"],
             "https://www.dramawavew2a.com/ads/101/2116/view?c=test",
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\nDescription" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\nDescription" % log["id"],
         )
         self.store.mark_publishing(log["id"])
         self.store.mark_media_uploaded(log["id"], "media-201")
@@ -314,8 +314,8 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.store.prepare_log(
             second_log["id"],
             "https://www.dramawavew2a.com/ads/101/2116/view?c=test",
-            "https://ai.yingliangads.com/s2l/%s.html" % second_log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\nDescription" % second_log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % second_log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\nDescription" % second_log["id"],
         )
         self.store.mark_publishing(second_log["id"])
         self.store.mark_failed(second_log["id"], "x_upstream_error", "known failure")
@@ -327,8 +327,8 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.store.prepare_log(
             third_log["id"],
             "https://www.dramawavew2a.com/ads/101/2116/view?c=test",
-            "https://ai.yingliangads.com/s2l/%s.html" % third_log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\nDescription" % third_log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % third_log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\nDescription" % third_log["id"],
         )
         self.store.mark_publishing(third_log["id"])
         self.store.mark_failed(

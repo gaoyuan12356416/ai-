@@ -69,8 +69,8 @@ class XPostCatchupStoreTests(unittest.TestCase):
             log["id"],
             "https://www.dramawavew2a.com/ads/101/2116/view"
             "?af_ad_id=%s" % queue["material_id"],
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\nbody"
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\nbody"
             % log["id"],
         )
         self.store.mark_publishing(log["id"])
@@ -370,8 +370,8 @@ class XPostCatchupStoreTests(unittest.TestCase):
             log["id"],
             "https://www.dramawavew2a.com/ads/101/2116/view"
             "?af_ad_id=%s" % queue["material_id"],
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\nbody"
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\nbody"
             % log["id"],
         )
         self.store.mark_publishing(log["id"])

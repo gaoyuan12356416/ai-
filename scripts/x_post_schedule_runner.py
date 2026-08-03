@@ -1035,7 +1035,7 @@ def _drama_candidates(
             if cached is not None:
                 return dict(cached)
             build_drama_episode_post_text(
-                "https://ai.yingliangads.com/s2l/1.html",
+                "https://gy.g2flow.com/s2l/1.html",
                 candidate["sub_num"],
                 candidate["drama_name"],
                 candidate["description"],

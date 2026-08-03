@@ -48,7 +48,7 @@ class XAccountsTestCase(unittest.TestCase):
         service.STATE_TTL_SECONDS = 600
         service.POST_DB_PATH = service.DB_PATH
         service.POST_PUBLIC_ROOT = root / "s2l"
-        service.POST_SHORT_BASE_URL = "https://ai.yingliangads.com/s2l"
+        service.POST_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
         service.POST_MEDIA_ALLOWED_HOSTS = ("media.example.com",)
         service.POST_HTTP_TIMEOUT_SECONDS = 30
         service.POST_MAX_MEDIA_BYTES = 512 * 1024 * 1024
@@ -242,7 +242,7 @@ class XAccountsTestCase(unittest.TestCase):
                 or {
                     "status": "published",
                     "log_id": 18,
-                    "short_url": "https://ai.yingliangads.com/s2l/18.html",
+                    "short_url": "https://gy.g2flow.com/s2l/18.html",
                     "post_id": "1900000000000000000",
                     "preview_url": "https://x.com/canary_user/status/1900000000000000000",
                     "access_token": "must-not-escape",
@@ -1239,7 +1239,7 @@ class XAccountsTestCase(unittest.TestCase):
         expected = {
             "status": "published",
             "log_id": 18,
-            "short_url": "https://ai.yingliangads.com/s2l/18.html",
+            "short_url": "https://gy.g2flow.com/s2l/18.html",
             "post_id": "1900000000000000000",
             "preview_url": "https://x.com/canary_user/status/1900000000000000000",
         }
@@ -1324,7 +1324,7 @@ class XAccountsTestCase(unittest.TestCase):
         expected_publish = {
             "status": "published",
             "log_id": 12,
-            "short_url": "https://ai.yingliangads.com/s2l/12.html",
+            "short_url": "https://gy.g2flow.com/s2l/12.html",
             "post_id": "1900000000000000012",
             "preview_url": "https://x.com/daily_scope_1/status/1900000000000000012",
         }
@@ -2200,7 +2200,7 @@ class XAccountsTestCase(unittest.TestCase):
             return {
                 "status": "published",
                 "log_id": 8,
-                "short_url": "https://ai.yingliangads.com/s2l/8.html",
+                "short_url": "https://gy.g2flow.com/s2l/8.html",
                 "post_id": "9001",
                 "preview_url": "https://x.com/queue_owner/status/9001",
                 "access_token": "must-not-escape",
@@ -2263,8 +2263,8 @@ class XAccountsTestCase(unittest.TestCase):
         store.prepare_log(
             log["id"],
             "https://example.invalid/frozen",
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
-            "https://ai.yingliangads.com/s2l/%s.html\nFrozen" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html\nFrozen" % log["id"],
         )
         store.mark_publishing(log["id"])
         store.mark_media_uploaded(log["id"], "media3002")

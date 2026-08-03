@@ -148,7 +148,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
     def publish_queue(self, queue, episode_number, post_id=None):
         log = self.store.reserve_log(queue["id"])
         text = service.build_drama_episode_post_text(
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
             episode_number,
             "Drama One",
             "A complete short-drama episode description.",
@@ -156,7 +156,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.store.prepare_log(
             log["id"],
             "https://www.dramawavew2a.com/ads/101/2116/view?x=1",
-            "https://ai.yingliangads.com/s2l/%s.html" % log["id"],
+            "https://gy.g2flow.com/s2l/%s.html" % log["id"],
             text,
         )
         self.store.mark_publishing(log["id"])
@@ -870,14 +870,14 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_drama_post_template_matches_the_requested_copy(self):
         rendered = service.build_drama_episode_post_text(
-            "https://ai.yingliangads.com/s2l/1.html",
+            "https://gy.g2flow.com/s2l/1.html",
             2,
             "Drama One",
             "A complete drama description.",
         )
         self.assertEqual(
             rendered,
-            "Watch now 👉 https://ai.yingliangads.com/s2l/1.html\n\n"
+            "Watch now 👉 https://gy.g2flow.com/s2l/1.html\n\n"
             "🎬 Drama One\n"
             "Episode 2\n"
             "A complete drama description.\n\n"
