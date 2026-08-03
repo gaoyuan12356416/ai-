@@ -1,0 +1,372 @@
+"""TikTok organic-post W2A tracking and immutable short-link wrappers."""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import tempfile
+import urllib.parse
+from pathlib import Path
+from typing import Any, Mapping
+
+
+TT_W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2250/view"
+TT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
+TT_SHORT_LINK_NAMESPACE = 8_000_000_000_000_000_000
+TT_SHORT_LINK_MAX_LOCAL_ID = 999_999_999_999_999_999
+TT_SHORT_LINK_ID_RE = re.compile(r"8[0-9]{18}")
+TT_SHORT_LINK_FILENAME_RE = re.compile(r"8[0-9]{18}[.]html")
+TT_W2A_QUERY_FIELDS = (
+    "c",
+    "af_adset",
+    "af_adset_id",
+    "af_ad",
+    "af_ad_id",
+    "af_channel",
+    "af_c_id",
+    "af_dp",
+)
+
+
+class TTPostLinkError(ValueError):
+    """Known pre-publish short-link failure."""
+
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code = str(code)
+        self.status = int(status)
+
+
+def _positive_int(
+    value: Any,
+    label: str,
+    maximum: int = 9_223_372_036_854_775_807,
+) -> int:
+    if isinstance(value, bool):
+        raise TTPostLinkError("invalid_request", "%s无效" % label)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise TTPostLinkError("invalid_request", "%s无效" % label) from None
+    if parsed <= 0 or parsed > maximum:
+        raise TTPostLinkError("invalid_request", "%s无效" % label)
+    return parsed
+
+
+def _clean_text(
+    value: Any,
+    label: str,
+    limit: int,
+    *,
+    forbidden: str = "",
+) -> str:
+    text = str(value or "").strip()
+    if (
+        not text
+        or len(text) > int(limit)
+        or any(ord(char) < 32 for char in text)
+        or any(char in text for char in forbidden)
+    ):
+        raise TTPostLinkError("invalid_request", "%s无效" % label)
+    return text
+
+
+def _clean_token(value: Any, label: str, limit: int) -> str:
+    text = _clean_text(value, label, limit)
+    if not re.fullmatch(r"[A-Za-z0-9._~:-]+", text):
+        raise TTPostLinkError("invalid_request", "%s无效" % label)
+    return text
+
+
+def short_link_id(pool_item_id: Any) -> int:
+    """Map one immutable TT material-pool identity into its reserved namespace."""
+
+    local_id = _positive_int(
+        pool_item_id,
+        "TikTok素材池ID",
+        TT_SHORT_LINK_MAX_LOCAL_ID,
+    )
+    return TT_SHORT_LINK_NAMESPACE + local_id
+
+
+def build_short_url(link_id: Any) -> str:
+    normalized = _positive_int(link_id, "TikTok短链ID")
+    if not TT_SHORT_LINK_ID_RE.fullmatch(str(normalized)):
+        raise TTPostLinkError("tt_short_link_id_invalid", "TikTok短链ID不在保留命名空间")
+    return "%s/%s.html" % (TT_SHORT_BASE_URL, normalized)
+
+
+def validate_short_url(value: Any) -> str:
+    url = str(value or "")
+    parsed = urllib.parse.urlsplit(url)
+    expected_base = urllib.parse.urlsplit(TT_SHORT_BASE_URL)
+    filename = parsed.path.rsplit("/", 1)[-1]
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != expected_base.hostname
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path.rsplit("/", 1)[0] != expected_base.path
+        or not TT_SHORT_LINK_FILENAME_RE.fullmatch(filename)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise TTPostLinkError("tt_short_url_invalid", "TikTok短链地址无效")
+    return url
+
+
+def build_w2a_url(params: Mapping[str, Any]) -> str:
+    """Build the TT W2A URL with the same ordered attribution contract as X."""
+
+    if not isinstance(params, Mapping):
+        raise TTPostLinkError("invalid_request", "W2A参数必须是对象")
+    required = {
+        "username",
+        "timestamp",
+        "material_language",
+        "drama_name",
+        "tag",
+        "link_id",
+        "page_name",
+        "page_id",
+        "material_name",
+        "material_id",
+        "queue_id",
+        "content_id",
+    }
+    if set(params) != required:
+        raise TTPostLinkError(
+            "invalid_request",
+            "W2A参数字段不完整或包含未知字段",
+        )
+    username = _clean_text(
+        str(params["username"] or "").lstrip("@"),
+        "TikTok用户名",
+        50,
+        forbidden="*[]",
+    )
+    if not re.fullmatch(r"[A-Za-z0-9._]+", username):
+        raise TTPostLinkError("invalid_request", "TikTok用户名无效")
+    timestamp = _positive_int(params["timestamp"], "时间戳")
+    link_id = _positive_int(params["link_id"], "TikTok短链ID")
+    if not TT_SHORT_LINK_ID_RE.fullmatch(str(link_id)):
+        raise TTPostLinkError(
+            "tt_short_link_id_invalid",
+            "TikTok短链ID不在保留命名空间",
+        )
+    language = _clean_text(
+        params["material_language"],
+        "素材语言",
+        32,
+        forbidden="*[]",
+    )
+    drama_name = _clean_text(
+        params["drama_name"],
+        "剧名",
+        255,
+        forbidden="*[]",
+    )
+    tag = _clean_text(params["tag"], "标签", 255, forbidden="*[]")
+    page_name = _clean_text(params["page_name"], "TikTok账号名", 255)
+    page_id = _clean_token(params["page_id"], "TikTok账号ID", 128)
+    material_name = _clean_text(params["material_name"], "素材名", 255)
+    material_id = _clean_token(params["material_id"], "素材ID", 128)
+    queue_id = _positive_int(params["queue_id"], "队列ID")
+    content_id = _clean_token(params["content_id"], "content_id", 128)
+
+    campaign = "yingliang_post_CLV_VL_%s*%snone%s*%s*%s*%s" % (
+        username,
+        timestamp,
+        language,
+        drama_name,
+        tag,
+        link_id,
+    )
+    query = urllib.parse.urlencode(
+        (
+            ("c", campaign),
+            ("af_adset", page_name),
+            ("af_adset_id", page_id),
+            ("af_ad", "%s_contentid[%s]" % (material_name, content_id)),
+            ("af_ad_id", material_id),
+            ("af_channel", "AIpost"),
+            ("af_c_id", str(queue_id)),
+            ("af_dp", content_id),
+        ),
+        quote_via=urllib.parse.quote,
+        safe="*",
+    )
+    return TT_W2A_BASE_URL + "?" + query
+
+
+def validate_w2a_url(value: Any) -> str:
+    url = str(value or "")
+    parsed = urllib.parse.urlsplit(url)
+    base = urllib.parse.urlsplit(TT_W2A_BASE_URL)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != base.hostname
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != base.path
+        or parsed.fragment
+    ):
+        raise TTPostLinkError(
+            "tt_short_link_target_invalid",
+            "TikTok短链目标不是允许的W2A地址",
+        )
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if (
+        tuple(key for key, _value in pairs) != TT_W2A_QUERY_FIELDS
+        or any(not value for _key, value in pairs)
+        or dict(pairs).get("af_channel") != "AIpost"
+    ):
+        raise TTPostLinkError(
+            "tt_short_link_target_invalid",
+            "TikTok W2A参数不完整",
+        )
+    return url
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(
+        str(path),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def write_short_redirect(public_root: Any, link_id: Any, long_url: Any) -> Path:
+    """Atomically create an immutable TT wrapper before Direct Post init."""
+
+    target = validate_w2a_url(long_url)
+    normalized_id = _positive_int(link_id, "TikTok短链ID")
+    if not TT_SHORT_LINK_ID_RE.fullmatch(str(normalized_id)):
+        raise TTPostLinkError(
+            "tt_short_link_id_invalid",
+            "TikTok短链ID不在保留命名空间",
+        )
+    configured_root = Path(str(public_root or "").strip()).expanduser()
+    if not configured_root.is_absolute():
+        raise TTPostLinkError(
+            "tt_short_link_root_invalid",
+            "TikTok短链目录必须是绝对路径",
+            500,
+        )
+    if configured_root.exists() and configured_root.is_symlink():
+        raise TTPostLinkError(
+            "tt_short_link_root_invalid",
+            "TikTok短链目录不能是符号链接",
+            500,
+        )
+    try:
+        configured_root.mkdir(mode=0o755, parents=False, exist_ok=True)
+        root = configured_root.resolve(strict=True)
+        if not root.is_dir():
+            raise OSError("not a directory")
+        os.chmod(root, 0o755)
+    except OSError as exc:
+        raise TTPostLinkError(
+            "tt_short_link_write_failed",
+            "TikTok短链目录不可用: %s" % type(exc).__name__,
+            500,
+        ) from None
+
+    destination = root / ("%s.html" % normalized_id)
+    escaped = html.escape(target, quote=True)
+    js_target = (
+        json.dumps(target, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+    payload = (
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"referrer\" content=\"no-referrer\">"
+        "<meta http-equiv=\"Cache-Control\" content=\"no-store\">"
+        "<meta http-equiv=\"refresh\" content=\"0;url=%s\">"
+        "<link rel=\"canonical\" href=\"%s\"><title>Redirecting</title>"
+        "<script>location.replace(%s);</script></head>"
+        "<body><a rel=\"noreferrer\" href=\"%s\">Continue</a></body></html>\n"
+        % (escaped, escaped, js_target, escaped)
+    ).encode("utf-8")
+    if destination.exists():
+        try:
+            if (
+                not destination.is_symlink()
+                and destination.is_file()
+                and destination.read_bytes() == payload
+            ):
+                os.chmod(destination, 0o644)
+                return destination
+        except OSError:
+            pass
+        raise TTPostLinkError(
+            "tt_short_link_conflict",
+            "TikTok短链ID已存在且目标不同",
+            409,
+        )
+
+    temporary_path = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=".%s." % normalized_id,
+            suffix=".tmp",
+            dir=str(root),
+        )
+        temporary_path = Path(raw_path)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o644)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        # A hard-link publish is atomic and, unlike ``os.replace``, can never
+        # overwrite an immutable wrapper created by a concurrent worker.
+        os.link(str(temporary_path), str(destination))
+        try:
+            temporary_path.unlink()
+        except OSError:
+            # The immutable destination is already durable. A hidden temporary
+            # hard link is harmless and must not turn a valid redirect into a
+            # failed publish boundary.
+            pass
+        temporary_path = None
+        _fsync_directory(root)
+        return destination
+    except FileExistsError:
+        if destination.exists() and destination.read_bytes() == payload:
+            return destination
+        raise TTPostLinkError(
+            "tt_short_link_conflict",
+            "TikTok短链ID已存在且目标不同",
+            409,
+        ) from None
+    except OSError as exc:
+        raise TTPostLinkError(
+            "tt_short_link_write_failed",
+            "TikTok短链页面写入失败: %s" % type(exc).__name__,
+            500,
+        ) from None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass

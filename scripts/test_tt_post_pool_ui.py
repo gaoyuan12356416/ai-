@@ -222,14 +222,38 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("function captionTemplateValidation()", PAGE)
         self.assertIn("发布描述模板包含未知占位符", PAGE)
         self.assertIn("发布描述模板包含不完整占位符", PAGE)
-        self.assertIn('remainder.includes("{{") || remainder.includes("}}")', PAGE)
+        self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}";', PAGE)
+        self.assertIn('const CAPTION_DESC_PLACEHOLDER = "{desc}";', PAGE)
         self.assertIn(
-            "renderCaptionTemplate(template, material.content_id)",
+            "https://gy.g2flow.com/s2l/8999999999999999999.html",
             PAGE,
         )
+        self.assertIn("CAPTION_SINGLE_PLACEHOLDER_PATTERN", PAGE)
+        self.assertIn(
+            'singlePlaceholders.filter(name => !["url", "desc"].includes(name))',
+            PAGE,
+        )
+        self.assertIn(
+            "braceRemainder.includes(\"{\") ||",
+            PAGE,
+        )
+        self.assertIn(
+            'if (name === "url") return CAPTION_URL_PREVIEW;',
+            PAGE,
+        )
+        self.assertIn('if (name === "desc") return normalizedDescription;', PAGE)
+        self.assertIn("function normalizeDramaDescription(value)", PAGE)
+        self.assertIn("缺少有效剧描述，不能使用 {desc}", PAGE)
+        self.assertIn("模板中的换行会原样提交给 TikTok", PAGE)
+        self.assertIn("material.description", PAGE)
         self.assertIn("if (units > 2200)", PAGE)
         self.assertIn("caption_template: byId(\"caption\").value", PAGE)
         self.assertIn("utf16Units", PAGE)
+        payload = source_between(
+            "function materialPoolPayload(material)",
+            "function resetMaterialPoolForm()",
+        )
+        self.assertNotIn("description:", payload)
 
     def test_material_validation_does_not_wait_for_or_require_final_video(self):
         validation = source_between(

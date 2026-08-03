@@ -339,6 +339,23 @@ def make_direct_clean_config(root, gates=False, **overrides):
     return replace(config, **overrides) if overrides else config
 
 
+def make_direct_outro_config(root, gates=False, **overrides):
+    base = make_config(root, gates=gates)
+    config = replace(
+        base,
+        default_source_trim_tail_seconds=0,
+        fixed_outro_sha256=hashlib.sha256(
+            base.fixed_outro_path.read_bytes()
+        ).hexdigest(),
+        logo_sha256=hashlib.sha256(
+            base.logo_path.read_bytes()
+        ).hexdigest(),
+        media_mode=worker.DIRECT_OUTRO_MEDIA_MODE,
+        profile=worker.DIRECT_OUTRO_PROFILE,
+    )
+    return replace(config, **overrides) if overrides else config
+
+
 def make_manual_canary_config(root):
     return replace(
         make_config(root, gates=False),
@@ -443,13 +460,35 @@ def seed_prepared(
 ):
     config = processor.config
     cos_key = "tt-post-prepared/aa/%s.mp4" % ("a" * 64)
+    request = {
+        "content_id": CONTENT_ID,
+        "media_mode": config.media_mode,
+    }
+    if config.media_mode == worker.DIRECT_OUTRO_MEDIA_MODE:
+        request.update(
+            {
+                "logo_sha256": hashlib.sha256(
+                    config.logo_path.read_bytes()
+                ).hexdigest(),
+                "logo_size": config.logo_path.stat().st_size,
+                "outro_sha256": hashlib.sha256(
+                    config.fixed_outro_path.read_bytes()
+                ).hexdigest(),
+                "outro_size": config.fixed_outro_path.stat().st_size,
+                "profile": config.profile,
+                "source_sha256": hashlib.sha256(SOURCE_BYTES).hexdigest(),
+                "source_size": len(SOURCE_BYTES),
+                "source_trim_tail_seconds": 0,
+                "source_url_sha256": hashlib.sha256(
+                    b"https://media.example.com/material.mp4"
+                ).hexdigest(),
+                "transition": config.preparation_transition(),
+            }
+        )
     manifest = {
         "completed_at": "2026-07-29T00:00:00Z",
         "cos_key": cos_key,
-        "request": {
-            "content_id": CONTENT_ID,
-            "media_mode": config.media_mode,
-        },
+        "request": request,
         "result": {
             "brand_overlay_review_required": (
                 config.brand_overlay_review_required()
@@ -479,7 +518,13 @@ def seed_prepared(
         },
         "storage": {"backend": "cos", "key": cos_key},
         "status": "ready",
-        "version": 2,
+        "version": (
+            4
+            if config.media_mode == worker.DIRECT_OUTRO_MEDIA_MODE
+            else 3
+            if config.media_mode == worker.DIRECT_CLEAN_MEDIA_MODE
+            else 2
+        ),
     }
     worker._atomic_write_json(processor._prepare_manifest_path(job_id), manifest)
 
@@ -972,6 +1017,82 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertTrue(loaded_clean.direct_post_eligible())
         self.assertFalse(loaded_clean.brand_overlay_review_required())
+        self.assertEqual(loaded_clean.preparation_transition(), "none")
+        direct_outro_env = dict(
+            env,
+            TT_POST_GPU_MEDIA_MODE="direct_outro",
+            TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS="0",
+            TT_POST_GPU_FIXED_OUTRO_SHA256=hashlib.sha256(
+                config.fixed_outro_path.read_bytes()
+            ).hexdigest(),
+            TT_POST_GPU_LOGO_SHA256=hashlib.sha256(
+                config.logo_path.read_bytes()
+            ).hexdigest(),
+        )
+        with mock.patch.dict(
+            os.environ,
+            dict(
+                env,
+                TT_POST_GPU_MEDIA_MODE="direct_outro",
+                TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS="0",
+            ),
+            clear=True,
+        ):
+            with self.assertRaises(worker.TTGPUError) as missing_pins:
+                worker.WorkerConfig.from_env()
+        self.assertEqual(
+            missing_pins.exception.code,
+            "invalid_configuration",
+        )
+        with mock.patch.dict(
+            os.environ,
+            dict(
+                direct_outro_env,
+                TT_POST_GPU_FIXED_OUTRO_SHA256="0" * 64,
+            ),
+            clear=True,
+        ):
+            with self.assertRaises(worker.TTGPUError) as mismatched_pin:
+                worker.WorkerConfig.from_env()
+        self.assertEqual(
+            mismatched_pin.exception.code,
+            "invalid_configuration",
+        )
+        with mock.patch.dict(
+            os.environ,
+            direct_outro_env,
+            clear=True,
+        ):
+            loaded_outro = worker.WorkerConfig.from_env()
+        self.assertEqual(
+            loaded_outro.media_mode,
+            worker.DIRECT_OUTRO_MEDIA_MODE,
+        )
+        self.assertEqual(
+            loaded_outro.profile,
+            worker.DIRECT_OUTRO_PROFILE,
+        )
+        self.assertTrue(loaded_outro.direct_post_eligible())
+        self.assertFalse(loaded_outro.brand_overlay_review_required())
+        self.assertTrue(loaded_outro.uses_outro_pipeline())
+        self.assertEqual(
+            loaded_outro.preparation_transition(),
+            "phone-match-0.9s",
+        )
+        self.assertTrue(loaded_outro.asset_identity_ready())
+        with mock.patch.dict(
+            os.environ,
+            dict(
+                direct_outro_env,
+                TT_POST_GPU_VIDEO_ENCODER="h264_nvenc",
+            ),
+            clear=True,
+        ):
+            loaded_outro_h264 = worker.WorkerConfig.from_env()
+        self.assertEqual(
+            loaded_outro_h264.profile,
+            worker.DIRECT_OUTRO_H264_PROFILE,
+        )
         with mock.patch.dict(
             os.environ,
             dict(env, TT_POST_GPU_MEDIA_MODE="unsafe_bypass"),
@@ -1527,6 +1648,328 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(published["state"], "initialized")
         self.assertEqual(published["publish_id"], "v_pub_url~v2.123")
         self.assertEqual(len(api.init_calls), 1)
+
+    def test_legacy_v1_cos_manifest_without_mode_or_storage_still_reads(self):
+        config = make_config(self.root)
+        processor = self.processor(config=config)
+        seed_prepared(processor, direct_post_eligible=False)
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        manifest = worker._read_json(manifest_path)
+        manifest["version"] = 1
+        manifest.pop("storage")
+        manifest["request"].pop("media_mode")
+        worker._atomic_write_json(manifest_path, manifest)
+
+        result = worker._prepare_response(
+            manifest,
+            True,
+            config,
+            JOB_ID,
+        )
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["media_mode"], "branded_preview")
+        self.assertEqual(result["storage_backend"], "cos")
+        self.assertFalse(result["direct_post_eligible"])
+
+    def test_direct_outro_prepare_uses_phone_match_and_freezes_assets(self):
+        config = make_direct_outro_config(self.root)
+        runner = FakeRunner(
+            [
+                input_probe(39.1),
+                input_probe(11.933333),
+                prepared_probe(50.133333),
+            ]
+        )
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+        )
+        result = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_OUTRO_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertEqual(result["status"], "ready")
+        self.assertFalse(result["brand_overlay_review_required"])
+        self.assertTrue(result["direct_post_eligible"])
+        self.assertEqual(result["profile"], worker.DIRECT_OUTRO_PROFILE)
+        self.assertEqual(result["media_mode"], worker.DIRECT_OUTRO_MEDIA_MODE)
+        self.assertEqual(result["transition"], "phone-match-0.9s")
+        self.assertEqual(
+            result["assets"],
+            {
+                "logo_sha256": config.logo_sha256,
+                "logo_size": len(b"logo"),
+                "outro_sha256": config.fixed_outro_sha256,
+                "outro_size": len(b"outro"),
+            },
+        )
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(manifest["version"], 4)
+        self.assertEqual(
+            manifest["request"]["media_mode"],
+            worker.DIRECT_OUTRO_MEDIA_MODE,
+        )
+        self.assertEqual(
+            manifest["request"]["transition"],
+            "phone-match-0.9s",
+        )
+        self.assertEqual(
+            manifest["request"]["logo_sha256"],
+            hashlib.sha256(b"logo").hexdigest(),
+        )
+        self.assertEqual(manifest["request"]["logo_size"], len(b"logo"))
+        self.assertEqual(
+            manifest["request"]["outro_sha256"],
+            hashlib.sha256(b"outro").hexdigest(),
+        )
+        self.assertEqual(
+            manifest["request"]["outro_size"],
+            len(b"outro"),
+        )
+        ffmpeg_commands = [
+            command
+            for command in runner.commands
+            if "ffmpeg" in Path(command[0]).name.lower()
+        ]
+        self.assertEqual(len(ffmpeg_commands), 2)
+        self.assertIn("approved-outro.mp4", " ".join(ffmpeg_commands[0]))
+        self.assertNotIn(str(config.fixed_outro_path), ffmpeg_commands[0])
+        composed = " ".join(ffmpeg_commands[1])
+        self.assertIn("source.mp4", composed)
+        self.assertIn("outro-normalized.mp4", composed)
+        self.assertIn("approved-logo.png", composed)
+        self.assertNotIn(str(config.logo_path), composed)
+        self.assertIn("-filter_complex", ffmpeg_commands[1])
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_OUTRO_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        self.assertEqual(len(calls), 1)
+
+    def test_direct_outro_reuse_rejects_changed_assets_or_media_mode(self):
+        config = make_direct_outro_config(self.root)
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner(
+                [
+                    input_probe(39.1),
+                    input_probe(11.933333),
+                    prepared_probe(50.133333),
+                ]
+            ),
+            downloader=make_downloader(calls),
+        )
+        request = make_prepare(
+            expected_profile=worker.DIRECT_OUTRO_PROFILE,
+            source_sha256=hashlib.sha256(SOURCE_BYTES).hexdigest(),
+            source_size=len(SOURCE_BYTES),
+            source_trim_tail_seconds=0,
+        )
+        processor.prepare(request)
+        original_logo = config.logo_path.read_bytes()
+        original_outro = config.fixed_outro_path.read_bytes()
+
+        config.logo_path.write_bytes(original_logo + b"-changed")
+        with self.assertRaises(worker.TTGPUError) as changed_logo:
+            processor.prepare(request)
+        self.assertEqual(
+            changed_logo.exception.code,
+            "prepare_idempotency_conflict",
+        )
+
+        config.logo_path.write_bytes(original_logo)
+        config.fixed_outro_path.write_bytes(original_outro + b"-changed")
+        with self.assertRaises(worker.TTGPUError) as changed_outro:
+            processor.prepare(request)
+        self.assertEqual(
+            changed_outro.exception.code,
+            "prepare_idempotency_conflict",
+        )
+
+        config.fixed_outro_path.write_bytes(original_outro)
+        with self.assertRaises(worker.TTGPUError) as changed_source_hint:
+            processor.prepare(
+                dict(request, source_sha256="b" * 64)
+            )
+        self.assertEqual(
+            changed_source_hint.exception.code,
+            "prepare_idempotency_conflict",
+        )
+
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        manifest = worker._read_json(manifest_path)
+        manifest["request"]["transition"] = "none"
+        worker._atomic_write_json(manifest_path, manifest)
+        with self.assertRaises(worker.TTGPUError) as changed_transition:
+            processor.prepare(request)
+        self.assertEqual(
+            changed_transition.exception.code,
+            "prepare_idempotency_conflict",
+        )
+
+        clean = make_direct_clean_config(self.root)
+        clean_processor = self.processor(
+            config=clean,
+            downloader=make_downloader(calls),
+        )
+        with self.assertRaises(worker.TTGPUError) as changed_mode:
+            clean_processor.prepare(
+                make_prepare(
+                    expected_profile=worker.DIRECT_CLEAN_PROFILE,
+                    source_trim_tail_seconds=0,
+                )
+            )
+        self.assertEqual(
+            changed_mode.exception.code,
+            "prepare_idempotency_conflict",
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_direct_outro_unapproved_asset_fails_before_external_work(self):
+        config = make_direct_outro_config(self.root)
+        config.logo_path.write_bytes(b"unapproved-logo")
+        calls = []
+        runner = FakeRunner()
+        object_store = FakeObjectStore()
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+            object_store=object_store,
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.prepare(
+                make_prepare(
+                    expected_profile=worker.DIRECT_OUTRO_PROFILE,
+                    job_id="ttjob_direct_outro_asset_drift_001",
+                    source_trim_tail_seconds=0,
+                )
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "direct_outro_asset_mismatch",
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(runner.commands, [])
+        self.assertEqual(object_store.upload_calls, [])
+
+    def test_direct_outro_h264_prepare_uses_distinct_avc1_profile(self):
+        config = make_direct_outro_config(
+            self.root,
+            video_encoder="h264_nvenc",
+            profile=worker.DIRECT_OUTRO_H264_PROFILE,
+        )
+        runner = FakeRunner(
+            [
+                input_probe(39.1),
+                input_probe(11.933333),
+                prepared_probe(50.133333, "h264_nvenc"),
+            ]
+        )
+        processor = self.processor(config=config, runner=runner)
+        result = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_OUTRO_H264_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertEqual(result["profile"], worker.DIRECT_OUTRO_H264_PROFILE)
+        self.assertTrue(result["direct_post_eligible"])
+        ffmpeg_commands = [
+            command
+            for command in runner.commands
+            if "ffmpeg" in Path(command[0]).name.lower()
+        ]
+        self.assertEqual(len(ffmpeg_commands), 2)
+        final_command = ffmpeg_commands[-1]
+        self.assertIn("h264_nvenc", final_command)
+        self.assertEqual(
+            final_command[final_command.index("-tag:v") + 1],
+            "avc1",
+        )
+
+    def test_direct_outro_prepared_manifest_reaches_formal_publish(self):
+        config = make_direct_outro_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner(
+                [
+                    input_probe(39.1),
+                    input_probe(11.933333),
+                    prepared_probe(50.133333),
+                ]
+            ),
+            api=api,
+        )
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.DIRECT_OUTRO_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(prepared["direct_post_eligible"])
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(published["publish_id"], "v_pub_url~v2.123")
+        self.assertEqual(len(api.init_calls), 1)
+
+    def test_direct_outro_publish_rejects_tampered_asset_identity(self):
+        config = make_direct_outro_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        manifest_path = processor._prepare_manifest_path(JOB_ID)
+        cases = (
+            (("version",), 3),
+            (("request", "media_mode"), worker.DIRECT_CLEAN_MEDIA_MODE),
+            (("request", "profile"), worker.DIRECT_CLEAN_PROFILE),
+            (("request", "transition"), "none"),
+            (("request", "logo_sha256"), "0" * 64),
+            (("request", "outro_sha256"), "0" * 64),
+            (("request", "source_sha256"), "g" * 64),
+            (("request", "source_size"), 0),
+        )
+        for path, value in cases:
+            with self.subTest(path=path):
+                seed_prepared(processor, direct_post_eligible=True)
+                manifest = worker._read_json(manifest_path)
+                target = manifest
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                worker._atomic_write_json(manifest_path, manifest)
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    processor.publish(make_publish(config))
+                self.assertEqual(
+                    caught.exception.code,
+                    "prepared_media_invalid",
+                )
+                self.assertEqual(api.init_calls, [])
+                self.assertFalse(
+                    processor._publish_ledger_path(JOB_ID).exists()
+                )
+
+    def test_direct_outro_publish_rejects_asset_drift_before_tiktok_init(self):
+        config = make_direct_outro_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor, direct_post_eligible=True)
+        config.logo_path.write_bytes(b"drifted-after-prepare")
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.publish(make_publish(config))
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+        self.assertEqual(api.init_calls, [])
+        self.assertFalse(processor._publish_ledger_path(JOB_ID).exists())
 
     def test_prepare_reuse_rejects_changed_url_hash_or_trim_contract(self):
         processor = self.processor()
@@ -2456,6 +2899,21 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertEqual(len(api.init_calls), 1)
 
+    def test_publish_sends_caption_line_breaks_to_tiktok_unchanged(self):
+        config = make_direct_clean_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(config=config, api=api)
+        seed_prepared(processor, direct_post_eligible=True)
+        caption = (
+            "Watch the full story\n\n"
+            "Drama ID: ABCD1234\n\n"
+            "https://gy.g2flow.com/s2l/8000000000000000009.html"
+        )
+        processor.publish(make_publish(config, title=caption))
+        _token, post_info, _video_url = api.init_calls[0]
+        self.assertEqual(caption, post_info["title"])
+        self.assertIn("\n\nDrama ID: ABCD1234\n\n", post_info["title"])
+
     def test_reconcile_remains_available_after_gates_close_and_returns_publish_id(self):
         enabled = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
@@ -2569,6 +3027,49 @@ class TTGPUWorkerTests(unittest.TestCase):
             worker.validate_credential_request(payload)
         self.assertEqual(caught.exception.code, "invalid_request")
         self.assertNotIn(TOKEN, str(caught.exception))
+
+    def test_direct_outro_health_reports_formal_profile_and_transition(self):
+        config = make_direct_outro_config(self.root, gates=True)
+        processor = self.processor(config=config)
+        server = worker.TTPostGPUHTTPServer(
+            ("127.0.0.1", 0),
+            processor,
+            config.internal_token,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        try:
+            connection = http.client.HTTPConnection(host, port, timeout=5)
+            connection.request("GET", worker.HEALTH_PATH)
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                payload["media_mode"],
+                worker.DIRECT_OUTRO_MEDIA_MODE,
+            )
+            self.assertEqual(payload["profile"], worker.DIRECT_OUTRO_PROFILE)
+            self.assertTrue(payload["direct_post_eligible"])
+            self.assertFalse(payload["brand_overlay_review_required"])
+            self.assertEqual(payload["transition"], "phone-match-0.9s")
+            self.assertTrue(payload["asset_identity_ready"])
+            self.assertTrue(payload["gates"]["ready"])
+            config.logo_path.write_bytes(b"health-drift")
+            connection = http.client.HTTPConnection(host, port, timeout=5)
+            connection.request("GET", worker.HEALTH_PATH)
+            drifted_response = connection.getresponse()
+            drifted_payload = json.loads(
+                drifted_response.read().decode("utf-8")
+            )
+            connection.close()
+            self.assertEqual(drifted_response.status, 200)
+            self.assertFalse(drifted_payload["asset_identity_ready"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_http_transport_is_bearer_protected_and_never_reflects_token(self):
         config = make_config(self.root)

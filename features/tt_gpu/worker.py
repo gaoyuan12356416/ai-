@@ -3,10 +3,11 @@
 The service has four responsibilities:
 
 * prepare an immutable vertical video with one explicit, versioned media mode:
-  the legacy branded-preview compositor or a clean Direct Post normalizer;
+  the legacy branded-preview compositor, a clean Direct Post normalizer, or a
+  reviewed Direct Post compositor with the fixed tutorial outro;
 * keep the branded-preview Logo/tutorial-outro profile permanently ineligible
-  for formal Direct Post while allowing the clean profile to carry a separate
-  auditable identity;
+  for formal Direct Post while allowing the clean and reviewed-outro profiles
+  to carry separate auditable identities;
 * query TikTok creator capabilities using a short-lived encrypted credential;
 * initialize and reconcile a TikTok Direct Post using ``PULL_FROM_URL``.
 
@@ -74,8 +75,11 @@ PROFILE = "tt-post-hevc-720x1280-v2"
 H264_FALLBACK_PROFILE = "tt-post-h264-720x1280-v2"
 DIRECT_CLEAN_PROFILE = "tt-post-direct-clean-hevc-720x1280-v1"
 DIRECT_CLEAN_H264_PROFILE = "tt-post-direct-clean-h264-720x1280-v1"
+DIRECT_OUTRO_PROFILE = "tt-post-direct-outro-hevc-720x1280-v1"
+DIRECT_OUTRO_H264_PROFILE = "tt-post-direct-outro-h264-720x1280-v1"
 BRANDED_PREVIEW_MEDIA_MODE = "branded_preview"
 DIRECT_CLEAN_MEDIA_MODE = "direct_clean"
+DIRECT_OUTRO_MEDIA_MODE = "direct_outro"
 DEFAULT_MEDIA_MODE = BRANDED_PREVIEW_MEDIA_MODE
 HEALTH_PATH = "/health"
 CREATOR_INFO_PATH = "/internal/tt-post/creator-info"
@@ -413,6 +417,12 @@ def _selected_media_profile(video_encoder, media_mode):
             if video_encoder == "hevc_nvenc"
             else DIRECT_CLEAN_H264_PROFILE
         )
+    if media_mode == DIRECT_OUTRO_MEDIA_MODE:
+        return (
+            DIRECT_OUTRO_PROFILE
+            if video_encoder == "hevc_nvenc"
+            else DIRECT_OUTRO_H264_PROFILE
+        )
     raise TTGPUError(
         "invalid_configuration",
         "TT_POST_GPU_MEDIA_MODE is not supported",
@@ -479,6 +489,8 @@ class WorkerConfig:
     prepare_total_timeout: int = DEFAULT_PREPARE_TOTAL_TIMEOUT
     media_mode: str = DEFAULT_MEDIA_MODE
     profile: str = PROFILE
+    fixed_outro_sha256: str = ""
+    logo_sha256: str = ""
 
     @classmethod
     def from_env(cls):
@@ -574,16 +586,61 @@ class WorkerConfig:
         if media_mode not in {
             BRANDED_PREVIEW_MEDIA_MODE,
             DIRECT_CLEAN_MEDIA_MODE,
+            DIRECT_OUTRO_MEDIA_MODE,
         }:
             raise TTGPUError(
                 "invalid_configuration",
                 (
-                    "TT_POST_GPU_MEDIA_MODE must be branded_preview "
-                    "or direct_clean"
+                    "TT_POST_GPU_MEDIA_MODE must be branded_preview, "
+                    "direct_clean, or direct_outro"
                 ),
                 500,
             )
         selected_profile = _selected_media_profile(encoder, media_mode)
+        fixed_outro_sha256 = str(
+            os.environ.get("TT_POST_GPU_FIXED_OUTRO_SHA256", "") or ""
+        ).strip().lower()
+        logo_sha256 = str(
+            os.environ.get("TT_POST_GPU_LOGO_SHA256", "") or ""
+        ).strip().lower()
+        if media_mode == DIRECT_OUTRO_MEDIA_MODE and (
+            not HEX_64_RE.fullmatch(fixed_outro_sha256)
+            or not HEX_64_RE.fullmatch(logo_sha256)
+        ):
+            raise TTGPUError(
+                "invalid_configuration",
+                (
+                    "direct_outro requires approved "
+                    "TT_POST_GPU_FIXED_OUTRO_SHA256 and "
+                    "TT_POST_GPU_LOGO_SHA256 fingerprints"
+                ),
+                500,
+            )
+        if media_mode == DIRECT_OUTRO_MEDIA_MODE:
+            try:
+                actual_outro_sha256, _ = _file_sha256(fixed_outro_path)
+                actual_logo_sha256, _ = _file_sha256(logo_path)
+            except OSError:
+                raise TTGPUError(
+                    "invalid_configuration",
+                    "approved direct_outro assets are unavailable",
+                    500,
+                ) from None
+            if (
+                not secrets.compare_digest(
+                    actual_outro_sha256,
+                    fixed_outro_sha256,
+                )
+                or not secrets.compare_digest(
+                    actual_logo_sha256,
+                    logo_sha256,
+                )
+            ):
+                raise TTGPUError(
+                    "invalid_configuration",
+                    "direct_outro assets do not match approved fingerprints",
+                    500,
+                )
         secret_id = str(os.environ.get("TT_POST_GPU_COS_SECRET_ID", "") or "").strip()
         secret_key = str(os.environ.get("TT_POST_GPU_COS_SECRET_KEY", "") or "").strip()
         bucket = str(os.environ.get("TT_POST_GPU_COS_BUCKET", "") or "").strip()
@@ -864,6 +921,8 @@ class WorkerConfig:
             video_encoder=encoder,
             media_mode=media_mode,
             profile=selected_profile,
+            fixed_outro_sha256=fixed_outro_sha256,
+            logo_sha256=logo_sha256,
             cos_secret_id=secret_id,
             cos_secret_key=secret_key,
             cos_bucket=bucket,
@@ -970,13 +1029,46 @@ class WorkerConfig:
         return self.media_mode == BRANDED_PREVIEW_MEDIA_MODE
 
     def direct_post_eligible(self):
-        return self.media_mode == DIRECT_CLEAN_MEDIA_MODE
+        return self.media_mode in {
+            DIRECT_CLEAN_MEDIA_MODE,
+            DIRECT_OUTRO_MEDIA_MODE,
+        }
+
+    def uses_outro_pipeline(self):
+        return self.media_mode in {
+            BRANDED_PREVIEW_MEDIA_MODE,
+            DIRECT_OUTRO_MEDIA_MODE,
+        }
+
+    def asset_identity_ready(self):
+        if self.media_mode != DIRECT_OUTRO_MEDIA_MODE:
+            return True
+        if (
+            not HEX_64_RE.fullmatch(self.fixed_outro_sha256)
+            or not HEX_64_RE.fullmatch(self.logo_sha256)
+        ):
+            return False
+        try:
+            actual_outro_sha256, _ = _file_sha256(self.fixed_outro_path)
+            actual_logo_sha256, _ = _file_sha256(self.logo_path)
+        except OSError:
+            return False
+        return bool(
+            secrets.compare_digest(
+                actual_outro_sha256,
+                self.fixed_outro_sha256,
+            )
+            and secrets.compare_digest(
+                actual_logo_sha256,
+                self.logo_sha256,
+            )
+        )
 
     def preparation_transition(self):
         return (
-            "none"
-            if self.direct_post_eligible()
-            else "phone-match-0.9s"
+            "phone-match-0.9s"
+            if self.uses_outro_pipeline()
+            else "none"
         )
 
     def gate_state(self):
@@ -3184,20 +3276,84 @@ def _prepare_response(manifest, reused, config, expected_job_id):
     )
     expected_brand_review = config.brand_overlay_review_required()
     expected_direct_eligible = config.direct_post_eligible()
+    request_contract_match = True
+    response_assets = None
+    if config.media_mode == DIRECT_OUTRO_MEDIA_MODE:
+        try:
+            current_outro_sha, current_outro_size = _file_sha256(
+                config.fixed_outro_path
+            )
+            current_logo_sha, current_logo_size = _file_sha256(
+                config.logo_path
+            )
+            request_source_size = int(stored_request.get("source_size"))
+            request_trim = float(
+                stored_request.get("source_trim_tail_seconds")
+            )
+        except OSError:
+            raise TTGPUError(
+                "prepared_media_invalid",
+                "current Direct Post outro assets are unavailable",
+                500,
+            ) from None
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            request_source_size = 0
+            request_trim = -1.0
+        expected_assets = {
+            "logo_sha256": current_logo_sha,
+            "logo_size": current_logo_size,
+            "outro_sha256": current_outro_sha,
+            "outro_size": current_outro_size,
+        }
+        response_assets = dict(expected_assets)
+        request_source_sha = str(
+            stored_request.get("source_sha256") or ""
+        ) if isinstance(stored_request, dict) else ""
+        request_source_url_sha = str(
+            stored_request.get("source_url_sha256") or ""
+        ) if isinstance(stored_request, dict) else ""
+        request_contract_match = bool(
+            isinstance(stored_request, dict)
+            and manifest.get("version") == 4
+            and HEX_64_RE.fullmatch(config.fixed_outro_sha256)
+            and HEX_64_RE.fullmatch(config.logo_sha256)
+            and secrets.compare_digest(
+                current_outro_sha,
+                config.fixed_outro_sha256,
+            )
+            and secrets.compare_digest(
+                current_logo_sha,
+                config.logo_sha256,
+            )
+            and stored_request.get("transition")
+            == config.preparation_transition()
+            and stored_request.get("profile") == config.profile
+            and HEX_64_RE.fullmatch(request_source_url_sha)
+            and HEX_64_RE.fullmatch(request_source_sha)
+            and request_source_size > 0
+            and request_source_size <= int(config.max_source_bytes)
+            and math.isfinite(request_trim)
+            and 0.0 <= request_trim <= 60.0
+            and all(
+                stored_request.get(key) == value
+                for key, value in expected_assets.items()
+            )
+        )
     if (
         str(result.get("job_id") or "") != str(expected_job_id or "")
         or not CONTENT_ID_RE.fullmatch(request_content_id)
         or str(result.get("content_id") or "") != request_content_id
         or not CONTENT_ID_RE.fullmatch(str(result.get("content_id") or ""))
         or (
-            expected_direct_eligible
-            and request_media_mode != DIRECT_CLEAN_MEDIA_MODE
-        )
-        or (
-            not expected_direct_eligible
+            config.media_mode == BRANDED_PREVIEW_MEDIA_MODE
             and request_media_mode
             not in {"", BRANDED_PREVIEW_MEDIA_MODE}
         )
+        or (
+            config.media_mode != BRANDED_PREVIEW_MEDIA_MODE
+            and request_media_mode != config.media_mode
+        )
+        or not request_contract_match
         or str(result.get("profile") or "") != str(config.profile)
         or (
             result.get("brand_overlay_review_required")
@@ -3262,11 +3418,12 @@ def _prepare_response(manifest, reused, config, expected_job_id):
                 "prepared GPU media is no longer available",
                 409,
             )
-    return {
+    response = {
         "brand_overlay_review_required": expected_brand_review,
         "content_id": result["content_id"],
         "direct_post_eligible": expected_direct_eligible,
         "job_id": result["job_id"],
+        "media_mode": config.media_mode,
         "output_sha256": result["output_sha256"],
         "output_size": result["output_size"],
         "output_url": result["output_url"],
@@ -3275,7 +3432,11 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         "reused": bool(reused),
         "storage_backend": storage_backend,
         "status": "ready",
+        "transition": config.preparation_transition(),
     }
+    if response_assets is not None:
+        response["assets"] = response_assets
+    return response
 
 
 class TTPostGPUProcessor:
@@ -3583,9 +3744,16 @@ class TTPostGPUProcessor:
                 request["source_url"].encode("utf-8")
             ).hexdigest(),
         }
-        if self.config.direct_post_eligible():
+        if self.config.media_mode != BRANDED_PREVIEW_MEDIA_MODE:
             reuse_contract["media_mode"] = self.config.media_mode
-        else:
+        if self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE:
+            reuse_contract["transition"] = (
+                self.config.preparation_transition()
+            )
+            for key in ("source_sha256", "source_size"):
+                if key in request:
+                    reuse_contract[key] = request[key]
+        if self.config.uses_outro_pipeline():
             outro_sha, outro_size = _file_sha256(
                 self.config.fixed_outro_path,
                 deadline=deadline,
@@ -3660,9 +3828,64 @@ class TTPostGPUProcessor:
         output_path = job_dir / "prepared.mp4"
         drama_text_path = job_dir / "drama-id.txt"
         tutorial_text_path = job_dir / "tutorial-label.txt"
+        outro_input_path = self.config.fixed_outro_path
+        logo_input_path = self.config.logo_path
         local_orphan = None
         try:
-            if self.config.brand_overlay_review_required():
+            if self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE:
+                outro_input_path = job_dir / "approved-outro.mp4"
+                logo_input_path = job_dir / "approved-logo.png"
+                deadline.check()
+                try:
+                    shutil.copyfile(
+                        self.config.fixed_outro_path,
+                        outro_input_path,
+                    )
+                    shutil.copyfile(
+                        self.config.logo_path,
+                        logo_input_path,
+                    )
+                except OSError:
+                    raise TTGPUError(
+                        "direct_outro_asset_unavailable",
+                        "approved Direct Post outro assets are unavailable",
+                        500,
+                    ) from None
+                snapshot_outro_sha, snapshot_outro_size = _file_sha256(
+                    outro_input_path,
+                    deadline=deadline,
+                )
+                snapshot_logo_sha, snapshot_logo_size = _file_sha256(
+                    logo_input_path,
+                    deadline=deadline,
+                )
+                if (
+                    not secrets.compare_digest(
+                        snapshot_outro_sha,
+                        self.config.fixed_outro_sha256,
+                    )
+                    or not secrets.compare_digest(
+                        snapshot_logo_sha,
+                        self.config.logo_sha256,
+                    )
+                    or snapshot_outro_sha
+                    != reuse_contract.get("outro_sha256")
+                    or snapshot_outro_size
+                    != reuse_contract.get("outro_size")
+                    or snapshot_logo_sha != reuse_contract.get("logo_sha256")
+                    or snapshot_logo_size != reuse_contract.get("logo_size")
+                ):
+                    raise TTGPUError(
+                        "direct_outro_asset_mismatch",
+                        (
+                            "Direct Post outro assets do not match approved "
+                            "fingerprints"
+                        ),
+                        500,
+                    )
+                os.chmod(outro_input_path, 0o400)
+                os.chmod(logo_input_path, 0o400)
+            if self.config.uses_outro_pipeline():
                 drama_text_path.write_text(
                     "DRAMA ID: %s" % request["content_id"],
                     encoding="utf-8",
@@ -3728,13 +3951,13 @@ class TTPostGPUProcessor:
                     "source trim would remove the complete usable material",
                     400,
                 )
-            if self.config.direct_post_eligible():
+            if not self.config.uses_outro_pipeline():
                 outro_info = None
                 expected_duration = effective_source_duration
             else:
                 outro_probe = probe_media(
                     self.config,
-                    self.config.fixed_outro_path,
+                    outro_input_path,
                     self.runner,
                     deadline=deadline,
                 )
@@ -3765,7 +3988,7 @@ class TTPostGPUProcessor:
                 )
             try:
                 deadline.check()
-                if self.config.direct_post_eligible():
+                if not self.config.uses_outro_pipeline():
                     _run_command(
                         self.runner,
                         build_normalize_command(
@@ -3787,7 +4010,7 @@ class TTPostGPUProcessor:
                         self.runner,
                         build_normalize_command(
                             self.config,
-                            self.config.fixed_outro_path,
+                            outro_input_path,
                             outro_normalized,
                             outro_info,
                             build_outro_filter(
@@ -3812,7 +4035,7 @@ class TTPostGPUProcessor:
                             effective_source_duration,
                             outro_info["duration"],
                             source_has_audio=source_info["has_audio"],
-                            logo_path=self.config.logo_path,
+                            logo_path=logo_input_path,
                         ),
                         deadline.stage_timeout(
                             self.config.transcode_timeout
@@ -3897,7 +4120,11 @@ class TTPostGPUProcessor:
                     "key": storage_key,
                 },
                 "version": (
-                    3 if self.config.direct_post_eligible() else 2
+                    4
+                    if self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE
+                    else 3
+                    if self.config.media_mode == DIRECT_CLEAN_MEDIA_MODE
+                    else 2
                 ),
             }
             if self.config.storage_backend == "cos":
@@ -4385,6 +4612,9 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
         self._send_json(
             200,
             {
+                "asset_identity_ready": (
+                    self.server.processor.config.asset_identity_ready()
+                ),
                 "brand_overlay_review_required": (
                     self.server.processor.config
                     .brand_overlay_review_required()

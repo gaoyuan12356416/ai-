@@ -31,6 +31,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from .links import (
+    TT_SHORT_LINK_MAX_LOCAL_ID,
+    TT_SHORT_LINK_NAMESPACE,
+    build_short_url,
+    short_link_id,
+    validate_short_url,
+    validate_w2a_url,
+)
+
 
 UTC = timezone.utc
 BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -121,6 +130,12 @@ _WORKER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
 _GPU_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{11,127}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
+_SINGLE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
+_URL_PLACEHOLDER = "{url}"
+_DESC_PLACEHOLDER = "{desc}"
+_MAX_TT_SHORT_URL = build_short_url(
+    TT_SHORT_LINK_NAMESPACE + TT_SHORT_LINK_MAX_LOCAL_ID
+)
 _PUBLISH_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 _SHANGHAI_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
@@ -170,6 +185,18 @@ def _optional_text(value: Any, label: str, limit: int) -> str:
     text = str(value or "").strip()
     if len(text) > int(limit) or "\x00" in text:
         raise TTPostError("invalid_request", "%s无效" % label, 400)
+    return text
+
+
+def _normalize_description(value: Any) -> str:
+    """Normalize one authoritative drama description without expanding macros."""
+
+    raw = str(value or "")
+    if "\x00" in raw:
+        raise ValueError("description contains NUL")
+    text = re.sub(r"\s+", " ", raw).strip()
+    if len(text) > 4096 or any(ord(char) < 32 for char in text):
+        raise ValueError("description is invalid")
     return text
 
 
@@ -658,13 +685,20 @@ def render_caption_template(
     template: Any,
     content_id: Any,
     *,
+    url: Any = None,
+    description: Any = None,
+    defer_url: bool = False,
+    defer_description: bool = False,
     max_chars: int = MAX_CAPTION_CHARS,
 ) -> str:
     """Render the user's caption at queue-freeze time.
 
     ``{{contect_id}}`` is supported exactly as supplied by the product owner.
     ``{{content_id}}`` is accepted as a correctly-spelled compatibility alias.
-    Unknown placeholders fail closed.
+    ``{url}`` is replaced by the immutable per-queue TT short URL. Material
+    intake may explicitly defer that one macro until the queue identity exists.
+    ``{desc}`` is the normalized drama description frozen with the material.
+    Unknown placeholders fail closed and internal line breaks are unchanged.
     """
 
     text = str(template or "")
@@ -697,14 +731,79 @@ def render_caption_template(
             "发布描述模板包含未知占位符",
             400,
         )
-    rendered = _PLACEHOLDER_RE.sub(
+    single_placeholders = [
+        match.group(1)
+        for match in _SINGLE_PLACEHOLDER_RE.finditer(text)
+    ]
+    single_remainder = _SINGLE_PLACEHOLDER_RE.sub("", remainder)
+    if "{" in single_remainder or "}" in single_remainder:
+        raise TTPostError(
+            "caption_placeholder_invalid",
+            "发布描述模板包含不完整占位符",
+            400,
+        )
+    unknown_single = sorted(
+        {name for name in single_placeholders if name not in {"url", "desc"}}
+    )
+    if unknown_single:
+        raise TTPostError(
+            "caption_placeholder_invalid",
+            "发布描述模板包含未知占位符",
+            400,
+        )
+    has_url = "url" in single_placeholders
+    has_description = "desc" in single_placeholders
+    normalized_url = ""
+    if has_url and not defer_url:
+        try:
+            normalized_url = validate_short_url(url)
+        except Exception:
+            raise TTPostError(
+                "caption_url_required",
+                "发布描述模板中的{url}必须绑定有效TikTok短链",
+                400,
+            ) from None
+    normalized_description = ""
+    if has_description and not defer_description:
+        try:
+            normalized_description = _normalize_description(description)
+        except ValueError:
+            normalized_description = ""
+        if not normalized_description:
+            raise TTPostError(
+                "caption_desc_required",
+                "发布描述模板中的{desc}必须绑定有效剧描述",
+                400,
+            )
+    rendered_base = _PLACEHOLDER_RE.sub(
         lambda match: normalized_content_id
         if match.group(1).strip() in {"contect_id", "content_id"}
         else match.group(0),
         text,
+    )
+
+    def render_single(match: re.Match, *, measuring: bool) -> str:
+        name = match.group(1)
+        if name == "url":
+            if defer_url:
+                return _MAX_TT_SHORT_URL if measuring else match.group(0)
+            return normalized_url
+        if name == "desc":
+            if defer_description:
+                return match.group(0)
+            return normalized_description
+        return match.group(0)
+
+    rendered = _SINGLE_PLACEHOLDER_RE.sub(
+        lambda match: render_single(match, measuring=False),
+        rendered_base,
+    ).strip()
+    measured = _SINGLE_PLACEHOLDER_RE.sub(
+        lambda match: render_single(match, measuring=True),
+        rendered_base,
     ).strip()
     try:
-        rendered_units = len(rendered.encode("utf-16-le")) // 2
+        rendered_units = len(measured.encode("utf-16-le")) // 2
     except UnicodeEncodeError:
         rendered_units = int(max_chars) + 1
     if not rendered or rendered_units > int(max_chars):
@@ -714,6 +813,24 @@ def render_caption_template(
             400,
         )
     return rendered
+
+
+def caption_uses_url_macro(template: Any) -> bool:
+    """Return whether the exact supported single-brace URL macro is present."""
+
+    return any(
+        match.group(1) == "url"
+        for match in _SINGLE_PLACEHOLDER_RE.finditer(str(template or ""))
+    )
+
+
+def caption_uses_desc_macro(template: Any) -> bool:
+    """Return whether the exact supported drama-description macro is present."""
+
+    return any(
+        match.group(1) == "desc"
+        for match in _SINGLE_PLACEHOLDER_RE.finditer(str(template or ""))
+    )
 
 
 def render_fixed_caption(content_id: Any) -> str:
@@ -1095,6 +1212,11 @@ def ensure_storage(db_path: Any) -> None:
                     content_id TEXT NOT NULL,
                     media_url TEXT NOT NULL,
                     source_media_url TEXT NOT NULL DEFAULT '',
+                    material_name TEXT NOT NULL DEFAULT '',
+                    drama_name TEXT NOT NULL DEFAULT '',
+                    material_language TEXT NOT NULL DEFAULT '',
+                    material_tag TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
                     account_id TEXT NOT NULL,
                     account_username TEXT NOT NULL DEFAULT '',
                     account_display_name TEXT NOT NULL DEFAULT '',
@@ -1105,6 +1227,10 @@ def ensure_storage(db_path: Any) -> None:
                     scheduled_at_utc TEXT NOT NULL,
                     caption_template TEXT NOT NULL,
                     caption TEXT NOT NULL,
+                    short_link_id INTEGER NOT NULL DEFAULT 0
+                        CHECK(short_link_id>=0),
+                    short_url TEXT NOT NULL DEFAULT '',
+                    long_url TEXT NOT NULL DEFAULT '',
                     privacy_level TEXT NOT NULL,
                     allow_comment INTEGER NOT NULL CHECK(allow_comment IN (0,1)),
                     allow_duet INTEGER NOT NULL CHECK(allow_duet IN (0,1)),
@@ -1187,6 +1313,11 @@ def ensure_storage(db_path: Any) -> None:
                     material_id TEXT NOT NULL UNIQUE,
                     account_id TEXT NOT NULL,
                     content_id TEXT NOT NULL,
+                    material_name TEXT NOT NULL DEFAULT '',
+                    drama_name TEXT NOT NULL DEFAULT '',
+                    material_language TEXT NOT NULL DEFAULT '',
+                    material_tag TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
                     source_media_url TEXT NOT NULL,
                     prepared_media_url TEXT NOT NULL,
                     gpu_job_id TEXT NOT NULL,
@@ -1235,6 +1366,7 @@ def ensure_storage(db_path: Any) -> None:
                     material_name TEXT NOT NULL DEFAULT '',
                     drama_name TEXT NOT NULL DEFAULT '',
                     material_language TEXT NOT NULL DEFAULT '',
+                    material_tag TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
                     gpu_job_id TEXT NOT NULL UNIQUE,
                     source_trim_tail_seconds REAL NOT NULL DEFAULT 0
@@ -1380,6 +1512,41 @@ def ensure_storage(db_path: Any) -> None:
                         TEXT NOT NULL DEFAULT ''
                     """
                 )
+            additive_columns = {
+                "tt_post_material_intake": {
+                    "material_tag": "TEXT NOT NULL DEFAULT ''",
+                },
+                "tt_post_recurring_pool": {
+                    "material_name": "TEXT NOT NULL DEFAULT ''",
+                    "drama_name": "TEXT NOT NULL DEFAULT ''",
+                    "material_language": "TEXT NOT NULL DEFAULT ''",
+                    "material_tag": "TEXT NOT NULL DEFAULT ''",
+                    "description": "TEXT NOT NULL DEFAULT ''",
+                },
+                "tt_post_queue": {
+                    "material_name": "TEXT NOT NULL DEFAULT ''",
+                    "drama_name": "TEXT NOT NULL DEFAULT ''",
+                    "material_language": "TEXT NOT NULL DEFAULT ''",
+                    "material_tag": "TEXT NOT NULL DEFAULT ''",
+                    "description": "TEXT NOT NULL DEFAULT ''",
+                    "short_link_id": "INTEGER NOT NULL DEFAULT 0",
+                    "short_url": "TEXT NOT NULL DEFAULT ''",
+                    "long_url": "TEXT NOT NULL DEFAULT ''",
+                },
+            }
+            for table_name, definitions in additive_columns.items():
+                existing_columns = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        "PRAGMA table_info(%s)" % table_name
+                    ).fetchall()
+                }
+                for column_name, definition in definitions.items():
+                    if column_name not in existing_columns:
+                        conn.execute(
+                            "ALTER TABLE %s ADD COLUMN %s %s"
+                            % (table_name, column_name, definition)
+                        )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -1388,6 +1555,12 @@ def ensure_storage(db_path: Any) -> None:
                     status,queue_id,execution_lease_expires_at_utc,
                     scheduled_at_utc,id
                 )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_queue_short_link
+                ON tt_post_queue(short_link_id) WHERE short_link_id>0
                 """
             )
             conn.commit()
@@ -2058,6 +2231,7 @@ class TTPostStore:
         material_name: Any = "",
         drama_name: Any = "",
         material_language: Any = "",
+        material_tag: Any = "",
         description: Any = "",
         actor_user_id: str = "",
         actor_name: str = "",
@@ -2113,11 +2287,17 @@ class TTPostStore:
             "TT成片配置版本",
             128,
         )
+        try:
+            normalized_description = _normalize_description(description)
+        except ValueError:
+            raise TTPostError("invalid_request", "素材描述无效", 400) from None
         normalized_template = str(caption_template or "")
         normalized_caption = str(caption or "")
         expected_caption = render_caption_template(
             normalized_template,
             normalized_content_id,
+            description=normalized_description,
+            defer_url=True,
         )
         if not secrets.compare_digest(
             normalized_caption.encode("utf-8"),
@@ -2156,10 +2336,10 @@ class TTPostStore:
             "素材语言",
             32,
         )
-        normalized_description = _optional_text(
-            description,
-            "素材描述",
-            4096,
+        normalized_tag = _optional_text(
+            material_tag,
+            "素材标签",
+            255,
         )
         normalized_actor_id = _optional_text(
             actor_user_id,
@@ -2185,6 +2365,7 @@ class TTPostStore:
             "material_id": normalized_material_id,
             "material_language": normalized_language,
             "material_name": normalized_material_name,
+            "material_tag": normalized_tag,
             "preparation_profile": normalized_profile,
             "source_media_url": normalized_source_url,
             "source_trim_tail_seconds": normalized_trim,
@@ -2266,13 +2447,13 @@ class TTPostStore:
                     INSERT INTO tt_post_material_intake(
                         idempotency_key,request_sha256,material_id,account_id,
                         content_id,source_media_url,material_name,drama_name,
-                        material_language,description,gpu_job_id,
+                        material_language,material_tag,description,gpu_job_id,
                         source_trim_tail_seconds,preparation_profile,
                         caption_template,caption,consent_version,
                         consented_at_utc,is_aigc,user_consent,status,
                         created_by_user_id,created_by_name,
                         updated_by_user_id,updated_by_name,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'queued',
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'queued',
                         ?,?,?,?,?,?)
                     """,
                     (
@@ -2285,6 +2466,7 @@ class TTPostStore:
                         normalized_material_name,
                         normalized_drama_name,
                         normalized_language,
+                        normalized_tag,
                         normalized_description,
                         normalized_gpu_job_id,
                         normalized_trim,
@@ -2672,6 +2854,15 @@ class TTPostStore:
                     "预制作结果与已冻结素材身份不一致",
                     409,
                 )
+            if secrets.compare_digest(
+                str(row["source_media_url"]),
+                normalized_url,
+            ):
+                raise TTPostError(
+                    "tt_prepared_media_matches_source",
+                    "TT最终成片地址不能与源素材地址相同",
+                    409,
+                )
             if str(row["status"]) == "ready":
                 stored_values = (
                     str(row["prepared_media_url"]),
@@ -2719,14 +2910,16 @@ class TTPostStore:
                     """
                     INSERT INTO tt_post_recurring_pool(
                         material_id,account_id,content_id,source_media_url,
-                        prepared_media_url,gpu_job_id,prepared_output_sha256,
+                        material_name,drama_name,material_language,material_tag,
+                        description,prepared_media_url,gpu_job_id,
+                        prepared_output_sha256,
                         prepared_output_size,prepared_duration_sec,
                         source_trim_tail_seconds,preparation_profile,
                         caption_template,caption,consent_version,
                         consented_at_utc,is_aigc,user_consent,status,
                         created_by_user_id,created_by_name,
                         updated_by_user_id,updated_by_name,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
                         ?,?,?,?,?,?)
                     """,
                     (
@@ -2734,6 +2927,11 @@ class TTPostStore:
                         str(row["account_id"]),
                         str(row["content_id"]),
                         str(row["source_media_url"]),
+                        str(row["material_name"]),
+                        str(row["drama_name"]),
+                        str(row["material_language"]),
+                        str(row["material_tag"]),
+                        str(row["description"]),
                         normalized_url,
                         normalized_gpu_job_id,
                         normalized_sha,
@@ -2894,6 +3092,11 @@ class TTPostStore:
         consent_version: Any,
         consented_at: Any,
         is_aigc: Any,
+        material_name: Any = "",
+        drama_name: Any = "",
+        material_language: Any = "",
+        material_tag: Any = "",
+        description: Any = "",
         actor_user_id: str = "",
         actor_name: str = "",
     ) -> Dict[str, Any]:
@@ -2914,6 +3117,15 @@ class TTPostStore:
             prepared_media_url,
             "最终成片地址",
         )
+        if secrets.compare_digest(
+            normalized_source_url,
+            normalized_prepared_url,
+        ):
+            raise TTPostError(
+                "tt_prepared_media_matches_source",
+                "TT最终成片地址不能与源素材地址相同",
+                409,
+            )
         normalized_gpu_job_id = str(gpu_job_id or "").strip()
         if not _GPU_JOB_ID_RE.fullmatch(normalized_gpu_job_id):
             raise TTPostError("invalid_gpu_job_id", "TT GPU任务ID无效", 400)
@@ -2957,11 +3169,17 @@ class TTPostStore:
             "TT成片配置版本",
             128,
         )
+        try:
+            normalized_description = _normalize_description(description)
+        except ValueError:
+            raise TTPostError("invalid_request", "素材描述无效", 400) from None
         normalized_template = str(caption_template or "")
         normalized_caption = str(caption or "")
         expected_caption = render_caption_template(
             normalized_template,
             normalized_content_id,
+            description=normalized_description,
+            defer_url=True,
         )
         if not secrets.compare_digest(
             normalized_caption.encode("utf-8"),
@@ -2982,6 +3200,26 @@ class TTPostStore:
             "发布确认时间",
         )
         normalized_is_aigc = _exact_bool(is_aigc, "AI生成内容标记")
+        normalized_material_name = _optional_text(
+            material_name,
+            "素材名称",
+            500,
+        )
+        normalized_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
+        normalized_language = _optional_text(
+            material_language,
+            "素材语言",
+            32,
+        )
+        normalized_tag = _optional_text(
+            material_tag,
+            "素材标签",
+            255,
+        )
         normalized_actor_id = _optional_text(
             actor_user_id,
             "操作人ID",
@@ -2996,6 +3234,11 @@ class TTPostStore:
             normalized_account_id,
             normalized_content_id,
             normalized_source_url,
+            normalized_material_name,
+            normalized_drama_name,
+            normalized_language,
+            normalized_tag,
+            normalized_description,
             normalized_prepared_url,
             normalized_gpu_job_id,
             normalized_sha,
@@ -3020,6 +3263,11 @@ class TTPostStore:
                     str(existing["account_id"]),
                     str(existing["content_id"]),
                     str(existing["source_media_url"]),
+                    str(existing["material_name"]),
+                    str(existing["drama_name"]),
+                    str(existing["material_language"]),
+                    str(existing["material_tag"]),
+                    str(existing["description"]),
                     str(existing["prepared_media_url"]),
                     str(existing["gpu_job_id"]),
                     str(existing["prepared_output_sha256"]),
@@ -3068,14 +3316,16 @@ class TTPostStore:
                     """
                     INSERT INTO tt_post_recurring_pool(
                         material_id,account_id,content_id,source_media_url,
-                        prepared_media_url,gpu_job_id,prepared_output_sha256,
+                        material_name,drama_name,material_language,material_tag,
+                        description,prepared_media_url,gpu_job_id,
+                        prepared_output_sha256,
                         prepared_output_size,prepared_duration_sec,
                         source_trim_tail_seconds,preparation_profile,
                         caption_template,caption,consent_version,
                         consented_at_utc,is_aigc,user_consent,status,
                         created_by_user_id,created_by_name,
                         updated_by_user_id,updated_by_name,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
                         ?,?,?,?,?,?)
                     """,
                     (
@@ -4327,6 +4577,11 @@ class TTPostStore:
         source_trim_tail_seconds: float = 0.0,
         recurring_run_id: Any = None,
         recurring_execution_token: Any = "",
+        material_name: Any = "",
+        drama_name: Any = "",
+        material_language: Any = "",
+        material_tag: Any = "",
+        description: Any = "",
     ) -> Dict[str, Any]:
         """Resolve the material and freeze all mutable publish inputs."""
 
@@ -4427,10 +4682,65 @@ class TTPostStore:
                 404,
             )
         resolution = resolve_material(material_resolver, pool["material_id"])
+        if frozen_source_url and secrets.compare_digest(
+            resolution.media_url,
+            frozen_source_url,
+        ):
+            raise TTPostError(
+                "tt_prepared_media_matches_source",
+                "TT最终成片地址不能与源素材地址相同",
+                409,
+            )
         frozen_caption_template = str(caption_template or "").strip()
+        frozen_material_name = _optional_text(
+            material_name,
+            "素材名称",
+            500,
+        )
+        frozen_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
+        frozen_material_language = _optional_text(
+            material_language,
+            "素材语言",
+            32,
+        )
+        frozen_material_tag = _optional_text(
+            material_tag,
+            "素材标签",
+            255,
+        )
+        try:
+            frozen_description = _normalize_description(description)
+        except ValueError:
+            raise TTPostError("invalid_request", "素材描述无效", 400) from None
+        has_url_macro = caption_uses_url_macro(frozen_caption_template)
+        if has_url_macro and not all(
+            (
+                frozen_material_name,
+                frozen_drama_name,
+                frozen_material_language,
+                frozen_material_tag,
+                account.username,
+                frozen_account_display_name,
+            )
+        ):
+            raise TTPostError(
+                "tt_post_link_metadata_incomplete",
+                "{url}短链所需的TikTok归因信息不完整",
+                409,
+            )
+        frozen_short_link_id = short_link_id(pool_id) if has_url_macro else 0
+        frozen_short_url = (
+            build_short_url(frozen_short_link_id) if has_url_macro else ""
+        )
         caption = render_caption_template(
             frozen_caption_template,
             resolution.content_id,
+            url=frozen_short_url if has_url_macro else None,
+            description=frozen_description,
         )
         normalized_key = str(idempotency_key or "").strip()
         if not normalized_key:
@@ -4515,6 +4825,15 @@ class TTPostStore:
                     and str(existing["caption_template"])
                     == frozen_caption_template
                     and str(existing["caption"]) == caption
+                    and str(existing["material_name"]) == frozen_material_name
+                    and str(existing["drama_name"]) == frozen_drama_name
+                    and str(existing["material_language"])
+                    == frozen_material_language
+                    and str(existing["material_tag"]) == frozen_material_tag
+                    and str(existing["description"]) == frozen_description
+                    and int(existing["short_link_id"] or 0)
+                    == frozen_short_link_id
+                    and str(existing["short_url"]) == frozen_short_url
                     and str(existing["privacy_level"])
                     == normalized_policy.privacy_level
                     and bool(existing["allow_comment"])
@@ -4590,6 +4909,11 @@ class TTPostStore:
                     "content_id",
                     "media_url",
                     "source_media_url",
+                    "material_name",
+                    "drama_name",
+                    "material_language",
+                    "material_tag",
+                    "description",
                     "account_id",
                     "account_username",
                     "account_display_name",
@@ -4600,6 +4924,9 @@ class TTPostStore:
                     "scheduled_at_utc",
                     "caption_template",
                     "caption",
+                    "short_link_id",
+                    "short_url",
+                    "long_url",
                     "privacy_level",
                     "allow_comment",
                     "allow_duet",
@@ -4627,6 +4954,11 @@ class TTPostStore:
                     resolution.content_id,
                     resolution.media_url,
                     frozen_source_url,
+                    frozen_material_name,
+                    frozen_drama_name,
+                    frozen_material_language,
+                    frozen_material_tag,
+                    frozen_description,
                     account.account_id,
                     account.username,
                     frozen_account_display_name,
@@ -4637,6 +4969,9 @@ class TTPostStore:
                     scheduled_at_utc,
                     frozen_caption_template,
                     caption,
+                    frozen_short_link_id,
+                    frozen_short_url,
+                    "",
                     normalized_policy.privacy_level,
                     int(normalized_policy.allow_comment),
                     int(normalized_policy.allow_duet),
@@ -4998,6 +5333,78 @@ class TTPostStore:
                 WHERE id=?
                 """,
                 (lease_iso, now_iso, normalized),
+            )
+            updated = conn.execute(
+                "SELECT * FROM tt_post_queue WHERE id=?",
+                (normalized,),
+            ).fetchone()
+        return _public_queue(updated)
+
+    def prepare_short_link(
+        self,
+        queue_id: Any,
+        claim_token: Any,
+        long_url: Any,
+    ) -> Dict[str, Any]:
+        """Freeze the exact W2A target before the remote publish boundary."""
+
+        normalized = _positive_int(queue_id, "发布队列ID")
+        try:
+            normalized_long_url = validate_w2a_url(long_url)
+        except Exception as exc:
+            raise TTPostError(
+                str(getattr(exc, "code", "tt_short_link_target_invalid")),
+                str(exc),
+                int(getattr(exc, "status", 400)),
+            ) from None
+        now_iso = self._now_iso()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_queue WHERE id=?",
+                (normalized,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_queue_not_found",
+                    "TikTok发布队列不存在",
+                    404,
+                )
+            self._assert_claim(
+                row,
+                claim_token,
+                allowed_statuses=("claimed",),
+                now_iso=now_iso,
+            )
+            if (
+                int(row["short_link_id"] or 0) <= 0
+                or not str(row["short_url"] or "")
+            ):
+                raise TTPostError(
+                    "tt_short_link_not_required",
+                    "TikTok发布描述没有待准备的短链",
+                    409,
+                )
+            existing = str(row["long_url"] or "")
+            if existing:
+                if not secrets.compare_digest(existing, normalized_long_url):
+                    raise TTPostError(
+                        "tt_short_link_target_conflict",
+                        "TikTok短链目标已冻结且不同",
+                        409,
+                    )
+                return _public_queue(row)
+            conn.execute(
+                """
+                UPDATE tt_post_queue
+                SET long_url=?,updated_at=?
+                WHERE id=? AND status='claimed' AND claim_token=?
+                """,
+                (
+                    normalized_long_url,
+                    now_iso,
+                    normalized,
+                    str(claim_token or ""),
+                ),
             )
             updated = conn.execute(
                 "SELECT * FROM tt_post_queue WHERE id=?",

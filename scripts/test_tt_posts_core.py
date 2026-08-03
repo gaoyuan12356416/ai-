@@ -29,6 +29,7 @@ from features.tt_posts import (  # noqa: E402
     render_fixed_caption,
     render_caption_template,
 )
+from features.tt_posts.links import build_w2a_url  # noqa: E402
 
 
 UTC = timezone.utc
@@ -434,6 +435,100 @@ class StorageTests(CoreTestCase):
             "Custom copy\n\nDrama ID: Y9v1yQcFqM",
             queue["caption"],
         )
+        self.assertEqual(0, queue["short_link_id"])
+        self.assertEqual("", queue["short_url"])
+        self.assertEqual("", queue["long_url"])
+
+    def test_queue_freezes_url_macro_and_exact_internal_line_breaks(self):
+        template = (
+            "Watch the full story\n\n"
+            "Drama ID: {{content_id}}\n\n"
+            "{url}"
+        )
+        pool = self.store.add_material("1001")
+        queue = self.store.freeze_queue(
+            pool["id"],
+            account(),
+            "2026-07-29 10:00:00",
+            template,
+            policy(),
+            resolver,
+            material_name="Material 1001",
+            drama_name="The Contract Bride",
+            material_language="en",
+            material_tag="romance",
+        )
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: Y9v1yQcFqM\n\n"
+                + queue["short_url"]
+            ),
+            queue["caption"],
+        )
+        self.assertEqual(
+            8_000_000_000_000_000_000 + int(pool["id"]),
+            queue["short_link_id"],
+        )
+        self.assertEqual("", queue["long_url"])
+
+        claim = self.claim_one(queue)
+        tracking = {
+            "username": queue["account_username"],
+            "timestamp": 1784736000,
+            "material_language": queue["material_language"],
+            "drama_name": queue["drama_name"],
+            "tag": queue["material_tag"],
+            "link_id": queue["short_link_id"],
+            "page_name": queue["account_display_name"],
+            "page_id": queue["account_id"],
+            "material_name": queue["material_name"],
+            "material_id": queue["material_id"],
+            "queue_id": queue["id"],
+            "content_id": queue["content_id"],
+        }
+        target = build_w2a_url(tracking)
+        prepared = self.store.prepare_short_link(
+            queue["id"],
+            claim.reveal_claim_token(),
+            target,
+        )
+        self.assertEqual(target, prepared["long_url"])
+        replay = self.store.prepare_short_link(
+            queue["id"],
+            claim.reveal_claim_token(),
+            target,
+        )
+        self.assertEqual(target, replay["long_url"])
+        conflict = build_w2a_url(
+            {**tracking, "timestamp": 1784736001}
+        )
+        with self.assertRaises(TTPostError) as caught:
+            self.store.prepare_short_link(
+                queue["id"],
+                claim.reveal_claim_token(),
+                conflict,
+            )
+        self.assertEqual(
+            "tt_short_link_target_conflict",
+            caught.exception.code,
+        )
+
+    def test_queue_url_macro_requires_frozen_attribution_metadata(self):
+        pool = self.store.add_material("1001")
+        with self.assertRaises(TTPostError) as caught:
+            self.store.freeze_queue(
+                pool["id"],
+                account(),
+                "2026-07-29 10:00:00",
+                "Drama ID: {{content_id}}\n\n{url}",
+                policy(),
+                resolver,
+            )
+        self.assertEqual(
+            "tt_post_link_metadata_incomplete",
+            caught.exception.code,
+        )
 
     def test_same_idempotency_key_with_changed_template_conflicts(self):
         pool = self.store.add_material("1001")
@@ -467,9 +562,16 @@ class MaterialIntakeStorageTests(CoreTestCase):
         account_id="acct-1",
         *,
         idempotency_key=None,
+        description=None,
+        template=None,
     ):
         content_id = "CONTENT_%s" % material_id
-        template = "Watch now\nDrama ID: {{contect_id}}"
+        frozen_description = (
+            "Description %s" % material_id
+            if description is None
+            else description
+        )
+        frozen_template = template or "Watch now\nDrama ID: {{contect_id}}"
         return self.store.add_material_intake(
             material_id,
             account_id,
@@ -481,15 +583,19 @@ class MaterialIntakeStorageTests(CoreTestCase):
             gpu_job_id="gpu-intake-job-%s" % material_id,
             source_trim_tail_seconds=4.333333,
             preparation_profile="tt-post-hevc-720x1280-v2",
-            caption_template=template,
-            caption=render_caption_template(template, content_id),
+            caption_template=frozen_template,
+            caption=render_caption_template(
+                frozen_template,
+                content_id,
+                description=frozen_description,
+            ),
             consent_version="tt-post-recurring-v1",
             consented_at="2026-07-29 10:00:00",
             is_aigc=False,
             material_name="material-%s" % material_id,
             drama_name="Drama %s" % material_id,
             material_language="English",
-            description="Description %s" % material_id,
+            description=frozen_description,
             actor_user_id="operator-1",
             actor_name="Operator",
         )
@@ -564,6 +670,46 @@ class MaterialIntakeStorageTests(CoreTestCase):
         with self.assertRaises(TTPostError) as used:
             self.add_intake("7201")
         self.assertEqual("tt_post_material_already_used", used.exception.code)
+
+    def test_description_is_normalized_and_frozen_into_recurring_pool(self):
+        intake = self.add_intake(
+            "7111",
+            description="  First\n\tchapter   summary  ",
+            template="Drama ID: {{content_id}}\n{desc}",
+        )
+        self.assertEqual("First chapter summary", intake["description"])
+        self.assertEqual(
+            "Drama ID: CONTENT_7111\nFirst chapter summary",
+            intake["caption"],
+        )
+        claim = self.store.claim_material_intake(
+            "prepare-worker-desc",
+            lease_seconds=60,
+        )
+        self.complete_intake(intake, claim.reveal_claim_token())
+        recurring = self.store.list_recurring_materials(account_id="acct-1")
+        self.assertEqual(1, len(recurring))
+        self.assertEqual("First chapter summary", recurring[0]["description"])
+
+    def test_completion_rejects_source_url_as_prepared_artifact(self):
+        intake = self.add_intake("7112")
+        claim = self.store.claim_material_intake(
+            "prepare-worker-source",
+            lease_seconds=60,
+        )
+        with self.assertRaises(TTPostError) as caught:
+            self.store.complete_material_intake(
+                intake["id"],
+                claim.reveal_claim_token(),
+                gpu_job_id=intake["gpu_job_id"],
+                prepared_media_url=intake["source_media_url"],
+                prepared_output_sha256="b" * 64,
+                prepared_output_size=123456,
+                prepared_duration_sec=120.25,
+                preparation_profile=intake["preparation_profile"],
+                source_trim_tail_seconds=intake["source_trim_tail_seconds"],
+            )
+        self.assertEqual("tt_prepared_media_matches_source", caught.exception.code)
 
     def test_claim_lease_renew_and_expired_owner_fencing(self):
         intake = self.add_intake()
@@ -846,9 +992,16 @@ class MaterialIntakeStorageTests(CoreTestCase):
 
 
 class RecurringStorageTests(CoreTestCase):
-    def add_recurring(self, material_id, account_id="acct-1"):
+    def add_recurring(
+        self,
+        material_id,
+        account_id="acct-1",
+        *,
+        description="",
+        template=None,
+    ):
         content_id = "CONTENT_%s" % material_id
-        template = "Watch now\nDrama ID: {{contect_id}}"
+        frozen_template = template or "Watch now\nDrama ID: {{contect_id}}"
         return self.store.add_recurring_material(
             material_id,
             account_id,
@@ -861,11 +1014,16 @@ class RecurringStorageTests(CoreTestCase):
             prepared_duration_sec=120.25,
             source_trim_tail_seconds=4.333333,
             preparation_profile="tt-post-outro-v1",
-            caption_template=template,
-            caption=render_caption_template(template, content_id),
+            caption_template=frozen_template,
+            caption=render_caption_template(
+                frozen_template,
+                content_id,
+                description=description,
+            ),
             consent_version="tt-post-recurring-v1",
             consented_at="2026-07-29 10:00:00",
             is_aigc=False,
+            description=description,
             actor_user_id="operator-1",
             actor_name="Operator",
         )
@@ -922,8 +1080,24 @@ class RecurringStorageTests(CoreTestCase):
             prepared_output_size=pool_item["prepared_output_size"],
             prepared_duration_sec=pool_item["prepared_duration_sec"],
             source_trim_tail_seconds=pool_item["source_trim_tail_seconds"],
+            description=pool_item.get("description") or "",
             recurring_run_id=run["id"],
             recurring_execution_token=execution_token,
+        )
+
+    def test_desc_is_frozen_from_recurring_pool_into_queue(self):
+        recurring = self.add_recurring(
+            "7350",
+            description="  Frozen\n drama   description ",
+            template="Drama ID: {{content_id}}\n{desc}",
+        )
+        run = self.claim_manual("desc")
+        queue = self.freeze_legacy_queue_for_run(run)
+        self.assertEqual("Frozen drama description", recurring["description"])
+        self.assertEqual("Frozen drama description", queue["description"])
+        self.assertEqual(
+            "Drama ID: CONTENT_7350\nFrozen drama description",
+            queue["caption"],
         )
 
     def test_schedule_defaults_disabled_and_saves_with_optimistic_version(self):
@@ -1524,6 +1698,120 @@ class CaptionPolicyAndTimeTests(unittest.TestCase):
             "Drama ID: ABC_123",
             render_caption_template("Drama ID: {{content_id}}", "ABC_123"),
         )
+
+    def test_caption_url_macro_preserves_exact_line_breaks(self):
+        short_url = (
+            "https://gy.g2flow.com/s2l/"
+            "8000000000000000009.html"
+        )
+        template = (
+            "Watch the full story\n\n"
+            "Drama ID: {{content_id}}\n\n"
+            "{url}"
+        )
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: ABC_123\n\n"
+                + short_url
+            ),
+            render_caption_template(
+                template,
+                "ABC_123",
+                url=short_url,
+            ),
+        )
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: ABC_123\n\n"
+                "{url}"
+            ),
+            render_caption_template(
+                template,
+                "ABC_123",
+                defer_url=True,
+            ),
+        )
+
+    def test_caption_url_macro_fails_closed(self):
+        with self.assertRaises(TTPostError) as missing:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n\n{url}",
+                "ABC_123",
+            )
+        self.assertEqual("caption_url_required", missing.exception.code)
+        with self.assertRaises(TTPostError) as unknown:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n\n{landing_url}",
+                "ABC_123",
+                defer_url=True,
+            )
+        self.assertEqual(
+            "caption_placeholder_invalid",
+            unknown.exception.code,
+        )
+        with self.assertRaises(TTPostError) as spaced:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n\n{ url }",
+                "ABC_123",
+                defer_url=True,
+            )
+        self.assertEqual(
+            "caption_placeholder_invalid",
+            spaced.exception.code,
+        )
+        for malformed in ("{url", "url}", "{desc", "desc}"):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(TTPostError) as incomplete:
+                    render_caption_template(
+                        "Drama ID: {{content_id}}\n" + malformed,
+                        "ABC_123",
+                        defer_url=True,
+                        defer_description=True,
+                    )
+                self.assertEqual(
+                    "caption_placeholder_invalid",
+                    incomplete.exception.code,
+                )
+
+    def test_caption_desc_macro_is_normalized_repeated_and_single_pass(self):
+        short_url = "https://gy.g2flow.com/s2l/8000000000000000009.html"
+        template = (
+            "Drama ID: {{content_id}}\n"
+            "{desc}\n{url}\n{desc}"
+        )
+        rendered = render_caption_template(
+            template,
+            "ABC_123",
+            url=short_url,
+            description="  A\n story with {url} and {{content_id}}  ",
+        )
+        self.assertEqual(
+            "Drama ID: ABC_123\n"
+            "A story with {url} and {{content_id}}\n"
+            + short_url
+            + "\nA story with {url} and {{content_id}}",
+            rendered,
+        )
+
+    def test_caption_desc_macro_fails_closed_without_valid_description(self):
+        for description in (None, "", " \n\t ", "bad\x00value"):
+            with self.subTest(description=description):
+                with self.assertRaises(TTPostError) as caught:
+                    render_caption_template(
+                        "Drama ID: {{content_id}}\n{desc}",
+                        "ABC_123",
+                        description=description,
+                    )
+                self.assertEqual("caption_desc_required", caught.exception.code)
+        with self.assertRaises(TTPostError) as uppercase:
+            render_caption_template(
+                "Drama ID: {{content_id}}\n{DESC}",
+                "ABC_123",
+                description="Story",
+            )
+        self.assertEqual("caption_placeholder_invalid", uppercase.exception.code)
 
     def test_caption_requires_content_id_placeholder(self):
         with self.assertRaises(TTPostError) as caught:

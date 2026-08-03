@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import urllib.parse
 import urllib.request
 import sys
 from dataclasses import replace
@@ -345,12 +346,17 @@ class GPUClientTests(unittest.TestCase):
     def test_publish_is_flat_and_inverts_allow_flags(self):
         connection = CaptureConnection({"item": {"publish_id": "pub-1"}})
         client = self.client(connection)
+        caption = (
+            "Watch the full story\n\n"
+            "Drama ID: ABCD1234\n\n"
+            "https://gy.g2flow.com/s2l/8000000000000000009.html"
+        )
         client.publish(
             job_id="ttpost-abcdef1234567890",
             source_account_id="101",
             access_token="token",
             queue={
-                "caption": "hello",
+                "caption": caption,
                 "privacy_level": "SELF_ONLY",
                 "allow_comment": True,
                 "allow_duet": False,
@@ -366,6 +372,7 @@ class GPUClientTests(unittest.TestCase):
         self.assertTrue(payload["disable_duet"])
         self.assertFalse(payload["disable_stitch"])
         self.assertTrue(payload["is_aigc"])
+        self.assertEqual(payload["title"], caption)
         self.assertNotIn("media_url", payload)
 
     def test_manual_canary_uses_dedicated_gpu_route_and_envelope_operation(self):
@@ -566,6 +573,7 @@ class FakeAccountRepository:
 class FakeMaterialResolver:
     def __init__(self):
         self.source_url = "https://cdn.example.com/source-a.mp4"
+        self.description = "A frozen drama description."
 
     def resolve(self, material_id):
         return {
@@ -575,6 +583,9 @@ class FakeMaterialResolver:
             "source_media_url": self.source_url,
             "material_name": "Material",
             "drama_name": "Drama",
+            "material_language": "en",
+            "material_tag": "romance",
+            "description": self.description,
         }
 
 
@@ -614,6 +625,7 @@ class FakeGPU:
         self.creator_info_by_account = {}
         self.creator_info_calls = []
         self.prepared_duration = 45.5
+        self.prepared_url = "https://cdn.example.com/prepared.mp4"
 
     def creator_info(self, **kwargs):
         account_id = str(kwargs.get("source_account_id") or "")
@@ -653,7 +665,7 @@ class FakeGPU:
             "content_id": material["content_id"],
             "output_sha256": "a" * 64,
             "output_size": 123456,
-            "output_url": "https://cdn.example.com/prepared.mp4",
+            "output_url": self.prepared_url,
             "probe": {"duration": self.prepared_duration},
             "profile": self.prepared_profile,
             "status": "ready",
@@ -749,6 +761,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             now_fn=self.clock,
             source_trim_tail_seconds=4.333333,
             media_profile_version="tt-post-hevc-720x1280-v2",
+            short_link_root=Path(self.temp.name) / "s2l",
         )
 
     def arm_manual_canary(self, service):
@@ -884,6 +897,78 @@ class ServiceLifecycleTests(unittest.TestCase):
             service.store.count_recurring_materials(account_id="101"),
             1,
         )
+
+    def test_recurring_pool_freezes_url_macro_when_run_is_created(self):
+        service = self.service(OPEN_GATES)
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:url-macro"
+        )
+        payload["caption_template"] = (
+            "Watch the full story\n\n"
+            "Drama ID: {{content_id}}\n\n"
+            "{url}"
+        )
+        self.add_ready(service, payload)
+        run = service.run_now(
+            {
+                "source_account_id": "101",
+                "idempotency_key": "tt-post-manual:url-macro",
+            }
+        )["item"]
+        queue = service.store.get_queue(run["queue_id"])
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: ABCD1234\n\n"
+                + queue["short_url"]
+            ),
+            queue["caption"],
+        )
+        self.assertEqual("Material", queue["material_name"])
+        self.assertEqual("Drama", queue["drama_name"])
+        self.assertEqual("en", queue["material_language"])
+        self.assertEqual("romance", queue["material_tag"])
+
+    def test_recurring_pool_freezes_desc_and_url_macros_for_later_run(self):
+        service = self.service(OPEN_GATES)
+        self.materials.description = "  A\n frozen   story with {url}.  "
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:desc-url-macro"
+        )
+        payload["caption_template"] = (
+            "Drama ID: {{content_id}}\n{desc}\n{url}"
+        )
+        ready = self.add_ready(service, payload)
+        self.assertEqual(
+            "A frozen story with {url}.",
+            ready["description"],
+        )
+        run = service.run_now(
+            {
+                "source_account_id": "101",
+                "idempotency_key": "tt-post-manual:desc-url-macro",
+            }
+        )["item"]
+        queue = service.store.get_queue(run["queue_id"])
+        self.assertEqual("A frozen story with {url}.", queue["description"])
+        self.assertEqual(
+            "Drama ID: ABCD1234\n"
+            "A frozen story with {url}.\n"
+            + queue["short_url"],
+            queue["caption"],
+        )
+
+    def test_material_pool_desc_macro_requires_authoritative_description(self):
+        service = self.service(CLOSED_GATES)
+        self.materials.description = " \n\t "
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:missing-desc"
+        )
+        payload["caption_template"] = "Drama ID: {{content_id}}\n{desc}"
+        with self.assertRaises(TTPostError) as caught:
+            service.material_pool_add(payload)
+        self.assertEqual("caption_desc_required", caught.exception.code)
+        self.assertEqual([], self.gpu.prepare_jobs)
 
     def test_daily_schedule_version_rejects_fractional_json_number(self):
         service = self.service(CLOSED_GATES)
@@ -2417,6 +2502,15 @@ class ServiceLifecycleTests(unittest.TestCase):
             [job[0] for job in self.gpu.prepare_jobs],
         )
 
+    def test_queue_rejects_gpu_result_that_reuses_source_url(self):
+        service = self.service(CLOSED_GATES)
+        self.gpu.prepared_url = self.materials.source_url
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.queue_create(queue_payload(self.clock))
+        self.assertEqual("tt_prepared_media_matches_source", caught.exception.code)
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+        self.assertEqual([], service.store.list_queues())
+
     def test_historical_custom_caption_exact_replay_remains_idempotent(self):
         service = self.service(CLOSED_GATES)
         payload = queue_payload(self.clock)
@@ -2450,6 +2544,34 @@ class ServiceLifecycleTests(unittest.TestCase):
         replay = service.queue_create(payload)["item"]
         self.assertEqual(created["id"], replay["id"])
         self.assertEqual(historical_caption, replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+    def test_historical_literal_desc_and_url_macros_exact_replay_is_safe(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(self.clock)
+        created = service.queue_create(payload)["item"]
+        legacy_template = "Drama ID: {{content_id}}\n{desc}\n{url}"
+        legacy_caption = "Drama ID: ABCD1234\n{desc}\n{url}"
+        connection = sqlite3.connect(Path(self.temp.name) / "tt.sqlite3")
+        try:
+            connection.execute(
+                """
+                UPDATE tt_post_queue
+                SET caption_template=?,caption=?,description='',short_url=''
+                WHERE id=?
+                """,
+                (legacy_template, legacy_caption, created["id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        replay_payload = dict(payload)
+        replay_payload.pop("caption_text")
+        replay_payload["caption_template"] = legacy_template
+        replay = service.queue_create(replay_payload)["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(legacy_template, replay["caption_template"])
+        self.assertEqual(legacy_caption, replay["caption_text"])
         self.assertEqual(1, len(self.gpu.prepare_jobs))
 
     def test_legacy_caption_replay_does_not_require_stored_template_spelling(self):
@@ -2623,6 +2745,112 @@ class ServiceLifecycleTests(unittest.TestCase):
         reconciled = service.reconcile(created["id"])["item"]
         self.assertEqual(reconciled["status"], "published")
         self.assertEqual(self.gpu.reconcile_jobs, [stable_job])
+
+    def test_url_macro_builds_tracking_wrapper_and_preserves_newlines(self):
+        service = self.service(OPEN_GATES)
+        payload = queue_payload(
+            self.clock,
+            publish_mode="direct_post",
+            key="tt-post:test-url-macro",
+        )
+        payload.pop("caption_text")
+        payload["caption_template"] = (
+            "Watch the full story\n\n"
+            "Drama ID: {{content_id}}\n\n"
+            "{url}"
+        )
+        created = service.queue_create(payload)["item"]
+        self.assertEqual(
+            (
+                "Watch the full story\n\n"
+                "Drama ID: ABCD1234\n\n"
+                + created["short_url"]
+            ),
+            created["caption_text"],
+        )
+        self.assertRegex(
+            created["short_url"],
+            (
+                r"^https://gy[.]g2flow[.]com/s2l/"
+                r"8[0-9]{18}[.]html$"
+            ),
+        )
+
+        self.clock.value += timedelta(minutes=30)
+        claim = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": DEFAULT_GRACE_SECONDS,
+                "limit": 1,
+            }
+        )["items"][0]
+        published = service.publish_claimed(
+            created["id"],
+            claim["claim_token"],
+        )["item"]
+        self.assertEqual("reconciling", published["status"])
+        sent_caption = self.gpu.publish_requests[-1]["queue"]["caption"]
+        self.assertEqual(created["caption_text"], sent_caption)
+        self.assertIn("\n\nDrama ID: ABCD1234\n\n", sent_caption)
+
+        frozen = service.store.get_queue(created["id"])
+        pairs = urllib.parse.parse_qsl(
+            urllib.parse.urlsplit(frozen["long_url"]).query,
+            keep_blank_values=True,
+        )
+        self.assertEqual(
+            [key for key, _value in pairs],
+            [
+                "c",
+                "af_adset",
+                "af_adset_id",
+                "af_ad",
+                "af_ad_id",
+                "af_channel",
+                "af_c_id",
+                "af_dp",
+            ],
+        )
+        tracking = dict(pairs)
+        self.assertEqual("AIpost", tracking["af_channel"])
+        self.assertEqual(str(created["id"]), tracking["af_c_id"])
+        self.assertEqual("ABCD1234", tracking["af_dp"])
+        self.assertEqual("9001", tracking["af_ad_id"])
+        wrapper = (
+            Path(self.temp.name)
+            / "s2l"
+            / ("%s.html" % frozen["short_link_id"])
+        )
+        self.assertTrue(wrapper.is_file())
+        self.assertIn(
+            "https://www.dramawavew2a.com/ads/101/2250/view",
+            wrapper.read_text(encoding="utf-8"),
+        )
+
+    def test_desc_macro_is_frozen_and_exact_replay_skips_gpu(self):
+        service = self.service(CLOSED_GATES)
+        self.materials.description = "  First\n drama   description.  "
+        payload = queue_payload(
+            self.clock,
+            key="tt-post:test-desc-macro",
+        )
+        payload.pop("caption_text")
+        payload["caption_template"] = (
+            "Drama ID: {{content_id}}\n{desc}\n{desc}"
+        )
+        created = service.queue_create(payload)["item"]
+        self.assertEqual("First drama description.", created["description"])
+        self.assertEqual(
+            "Drama ID: ABCD1234\n"
+            "First drama description.\n"
+            "First drama description.",
+            created["caption_text"],
+        )
+        self.materials.description = "Changed upstream description."
+        replay = service.queue_create(dict(payload))["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(created["caption_text"], replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
 
     def test_automatic_reconcile_terminalizes_explicit_remote_failure(self):
         service = self.service(OPEN_GATES)
@@ -3010,6 +3238,7 @@ class MaterialResolverTests(unittest.TestCase):
             item["source_media_url"],
             "https://cdn.example.com/source.mp4",
         )
+        self.assertEqual(item["description"], "Description")
         selector.assert_called_once()
         connection.close.assert_called_once()
 
@@ -3034,7 +3263,7 @@ class MaterialResolverTests(unittest.TestCase):
                 "language": "English",
                 "drama_name": "Drama",
                 "drama_labels": "romance",
-                "drama_description": "Description",
+                "drama_description": "  First line\nSecond\tline  ",
             }
         ]
         with (
@@ -3049,8 +3278,8 @@ class MaterialResolverTests(unittest.TestCase):
                 return_value=[],
             ) as tags,
             mock.patch(
-                "features.tt_posts.service."
-                "_TTDramawaveCandidateSelector._pool_drama_rows",
+                "features.x_posts.selector."
+                "DramawaveCandidateSelector._pool_drama_rows",
                 return_value=drama_rows,
             ) as mapping,
             mock.patch(
@@ -3066,6 +3295,7 @@ class MaterialResolverTests(unittest.TestCase):
             item["source_media_url"],
             "https://cdn.example.com/source.mp4",
         )
+        self.assertEqual("First line Second line", item["description"])
         self.assertEqual(len(statements), 1)
         self.assertEqual(statements[0][1], ("9001",))
         violations.assert_called_once_with("9001")
@@ -3944,6 +4174,9 @@ class DeployContractTests(unittest.TestCase):
             root / "deploy" / "tt-post-runner.path"
         ).read_text("utf-8")
         nginx = (root / "deploy" / "nginx-x-oauth.conf").read_text("utf-8")
+        short_nginx = (
+            root / "deploy" / "nginx-tt-short-domain-location.conf"
+        ).read_text("utf-8")
         service = (root / "deploy" / "tt-post-service.service").read_text("utf-8")
         runner = (root / "deploy" / "tt-post-runner.service").read_text("utf-8")
         gpu_env = (
@@ -3974,6 +4207,25 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn("TT_POST_RECONCILE_TIMEOUT=1500", env)
         self.assertIn("TT_POST_GPU_TIMEOUT=900", env)
         self.assertIn("TT_POST_GPU_PREPARE_TIMEOUT=9000", env)
+        self.assertIn(
+            (
+                "TT_POST_SHORT_LINK_ROOT="
+                "/mnt/data-disk/tt-post-publisher/s2l"
+            ),
+            env,
+        )
+        self.assertIn(
+            'location ~ "^/s2l/8[0-9]{18}[.]html$"',
+            short_nginx,
+        )
+        self.assertIn(
+            "root /mnt/data-disk/tt-post-publisher;",
+            short_nginx,
+        )
+        self.assertIn(
+            "before the generic numeric /s2l/ location",
+            short_nginx,
+        )
         self.assertIn(
             "location = /api/admin/tt-posts/materials/preview",
             nginx,

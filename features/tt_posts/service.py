@@ -58,9 +58,18 @@ from .core import (
     TTPostPolicy,
     TTPostStore,
     beijing_to_utc,
+    caption_uses_desc_macro,
+    caption_uses_url_macro,
     redact_text,
     render_fixed_caption,
     render_caption_template,
+)
+from .links import (
+    TTPostLinkError,
+    build_short_url,
+    build_w2a_url,
+    validate_short_url,
+    write_short_redirect,
 )
 
 
@@ -73,6 +82,7 @@ DEFAULT_CPU_HOST = "127.0.0.1"
 DEFAULT_CPU_PORT = 18829
 DEFAULT_GPU_URL = "http://127.0.0.1:18830"
 DEFAULT_DB_PATH = "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3"
+DEFAULT_SHORT_LINK_ROOT = "/mnt/data-disk/tt-post-publisher/s2l"
 DEFAULT_GRACE_SECONDS = 600
 DEFAULT_LEASE_SECONDS = 300
 CLAIM_LEASE_BUFFER_SECONDS = 60
@@ -752,6 +762,35 @@ class MySQLSnapshotAccountRepository:
 class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
     """Keep shared safety checks while applying TikTok's duration ceiling."""
 
+    def _pool_drama_rows(
+        self,
+        content_id: str,
+        language: str,
+    ) -> List[Dict[str, Any]]:
+        """Collapse TT description whitespace before shared validation only."""
+
+        rows = super()._pool_drama_rows(content_id, language)
+        normalized_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_description = item.get("drama_description")
+            if isinstance(raw_description, bytes):
+                try:
+                    raw_description = raw_description.decode(
+                        "utf-8",
+                        errors="strict",
+                    )
+                except UnicodeDecodeError:
+                    pass
+            if isinstance(raw_description, str):
+                item["drama_description"] = re.sub(
+                    r"\s+",
+                    " ",
+                    raw_description,
+                ).strip()
+            normalized_rows.append(item)
+        return normalized_rows
+
     def _pool_material_rows(self, material_id: str) -> List[Dict[str, Any]]:
         sql = """
             SELECT
@@ -951,7 +990,8 @@ class DramawaveMaterialResolver:
             "material_name": str(candidate.get("material_name") or "")[:500],
             "drama_name": str(candidate.get("drama_name") or "")[:500],
             "material_language": str(candidate.get("material_language") or "")[:32],
-            "description": str(candidate.get("description") or "")[:4096],
+            "material_tag": str(candidate.get("tag") or "")[:255],
+            "description": str(candidate.get("description") or ""),
         }
 
 
@@ -1675,6 +1715,9 @@ def _caption_template_from_frozen(caption: Any, content_id: Any) -> str:
 def _caption_from_submission(
     payload: Mapping[str, Any],
     content_id: Any,
+    *,
+    description: Any = None,
+    defer_description: bool = False,
 ) -> Tuple[str, str]:
     """Normalize editable templates while preserving legacy callers."""
 
@@ -1686,18 +1729,27 @@ def _caption_from_submission(
             "发布描述模板",
             20000,
         )
-        caption = render_caption_template(template, content_id)
+        caption = render_caption_template(
+            template,
+            content_id,
+            description=description,
+            defer_url=True,
+            defer_description=defer_description,
+        )
         if raw_caption not in (None, ""):
             submitted = _bounded_text(raw_caption, "发布描述", 2200)
-            if not secrets.compare_digest(
-                submitted.encode("utf-8"),
-                caption.encode("utf-8"),
+            if not (
+                defer_description and caption_uses_desc_macro(template)
             ):
-                raise TTPostServiceError(
-                    "tt_caption_template_render_mismatch",
-                    "发布描述与模板按当前Drama ID渲染后的内容不一致",
-                    400,
-                )
+                if not secrets.compare_digest(
+                    submitted.encode("utf-8"),
+                    caption.encode("utf-8"),
+                ):
+                    raise TTPostServiceError(
+                        "tt_caption_template_render_mismatch",
+                        "发布描述与模板按当前Drama ID渲染后的内容不一致",
+                        400,
+                    )
         return template, caption
 
     if raw_caption in (None, ""):
@@ -1705,7 +1757,13 @@ def _caption_from_submission(
 
     caption = _bounded_text(raw_caption, "发布描述", 2200)
     template = _caption_template_from_frozen(caption, content_id)
-    rendered = render_caption_template(template, content_id)
+    rendered = render_caption_template(
+        template,
+        content_id,
+        description=description,
+        defer_url=True,
+        defer_description=defer_description,
+    )
     if not secrets.compare_digest(
         rendered.encode("utf-8"),
         caption.encode("utf-8"),
@@ -1826,6 +1884,7 @@ class TTPostService:
         media_profile_version: str = "tt-post-hevc-720x1280-v2",
         runner_kick_path: str = DEFAULT_RUNNER_KICK_PATH,
         preparation_kick_path: str = DEFAULT_PREPARATION_KICK_PATH,
+        short_link_root: Any = DEFAULT_SHORT_LINK_ROOT,
     ):
         self.store = store
         self.account_repository = account_repository
@@ -1865,6 +1924,7 @@ class TTPostService:
             "TT媒体制作版本",
             128,
         )
+        self.short_link_root = str(short_link_root or "").strip()
         normalized_kick_path = str(runner_kick_path or "").strip()
         if (
             os.name == "nt"
@@ -2258,6 +2318,15 @@ class TTPostService:
             or prepared.get("final_media_url"),
             "TT最终成片地址",
         )
+        if secrets.compare_digest(
+            final_url,
+            str(resolved["source_media_url"]),
+        ):
+            raise TTPostServiceError(
+                "tt_prepared_media_matches_source",
+                "TT最终成片地址不能与源素材地址相同",
+                409,
+            )
         output_sha = str(prepared.get("output_sha256") or "").strip().lower()
         if not re.fullmatch(r"[a-f0-9]{64}", output_sha):
             raise TTPostServiceError(
@@ -2898,6 +2967,7 @@ class TTPostService:
         caption_template, caption = _caption_from_submission(
             payload,
             resolved["content_id"],
+            description=resolved.get("description"),
         )
         item = self.store.add_material_intake(
             material_id,
@@ -2913,6 +2983,11 @@ class TTPostService:
             consent_version=consent["version"],
             consented_at=consent["accepted_at"],
             is_aigc=settings.is_aigc,
+            material_name=resolved.get("material_name"),
+            drama_name=resolved.get("drama_name"),
+            material_language=resolved.get("material_language"),
+            material_tag=resolved.get("material_tag"),
+            description=resolved.get("description"),
         )
         result = self._material_intake_api_item(item)
         result["account_name_snapshot"] = str(
@@ -3566,6 +3641,13 @@ class TTPostService:
                 ),
                 recurring_run_id=claimed["id"],
                 recurring_execution_token=execution_token,
+                material_name=str(pool_item.get("material_name") or ""),
+                drama_name=str(pool_item.get("drama_name") or ""),
+                material_language=str(
+                    pool_item.get("material_language") or ""
+                ),
+                material_tag=str(pool_item.get("material_tag") or ""),
+                description=str(pool_item.get("description") or ""),
             )
             bound = self.store.bind_recurring_queue(
                 claimed["id"],
@@ -4050,6 +4132,7 @@ class TTPostService:
         caption_template: Optional[str],
         caption: str,
         consent: Mapping[str, Any],
+        submitted_caption: Any = None,
     ) -> Optional[Dict[str, Any]]:
         try:
             existing = self.store.get_queue_by_idempotency_key(idempotency_key)
@@ -4062,7 +4145,6 @@ class TTPostService:
             "material_id": material_id,
             "content_id": content_id,
             "scheduled_at_utc": scheduled_at_utc,
-            "caption": caption,
             "user_consent": bool(consent.get("accepted")),
             "consent_version": str(consent.get("version") or ""),
             "consented_at_utc": str(consent.get("accepted_at") or ""),
@@ -4070,6 +4152,57 @@ class TTPostService:
         if caption_template is not None:
             expected["caption_template"] = caption_template
         if any(existing.get(key) != value for key, value in expected.items()):
+            raise TTPostServiceError(
+                "tt_post_idempotency_conflict",
+                "幂等键已用于不同TikTok排期",
+                409,
+            )
+        if submitted_caption not in (None, ""):
+            normalized_submitted = _bounded_text(
+                submitted_caption,
+                "发布描述",
+                2200,
+            )
+            if not secrets.compare_digest(
+                str(existing.get("caption") or "").encode("utf-8"),
+                normalized_submitted.encode("utf-8"),
+            ):
+                raise TTPostServiceError(
+                    "tt_post_idempotency_conflict",
+                    "幂等键已用于不同TikTok排期",
+                    409,
+                )
+        legacy_deferred_caption = bool(
+            caption_template is not None
+            and secrets.compare_digest(
+                str(existing.get("caption") or "").encode("utf-8"),
+                str(caption or "").encode("utf-8"),
+            )
+            and (
+                (
+                    caption_uses_desc_macro(caption_template)
+                    and not str(existing.get("description") or "")
+                )
+                or (
+                    caption_uses_url_macro(caption_template)
+                    and not str(existing.get("short_url") or "")
+                )
+            )
+        )
+        if legacy_deferred_caption:
+            return existing
+        expected_caption = caption
+        if caption_template is not None:
+            expected_caption = render_caption_template(
+                caption_template,
+                content_id,
+                url=existing.get("short_url"),
+                description=existing.get("description"),
+            )
+        if not secrets.compare_digest(
+            str(existing.get("caption") or "").encode("utf-8"),
+            str(expected_caption or "").encode("utf-8"),
+        ):
             raise TTPostServiceError(
                 "tt_post_idempotency_conflict",
                 "幂等键已用于不同TikTok排期",
@@ -4107,6 +4240,7 @@ class TTPostService:
             candidate_template, candidate_caption = _caption_from_submission(
                 payload,
                 requested_content_id,
+                defer_description=True,
             )
         elif submitted_caption not in (None, ""):
             candidate_template = None
@@ -4141,6 +4275,7 @@ class TTPostService:
             caption_template=candidate_template,
             caption=candidate_caption,
             consent=consent,
+            submitted_caption=submitted_caption,
         )
         if existing is not None:
             return {
@@ -4156,10 +4291,6 @@ class TTPostService:
                 "发布时间必须晚于当前时间",
                 400,
             )
-        caption_template, caption = _caption_from_submission(
-            payload,
-            requested_content_id,
-        )
         account = self.account_repository.get_public_account(account_id)
         safe_account = SafeAccount.from_mapping(
             self.account_repository._safe_account_mapping(account)
@@ -4200,6 +4331,11 @@ class TTPostService:
                 "页面Drama ID与素材真实映射不一致",
                 409,
             )
+        caption_template, caption = _caption_from_submission(
+            payload,
+            requested_content_id,
+            description=prepared.get("description"),
+        )
         maximum_duration = int(
             creator.get("max_video_post_duration_sec") or 0
         )
@@ -4242,6 +4378,13 @@ class TTPostService:
             source_trim_tail_seconds=prepared[
                 "source_trim_tail_seconds"
             ],
+            material_name=str(prepared.get("material_name") or ""),
+            drama_name=str(prepared.get("drama_name") or ""),
+            material_language=str(
+                prepared.get("material_language") or ""
+            ),
+            material_tag=str(prepared.get("material_tag") or ""),
+            description=str(prepared.get("description") or ""),
         )
         return {
             "item": self._queue_api_item(queue, gates=self.gates),
@@ -4404,6 +4547,85 @@ class TTPostService:
             )
         return _normalized_creator_info(raw.get("creator_info", raw))
 
+    def _prepare_queue_short_link(
+        self,
+        queue: Mapping[str, Any],
+        claim_token: str,
+    ) -> Dict[str, Any]:
+        """Persist and materialize the immutable redirect before Direct Post."""
+
+        current = dict(queue)
+        short_url = str(current.get("short_url") or "")
+        if not short_url:
+            if int(current.get("short_link_id") or 0) or str(
+                current.get("long_url") or ""
+            ):
+                raise TTPostServiceError(
+                    "tt_short_link_state_invalid",
+                    "TikTok短链冻结状态不完整",
+                    409,
+                )
+            return current
+        try:
+            normalized_short_url = validate_short_url(short_url)
+            expected_short_url = build_short_url(
+                current.get("short_link_id")
+            )
+            if (
+                not secrets.compare_digest(
+                    normalized_short_url,
+                    expected_short_url,
+                )
+                or normalized_short_url
+                not in str(current.get("caption") or "")
+            ):
+                raise TTPostLinkError(
+                    "tt_short_link_state_invalid",
+                    "TikTok短链与冻结描述不一致",
+                    409,
+                )
+            if not str(current.get("long_url") or ""):
+                long_url = build_w2a_url(
+                    {
+                        "username": (
+                            current.get("creator_username_snapshot")
+                            or current.get("account_username")
+                        ),
+                        "timestamp": int(_now_utc(self._now_fn).timestamp()),
+                        "material_language": current.get("material_language"),
+                        "drama_name": current.get("drama_name"),
+                        "tag": current.get("material_tag"),
+                        "link_id": current.get("short_link_id"),
+                        "page_name": (
+                            current.get("creator_nickname_snapshot")
+                            or current.get("account_display_name")
+                            or current.get("account_username")
+                        ),
+                        "page_id": current.get("account_id"),
+                        "material_name": current.get("material_name"),
+                        "material_id": current.get("material_id"),
+                        "queue_id": current.get("id"),
+                        "content_id": current.get("content_id"),
+                    }
+                )
+                current = self.store.prepare_short_link(
+                    current["id"],
+                    claim_token,
+                    long_url,
+                )
+            write_short_redirect(
+                self.short_link_root,
+                current["short_link_id"],
+                current["long_url"],
+            )
+        except TTPostLinkError as exc:
+            raise TTPostServiceError(
+                exc.code,
+                str(exc),
+                exc.status,
+            ) from None
+        return dict(current)
+
     def _record_remote_publish_id_or_unknown(
         self,
         queue_id: int,
@@ -4522,6 +4744,7 @@ class TTPostService:
                 token,
                 lease_seconds=self._claim_lease_seconds(),
             )
+            queue = self._prepare_queue_short_link(queue, token)
         except TTPostError as exc:
             failed = self.store.mark_failed(
                 normalized_queue_id,
@@ -4865,6 +5088,12 @@ def build_service_from_env(
             source.get(
                 "TT_POST_PREPARE_RUNNER_KICK_PATH",
                 DEFAULT_PREPARATION_KICK_PATH,
+            )
+        ),
+        short_link_root=str(
+            source.get(
+                "TT_POST_SHORT_LINK_ROOT",
+                DEFAULT_SHORT_LINK_ROOT,
             )
         ),
     )
