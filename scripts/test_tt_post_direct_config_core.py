@@ -210,8 +210,27 @@ class DirectConfigCoreTests(unittest.TestCase):
                 )
             }
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            direct_indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='index' AND tbl_name='tt_post_direct_test' "
+                    "AND sql IS NOT NULL"
+                )
+            }
         self.assertIn("tt_post_auto_publish_config", names)
         self.assertIn("tt_post_direct_test", names)
+        self.assertEqual(
+            {
+                "idx_tt_post_direct_test_prepare",
+                "idx_tt_post_direct_test_publish",
+                "idx_tt_post_direct_test_material",
+                "ux_tt_post_direct_test_active_material",
+                "ux_tt_post_direct_test_publish_id",
+                "ux_tt_post_direct_test_short_link",
+            },
+            direct_indexes,
+        )
         self.assertEqual("ok", integrity)
         self.assertEqual(before, self.store.get_material(old["id"]))
 

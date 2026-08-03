@@ -52,7 +52,7 @@ python scripts/test_tt_posts_service.py
 1. 只在 DB 副本启动应用迁移两次。
 2. 两次后表/索引相同，`PRAGMA integrity_check=ok`。
 3. 旧 schedule/pool/queue/run 行、版本和计数保持不变；单例配置和 direct-test 表为空。
-4. schema 只出现两张新表及 direct-test 的五个实际索引；不得出现 `tt_post_direct_test_event`、`tt_post_auto_due` 或额外 account index。
+4. schema 只出现两张新表及 direct-test 的六个实际索引；其中 active/unknown material partial unique index 负责跨请求并发互斥，不得出现 `tt_post_direct_test_event`、`tt_post_auto_due` 或额外 account index。
 5. 在副本验证 uniform/mixed version-0 投影、mixed 停用首次保存、下一版本启用及事务回滚。
 
 ## 完成条件

@@ -37,7 +37,7 @@ git diff --check
 4. 新 schema 只包含：
    - `tt_post_auto_publish_config`；
    - `tt_post_direct_test`；
-   - direct-test prepare/publish/material 三个普通索引和 publish-id/short-link 两个唯一索引。
+   - direct-test prepare/publish/material 三个普通索引，以及 active-material、publish-id、short-link 三个 partial unique 索引。
 5. 明确不存在 `tt_post_direct_test_event`、`tt_post_auto_due` 和 direct-test account index。
 
 ## GitHub 发布

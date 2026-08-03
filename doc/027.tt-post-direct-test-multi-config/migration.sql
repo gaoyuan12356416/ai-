@@ -121,6 +121,11 @@ CREATE INDEX IF NOT EXISTS idx_tt_post_direct_test_publish
     ON tt_post_direct_test(status,claim_phase,lease_expires_at_utc,prepared_at_utc,id);
 CREATE INDEX IF NOT EXISTS idx_tt_post_direct_test_material
     ON tt_post_direct_test(material_id,status,updated_at,id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_direct_test_active_material
+    ON tt_post_direct_test(material_id)
+    WHERE status IN (
+        'queued','preparing','ready','publishing','reconciling','unknown'
+    );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_direct_test_publish_id
     ON tt_post_direct_test(publish_id) WHERE publish_id<>'';
 CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_direct_test_short_link
