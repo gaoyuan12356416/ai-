@@ -210,6 +210,21 @@
     .account-copy span { margin-top: 3px; color: var(--muted); font-size: 12px; }
     .account-state { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
     .account-option.ineligible .account-state { color: var(--red); }
+    .account-state.paused { color: var(--amber); }
+    .account-state.attention-required { color: var(--red); }
+    .account-state.not-selected { color: var(--muted); }
+    .selection-summary { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .operation-account {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      color: var(--ink);
+      background: #fff;
+      outline: none;
+    }
+    .operation-account:focus { border-color: #86a8f8; box-shadow: 0 0 0 3px rgba(37, 99, 235, .11); }
     .info-card {
       min-height: 82px;
       padding: 14px;
@@ -375,7 +390,7 @@
     .schedule-toggle input { width: 17px; height: 17px; accent-color: var(--blue); }
     .schedule-facts {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
     }
     .schedule-fact {
@@ -404,6 +419,33 @@
     }
     .button.run-now:hover:not(:disabled) { background: linear-gradient(135deg, #cf2d62, #b51d48); }
     .run-now-help { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .direct-test-panel {
+      grid-column: span 2;
+      display: grid;
+      gap: 10px;
+      padding: 15px;
+      border: 1px solid #f0c0ce;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #fff7fa, #fff);
+    }
+    .direct-test-panel strong { font-size: 14px; }
+    .direct-test-panel p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .direct-test-list { display: grid; gap: 8px; }
+    .direct-test-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px 12px;
+      padding: 10px 11px;
+      border: 1px solid #ead8df;
+      border-radius: 11px;
+      background: #fff;
+    }
+    .direct-test-item-copy { min-width: 0; }
+    .direct-test-item-copy strong,
+    .direct-test-item-copy span { display: block; overflow-wrap: anywhere; }
+    .direct-test-item-copy span { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .direct-test-error { grid-column: 1 / -1; color: var(--red); font-size: 12px; line-height: 1.45; }
+    .direct-test-selection { color: #344760; font-size: 12px; font-weight: 750; }
     .caption-meta {
       display: flex;
       align-items: center;
@@ -557,6 +599,7 @@
       .gate-grid, .stats, .setting-grid, .check-grid, .disclosure-options, .filters,
       .schedule-controls, .schedule-facts { grid-template-columns: 1fr; }
       .schedule-panel { grid-column: auto; }
+      .direct-test-panel { grid-column: auto; }
       .run-now-row { align-items: stretch; flex-direction: column; }
       .form-footer { align-items: stretch; flex-direction: column; }
       .form-footer .button { width: 100%; }
@@ -578,7 +621,7 @@
       <header class="topbar">
         <div class="title">
           <h1>TT Post 发布池</h1>
-          <p>为每个 TikTok 个号维护待发素材，并设置每天固定时间自动消费下一条；需要时也可手动立即发布一条。</p>
+          <p>为 TikTok 个号维护自动发布素材池与每日时间；立即测试从已校验结果中明确选择一条素材，独立发布且不占用素材池。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -601,7 +644,7 @@
           <div class="notice-mark">!</div>
           <div>
             <strong>当前片尾含 DramaWave 品牌与跳转引导，正式直发前必须完成平台审核确认。</strong>
-            TikTok 官方 Direct Post 对内部账号管理工具、品牌 Logo 和推广引导有额外限制。页面未显示全部开放时，素材与排期仍可保存，但自动和立即发布均不会发送到 TikTok，也不会消费待发素材。
+            TikTok 官方 Direct Post 对内部账号管理工具、品牌 Logo 和推广引导有额外限制。页面未显示全部开放时，素材与配置仍可保存；自动发布不会从素材池取下一条，立即测试也不会创建发布任务，且任何时候都不占用素材池。
           </div>
         </section>
 
@@ -609,7 +652,7 @@
           <div class="section-head">
             <div>
               <h2>发布与合规状态</h2>
-              <p>三个条件全部通过后，每日到点与立即发布才会消费下一条并直发；状态缺失一律按未开放处理。</p>
+              <p>三个条件全部通过后，自动发布才会按时消费素材池中的下一条；立即测试使用明确选择的已校验素材独立发布，不占用或消费素材池。状态缺失一律按未开放处理。</p>
             </div>
             <button id="refreshGates" class="button small" type="button">刷新状态</button>
           </div>
@@ -617,30 +660,39 @@
             <article id="liveGateCard" class="gate-card unknown"><span>真实发布开关</span><strong id="liveGateText">正在确认…</strong></article>
             <article id="auditGateCard" class="gate-card unknown"><span>Direct Post 审核</span><strong id="auditGateText">正在确认…</strong></article>
             <article id="urlGateCard" class="gate-card unknown"><span>媒体域名验证</span><strong id="urlGateText">正在确认…</strong></article>
-            <article id="modeGateCard" class="gate-card unknown"><span>自动 / 立即发布</span><strong id="modeGateText">已阻断，不消费素材</strong></article>
+            <article id="modeGateCard" class="gate-card unknown"><span>自动 / 立即发布</span><strong id="modeGateText">已阻断，不发送</strong></article>
           </div>
         </section>
 
         <section class="panel">
           <div class="section-head">
             <div>
-              <h2>维护账号发布池</h2>
-              <p>每批选择一个账号，可一次填写多个素材；隐私、互动与内容声明统一从“TT 个号管理”读取，发布池只读展示、不再单独编辑。成功素材按入池顺序等待每天的固定发布时间。</p>
+              <h2>自动发布配置与素材测试</h2>
+              <p>自动发布账号、描述模板、时间和开关作为一份配置统一保存；立即发布测试使用单独明确选择的账号与已校验素材，不会从素材池取素材。</p>
             </div>
           </div>
 
           <div id="createFormFields" class="create-grid">
             <div class="column">
               <div class="field">
-                <label for="accountSearch"><span class="step">1</span>选择 TikTok 个号</label>
+                <label for="accountSearch"><span class="step">1</span>选择自动发布 TikTok 个号（可多选）</label>
                 <div class="search-line">
                   <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称或账号 ID" />
                   <button id="refreshAccounts" class="button" type="button">刷新账号</button>
                 </div>
-                <div id="accountList" class="account-list" role="radiogroup" aria-label="选择 TikTok 发布账号">
+                <div id="accountList" class="account-list" role="group" aria-label="选择自动发布 TikTok 账号">
                   <div class="empty">正在加载账号…</div>
                 </div>
-                <span id="accountHelp" class="helper">账号列表不会显示或下发任何凭证。</span>
+                <div id="selectedAccountSummary" class="selection-summary">尚未选择自动发布账号。</div>
+                <span id="accountHelp" class="helper">勾选状态由已保存配置回填；列表不会显示或下发任何凭证。</span>
+              </div>
+
+              <div class="field">
+                <label for="operationAccountId">本次测试账号 / 素材入池账号（单选）</label>
+                <select id="operationAccountId" class="operation-account" aria-describedby="operationAccountHelp">
+                  <option value="">请明确选择一个账号</option>
+                </select>
+                <span id="operationAccountHelp" class="helper">该选择只用于本次立即测试与素材入池，不会静默取自动发布多选列表中的第一个账号。</span>
               </div>
 
               <div id="creatorCard" class="info-card" aria-live="polite">
@@ -667,7 +719,7 @@ Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">必须保留 {{contect_id}} 或 {{content_id}}；可使用 {url} 生成专属投放短链，使用 {desc} 填入当前剧描述。模板中的换行会原样提交给 TikTok。</span>
+                  <span id="captionHelp">必须保留 {{contect_id}} 或 {{content_id}}；可使用 {url} 生成专属投放短链，使用 {desc} 填入当前剧描述。模板会与账号、时间和开关一起保存。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -676,10 +728,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 <div class="schedule-panel">
                   <div class="schedule-panel-head">
                     <div>
-                      <strong><span class="step">4</span>自动发布设置</strong>
-                      <p>自动发布设置独立保存；启用后每天到点消费该账号素材池中的下一条，关闭后池内素材仍保留。不同账号需选择不同的分钟。</p>
+                      <strong><span class="step">4</span>自动发布配置</strong>
+                      <p>描述模板、发布时间、开关及勾选账号是一份配置；只有点击保存后才生效。关闭后素材池内容仍保留。</p>
                     </div>
-                    <button id="saveSchedule" class="button primary" type="button" aria-describedby="scheduleState">保存发布设置</button>
+                    <button id="saveSchedule" class="button primary" type="button" aria-describedby="scheduleState">保存自动发布配置</button>
                   </div>
                   <div class="schedule-controls">
                     <div class="field">
@@ -690,18 +742,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                       <input id="scheduleEnabled" type="checkbox" />
                       <span>启用素材池自动发布</span>
                     </label>
-                    <span id="scheduleState" class="helper">请选择账号后加载排期。</span>
+                    <span id="scheduleState" class="helper">正在加载自动发布配置。</span>
                   </div>
                   <div class="schedule-facts" aria-live="polite">
-                    <div class="schedule-fact"><span>排期状态</span><strong id="scheduleStatus">未加载</strong></div>
-                    <div class="schedule-fact"><span>下一次自动发布</span><strong id="scheduleNextRun">—</strong></div>
-                    <div class="schedule-fact"><span>排期版本</span><strong id="scheduleVersion">—</strong></div>
-                    <div class="schedule-fact"><span>可立即发布</span><strong id="availableMaterialCount">—</strong></div>
-                    <div class="schedule-fact"><span>制作中</span><strong id="preparingMaterialCount">—</strong></div>
-                  </div>
-                  <div class="run-now-row">
-                    <button id="runNow" class="button run-now" type="button" disabled>立即发布一条</button>
-                    <span id="runNowHelp" class="run-now-help">请选择已配置账号并等待状态加载。立即发布会额外消费下一条，不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束。</span>
+                    <div class="schedule-fact"><span>配置状态</span><strong id="scheduleStatus">未加载</strong></div>
+                    <div class="schedule-fact"><span>自动发布账号</span><strong id="autoAccountCount">—</strong></div>
+                    <div class="schedule-fact"><span>配置版本</span><strong id="scheduleVersion">—</strong></div>
+                    <div class="schedule-fact"><span>当前草稿</span><strong id="scheduleDraftStatus">—</strong></div>
                   </div>
                 </div>
                 <div id="accountSettingsCard" class="account-settings-card warning" aria-live="polite">
@@ -714,10 +761,24 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 </div>
               </div>
 
+              <div class="direct-test-panel">
+                <strong>立即发布测试（不入池）</strong>
+                <p>只发布当前明确选择的一个校验通过素材；即使该素材历史上已经发布过也允许再次测试。不会读取、占用或消费素材池。</p>
+                <div id="directTestSelection" class="direct-test-selection">尚未选择测试账号和素材。</div>
+                <div class="run-now-row">
+                  <button id="runNow" class="button run-now" type="button" disabled>立即发布所选素材</button>
+                  <span id="runNowHelp" class="run-now-help">请先明确选择本次测试账号，并从校验通过结果中选择一个素材。</span>
+                </div>
+                <div id="directTestSummary" class="helper" role="status" aria-live="polite">正在加载最近测试任务…</div>
+                <div id="directTestRows" class="direct-test-list" aria-label="最近立即发布测试任务">
+                  <div class="empty">正在加载最近测试任务…</div>
+                </div>
+              </div>
+
               <div class="consent">
                 <label class="inline-check">
                   <input id="publishConsent" type="checkbox" />
-                  <span id="consentText">我已核对目标账号、素材与 Drama ID、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。视频会在入池后由后台预制作；当前状态未全部开放时，不会自动或立即发送到 TikTok。</span>
+                  <span id="consentText">我已核对自动发布账号、描述、时间、开关、本次测试账号、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试不会从素材池选择素材。</span>
                 </label>
               </div>
 
@@ -750,12 +811,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <th>入池时间</th>
                   <th>TikTok账号</th>
                   <th>素材 / Drama ID</th>
+                  <th>发布状态</th>
+                  <th>可用状态</th>
                   <th>预制作状态</th>
                   <th>详情</th>
                   <th>更新时间</th>
                 </tr>
               </thead>
-              <tbody id="preparationRows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody>
+              <tbody id="preparationRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -858,18 +921,26 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         "preflight_failed", "failed", "canceled", "cancelled", "missed", "blocked_compliance",
       ]);
       const RUN_NOW_SUBMITTED_STATUSES = new Set([
-        "scheduled", "claimed", "publishing", "reconciling",
+        "queued", "preparing", "ready", "scheduled", "claimed", "publishing", "reconciling",
       ]);
       const DEFAULT_DAILY_PUBLISH_TIME = "11:00";
-      const RUN_NOW_PENDING_STORAGE_KEY = "tt-post:pending-run-now:v1";
+      const RUN_NOW_PENDING_STORAGE_KEY = "tt-post:pending-direct-test:v3";
       const RUN_NOW_PENDING_STORAGE_MAX_BYTES = 32768;
-      const RUN_NOW_PENDING_MAX_ACCOUNTS = 100;
+      const RUN_NOW_PENDING_MAX_TARGETS = 100;
+      const DIRECT_TEST_POLL_INTERVAL_MS = 10000;
+      const DIRECT_TEST_POLL_STATUSES = new Set([
+        "queued", "preparing", "ready", "publishing", "reconciling",
+      ]);
       const PREPARATION_ACTIVE_STATUSES = new Set(["queued", "preparing", "retry_wait"]);
       const PREPARATION_POLL_INTERVAL_MS = 10000;
       const state = {
         auth: null,
         accounts: [],
+        autoAccountIds: new Set(),
+        savedAutoAccountIds: new Set(),
+        savedAutoEnabled: false,
         selectedAccountId: "",
+        selectedDirectMaterialId: "",
         creatorInfo: null,
         creatorRequestVersion: 0,
         materials: [],
@@ -889,9 +960,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         schedule: null,
         scheduleRequestVersion: 0,
         scheduleDraftDirty: false,
+        scheduleDraftBaseVersion: 0,
+        scheduleStale: false,
         scheduleBusy: false,
         runNowBusy: false,
-        pendingRunNowByAccount: Object.create(null),
+        pendingRunNowByTarget: Object.create(null),
+        directTests: [],
+        directTestsLoading: false,
+        directTestPollTimer: null,
         gates: {
           liveEnabled: undefined,
           auditApproved: undefined,
@@ -1047,11 +1123,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         state.gates.auditApproved === true &&
         state.gates.urlVerified === true
       );
-      const manualCanaryReady = () => boolValue(firstDefined(
-        state.schedule && state.schedule.manual_canary_ready,
-        state.schedule && state.schedule.manual_canary && state.schedule.manual_canary.ready,
-        false
-      )) === true;
       function renderGate(cardId, textId, value, readyText, blockedText) {
         const card = byId(cardId);
         card.classList.remove("ready", "blocked", "unknown");
@@ -1074,17 +1145,17 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         modeCard.classList.remove("ready", "blocked", "unknown");
         if (gatesOpen()) {
           modeCard.classList.add("ready");
-          setText(byId("modeGateText"), "允许消费下一条并直发");
+          setText(byId("modeGateText"), "允许自动发布与手动测试");
           setText(
             byId("consentText"),
-            "我已核对目标账号、素材与 Drama ID、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。视频会在入池后由后台预制作；制作完成后才会按上述设置提交到 TikTok。"
+            "我已核对自动发布账号、描述、时间、开关、本次测试账号、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试不会从素材池选择素材。"
           );
         } else {
           modeCard.classList.add("blocked");
-          setText(byId("modeGateText"), "已阻断，不消费素材");
+          setText(byId("modeGateText"), "已阻断，不发送");
           setText(
             byId("consentText"),
-            "我已核对目标账号、素材与 Drama ID、描述、每日排期及该账号已保存的发布设置，并同意 TikTok Music Usage Confirmation。视频会在入池后由后台预制作；当前状态未全部开放，不会自动或立即发送到 TikTok。"
+            "我已核对自动发布账号、描述、时间、开关、本次测试账号、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。当前门禁未全部开放，不会自动或立即发送到 TikTok。"
           );
         }
         validateForm();
@@ -1115,10 +1186,12 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       function selectedAccount() {
         return state.accounts.find(item => accountId(item) === state.selectedAccountId) || null;
       }
-      function selectedAccountSettings() {
-        const item = selectedAccount();
+      function accountSettingsFor(item) {
         const settings = asObject(item && item.account_settings);
         return settings.configured === true ? settings : null;
+      }
+      function selectedAccountSettings() {
+        return accountSettingsFor(selectedAccount());
       }
       function privacyLabel(value) {
         return {
@@ -1190,6 +1263,80 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         });
         if (Array.from(select.options).some(option => option.value === current)) select.value = current;
       }
+      function autoAccountStatus(id) {
+        const selected = state.autoAccountIds.has(id);
+        const saved = state.savedAutoAccountIds.has(id);
+        const account = state.accounts.find(item => accountId(item) === id);
+        const savedState = String(account && account.auto_publish_state || "").trim();
+        const savedStateVersion = Number(account && account.auto_publish_config_version);
+        const currentConfigVersion = Number(state.schedule && state.schedule.version);
+        const savedStateIsCurrent = Number.isInteger(savedStateVersion) &&
+          Number.isInteger(currentConfigVersion) &&
+          savedStateVersion === currentConfigVersion;
+        if (selected && !saved) {
+          return { type: "active", draft: "add", label: "待保存加入" };
+        }
+        if (!selected && saved) {
+          return { type: "not_selected", draft: "remove", label: "待保存移除" };
+        }
+        if (selected && saved && savedStateIsCurrent && savedState === "attention_required") {
+          return { type: "attention_required", draft: "", label: "已加入 · 需要处理" };
+        }
+        if (selected && saved && savedStateIsCurrent && savedState === "active") {
+          return { type: "active", draft: "", label: "已加入自动发布" };
+        }
+        if (selected && saved && savedStateIsCurrent && savedState === "paused") {
+          return { type: "paused", draft: "", label: "已加入 · 自动发布关闭" };
+        }
+        if (selected && state.savedAutoEnabled) {
+          return { type: "active", draft: "", label: "已加入自动发布" };
+        }
+        if (selected) {
+          return { type: "paused", draft: "", label: "已加入 · 自动发布关闭" };
+        }
+        return { type: "not_selected", draft: "", label: "未加入自动发布" };
+      }
+      function renderSelectedAccountSummary() {
+        const selected = state.autoAccountIds.size;
+        const saved = state.savedAutoAccountIds.size;
+        const added = Array.from(state.autoAccountIds).filter(id => !state.savedAutoAccountIds.has(id)).length;
+        const removed = Array.from(state.savedAutoAccountIds).filter(id => !state.autoAccountIds.has(id)).length;
+        const draft = [
+          added ? `待加入 ${added} 个` : "",
+          removed ? `待移除 ${removed} 个` : "",
+        ].filter(Boolean).join("，");
+        setText(
+          byId("selectedAccountSummary"),
+          `当前勾选 ${selected} 个；已保存 ${saved} 个${draft ? `；${draft}` : "。"}`
+        );
+      }
+      function renderOperationAccountOptions() {
+        const select = byId("operationAccountId");
+        const current = state.selectedAccountId;
+        select.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        setText(placeholder, "请明确选择一个账号");
+        select.appendChild(placeholder);
+        state.accounts.forEach(item => {
+          const id = accountId(item);
+          if (!id) return;
+          const option = document.createElement("option");
+          option.value = id;
+          option.disabled = !accountEligible(item);
+          setText(
+            option,
+            `${accountName(item)} · 账号 ID ${firstDefined(item.external_account_id, item.main_account_id, id)}`
+          );
+          select.appendChild(option);
+        });
+        if (current && Array.from(select.options).some(option => option.value === current && !option.disabled)) {
+          select.value = current;
+        } else {
+          state.selectedAccountId = "";
+          select.value = "";
+        }
+      }
       function renderAccounts() {
         const query = byId("accountSearch").value.trim().toLowerCase();
         const items = state.accounts.filter(item => {
@@ -1203,6 +1350,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         });
         if (!items.length) {
           setAccountListEmpty(query ? "没有匹配账号。" : "暂无可显示账号。");
+          renderSelectedAccountSummary();
           return;
         }
         const list = byId("accountList");
@@ -1210,17 +1358,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         items.forEach(item => {
           const id = accountId(item);
           const eligible = accountEligible(item);
+          const selected = state.autoAccountIds.has(id);
+          const membership = autoAccountStatus(id);
           const label = document.createElement("label");
           label.className = `account-option${eligible ? "" : " ineligible"}`;
+          label.dataset.autoStatus = membership.type;
+          if (membership.draft) label.dataset.draftChange = membership.draft;
 
-          const radio = document.createElement("input");
-          radio.type = "radio";
-          radio.name = "ttAccount";
-          radio.value = id;
-          radio.dataset.accountId = id;
-          radio.checked = id === state.selectedAccountId;
-          radio.disabled = state.scheduleBusy;
-          label.appendChild(radio);
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.value = id;
+          checkbox.dataset.autoAccountId = id;
+          checkbox.checked = selected;
+          checkbox.disabled = state.scheduleBusy || (!eligible && !selected);
+          label.appendChild(checkbox);
 
           const copy = document.createElement("div");
           copy.className = "account-copy";
@@ -1233,13 +1384,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           label.appendChild(copy);
 
           const status = document.createElement("span");
-          status.className = "account-state";
-          setText(status, eligible ? "可确认" : "不可发布，可管理");
+          status.className = `account-state ${membership.type.replace("_", "-")}`;
+          setText(status, eligible ? membership.label : (selected ? "不可发布 · 可移除" : "不可发布"));
           status.title = accountReason(item);
           label.appendChild(status);
 
           list.appendChild(label);
         });
+        renderSelectedAccountSummary();
       }
       function resetCreatorInfo(message = "选择账号后会实时确认 TikTok 昵称和最长视频时长。") {
         state.creatorInfo = null;
@@ -1324,20 +1476,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       }
       function emptySchedule() {
         return {
+          loaded: false,
           enabled: false,
-          publish_time: "",
+          timezone: "Asia/Shanghai",
           publish_times: [],
+          account_ids: [],
+          caption_template: CAPTION_TEMPLATE,
           version: 0,
-          next_run_at: "",
-          available_material_count: 0,
-          can_publish_now: false,
-          manual_canary_ready: false,
-          manual_canary: {
-            enabled: false,
-            ready: false,
-            privacy_level: "SELF_ONLY",
-            test_bypass: false,
-          },
         };
       }
       function schedulePublishTime(item) {
@@ -1406,79 +1551,126 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           boolValue(state.schedule.enabled) === true &&
           byId("scheduleEnabled").checked === false;
       }
+      function selectedDirectMaterial() {
+        return state.materials.find(
+          item => cleanId(item.material_id) === state.selectedDirectMaterialId
+        ) || null;
+      }
+      function setsEqual(left, right) {
+        return left.size === right.size && Array.from(left).every(value => right.has(value));
+      }
+      function scheduleDraftMatchesSaved() {
+        if (!state.schedule) return false;
+        const currentTime = String(byId("dailyPublishTime").value || "").trim();
+        const savedTime = schedulePublishTime(state.schedule) || DEFAULT_DAILY_PUBLISH_TIME;
+        return setsEqual(state.autoAccountIds, state.savedAutoAccountIds) &&
+          byId("scheduleEnabled").checked === state.savedAutoEnabled &&
+          currentTime === savedTime &&
+          byId("caption").value === String(state.schedule.caption_template || CAPTION_TEMPLATE);
+      }
+      function markScheduleDirty() {
+        const wasDirty = state.scheduleDraftDirty;
+        state.scheduleDraftDirty = !scheduleDraftMatchesSaved();
+        if (state.scheduleDraftDirty && !wasDirty) {
+          state.scheduleDraftBaseVersion = Number(state.schedule && state.schedule.version || 0);
+        }
+        if (!state.scheduleDraftDirty) state.scheduleStale = false;
+        state.consentAcceptedAt = "";
+        renderSchedule({ hydrateDraft: false });
+        validateForm();
+      }
       function scheduleSaveError() {
-        const item = selectedAccount();
-        if (!item) return "请先选择一个 TikTok 个号。";
-        if (!state.schedule) return "请等待该账号每日排期加载完成。";
-        if (!byId("scheduleEnabled").checked) return "";
-        if (!accountEligible(item)) return "所选账号当前不可用于发布。";
-        if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
-        if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";
-        if (manualCanaryReady()) return "一次性私密测试有效期间，每日自动排期保持关闭。";
+        if (!state.schedule) return "请等待自动发布配置加载完成。";
+        if (state.scheduleStale) return "配置已被其他操作更新；请刷新配置后重新修改。";
+        const captionValidation = captionTemplateValidation([]);
+        if (captionValidation.error) return captionValidation.error;
         if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(byId("dailyPublishTime").value)) {
           return "请选择有效的每日上海发布时间。";
         }
-        if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
+        const selectedIds = Array.from(state.autoAccountIds);
+        if (byId("scheduleEnabled").checked && !selectedIds.length) {
+          return "启用自动发布前，请至少勾选一个账号。";
+        }
+        const invalid = selectedIds.find(id => {
+          const item = state.accounts.find(account => accountId(account) === id);
+          return !item || !accountEligible(item) || !accountSettingsFor(item);
+        });
+        if (byId("scheduleEnabled").checked && invalid) {
+          return "已选账号中存在不可发布或尚未配置的账号，请移除或完成配置。";
+        }
+        if (byId("scheduleEnabled").checked && !byId("publishConsent").checked) {
+          return "请核对内容并勾选发布确认。";
+        }
         return "";
       }
       function runNowDisabledReason() {
         const item = selectedAccount();
-        if (!item) return "请选择 TikTok 个号。";
-        if (!accountEligible(item) || !selectedAccountSettings() || !state.creatorInfo) {
+        const material = selectedDirectMaterial();
+        const settings = selectedAccountSettings();
+        if (!item) return "请明确选择本次测试账号。";
+        if (!material) return "请从校验通过结果中选择一个本次测试素材。";
+        if (!state.schedule) return "正在加载已保存的自动发布配置。";
+        if (Number(state.schedule.version || 0) <= 0) {
+          return "请先保存自动发布配置，再进行立即测试。";
+        }
+        if (state.scheduleDraftDirty || state.scheduleStale) {
+          return "描述或自动发布配置有未保存变更，请先保存配置。";
+        }
+        if (!accountEligible(item) || !settings || !state.creatorInfo) {
           return "该账号尚未完成可发布配置或实时确认。";
         }
-        if (!state.schedule) return "正在加载该账号的素材池状态。";
-        if (!gatesOpen() && !manualCanaryReady()) {
+        if (
+          settings.privacy_level !== "PUBLIC_TO_EVERYONE" ||
+          boolValue(settings.allow_comment) !== true
+        ) {
+          return "立即测试要求账号设置为所有人可见并允许评论。";
+        }
+        if (!gatesOpen()) {
           return "发布门禁尚未全部开放，立即发布已禁用。";
         }
-        if (Number(state.schedule.available_material_count || 0) < 1) {
-          const preparation = selectedPreparationState();
-          if (preparation.activeCount > 0) {
-            const materialLabel = preparation.activeMaterialIds.length
-              ? `素材 ${preparation.activeMaterialIds.slice(0, 3).join("、")}`
-              : `${preparation.activeCount} 条素材`;
-            return `${materialLabel} 正在制作，完成后会自动开放立即发布。`;
-          }
-          return "该账号素材池没有可立即发布素材。";
-        }
-        if (boolValue(state.schedule.can_publish_now) !== true) {
-          return "服务端当前不允许立即发布，请刷新状态后重试。";
-        }
+        const captionValidation = captionTemplateValidation([material]);
+        if (captionValidation.error) return captionValidation.error;
+        if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
         return "";
       }
       function updateScheduleActions() {
-        const scheduleControlsLocked = state.scheduleBusy || (
-          manualCanaryReady() &&
-          boolValue(state.schedule && state.schedule.enabled) !== true
-        );
+        const scheduleControlsLocked = state.scheduleBusy || !state.schedule;
         byId("dailyPublishTime").disabled = scheduleControlsLocked;
         byId("scheduleEnabled").disabled = scheduleControlsLocked;
         byId("refreshAccounts").disabled = state.scheduleBusy;
         byId("accountList")
-          .querySelectorAll("input[data-account-id]")
-          .forEach(radio => { radio.disabled = state.scheduleBusy; });
+          .querySelectorAll("input[data-auto-account-id]")
+          .forEach(checkbox => {
+            const id = cleanId(checkbox.dataset.autoAccountId);
+            const item = state.accounts.find(account => accountId(account) === id);
+            checkbox.disabled = scheduleControlsLocked || (!accountEligible(item) && !checkbox.checked);
+          });
         const saveButton = byId("saveSchedule");
         const saveError = scheduleSaveError();
-        saveButton.disabled = state.scheduleBusy;
+        saveButton.disabled = state.scheduleBusy || !state.schedule || state.scheduleStale;
         saveButton.title = saveError;
         if (!state.scheduleBusy) {
           setText(
             saveButton,
             scheduleWantsDisable()
               ? "关闭自动发布"
-              : boolValue(state.schedule && state.schedule.enabled) !== true &&
+              : !state.savedAutoEnabled &&
                 byId("scheduleEnabled").checked
               ? "启用自动发布"
-              : "保存发布设置"
+              : "保存自动发布配置"
           );
         }
         const runButton = byId("runNow");
         const runError = runNowDisabledReason();
         runButton.disabled = !!runError || state.scheduleBusy || state.runNowBusy || state.busy;
         if (!state.runNowBusy) {
-          setText(runButton, manualCanaryReady() ? "仅一次私密测试" : "立即发布一条");
+          setText(runButton, "立即发布所选素材");
         }
-        const pendingRun = pendingRunNowEntry(state.selectedAccountId);
+        const material = selectedDirectMaterial();
+        const pendingRun = pendingRunNowEntry(
+          state.selectedAccountId,
+          material && material.material_id
+        );
         const hasPendingRetry = !!pendingRun;
         const pendingNeedsReview = hasPendingRetry && pendingRun.status === "unknown";
         setText(
@@ -1488,116 +1680,132 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               ? "上次立即发布结果未知，需人工核对；系统已保留同一请求标识，不会生成新的重复请求。"
               : hasPendingRetry
               ? "上次立即发布结果尚未确认；再次点击会复用同一请求标识安全重试，不会额外创建第二次请求。"
-              : manualCanaryReady()
-              ? "一次性测试已精确绑定当前账号与素材；仅由你点击触发，强制 SELF_ONLY，关闭评论、Duet、Stitch，自动排期保持关闭。"
-              : "会额外消费素材池中的下一条并立即执行，不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束。"
+              : "只使用当前明确选择的账号和素材；不会读取、占用或消费素材池，历史已发布素材也允许再次测试。"
           )
+        );
+        setText(
+          byId("directTestSelection"),
+          state.selectedAccountId && material
+            ? `测试账号：${accountName(selectedAccount())} · 测试素材：${material.material_id}`
+            : state.selectedAccountId
+            ? `测试账号：${accountName(selectedAccount())} · 尚未选择测试素材`
+            : material
+            ? `测试素材：${material.material_id} · 尚未选择测试账号`
+            : "尚未选择测试账号和素材。"
         );
       }
       function renderSchedule({ hydrateDraft = true } = {}) {
         const item = state.schedule;
-        const preparation = selectedPreparationState();
         if (!item) {
           if (hydrateDraft) {
             byId("dailyPublishTime").value = DEFAULT_DAILY_PUBLISH_TIME;
             byId("scheduleEnabled").checked = false;
           }
-          byId("dailyPublishTime").disabled = false;
-          byId("scheduleEnabled").disabled = false;
-          setText(byId("scheduleStatus"), state.selectedAccountId ? "正在加载" : "未加载");
-          setText(byId("scheduleNextRun"), "—");
+          setText(byId("scheduleStatus"), "正在加载");
+          setText(byId("autoAccountCount"), "—");
           setText(byId("scheduleVersion"), "—");
-          setText(byId("availableMaterialCount"), "—");
-          setText(
-            byId("preparingMaterialCount"),
-            state.selectedAccountId ? `${preparation.activeCount} 条` : "—"
-          );
+          setText(byId("scheduleDraftStatus"), "—");
+          renderAccounts();
           updateScheduleActions();
           return;
         }
         const publishTime = schedulePublishTime(item);
-        if (hydrateDraft) {
+        if (hydrateDraft && !state.scheduleDraftDirty) {
           byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;
           byId("scheduleEnabled").checked = boolValue(item.enabled) === true;
+          byId("caption").value = String(item.caption_template || CAPTION_TEMPLATE);
+          state.autoAccountIds = new Set(state.savedAutoAccountIds);
+          state.scheduleDraftBaseVersion = Number(item.version || 0);
+          state.scheduleStale = false;
         }
-        const canaryLocksInactiveSchedule = manualCanaryReady() &&
-          boolValue(item.enabled) !== true;
-        byId("dailyPublishTime").disabled = canaryLocksInactiveSchedule;
-        byId("scheduleEnabled").disabled = canaryLocksInactiveSchedule;
         setText(
           byId("scheduleStatus"),
           boolValue(item.enabled) === true
             ? `已启用 · 每天 ${publishTime || byId("dailyPublishTime").value}`
             : "已停用"
         );
-        setText(
-          byId("scheduleNextRun"),
-          boolValue(item.enabled) === true && item.next_run_at
-            ? formatTime(item.next_run_at)
-            : "—"
-        );
         const version = Number(item.version || 0);
         setText(byId("scheduleVersion"), version > 0 ? `版本 ${version}` : "尚未保存");
-        setText(byId("availableMaterialCount"), `${Number(item.available_material_count || 0)} 条`);
-        setText(byId("preparingMaterialCount"), `${preparation.activeCount} 条`);
+        setText(byId("autoAccountCount"), `${state.savedAutoAccountIds.size} 个`);
+        setText(
+          byId("scheduleDraftStatus"),
+          state.scheduleStale ? "配置已过期" : state.scheduleDraftDirty ? "有未保存变更" : "已保存"
+        );
         setText(
           byId("scheduleState"),
-          state.scheduleDraftDirty && scheduleWantsDisable()
+          state.scheduleStale
+            ? "配置已被其他操作更新；当前草稿未覆盖，请刷新配置后重新修改。"
+            : state.scheduleDraftDirty && scheduleWantsDisable()
             ? "自动发布将关闭；关闭不需要发布确认，点击“关闭自动发布”后生效。"
             : state.scheduleDraftDirty
-            ? "每日排期已修改；保存后生效。"
-            : manualCanaryReady()
-            ? "一次性私密测试已开放；每日自动排期锁定为关闭。"
+            ? "账号、描述、时间或开关已修改；统一保存后生效。"
             : boolValue(item.enabled) === true
-            ? "发布设置已加载；自动发布已启用。"
-            : "发布设置已加载；自动发布已关闭。"
+            ? "自动发布配置已加载并启用。"
+            : "自动发布配置已加载；当前为关闭状态。"
         );
-        byId("scheduleState").className = "helper";
-        if (manualCanaryReady()) {
-          setText(
-            byId("consentText"),
-            "我已核对当前账号与绑定素材，并同意 TikTok Music Usage Confirmation。此次仅由我手动触发一次，服务端强制 SELF_ONLY 并关闭评论、Duet、Stitch；每日自动排期保持关闭。"
-          );
-        }
+        byId("scheduleState").className = `helper${state.scheduleStale ? " error" : ""}`;
+        renderAccounts();
+        renderSelectedAccountSummary();
+        updateCaptionState();
         updateScheduleActions();
+      }
+      function applySchedule(payload, { hydrateDraft = true } = {}) {
+        const raw = Object.assign(emptySchedule(), readPayloadItem(payload, ["item", "auto_config", "schedule"]));
+        const accountIds = Array.isArray(raw.account_ids) ? raw.account_ids : [];
+        const publishTimes = Array.isArray(raw.publish_times) ? raw.publish_times : [];
+        const normalized = Object.assign(emptySchedule(), raw, {
+          loaded: true,
+          timezone: String(raw.timezone || "Asia/Shanghai"),
+          account_ids: Array.from(new Set(accountIds.map(cleanId).filter(id => /^[1-9]\d*$/.test(id)))),
+          publish_times: Array.from(new Set(publishTimes.map(value => String(value || "").trim()).filter(value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)))).sort(),
+          caption_template: String(raw.caption_template || CAPTION_TEMPLATE),
+          version: Number(raw.version || 0),
+          enabled: boolValue(raw.enabled) === true,
+        });
+        if (
+          state.scheduleDraftDirty &&
+          normalized.version !== state.scheduleDraftBaseVersion
+        ) {
+          state.scheduleStale = true;
+        }
+        state.schedule = normalized;
+        state.savedAutoAccountIds = new Set(normalized.account_ids);
+        state.savedAutoEnabled = normalized.enabled;
+        if (hydrateDraft && !state.scheduleDraftDirty) {
+          state.autoAccountIds = new Set(normalized.account_ids);
+        }
+        renderSchedule({ hydrateDraft });
       }
       async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {}) {
         if (state.scheduleBusy && !allowWhileSaving) return false;
         const requestVersion = ++state.scheduleRequestVersion;
-        const requestedAccountId = state.selectedAccountId;
-        if (!preserveDraft) {
+        if (!preserveDraft && !state.scheduleDraftDirty) {
           state.scheduleDraftDirty = false;
           state.schedule = null;
           renderSchedule();
         }
-        if (!requestedAccountId) return false;
         if (!preserveDraft) {
-          setText(byId("scheduleState"), "正在加载该账号的每日排期与素材池数量…");
+          setText(byId("scheduleState"), "正在加载自动发布账号、描述、时间和开关…");
         }
         try {
-          const params = new URLSearchParams({ source_account_id: requestedAccountId });
-          const result = await api(`${API_BASE}/schedule?${params.toString()}`);
+          const result = await api(`${API_BASE}/auto-config`);
           if (
             requestVersion !== state.scheduleRequestVersion ||
-            requestedAccountId !== state.selectedAccountId ||
             (state.scheduleBusy && !allowWhileSaving)
           ) return false;
           applyGates(result);
-          state.schedule = Object.assign(emptySchedule(), readPayloadItem(result, ["item", "schedule"]));
-          renderSchedule({ hydrateDraft: !preserveDraft || !state.scheduleDraftDirty });
-          delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId];
+          applySchedule(result, { hydrateDraft: !preserveDraft || !state.scheduleDraftDirty });
           return true;
         } catch (error) {
           if (
             requestVersion !== state.scheduleRequestVersion ||
-            requestedAccountId !== state.selectedAccountId ||
             (state.scheduleBusy && !allowWhileSaving)
           ) return false;
-          if (!preserveDraft) {
+          if (!preserveDraft && !state.scheduleDraftDirty) {
             state.schedule = null;
             renderSchedule();
           }
-          setText(byId("scheduleState"), `排期加载失败：${error.message}`);
+          setText(byId("scheduleState"), `自动发布配置加载失败：${error.message}`);
           byId("scheduleState").className = "helper error";
           return false;
         }
@@ -1616,73 +1824,55 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         state.scheduleRequestVersion += 1;
         updateScheduleActions();
         const button = byId("saveSchedule");
-        const requestedAccountId = state.selectedAccountId;
         const requestedEnabled = byId("scheduleEnabled").checked;
         const requestedPublishTime = byId("dailyPublishTime").value;
         const expectedVersion = Number(state.schedule && state.schedule.version || 0);
         const schedulePayload = {
-          source_account_id: requestedAccountId,
-          enabled: requestedEnabled,
           expected_version: expectedVersion,
-        };
-        if (requestedEnabled) {
-          schedulePayload.publish_time = requestedPublishTime;
-          schedulePayload.timezone = "Asia/Shanghai";
-          schedulePayload.consent = {
-            accepted: true,
+          enabled: requestedEnabled,
+          timezone: "Asia/Shanghai",
+          publish_times: [requestedPublishTime],
+          source_account_ids: Array.from(state.autoAccountIds),
+          caption_template: byId("caption").value,
+          consent: {
+            accepted: byId("publishConsent").checked,
             version: CONSENT_VERSION,
-            accepted_at: ensureConsentAcceptedAt(),
-          };
-        }
+            accepted_at: byId("publishConsent").checked ? ensureConsentAcceptedAt() : "",
+          },
+        };
         setText(button, "正在保存…");
         try {
-          const result = await api(`${API_BASE}/schedule`, {
+          const result = await api(`${API_BASE}/auto-config`, {
             method: "POST",
             body: JSON.stringify(schedulePayload),
           });
           state.scheduleRequestVersion += 1;
           applyGates(result);
-          if (requestedAccountId !== state.selectedAccountId) {
-            showToast("原账号的每日排期已保存；当前账号已切换，正在加载当前账号设置。");
-            await loadSchedule({ preserveDraft: true, allowWhileSaving: true });
-            return;
-          }
-          state.schedule = Object.assign(emptySchedule(), readPayloadItem(result, ["item", "schedule"]));
           state.scheduleDraftDirty = false;
+          state.scheduleStale = false;
+          applySchedule(result, { hydrateDraft: true });
           byId("publishConsent").checked = false;
           state.consentAcceptedAt = "";
-          renderSchedule();
           showToast(
             boolValue(state.schedule.enabled) === true
-              ? `已保存：每天 ${schedulePublishTime(state.schedule) || byId("dailyPublishTime").value} 自动发布一条。`
-              : "每日自动发布已停用；素材仍保留在池中。"
+              ? `已保存：${state.savedAutoAccountIds.size} 个账号每天 ${schedulePublishTime(state.schedule)} 自动发布。`
+              : "自动发布配置已保存并关闭；账号、模板与素材池仍保留。"
           );
         } catch (error) {
-          if (error.code === "tt_post_schedule_version_conflict") {
-            const accountChanged = requestedAccountId !== state.selectedAccountId;
-            if (!accountChanged) state.scheduleDraftDirty = false;
+          if (["tt_post_auto_config_version_conflict", "tt_post_schedule_version_conflict"].includes(error.code)) {
             const refreshed = await loadSchedule({
-              preserveDraft: accountChanged,
+              preserveDraft: true,
               allowWhileSaving: true,
             });
-            const message = accountChanged
-              ? "原账号的每日排期已被其他操作更新；当前账号设置已保留。"
-              : refreshed
-              ? "每日排期已被其他操作更新；已加载最新设置，请重新修改后再保存。"
-              : "每日排期已被其他操作更新，且最新设置加载失败；请刷新状态后重新修改。";
+            state.scheduleStale = true;
+            const message = refreshed
+              ? "自动发布配置已被其他操作更新；当前草稿未覆盖，请刷新后重新修改。"
+              : "自动发布配置已变更且刷新失败；当前草稿未提交。";
             setText(byId("scheduleState"), message);
             byId("scheduleState").className = "helper error";
             showToast(message, true);
           } else {
-            const accountChanged = requestedAccountId !== state.selectedAccountId;
-            const refreshed = accountChanged
-              ? await loadSchedule({ preserveDraft: false, allowWhileSaving: true })
-              : false;
-            const message = accountChanged
-              ? refreshed
-                ? `原账号的每日排期保存失败：${error.message}；已加载当前账号最新设置。`
-                : `原账号的每日排期保存失败：${error.message}；当前账号设置加载失败，请刷新状态。`
-              : `每日排期保存失败：${error.message}`;
+            const message = `自动发布配置保存失败：${error.message}`;
             setText(byId("scheduleState"), message);
             byId("scheduleState").className = "helper error";
             showToast(message, true);
@@ -1692,47 +1882,61 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           validateForm();
         }
       }
-      function validPendingRunNowAccountId(value) {
+      function validPendingRunNowId(value) {
         return /^[1-9]\d{0,29}$/.test(String(value || ""));
       }
-      function validPendingRunNowKey(accountIdValue, value) {
-        const accountIdValueText = String(accountIdValue || "");
+      function pendingRunNowTarget(accountIdValue, materialIdValue) {
+        return `${String(accountIdValue || "")}:${String(materialIdValue || "")}`;
+      }
+      function validPendingRunNowKey(accountIdValue, materialIdValue, value) {
+        const account = String(accountIdValue || "");
+        const material = String(materialIdValue || "");
         const key = String(value || "");
-        const prefix = `tt-post:run-now:${accountIdValueText}:`;
+        const prefix = `tt-post:test-publish:${account}:${material}:`;
         if (
-          !validPendingRunNowAccountId(accountIdValueText) ||
+          !validPendingRunNowId(account) ||
+          !validPendingRunNowId(material) ||
           key.length <= prefix.length ||
           key.length > 255 ||
           !key.startsWith(prefix)
-        ) {
-          return false;
-        }
+        ) return false;
         return /^[A-Za-z0-9:-]{8,180}$/.test(key.slice(prefix.length));
       }
-      function validPendingRunNowEntry(accountIdValue, value) {
+      function validPendingRunNowEntry(target, value) {
         if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-        if (!validPendingRunNowKey(accountIdValue, value.key)) return false;
-        return value.status === "" || value.status === "unknown";
+        const account = String(value.account_id || "");
+        const material = String(value.material_id || "");
+        const configVersion = Number(value.expected_config_version);
+        const acceptedAt = String(value.consent_accepted_at || "");
+        const status = String(value.status || "").trim().toLowerCase();
+        if (target !== pendingRunNowTarget(account, material)) return false;
+        if (!validPendingRunNowKey(account, material, value.key)) return false;
+        if (!Number.isInteger(configVersion) || configVersion <= 0 || configVersion > 2147483647) return false;
+        if (!acceptedAt || acceptedAt.length > 64 || !Number.isFinite(Date.parse(acceptedAt))) return false;
+        if (value.direct_test_id && !validPendingRunNowId(value.direct_test_id)) return false;
+        return status === "" || status === "unknown" || RUN_NOW_SUBMITTED_STATUSES.has(status);
       }
       function persistPendingRunNowState() {
         const payload = Object.create(null);
-        Object.keys(state.pendingRunNowByAccount)
+        Object.keys(state.pendingRunNowByTarget)
           .sort()
-          .slice(0, RUN_NOW_PENDING_MAX_ACCOUNTS)
-          .forEach(accountIdValue => {
-            const entry = state.pendingRunNowByAccount[accountIdValue];
-            if (validPendingRunNowEntry(accountIdValue, entry)) {
-              payload[accountIdValue] = {
+          .slice(0, RUN_NOW_PENDING_MAX_TARGETS)
+          .forEach(target => {
+            const entry = state.pendingRunNowByTarget[target];
+            if (validPendingRunNowEntry(target, entry)) {
+              payload[target] = {
+                account_id: entry.account_id,
+                material_id: entry.material_id,
                 key: entry.key,
                 status: entry.status,
+                expected_config_version: entry.expected_config_version,
+                consent_accepted_at: entry.consent_accepted_at,
+                direct_test_id: entry.direct_test_id || "",
               };
             }
           });
         try {
-          window.sessionStorage.setItem(
-            RUN_NOW_PENDING_STORAGE_KEY,
-            JSON.stringify(payload)
-          );
+          window.sessionStorage.setItem(RUN_NOW_PENDING_STORAGE_KEY, JSON.stringify(payload));
         } catch (_) {
           // sessionStorage may be unavailable; the in-memory idempotency guard remains active.
         }
@@ -1743,90 +1947,87 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         try {
           raw = window.sessionStorage.getItem(RUN_NOW_PENDING_STORAGE_KEY) || "";
         } catch (_) {
-          state.pendingRunNowByAccount = clean;
+          state.pendingRunNowByTarget = clean;
           return;
         }
-        if (!raw) {
-          state.pendingRunNowByAccount = clean;
-          return;
-        }
-        if (raw.length > RUN_NOW_PENDING_STORAGE_MAX_BYTES) {
-          try { window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY); } catch (_) {}
-          state.pendingRunNowByAccount = clean;
+        if (!raw || raw.length > RUN_NOW_PENDING_STORAGE_MAX_BYTES) {
+          if (raw) try { window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY); } catch (_) {}
+          state.pendingRunNowByTarget = clean;
           return;
         }
         let decoded;
-        try {
-          decoded = JSON.parse(raw);
-        } catch (_) {
-          try { window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY); } catch (_) {}
-          state.pendingRunNowByAccount = clean;
-          return;
-        }
+        try { decoded = JSON.parse(raw); } catch (_) { decoded = null; }
         if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
           try { window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY); } catch (_) {}
-          state.pendingRunNowByAccount = clean;
+          state.pendingRunNowByTarget = clean;
           return;
         }
         let accepted = 0;
-        Object.entries(decoded).forEach(([accountIdValue, entry]) => {
-          if (
-            accepted < RUN_NOW_PENDING_MAX_ACCOUNTS &&
-            validPendingRunNowEntry(accountIdValue, entry)
-          ) {
-            clean[accountIdValue] = {
+        Object.entries(decoded).forEach(([target, entry]) => {
+          if (accepted < RUN_NOW_PENDING_MAX_TARGETS && validPendingRunNowEntry(target, entry)) {
+            clean[target] = {
+              account_id: String(entry.account_id),
+              material_id: String(entry.material_id),
               key: entry.key,
-              status: entry.status,
+              status: String(entry.status || "").trim().toLowerCase(),
+              expected_config_version: Number(entry.expected_config_version),
+              consent_accepted_at: String(entry.consent_accepted_at),
+              direct_test_id: String(entry.direct_test_id || ""),
             };
             accepted += 1;
           }
         });
-        state.pendingRunNowByAccount = clean;
+        state.pendingRunNowByTarget = clean;
         persistPendingRunNowState();
       }
-      function pendingRunNowEntry(accountIdValue) {
-        const normalizedAccountId = String(accountIdValue || "");
-        const entry = state.pendingRunNowByAccount[normalizedAccountId];
-        return validPendingRunNowEntry(normalizedAccountId, entry) ? entry : null;
+      function pendingRunNowEntry(accountIdValue, materialIdValue) {
+        const target = pendingRunNowTarget(accountIdValue, materialIdValue);
+        const entry = state.pendingRunNowByTarget[target];
+        return validPendingRunNowEntry(target, entry) ? entry : null;
       }
-      function pendingRunNowKeyForAccount(accountIdValue) {
-        const normalizedAccountId = String(accountIdValue || "");
-        const existing = pendingRunNowEntry(normalizedAccountId);
-        if (existing) {
-          return existing.key;
-        }
+      function pendingRunNowRequestForTarget(accountIdValue, materialIdValue) {
+        const account = String(accountIdValue || "");
+        const material = String(materialIdValue || "");
+        const target = pendingRunNowTarget(account, material);
+        const existing = pendingRunNowEntry(account, material);
+        if (existing) return existing;
         const suffix = window.crypto && typeof window.crypto.randomUUID === "function"
           ? window.crypto.randomUUID()
           : `${Date.now()}:${Math.random().toString(16).slice(2)}`;
-        const requestKey = `tt-post:run-now:${normalizedAccountId}:${suffix}`;
-        if (!validPendingRunNowKey(normalizedAccountId, requestKey)) {
+        const requestKey = `tt-post:test-publish:${account}:${material}:${suffix}`;
+        if (!validPendingRunNowKey(account, material, requestKey)) {
           throw new Error("无法生成有效的立即发布请求标识");
         }
-        state.pendingRunNowByAccount[normalizedAccountId] = {
+        state.pendingRunNowByTarget[target] = {
+          account_id: account,
+          material_id: material,
           key: requestKey,
           status: "",
+          expected_config_version: Number(state.schedule && state.schedule.version || 0),
+          consent_accepted_at: ensureConsentAcceptedAt(),
+          direct_test_id: "",
         };
         persistPendingRunNowState();
-        return requestKey;
+        return state.pendingRunNowByTarget[target];
       }
-      function clearPendingRunNowKey(accountIdValue, requestKey) {
-        const normalizedAccountId = String(accountIdValue || "");
-        const existing = pendingRunNowEntry(normalizedAccountId);
+      function clearPendingRunNowKey(accountIdValue, materialIdValue, requestKey) {
+        const target = pendingRunNowTarget(accountIdValue, materialIdValue);
+        const existing = pendingRunNowEntry(accountIdValue, materialIdValue);
         if (existing && existing.key === requestKey) {
-          delete state.pendingRunNowByAccount[normalizedAccountId];
+          delete state.pendingRunNowByTarget[target];
           persistPendingRunNowState();
         }
       }
-      function markPendingRunNowUnknown(accountIdValue, requestKey) {
-        const normalizedAccountId = String(accountIdValue || "");
-        const existing = pendingRunNowEntry(normalizedAccountId);
+      function updatePendingRunNowEntry(accountIdValue, materialIdValue, requestKey, changes) {
+        const target = pendingRunNowTarget(accountIdValue, materialIdValue);
+        const existing = pendingRunNowEntry(accountIdValue, materialIdValue);
         if (existing && existing.key === requestKey) {
-          state.pendingRunNowByAccount[normalizedAccountId] = {
-            key: existing.key,
-            status: "unknown",
-          };
+          state.pendingRunNowByTarget[target] = Object.assign({}, existing, changes || {});
           persistPendingRunNowState();
         }
+      }
+      function markPendingRunNowUnknown(accountIdValue, materialIdValue, requestKey) {
+        updatePendingRunNowEntry(accountIdValue, materialIdValue, requestKey, { status: "unknown" });
       }
       function classifyRunNowResponse(run) {
         const item = asObject(run);
@@ -1845,6 +2046,97 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         }
         return { kind: "unconfirmed", status };
       }
+      function reconcilePendingRunNowState(items) {
+        const byKey = new Map();
+        (Array.isArray(items) ? items : []).forEach(item => {
+          const key = String(item && item.idempotency_key || "");
+          if (key) byKey.set(key, item);
+        });
+        let changed = false;
+        Object.entries(state.pendingRunNowByTarget).forEach(([target, entry]) => {
+          if (!validPendingRunNowEntry(target, entry)) return;
+          const item = byKey.get(entry.key);
+          if (!item) return;
+          const outcome = classifyRunNowResponse(item);
+          if (outcome.kind === "published" || outcome.kind === "not_published") {
+            delete state.pendingRunNowByTarget[target];
+            changed = true;
+            return;
+          }
+          if (outcome.kind === "submitted" || outcome.kind === "unknown") {
+            state.pendingRunNowByTarget[target] = Object.assign({}, entry, {
+              status: outcome.status || (outcome.kind === "unknown" ? "unknown" : entry.status),
+              direct_test_id: String(item.id || entry.direct_test_id || ""),
+            });
+            changed = true;
+          }
+        });
+        if (changed) persistPendingRunNowState();
+      }
+      function renderDirectTests(items) {
+        const list = byId("directTestRows");
+        list.replaceChildren();
+        if (!items.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          setText(empty, "暂无立即发布测试任务。");
+          list.appendChild(empty);
+          return;
+        }
+        items.slice(0, 5).forEach(item => {
+          const row = document.createElement("article");
+          row.className = "direct-test-item";
+          const copy = document.createElement("div");
+          copy.className = "direct-test-item-copy";
+          const title = document.createElement("strong");
+          setText(title, `测试任务 ${item.id || "—"} · 素材 ${item.material_id || "—"}`);
+          const account = document.createElement("span");
+          setText(
+            account,
+            `账号 ${item.source_account_id || item.account_id || "—"} · 阶段 ${item.claim_phase || item.status || "—"}`
+          );
+          const job = document.createElement("span");
+          setText(job, `制作任务 ${item.gpu_job_id || "—"} · 更新 ${formatTime(item.updated_at)}`);
+          copy.append(title, account, job);
+          row.appendChild(copy);
+          const meta = statusMeta(item);
+          row.appendChild(badge(meta.label, meta.kind));
+          const safeError = [item.error_code, item.error_message || item.safe_message]
+            .filter(Boolean)
+            .join(" · ");
+          if (safeError) {
+            const error = document.createElement("div");
+            error.className = "direct-test-error";
+            setText(error, safeError);
+            row.appendChild(error);
+          }
+          list.appendChild(row);
+        });
+      }
+      function directTestPollingNeeded() {
+        if (state.directTests.some(item => DIRECT_TEST_POLL_STATUSES.has(String(item.status || "").toLowerCase()))) {
+          return true;
+        }
+        return Object.entries(state.pendingRunNowByTarget).some(
+          ([target, entry]) => (
+            validPendingRunNowEntry(target, entry) && entry.status !== "unknown"
+          )
+        );
+      }
+      function stopDirectTestPolling() {
+        if (state.directTestPollTimer) {
+          window.clearTimeout(state.directTestPollTimer);
+          state.directTestPollTimer = null;
+        }
+      }
+      function syncDirectTestPolling() {
+        stopDirectTestPolling();
+        if (document.hidden || !directTestPollingNeeded()) return;
+        state.directTestPollTimer = window.setTimeout(() => {
+          state.directTestPollTimer = null;
+          void loadDirectTests({ quiet: true });
+        }, DIRECT_TEST_POLL_INTERVAL_MS);
+      }
       async function runNow() {
         const error = runNowDisabledReason();
         if (error || state.runNowBusy) {
@@ -1852,26 +2144,33 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return;
         }
         const item = selectedAccount();
-        const privateCanary = manualCanaryReady();
+        const material = selectedDirectMaterial();
         const confirmed = window.confirm(
-          privateCanary
-            ? `确定为“${accountName(item)}”执行仅一次私密测试？系统会使用绑定素材，强制 SELF_ONLY 并关闭评论、Duet、Stitch；本次提交后不能自动重试。`
-            : `确定为“${accountName(item)}”立即发布一条？这会额外消费素材池中的下一条，不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束。`
+          `确定使用“${accountName(item)}”立即发布素材 ${material.material_id}？本次测试不入池、不消费素材池；即使历史已发布也允许再次测试。`
         );
         if (!confirmed) return;
         const requestedAccountId = state.selectedAccountId;
+        const requestedMaterialId = cleanId(material.material_id);
         const requestedAccountName = accountName(item);
-        const requestKey = pendingRunNowKeyForAccount(requestedAccountId);
+        const pendingRequest = pendingRunNowRequestForTarget(requestedAccountId, requestedMaterialId);
+        const requestKey = pendingRequest.key;
         state.runNowBusy = true;
         updateScheduleActions();
         const button = byId("runNow");
         setText(button, "正在提交…");
         try {
-          const result = await api(`${API_BASE}/run-now`, {
+          const result = await api(`${API_BASE}/test-publish`, {
             method: "POST",
             body: JSON.stringify({
               source_account_id: requestedAccountId,
+              material_id: requestedMaterialId,
+              expected_config_version: pendingRequest.expected_config_version,
               idempotency_key: requestKey,
+              consent: {
+                accepted: true,
+                version: CONSENT_VERSION,
+                accepted_at: pendingRequest.consent_accepted_at,
+              },
             }),
           });
           applyGates(result);
@@ -1882,7 +2181,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             run.error_message || run.safe_message || run.message || ""
           ).trim();
           if (outcome.kind === "not_published") {
-            clearPendingRunNowKey(requestedAccountId, requestKey);
+            clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
             showToast(
               `“${requestedAccountName}”本次未发布（${outcome.status}）${
                 safeDetail ? `：${safeDetail}` : "。"
@@ -1890,18 +2189,23 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               true
             );
           } else if (outcome.kind === "unknown") {
-            markPendingRunNowUnknown(requestedAccountId, requestKey);
+            markPendingRunNowUnknown(requestedAccountId, requestedMaterialId, requestKey);
             showToast(
               `“${requestedAccountName}”立即发布结果未知，需人工核对；系统已保留同一请求标识，不会生成新的重复请求。`,
               true
             );
           } else if (outcome.kind === "published") {
-            clearPendingRunNowKey(requestedAccountId, requestKey);
+            clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
             showToast(
               `“${requestedAccountName}”立即发布已完成${runId ? `（${runId}）` : "。"}`
             );
           } else if (outcome.kind === "submitted") {
-            clearPendingRunNowKey(requestedAccountId, requestKey);
+            updatePendingRunNowEntry(
+              requestedAccountId,
+              requestedMaterialId,
+              requestKey,
+              { status: outcome.status, direct_test_id: String(runId || "") }
+            );
             showToast(
               `“${requestedAccountName}”立即发布已提交${runId ? `（${runId}）` : ""}，请在下方任务中查看进度。`
             );
@@ -1912,16 +2216,54 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 : "服务端未返回可确认的立即发布状态"
             );
           }
-          await Promise.all([loadSchedule({ preserveDraft: true }), loadQueue()]);
+          await Promise.all([loadDirectTests(), loadQueue()]);
         } catch (error) {
-          showToast(
-            `立即发布结果未确认：${error.message}。可再次点击，系统会复用同一请求标识安全重试。`,
-            true
-          );
+          if (Number(error.status) >= 400 && Number(error.status) < 500) {
+            clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(`立即发布请求未创建：${error.message}`, true);
+          } else {
+            markPendingRunNowUnknown(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(
+              `立即发布结果未确认：${error.message}。可再次点击，系统会复用同一请求标识安全重试。`,
+              true
+            );
+          }
+          await loadDirectTests();
         } finally {
           state.runNowBusy = false;
-          setText(button, "立即发布一条");
+          setText(button, "立即发布所选素材");
           updateScheduleActions();
+        }
+      }
+      async function loadDirectTests({ quiet = false } = {}) {
+        if (state.directTestsLoading) return false;
+        state.directTestsLoading = true;
+        try {
+          const result = await api(`${API_BASE}/direct-tests?page=1&page_size=20`);
+          applyGates(result);
+          state.directTests = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.direct_tests) ? result.direct_tests : []);
+          reconcilePendingRunNowState(state.directTests);
+          renderDirectTests(state.directTests);
+          const latest = state.directTests[0];
+          byId("directTestSummary").className = "helper";
+          setText(
+            byId("directTestSummary"),
+            latest
+              ? `最近测试：素材 ${latest.material_id || "—"} · 账号 ${latest.source_account_id || latest.account_id || "—"} · ${statusMeta(latest).label}`
+              : "暂无立即发布测试任务。"
+          );
+          return true;
+        } catch (error) {
+          if (!quiet) {
+            setText(byId("directTestSummary"), `测试任务加载失败：${error.message}`);
+            byId("directTestSummary").className = "helper error";
+          }
+          return false;
+        } finally {
+          state.directTestsLoading = false;
+          syncDirectTestPolling();
         }
       }
       async function loadAccounts() {
@@ -1935,13 +2277,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           state.accounts = items.filter(item => accountId(item));
           if (state.selectedAccountId && !state.accounts.some(item => accountId(item) === state.selectedAccountId)) {
             state.selectedAccountId = "";
-            state.schedule = null;
-            state.scheduleDraftDirty = false;
-            state.scheduleRequestVersion += 1;
             resetCreatorInfo();
-            renderSchedule();
           }
           renderAccounts();
+          renderOperationAccountOptions();
           renderAccountSettings();
           renderAccountFilters();
           if (boolValue(result.account_source_available) === false) {
@@ -1957,6 +2296,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         } catch (error) {
           state.accounts = [];
           setAccountListEmpty(`账号加载失败：${error.message}`);
+          renderOperationAccountOptions();
           setText(byId("accountHelp"), "账号列表不可用，已停止新建任务。");
           byId("accountHelp").className = "helper error";
         }
@@ -2001,8 +2341,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return;
         }
         state.materials.forEach(item => {
-          const row = document.createElement("div");
-          row.className = "material-result success";
+          const materialId = cleanId(item.material_id);
+          const selected = materialId === state.selectedDirectMaterialId;
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = `material-result success${selected ? " active" : ""}`;
+          row.dataset.directMaterialId = materialId;
+          row.setAttribute("aria-pressed", selected ? "true" : "false");
           const copy = document.createElement("span");
           copy.className = "material-result-copy";
           const title = document.createElement("strong");
@@ -2012,7 +2357,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           copy.append(title, detail);
           const status = document.createElement("span");
           status.className = "material-result-state";
-          setText(status, "校验通过");
+          setText(status, selected ? "已选测试" : "校验通过 · 可选测试");
           row.append(copy, status);
           container.appendChild(row);
         });
@@ -2082,6 +2427,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       function resetMaterials(message = "支持一次校验最多 100 个素材；系统只确认素材身份和真实 Drama ID。") {
         state.materials = [];
         state.failures = [];
+        state.selectedDirectMaterialId = "";
         state.validationCompleted = 0;
         state.validationTotal = 0;
         byId("materialResults").replaceChildren();
@@ -2147,6 +2493,12 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             renderMaterialResults();
           }
           const summary = `校验完成：通过 ${state.materials.length} 个，失败 ${state.failures.length} 个。`;
+          if (state.materials.length === 1) {
+            state.selectedDirectMaterialId = cleanId(state.materials[0].material_id);
+          } else if (!state.materials.some(item => cleanId(item.material_id) === state.selectedDirectMaterialId)) {
+            state.selectedDirectMaterialId = "";
+          }
+          renderMaterialResults();
           updateMaterialProgress(summary, state.failures.length ? "error" : "success");
           setText(
             byId("materialHelp"),
@@ -2194,7 +2546,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           }
         ).trim();
       }
-      function captionTemplateValidation() {
+      function captionTemplateValidation(materials = state.materials) {
         const template = byId("caption").value;
         if (!template.trim()) return { error: "发布描述模板不能为空。", maxRenderedUnits: 0 };
         if (template.includes("\u0000")) return { error: "发布描述模板包含无效字符。", maxRenderedUnits: 0 };
@@ -2253,7 +2605,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           };
         }
         let maxRenderedUnits = 0;
-        for (const material of state.materials) {
+        for (const material of materials) {
           if (
             singlePlaceholders.includes("desc") &&
             !normalizeDramaDescription(material.description)
@@ -2302,9 +2654,15 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       }
       function formValidationError() {
         const item = selectedAccount();
-        if (!item) return "请选择一个 TikTok 个号。";
+        if (!item) return "请明确选择本次素材入池账号。";
         if (!accountEligible(item)) return "所选账号当前不可用于发布。";
         if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
+        if (!state.schedule) return "请等待自动发布配置加载完成。";
+        if (Number(state.schedule.version || 0) <= 0) return "请先保存自动发布配置，再加入素材池。";
+        if (state.scheduleDraftDirty || state.scheduleStale) return "描述或自动发布配置有未保存变更，请先保存配置。";
+        if (!state.savedAutoAccountIds.has(accountId(item))) {
+          return "所选账号尚未加入已保存的自动发布配置，不能加入素材池。";
+        }
         if (!state.materials.length) return "请先批量校验素材，并至少确认一个真实 Drama ID。";
         const captionValidation = captionTemplateValidation();
         if (captionValidation.error) return captionValidation.error;
@@ -2355,6 +2713,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           source_account_id: state.selectedAccountId,
           material_id: material.material_id,
           content_id: material.content_id,
+          expected_config_version: Number(state.schedule && state.schedule.version || 0),
           caption_template: byId("caption").value,
           consent: {
             accepted: true,
@@ -2367,7 +2726,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         state.formKey = "";
         state.consentAcceptedAt = "";
         byId("materialIds").value = "";
-        byId("caption").value = CAPTION_TEMPLATE;
+        byId("caption").value = String(
+          state.schedule && state.schedule.caption_template || CAPTION_TEMPLATE
+        );
         byId("publishConsent").checked = false;
         resetMaterials();
         updateCaptionState();
@@ -2458,6 +2819,31 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           validateForm();
         }
       }
+      function publicationStatusMeta(item) {
+        const raw = String(item.publication_status || "unpublished").trim().toLowerCase();
+        if (raw === "published") return { status: "published", label: "已发布", kind: "success" };
+        if (raw === "unknown") return { status: "unknown", label: "发布结果待确认", kind: "warning" };
+        return { status: "unpublished", label: "未发布", kind: "neutral" };
+      }
+      function poolAvailabilityMeta(item) {
+        const raw = String(
+          item.availability || item.pool_availability || item.status || item.preparation_status || ""
+        ).trim().toLowerCase();
+        const map = {
+          available: ["可用于自动发布", "success"],
+          reserved: ["已被发布任务占用", "progress"],
+          consumed: ["已消费（以发布状态为准）", "neutral"],
+          canceled: ["已取消", "neutral"],
+          queued: ["等待制作", "progress"],
+          preparing: ["制作中", "progress"],
+          retry_wait: ["等待重试", "warning"],
+          ready: ["制作完成", "success"],
+          failed: ["不可用", "failure"],
+          unknown: ["待核查", "warning"],
+        };
+        const value = map[raw] || [raw || "未入可用池", "neutral"];
+        return { status: raw || "not_available", label: value[0], kind: value[1] };
+      }
       function preparationStatusMeta(item) {
         const raw = String(
           item.preparation_status || item.prepare_status || item.status || "queued"
@@ -2502,7 +2888,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         body.replaceChildren();
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 6;
+        cell.colSpan = 8;
         cell.className = "empty";
         setText(cell, message);
         row.appendChild(cell);
@@ -2565,6 +2951,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             `素材 ${item.material_id || "—"}`,
             `Drama ID ${item.content_id || "—"}`
           );
+          const publicationCell = document.createElement("td");
+          const publication = publicationStatusMeta(item);
+          publicationCell.appendChild(badge(publication.label, publication.kind));
+          if (item.published_at) {
+            const publishedAt = document.createElement("div");
+            publishedAt.className = "subtle";
+            setText(publishedAt, formatTime(item.published_at));
+            publicationCell.appendChild(publishedAt);
+          }
+          row.appendChild(publicationCell);
+          const availabilityCell = document.createElement("td");
+          const availability = poolAvailabilityMeta(item);
+          availabilityCell.appendChild(badge(availability.label, availability.kind));
+          row.appendChild(availabilityCell);
           const statusCell = document.createElement("td");
           const meta = preparationStatusMeta(item);
           statusCell.appendChild(badge(meta.label, meta.kind));
@@ -2587,13 +2987,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           ready: 0,
           failed: 0,
         };
+        const publicationCounts = { published: 0, unknown: 0, unpublished: 0 };
         items.forEach(item => {
           const status = preparationStatusMeta(item).status;
           if (Object.prototype.hasOwnProperty.call(visibleCounts, status)) {
             visibleCounts[status] += 1;
           }
+          publicationCounts[publicationStatusMeta(item).status] += 1;
         });
         const summary = asObject(result.summary);
+        const allPublicationCounts = {
+          published: Number(firstDefined(summary.published, publicationCounts.published, 0) || 0),
+          unpublished: Number(firstDefined(summary.unpublished, publicationCounts.unpublished, 0) || 0),
+          unknown: Number(firstDefined(summary.unknown_publication, publicationCounts.unknown, 0) || 0),
+        };
         const counts = {};
         Object.keys(visibleCounts).forEach(status => {
           counts[status] = Number(
@@ -2606,7 +3013,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         );
         setText(
           byId("preparationSummary"),
-          `共 ${total} 条 · 等待制作 ${counts.queued} · 制作中 ${counts.preparing} · 等待重试 ${counts.retry_wait} · 制作完成 ${counts.ready} · 制作失败 ${counts.failed}`
+          `共 ${total} 条 · 未发布 ${allPublicationCounts.unpublished} · 已发布 ${allPublicationCounts.published} · 结果待确认 ${allPublicationCounts.unknown} · 等待制作 ${counts.queued} · 制作中 ${counts.preparing} · 制作完成 ${counts.ready} · 制作失败 ${counts.failed}`
         );
       }
       async function loadPreparationStatus({ quiet = false, force = false } = {}) {
@@ -2701,7 +3108,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         }
         const map = {
           draft: ["草稿", "neutral"],
+          queued: ["等待制作", "progress"],
           preparing: ["视频准备中", "progress"],
+          ready: ["等待发布", "progress"],
           ready_for_consent: ["等待确认", "warning"],
           hold: ["安全待处理", "warning"],
           scheduled: ["等待发布时间", "progress"],
@@ -2709,10 +3118,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           creator_recheck: ["确认账号中", "progress"],
           initializing: ["提交 TikTok 中", "warning"],
           processing_download: ["TikTok处理中", "progress"],
+          publishing: ["提交 TikTok 中", "warning"],
           reconciling: ["状态核对中", "warning"],
+          unknown: ["结果待确认", "warning"],
           published: ["已发布", "success"],
           failed: ["发布失败", "failure"],
           missed: ["已错过时间", "failure"],
+          canceled: ["已取消", "neutral"],
           cancelled: ["已取消", "neutral"],
         };
         const value = map[status] || [status || "未知", "neutral"];
@@ -3067,20 +3479,43 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           return;
         }
         show(byId("pageRoot"));
-        await Promise.all([loadAccounts(), loadQueue(), loadPreparationStatus()]);
+        await Promise.all([
+          loadAccounts(),
+          loadSchedule(),
+          loadDirectTests(),
+          loadQueue(),
+          loadPreparationStatus(),
+        ]);
       }
 
       byId("accountSearch").addEventListener("input", renderAccounts);
       byId("accountList").addEventListener("change", event => {
-        const radio = event.target.closest("input[data-account-id]");
-        if (!radio || radio.disabled) return;
-        state.selectedAccountId = cleanId(radio.dataset.accountId);
-        state.schedule = null;
-        state.scheduleDraftDirty = false;
+        const checkbox = event.target.closest("input[data-auto-account-id]");
+        if (!checkbox || checkbox.disabled) return;
+        const id = cleanId(checkbox.dataset.autoAccountId);
+        const item = state.accounts.find(account => accountId(account) === id);
+        if (checkbox.checked) {
+          if (!accountEligible(item)) {
+            checkbox.checked = false;
+            showToast("该账号当前不可发布，不能加入自动发布。", true);
+            return;
+          }
+          state.autoAccountIds.add(id);
+        } else {
+          state.autoAccountIds.delete(id);
+        }
         resetBatchConfirmation();
+        markScheduleDirty();
         renderAccounts();
-        loadCreatorInfo();
-        loadSchedule();
+      });
+      byId("operationAccountId").addEventListener("change", event => {
+        state.selectedAccountId = cleanId(event.target.value);
+        state.creatorInfo = null;
+        state.creatorRequestVersion += 1;
+        resetBatchConfirmation();
+        renderAccountSettings();
+        if (state.selectedAccountId) loadCreatorInfo();
+        else resetCreatorInfo();
         void loadPreparationStatus({ quiet: true, force: true });
       });
       byId("refreshAccounts").addEventListener("click", loadAccounts);
@@ -3089,11 +3524,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           loadAccounts(),
           loadQueue(),
           loadSchedule({ preserveDraft: true }),
+          loadDirectTests(),
           loadPreparationStatus(),
         ]);
         showToast("发布与合规状态已刷新。");
       });
       byId("previewMaterial").addEventListener("click", validateMaterials);
+      byId("materialResults").addEventListener("click", event => {
+        const button = event.target.closest("button[data-direct-material-id]");
+        if (!button) return;
+        state.selectedDirectMaterialId = cleanId(button.dataset.directMaterialId);
+        resetBatchConfirmation();
+        renderMaterialResults();
+        validateForm();
+      });
       byId("materialIds").addEventListener("input", () => {
         if (state.materials.length || state.failures.length) {
           resetMaterials("素材 ID 已修改，请重新批量校验素材。");
@@ -3110,13 +3554,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       });
       byId("caption").addEventListener("input", () => {
         resetBatchConfirmation();
-        updateCaptionState();
+        markScheduleDirty();
       });
       ["dailyPublishTime", "scheduleEnabled"].forEach(id => byId(id).addEventListener("change", () => {
-        state.scheduleDraftDirty = true;
-        state.consentAcceptedAt = "";
-        renderSchedule({ hydrateDraft: false });
-        validateForm();
+        markScheduleDirty();
       }));
       byId("publishConsent").addEventListener("change", () => {
         validateForm();
@@ -3130,9 +3571,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
           stopPreparationPolling();
+          stopDirectTestPolling();
         } else if (preparationPollingNeeded()) {
           void loadPreparationStatus({ quiet: true });
         }
+        if (!document.hidden) syncDirectTestPolling();
       });
       byId("queueFilters").addEventListener("submit", event => {
         event.preventDefault();

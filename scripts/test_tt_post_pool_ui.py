@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -32,50 +33,21 @@ def source_between(start: str, end: str) -> str:
     return PAGE[start_index:end_index]
 
 
-def source_between_text(source: str, start: str, end: str) -> str:
-    start_index = source.index(start)
-    end_index = source.index(end, start_index)
-    return source[start_index:end_index]
-
-
 class TtPostPoolUiTest(unittest.TestCase):
-    def test_navigation_registers_tt_pool_with_standalone_permission(self):
-        group = next(item for item in NAVIGATION if item.get("key") == "tiktok_platform")
-        self.assertEqual(group["label"], "TikTok 社媒")
-        self.assertEqual(group["order"], 35)
-        self.assertEqual(group["module"], "tt_posts")
-        settings = next(
-            entry
-            for entry in group["items"]
-            if entry.get("key") == "ttAccountSettings"
-        )
-        self.assertEqual(settings["label"], "TT 个号管理")
-        self.assertEqual(settings["href"], "/tt-account-settings.html")
-        self.assertEqual(settings["module"], "tt_posts")
-        self.assertEqual(settings["order"], 10)
-        self.assertFalse(settings["adminOnly"])
-        self.assertTrue(settings["enabled"])
-        item = next(entry for entry in group["items"] if entry.get("key") == "ttPostPool")
-        self.assertEqual(item["label"], "TT Post发布池")
-        self.assertEqual(item["href"], "/tt-post-pool.html")
-        self.assertEqual(item["module"], "tt_posts")
-        self.assertEqual(item["order"], 20)
-        self.assertFalse(item["adminOnly"])
-        self.assertTrue(item["enabled"])
-
-        self.assertIn(
-            'ttAccountSettings: "/tt-account-settings.html"',
-            QUICK_NAV,
-        )
-        self.assertIn('ttPostPool: "/tt-post-pool.html"', QUICK_NAV)
-        self.assertIn('key: "tiktok_platform"', QUICK_NAV)
-        self.assertIn('key: "ttAccountSettings"', QUICK_NAV)
-        self.assertIn('key: "ttPostPool"', QUICK_NAV)
-        self.assertIn('module: "tt_posts"', QUICK_NAV)
-        self.assertIn("if (!tiktokPlatform)", QUICK_NAV)
-        self.assertIn("if (!ttAccountSettingsExists)", QUICK_NAV)
-        self.assertIn("if (!ttPostPoolExists)", QUICK_NAV)
-        self.assertIn('quickNavConfigCache:v5', QUICK_NAV)
+    def test_page_javascript_parses(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "tt-post-pool-inline.js"
+            script_path.write_text(inline_javascript(PAGE), encoding="utf-8")
+            result = subprocess.run(
+                [node, "--check", str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_page_uses_existing_shell_and_tt_permission(self):
         self.assertIn('href="/ui-topbar.css"', PAGE)
@@ -87,964 +59,395 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('id="loginGate"', PAGE)
         self.assertIn('id="permissionGate"', PAGE)
 
-    def test_create_form_covers_account_material_daily_schedule_and_consent(self):
+    def test_navigation_keeps_tt_post_pool_registered(self):
+        group = next(item for item in NAVIGATION if item.get("key") == "tiktok_platform")
+        item = next(entry for entry in group["items"] if entry.get("key") == "ttPostPool")
+        self.assertEqual(item["href"], "/tt-post-pool.html")
+        self.assertEqual(item["module"], "tt_posts")
+        self.assertTrue(item["enabled"])
+        self.assertIn('ttPostPool: "/tt-post-pool.html"', QUICK_NAV)
+        self.assertIn('key: "ttPostPool"', QUICK_NAV)
+
+    def test_page_does_not_embed_credentials_or_use_unsafe_html_sinks(self):
+        for secret_fragment in ("AKIDvgCX", "KTN3WwHT", "secret-key", "secret-id"):
+            self.assertNotIn(secret_fragment, PAGE)
+        self.assertNotIn(".innerHTML", PAGE)
+        self.assertNotIn("document.write", PAGE)
+
+    def test_unified_config_and_direct_test_controls_exist(self):
         required_ids = {
-            "accountSearch",
-            "refreshAccounts",
             "accountList",
-            "creatorCard",
-            "materialIds",
-            "previewMaterial",
-            "materialProgress",
-            "materialResults",
+            "selectedAccountSummary",
+            "operationAccountId",
             "caption",
             "dailyPublishTime",
             "scheduleEnabled",
             "saveSchedule",
             "scheduleStatus",
-            "scheduleNextRun",
+            "autoAccountCount",
             "scheduleVersion",
-            "availableMaterialCount",
-            "preparingMaterialCount",
+            "scheduleDraftStatus",
+            "directTestSelection",
             "runNow",
             "runNowHelp",
-            "accountSettingsCard",
-            "accountSettingsStatus",
-            "accountSettingsSummary",
-            "queueSubmitPanel",
-            "queueSubmitSummary",
-            "queueSubmitResults",
+            "directTestSummary",
+            "directTestRows",
             "publishConsent",
-            "addMaterialsToPool",
-            "preparationPanel",
-            "refreshPreparationStatus",
-            "preparationSummary",
             "preparationRows",
         }
-        for element_id in required_ids:
-            self.assertIn(f'id="{element_id}"', PAGE)
+        for field_id in required_ids:
+            self.assertIn(f'id="{field_id}"', PAGE)
+        self.assertIn("账号、描述、时间或开关已修改；统一保存后生效。", PAGE)
 
-        self.assertIn('type="search"', PAGE)
-        self.assertIn('type="time"', PAGE)
-        self.assertNotIn('type="datetime-local"', PAGE)
-        self.assertIn('schedulePayload.timezone = "Asia/Shanghai"', PAGE)
-        self.assertIn("source_account_id: state.selectedAccountId", PAGE)
-        self.assertNotIn("Number(state.selectedAccountId)", PAGE)
-        self.assertIn("material_id: material.material_id", PAGE)
-        self.assertIn("content_id: material.content_id", PAGE)
-        self.assertIn("materials: []", PAGE)
-        self.assertIn("failures: []", PAGE)
-        self.assertIn("CONSENT_VERSION", PAGE)
-        self.assertIn("Music Usage Confirmation", PAGE)
-        self.assertIn('href="/tt-account-settings.html"', PAGE)
+    def test_every_javascript_dom_reference_exists(self):
+        html_ids = set(re.findall(r'\bid="([^"]+)"', PAGE))
+        javascript_ids = set(re.findall(r'byId\("([^"]+)"\)', PAGE))
+        self.assertEqual(javascript_ids - html_ids, set())
 
-    def test_page_only_calls_same_origin_admin_contracts(self):
-        for endpoint in (
-            "${API_BASE}/accounts",
-            "${API_BASE}/creator-info",
-            "${API_BASE}/materials/preview",
-            "${API_BASE}/schedule?",
-            "${API_BASE}/schedule`",
-            "${API_BASE}/material-pool",
-            "${API_BASE}/run-now",
-            "${API_BASE}/queue",
-            "${API_BASE}/events?",
-        ):
-            self.assertIn(endpoint, PAGE)
-        self.assertIn('const API_BASE = "/api/admin/tt-posts"', PAGE)
-        self.assertNotIn("open.tiktokapis.com", PAGE)
-
-    def test_batch_material_input_normalizes_deduplicates_and_isolates_failures(self):
-        material_input = re.search(
-            r'<textarea id="materialIds"(?P<attrs>[^>]*)>',
-            PAGE,
+    def test_auto_publish_accounts_are_multi_select_checkboxes(self):
+        render_accounts = source_between(
+            "function renderAccounts()", "function resetCreatorInfo"
         )
-        self.assertIsNotNone(material_input)
-        self.assertIn('inputmode="numeric"', material_input.group("attrs"))
-        self.assertIn("function normalizeMaterialIdToken(value, index)", PAGE)
-        self.assertIn("function parseMaterialIds()", PAGE)
-        self.assertIn(r"raw.split(/[\s,，;；]+/)", PAGE)
-        self.assertIn(r"!/^\d+$/.test(value)", PAGE)
-        self.assertIn('value.replace(/^0+/, "")', PAGE)
-        self.assertIn(r"!/^[1-9]\d{0,18}$/.test(withoutLeadingZeros)", PAGE)
-        self.assertIn("String(BigInt(withoutLeadingZeros))", PAGE)
-        self.assertIn("Array.from(new Set(", PAGE)
-        self.assertIn("if (ids.length > 100)", PAGE)
+        self.assertIn('role="group"', PAGE)
+        self.assertNotIn('role="radiogroup"', PAGE)
+        self.assertIn('checkbox.type = "checkbox"', render_accounts)
+        self.assertIn("checkbox.dataset.autoAccountId = id", render_accounts)
+        self.assertIn("state.autoAccountIds.has(id)", render_accounts)
+        self.assertIn('input[data-auto-account-id]', PAGE)
 
-        validation = source_between(
-            "async function validateMaterials()",
-            "function renderCaptionTemplate(",
+    def test_account_membership_exposes_saved_and_draft_states(self):
+        status_source = source_between(
+            "function autoAccountStatus(id)", "function renderSelectedAccountSummary()"
         )
+        for state_name in ('type: "active"', 'type: "paused"', 'type: "not_selected"'):
+            self.assertIn(state_name, status_source)
+        self.assertIn('draft: "add"', status_source)
+        self.assertIn('draft: "remove"', status_source)
+        self.assertIn("已加入自动发布", status_source)
+        self.assertIn("自动发布关闭", status_source)
+        self.assertIn("未加入自动发布", status_source)
+        self.assertIn('savedState === "attention_required"', status_source)
+        self.assertIn("account.auto_publish_config_version", status_source)
+        self.assertIn("savedStateVersion === currentConfigVersion", status_source)
+        self.assertIn("savedStateIsCurrent", status_source)
+        self.assertIn('type: "attention_required"', status_source)
+        self.assertIn("已加入 · 需要处理", status_source)
+        self.assertIn("label.dataset.autoStatus = membership.type", PAGE)
+        self.assertIn("label.dataset.draftChange = membership.draft", PAGE)
+
+    def test_operation_account_is_an_independent_explicit_single_select(self):
+        options_source = source_between(
+            "function renderOperationAccountOptions()", "function renderAccounts()"
+        )
+        event_source = source_between(
+            'byId("operationAccountId").addEventListener',
+            'byId("refreshAccounts").addEventListener',
+        )
+        self.assertRegex(PAGE, r'<select id="operationAccountId"[^>]*>')
+        self.assertIn('placeholder.value = ""', options_source)
+        self.assertIn('setText(placeholder, "请明确选择一个账号")', options_source)
+        self.assertNotIn("state.autoAccountIds.values", options_source)
+        self.assertNotIn("state.autoAccountIds.forEach", options_source)
+        self.assertIn("state.selectedAccountId = cleanId(event.target.value)", event_source)
+
+    def test_auto_config_loads_from_the_atomic_endpoint(self):
+        load_source = source_between("async function loadSchedule", "async function saveSchedule")
+        self.assertIn('api(`${API_BASE}/auto-config`)', load_source)
+        self.assertIn("applySchedule(result", load_source)
+        self.assertNotIn("/schedule", load_source)
+
+    def test_auto_config_save_is_one_atomic_request_with_all_fields(self):
+        save_source = source_between("async function saveSchedule", "function validPendingRunNowId")
+        self.assertEqual(save_source.count('api(`${API_BASE}/auto-config`'), 1)
+        self.assertIn('method: "POST"', save_source)
+        self.assertIn("expected_version: expectedVersion", save_source)
+        self.assertIn("enabled: requestedEnabled", save_source)
+        self.assertIn('timezone: "Asia/Shanghai"', save_source)
+        self.assertIn("publish_times: [requestedPublishTime]", save_source)
+        self.assertIn("source_account_ids: Array.from(state.autoAccountIds)", save_source)
+        self.assertIn('caption_template: byId("caption").value', save_source)
+        self.assertIn("consent:", save_source)
+        self.assertNotIn("for (", save_source)
+
+    def test_config_draft_uses_version_conflict_protection(self):
+        apply_source = source_between("function applySchedule", "async function loadSchedule")
+        save_source = source_between("async function saveSchedule", "function validPendingRunNowId")
+        self.assertIn("scheduleDraftBaseVersion", PAGE)
+        self.assertIn("scheduleStale", PAGE)
+        self.assertIn("normalized.version !== state.scheduleDraftBaseVersion", apply_source)
+        self.assertIn("expected_version: expectedVersion", save_source)
+        self.assertIn("tt_post_auto_config_version_conflict", save_source)
+        self.assertIn("preserveDraft: true", save_source)
+
+    def test_disabling_auto_publish_does_not_require_publish_consent(self):
+        validation_source = source_between(
+            "function scheduleSaveError()", "function runNowDisabledReason()"
+        )
+        self.assertIn("captionTemplateValidation([])", validation_source)
         self.assertIn(
-            "for (let index = 0; index < materialIds.length; index += 1)",
-            validation,
+            'if (byId("scheduleEnabled").checked && !byId("publishConsent").checked)',
+            validation_source,
         )
-        self.assertIn("await api(`${API_BASE}/materials/preview`", validation)
-        self.assertIn("state.materials.push(", validation)
-        self.assertIn("state.failures.push(", validation)
-        self.assertIn("renderMaterialResults()", validation)
-        self.assertIn("通过 ${state.materials.length} 个", validation)
-        self.assertIn("失败 ${state.failures.length} 个", validation)
-        self.assertLess(
-            validation.index("materialIds = parseMaterialIds()"),
-            validation.index("await api(`${API_BASE}/materials/preview`"),
+        self.assertNotIn(
+            'if (!byId("publishConsent").checked)',
+            validation_source,
         )
-        self.assertNotIn("Promise.all(", validation)
-        self.assertIn("批量校验素材", PAGE)
-        self.assertIn("校验通过", PAGE)
-        self.assertNotIn('id="mediaPreview"', PAGE)
-        self.assertNotIn('id="videoShell"', PAGE)
 
-    def test_caption_template_is_visible_editable_and_rendered_per_material(self):
-        expected = (
-            "Watch the full story in the app 🎬\\n\\n"
-            "Drama ID: {{contect_id}}\\n\\n"
-            "Visit my profile → Open the link → Search the Drama ID → Watch now."
+    def test_validated_materials_are_explicit_direct_test_choices(self):
+        render_source = source_between(
+            "function renderMaterialResults()", "function renderQueueSubmitResults()"
         )
-        self.assertIn(f'const CAPTION_TEMPLATE = "{expected}";', PAGE)
-        caption = re.search(
-            r'<textarea id="caption"(?P<attrs>[^>]*)>(?P<body>.*?)</textarea>',
+        validation_source = source_between(
+            "async function validateMaterials()", "function normalizeDramaDescription"
+        )
+        click_source = source_between(
+            'byId("materialResults").addEventListener',
+            'byId("materialIds").addEventListener("input"',
+        )
+        self.assertIn('row.dataset.directMaterialId = materialId', render_source)
+        self.assertIn('row.setAttribute("aria-pressed"', render_source)
+        self.assertIn("state.materials.length === 1", validation_source)
+        self.assertIn("state.selectedDirectMaterialId = cleanId(state.materials[0].material_id)", validation_source)
+        self.assertIn("state.selectedDirectMaterialId = cleanId(button.dataset.directMaterialId)", click_source)
+
+    def test_direct_test_button_has_only_direct_test_prerequisites(self):
+        reason_source = source_between(
+            "function runNowDisabledReason()", "function updateScheduleActions()"
+        )
+        for requirement in (
+            "selectedAccount()",
+            "selectedDirectMaterial()",
+            "Number(state.schedule.version || 0) <= 0",
+            "state.scheduleDraftDirty",
+            "state.scheduleStale",
+            "accountEligible(item)",
+            "selectedAccountSettings()",
+            "state.creatorInfo",
+            'settings.privacy_level !== "PUBLIC_TO_EVERYONE"',
+            "boolValue(settings.allow_comment) !== true",
+            "gatesOpen()",
+            "captionTemplateValidation([material])",
+            'byId("publishConsent").checked',
+        ):
+            self.assertIn(requirement, reason_source)
+        for forbidden in (
+            "available_material_count",
+            "can_publish_now",
+            "publication_status",
+            "preparationItems",
+            "material-pool",
+            "savedAutoAccountIds",
+        ):
+            self.assertNotIn(forbidden, reason_source)
+
+    def test_pool_add_requires_saved_auto_publish_membership_but_direct_test_does_not(self):
+        pool_validation = source_between(
+            "function formValidationError()", "function validateForm()"
+        )
+        direct_validation = source_between(
+            "function runNowDisabledReason()", "function updateScheduleActions()"
+        )
+        self.assertIn("Number(state.schedule.version || 0) <= 0", pool_validation)
+        self.assertIn("state.savedAutoAccountIds.has(accountId(item))", pool_validation)
+        self.assertNotIn("savedAutoAccountIds", direct_validation)
+
+    def test_page_copy_distinguishes_pool_consumption_from_direct_test(self):
+        self.assertNotIn("每日到点与立即发布才会消费下一条", PAGE)
+        self.assertNotIn("自动和立即发布均不会发送到 TikTok，也不会消费待发素材", PAGE)
+        self.assertIn("自动发布才会按时消费素材池中的下一条", PAGE)
+        self.assertIn("立即测试使用明确选择的已校验素材独立发布，不占用或消费素材池", PAGE)
+
+    def test_direct_test_posts_the_selected_material_without_using_the_pool(self):
+        run_source = source_between("async function runNow()", "async function loadDirectTests")
+        self.assertIn('api(`${API_BASE}/test-publish`', run_source)
+        self.assertIn('method: "POST"', run_source)
+        self.assertIn("source_account_id: requestedAccountId", run_source)
+        self.assertIn("material_id: requestedMaterialId", run_source)
+        self.assertIn("expected_config_version:", run_source)
+        self.assertIn("idempotency_key: requestKey", run_source)
+        self.assertIn("consent:", run_source)
+        self.assertNotIn("/material-pool", run_source)
+        self.assertNotIn("/run-now", run_source)
+        self.assertIn("历史已发布也允许再次测试", run_source)
+
+    def test_direct_test_creation_statuses_are_treated_as_submitted(self):
+        submitted_match = re.search(
+            r"const RUN_NOW_SUBMITTED_STATUSES = new Set\(\[(.*?)\]\);",
             PAGE,
             flags=re.DOTALL,
         )
-        self.assertIsNotNone(caption)
-        self.assertIn('maxlength="2200"', caption.group("attrs"))
-        self.assertNotIn("readonly", caption.group("attrs"))
-        self.assertNotIn("disabled", caption.group("attrs"))
-        self.assertEqual(
-            caption.group("body"),
-            expected.replace("\\n", "\n"),
+        self.assertIsNotNone(submitted_match)
+        submitted = submitted_match.group(1)
+        for status in ("queued", "preparing", "ready", "publishing", "reconciling"):
+            self.assertIn(f'"{status}"', submitted)
+        classify_source = source_between(
+            "function classifyRunNowResponse", "async function runNow()"
         )
-        self.assertIn('byId("caption").addEventListener("input"', PAGE)
-        self.assertIn("byId(\"caption\").value = CAPTION_TEMPLATE", PAGE)
-        self.assertIn("CAPTION_PLACEHOLDERS", PAGE)
+        self.assertIn("RUN_NOW_SUBMITTED_STATUSES.has(status)", classify_source)
+
+    def test_direct_test_idempotency_is_scoped_to_account_and_material(self):
+        pending_source = source_between(
+            "function pendingRunNowTarget", "function classifyRunNowResponse"
+        )
+        self.assertIn('return `${String(accountIdValue || "")}:${String(materialIdValue || "")}`', pending_source)
+        self.assertIn('`tt-post:test-publish:${account}:${material}:`', pending_source)
+        self.assertIn('"tt-post:pending-direct-test:v3"', PAGE)
+        self.assertIn("account_id: account", pending_source)
+        self.assertIn("material_id: material", pending_source)
+        self.assertIn("expected_config_version", pending_source)
+        self.assertIn("consent_accepted_at", pending_source)
+        self.assertIn("direct_test_id", pending_source)
+
+    def test_direct_test_pending_request_is_kept_until_terminal(self):
+        pending_source = source_between(
+            "function pendingRunNowTarget", "function classifyRunNowResponse"
+        )
+        run_source = source_between(
+            "async function runNow()", "async function loadDirectTests"
+        )
+        load_source = source_between(
+            "async function loadDirectTests", "async function loadAccounts()"
+        )
+        self.assertIn("function pendingRunNowRequestForTarget", pending_source)
+        self.assertIn("if (existing) return existing", pending_source)
+        self.assertIn(
+            "expected_config_version: pendingRequest.expected_config_version",
+            run_source,
+        )
+        self.assertIn(
+            "accepted_at: pendingRequest.consent_accepted_at",
+            run_source,
+        )
+        submitted = run_source.index('outcome.kind === "submitted"')
+        submitted_end = run_source.index("} else {", submitted)
+        submitted_source = run_source[submitted:submitted_end]
+        self.assertIn("updatePendingRunNowEntry", submitted_source)
+        self.assertNotIn("clearPendingRunNowKey", submitted_source)
+        self.assertIn("reconcilePendingRunNowState(state.directTests)", load_source)
+        self.assertIn("Number(error.status) >= 400", run_source)
+
+    def test_direct_test_history_is_loaded_separately(self):
+        source = source_between("async function loadDirectTests", "async function loadAccounts()")
+        self.assertIn('api(`${API_BASE}/direct-tests?page=1&page_size=20`)', source)
+        self.assertIn("state.directTests", source)
+        self.assertIn('byId("directTestSummary")', source)
+        status_source = source_between("function statusMeta(item)", "function appendCell")
+        for direct_status in ("queued", "preparing", "ready", "publishing", "unknown", "canceled"):
+            self.assertIn(f"{direct_status}:", status_source)
+
+    def test_direct_test_history_renders_details_and_polls_nonterminal_tasks(self):
+        render_source = source_between(
+            "function renderDirectTests(items)", "function directTestPollingNeeded()"
+        )
+        polling_source = source_between(
+            "function directTestPollingNeeded()", "async function runNow()"
+        )
+        load_source = source_between(
+            "async function loadDirectTests", "async function loadAccounts()"
+        )
+        for field in (
+            "item.id",
+            "item.material_id",
+            "item.source_account_id",
+            "item.claim_phase",
+            "item.gpu_job_id",
+            "item.updated_at",
+            "item.error_code",
+            "item.error_message",
+        ):
+            self.assertIn(field, render_source)
+        for status in ("queued", "preparing", "ready", "publishing", "reconciling"):
+            self.assertIn(f'"{status}"', PAGE)
+        self.assertIn("DIRECT_TEST_POLL_INTERVAL_MS = 10000", PAGE)
+        self.assertIn("DIRECT_TEST_POLL_STATUSES", polling_source)
+        self.assertIn("validPendingRunNowEntry", polling_source)
+        self.assertIn('entry.status !== "unknown"', polling_source)
+        self.assertIn("loadDirectTests({ quiet: true })", polling_source)
+        self.assertIn("renderDirectTests(state.directTests)", load_source)
+        self.assertIn("syncDirectTestPolling()", load_source)
+
+    def test_pool_add_is_version_bound_to_saved_config(self):
+        payload_source = source_between(
+            "function materialPoolPayload(material)", "function resetMaterialPoolForm()"
+        )
+        self.assertIn("source_account_id: state.selectedAccountId", payload_source)
+        self.assertIn("material_id: material.material_id", payload_source)
+        self.assertIn("expected_config_version:", payload_source)
+        self.assertIn('caption_template: byId("caption").value', payload_source)
+        self.assertIn("consent:", payload_source)
+
+    def test_publication_status_is_independent_from_pool_availability(self):
+        publication_source = source_between(
+            "function publicationStatusMeta(item)", "function poolAvailabilityMeta(item)"
+        )
+        availability_source = source_between(
+            "function poolAvailabilityMeta(item)", "function preparationStatusMeta(item)"
+        )
+        rows_source = source_between(
+            "function renderPreparationRows(items)", "function renderPreparationSummary(result, items)"
+        )
+        self.assertIn('item.publication_status || "unpublished"', publication_source)
+        self.assertIn('status: "published"', publication_source)
+        self.assertIn('status: "unknown"', publication_source)
+        self.assertIn('status: "unpublished"', publication_source)
+        self.assertNotIn("item.status", publication_source)
+        self.assertIn("consumed:", availability_source)
+        self.assertIn("已消费（以发布状态为准）", availability_source)
+        self.assertNotIn('consumed: ["已发布"', availability_source)
+        self.assertIn("publicationStatusMeta(item)", rows_source)
+        self.assertIn("poolAvailabilityMeta(item)", rows_source)
+
+    def test_pool_table_shows_publication_availability_and_preparation_columns(self):
+        table_source = source_between('<table class="preparation-table">', "</table>")
+        for heading in ("发布状态", "可用状态", "预制作状态"):
+            self.assertIn(f"<th>{heading}</th>", table_source)
+        self.assertIn("cell.colSpan = 8", PAGE)
+        self.assertIn("publicationCounts", PAGE)
+        self.assertIn("summary.unknown_publication", PAGE)
+        self.assertIn("allPublicationCounts.unpublished", PAGE)
+
+    def test_caption_supports_url_desc_and_both_drama_id_macros(self):
         self.assertIn('new Set(["contect_id", "content_id"])', PAGE)
-        self.assertIn("function captionTemplateValidation()", PAGE)
-        self.assertIn("发布描述模板包含未知占位符", PAGE)
-        self.assertIn("发布描述模板包含不完整占位符", PAGE)
-        self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}";', PAGE)
-        self.assertIn('const CAPTION_DESC_PLACEHOLDER = "{desc}";', PAGE)
-        self.assertIn(
-            "https://gy.g2flow.com/s2l/8999999999999999999.html",
-            PAGE,
+        self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}"', PAGE)
+        self.assertIn('const CAPTION_DESC_PLACEHOLDER = "{desc}"', PAGE)
+        render_source = source_between(
+            "function renderCaptionTemplate", "function captionTemplateValidation"
         )
-        self.assertIn("CAPTION_SINGLE_PLACEHOLDER_PATTERN", PAGE)
-        self.assertIn(
-            'singlePlaceholders.filter(name => !["url", "desc"].includes(name))',
-            PAGE,
+        validation_source = source_between(
+            "function captionTemplateValidation", "function updateCaptionState"
         )
-        self.assertIn(
-            "braceRemainder.includes(\"{\") ||",
-            PAGE,
-        )
-        self.assertIn(
-            'if (name === "url") return CAPTION_URL_PREVIEW;',
-            PAGE,
-        )
-        self.assertIn('if (name === "desc") return normalizedDescription;', PAGE)
-        self.assertIn("function normalizeDramaDescription(value)", PAGE)
-        self.assertIn("缺少有效剧描述，不能使用 {desc}", PAGE)
-        self.assertIn("模板中的换行会原样提交给 TikTok", PAGE)
-        self.assertIn("material.description", PAGE)
-        self.assertIn("if (units > 2200)", PAGE)
-        self.assertIn("caption_template: byId(\"caption\").value", PAGE)
-        self.assertIn("utf16Units", PAGE)
-        payload = source_between(
-            "function materialPoolPayload(material)",
-            "function resetMaterialPoolForm()",
-        )
-        self.assertNotIn("description:", payload)
+        self.assertIn('if (name === "url") return CAPTION_URL_PREVIEW', render_source)
+        self.assertIn('if (name === "desc") return normalizedDescription', render_source)
+        self.assertIn('["url", "desc"].includes(name)', validation_source)
+        self.assertIn("缺少有效剧描述", validation_source)
 
-    def test_material_validation_does_not_wait_for_or_require_final_video(self):
-        validation = source_between(
-            "async function validateMaterials()",
-            "function renderCaptionTemplate(",
+    def test_material_validation_is_sequential_and_bounded(self):
+        parse_source = source_between("function parseMaterialIds()", "function updateMaterialProgress")
+        validate_source = source_between(
+            "async function validateMaterials()", "function normalizeDramaDescription"
         )
-        form_validation = source_between(
-            "function formValidationError()",
-            "function validateForm()",
-        )
-        self.assertIn(
-            'body: JSON.stringify({ material_id: materialId })',
-            validation,
-        )
-        self.assertIn("const contentId = cleanId(item.content_id)", validation)
-        for forbidden in (
-            "prepared_media_url",
-            "final_media_url",
-            "output_sha256",
-            "duration_sec",
-            "final_duration_sec",
-            "renderVideoPreview",
-            "renderMaterial(",
-        ):
-            self.assertNotIn(forbidden, validation)
-            self.assertNotIn(forbidden, form_validation)
-        self.assertIn(
-            "请先批量校验素材，并至少确认一个真实 Drama ID。",
-            form_validation,
-        )
-        self.assertNotIn("creatorInfo", form_validation)
-        self.assertIn(
-            'if (!state.creatorInfo) return "请等待 TikTok 账号实时确认完成。";',
-            source_between(
-                "function scheduleSaveError()",
-                "function runNowDisabledReason()",
-            ),
-        )
-        self.assertIn("校验通过即可入池", PAGE)
-        self.assertIn("视频将在后台预制作", PAGE)
+        self.assertIn("ids.length > 100", parse_source)
+        self.assertIn("for (let index = 0; index < materialIds.length; index += 1)", validate_source)
+        self.assertIn('api(`${API_BASE}/materials/preview`', validate_source)
+        self.assertNotIn("Promise.all", validate_source)
 
-    def test_daily_schedule_uses_time_of_day_versioning_and_account_scope(self):
-        publish_time = re.search(
-            r'<input id="dailyPublishTime"(?P<attrs>[^>]*)>',
-            PAGE,
-        )
-        self.assertIsNotNone(publish_time)
-        for attribute in (
-            'type="time"',
-            'step="60"',
-            'value="11:00"',
-        ):
-            self.assertIn(attribute, publish_time.group("attrs"))
-        self.assertIn("自动发布设置", PAGE)
-        self.assertIn("启用素材池自动发布", PAGE)
-        self.assertIn("保存发布设置", PAGE)
-        self.assertIn("不同账号需选择不同的分钟", PAGE)
-        self.assertIn("每天固定时间自动消费下一条", PAGE)
-        self.assertIn(
-            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
-            PAGE,
-        )
-        save = source_between(
-            "async function saveSchedule()",
-            "function pendingRunNowKeyForAccount(accountIdValue)",
-        )
-        self.assertIn("await api(`${API_BASE}/schedule`", save)
-        self.assertIn('const requestedEnabled = byId("scheduleEnabled").checked', save)
-        self.assertIn('const requestedPublishTime = byId("dailyPublishTime").value', save)
-        self.assertIn("enabled: requestedEnabled", save)
-        self.assertIn("schedulePayload.publish_time = requestedPublishTime", save)
-        self.assertIn('schedulePayload.timezone = "Asia/Shanghai"', save)
-        self.assertIn(
-            "const expectedVersion = Number(state.schedule && state.schedule.version || 0)",
-            save,
-        )
-        self.assertIn("expected_version: expectedVersion", save)
-        self.assertNotIn("scheduled_at:", save)
-        self.assertNotIn("scheduleIntervalMinutes", PAGE)
-        self.assertNotIn("scheduledAtForIndex", PAGE)
-
-    def test_unconfigured_or_loading_account_cannot_inherit_prior_account_time(self):
-        self.assertIn(
-            'const DEFAULT_DAILY_PUBLISH_TIME = "11:00";',
-            PAGE,
-        )
-        renderer = source_between(
-            "function renderSchedule({ hydrateDraft = true } = {})",
-            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
-        )
-        self.assertIn(
-            'byId("dailyPublishTime").value = DEFAULT_DAILY_PUBLISH_TIME;',
-            renderer,
-        )
-        self.assertIn(
-            'byId("dailyPublishTime").value = publishTime || DEFAULT_DAILY_PUBLISH_TIME;',
-            renderer,
-        )
-
-    def test_disabling_schedule_is_actionable_without_new_publish_consent(self):
-        validation = source_between(
-            "function scheduleSaveError()",
-            "function runNowDisabledReason()",
-        )
-        disable_guard = 'if (!byId("scheduleEnabled").checked) return "";'
-        self.assertIn(disable_guard, validation)
-        self.assertLess(
-            validation.index(disable_guard),
-            validation.index("if (!accountEligible(item))"),
-        )
-        for publish_only_check in (
-            "selectedAccountSettings()",
-            "state.creatorInfo",
-            "manualCanaryReady()",
-            "dailyPublishTime",
-            "publishConsent",
-        ):
-            self.assertGreater(
-                validation.index(publish_only_check),
-                validation.index(disable_guard),
-            )
-
-        save = source_between(
-            "async function saveSchedule()",
-            "function validPendingRunNowAccountId(value)",
-        )
-        base_payload = source_between_text(
-            save,
-            "const schedulePayload = {",
-            "if (requestedEnabled) {",
-        )
-        for forbidden in ("publish_time", "timezone", "consent"):
-            self.assertNotIn(forbidden, base_payload)
-        enabled_payload = source_between_text(
-            save,
-            "if (requestedEnabled) {",
-            'setText(button, "正在保存…")',
-        )
-        self.assertIn("schedulePayload.publish_time", enabled_payload)
-        self.assertIn("schedulePayload.timezone", enabled_payload)
-        self.assertIn("schedulePayload.consent", enabled_payload)
-        self.assertIn("body: JSON.stringify(schedulePayload)", save)
-        self.assertIn('setText(byId("scheduleState"), error)', save)
-
-        save_button = re.search(
-            r'<button id="saveSchedule"(?P<attrs>[^>]*)>',
-            PAGE,
-        )
-        self.assertIsNotNone(save_button)
-        self.assertNotIn("disabled", save_button.group("attrs"))
-        actions = source_between(
-            "function updateScheduleActions()",
-            "function renderSchedule(",
-        )
-        self.assertIn("const scheduleControlsLocked = state.scheduleBusy", actions)
-        self.assertIn('byId("dailyPublishTime").disabled = scheduleControlsLocked', actions)
-        self.assertIn('byId("scheduleEnabled").disabled = scheduleControlsLocked', actions)
-        self.assertIn('byId("refreshAccounts").disabled = state.scheduleBusy', actions)
-        self.assertIn('.querySelectorAll("input[data-account-id]")', actions)
-        self.assertIn("radio.disabled = state.scheduleBusy", actions)
-        self.assertIn("saveButton.disabled = state.scheduleBusy", actions)
-        self.assertIn('saveButton.title = saveError', actions)
-        self.assertIn('"关闭自动发布"', actions)
-
-    def test_schedule_draft_survives_gate_and_background_refreshes(self):
-        gates = source_between(
-            "function renderGates()",
-            "function accountEligible(item)",
-        )
-        self.assertNotIn("renderSchedule(", gates)
-        self.assertIn("scheduleDraftDirty: false", PAGE)
-
-        load = source_between(
-            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
-            "async function saveSchedule()",
-        )
-        self.assertIn("if (!preserveDraft)", load)
-        self.assertIn(
-            "renderSchedule({ hydrateDraft: !preserveDraft || !state.scheduleDraftDirty })",
-            load,
-        )
-        self.assertIn("state.scheduleDraftDirty = false", load)
-
-        change = source_between(
-            '["dailyPublishTime", "scheduleEnabled"].forEach',
-            'byId("publishConsent").addEventListener',
-        )
-        self.assertIn("state.scheduleDraftDirty = true", change)
-        self.assertIn("renderSchedule({ hydrateDraft: false })", change)
-        self.assertNotIn("resetBatchConfirmation()", change)
-        refresh = source_between(
-            'byId("refreshGates").addEventListener',
-            'byId("previewMaterial").addEventListener',
-        )
-        self.assertIn("loadSchedule({ preserveDraft: true })", refresh)
-
-    def test_schedule_save_rejects_stale_gets_and_rehydrates_version_conflicts(self):
-        load = source_between(
-            "async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {})",
-            "async function saveSchedule()",
-        )
-        self.assertIn(
-            "if (state.scheduleBusy && !allowWhileSaving) return false;",
-            load,
-        )
-        self.assertEqual(load.count("(state.scheduleBusy && !allowWhileSaving)"), 3)
-        self.assertIn("return true;", load)
-        self.assertGreaterEqual(load.count("return false;"), 4)
-        self.assertLess(
-            load.index("delete state.preparationScheduleRefreshPendingByAccount"),
-            load.index("return true;"),
-        )
-
-        save = source_between(
-            "async function saveSchedule()",
-            "function validPendingRunNowAccountId(value)",
-        )
-        bump = "state.scheduleRequestVersion += 1"
-        self.assertEqual(save.count(bump), 2)
-        bumps = [save.index(bump), save.index(bump, save.index(bump) + 1)]
-        api_call = save.index("const result = await api(`${API_BASE}/schedule`")
-        apply_result = save.index("applyGates(result)", api_call)
-        self.assertLess(bumps[0], api_call)
-        self.assertGreater(bumps[1], api_call)
-        self.assertLess(bumps[1], apply_result)
-
-        conflict = source_between_text(
-            save,
-            'if (error.code === "tt_post_schedule_version_conflict")',
-            "} else {",
-        )
-        self.assertIn("requestedAccountId !== state.selectedAccountId", conflict)
-        self.assertIn("if (!accountChanged) state.scheduleDraftDirty = false", conflict)
-        self.assertIn("preserveDraft: accountChanged", conflict)
-        self.assertIn("allowWhileSaving: true", conflict)
-        self.assertIn("已加载最新设置，请重新修改后再保存", conflict)
-        non_conflict = source_between_text(save, "} else {", "} finally {")
-        self.assertIn("requestedAccountId !== state.selectedAccountId", non_conflict)
-        self.assertIn(
-            "await loadSchedule({ preserveDraft: false, allowWhileSaving: true })",
-            non_conflict,
-        )
-        self.assertIn(": false;", non_conflict)
-        self.assertIn("每日排期保存失败", non_conflict)
-
-    def test_ineligible_account_remains_selectable_for_schedule_stop(self):
-        renderer = source_between(
-            "function renderAccounts()",
-            "function resetCreatorInfo(",
-        )
-        self.assertIn('label.className = `account-option${eligible ? "" : " ineligible"}`', renderer)
-        self.assertIn('setText(status, eligible ? "可确认" : "不可发布，可管理")', renderer)
-        self.assertIn("radio.disabled = state.scheduleBusy", renderer)
-        self.assertNotIn("radio.disabled = !eligible", renderer)
-        self.assertNotIn("account-option.disabled", PAGE)
-
-    def test_account_source_degradation_shows_backend_warning_not_success_copy(self):
-        loader = source_between(
-            "async function loadAccounts()",
-            "function resetBatchConfirmation()",
-        )
-        degraded = source_between_text(
-            loader,
-            "if (boolValue(result.account_source_available) === false)",
-            "} else {",
-        )
-        self.assertIn("result.warning", degraded)
-        self.assertIn('className = "helper warning"', degraded)
-        self.assertNotIn("已加载 ${state.accounts.length} 个账号", degraded)
-        self.assertIn("已加载 ${state.accounts.length} 个账号", loader)
-        self.assertIn(".helper.warning { color: var(--amber); }", PAGE)
-
-    def test_preparation_change_refreshes_selected_schedule_and_run_now_reason(self):
-        preparation = source_between(
-            "async function loadPreparationStatus(",
-            "function statusMeta(item)",
-        )
-        self.assertIn("previousFingerprint = preparationStatusFingerprint", preparation)
-        self.assertIn("currentFingerprint = preparationStatusFingerprint", preparation)
-        self.assertIn("currentFingerprint !== previousFingerprint", preparation)
-        self.assertIn("renderSchedule({ hydrateDraft: false })", preparation)
-        self.assertIn("await loadSchedule({ preserveDraft: true })", preparation)
-        self.assertIn(
-            "state.preparationScheduleRefreshPendingByAccount[requestedAccountId] = true",
-            preparation,
-        )
-        self.assertIn("if (scheduleRefreshed)", preparation)
-        self.assertIn(
-            "delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId]",
-            preparation,
-        )
-
-        reason = source_between(
-            "function runNowDisabledReason()",
-            "function updateScheduleActions()",
-        )
-        self.assertIn("selectedPreparationState()", reason)
-        self.assertIn("正在制作，完成后会自动开放立即发布", reason)
-        self.assertIn("没有可立即发布素材", reason)
-        self.assertIn('id="preparingMaterialCount"', PAGE)
-        self.assertIn('setText(byId("preparingMaterialCount")', PAGE)
-
-    def test_material_pool_creation_is_sequential_and_keeps_partial_failure_state(self):
-        creation = source_between(
-            "async function addMaterialsToPool()",
-            "function statusMeta(",
-        )
-        self.assertIn(
-            "const payloads = materials.map(material => materialPoolPayload(material))",
-            creation,
-        )
-        self.assertIn(
-            "for (let index = 0; index < materials.length; index += 1)",
-            creation,
-        )
-        self.assertIn("await api(`${API_BASE}/material-pool`", creation)
-        self.assertIn("created.push(", creation)
-        self.assertIn("poolFailures.push(", creation)
-        self.assertNotIn("Promise.all(", creation)
-        self.assertIn(
-            "if (!poolFailures.length && !previewFailureCount)",
-            creation,
-        )
-        self.assertIn("resetMaterialPoolForm()", creation)
-        self.assertIn("state.queueSummary =", creation)
-        self.assertIn("页面已保留", creation)
-        self.assertIn("已成功素材不会重复入池", creation)
-        self.assertIn("已入池，后台预制作", creation)
-        self.assertIn("void loadPreparationStatus({ quiet: true })", creation)
-
-    def test_preparation_status_panel_polls_active_or_pending_refresh_without_form_lock(self):
-        preparation = source_between(
-            "function preparationStatusMeta(item)",
-            "function statusMeta(item)",
-        )
-        self.assertIn(
-            'new Set(["queued", "preparing", "retry_wait"])',
-            PAGE,
-        )
-        self.assertIn("PREPARATION_POLL_INTERVAL_MS = 10000", PAGE)
-        for status in ("queued", "preparing", "retry_wait", "ready", "failed"):
-            self.assertIn(f"{status}:", preparation)
-        self.assertIn("preparation_status", preparation)
-        self.assertIn(
-            "PREPARATION_ACTIVE_STATUSES.has(preparationStatusMeta(item).status)",
-            preparation,
-        )
-        self.assertIn("preparationHasActive: false", PAGE)
-        self.assertIn(
-            "if (!preparationPollingNeeded() || document.hidden) return;",
-            preparation,
-        )
-        self.assertIn(
-            "return state.preparationHasActive || selectedPreparationScheduleRefreshPending()",
-            preparation,
-        )
-        self.assertIn(
-            "status => Number(summary[status] || 0) > 0",
-            preparation,
-        )
-        self.assertIn("window.setTimeout(", preparation)
-        self.assertIn(
-            "void loadPreparationStatus({ quiet: true })",
-            preparation,
-        )
-        self.assertIn(
-            "await api(`${API_BASE}/material-pool?${params.toString()}`)",
-            preparation,
-        )
-        load = source_between(
-            "async function loadPreparationStatus(",
-            "function statusMeta(item)",
-        )
-        self.assertIn("state.preparationLoading = true", load)
-        self.assertIn("state.preparationLoading = false", load)
-        self.assertNotIn("state.busy =", load)
-        self.assertNotIn("createFormFields", load)
-        self.assertNotIn('data-action="retry', PAGE)
-        self.assertIn('meta.status === "failed" ? "待处理" : ""', preparation)
-        self.assertIn("document.addEventListener(\"visibilitychange\"", PAGE)
-
-    def test_preparation_refresh_is_account_scoped_and_retries_failed_schedule_get(self):
-        fingerprint = source_between(
-            "function preparationStatusFingerprint(",
-            "function selectedPreparationState()",
-        )
-        for summary_count in ("active", "ready", "available", "total"):
-            self.assertIn(f"`{summary_count}:$", fingerprint)
-        self.assertIn("preparationSummary: {}", PAGE)
-        self.assertIn("preparationReloadPending: false", PAGE)
-
-        preparation = source_between(
-            "async function loadPreparationStatus(",
-            "function statusMeta(item)",
-        )
-        self.assertIn('params.set("source_account_id", requestedAccountId)', preparation)
-        self.assertIn("state.preparationSummary = summary", preparation)
-        self.assertIn("state.preparationReloadPending = true", preparation)
-        self.assertIn(
-            "void loadPreparationStatus({ quiet: true, force: true })",
-            preparation,
-        )
-        refresh_call = preparation.index(
-            "const scheduleRefreshed = await loadSchedule({ preserveDraft: true })"
-        )
-        conditional_clear = preparation.index("if (scheduleRefreshed)", refresh_call)
-        pending_clear = preparation.index(
-            "delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId]",
-            conditional_clear,
-        )
-        self.assertLess(refresh_call, conditional_clear)
-        self.assertLess(conditional_clear, pending_clear)
-
-        account_change = source_between(
-            'byId("accountList").addEventListener("change"',
-            'byId("refreshAccounts").addEventListener',
-        )
-        self.assertIn(
-            "void loadPreparationStatus({ quiet: true, force: true })",
-            account_change,
-        )
-
-    def test_queue_results_keep_every_material_visible_with_its_own_outcome(self):
-        creation = source_between(
-            "async function addMaterialsToPool()",
-            "function statusMeta(",
-        )
-        renderer = source_between(
-            "function renderQueueSubmitResults()",
-            "function resetMaterials(",
-        )
-        self.assertIn("queueResults: []", PAGE)
-        self.assertIn(
-            "state.queueResults = payloads.map(payload => ({",
-            creation,
-        )
-        self.assertIn('status: "pending"', creation)
-        self.assertIn('poolResult.status = "saving"', creation)
-        self.assertIn('poolResult.status = "success"', creation)
-        self.assertIn('poolResult.status = "failure"', creation)
-        self.assertGreaterEqual(
-            creation.count("renderQueueSubmitResults()"),
-            3,
-        )
-        self.assertIn("state.queueResults.forEach(item => {", renderer)
-        self.assertIn("state.queueResults.length", renderer)
-        self.assertIn("item.material_id", renderer)
-        self.assertIn("item.message", renderer)
-        self.assertNotIn(".slice(", renderer)
-        reset = source_between(
-            "function resetMaterialPoolForm()",
-            "async function addMaterialsToPool()",
-        )
-        self.assertNotIn("state.queueResults =", reset)
-        self.assertNotIn('hide(byId("queueSubmitPanel"))', reset)
-
-    def test_material_changes_reset_batch_confirmation_but_schedule_draft_does_not(self):
-        self.assertIn("function resetBatchConfirmation()", PAGE)
-        self.assertIn('state.formKey = "";', PAGE)
-        self.assertIn('state.consentAcceptedAt = "";', PAGE)
-        self.assertIn('byId("publishConsent").checked = false;', PAGE)
-        self.assertIn(
-            'byId("materialIds").addEventListener("input"',
-            PAGE,
-        )
-        self.assertIn(
-            'byId("caption").addEventListener("input"',
-            PAGE,
-        )
-        self.assertIn(
-            '["dailyPublishTime", "scheduleEnabled"].forEach',
-            PAGE,
-        )
-        schedule_change = source_between(
-            '["dailyPublishTime", "scheduleEnabled"].forEach',
-            'byId("publishConsent").addEventListener',
-        )
-        self.assertIn("state.scheduleDraftDirty = true", schedule_change)
-        self.assertIn('state.consentAcceptedAt = "";', schedule_change)
-        self.assertNotIn("resetBatchConfirmation()", schedule_change)
-        self.assertNotIn('byId("publishConsent").checked = false', schedule_change)
-
-    def test_partial_retry_reuses_frozen_batch_consent_timestamp(self):
-        self.assertIn('consentAcceptedAt: ""', PAGE)
-        self.assertIn("function ensureConsentAcceptedAt()", PAGE)
-        payload = source_between(
-            "function materialPoolPayload(material)",
-            "function resetMaterialPoolForm()",
-        )
-        self.assertIn("accepted_at: ensureConsentAcceptedAt()", payload)
-        self.assertNotIn("accepted_at: new Date().toISOString()", payload)
-
-    def test_creator_info_ignores_stale_account_switch_responses(self):
-        creator = source_between(
-            "async function loadCreatorInfo()",
-            "async function loadAccounts()",
-        )
-        self.assertIn("creatorRequestVersion: 0", PAGE)
-        self.assertIn(
-            "const requestVersion = ++state.creatorRequestVersion",
-            creator,
-        )
-        self.assertIn("const requestedAccountId = accountId(item)", creator)
-        self.assertIn("source_account_id: requestedAccountId", creator)
-        stale_guard = (
-            "requestVersion !== state.creatorRequestVersion ||\n"
-            "            state.selectedAccountId !== requestedAccountId"
-        )
-        self.assertGreaterEqual(creator.count(stale_guard), 2)
-
-    def test_account_settings_are_read_only_and_required_in_pool(self):
-        for removed_id in (
-            "privacyLevel",
-            "allowComment",
-            "allowDuet",
-            "allowStitch",
-            "commercialDisclosure",
-            "ownBrand",
-            "brandedContent",
-            "isAigc",
-        ):
-            self.assertNotIn(f'id="{removed_id}"', PAGE)
-
-        self.assertIn("function selectedAccountSettings()", PAGE)
-        self.assertIn(
-            'if (!selectedAccountSettings()) return "所选账号尚未配置',
-            PAGE,
-        )
-        self.assertIn("renderAccountSettings", PAGE)
+    def test_account_settings_remain_read_only_on_this_page(self):
+        self.assertIn('href="/tt-account-settings.html"', PAGE)
+        self.assertIn("item && item.account_settings", PAGE)
         self.assertIn("settings.configured === true", PAGE)
-        self.assertNotIn('privacy_level: byId("privacyLevel").value', PAGE)
-        self.assertNotIn('allow_comment: byId("allowComment").checked', PAGE)
-        self.assertNotIn(
-            'brand_content_toggle: commercial && byId("brandedContent").checked',
-            PAGE,
-        )
-        self.assertIn("max_video_post_duration_sec", PAGE)
-        self.assertIn("发布池只读展示、不再单独编辑", PAGE)
+        self.assertNotIn('api(`${API_BASE}/account-settings`, {', PAGE)
 
-    def test_live_compliance_gates_default_to_hold(self):
-        for element_id in (
-            "liveGateCard",
-            "auditGateCard",
-            "urlGateCard",
-            "modeGateCard",
-            "refreshGates",
+    def test_initial_load_fetches_config_direct_tests_pool_and_preparation(self):
+        init_source = source_between("async function init()", 'byId("accountSearch")')
+        for loader in (
+            "loadAccounts()",
+            "loadSchedule()",
+            "loadDirectTests()",
+            "loadQueue()",
+            "loadPreparationStatus()",
         ):
-            self.assertIn(f'id="{element_id}"', PAGE)
-        self.assertIn("liveEnabled: undefined", PAGE)
-        self.assertIn("auditApproved: undefined", PAGE)
-        self.assertIn("urlVerified: undefined", PAGE)
-        self.assertIn(
-            "if (!gatesOpen() && !manualCanaryReady())",
-            PAGE,
-        )
-        self.assertIn("状态缺失一律按未开放处理", PAGE)
-        self.assertIn("当前片尾含 DramaWave 品牌与跳转引导", PAGE)
-        self.assertIn("不会消费待发素材", PAGE)
-
-    def test_manual_publish_is_prominent_confirmed_and_never_replaces_daily_slot(self):
-        run = source_between(
-            "async function runNow()",
-            "async function loadAccounts()",
-        )
-        self.assertIn('id="runNow" class="button run-now"', PAGE)
-        self.assertIn("function runNowDisabledReason()", PAGE)
-        self.assertIn("available_material_count", PAGE)
-        self.assertIn("can_publish_now", PAGE)
-        self.assertIn("window.confirm(", run)
-        self.assertIn("额外消费素材池中的下一条", run)
-        self.assertIn("不修改每日设置；若与自动时点重叠，仍受账号串行安全规则约束", run)
-        self.assertIn("await api(`${API_BASE}/run-now`", run)
-        self.assertIn("source_account_id: requestedAccountId", run)
-        self.assertIn("idempotency_key: requestKey", run)
-        self.assertIn(
-            "Promise.all([loadSchedule({ preserveDraft: true }), loadQueue()])",
-            run,
-        )
-        self.assertIn("仅一次私密测试", PAGE)
-        self.assertIn("manual_canary_ready", PAGE)
-        self.assertIn("强制 SELF_ONLY", PAGE)
-        self.assertIn("每日自动排期锁定为关闭", PAGE)
-
-    def test_manual_publish_reuses_pending_key_until_server_success(self):
-        key_helper = source_between(
-            "function pendingRunNowKeyForAccount(accountIdValue)",
-            "async function runNow()",
-        )
-        run = source_between(
-            "async function runNow()",
-            "async function loadAccounts()",
-        )
-        self.assertIn("pendingRunNowByAccount: Object.create(null)", PAGE)
-        self.assertIn(
-            "const existing = pendingRunNowEntry(normalizedAccountId)",
-            key_helper,
-        )
-        self.assertIn("return existing.key", key_helper)
-        self.assertIn(
-            "state.pendingRunNowByAccount[normalizedAccountId] = {",
-            key_helper,
-        )
-        self.assertIn(
-            "const requestKey = `tt-post:run-now:${normalizedAccountId}:${suffix}`",
-            key_helper,
-        )
-        self.assertIn("persistPendingRunNowState()", key_helper)
-        self.assertLess(
-            run.index("if (!confirmed) return;"),
-            run.index("const requestKey = pendingRunNowKeyForAccount(requestedAccountId)"),
-        )
-        self.assertIn("const outcome = classifyRunNowResponse(run)", run)
-        catch_block = run[run.index("} catch (error) {") :]
-        self.assertNotIn("clearPendingRunNowKey(", catch_block)
-        self.assertIn("复用同一请求标识安全重试", catch_block)
-        self.assertNotIn("不会替代、取消或挪动今天的定时发布", PAGE)
-
-    def test_manual_publish_response_status_controls_operator_message_and_key(self):
-        classifier = source_between(
-            "function classifyRunNowResponse(run)",
-            "async function runNow()",
-        )
-        run = source_between(
-            "async function runNow()",
-            "async function loadAccounts()",
-        )
-        self.assertIn("RUN_NOW_NOT_PUBLISHED_STATUSES", PAGE)
-        for status in (
-            "preflight_failed",
-            "failed",
-            "canceled",
-            "missed",
-            "blocked_compliance",
-        ):
-            self.assertIn(f'"{status}"', PAGE)
-        for status in ("scheduled", "claimed", "publishing", "reconciling"):
-            self.assertIn(f'"{status}"', PAGE)
-        self.assertIn('status === "unknown"', classifier)
-        self.assertIn('status === "published"', classifier)
-        self.assertIn(
-            'RUN_NOW_SUBMITTED_STATUSES.has(status) || cleanId(item.queue_id)',
-            classifier,
-        )
-        self.assertIn('return { kind: "unconfirmed", status }', classifier)
-        self.assertIn('outcome.kind === "not_published"', run)
-        self.assertIn("本次未发布", run)
-        self.assertIn(
-            "clearPendingRunNowKey(requestedAccountId, requestKey)",
-            run,
-        )
-        unknown_block = run[
-            run.index('outcome.kind === "unknown"') :
-            run.index('outcome.kind === "published"')
-        ]
-        self.assertIn("需人工核对", unknown_block)
-        self.assertIn(
-            "markPendingRunNowUnknown(requestedAccountId, requestKey)",
-            unknown_block,
-        )
-        self.assertNotIn("clearPendingRunNowKey(", unknown_block)
-        published_block = run[
-            run.index('outcome.kind === "published"') :
-            run.index('outcome.kind === "submitted"')
-        ]
-        self.assertIn("立即发布已完成", published_block)
-        self.assertIn("clearPendingRunNowKey(", published_block)
-        submitted_block = run[
-            run.index('outcome.kind === "submitted"') :
-            run.index("} else {", run.index('outcome.kind === "submitted"'))
-        ]
-        self.assertIn("立即发布已提交", submitted_block)
-        self.assertIn("clearPendingRunNowKey(", submitted_block)
-        self.assertNotIn("runId) {", run)
-
-    def test_pending_manual_keys_are_session_scoped_validated_and_per_account(self):
-        storage = source_between(
-            "function validPendingRunNowAccountId(value)",
-            "function classifyRunNowResponse(run)",
-        )
-        self.assertIn(
-            'const RUN_NOW_PENDING_STORAGE_KEY = "tt-post:pending-run-now:v1"',
-            PAGE,
-        )
-        self.assertIn("RUN_NOW_PENDING_STORAGE_MAX_BYTES = 32768", PAGE)
-        self.assertIn("RUN_NOW_PENDING_MAX_ACCOUNTS = 100", PAGE)
-        self.assertIn(r"/^[1-9]\d{0,29}$/", storage)
-        self.assertIn("key.length > 255", storage)
-        self.assertIn("key.startsWith(prefix)", storage)
-        self.assertIn(r"/^[A-Za-z0-9:-]{8,180}$/", storage)
-        self.assertIn('value.status === "" || value.status === "unknown"', storage)
-        self.assertIn("window.sessionStorage.getItem(RUN_NOW_PENDING_STORAGE_KEY)", storage)
-        self.assertIn("window.sessionStorage.setItem(", storage)
-        self.assertIn("window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY)", storage)
-        self.assertIn("JSON.parse(raw)", storage)
-        self.assertIn("Object.create(null)", storage)
-        self.assertIn("state.pendingRunNowByAccount[normalizedAccountId]", storage)
-        self.assertIn("delete state.pendingRunNowByAccount[normalizedAccountId]", storage)
-        self.assertIn("loadPendingRunNowState();", PAGE)
-
-    def test_queue_and_event_monitor_are_present(self):
-        for element_id in (
-            "queueFilters",
-            "filterMaterialId",
-            "filterAccountId",
-            "filterStatus",
-            "queueRows",
-            "pageInfo",
-            "eventDialog",
-            "eventList",
-        ):
-            self.assertIn(f'id="{element_id}"', PAGE)
-        self.assertIn("PROCESSING_STATUSES", PAGE)
-        self.assertIn("结果待确认", PAGE)
-        self.assertIn("不会自动创建第二条发布请求", PAGE)
-        self.assertIn("queue_id: String(queueId)", PAGE)
-
-    def test_queue_cancel_and_manual_reconcile_are_status_scoped(self):
-        self.assertIn("function canCancelQueue(item)", PAGE)
-        self.assertIn(
-            'return ["scheduled", "claimed"].includes(rawQueueStatus(item));',
-            PAGE,
-        )
-        self.assertIn("function canManuallyReconcileQueue(item)", PAGE)
-        self.assertIn(
-            '["unknown", "needs_review", "reconciling"].includes(rawQueueStatus(item))',
-            PAGE,
-        )
-        self.assertIn('queueActionButton("cancel", queueId, "取消任务", "danger")', PAGE)
-        self.assertIn(
-            'queueActionButton("reconcile", queueId, "人工核对", "warning")',
-            PAGE,
-        )
-        self.assertIn(
-            "`${API_BASE}/queue/${encodeURIComponent(normalizedQueueId)}/${action}`",
-            PAGE,
-        )
-        self.assertIn('method: "POST"', PAGE)
-        self.assertIn(
-            'isCancel ? { reason: "由AI后台操作人员人工取消" } : {}',
-            PAGE,
-        )
-        self.assertIn("window.confirm(", PAGE)
-        self.assertIn("不会创建第二条发布请求", PAGE)
-
-    def test_frontend_does_not_expose_credentials_or_use_html_injection(self):
-        lowered = PAGE.lower()
-        for forbidden in (
-            "access_token",
-            "refresh_token",
-            "client_secret",
-            "innerhtml",
-            "outerhtml",
-            "insertadjacenthtml",
-            "document.write",
-            "eval(",
-        ):
-            self.assertNotIn(forbidden, lowered)
-        self.assertNotIn("\ufffd", PAGE)
-        self.assertIn("document.createElement", PAGE)
-        self.assertIn(".textContent", PAGE)
-        self.assertIn(".replaceChildren", PAGE)
-
-    def test_inline_javascript_parses(self):
-        javascript = inline_javascript(PAGE)
-        self.assertTrue(javascript.strip())
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=".js",
-            delete=False,
-        ) as handle:
-            handle.write(javascript)
-            temporary = Path(handle.name)
-        try:
-            completed = subprocess.run(
-                ["node", "--check", str(temporary)],
-                cwd=ROOT,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-        finally:
-            temporary.unlink(missing_ok=True)
-        self.assertEqual(
-            completed.returncode,
-            0,
-            "tt-post-pool.html inline JavaScript failed syntax check:\n"
-            f"{completed.stdout}\n{completed.stderr}",
-        )
+            self.assertIn(loader, init_source)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

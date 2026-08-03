@@ -219,6 +219,72 @@ class PrepareRunnerTickTests(unittest.TestCase):
             )
         self.assertTrue(ImmediateHeartbeat.instances[0].closed)
 
+    def test_direct_test_is_claimed_before_material_pool_and_uses_direct_routes(self):
+        class DirectClient(FakeClient):
+            def __init__(self):
+                super().__init__(
+                    claim={
+                        "item": {"id": 99, "status": "preparing"},
+                        "claim_token": "must-not-be-used" * 3,
+                    },
+                )
+                self.direct_claim_calls = []
+                self.direct_renew_calls = []
+                self.direct_process_calls = []
+
+            def claim_direct(self, *, worker_id, lease_seconds):
+                self.direct_claim_calls.append((worker_id, lease_seconds))
+                return {
+                    "item": {
+                        "id": 18,
+                        "material_id": "5391678",
+                        "status": "preparing",
+                    },
+                    "claim_token": CLAIM_TOKEN,
+                }
+
+            def renew_direct(
+                self,
+                direct_test_id,
+                claim_token,
+                *,
+                lease_seconds,
+            ):
+                self.direct_renew_calls.append(
+                    (direct_test_id, claim_token, lease_seconds)
+                )
+                return {"item": {"id": direct_test_id, "status": "preparing"}}
+
+            def process_direct(self, direct_test_id, claim_token):
+                self.direct_process_calls.append((direct_test_id, claim_token))
+                return {
+                    "item": {
+                        "id": direct_test_id,
+                        "material_id": "5391678",
+                        "source_account_id": "2001",
+                        "status": "ready",
+                        "attempt_count": 1,
+                    }
+                }
+
+        client = DirectClient()
+        result = runner.execute_prepare_tick(
+            config(),
+            client=client,
+            heartbeat_factory=ImmediateHeartbeat,
+        )
+
+        self.assertEqual("processed", result["status"])
+        self.assertEqual("direct_test", result["task_type"])
+        self.assertEqual([], client.claim_calls)
+        self.assertEqual(
+            [(runner.DEFAULT_WORKER_ID, 180)],
+            client.direct_claim_calls,
+        )
+        self.assertEqual([(18, CLAIM_TOKEN, 180)], client.direct_renew_calls)
+        self.assertEqual([(18, CLAIM_TOKEN)], client.direct_process_calls)
+        self.assertNotIn(CLAIM_TOKEN, json.dumps(result))
+
 
 class LeaseHeartbeatTests(unittest.TestCase):
     def test_real_heartbeat_renews_until_closed(self):
@@ -345,6 +411,52 @@ class PrepareSidecarClientTests(unittest.TestCase):
         )
         with self.assertRaises(runner.PrepareRunnerError):
             client.claim(worker_id="worker-1", lease_seconds=180)
+
+    def test_direct_contract_uses_dedicated_paths_and_long_process_timeout(self):
+        responses = [
+            {
+                "item": {"id": 9, "status": "preparing"},
+                "claim_token": CLAIM_TOKEN,
+            },
+            {"item": {"id": 9, "status": "preparing"}},
+            {"item": {"id": 9, "status": "ready"}},
+        ]
+        connections = []
+
+        def factory(_host, _port, timeout):
+            connection = RecordingConnection(
+                FakeResponse(200, responses[len(connections)]),
+                timeout,
+            )
+            connections.append(connection)
+            return connection
+
+        client = runner.PrepareSidecarClient(
+            runner.DEFAULT_INTERNAL_URL,
+            TOKEN,
+            timeout=60,
+            process_timeout=9300,
+            connection_factory=factory,
+        )
+        claimed = client.claim_direct(worker_id="worker-1", lease_seconds=180)
+        client.renew_direct(9, CLAIM_TOKEN, lease_seconds=180)
+        client.process_direct(9, CLAIM_TOKEN)
+
+        self.assertEqual(9, claimed["item"]["id"])
+        self.assertEqual(
+            [
+                "/internal/tt-posts/direct-tests/preparations/claim",
+                "/internal/tt-posts/direct-tests/preparations/9/renew",
+                "/internal/tt-posts/direct-tests/preparations/9/process",
+            ],
+            [connection.requests[0][1] for connection in connections],
+        )
+        self.assertEqual([60, 60, 9300], [item.timeout for item in connections])
+        self.assertEqual(
+            {"lease_seconds": 180, "worker_id": "worker-1"},
+            json.loads(connections[0].requests[0][2]),
+        )
+        self.assertTrue(all(item.closed for item in connections))
 
 
 class PrepareDeployContractTests(unittest.TestCase):

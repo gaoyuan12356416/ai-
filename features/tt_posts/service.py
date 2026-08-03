@@ -68,6 +68,7 @@ from .links import (
     TTPostLinkError,
     build_short_url,
     build_w2a_url,
+    direct_test_short_link_id,
     validate_short_url,
     write_short_redirect,
 )
@@ -336,6 +337,30 @@ def _batch_account_ids(value: Any) -> List[str]:
             raise TTPostServiceError(
                 "invalid_batch_targets",
                 "批量个号目标不能重复",
+                400,
+            )
+        seen.add(account_id)
+        result.append(account_id)
+    return result
+
+
+def _auto_config_account_ids(value: Any) -> List[str]:
+    """Normalize the complete auto-publish membership, including an empty set."""
+
+    if not isinstance(value, list) or len(value) > MAX_ACCOUNT_SETTINGS_BATCH:
+        raise TTPostServiceError(
+            "invalid_auto_publish_accounts",
+            "自动发布账号必须是最多50个账号的列表",
+            400,
+        )
+    result = []
+    seen = set()
+    for raw_account_id in value:
+        account_id = _positive_decimal(raw_account_id, "TikTok账号ID")
+        if account_id in seen:
+            raise TTPostServiceError(
+                "invalid_auto_publish_accounts",
+                "自动发布账号不能重复",
                 400,
             )
         seen.add(account_id)
@@ -2079,6 +2104,10 @@ class TTPostService:
     def accounts(self) -> Dict[str, Any]:
         items = []
         listed_account_ids = set()
+        auto_config = self.store.get_auto_publish_config()
+        auto_account_ids = {
+            str(value) for value in auto_config.get("account_ids") or []
+        }
         account_source_available = True
         try:
             source_accounts = self.account_repository.list_public_accounts()
@@ -2108,10 +2137,35 @@ class TTPostService:
             )
             items.append(item)
             listed_account_ids.add(account_id)
+        for item in items:
+            account_id = str(item.get("source_account_id") or "")
+            selected = account_id in auto_account_ids
+            configured = bool(
+                isinstance(item.get("account_settings"), Mapping)
+                and item["account_settings"].get("configured")
+            )
+            if not selected:
+                state = "not_selected"
+            elif not auto_config.get("enabled"):
+                state = "paused"
+            elif (
+                item.get("publish_eligible") is False
+                or item.get("status") == "unavailable"
+                or not configured
+            ):
+                state = "attention_required"
+            else:
+                state = "active"
+            item["auto_publish_selected"] = selected
+            item["auto_publish_state"] = state
+            item["auto_publish_config_version"] = int(
+                auto_config.get("version") or 0
+            )
         result = {
             "items": items,
             "gates": self._gates(),
             "account_source_available": account_source_available,
+            "auto_publish_config": auto_config,
         }
         if not account_source_available:
             result["warning"] = (
@@ -2122,6 +2176,187 @@ class TTPostService:
 
     def account_settings(self) -> Dict[str, Any]:
         return self.accounts()
+
+    def auto_config_get(self) -> Dict[str, Any]:
+        """Return the one saved template, schedule and account membership."""
+
+        return {
+            "item": self.store.get_auto_publish_config(),
+            "gates": self._gates(),
+        }
+
+    def auto_config_save(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise TTPostServiceError(
+                "invalid_request",
+                "自动发布配置请求必须是对象",
+                400,
+            )
+        allowed = {
+            "expected_version",
+            "enabled",
+            "timezone",
+            "publish_times",
+            "source_account_ids",
+            "caption_template",
+            "consent",
+        }
+        required = allowed - {"consent"}
+        if set(payload).difference(allowed) or not required.issubset(payload):
+            raise TTPostServiceError(
+                "invalid_request",
+                "自动发布配置字段不完整或包含未知字段",
+                400,
+            )
+        expected_version = payload.get("expected_version")
+        if (
+            type(expected_version) is not int
+            or expected_version < 0
+            or expected_version > 2**31 - 1
+        ):
+            raise TTPostServiceError(
+                "tt_post_auto_config_version_required",
+                "自动发布配置版本必须是非负整数",
+                400,
+            )
+        enabled = _exact_bool(payload.get("enabled"), "自动发布开关")
+        if str(payload.get("timezone") or "") != "Asia/Shanghai":
+            raise TTPostServiceError(
+                "tt_timezone_invalid",
+                "自动发布只接受Asia/Shanghai时区",
+                400,
+            )
+        publish_times = payload.get("publish_times")
+        if not isinstance(publish_times, list) or len(publish_times) > 1:
+            raise TTPostServiceError(
+                "invalid_publish_times",
+                "当前版本只支持一个共同的自动发布时间",
+                400,
+            )
+        account_ids = _auto_config_account_ids(
+            payload.get("source_account_ids")
+        )
+        if enabled and not account_ids:
+            raise TTPostServiceError(
+                "tt_post_auto_accounts_required",
+                "启用自动发布前至少选择一个TikTok账号",
+                400,
+            )
+        caption_template = _bounded_text(
+            payload.get("caption_template"),
+            "发布描述模板",
+            20000,
+        )
+        # Syntax and UTF-16 sizing are checked now; material-specific {desc}
+        # is still rendered and frozen when a material enters a pool.
+        render_caption_template(
+            caption_template,
+            "VALID001",
+            defer_url=True,
+            defer_description=True,
+        )
+        # A pure stop must not require the operator to create a new consent
+        # record. The UI still submits an explicit accepted=false placeholder
+        # when disabling; ignore it and let the core preserve prior consent.
+        consent = self._consent_from_payload(payload) if enabled else None
+
+        # Stopping automatic publication is dependency-light, but it must not
+        # become a way to persist arbitrary account IDs. Existing members can
+        # be kept or removed without live TikTok calls; newly added members
+        # must exist in the current trusted account snapshot and already have
+        # locally saved publication settings.
+        if not enabled:
+            current_config = self.store.get_auto_publish_config()
+            if expected_version != int(current_config.get("version") or 0):
+                raise TTPostServiceError(
+                    "tt_post_auto_config_version_conflict",
+                    "Automatic publish config changed; refresh and retry",
+                    409,
+                )
+            existing_ids = {
+                str(value)
+                for value in current_config.get("account_ids") or []
+            }
+            added_ids = [
+                account_id
+                for account_id in account_ids
+                if account_id not in existing_ids
+            ]
+            if added_ids:
+                trusted_ids = {
+                    str(item.get("source_account_id") or "")
+                    for item in self.account_repository.list_public_accounts()
+                    if isinstance(item, Mapping)
+                }
+                missing_ids = [
+                    account_id
+                    for account_id in added_ids
+                    if account_id not in trusted_ids
+                ]
+                if missing_ids:
+                    raise TTPostServiceError(
+                        "tt_post_auto_account_not_found",
+                        "Automatic publish account is not in the trusted account snapshot",
+                        409,
+                    )
+                for account_id in added_ids:
+                    self.store.get_account_settings(account_id, required=True)
+
+        if enabled:
+            detected = self._batch_creator_info(account_ids)
+            creators = {
+                str(item["source_account_id"]): item
+                for item in detected["items"]
+            }
+            for account_id in account_ids:
+                if self.manual_canary.allows_manual_account(
+                    "manual",
+                    account_id,
+                    now=_now_utc(self._now_fn),
+                ):
+                    raise TTPostServiceError(
+                        "tt_post_manual_canary_schedule_locked",
+                        "一次性私密测试期间不能启用该账号自动发布",
+                        409,
+                    )
+                saved_settings = self.store.get_account_settings(
+                    account_id,
+                    required=True,
+                )
+                settings = TTPostAccountSettings.from_mapping(
+                    {
+                        key: saved_settings[key]
+                        for key in (
+                            "privacy_level",
+                            "allow_comment",
+                            "allow_duet",
+                            "allow_stitch",
+                            "brand_content_toggle",
+                            "brand_organic_toggle",
+                            "is_aigc",
+                        )
+                    }
+                )
+                self._assert_creator_settings(
+                    creators[account_id]["creator_info"],
+                    settings,
+                )
+
+        saved = self.store.save_auto_publish_config(
+            expected_version=expected_version,
+            enabled=enabled,
+            timezone="Asia/Shanghai",
+            publish_times=publish_times,
+            account_ids=account_ids,
+            caption_template=caption_template,
+            user_consent=(consent or {}).get("accepted"),
+            consent_version=(consent or {}).get("version"),
+            consented_at=(consent or {}).get("accepted_at"),
+        )
+        return {"item": saved, "gates": self._gates()}
 
     def _creator_info_for_account(
         self,
@@ -2391,16 +2626,262 @@ class TTPostService:
     def material_preview(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         material_id = _positive_decimal(payload.get("material_id"), "素材ID", 19)
         resolved = dict(self.material_resolver.resolve(material_id))
+        publication = self.store.get_material_publication_state(material_id)
         resolved.update(
             {
                 "status": "validated",
                 "status_label": "素材校验通过，可加入素材池",
                 "preparation_status": "not_started",
                 "publish_ready": False,
+                **publication,
             }
         )
         return {
             "item": resolved,
+            "gates": self._gates(),
+        }
+
+    def direct_tests_list(
+        self,
+        query: Mapping[str, Sequence[str]],
+    ) -> Dict[str, Any]:
+        try:
+            page = int(self._query_first(query, "page", "1"))
+            page_size = int(self._query_first(query, "page_size", "20"))
+        except ValueError:
+            raise TTPostServiceError(
+                "invalid_request", "分页参数无效", 400
+            ) from None
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise TTPostServiceError("invalid_request", "分页参数无效", 400)
+        account_id = self._query_first(query, "source_account_id")
+        material_id = self._query_first(query, "material_id")
+        status = self._query_first(query, "status")
+        rows = self.store.list_direct_tests(
+            account_id=account_id or None,
+            material_id=material_id or None,
+            status=status or None,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
+        return {
+            "items": [self._direct_test_api_item(row) for row in rows],
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "has_more": len(rows) == page_size,
+            },
+            "gates": self._gates(),
+        }
+
+    def direct_test_create(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        required = {
+            "source_account_id",
+            "material_id",
+            "expected_config_version",
+            "idempotency_key",
+            "consent",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != required:
+            raise TTPostServiceError(
+                "invalid_request",
+                "立即测试发布字段不完整或包含未知字段",
+                400,
+            )
+        account_id = _positive_decimal(
+            payload.get("source_account_id"), "TikTok账号ID"
+        )
+        material_id = _positive_decimal(
+            payload.get("material_id"), "素材ID", 19
+        )
+        request_key = _bounded_text(
+            payload.get("idempotency_key"), "立即测试发布幂等键", 255
+        )
+        expected_version = payload.get("expected_config_version")
+        if type(expected_version) is not int or expected_version <= 0:
+            raise TTPostServiceError(
+                "tt_post_auto_config_version_required",
+                "请先保存自动发布配置",
+                409,
+            )
+        # Consent is part of the immutable request identity. Parsing it here is
+        # deterministic and local, so an exact replay still skips gates and all
+        # account/material/TikTok network dependencies.
+        consent = self._consent_from_payload(payload)
+        existing_by_key = self.store.get_direct_test_by_idempotency_key(
+            request_key
+        )
+        if existing_by_key is not None:
+            if (
+                str(existing_by_key.get("account_id") or "") == account_id
+                and str(existing_by_key.get("material_id") or "")
+                == material_id
+                and int(existing_by_key.get("config_version") or 0)
+                == expected_version
+                and secrets.compare_digest(
+                    str(existing_by_key.get("consent_version") or ""),
+                    consent["version"],
+                )
+                and secrets.compare_digest(
+                    str(existing_by_key.get("consented_at_utc") or ""),
+                    consent["accepted_at"],
+                )
+            ):
+                return {
+                    "item": self._direct_test_api_item(existing_by_key),
+                    "preparation_wakeup_requested": False,
+                    "preparation_timer_fallback_seconds": 60,
+                    "gates": self._gates(),
+                }
+            raise TTPostServiceError(
+                "tt_post_direct_test_idempotency_conflict",
+                "立即测试发布幂等键已用于不同请求",
+                409,
+            )
+        if not self.gates.is_open:
+            raise TTPostServiceError(
+                "tt_post_live_gates_closed",
+                "发布门禁尚未全部开放，本次未创建测试任务",
+                409,
+            )
+        config = self.store.get_auto_publish_config()
+        if expected_version != int(config.get("version") or 0):
+            raise TTPostServiceError(
+                "tt_post_auto_config_version_conflict",
+                "自动发布配置已变化，请刷新后重试",
+                409,
+            )
+        account = self.account_repository.get_public_account(account_id)
+        saved_settings = self.store.get_account_settings(
+            account_id,
+            required=True,
+        )
+        settings = TTPostAccountSettings.from_mapping(
+            {
+                key: saved_settings[key]
+                for key in (
+                    "privacy_level",
+                    "allow_comment",
+                    "allow_duet",
+                    "allow_stitch",
+                    "brand_content_toggle",
+                    "brand_organic_toggle",
+                    "is_aigc",
+                )
+            }
+        )
+        if (
+            settings.privacy_level != "PUBLIC_TO_EVERYONE"
+            or not settings.allow_comment
+        ):
+            raise TTPostServiceError(
+                "tt_post_direct_test_public_comment_required",
+                "立即测试账号必须已保存为所有人可见且允许评论",
+                409,
+            )
+        creator = self.creator_info(
+            {"source_account_id": account_id}
+        )["item"]
+        self._assert_creator_settings(creator, settings)
+        resolved = dict(self.material_resolver.resolve(material_id))
+
+        # A same-key retry is allowed. A different active or unknown attempt
+        # for the same material is fail-closed until it reaches a clear result.
+        for existing in self.store.list_direct_tests(
+            material_id=material_id,
+            limit=1000,
+        ):
+            if str(existing.get("status") or "") in {
+                "queued",
+                "preparing",
+                "ready",
+                "publishing",
+                "reconciling",
+                "unknown",
+            }:
+                raise TTPostServiceError(
+                    "tt_post_direct_test_active",
+                    "该素材仍有未明确结束的测试任务，请先等待或核对",
+                    409,
+                )
+        for queue in self.store.list_queues():
+            if (
+                str(queue.get("material_id") or "") == material_id
+                and str(queue.get("status") or "")
+                in {"scheduled", "claimed", "publishing", "reconciling", "unknown"}
+            ):
+                raise TTPostServiceError(
+                    "tt_post_material_publish_active",
+                    "该素材正被自动发布或等待核对，暂不能同时测试",
+                    409,
+                )
+
+        identity = "%s|%s|%s" % (account_id, material_id, request_key)
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        gpu_job_id = "tttest-" + digest[:48]
+        caption_template = str(config.get("caption_template") or "")
+        if caption_uses_url_macro(caption_template):
+            link_id = direct_test_short_link_id(identity)
+            short_url = build_short_url(link_id)
+        else:
+            link_id = 0
+            short_url = ""
+        caption = render_caption_template(
+            caption_template,
+            resolved["content_id"],
+            url=short_url or None,
+            description=resolved.get("description"),
+        )
+        synced_at = _now_utc(self._now_fn).replace(
+            microsecond=0
+        ).isoformat().replace("+00:00", "Z")
+        item = self.store.create_direct_test(
+            material_id,
+            account_id,
+            resolved["content_id"],
+            resolved["source_media_url"],
+            idempotency_key=request_key,
+            gpu_job_id=gpu_job_id,
+            source_trim_tail_seconds=self.source_trim_tail_seconds,
+            preparation_profile=self.media_profile_version,
+            caption_template=caption_template,
+            caption=caption,
+            short_link_id=link_id,
+            short_url=short_url,
+            settings=settings,
+            consent_version=consent["version"],
+            consented_at=consent["accepted_at"],
+            config_version=expected_version,
+            material_name=resolved.get("material_name"),
+            drama_name=resolved.get("drama_name"),
+            material_language=resolved.get("material_language"),
+            material_tag=resolved.get("material_tag"),
+            description=resolved.get("description"),
+            account_username=(
+                account.get("username")
+                or account.get("account_username")
+                or creator.get("creator_username")
+                or ""
+            ),
+            account_display_name=(
+                account.get("display_name")
+                or account.get("account_name")
+                or creator.get("creator_nickname")
+                or ""
+            ),
+            creator_nickname_snapshot=creator.get("creator_nickname"),
+            creator_username_snapshot=creator.get("creator_username"),
+            creator_info_hash=_creator_info_hash(creator),
+            creator_info_synced_at=synced_at,
+        )
+        kicked = self._kick_preparation_runner()
+        return {
+            "item": self._direct_test_api_item(item),
+            "preparation_wakeup_requested": kicked,
+            "preparation_timer_fallback_seconds": 60,
             "gates": self._gates(),
         }
 
@@ -2676,6 +3157,31 @@ class TTPostService:
         return result
 
     @staticmethod
+    def _direct_test_api_item(item: Mapping[str, Any]) -> Dict[str, Any]:
+        result = dict(item)
+        status = str(result.get("status") or "queued")
+        result["direct_test_id"] = result.get("id")
+        result["source_account_id"] = str(result.get("account_id") or "")
+        result["caption_text"] = str(result.get("caption") or "")
+        result["duration_sec"] = float(
+            result.get("prepared_duration_sec") or 0
+        )
+        result["preparation_status"] = (
+            status if status in {"queued", "preparing", "failed", "canceled"}
+            else "ready"
+        )
+        result["publication_status"] = (
+            "published"
+            if status == "published"
+            else "unknown"
+            if status == "unknown"
+            else "unpublished"
+        )
+        result["publish_ready"] = status == "ready"
+        result["task_type"] = "direct_test"
+        return result
+
+    @staticmethod
     def _recurring_run_api_item(item: Mapping[str, Any]) -> Dict[str, Any]:
         result = dict(item)
         result.pop("manual_request_key", None)
@@ -2828,6 +3334,20 @@ class TTPostService:
             for row in recurring_rows
             if int(row.get("id") or 0) not in linked_pool_ids
         )
+        publication_states = self.store.get_material_publication_states(
+            [str(row.get("material_id") or "") for row in rows]
+        )
+        for row in rows:
+            row.update(
+                publication_states.get(
+                    str(row.get("material_id") or ""),
+                    {
+                        "publication_status": "unpublished",
+                        "publish_count": 0,
+                        "unknown_count": 0,
+                    },
+                )
+            )
         if material_filter:
             material_id = _positive_decimal(
                 material_filter,
@@ -2893,6 +3413,18 @@ class TTPostService:
                     str(row.get("status") or "") == "consumed"
                     for row in rows
                 ),
+                "published": sum(
+                    str(row.get("publication_status") or "") == "published"
+                    for row in rows
+                ),
+                "unpublished": sum(
+                    str(row.get("publication_status") or "") == "unpublished"
+                    for row in rows
+                ),
+                "unknown_publication": sum(
+                    str(row.get("publication_status") or "") == "unknown"
+                    for row in rows
+                ),
             },
             "gates": self._gates(),
         }
@@ -2908,6 +3440,7 @@ class TTPostService:
             "source_account_id",
             "material_id",
             "content_id",
+            "expected_config_version",
             "caption_template",
             "caption_text",
             "consent",
@@ -2927,6 +3460,29 @@ class TTPostService:
             payload.get("source_account_id"),
             "TikTok账号ID",
         )
+        expected_config_version = payload.get("expected_config_version")
+        auto_config = None
+        if expected_config_version is not None:
+            auto_config = self.store.get_auto_publish_config()
+            if (
+                type(expected_config_version) is not int
+                or expected_config_version <= 0
+                or expected_config_version
+                != int(auto_config.get("version") or 0)
+            ):
+                raise TTPostServiceError(
+                    "tt_post_auto_config_version_conflict",
+                    "自动发布配置已变化，请刷新并保存后再加入素材",
+                    409,
+                )
+            if account_id not in {
+                str(value) for value in auto_config.get("account_ids") or []
+            }:
+                raise TTPostServiceError(
+                    "tt_post_auto_account_not_selected",
+                    "该TikTok账号尚未加入自动发布配置",
+                    409,
+                )
         material_id = _positive_decimal(
             payload.get("material_id"),
             "素材ID",
@@ -2964,11 +3520,43 @@ class TTPostService:
                 "页面Drama ID与素材真实映射不一致",
                 409,
             )
-        caption_template, caption = _caption_from_submission(
-            payload,
-            resolved["content_id"],
-            description=resolved.get("description"),
-        )
+        if auto_config is None:
+            # Compatibility for the previous version during a rolling deploy.
+            # The new UI always supplies expected_config_version and therefore
+            # always uses the atomic saved template/account membership.
+            caption_template, caption = _caption_from_submission(
+                payload,
+                resolved["content_id"],
+                description=resolved.get("description"),
+            )
+        else:
+            caption_template = str(auto_config.get("caption_template") or "")
+            caption = render_caption_template(
+                caption_template,
+                resolved["content_id"],
+                description=resolved.get("description"),
+                defer_url=True,
+            )
+        submitted_template = payload.get("caption_template")
+        submitted_caption = payload.get("caption_text")
+        if auto_config is not None and submitted_template not in (None, "") and not secrets.compare_digest(
+            str(submitted_template),
+            caption_template,
+        ):
+            raise TTPostServiceError(
+                "tt_post_auto_config_version_conflict",
+                "页面描述模板不是当前已保存版本",
+                409,
+            )
+        if auto_config is not None and submitted_caption not in (None, "") and not secrets.compare_digest(
+            str(submitted_caption).strip(),
+            caption,
+        ):
+            raise TTPostServiceError(
+                "tt_caption_template_render_mismatch",
+                "页面描述与当前已保存模板不一致",
+                409,
+            )
         item = self.store.add_material_intake(
             material_id,
             account_id,
@@ -3243,6 +3831,182 @@ class TTPostService:
                 "processing_error": {
                     "code": "tt_preparation_unexpected",
                     "retryable": retryable,
+                },
+                "gates": self._gates(),
+            }
+
+    def direct_preparation_claim(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "worker_id",
+            "lease_seconds",
+        }:
+            raise TTPostServiceError(
+                "invalid_request", "立即测试预制作领取字段无效", 400
+            )
+        worker_id = _bounded_text(
+            payload.get("worker_id"), "后台制作worker ID", 128
+        )
+        lease_seconds = _positive_int(
+            payload.get("lease_seconds"),
+            "后台制作租约",
+            MAX_PREPARATION_LEASE_SECONDS,
+        )
+        claims = self.store.claim_direct_test_prepare(
+            worker_id,
+            lease_seconds=lease_seconds,
+            limit=1,
+        )
+        if not claims:
+            return {"item": None, "gates": self._gates()}
+        claim = claims[0]
+        return {
+            "item": self._direct_test_api_item(claim.item),
+            "claim_token": claim.reveal_claim_token(),
+            "gates": self._gates(),
+        }
+
+    def direct_preparation_renew(
+        self,
+        direct_test_id: Any,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "claim_token",
+            "lease_seconds",
+        }:
+            raise TTPostServiceError(
+                "invalid_request", "立即测试预制作续租字段无效", 400
+            )
+        item = self.store.renew_direct_test_prepare(
+            _positive_int(direct_test_id, "立即测试任务ID"),
+            _bounded_text(payload.get("claim_token"), "后台制作领取凭据", 512),
+            lease_seconds=_positive_int(
+                payload.get("lease_seconds"),
+                "后台制作租约",
+                MAX_PREPARATION_LEASE_SECONDS,
+            ),
+        )
+        return {"item": self._direct_test_api_item(item), "gates": self._gates()}
+
+    def direct_preparation_process(
+        self,
+        direct_test_id: Any,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {"claim_token"}:
+            raise TTPostServiceError(
+                "invalid_request", "立即测试预制作执行字段无效", 400
+            )
+        normalized_id = _positive_int(direct_test_id, "立即测试任务ID")
+        token = _bounded_text(
+            payload.get("claim_token"), "后台制作领取凭据", 512
+        )
+        claimed = None
+        try:
+            claimed = self.store.renew_direct_test_prepare(
+                normalized_id,
+                token,
+                lease_seconds=DEFAULT_PREPARATION_LEASE_SECONDS,
+            )
+            account_id = str(claimed["account_id"])
+            self.account_repository.get_public_account(account_id)
+            saved_settings = self.store.get_account_settings(
+                account_id,
+                required=True,
+            )
+            settings = TTPostAccountSettings.from_mapping(
+                {
+                    key: saved_settings[key]
+                    for key in (
+                        "privacy_level",
+                        "allow_comment",
+                        "allow_duet",
+                        "allow_stitch",
+                        "brand_content_toggle",
+                        "brand_organic_toggle",
+                        "is_aigc",
+                    )
+                }
+            )
+            creator = self.creator_info(
+                {"source_account_id": account_id}
+            )["item"]
+            self._assert_creator_settings(creator, settings)
+            prepared = self._prepare_resolved(
+                {
+                    "material_id": str(claimed["material_id"]),
+                    "content_id": str(claimed["content_id"]),
+                    "source_media_url": str(claimed["source_media_url"]),
+                    "media_url": str(claimed["source_media_url"]),
+                },
+                gpu_job_id=str(claimed["gpu_job_id"]),
+            )
+            duration = float(prepared.get("duration_sec") or 0)
+            maximum_duration = int(
+                creator.get("max_video_post_duration_sec") or 0
+            )
+            if duration <= 0 or duration > maximum_duration:
+                raise TTPostServiceError(
+                    "tt_prepared_media_duration_invalid",
+                    "最终成片时长不满足目标账号实时限制",
+                    409,
+                )
+            item = self.store.complete_direct_test_prepare(
+                normalized_id,
+                token,
+                gpu_job_id=prepared["gpu_job_id"],
+                prepared_media_url=prepared["prepared_media_url"],
+                prepared_output_sha256=prepared["output_sha256"],
+                prepared_output_size=prepared["output_size"],
+                prepared_duration_sec=prepared["duration_sec"],
+                source_trim_tail_seconds=prepared[
+                    "source_trim_tail_seconds"
+                ],
+                preparation_profile=(
+                    prepared.get("profile") or self.media_profile_version
+                ),
+            )
+            kicked = self._kick_runner()
+            return {
+                "item": self._direct_test_api_item(item),
+                "publish_wakeup_requested": kicked,
+                "gates": self._gates(),
+            }
+        except TTPostError as exc:
+            if claimed is None:
+                raise
+            failed = self.store.fail_direct_test_prepare(
+                normalized_id,
+                token,
+                error_code=exc.code,
+                error_message=str(exc),
+            )
+            return {
+                "item": self._direct_test_api_item(failed),
+                "processing_error": {
+                    "code": exc.code,
+                    "retryable": False,
+                },
+                "gates": self._gates(),
+            }
+        except Exception as exc:
+            if claimed is None:
+                raise
+            failed = self.store.fail_direct_test_prepare(
+                normalized_id,
+                token,
+                error_code="tt_post_direct_prepare_unexpected",
+                error_message="立即测试预制作发生未预期错误（%s）"
+                % type(exc).__name__,
+            )
+            return {
+                "item": self._direct_test_api_item(failed),
+                "processing_error": {
+                    "code": "tt_post_direct_prepare_unexpected",
+                    "retryable": False,
                 },
                 "gates": self._gates(),
             }
@@ -3731,6 +4495,91 @@ class TTPostService:
                 result["run_key"] = run_key
             return result
 
+        # Snapshot and durably reserve every currently due slot before any
+        # recovery path can enter creator-info. Merely listing old recovery
+        # rows is local; `_execute_recurring_run` is the first live boundary.
+        due_slots = []
+        for schedule in self.store.list_daily_schedules():
+            if not schedule.get("enabled"):
+                continue
+            account_id = str(schedule.get("account_id") or "")
+            for day_offset in (0, -1):
+                local_day = (
+                    now_shanghai + timedelta(days=day_offset)
+                ).date()
+                shanghai_date = local_day.isoformat()
+                for publish_time in sorted(
+                    str(value)
+                    for value in schedule.get("publish_times") or []
+                ):
+                    try:
+                        hour, minute = (
+                            int(part)
+                            for part in publish_time.split(":")
+                        )
+                        local_slot = datetime(
+                            local_day.year,
+                            local_day.month,
+                            local_day.day,
+                            hour,
+                            minute,
+                            tzinfo=BEIJING_TZ,
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    slot_utc = local_slot.astimezone(UTC)
+                    age_seconds = (now_utc - slot_utc).total_seconds()
+                    if 0 <= age_seconds <= DEFAULT_GRACE_SECONDS:
+                        due_slots.append(
+                            (
+                                slot_utc,
+                                account_id,
+                                shanghai_date,
+                                publish_time,
+                                int(schedule.get("version") or 0),
+                            )
+                        )
+
+        preclaimed_run_keys = set()
+        preclaim_errors: Dict[str, TTPostError] = {}
+        if self.gates.is_open:
+            for (
+                slot_utc,
+                account_id,
+                shanghai_date,
+                publish_time,
+                config_version,
+            ) in sorted(due_slots):
+                scheduled_at_utc = slot_utc.isoformat().replace(
+                    "+00:00",
+                    "Z",
+                )
+                run_key = "tt-post:auto:v1:%s:%s:%s" % (
+                    account_id,
+                    shanghai_date,
+                    publish_time.replace(":", ""),
+                )
+                try:
+                    self.store.get_recurring_run_by_key(run_key)
+                except TTPostError as exc:
+                    if exc.code != "tt_post_schedule_run_not_found":
+                        raise
+                else:
+                    continue
+                try:
+                    self.store.claim_recurring_run(
+                        run_key,
+                        "auto",
+                        account_id,
+                        shanghai_date,
+                        publish_time,
+                        scheduled_at_utc,
+                        config_version=config_version,
+                    )
+                    preclaimed_run_keys.add(run_key)
+                except TTPostError as exc:
+                    preclaim_errors[run_key] = exc
+
         # First recover a run that was durably reserved by an earlier process
         # but not yet bound to its legacy queue. This closes both crash gaps:
         # claim->freeze and freeze->bind.
@@ -3836,48 +4685,6 @@ class TTPostService:
                         }
                     )
 
-        due_slots = []
-        for schedule in self.store.list_daily_schedules():
-            if not schedule.get("enabled"):
-                continue
-            account_id = str(schedule.get("account_id") or "")
-            for day_offset in (0, -1):
-                local_day = (
-                    now_shanghai + timedelta(days=day_offset)
-                ).date()
-                shanghai_date = local_day.isoformat()
-                for publish_time in sorted(
-                    str(value)
-                    for value in schedule.get("publish_times") or []
-                ):
-                    try:
-                        hour, minute = (
-                            int(part)
-                            for part in publish_time.split(":")
-                        )
-                        local_slot = datetime(
-                            local_day.year,
-                            local_day.month,
-                            local_day.day,
-                            hour,
-                            minute,
-                            tzinfo=BEIJING_TZ,
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    slot_utc = local_slot.astimezone(UTC)
-                    age_seconds = (now_utc - slot_utc).total_seconds()
-                    if 0 <= age_seconds <= DEFAULT_GRACE_SECONDS:
-                        due_slots.append(
-                            (
-                                slot_utc,
-                                account_id,
-                                shanghai_date,
-                                publish_time,
-                                int(schedule.get("version") or 0),
-                            )
-                        )
-
         for (
             slot_utc,
             account_id,
@@ -3904,6 +4711,17 @@ class TTPostService:
                 if exc.code != "tt_post_schedule_run_not_found":
                     raise
             else:
+                if run_key not in preclaimed_run_keys:
+                    continue
+            if run_key in preclaim_errors:
+                items.append(
+                    skipped_item(
+                        account_id=account_id,
+                        publish_time=publish_time,
+                        exc=preclaim_errors[run_key],
+                        run_key=run_key,
+                    )
+                )
                 continue
             try:
                 item = self._execute_recurring_run(
@@ -4661,6 +5479,341 @@ class TTPostService:
                 ),
             )
 
+    def direct_publish_claim(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "worker_id",
+            "lease_seconds",
+            "limit",
+        }:
+            raise TTPostServiceError(
+                "invalid_request", "立即测试发布领取字段无效", 400
+            )
+        worker_id = _bounded_text(
+            payload.get("worker_id"), "发布执行器ID", 128
+        )
+        lease_seconds = _positive_int(
+            payload.get("lease_seconds"), "发布认领时长", 3600
+        )
+        limit = _positive_int(payload.get("limit"), "发布认领数量", 10)
+        self.store.quarantine_expired_direct_test_publishes()
+        items = []
+        for row in self.store.list_direct_tests(status="ready", limit=limit):
+            try:
+                claim = self.store.claim_direct_test_publish(
+                    row["id"],
+                    worker_id,
+                    lease_seconds=lease_seconds,
+                )
+            except TTPostError as exc:
+                if exc.code in {
+                    "tt_post_direct_test_not_ready",
+                    "tt_post_direct_test_claim_conflict",
+                    "tt_post_account_publish_busy",
+                }:
+                    continue
+                raise
+            items.append(
+                {
+                    "item": self._direct_test_api_item(claim.item),
+                    "claim_token": claim.reveal_claim_token(),
+                }
+            )
+        return {"items": items, "gates": self._gates()}
+
+    def _direct_test_prepare_short_link(
+        self,
+        item: Mapping[str, Any],
+        claim_token: str,
+    ) -> Dict[str, Any]:
+        current = dict(item)
+        short_url = str(current.get("short_url") or "")
+        if not short_url:
+            return current
+        try:
+            if not secrets.compare_digest(
+                validate_short_url(short_url),
+                build_short_url(current.get("short_link_id")),
+            ):
+                raise TTPostLinkError(
+                    "tt_short_link_state_invalid",
+                    "立即测试短链身份不一致",
+                    409,
+                )
+            if not str(current.get("long_url") or ""):
+                long_url = build_w2a_url(
+                    {
+                        "username": (
+                            current.get("creator_username_snapshot")
+                            or current.get("account_username")
+                        ),
+                        "timestamp": int(_now_utc(self._now_fn).timestamp()),
+                        "material_language": current.get("material_language"),
+                        "drama_name": current.get("drama_name"),
+                        "tag": current.get("material_tag"),
+                        "link_id": current.get("short_link_id"),
+                        "page_name": (
+                            current.get("creator_nickname_snapshot")
+                            or current.get("account_display_name")
+                            or current.get("account_username")
+                        ),
+                        "page_id": current.get("account_id"),
+                        "material_name": current.get("material_name"),
+                        "material_id": current.get("material_id"),
+                        "queue_id": current.get("id"),
+                        "content_id": current.get("content_id"),
+                    }
+                )
+                current = self.store.prepare_direct_test_short_link(
+                    current["id"],
+                    claim_token,
+                    long_url,
+                )
+            write_short_redirect(
+                self.short_link_root,
+                current["short_link_id"],
+                current["long_url"],
+            )
+        except TTPostLinkError as exc:
+            raise TTPostServiceError(exc.code, str(exc), exc.status) from None
+        return dict(current)
+
+    def direct_publish_claimed(
+        self,
+        direct_test_id: Any,
+        claim_token: Any,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(direct_test_id, "立即测试任务ID")
+        token = _bounded_text(claim_token, "发布领取凭据", 512)
+        item = self.store.get_direct_test(normalized_id)
+        if str(item.get("status") or "") == "unknown":
+            raise TTPostServiceError(
+                "tt_post_unknown_no_retry",
+                "未知结果的立即测试禁止重新发布，只能核对",
+                409,
+            )
+        if str(item.get("status") or "") != "publishing":
+            raise TTPostServiceError(
+                "tt_post_direct_test_not_claimed",
+                "立即测试任务没有有效发布认领",
+                409,
+            )
+        if not self.gates.is_open:
+            final = self.store.fail_direct_test_publish(
+                normalized_id,
+                token,
+                error_code="tt_post_live_gates_closed",
+                error_message="发布门禁尚未全部开放",
+                publish_was_not_created=True,
+            )
+            return {"item": self._direct_test_api_item(final), "gates": self._gates()}
+        account_id = str(item["account_id"])
+        gpu_job_id = _required_gpu_job_id(item.get("gpu_job_id"))
+        settings = TTPostAccountSettings.from_mapping(
+            {
+                key: item[key]
+                for key in (
+                    "privacy_level",
+                    "allow_comment",
+                    "allow_duet",
+                    "allow_stitch",
+                    "brand_content_toggle",
+                    "brand_organic_toggle",
+                    "is_aigc",
+                )
+            }
+        )
+        try:
+            with self.account_source.publish_credentials(account_id) as credentials:
+                self.store.renew_direct_test_publish(
+                    normalized_id,
+                    token,
+                    lease_seconds=self._claim_lease_seconds(),
+                )
+                creator_raw = self.gpu_client.creator_info(
+                    job_id=gpu_job_id,
+                    source_account_id=account_id,
+                    access_token=credentials.reveal_access_token(),
+                )
+            creator = _normalized_creator_info(
+                creator_raw.get("creator_info", creator_raw)
+            )
+            self._assert_creator_settings(creator, settings)
+            if not secrets.compare_digest(
+                _creator_info_hash(creator),
+                str(item.get("creator_info_hash") or ""),
+            ):
+                raise TTPostServiceError(
+                    "tt_creator_info_changed",
+                    "TikTok账号实时能力与测试创建时的快照不一致",
+                    409,
+                )
+            duration = float(item.get("prepared_duration_sec") or 0)
+            if duration <= 0 or duration > int(
+                creator.get("max_video_post_duration_sec") or 0
+            ):
+                raise TTPostServiceError(
+                    "tt_prepared_media_duration_invalid",
+                    "最终成片时长不满足目标账号实时限制",
+                    409,
+                )
+            self.store.renew_direct_test_publish(
+                normalized_id,
+                token,
+                lease_seconds=self._claim_lease_seconds(),
+            )
+            item = self._direct_test_prepare_short_link(item, token)
+        except TTPostError as exc:
+            failed = self.store.fail_direct_test_publish(
+                normalized_id,
+                token,
+                error_code=exc.code,
+                error_message=str(exc),
+                publish_was_not_created=True,
+            )
+            return {"item": self._direct_test_api_item(failed), "gates": self._gates()}
+
+        try:
+            with self.account_source.publish_credentials(account_id) as credentials:
+                self.store.renew_direct_test_publish(
+                    normalized_id,
+                    token,
+                    lease_seconds=self._claim_lease_seconds(),
+                )
+                result = self.gpu_client.publish(
+                    job_id=gpu_job_id,
+                    source_account_id=account_id,
+                    access_token=credentials.reveal_access_token(),
+                    queue=item,
+                )
+        except GPUClientError as exc:
+            recovered_publish_id = str(exc.details.get("publish_id") or "")
+            if exc.code == "tt_publish_reconcile_required" and recovered_publish_id:
+                final = self.store.record_direct_test_publish_id(
+                    normalized_id,
+                    token,
+                    recovered_publish_id,
+                )
+            else:
+                final = self.store.fail_direct_test_publish(
+                    normalized_id,
+                    token,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                    publish_was_not_created=(
+                        bool(exc.publish_was_not_created)
+                        and not bool(exc.unknown_outcome)
+                    ),
+                )
+            return {"item": self._direct_test_api_item(final), "gates": self._gates()}
+        except TTPostError as exc:
+            failed = self.store.fail_direct_test_publish(
+                normalized_id,
+                token,
+                error_code=exc.code,
+                error_message=str(exc),
+                publish_was_not_created=True,
+            )
+            return {"item": self._direct_test_api_item(failed), "gates": self._gates()}
+        publish_id = str(result.get("publish_id") or "").strip()
+        if not publish_id:
+            final = self.store.fail_direct_test_publish(
+                normalized_id,
+                token,
+                error_code="tt_post_gpu_publish_id_missing",
+                error_message="TT GPU返回结果缺少publish_id",
+                publish_was_not_created=False,
+            )
+        else:
+            try:
+                final = self.store.record_direct_test_publish_id(
+                    normalized_id,
+                    token,
+                    publish_id,
+                )
+            except TTPostError:
+                # The GPU ledger is now authoritative; never attempt init again.
+                final = self.store.fail_direct_test_publish(
+                    normalized_id,
+                    token,
+                    error_code="tt_post_publish_id_persistence_failed",
+                    error_message="GPU已返回publish_id但CPU落账失败，需要人工核对",
+                    publish_was_not_created=False,
+                )
+        return {"item": self._direct_test_api_item(final), "gates": self._gates()}
+
+    def direct_reconciling(self, limit: Any = 100) -> Dict[str, Any]:
+        rows = self.store.list_direct_tests(
+            status="reconciling",
+            limit=_positive_int(limit, "立即测试核对数量", 100),
+        )
+        return {
+            "items": [self._direct_test_api_item(row) for row in rows],
+            "gates": self._gates(),
+        }
+
+    def direct_reconcile(self, direct_test_id: Any) -> Dict[str, Any]:
+        normalized_id = _positive_int(direct_test_id, "立即测试任务ID")
+        item = self.store.get_direct_test(normalized_id)
+        if str(item.get("status") or "") == "published":
+            return {"item": self._direct_test_api_item(item), "gates": self._gates()}
+        if str(item.get("status") or "") not in {"reconciling", "unknown"}:
+            raise TTPostServiceError(
+                "tt_post_reconcile_only",
+                "立即测试没有可核对的TikTok发布结果",
+                409,
+            )
+        account_id = str(item["account_id"])
+        gpu_job_id = _required_gpu_job_id(item.get("gpu_job_id"))
+        with self.account_source.publish_credentials(account_id) as credentials:
+            result = self.gpu_client.reconcile(
+                job_id=gpu_job_id,
+                source_account_id=account_id,
+                access_token=credentials.reveal_access_token(),
+            )
+        returned_publish_id = str(result.get("publish_id") or "").strip()
+        if not returned_publish_id:
+            raise TTPostServiceError(
+                "tt_post_gpu_ledger_publish_id_missing",
+                "GPU账本没有可恢复的TikTok publish_id",
+                409,
+            )
+        if str(item.get("status") or "") == "unknown":
+            item = self.store.recover_direct_test_publish_id(
+                normalized_id,
+                returned_publish_id,
+            )
+        elif not secrets.compare_digest(
+            str(item.get("publish_id") or ""), returned_publish_id
+        ):
+            raise TTPostServiceError(
+                "tt_post_publish_id_conflict",
+                "GPU账本publish_id与CPU冻结记录不一致",
+                409,
+            )
+        remote_status = str(
+            result.get("state") or result.get("remote_status") or ""
+        ).lower()
+        if remote_status in {"published", "publish_complete"}:
+            item = self.store.reconcile_direct_test_published(
+                normalized_id,
+                returned_publish_id,
+                publish_url=str(result.get("publish_url") or ""),
+            )
+        elif remote_status in {"failed", "publish_failed"}:
+            item = self.store.reconcile_direct_test_failed(
+                normalized_id,
+                returned_publish_id,
+                remote_status=remote_status,
+            )
+        return {
+            "item": self._direct_test_api_item(item),
+            "remote_status": remote_status,
+            "gates": self._gates(),
+        }
+
     def publish_claimed(
         self,
         queue_id: Any,
@@ -5202,6 +6355,10 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             raise PermissionError
         if self.command == "GET" and path == "/api/admin/tt-posts/accounts":
             return service.accounts()
+        if self.command == "GET" and path == "/api/admin/tt-posts/auto-config":
+            return service.auto_config_get()
+        if self.command == "POST" and path == "/api/admin/tt-posts/auto-config":
+            return service.auto_config_save(self._body())
         if (
             self.command == "GET"
             and path == "/api/admin/tt-posts/account-settings"
@@ -5257,6 +6414,12 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             )
         if self.command == "POST" and path == "/api/admin/tt-posts/material-pool":
             return service.material_pool_add(self._body())
+        if self.command == "GET" and path == "/api/admin/tt-posts/direct-tests":
+            return service.direct_tests_list(
+                urllib.parse.parse_qs(parsed.query)
+            )
+        if self.command == "POST" and path == "/api/admin/tt-posts/test-publish":
+            return service.direct_test_create(self._body())
         if (
             self.command == "POST"
             and path == "/internal/tt-posts/preparations/claim"
@@ -5278,6 +6441,29 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
         if self.command == "POST" and preparation_process:
             return service.preparation_process(
                 preparation_process.group(1),
+                self._body(),
+            )
+        if (
+            self.command == "POST"
+            and path == "/internal/tt-posts/direct-tests/preparations/claim"
+        ):
+            return service.direct_preparation_claim(self._body())
+        direct_preparation_renew = re.fullmatch(
+            r"/internal/tt-posts/direct-tests/preparations/([1-9][0-9]*)/renew",
+            path,
+        )
+        if self.command == "POST" and direct_preparation_renew:
+            return service.direct_preparation_renew(
+                direct_preparation_renew.group(1),
+                self._body(),
+            )
+        direct_preparation_process = re.fullmatch(
+            r"/internal/tt-posts/direct-tests/preparations/([1-9][0-9]*)/process",
+            path,
+        )
+        if self.command == "POST" and direct_preparation_process:
+            return service.direct_preparation_process(
+                direct_preparation_process.group(1),
                 self._body(),
             )
         if self.command == "GET" and path == "/api/admin/tt-posts/schedule":
@@ -5319,6 +6505,18 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             return service.claim_due(self._body())
         if (
             self.command == "POST"
+            and path == "/internal/tt-posts/direct-tests/claim"
+        ):
+            return service.direct_publish_claim(self._body())
+        if (
+            self.command == "GET"
+            and path == "/internal/tt-posts/direct-tests/reconciling"
+        ):
+            query = urllib.parse.parse_qs(parsed.query)
+            values = query.get("limit") or ["100"]
+            return service.direct_reconciling(values[0])
+        if (
+            self.command == "POST"
             and path == "/internal/tt-posts/schedules/due"
         ):
             return service.schedules_due(self._body())
@@ -5336,6 +6534,16 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
                 publish.group(1),
                 payload.get("claim_token"),
             )
+        direct_publish = re.fullmatch(
+            r"/internal/tt-posts/direct-tests/([1-9][0-9]*)/publish",
+            path,
+        )
+        if self.command == "POST" and direct_publish:
+            payload = self._body()
+            return service.direct_publish_claimed(
+                direct_publish.group(1),
+                payload.get("claim_token"),
+            )
         reconcile = re.fullmatch(
             r"/internal/tt-posts/queue/([1-9][0-9]*)/reconcile",
             path,
@@ -5343,6 +6551,13 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
         if self.command == "POST" and reconcile:
             self._body()
             return service.reconcile(reconcile.group(1))
+        direct_reconcile = re.fullmatch(
+            r"/internal/tt-posts/direct-tests/([1-9][0-9]*)/reconcile",
+            path,
+        )
+        if self.command == "POST" and direct_reconcile:
+            self._body()
+            return service.direct_reconcile(direct_reconcile.group(1))
         raise TTPostServiceError("not_found", "接口不存在", 404)
 
     def _handle(self) -> None:

@@ -81,6 +81,32 @@ RECURRING_POOL_STATUSES = frozenset(
 MATERIAL_INTAKE_STATUSES = frozenset(
     {"queued", "preparing", "retry_wait", "ready", "failed", "canceled"}
 )
+DIRECT_TEST_STATUSES = frozenset(
+    {
+        "queued",
+        "preparing",
+        "ready",
+        "publishing",
+        "reconciling",
+        "published",
+        "failed",
+        "unknown",
+        "canceled",
+    }
+)
+DIRECT_MATERIAL_BLOCKING_STATUSES = frozenset(
+    {
+        "queued",
+        "preparing",
+        "ready",
+        "publishing",
+        "reconciling",
+        "unknown",
+    }
+)
+DIRECT_ACCOUNT_BLOCKING_STATUSES = frozenset(
+    {"publishing", "reconciling", "unknown"}
+)
 SCHEDULE_RUN_STATUSES = frozenset(
     {
         "claimed",
@@ -1150,6 +1176,35 @@ class MaterialIntakeClaim:
         ) % self.intake_id
 
 
+class DirectTestClaim:
+    """Direct-test lease wrapper whose fencing token stays private."""
+
+    __slots__ = ("item", "_claim_token")
+
+    def __init__(self, item: Mapping[str, Any], claim_token: str):
+        self.item = dict(item)
+        self._claim_token = str(claim_token)
+
+    @property
+    def direct_test_id(self) -> int:
+        return int(self.item["id"])
+
+    def reveal_claim_token(self) -> str:
+        if not self._claim_token:
+            raise TTPostError(
+                "tt_post_direct_test_claim_closed",
+                "立即测试发布认领凭据已关闭",
+                409,
+            )
+        return self._claim_token
+
+    def __repr__(self) -> str:
+        return (
+            "DirectTestClaim("
+            "direct_test_id=%r, claim_token=<redacted>)"
+        ) % self.direct_test_id
+
+
 def _connect(db_path: Any) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -1308,6 +1363,28 @@ def ensure_storage(db_path: Any) -> None:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS tt_post_auto_publish_config (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    version INTEGER NOT NULL CHECK(version>0),
+                    enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(enabled IN (0,1)),
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(timezone='Asia/Shanghai'),
+                    publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    account_ids_json TEXT NOT NULL DEFAULT '[]',
+                    caption_template TEXT NOT NULL,
+                    user_consent INTEGER NOT NULL DEFAULT 0
+                        CHECK(user_consent IN (0,1)),
+                    consent_version TEXT NOT NULL DEFAULT '',
+                    consented_at_utc TEXT NOT NULL DEFAULT '',
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS tt_post_recurring_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     material_id TEXT NOT NULL UNIQUE,
@@ -1419,6 +1496,117 @@ def ensure_storage(db_path: Any) -> None:
                     )
                 );
 
+                CREATE TABLE IF NOT EXISTS tt_post_direct_test (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_sha256 TEXT NOT NULL,
+                    material_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    content_id TEXT NOT NULL,
+                    source_media_url TEXT NOT NULL,
+                    prepared_media_url TEXT NOT NULL DEFAULT '',
+                    material_name TEXT NOT NULL DEFAULT '',
+                    drama_name TEXT NOT NULL DEFAULT '',
+                    material_language TEXT NOT NULL DEFAULT '',
+                    material_tag TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    account_username TEXT NOT NULL DEFAULT '',
+                    account_display_name TEXT NOT NULL DEFAULT '',
+                    creator_nickname_snapshot TEXT NOT NULL DEFAULT '',
+                    creator_username_snapshot TEXT NOT NULL DEFAULT '',
+                    creator_info_hash TEXT NOT NULL DEFAULT '',
+                    creator_info_synced_at_utc TEXT NOT NULL DEFAULT '',
+                    gpu_job_id TEXT NOT NULL UNIQUE,
+                    source_trim_tail_seconds REAL NOT NULL DEFAULT 0
+                        CHECK(source_trim_tail_seconds>=0),
+                    preparation_profile TEXT NOT NULL,
+                    prepared_output_sha256 TEXT NOT NULL DEFAULT '',
+                    prepared_output_size INTEGER NOT NULL DEFAULT 0
+                        CHECK(prepared_output_size>=0),
+                    prepared_duration_sec REAL NOT NULL DEFAULT 0
+                        CHECK(prepared_duration_sec>=0),
+                    caption_template TEXT NOT NULL,
+                    caption TEXT NOT NULL,
+                    short_link_id INTEGER NOT NULL DEFAULT 0
+                        CHECK(short_link_id>=0),
+                    short_url TEXT NOT NULL DEFAULT '',
+                    long_url TEXT NOT NULL DEFAULT '',
+                    privacy_level TEXT NOT NULL
+                        CHECK(privacy_level IN (
+                            'PUBLIC_TO_EVERYONE',
+                            'MUTUAL_FOLLOW_FRIENDS',
+                            'FOLLOWER_OF_CREATOR',
+                            'SELF_ONLY'
+                        )),
+                    allow_comment INTEGER NOT NULL
+                        CHECK(allow_comment IN (0,1)),
+                    allow_duet INTEGER NOT NULL
+                        CHECK(allow_duet IN (0,1)),
+                    allow_stitch INTEGER NOT NULL
+                        CHECK(allow_stitch IN (0,1)),
+                    brand_content_toggle INTEGER NOT NULL
+                        CHECK(brand_content_toggle IN (0,1)),
+                    brand_organic_toggle INTEGER NOT NULL
+                        CHECK(brand_organic_toggle IN (0,1)),
+                    is_aigc INTEGER NOT NULL DEFAULT 0
+                        CHECK(is_aigc IN (0,1)),
+                    user_consent INTEGER NOT NULL CHECK(user_consent=1),
+                    consent_version TEXT NOT NULL,
+                    consented_at_utc TEXT NOT NULL,
+                    config_version INTEGER NOT NULL DEFAULT 0
+                        CHECK(config_version>=0),
+                    status TEXT NOT NULL DEFAULT 'queued'
+                        CHECK(status IN (
+                            'queued','preparing','ready','publishing',
+                            'reconciling','published','failed','unknown',
+                            'canceled'
+                        )),
+                    preparation_attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(preparation_attempt_count>=0),
+                    publish_attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(publish_attempt_count>=0),
+                    claim_phase TEXT NOT NULL DEFAULT ''
+                        CHECK(claim_phase IN ('','prepare','publish')),
+                    claim_worker TEXT NOT NULL DEFAULT '',
+                    claim_token TEXT NOT NULL DEFAULT '',
+                    lease_expires_at_utc TEXT NOT NULL DEFAULT '',
+                    publish_id TEXT NOT NULL DEFAULT '',
+                    publish_url TEXT NOT NULL DEFAULT '',
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    unknown_outcome INTEGER NOT NULL DEFAULT 0
+                        CHECK(unknown_outcome IN (0,1)),
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    claimed_at_utc TEXT NOT NULL DEFAULT '',
+                    prepared_at_utc TEXT NOT NULL DEFAULT '',
+                    publish_started_at_utc TEXT NOT NULL DEFAULT '',
+                    published_at_utc TEXT NOT NULL DEFAULT '',
+                    failed_at_utc TEXT NOT NULL DEFAULT '',
+                    canceled_at_utc TEXT NOT NULL DEFAULT '',
+                    CHECK(
+                        (status='preparing' AND claim_phase='prepare')
+                        OR
+                        (status='publishing' AND claim_phase='publish')
+                        OR
+                        (
+                            status NOT IN ('preparing','publishing')
+                            AND claim_phase=''
+                        )
+                    ),
+                    CHECK(
+                        (
+                            short_link_id=0 AND short_url='' AND long_url=''
+                        )
+                        OR
+                        (short_link_id>0 AND short_url<>'')
+                    )
+                );
+
                 CREATE TABLE IF NOT EXISTS tt_post_schedule_run (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_key TEXT NOT NULL UNIQUE,
@@ -1478,6 +1666,32 @@ def ensure_storage(db_path: Any) -> None:
                     );
                 CREATE INDEX IF NOT EXISTS idx_tt_post_material_intake_account
                     ON tt_post_material_intake(account_id,status,created_at,id);
+                CREATE INDEX IF NOT EXISTS idx_tt_post_direct_test_prepare
+                    ON tt_post_direct_test(
+                        status,claim_phase,lease_expires_at_utc,created_at,id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_tt_post_direct_test_publish
+                    ON tt_post_direct_test(
+                        status,claim_phase,lease_expires_at_utc,
+                        prepared_at_utc,id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_tt_post_direct_test_material
+                    ON tt_post_direct_test(material_id,status,updated_at,id);
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    ux_tt_post_direct_test_active_material
+                    ON tt_post_direct_test(material_id)
+                    WHERE status IN (
+                        'queued','preparing','ready','publishing',
+                        'reconciling','unknown'
+                    );
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    ux_tt_post_direct_test_publish_id
+                    ON tt_post_direct_test(publish_id)
+                    WHERE publish_id<>'';
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    ux_tt_post_direct_test_short_link
+                    ON tt_post_direct_test(short_link_id)
+                    WHERE short_link_id>0;
                 CREATE INDEX IF NOT EXISTS idx_tt_post_schedule_run_account
                     ON tt_post_schedule_run(account_id,status,scheduled_at_utc,id);
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_schedule_run_manual
@@ -1670,6 +1884,39 @@ def _default_daily_schedule(account_id: str) -> Dict[str, Any]:
     }
 
 
+def _public_auto_publish_config(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    result.pop("id", None)
+    result["enabled"] = bool(result.get("enabled"))
+    result["user_consent"] = bool(result.get("user_consent"))
+    for source, target in (
+        ("publish_times_json", "publish_times"),
+        ("account_ids_json", "account_ids"),
+    ):
+        try:
+            parsed = json.loads(str(result.pop(source, "[]")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise TTPostError(
+                "tt_post_auto_config_storage_invalid",
+                "自动发布配置存储内容无效",
+                500,
+            ) from None
+        if not isinstance(parsed, list) or not all(
+            isinstance(item, str) for item in parsed
+        ):
+            raise TTPostError(
+                "tt_post_auto_config_storage_invalid",
+                "自动发布配置存储内容无效",
+                500,
+            )
+        result[target] = parsed
+    result["legacy_review_required"] = False
+    result["legacy_schedule_mode"] = "atomic"
+    result["legacy_publish_times_by_account"] = {}
+    result["legacy_membership_mode"] = "atomic"
+    return result
+
+
 def _public_recurring_pool(row: sqlite3.Row) -> Dict[str, Any]:
     result = dict(row)
     result["is_aigc"] = bool(result.get("is_aigc"))
@@ -1683,6 +1930,28 @@ def _public_material_intake(row: sqlite3.Row) -> Dict[str, Any]:
     result.pop("lease_expires_at_utc", None)
     result["is_aigc"] = bool(result.get("is_aigc"))
     result["user_consent"] = bool(result.get("user_consent"))
+    return result
+
+
+def _public_direct_test(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    result.pop("claim_token", None)
+    result.pop("lease_expires_at_utc", None)
+    for field in (
+        "allow_comment",
+        "allow_duet",
+        "allow_stitch",
+        "brand_content_toggle",
+        "brand_organic_toggle",
+        "is_aigc",
+        "user_consent",
+        "unknown_outcome",
+    ):
+        result[field] = bool(result.get(field))
+    result["commercial_disclosure"] = bool(
+        result.get("brand_content_toggle")
+        or result.get("brand_organic_toggle")
+    )
     return result
 
 
@@ -1967,6 +2236,454 @@ class TTPostStore:
                 rows.append(_public_account_settings(row))
         return rows
 
+    @staticmethod
+    def _legacy_auto_publish_config(
+        conn: sqlite3.Connection,
+    ) -> Dict[str, Any]:
+        """Build the version-zero compatibility view without writing a row."""
+
+        rows = conn.execute(
+            """
+            SELECT * FROM tt_post_daily_schedule
+            ORDER BY account_id
+            """
+        ).fetchall()
+        all_schedules = [_public_daily_schedule(row) for row in rows]
+        enabled_schedules = [
+            schedule for schedule in all_schedules if schedule["enabled"]
+        ]
+        # During the rolling migration, enabled legacy rows remain the active
+        # membership. If every historical row is paused, preserve those rows as
+        # the selected-but-paused membership so the new UI does not silently
+        # forget the last configured accounts when the global switch is off.
+        schedules = enabled_schedules or all_schedules
+        projected_enabled = bool(enabled_schedules)
+        account_ids = [
+            _account_id(schedule["account_id"])
+            for schedule in schedules
+        ]
+        times_by_account = {
+            str(schedule["account_id"]): [
+                _publish_time(value)
+                for value in schedule["publish_times"]
+            ]
+            for schedule in schedules
+        }
+        distinct_time_sets = {
+            tuple(values) for values in times_by_account.values()
+        }
+        legacy_mixed = len(distinct_time_sets) > 1
+        publish_times = (
+            []
+            if legacy_mixed
+            else list(next(iter(distinct_time_sets), ()))
+        )
+        consent_source = schedules[0] if schedules else {}
+        return {
+            "version": 0,
+            "enabled": projected_enabled,
+            "timezone": "Asia/Shanghai",
+            "publish_times": publish_times,
+            "account_ids": account_ids,
+            "caption_template": FIXED_CAPTION_TEMPLATE,
+            "user_consent": bool(consent_source.get("user_consent")),
+            "consent_version": str(
+                consent_source.get("consent_version", "") or ""
+            ),
+            "consented_at_utc": str(
+                consent_source.get("consented_at_utc", "") or ""
+            ),
+            "created_by_user_id": "",
+            "created_by_name": "",
+            "updated_by_user_id": "",
+            "updated_by_name": "",
+            "created_at": "",
+            "updated_at": "",
+            "legacy_review_required": legacy_mixed,
+            "legacy_schedule_mode": "mixed" if legacy_mixed else "uniform",
+            "legacy_publish_times_by_account": times_by_account,
+            "legacy_membership_mode": (
+                "enabled"
+                if enabled_schedules
+                else "paused"
+                if all_schedules
+                else "empty"
+            ),
+        }
+
+    def get_auto_publish_config(self) -> Dict[str, Any]:
+        """Return the atomic UI config or a read-only legacy projection."""
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_auto_publish_config WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return self._legacy_auto_publish_config(conn)
+        return _public_auto_publish_config(row)
+
+    def save_auto_publish_config(
+        self,
+        *,
+        expected_version: Any,
+        enabled: Any,
+        timezone: Any = None,
+        publish_times: Any = None,
+        account_ids: Any = None,
+        caption_template: Any = None,
+        user_consent: Any = None,
+        consent_version: Any = None,
+        consented_at: Any = None,
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        """Atomically save caption, accounts and automatic schedule settings."""
+
+        normalized_version = _nonnegative_int(
+            expected_version,
+            "自动发布配置版本",
+            2**31 - 1,
+        )
+        normalized_enabled = _exact_bool(enabled, "自动发布启用状态")
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        timestamp = self._now_iso()
+
+        with self._transaction() as conn:
+            stored = conn.execute(
+                "SELECT * FROM tt_post_auto_publish_config WHERE id=1"
+            ).fetchone()
+            current = (
+                _public_auto_publish_config(stored)
+                if stored is not None
+                else self._legacy_auto_publish_config(conn)
+            )
+            if normalized_version != int(current["version"]):
+                raise TTPostError(
+                    "tt_post_auto_config_version_conflict",
+                    "自动发布配置已被其他操作更新，请刷新后重试",
+                    409,
+                )
+            if bool(current.get("legacy_review_required")):
+                if publish_times is None:
+                    raise TTPostError(
+                        "tt_post_auto_config_legacy_review_required",
+                        "旧自动排期时间不一致，首次保存必须明确提交统一时间",
+                        409,
+                    )
+                if normalized_enabled:
+                    raise TTPostError(
+                        "tt_post_auto_config_legacy_review_required",
+                        "旧自动排期时间不一致，请先保存停用的统一配置后再启用",
+                        409,
+                    )
+
+            if timezone is None:
+                normalized_timezone = str(current["timezone"])
+            else:
+                normalized_timezone = str(timezone or "").strip()
+            if normalized_timezone != "Asia/Shanghai":
+                raise TTPostError(
+                    "invalid_timezone",
+                    "自动发布时区必须是Asia/Shanghai",
+                    400,
+                )
+
+            normalized_times = (
+                list(current["publish_times"])
+                if publish_times is None
+                else _publish_times(publish_times)
+            )
+            if account_ids is None:
+                normalized_account_ids = list(current["account_ids"])
+            else:
+                if (
+                    isinstance(account_ids, (str, bytes, bytearray, Mapping))
+                    or not isinstance(account_ids, Iterable)
+                ):
+                    raise TTPostError(
+                        "invalid_auto_publish_accounts",
+                        "自动发布账号必须是列表",
+                        400,
+                    )
+                raw_account_ids = list(account_ids)
+                if len(raw_account_ids) > MAX_ACCOUNT_SETTINGS_BATCH:
+                    raise TTPostError(
+                        "invalid_auto_publish_accounts",
+                        "自动发布账号最多%d个"
+                        % MAX_ACCOUNT_SETTINGS_BATCH,
+                        400,
+                    )
+                normalized_account_ids = []
+                seen_account_ids = set()
+                for value in raw_account_ids:
+                    normalized_account_id = _account_id(value)
+                    if normalized_account_id in seen_account_ids:
+                        raise TTPostError(
+                            "invalid_auto_publish_accounts",
+                            "自动发布账号不能重复",
+                            400,
+                        )
+                    seen_account_ids.add(normalized_account_id)
+                    normalized_account_ids.append(normalized_account_id)
+
+            normalized_template = (
+                str(current["caption_template"])
+                if caption_template is None
+                else _required_text(
+                    caption_template,
+                    "发布描述模板",
+                    20000,
+                )
+            )
+            # Validate every supported macro now; the real values remain
+            # frozen per direct-test/queue row later.
+            render_caption_template(
+                normalized_template,
+                "TT_CONFIG",
+                url=_MAX_TT_SHORT_URL,
+                description="Drama description",
+            )
+
+            normalized_user_consent = (
+                bool(current["user_consent"])
+                if user_consent is None
+                else _exact_bool(user_consent, "自动发布用户授权")
+            )
+            if consent_version is None:
+                normalized_consent_version = str(
+                    current["consent_version"] or ""
+                )
+            else:
+                normalized_consent_version = _optional_text(
+                    consent_version,
+                    "自动发布确认版本",
+                    128,
+                )
+            if consented_at is None:
+                normalized_consented_at = str(
+                    current["consented_at_utc"] or ""
+                )
+            else:
+                normalized_consented_at = _iso_utc(
+                    consented_at,
+                    "自动发布确认时间",
+                )
+
+            if normalized_enabled and not normalized_times:
+                raise TTPostError(
+                    "tt_post_auto_config_times_required",
+                    "启用自动发布前至少需要设置一个时间点",
+                    400,
+                )
+            if normalized_enabled and not normalized_account_ids:
+                raise TTPostError(
+                    "tt_post_auto_config_accounts_required",
+                    "启用自动发布前至少需要选择一个TikTok账号",
+                    400,
+                )
+            if normalized_enabled and normalized_account_ids and (
+                not normalized_user_consent
+                or not normalized_consent_version
+                or not normalized_consented_at
+            ):
+                raise TTPostError(
+                    "tt_post_consent_required",
+                    "保存自动发布账号前必须记录用户授权",
+                    409,
+                )
+
+            old_account_ids = set(current["account_ids"])
+            new_account_ids = set(normalized_account_ids)
+            new_version = int(current["version"]) + 1
+            times_json = json.dumps(
+                normalized_times,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            account_ids_json = json.dumps(
+                normalized_account_ids,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if stored is None:
+                conn.execute(
+                    """
+                    INSERT INTO tt_post_auto_publish_config(
+                        id,version,enabled,timezone,publish_times_json,
+                        account_ids_json,caption_template,user_consent,
+                        consent_version,consented_at_utc,
+                        created_by_user_id,created_by_name,
+                        updated_by_user_id,updated_by_name,created_at,updated_at
+                    ) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        new_version,
+                        int(normalized_enabled),
+                        normalized_timezone,
+                        times_json,
+                        account_ids_json,
+                        normalized_template,
+                        int(normalized_user_consent),
+                        normalized_consent_version,
+                        normalized_consented_at,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_auto_publish_config
+                    SET version=?,enabled=?,timezone=?,publish_times_json=?,
+                        account_ids_json=?,caption_template=?,user_consent=?,
+                        consent_version=?,consented_at_utc=?,
+                        updated_by_user_id=?,updated_by_name=?,updated_at=?
+                    WHERE id=1 AND version=?
+                    """,
+                    (
+                        new_version,
+                        int(normalized_enabled),
+                        normalized_timezone,
+                        times_json,
+                        account_ids_json,
+                        normalized_template,
+                        int(normalized_user_consent),
+                        normalized_consent_version,
+                        normalized_consented_at,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        int(current["version"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise TTPostError(
+                        "tt_post_auto_config_version_conflict",
+                        "自动发布配置已被其他操作更新，请刷新后重试",
+                        409,
+                    )
+
+            for normalized_account_id in normalized_account_ids:
+                schedule = conn.execute(
+                    """
+                    SELECT * FROM tt_post_daily_schedule
+                    WHERE account_id=?
+                    """,
+                    (normalized_account_id,),
+                ).fetchone()
+                if schedule is None:
+                    # A disabled atomic config may remember trusted account
+                    # membership before any publish consent exists. Do not
+                    # fabricate a legacy schedule whose schema means consent=1.
+                    if not normalized_user_consent:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO tt_post_daily_schedule(
+                            account_id,enabled,timezone,publish_times_json,
+                            version,user_consent,consent_version,
+                            consented_at_utc,created_by_user_id,
+                            created_by_name,updated_by_user_id,
+                            updated_by_name,created_at,updated_at
+                        ) VALUES(?,?,'Asia/Shanghai',?,1,1,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            normalized_account_id,
+                            int(normalized_enabled),
+                            times_json,
+                            normalized_consent_version,
+                            normalized_consented_at,
+                            normalized_actor_id,
+                            normalized_actor_name,
+                            normalized_actor_id,
+                            normalized_actor_name,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                else:
+                    schedule_user_consent = int(
+                        normalized_user_consent
+                        or bool(schedule["user_consent"])
+                    )
+                    schedule_consent_version = (
+                        normalized_consent_version
+                        if normalized_user_consent
+                        else str(schedule["consent_version"] or "")
+                    )
+                    schedule_consented_at = (
+                        normalized_consented_at
+                        if normalized_user_consent
+                        else str(schedule["consented_at_utc"] or "")
+                    )
+                    conn.execute(
+                        """
+                        UPDATE tt_post_daily_schedule
+                        SET enabled=?,timezone='Asia/Shanghai',
+                            publish_times_json=?,version=?,user_consent=?,
+                            consent_version=?,consented_at_utc=?,
+                            updated_by_user_id=?,updated_by_name=?,updated_at=?
+                        WHERE account_id=?
+                        """,
+                        (
+                            int(normalized_enabled),
+                            times_json,
+                            int(schedule["version"]) + 1,
+                            schedule_user_consent,
+                            schedule_consent_version,
+                            schedule_consented_at,
+                            normalized_actor_id,
+                            normalized_actor_name,
+                            timestamp,
+                            normalized_account_id,
+                        ),
+                    )
+
+            for removed_account_id in sorted(
+                old_account_ids.difference(new_account_ids)
+            ):
+                schedule = conn.execute(
+                    """
+                    SELECT * FROM tt_post_daily_schedule
+                    WHERE account_id=?
+                    """,
+                    (removed_account_id,),
+                ).fetchone()
+                if schedule is not None and bool(schedule["enabled"]):
+                    conn.execute(
+                        """
+                        UPDATE tt_post_daily_schedule
+                        SET enabled=0,version=?,updated_by_user_id=?,
+                            updated_by_name=?,updated_at=?
+                        WHERE account_id=?
+                        """,
+                        (
+                            int(schedule["version"]) + 1,
+                            normalized_actor_id,
+                            normalized_actor_name,
+                            timestamp,
+                            removed_account_id,
+                        ),
+                    )
+
+            result = conn.execute(
+                "SELECT * FROM tt_post_auto_publish_config WHERE id=1"
+            ).fetchone()
+        return _public_auto_publish_config(result)
+
     def get_daily_schedule(self, account_id: Any) -> Dict[str, Any]:
         normalized = _account_id(account_id)
         with contextlib.closing(_connect(self.db_path)) as conn:
@@ -2211,6 +2928,1817 @@ class TTPostStore:
                 (normalized_account_id,),
             ).fetchone()
         return _public_daily_schedule(row)
+
+    def create_direct_test(
+        self,
+        material_id: Any,
+        account_id: Any,
+        content_id: Any,
+        source_media_url: Any,
+        *,
+        idempotency_key: Any,
+        gpu_job_id: Any,
+        source_trim_tail_seconds: Any,
+        preparation_profile: Any,
+        caption_template: Any,
+        caption: Any,
+        short_link_id: Any,
+        short_url: Any,
+        settings: Any,
+        consent_version: Any,
+        consented_at: Any,
+        config_version: Any,
+        material_name: Any = "",
+        drama_name: Any = "",
+        material_language: Any = "",
+        material_tag: Any = "",
+        description: Any = "",
+        account_username: Any = "",
+        account_display_name: Any = "",
+        creator_nickname_snapshot: Any = "",
+        creator_username_snapshot: Any = "",
+        creator_info_hash: Any = "",
+        creator_info_synced_at: Any = "",
+        actor_user_id: str = "",
+        actor_name: str = "",
+    ) -> Dict[str, Any]:
+        """Create one repeatable test attempt without touching a material pool."""
+
+        normalized_material_id = _material_id(material_id)
+        normalized_account_id = _account_id(account_id)
+        normalized_content_id = str(content_id or "").strip()
+        if not _CONTENT_ID_RE.fullmatch(normalized_content_id):
+            raise TTPostError(
+                "tt_content_id_invalid",
+                "素材对应的content_id无效",
+                400,
+            )
+        normalized_source_url = _https_url(
+            source_media_url,
+            "素材源视频地址",
+        )
+        normalized_idempotency_key = _required_text(
+            idempotency_key,
+            "立即测试发布幂等键",
+            255,
+        )
+        normalized_gpu_job_id = str(gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_gpu_job_id):
+            raise TTPostError(
+                "invalid_gpu_job_id",
+                "TT GPU任务ID无效",
+                400,
+            )
+        try:
+            normalized_trim = float(source_trim_tail_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT源视频裁剪参数无效",
+                400,
+            ) from None
+        if (
+            not math.isfinite(normalized_trim)
+            or normalized_trim < 0
+            or normalized_trim >= 86400
+        ):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT源视频裁剪参数无效",
+                400,
+            )
+        normalized_trim = round(normalized_trim, 6)
+        normalized_profile = _required_text(
+            preparation_profile,
+            "TT成片配置版本",
+            128,
+        )
+        try:
+            normalized_description = _normalize_description(description)
+        except ValueError:
+            raise TTPostError("invalid_request", "素材描述无效", 400) from None
+        normalized_template = _required_text(
+            caption_template,
+            "发布描述模板",
+            20000,
+        )
+        normalized_short_link_id = _nonnegative_int(
+            short_link_id,
+            "TikTok短链ID",
+        )
+        normalized_short_url = str(short_url or "").strip()
+        if caption_uses_url_macro(normalized_template):
+            if normalized_short_link_id <= 0:
+                raise TTPostError(
+                    "caption_url_required",
+                    "发布描述中的{url}必须绑定独立测试短链",
+                    400,
+                )
+            try:
+                expected_short_url = build_short_url(
+                    normalized_short_link_id
+                )
+                normalized_short_url = validate_short_url(
+                    normalized_short_url
+                )
+            except Exception as exc:
+                raise TTPostError(
+                    str(getattr(exc, "code", "tt_short_url_invalid")),
+                    str(exc),
+                    int(getattr(exc, "status", 400)),
+                ) from None
+            if not secrets.compare_digest(
+                normalized_short_url,
+                expected_short_url,
+            ):
+                raise TTPostError(
+                    "tt_short_link_identity_mismatch",
+                    "TikTok测试短链与短链ID不匹配",
+                    409,
+                )
+        elif normalized_short_link_id or normalized_short_url:
+            raise TTPostError(
+                "tt_short_link_not_required",
+                "发布描述没有{url}时不能绑定测试短链",
+                400,
+            )
+        normalized_caption = str(caption or "")
+        expected_caption = render_caption_template(
+            normalized_template,
+            normalized_content_id,
+            url=normalized_short_url or None,
+            description=normalized_description,
+        )
+        if not secrets.compare_digest(
+            normalized_caption.encode("utf-8"),
+            expected_caption.encode("utf-8"),
+        ):
+            raise TTPostError(
+                "tt_post_caption_mismatch",
+                "发布描述与已冻结素材及短链不匹配",
+                409,
+            )
+        normalized_settings = (
+            settings
+            if isinstance(settings, TTPostAccountSettings)
+            else TTPostAccountSettings.from_mapping(settings)
+        )
+        normalized_consent_version = _required_text(
+            consent_version,
+            "发布确认版本",
+            128,
+        )
+        normalized_consented_at = _iso_utc(
+            consented_at,
+            "发布确认时间",
+        )
+        normalized_config_version = _nonnegative_int(
+            config_version,
+            "自动发布配置版本",
+            2**31 - 1,
+        )
+        normalized_material_name = _optional_text(
+            material_name,
+            "素材名称",
+            500,
+        )
+        normalized_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
+        normalized_language = _optional_text(
+            material_language,
+            "素材语言",
+            32,
+        )
+        normalized_tag = _optional_text(material_tag, "素材标签", 255)
+        normalized_account_username = _optional_text(
+            account_username,
+            "TikTok用户名",
+            128,
+        )
+        normalized_account_display_name = _optional_text(
+            account_display_name,
+            "TikTok显示名",
+            255,
+        )
+        normalized_creator_nickname = _optional_text(
+            creator_nickname_snapshot,
+            "TikTok创作者昵称快照",
+            255,
+        )
+        normalized_creator_username = _optional_text(
+            creator_username_snapshot,
+            "TikTok创作者用户名快照",
+            128,
+        )
+        normalized_creator_hash = _optional_text(
+            creator_info_hash,
+            "TikTok创作者信息哈希",
+            64,
+        ).lower()
+        if normalized_creator_hash and not _SHA256_RE.fullmatch(
+            normalized_creator_hash
+        ):
+            raise TTPostError(
+                "invalid_creator_info_hash",
+                "TikTok创作者信息哈希无效",
+                400,
+            )
+        normalized_creator_synced_at = (
+            _iso_utc(
+                creator_info_synced_at,
+                "TikTok创作者信息同步时间",
+            )
+            if creator_info_synced_at not in (None, "")
+            else ""
+        )
+        normalized_actor_id = _optional_text(
+            actor_user_id,
+            "操作人ID",
+            128,
+        )
+        normalized_actor_name = _optional_text(
+            actor_name,
+            "操作人名称",
+            255,
+        )
+        frozen_payload = {
+            "account_display_name": normalized_account_display_name,
+            "account_id": normalized_account_id,
+            "account_username": normalized_account_username,
+            "caption": normalized_caption,
+            "caption_template": normalized_template,
+            "config_version": normalized_config_version,
+            "consent_version": normalized_consent_version,
+            "consented_at_utc": normalized_consented_at,
+            "content_id": normalized_content_id,
+            "creator_info_hash": normalized_creator_hash,
+            "creator_info_synced_at_utc": normalized_creator_synced_at,
+            "creator_nickname_snapshot": normalized_creator_nickname,
+            "creator_username_snapshot": normalized_creator_username,
+            "description": normalized_description,
+            "drama_name": normalized_drama_name,
+            "gpu_job_id": normalized_gpu_job_id,
+            "material_id": normalized_material_id,
+            "material_language": normalized_language,
+            "material_name": normalized_material_name,
+            "material_tag": normalized_tag,
+            "preparation_profile": normalized_profile,
+            "settings": normalized_settings.as_dict(),
+            "short_link_id": normalized_short_link_id,
+            "short_url": normalized_short_url,
+            "source_media_url": normalized_source_url,
+            "source_trim_tail_seconds": normalized_trim,
+        }
+        request_sha256 = hashlib.sha256(
+            json.dumps(
+                frozen_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM tt_post_direct_test
+                WHERE idempotency_key=?
+                """,
+                (normalized_idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if secrets.compare_digest(
+                    str(existing["request_sha256"]),
+                    request_sha256,
+                ):
+                    return _public_direct_test(existing)
+                raise TTPostError(
+                    "tt_post_direct_test_idempotency_conflict",
+                    "立即测试发布幂等键已用于不同请求",
+                    409,
+                )
+            direct_statuses = sorted(DIRECT_MATERIAL_BLOCKING_STATUSES)
+            direct_placeholders = ",".join("?" for _ in direct_statuses)
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_direct_test
+                WHERE material_id=? AND status IN (%s)
+                LIMIT 1
+                """
+                % direct_placeholders,
+                (normalized_material_id, *direct_statuses),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_direct_test_active",
+                    "This material already has an active or unknown direct test",
+                    409,
+                )
+            queue_statuses = sorted(ACTIVE_QUEUE_STATUSES)
+            queue_placeholders = ",".join("?" for _ in queue_statuses)
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_queue
+                WHERE material_id=? AND status IN (%s)
+                LIMIT 1
+                """
+                % queue_placeholders,
+                (normalized_material_id, *queue_statuses),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_material_publish_active",
+                    "This material already has an active or unknown publish",
+                    409,
+                )
+            if conn.execute(
+                """
+                SELECT 1
+                FROM tt_post_recurring_pool AS pool
+                LEFT JOIN tt_post_schedule_run AS run
+                  ON run.id=pool.run_id
+                WHERE pool.material_id=?
+                  AND (
+                    pool.status='reserved'
+                    OR (run.status='claimed' AND run.queue_id IS NULL)
+                  )
+                LIMIT 1
+                """,
+                (normalized_material_id,),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_material_publish_active",
+                    "This material is reserved by an active recurring publish",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tt_post_direct_test(
+                        idempotency_key,request_sha256,material_id,account_id,
+                        content_id,source_media_url,material_name,drama_name,
+                        material_language,material_tag,description,
+                        account_username,account_display_name,
+                        creator_nickname_snapshot,creator_username_snapshot,
+                        creator_info_hash,creator_info_synced_at_utc,gpu_job_id,
+                        source_trim_tail_seconds,preparation_profile,
+                        caption_template,caption,short_link_id,short_url,
+                        privacy_level,allow_comment,allow_duet,allow_stitch,
+                        brand_content_toggle,brand_organic_toggle,is_aigc,
+                        user_consent,consent_version,consented_at_utc,
+                        config_version,status,created_by_user_id,
+                        created_by_name,updated_by_user_id,updated_by_name,
+                        created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                        ?,?,?,?,?,?,?,1,?,?,?,'queued',?,?,?,?,?,?)
+                    """,
+                    (
+                        normalized_idempotency_key,
+                        request_sha256,
+                        normalized_material_id,
+                        normalized_account_id,
+                        normalized_content_id,
+                        normalized_source_url,
+                        normalized_material_name,
+                        normalized_drama_name,
+                        normalized_language,
+                        normalized_tag,
+                        normalized_description,
+                        normalized_account_username,
+                        normalized_account_display_name,
+                        normalized_creator_nickname,
+                        normalized_creator_username,
+                        normalized_creator_hash,
+                        normalized_creator_synced_at,
+                        normalized_gpu_job_id,
+                        normalized_trim,
+                        normalized_profile,
+                        normalized_template,
+                        normalized_caption,
+                        normalized_short_link_id,
+                        normalized_short_url,
+                        normalized_settings.privacy_level,
+                        int(normalized_settings.allow_comment),
+                        int(normalized_settings.allow_duet),
+                        int(normalized_settings.allow_stitch),
+                        int(normalized_settings.brand_content_toggle),
+                        int(normalized_settings.brand_organic_toggle),
+                        int(normalized_settings.is_aigc),
+                        normalized_consent_version,
+                        normalized_consented_at,
+                        normalized_config_version,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        normalized_actor_id,
+                        normalized_actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                message = str(exc).lower()
+                if "gpu_job_id" in message:
+                    code = "tt_post_direct_test_gpu_job_conflict"
+                    safe_message = "TT GPU任务ID已用于其他立即测试发布"
+                elif "short_link_id" in message:
+                    code = "tt_post_direct_test_short_link_conflict"
+                    safe_message = "TikTok测试短链ID发生冲突，请换新操作键重试"
+                elif "material_id" in message:
+                    code = "tt_post_direct_test_active"
+                    safe_message = (
+                        "This material already has an active or unknown direct test"
+                    )
+                else:
+                    code = "tt_post_direct_test_conflict"
+                    safe_message = "立即测试发布发生唯一性冲突，请刷新后重试"
+                raise TTPostError(code, safe_message, 409) from None
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return _public_direct_test(row)
+
+    def get_direct_test(self, direct_test_id: Any) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        if row is None:
+            raise TTPostError(
+                "tt_post_direct_test_not_found",
+                "立即测试发布记录不存在",
+                404,
+            )
+        return _public_direct_test(row)
+
+    def get_direct_test_by_idempotency_key(
+        self,
+        idempotency_key: Any,
+        *,
+        required: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_key = _required_text(
+            idempotency_key,
+            "立即测试发布幂等键",
+            255,
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM tt_post_direct_test
+                WHERE idempotency_key=?
+                """,
+                (normalized_key,),
+            ).fetchone()
+        if row is None:
+            if required:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            return None
+        return _public_direct_test(row)
+
+    def list_direct_tests(
+        self,
+        *,
+        account_id: Any = None,
+        material_id: Any = None,
+        status: Any = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        normalized_limit = _positive_int(limit, "立即测试发布列表数量", 1000)
+        normalized_offset = _nonnegative_int(
+            offset,
+            "立即测试发布列表偏移",
+            2**31 - 1,
+        )
+        clauses = []
+        params: List[Any] = []
+        if account_id is not None:
+            clauses.append("account_id=?")
+            params.append(_account_id(account_id))
+        if material_id is not None:
+            clauses.append("material_id=?")
+            params.append(_material_id(material_id))
+        if status is not None:
+            normalized_status = str(status or "").strip()
+            if normalized_status not in DIRECT_TEST_STATUSES:
+                raise TTPostError(
+                    "invalid_direct_test_status",
+                    "立即测试发布状态无效",
+                    400,
+                )
+            clauses.append("status=?")
+            params.append(normalized_status)
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.extend((normalized_limit, normalized_offset))
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tt_post_direct_test%s
+                ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?
+                """
+                % where_sql,
+                params,
+            ).fetchall()
+        return [_public_direct_test(row) for row in rows]
+
+    @staticmethod
+    def _assert_direct_test_claim(
+        row: sqlite3.Row,
+        claim_token: Any,
+        *,
+        phase: str,
+        allowed_statuses: Sequence[str],
+        now_iso: str,
+    ) -> None:
+        supplied = str(claim_token or "")
+        stored = str(row["claim_token"] or "")
+        if (
+            not supplied
+            or not stored
+            or not secrets.compare_digest(supplied, stored)
+            or str(row["claim_phase"]) != phase
+            or str(row["status"]) not in set(allowed_statuses)
+        ):
+            raise TTPostError(
+                "tt_post_direct_test_claim_invalid",
+                "立即测试发布认领无效或状态已变更",
+                409,
+            )
+        if (
+            row["lease_expires_at_utc"]
+            and str(row["lease_expires_at_utc"]) <= now_iso
+        ):
+            raise TTPostError(
+                "tt_post_direct_test_claim_expired",
+                "立即测试发布认领已过期",
+                409,
+            )
+
+    def claim_direct_test_prepare(
+        self,
+        worker_id: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 900,
+        limit: int = 10,
+    ) -> List[DirectTestClaim]:
+        worker = str(worker_id or "").strip()
+        if not _WORKER_ID_RE.fullmatch(worker):
+            raise TTPostError("invalid_worker_id", "预制作执行器ID无效", 400)
+        normalized_lease = _positive_int(
+            lease_seconds,
+            "预制作认领时长",
+            86400,
+        )
+        normalized_limit = _positive_int(limit, "预制作认领数量", 100)
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease)
+        )
+        claims: List[DirectTestClaim] = []
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='queued',claim_phase='',claim_worker='',
+                    claim_token='',lease_expires_at_utc='',
+                    error_code='tt_post_direct_prepare_lease_expired',
+                    error_message='预制作租约过期，已安全重新排队',
+                    updated_at=?
+                WHERE status='preparing' AND claim_phase='prepare'
+                  AND lease_expires_at_utc<>''
+                  AND lease_expires_at_utc<=?
+                """,
+                (now_iso, now_iso),
+            )
+            candidates = conn.execute(
+                """
+                SELECT * FROM tt_post_direct_test
+                WHERE status='queued'
+                ORDER BY created_at,id LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+            for row in candidates:
+                token = secrets.token_urlsafe(32)
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_direct_test
+                    SET status='preparing',claim_phase='prepare',
+                        claim_worker=?,claim_token=?,lease_expires_at_utc=?,
+                        preparation_attempt_count=
+                            preparation_attempt_count+1,
+                        claimed_at_utc=?,error_code='',error_message='',
+                        failed_at_utc='',updated_at=?
+                    WHERE id=? AND status='queued'
+                    """,
+                    (
+                        worker,
+                        token,
+                        lease_iso,
+                        now_iso,
+                        now_iso,
+                        int(row["id"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                claimed = conn.execute(
+                    "SELECT * FROM tt_post_direct_test WHERE id=?",
+                    (int(row["id"]),),
+                ).fetchone()
+                claims.append(DirectTestClaim(_public_direct_test(claimed), token))
+        return claims
+
+    def _renew_direct_test_claim(
+        self,
+        direct_test_id: Any,
+        claim_token: Any,
+        *,
+        phase: str,
+        status: str,
+        now: Optional[Any],
+        lease_seconds: int,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        normalized_lease = _positive_int(
+            lease_seconds,
+            "立即测试发布认领时长",
+            86400,
+        )
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease)
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            self._assert_direct_test_claim(
+                row,
+                claim_token,
+                phase=phase,
+                allowed_statuses=(status,),
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET lease_expires_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (lease_iso, now_iso, normalized_id),
+            )
+            renewed = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(renewed)
+
+    def renew_direct_test_prepare(
+        self,
+        direct_test_id: Any,
+        claim_token: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 900,
+    ) -> Dict[str, Any]:
+        return self._renew_direct_test_claim(
+            direct_test_id,
+            claim_token,
+            phase="prepare",
+            status="preparing",
+            now=now,
+            lease_seconds=lease_seconds,
+        )
+
+    def complete_direct_test_prepare(
+        self,
+        direct_test_id: Any,
+        claim_token: Any,
+        *,
+        gpu_job_id: Any,
+        prepared_media_url: Any,
+        prepared_output_sha256: Any,
+        prepared_output_size: Any,
+        prepared_duration_sec: Any,
+        source_trim_tail_seconds: Any,
+        preparation_profile: Any,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        normalized_gpu_job_id = str(gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_gpu_job_id):
+            raise TTPostError("invalid_gpu_job_id", "TT GPU任务ID无效", 400)
+        normalized_url = _https_url(
+            prepared_media_url,
+            "TT最终成片地址",
+        )
+        normalized_sha = str(prepared_output_sha256 or "").strip().lower()
+        if not _SHA256_RE.fullmatch(normalized_sha):
+            raise TTPostError(
+                "invalid_prepared_output_sha",
+                "TT最终成片SHA256无效",
+                400,
+            )
+        normalized_size = _positive_int(
+            prepared_output_size,
+            "TT最终成片大小",
+        )
+        try:
+            normalized_duration = float(prepared_duration_sec)
+            normalized_trim = float(source_trim_tail_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT最终成片时长或裁剪参数无效",
+                400,
+            ) from None
+        if (
+            not math.isfinite(normalized_duration)
+            or normalized_duration <= 0
+            or normalized_duration > 86400
+            or not math.isfinite(normalized_trim)
+            or normalized_trim < 0
+            or normalized_trim >= normalized_duration
+        ):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT最终成片时长或裁剪参数无效",
+                400,
+            )
+        normalized_duration = round(normalized_duration, 6)
+        normalized_trim = round(normalized_trim, 6)
+        normalized_profile = _required_text(
+            preparation_profile,
+            "TT成片配置版本",
+            128,
+        )
+        artifact = (
+            normalized_url,
+            normalized_sha,
+            normalized_size,
+            normalized_duration,
+        )
+        now_iso = self._now_iso()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            frozen_matches = (
+                secrets.compare_digest(
+                    str(row["gpu_job_id"]),
+                    normalized_gpu_job_id,
+                )
+                and secrets.compare_digest(
+                    str(row["preparation_profile"]),
+                    normalized_profile,
+                )
+                and float(row["source_trim_tail_seconds"]) == normalized_trim
+            )
+            if not frozen_matches:
+                raise TTPostError(
+                    "tt_post_direct_test_artifact_mismatch",
+                    "预制作结果与已冻结立即测试身份不一致",
+                    409,
+                )
+            if secrets.compare_digest(
+                str(row["source_media_url"]),
+                normalized_url,
+            ):
+                raise TTPostError(
+                    "tt_prepared_media_matches_source",
+                    "TT最终成片地址不能与源素材地址相同",
+                    409,
+                )
+            if str(row["status"]) == "ready":
+                stored_artifact = (
+                    str(row["prepared_media_url"]),
+                    str(row["prepared_output_sha256"]),
+                    int(row["prepared_output_size"]),
+                    float(row["prepared_duration_sec"]),
+                )
+                if stored_artifact == artifact:
+                    return _public_direct_test(row)
+                raise TTPostError(
+                    "tt_post_direct_test_completion_conflict",
+                    "立即测试成片已完成且结果不同",
+                    409,
+                )
+            self._assert_direct_test_claim(
+                row,
+                claim_token,
+                phase="prepare",
+                allowed_statuses=("preparing",),
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='ready',prepared_media_url=?,
+                    prepared_output_sha256=?,prepared_output_size=?,
+                    prepared_duration_sec=?,claim_phase='',claim_worker='',
+                    claim_token='',lease_expires_at_utc='',error_code='',
+                    error_message='',prepared_at_utc=?,failed_at_utc='',
+                    updated_at=?
+                WHERE id=? AND status='preparing' AND claim_phase='prepare'
+                  AND claim_token=?
+                """,
+                (
+                    normalized_url,
+                    normalized_sha,
+                    normalized_size,
+                    normalized_duration,
+                    now_iso,
+                    now_iso,
+                    normalized_id,
+                    str(claim_token or ""),
+                ),
+            )
+            completed = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(completed)
+
+    def fail_direct_test_prepare(
+        self,
+        direct_test_id: Any,
+        claim_token: Any,
+        *,
+        error_code: Any,
+        error_message: Any,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        normalized_code = _required_text(
+            error_code,
+            "预制作错误码",
+            96,
+        )
+        normalized_message = _required_text(
+            redact_text(error_message),
+            "预制作错误说明",
+            500,
+        )
+        now_iso = self._now_iso()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if (
+                str(row["status"]) == "failed"
+                and str(row["error_code"]) == normalized_code
+                and str(row["error_message"]) == normalized_message
+            ):
+                return _public_direct_test(row)
+            self._assert_direct_test_claim(
+                row,
+                claim_token,
+                phase="prepare",
+                allowed_statuses=("preparing",),
+                now_iso=now_iso,
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='failed',claim_phase='',claim_worker='',
+                    claim_token='',lease_expires_at_utc='',error_code=?,
+                    error_message=?,failed_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    normalized_code,
+                    normalized_message,
+                    now_iso,
+                    now_iso,
+                    normalized_id,
+                ),
+            )
+            failed = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(failed)
+
+    def quarantine_expired_direct_test_publishes(
+        self,
+        *,
+        now: Optional[Any] = None,
+    ) -> int:
+        """Move every expired in-flight direct publish to reconcile-only unknown."""
+
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "current time",
+        )
+        with self._transaction() as conn:
+            updated = conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='unknown',unknown_outcome=1,claim_phase='',
+                    claim_worker='',claim_token='',lease_expires_at_utc='',
+                    error_code='tt_post_direct_publish_lease_expired',
+                    error_message='Direct publish lease expired; manual reconciliation is required',
+                    failed_at_utc=?,updated_at=?
+                WHERE status='publishing' AND claim_phase='publish'
+                  AND lease_expires_at_utc<>''
+                  AND lease_expires_at_utc<=?
+                """,
+                (now_iso, now_iso, now_iso),
+            )
+            return int(updated.rowcount)
+
+    def claim_direct_test_publish(
+        self,
+        direct_test_id: Any,
+        worker_id: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 300,
+    ) -> DirectTestClaim:
+        """Claim one exact ready test; stale publish leases become unknown."""
+
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        worker = str(worker_id or "").strip()
+        if not _WORKER_ID_RE.fullmatch(worker):
+            raise TTPostError("invalid_worker_id", "发布执行器ID无效", 400)
+        normalized_lease = _positive_int(
+            lease_seconds,
+            "发布认领时长",
+            86400,
+        )
+        current = _utc_datetime(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        now_iso = _iso_utc(current)
+        lease_iso = _iso_utc(
+            current + timedelta(seconds=normalized_lease)
+        )
+        stale_quarantined = False
+        with self._transaction() as conn:
+            stale = conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='unknown',unknown_outcome=1,claim_phase='',
+                    claim_worker='',claim_token='',lease_expires_at_utc='',
+                    error_code='tt_post_direct_publish_lease_expired',
+                    error_message='发布执行中租约过期，结果需要人工核对',
+                    failed_at_utc=?,updated_at=?
+                WHERE id=? AND status='publishing' AND claim_phase='publish'
+                  AND lease_expires_at_utc<>''
+                  AND lease_expires_at_utc<=?
+                """,
+                (now_iso, now_iso, normalized_id, now_iso),
+            )
+            stale_quarantined = stale.rowcount == 1
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if stale_quarantined:
+                claimed = None
+            elif str(row["status"]) != "ready":
+                raise TTPostError(
+                    "tt_post_direct_test_not_ready",
+                    "立即测试发布尚未完成成片或状态已变更",
+                    409,
+                )
+            else:
+                direct_account_statuses = sorted(
+                    DIRECT_ACCOUNT_BLOCKING_STATUSES
+                )
+                direct_account_placeholders = ",".join(
+                    "?" for _ in direct_account_statuses
+                )
+                if conn.execute(
+                    """
+                    SELECT 1 FROM tt_post_direct_test
+                    WHERE account_id=? AND id<>? AND status IN (%s)
+                    LIMIT 1
+                    """
+                    % direct_account_placeholders,
+                    (
+                        str(row["account_id"]),
+                        normalized_id,
+                        *direct_account_statuses,
+                    ),
+                ).fetchone():
+                    raise TTPostError(
+                        "tt_post_account_publish_busy",
+                        "This TikTok account has an active or unknown direct test",
+                        409,
+                    )
+                queue_statuses = sorted(ACTIVE_QUEUE_STATUSES)
+                queue_placeholders = ",".join(
+                    "?" for _ in queue_statuses
+                )
+                if conn.execute(
+                    """
+                    SELECT 1 FROM tt_post_queue
+                    WHERE account_id=? AND status IN (%s)
+                    LIMIT 1
+                    """
+                    % queue_placeholders,
+                    (str(row["account_id"]), *queue_statuses),
+                ).fetchone():
+                    raise TTPostError(
+                        "tt_post_account_publish_busy",
+                        "This TikTok account has an active or unknown queue",
+                        409,
+                    )
+                run_statuses = sorted(ACTIVE_SCHEDULE_RUN_STATUSES)
+                run_placeholders = ",".join("?" for _ in run_statuses)
+                if conn.execute(
+                    """
+                    SELECT 1 FROM tt_post_schedule_run
+                    WHERE account_id=? AND status IN (%s)
+                    LIMIT 1
+                    """
+                    % run_placeholders,
+                    (str(row["account_id"]), *run_statuses),
+                ).fetchone():
+                    raise TTPostError(
+                        "tt_post_account_publish_busy",
+                        "This TikTok account has an active or unknown recurring run",
+                        409,
+                    )
+                token = secrets.token_urlsafe(32)
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_direct_test
+                    SET status='publishing',claim_phase='publish',
+                        claim_worker=?,claim_token=?,lease_expires_at_utc=?,
+                        publish_attempt_count=publish_attempt_count+1,
+                        claimed_at_utc=?,publish_started_at_utc=?,
+                        error_code='',error_message='',unknown_outcome=0,
+                        failed_at_utc='',updated_at=?
+                    WHERE id=? AND status='ready'
+                    """,
+                    (
+                        worker,
+                        token,
+                        lease_iso,
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                        normalized_id,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise TTPostError(
+                        "tt_post_direct_test_claim_conflict",
+                        "立即测试发布已被其他执行器认领",
+                        409,
+                    )
+                claimed = conn.execute(
+                    "SELECT * FROM tt_post_direct_test WHERE id=?",
+                    (normalized_id,),
+                ).fetchone()
+        if stale_quarantined:
+            raise TTPostError(
+                "tt_post_direct_test_outcome_unknown",
+                "发布执行租约已过期，结果需要人工核对",
+                409,
+            )
+        return DirectTestClaim(_public_direct_test(claimed), token)
+
+    def renew_direct_test_publish(
+        self,
+        direct_test_id: Any,
+        claim_token: Any,
+        *,
+        now: Optional[Any] = None,
+        lease_seconds: int = 300,
+    ) -> Dict[str, Any]:
+        return self._renew_direct_test_claim(
+            direct_test_id,
+            claim_token,
+            phase="publish",
+            status="publishing",
+            now=now,
+            lease_seconds=lease_seconds,
+        )
+
+    def prepare_direct_test_short_link(
+        self,
+        direct_test_id: Any,
+        publish_claim_token: Any,
+        long_url: Any,
+    ) -> Dict[str, Any]:
+        """Freeze one W2A wrapper target under the active publish lease."""
+
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        try:
+            normalized_long_url = validate_w2a_url(long_url)
+        except Exception as exc:
+            raise TTPostError(
+                str(getattr(exc, "code", "tt_short_link_target_invalid")),
+                str(exc),
+                int(getattr(exc, "status", 400)),
+            ) from None
+        now_iso = self._now_iso()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            self._assert_direct_test_claim(
+                row,
+                publish_claim_token,
+                phase="publish",
+                allowed_statuses=("publishing",),
+                now_iso=now_iso,
+            )
+            if (
+                int(row["short_link_id"] or 0) <= 0
+                or not str(row["short_url"] or "")
+            ):
+                raise TTPostError(
+                    "tt_short_link_not_required",
+                    "立即测试发布描述没有待准备的短链",
+                    409,
+                )
+            existing = str(row["long_url"] or "")
+            if existing:
+                if not secrets.compare_digest(existing, normalized_long_url):
+                    raise TTPostError(
+                        "tt_short_link_target_conflict",
+                        "立即测试短链目标已冻结且不同",
+                        409,
+                    )
+                return _public_direct_test(row)
+            updated = conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET long_url=?,updated_at=?
+                WHERE id=? AND status='publishing'
+                  AND claim_phase='publish' AND claim_token=?
+                  AND long_url=''
+                """,
+                (
+                    normalized_long_url,
+                    now_iso,
+                    normalized_id,
+                    str(publish_claim_token or ""),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_short_link_target_conflict",
+                    "立即测试短链目标已被其他操作变更",
+                    409,
+                )
+            prepared = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(prepared)
+
+    def record_direct_test_publish_id(
+        self,
+        direct_test_id: Any,
+        publish_claim_token: Any,
+        publish_id: Any,
+        *,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Persist the remote ID and permanently enter reconcile-only mode."""
+
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        remote_id = str(publish_id or "").strip()
+        if not _PUBLISH_ID_RE.fullmatch(remote_id):
+            raise TTPostError("invalid_publish_id", "TikTok publish_id无效", 400)
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if str(row["status"]) == "reconciling":
+                if secrets.compare_digest(str(row["publish_id"]), remote_id):
+                    return _public_direct_test(row)
+                raise TTPostError(
+                    "tt_post_publish_id_conflict",
+                    "TikTok publish_id与已冻结结果不一致",
+                    409,
+                )
+            self._assert_direct_test_claim(
+                row,
+                publish_claim_token,
+                phase="publish",
+                allowed_statuses=("publishing",),
+                now_iso=now_iso,
+            )
+            if int(row["short_link_id"] or 0) > 0 and not str(
+                row["long_url"] or ""
+            ):
+                raise TTPostError(
+                    "tt_short_link_target_required",
+                    "TikTok init前必须先冻结立即测试短链目标",
+                    409,
+                )
+            try:
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_direct_test
+                    SET status='reconciling',publish_id=?,claim_phase='',
+                        claim_worker='',claim_token='',
+                        lease_expires_at_utc='',unknown_outcome=0,
+                        error_code='',error_message='',updated_at=?
+                    WHERE id=? AND status='publishing'
+                      AND claim_phase='publish' AND claim_token=?
+                    """,
+                    (
+                        remote_id,
+                        now_iso,
+                        normalized_id,
+                        str(publish_claim_token or ""),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_publish_id_conflict",
+                    "TikTok publish_id已绑定其他立即测试发布",
+                    409,
+                ) from None
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_direct_test_claim_invalid",
+                    "立即测试发布认领无效或状态已变更",
+                    409,
+                )
+            recorded = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(recorded)
+
+    def recover_direct_test_publish_id(
+        self,
+        direct_test_id: Any,
+        publish_id: Any,
+        *,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Recover a GPU-ledger publish ID after CPU acknowledgement loss."""
+
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        remote_id = str(publish_id or "").strip()
+        if not _PUBLISH_ID_RE.fullmatch(remote_id):
+            raise TTPostError("invalid_publish_id", "TikTok publish_id无效", 400)
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            stored_id = str(row["publish_id"] or "")
+            if str(row["status"]) == "reconciling":
+                if secrets.compare_digest(stored_id, remote_id):
+                    return _public_direct_test(row)
+                raise TTPostError(
+                    "tt_post_publish_id_conflict",
+                    "TikTok publish_id与已恢复结果不一致",
+                    409,
+                )
+            if str(row["status"]) not in {"unknown", "publishing"}:
+                raise TTPostError(
+                    "tt_post_direct_publish_recovery_not_allowed",
+                    "当前立即测试状态不允许恢复publish_id",
+                    409,
+                )
+            if stored_id and not secrets.compare_digest(stored_id, remote_id):
+                raise TTPostError(
+                    "tt_post_publish_id_conflict",
+                    "TikTok publish_id与已冻结结果不一致",
+                    409,
+                )
+            try:
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_direct_test
+                    SET status='reconciling',publish_id=?,unknown_outcome=0,
+                        claim_phase='',claim_worker='',claim_token='',
+                        lease_expires_at_utc='',error_code='',error_message='',
+                        updated_at=?
+                    WHERE id=? AND status IN ('unknown','publishing')
+                    """,
+                    (remote_id, now_iso, normalized_id),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_publish_id_conflict",
+                    "TikTok publish_id已绑定其他立即测试发布",
+                    409,
+                ) from None
+            if updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_direct_publish_recovery_not_allowed",
+                    "当前立即测试状态不允许恢复publish_id",
+                    409,
+                )
+            recovered = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(recovered)
+
+    def fail_direct_test_publish(
+        self,
+        direct_test_id: Any,
+        publish_claim_token: Any,
+        *,
+        error_code: Any,
+        error_message: Any,
+        publish_was_not_created: Any,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        normalized_code = _required_text(error_code, "发布错误码", 96)
+        normalized_message = _required_text(
+            redact_text(error_message),
+            "发布错误说明",
+            500,
+        )
+        known_safe = _exact_bool(
+            publish_was_not_created,
+            "远端未创建发布结果确认",
+        )
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if str(row["status"]) in {
+                "published",
+                "failed",
+                "unknown",
+                "canceled",
+            }:
+                return _public_direct_test(row)
+            if row["publish_id"] or str(row["status"]) == "reconciling":
+                raise TTPostError(
+                    "tt_post_reconcile_only",
+                    "已取得publish_id的立即测试只能执行核对",
+                    409,
+                )
+            self._assert_direct_test_claim(
+                row,
+                publish_claim_token,
+                phase="publish",
+                allowed_statuses=("publishing",),
+                now_iso=now_iso,
+            )
+            target_status = "failed" if known_safe else "unknown"
+            stored_code = (
+                normalized_code
+                if known_safe
+                else "tt_post_direct_outcome_unknown"
+            )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status=?,unknown_outcome=?,claim_phase='',
+                    claim_worker='',claim_token='',lease_expires_at_utc='',
+                    error_code=?,error_message=?,failed_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    target_status,
+                    0 if known_safe else 1,
+                    stored_code,
+                    normalized_message,
+                    now_iso,
+                    now_iso,
+                    normalized_id,
+                ),
+            )
+            failed = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(failed)
+
+    def reconcile_direct_test_published(
+        self,
+        direct_test_id: Any,
+        publish_id: Any,
+        *,
+        publish_url: Any = "",
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        remote_id = str(publish_id or "").strip()
+        if not _PUBLISH_ID_RE.fullmatch(remote_id):
+            raise TTPostError("invalid_publish_id", "TikTok publish_id无效", 400)
+        normalized_url = _https_url(
+            publish_url,
+            "TikTok Post地址",
+            allow_empty=True,
+        )
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if str(row["status"]) == "published":
+                if secrets.compare_digest(str(row["publish_id"]), remote_id):
+                    return _public_direct_test(row)
+                raise TTPostError(
+                    "tt_post_publish_id_conflict",
+                    "TikTok publish_id与已发布结果不一致",
+                    409,
+                )
+            if (
+                str(row["status"]) != "reconciling"
+                or not secrets.compare_digest(
+                    str(row["publish_id"]),
+                    remote_id,
+                )
+            ):
+                raise TTPostError(
+                    "tt_post_reconcile_only",
+                    "立即测试没有可核对的TikTok publish_id",
+                    409,
+                )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='published',publish_url=?,unknown_outcome=0,
+                    error_code='',error_message='',published_at_utc=?,
+                    failed_at_utc='',updated_at=?
+                WHERE id=? AND status='reconciling' AND publish_id=?
+                """,
+                (
+                    normalized_url,
+                    now_iso,
+                    now_iso,
+                    normalized_id,
+                    remote_id,
+                ),
+            )
+            published = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(published)
+
+    def reconcile_direct_test_failed(
+        self,
+        direct_test_id: Any,
+        publish_id: Any,
+        *,
+        remote_status: Any,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        remote_id = str(publish_id or "").strip()
+        if not _PUBLISH_ID_RE.fullmatch(remote_id):
+            raise TTPostError("invalid_publish_id", "TikTok publish_id无效", 400)
+        normalized_remote_status = str(remote_status or "").strip().lower()
+        if normalized_remote_status not in {"failed", "publish_failed"}:
+            raise TTPostError(
+                "invalid_remote_publish_status",
+                "TikTok远端发布失败状态无效",
+                400,
+            )
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        message = "TikTok远端核对明确返回发布失败（%s）" % (
+            normalized_remote_status
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if (
+                str(row["status"]) == "failed"
+                and str(row["error_code"])
+                == "tt_post_direct_remote_publish_failed"
+                and secrets.compare_digest(str(row["publish_id"]), remote_id)
+            ):
+                return _public_direct_test(row)
+            if (
+                str(row["status"]) != "reconciling"
+                or not secrets.compare_digest(
+                    str(row["publish_id"]),
+                    remote_id,
+                )
+            ):
+                raise TTPostError(
+                    "tt_post_reconcile_only",
+                    "立即测试没有可核对的TikTok publish_id",
+                    409,
+                )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='failed',unknown_outcome=0,
+                    error_code='tt_post_direct_remote_publish_failed',
+                    error_message=?,failed_at_utc=?,updated_at=?
+                WHERE id=? AND status='reconciling' AND publish_id=?
+                """,
+                (message, now_iso, now_iso, normalized_id, remote_id),
+            )
+            failed = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(failed)
+
+    def cancel_direct_test(
+        self,
+        direct_test_id: Any,
+        *,
+        reason: Any,
+        now: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            direct_test_id,
+            "立即测试发布记录ID",
+        )
+        normalized_reason = _required_text(
+            redact_text(reason),
+            "取消原因",
+            500,
+        )
+        now_iso = _iso_utc(
+            now if now is not None else self._now_fn(),
+            "当前时间",
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise TTPostError(
+                    "tt_post_direct_test_not_found",
+                    "立即测试发布记录不存在",
+                    404,
+                )
+            if str(row["status"]) == "canceled":
+                return _public_direct_test(row)
+            if str(row["status"]) not in {"queued", "ready"}:
+                raise TTPostError(
+                    "tt_post_direct_test_cancel_not_allowed",
+                    "当前立即测试发布状态不允许取消",
+                    409,
+                )
+            conn.execute(
+                """
+                UPDATE tt_post_direct_test
+                SET status='canceled',claim_phase='',claim_worker='',
+                    claim_token='',lease_expires_at_utc='',
+                    error_code='tt_post_direct_test_canceled',
+                    error_message=?,canceled_at_utc=?,updated_at=?
+                WHERE id=?
+                """,
+                (normalized_reason, now_iso, now_iso, normalized_id),
+            )
+            canceled = conn.execute(
+                "SELECT * FROM tt_post_direct_test WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_direct_test(canceled)
+
+    def get_material_publication_states(
+        self,
+        material_ids: Any,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Aggregate legacy and direct-test publication history by material."""
+
+        if (
+            isinstance(material_ids, (str, bytes, bytearray, Mapping))
+            or not isinstance(material_ids, Iterable)
+        ):
+            raise TTPostError(
+                "invalid_material_ids",
+                "素材ID必须是列表",
+                400,
+            )
+        normalized_ids = []
+        seen_ids = set()
+        for value in list(material_ids):
+            normalized = _material_id(value)
+            if normalized not in seen_ids:
+                seen_ids.add(normalized)
+                normalized_ids.append(normalized)
+        if len(normalized_ids) > 1000:
+            raise TTPostError(
+                "invalid_material_ids",
+                "一次最多查询1000个素材ID",
+                400,
+            )
+        aggregates: Dict[str, Dict[str, Any]] = {
+            material_id: {
+                "material_id": material_id,
+                "publication_state": "unpublished",
+                "publication_status": "unpublished",
+                "publish_count": 0,
+                "unknown_count": 0,
+                "attempt_count": 0,
+                "latest_published_at_utc": "",
+                "latest_publish_id": "",
+                "latest_publish_url": "",
+                "latest_status_at_utc": "",
+            }
+            for material_id in normalized_ids
+        }
+        if not normalized_ids:
+            return aggregates
+        placeholders = ",".join("?" for _ in normalized_ids)
+        params = tuple(normalized_ids) + tuple(normalized_ids)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT material_id,status,unknown_outcome,publish_id,
+                    publish_url,updated_at AS status_at_utc,
+                    CASE WHEN status='published' THEN updated_at ELSE '' END
+                        AS published_at_utc,
+                    'legacy_queue' AS source
+                FROM tt_post_queue
+                WHERE material_id IN (%s)
+                UNION ALL
+                SELECT material_id,status,unknown_outcome,publish_id,
+                    publish_url,updated_at AS status_at_utc,
+                    CASE WHEN status='published'
+                        THEN CASE WHEN published_at_utc<>''
+                            THEN published_at_utc ELSE updated_at END
+                        ELSE '' END AS published_at_utc,
+                    'direct_test' AS source
+                FROM tt_post_direct_test
+                WHERE material_id IN (%s)
+                """
+                % (placeholders, placeholders),
+                params,
+            ).fetchall()
+        uncertain_statuses = {"publishing", "reconciling", "unknown"}
+        for row in rows:
+            material_id = str(row["material_id"])
+            aggregate = aggregates[material_id]
+            aggregate["attempt_count"] += 1
+            status_at = str(row["status_at_utc"] or "")
+            if status_at > aggregate["latest_status_at_utc"]:
+                aggregate["latest_status_at_utc"] = status_at
+            status = str(row["status"])
+            if status == "published":
+                aggregate["publish_count"] += 1
+                published_at = str(row["published_at_utc"] or "")
+                if published_at >= aggregate["latest_published_at_utc"]:
+                    aggregate["latest_published_at_utc"] = published_at
+                    aggregate["latest_publish_id"] = str(
+                        row["publish_id"] or ""
+                    )
+                    aggregate["latest_publish_url"] = str(
+                        row["publish_url"] or ""
+                    )
+            elif bool(row["unknown_outcome"]) or status in uncertain_statuses:
+                aggregate["unknown_count"] += 1
+        for aggregate in aggregates.values():
+            if aggregate["publish_count"]:
+                aggregate["publication_state"] = "published"
+                aggregate["publication_status"] = "published"
+            elif aggregate["unknown_count"]:
+                aggregate["publication_state"] = "unknown"
+                aggregate["publication_status"] = "unknown"
+        return aggregates
+
+    def get_material_publication_state(
+        self,
+        material_id: Any,
+    ) -> Dict[str, Any]:
+        normalized = _material_id(material_id)
+        return self.get_material_publication_states([normalized])[normalized]
 
     def add_material_intake(
         self,
@@ -3613,6 +6141,30 @@ class TTPostStore:
                         409,
                     )
 
+            direct_account_statuses = sorted(
+                DIRECT_ACCOUNT_BLOCKING_STATUSES
+            )
+            direct_account_placeholders = ",".join(
+                "?" for _ in direct_account_statuses
+            )
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_direct_test
+                WHERE account_id=? AND status IN (%s)
+                LIMIT 1
+                """
+                % direct_account_placeholders,
+                (
+                    normalized_account_id,
+                    *direct_account_statuses,
+                ),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_account_publish_busy",
+                    "This TikTok account has an active or unknown direct test",
+                    409,
+                )
+
             placeholders = ",".join("?" for _ in ACTIVE_QUEUE_STATUSES)
             if conn.execute(
                 """
@@ -3661,6 +6213,29 @@ class TTPostStore:
                 raise TTPostError(
                     "tt_post_recurring_pool_empty",
                     "该TikTok账号没有可用的每日发布素材",
+                    409,
+                )
+            direct_material_statuses = sorted(
+                DIRECT_MATERIAL_BLOCKING_STATUSES
+            )
+            direct_material_placeholders = ",".join(
+                "?" for _ in direct_material_statuses
+            )
+            if conn.execute(
+                """
+                SELECT 1 FROM tt_post_direct_test
+                WHERE material_id=? AND status IN (%s)
+                LIMIT 1
+                """
+                % direct_material_placeholders,
+                (
+                    str(pool["material_id"]),
+                    *direct_material_statuses,
+                ),
+            ).fetchone():
+                raise TTPostError(
+                    "tt_post_direct_test_active",
+                    "The FIFO material has an active or unknown direct test",
                     409,
                 )
             try:

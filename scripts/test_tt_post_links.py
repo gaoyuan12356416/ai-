@@ -19,10 +19,13 @@ if str(ROOT) not in sys.path:
 
 from features.tt_posts.links import (  # noqa: E402
     TTPostLinkError,
+    TT_DIRECT_TEST_SHORT_LINK_NAMESPACE,
+    TT_SHORT_LINK_MAX_LOCAL_ID,
     TT_SHORT_LINK_NAMESPACE,
     TT_W2A_BASE_URL,
     build_short_url,
     build_w2a_url,
+    direct_test_short_link_id,
     short_link_id,
     validate_short_url,
     validate_w2a_url,
@@ -50,6 +53,18 @@ def tracking_params(**overrides):
 
 
 class TTPostLinkTests(unittest.TestCase):
+    def test_direct_test_link_identity_is_stable_and_separate(self):
+        first = direct_test_short_link_id("tttest-5837129-operation-a")
+        self.assertEqual(first, direct_test_short_link_id("tttest-5837129-operation-a"))
+        self.assertNotEqual(first, direct_test_short_link_id("tttest-5837129-operation-b"))
+        self.assertGreater(first, TT_DIRECT_TEST_SHORT_LINK_NAMESPACE)
+        self.assertLessEqual(first, 8_999_999_999_999_999_999)
+        self.assertLess(
+            short_link_id(TT_SHORT_LINK_MAX_LOCAL_ID),
+            TT_DIRECT_TEST_SHORT_LINK_NAMESPACE,
+        )
+        self.assertTrue(build_short_url(first).endswith("%s.html" % first))
+
     def test_reserved_id_and_public_url_are_stable(self):
         link_id = short_link_id(9)
         self.assertEqual(TT_SHORT_LINK_NAMESPACE + 9, link_id)

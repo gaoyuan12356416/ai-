@@ -41503,6 +41503,9 @@ TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/creator-info": {"POST"},
     "/api/admin/tt-posts/materials/preview": {"POST"},
     "/api/admin/tt-posts/material-pool": {"GET", "POST"},
+    "/api/admin/tt-posts/auto-config": {"GET", "POST"},
+    "/api/admin/tt-posts/direct-tests": {"GET"},
+    "/api/admin/tt-posts/test-publish": {"POST"},
     "/api/admin/tt-posts/schedule": {"GET", "POST"},
     "/api/admin/tt-posts/run-now": {"POST"},
     "/api/admin/tt-posts/queue": {"GET"},
@@ -93869,6 +93872,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/api/admin/tt-posts/accounts",
             "/api/admin/tt-posts/account-settings",
             "/api/admin/tt-posts/material-pool",
+            "/api/admin/tt-posts/auto-config",
+            "/api/admin/tt-posts/direct-tests",
             "/api/admin/tt-posts/schedule",
             "/api/admin/tt-posts/queue",
             "/api/admin/tt-posts/events",
@@ -93884,6 +93889,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 if parsed.path in {
                     "/api/admin/tt-posts/accounts",
                     "/api/admin/tt-posts/account-settings",
+                    "/api/admin/tt-posts/auto-config",
                 }:
                     query = _tt_post_query_params(parsed.query, set())
                 elif parsed.path == "/api/admin/tt-posts/events":
@@ -93898,7 +93904,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         {"source_account_id"},
                         required={"source_account_id"},
                     )
-                elif parsed.path == "/api/admin/tt-posts/material-pool":
+                elif parsed.path in {
+                    "/api/admin/tt-posts/material-pool",
+                    "/api/admin/tt-posts/direct-tests",
+                }:
                     query = _tt_post_query_params(
                         parsed.query,
                         {
@@ -97364,6 +97373,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/api/admin/tt-posts/creator-info",
             "/api/admin/tt-posts/materials/preview",
             "/api/admin/tt-posts/material-pool",
+            "/api/admin/tt-posts/auto-config",
+            "/api/admin/tt-posts/test-publish",
             "/api/admin/tt-posts/schedule",
             "/api/admin/tt-posts/run-now",
         }:
@@ -97396,6 +97407,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 "/api/admin/tt-posts/creator-info": "check_tt_post_creator_info",
                 "/api/admin/tt-posts/materials/preview": "prepare_tt_post_material",
                 "/api/admin/tt-posts/material-pool": "add_tt_post_material_pool",
+                "/api/admin/tt-posts/auto-config": "save_tt_post_auto_config",
+                "/api/admin/tt-posts/test-publish": "create_tt_post_direct_test",
                 "/api/admin/tt-posts/schedule": "save_tt_post_daily_schedule",
                 "/api/admin/tt-posts/run-now": "run_tt_post_now",
             }
@@ -97435,6 +97448,19 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         )
                         if str(value or "").strip()
                     ]
+                elif parsed.path == "/api/admin/tt-posts/auto-config":
+                    raw_account_ids = request_payload.get(
+                        "source_account_ids"
+                    )
+                    batch_source_account_ids = [
+                        str(value or "").strip()
+                        for value in (
+                            raw_account_ids[:50]
+                            if isinstance(raw_account_ids, list)
+                            else []
+                        )
+                        if str(value or "").strip()
+                    ]
                 result = _tt_post_service_request(
                     "POST",
                     parsed.path,
@@ -97446,7 +97472,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     and isinstance(result.get("item"), dict)
                     else {}
                 )
-                if batch_source_account_ids:
+                is_direct_test = parsed.path == (
+                    "/api/admin/tt-posts/test-publish"
+                )
+                if is_direct_test:
+                    target_id = str(item.get("id") or "")
+                elif batch_source_account_ids:
                     target_id = "batch:%d" % len(batch_source_account_ids)
                 elif parsed.path.startswith(
                     "/api/admin/tt-posts/account-settings"
@@ -97475,9 +97506,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             or request_payload.get("content_id")
                             or ""
                         ),
-                        "queue_id": str(
-                            item.get("queue_id") or item.get("id") or ""
-                        ),
+                        "queue_id": str(item.get("queue_id") or ""),
                         "scheduled_at": str(
                             item.get("scheduled_at")
                             or request_payload.get("scheduled_at")
@@ -97553,6 +97582,42 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         )
                         audit_details["account_count"] = len(
                             batch_source_account_ids
+                        )
+                    elif parsed.path == "/api/admin/tt-posts/auto-config":
+                        audit_details["source_account_ids"] = (
+                            batch_source_account_ids
+                        )
+                        audit_details["account_count"] = len(
+                            batch_source_account_ids
+                        )
+                        audit_details["enabled"] = bool(
+                            item.get(
+                                "enabled",
+                                request_payload.get("enabled", False),
+                            )
+                        )
+                        audit_details["publish_times"] = list(
+                            item.get("publish_times")
+                            if isinstance(item.get("publish_times"), list)
+                            else request_payload.get("publish_times")
+                            if isinstance(
+                                request_payload.get("publish_times"), list
+                            )
+                            else []
+                        )
+                        audit_details["expected_version"] = (
+                            request_payload.get("expected_version")
+                        )
+                        audit_details["result_version"] = item.get("version")
+                    elif is_direct_test:
+                        audit_details["direct_test_id"] = str(
+                            item.get("id") or ""
+                        )
+                        audit_details["direct_test_status"] = str(
+                            item.get("status") or ""
+                        )
+                        audit_details["expected_config_version"] = (
+                            request_payload.get("expected_config_version")
                         )
                     append_audit_log(
                         session,

@@ -77,6 +77,9 @@ def _client_namespace():
             "/api/admin/tt-posts/creator-info": {"POST"},
             "/api/admin/tt-posts/materials/preview": {"POST"},
             "/api/admin/tt-posts/material-pool": {"GET", "POST"},
+            "/api/admin/tt-posts/auto-config": {"GET", "POST"},
+            "/api/admin/tt-posts/direct-tests": {"GET"},
+            "/api/admin/tt-posts/test-publish": {"POST"},
             "/api/admin/tt-posts/schedule": {"GET", "POST"},
             "/api/admin/tt-posts/run-now": {"POST"},
             "/api/admin/tt-posts/queue": {"GET"},
@@ -201,6 +204,8 @@ class TTPostsAppContractTest(unittest.TestCase):
         self.assertIn('"/api/admin/tt-posts/queue"', route)
         self.assertIn('"/api/admin/tt-posts/events"', route)
         self.assertIn('"/api/admin/tt-posts/material-pool"', route)
+        self.assertIn('"/api/admin/tt-posts/auto-config"', route)
+        self.assertIn('"/api/admin/tt-posts/direct-tests"', route)
         self.assertIn('"/api/admin/tt-posts/schedule"', route)
         self.assertIn("_tt_post_query_params(", route)
         self.assertIn("_tt_post_service_request(", route)
@@ -237,6 +242,8 @@ class TTPostsAppContractTest(unittest.TestCase):
         )
         self.assertIn('"/api/admin/tt-posts/materials/preview"', route)
         self.assertIn('"/api/admin/tt-posts/material-pool"', route)
+        self.assertIn('"/api/admin/tt-posts/auto-config"', route)
+        self.assertIn('"/api/admin/tt-posts/test-publish"', route)
         self.assertIn('"/api/admin/tt-posts/schedule"', route)
         self.assertIn('"/api/admin/tt-posts/run-now"', route)
         self.assertNotIn('"/api/admin/tt-posts/queue"', route)
@@ -244,6 +251,24 @@ class TTPostsAppContractTest(unittest.TestCase):
         self.assertIn("append_audit_log(", route)
         self.assertIn('"save_tt_post_account_settings"', route)
         self.assertIn('"batch_save_tt_post_account_settings"', route)
+        self.assertIn('"save_tt_post_auto_config"', route)
+        self.assertIn('"create_tt_post_direct_test"', route)
+        self.assertIn('audit_details["source_account_ids"]', route)
+        self.assertIn('audit_details["account_count"]', route)
+        self.assertIn('audit_details["enabled"]', route)
+        self.assertIn('audit_details["publish_times"]', route)
+        self.assertIn('audit_details["expected_version"]', route)
+        self.assertIn('audit_details["result_version"]', route)
+        self.assertIn('audit_details["direct_test_id"]', route)
+        self.assertIn('audit_details["direct_test_status"]', route)
+        self.assertIn(
+            'audit_details["expected_config_version"]',
+            route,
+        )
+        self.assertNotIn(
+            'item.get("queue_id") or item.get("id")',
+            route,
+        )
         self.assertIn(
             '"batch_check_tt_post_account_settings_creator_info"',
             route,
@@ -261,6 +286,18 @@ class TTPostsAppContractTest(unittest.TestCase):
 
     def test_legacy_exact_queue_creation_is_not_publicly_writable(self):
         methods = _literal_assignment("TT_POST_ADMIN_ROUTE_METHODS")
+        self.assertEqual(
+            {"GET", "POST"},
+            methods["/api/admin/tt-posts/auto-config"],
+        )
+        self.assertEqual(
+            {"GET"},
+            methods["/api/admin/tt-posts/direct-tests"],
+        )
+        self.assertEqual(
+            {"POST"},
+            methods["/api/admin/tt-posts/test-publish"],
+        )
         self.assertEqual(
             {"GET"},
             methods["/api/admin/tt-posts/queue"],

@@ -400,6 +400,32 @@ class TTPostSidecarClient:
             timeout=self.reconcile_timeout,
         )
 
+    def direct_reconciling(self, limit: int) -> List[Dict[str, Any]]:
+        result = self._request(
+            "GET",
+            "/internal/tt-posts/direct-tests/reconciling?limit=%s"
+            % int(limit),
+        )
+        items = result.get("items")
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict) for item in items
+        ):
+            raise RunnerError(
+                "tt_post_sidecar_invalid_response",
+                "direct-test reconcile response is invalid",
+                502,
+            )
+        return [dict(item) for item in items]
+
+    def reconcile_direct(self, direct_test_id: int) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/internal/tt-posts/direct-tests/%s/reconcile"
+            % int(direct_test_id),
+            {},
+            timeout=self.reconcile_timeout,
+        )
+
     def claim(
         self,
         *,
@@ -435,6 +461,48 @@ class TTPostSidecarClient:
             "/internal/tt-posts/schedules/due",
             {"limit": int(limit)},
             timeout=self.schedule_timeout,
+        )
+
+    def claim_direct(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        lease_seconds: int,
+    ) -> List[Dict[str, Any]]:
+        result = self._request(
+            "POST",
+            "/internal/tt-posts/direct-tests/claim",
+            {
+                "worker_id": worker_id,
+                "limit": int(limit),
+                "lease_seconds": int(lease_seconds),
+            },
+        )
+        items = result.get("items")
+        if not isinstance(items, list) or any(
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("item"), dict)
+            for entry in items
+        ):
+            raise RunnerError(
+                "tt_post_sidecar_invalid_response",
+                "direct-test publish claim response is invalid",
+                502,
+            )
+        return [dict(entry) for entry in items]
+
+    def publish_direct(
+        self,
+        direct_test_id: int,
+        claim_token: str,
+    ) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/internal/tt-posts/direct-tests/%s/publish"
+            % int(direct_test_id),
+            {"claim_token": str(claim_token)},
+            timeout=self.publish_timeout,
         )
 
     def publish(self, queue_id: int, claim_token: str) -> Dict[str, Any]:
@@ -577,10 +645,66 @@ def execute_runner_tick(
             results.append({"operation": "publish", **_safe_result(result)})
         return processed
 
+    def claim_and_publish_direct(limit: int) -> int:
+        claim_direct = getattr(sidecar, "claim_direct", None)
+        publish_direct = getattr(sidecar, "publish_direct", None)
+        if not callable(claim_direct) or not callable(publish_direct):
+            return 0
+        processed = 0
+        while processed < limit:
+            claims = claim_direct(
+                worker_id=config.worker_id,
+                lease_seconds=max(config.publish_timeout + 60, 300),
+                limit=1,
+            )
+            if not claims:
+                break
+            if len(claims) != 1:
+                raise RunnerError(
+                    "tt_post_sidecar_invalid_response",
+                    "direct-test claim exceeded the single-item contract",
+                    502,
+                )
+            claim = claims[0]
+            item = claim["item"]
+            processed += 1
+            try:
+                direct_test_id = int(
+                    item.get("id") or item.get("direct_test_id") or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                direct_test_id = 0
+            claim_token = str(claim.get("claim_token") or "")
+            if direct_test_id <= 0 or not claim_token:
+                results.append(
+                    _safe_publish_request_error(
+                        item,
+                        RunnerError(
+                            "tt_post_sidecar_invalid_response",
+                            "direct-test claim identity is invalid",
+                            502,
+                        ),
+                    )
+                )
+                continue
+            try:
+                result = publish_direct(direct_test_id, claim_token)
+            except RunnerError as exc:
+                results.append(_safe_publish_request_error(item, exc))
+                continue
+            results.append(
+                {"operation": "direct_publish", **_safe_result(result)}
+            )
+        return processed
+
     # Persist and freeze recurring daily slots before any potentially slow
     # remote publish call. The sidecar owns all timezone/FIFO/idempotency and
     # crash-recovery decisions.
-    due_result = sidecar.schedules_due(1)
+    # Freeze every due account before the first potentially slow TikTok call.
+    # A shared multi-account schedule may have many accounts in the same
+    # minute; reserving just one would let the remainder age out of the
+    # 600-second safety window while earlier publishes are processed.
+    due_result = sidecar.schedules_due(100)
     due_items = due_result.get("items", [])
     if not isinstance(due_items, list):
         raise RunnerError(
@@ -630,14 +754,71 @@ def execute_runner_tick(
             }
         )
 
-    # Claim immediately before each publish. This prevents later FIFO items
-    # from losing their lease while an earlier TikTok request is still active.
-    claim_and_publish(config.claim_limit)
+    # Claim each automatic queue immediately before publishing it. Automatic
+    # rows have a bounded 600-second window, so a slow operator test must never
+    # consume or run ahead of this safety budget.
+    automatic_publish_count = claim_and_publish(config.claim_limit)
+
+    # Operator tests are capped at one and only run on an automatic-idle tick.
+    # Even after one automatic row is published, other same-minute accounts can
+    # remain frozen behind the per-tick claim limit; a slow test publish must not
+    # consume their 600-second safety window.
+    direct_publish_count = (
+        0 if automatic_publish_count else claim_and_publish_direct(1)
+    )
 
     # A stored publish ID is reconciled after all due claims. Each row is isolated
     # so one remote business error cannot block the rest of the tick.
-    reconciling_items = sidecar.reconciling(config.reconcile_limit)
-    if len(reconciling_items) > config.reconcile_limit:
+    direct_reconcile_count = 0
+    direct_items: List[Dict[str, Any]] = []
+    direct_reconciling = getattr(sidecar, "direct_reconciling", None)
+    reconcile_direct = getattr(sidecar, "reconcile_direct", None)
+    if callable(direct_reconciling) and callable(reconcile_direct):
+        direct_items = direct_reconciling(config.reconcile_limit)
+        if len(direct_items) > config.reconcile_limit:
+            raise RunnerError(
+                "tt_post_sidecar_invalid_response",
+                "direct-test reconcile response exceeded the budget",
+                502,
+            )
+        for item in direct_items:
+            try:
+                direct_test_id = int(
+                    item.get("id") or item.get("direct_test_id") or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                direct_test_id = 0
+            if direct_test_id <= 0 or not item.get("publish_id"):
+                results.append(
+                    _safe_reconcile_error(
+                        item,
+                        RunnerError(
+                            "tt_post_sidecar_invalid_response",
+                            "direct-test reconcile identity is invalid",
+                            502,
+                        ),
+                    )
+                )
+                continue
+            try:
+                result = reconcile_direct(direct_test_id)
+            except RunnerError as exc:
+                results.append(_safe_reconcile_error(item, exc))
+                continue
+            direct_reconcile_count += 1
+            results.append(
+                {"operation": "direct_reconcile", **_safe_result(result)}
+            )
+
+    remaining_reconcile_budget = max(
+        0, config.reconcile_limit - len(direct_items)
+    )
+    reconciling_items = (
+        sidecar.reconciling(remaining_reconcile_budget)
+        if remaining_reconcile_budget > 0
+        else []
+    )
+    if len(reconciling_items) > remaining_reconcile_budget:
         raise RunnerError(
             "tt_post_sidecar_invalid_response",
             "TT Post reconcile response exceeded the per-tick budget",
@@ -674,6 +855,8 @@ def execute_runner_tick(
         "oldest_deferred_at_utc": oldest_deferred_at_utc,
         "grace_seconds": config.grace_seconds,
         "reconcile_budget": config.reconcile_limit,
+        "direct_publish_count": direct_publish_count,
+        "direct_reconcile_count": direct_reconcile_count,
         "reconcile_count": sum(
             item["operation"] == "reconcile" for item in results
         ),

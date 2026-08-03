@@ -845,6 +845,505 @@ class ServiceLifecycleTests(unittest.TestCase):
             },
         }
 
+    def save_public_settings(
+        self,
+        service,
+        account_id="101",
+        *,
+        allow_comment=True,
+        privacy_level="PUBLIC_TO_EVERYONE",
+    ):
+        current = service.store.get_account_settings(account_id)
+        return service.store.save_account_settings(
+            account_id,
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": privacy_level,
+                    "allow_comment": allow_comment,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": True,
+                }
+            ),
+            expected_version=(
+                int(current["version"]) if current is not None else 0
+            ),
+        )
+
+    def auto_config_payload(
+        self,
+        *,
+        version=0,
+        enabled=True,
+        account_ids=None,
+        accepted=True,
+    ):
+        return {
+            "expected_version": version,
+            "enabled": enabled,
+            "timezone": "Asia/Shanghai",
+            "publish_times": ["11:00"],
+            "source_account_ids": list(account_ids or ["101"]),
+            "caption_template": (
+                "Drama {{content_id}}\n{url}\n{desc}"
+            ),
+            "consent": {
+                "accepted": accepted,
+                "version": "tt-auto-config-v1" if accepted else "",
+                "accepted_at": self.clock.value.isoformat(),
+            },
+        }
+
+    def configure_auto(self, service, account_ids=None):
+        normalized_ids = list(account_ids or ["101"])
+        for account_id in normalized_ids:
+            self.save_public_settings(service, account_id)
+        return service.auto_config_save(
+            self.auto_config_payload(account_ids=normalized_ids)
+        )["item"]
+
+    def direct_test_payload(
+        self,
+        config_version,
+        *,
+        material_id="9001",
+        key="tt-direct-test:9001:first",
+        account_id="101",
+    ):
+        return {
+            "source_account_id": account_id,
+            "material_id": material_id,
+            "expected_config_version": config_version,
+            "idempotency_key": key,
+            "consent": {
+                "accepted": True,
+                "version": "tt-direct-test-v1",
+                "accepted_at": self.clock.value.isoformat(),
+            },
+        }
+
+    def prepare_direct_test(self, service):
+        claimed = service.direct_preparation_claim(
+            {
+                "worker_id": "tt-direct-prepare-test",
+                "lease_seconds": 180,
+            }
+        )
+        self.assertIsNotNone(claimed["item"])
+        return service.direct_preparation_process(
+            claimed["item"]["id"],
+            {"claim_token": claimed["claim_token"]},
+        )["item"]
+
+    def publish_direct_test(self, service, direct_test_id):
+        claimed = service.direct_publish_claim(
+            {
+                "worker_id": "tt-direct-publish-test",
+                "lease_seconds": 300,
+                "limit": 1,
+            }
+        )
+        self.assertEqual(1, len(claimed["items"]))
+        claim = claimed["items"][0]
+        self.assertEqual(direct_test_id, claim["item"]["id"])
+        return service.direct_publish_claimed(
+            direct_test_id,
+            claim["claim_token"],
+        )["item"]
+
+    def test_auto_config_multi_account_is_atomic_and_stop_needs_no_consent(self):
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        self.save_public_settings(service, "101")
+        self.save_public_settings(service, "102")
+        saved = service.auto_config_save(
+            self.auto_config_payload(account_ids=["101", "102"])
+        )["item"]
+        self.assertEqual(1, saved["version"])
+        self.assertTrue(saved["enabled"])
+        self.assertEqual(["101", "102"], saved["account_ids"])
+        first_schedule = service.store.get_daily_schedule("101")
+        second_schedule = service.store.get_daily_schedule("102")
+        self.assertTrue(first_schedule["enabled"])
+        self.assertTrue(second_schedule["enabled"])
+        self.assertEqual(["11:00"], first_schedule["publish_times"])
+        self.assertEqual(["11:00"], second_schedule["publish_times"])
+        account_states = {
+            row["source_account_id"]: row
+            for row in service.accounts()["items"]
+        }
+        self.assertTrue(account_states["101"]["auto_publish_selected"])
+        self.assertTrue(account_states["102"]["auto_publish_selected"])
+        self.assertEqual("active", account_states["101"]["auto_publish_state"])
+
+        stopped = service.auto_config_save(
+            self.auto_config_payload(
+                version=1,
+                enabled=False,
+                account_ids=["101", "102"],
+                accepted=False,
+            )
+        )["item"]
+        self.assertFalse(stopped["enabled"])
+        self.assertEqual(["101", "102"], stopped["account_ids"])
+        self.assertEqual(saved["caption_template"], stopped["caption_template"])
+        self.assertEqual(saved["consent_version"], stopped["consent_version"])
+        self.assertFalse(service.store.get_daily_schedule("101")["enabled"])
+        self.assertFalse(service.store.get_daily_schedule("102")["enabled"])
+
+    def test_auto_config_version_or_invalid_account_failure_writes_nothing(self):
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        saved = self.configure_auto(service, ["101", "102"])
+        before_first = service.store.get_daily_schedule("101")
+        before_second = service.store.get_daily_schedule("102")
+
+        with self.assertRaises(TTPostError) as stale:
+            service.auto_config_save(
+                self.auto_config_payload(
+                    version=0,
+                    account_ids=["101"],
+                )
+            )
+        self.assertEqual(
+            "tt_post_auto_config_version_conflict",
+            stale.exception.code,
+        )
+        with self.assertRaises(TTPostError) as invalid:
+            service.auto_config_save(
+                self.auto_config_payload(
+                    version=1,
+                    account_ids=["101", "999"],
+                )
+            )
+        self.assertEqual("tt_batch_creator_info_failed", invalid.exception.code)
+        self.assertEqual(saved, service.store.get_auto_publish_config())
+        self.assertEqual(before_first, service.store.get_daily_schedule("101"))
+        self.assertEqual(before_second, service.store.get_daily_schedule("102"))
+        self.assertEqual(0, service.store.get_daily_schedule("999")["version"])
+
+    def test_disabled_auto_config_cannot_add_untrusted_or_unconfigured_account(self):
+        service = self.service(OPEN_GATES)
+        saved = self.configure_auto(service, ["101"])
+        before_config = service.store.get_auto_publish_config()
+        before_schedule = service.store.get_daily_schedule("101")
+
+        with self.assertRaises(TTPostError) as unknown:
+            service.auto_config_save(
+                self.auto_config_payload(
+                    version=saved["version"],
+                    enabled=False,
+                    account_ids=["101", "999"],
+                    accepted=False,
+                )
+            )
+        self.assertEqual(
+            "tt_post_auto_account_not_found",
+            unknown.exception.code,
+        )
+        self.assertEqual(before_config, service.store.get_auto_publish_config())
+        self.assertEqual(before_schedule, service.store.get_daily_schedule("101"))
+        self.assertEqual(0, service.store.get_daily_schedule("999")["version"])
+
+        self.accounts.add_account("102")
+        with self.assertRaises(TTPostError) as unconfigured:
+            service.auto_config_save(
+                self.auto_config_payload(
+                    version=saved["version"],
+                    enabled=False,
+                    account_ids=["101", "102"],
+                    accepted=False,
+                )
+            )
+        self.assertEqual(
+            "tt_account_settings_required",
+            unconfigured.exception.code,
+        )
+        self.assertEqual(before_config, service.store.get_auto_publish_config())
+        self.assertEqual(0, service.store.get_daily_schedule("102")["version"])
+
+        self.save_public_settings(service, "102")
+        creator_calls = len(self.gpu.creator_info_calls)
+        stopped = service.auto_config_save(
+            self.auto_config_payload(
+                version=saved["version"],
+                enabled=False,
+                account_ids=["101", "102"],
+                accepted=False,
+            )
+        )["item"]
+        self.assertFalse(stopped["enabled"])
+        self.assertEqual(["101", "102"], stopped["account_ids"])
+        self.assertFalse(service.store.get_daily_schedule("102")["enabled"])
+        self.assertEqual(creator_calls, len(self.gpu.creator_info_calls))
+
+    def test_first_disabled_config_accepts_trusted_configured_account_without_consent(self):
+        service = self.service(OPEN_GATES)
+        self.save_public_settings(service, "101")
+        creator_calls = len(self.gpu.creator_info_calls)
+        saved = service.auto_config_save(
+            self.auto_config_payload(
+                version=0,
+                enabled=False,
+                account_ids=["101"],
+                accepted=False,
+            )
+        )["item"]
+        self.assertEqual(1, saved["version"])
+        self.assertFalse(saved["enabled"])
+        self.assertFalse(saved["user_consent"])
+        self.assertEqual(["101"], saved["account_ids"])
+        self.assertEqual(0, service.store.get_daily_schedule("101")["version"])
+        self.assertEqual(creator_calls, len(self.gpu.creator_info_calls))
+
+    def test_direct_target_is_independent_and_replay_skips_live_dependencies(self):
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        config = self.configure_auto(service, ["101"])
+        self.save_public_settings(service, "102")
+        preview = service.material_preview({"material_id": "9001"})["item"]
+        self.assertEqual("validated", preview["status"])
+        payload = self.direct_test_payload(
+            config["version"],
+            account_id="102",
+        )
+        created = service.direct_test_create(payload)["item"]
+        self.assertEqual("102", created["source_account_id"])
+        self.assertEqual(["101"], service.store.get_auto_publish_config()["account_ids"])
+        self.assertEqual(0, service.store.count_recurring_materials())
+
+        service.auto_config_save(
+            self.auto_config_payload(
+                version=1,
+                enabled=False,
+                account_ids=["101"],
+                accepted=False,
+            )
+        )
+        service.gates = CLOSED_GATES
+        self.materials.resolve = mock.Mock(
+            side_effect=AssertionError("idempotent replay resolved material")
+        )
+        self.gpu.creator_info_override = {
+            "creator_info": {"privacy_level_options": []}
+        }
+        replay = service.direct_test_create(payload)["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(1, len(service.store.list_direct_tests()))
+        self.assertEqual(0, service.store.count_recurring_materials())
+        self.materials.resolve.assert_not_called()
+
+        changed_consent = {
+            **payload,
+            "consent": {
+                **payload["consent"],
+                "version": "tt-direct-test-v2",
+            },
+        }
+        with self.assertRaises(TTPostError) as consent_conflict:
+            service.direct_test_create(changed_consent)
+        self.assertEqual(
+            "tt_post_direct_test_idempotency_conflict",
+            consent_conflict.exception.code,
+        )
+        changed_consent_time = {
+            **payload,
+            "consent": {
+                **payload["consent"],
+                "accepted_at": (
+                    self.clock.value + timedelta(seconds=1)
+                ).isoformat(),
+            },
+        }
+        with self.assertRaises(TTPostError) as consent_time_conflict:
+            service.direct_test_create(changed_consent_time)
+        self.assertEqual(
+            "tt_post_direct_test_idempotency_conflict",
+            consent_time_conflict.exception.code,
+        )
+        self.materials.resolve.assert_not_called()
+
+        changed = dict(payload)
+        changed["material_id"] = "9002"
+        with self.assertRaises(TTPostError) as conflict:
+            service.direct_test_create(changed)
+        self.assertEqual(
+            "tt_post_direct_test_idempotency_conflict",
+            conflict.exception.code,
+        )
+
+    def test_direct_requires_public_comments_and_blocks_active_or_unknown(self):
+        service = self.service(OPEN_GATES)
+        config = self.configure_auto(service)
+        payload = self.direct_test_payload(config["version"])
+
+        self.save_public_settings(
+            service,
+            allow_comment=False,
+            privacy_level="PUBLIC_TO_EVERYONE",
+        )
+        with self.assertRaises(TTPostError) as comments:
+            service.direct_test_create(payload)
+        self.assertEqual(
+            "tt_post_direct_test_public_comment_required",
+            comments.exception.code,
+        )
+        self.save_public_settings(
+            service,
+            allow_comment=True,
+            privacy_level="SELF_ONLY",
+        )
+        with self.assertRaises(TTPostError) as privacy:
+            service.direct_test_create(payload)
+        self.assertEqual(
+            "tt_post_direct_test_public_comment_required",
+            privacy.exception.code,
+        )
+        self.save_public_settings(service)
+        created = service.direct_test_create(payload)["item"]
+        active_payload = self.direct_test_payload(
+            config["version"],
+            key="tt-direct-test:9001:active",
+        )
+        with self.assertRaises(TTPostError) as active:
+            service.direct_test_create(active_payload)
+        self.assertEqual("tt_post_direct_test_active", active.exception.code)
+
+        prepared = self.prepare_direct_test(service)
+        self.assertEqual(created["id"], prepared["id"])
+
+        def publish_without_id(*, job_id, **kwargs):
+            self.gpu.publish_jobs.append(job_id)
+            self.gpu.publish_requests.append({"job_id": job_id, **kwargs})
+            return {"job_id": job_id, "state": "initialized"}
+
+        self.gpu.publish = publish_without_id
+        unknown = self.publish_direct_test(service, created["id"])
+        self.assertEqual("unknown", unknown["status"])
+        with self.assertRaises(TTPostError) as blocked_unknown:
+            service.direct_test_create(active_payload)
+        self.assertEqual(
+            "tt_post_direct_test_active",
+            blocked_unknown.exception.code,
+        )
+        self.assertEqual(1, len(service.store.list_direct_tests()))
+        self.assertEqual(0, service.store.count_recurring_materials())
+
+    def test_direct_published_history_can_repeat_without_consuming_pool(self):
+        service = self.service(OPEN_GATES)
+        config = self.configure_auto(service)
+        first = service.direct_test_create(
+            self.direct_test_payload(config["version"])
+        )["item"]
+        ready = self.prepare_direct_test(service)
+        self.assertEqual(first["id"], ready["id"])
+        reconciling = self.publish_direct_test(service, first["id"])
+        self.assertEqual("reconciling", reconciling["status"])
+        published = service.direct_reconcile(first["id"])["item"]
+        self.assertEqual("published", published["status"])
+        second = service.direct_test_create(
+            self.direct_test_payload(
+                config["version"],
+                key="tt-direct-test:9001:second",
+            )
+        )["item"]
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(first["material_id"], second["material_id"])
+        self.assertEqual("queued", second["status"])
+        self.assertEqual(0, service.store.count_recurring_materials())
+
+    def test_direct_publish_claim_serializes_account_and_sweeps_expired_lease(self):
+        service = self.service(OPEN_GATES)
+        config = self.configure_auto(service)
+        first = service.direct_test_create(
+            self.direct_test_payload(config["version"])
+        )["item"]
+        self.prepare_direct_test(service)
+        second = service.direct_test_create(
+            self.direct_test_payload(
+                config["version"],
+                material_id="9002",
+                key="tt-direct-test:9002:first",
+            )
+        )["item"]
+        self.prepare_direct_test(service)
+
+        claimed = service.direct_publish_claim(
+            {
+                "worker_id": "tt-direct-publish-serial",
+                "lease_seconds": 1,
+                "limit": 10,
+            }
+        )["items"]
+        self.assertEqual(1, len(claimed))
+        claimed_id = claimed[0]["item"]["id"]
+        waiting_id = second["id"] if claimed_id == first["id"] else first["id"]
+        self.assertIn(claimed_id, {first["id"], second["id"]})
+        self.assertEqual("ready", service.store.get_direct_test(waiting_id)["status"])
+
+        self.clock.value += timedelta(seconds=2)
+        after_expiry = service.direct_publish_claim(
+            {
+                "worker_id": "tt-direct-publish-after-expiry",
+                "lease_seconds": 300,
+                "limit": 10,
+            }
+        )["items"]
+        self.assertEqual([], after_expiry)
+        expired = service.store.get_direct_test(claimed_id)
+        self.assertEqual("unknown", expired["status"])
+        self.assertTrue(expired["unknown_outcome"])
+        self.assertEqual(
+            "tt_post_direct_publish_lease_expired",
+            expired["error_code"],
+        )
+        self.assertEqual("ready", service.store.get_direct_test(waiting_id)["status"])
+
+    def test_direct_and_recurring_paths_block_the_same_active_material(self):
+        service = self.service(OPEN_GATES)
+        config = self.configure_auto(service)
+        direct = service.direct_test_create(
+            self.direct_test_payload(config["version"])
+        )["item"]
+        pool = self.add_ready(service)
+        with self.assertRaises(TTPostError) as direct_active:
+            service.run_now(
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "tt-post-manual:direct-active-material",
+                }
+            )
+        self.assertEqual("tt_post_direct_test_active", direct_active.exception.code)
+        self.assertEqual(
+            "available",
+            service.store.list_recurring_materials(account_id="101")[0]["status"],
+        )
+
+        service.store.cancel_direct_test(
+            direct["id"],
+            reason="test releases active material",
+        )
+        run = service.run_now(
+            {
+                "source_account_id": "101",
+                "idempotency_key": "tt-post-manual:queue-active-material",
+            }
+        )["item"]
+        self.assertEqual(pool["material_id"], run["material_id"])
+        with self.assertRaises(TTPostError) as queue_active:
+            service.direct_test_create(
+                self.direct_test_payload(
+                    config["version"],
+                    key="tt-direct-test:9001:queue-active",
+                )
+            )
+        self.assertEqual(
+            "tt_post_material_publish_active",
+            queue_active.exception.code,
+        )
+
     def test_recurring_material_and_daily_schedule_are_saved_separately(self):
         service = self.service(CLOSED_GATES)
         added = service.material_pool_add(
@@ -1432,6 +1931,17 @@ class ServiceLifecycleTests(unittest.TestCase):
         second_schedule["source_account_id"] = "102"
         service.schedule_save(second_schedule)
 
+        creator_info = self.gpu.creator_info
+        claims_visible_before_network = []
+
+        def observed_creator_info(**kwargs):
+            claims_visible_before_network.append(
+                len(service.store.list_claimed_unbound_recurring_runs())
+            )
+            return creator_info(**kwargs)
+
+        self.gpu.creator_info = observed_creator_info
+
         first_result = service.schedules_due({"limit": 1})
         first = first_result["items"]
         second_result = service.schedules_due({"limit": 1})
@@ -1451,6 +1961,73 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(second_result["deferred_count"], 0)
         self.assertEqual(second_result["oldest_deferred_at_utc"], "")
         self.assertEqual(len(service.store.list_queues()), 2)
+        self.assertGreaterEqual(claims_visible_before_network[0], 2)
+
+    def test_current_due_is_preclaimed_before_old_recovery_uses_creator_info(self):
+        service = self.service(OPEN_GATES)
+        self.accounts.add_account("102")
+        service.store.save_account_settings(
+            "102",
+            TTPostAccountSettings.from_mapping(
+                {
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": True,
+                }
+            ),
+            expected_version=0,
+        )
+        self.add_ready(service)
+        second_material = self.recurring_material_payload(
+            "tt-post-pool:test:9002:recovery-order"
+        )
+        second_material.update(
+            {
+                "source_account_id": "102",
+                "material_id": "9002",
+            }
+        )
+        self.add_ready(service, second_material)
+        recovery_schedule = service.schedule_save(
+            self.schedule_payload(publish_time="10:58")
+        )["item"]
+        service.store.claim_recurring_run(
+            "tt-post:auto:v1:101:2026-07-29:1058",
+            "auto",
+            "101",
+            "2026-07-29",
+            "10:58",
+            "2026-07-29T02:58:00Z",
+            config_version=recovery_schedule["version"],
+        )
+        second_schedule = self.schedule_payload(publish_time="10:59")
+        second_schedule["source_account_id"] = "102"
+        service.schedule_save(second_schedule)
+
+        due_key = "tt-post:auto:v1:102:2026-07-29:1059"
+        original_creator_info = service.creator_info
+        due_states_before_network = []
+
+        def observed_creator_info(payload):
+            due_states_before_network.append(
+                service.store.get_recurring_run_by_key(due_key)["status"]
+            )
+            return original_creator_info(payload)
+
+        service.creator_info = observed_creator_info
+        result = service.schedules_due({"limit": 2})
+
+        self.assertTrue(due_states_before_network)
+        self.assertEqual(
+            ["claimed"] * len(due_states_before_network),
+            due_states_before_network,
+        )
+        self.assertEqual(2, len(result["items"]))
+        self.assertTrue(service.store.get_recurring_run_by_key(due_key)["queue_id"])
 
     def test_material_pool_rejects_media_over_current_account_limit(self):
         service = self.service(OPEN_GATES)
@@ -3598,6 +4175,68 @@ class NewDailyQueueSidecar(FakeRunnerSidecar):
         return []
 
 
+class DirectRunnerSidecar(FakeRunnerSidecar):
+    def __init__(self):
+        super().__init__()
+        self.pending_direct_claims = [
+            {
+                "item": {
+                    "id": 81,
+                    "source_account_id": "501",
+                    "status": "publishing",
+                },
+                "claim_token": "direct-claim-secret-81",
+            },
+            {
+                "item": {
+                    "id": 82,
+                    "source_account_id": "502",
+                    "status": "publishing",
+                },
+                "claim_token": "direct-claim-secret-82",
+            },
+        ]
+
+    def claim_direct(self, **kwargs):
+        self.calls.append(("claim_direct", kwargs))
+        if not self.pending_direct_claims:
+            return []
+        return [self.pending_direct_claims.pop(0)]
+
+    def publish_direct(self, direct_test_id, claim_token):
+        self.calls.append(("publish_direct", direct_test_id, claim_token))
+        return {
+            "item": {
+                "id": direct_test_id,
+                "source_account_id": "501",
+                "status": "reconciling",
+                "publish_id": "direct-pub-81",
+            }
+        }
+
+    def direct_reconciling(self, limit):
+        self.calls.append(("direct_reconciling", limit))
+        return [
+            {
+                "id": 83,
+                "source_account_id": "503",
+                "status": "reconciling",
+                "publish_id": "direct-pub-83",
+            }
+        ][:limit]
+
+    def reconcile_direct(self, direct_test_id):
+        self.calls.append(("reconcile_direct", direct_test_id))
+        return {
+            "item": {
+                "id": direct_test_id,
+                "source_account_id": "503",
+                "status": "published",
+                "publish_id": "direct-pub-83",
+            }
+        }
+
+
 class RunnerTests(unittest.TestCase):
     def config(self):
         return RunnerConfig(
@@ -3644,6 +4283,56 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("claim-secret", rendered)
         self.assertNotIn("must-not-be-used", rendered)
         self.assertEqual(result["publish_request_count"], 1)
+
+    def test_automatic_publish_defers_direct_test_to_an_idle_tick(self):
+        sidecar = DirectRunnerSidecar()
+        result = execute_runner_tick(self.config(), client=sidecar)
+
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            [
+                "schedules_due",
+                "claim",
+                "publish",
+                "direct_reconciling",
+                "reconcile_direct",
+            ],
+        )
+        self.assertEqual(1, result["publish_request_count"])
+        self.assertEqual(0, result["direct_publish_count"])
+        self.assertEqual(1, result["direct_reconcile_count"])
+        self.assertEqual(0, result["reconcile_count"])
+        self.assertEqual(2, len(sidecar.pending_direct_claims))
+        rendered = json.dumps(result)
+        self.assertNotIn("claim-secret", rendered)
+        self.assertNotIn("direct-claim-secret", rendered)
+
+    def test_idle_automatic_tick_publishes_only_one_direct_test(self):
+        sidecar = DirectRunnerSidecar()
+        sidecar.pending_claims = []
+        result = execute_runner_tick(self.config(), client=sidecar)
+
+        self.assertEqual(
+            [call[0] for call in sidecar.calls],
+            [
+                "schedules_due",
+                "claim",
+                "claim_direct",
+                "publish_direct",
+                "direct_reconciling",
+                "reconcile_direct",
+            ],
+        )
+        self.assertEqual(0, result["publish_request_count"])
+        self.assertEqual(1, result["direct_publish_count"])
+        self.assertEqual(1, len(sidecar.pending_direct_claims))
+        direct_claim = next(
+            call for call in sidecar.calls if call[0] == "claim_direct"
+        )
+        self.assertEqual(1, direct_claim[1]["limit"])
+        rendered = json.dumps(result)
+        self.assertNotIn("claim-secret", rendered)
+        self.assertNotIn("direct-claim-secret", rendered)
 
     def test_runner_never_republishes_unknown(self):
         sidecar = UnknownRunnerSidecar()
@@ -3830,6 +4519,70 @@ class RunnerTests(unittest.TestCase):
         client.reconcile(7)
         self.assertEqual(timeouts, [1500, 60, 2400, 1500])
 
+    def test_direct_runner_client_uses_dedicated_publish_routes(self):
+        timeouts = []
+        connections = [
+            CaptureConnection(
+                {
+                    "items": [
+                        {
+                            "item": {"id": 8, "status": "publishing"},
+                            "claim_token": "direct-claim-token",
+                        }
+                    ]
+                }
+            ),
+            CaptureConnection(
+                {"item": {"id": 8, "status": "reconciling"}}
+            ),
+            CaptureConnection(
+                {
+                    "items": [
+                        {
+                            "id": 8,
+                            "status": "reconciling",
+                            "publish_id": "pub-8",
+                        }
+                    ]
+                }
+            ),
+            CaptureConnection(
+                {"item": {"id": 8, "status": "published"}}
+            ),
+        ]
+        used_connections = []
+
+        def factory(_host, _port, timeout):
+            timeouts.append(timeout)
+            connection = connections.pop(0)
+            used_connections.append(connection)
+            return connection
+
+        client = TTPostSidecarClient(
+            "http://127.0.0.1:18829",
+            INTERNAL_TOKEN,
+            timeout=60,
+            schedule_timeout=1500,
+            publish_timeout=2400,
+            reconcile_timeout=1500,
+            connection_factory=factory,
+        )
+        client.claim_direct(worker_id="runner", lease_seconds=2460, limit=1)
+        client.publish_direct(8, "direct-claim-token")
+        client.direct_reconciling(1)
+        client.reconcile_direct(8)
+
+        self.assertEqual(
+            [
+                "/internal/tt-posts/direct-tests/claim",
+                "/internal/tt-posts/direct-tests/8/publish",
+                "/internal/tt-posts/direct-tests/reconciling?limit=1",
+                "/internal/tt-posts/direct-tests/8/reconcile",
+            ],
+            [item.requests[0]["path"] for item in used_connections],
+        )
+        self.assertEqual([60, 2400, 60, 1500], timeouts)
+
 
 class HTTPContractTests(unittest.TestCase):
     class Facade:
@@ -3871,6 +4624,18 @@ class HTTPContractTests(unittest.TestCase):
         def material_pool_add(self, payload):
             return {"item": {"marker": "material-pool-add", **payload}}
 
+        def auto_config_get(self):
+            return {"item": {"marker": "auto-config-get", "version": 1}}
+
+        def auto_config_save(self, payload):
+            return {"item": {"marker": "auto-config-save", **payload}}
+
+        def direct_tests_list(self, _query):
+            return {"items": [], "marker": "direct-tests-list"}
+
+        def direct_test_create(self, payload):
+            return {"item": {"marker": "direct-test-create", **payload}}
+
         def preparation_claim(self, payload):
             return {"item": {"id": 7, **payload}, "claim_token": "x" * 43}
 
@@ -3888,6 +4653,27 @@ class HTTPContractTests(unittest.TestCase):
                 "item": {
                     "marker": "preparation-process",
                     "id": int(intake_id),
+                    **payload,
+                }
+            }
+
+        def direct_preparation_claim(self, payload):
+            return {"item": {"id": 8, **payload}, "claim_token": "y" * 43}
+
+        def direct_preparation_renew(self, direct_test_id, payload):
+            return {
+                "item": {
+                    "marker": "direct-preparation-renew",
+                    "id": int(direct_test_id),
+                    **payload,
+                }
+            }
+
+        def direct_preparation_process(self, direct_test_id, payload):
+            return {
+                "item": {
+                    "marker": "direct-preparation-process",
+                    "id": int(direct_test_id),
                     **payload,
                 }
             }
@@ -3922,14 +4708,30 @@ class HTTPContractTests(unittest.TestCase):
         def claim_due(self, _payload):
             return {"items": []}
 
+        def direct_publish_claim(self, _payload):
+            return {"items": []}
+
+        def direct_reconciling(self, _limit):
+            return {"items": []}
+
         def reconciling(self, _limit):
             return {"items": []}
 
         def publish_claimed(self, queue_id, _claim_token):
             return {"item": {"marker": "publish", "id": int(queue_id)}}
 
+        def direct_publish_claimed(self, direct_test_id, _claim_token):
+            return {
+                "item": {"marker": "direct-publish", "id": int(direct_test_id)}
+            }
+
         def reconcile(self, queue_id):
             return {"item": {"marker": "reconcile", "id": int(queue_id)}}
+
+        def direct_reconcile(self, direct_test_id):
+            return {
+                "item": {"marker": "direct-reconcile", "id": int(direct_test_id)}
+            }
 
     def setUp(self):
         self.server = TTPostHTTPServer(
@@ -4037,6 +4839,30 @@ class HTTPContractTests(unittest.TestCase):
             )["item"]["marker"],
             "material-pool-add",
         )
+        self.assertEqual(
+            self.request("/api/admin/tt-posts/auto-config")["item"]["marker"],
+            "auto-config-get",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/auto-config",
+                "POST",
+                {"expected_version": 1},
+            )["item"]["marker"],
+            "auto-config-save",
+        )
+        self.assertEqual(
+            self.request("/api/admin/tt-posts/direct-tests?page=1")["marker"],
+            "direct-tests-list",
+        )
+        self.assertEqual(
+            self.request(
+                "/api/admin/tt-posts/test-publish",
+                "POST",
+                {"material_id": "9001"},
+            )["item"]["marker"],
+            "direct-test-create",
+        )
         preparation_claim = self.request(
             "/internal/tt-posts/preparations/claim",
             "POST",
@@ -4061,6 +4887,28 @@ class HTTPContractTests(unittest.TestCase):
                 {"claim_token": "x" * 43},
             )["item"]["marker"],
             "preparation-process",
+        )
+        direct_preparation_claim = self.request(
+            "/internal/tt-posts/direct-tests/preparations/claim",
+            "POST",
+            {"worker_id": "worker-1", "lease_seconds": 180},
+        )
+        self.assertEqual(direct_preparation_claim["item"]["id"], 8)
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/direct-tests/preparations/8/renew",
+                "POST",
+                {"claim_token": "y" * 43, "lease_seconds": 180},
+            )["item"]["marker"],
+            "direct-preparation-renew",
+        )
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/direct-tests/preparations/8/process",
+                "POST",
+                {"claim_token": "y" * 43},
+            )["item"]["marker"],
+            "direct-preparation-process",
         )
         self.assertEqual(
             self.request(
@@ -4123,6 +4971,14 @@ class HTTPContractTests(unittest.TestCase):
         )
         self.assertEqual(
             self.request(
+                "/internal/tt-posts/direct-tests/claim",
+                "POST",
+                {"worker_id": "worker-1", "lease_seconds": 300, "limit": 1},
+            )["items"],
+            [],
+        )
+        self.assertEqual(
+            self.request(
                 "/internal/tt-posts/schedules/due",
                 "POST",
                 {},
@@ -4131,6 +4987,12 @@ class HTTPContractTests(unittest.TestCase):
         )
         self.assertEqual(
             self.request("/internal/tt-posts/reconciling?limit=10")["items"],
+            [],
+        )
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/direct-tests/reconciling?limit=10"
+            )["items"],
             [],
         )
         self.assertEqual(
@@ -4148,6 +5010,22 @@ class HTTPContractTests(unittest.TestCase):
                 {},
             )["item"]["marker"],
             "reconcile",
+        )
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/direct-tests/8/publish",
+                "POST",
+                {"claim_token": "claim"},
+            )["item"]["marker"],
+            "direct-publish",
+        )
+        self.assertEqual(
+            self.request(
+                "/internal/tt-posts/direct-tests/8/reconcile",
+                "POST",
+                {},
+            )["item"]["marker"],
+            "direct-reconcile",
         )
         self.assertEqual(
             self.request(

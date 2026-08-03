@@ -313,7 +313,12 @@ class PrepareSidecarClient:
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         if (
-            not path.startswith("/internal/tt-posts/preparations/")
+            not (
+                path.startswith("/internal/tt-posts/preparations/")
+                or path.startswith(
+                    "/internal/tt-posts/direct-tests/preparations/"
+                )
+            )
             or "://" in path
             or "?" in path
             or "#" in path
@@ -454,6 +459,61 @@ class PrepareSidecarClient:
             )
         return result
 
+    def claim_direct(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> Optional[Dict[str, Any]]:
+        result = self._request(
+            "/internal/tt-posts/direct-tests/preparations/claim",
+            {
+                "worker_id": str(worker_id),
+                "lease_seconds": int(lease_seconds),
+            },
+        )
+        item = result.get("item")
+        if item is None:
+            return None
+        if not isinstance(item, Mapping):
+            raise PrepareRunnerError(
+                "tt_post_prepare_sidecar_invalid_response",
+                "direct-test preparation claim item is invalid",
+                502,
+            )
+        normalized = dict(item)
+        normalized["id"] = _positive_id(
+            normalized.get("id") or normalized.get("direct_test_id"),
+            "direct test id",
+        )
+        return {
+            "item": normalized,
+            "claim_token": _claim_token(result.get("claim_token")),
+        }
+
+    def renew_direct(
+        self,
+        direct_test_id: int,
+        claim_token: str,
+        *,
+        lease_seconds: int,
+    ) -> Dict[str, Any]:
+        result = self._request(
+            "/internal/tt-posts/direct-tests/preparations/%s/renew"
+            % _positive_id(direct_test_id, "direct test id"),
+            {
+                "claim_token": _claim_token(claim_token),
+                "lease_seconds": int(lease_seconds),
+            },
+        )
+        if not isinstance(result.get("item"), Mapping):
+            raise PrepareRunnerError(
+                "tt_post_prepare_sidecar_invalid_response",
+                "direct-test preparation renew response is invalid",
+                502,
+            )
+        return result
+
     def process(
         self,
         preparation_id: int,
@@ -480,6 +540,37 @@ class PrepareSidecarClient:
             raise PrepareRunnerError(
                 "tt_post_prepare_sidecar_invalid_response",
                 "preparation process response identity does not match",
+                502,
+            )
+        return result
+
+    def process_direct(
+        self,
+        direct_test_id: int,
+        claim_token: str,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_id(direct_test_id, "direct test id")
+        result = self._request(
+            "/internal/tt-posts/direct-tests/preparations/%s/process"
+            % normalized_id,
+            {"claim_token": _claim_token(claim_token)},
+            timeout=self.process_timeout,
+        )
+        item = result.get("item")
+        if not isinstance(item, Mapping):
+            raise PrepareRunnerError(
+                "tt_post_prepare_sidecar_invalid_response",
+                "direct-test preparation process response is invalid",
+                502,
+            )
+        returned_id = _positive_id(
+            item.get("id") or item.get("direct_test_id"),
+            "direct test id",
+        )
+        if returned_id != normalized_id:
+            raise PrepareRunnerError(
+                "tt_post_prepare_sidecar_invalid_response",
+                "direct-test preparation response identity does not match",
                 502,
             )
         return result
@@ -577,10 +668,23 @@ def execute_prepare_tick(
         timeout=config.internal_timeout,
         process_timeout=config.process_timeout,
     )
-    claim = sidecar.claim(
-        worker_id=config.worker_id,
-        lease_seconds=config.lease_seconds,
+    direct = False
+    claim_direct = getattr(sidecar, "claim_direct", None)
+    claim = (
+        claim_direct(
+            worker_id=config.worker_id,
+            lease_seconds=config.lease_seconds,
+        )
+        if callable(claim_direct)
+        else None
     )
+    if claim is not None:
+        direct = True
+    else:
+        claim = sidecar.claim(
+            worker_id=config.worker_id,
+            lease_seconds=config.lease_seconds,
+        )
     if claim is None:
         return {
             "status": "idle",
@@ -591,8 +695,18 @@ def execute_prepare_tick(
     item = claim["item"]
     preparation_id = _positive_id(item.get("id"), "preparation id")
     claim_token = _claim_token(claim.get("claim_token"))
+    renew_fn = (
+        getattr(sidecar, "renew_direct")
+        if direct
+        else sidecar.renew
+    )
+    process_fn = (
+        getattr(sidecar, "process_direct")
+        if direct
+        else sidecar.process
+    )
     heartbeat = heartbeat_factory(
-        lambda: sidecar.renew(
+        lambda: renew_fn(
             preparation_id,
             claim_token,
             lease_seconds=config.lease_seconds,
@@ -601,7 +715,7 @@ def execute_prepare_tick(
     )
     try:
         with heartbeat:
-            result = sidecar.process(preparation_id, claim_token)
+            result = process_fn(preparation_id, claim_token)
     finally:
         heartbeat.close()
     processed = dict(result["item"])
@@ -610,6 +724,7 @@ def execute_prepare_tick(
         "status": "processed",
         "claimed_count": 1,
         "processed_count": 1,
+        "task_type": "direct_test" if direct else "material_pool",
         "item": _safe_item(processed),
         **heartbeat_state,
     }

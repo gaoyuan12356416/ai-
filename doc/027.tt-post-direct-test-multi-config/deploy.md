@@ -1,0 +1,78 @@
+# 部署计划（GitHub-first，仅计划，未执行）
+
+## 发布前提
+
+- 87/87 用例与 9 个真实测试脚本全部通过，P0/P1 开放缺陷为 0。
+- 变更已提交并推送 GitHub；记录精确 commit，生产只能拉取/checkout 该 commit，不直接复制本地源码。
+- 明确 CPU 主机、部署路径、sidecar/app/Nginx 静态页路径、service/timer 名称、SQLite 绝对路径和 GPU 服务现状。
+- `.env`、Token、COS Secret、数据库副本和生产凭据不得进入 Git/GitHub。
+- 生产验收只读，不创建真实 TikTok Post，不保存 auto-config，不调用内部 publish。
+
+## 本地门禁
+
+```powershell
+git status --short
+git branch --show-current
+git remote -v
+python -m py_compile features/tt_posts/core.py features/tt_posts/service.py scripts/tt_post_prepare_runner.py scripts/tt_post_runner.py app.py
+python scripts/test_tt_account_settings_ui.py
+python scripts/test_tt_gpu_worker.py
+python scripts/test_tt_post_direct_config_core.py
+python scripts/test_tt_post_links.py
+python scripts/test_tt_post_pool_ui.py
+python scripts/test_tt_post_prepare_runner.py
+python scripts/test_tt_posts_app_contract.py
+python scripts/test_tt_posts_core.py
+python scripts/test_tt_posts_service.py
+git diff --check
+```
+
+不得引用仓库中不存在的测试文件。提交前确认 `migration.sql` 只是评审镜像，不作为生产手工 SQL 执行。
+
+## DB 副本迁移门禁
+
+1. 用 SQLite online backup 创建隔离 DB-COPY，确认任何 runner/service 都不连接该副本。
+2. 以候选 commit 启动初始化两次。
+3. 验证 `PRAGMA integrity_check=ok`，旧 schedule/pool/queue/run 行与索引 0 diff。
+4. 新 schema 只包含：
+   - `tt_post_auto_publish_config`；
+   - `tt_post_direct_test`；
+   - direct-test prepare/publish/material 三个普通索引和 publish-id/short-link 两个唯一索引。
+5. 明确不存在 `tt_post_direct_test_event`、`tt_post_auto_due` 和 direct-test account index。
+
+## GitHub 发布
+
+1. 只暂存 027 对应代码/文档，排除无关 dirty files 和任何 Secret。
+2. 提交并记录 commit SHA，推送目标分支。
+3. 验证远端：`git ls-remote <remote> <branch>` 指向该 SHA。
+4. 未验证 push 时不得称为“已同步 GitHub”。
+
+## 服务器部署顺序
+
+1. 只读记录服务器 repo 状态：路径、branch、remote、`git status --short`、当前 commit。
+2. 记录 service/timer/Nginx 状态和最近业务日志；保存当前 release commit 作为回滚点。
+3. 对非 Git 管理的 unit/Nginx/静态副本做带时间戳备份；SQLite 仅做 online backup 留作灾难恢复，不作为普通回滚覆盖源。
+4. `git fetch --all --prune`，checkout 精确候选 commit 或 `git pull --ff-only` 到已验证分支。
+5. 重启前运行 Python 编译、必要的无网络测试、Nginx 配置测试和三份静态页 SHA 比对。
+6. 只重启/重载受影响的窄服务；不使用宽泛 `pkill`，不改 GPU release/profile/env/ledger。
+7. 验证 service/timer active、health 正常、日志无 schema/route 错误。
+
+## 只读生产验收
+
+1. 打开页面并只执行 GET：accounts、auto-config、material-pool、direct-tests。
+2. 确认账号列表显示 `auto_publish_selected` 与 `active|paused|attention_required|not_selected`；配置响应顶层为 `item`。
+3. 确认素材只显示 `published|unknown|unpublished`，无 `processing`。
+4. 检查浏览器 Network：无 `POST /auto-config`、`POST /material-pool`、`POST /test-publish`、`POST /run-now` 或 `/internal/*`。
+5. 前后只读比较 config/schedule/pool/queue/run/direct-test 行与状态、GPU ledger 文件数/hash、已知 TikTok Post ID，要求完全一致。
+
+## 发布后报告必须包含
+
+- GitHub commit SHA、branch 和远端验证；
+- CPU host、部署路径、DB 绝对路径；
+- 部署前 commit/备份/回滚点；
+- 本地与服务器验证命令/结果；
+- service/timer/Nginx restart/reload 结果；
+- 生产只读 0 副作用证据；
+- 精确回滚步骤。
+
+当前文档未授权或执行任何提交、推送、部署、重启或生产写操作。

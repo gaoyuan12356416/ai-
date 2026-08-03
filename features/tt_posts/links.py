@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,9 @@ from typing import Any, Mapping
 TT_W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2250/view"
 TT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
 TT_SHORT_LINK_NAMESPACE = 8_000_000_000_000_000_000
-TT_SHORT_LINK_MAX_LOCAL_ID = 999_999_999_999_999_999
+TT_SHORT_LINK_MAX_LOCAL_ID = 499_999_999_999_999_999
+TT_DIRECT_TEST_SHORT_LINK_NAMESPACE = 8_500_000_000_000_000_000
+TT_DIRECT_TEST_SHORT_LINK_SLOTS = 499_999_999_999_999_999
 TT_SHORT_LINK_ID_RE = re.compile(r"8[0-9]{18}")
 TT_SHORT_LINK_FILENAME_RE = re.compile(r"8[0-9]{18}[.]html")
 TT_W2A_QUERY_FIELDS = (
@@ -89,6 +92,22 @@ def short_link_id(pool_item_id: Any) -> int:
         TT_SHORT_LINK_MAX_LOCAL_ID,
     )
     return TT_SHORT_LINK_NAMESPACE + local_id
+
+
+def direct_test_short_link_id(identity: Any) -> int:
+    """Map one explicit test attempt into a separate TT link namespace."""
+
+    normalized = _clean_text(
+        identity,
+        "TikTok test publish identity",
+        512,
+    )
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    local_id = (
+        int.from_bytes(digest[:16], "big")
+        % TT_DIRECT_TEST_SHORT_LINK_SLOTS
+    ) + 1
+    return TT_DIRECT_TEST_SHORT_LINK_NAMESPACE + local_id
 
 
 def build_short_url(link_id: Any) -> str:
