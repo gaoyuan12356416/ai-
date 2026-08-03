@@ -1,4 +1,16 @@
-# 部署计划（GitHub-first，仅计划，未执行）
+# 部署记录（GitHub-first，已执行）
+
+## 2026-08-03 生产结果
+
+- GitHub 分支：`codex/tt-post-direct-multi-config-20260803`；生产代码 commit：`9fd0f99843d45269a5f2e4f0c7028c56321e427c`，远端引用已核对一致。
+- CPU 主机：`43.166.187.96`；当前 release：`/opt/tt-post/releases/9fd0f99843d45269a5f2e4f0c7028c56321e427c`。
+- 回滚 release：`/opt/tt-post/releases/282eb914172531bd55500b65539d5715a282e5bc`。
+- SQLite：`/mnt/data-disk/tt-post-publisher/tt-post.sqlite3`；online backup：`/mnt/data-disk/tt-post-publisher/backups/20260803T085637Z-282eb91-to-9fd0f99-direct-multi`。
+- 隔离 DB-COPY 连续初始化两次通过；`PRAGMA integrity_check=ok`；仅新增 `tt_post_auto_publish_config`、`tt_post_direct_test` 和约定的 6 个索引。
+- 三份生产静态页 SHA-256 均为 `b0e9ac232a1a4548a201858b7e490a74474d5e449d671df481974abbf2e95de9`；公网页面返回 200 且 hash 一致。
+- `tt-post-service.service`、`drama-material-api.service`、runner/prepare timer/path 恢复正常；17:00 自然 tick 为 0 个自动任务、0 个立即测试任务。
+- 只读验收前后 schedule/pool/queue/run/intake 统计一致；新配置表和 direct-test 表均为 0 行，没有保存配置、消费素材或创建 TikTok Post。
+- GPU release/profile/env/ledger 未修改，GPU 服务未重启。
 
 ## 发布前提
 
@@ -75,4 +87,4 @@ git diff --check
 - 生产只读 0 副作用证据；
 - 精确回滚步骤。
 
-当前文档未授权或执行任何提交、推送、部署、重启或生产写操作。
+本次部署仅执行版本化代码/静态页切换、additive schema 初始化和必要的窄服务重启；验收阶段未调用任何业务写接口。

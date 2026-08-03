@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-**本地发布门禁已通过，可以进入版本化部署；生产只读验收尚待部署后回填。**
+**本地与服务器门禁均已通过，生产版本已部署；验收未创建真实 TikTok Post、未保存自动配置、未消费素材池。**
 
 截至 2026-08-03，027 实现、文档和独立审查已收口。9 个 Python 测试脚本共 `334/334` 通过，Node bridge `53/53` 断言通过，目标 Python 文件编译通过，`git diff --check` 通过；独立审查无 P0/P1。测试未连接真实发布接口、未创建 TikTok Post、未消费生产素材池。
 
@@ -44,12 +44,14 @@
 
 `test_tt_drama_bridge.js` 为 `53/53`；内联页面 JavaScript 语法、6 个目标 Python 文件编译和 `git diff --check` 均通过。
 
-## 部署后待补证据
+## 生产验收证据
 
-1. 精确 Git commit、远端分支和不可变 CPU release。
-2. 生产 SQLite online backup 路径、DB-COPY 连续初始化两次与 `integrity_check=ok`。
-3. sidecar、主 API、runner/prepare timer/path、三份页面 hash 和健康检查。
-4. 生产浏览器 Network 与只读 SQL：无配置保存、无测试发布，前后 config/schedule/pool/queue/run/direct-test 基线一致。
+1. 生产代码 commit 为 `9fd0f99843d45269a5f2e4f0c7028c56321e427c`，不可变 release 为 `/opt/tt-post/releases/9fd0f99843d45269a5f2e4f0c7028c56321e427c`；远端分支引用一致。
+2. SQLite online backup 位于 `/mnt/data-disk/tt-post-publisher/backups/20260803T085637Z-282eb91-to-9fd0f99-direct-multi`；DB-COPY 连续初始化两次通过，`integrity_check=ok`，旧表统计无变化。
+3. sidecar、主 API、runner/prepare timer/path 正常；三份静态页与公网响应 SHA-256 均为 `b0e9ac232a1a4548a201858b7e490a74474d5e449d671df481974abbf2e95de9`。
+4. 内部只读 GET 返回 auto-config version 0、enabled=false、账号 640 为 paused；direct-test 为 0 条；素材统计为 published=3、unpublished=2。
+5. 验收前后 schedule/pool/queue/run/intake 状态与数量一致；没有 POST 配置、立即测试或素材池接口，没有真实发布。
+6. 浏览器已刷新公网静态页并确认新文案加载；Chrome 与应用内浏览器均无登录态，因此未代为登录，也未触碰保存/发布控件。已登录态下的 UI 行为由 30/30 页面断言和服务端只读 GET 共同覆盖。
 
 ## 已关闭的阻断风险
 
@@ -61,6 +63,6 @@
 
 非阻塞 P2：素材池聚合当前每类最多读取 1000 条；长期超过上限后应改为数据库分页/分块聚合，不影响本次上线。
 
-## 发布建议
+## 发布结论
 
-**建议进入 GitHub-first 版本化部署。** 生产验收仍必须只读，不保存配置、不触发立即发布；DB-COPY migration、备份和 0 副作用证据不通过则立即回滚代码/页面。
+**可以交付使用。** 立即测试仍属于真实外部发布动作，首次由用户在页面确认账号、素材和同意项后手动触发；本次验收不代发。
