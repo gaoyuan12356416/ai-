@@ -1,12 +1,16 @@
 # 部署记录（GitHub-first）
 
-## BUG-005 增量状态（本地通过、待生产部署）
+## BUG-005 增量状态（已部署并通过生产只读验收）
 
 - 目标：发布任务主表通过只读 `/tasks` 统一显示自动/排期 queue 与立即测试 direct-test；旧 `/queue` 保持原合同。
-- 代码、API/UI 契约、T01-T12 和全量本地回归已完成；9 个 Python 脚本 `341/341`、Node bridge `53/53`，独立审查无 P0/P1。候选 commit/release 和生产只读证据待提交部署后补充。
-- 增量不得修改 schema、runner、GPU release/profile/env/ledger、自动配置或发布状态机；direct 合成行不提供 queue 事件、取消或核对操作。
-- 本地 `/queue` 快照兼容和查询 0 DB/GPU 写入已通过；生产只读 0 副作用证据未齐前不得关闭 BUG-005。
-- 上线前必须另行记录候选 GitHub commit、CPU release、静态页 SHA、回滚 release 和生产 GET `/tasks` 证据；不得复用下方基线 SHA 作为 BUG-005 增量证据。
+- GitHub 代码 commit：`f91a3e1ae82c9843b37145d60c3fe5c188a8fea3`；分支 `codex/tt-post-direct-multi-config-20260803` 的远端引用已核对一致。
+- CPU release：`/opt/tt-post/releases/f91a3e1ae82c9843b37145d60c3fe5c188a8fea3`；回滚 release：`/opt/tt-post/releases/9fd0f99843d45269a5f2e4f0c7028c56321e427c`。
+- SQLite：`/mnt/data-disk/tt-post-publisher/tt-post.sqlite3`；最终 online backup：`/mnt/data-disk/tt-post-publisher/backups/20260803T104443Z-9fd0f99-to-f91a3e1-bug005-final`。
+- 三份静态页及公网响应 SHA-256 均为 `57f26de36daec7ac079b5965c3277479485601f069c79870aa000bfb69d209c8`。
+- 生产纯 GET `/tasks` 返回 total=5、published=4、scheduled/processing/needs_review=0；`direct_test:1` 为素材 `5837129`、账号 `640`、状态 `published`、标签“立即测试”；旧 `/queue` 仍为 4 条。
+- 验收前后 10 张 TT 表的逻辑指纹均为 `7aadf756ac4b733fa3109bab130d74863ac9d4b8d5e86fe74a48dd6773d8feb2`，`integrity_check=ok`；已有 publish ID `v_pub_url~v2-1.7669738344867448839` 未变。
+- sidecar、主 API、runner/prepare timer/path 均正常；登录态 Chrome 已刷新并看到“共 5 条 / 已发布 4 条”和“立即测试 1”行。验收未调用任何 POST、未保存配置、未创建 TikTok Post、未消费素材池，GPU 未改动或重启。
+- 第一次切换因远程验收脚本直接比较中文标签的传输编码而触发自动回滚；旧 release、三份静态页、服务及数据库均核对恢复。修正为 Unicode escape 断言后重新部署并通过，首次备份保留在 `20260803T104225Z-9fd0f99-to-f91a3e1-bug005`。
 
 ## 2026-08-03 027 基线生产结果（历史）
 
@@ -100,4 +104,4 @@ git diff --check
 
 BUG-005 普通回滚只切回上一 CPU release 和三份静态页；不恢复 SQLite backup，不删除 direct-test/queue 历史，不改 GPU ledger/COS/短链。回滚后旧 `/queue` 和原 direct-test 最近任务区应继续可读。
 
-2026-08-03 基线部署仅执行版本化代码/静态页切换、additive schema 初始化和必要的窄服务重启；验收阶段未调用任何业务写接口。BUG-005 增量尚未部署。
+2026-08-03 BUG-005 增量仅执行版本化 CPU 代码/静态页切换和必要的窄服务重启；未执行 schema 变更，验收阶段未调用任何业务写接口。

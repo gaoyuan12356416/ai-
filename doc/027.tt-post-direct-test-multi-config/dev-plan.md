@@ -4,7 +4,7 @@
 
 本需求修改 TT CPU 控制面、SQLite 状态、runner 和 TT 素材池页面。GPU 继续使用现有 prepare/publish 与 job-keyed ledger；每个 direct-test 生成新 `tttest-*` job ID。实现只新增 `tt_post_auto_publish_config`、`tt_post_direct_test` 两张表，不新增 direct-test event 或 auto-due 表；既有 `tt_post_event` 不变。
 
-027 基线已于 2026-08-03 部署。BUG-005 是后续只读展示增量：新增统一任务查询和主表展示，不改 schema、runner、GPU、发布状态机或旧 `/queue`；当前代码、专项自动化、全量回归和独立审查已完成，待生产部署与只读验收。
+027 基线与 BUG-005 只读展示增量均已于 2026-08-03 部署。增量新增统一任务查询和主表展示，不改 schema、runner、GPU、发布状态机或旧 `/queue`；代码、专项自动化、全量回归、服务器候选测试和生产只读验收均已完成。
 
 ## 工作项与当前状态
 
@@ -74,4 +74,4 @@ BUG-005 不新增测试脚本，测试写入现有 `test_tt_posts_service.py`、
 - fake GPU/TT 证明没有真实 Post；生产只读验收不发送写请求。
 - SA 代码评审确认 API 名称、字段、两张表、同分钟顺序、统一任务分页与操作隔离均与实现一致。
 - GitHub commit、release SHA、DB 路径/备份、服务/timer 状态和回滚点齐全后才允许部署。
-- BUG-005 在 T01-T12、旧 `/queue` 快照回归和生产只读 0 副作用证据齐全前保持“待验证/待上线”。
+- BUG-005 的 T01-T12、旧 `/queue` 快照回归和生产只读 0 副作用证据已齐全，状态为已上线、已关闭。

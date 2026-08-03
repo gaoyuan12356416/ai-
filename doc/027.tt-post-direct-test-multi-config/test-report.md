@@ -2,9 +2,9 @@
 
 ## 当前结论
 
-**027 基线已部署；BUG-005 增量已实现并通过本地门禁，待生产只读验收和上线。**
+**027 基线与 BUG-005 增量均已部署；本地、服务器候选和生产只读验收全部通过。**
 
-截至 2026-08-03，BUG-005 增量后的 9 个 Python 测试脚本共 `341/341` 通过，Node bridge `53/53` 断言通过，目标 Python 文件编译和 `git diff --check` 通过。专项覆盖同 ID 隔离、完整状态桶、并列时间稳定分页、已发布 direct-test、旧 `/queue` 快照、查询 0 DB/GPU 写入、UI direct 只读操作和代理白名单。独立审查无 P0/P1；一个慢响应覆盖新筛选的 P2 已修复并复验。
+截至 2026-08-03，BUG-005 增量后的 9 个 Python 测试脚本在本地和服务器候选版本均为 `341/341`，Node bridge 均为 `53/53`；目标 Python 文件编译和 `git diff --check` 通过。专项覆盖同 ID 隔离、完整状态桶、并列时间稳定分页、已发布 direct-test、旧 `/queue` 快照、查询 0 DB/GPU 写入、UI direct 只读操作和代理白名单。一个慢响应覆盖新筛选的竞态已修复并复验。
 
 ## 计划范围
 
@@ -57,13 +57,15 @@ BUG-005 新增 service 2 项、UI 3 项、app contract 1 项，分别覆盖 T01-
 5. 验收前后 schedule/pool/queue/run/intake 状态与数量一致；没有 POST 配置、立即测试或素材池接口，没有真实发布。
 6. 浏览器已刷新公网静态页并确认新文案加载；Chrome 与应用内浏览器均无登录态，因此未代为登录，也未触碰保存/发布控件。已登录态下的 UI 行为由 30/30 页面断言和服务端只读 GET 共同覆盖。
 
-## BUG-005 本地证据与生产待补项
+## BUG-005 本地与生产证据
 
 - 已修复：主发布任务表、total/summary、筛选和分页统一包含 `tt_post_queue` 与 `tt_post_direct_test`；详情见 `bugs/BUG-005.md`。
 - 已实现合同：新增纯 GET `/tasks`，服务端在单一读快照中合并后筛选、稳定排序、分页前统计再分页；旧 `/queue` 完全保持。
 - 操作边界：direct 行只读，不显示或调用 queue events/cancel/reconcile；相同数字 ID 由 `task_key/task_type` 隔离。
 - 已完成：T01-T12、9 个 Python 脚本全量回归、Node bridge、临时 DB `/queue` 前后快照和查询前后 DB hash 0 diff。
-- 待补：生产 GET `/tasks` 命中 2026-08-03 已有 direct-test ID 1，并证明部署前后 queue/direct-test/pool/run/config/Post 标识 0 diff。
+- 生产已完成：GET `/tasks` 命中 2026-08-03 的 `direct_test:1`，total=5、published=4；旧 `/queue` total=4。
+- 生产 0 副作用：10 张 TT 表的部署前后逻辑指纹相同，`integrity_check=ok`，已有 publish ID 未变；未调用任何写接口。
+- 登录态 Chrome 已刷新，主表显示“共 5 条 / 已发布 4 条”，并显示“立即测试 1 / 素材 5837129 / 已发布 / 查看详情”。
 - 禁令：不得通过创建真实 direct-test、修改自动配置或触发发布来验证列表；生产只使用已有事实执行 GET。
 
 ## 已关闭的阻断风险
@@ -78,4 +80,4 @@ BUG-005 新增 service 2 项、UI 3 项、app contract 1 项，分别覆盖 T01-
 
 ## 发布结论
 
-**BUG-005 已批准进入生产只读验收和部署。** 生产只使用已有任务执行 GET，不创建测试 Post、不保存配置、不消费素材池；只读 0 副作用证据通过后关闭缺陷。
+**BUG-005 已通过生产只读验收并关闭。** 验收只读取已有任务，没有创建测试 Post、保存配置或消费素材池。

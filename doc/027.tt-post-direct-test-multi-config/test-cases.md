@@ -73,18 +73,18 @@
 
 | 编号 | 场景 | 前置条件 | 步骤 | 预期结果 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| T01 | 默认混合列表 | 1 条 queue、1 条 direct-test，且数字 ID 相同 | GET `/tasks` 不传 type | 返回 2 条且各出现一次；`task_type/task_key/task_id` 与源 ID 正确 | P0 | 本地通过，待生产只读 |
-| T02 | 立即测试类型标记 | T01 | 打开主表 | queue 显示“自动/排期发布”，direct 显示“立即测试”；direct 时间列使用创建时间，不伪造排期 | P1 | 本地通过，待生产只读 |
-| T03 | 混合统计口径 | 依次构造 scheduled/claimed/ready/unknown/published/failed 代表状态 | GET `/tasks?page_size=1` | summary 基于分页前全集；scheduled/processing/needs_review/published 精确命中约定状态，total 含 failed；按任务不按素材去重 | P0 | 本地通过，待生产只读 |
-| T04 | 类型筛选与旧 queue 快照 | 同一临时 DB 保存改前 `/queue` 响应 | 分别查询 all/automatic/direct_test，并再次调用 `/queue` | 三种 type 结果准确；旧 `/queue` items/summary/pagination/排序逐字段不变 | P0 | 本地通过，待生产只读 |
-| T05 | 账号与素材组合筛选 | 两表各有命中/不命中账号和素材 | 组合传 account/material/type | 只返回两表中的精确交集；total/summary 与 items 数据集一致 | P1 | 本地通过，待生产只读 |
-| T06 | 状态与别名筛选 | 两表依次切换 processing/published/failed/unknown | 查询原始状态、`processing_download` 和 `needs_review` | direct/queue 均按统一口径命中；unknown/unknown_outcome 归 needs_review；无跨状态误匹配 | P0 | 本地通过，待生产只读 |
-| T07 | 稳定排序和分页 | 跨表任务含相同 `task_at_utc`，page_size=1 | 顺序读取全部页并重复一次 | 相同数据两次顺序一致；跨页无重复/遗漏；页外返回空 items 与准确 total | P0 | 本地通过，待生产只读 |
-| T08 | 同数字 ID 隔离 | SAME-ID | 查看两行及其 dataset/DTO | task key 分别为 `automatic:1`、`direct_test:1`；源 ID 不互填，详情不串 | P0 | 本地通过，待生产只读 |
-| T09 | 事件按钮兼容 | SAME-ID，queue 有事件 | 检查事件路由与两类行分支 | 仅 queue 可发 GET `/events?queue_id=1`；direct 无事件按钮且 0 queue event 请求 | P0 | 本地通过，待生产只读 |
-| T10 | 写操作能力隔离 | queue 有 cancel/reconcile 合同，direct 有独立状态 | 检查渲染分支与 HTTP 合同 | queue 原 cancel/reconcile 行为不变；direct 不显示也不调用 queue 写路由 | P0 | 本地通过，待生产只读 |
-| T11 | App/HTTP 查询合同与脱敏 | 登录/无权限合同、未知 query、含安全错误的 direct | 调 `/tasks` 与代理单测 | 登录可 GET；未登录/无权限 401/403；未知参数/非法 type/page 400；无 claim token/secret | P0 | 本地通过，待生产只读 |
-| T12 | 纯只读与全回归 | 临时 DB/fake GPU/TT，记录 DB/GPU 调用基线 | 多次加载、筛选、翻页，执行 9 个 Python 脚本和 Node bridge | DB 文件 hash 0 diff；GPU publish/reconcile 调用 0 增量；既有 D/P/C/S/M/N 全通过 | P0 | 本地通过，待生产只读 |
+| T01 | 默认混合列表 | 1 条 queue、1 条 direct-test，且数字 ID 相同 | GET `/tasks` 不传 type | 返回 2 条且各出现一次；`task_type/task_key/task_id` 与源 ID 正确 | P0 | 通过（自动化+生产只读） |
+| T02 | 立即测试类型标记 | T01 | 打开主表 | queue 显示“自动/排期发布”，direct 显示“立即测试”；direct 时间列使用创建时间，不伪造排期 | P1 | 通过（自动化+生产 UI） |
+| T03 | 混合统计口径 | 依次构造 scheduled/claimed/ready/unknown/published/failed 代表状态 | GET `/tasks?page_size=1` | summary 基于分页前全集；scheduled/processing/needs_review/published 精确命中约定状态，total 含 failed；按任务不按素材去重 | P0 | 通过（自动化+生产只读） |
+| T04 | 类型筛选与旧 queue 快照 | 同一临时 DB 保存改前 `/queue` 响应 | 分别查询 all/automatic/direct_test，并再次调用 `/queue` | 三种 type 结果准确；旧 `/queue` items/summary/pagination/排序逐字段不变 | P0 | 通过（自动化+生产只读） |
+| T05 | 账号与素材组合筛选 | 两表各有命中/不命中账号和素材 | 组合传 account/material/type | 只返回两表中的精确交集；total/summary 与 items 数据集一致 | P1 | 通过（自动化） |
+| T06 | 状态与别名筛选 | 两表依次切换 processing/published/failed/unknown | 查询原始状态、`processing_download` 和 `needs_review` | direct/queue 均按统一口径命中；unknown/unknown_outcome 归 needs_review；无跨状态误匹配 | P0 | 通过（自动化） |
+| T07 | 稳定排序和分页 | 跨表任务含相同 `task_at_utc`，page_size=1 | 顺序读取全部页并重复一次 | 相同数据两次顺序一致；跨页无重复/遗漏；页外返回空 items 与准确 total | P0 | 通过（自动化） |
+| T08 | 同数字 ID 隔离 | SAME-ID | 查看两行及其 dataset/DTO | task key 分别为 `automatic:1`、`direct_test:1`；源 ID 不互填，详情不串 | P0 | 通过（自动化） |
+| T09 | 事件按钮兼容 | SAME-ID，queue 有事件 | 检查事件路由与两类行分支 | 仅 queue 可发 GET `/events?queue_id=1`；direct 无事件按钮且 0 queue event 请求 | P0 | 通过（自动化） |
+| T10 | 写操作能力隔离 | queue 有 cancel/reconcile 合同，direct 有独立状态 | 检查渲染分支与 HTTP 合同 | queue 原 cancel/reconcile 行为不变；direct 不显示也不调用 queue 写路由 | P0 | 通过（自动化+生产 UI） |
+| T11 | App/HTTP 查询合同与脱敏 | 登录/无权限合同、未知 query、含安全错误的 direct | 调 `/tasks` 与代理单测 | 登录可 GET；未登录/无权限 401/403；未知参数/非法 type/page 400；无 claim token/secret | P0 | 通过（自动化+生产登录态 GET） |
+| T12 | 纯只读与全回归 | 临时 DB/fake GPU/TT，记录 DB/GPU 调用基线 | 多次加载、筛选、翻页，执行 9 个 Python 脚本和 Node bridge | DB 文件 hash 0 diff；GPU publish/reconcile 调用 0 增量；既有 D/P/C/S/M/N 全通过 | P0 | 通过（自动化+生产 0 diff） |
 
 ## P. 素材发布状态与 auto/direct 互斥
 
@@ -188,7 +188,7 @@
 ## 通过门槛
 
 - 所有 P0/P1 用例通过；开放 P0/P1 缺陷为 0。
-- 计划总数为 99：既有 87 个 D/P/C/S/M/N 用例与新增 T01-T12；BUG-005 未执行前保持待验证、待上线。
+- 计划总数为 99：既有 87 个 D/P/C/S/M/N 用例与新增 T01-T12；BUG-005 已完成并上线。
 - 任一错误用例必须同时断言错误码和“0 非预期副作用”，不能只断言 HTTP 状态。
 - migration 在生产副本上幂等运行两次，并证明无旧排期时间交叉放大。
 - 生产只读验收前后 config/schedule/pool/queue/run/direct-test/GPU ledger/已知 Post 基线一致。
