@@ -36,4 +36,21 @@ GPU worker、GPU release、COS、媒体制作 profile 和环境变量不变。
 
 ## 生产记录
 
-部署提交、release、备份路径、测试数量、文件哈希和验收基线在完成上线后补录。
+- 上线时间：`2026-07-31 18:32:45 CST`。
+- GitHub 功能提交：`2c8c5428474b907155d22f6b4733f9a7240eaf8e`，分支 `codex/tt-post-one-shot-canary-20260731`。
+- CPU release：从 `/opt/tt-post/releases/a8d82571f17fb413016463d77acfc7f12e3d3013` 切换到 `/opt/tt-post/releases/2c8c5428474b907155d22f6b4733f9a7240eaf8e`。
+- 回滚备份：`/mnt/data-disk/tt-post-publisher/backups/20260731T103245Z-a8d8257-to-2c8c542-tt-pool-controls`。
+- 候选 release 共 `281/281` 个 TT 自动化用例通过；Python 编译和 `git diff --check` 通过。
+- `/opt/tt-post/current/static/tt-post-pool.html`、`/root/drama_material_service/static/tt-post-pool.html` 和 `/usr/share/nginx/html/tt-post-pool.html` 的 SHA-256 均为 `99c71e8316b184b02566e6cb0b74fb8d6cb3d219be7f71272db75a50ecf8cc85`。
+- `tt-post-service.service` 仅重启受影响的 CPU sidecar；`app.py` 未变化，主 API 未重启。GPU release、COS、媒体制作 profile 和 GPU 环境均未修改。
+- 上线后 CPU sidecar、runner/prepare timer 与 path、GPU 隧道健康；每分钟自然 runner 均为 `status=ok`，没有由部署验收创建发布请求。
+- 上线时 SQLite `integrity_check=ok`；排期 `1`、素材池 `5`、队列 `3`、schedule run `3`、素材 intake `4`。账号 `640` 保持 `enabled=1`、每天 `11:00`、版本 `1`，发布队列仍为已发布 `2`、失败 `1`。
+- 登录态验收只操作本地草稿：取消勾选后按钮变为“关闭自动发布”，刷新制作状态不会覆盖草稿；整页刷新后服务端排期仍为启用。未点击“关闭自动发布”或“立即发布一条”。
+
+## 2026-08-03 复核
+
+- 生产仍运行精确 release `2c8c5428474b907155d22f6b4733f9a7240eaf8e`，三份页面哈希未变化；相关服务、timer、path 和 SocialKit 每小时同步均健康。
+- 账号 `640` 当前可确认，账号发布设置仍为所有人可见并允许评论、Duet、Stitch；自动发布仍为每天 `11:00`、版本 `1`。
+- 取消勾选后“关闭自动发布”按钮可用，制作状态刷新后草稿保持；整页刷新后恢复服务端已启用状态。复核没有保存开关或触发发布。
+- 当前可立即发布素材为 `0`、制作中为 `0`，所以“立即发布一条”按预期禁用并明确提示素材池没有可立即发布素材。
+- `2026-08-01 11:00` 的自然排期已公开发布素材 `5801636`，使用所有人可见并允许评论、Duet、Stitch；当前任务总数 `4`、已发布 `3`、失败 `1`。该任务不是部署验收触发的手动发布。
