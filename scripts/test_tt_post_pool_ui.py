@@ -362,7 +362,11 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("DIRECT_TEST_POLL_STATUSES", polling_source)
         self.assertIn("validPendingRunNowEntry", polling_source)
         self.assertIn('entry.status !== "unknown"', polling_source)
-        self.assertIn("loadDirectTests({ quiet: true })", polling_source)
+        self.assertIn(
+            "loadDirectTests({ quiet: true, reschedule: false })",
+            polling_source,
+        )
+        self.assertIn(".finally(syncDirectTestPolling)", polling_source)
         self.assertIn("renderDirectTests(state.directTests)", load_source)
         self.assertIn("syncDirectTestPolling()", load_source)
 
@@ -447,6 +451,73 @@ class TtPostPoolUiTest(unittest.TestCase):
             "loadPreparationStatus()",
         ):
             self.assertIn(loader, init_source)
+
+    def test_publish_task_table_uses_the_unified_server_projection(self):
+        query_source = source_between(
+            "function queueQuery()", "function updateStats"
+        )
+        load_source = source_between(
+            "async function loadQueue()", "function setEventsEmpty"
+        )
+        self.assertIn('id="filterTaskType"', PAGE)
+        self.assertIn('value="automatic"', PAGE)
+        self.assertIn('value="direct_test"', PAGE)
+        self.assertIn('task_type: byId("filterTaskType").value || "all"', query_source)
+        self.assertIn('api(`${API_BASE}/tasks?${queueQuery()}`)', load_source)
+        self.assertNotIn('api(`${API_BASE}/queue?${queueQuery()}`)', load_source)
+        self.assertIn("state.publishTasks = items", load_source)
+
+    def test_direct_rows_are_namespaced_and_never_receive_queue_actions(self):
+        rows_source = source_between(
+            "function renderQueueRows(items)", "function queueQuery()"
+        )
+        action_start = rows_source.index('actionList.className = "queue-actions"')
+        action_source = rows_source[action_start:]
+        direct_start = action_source.index("if (directTest)")
+        automatic_start = action_source.index("} else {", direct_start)
+        direct_branch = action_source[direct_start:automatic_start]
+        automatic_branch = action_source[automatic_start:]
+        self.assertIn('item.task_type === "direct_test"', rows_source)
+        self.assertIn("directDetailsButton(item)", direct_branch)
+        self.assertNotIn("queueActionButton", direct_branch)
+        for operation in ('"events"', '"cancel"', '"reconcile"'):
+            self.assertIn(operation, automatic_branch)
+
+        details_source = source_between(
+            "function directDetailsButton(item)", "function renderQueueRows(items)"
+        )
+        self.assertIn("button.dataset.taskKey", details_source)
+        self.assertNotIn("dataset.queueId", details_source)
+
+    def test_direct_task_details_are_read_only_and_poll_with_the_table(self):
+        detail_source = source_between(
+            "function directTaskTimeline(item)", "async function runQueueAction"
+        )
+        click_source = source_between(
+            'byId("queueRows").addEventListener', 'byId("closeEvents")'
+        )
+        polling_source = source_between(
+            "function syncDirectTestPolling()", "async function runNow()"
+        )
+        self.assertIn('task.task_type === "direct_test"', detail_source)
+        self.assertIn("task.task_key === taskKey", detail_source)
+        self.assertIn("item.created_at", detail_source)
+        self.assertIn("item.published_at_utc", detail_source)
+        self.assertIn('action === "direct-details"', click_source)
+        self.assertIn("openDirectTaskDetails(button.dataset.taskKey)", click_source)
+        self.assertIn(
+            "loadDirectTests({ quiet: true, reschedule: false })",
+            polling_source,
+        )
+        self.assertIn("loadQueue()", polling_source)
+        load_source = source_between(
+            "async function loadQueue()", "function setEventsEmpty"
+        )
+        self.assertIn("const requestVersion = ++state.queueRequestVersion", load_source)
+        self.assertGreaterEqual(
+            load_source.count("requestVersion !== state.queueRequestVersion"),
+            2,
+        )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-**待最终自动化回归和 diff 复核。** 当前文档按工作树实现合同记录，不等于已批准部署。
+027 基线已有历史部署与回归证据。BUG-005 已完成 diff 复核、T01-T12 自动化覆盖和全量回归；独立审查未发现 P0/P1。审查发现的慢 `/tasks` 响应覆盖新筛选的 P2 已增加 request generation 保护，并把下一轮轮询延后到 direct/tasks 两个 GET 均完成后，UI 33/33 复验通过。当前批准进入生产只读验收和部署。
 
 ## P0 核对项
 
@@ -20,14 +20,20 @@
 | CR-09 | 恢复与未知 | claimed/unbound 用现有 run/pool 恢复；unknown 不自动重发；内部 reconciliation |
 | CR-10 | 兼容接口 | `/run-now` 保留；页面立即测试不调用它 |
 | CR-11 | 安全 | token/secret/claim token 不进入 API/UI 日志；生产验收无写请求 |
+| CR-12 | 统一任务读模型 | 新 GET `/tasks` 在服务端合并 queue/direct-test 后筛选、稳定排序、分页前统计再分页；无前端双分页拼接 |
+| CR-13 | 类型与 ID | item 有 `task_key/task_type/task_id`，源 ID 互斥；相同数字 ID 不串任务 |
+| CR-14 | 操作隔离 | queue events/cancel/reconcile 保持；direct 三项能力关闭，UI 不生成 queue action；不新增 direct event/管理写路由 |
+| CR-15 | `/queue` 兼容 | 旧 `/queue` 的 items/summary/pagination/排序、错误合同和旧自动任务行为逐字段回归 |
+| CR-16 | 只读安全 | `/tasks`、筛选和翻页不写 DB、不唤醒 runner、不调用 GPU/COS/TikTok、不创建 Post |
 
 ## 文件级核对
 
 - `features/tt_posts/core.py`：schema、version-0 投影、原子保存、direct-test 状态机、发布聚合、现有 claim。
-- `features/tt_posts/service.py`：精确字段集合、非成员测试账号、关闭 consent、material-level 阻断、同分钟两阶段循环。
+- `features/tt_posts/service.py`：精确字段集合、非成员测试账号、关闭 consent、material-level 阻断、同分钟两阶段循环，以及 BUG-005 统一任务只读投影。
 - `scripts/tt_post_prepare_runner.py`、`scripts/tt_post_runner.py`：任务领取、恢复、内部核对，无真实测试旁路。
-- `app.py`：允许路由与 service 一致。
-- `static/tt-post-pool.html` 及部署副本：多选成员、独立测试账号、单素材入池、三态展示、dirty/version 控制。
+- `app.py`：允许路由与 service 一致；`/tasks` 仅 GET、查询参数白名单、权限和脱敏保持。
+- `static/tt-post-pool.html` 及部署副本：多选成员、独立测试账号、单素材入池、三态展示、dirty/version 控制，以及任务类型标记/筛选、direct 只读操作门禁。
+- `scripts/test_tt_posts_service.py`、`scripts/test_tt_post_pool_ui.py`、`scripts/test_tt_posts_app_contract.py`：T01-T12 的服务、UI 和代理合同；如查询下沉到 core，补 `scripts/test_tt_posts_core.py`。
 
 ## 评审输出要求
 
@@ -36,3 +42,5 @@
 - schema 二次初始化与 `PRAGMA integrity_check`；
 - 同分钟首个网络调用前的 DB/调用顺序证据；
 - 生产只读 0 副作用证据与回滚点。
+- `/queue` 增量前后快照、混合列表跨页 task-key 集合、同号 ID 操作隔离证据；
+- BUG-005 targeted 与 9 个脚本全量结果为 `341/341`，Node bridge 为 `53/53`；不得以旧基线 `334/334` 替代。

@@ -41508,6 +41508,7 @@ TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/test-publish": {"POST"},
     "/api/admin/tt-posts/schedule": {"GET", "POST"},
     "/api/admin/tt-posts/run-now": {"POST"},
+    "/api/admin/tt-posts/tasks": {"GET"},
     "/api/admin/tt-posts/queue": {"GET"},
     "/api/admin/tt-posts/events": {"GET"},
 }
@@ -93875,6 +93876,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             "/api/admin/tt-posts/auto-config",
             "/api/admin/tt-posts/direct-tests",
             "/api/admin/tt-posts/schedule",
+            "/api/admin/tt-posts/tasks",
             "/api/admin/tt-posts/queue",
             "/api/admin/tt-posts/events",
         }:
@@ -93916,6 +93918,18 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             "material_id",
                             "source_account_id",
                             "status",
+                        },
+                    )
+                elif parsed.path == "/api/admin/tt-posts/tasks":
+                    query = _tt_post_query_params(
+                        parsed.query,
+                        {
+                            "page",
+                            "page_size",
+                            "material_id",
+                            "source_account_id",
+                            "status",
+                            "task_type",
                         },
                     )
                 else:

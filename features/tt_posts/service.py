@@ -4939,6 +4939,50 @@ class TTPostService:
             item["publish_mode"] = "hold"
         return item
 
+    def _publish_task_api_item(
+        self,
+        task: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        task_type = str(task.get("task_type") or "")
+        source = task.get("item")
+        if not isinstance(source, Mapping):
+            raise TTPostServiceError(
+                "tt_post_storage_conflict",
+                "发布任务读取结果无效",
+                500,
+            )
+        if task_type == "direct_test":
+            item = self._direct_test_api_item(source)
+            item["scheduled_at"] = str(
+                task.get("task_at_utc") or item.get("created_at") or ""
+            )
+            item["scheduled_at_utc"] = item["scheduled_at"]
+            item["timezone"] = "Asia/Shanghai"
+            item["account_name_snapshot"] = (
+                item.get("creator_nickname_snapshot")
+                or item.get("account_display_name")
+                or item.get("account_username")
+            )
+            item["publish_mode"] = "direct_post"
+        elif task_type == "automatic":
+            item = self._queue_api_item(source, gates=self.gates)
+        else:
+            raise TTPostServiceError(
+                "tt_post_storage_conflict",
+                "发布任务类型无效",
+                500,
+            )
+        item["task_type"] = task_type
+        item["task_id"] = int(task.get("task_id") or 0)
+        item["task_key"] = str(task.get("task_key") or "")
+        item["task_at_utc"] = str(task.get("task_at_utc") or "")
+        item["raw_status"] = str(task.get("raw_status") or "")
+        item["status_group"] = str(task.get("status_group") or "")
+        item["task_label"] = (
+            "立即测试" if task_type == "direct_test" else "自动/排期发布"
+        )
+        return item
+
     def _existing_queue(
         self,
         *,
@@ -5266,6 +5310,50 @@ class TTPostService:
                 ),
                 "published": sum(row["status"] == "published" for row in rows),
             },
+            "gates": self._gates(),
+        }
+
+    def publish_tasks_list(
+        self,
+        query: Mapping[str, Sequence[str]],
+    ) -> Dict[str, Any]:
+        """List automatic and direct-test tasks in one read-only view."""
+
+        def first(name: str, default: str = "") -> str:
+            values = query.get(name, ())
+            return str(values[0] if values else default).strip()
+
+        try:
+            page = int(first("page", "1"))
+            page_size = int(first("page_size", "20"))
+        except ValueError:
+            raise TTPostServiceError(
+                "invalid_request",
+                "分页参数无效",
+                400,
+            ) from None
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise TTPostServiceError("invalid_request", "分页参数无效", 400)
+        result = self.store.list_publish_tasks(
+            material_id=first("material_id") or None,
+            account_id=first("source_account_id") or None,
+            status=first("status") or None,
+            task_type=first("task_type", "all"),
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
+        total = int(result.get("total") or 0)
+        return {
+            "items": [
+                self._publish_task_api_item(task)
+                for task in result.get("items", [])
+            ],
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+            },
+            "summary": dict(result.get("summary") or {}),
             "gates": self._gates(),
         }
 
@@ -6474,6 +6562,10 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             return service.schedule_save(self._body())
         if self.command == "POST" and path == "/api/admin/tt-posts/run-now":
             return service.run_now(self._body())
+        if self.command == "GET" and path == "/api/admin/tt-posts/tasks":
+            return service.publish_tasks_list(
+                urllib.parse.parse_qs(parsed.query)
+            )
         if self.command == "GET" and path == "/api/admin/tt-posts/queue":
             return service.queue_list(urllib.parse.parse_qs(parsed.query))
         if self.command == "POST" and path == "/api/admin/tt-posts/queue":

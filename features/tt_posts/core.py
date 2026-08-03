@@ -7639,6 +7639,213 @@ class TTPostStore:
             ).fetchall()
         return [_public_queue(row) for row in rows]
 
+    def list_publish_tasks(
+        self,
+        *,
+        material_id: Any = None,
+        account_id: Any = None,
+        status: Any = None,
+        task_type: Any = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Return queue and direct-test tasks from one read snapshot."""
+
+        normalized_limit = _positive_int(limit, "发布任务列表数量", 100)
+        normalized_offset = _nonnegative_int(
+            offset,
+            "发布任务列表偏移",
+            2**31 - 1,
+        )
+        normalized_material = (
+            _material_id(material_id) if material_id not in (None, "") else ""
+        )
+        normalized_account = (
+            _account_id(account_id) if account_id not in (None, "") else ""
+        )
+        normalized_type = str(task_type or "all").strip().lower()
+        if normalized_type not in {"all", "automatic", "direct_test"}:
+            raise TTPostError(
+                "invalid_request",
+                "发布任务类型无效",
+                400,
+            )
+        normalized_status = str(status or "").strip().lower()
+        allowed_statuses = {
+            "",
+            "scheduled",
+            "queued",
+            "preparing",
+            "ready",
+            "claimed",
+            "processing_download",
+            "publishing",
+            "reconciling",
+            "published",
+            "failed",
+            "needs_review",
+            "unknown",
+            "missed",
+            "hold",
+            "blocked_compliance",
+            "canceled",
+            "cancelled",
+        }
+        if normalized_status not in allowed_statuses:
+            raise TTPostError(
+                "invalid_request",
+                "发布任务状态无效",
+                400,
+            )
+
+        clauses: List[str] = []
+        params: List[Any] = []
+        if normalized_material:
+            clauses.append("material_id=?")
+            params.append(normalized_material)
+        if normalized_account:
+            clauses.append("account_id=?")
+            params.append(normalized_account)
+        if normalized_type != "all":
+            clauses.append("task_type=?")
+            params.append(normalized_type)
+        if normalized_status == "scheduled":
+            clauses.append("status_group='scheduled'")
+        elif normalized_status == "processing_download":
+            clauses.append("status_group='processing'")
+        elif normalized_status in {"needs_review", "unknown"}:
+            clauses.append("status_group='needs_review'")
+        elif normalized_status in {"hold", "blocked_compliance"}:
+            clauses.append("raw_status='blocked_compliance'")
+        elif normalized_status in {"canceled", "cancelled"}:
+            clauses.append("raw_status='canceled'")
+        elif normalized_status:
+            clauses.append("raw_status=?")
+            params.append(normalized_status)
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        task_cte = """
+            WITH publish_tasks AS (
+                SELECT
+                    'automatic' AS task_type,
+                    id AS task_id,
+                    scheduled_at_utc AS task_at_utc,
+                    material_id,
+                    account_id,
+                    status AS raw_status,
+                    unknown_outcome
+                FROM tt_post_queue
+                UNION ALL
+                SELECT
+                    'direct_test' AS task_type,
+                    id AS task_id,
+                    created_at AS task_at_utc,
+                    material_id,
+                    account_id,
+                    status AS raw_status,
+                    unknown_outcome
+                FROM tt_post_direct_test
+            ), classified AS (
+                SELECT
+                    *,
+                    CASE
+                        WHEN unknown_outcome=1 OR raw_status='unknown'
+                            THEN 'needs_review'
+                        WHEN raw_status='published' THEN 'published'
+                        WHEN task_type='automatic' AND raw_status='scheduled'
+                            THEN 'scheduled'
+                        WHEN (
+                            task_type='automatic'
+                            AND raw_status IN (
+                                'claimed','publishing','reconciling'
+                            )
+                        ) OR (
+                            task_type='direct_test'
+                            AND raw_status IN (
+                                'queued','preparing','ready',
+                                'publishing','reconciling'
+                            )
+                        ) THEN 'processing'
+                        ELSE 'other'
+                    END AS status_group
+                FROM publish_tasks
+            )
+        """
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN")
+            summary_row = conn.execute(
+                task_cte
+                + """
+                    SELECT
+                        COUNT(*) AS total,
+                        COALESCE(SUM(status_group='scheduled'),0) AS scheduled,
+                        COALESCE(SUM(status_group='processing'),0) AS processing,
+                        COALESCE(SUM(status_group='needs_review'),0)
+                            AS needs_review,
+                        COALESCE(SUM(status_group='published'),0) AS published
+                    FROM classified
+                """
+                + where_sql,
+                params,
+            ).fetchone()
+            refs = conn.execute(
+                task_cte
+                + """
+                    SELECT
+                        task_type,task_id,task_at_utc,raw_status,status_group
+                    FROM classified
+                """
+                + where_sql
+                + """
+                    ORDER BY task_at_utc DESC,task_type,task_id DESC
+                    LIMIT ? OFFSET ?
+                """,
+                [*params, normalized_limit, normalized_offset],
+            ).fetchall()
+            items: List[Dict[str, Any]] = []
+            for ref in refs:
+                is_direct = str(ref["task_type"]) == "direct_test"
+                table = (
+                    "tt_post_direct_test" if is_direct else "tt_post_queue"
+                )
+                row = conn.execute(
+                    "SELECT * FROM %s WHERE id=?" % table,
+                    (int(ref["task_id"]),),
+                ).fetchone()
+                if row is None:
+                    raise TTPostError(
+                        "tt_post_storage_conflict",
+                        "发布任务读取期间发生变化，请刷新后重试",
+                        409,
+                    )
+                items.append(
+                    {
+                        "task_type": str(ref["task_type"]),
+                        "task_id": int(ref["task_id"]),
+                        "task_key": "%s:%s"
+                        % (str(ref["task_type"]), int(ref["task_id"])),
+                        "task_at_utc": str(ref["task_at_utc"]),
+                        "raw_status": str(ref["raw_status"]),
+                        "status_group": str(ref["status_group"]),
+                        "item": (
+                            _public_direct_test(row)
+                            if is_direct
+                            else _public_queue(row)
+                        ),
+                    }
+                )
+        summary = dict(summary_row or {})
+        return {
+            "items": items,
+            "total": int(summary.get("total") or 0),
+            "summary": {
+                "total": int(summary.get("total") or 0),
+                "scheduled": int(summary.get("scheduled") or 0),
+                "processing": int(summary.get("processing") or 0),
+                "needs_review": int(summary.get("needs_review") or 0),
+                "published": int(summary.get("published") or 0),
+            },
+        }
+
     def get_queue_by_idempotency_key(self, idempotency_key: Any) -> Dict[str, Any]:
         normalized = _required_text(idempotency_key, "幂等键", 255)
         with contextlib.closing(_connect(self.db_path)) as conn:

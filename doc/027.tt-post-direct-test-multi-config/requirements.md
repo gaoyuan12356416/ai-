@@ -8,6 +8,8 @@
 
 素材池的 `available/reserved/consumed/canceled` 是自动流程的运营状态，不是平台发布结果。尤其 `consumed` 可能对应失败、阻断或结果未知，不能被展示为“已发布”。
 
+027 基线已增加独立 direct-test 轨道，但页面底部“发布任务”主表仍只读取旧 `/queue`，因此立即测试虽然已经真实落账并可在上方最近任务区看到，却不会进入主表统计、筛选和分页。这会让运营误以为测试任务没有创建，也不能在统一审计视图中同时核对自动/排期任务与立即测试任务。
+
 ## 目标
 
 1. 增加独立的异步“立即测试”轨道，允许用任意一个已校验素材 ID 对一个明确账号发起测试，包括此前已发布过的素材。
@@ -17,6 +19,7 @@
 5. 在账号列表同时提供布尔勾选状态和可读状态值，明确哪些账号已加入自动发布。
 6. 支持多个账号使用同一分钟，并保证该分钟全部 due slot 先完成现有 recurring-run 原子预占尝试，再开始任何实时账号网络预检。
 7. 以 additive migration 兼容旧逐账号排期；正常回滚不覆盖 SQLite 或 GPU ledger。
+8. 增加只读统一发布任务视图，在同一主表中展示自动/排期 queue 与立即测试 direct-test；旧 `/queue` 合同和两条发布状态机保持不变。
 
 ## 范围
 
@@ -31,6 +34,7 @@
 - 每条入池素材继续显式冻结一个自动归属账号。
 - 同分钟所有 due slot 复用 `claim_recurring_run` 的逐项原子预占、去重、崩溃恢复与后续逐条执行。
 - 旧 `tt_post_daily_schedule` 的只读投影、首次显式迁移和向旧代码兼容写入。
+- 服务端只读合成 queue/direct-test 的统一任务列表，并在主表提供类型标记、统一统计、筛选和分页。
 - CPU sidecar、AI 后台同源代理、静态页面、runner、SQLite additive schema、测试与部署文档。
 
 ### 不包含
@@ -41,6 +45,8 @@
 - 不改变 GPU publish ledger 的 key、文件格式、去重或覆写规则。
 - 不自动重试 `unknown`，不把未知结果猜成成功或失败。
 - 不通过回滚删除或恢复覆盖 SQLite、ledger、manifest、短链 wrapper 或 COS 对象。
+- 不改变旧 `/queue` 的响应、排序、分页或操作语义；不新增 direct-test event、取消或管理端人工核对接口。
+- 统一任务查询和页面渲染不得触发 prepare、publish、reconcile、自动领取或任何业务写入。
 - 本需求验收不创建真实 TikTok Post，不保存生产配置，不启停生产自动发布。
 
 ## 用户故事 / 业务规则
@@ -109,6 +115,17 @@
 5. 预占成功后进程崩溃，由既有 claimed/unbound run 和 pool reservation 在后续 runner 恢复；每轮必须先预占当前 due slots，再执行旧 recovery，保证 recovery 的 creator-info 也不抢在本轮 preclaim 之前。宽限期不删除已持久化 run。
 6. 无素材的 slot 会在 `claim_recurring_run` 时报错并返回 skipped 信息，不创建空 run 行；该失败不得阻止其余 slots 的预占或执行。各预占事务独立，不承诺整批全成或整批回滚。
 
+### G. 统一发布任务只读视图（BUG-005 增量）
+
+1. 页面底部“发布任务”主表默认同时展示 `tt_post_queue` 的自动/排期任务与 `tt_post_direct_test` 的立即测试任务；上方最近 direct-test 区仍用于非终态 10 秒轮询，二者不能在主表内重复计数。
+2. 新增独立只读管理接口 `GET /api/admin/tt-posts/tasks`。旧 `GET /api/admin/tt-posts/queue` 保持原合同，旧调用方不因统一视图改变结果。
+3. 统一 item 必须返回带来源命名空间的 `task_key`、`task_type=automatic|direct_test`、`task_label`、`task_id`，并分别保留 `queue_id` 或 `direct_test_id`；两个表出现相同数字 ID 时也不能混淆。
+4. `task_type=automatic` 在页面显示“自动/排期发布”，`task_type=direct_test` 显示“立即测试”。automatic 的 `task_at_utc` 使用排期时间，direct-test 使用创建时间。
+5. 账号、素材、状态和任务类型筛选在服务端同时作用于两类任务；服务端先合并、筛选和稳定排序，再统计和分页，禁止在浏览器拼接两个已经分页的响应。
+6. `summary` 是过滤后、分页前的任务计数：`scheduled` 只计 queue scheduled；`processing` 计 queue claimed/publishing/reconciling 与 direct queued/preparing/ready/publishing/reconciling；`needs_review` 计 queue unknown/unknown_outcome 与 direct unknown；`published` 计两类 published。计数按任务行，不按素材去重。
+7. queue 行继续使用既有事件、取消和人工核对操作。direct-test 没有 event 表和管理端写操作，统一 DTO 必须标记为只读，页面不得把 `direct_test_id` 传给 `/events?queue_id=`、queue cancel 或 queue reconcile。
+8. 统一 GET、页面查询、分页和类型切换均不得写 SQLite、唤醒 runner、调用 GPU/COS/TikTok 或创建 Post。
+
 ## 交互与流程
 
 ### 页面结构
@@ -118,6 +135,7 @@
 3. “素材校验结果”每行显示发布状态、自动池状态、Drama ID，并提供“立即测试”操作。
 4. 自动入池区另有“本批素材归属账号”单选；测试弹层另有“测试目标账号”单选，两者不能从多选集合隐式推导。
 5. direct-test 创建成功后展示任务 ID、素材、目标账号、prepare job、当前阶段、更新时间和安全错误；轮询任务状态，不把“已提交”显示成“已发布”。
+6. “发布任务”主表增加任务类型筛选和明显类型标签，默认显示自动/排期与立即测试；direct-test 行只展示详情，不显示 queue 专属操作。
 
 ### direct-test 流程
 
@@ -198,6 +216,7 @@
 - `POST /api/admin/tt-posts/auto-config`
 - `POST /api/admin/tt-posts/test-publish`：创建独立立即测试。
 - `GET /api/admin/tt-posts/direct-tests`：分页/筛选查询测试任务。
+- `GET /api/admin/tt-posts/tasks`：只读合成自动/排期与立即测试，统一筛选、统计和分页；BUG-005 增量接口。
 - `POST /api/admin/tt-posts/materials/preview`：响应合并发布状态字段。
 - `GET /api/admin/tt-posts/material-pool`：响应合并发布状态字段，summary 增加三态计数。
 - `POST /api/admin/tt-posts/material-pool`：一次一个素材，要求单一 `source_account_id` 与 `expected_config_version`。
@@ -219,6 +238,8 @@
 - 保存后旧异步 GET 返回：前端按 request generation/version 丢弃，不覆盖新状态。
 - 同分钟账号超过执行 `limit`：全部 slot 仍先尝试原子预占；成功但未执行的 run 进入既有 recovery backlog。
 - 直接测试已发布素材：允许创建新任务，但仍受同素材活动/未知阻断。
+- 统一任务查询参数无效：400，0 写入；页码越界返回空 items 和准确 total，不重复或遗漏任务。
+- direct-test 与 queue 数字 ID 相同：必须以 `task_key/task_type` 隔离；direct 行不得出现或触发 queue 事件、取消、核对操作。
 
 ## 验收标准
 
@@ -241,6 +262,12 @@
 | AC-15 | 冻结不漂移 | 配置修改不改变既有 pool/queue/direct-test 的模板、账号和事实快照 | P1 |
 | AC-16 | 无真实副作用 | 自动化用临时 DB/fake GPU；生产只读验收前后配置、pool/queue/run/direct-test/ledger/Post 基线相同 | P0 |
 | AC-17 | 回滚保留历史 | 回退代码/静态资源后 SQLite 新表、direct-test、unknown、ledger、manifest、COS 均保留 | P0 |
+| AC-18 | 统一任务可见 | 主表默认同时出现 queue 与 direct-test；立即测试有明显类型标记且不重复 | P1 |
+| AC-19 | 统一统计与筛选 | 账号/素材/状态/类型筛选作用两类；summary 来自过滤后分页前全集，状态桶映射准确 | P1 |
+| AC-20 | 稳定分页 | 合并后再排序和分页；数据不变时跨页无重复/遗漏，total 与筛选一致 | P1 |
+| AC-21 | ID 与事件隔离 | 同数字 queue/direct ID 使用不同 task key；queue 事件按钮不回归，direct 不调用任何 queue 操作 | P0 |
+| AC-22 | 旧 `/queue` 兼容 | `/queue` items/summary/pagination/排序及旧自动任务操作合同与增量前一致 | P0 |
+| AC-23 | 统一视图无副作用 | `/tasks` 和页面查询前后 DB/ledger/Post 基线 0 diff，GPU/TikTok publish 调用为 0 | P0 |
 
 ## 风险与待确认
 
@@ -262,8 +289,12 @@
 - **P1：状态误导。** “已消费”不能复用为“已发布”；UI/API 必须双状态展示。
 - **P1：成员与素材归属混淆。** 多选后需要独立的批次归属单选和测试目标单选。
 - **P1：50 账号实时检测耗时。** 开启前能力检测并发需有上限；失败整批终止，不能部分启用。
+- **P1：任务审计遗漏。** 若主表只读 `/queue`，立即测试会被统计、筛选和分页漏掉；必须使用服务端统一只读投影。
+- **P0：跨表 ID 误操作。** queue/direct-test 各自自增 ID 可相同；若共用 queue action，会查看或修改错误任务。必须以类型和命名空间隔离，并让 direct 行保持只读。
+- **P1：前端双分页拼接。** 分别请求 `/queue` 与 `/direct-tests` 再拼接会造成 total、排序和翻页不可信；合并必须在服务端完成。
 
 ## 变更记录
 
 - 2026-08-03：初版。
 - 2026-08-03：按实现复核修订：立即测试改为 `/test-publish` 且账号独立于自动成员；发布状态改为三态扁平字段；同分钟复用 `claim_recurring_run` 逐项原子预占，不新增 due/event 表；旧 `/run-now` 保持兼容。
+- 2026-08-03：新增 BUG-005 增量需求：发布任务主表统一显示 queue/direct-test；新增只读 `/tasks`，旧 `/queue` 保持；direct 合成行不提供 queue 事件或写操作。代码、专项自动化、全量回归和独立审查已完成，待生产部署与只读验收。

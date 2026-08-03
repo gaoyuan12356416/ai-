@@ -924,6 +924,207 @@ class ServiceLifecycleTests(unittest.TestCase):
             },
         }
 
+    def create_mixed_publish_tasks(self):
+        """Create one legacy queue row and one direct-test row with colliding IDs."""
+
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        config = self.configure_auto(service, ["101"])
+        self.save_public_settings(service, "102")
+
+        automatic_payload = queue_payload(
+            self.clock,
+            key="tt-post:mixed-list:automatic:1",
+        )
+        automatic_payload["material_id"] = "9101"
+        automatic = service.queue_create(automatic_payload)["item"]
+        direct = service.direct_test_create(
+            self.direct_test_payload(
+                config["version"],
+                material_id="9201",
+                key="tt-direct-test:mixed-list:direct:1",
+                account_id="102",
+            )
+        )["item"]
+        return service, automatic, direct
+
+    def test_publish_tasks_unifies_direct_and_automatic_without_writes(self):
+        service, automatic, direct = self.create_mixed_publish_tasks()
+        legacy_before = service.queue_list({})
+        database_path = Path(service.store.db_path)
+        database_before = hashlib.sha256(database_path.read_bytes()).hexdigest()
+        gpu_before = (
+            len(self.gpu.prepare_jobs),
+            len(self.gpu.publish_jobs),
+            len(self.gpu.reconcile_jobs),
+        )
+
+        combined = service.publish_tasks_list({})
+        self.assertEqual(2, combined["pagination"]["total"])
+        self.assertEqual(
+            {
+                "total": 2,
+                "scheduled": 1,
+                "processing": 1,
+                "needs_review": 0,
+                "published": 0,
+            },
+            combined["summary"],
+        )
+        by_type = {item["task_type"]: item for item in combined["items"]}
+        self.assertEqual({"automatic", "direct_test"}, set(by_type))
+        self.assertEqual(automatic["id"], direct["id"])
+        self.assertEqual("automatic:1", by_type["automatic"]["task_key"])
+        self.assertEqual("direct_test:1", by_type["direct_test"]["task_key"])
+        self.assertEqual("自动/排期发布", by_type["automatic"]["task_label"])
+        self.assertEqual("立即测试", by_type["direct_test"]["task_label"])
+        self.assertEqual(automatic["id"], by_type["automatic"]["queue_id"])
+        self.assertEqual(direct["id"], by_type["direct_test"]["direct_test_id"])
+        self.assertEqual("queued", by_type["direct_test"]["status"])
+
+        cases = (
+            ({"task_type": ["automatic"]}, "automatic", "9101"),
+            ({"task_type": ["direct_test"]}, "direct_test", "9201"),
+            ({"material_id": ["9201"]}, "direct_test", "9201"),
+            ({"source_account_id": ["102"]}, "direct_test", "9201"),
+            ({"status": ["scheduled"]}, "automatic", "9101"),
+            ({"status": ["processing_download"]}, "direct_test", "9201"),
+        )
+        for query, expected_type, expected_material in cases:
+            with self.subTest(query=query):
+                result = service.publish_tasks_list(query)
+                self.assertEqual(1, result["pagination"]["total"])
+                self.assertEqual(expected_type, result["items"][0]["task_type"])
+                self.assertEqual(expected_material, result["items"][0]["material_id"])
+                self.assertEqual(1, result["summary"]["total"])
+
+        first_page = service.publish_tasks_list(
+            {"page": ["1"], "page_size": ["1"]}
+        )
+        second_page = service.publish_tasks_list(
+            {"page": ["2"], "page_size": ["1"]}
+        )
+        beyond = service.publish_tasks_list(
+            {"page": ["3"], "page_size": ["1"]}
+        )
+        self.assertNotEqual(
+            first_page["items"][0]["task_key"],
+            second_page["items"][0]["task_key"],
+        )
+        self.assertEqual([], beyond["items"])
+        self.assertEqual(2, beyond["pagination"]["total"])
+
+        for query in ({"task_type": ["queue"]}, {"status": ["invented"]}):
+            with self.subTest(invalid=query), self.assertRaises(TTPostError) as caught:
+                service.publish_tasks_list(query)
+            self.assertEqual("invalid_request", caught.exception.code)
+
+        self.assertEqual(legacy_before, service.queue_list({}))
+        self.assertEqual(database_before, hashlib.sha256(database_path.read_bytes()).hexdigest())
+        self.assertEqual(
+            gpu_before,
+            (
+                len(self.gpu.prepare_jobs),
+                len(self.gpu.publish_jobs),
+                len(self.gpu.reconcile_jobs),
+            ),
+        )
+
+    def test_publish_tasks_includes_a_completed_direct_test(self):
+        service, _automatic, direct = self.create_mixed_publish_tasks()
+        self.prepare_direct_test(service)
+        self.publish_direct_test(service, direct["id"])
+        published = service.direct_reconcile(direct["id"])["item"]
+        self.assertEqual("published", published["status"])
+
+        result = service.publish_tasks_list({"status": ["published"]})
+        self.assertEqual(1, result["pagination"]["total"])
+        self.assertEqual(1, result["summary"]["published"])
+        self.assertEqual("direct_test", result["items"][0]["task_type"])
+        self.assertEqual("published", result["items"][0]["status"])
+        self.assertEqual(direct["id"], result["items"][0]["direct_test_id"])
+
+    def test_publish_tasks_status_buckets_and_tied_pagination_are_stable(self):
+        service, automatic, direct = self.create_mixed_publish_tasks()
+        database_path = Path(service.store.db_path)
+        with contextlib.closing(sqlite3.connect(database_path)) as conn:
+            conn.execute(
+                "UPDATE tt_post_queue SET scheduled_at_utc=? WHERE id=?",
+                (direct["created_at"], automatic["id"]),
+            )
+            conn.commit()
+
+        def paged_keys():
+            return [
+                service.publish_tasks_list(
+                    {"page": [str(page)], "page_size": ["1"]}
+                )["items"][0]["task_key"]
+                for page in (1, 2)
+            ]
+
+        self.assertEqual(
+            ["automatic:1", "direct_test:1"],
+            paged_keys(),
+        )
+        self.assertEqual(paged_keys(), paged_keys())
+
+        cases = (
+            (
+                "claimed",
+                "ready",
+                0,
+                "processing_download",
+                {"processing": 2},
+            ),
+            (
+                "unknown",
+                "unknown",
+                1,
+                "needs_review",
+                {"needs_review": 2},
+            ),
+            (
+                "published",
+                "published",
+                0,
+                "published",
+                {"published": 2},
+            ),
+            (
+                "failed",
+                "failed",
+                0,
+                "failed",
+                {
+                    "scheduled": 0,
+                    "processing": 0,
+                    "needs_review": 0,
+                    "published": 0,
+                },
+            ),
+        )
+        for queue_status, direct_status, unknown, query_status, expected in cases:
+            with contextlib.closing(sqlite3.connect(database_path)) as conn:
+                conn.execute(
+                    "UPDATE tt_post_queue SET status=?,unknown_outcome=? WHERE id=?",
+                    (queue_status, unknown, automatic["id"]),
+                )
+                conn.execute(
+                    "UPDATE tt_post_direct_test "
+                    "SET status=?,unknown_outcome=?,claim_phase='' WHERE id=?",
+                    (direct_status, unknown, direct["id"]),
+                )
+                conn.commit()
+            with self.subTest(status=query_status):
+                result = service.publish_tasks_list({})
+                self.assertEqual(2, result["summary"]["total"])
+                for field, count in expected.items():
+                    self.assertEqual(count, result["summary"][field])
+                filtered = service.publish_tasks_list(
+                    {"status": [query_status]}
+                )
+                self.assertEqual(2, filtered["pagination"]["total"])
+
     def prepare_direct_test(self, service):
         claimed = service.direct_preparation_claim(
             {
@@ -4693,6 +4894,13 @@ class HTTPContractTests(unittest.TestCase):
         def queue_list(self, _query):
             return {"items": [], "marker": "queue-list"}
 
+        def publish_tasks_list(self, query):
+            return {
+                "items": [],
+                "marker": "publish-tasks-list",
+                "task_type": (query.get("task_type") or [""])[0],
+            }
+
         def queue_create(self, payload):
             return {"item": {"marker": "queue-create", **payload}}
 
@@ -4855,6 +5063,11 @@ class HTTPContractTests(unittest.TestCase):
             self.request("/api/admin/tt-posts/direct-tests?page=1")["marker"],
             "direct-tests-list",
         )
+        tasks = self.request(
+            "/api/admin/tt-posts/tasks?page=1&task_type=direct_test"
+        )
+        self.assertEqual("publish-tasks-list", tasks["marker"])
+        self.assertEqual("direct_test", tasks["task_type"])
         self.assertEqual(
             self.request(
                 "/api/admin/tt-posts/test-publish",

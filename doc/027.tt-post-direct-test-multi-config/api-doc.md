@@ -1,4 +1,4 @@
-# API 合同（与当前实现一致）
+# API 合同（027 基线已上线；BUG-005 增量已实现、待部署）
 
 ## 通用约定
 
@@ -19,6 +19,7 @@
 | POST | `/material-pool` | 单素材加入自动池 |
 | POST | `/test-publish` | 创建独立立即测试任务 |
 | GET | `/direct-tests` | 分页/筛选查询立即测试任务 |
+| GET | `/tasks` | 只读统一查询自动/排期与立即测试 |
 | POST | `/run-now` | 旧自动池手工触发兼容接口；UI 不调用 |
 
 管理端没有 `/direct-tests/{id}` 详情接口，也没有人工 reconcile POST。
@@ -267,6 +268,74 @@
 
 任务 API item 会移除 claim token 等敏感字段，并补充 `direct_test_id`、`source_account_id`、`caption_text`、`duration_sec`、`preparation_status`、`publication_status`、`publish_ready` 和 `task_type`。
 
+## 7A. 统一发布任务只读列表（BUG-005）
+
+`GET /api/admin/tt-posts/tasks?page=1&page_size=20&task_type=all&source_account_id=640&material_id=5837129&status=published`
+
+查询参数：
+
+- `page>=1`，`1<=page_size<=100`；
+- `task_type=all|automatic|direct_test`，省略时为 `all`；
+- `source_account_id`、`material_id`、`status` 可选，并同时作用于两类任务；
+- 未声明参数或非法类型返回 400，且查询不得产生业务写入。
+
+服务端必须在同一 SQLite 读快照中先读取并合成 queue/direct-test，再执行筛选、summary、稳定排序和分页。禁止由浏览器分别读取两个已经分页的接口后拼接。统一排序按 `task_at_utc DESC`，再按 `task_type`、`task_id DESC` 稳定打破并列；automatic 的 `task_at_utc` 为排期时间，direct-test 为创建时间。旧 `/queue` 自身排序不变。
+
+响应示例：
+
+```json
+{
+  "items": [
+    {
+      "task_key": "direct_test:17",
+      "task_type": "direct_test",
+      "task_label": "立即测试",
+      "task_id": 17,
+      "direct_test_id": 17,
+      "source_account_id": "640",
+      "material_id": "5837129",
+      "content_id": "ico5tD77Pb",
+      "caption_text": "...",
+      "status": "published",
+      "raw_status": "published",
+      "status_group": "published",
+      "task_at_utc": "2026-08-03T09:43:14Z",
+      "created_at": "2026-08-03T09:43:14Z",
+      "updated_at": "2026-08-03T09:44:25Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 1
+  },
+  "summary": {
+    "total": 1,
+    "scheduled": 0,
+    "processing": 0,
+    "needs_review": 0,
+    "published": 1
+  },
+  "gates": {}
+}
+```
+
+类型与操作合同：
+
+- automatic：`task_key=automatic:<queue_id>`、`task_label=自动/排期发布`，保留既有 queue 字段及 `queue_id`。
+- direct-test：`task_key=direct_test:<direct_test_id>`、`task_label=立即测试`；返回已冻结 caption、账号设置、GPU job、状态、创建/更新时间和安全错误。页面按 `task_type` 将该行限制为只读详情，不生成 queue 操作。
+- `task_id` 仅用于显示与稳定排序。调用事件或写操作时只能使用类型对应的源 ID；direct-test ID 绝不能作为 queue ID。
+
+summary 口径：
+
+- `scheduled`：queue `scheduled`；
+- `processing`：queue `claimed|publishing|reconciling`，以及 direct-test `queued|preparing|ready|publishing|reconciling`；
+- `needs_review`：queue `unknown`/`unknown_outcome`，以及 direct-test `unknown`；
+- `published`：两类任务 `published`；
+- 统计按任务行计算，不按 material ID 去重，并基于过滤后、分页前全集。
+
+该接口是纯只读管理投影：不得修改 queue/direct-test/pool/run/config，唤醒 runner，调用 GPU/COS/TikTok，或创建任何 Post。
+
 ## 8. 内部 reconciliation
 
 - `GET /internal/tt-posts/direct-tests/reconciling?limit=100`：列出待内部核对任务。
@@ -328,3 +397,5 @@
 2. `tt_post_account_setting`、GPU prepare/publish 合同、GPU ledger 格式、legacy pool/queue material 唯一约束保持。
 3. 单例未保存时只读投影旧 schedule；首次保存同步 legacy schedule，便于旧 release 继续读取。
 4. 旧 `/run-now` 保留兼容语义；独立测试的唯一页面入口是 `/test-publish`。
+5. BUG-005 新增 `/tasks` 只读合成视图；旧 `/queue` 的 items、summary、pagination、排序和操作语义保持不变。
+6. 统一视图不新增 `tt_post_direct_test_event` 或 direct-test 管理写路由；direct-test 行不能调用 queue event/cancel/reconcile。

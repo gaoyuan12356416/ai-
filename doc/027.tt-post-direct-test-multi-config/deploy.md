@@ -1,6 +1,14 @@
-# 部署记录（GitHub-first，已执行）
+# 部署记录（GitHub-first）
 
-## 2026-08-03 生产结果
+## BUG-005 增量状态（本地通过、待生产部署）
+
+- 目标：发布任务主表通过只读 `/tasks` 统一显示自动/排期 queue 与立即测试 direct-test；旧 `/queue` 保持原合同。
+- 代码、API/UI 契约、T01-T12 和全量本地回归已完成；9 个 Python 脚本 `341/341`、Node bridge `53/53`，独立审查无 P0/P1。候选 commit/release 和生产只读证据待提交部署后补充。
+- 增量不得修改 schema、runner、GPU release/profile/env/ledger、自动配置或发布状态机；direct 合成行不提供 queue 事件、取消或核对操作。
+- 本地 `/queue` 快照兼容和查询 0 DB/GPU 写入已通过；生产只读 0 副作用证据未齐前不得关闭 BUG-005。
+- 上线前必须另行记录候选 GitHub commit、CPU release、静态页 SHA、回滚 release 和生产 GET `/tasks` 证据；不得复用下方基线 SHA 作为 BUG-005 增量证据。
+
+## 2026-08-03 027 基线生产结果（历史）
 
 - GitHub 分支：`codex/tt-post-direct-multi-config-20260803`；生产代码 commit：`9fd0f99843d45269a5f2e4f0c7028c56321e427c`，远端引用已核对一致。
 - CPU 主机：`43.166.187.96`；当前 release：`/opt/tt-post/releases/9fd0f99843d45269a5f2e4f0c7028c56321e427c`。
@@ -14,7 +22,7 @@
 
 ## 发布前提
 
-- 87/87 用例与 9 个真实测试脚本全部通过，P0/P1 开放缺陷为 0。
+- 99/99 计划用例通过，其中新增 T01-T12 必须有独立结果；9 个真实测试脚本全部通过，P0/P1 开放缺陷为 0。
 - 变更已提交并推送 GitHub；记录精确 commit，生产只能拉取/checkout 该 commit，不直接复制本地源码。
 - 明确 CPU 主机、部署路径、sidecar/app/Nginx 静态页路径、service/timer 名称、SQLite 绝对路径和 GPU 服务现状。
 - `.env`、Token、COS Secret、数据库副本和生产凭据不得进入 Git/GitHub。
@@ -68,14 +76,17 @@ git diff --check
 5. 重启前运行 Python 编译、必要的无网络测试、Nginx 配置测试和三份静态页 SHA 比对。
 6. 只重启/重载受影响的窄服务；不使用宽泛 `pkill`，不改 GPU release/profile/env/ledger。
 7. 验证 service/timer active、health 正常、日志无 schema/route 错误。
+8. BUG-005 仅涉及 CPU read model、同源代理和静态页；除非实现 diff 另有必要，不重启 runner/prepare timer 或 GPU 服务。
 
 ## 只读生产验收
 
-1. 打开页面并只执行 GET：accounts、auto-config、material-pool、direct-tests。
+1. 打开页面并只执行 GET：accounts、auto-config、material-pool、direct-tests、tasks、旧 queue。
 2. 确认账号列表显示 `auto_publish_selected` 与 `active|paused|attention_required|not_selected`；配置响应顶层为 `item`。
 3. 确认素材只显示 `published|unknown|unpublished`，无 `processing`。
 4. 检查浏览器 Network：无 `POST /auto-config`、`POST /material-pool`、`POST /test-publish`、`POST /run-now` 或 `/internal/*`。
 5. 前后只读比较 config/schedule/pool/queue/run/direct-test 行与状态、GPU ledger 文件数/hash、已知 TikTok Post ID，要求完全一致。
+6. 用生产已有 queue/direct-test 事实核对 `/tasks` 的类型、summary、筛选与分页；不为验收创建新任务。
+7. 相同数字 ID 如无生产 fixture，只在临时 DB 自动化验证；生产不得为制造 fixture 写入数据。
 
 ## 发布后报告必须包含
 
@@ -87,4 +98,6 @@ git diff --check
 - 生产只读 0 副作用证据；
 - 精确回滚步骤。
 
-本次部署仅执行版本化代码/静态页切换、additive schema 初始化和必要的窄服务重启；验收阶段未调用任何业务写接口。
+BUG-005 普通回滚只切回上一 CPU release 和三份静态页；不恢复 SQLite backup，不删除 direct-test/queue 历史，不改 GPU ledger/COS/短链。回滚后旧 `/queue` 和原 direct-test 最近任务区应继续可读。
+
+2026-08-03 基线部署仅执行版本化代码/静态页切换、additive schema 初始化和必要的窄服务重启；验收阶段未调用任何业务写接口。BUG-005 增量尚未部署。

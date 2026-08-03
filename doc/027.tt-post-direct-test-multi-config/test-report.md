@@ -2,9 +2,9 @@
 
 ## 当前结论
 
-**本地与服务器门禁均已通过，生产版本已部署；验收未创建真实 TikTok Post、未保存自动配置、未消费素材池。**
+**027 基线已部署；BUG-005 增量已实现并通过本地门禁，待生产只读验收和上线。**
 
-截至 2026-08-03，027 实现、文档和独立审查已收口。9 个 Python 测试脚本共 `334/334` 通过，Node bridge `53/53` 断言通过，目标 Python 文件编译通过，`git diff --check` 通过；独立审查无 P0/P1。测试未连接真实发布接口、未创建 TikTok Post、未消费生产素材池。
+截至 2026-08-03，BUG-005 增量后的 9 个 Python 测试脚本共 `341/341` 通过，Node bridge `53/53` 断言通过，目标 Python 文件编译和 `git diff --check` 通过。专项覆盖同 ID 隔离、完整状态桶、并列时间稳定分页、已发布 direct-test、旧 `/queue` 快照、查询 0 DB/GPU 写入、UI direct 只读操作和代理白名单。独立审查无 P0/P1；一个慢响应覆盖新筛选的 P2 已修复并复验。
 
 ## 计划范围
 
@@ -14,37 +14,41 @@
 - 同分钟全部 slots 在首个 creator-info 前调用现有 `claim_recurring_run`，逐项原子、无 due 表；
 - 两张 additive 表、legacy mixed 两步迁移、回滚不覆盖 SQLite/ledger；
 - 权限、脱敏、UI 路由、GPU/COS/短链回归和生产零写入。
+- BUG-005：通过只读 `/tasks` 在主表统一展示自动/排期与立即测试，覆盖任务类型、统计、筛选、稳定分页、跨表 ID/操作隔离和旧 `/queue` 回归。
 
 ## 执行统计
 
 | 类型 | 计划 | 已执行 | 通过 | 失败 | 待执行 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 独立 direct-test（D） | 23 | 23 | 23 | 0 | 0 |
+| 统一发布任务主表（T） | 12 | 12 | 12 | 0 | 0 |
 | 发布状态/auto-direct 互斥（P） | 12 | 12 | 12 | 0 | 0 |
 | 原子配置/UI（C） | 22 | 22 | 22 | 0 | 0 |
 | 同分钟 preclaim（S） | 10 | 10 | 10 | 0 | 0 |
 | 迁移/回滚（M） | 10 | 10 | 10 | 0 | 0 |
 | 安全/无副作用（N） | 10 | 10 | 10 | 0 | 0 |
-| **合计** | **87** | **87** | **87** | **0** | **0** |
+| **合计** | **99** | **99** | **99** | **0** | **0** |
 
-## 自动化证据
+## BUG-005 后全量自动化证据
 
 | 脚本 | 结果 |
 | --- | ---: |
 | `test_tt_post_direct_config_core.py` | 8/8 |
 | `test_tt_post_links.py` | 6/6 |
-| `test_tt_post_pool_ui.py` | 30/30 |
+| `test_tt_post_pool_ui.py` | 33/33 |
 | `test_tt_post_prepare_runner.py` | 16/16 |
-| `test_tt_posts_app_contract.py` | 12/12 |
+| `test_tt_posts_app_contract.py` | 13/13 |
 | `test_tt_posts_core.py` | 68/68 |
-| `test_tt_posts_service.py` | 116/116 |
+| `test_tt_posts_service.py` | 119/119 |
 | `test_tt_gpu_worker.py` | 67/67 |
 | `test_tt_account_settings_ui.py` | 11/11 |
-| **Python 合计** | **334/334** |
+| **Python 合计** | **341/341** |
 
 `test_tt_drama_bridge.js` 为 `53/53`；内联页面 JavaScript 语法、6 个目标 Python 文件编译和 `git diff --check` 均通过。
 
-## 生产验收证据
+BUG-005 新增 service 2 项、UI 3 项、app contract 1 项，分别覆盖 T01-T12 的服务、页面和代理合同；测试全部使用临时 DB、fake GPU/TT，不连接真实发布接口。
+
+## 027 基线生产验收证据
 
 1. 生产代码 commit 为 `9fd0f99843d45269a5f2e4f0c7028c56321e427c`，不可变 release 为 `/opt/tt-post/releases/9fd0f99843d45269a5f2e4f0c7028c56321e427c`；远端分支引用一致。
 2. SQLite online backup 位于 `/mnt/data-disk/tt-post-publisher/backups/20260803T085637Z-282eb91-to-9fd0f99-direct-multi`；DB-COPY 连续初始化两次通过，`integrity_check=ok`，旧表统计无变化。
@@ -52,6 +56,15 @@
 4. 内部只读 GET 返回 auto-config version 0、enabled=false、账号 640 为 paused；direct-test 为 0 条；素材统计为 published=3、unpublished=2。
 5. 验收前后 schedule/pool/queue/run/intake 状态与数量一致；没有 POST 配置、立即测试或素材池接口，没有真实发布。
 6. 浏览器已刷新公网静态页并确认新文案加载；Chrome 与应用内浏览器均无登录态，因此未代为登录，也未触碰保存/发布控件。已登录态下的 UI 行为由 30/30 页面断言和服务端只读 GET 共同覆盖。
+
+## BUG-005 本地证据与生产待补项
+
+- 已修复：主发布任务表、total/summary、筛选和分页统一包含 `tt_post_queue` 与 `tt_post_direct_test`；详情见 `bugs/BUG-005.md`。
+- 已实现合同：新增纯 GET `/tasks`，服务端在单一读快照中合并后筛选、稳定排序、分页前统计再分页；旧 `/queue` 完全保持。
+- 操作边界：direct 行只读，不显示或调用 queue events/cancel/reconcile；相同数字 ID 由 `task_key/task_type` 隔离。
+- 已完成：T01-T12、9 个 Python 脚本全量回归、Node bridge、临时 DB `/queue` 前后快照和查询前后 DB hash 0 diff。
+- 待补：生产 GET `/tasks` 命中 2026-08-03 已有 direct-test ID 1，并证明部署前后 queue/direct-test/pool/run/config/Post 标识 0 diff。
+- 禁令：不得通过创建真实 direct-test、修改自动配置或触发发布来验证列表；生产只使用已有事实执行 GET。
 
 ## 已关闭的阻断风险
 
@@ -65,4 +78,4 @@
 
 ## 发布结论
 
-**可以交付使用。** 立即测试仍属于真实外部发布动作，首次由用户在页面确认账号、素材和同意项后手动触发；本次验收不代发。
+**BUG-005 已批准进入生产只读验收和部署。** 生产只使用已有任务执行 GET，不创建测试 Post、不保存配置、不消费素材池；只读 0 副作用证据通过后关闭缺陷。

@@ -82,6 +82,7 @@ def _client_namespace():
             "/api/admin/tt-posts/test-publish": {"POST"},
             "/api/admin/tt-posts/schedule": {"GET", "POST"},
             "/api/admin/tt-posts/run-now": {"POST"},
+            "/api/admin/tt-posts/tasks": {"GET"},
             "/api/admin/tt-posts/queue": {"GET"},
             "/api/admin/tt-posts/events": {"GET"},
         },
@@ -207,6 +208,8 @@ class TTPostsAppContractTest(unittest.TestCase):
         self.assertIn('"/api/admin/tt-posts/auto-config"', route)
         self.assertIn('"/api/admin/tt-posts/direct-tests"', route)
         self.assertIn('"/api/admin/tt-posts/schedule"', route)
+        self.assertIn('"/api/admin/tt-posts/tasks"', route)
+        self.assertIn('"task_type"', route)
         self.assertIn("_tt_post_query_params(", route)
         self.assertIn("_tt_post_service_request(", route)
         self.assertGreaterEqual(route.count("no_store=True"), 2)
@@ -302,6 +305,10 @@ class TTPostsAppContractTest(unittest.TestCase):
             {"GET"},
             methods["/api/admin/tt-posts/queue"],
         )
+        self.assertEqual(
+            {"GET"},
+            methods["/api/admin/tt-posts/tasks"],
+        )
         start = APP_SOURCE.index(
             '        if parsed.path in {\n'
             '            "/api/admin/tt-posts/account-settings",'
@@ -380,6 +387,37 @@ class TTPostsAppContractTest(unittest.TestCase):
             "Bearer " + "i" * 48,
         )
         self.assertNotIn("Authorization", call.args[1])
+
+    def test_unified_tasks_get_forwards_only_read_query_parameters(self):
+        namespace, fake_requests = _client_namespace()
+        fake_requests.request.reset_mock()
+        fake_requests.request.return_value = FakeResponse(
+            200,
+            {
+                "items": [
+                    {
+                        "task_key": "direct_test:1",
+                        "task_type": "direct_test",
+                        "source_account_id": "640",
+                    }
+                ],
+                "pagination": {"page": 1, "page_size": 20, "total": 1},
+            },
+        )
+        result = namespace["_tt_post_service_request"](
+            "GET",
+            "/api/admin/tt-posts/tasks",
+            query={"task_type": "direct_test", "status": "published"},
+        )
+        self.assertEqual("direct_test:1", result["items"][0]["task_key"])
+        call = fake_requests.request.call_args
+        self.assertEqual(call.args[0], "GET")
+        self.assertTrue(call.args[1].endswith("/api/admin/tt-posts/tasks"))
+        self.assertEqual(
+            {"task_type": "direct_test", "status": "published"},
+            call.kwargs["params"],
+        )
+        self.assertIsNone(call.kwargs["json"])
 
     def test_mocked_service_rejects_secret_fields_in_response(self):
         namespace, fake_requests = _client_namespace()

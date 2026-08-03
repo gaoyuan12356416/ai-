@@ -3,6 +3,7 @@
 ## 测试范围
 
 - D：独立 direct-test、重复素材、幂等、每任务新 GPU job 和 unknown 阻断。
+- T：发布任务主表统一显示 queue/direct-test，覆盖类型、统计、筛选、分页和只读操作隔离。
 - P：素材发布状态、自动池状态和自动不复用。
 - C：描述模板、总开关/时间、多账号的原子配置与 UI 成员状态。
 - S：同分钟全部 due slot 的 existing-claim 预占、执行和崩溃恢复。
@@ -30,6 +31,7 @@
 | LEGACY-ONE | 多个旧账号都只在 11:00 启用，单例配置不存在 |
 | LEGACY-MULTI | 账号 A=11:00、B=11:10，单例配置不存在 |
 | KEY-1/KEY-2 | 两个不同 direct-test 幂等键 |
+| SAME-ID | `tt_post_queue.id=1` 与 `tt_post_direct_test.id=1` 同时存在，用于验证跨表 ID 隔离 |
 | DB-COPY | 生产 online backup 的隔离副本，已脱敏且 runner 不连接 |
 
 ## 执行前基线与禁令
@@ -66,6 +68,23 @@
 | D21 | unknown 内部核对成功 | D20，fake GPU ledger 已出现明确 publish 事实 | 调内部 reconcile | 原任务转 published 并写 publish 字段；解除同素材阻断；不依赖 `tt_post_direct_test_event` | P0 | 待执行 |
 | D22 | reconcile 无明确证据 | unknown 但 GPU/远端仍不明确，或任务非待核对 | 调内部 reconcile | 保持 unknown/合法原状态；不猜测 published/failed，不新发 Post | P0 | 待执行 |
 | D23 | direct-test 与自动池隔离 | MAT-B，保存 pool 字段基线 | 跑测试到任意终态 | pool status/run_id/queue_id/created/updated/FIFO 均不变 | P0 | 待执行 |
+
+## T. 统一发布任务主表（BUG-005）
+
+| 编号 | 场景 | 前置条件 | 步骤 | 预期结果 | 优先级 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| T01 | 默认混合列表 | 1 条 queue、1 条 direct-test，且数字 ID 相同 | GET `/tasks` 不传 type | 返回 2 条且各出现一次；`task_type/task_key/task_id` 与源 ID 正确 | P0 | 本地通过，待生产只读 |
+| T02 | 立即测试类型标记 | T01 | 打开主表 | queue 显示“自动/排期发布”，direct 显示“立即测试”；direct 时间列使用创建时间，不伪造排期 | P1 | 本地通过，待生产只读 |
+| T03 | 混合统计口径 | 依次构造 scheduled/claimed/ready/unknown/published/failed 代表状态 | GET `/tasks?page_size=1` | summary 基于分页前全集；scheduled/processing/needs_review/published 精确命中约定状态，total 含 failed；按任务不按素材去重 | P0 | 本地通过，待生产只读 |
+| T04 | 类型筛选与旧 queue 快照 | 同一临时 DB 保存改前 `/queue` 响应 | 分别查询 all/automatic/direct_test，并再次调用 `/queue` | 三种 type 结果准确；旧 `/queue` items/summary/pagination/排序逐字段不变 | P0 | 本地通过，待生产只读 |
+| T05 | 账号与素材组合筛选 | 两表各有命中/不命中账号和素材 | 组合传 account/material/type | 只返回两表中的精确交集；total/summary 与 items 数据集一致 | P1 | 本地通过，待生产只读 |
+| T06 | 状态与别名筛选 | 两表依次切换 processing/published/failed/unknown | 查询原始状态、`processing_download` 和 `needs_review` | direct/queue 均按统一口径命中；unknown/unknown_outcome 归 needs_review；无跨状态误匹配 | P0 | 本地通过，待生产只读 |
+| T07 | 稳定排序和分页 | 跨表任务含相同 `task_at_utc`，page_size=1 | 顺序读取全部页并重复一次 | 相同数据两次顺序一致；跨页无重复/遗漏；页外返回空 items 与准确 total | P0 | 本地通过，待生产只读 |
+| T08 | 同数字 ID 隔离 | SAME-ID | 查看两行及其 dataset/DTO | task key 分别为 `automatic:1`、`direct_test:1`；源 ID 不互填，详情不串 | P0 | 本地通过，待生产只读 |
+| T09 | 事件按钮兼容 | SAME-ID，queue 有事件 | 检查事件路由与两类行分支 | 仅 queue 可发 GET `/events?queue_id=1`；direct 无事件按钮且 0 queue event 请求 | P0 | 本地通过，待生产只读 |
+| T10 | 写操作能力隔离 | queue 有 cancel/reconcile 合同，direct 有独立状态 | 检查渲染分支与 HTTP 合同 | queue 原 cancel/reconcile 行为不变；direct 不显示也不调用 queue 写路由 | P0 | 本地通过，待生产只读 |
+| T11 | App/HTTP 查询合同与脱敏 | 登录/无权限合同、未知 query、含安全错误的 direct | 调 `/tasks` 与代理单测 | 登录可 GET；未登录/无权限 401/403；未知参数/非法 type/page 400；无 claim token/secret | P0 | 本地通过，待生产只读 |
+| T12 | 纯只读与全回归 | 临时 DB/fake GPU/TT，记录 DB/GPU 调用基线 | 多次加载、筛选、翻页，执行 9 个 Python 脚本和 Node bridge | DB 文件 hash 0 diff；GPU publish/reconcile 调用 0 增量；既有 D/P/C/S/M/N 全通过 | P0 | 本地通过，待生产只读 |
 
 ## P. 素材发布状态与 auto/direct 互斥
 
@@ -148,11 +167,11 @@
 | N01 | 未登录/无权限 | 各新 API | GET/POST | 401/403；0 写入 | P0 | 待执行 |
 | N02 | 同源与未知字段 | 写 API | 跨站、错误 content-type、注入字段 | 拒绝；0 写入/0 GPU | P0 | 待执行 |
 | N03 | Token/Secret 脱敏 | 构造上游错误含凭据 | 查看 API/audit/UI | 响应和日志均无敏感值 | P0 | 待执行 |
-| N04 | 自动化无真实 Post | 临时 DB + fake GPU | 执行全部 D/P/C/S/M 用例 | 真实 publish endpoint 调用=0；生产 ledger/Post 不变 | P0 | 待执行 |
-| N05 | 生产只读验收 | 保存生产基线 | 只打开页面、GET、只读 SQL/health | 无 POST 写请求；配置/pool/queue/run/test/ledger/Post 基线相同 | P0 | 待执行 |
+| N04 | 自动化无真实 Post | 临时 DB + fake GPU | 执行全部 D/T/P/C/S/M 用例 | 真实 publish endpoint 调用=0；生产 ledger/Post 不变 | P0 | 待执行 |
+| N05 | 生产只读验收 | 保存生产基线 | 只打开页面、GET `/tasks`、只读 SQL/health | 无 POST 写请求；配置/pool/queue/run/test/ledger/Post 基线相同 | P0 | 待执行 |
 | N06 | 不保存生产配置 | 浏览器登录生产 | 检查多选/状态/迁移提示后退出 | 不点击保存；config 与 legacy schedule version/值不变 | P0 | 待执行 |
 | N07 | 旧 run-now 兼容 | 部署候选 + 临时 DB/fake 上游 | 调旧接口并审计 UI | 兼容路由仍可用；新 UI 立即测试从不调用它，只调用 `/test-publish` | P0 | 待执行 |
-| N08 | 三份 UI 一致 | 候选 release/后台/Nginx | 比较 SHA-256 | 三份完全相同；页面调用 `/test-publish`、`/direct-tests`、`/auto-config` | P1 | 待执行 |
+| N08 | 三份 UI 一致 | 候选 release/后台/Nginx | 比较 SHA-256 | 三份完全相同；页面调用 `/test-publish`、`/direct-tests`、`/tasks`、`/auto-config` | P1 | 待执行 |
 | N09 | GPU ledger 不改协议 | fake + 旧 ledger fixture | 两次重复素材测试 | 仅出现不同 job key；旧 ledger 内容/hash 不变 | P0 | 待执行 |
 | N10 | COS/短链隔离 | fake storage 和 TT namespace | 重复测试/失败/回滚 | 只用 TT 专用 COS/TT 短链；X 和其他桶行为不变 | P1 | 待执行 |
 
@@ -163,11 +182,13 @@
 - 023/024：旧一次性 canary、direct_clean profile 和正式三重门禁不被绕过。
 - 024/026：`{{content_id}}`/`{{contect_id}}`、`{url}`、`{desc}`、UTF-16 2200、短链和片尾合同。
 - 025：自动发布可纯关闭、失效账号占位、dirty draft、409、后台轮询和 no-side-effect 浏览器验收。
+- 027 基线：独立 direct-test 最近任务轮询仍工作；新增主表投影不替换 direct 状态机、不改变旧 `/queue`。
 - X 发布链路、X 短链 namespace、其他 COS 桶和 Meta/其他后台功能不变。
 
 ## 通过门槛
 
 - 所有 P0/P1 用例通过；开放 P0/P1 缺陷为 0。
+- 计划总数为 99：既有 87 个 D/P/C/S/M/N 用例与新增 T01-T12；BUG-005 未执行前保持待验证、待上线。
 - 任一错误用例必须同时断言错误码和“0 非预期副作用”，不能只断言 HTTP 状态。
 - migration 在生产副本上幂等运行两次，并证明无旧排期时间交叉放大。
 - 生产只读验收前后 config/schedule/pool/queue/run/direct-test/GPU ledger/已知 Post 基线一致。
