@@ -877,7 +877,6 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         self.assertEqual(
             rendered,
-            "Watch now 👉 https://gy.g2flow.com/s2l/1.html\n\n"
             "🎬 Drama One\n"
             "Episode 2\n"
             "A complete drama description.\n\n"

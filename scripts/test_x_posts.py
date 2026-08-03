@@ -354,24 +354,18 @@ class XPostsTests(unittest.TestCase):
             self.assertFalse(caught.exception.unknown_outcome)
             self.assertEqual(len(client.requests), 1)
 
-    def test_post_text_preserves_url_and_conservatively_truncates(self):
+    def test_post_text_omits_url_and_conservatively_truncates(self):
         short = "https://gy.g2flow.com/s2l/12.html"
         text = service.build_post_text(short, "My Drama", "剧" * 300)
-        self.assertTrue(
-            text.startswith(
-                "Watch now 👉 %s\n\n🎬 My Drama\n" % short
-            )
-        )
+        self.assertTrue(text.startswith("🎬 My Drama\n"))
+        self.assertNotIn(short, text)
+        self.assertNotIn("Watch now", text)
         self.assertTrue(
             text.endswith(
                 "…\n\n#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
             )
         )
-        without_url = text.replace(short, "", 1)
-        self.assertLessEqual(
-            23 + service._tweet_text_weight(without_url),
-            280,
-        )
+        self.assertLessEqual(service._tweet_text_weight(text), 280)
 
     def test_material_post_template_matches_the_requested_copy(self):
         short = "https://gy.g2flow.com/s2l/12.html"
@@ -381,11 +375,9 @@ class XPostsTests(unittest.TestCase):
                 "My Stepmom and Her Secret Besties",
                 "A complete drama description.",
             ),
-            "Watch now 👉 %s\n\n"
             "🎬 My Stepmom and Her Secret Besties\n"
             "A complete drama description.\n\n"
-            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
-            % short,
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave",
         )
 
     def test_short_redirect_is_atomic_immutable_and_public_readable(self):

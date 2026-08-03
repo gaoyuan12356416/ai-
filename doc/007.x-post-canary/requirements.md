@@ -39,15 +39,13 @@
 6. 素材帖子正文固定为：
 
 ```text
-Watch now 👉 {{short_link}}
-
 🎬 {{drama_name}}
 {{desc}}
 
 #shortdrama #shortfilms #tvdrama #aidrama #dramawave
 ```
 
-描述为空或清洗后为空不得发布；超出 X 文本限制时只截断描述，不改 CTA、短链、剧名和固定 hashtags。
+短链继续生成并写入发布日志用于归因和审计，但不进入帖子正文。描述为空或清洗后为空不得发布；超出 X 文本限制时只截断描述，不改剧名和固定 hashtags。
 7. 长链基址固定为 `https://www.dramawavew2a.com/ads/101/2116/view`，参数名与业务规则一致并逐项 URL 编码。
 8. `c` 参数固定为 `yingliang_post_CLV_VL_<用户名>*<Unix秒级时间戳>none<素材语言>*<剧名>*<标签>*<日志ID>`。
 9. `af_dp` 使用 `content_id`；短链只能跳转到允许的 Dramawave W2A 主机和固定路径前缀。

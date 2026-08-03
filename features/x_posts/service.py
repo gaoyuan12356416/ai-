@@ -324,8 +324,9 @@ def _normalize_post_field(value, label, maximum):
 def _render_post_text(short_url, drama_name, description, episode_number=None):
     """Render the shared fixed copy while truncating only the description.
 
-    X assigns every HTTPS URL a fixed t.co weight of 23. The CTA, drama name,
-    optional episode line and fixed hashtags are mandatory.
+    The short URL remains validated and stored for attribution/audit, but it is
+    intentionally excluded from the public Post body. The drama name, optional
+    episode line and fixed hashtags are mandatory.
     """
     parsed = urllib.parse.urlsplit(str(short_url or ""))
     if (
@@ -339,18 +340,15 @@ def _render_post_text(short_url, drama_name, description, episode_number=None):
         raise XPostError("invalid_request", "短链无效", 400)
     normalized_name = _normalize_post_field(drama_name, "剧名", 500)
     normalized_description = _normalize_post_field(description, "剧描述", 10000)
-    before_url = "Watch now 👉 "
-    after_url = "\n\n🎬 %s\n" % normalized_name
+    before_description = "🎬 %s\n" % normalized_name
     if episode_number is not None:
-        after_url += "Episode %s\n" % _positive_int(
+        before_description += "Episode %s\n" % _positive_int(
             episode_number,
             "episode_number",
         )
     after_description = "\n\n" + X_POST_HASHTAGS
     mandatory_weight = (
-        _tweet_text_weight(before_url)
-        + 23
-        + _tweet_text_weight(after_url)
+        _tweet_text_weight(before_description)
         + _tweet_text_weight(after_description)
     )
     remaining = 280 - mandatory_weight
@@ -375,13 +373,7 @@ def _render_post_text(short_url, drama_name, description, episode_number=None):
         rendered_description = "".join(selected).rstrip() + ellipsis
     if not rendered_description.strip(" …"):
         raise XPostError("x_post_copy_too_long", "X Post描述截断后为空", 409)
-    return (
-        before_url
-        + str(short_url)
-        + after_url
-        + rendered_description
-        + after_description
-    )
+    return before_description + rendered_description + after_description
 
 
 def build_post_text(short_url, drama_name, description):

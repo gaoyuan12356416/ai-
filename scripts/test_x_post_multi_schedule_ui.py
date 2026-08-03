@@ -183,7 +183,6 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
 
     def test_material_and_drama_templates_are_rendered_exactly(self):
         material_expected = (
-            "Watch now 👉 {{short_link}}\n\n"
             "🎬 {{drama_name}}\n"
             "{{desc}}\n\n"
             "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
@@ -197,7 +196,6 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertEqual(material_match.group("body"), material_expected)
 
         drama_expected = (
-            "Watch now 👉 {{short_link}}\n\n"
             "🎬 {{drama_name}}\n"
             "Episode {{episode_number}}\n"
             "{{desc}}\n\n"
@@ -210,6 +208,8 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         )
         self.assertIsNotNone(drama_match)
         self.assertEqual(drama_match.group("body"), drama_expected)
+        self.assertNotIn("{{short_link}}", material_expected)
+        self.assertNotIn("{{short_link}}", drama_expected)
         self.assertNotIn("Episode {{episode_number}}", material_expected)
         self.assertIn("短剧 ID（content_id）", DRAMA)
         self.assertIn(r"/^[A-Za-z0-9_-]{1,128}$/", DRAMA)
