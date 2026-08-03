@@ -13,18 +13,18 @@
 
 | 任务 | 负责人 | 文件/模块 | 状态 |
 | --- | --- | --- | --- |
-| DEV-01 单次宏 tokenizer、UTF-16 helper 与错误合同 | 后端 | `features/tt_posts/core.py` | 实现中，待最终 diff/测试 |
-| DEV-02 description additive schema、intake/pool/queue 冻结与幂等 | 后端 | `features/tt_posts/core.py` | 实现中，待最终 diff/测试 |
-| DEV-03 resolver 信任边界、入池传递、pool->queue 复制和最终渲染 | 后端 | `features/tt_posts/service.py` | 实现中，待最终 diff/测试 |
-| DEV-04 TT 短链 ID、W2A 参数、atomic wrapper | 后端 | `features/tt_posts/links.py` | 实现中，待最终 diff/测试 |
-| DEV-05 素材池 UI 宏帮助、逐素材 description 预览和 UTF-16 校验 | 前端 | `static/tt-post-pool.html` | 待实现/复核 |
-| DEV-06 `direct_outro` mode/profile/eligibility | GPU | `features/tt_gpu/worker.py` | 待实现 |
-| DEV-07 复用已审核 Logo/tutorial-outro pipeline、asset fingerprint 和 reuse contract | GPU | `features/tt_gpu/worker.py` | 实现中，待最终 diff/测试 |
-| DEV-08 core/service/link/UI/GPU 自动测试 | QA/开发 | `scripts/test_tt_*.py` | 待补齐并执行 |
-| DEV-09 Nginx 精确短链路由和 TT 专用 COS 配置 | 运维 | `deploy/*` | 配置草案存在，未部署 |
-| DEV-10 需求、评审、测试、API、部署、缺陷制品 | PM/SA/QA | `doc/026.tt-post-macros-endcard/` | 已补齐，待代码结果回填 |
+| DEV-01 单次宏 tokenizer、UTF-16 helper 与错误合同 | 后端 | `features/tt_posts/core.py` | 已完成并验证 |
+| DEV-02 description additive schema、intake/pool/queue 冻结与幂等 | 后端 | `features/tt_posts/core.py` | 已完成并验证 |
+| DEV-03 resolver 信任边界、入池传递、pool->queue 复制和最终渲染 | 后端 | `features/tt_posts/service.py` | 已完成并验证 |
+| DEV-04 TT 短链 ID、W2A 参数、atomic wrapper | 后端 | `features/tt_posts/links.py` | 已完成并验证 |
+| DEV-05 素材池 UI 宏帮助、逐素材 description 预览和 UTF-16 校验 | 前端 | `static/tt-post-pool.html` | 已完成并验证 |
+| DEV-06 `direct_outro` mode/profile/eligibility | GPU | `features/tt_gpu/worker.py` | 已完成并验证 |
+| DEV-07 复用已审核 Logo/tutorial-outro pipeline、asset fingerprint 和 reuse contract | GPU | `features/tt_gpu/worker.py` | 已完成并验证 |
+| DEV-08 core/service/link/UI/GPU 自动测试 | QA/开发 | `scripts/test_tt_*.py` | 已完成并验证 |
+| DEV-09 Nginx 精确短链路由和 TT 专用 COS 配置 | 运维 | `deploy/*` | 已部署并验证 |
+| DEV-10 需求、评审、测试、API、部署、缺陷制品 | PM/SA/QA | `doc/026.tt-post-macros-endcard/` | 已完成并回填证据 |
 
-“实现中”只表示共享工作区存在并发改动，不代表已经评审、测试或可发布；最终状态以代码评审和测试报告为准。
+以上任务均已完成代码评审、自动化测试、生产部署和 prepare-only 验收；详细证据以 `test-report.md` 与 `deploy.md` 为准。
 
 ## 实现顺序
 
@@ -96,4 +96,5 @@ python -m unittest scripts.test_tt_post_links scripts.test_tt_posts_core scripts
 ## 完成记录
 
 - 2026-08-03：需求、SA、开发计划、测试矩阵、API、部署与缺陷文档已补齐。
-- 代码最终评审、自动测试、环境 prepare-only、提交和部署：待主任务完成后回填真实结果。
+- 代码最终评审、312 个 Python 用例、53 个 Node 断言、生产 migration/Nginx、环境 prepare-only、提交和部署：全部完成并通过。
+- 部署 commit：`282eb914172531bd55500b65539d5715a282e5bc`；未创建真实 TikTok Post，自动排期与 gate 原状态已恢复。

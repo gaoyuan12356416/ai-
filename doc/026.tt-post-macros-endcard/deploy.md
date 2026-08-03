@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-**执行中，待主任务回填。** 本轮按 GitHub-first 在最终 review 和测试通过后形成可追溯 commit，再以只读 release 目录部署；禁止直接在服务器 current 目录手改。允许部署与 `prepare-only`，不创建真实 TikTok Post，不保存或人为触发自动排期。
+**已部署并验证。** 2026-08-03 按 GitHub-first 将 commit `282eb914172531bd55500b65539d5715a282e5bc` 部署为 CPU/GPU 只读 release，完成 SQLite、Nginx、UI、`direct_outro` 与 prepare-only 验收。没有创建真实 TikTok Post，没有保存或人为触发自动排期；原有 runner/timer/path 与 gate 已恢复。
 
 ## 变更内容
 
@@ -167,6 +167,17 @@ sqlite3 /mnt/data-disk/tt-post-publisher/tt-post.sqlite3 'PRAGMA integrity_check
 ```
 
 对公网短链使用显式 no-cache 头，并分别请求 TT/X 形状 URL。不要将内部 token 输出到终端或日志；prepare 请求使用现有 root-only 安全 wrapper。
+
+## 实际部署记录（2026-08-03）
+
+- commit：`282eb914172531bd55500b65539d5715a282e5bc`。
+- CPU release：`/opt/tt-post/releases/282eb914172531bd55500b65539d5715a282e5bc`；GPU release：`/opt/tt-post-gpu/releases/282eb914172531bd55500b65539d5715a282e5bc`。
+- CPU 备份：`/mnt/data-disk/tt-post-publisher/backups/20260803-120250-2c8c5428474b907155d22f6b4733f9a7240eaf8e`；含 online SQLite、env、Nginx、ACL、UI、unit 状态和 migration canary。
+- GPU 备份：`/data/tt-post-publisher/backups/20260803-120250-a8d82571f17fb413016463d77acfc7f12e3d3013`；含 env、批准资产、manifest、publish ledger 和 unit 状态，未复制或输出 secret 内容。
+- prepare-only 证据：`/data/tt-post-publisher/validation/20260803-120250/{prepare-result.json,validation-evidence.json,visual-evidence.json}`；manifest 为 `/data/tt-post-publisher/manifests/ttoutro-5801636-20260803-v1.json`。
+- 线上结果：CPU/GPU health 正常，profile 完全一致；Nginx/TT/X 短链、数据库 migration、COS SHA/size、ffprobe、Range、片尾抽帧均通过。
+- 外部状态：CPU queue/published ID、GPU publish ledger 和 schedule 版本/启用状态前后不变；没有调用 publish/canary/run-now/schedule-save。
+- 回滚演练：旧 CPU release 可读取 additive migration canary；旧 GPU release 57/57 测试通过。实际生产未回切，因为新版本全部门禁通过。
 
 ## 回滚方案
 
