@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 from features.tt_gpu.credentials import open_access_token
 from features.tt_posts.core import (
     AccountSourceError,
+    BEIJING_TZ,
     LiveGates,
     SnapshotAccountSource,
     TTPostAccountSettings,
@@ -879,12 +880,19 @@ class ServiceLifecycleTests(unittest.TestCase):
         enabled=True,
         account_ids=None,
         accepted=True,
+        publish_times=None,
+        schedule_mode="fixed",
+        random_daily_count=0,
     ):
         return {
             "expected_version": version,
             "enabled": enabled,
             "timezone": "Asia/Shanghai",
-            "publish_times": ["11:00"],
+            "publish_times": (
+                ["11:00"] if publish_times is None else list(publish_times)
+            ),
+            "schedule_mode": schedule_mode,
+            "random_daily_count": random_daily_count,
             "source_account_ids": list(account_ids or ["101"]),
             "caption_template": (
                 "Drama {{content_id}}\n{url}\n{desc}"
@@ -1194,6 +1202,81 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(saved["consent_version"], stopped["consent_version"])
         self.assertFalse(service.store.get_daily_schedule("101")["enabled"])
         self.assertFalse(service.store.get_daily_schedule("102")["enabled"])
+
+    def test_auto_config_accepts_multiple_fixed_publish_times(self):
+        service = self.service(CLOSED_GATES)
+        self.save_public_settings(service, "101")
+        saved = service.auto_config_save(
+            self.auto_config_payload(
+                publish_times=["21:05", "07:15", "13:40"],
+            )
+        )["item"]
+
+        expected = ["07:15", "13:40", "21:05"]
+        self.assertEqual("fixed", saved["schedule_mode"])
+        self.assertEqual(expected, saved["publish_times"])
+        self.assertEqual(
+            expected,
+            service.store.get_daily_schedule("101")["publish_times"],
+        )
+
+    def test_random_auto_config_persists_one_plan_per_account(self):
+        self.accounts.add_account("102")
+        service = self.service(CLOSED_GATES)
+        self.save_public_settings(service, "101")
+        self.save_public_settings(service, "102")
+        saved = service.auto_config_save(
+            self.auto_config_payload(
+                account_ids=["101", "102"],
+                publish_times=[],
+                schedule_mode="random",
+                random_daily_count=3,
+            )
+        )["item"]
+
+        self.assertEqual("random", saved["schedule_mode"])
+        self.assertEqual(3, saved["random_daily_count"])
+        self.assertEqual("2026-07-30", saved["random_effective_date"])
+        self.assertEqual(2, len(saved["random_daily_plans"]))
+        self.assertEqual(
+            {"101", "102"},
+            {item["account_id"] for item in saved["random_daily_plans"]},
+        )
+        for plan in saved["random_daily_plans"]:
+            self.assertEqual("2026-07-30", plan["shanghai_date"])
+            self.assertEqual(3, len(plan["publish_times"]))
+            minute_values = [
+                int(value[:2]) * 60 + int(value[3:])
+                for value in plan["publish_times"]
+            ]
+            self.assertTrue(all(value % 60 for value in minute_values))
+            self.assertTrue(
+                all(
+                    right - left >= 60
+                    for left, right in zip(minute_values, minute_values[1:])
+                )
+            )
+        self.assertEqual(
+            saved["random_daily_plans"],
+            service.auto_config_get()["item"]["random_daily_plans"],
+        )
+
+    def test_random_auto_config_rejects_mixed_times_without_writes(self):
+        service = self.service(CLOSED_GATES)
+        before = service.store.get_auto_publish_config()
+        with self.assertRaises(TTPostServiceError) as mixed:
+            service.auto_config_save(
+                self.auto_config_payload(
+                    publish_times=["11:00"],
+                    schedule_mode="random",
+                    random_daily_count=2,
+                )
+            )
+        self.assertEqual(
+            "tt_post_random_times_must_be_empty",
+            mixed.exception.code,
+        )
+        self.assertEqual(before, service.store.get_auto_publish_config())
 
     def test_auto_config_version_or_invalid_account_failure_writes_nothing(self):
         self.accounts.add_account("102")
@@ -2153,6 +2236,33 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(second, [])
         self.assertEqual(len(service.store.list_queues()), 1)
+
+    def test_random_daily_due_uses_the_persisted_account_slot_once(self):
+        service = self.service(OPEN_GATES)
+        self.add_ready(service)
+        saved = service.auto_config_save(
+            self.auto_config_payload(
+                publish_times=[],
+                schedule_mode="random",
+                random_daily_count=2,
+            )
+        )["item"]
+        plan = saved["random_daily_plans"][0]
+        publish_time = plan["publish_times"][0]
+        local_slot = datetime.strptime(
+            "%s %s" % (plan["shanghai_date"], publish_time),
+            "%Y-%m-%d %H:%M",
+        ).replace(tzinfo=BEIJING_TZ)
+        self.clock.value = local_slot.astimezone(UTC) + timedelta(seconds=20)
+
+        first = service.schedules_due({})["items"]
+        second = service.schedules_due({})["items"]
+
+        self.assertEqual(1, len(first))
+        self.assertEqual(publish_time, first[0]["publish_time"])
+        self.assertEqual("101", first[0]["source_account_id"])
+        self.assertEqual([], second)
+        self.assertEqual(1, len(service.store.list_queues()))
 
     def test_daily_due_limit_processes_only_one_new_account_per_call(self):
         service = self.service(OPEN_GATES)

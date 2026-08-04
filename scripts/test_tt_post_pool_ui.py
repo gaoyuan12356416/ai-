@@ -81,6 +81,13 @@ class TtPostPoolUiTest(unittest.TestCase):
             "operationAccountId",
             "caption",
             "dailyPublishTime",
+            "dailyPublishTimes",
+            "addPublishTime",
+            "fixedScheduleFields",
+            "randomScheduleEnabled",
+            "randomScheduleFields",
+            "randomDailyCount",
+            "randomPlanPreview",
             "scheduleEnabled",
             "saveSchedule",
             "scheduleStatus",
@@ -163,11 +170,26 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("expected_version: expectedVersion", save_source)
         self.assertIn("enabled: requestedEnabled", save_source)
         self.assertIn('timezone: "Asia/Shanghai"', save_source)
-        self.assertIn("publish_times: [requestedPublishTime]", save_source)
+        self.assertIn("schedule_mode: requestedMode", save_source)
+        self.assertIn("publish_times: requestedPublishTimes", save_source)
+        self.assertIn("random_daily_count: requestedRandomCount", save_source)
         self.assertIn("source_account_ids: Array.from(state.autoAccountIds)", save_source)
         self.assertIn('caption_template: byId("caption").value', save_source)
         self.assertIn("consent:", save_source)
         self.assertNotIn("for (", save_source)
+
+    def test_fixed_and_random_schedule_controls_follow_the_contract(self):
+        save_source = source_between("async function saveSchedule", "function validPendingRunNowId")
+        self.assertIn("北京时间 00:00–23:59", PAGE)
+        self.assertIn("至少间隔 1 小时", PAGE)
+        self.assertIn("随机时间发布（每个账号独立生成）", PAGE)
+        self.assertIn("fixedPublishTimesFromDraft", PAGE)
+        self.assertIn("appendFixedPublishTime", PAGE)
+        self.assertIn("data-remove-publish-time", PAGE)
+        self.assertIn("renderRandomPlanPreview", PAGE)
+        self.assertIn('requestedMode === "fixed"', save_source)
+        self.assertIn("? fixedPublishTimesFromDraft()", save_source)
+        self.assertIn(": [];", save_source)
 
     def test_config_draft_uses_version_conflict_protection(self):
         apply_source = source_between("function applySchedule", "async function loadSchedule")

@@ -130,7 +130,7 @@ class CoreTestCase(unittest.TestCase):
 
 
 class StorageTests(CoreTestCase):
-    def test_storage_has_legacy_four_plus_exactly_four_recurring_tables(self):
+    def test_storage_has_expected_tables(self):
         conn = sqlite3.connect(self.db_path)
         try:
             names = {
@@ -150,6 +150,7 @@ class StorageTests(CoreTestCase):
                 "tt_post_account_setting",
                 "tt_post_daily_schedule",
                 "tt_post_auto_publish_config",
+                "tt_post_random_daily_plan",
                 "tt_post_recurring_pool",
                 "tt_post_material_intake",
                 "tt_post_direct_test",
@@ -231,6 +232,271 @@ class StorageTests(CoreTestCase):
             migrated.get_daily_schedule("acct-1"),
             replay.get_daily_schedule("acct-1"),
         )
+
+    def test_schedule_mode_columns_migrate_from_the_previous_schema(self):
+        original = self.store.save_auto_publish_config(
+            expected_version=0,
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=["11:00"],
+            account_ids=["acct-1"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-fixed-v1",
+            consented_at="2026-07-29 10:00:00",
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.executescript(
+                """
+                ALTER TABLE tt_post_daily_schedule
+                    RENAME TO tt_post_daily_schedule_current;
+                CREATE TABLE tt_post_daily_schedule (
+                    account_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(enabled IN (0,1)),
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(timezone='Asia/Shanghai'),
+                    publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
+                    user_consent INTEGER NOT NULL CHECK(user_consent=1),
+                    consent_version TEXT NOT NULL,
+                    consented_at_utc TEXT NOT NULL,
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO tt_post_daily_schedule
+                SELECT account_id,enabled,timezone,publish_times_json,
+                    version,user_consent,consent_version,consented_at_utc,
+                    created_by_user_id,created_by_name,updated_by_user_id,
+                    updated_by_name,created_at,updated_at
+                FROM tt_post_daily_schedule_current;
+                DROP TABLE tt_post_daily_schedule_current;
+
+                ALTER TABLE tt_post_auto_publish_config
+                    RENAME TO tt_post_auto_publish_config_current;
+                CREATE TABLE tt_post_auto_publish_config (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    version INTEGER NOT NULL CHECK(version>0),
+                    enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(enabled IN (0,1)),
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
+                        CHECK(timezone='Asia/Shanghai'),
+                    publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    account_ids_json TEXT NOT NULL DEFAULT '[]',
+                    caption_template TEXT NOT NULL,
+                    user_consent INTEGER NOT NULL DEFAULT 0
+                        CHECK(user_consent IN (0,1)),
+                    consent_version TEXT NOT NULL DEFAULT '',
+                    consented_at_utc TEXT NOT NULL DEFAULT '',
+                    created_by_user_id TEXT NOT NULL DEFAULT '',
+                    created_by_name TEXT NOT NULL DEFAULT '',
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO tt_post_auto_publish_config
+                SELECT id,version,enabled,timezone,publish_times_json,
+                    account_ids_json,caption_template,user_consent,
+                    consent_version,consented_at_utc,created_by_user_id,
+                    created_by_name,updated_by_user_id,updated_by_name,
+                    created_at,updated_at
+                FROM tt_post_auto_publish_config_current;
+                DROP TABLE tt_post_auto_publish_config_current;
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated = TTPostStore(self.db_path, now_fn=self.clock)
+        config = migrated.get_auto_publish_config()
+        schedule = migrated.get_daily_schedule("acct-1")
+        self.assertEqual(original["publish_times"], config["publish_times"])
+        self.assertEqual("fixed", config["schedule_mode"])
+        self.assertEqual(0, config["random_daily_count"])
+        self.assertEqual("", config["random_effective_date"])
+        self.assertEqual("fixed", schedule["schedule_mode"])
+        self.assertEqual(0, schedule["random_daily_count"])
+        self.assertEqual("", schedule["random_effective_date"])
+        updated = migrated.save_auto_publish_config(
+            expected_version=config["version"],
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=["07:15", "19:45"],
+            schedule_mode="fixed",
+            random_daily_count=0,
+            account_ids=["acct-1"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-fixed-v2",
+            consented_at="2026-07-29 10:05:00",
+        )
+        self.assertEqual(["07:15", "19:45"], updated["publish_times"])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual("ok", conn.execute("PRAGMA integrity_check").fetchone()[0])
+        finally:
+            conn.close()
+
+    def test_random_daily_plans_are_persistent_non_hourly_and_spaced(self):
+        saved = self.store.save_auto_publish_config(
+            expected_version=0,
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=[],
+            schedule_mode="random",
+            random_daily_count=24,
+            account_ids=["acct-1", "acct-2"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-random-v1",
+            consented_at="2026-07-29 10:00:00",
+        )
+        self.assertEqual("random", saved["schedule_mode"])
+        self.assertEqual(24, saved["random_daily_count"])
+        self.assertEqual("2026-07-30", saved["random_effective_date"])
+        self.assertEqual(2, len(saved["random_daily_plans"]))
+        frozen = {
+            (item["account_id"], item["shanghai_date"]): item
+            for item in saved["random_daily_plans"]
+        }
+        for item in frozen.values():
+            self.assertEqual(24, len(item["publish_times"]))
+            minute_values = []
+            for value in item["publish_times"]:
+                hour, minute = (int(part) for part in value.split(":"))
+                self.assertNotEqual(0, minute)
+                minute_values.append(hour * 60 + minute)
+            self.assertTrue(
+                all(
+                    right - left >= 60
+                    for left, right in zip(
+                        minute_values,
+                        minute_values[1:],
+                    )
+                )
+            )
+
+        replay = TTPostStore(self.db_path, now_fn=self.clock)
+        self.assertEqual(
+            saved["random_daily_plans"],
+            replay.get_auto_publish_config()["random_daily_plans"],
+        )
+        self.clock.current += timedelta(days=1)
+        replay.ensure_random_daily_plans(["2026-07-31"])
+        all_plans = replay.list_random_daily_plans()
+        for account_id in ("acct-1", "acct-2"):
+            first = next(
+                item for item in all_plans
+                if item["account_id"] == account_id
+                and item["shanghai_date"] == "2026-07-30"
+            )
+            second = next(
+                item for item in all_plans
+                if item["account_id"] == account_id
+                and item["shanghai_date"] == "2026-07-31"
+            )
+            self.assertNotEqual(first["publish_times"], second["publish_times"])
+
+    def test_random_config_change_keeps_today_and_replaces_tomorrow(self):
+        first = self.store.save_auto_publish_config(
+            expected_version=0,
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=[],
+            schedule_mode="random",
+            random_daily_count=2,
+            account_ids=["acct-1"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-random-v1",
+            consented_at="2026-07-29 10:00:00",
+        )
+        self.clock.current += timedelta(days=1)
+        self.store.ensure_random_daily_plans(["2026-07-31"])
+        before = {
+            item["shanghai_date"]: item["publish_times"]
+            for item in self.store.list_random_daily_plans(
+                account_ids=["acct-1"]
+            )
+        }
+        changed = self.store.save_auto_publish_config(
+            expected_version=first["version"],
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=[],
+            schedule_mode="random",
+            random_daily_count=3,
+            account_ids=["acct-1"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-random-v1",
+            consented_at="2026-07-30 10:00:00",
+        )
+        after = {
+            item["shanghai_date"]: item["publish_times"]
+            for item in self.store.list_random_daily_plans(
+                account_ids=["acct-1"]
+            )
+        }
+        self.assertEqual("2026-07-31", changed["random_effective_date"])
+        self.assertEqual(before["2026-07-30"], after["2026-07-30"])
+        self.assertEqual(3, len(after["2026-07-31"]))
+
+    def test_concurrent_random_plan_ensure_keeps_one_persisted_result(self):
+        self.store.save_auto_publish_config(
+            expected_version=0,
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=[],
+            schedule_mode="random",
+            random_daily_count=4,
+            account_ids=["acct-1"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-random-v1",
+            consented_at="2026-07-29 10:00:00",
+        )
+        stores = [
+            TTPostStore(self.db_path, now_fn=self.clock),
+            TTPostStore(self.db_path, now_fn=self.clock),
+        ]
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def ensure(store):
+            try:
+                barrier.wait()
+                item = store.ensure_random_daily_plans(["2026-07-31"])[0]
+                with lock:
+                    results.append(item)
+            except Exception as exc:  # pragma: no cover - asserted below
+                with lock:
+                    errors.append(exc)
+
+        workers = [threading.Thread(target=ensure, args=(store,)) for store in stores]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(results[0], results[1])
+        persisted = self.store.list_random_daily_plans(
+            account_ids=["acct-1"],
+            shanghai_dates=["2026-07-31"],
+        )
+        self.assertEqual([results[0]], persisted)
 
     def test_account_settings_are_required_versioned_and_boolean_safe(self):
         self.assertIsNone(self.store.get_account_settings("acct-1"))
@@ -1092,6 +1358,46 @@ class RecurringStorageTests(CoreTestCase):
             actor_user_id="operator-1",
             actor_name="Operator",
         )
+
+    def test_random_auto_claim_requires_exact_persisted_slot(self):
+        saved = self.store.save_auto_publish_config(
+            expected_version=0,
+            enabled=True,
+            timezone="Asia/Shanghai",
+            publish_times=[],
+            schedule_mode="random",
+            random_daily_count=1,
+            account_ids=["acct-1"],
+            caption_template=CAPTION,
+            user_consent=True,
+            consent_version="tt-post-random-v1",
+            consented_at="2026-07-29 10:00:00",
+        )
+        plan = saved["random_daily_plans"][0]
+        self.add_recurring("91001", "acct-1")
+        with self.assertRaises(TTPostError) as invalid:
+            self.store.claim_recurring_run(
+                "tt-post:auto:v1:acct-1:2026-07-30:0000",
+                "auto",
+                "acct-1",
+                "2026-07-30",
+                "00:00",
+                beijing_to_utc("2026-07-30 00:00:00"),
+                config_version=plan["config_version"],
+            )
+        self.assertEqual("tt_post_schedule_not_current", invalid.exception.code)
+        publish_time = plan["publish_times"][0]
+        claimed = self.store.claim_recurring_run(
+            "tt-post:auto:v1:acct-1:2026-07-30:%s"
+            % publish_time.replace(":", ""),
+            "auto",
+            "acct-1",
+            "2026-07-30",
+            publish_time,
+            beijing_to_utc("2026-07-30 %s:00" % publish_time),
+            config_version=plan["config_version"],
+        )
+        self.assertEqual(publish_time, claimed["publish_time"])
 
     def claim_manual(
         self,

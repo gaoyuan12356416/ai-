@@ -45,6 +45,9 @@ BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 MAX_CAPTION_CHARS = 2200
 MAX_EVENT_MESSAGE_CHARS = 500
 MAX_ACCOUNT_SETTINGS_BATCH = 50
+SCHEDULE_MODES = frozenset({"fixed", "random"})
+MAX_DAILY_PUBLISH_COUNT = 24
+RANDOM_PUBLISH_MIN_GAP_MINUTES = 60
 FIXED_CAPTION_TEMPLATE = (
     "Watch the full story in the app 🎬\n\n"
     "Drama ID: {{contect_id}}\n\n"
@@ -293,7 +296,7 @@ def _publish_times(value: Any) -> List[str]:
             400,
         )
     raw_items = list(value)
-    if len(raw_items) > 24:
+    if len(raw_items) > MAX_DAILY_PUBLISH_COUNT:
         raise TTPostError(
             "invalid_publish_times",
             "每日发布时间最多24个",
@@ -307,6 +310,71 @@ def _publish_times(value: Any) -> List[str]:
             400,
         )
     return sorted(normalized)
+
+
+def _schedule_mode(value: Any) -> str:
+    normalized = str(value or "fixed").strip().lower()
+    if normalized not in SCHEDULE_MODES:
+        raise TTPostError(
+            "invalid_schedule_mode",
+            "自动发布模式必须是 fixed 或 random",
+            400,
+        )
+    return normalized
+
+
+def _random_daily_count(value: Any, *, allow_zero: bool = False) -> int:
+    normalized = _nonnegative_int(
+        value,
+        "每日随机发布次数",
+        MAX_DAILY_PUBLISH_COUNT,
+    )
+    if not allow_zero and normalized < 1:
+        raise TTPostError(
+            "invalid_random_daily_count",
+            "每日随机发布次数必须是1到24",
+            400,
+        )
+    return normalized
+
+
+def _generate_random_publish_times(
+    count: Any,
+    *,
+    previous_times: Sequence[str] = (),
+) -> List[str]:
+    """Generate one bounded non-hourly plan with a 60-minute minimum gap."""
+
+    normalized_count = _random_daily_count(count)
+    previous = list(previous_times)
+    # For sorted unique y values, x[i] = y[i] + i * 59 guarantees
+    # x[i+1] - x[i] >= 60 while keeping x in the same Shanghai day.
+    upper = 1439 - (normalized_count - 1) * (
+        RANDOM_PUBLISH_MIN_GAP_MINUTES - 1
+    )
+    rng = secrets.SystemRandom()
+    for _attempt in range(512):
+        compressed = sorted(
+            rng.sample(range(upper + 1), normalized_count)
+        )
+        minute_values = [
+            value
+            + index * (RANDOM_PUBLISH_MIN_GAP_MINUTES - 1)
+            for index, value in enumerate(compressed)
+        ]
+        if any(value % 60 == 0 for value in minute_values):
+            continue
+        result = [
+            "%02d:%02d" % divmod(value, 60)
+            for value in minute_values
+        ]
+        if result != previous:
+            return result
+    raise TTPostError(
+        "tt_post_random_plan_generation_failed",
+        "无法生成满足间隔要求的每日随机发布时间",
+        500,
+    )
 
 
 def _shanghai_date(value: Any) -> str:
@@ -1348,6 +1416,11 @@ def ensure_storage(db_path: Any) -> None:
                     timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
                         CHECK(timezone='Asia/Shanghai'),
                     publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    schedule_mode TEXT NOT NULL DEFAULT 'fixed'
+                        CHECK(schedule_mode IN ('fixed','random')),
+                    random_daily_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(random_daily_count BETWEEN 0 AND 24),
+                    random_effective_date TEXT NOT NULL DEFAULT '',
                     version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
                     user_consent INTEGER NOT NULL CHECK(user_consent=1),
                     consent_version TEXT NOT NULL,
@@ -1368,6 +1441,11 @@ def ensure_storage(db_path: Any) -> None:
                     timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'
                         CHECK(timezone='Asia/Shanghai'),
                     publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    schedule_mode TEXT NOT NULL DEFAULT 'fixed'
+                        CHECK(schedule_mode IN ('fixed','random')),
+                    random_daily_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(random_daily_count BETWEEN 0 AND 24),
+                    random_effective_date TEXT NOT NULL DEFAULT '',
                     account_ids_json TEXT NOT NULL DEFAULT '[]',
                     caption_template TEXT NOT NULL,
                     user_consent INTEGER NOT NULL DEFAULT 0
@@ -1380,6 +1458,15 @@ def ensure_storage(db_path: Any) -> None:
                     updated_by_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS tt_post_random_daily_plan (
+                    account_id TEXT NOT NULL,
+                    shanghai_date TEXT NOT NULL,
+                    config_version INTEGER NOT NULL CHECK(config_version>0),
+                    publish_times_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(account_id,shanghai_date)
                 );
 
                 CREATE TABLE IF NOT EXISTS tt_post_recurring_pool (
@@ -1700,6 +1787,8 @@ def ensure_storage(db_path: Any) -> None:
                     ) WHERE trigger_type='auto';
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_tt_post_schedule_run_queue
                     ON tt_post_schedule_run(queue_id) WHERE queue_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_tt_post_random_plan_date
+                    ON tt_post_random_daily_plan(shanghai_date,account_id);
                 """
             )
             schedule_run_columns = {
@@ -1724,6 +1813,16 @@ def ensure_storage(db_path: Any) -> None:
                     """
                 )
             additive_columns = {
+                "tt_post_daily_schedule": {
+                    "schedule_mode": "TEXT NOT NULL DEFAULT 'fixed'",
+                    "random_daily_count": "INTEGER NOT NULL DEFAULT 0",
+                    "random_effective_date": "TEXT NOT NULL DEFAULT ''",
+                },
+                "tt_post_auto_publish_config": {
+                    "schedule_mode": "TEXT NOT NULL DEFAULT 'fixed'",
+                    "random_daily_count": "INTEGER NOT NULL DEFAULT 0",
+                    "random_effective_date": "TEXT NOT NULL DEFAULT ''",
+                },
                 "tt_post_material_intake": {
                     "material_tag": "TEXT NOT NULL DEFAULT ''",
                 },
@@ -1859,6 +1958,16 @@ def _public_daily_schedule(row: sqlite3.Row) -> Dict[str, Any]:
             "每日发布排期存储内容无效",
             500,
         )
+    result["schedule_mode"] = _schedule_mode(
+        result.get("schedule_mode", "fixed")
+    )
+    result["random_daily_count"] = _random_daily_count(
+        result.get("random_daily_count", 0),
+        allow_zero=True,
+    )
+    result["random_effective_date"] = str(
+        result.get("random_effective_date", "") or ""
+    )
     return result
 
 
@@ -1868,6 +1977,9 @@ def _default_daily_schedule(account_id: str) -> Dict[str, Any]:
         "enabled": False,
         "timezone": "Asia/Shanghai",
         "publish_times": [],
+        "schedule_mode": "fixed",
+        "random_daily_count": 0,
+        "random_effective_date": "",
         "version": 0,
         "user_consent": False,
         "consent_version": "",
@@ -1911,6 +2023,42 @@ def _public_auto_publish_config(row: sqlite3.Row) -> Dict[str, Any]:
     result["legacy_schedule_mode"] = "atomic"
     result["legacy_publish_times_by_account"] = {}
     result["legacy_membership_mode"] = "atomic"
+    result["schedule_mode"] = _schedule_mode(
+        result.get("schedule_mode", "fixed")
+    )
+    result["random_daily_count"] = _random_daily_count(
+        result.get("random_daily_count", 0),
+        allow_zero=True,
+    )
+    result["random_effective_date"] = str(
+        result.get("random_effective_date", "") or ""
+    )
+    result["random_daily_plans"] = []
+    return result
+
+
+def _public_random_daily_plan(row: sqlite3.Row) -> Dict[str, Any]:
+    result = dict(row)
+    try:
+        publish_times = json.loads(
+            str(result.pop("publish_times_json", "[]"))
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise TTPostError(
+            "tt_post_random_plan_storage_invalid",
+            "每日随机发布时间计划存储内容无效",
+            500,
+        ) from None
+    result["publish_times"] = _publish_times(publish_times)
+    result["account_id"] = _account_id(result.get("account_id"))
+    result["shanghai_date"] = _shanghai_date(
+        result.get("shanghai_date")
+    )
+    result["config_version"] = _positive_int(
+        result.get("config_version"),
+        "随机计划配置版本",
+        2**31 - 1,
+    )
     return result
 
 
@@ -2281,6 +2429,10 @@ class TTPostStore:
             "enabled": projected_enabled,
             "timezone": "Asia/Shanghai",
             "publish_times": publish_times,
+            "schedule_mode": "fixed",
+            "random_daily_count": 0,
+            "random_effective_date": "",
+            "random_daily_plans": [],
             "account_ids": account_ids,
             "caption_template": FIXED_CAPTION_TEMPLATE,
             "user_consent": bool(consent_source.get("user_consent")),
@@ -2308,6 +2460,227 @@ class TTPostStore:
             ),
         }
 
+    @staticmethod
+    def _ensure_random_daily_plan(
+        conn: sqlite3.Connection,
+        schedule: sqlite3.Row,
+        shanghai_date: str,
+        timestamp: str,
+        *,
+        replace_future: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_date = _shanghai_date(shanghai_date)
+        if (
+            not bool(schedule["enabled"])
+            or _schedule_mode(schedule["schedule_mode"]) != "random"
+            or int(schedule["random_daily_count"] or 0) < 1
+            or not str(schedule["random_effective_date"] or "")
+            or normalized_date < str(schedule["random_effective_date"])
+        ):
+            return None
+        account_id = _account_id(schedule["account_id"])
+        existing = conn.execute(
+            """
+            SELECT * FROM tt_post_random_daily_plan
+            WHERE account_id=? AND shanghai_date=?
+            """,
+            (account_id, normalized_date),
+        ).fetchone()
+        if existing is not None and not replace_future:
+            return _public_random_daily_plan(existing)
+        if existing is not None:
+            started = conn.execute(
+                """
+                SELECT 1 FROM tt_post_schedule_run
+                WHERE trigger_type='auto' AND account_id=?
+                    AND shanghai_date=?
+                LIMIT 1
+                """,
+                (account_id, normalized_date),
+            ).fetchone()
+            if started is not None:
+                return _public_random_daily_plan(existing)
+        previous_row = conn.execute(
+            """
+            SELECT * FROM tt_post_random_daily_plan
+            WHERE account_id=? AND shanghai_date<?
+            ORDER BY shanghai_date DESC
+            LIMIT 1
+            """,
+            (account_id, normalized_date),
+        ).fetchone()
+        previous_times = (
+            _public_random_daily_plan(previous_row)["publish_times"]
+            if previous_row is not None
+            else []
+        )
+        publish_times = _generate_random_publish_times(
+            int(schedule["random_daily_count"]),
+            previous_times=previous_times,
+        )
+        payload = json.dumps(
+            publish_times,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO tt_post_random_daily_plan(
+                    account_id,shanghai_date,config_version,
+                    publish_times_json,created_at
+                ) VALUES(?,?,?,?,?)
+                """,
+                (
+                    account_id,
+                    normalized_date,
+                    int(schedule["version"]),
+                    payload,
+                    timestamp,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE tt_post_random_daily_plan
+                SET config_version=?,publish_times_json=?,created_at=?
+                WHERE account_id=? AND shanghai_date=?
+                """,
+                (
+                    int(schedule["version"]),
+                    payload,
+                    timestamp,
+                    account_id,
+                    normalized_date,
+                ),
+            )
+        row = conn.execute(
+            """
+            SELECT * FROM tt_post_random_daily_plan
+            WHERE account_id=? AND shanghai_date=?
+            """,
+            (account_id, normalized_date),
+        ).fetchone()
+        return _public_random_daily_plan(row)
+
+    def ensure_random_daily_plans(
+        self,
+        shanghai_dates: Iterable[Any],
+    ) -> List[Dict[str, Any]]:
+        if isinstance(shanghai_dates, (str, bytes, bytearray, Mapping)):
+            raise TTPostError(
+                "invalid_shanghai_date",
+                "随机计划日期必须是列表",
+                400,
+            )
+        normalized_dates = sorted(
+            {_shanghai_date(value) for value in shanghai_dates}
+        )
+        if len(normalized_dates) > 7:
+            raise TTPostError(
+                "invalid_shanghai_date",
+                "单次最多生成7天随机计划",
+                400,
+            )
+        timestamp = self._now_iso()
+        results: List[Dict[str, Any]] = []
+        with self._transaction() as conn:
+            schedules = conn.execute(
+                """
+                SELECT * FROM tt_post_daily_schedule
+                WHERE enabled=1 AND schedule_mode='random'
+                ORDER BY account_id
+                """
+            ).fetchall()
+            for schedule in schedules:
+                for normalized_date in normalized_dates:
+                    plan = self._ensure_random_daily_plan(
+                        conn,
+                        schedule,
+                        normalized_date,
+                        timestamp,
+                    )
+                    if plan is not None:
+                        results.append(plan)
+        return sorted(
+            results,
+            key=lambda item: (
+                str(item["shanghai_date"]),
+                str(item["account_id"]),
+            ),
+        )
+
+    def list_random_daily_plans(
+        self,
+        *,
+        account_ids: Optional[Iterable[Any]] = None,
+        shanghai_dates: Optional[Iterable[Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if account_ids is not None:
+            if isinstance(account_ids, (str, bytes, bytearray, Mapping)):
+                raise TTPostError(
+                    "invalid_auto_publish_accounts",
+                    "随机计划账号必须是列表",
+                    400,
+                )
+            normalized_accounts = sorted(
+                {_account_id(value) for value in account_ids}
+            )
+            if not normalized_accounts:
+                return []
+            clauses.append(
+                "account_id IN (%s)"
+                % ",".join("?" for _ in normalized_accounts)
+            )
+            params.extend(normalized_accounts)
+        if shanghai_dates is not None:
+            if isinstance(
+                shanghai_dates,
+                (str, bytes, bytearray, Mapping),
+            ):
+                raise TTPostError(
+                    "invalid_shanghai_date",
+                    "随机计划日期必须是列表",
+                    400,
+                )
+            normalized_dates = sorted(
+                {_shanghai_date(value) for value in shanghai_dates}
+            )
+            if not normalized_dates:
+                return []
+            clauses.append(
+                "shanghai_date IN (%s)"
+                % ",".join("?" for _ in normalized_dates)
+            )
+            params.extend(normalized_dates)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT * FROM tt_post_random_daily_plan"
+                + where
+                + " ORDER BY shanghai_date,account_id",
+                tuple(params),
+            ).fetchall()
+        return [_public_random_daily_plan(row) for row in rows]
+
+    def _auto_config_with_random_plans(
+        self,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        result = dict(config)
+        now_shanghai = self._now_fn().astimezone(BEIJING_TZ)
+        dates = [
+            now_shanghai.date().isoformat(),
+            (now_shanghai.date() + timedelta(days=1)).isoformat(),
+        ]
+        result["random_daily_plans"] = self.list_random_daily_plans(
+            account_ids=result.get("account_ids") or [],
+            shanghai_dates=dates,
+        )
+        return result
+
     def get_auto_publish_config(self) -> Dict[str, Any]:
         """Return the atomic UI config or a read-only legacy projection."""
 
@@ -2317,7 +2690,9 @@ class TTPostStore:
             ).fetchone()
             if row is None:
                 return self._legacy_auto_publish_config(conn)
-        return _public_auto_publish_config(row)
+        return self._auto_config_with_random_plans(
+            _public_auto_publish_config(row)
+        )
 
     def save_auto_publish_config(
         self,
@@ -2326,6 +2701,8 @@ class TTPostStore:
         enabled: Any,
         timezone: Any = None,
         publish_times: Any = None,
+        schedule_mode: Any = None,
+        random_daily_count: Any = None,
         account_ids: Any = None,
         caption_template: Any = None,
         user_consent: Any = None,
@@ -2399,6 +2776,30 @@ class TTPostStore:
                 if publish_times is None
                 else _publish_times(publish_times)
             )
+            normalized_mode = (
+                _schedule_mode(current.get("schedule_mode", "fixed"))
+                if schedule_mode is None
+                else _schedule_mode(schedule_mode)
+            )
+            normalized_random_count = (
+                _random_daily_count(
+                    current.get("random_daily_count", 0),
+                    allow_zero=True,
+                )
+                if random_daily_count is None
+                else _random_daily_count(
+                    random_daily_count,
+                    allow_zero=True,
+                )
+            )
+            if normalized_mode == "random" and normalized_times:
+                raise TTPostError(
+                    "tt_post_random_times_must_be_empty",
+                    "随机发布模式不能同时设置固定发布时间",
+                    400,
+                )
+            if normalized_mode == "fixed":
+                normalized_random_count = 0
             if account_ids is None:
                 normalized_account_ids = list(current["account_ids"])
             else:
@@ -2431,6 +2832,33 @@ class TTPostStore:
                         )
                     seen_account_ids.add(normalized_account_id)
                     normalized_account_ids.append(normalized_account_id)
+
+            random_config_changed = bool(
+                normalized_mode == "random"
+                and (
+                    _schedule_mode(
+                        current.get("schedule_mode", "fixed")
+                    )
+                    != "random"
+                    or int(current.get("random_daily_count") or 0)
+                    != normalized_random_count
+                    or bool(current.get("enabled")) != normalized_enabled
+                    or set(current.get("account_ids") or [])
+                    != set(normalized_account_ids)
+                    or not str(
+                        current.get("random_effective_date") or ""
+                    )
+                )
+            )
+            if normalized_mode == "random":
+                today = self._now_fn().astimezone(BEIJING_TZ).date()
+                normalized_random_effective_date = (
+                    (today + timedelta(days=1)).isoformat()
+                    if random_config_changed
+                    else str(current.get("random_effective_date") or "")
+                )
+            else:
+                normalized_random_effective_date = ""
 
             normalized_template = (
                 str(current["caption_template"])
@@ -2475,10 +2903,24 @@ class TTPostStore:
                     "自动发布确认时间",
                 )
 
-            if normalized_enabled and not normalized_times:
+            if (
+                normalized_enabled
+                and normalized_mode == "fixed"
+                and not normalized_times
+            ):
                 raise TTPostError(
                     "tt_post_auto_config_times_required",
                     "启用自动发布前至少需要设置一个时间点",
+                    400,
+                )
+            if (
+                normalized_enabled
+                and normalized_mode == "random"
+                and normalized_random_count < 1
+            ):
+                raise TTPostError(
+                    "invalid_random_daily_count",
+                    "启用随机自动发布前必须设置每天1到24次",
                     400,
                 )
             if normalized_enabled and not normalized_account_ids:
@@ -2516,17 +2958,22 @@ class TTPostStore:
                     """
                     INSERT INTO tt_post_auto_publish_config(
                         id,version,enabled,timezone,publish_times_json,
+                        schedule_mode,random_daily_count,
+                        random_effective_date,
                         account_ids_json,caption_template,user_consent,
                         consent_version,consented_at_utc,
                         created_by_user_id,created_by_name,
                         updated_by_user_id,updated_by_name,created_at,updated_at
-                    ) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         new_version,
                         int(normalized_enabled),
                         normalized_timezone,
                         times_json,
+                        normalized_mode,
+                        normalized_random_count,
+                        normalized_random_effective_date,
                         account_ids_json,
                         normalized_template,
                         int(normalized_user_consent),
@@ -2545,6 +2992,8 @@ class TTPostStore:
                     """
                     UPDATE tt_post_auto_publish_config
                     SET version=?,enabled=?,timezone=?,publish_times_json=?,
+                        schedule_mode=?,random_daily_count=?,
+                        random_effective_date=?,
                         account_ids_json=?,caption_template=?,user_consent=?,
                         consent_version=?,consented_at_utc=?,
                         updated_by_user_id=?,updated_by_name=?,updated_at=?
@@ -2555,6 +3004,9 @@ class TTPostStore:
                         int(normalized_enabled),
                         normalized_timezone,
                         times_json,
+                        normalized_mode,
+                        normalized_random_count,
+                        normalized_random_effective_date,
                         account_ids_json,
                         normalized_template,
                         int(normalized_user_consent),
@@ -2591,16 +3043,21 @@ class TTPostStore:
                         """
                         INSERT INTO tt_post_daily_schedule(
                             account_id,enabled,timezone,publish_times_json,
+                            schedule_mode,random_daily_count,
+                            random_effective_date,
                             version,user_consent,consent_version,
                             consented_at_utc,created_by_user_id,
                             created_by_name,updated_by_user_id,
                             updated_by_name,created_at,updated_at
-                        ) VALUES(?,?,'Asia/Shanghai',?,1,1,?,?,?,?,?,?,?,?)
+                        ) VALUES(?,?,'Asia/Shanghai',?,?,?,?,1,1,?,?,?,?,?,?,?,?)
                         """,
                         (
                             normalized_account_id,
                             int(normalized_enabled),
                             times_json,
+                            normalized_mode,
+                            normalized_random_count,
+                            normalized_random_effective_date,
                             normalized_consent_version,
                             normalized_consented_at,
                             normalized_actor_id,
@@ -2630,7 +3087,9 @@ class TTPostStore:
                         """
                         UPDATE tt_post_daily_schedule
                         SET enabled=?,timezone='Asia/Shanghai',
-                            publish_times_json=?,version=?,user_consent=?,
+                            publish_times_json=?,schedule_mode=?,
+                            random_daily_count=?,random_effective_date=?,
+                            version=?,user_consent=?,
                             consent_version=?,consented_at_utc=?,
                             updated_by_user_id=?,updated_by_name=?,updated_at=?
                         WHERE account_id=?
@@ -2638,6 +3097,9 @@ class TTPostStore:
                         (
                             int(normalized_enabled),
                             times_json,
+                            normalized_mode,
+                            normalized_random_count,
+                            normalized_random_effective_date,
                             int(schedule["version"]) + 1,
                             schedule_user_consent,
                             schedule_consent_version,
@@ -2648,6 +3110,24 @@ class TTPostStore:
                             normalized_account_id,
                         ),
                     )
+
+            if normalized_enabled and normalized_mode == "random":
+                for normalized_account_id in normalized_account_ids:
+                    schedule = conn.execute(
+                        """
+                        SELECT * FROM tt_post_daily_schedule
+                        WHERE account_id=?
+                        """,
+                        (normalized_account_id,),
+                    ).fetchone()
+                    if schedule is not None:
+                        self._ensure_random_daily_plan(
+                            conn,
+                            schedule,
+                            normalized_random_effective_date,
+                            timestamp,
+                            replace_future=random_config_changed,
+                        )
 
             for removed_account_id in sorted(
                 old_account_ids.difference(new_account_ids)
@@ -2679,7 +3159,9 @@ class TTPostStore:
             result = conn.execute(
                 "SELECT * FROM tt_post_auto_publish_config WHERE id=1"
             ).fetchone()
-        return _public_auto_publish_config(result)
+        return self._auto_config_with_random_plans(
+            _public_auto_publish_config(result)
+        )
 
     def get_daily_schedule(self, account_id: Any) -> Dict[str, Any]:
         normalized = _account_id(account_id)
@@ -2903,7 +3385,9 @@ class TTPostStore:
                     """
                     UPDATE tt_post_daily_schedule
                     SET enabled=?,timezone='Asia/Shanghai',
-                        publish_times_json=?,version=?,
+                        publish_times_json=?,schedule_mode='fixed',
+                        random_daily_count=0,random_effective_date='',
+                        version=?,
                         user_consent=1,consent_version=?,consented_at_utc=?,
                         updated_by_user_id=?,updated_by_name=?,updated_at=?
                     WHERE account_id=?
@@ -6125,13 +6609,48 @@ class TTPostStore:
                     """,
                     (normalized_account_id,),
                 ).fetchone()
-                if (
-                    schedule is None
-                    or not bool(schedule["enabled"])
-                    or int(schedule["version"]) != normalized_config_version
-                    or normalized_time
-                    not in json.loads(str(schedule["publish_times_json"]))
-                ):
+                valid_slot = False
+                if schedule is not None and bool(schedule["enabled"]):
+                    mode = _schedule_mode(schedule["schedule_mode"])
+                    if mode == "fixed":
+                        try:
+                            configured_times = _publish_times(
+                                json.loads(
+                                    str(schedule["publish_times_json"])
+                                )
+                            )
+                        except (
+                            TypeError,
+                            ValueError,
+                            json.JSONDecodeError,
+                        ):
+                            raise TTPostError(
+                                "tt_post_schedule_storage_invalid",
+                                "每日发布时间配置损坏",
+                                500,
+                            ) from None
+                        valid_slot = bool(
+                            int(schedule["version"])
+                            == normalized_config_version
+                            and normalized_time in configured_times
+                        )
+                    else:
+                        plan = conn.execute(
+                            """
+                            SELECT * FROM tt_post_random_daily_plan
+                            WHERE account_id=? AND shanghai_date=?
+                            """,
+                            (normalized_account_id, normalized_date),
+                        ).fetchone()
+                        if plan is not None:
+                            public_plan = _public_random_daily_plan(plan)
+                            valid_slot = bool(
+                                int(public_plan["config_version"])
+                                == normalized_config_version
+                                and normalized_time
+                                in public_plan["publish_times"]
+                            )
+                if not valid_slot:
                     raise TTPostError(
                         "tt_post_schedule_not_current",
                         "每日发布排期未启用或版本已变化",

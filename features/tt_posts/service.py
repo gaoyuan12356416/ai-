@@ -50,6 +50,7 @@ from .core import (
     FIXED_CAPTION_TEMPLATE,
     LiveGates,
     MAX_ACCOUNT_SETTINGS_BATCH,
+    MAX_DAILY_PUBLISH_COUNT,
     MaterialResolution,
     SafeAccount,
     SnapshotAccountSource,
@@ -2221,11 +2222,17 @@ class TTPostService:
             "enabled",
             "timezone",
             "publish_times",
+            "schedule_mode",
+            "random_daily_count",
             "source_account_ids",
             "caption_template",
             "consent",
         }
-        required = allowed - {"consent"}
+        required = allowed - {
+            "consent",
+            "schedule_mode",
+            "random_daily_count",
+        }
         if set(payload).difference(allowed) or not required.issubset(payload):
             raise TTPostServiceError(
                 "invalid_request",
@@ -2251,10 +2258,55 @@ class TTPostService:
                 400,
             )
         publish_times = payload.get("publish_times")
-        if not isinstance(publish_times, list) or len(publish_times) > 1:
+        if (
+            not isinstance(publish_times, list)
+            or len(publish_times) > MAX_DAILY_PUBLISH_COUNT
+        ):
             raise TTPostServiceError(
                 "invalid_publish_times",
-                "当前版本只支持一个共同的自动发布时间",
+                "固定自动发布时间必须是最多24项的数组",
+                400,
+            )
+        schedule_mode = str(
+            payload.get("schedule_mode", "fixed") or ""
+        ).strip().lower()
+        if schedule_mode not in {"fixed", "random"}:
+            raise TTPostServiceError(
+                "invalid_schedule_mode",
+                "自动发布模式必须是fixed或random",
+                400,
+            )
+        random_daily_count = payload.get("random_daily_count", 0)
+        if (
+            type(random_daily_count) is not int
+            or random_daily_count < 0
+            or random_daily_count > MAX_DAILY_PUBLISH_COUNT
+        ):
+            raise TTPostServiceError(
+                "invalid_random_daily_count",
+                "每日随机发布次数必须是0到24的整数",
+                400,
+            )
+        if schedule_mode == "random" and publish_times:
+            raise TTPostServiceError(
+                "tt_post_random_times_must_be_empty",
+                "随机发布模式不能同时设置固定发布时间",
+                400,
+            )
+        if enabled and schedule_mode == "fixed" and not publish_times:
+            raise TTPostServiceError(
+                "tt_post_auto_config_times_required",
+                "启用固定自动发布前至少设置一个时间点",
+                400,
+            )
+        if (
+            enabled
+            and schedule_mode == "random"
+            and random_daily_count < 1
+        ):
+            raise TTPostServiceError(
+                "invalid_random_daily_count",
+                "启用随机自动发布前必须设置每天1到24次",
                 400,
             )
         account_ids = _auto_config_account_ids(
@@ -2342,6 +2394,8 @@ class TTPostService:
             enabled=enabled,
             timezone="Asia/Shanghai",
             publish_times=publish_times,
+            schedule_mode=schedule_mode,
+            random_daily_count=random_daily_count,
             account_ids=account_ids,
             caption_template=caption_template,
             user_consent=(consent or {}).get("accepted"),
@@ -4482,6 +4536,25 @@ class TTPostService:
         # Snapshot and durably reserve every currently due slot before any
         # recovery path can enter creator-info. Merely listing old recovery
         # rows is local; `_execute_recurring_run` is the first live boundary.
+        today = now_shanghai.date()
+        tomorrow = today + timedelta(days=1)
+        yesterday = today - timedelta(days=1)
+        self.store.ensure_random_daily_plans(
+            [today.isoformat(), tomorrow.isoformat()]
+        )
+        random_plans = {
+            (
+                str(item.get("account_id") or ""),
+                str(item.get("shanghai_date") or ""),
+            ): item
+            for item in self.store.list_random_daily_plans(
+                shanghai_dates=[
+                    yesterday.isoformat(),
+                    today.isoformat(),
+                    tomorrow.isoformat(),
+                ]
+            )
+        }
         due_slots = []
         for schedule in self.store.list_daily_schedules():
             if not schedule.get("enabled"):
@@ -4492,9 +4565,28 @@ class TTPostService:
                     now_shanghai + timedelta(days=day_offset)
                 ).date()
                 shanghai_date = local_day.isoformat()
+                if str(schedule.get("schedule_mode") or "fixed") == "random":
+                    plan = random_plans.get((account_id, shanghai_date))
+                    publish_times = (
+                        list(plan.get("publish_times") or [])
+                        if isinstance(plan, Mapping)
+                        else []
+                    )
+                    config_version = (
+                        int(plan.get("config_version") or 0)
+                        if isinstance(plan, Mapping)
+                        else 0
+                    )
+                else:
+                    publish_times = list(
+                        schedule.get("publish_times") or []
+                    )
+                    config_version = int(
+                        schedule.get("version") or 0
+                    )
                 for publish_time in sorted(
                     str(value)
-                    for value in schedule.get("publish_times") or []
+                    for value in publish_times
                 ):
                     try:
                         hour, minute = (
@@ -4520,7 +4612,7 @@ class TTPostService:
                                 account_id,
                                 shanghai_date,
                                 publish_time,
-                                int(schedule.get("version") or 0),
+                                config_version,
                             )
                         )
 
