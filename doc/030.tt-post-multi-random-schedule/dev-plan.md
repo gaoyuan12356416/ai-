@@ -6,7 +6,7 @@
 | API 模式、次数与领取适配 | `features/tt_posts/service.py` | 已完成 |
 | 多时间与随机模式 UI | `static/tt-post-pool.html` | 已完成 |
 | 核心、服务、UI 契约测试 | `scripts/test_tt_*.py` | 已完成 |
-| GitHub 推送与生产发布 | immutable release | 待执行 |
+| GitHub 推送与生产发布 | immutable release | 已完成 |
 
 ## 验证命令
 

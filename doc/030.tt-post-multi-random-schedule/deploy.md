@@ -24,3 +24,24 @@
 
 - 将 `/opt/tt-post/current` 切回部署前 release，恢复静态页并重启 `tt-post-service`。
 - 新表和加法字段可保留；如必须恢复数据库，先停服务后使用部署前 online backup。
+
+## 2026-08-04 生产发布记录
+
+- GitHub/生产提交：`139a7c477f7336a10a9daece950c397d18f5a4e5`
+- 前一 release：`/opt/tt-post/releases/e11305771246dea484f3a11c5a62dfc46a60b9fb`
+- 当前 release：`/opt/tt-post/releases/139a7c477f7336a10a9daece950c397d18f5a4e5`
+- online backup：`/mnt/data-disk/tt-post-publisher/backups/20260804T151255+0800-multi-random-pre-139a7c4`
+- 数据盘 UUID：`3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`
+- 副本迁移：`integrity_check=ok`，历史配置保持版本 6、启用、7 个账号、固定 `14:00`；新随机计划表为空。
+- 首次切换因新 release 根目录继承 `0700` 权限，`tt-post` 用户无法读取而失败；自动回滚到前一 release，数据库未迁移，队列/运行/发布 ID 均未变化。按现有不可变 release 模型修正为目录 `0555`、普通文件 `0444`、可执行文件 `0555`，并以 `tt-post` 用户导入通过后重新发布。
+- 最终切换：2026-08-04 15:16:50 CST；`tt-post-service` 健康，runner/prepare 的 timer 与 path 均 active。
+- 三处静态页（release、应用 static、Nginx static）SHA-256 均为 `4c3919ce3094c35cd789eebd3974a6a0ea7ddf965945101f4c984a43a663dfda`，公网无缓存获取结果一致。
+- 部署前后生产基线均为：队列 7、最大队列 ID 7、非空 TikTok `publish_id` 6、运行 7、最大运行 ID 7。
+- 15:17 CST 自然 runner：`status=ok`、`schedule_due_count=0`、`publish_request_count=0`；未人工触发 runner 或真实发布。
+
+### 精确回滚
+
+1. 将 `/opt/tt-post/current` 原子切回 `/opt/tt-post/releases/e11305771246dea484f3a11c5a62dfc46a60b9fb`。
+2. 从上述 backup 的 `static/app-tt-post-pool.html` 与 `static/nginx-tt-post-pool.html` 恢复两处页面。
+3. 只重启 `tt-post-service.service`；加法字段和空计划表可安全保留。
+4. 只有数据库本身损坏时，停服务后才使用 `tt-post.sqlite3.pre`；该 pristine 副本 `integrity_check=ok` 且未执行新迁移。
