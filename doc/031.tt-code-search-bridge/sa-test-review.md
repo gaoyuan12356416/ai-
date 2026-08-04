@@ -2,7 +2,7 @@
 
 ## 结论
 
-测试设计已按最终实现扩充到 91 条，可作为发布验收基线。自动化已实现并有阶段性通过记录，但最终 diff 的全量运行、浏览器重跑和生产 H 类证据尚未完成。
+测试设计按最终实现扩充到 91 条并作为发布验收基线。最终 diff 全量运行、移动/桌面浏览器和生产 H 类只读证据均已完成；生产回滚未实际切换旧代码，以现成旧 release、备份 manifest 和 Redis 停机降级证明可回退。
 
 ## 覆盖检查
 
@@ -31,9 +31,9 @@
 
 ## 当前执行判定
 
-- 聚焦 Python/Node/浏览器运行是阶段性证据，因其后代码继续变化，不能直接批量把 91 行改为通过。
-- 最终 Python discover、编译、Node 新旧 bridge、diff 检查和移动/桌面浏览器必须基于同一个 commit。
-- H 类只在实际候选/生产部署后填写；本地结果不得伪造成 production passed。
+- 最终 Python discover 为 395 tests，Node 新旧 bridge 为 84/53 assertions，编译与 diff 检查均通过。
+- 390x844 与 1440x900 生产资源浏览器验证通过，无 console/page error。
+- H01-H07 已有完整生产证据；H08 的破坏性生产代码切回未执行。H09 只实际验证了停止/恢复 Redis 与 SQLite 降级，未恢复 unit/config 或切旧代码；旧 release、备份 manifest 和回滚步骤已核验。
 
 ## 发布门禁
 

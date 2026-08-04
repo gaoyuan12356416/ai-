@@ -2,22 +2,22 @@
 
 ## 当前状态
 
-业务代码和部署资产已实现；阶段性本地自动化已通过，最终全量回归、独立复审和生产部署仍在进行。本文不把本地结果写成线上结果，也不授权真实 TikTok 发布测试。
+业务代码、部署资产、最终全量回归、独立复审和生产部署均已完成。线上验收只使用 GET、只读状态与缓存停启验证，没有触发真实 TikTok 发布。
 
 ## 任务完成表
 
 | 任务 | 文件 / 模块 | 实际交付 | 状态 |
 | --- | --- | --- | --- |
-| D1 加法迁移 | `code_routes.py`, `core.py` | route/audit 表、索引、trigger、queue `code` 字段，事务化幂等迁移 | 已实现，本地验证中 |
-| D2 code 分配 | `code_routes.py` | 安全随机、有界碰撞、O(capacity) 空槽位图、满池最早回收和审计、queue 幂等 | 已实现，本地验证中 |
-| D3 `{code}` | `core.py`, `service.py`, `tt-post-pool.html` | 正式队列冻结、preview `A1B2`、UTF-16 校验、直接测试拒绝 | 已实现，本地验证中 |
-| D4 正式 URL | `links.py`, `core.py`, `service.py` | 新正式队列 TT、`af_dp` 第一、冻结 route；历史/直接测试 AIpost 兼容 | 已实现，本地验证中 |
-| D5 Redis | `code_routes.py`, env/deploy | stdlib RESP、24h/30s 固定 TTL、随机 namespace、SQLite fallback、loopback 6381 | 已实现，本地验证中 |
-| D6 公共组合 API | `app.py`, `service.py` | 主 app 限流/并发/剧目校验，bearer 私有 sidecar，一次组合响应 | 已实现，本地验证中 |
-| D7 新页面 | `tt-drama-code-search.html/js` | code/ID 搜索、五条 Featured、触摸/鼠标/触控笔/按钮横滑和防误触 | 已实现，本地验证中 |
-| D8 部署资产 | Nginx、Redis config/unit、env examples | `/tt-code`/JS/API exact routes，Redis 独立 unit，原 `/tt` 不动 | 已实现，待生产部署 |
-| D9 自动化 | `scripts/test_tt_*` | allocator/schema/cache/API/link/UI/bridge 及既有 TT 回归 | 已实现，最终全量重跑中 |
-| D10 文档与上线证据 | 本目录 | 需求/API/评审/测试/部署合同已按实现修订 | 进行中：待上线后补证据 |
+| D1 加法迁移 | `code_routes.py`, `core.py` | route/audit 表、索引、trigger、queue `code` 字段，事务化幂等迁移 | 已完成，副本与生产验证通过 |
+| D2 code 分配 | `code_routes.py` | 安全随机、有界碰撞、O(capacity) 空槽位图、满池最早回收和审计、queue 幂等 | 已完成，自动化通过 |
+| D3 `{code}` | `core.py`, `service.py`, `tt-post-pool.html` | 正式队列冻结、preview `A1B2`、UTF-16 校验、直接测试拒绝 | 已完成，自动化通过 |
+| D4 正式 URL | `links.py`, `core.py`, `service.py` | 新正式队列 TT、`af_dp` 第一、冻结 route；历史/直接测试 AIpost 兼容 | 已完成，自动化通过 |
+| D5 Redis | `code_routes.py`, env/deploy | stdlib RESP、24h/30s 固定 TTL、随机 namespace、SQLite fallback、loopback 6381 | 已完成，生产降级验证通过 |
+| D6 公共组合 API | `app.py`, `service.py` | 主 app 限流/并发/剧目校验，bearer 私有 sidecar，一次组合响应 | 已完成，线上验证通过 |
+| D7 新页面 | `tt-drama-code-search.html/js` | code/ID 搜索、五条 Featured、触摸/鼠标/触控笔/按钮横滑和防误触 | 已完成，移动与桌面验证通过 |
+| D8 部署资产 | Nginx、Redis config/unit、env examples | `/tt-code`/JS/API exact routes，Redis 独立 unit，原 `/tt` 不动 | 已完成生产部署 |
+| D9 自动化 | `scripts/test_tt_*` | allocator/schema/cache/API/link/UI/bridge 及既有 TT 回归 | 已完成：Python 395、Node 84/53 |
+| D10 文档与上线证据 | 本目录 | 需求/API/评审/测试/部署合同及生产证据 | 已完成 |
 
 ## 最终实现顺序
 
@@ -76,10 +76,8 @@ git diff --exit-code -- static/tt-drama-search.html static/tt-drama-search.js de
 
 另需在隔离浏览器验证 390x844 和桌面视口的五条卡片、按钮、鼠标拖动、snap、code 大写和无 console error。
 
-## 待完成
+## 完成记录
 
-- 在最终 diff 上跑完上表全量命令并记录可核对的数量/退出码。
-- 完成独立 P0/P1 代码复审。
-- push GitHub exact commit，在服务器候选 release 对 DB 副本演练迁移。
-- 按 `deploy.md` 备份、部署并完成只读/无真实发布验收。
-- 上线后补录 commit、release、backup、hash、服务状态、API/Redis/Nginx/浏览器和零发布证据。
+- 运行代码 exact commit：`b01dabe22d9da1571c68b6fb0775a61bb48e18de`。
+- 服务器 release、DB 副本迁移、备份 manifest、Redis/Nginx/systemd、公共 API、浏览器和旧 `/tt` 隔离均已验证。
+- 发布前后 queue、run、plan、publish ID 计数一致；没有调用 publish、canary、`run-now` 或人工 scheduler。

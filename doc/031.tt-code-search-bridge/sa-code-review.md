@@ -2,7 +2,7 @@
 
 ## 结论
 
-多轮独立评审发现的兼容性和边界问题已按下表修订；当前最终 diff 已完成收口复审与 395 项全量回归，没有未关闭的 P0/P1/P2。此结论批准进入受控生产候选验证，不替代 DB/Redis/Nginx/systemd 与线上回滚门禁。
+多轮独立评审发现的兼容性和边界问题已全部修订；最终 diff 完成 395 项全量回归且无未关闭 P0/P1/P2。生产候选、DB/Redis/Nginx/systemd 及回滚材料/回滚点门禁已验证，运行代码为 `b01dabe22d9da1571c68b6fb0775a61bb48e18de`；未做破坏性生产代码切回。
 
 ## 评审范围
 
@@ -22,8 +22,8 @@
 | CR-F04 | P1 | Redis 网络阻塞可能占用 queue/route 的共享写锁 | lookup 在锁外做 GET/SET；两阶段失效在事务共享锁内先旋转 namespace，再在锁外 best-effort DELETE；publish reconcile 释放共享锁后才执行网络失效；增加慢读/慢删并发测试 | 已关闭，全量回归通过 |
 | CR-F05 | P1 | 高占用兜底若逐 code 发 SQL，最坏会执行 1,679,616 次查询 | 一次读取占用 code 并构建 bytearray 位图，O(capacity) 内存扫描空槽 | 已关闭，全量回归通过 |
 | CR-F06 | P1 | 新正式 URL 与需求给定的 `af_dp` 第一顺序不一致 | 新正式和 clone URL 都使用 `af_dp,c,...,af_c_id`；validator 同时兼容历史 c-first | 已关闭，全量回归通过 |
-| CR-F07 | P1 | Redis unit 启动时 data dir 可能不存在；候选机进一步证明主 unit 的 mount namespace 会先于 `ExecStartPre` 建立，首次启动返回 `226/NAMESPACE` | 拆分最小权限 `tt-post` oneshot prepare unit：以 `RequiresMountsFor` 等待数据盘并通过 mount condition 后，于既有 `tt-post` 父目录创建 0700 子目录；主 Redis unit 通过 `Requires/After` 等待，且仍只写子目录 | 已关闭，待新 commit 候选复验 |
-| CR-F08 | P1 | `executescript` 会隐式提交，route 表和 queue.code 迁移可能不在同一事务 | baseline script 后显式新开 `BEGIN IMMEDIATE`，其后的加法迁移一起提交/回滚 | 已关闭，待 DB 副本演练 |
+| CR-F07 | P1 | Redis unit 启动时 data dir 可能不存在；候选机进一步证明主 unit 的 mount namespace 会先于 `ExecStartPre` 建立，首次启动返回 `226/NAMESPACE` | 拆分最小权限 `tt-post` oneshot prepare unit：以 `RequiresMountsFor` 等待数据盘并通过 mount condition 后，于既有 `tt-post` 父目录创建 0700 子目录；主 Redis unit 通过 `Requires/After` 等待，且仍只写子目录 | 已关闭，exact commit 首次启动复验通过 |
+| CR-F08 | P1 | `executescript` 会隐式提交，route 表和 queue.code 迁移可能不在同一事务 | baseline script 后显式新开 `BEGIN IMMEDIATE`，其后的加法迁移一起提交/回滚 | 已关闭，DB 副本迁移/回滚/幂等验证通过 |
 | CR-F09 | P1 | 满池回收只有结果、缺少持久审计 | 增加 `tt_post_code_recycle_audit`，同事务记录旧 code/queue/content 与新 queue/time | 已关闭，全量回归通过 |
 | CR-F10 | P0 | 含 `{code}` 的正式 queue 使用相同 payload/idempotency_key 重试时被误判为事实冲突 | 幂等校验只在其他冻结事实完全一致时，允许 caption 等于 deterministic pre-freeze 形态或该 queue 已冻结 code 渲染后的 caption；新增 exact replay 测试，差异 payload 仍 409 | 已关闭，全量回归通过 |
 | CR-F11 | P1 | 用户修改搜索输入后，旧结果和旧 `href` 仍暂时可点击，pending 响应还可能覆盖新输入状态 | 新增 input handler：输入变化立即递增请求序列、abort pending request、隐藏/清空旧结果与 href/data；过期响应受序列门禁阻止覆盖 | 已关闭，Chrome 已复验 |
@@ -32,7 +32,7 @@
 
 | 编号 | 检查项 | 结论 |
 | --- | --- | --- |
-| CR-01 | 原 `/tt` 隔离 | 旧 HTML/JS/Nginx 源文件在当前工作树保持零 diff；生产 hash 待验收 |
+| CR-01 | 原 `/tt` 隔离 | 旧 HTML/JS/Nginx 源文件零 diff；生产部署前后 hash 完全一致 |
 | CR-02 | schema | route/audit 表、索引、trigger、queue.code 均为加法；旧表不重建 |
 | CR-03 | code 约束 | code PK、大写四位 CHECK、queue unique、channel TT CHECK |
 | CR-04 | 分配原子性 | queue insert、route/code、最终 caption 在同一写事务 |
@@ -47,7 +47,7 @@
 | CR-13 | 幂等重放 | 相同 formal payload/idempotency_key 接受 pre-freeze 或 frozen exact caption；任何其他事实差异仍冲突 |
 | CR-14 | 输入失效 | input 变化立即清空旧 CTA/href并中止 pending request；旧响应不能覆盖当前输入 |
 
-## 最终复审重点
+## 最终复审完成证据
 
 1. 在当前最终代码上确认 CR-F04 的 GET/SET/DEL 均不在共享 queue 写锁内等待网络，并运行慢 Redis 读/失效并发测试。
 2. 确认 storage migration failure 会完整回滚 route/audit/queue.code 加法，不留下半迁移状态。

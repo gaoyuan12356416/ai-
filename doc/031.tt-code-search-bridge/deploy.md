@@ -2,7 +2,7 @@
 
 ## 状态
 
-部署方案已按当前实现更新，但尚未执行。本文件中的 commit、release、backup、PID、hash 和运行结果字段必须在实际部署后填写；任何计划步骤都不得描述成线上已通过。
+已于 2026-08-04 按本方案完成生产部署与只读验收。运行代码 exact commit 为 `b01dabe22d9da1571c68b6fb0775a61bb48e18de`；原 `/tt`、现有 timer 和发布 ledger 未改变，验收未触发真实 TikTok 发布。
 
 ## 变更范围
 
@@ -187,23 +187,26 @@ ss -lnt '( sport = :6381 )'
 
 只有确认数据库损坏且得到明确批准，才停止所有 writer、保存损坏副本并按 manifest 恢复 online backup。普通代码回滚绝不能用旧 DB 覆盖可能已经前进的 queue/publish ledger。
 
-## 上线后补录
+## 上线结果
 
-```text
-GitHub commit:
-old release:
-new release:
-backup directory / manifest:
-old /tt hashes before / after:
-new /tt-code HTML / JS hashes:
-main app hash before / after:
-Redis package / unit / listen / PING:
-DB baseline / migration / integrity:
-Nginx test and service PIDs:
-API and browser evidence:
-zero-publish ledger evidence:
-rollback point / rehearsal:
-```
+| 项目 | 实际结果 |
+| --- | --- |
+| GitHub / runtime commit | `b01dabe22d9da1571c68b6fb0775a61bb48e18de` |
+| old release | `/opt/tt-post/releases/af95ea73d95b883e591318c7e0ab09cfeb4716e4` |
+| new release | `/opt/tt-post/releases/b01dabe22d9da1571c68b6fb0775a61bb48e18de` |
+| backup / manifest | `/mnt/data-disk/tt-post-publisher/backups/20260804T103938Z-tt-code-pre-af95ea73/`；DB online backup、rootfs/config/env、候选代码和 manifest 已校验 |
+| 数据盘 | ext4 UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8`，约 196G、验证时使用 20% |
+| 原 `/tt` hashes | HTML `abce427bde5e1777020e87291e5f3bc0bc30c2507df2837c5ce5bd516ec6b88b`、JS `635d50a21aa69fcf68f84611e08ac4e9195957476739fcd40a5bf75a957e1a80`、Nginx `cac88179d911225186784f27f73f96752ce94fc12a034d0bcea05f51eebcc35f`；部署前后完全一致 |
+| 新静态 hashes | HTML `964af58f667ce9f9e411f14fe37d75fe9807f28126a67f7b86c48c52c688b608`；JS `bf16bc67923601ccf51540e7b046d73ff6ae7aaf4933b7abe2b924153c1804c5` |
+| 运行代码 hashes | 主 app `4a6faf6b6907295c20ce3e71260964b747fb5665c9f478ec102af48d6d952e8e`；sidecar `acd84108830699932f4f9e3f1c3ba002df8c1921f35601cd2b560fc9c3e52031` |
+| Redis | `redis-5.0.3-5.module_el8.4.0+955+7126e393`；prepare/main unit 首次启动通过；只监听 `127.0.0.1:6381`，PING=PONG |
+| DB | 迁移副本重复执行幂等；生产 `integrity_check=ok`；route/audit 均为 0；旧 queue/run/plan 行数不变 |
+| Nginx / 服务 | `nginx -t` 通过；验证时 sidecar PID 1997137、主 app PID 1997191、Redis PID 1998209，均 active |
+| 公共 API | 安全剧 ID `ZZ4b4w5k3h` 的 Search/Featured 均为 `generic_fallback`；未知 code 和不存在剧均 404；internal route 公网 404、无 bearer 403 |
+| 浏览器 | 390x844 与 1440x900 均验证五张卡、按钮/拖动、输入失效隔离和零 console/page error |
+| Redis 降级 | 查询产生缓存活动；停止 6381 后相同公共查询仍由 SQLite 成功；恢复后 PONG |
+| 零发布证据 | 部署前后 queue `7`、max queue `7`、非空 publish ID `6`；schedule runs `7`、random plans `7`；未调用 publish/canary/run-now/schedule-save |
+| 回滚点 | 旧 release、完整备份和 manifest 可用；未做破坏性生产代码切回，Redis 停机降级已实际验证 |
 
 ## 观察项
 
