@@ -29,4 +29,9 @@ node scripts/test_tt_drama_bridge.js
 
 ## 生产验证
 
-待部署后补充 release、服务、Nginx、历史 TT/X 链接 hash 和只读数据库核对结果。不执行真实 TikTok 发布。
+- release `e11305771246dea484f3a11c5a62dfc46a60b9fb` 已上线。
+- 服务健康、Nginx 配置和新旧路由合同通过。
+- 历史 X `/s2l/6.html` 与旧 TT 19 位链接的公开内容 hash 与部署前一致。
+- 部署前后 queue CSV 无差异，SQLite 完整性通过，活动 queue 数为 0。
+- 14:40 自然 runner tick 返回 `status=ok` 且发布请求数为 0。
+- 未创建生产 queue、未创建新短链文件、未执行真实 TikTok 发布。
