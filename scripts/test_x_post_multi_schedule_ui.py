@@ -14,11 +14,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MATERIAL_PATH = ROOT / "static" / "x-post-material-pool.html"
 DRAMA_PATH = ROOT / "static" / "x-post-drama-pool.html"
+LOGS_PATH = ROOT / "static" / "x-post-logs.html"
 QUICK_NAV_PATH = ROOT / "static" / "quick-nav.js"
 NAVIGATION_PATH = ROOT / "static" / "navigation.json"
 
 MATERIAL = MATERIAL_PATH.read_text(encoding="utf-8")
 DRAMA = DRAMA_PATH.read_text(encoding="utf-8")
+LOGS = LOGS_PATH.read_text(encoding="utf-8")
 QUICK_NAV = QUICK_NAV_PATH.read_text(encoding="utf-8")
 NAVIGATION = json.loads(NAVIGATION_PATH.read_text(encoding="utf-8"))
 
@@ -34,6 +36,13 @@ def inline_javascript(source):
 
 
 class XPostMultiScheduleUiTest(unittest.TestCase):
+    def test_pool_pages_describe_newest_upload_first(self):
+        self.assertIn("可用素材按上传时间倒序、最新上传优先", MATERIAL)
+        self.assertIn("按上传时间倒序领取尚未发布过的新剧", DRAMA)
+        self.assertIn("领取最新上传的未绑定短剧", DRAMA)
+        self.assertIn("人工素材池按最新上传优先选材", LOGS)
+        self.assertNotIn("人工素材池 FIFO", LOGS)
+
     def test_navigation_registers_drama_pool_and_keeps_configurable_permission(self):
         items = x_navigation_items()
         drama = items["xPostDramaPool"]
