@@ -1,0 +1,38 @@
+[Unit]
+Description=TikTok code-route loopback Redis cache
+After=network.target
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=simple
+User=tt-post
+Group=tt-post
+ExecStart=/usr/bin/redis-server /etc/tt-code-redis.conf
+ExecStop=/usr/bin/redis-cli -h 127.0.0.1 -p 6381 shutdown nosave
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=tt-code-redis
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/mnt/data-disk/tt-post-publisher/redis /run/tt-code-redis
+UMask=0077
+LimitNOFILE=65535
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

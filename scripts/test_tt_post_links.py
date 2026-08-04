@@ -126,7 +126,7 @@ class TTPostLinkTests(unittest.TestCase):
             "The Prodigy Sage Is Back_contentid[ABCD1234]",
         )
         self.assertEqual(values["af_ad_id"], "9001")
-        self.assertEqual(values["af_channel"], "AIpost")
+        self.assertEqual(values["af_channel"], "TT")
         self.assertEqual(values["af_c_id"], "27")
         self.assertEqual(values["af_dp"], "ABCD1234")
         self.assertEqual(validate_w2a_url(target), target)

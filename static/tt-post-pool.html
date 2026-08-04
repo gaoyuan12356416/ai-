@@ -763,7 +763,7 @@ Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">必须保留 {{contect_id}} 或 {{content_id}}；可使用 {url} 生成专属投放短链，使用 {desc} 填入当前剧描述。模板会与账号、时间和开关一起保存。</span>
+                  <span id="captionHelp">必须保留 {{contect_id}} 或 {{content_id}}；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。模板会与账号、时间和开关一起保存。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -980,7 +980,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       const CAPTION_SINGLE_PLACEHOLDER_PATTERN = /\{([^{}]*)\}/g;
       const CAPTION_URL_PLACEHOLDER = "{url}";
       const CAPTION_DESC_PLACEHOLDER = "{desc}";
+      const CAPTION_CODE_PLACEHOLDER = "{code}";
       const CAPTION_URL_PREVIEW = "https://gy.g2flow.com/s2l/tt/123.html";
+      const CAPTION_CODE_PREVIEW = "A1B2";
       const CONSENT_VERSION = "tt-direct-post-consent-20260729";
       const PROCESSING_STATUSES = new Set([
         "queued", "preparing", "ready", "claimed", "creator_recheck", "initializing",
@@ -2762,6 +2764,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           (match, name) => {
             if (name === "url") return CAPTION_URL_PREVIEW;
             if (name === "desc") return normalizedDescription;
+            if (name === "code") return CAPTION_CODE_PREVIEW;
             return match;
           }
         ).trim();
@@ -2810,7 +2813,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           };
         }
         const unknownSingle = Array.from(new Set(
-          singlePlaceholders.filter(name => !["url", "desc"].includes(name))
+          singlePlaceholders.filter(name => !["url", "desc", "code"].includes(name))
         ));
         if (unknownSingle.length) {
           return {

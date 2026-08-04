@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -34,10 +35,12 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from .links import (
     TT_SHORT_LINK_MAX_LOCAL_ID,
     build_short_url,
+    build_w2a_url,
     short_link_id,
     validate_short_url,
     validate_w2a_url,
 )
+from .code_routes import allocate_code_route, ensure_code_route_storage
 
 
 UTC = timezone.utc
@@ -161,6 +164,7 @@ _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 _SINGLE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
 _URL_PLACEHOLDER = "{url}"
 _DESC_PLACEHOLDER = "{desc}"
+_CODE_PLACEHOLDER = "{code}"
 _MAX_TT_SHORT_URL = build_short_url(TT_SHORT_LINK_MAX_LOCAL_ID)
 _PUBLISH_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 _SHANGHAI_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -267,6 +271,14 @@ def _public_drama_language(value: Any) -> str:
             raise
         text = str(value or "").strip()
         return redact_text(text, 32) or "invalid"
+
+
+def _campaign_segment(value: Any, fallback: str) -> str:
+    """Keep user-facing metadata usable inside the ``c`` delimiter format."""
+
+    text = re.sub(r"[*\[\]]+", " ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or fallback
 
 
 def _normalize_description(value: Any) -> str:
@@ -833,8 +845,10 @@ def render_caption_template(
     *,
     url: Any = None,
     description: Any = None,
+    code: Any = None,
     defer_url: bool = False,
     defer_description: bool = False,
+    defer_code: bool = False,
     max_chars: int = MAX_CAPTION_CHARS,
 ) -> str:
     """Render the user's caption at queue-freeze time.
@@ -844,6 +858,7 @@ def render_caption_template(
     ``{url}`` is replaced by the immutable per-queue TT short URL. Material
     intake may explicitly defer that one macro until the queue identity exists.
     ``{desc}`` is the normalized drama description frozen with the material.
+    ``{code}`` is the exact lowercase, single-brace four-character route code.
     Unknown placeholders fail closed and internal line breaks are unchanged.
     """
 
@@ -889,7 +904,11 @@ def render_caption_template(
             400,
         )
     unknown_single = sorted(
-        {name for name in single_placeholders if name not in {"url", "desc"}}
+        {
+            name
+            for name in single_placeholders
+            if name not in {"url", "desc", "code"}
+        }
     )
     if unknown_single:
         raise TTPostError(
@@ -899,6 +918,7 @@ def render_caption_template(
         )
     has_url = "url" in single_placeholders
     has_description = "desc" in single_placeholders
+    has_code = "code" in single_placeholders
     normalized_url = ""
     if has_url and not defer_url:
         try:
@@ -921,6 +941,15 @@ def render_caption_template(
                 "发布描述模板中的{desc}必须绑定有效剧描述",
                 400,
             )
+    normalized_code = ""
+    if has_code and not defer_code:
+        normalized_code = str(code or "").strip()
+        if not re.fullmatch(r"[A-Z0-9]{4}", normalized_code):
+            raise TTPostError(
+                "caption_code_required",
+                "发布描述模板中的{code}必须绑定有效四位码",
+                400,
+            )
     rendered_base = _PLACEHOLDER_RE.sub(
         lambda match: normalized_content_id
         if match.group(1).strip() in {"contect_id", "content_id"}
@@ -938,6 +967,10 @@ def render_caption_template(
             if defer_description:
                 return match.group(0)
             return normalized_description
+        if name == "code":
+            if defer_code:
+                return "ZZZZ" if measuring else match.group(0)
+            return normalized_code
         return match.group(0)
 
     rendered = _SINGLE_PLACEHOLDER_RE.sub(
@@ -975,6 +1008,15 @@ def caption_uses_desc_macro(template: Any) -> bool:
 
     return any(
         match.group(1) == "desc"
+        for match in _SINGLE_PLACEHOLDER_RE.finditer(str(template or ""))
+    )
+
+
+def caption_uses_code_macro(template: Any) -> bool:
+    """Return whether the exact lowercase single-brace code macro is present."""
+
+    return any(
+        match.group(1) == "code"
         for match in _SINGLE_PLACEHOLDER_RE.finditer(str(template or ""))
     )
 
@@ -1415,6 +1457,7 @@ def ensure_storage(db_path: Any) -> None:
                         CHECK(short_link_id>=0),
                     short_url TEXT NOT NULL DEFAULT '',
                     long_url TEXT NOT NULL DEFAULT '',
+                    code TEXT NOT NULL DEFAULT '',
                     privacy_level TEXT NOT NULL,
                     allow_comment INTEGER NOT NULL CHECK(allow_comment IN (0,1)),
                     allow_duet INTEGER NOT NULL CHECK(allow_duet IN (0,1)),
@@ -1856,6 +1899,7 @@ def ensure_storage(db_path: Any) -> None:
                     ON tt_post_random_daily_plan(shanghai_date,account_id);
                 """
             )
+            ensure_code_route_storage(conn)
             schedule_run_columns = {
                 str(row["name"])
                 for row in conn.execute(
@@ -1911,6 +1955,7 @@ def ensure_storage(db_path: Any) -> None:
                     "short_link_id": "INTEGER NOT NULL DEFAULT 0",
                     "short_url": "TEXT NOT NULL DEFAULT ''",
                     "long_url": "TEXT NOT NULL DEFAULT ''",
+                    "code": "TEXT NOT NULL DEFAULT ''",
                 },
             }
             for table_name, definitions in additive_columns.items():
@@ -2240,21 +2285,25 @@ class TTPostStore:
         db_path: Any,
         *,
         now_fn: Callable[[], datetime] = utc_now,
+        code_route_lock: Optional[threading.RLock] = None,
     ):
         self.db_path = str(db_path)
         self._now_fn = now_fn
+        self.code_route_lock = code_route_lock or threading.RLock()
+        self.code_route_invalidator: Optional[Callable[[str], None]] = None
         ensure_storage(self.db_path)
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
-        with contextlib.closing(_connect(self.db_path)) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        with self.code_route_lock:
+            with contextlib.closing(_connect(self.db_path)) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    yield conn
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
 
     def _now_iso(self) -> str:
         return _iso_utc(self._now_fn(), "当前时间")
@@ -3009,6 +3058,7 @@ class TTPostStore:
                 "TT_CONFIG",
                 url=_MAX_TT_SHORT_URL,
                 description="Drama description",
+                code="AB12",
             )
 
             normalized_user_consent = (
@@ -5441,6 +5491,7 @@ class TTPostStore:
             normalized_content_id,
             description=normalized_description,
             defer_url=True,
+            defer_code=True,
         )
         if not secrets.compare_digest(
             normalized_caption.encode("utf-8"),
@@ -6326,6 +6377,7 @@ class TTPostStore:
             normalized_content_id,
             description=normalized_description,
             defer_url=True,
+            defer_code=True,
         )
         if not secrets.compare_digest(
             normalized_caption.encode("utf-8"),
@@ -8048,6 +8100,7 @@ class TTPostStore:
         except ValueError:
             raise TTPostError("invalid_request", "素材描述无效", 400) from None
         has_url_macro = caption_uses_url_macro(frozen_caption_template)
+        has_code_macro = caption_uses_code_macro(frozen_caption_template)
         if has_url_macro and not all(
             (
                 frozen_material_name,
@@ -8063,7 +8116,12 @@ class TTPostStore:
                 "{url}短链所需的TikTok归因信息不完整",
                 409,
             )
-        def frozen_link(queue_identity: Any) -> Tuple[int, str, str]:
+        def frozen_link(
+            queue_identity: Any,
+            *,
+            code: Any = None,
+            defer_code: bool = False,
+        ) -> Tuple[int, str, str]:
             link_id = short_link_id(queue_identity) if has_url_macro else 0
             short_url = build_short_url(link_id) if has_url_macro else ""
             rendered_caption = render_caption_template(
@@ -8071,6 +8129,8 @@ class TTPostStore:
                 resolution.content_id,
                 url=short_url if has_url_macro else None,
                 description=frozen_description,
+                code=code,
+                defer_code=defer_code,
             )
             return link_id, short_url, rendered_caption
         normalized_key = str(idempotency_key or "").strip()
@@ -8145,6 +8205,15 @@ class TTPostStore:
                 (normalized_key,),
             ).fetchone()
             if existing is not None:
+                existing_route = conn.execute(
+                    "SELECT * FROM tt_post_code_route WHERE queue_id=?",
+                    (int(existing["id"]),),
+                ).fetchone()
+                existing_code = str(
+                    (existing_route["code"] if existing_route is not None else "")
+                    or existing["code"]
+                    or ""
+                )
                 existing_short_link_id = int(
                     existing["short_link_id"] or 0
                 )
@@ -8165,6 +8234,7 @@ class TTPostStore:
                         resolution.content_id,
                         url=existing_short_url,
                         description=frozen_description,
+                        code=existing_code,
                     )
                 else:
                     valid_existing_short_url = existing_short_url
@@ -8173,6 +8243,7 @@ class TTPostStore:
                         frozen_caption_template,
                         resolution.content_id,
                         description=frozen_description,
+                        code=existing_code,
                     )
                 if (
                     int(existing["pool_item_id"]) == pool_id
@@ -8186,6 +8257,7 @@ class TTPostStore:
                     == frozen_caption_template
                     and str(existing["caption"])
                     == expected_existing_caption
+                    and str(existing["code"]) == existing_code
                     and str(existing["material_name"]) == frozen_material_name
                     and str(existing["drama_name"]) == frozen_drama_name
                     and str(existing["material_language"])
@@ -8267,7 +8339,59 @@ class TTPostStore:
                 else 1
             )
             frozen_short_link_id, frozen_short_url, caption = frozen_link(
-                predicted_queue_id
+                predicted_queue_id,
+                defer_code=has_code_macro,
+            )
+            route_username = re.sub(
+                r"[^A-Za-z0-9._]",
+                "_",
+                str(account.username or account.account_id).lstrip("@"),
+            ).strip("_") or "unknown"
+            route_material_name = frozen_material_name or resolution.material_id
+            route_drama_name = _campaign_segment(
+                frozen_drama_name,
+                resolution.content_id,
+            )
+            route_language = _campaign_segment(
+                frozen_material_language,
+                "unknown",
+            )
+            route_tag = _campaign_segment(frozen_material_tag, "none")
+            route_page_name = (
+                frozen_creator_nickname
+                or frozen_account_display_name
+                or account.username
+                or account.account_id
+            )
+            try:
+                frozen_long_url = build_w2a_url(
+                    {
+                        "username": route_username,
+                        "timestamp": int(_utc_datetime(timestamp).timestamp()),
+                        "material_language": route_language,
+                        "drama_name": route_drama_name,
+                        "tag": route_tag,
+                        "link_id": predicted_queue_id,
+                        "page_name": route_page_name,
+                        "page_id": account.account_id,
+                        "material_name": route_material_name,
+                        "material_id": resolution.material_id,
+                        "queue_id": predicted_queue_id,
+                        "content_id": resolution.content_id,
+                        "channel": "TT",
+                    }
+                )
+            except Exception as exc:
+                raise TTPostError(
+                    "tt_post_link_metadata_invalid",
+                    "TikTok归因信息无法冻结: %s" % type(exc).__name__,
+                    409,
+                ) from None
+            frozen_query = dict(
+                urllib.parse.parse_qsl(
+                    urllib.parse.urlsplit(frozen_long_url).query,
+                    keep_blank_values=True,
+                )
             )
             try:
                 insert_columns = (
@@ -8295,6 +8419,7 @@ class TTPostStore:
                     "short_link_id",
                     "short_url",
                     "long_url",
+                    "code",
                     "privacy_level",
                     "allow_comment",
                     "allow_duet",
@@ -8340,6 +8465,7 @@ class TTPostStore:
                     frozen_short_link_id,
                     frozen_short_url,
                     "",
+                    "",
                     normalized_policy.privacy_level,
                     int(normalized_policy.allow_comment),
                     int(normalized_policy.allow_duet),
@@ -8381,6 +8507,52 @@ class TTPostStore:
                     "TikTok发布任务自增ID与短链ID不一致",
                     500,
                 )
+            try:
+                route = allocate_code_route(
+                    conn,
+                    queue_id,
+                    {
+                        "content_id": resolution.content_id,
+                        "c": frozen_query["c"],
+                        "af_adset": frozen_query["af_adset"],
+                        "af_adset_id": frozen_query["af_adset_id"],
+                        "af_ad": frozen_query["af_ad"],
+                        "af_ad_id": frozen_query["af_ad_id"],
+                        "af_channel": "TT",
+                        "af_c_id": frozen_query["af_c_id"],
+                        "long_url": frozen_long_url,
+                        "state": "scheduled",
+                        "created_at": timestamp,
+                        "published_at": "",
+                        "updated_at": timestamp,
+                    },
+                )
+            except Exception as exc:
+                raise TTPostError(
+                    "tt_post_code_allocation_failed",
+                    "TikTok四位码无法冻结: %s" % type(exc).__name__,
+                    500,
+                ) from None
+            frozen_code = str(route["code"])
+            _, _, final_caption = frozen_link(
+                queue_id,
+                code=frozen_code,
+            )
+            finalized = conn.execute(
+                """
+                UPDATE tt_post_queue SET code=?,caption=?,updated_at=?
+                WHERE id=? AND code=''
+                """,
+                (frozen_code, final_caption, timestamp, queue_id),
+            )
+            if finalized.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_code_allocation_failed",
+                    "TikTok四位码冻结状态冲突",
+                    500,
+                )
+            if callable(self.code_route_invalidator):
+                self.code_route_invalidator(frozen_code)
             updated = conn.execute(
                 """
                 UPDATE tt_post_material_pool
@@ -8430,6 +8602,21 @@ class TTPostStore:
                 404,
             )
         return _public_queue(row)
+
+    def get_code_route_for_queue(self, queue_id: Any) -> Dict[str, Any]:
+        normalized = _positive_int(queue_id, "发布队列ID")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_post_code_route WHERE queue_id=?",
+                (normalized,),
+            ).fetchone()
+        if row is None:
+            raise TTPostError(
+                "tt_post_code_route_not_found",
+                "TikTok四位码路由不存在",
+                404,
+            )
+        return dict(row)
 
     def list_queues(self) -> List[Dict[str, Any]]:
         with contextlib.closing(_connect(self.db_path)) as conn:

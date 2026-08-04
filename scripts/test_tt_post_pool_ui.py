@@ -481,6 +481,10 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('new Set(["contect_id", "content_id"])', PAGE)
         self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}"', PAGE)
         self.assertIn('const CAPTION_DESC_PLACEHOLDER = "{desc}"', PAGE)
+        self.assertIn('const CAPTION_CODE_PLACEHOLDER = "{code}"', PAGE)
+        self.assertIn("仅自动/排期正式队列支持，立即测试不支持", PAGE)
+        self.assertIn('const CAPTION_CODE_PREVIEW = "A1B2"', PAGE)
+        self.assertIn('["url", "desc", "code"].includes(name)', PAGE)
         render_source = source_between(
             "function renderCaptionTemplate", "function captionTemplateValidation"
         )
@@ -489,7 +493,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         )
         self.assertIn('if (name === "url") return CAPTION_URL_PREVIEW', render_source)
         self.assertIn('if (name === "desc") return normalizedDescription', render_source)
-        self.assertIn('["url", "desc"].includes(name)', validation_source)
+        self.assertIn('["url", "desc", "code"].includes(name)', validation_source)
         self.assertIn("缺少有效剧描述", validation_source)
 
     def test_material_validation_is_sequential_and_bounded(self):

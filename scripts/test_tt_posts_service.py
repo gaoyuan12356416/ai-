@@ -4009,7 +4009,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             ],
         )
         tracking = dict(pairs)
-        self.assertEqual("AIpost", tracking["af_channel"])
+        self.assertEqual("TT", tracking["af_channel"])
         self.assertEqual(str(created["id"]), tracking["af_c_id"])
         self.assertEqual("ABCD1234", tracking["af_dp"])
         self.assertEqual("9001", tracking["af_ad_id"])

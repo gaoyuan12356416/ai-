@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import socket
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,6 +61,7 @@ from .core import (
     TTPostStore,
     beijing_to_utc,
     caption_uses_desc_macro,
+    caption_uses_code_macro,
     caption_uses_url_macro,
     normalize_drama_language,
     redact_text,
@@ -72,7 +74,13 @@ from .links import (
     build_w2a_url,
     direct_test_short_link_id,
     validate_short_url,
+    validate_w2a_url,
     write_short_redirect,
+)
+from .code_routes import (
+    RedisRESPClient,
+    TTCodeRouteError,
+    TTCodeRouteResolver,
 )
 
 
@@ -86,6 +94,9 @@ DEFAULT_CPU_PORT = 18829
 DEFAULT_GPU_URL = "http://127.0.0.1:18830"
 DEFAULT_DB_PATH = "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3"
 DEFAULT_SHORT_LINK_ROOT = "/mnt/data-disk/tt-post-publisher/s2l"
+DEFAULT_CODE_REDIS_HOST = "127.0.0.1"
+DEFAULT_CODE_REDIS_PORT = 6381
+DEFAULT_CODE_REDIS_TIMEOUT = 0.2
 DEFAULT_GRACE_SECONDS = 600
 DEFAULT_LEASE_SECONDS = 300
 CLAIM_LEASE_BUFFER_SECONDS = 60
@@ -1784,6 +1795,7 @@ def _caption_from_submission(
             description=description,
             defer_url=True,
             defer_description=defer_description,
+            defer_code=True,
         )
         if raw_caption not in (None, ""):
             submitted = _bounded_text(raw_caption, "发布描述", 2200)
@@ -1812,6 +1824,7 @@ def _caption_from_submission(
         description=description,
         defer_url=True,
         defer_description=defer_description,
+        defer_code=True,
     )
     if not secrets.compare_digest(
         rendered.encode("utf-8"),
@@ -1934,6 +1947,7 @@ class TTPostService:
         runner_kick_path: str = DEFAULT_RUNNER_KICK_PATH,
         preparation_kick_path: str = DEFAULT_PREPARATION_KICK_PATH,
         short_link_root: Any = DEFAULT_SHORT_LINK_ROOT,
+        code_resolver: Optional[TTCodeRouteResolver] = None,
     ):
         self.store = store
         self.account_repository = account_repository
@@ -1974,6 +1988,13 @@ class TTPostService:
             128,
         )
         self.short_link_root = str(short_link_root or "").strip()
+        self.code_resolver = code_resolver or TTCodeRouteResolver(
+            self.store.db_path,
+            lock=self.store.code_route_lock,
+        )
+        self.store.code_route_invalidator = (
+            lambda _code: self.code_resolver.rotate_namespace()
+        )
         normalized_kick_path = str(runner_kick_path or "").strip()
         if (
             os.name == "nt"
@@ -2023,6 +2044,42 @@ class TTPostService:
 
     def _gates(self) -> Dict[str, bool]:
         return self.gates.as_dict()
+
+    def resolve_code_route(self, query: Any, source: Any) -> Dict[str, Any]:
+        try:
+            return self.code_resolver.resolve(query, source)
+        except TTCodeRouteError as exc:
+            raise TTPostServiceError(exc.code, str(exc), exc.status) from None
+
+    def _invalidate_published_code_route(
+        self,
+        queue: Mapping[str, Any],
+    ) -> None:
+        if str(queue.get("status") or "") == "published":
+            self.code_resolver.invalidate_latest(queue.get("content_id"))
+
+    def _freeze_queue_and_invalidate_code(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        return self.store.freeze_queue(*args, **kwargs)
+
+    def _reconcile_published_with_cache(
+        self,
+        queue_id: Any,
+        publish_id: Any,
+        *,
+        publish_url: Any = "",
+    ) -> Dict[str, Any]:
+        with self.store.code_route_lock:
+            queue = self.store.reconcile_published(
+                queue_id,
+                publish_id,
+                publish_url=publish_url,
+            )
+            self._invalidate_published_code_route(queue)
+            return queue
 
     def _is_manual_canary_queue(
         self,
@@ -2332,6 +2389,7 @@ class TTPostService:
             "VALID001",
             defer_url=True,
             defer_description=True,
+            defer_code=True,
         )
         # A pure stop must not require the operator to create a new consent
         # record. The UI still submits an explicit accepted=false placeholder
@@ -2872,6 +2930,12 @@ class TTPostService:
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         gpu_job_id = "tttest-" + digest[:48]
         caption_template = str(config.get("caption_template") or "")
+        if caption_uses_code_macro(caption_template):
+            raise TTPostServiceError(
+                "tt_post_code_macro_queue_only",
+                "{code} is available only for formal TT queue publishing",
+                409,
+            )
         if caption_uses_url_macro(caption_template):
             link_id = direct_test_short_link_id(identity)
             short_url = build_short_url(link_id)
@@ -3673,6 +3737,7 @@ class TTPostService:
                 resolved["content_id"],
                 description=resolved.get("description"),
                 defer_url=True,
+                defer_code=True,
             )
         submitted_template = payload.get("caption_template")
         submitted_caption = payload.get("caption_text")
@@ -4492,7 +4557,7 @@ class TTPostService:
                 str(pool_item["material_id"]),
                 recurring_pool_id=pool_item["id"],
             )
-            queue = self.store.freeze_queue(
+            queue = self._freeze_queue_and_invalidate_code(
                 legacy_pool["id"],
                 safe_account,
                 str(claimed["scheduled_at_utc"]),
@@ -5227,6 +5292,7 @@ class TTPostService:
                 content_id,
                 url=existing.get("short_url"),
                 description=existing.get("description"),
+                code=existing.get("code"),
             )
         if not secrets.compare_digest(
             str(existing.get("caption") or "").encode("utf-8"),
@@ -5384,7 +5450,7 @@ class TTPostService:
                 409,
             )
         pool = self._ensure_pool_item(material_id)
-        queue = self.store.freeze_queue(
+        queue = self._freeze_queue_and_invalidate_code(
             pool["id"],
             safe_account,
             scheduled_at_utc,
@@ -5662,29 +5728,8 @@ class TTPostService:
                     409,
                 )
             if not str(current.get("long_url") or ""):
-                long_url = build_w2a_url(
-                    {
-                        "username": (
-                            current.get("creator_username_snapshot")
-                            or current.get("account_username")
-                        ),
-                        "timestamp": int(_now_utc(self._now_fn).timestamp()),
-                        "material_language": current.get("material_language"),
-                        "drama_name": current.get("drama_name"),
-                        "tag": current.get("material_tag"),
-                        "link_id": current.get("short_link_id"),
-                        "page_name": (
-                            current.get("creator_nickname_snapshot")
-                            or current.get("account_display_name")
-                            or current.get("account_username")
-                        ),
-                        "page_id": current.get("account_id"),
-                        "material_name": current.get("material_name"),
-                        "material_id": current.get("material_id"),
-                        "queue_id": current.get("id"),
-                        "content_id": current.get("content_id"),
-                    }
-                )
+                route = self.store.get_code_route_for_queue(current["id"])
+                long_url = validate_w2a_url(route.get("long_url"))
                 current = self.store.prepare_short_link(
                     current["id"],
                     claim_token,
@@ -6266,7 +6311,7 @@ class TTPostService:
                     or ""
                 ).lower()
                 if remote_status in {"published", "publish_complete"}:
-                    final = self.store.reconcile_published(
+                    final = self._reconcile_published_with_cache(
                         normalized_queue_id,
                         publish_id,
                         publish_url=str(result.get("publish_url") or ""),
@@ -6325,7 +6370,7 @@ class TTPostService:
                 409,
             )
         if remote_status in {"published", "publish_complete"}:
-            queue = self.store.reconcile_published(
+            queue = self._reconcile_published_with_cache(
                 normalized_queue_id,
                 str(queue["publish_id"]),
                 publish_url=str(result.get("publish_url") or ""),
@@ -6398,7 +6443,7 @@ class TTPostService:
             result.get("state") or result.get("remote_status") or ""
         ).lower()
         if remote_status in {"published", "publish_complete"}:
-            queue = self.store.reconcile_published(
+            queue = self._reconcile_published_with_cache(
                 normalized_queue_id,
                 returned_publish_id,
                 publish_url=str(result.get("publish_url") or ""),
@@ -6473,8 +6518,50 @@ def build_service_from_env(
             "TT Post账本路径必须是绝对路径",
             500,
         )
+    redis_host = str(
+        source.get("TT_POST_CODE_REDIS_HOST", DEFAULT_CODE_REDIS_HOST)
+    ).strip()
+    try:
+        redis_port = int(
+            source.get("TT_POST_CODE_REDIS_PORT", str(DEFAULT_CODE_REDIS_PORT))
+        )
+        redis_timeout = float(
+            source.get(
+                "TT_POST_CODE_REDIS_TIMEOUT_SECONDS",
+                str(DEFAULT_CODE_REDIS_TIMEOUT),
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        raise TTPostServiceError(
+            "tt_post_code_redis_config_invalid",
+            "TT code Redis configuration is invalid",
+            500,
+        ) from None
+    if (
+        redis_host not in {"127.0.0.1", "::1"}
+        or redis_port < 1
+        or redis_port > 65535
+        or redis_timeout <= 0
+        or redis_timeout > 5
+    ):
+        raise TTPostServiceError(
+            "tt_post_code_redis_config_invalid",
+            "TT code Redis configuration is invalid",
+            500,
+        )
+    code_route_lock = threading.RLock()
+    store = TTPostStore(db_path, code_route_lock=code_route_lock)
+    code_resolver = TTCodeRouteResolver(
+        db_path,
+        redis_client=RedisRESPClient(
+            redis_host,
+            redis_port,
+            redis_timeout,
+        ),
+        lock=code_route_lock,
+    )
     return TTPostService(
-        TTPostStore(db_path),
+        store,
         account_repository,
         material_resolver,
         gpu,
@@ -6508,6 +6595,7 @@ def build_service_from_env(
                 DEFAULT_SHORT_LINK_ROOT,
             )
         ),
+        code_resolver=code_resolver,
     )
 
 
@@ -6610,6 +6698,26 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
         service = self.server.tt_service
         if self.command == "GET" and path == "/health":
             return {"ok": True, "gates": service.gates.as_dict()}
+        if self.command == "GET" and path == "/api/public/tt-code/resolve":
+            query_params = urllib.parse.parse_qs(
+                parsed.query,
+                keep_blank_values=True,
+            )
+            if (
+                parsed.fragment
+                or set(query_params) != {"query", "source"}
+                or len(query_params["query"]) != 1
+                or len(query_params["source"]) != 1
+            ):
+                raise TTPostServiceError(
+                    "invalid_request",
+                    "TT code resolve query is invalid",
+                    400,
+                )
+            return service.resolve_code_route(
+                query_params["query"][0],
+                query_params["source"][0],
+            )
         if not self._authorized():
             raise PermissionError
         if self.command == "GET" and path == "/api/admin/tt-posts/accounts":

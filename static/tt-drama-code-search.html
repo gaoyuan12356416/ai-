@@ -1,0 +1,726 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="data:,">
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; img-src 'self' https://ads-cdn.yingliang.tech https://cdn.usrgrow.com https://static.mydramawave.com https://static-v1.mydramawave.com https://static-v2.mydramawave.com data:; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+  >
+  <title>Find your DramaWave story</title>
+  <script src="/tt-drama-code-search.js" defer></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090612;
+      --card: rgba(24, 17, 39, .9);
+      --text: #fff;
+      --muted: #aaa1b8;
+      --pink: #ff2d70;
+      --pink-2: #ff5a8c;
+      --purple: #7c4dff;
+      --line: rgba(255, 255, 255, .11);
+      --shadow: 0 22px 60px rgba(0, 0, 0, .34);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      min-height: 100%;
+      background: var(--bg);
+    }
+
+    body {
+      min-width: 320px;
+      min-height: 100%;
+      margin: 0;
+      overflow-x: hidden;
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button,
+    input,
+    a { font: inherit; }
+
+    button,
+    a { -webkit-tap-highlight-color: transparent; }
+
+    .page {
+      position: relative;
+      width: min(100%, 520px);
+      min-height: 100svh;
+      margin: 0 auto;
+      padding: max(18px, env(safe-area-inset-top)) 18px max(26px, env(safe-area-inset-bottom));
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 86% 4%, rgba(124, 77, 255, .3), transparent 33%),
+        radial-gradient(circle at 2% 34%, rgba(255, 45, 112, .18), transparent 31%),
+        linear-gradient(180deg, #10091c 0%, #090612 68%);
+    }
+
+    .page::before {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      content: "";
+      opacity: .18;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, .035) 1px, transparent 1px);
+      background-size: 28px 28px;
+      mask-image: linear-gradient(to bottom, #000, transparent 66%);
+    }
+
+    .content {
+      position: relative;
+      z-index: 1;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 38px;
+      height: 38px;
+      flex: 0 0 auto;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, .16);
+      border-radius: 13px;
+      background: linear-gradient(145deg, var(--pink-2), var(--purple));
+      box-shadow: 0 12px 26px rgba(124, 77, 255, .28);
+    }
+
+    .brand-mark svg { width: 23px; height: 23px; }
+
+    .brand-name {
+      overflow: hidden;
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: -.45px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .brand-pill {
+      flex: 0 0 auto;
+      padding: 6px 9px;
+      border: 1px solid rgba(255, 255, 255, .11);
+      border-radius: 999px;
+      color: #c9c0d3;
+      background: rgba(255, 255, 255, .055);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .55px;
+      text-transform: uppercase;
+    }
+
+    .eyebrow {
+      margin-bottom: 10px;
+      color: #ff78a4;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 440px;
+      margin: 0;
+      font-size: clamp(35px, 10vw, 50px);
+      line-height: .98;
+      letter-spacing: -2.25px;
+    }
+
+    h1 span {
+      color: transparent;
+      background: linear-gradient(90deg, #ff6a9b, #b795ff);
+      background-clip: text;
+      -webkit-background-clip: text;
+    }
+
+    .intro {
+      max-width: 430px;
+      margin: 14px 0 21px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .search-card {
+      position: relative;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: linear-gradient(160deg, rgba(37, 26, 57, .94), rgba(20, 14, 34, .92));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+    }
+
+    .search-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 2px 9px;
+      color: #ddd5e7;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .35px;
+      text-transform: uppercase;
+    }
+
+    .search-label span:last-child {
+      color: #847a92;
+      font-weight: 700;
+    }
+
+    .search-row {
+      display: grid;
+      grid-template-columns: 1fr 52px;
+      gap: 9px;
+    }
+
+    .input-wrap { position: relative; }
+
+    .input-icon {
+      position: absolute;
+      top: 50%;
+      left: 16px;
+      width: 20px;
+      height: 20px;
+      color: #8f849d;
+      transform: translateY(-50%);
+      pointer-events: none;
+    }
+
+    input {
+      width: 100%;
+      height: 54px;
+      padding: 0 15px 0 47px;
+      border: 1px solid rgba(255, 255, 255, .12);
+      border-radius: 15px;
+      outline: none;
+      color: #fff;
+      background: rgba(9, 6, 18, .76);
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: .15px;
+      transition: border-color .18s ease, box-shadow .18s ease;
+    }
+
+    input::placeholder {
+      color: #716779;
+      font-weight: 600;
+    }
+
+    input:focus {
+      border-color: rgba(255, 90, 140, .72);
+      box-shadow: 0 0 0 4px rgba(255, 45, 112, .11);
+    }
+
+    .search-button {
+      display: grid;
+      width: 52px;
+      height: 54px;
+      padding: 0;
+      border: 0;
+      border-radius: 15px;
+      color: #fff;
+      background: linear-gradient(145deg, var(--pink-2), var(--pink));
+      box-shadow: 0 12px 25px rgba(255, 45, 112, .27);
+      cursor: pointer;
+      place-items: center;
+    }
+
+    .search-button svg { width: 22px; height: 22px; }
+    .search-button:active { transform: scale(.97); }
+
+    .search-button:disabled {
+      opacity: .6;
+      cursor: wait;
+    }
+
+    .helper {
+      min-height: 34px;
+      margin: 10px 2px 0;
+      color: #8f849d;
+      font-size: 11px;
+      line-height: 1.48;
+    }
+
+    .helper.error { color: #ff8eaf; }
+
+    .result {
+      display: none;
+      margin-top: 13px;
+      padding: 15px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .13);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, .055);
+    }
+
+    .result.visible {
+      display: grid;
+      gap: 13px;
+      animation: rise .34s cubic-bezier(.2, .8, .2, 1) both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(9px) scale(.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .result-layout {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 13px;
+      align-items: start;
+    }
+
+    .result-cover-shell {
+      position: relative;
+      width: 88px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .12);
+      border-radius: 13px;
+      aspect-ratio: 2 / 3;
+      background:
+        radial-gradient(circle at 30% 20%, rgba(255, 90, 140, .42), transparent 38%),
+        linear-gradient(145deg, #43254f, #171020);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, .28);
+    }
+
+    .result-cover-placeholder {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255, 255, 255, .28);
+      font-size: 32px;
+      font-weight: 900;
+    }
+
+    .result-cover {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .result-copy { min-width: 0; padding-top: 1px; }
+
+    .match-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+      color: #83efb6;
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: .7px;
+      text-transform: uppercase;
+    }
+
+    .match-badge::before {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      content: "";
+      background: #5de49c;
+      box-shadow: 0 0 9px rgba(93, 228, 156, .8);
+    }
+
+    .result-title {
+      display: block;
+      margin: 0 0 6px;
+      overflow: hidden;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.22;
+      overflow-wrap: anywhere;
+    }
+
+    .result-meta {
+      margin-bottom: 7px;
+      color: #b0a5bd;
+      font-size: 10.5px;
+      line-height: 1.45;
+    }
+
+    .result-description {
+      display: -webkit-box;
+      margin: 0;
+      overflow: hidden;
+      color: #8f849d;
+      font-size: 10.5px;
+      line-height: 1.45;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 4;
+    }
+
+    .continue {
+      display: flex;
+      min-height: 47px;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      border-radius: 14px;
+      color: #fff;
+      background: linear-gradient(90deg, var(--pink), #b33cff);
+      box-shadow: 0 12px 25px rgba(179, 60, 255, .21);
+      font-size: 12px;
+      font-weight: 900;
+      text-decoration: none;
+    }
+
+    .continue:not([href]) {
+      opacity: .48;
+      pointer-events: none;
+    }
+
+    .continue svg { width: 17px; height: 17px; }
+
+    .section-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 14px;
+      margin: 26px 2px 12px;
+    }
+
+    .section-copy { min-width: 0; }
+
+    .section-head h2 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: -.3px;
+    }
+
+    .section-head p {
+      margin: 3px 0 0;
+      color: #796f87;
+      font-size: 10.5px;
+    }
+
+    .carousel-controls {
+      display: flex;
+      flex: 0 0 auto;
+      gap: 7px;
+    }
+
+    .carousel-control {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, .13);
+      border-radius: 11px;
+      color: #e7deef;
+      background: rgba(255, 255, 255, .07);
+      cursor: pointer;
+      place-items: center;
+      transition: border-color .18s ease, background .18s ease, opacity .18s ease;
+    }
+
+    .carousel-control:hover:not(:disabled),
+    .carousel-control:focus-visible {
+      border-color: rgba(255, 90, 140, .65);
+      background: rgba(255, 90, 140, .13);
+      outline: none;
+    }
+
+    .carousel-control:disabled {
+      opacity: .28;
+      cursor: default;
+    }
+
+    .carousel-control svg { width: 16px; height: 16px; }
+
+    .stories {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 118px;
+      gap: 11px;
+      margin: 0 -18px;
+      padding: 0 18px 8px;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+      scroll-behavior: smooth;
+      scrollbar-width: none;
+      scroll-padding-inline: 18px;
+      scroll-snap-type: x proximity;
+      touch-action: pan-x pan-y;
+      cursor: grab;
+      user-select: none;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .stories:focus-visible {
+      outline: 2px solid rgba(255, 125, 166, .8);
+      outline-offset: 4px;
+      border-radius: 14px;
+    }
+
+    .stories.is-dragging {
+      scroll-behavior: auto;
+      scroll-snap-type: none;
+      cursor: grabbing;
+    }
+
+    .stories::-webkit-scrollbar { display: none; }
+
+    .story {
+      position: relative;
+      display: block;
+      height: 169px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .1);
+      border-radius: 16px;
+      scroll-snap-align: start;
+      color: inherit;
+      text-decoration: none;
+      background: #2a1c3b;
+      box-shadow: 0 14px 28px rgba(0, 0, 0, .22);
+    }
+
+    .story-link {
+      transition: transform .18s ease, border-color .18s ease;
+    }
+
+    .story-link:active { transform: scale(.98); }
+
+    .story-link[data-opening="true"] {
+      border-color: rgba(255, 125, 166, .72);
+      opacity: .82;
+    }
+
+    .story-link:focus-visible {
+      border-color: rgba(255, 125, 166, .72);
+      outline: 2px solid #ff7da6;
+      outline-offset: 3px;
+    }
+
+    .story-cover-placeholder {
+      position: absolute;
+      z-index: 0;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255, 255, 255, .28);
+      background:
+        radial-gradient(circle at 72% 18%, rgba(255, 84, 143, .42), transparent 35%),
+        linear-gradient(145deg, #322047, #171020);
+      font-size: 42px;
+      font-style: italic;
+      font-weight: 900;
+    }
+
+    .story img {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      pointer-events: none;
+      -webkit-user-drag: none;
+    }
+
+    .story::after {
+      position: absolute;
+      z-index: 2;
+      inset: 36% 0 0;
+      content: "";
+      pointer-events: none;
+      background: linear-gradient(to bottom, transparent, rgba(11, 7, 18, .94));
+    }
+
+    .story-info {
+      position: absolute;
+      z-index: 3;
+      right: 9px;
+      bottom: 9px;
+      left: 9px;
+    }
+
+    .story-title {
+      display: -webkit-box;
+      overflow: hidden;
+      font-size: 11.5px;
+      font-weight: 800;
+      line-height: 1.18;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+
+    .story-tag {
+      margin-top: 5px;
+      color: #c8bdcf;
+      font-size: 8.5px;
+      font-weight: 800;
+      letter-spacing: .35px;
+      text-transform: uppercase;
+    }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      margin-top: 26px;
+      color: #6e6478;
+      font-size: 9.5px;
+      text-align: center;
+    }
+
+    .footer svg { width: 13px; height: 13px; }
+
+    @media (max-height: 720px) {
+      .brand { margin-bottom: 20px; }
+      h1 { font-size: 34px; }
+      .intro { margin: 10px 0 16px; }
+      .section-head { margin-top: 20px; }
+      .story { height: 151px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="content">
+      <header class="brand">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M8.2 5.5 17.7 12l-9.5 6.5v-13Z" fill="currentColor"></path>
+            </svg>
+          </div>
+          <div class="brand-name">DramaWave</div>
+        </div>
+        <div class="brand-pill">Code search</div>
+      </header>
+
+      <section aria-labelledby="page-title">
+        <div class="eyebrow">Continue the story</div>
+        <h1 id="page-title">Find the drama you <span>were watching.</span></h1>
+        <p class="intro">Enter the four-character code or the Content ID shown with the video. We’ll confirm the matching story before opening DramaWave.</p>
+      </section>
+
+      <section class="search-card" aria-label="Search by short code or DramaWave Content ID">
+        <form id="search-form" novalidate>
+          <label class="search-label" for="drama-query">
+            <span>Short code or Content ID</span>
+            <span>Exact match</span>
+          </label>
+          <div class="search-row">
+            <div class="input-wrap">
+              <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="11" cy="11" r="7"></circle>
+                <path d="m20 20-3.6-3.6"></path>
+              </svg>
+              <input
+                id="drama-query"
+                name="query"
+                type="text"
+                maxlength="32"
+                autocomplete="off"
+                autocapitalize="characters"
+                spellcheck="false"
+                placeholder="e.g. A7K2 or Content ID"
+                aria-describedby="search-helper"
+              >
+            </div>
+            <button class="search-button" id="search-button" type="submit" aria-label="Find story">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6"></path>
+              </svg>
+            </button>
+          </div>
+        </form>
+
+        <div class="helper" id="search-helper" role="status" aria-live="polite">Codes use four letters or numbers. Content IDs use the complete 10–32 character value.</div>
+
+        <article class="result" id="result" aria-live="polite">
+          <div class="result-layout">
+            <div class="result-cover-shell">
+              <div class="result-cover-placeholder" id="result-cover-placeholder" aria-hidden="true">D</div>
+              <img class="result-cover" id="result-cover" alt="" hidden>
+            </div>
+            <div class="result-copy">
+              <div class="match-badge">Match confirmed</div>
+              <strong class="result-title" id="result-title"></strong>
+              <div class="result-meta" id="result-meta"></div>
+              <p class="result-description" id="result-description"></p>
+            </div>
+          </div>
+          <a class="continue" id="continue-link" rel="noreferrer">
+            <span id="continue-text">Open matching story</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6"></path>
+            </svg>
+          </a>
+        </article>
+      </section>
+
+      <section aria-labelledby="recent-title">
+        <div class="section-head">
+          <div class="section-copy">
+            <h2 id="recent-title">Recently featured</h2>
+            <p id="recent-note">Swipe, drag, or use the arrows</p>
+          </div>
+          <div class="carousel-controls" aria-label="Featured story controls">
+            <button class="carousel-control" id="stories-previous" type="button" aria-label="Previous featured stories">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path d="m15 18-6-6 6-6"></path>
+              </svg>
+            </button>
+            <button class="carousel-control" id="stories-next" type="button" aria-label="Next featured stories">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path d="m9 18 6-6-6-6"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="stories" id="stories" role="list" tabindex="0" aria-label="Featured stories"></div>
+      </section>
+
+      <footer class="footer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+        </svg>
+        Story and destination are verified before DramaWave opens
+      </footer>
+    </div>
+  </main>
+</body>
+</html>

@@ -153,7 +153,7 @@ def validate_short_url(value: Any) -> str:
 
 
 def build_w2a_url(params: Mapping[str, Any]) -> str:
-    """Build the TT W2A URL with the same ordered attribution contract as X."""
+    """Build one immutable TT W2A attribution URL."""
 
     if not isinstance(params, Mapping):
         raise TTPostLinkError("invalid_request", "W2A参数必须是对象")
@@ -171,7 +171,8 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
         "queue_id",
         "content_id",
     }
-    if set(params) != required:
+    allowed = required | {"channel"}
+    if not required.issubset(params) or not set(params).issubset(allowed):
         raise TTPostLinkError(
             "invalid_request",
             "W2A参数字段不完整或包含未知字段",
@@ -205,6 +206,9 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
     material_id = _clean_token(params["material_id"], "素材ID", 128)
     queue_id = _positive_int(params["queue_id"], "队列ID")
     content_id = _clean_token(params["content_id"], "content_id", 128)
+    channel = str(params.get("channel") or "TT").strip()
+    if channel not in {"TT", "Search", "Featured", "AIpost"}:
+        raise TTPostLinkError("invalid_request", "TikTok归因渠道无效")
 
     campaign = "yingliang_post_CLV_VL_%s*%snone%s*%s*%s*%s" % (
         username,
@@ -221,7 +225,7 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
             ("af_adset_id", page_id),
             ("af_ad", "%s_contentid[%s]" % (material_name, content_id)),
             ("af_ad_id", material_id),
-            ("af_channel", "AIpost"),
+            ("af_channel", channel),
             ("af_c_id", str(queue_id)),
             ("af_dp", content_id),
         ),
@@ -229,6 +233,87 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
         safe="*",
     )
     return TT_W2A_BASE_URL + "?" + query
+
+
+def build_w2a_url_from_fields(
+    fields: Mapping[str, Any],
+    *,
+    channel: Any,
+) -> str:
+    """Rebuild frozen attribution while changing only ``af_channel``."""
+
+    required = {
+        "c",
+        "af_adset",
+        "af_adset_id",
+        "af_ad",
+        "af_ad_id",
+        "af_c_id",
+        "af_dp",
+    }
+    if not isinstance(fields, Mapping) or set(fields) != required:
+        raise TTPostLinkError("invalid_request", "TikTok W2A frozen fields are invalid")
+    normalized_channel = str(channel or "").strip()
+    if normalized_channel not in {"TT", "Search", "Featured", "AIpost"}:
+        raise TTPostLinkError("invalid_request", "TikTok attribution channel is invalid")
+    normalized = {
+        name: _clean_text(fields[name], name, 2048)
+        for name in required
+    }
+    query = urllib.parse.urlencode(
+        (
+            ("c", normalized["c"]),
+            ("af_adset", normalized["af_adset"]),
+            ("af_adset_id", normalized["af_adset_id"]),
+            ("af_ad", normalized["af_ad"]),
+            ("af_ad_id", normalized["af_ad_id"]),
+            ("af_channel", normalized_channel),
+            ("af_c_id", normalized["af_c_id"]),
+            ("af_dp", normalized["af_dp"]),
+        ),
+        quote_via=urllib.parse.quote,
+        safe="*",
+    )
+    return validate_w2a_url(TT_W2A_BASE_URL + "?" + query)
+
+
+def build_generic_w2a_url(content_id: Any, channel: Any) -> str:
+    """Build the fixed no-history search fallback from trusted values only."""
+
+    normalized_content_id = _clean_token(content_id, "content_id", 128)
+    normalized_channel = str(channel or "").strip()
+    if normalized_channel not in {"Search", "Featured"}:
+        raise TTPostLinkError("invalid_request", "TikTok search source is invalid")
+    query = urllib.parse.urlencode(
+        (
+            ("af_dp", normalized_content_id),
+            ("c", "TTpost"),
+            ("af_c_id", "0001"),
+            ("af_channel", normalized_channel),
+        ),
+        quote_via=urllib.parse.quote,
+    )
+    target = TT_W2A_BASE_URL + "?" + query
+    parsed = urllib.parse.urlsplit(target)
+    base = urllib.parse.urlsplit(TT_W2A_BASE_URL)
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != base.hostname
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != base.path
+        or parsed.fragment
+        or tuple(key for key, _value in pairs)
+        != ("af_dp", "c", "af_c_id", "af_channel")
+        or any(not value for _key, value in pairs)
+    ):
+        raise TTPostLinkError(
+            "tt_short_link_target_invalid",
+            "TikTok W2A fallback target is invalid",
+        )
+    return target
 
 
 def validate_w2a_url(value: Any) -> str:
@@ -252,7 +337,8 @@ def validate_w2a_url(value: Any) -> str:
     if (
         tuple(key for key, _value in pairs) != TT_W2A_QUERY_FIELDS
         or any(not value for _key, value in pairs)
-        or dict(pairs).get("af_channel") != "AIpost"
+        or dict(pairs).get("af_channel")
+        not in {"AIpost", "TT", "Search", "Featured"}
     ):
         raise TTPostLinkError(
             "tt_short_link_target_invalid",

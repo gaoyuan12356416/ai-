@@ -222,6 +222,7 @@ class StorageTests(CoreTestCase):
             {
                 "tt_post_material_pool",
                 "tt_post_queue",
+                "tt_post_code_route",
                 "tt_post_event",
                 "tt_post_account_setting",
                 "tt_post_daily_schedule",
@@ -817,6 +818,42 @@ class StorageTests(CoreTestCase):
         self.assertEqual(0, queue["short_link_id"])
         self.assertEqual("", queue["short_url"])
         self.assertEqual("", queue["long_url"])
+
+    def test_queue_allocates_code_and_freezes_exact_code_macro(self):
+        queue = self.add_and_freeze(
+            template="Drama ID: {{content_id}}\nCode: {code}"
+        )
+        self.assertRegex(queue["code"], r"^[A-Z0-9]{4}$")
+        self.assertEqual(
+            "Drama ID: Y9v1yQcFqM\nCode: %s" % queue["code"],
+            queue["caption"],
+        )
+        route = self.store.get_code_route_for_queue(queue["id"])
+        self.assertEqual(queue["code"], route["code"])
+        self.assertEqual(queue["content_id"], route["content_id"])
+        self.assertEqual("TT", route["af_channel"])
+        self.assertEqual("scheduled", route["state"])
+
+    def test_queue_sanitizes_campaign_delimiters_without_rejecting_metadata(self):
+        pool = self.store.add_material("1001")
+        queue = self.store.freeze_queue(
+            pool["id"],
+            account(),
+            "2026-07-29 10:00:00",
+            CAPTION,
+            policy(),
+            resolver,
+            drama_name="The * Contract [Bride]",
+            material_language="en[*]",
+            material_tag="romance*[vip]",
+        )
+        route = self.store.get_code_route_for_queue(queue["id"])
+        self.assertIn(
+            "noneen*The Contract Bride*romance vip*%s" % queue["id"],
+            route["c"],
+        )
+        self.assertNotIn("[Bride]", route["c"])
+        self.assertNotIn("[vip]", route["c"])
 
     def test_queue_freezes_url_macro_and_exact_internal_line_breaks(self):
         template = (
@@ -2955,6 +2992,10 @@ class LifecycleTests(CoreTestCase):
         )
         self.assertEqual("reconciling", pending["status"])
         self.assertEqual(
+            "reconciling",
+            self.store.get_code_route_for_queue(queue["id"])["state"],
+        )
+        self.assertEqual(
             "v_pub_url~v2-1.7668584571734657042",
             pending["publish_id"],
         )
@@ -2984,6 +3025,9 @@ class LifecycleTests(CoreTestCase):
         )
         self.assertEqual("published", published["status"])
         self.assertEqual("published", replay["status"])
+        published_route = self.store.get_code_route_for_queue(queue["id"])
+        self.assertEqual("published", published_route["state"])
+        self.assertTrue(published_route["published_at"])
 
     def test_explicit_remote_failure_is_terminal_and_retains_publish_id(self):
         queue = self.add_and_freeze()
