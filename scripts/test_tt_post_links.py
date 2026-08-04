@@ -40,7 +40,7 @@ def tracking_params(**overrides):
         "material_language": "en",
         "drama_name": "The Contract Bride",
         "tag": "romance",
-        "link_id": TT_SHORT_LINK_NAMESPACE + 9,
+        "link_id": 9,
         "page_name": "DramaWave popular reels",
         "page_id": "101",
         "material_name": "The Prodigy Sage Is Back",
@@ -59,17 +59,17 @@ class TTPostLinkTests(unittest.TestCase):
         self.assertNotEqual(first, direct_test_short_link_id("tttest-5837129-operation-b"))
         self.assertGreater(first, TT_DIRECT_TEST_SHORT_LINK_NAMESPACE)
         self.assertLessEqual(first, 8_999_999_999_999_999_999)
-        self.assertLess(
+        self.assertEqual(
             short_link_id(TT_SHORT_LINK_MAX_LOCAL_ID),
-            TT_DIRECT_TEST_SHORT_LINK_NAMESPACE,
+            TT_SHORT_LINK_MAX_LOCAL_ID,
         )
-        self.assertTrue(build_short_url(first).endswith("%s.html" % first))
+        self.assertTrue(build_short_url(first).endswith("/%s.html" % first))
 
     def test_reserved_id_and_public_url_are_stable(self):
         link_id = short_link_id(9)
-        self.assertEqual(TT_SHORT_LINK_NAMESPACE + 9, link_id)
+        self.assertEqual(9, link_id)
         self.assertEqual(
-            "https://gy.g2flow.com/s2l/8000000000000000009.html",
+            "https://gy.g2flow.com/s2l/tt/9.html",
             build_short_url(link_id),
         )
         self.assertEqual(
@@ -77,12 +77,18 @@ class TTPostLinkTests(unittest.TestCase):
             validate_short_url(build_short_url(link_id)),
         )
         with self.assertRaises(TTPostLinkError):
-            build_short_url(9)
-        with self.assertRaises(TTPostLinkError):
             validate_short_url(
                 "https://ai.yingliangads.com/s2l/"
                 "8000000000000000009.html"
             )
+
+    def test_historical_reserved_url_remains_valid(self):
+        link_id = TT_SHORT_LINK_NAMESPACE + 9
+        historical_url = (
+            "https://gy.g2flow.com/s2l/8000000000000000009.html"
+        )
+        self.assertEqual(historical_url, build_short_url(link_id))
+        self.assertEqual(historical_url, validate_short_url(historical_url))
 
     def test_w2a_url_matches_x_field_order_and_attribution_contract(self):
         target = build_w2a_url(tracking_params())
@@ -110,7 +116,7 @@ class TTPostLinkTests(unittest.TestCase):
             (
                 "yingliang_post_CLV_VL_creator_101*"
                 "1784736000noneen*The Contract Bride*romance*"
-                "8000000000000000009"
+                "9"
             ),
         )
         self.assertEqual(values["af_adset"], "DramaWave popular reels")
@@ -138,12 +144,12 @@ class TTPostLinkTests(unittest.TestCase):
     def test_wrapper_is_atomic_immutable_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "s2l"
-            link_id = TT_SHORT_LINK_NAMESPACE + 9
+            link_id = 9
             first_target = build_w2a_url(tracking_params())
             destination = write_short_redirect(root, link_id, first_target)
             self.assertEqual(
                 destination,
-                root / "8000000000000000009.html",
+                root / "tt" / "9.html",
             )
             payload = destination.read_text(encoding="utf-8")
             self.assertIn(
@@ -168,7 +174,7 @@ class TTPostLinkTests(unittest.TestCase):
     def test_concurrent_different_targets_cannot_overwrite_each_other(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "s2l"
-            link_id = TT_SHORT_LINK_NAMESPACE + 9
+            link_id = 9
             targets = [
                 build_w2a_url(tracking_params(queue_id=27)),
                 build_w2a_url(tracking_params(queue_id=28)),
@@ -206,7 +212,7 @@ class TTPostLinkTests(unittest.TestCase):
                 for status, target in outcomes
                 if status == "created"
             )
-            destination = root / "8000000000000000009.html"
+            destination = root / "tt" / "9.html"
             payload = destination.read_text(encoding="utf-8")
             self.assertIn(html.escape(winner, quote=True), payload)
 

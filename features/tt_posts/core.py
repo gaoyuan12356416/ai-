@@ -33,7 +33,6 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from .links import (
     TT_SHORT_LINK_MAX_LOCAL_ID,
-    TT_SHORT_LINK_NAMESPACE,
     build_short_url,
     short_link_id,
     validate_short_url,
@@ -159,9 +158,7 @@ _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]*)\}\}")
 _SINGLE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
 _URL_PLACEHOLDER = "{url}"
 _DESC_PLACEHOLDER = "{desc}"
-_MAX_TT_SHORT_URL = build_short_url(
-    TT_SHORT_LINK_NAMESPACE + TT_SHORT_LINK_MAX_LOCAL_ID
-)
+_MAX_TT_SHORT_URL = build_short_url(TT_SHORT_LINK_MAX_LOCAL_ID)
 _PUBLISH_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 _SHANGHAI_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
@@ -7307,16 +7304,16 @@ class TTPostStore:
                 "{url}短链所需的TikTok归因信息不完整",
                 409,
             )
-        frozen_short_link_id = short_link_id(pool_id) if has_url_macro else 0
-        frozen_short_url = (
-            build_short_url(frozen_short_link_id) if has_url_macro else ""
-        )
-        caption = render_caption_template(
-            frozen_caption_template,
-            resolution.content_id,
-            url=frozen_short_url if has_url_macro else None,
-            description=frozen_description,
-        )
+        def frozen_link(queue_identity: Any) -> Tuple[int, str, str]:
+            link_id = short_link_id(queue_identity) if has_url_macro else 0
+            short_url = build_short_url(link_id) if has_url_macro else ""
+            rendered_caption = render_caption_template(
+                frozen_caption_template,
+                resolution.content_id,
+                url=short_url if has_url_macro else None,
+                description=frozen_description,
+            )
+            return link_id, short_url, rendered_caption
         normalized_key = str(idempotency_key or "").strip()
         if not normalized_key:
             normalized_key = "tt-post:%s:%s:%s" % (
@@ -7389,6 +7386,35 @@ class TTPostStore:
                 (normalized_key,),
             ).fetchone()
             if existing is not None:
+                existing_short_link_id = int(
+                    existing["short_link_id"] or 0
+                )
+                existing_short_url = str(existing["short_url"] or "")
+                if has_url_macro:
+                    try:
+                        valid_existing_short_url = validate_short_url(
+                            existing_short_url
+                        )
+                        expected_existing_short_url = build_short_url(
+                            existing_short_link_id
+                        )
+                    except Exception:
+                        valid_existing_short_url = ""
+                        expected_existing_short_url = ""
+                    expected_existing_caption = render_caption_template(
+                        frozen_caption_template,
+                        resolution.content_id,
+                        url=existing_short_url,
+                        description=frozen_description,
+                    )
+                else:
+                    valid_existing_short_url = existing_short_url
+                    expected_existing_short_url = ""
+                    expected_existing_caption = render_caption_template(
+                        frozen_caption_template,
+                        resolution.content_id,
+                        description=frozen_description,
+                    )
                 if (
                     int(existing["pool_item_id"]) == pool_id
                     and secrets.compare_digest(
@@ -7399,16 +7425,17 @@ class TTPostStore:
                     and str(existing["content_id"]) == resolution.content_id
                     and str(existing["caption_template"])
                     == frozen_caption_template
-                    and str(existing["caption"]) == caption
+                    and str(existing["caption"])
+                    == expected_existing_caption
                     and str(existing["material_name"]) == frozen_material_name
                     and str(existing["drama_name"]) == frozen_drama_name
                     and str(existing["material_language"])
                     == frozen_material_language
                     and str(existing["material_tag"]) == frozen_material_tag
                     and str(existing["description"]) == frozen_description
-                    and int(existing["short_link_id"] or 0)
-                    == frozen_short_link_id
-                    and str(existing["short_url"]) == frozen_short_url
+                    and bool(existing_short_link_id) == has_url_macro
+                    and valid_existing_short_url
+                    == expected_existing_short_url
                     and str(existing["privacy_level"])
                     == normalized_policy.privacy_level
                     and bool(existing["allow_comment"])
@@ -7417,10 +7444,6 @@ class TTPostStore:
                     == normalized_policy.allow_duet
                     and bool(existing["allow_stitch"])
                     == normalized_policy.allow_stitch
-                    and bool(existing["brand_content_toggle"])
-                    == normalized_policy.brand_content_toggle
-                    and bool(existing["brand_organic_toggle"])
-                    == normalized_policy.brand_organic_toggle
                     and bool(existing["user_consent"])
                     == normalized_policy.user_consent
                     and str(existing["consent_version"])
@@ -7476,6 +7499,17 @@ class TTPostStore:
                     409,
                 )
 
+            sequence_row = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name='tt_post_queue'"
+            ).fetchone()
+            predicted_queue_id = (
+                int(sequence_row["seq"] or 0) + 1
+                if sequence_row is not None
+                else 1
+            )
+            frozen_short_link_id, frozen_short_url, caption = frozen_link(
+                predicted_queue_id
+            )
             try:
                 insert_columns = (
                     "idempotency_key",
@@ -7551,8 +7585,8 @@ class TTPostStore:
                     int(normalized_policy.allow_comment),
                     int(normalized_policy.allow_duet),
                     int(normalized_policy.allow_stitch),
-                    int(normalized_policy.brand_content_toggle),
-                    int(normalized_policy.brand_organic_toggle),
+                    0,
+                    0,
                     int(normalized_policy.user_consent),
                     normalized_policy.consent_version,
                     normalized_policy.consented_at_utc,
@@ -7582,6 +7616,12 @@ class TTPostStore:
                     409,
                 ) from None
             queue_id = int(cursor.lastrowid)
+            if queue_id != predicted_queue_id:
+                raise TTPostError(
+                    "tt_short_link_identity_mismatch",
+                    "TikTok发布任务自增ID与短链ID不一致",
+                    500,
+                )
             updated = conn.execute(
                 """
                 UPDATE tt_post_material_pool
@@ -8345,7 +8385,9 @@ class TTPostStore:
             conn.execute(
                 """
                 UPDATE tt_post_queue
-                SET status='publishing',updated_at=?
+                SET status='publishing',
+                    brand_content_toggle=0,brand_organic_toggle=0,
+                    updated_at=?
                 WHERE id=? AND status='claimed'
                 """,
                 (now_iso, normalized),

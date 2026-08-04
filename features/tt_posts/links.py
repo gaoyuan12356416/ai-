@@ -16,11 +16,13 @@ from typing import Any, Mapping
 TT_W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2250/view"
 TT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
 TT_SHORT_LINK_NAMESPACE = 8_000_000_000_000_000_000
-TT_SHORT_LINK_MAX_LOCAL_ID = 499_999_999_999_999_999
+TT_SHORT_LINK_MAX_LOCAL_ID = 9_223_372_036_854_775_807
 TT_DIRECT_TEST_SHORT_LINK_NAMESPACE = 8_500_000_000_000_000_000
 TT_DIRECT_TEST_SHORT_LINK_SLOTS = 499_999_999_999_999_999
 TT_SHORT_LINK_ID_RE = re.compile(r"8[0-9]{18}")
 TT_SHORT_LINK_FILENAME_RE = re.compile(r"8[0-9]{18}[.]html")
+TT_AUTO_SHORT_LINK_ID_RE = re.compile(r"[1-9][0-9]{0,18}")
+TT_AUTO_SHORT_LINK_FILENAME_RE = re.compile(r"[1-9][0-9]{0,18}[.]html")
 TT_W2A_QUERY_FIELDS = (
     "c",
     "af_adset",
@@ -83,15 +85,15 @@ def _clean_token(value: Any, label: str, limit: int) -> str:
     return text
 
 
-def short_link_id(pool_item_id: Any) -> int:
-    """Map one immutable TT material-pool identity into its reserved namespace."""
+def short_link_id(queue_id: Any) -> int:
+    """Use the immutable auto-increment queue identity as the short-link ID."""
 
     local_id = _positive_int(
-        pool_item_id,
-        "TikTok素材池ID",
+        queue_id,
+        "TikTok发布任务ID",
         TT_SHORT_LINK_MAX_LOCAL_ID,
     )
-    return TT_SHORT_LINK_NAMESPACE + local_id
+    return local_id
 
 
 def direct_test_short_link_id(identity: Any) -> int:
@@ -112,9 +114,14 @@ def direct_test_short_link_id(identity: Any) -> int:
 
 def build_short_url(link_id: Any) -> str:
     normalized = _positive_int(link_id, "TikTok短链ID")
-    if not TT_SHORT_LINK_ID_RE.fullmatch(str(normalized)):
-        raise TTPostLinkError("tt_short_link_id_invalid", "TikTok短链ID不在保留命名空间")
-    return "%s/%s.html" % (TT_SHORT_BASE_URL, normalized)
+    text = str(normalized)
+    if TT_SHORT_LINK_ID_RE.fullmatch(text):
+        # Historical automatic links and direct-test links keep their exact
+        # immutable 19-digit URL and filesystem location.
+        return "%s/%s.html" % (TT_SHORT_BASE_URL, normalized)
+    if not TT_AUTO_SHORT_LINK_ID_RE.fullmatch(text):
+        raise TTPostLinkError("tt_short_link_id_invalid", "TikTok短链ID无效")
+    return "%s/tt/%s.html" % (TT_SHORT_BASE_URL, normalized)
 
 
 def validate_short_url(value: Any) -> str:
@@ -122,14 +129,22 @@ def validate_short_url(value: Any) -> str:
     parsed = urllib.parse.urlsplit(url)
     expected_base = urllib.parse.urlsplit(TT_SHORT_BASE_URL)
     filename = parsed.path.rsplit("/", 1)[-1]
+    directory = parsed.path.rsplit("/", 1)[0]
+    legacy = bool(
+        directory == expected_base.path
+        and TT_SHORT_LINK_FILENAME_RE.fullmatch(filename)
+    )
+    automatic = bool(
+        directory == expected_base.path + "/tt"
+        and TT_AUTO_SHORT_LINK_FILENAME_RE.fullmatch(filename)
+    )
     if (
         parsed.scheme != "https"
         or parsed.hostname != expected_base.hostname
         or parsed.port is not None
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.path.rsplit("/", 1)[0] != expected_base.path
-        or not TT_SHORT_LINK_FILENAME_RE.fullmatch(filename)
+        or not (legacy or automatic)
         or parsed.query
         or parsed.fragment
     ):
@@ -171,11 +186,6 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
         raise TTPostLinkError("invalid_request", "TikTok用户名无效")
     timestamp = _positive_int(params["timestamp"], "时间戳")
     link_id = _positive_int(params["link_id"], "TikTok短链ID")
-    if not TT_SHORT_LINK_ID_RE.fullmatch(str(link_id)):
-        raise TTPostLinkError(
-            "tt_short_link_id_invalid",
-            "TikTok短链ID不在保留命名空间",
-        )
     language = _clean_text(
         params["material_language"],
         "素材语言",
@@ -269,10 +279,13 @@ def write_short_redirect(public_root: Any, link_id: Any, long_url: Any) -> Path:
 
     target = validate_w2a_url(long_url)
     normalized_id = _positive_int(link_id, "TikTok短链ID")
-    if not TT_SHORT_LINK_ID_RE.fullmatch(str(normalized_id)):
+    normalized_text = str(normalized_id)
+    legacy = bool(TT_SHORT_LINK_ID_RE.fullmatch(normalized_text))
+    automatic = bool(TT_AUTO_SHORT_LINK_ID_RE.fullmatch(normalized_text))
+    if not (legacy or automatic):
         raise TTPostLinkError(
             "tt_short_link_id_invalid",
-            "TikTok短链ID不在保留命名空间",
+            "TikTok短链ID无效",
         )
     configured_root = Path(str(public_root or "").strip()).expanduser()
     if not configured_root.is_absolute():
@@ -300,7 +313,28 @@ def write_short_redirect(public_root: Any, link_id: Any, long_url: Any) -> Path:
             500,
         ) from None
 
-    destination = root / ("%s.html" % normalized_id)
+    destination_root = root
+    if automatic and not legacy:
+        destination_root = root / "tt"
+        if destination_root.exists() and destination_root.is_symlink():
+            raise TTPostLinkError(
+                "tt_short_link_root_invalid",
+                "TikTok自动短链目录不能是符号链接",
+                500,
+            )
+        try:
+            destination_root.mkdir(mode=0o755, parents=False, exist_ok=True)
+            destination_root = destination_root.resolve(strict=True)
+            if destination_root.parent != root or not destination_root.is_dir():
+                raise OSError("invalid automatic short-link directory")
+            os.chmod(destination_root, 0o755)
+        except OSError as exc:
+            raise TTPostLinkError(
+                "tt_short_link_write_failed",
+                "TikTok自动短链目录不可用: %s" % type(exc).__name__,
+                500,
+            ) from None
+    destination = destination_root / ("%s.html" % normalized_id)
     escaped = html.escape(target, quote=True)
     js_target = (
         json.dumps(target, ensure_ascii=True)
@@ -340,7 +374,7 @@ def write_short_redirect(public_root: Any, link_id: Any, long_url: Any) -> Path:
         descriptor, raw_path = tempfile.mkstemp(
             prefix=".%s." % normalized_id,
             suffix=".tmp",
-            dir=str(root),
+            dir=str(destination_root),
         )
         temporary_path = Path(raw_path)
         try:
@@ -367,7 +401,7 @@ def write_short_redirect(public_root: Any, link_id: Any, long_url: Any) -> Path:
             # failed publish boundary.
             pass
         temporary_path = None
-        _fsync_directory(root)
+        _fsync_directory(destination_root)
         return destination
     except FileExistsError:
         if destination.exists() and destination.read_bytes() == payload:

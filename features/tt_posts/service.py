@@ -2961,18 +2961,20 @@ class TTPostService:
         )
 
     @staticmethod
-    def _policy_from_account_settings(
+    def _automatic_policy_from_account_settings(
         settings: TTPostAccountSettings,
         consent: Mapping[str, Any],
     ) -> TTPostPolicy:
+        """Build an automatic queue policy with disclosure always disabled."""
+
         return TTPostPolicy.from_mapping(
             {
                 "privacy_level": settings.privacy_level,
                 "allow_comment": settings.allow_comment,
                 "allow_duet": settings.allow_duet,
                 "allow_stitch": settings.allow_stitch,
-                "brand_content_toggle": settings.brand_content_toggle,
-                "brand_organic_toggle": settings.brand_organic_toggle,
+                "brand_content_toggle": False,
+                "brand_organic_toggle": False,
                 "user_consent": consent.get("accepted"),
                 "consent_version": consent.get("version"),
                 "consented_at": consent.get("accepted_at"),
@@ -4331,7 +4333,10 @@ class TTPostService:
             policy = (
                 self._manual_canary_policy(pool_item)
                 if manual_canary_run
-                else self._policy_from_account_settings(settings, consent)
+                else self._automatic_policy_from_account_settings(
+                    settings,
+                    consent,
+                )
             )
             self._assert_creator_policy(creator, policy)
             claimed = self.store.renew_recurring_execution(
@@ -5154,7 +5159,10 @@ class TTPostService:
                 )
             }
         )
-        policy = self._policy_from_account_settings(settings, consent)
+        policy = self._automatic_policy_from_account_settings(
+            settings,
+            consent,
+        )
         is_aigc = settings.is_aigc
 
         creator_result = self.creator_info({"source_account_id": account_id})
@@ -5943,8 +5951,8 @@ class TTPostService:
                 allow_comment=bool(queue["allow_comment"]),
                 allow_duet=bool(queue["allow_duet"]),
                 allow_stitch=bool(queue["allow_stitch"]),
-                brand_content_toggle=bool(queue["brand_content_toggle"]),
-                brand_organic_toggle=bool(queue["brand_organic_toggle"]),
+                brand_content_toggle=False,
+                brand_organic_toggle=False,
                 user_consent=True,
                 consent_version=str(queue["consent_version"]),
                 consented_at_utc=str(queue["consented_at_utc"]),

@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -469,9 +470,15 @@ class StorageTests(CoreTestCase):
             queue["caption"],
         )
         self.assertEqual(
-            8_000_000_000_000_000_000 + int(pool["id"]),
+            queue["id"],
             queue["short_link_id"],
         )
+        self.assertEqual(
+            "https://gy.g2flow.com/s2l/tt/%s.html" % queue["id"],
+            queue["short_url"],
+        )
+        self.assertFalse(queue["brand_content_toggle"])
+        self.assertFalse(queue["brand_organic_toggle"])
         self.assertEqual("", queue["long_url"])
 
         claim = self.claim_one(queue)
@@ -515,6 +522,62 @@ class StorageTests(CoreTestCase):
             "tt_short_link_target_conflict",
             caught.exception.code,
         )
+
+    def test_concurrent_queue_links_use_each_own_auto_increment_id(self):
+        template = "Drama ID: {{content_id}}\n{url}"
+        pools = [
+            self.store.add_material("81001"),
+            self.store.add_material("81002"),
+        ]
+        stores = [
+            TTPostStore(self.db_path, now_fn=self.clock),
+            TTPostStore(self.db_path, now_fn=self.clock),
+        ]
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def freeze(index):
+            try:
+                barrier.wait()
+                item = stores[index].freeze_queue(
+                    pools[index]["id"],
+                    account("acct-%s" % (index + 1)),
+                    "2026-07-29 10:00:00",
+                    template,
+                    policy(),
+                    resolver,
+                    material_name="Concurrent material %s" % index,
+                    drama_name="Concurrent drama",
+                    material_language="en",
+                    material_tag="drama",
+                )
+                with lock:
+                    results.append(item)
+            except Exception as exc:  # pragma: no cover - asserted below
+                with lock:
+                    errors.append(exc)
+
+        workers = [
+            threading.Thread(target=freeze, args=(index,))
+            for index in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(2, len({item["id"] for item in results}))
+        for item in results:
+            self.assertEqual(item["id"], item["short_link_id"])
+            self.assertEqual(
+                "https://gy.g2flow.com/s2l/tt/%s.html" % item["id"],
+                item["short_url"],
+            )
 
     def test_queue_url_macro_requires_frozen_attribution_metadata(self):
         pool = self.store.add_material("1001")
@@ -1921,6 +1984,29 @@ class LifecycleTests(CoreTestCase):
             now=datetime(2026, 7, 29, 2, 0, 20, tzinfo=UTC),
         )
         self.assertEqual("publishing", started["status"])
+
+    def test_begin_publish_clears_legacy_disclosure_flags(self):
+        queue = self.add_and_freeze()
+        claim = self.claim_one(queue)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE tt_post_queue SET brand_content_toggle=1, "
+                "brand_organic_toggle=1 WHERE id=?",
+                (queue["id"],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        started = self.store.begin_publish(
+            queue["id"],
+            claim.reveal_claim_token(),
+            OPEN_GATES,
+            now=datetime(2026, 7, 29, 2, 0, 20, tzinfo=UTC),
+        )
+        self.assertEqual("publishing", started["status"])
+        self.assertFalse(started["brand_content_toggle"])
+        self.assertFalse(started["brand_organic_toggle"])
 
     def test_claim_lease_can_be_reclaimed_before_publish(self):
         queue = self.add_and_freeze()

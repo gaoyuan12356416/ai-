@@ -3170,6 +3170,8 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertFalse(created["allow_duet"])
         self.assertFalse(created["allow_stitch"])
         self.assertFalse(created["commercial_disclosure"])
+        self.assertFalse(created["brand_content_toggle"])
+        self.assertFalse(created["brand_organic_toggle"])
         self.assertTrue(created["is_aigc"])
 
     def test_idempotent_replay_keeps_original_after_account_setting_changes(self):
@@ -3601,10 +3603,13 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertRegex(
             created["short_url"],
             (
-                r"^https://gy[.]g2flow[.]com/s2l/"
-                r"8[0-9]{18}[.]html$"
+                r"^https://gy[.]g2flow[.]com/s2l/tt/"
+                r"[1-9][0-9]{0,18}[.]html$"
             ),
         )
+        self.assertEqual(created["id"], created["short_link_id"])
+        self.assertFalse(created["brand_content_toggle"])
+        self.assertFalse(created["brand_organic_toggle"])
 
         self.clock.value += timedelta(minutes=30)
         claim = service.claim_due(
@@ -3622,6 +3627,16 @@ class ServiceLifecycleTests(unittest.TestCase):
         sent_caption = self.gpu.publish_requests[-1]["queue"]["caption"]
         self.assertEqual(created["caption_text"], sent_caption)
         self.assertIn("\n\nDrama ID: ABCD1234\n\n", sent_caption)
+        self.assertFalse(
+            self.gpu.publish_requests[-1]["queue"][
+                "brand_content_toggle"
+            ]
+        )
+        self.assertFalse(
+            self.gpu.publish_requests[-1]["queue"][
+                "brand_organic_toggle"
+            ]
+        )
 
         frozen = service.store.get_queue(created["id"])
         pairs = urllib.parse.parse_qsl(
@@ -3649,6 +3664,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         wrapper = (
             Path(self.temp.name)
             / "s2l"
+            / "tt"
             / ("%s.html" % frozen["short_link_id"])
         )
         self.assertTrue(wrapper.is_file())
@@ -5356,6 +5372,10 @@ class DeployContractTests(unittest.TestCase):
                 "/mnt/data-disk/tt-post-publisher/s2l"
             ),
             env,
+        )
+        self.assertIn(
+            'location ~ "^/s2l/tt/[1-9][0-9]{0,18}[.]html$"',
+            short_nginx,
         )
         self.assertIn(
             'location ~ "^/s2l/8[0-9]{18}[.]html$"',
