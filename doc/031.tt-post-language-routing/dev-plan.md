@@ -15,7 +15,7 @@
 | 个号管理剧语言输入/回填/批量保存 | Codex | `static/tt-account-settings.html` | 已完成 |
 | 预制作状态剧语言和领取账号展示 | Codex | `static/tt-post-pool.html` | 已完成 |
 | Core/Service/代理/页面回归 | QA/Codex | `scripts/test_tt_*.py` | 已完成 |
-| 生产副本迁移和只读验收 | QA/Ops | 部署主机、SQLite 副本、公网页面 | 待执行 |
+| 生产副本迁移和只读验收 | QA/Ops | 部署主机、SQLite 副本、公网页面 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -51,4 +51,4 @@ python -m unittest scripts.test_tt_posts_app_contract scripts.test_tt_posts_core
 - 2026-08-04：补齐超过 1000 条的素材池最终账号筛选，以及 active canary + 已启用排期的按钮/执行一致性。
 - 2026-08-04：Python 完整 TT 回归 372/372 通过（Core 83、Service 130）；Drama bridge 53 项断言通过；py_compile 与 `git diff --check` 通过。
 - 2026-08-04：候选机旧 SQLite 不支持测试用 `DROP COLUMN`；生产迁移未受影响，测试已改为兼容式重建旧表并完成本地 372/372 复验，详见 `bugs/BUG-002.md`。
-- 生产副本迁移、浏览器登录态只读验收和部署证据仍须在正式部署窗口回填；不得用真实发布验证。
+- 2026-08-04：生产副本迁移、GitHub 精确 release、Chrome 登录态 100% 布局和自然 runner 验收完成；未使用真实发布验证。
