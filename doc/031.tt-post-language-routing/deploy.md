@@ -26,15 +26,18 @@ Sidecar 启动时幂等执行：
 ```sql
 ALTER TABLE tt_post_account_setting
 ADD COLUMN drama_language TEXT NOT NULL DEFAULT 'en';
+
+ALTER TABLE tt_post_recurring_pool
+ADD COLUMN routing_language TEXT NOT NULL DEFAULT '';
 ```
 
-仅当列不存在时执行。`tt_post_recurring_pool`、`tt_post_schedule_run` 和 `tt_post_queue` 不新增列。
+仅当列不存在时执行。随后按服务端统一规范函数回填 `routing_language`：历史空语言回填 `en`，非法历史值写隔离键；再校验或重建 `(status,routing_language,created_at,id)` 复合索引。`tt_post_schedule_run` 和 `tt_post_queue` 不新增列。
 
 上线前必须：
 
 1. 对生产 SQLite 使用在线 backup API 备份，不直接复制活动 WAL 文件。
 2. 在副本连续初始化两次。
-3. 检查 `PRAGMA integrity_check`、账号默认值、历史 queue/run/publish_id 数量和素材状态分布不变。
+3. 检查 `PRAGMA integrity_check`、账号默认值、素材路由键/索引、历史 queue/run/publish_id 数量和素材状态分布不变。
 4. 审计历史空/非空素材语言分布；空值按 en 是已确认语义。
 
 ## 部署步骤
@@ -49,10 +52,11 @@ ADD COLUMN drama_language TEXT NOT NULL DEFAULT 'en';
 
 4. 备份 SQLite、`/opt/tt-post/current` 指向和三份相关静态页。
 5. 从 GitHub 精确 commit 构建只读 release，先在隔离数据库运行 py_compile、全量 TT 测试和迁移副本检查。
-6. 原子切换 `/opt/tt-post/current`。
-7. 安装同 commit 的 `tt-account-settings.html`、`tt-post-pool.html` 到主后台静态目录和 Nginx 公共目录。
-8. 仅重启 `tt-post-service` 以执行增量迁移；不重启 GPU，不手工执行真实发布。
-9. 确认 runner/prepare timer 和 Nginx 仍为 active；不改变自动配置开关、账号成员或发布时间。
+6. 在无到期槽窗口先停止 `tt-post-runner.timer`、`tt-post-prepare.timer` 和 `tt-post-service`，并确认旧 writer 已退出；不停止 GPU/Nginx。
+7. 原子切换 `/opt/tt-post/current`。
+8. 安装同 commit 的 `tt-account-settings.html`、`tt-post-pool.html` 到主后台静态目录和 Nginx 公共目录。
+9. 启动 `tt-post-service` 完成增量迁移，再恢复 runner/prepare timer；不手工执行真实发布。
+10. 确认 sidecar、runner/prepare timer 和 Nginx 均为 active；不改变自动配置开关、账号成员或发布时间。
 
 ## 验证步骤
 
@@ -67,6 +71,8 @@ ADD COLUMN drama_language TEXT NOT NULL DEFAULT 'en';
 ```sql
 PRAGMA integrity_check;
 PRAGMA table_info(tt_post_account_setting);
+PRAGMA table_info(tt_post_recurring_pool);
+PRAGMA index_info(idx_tt_post_recurring_pool_language_fifo);
 SELECT drama_language, COUNT(*)
 FROM tt_post_account_setting
 GROUP BY drama_language;
@@ -96,8 +102,8 @@ SELECT COUNT(*) FROM tt_post_queue WHERE publish_id<>'';
 
 1. 停止进一步发布变更，记录当前 queue/run/publish_id；未知结果不得补发。
 2. 将 `/opt/tt-post/current` 原子切回上一个已验证 release，并恢复对应静态页。
-3. 仅重启 `tt-post-service`，确认 timers/Nginx 状态。
-4. 保留新增 `drama_language` 列；旧代码会忽略该 additive 列，不应回滚整个活动数据库。
+3. 在旧 writer 全部停止后切回 release，启动 `tt-post-service` 并恢复 timers，确认 Nginx 状态。
+4. 保留新增 `drama_language`、`routing_language` 列和索引；旧代码会忽略 additive 字段，不应回滚整个活动数据库。
 5. 仅在完整性损坏且确认没有新 queue/publish_id 时，才由人工评审离线恢复数据库备份。不得用旧备份覆盖已产生的发布身份。
 
 回滚后旧代码不再提供语言路由保护；若原因涉及跨语言风险，应由运营显式暂停自动配置，完成修复和数据审计后再恢复。
@@ -107,4 +113,5 @@ SELECT COUNT(*) FROM tt_post_queue WHERE publish_id<>'';
 - 自动领取会把 pool 的 `account_id` 和 `is_aigc` 改为实际领取账号，这是预期账本变化。
 - 已存在 run/queue/publish_id 不因配置后改重选。
 - 手动立即发布仍按精确账号分池，不能用它验证自动语言路由。
+- 新代码迁移前必须停净旧 writer；禁止一边让旧进程新增空 `routing_language` 行，一边启动新版本。
 - 技能上下文若无新的长期运维规则可保持不变；部署记录和实际 commit/备份路径必须回填本文件。
