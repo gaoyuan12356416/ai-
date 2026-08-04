@@ -454,7 +454,7 @@
     .button.run-now:hover:not(:disabled) { background: linear-gradient(135deg, #cf2d62, #b51d48); }
     .run-now-help { color: var(--muted); font-size: 12px; line-height: 1.5; }
     .direct-test-panel {
-      grid-column: span 2;
+      grid-column: auto;
       display: grid;
       gap: 10px;
       padding: 15px;
@@ -488,7 +488,12 @@
       color: var(--muted);
       font-size: 12px;
     }
-    .setting-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
+    .setting-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 13px;
+      align-items: start;
+    }
     .check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
     .check-card {
       display: flex;
@@ -621,6 +626,10 @@
       line-height: 1.5;
     }
     .toast.error { background: #a72d3a; }
+    @media (max-width: 1680px) {
+      .setting-grid { grid-template-columns: minmax(0, 1fr); }
+      .schedule-panel { grid-column: auto; }
+    }
     @media (max-width: 1180px) {
       .gate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .create-grid { grid-template-columns: 1fr; }

@@ -191,6 +191,30 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("? fixedPublishTimesFromDraft()", save_source)
         self.assertIn(": [];", save_source)
 
+    def test_configuration_layout_does_not_create_implicit_outer_columns(self):
+        direct_panel_css = source_between(
+            ".direct-test-panel {", ".direct-test-panel strong"
+        )
+        schedule_panel_css = source_between(
+            ".schedule-panel {", ".schedule-panel-head {"
+        )
+        setting_grid_css = source_between(".setting-grid {", ".check-grid")
+        desktop_narrow_css = source_between(
+            "@media (max-width: 1680px)", "@media (max-width: 1180px)"
+        )
+        self.assertIn("grid-column: auto;", direct_panel_css)
+        self.assertNotIn("grid-column: span 2;", direct_panel_css)
+        self.assertIn("grid-column: span 2;", schedule_panel_css)
+        self.assertIn("align-items: start;", setting_grid_css)
+        self.assertIn(
+            ".setting-grid { grid-template-columns: minmax(0, 1fr); }",
+            desktop_narrow_css,
+        )
+        self.assertIn(
+            ".schedule-panel { grid-column: auto; }",
+            desktop_narrow_css,
+        )
+
     def test_config_draft_uses_version_conflict_protection(self):
         apply_source = source_between("function applySchedule", "async function loadSchedule")
         save_source = source_between("async function saveSchedule", "function validPendingRunNowId")

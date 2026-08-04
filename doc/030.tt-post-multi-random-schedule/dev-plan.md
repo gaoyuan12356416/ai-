@@ -5,6 +5,7 @@
 | 加法迁移和随机计划生成 | `features/tt_posts/core.py` | 已完成 |
 | API 模式、次数与领取适配 | `features/tt_posts/service.py` | 已完成 |
 | 多时间与随机模式 UI | `static/tt-post-pool.html` | 已完成 |
+| 桌面 100% 缩放布局修复与回归 | `static/tt-post-pool.html`、`scripts/test_tt_post_pool_ui.py` | 已完成 |
 | 核心、服务、UI 契约测试 | `scripts/test_tt_*.py` | 已完成 |
 | GitHub 推送与生产发布 | immutable release | 已完成 |
 
@@ -24,3 +25,4 @@ git diff --check
 
 - 生产数据库只允许在线备份后执行加法迁移。
 - 调度器测试不得调用真实 Creator Info、GPU 或 TikTok 发布接口。
+- UI 修复只调整 Grid 排版与响应式断点，不修改 DOM、事件、请求体或随机发布状态。
