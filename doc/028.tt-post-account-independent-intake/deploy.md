@@ -37,6 +37,27 @@
 - 重启 `tt-post-service.service` 并复核 health/hash。
 - 本次无 schema 变更，普通回滚不覆盖 SQLite backup、不修改 GPU ledger。
 
-## 生产结果
+## 生产结果（2026-08-04）
 
-待部署后补充：最终 commit、release、backup、hash、服务状态、只读 0 副作用证据和精确回滚命令。
+- 代码 commit：`32f1f2875a569531f697bad93e84f61e5a2a91eb`；部署前已验证 GitHub 远端分支指向该 SHA。
+- 新 release：`/opt/tt-post/releases/32f1f2875a569531f697bad93e84f61e5a2a91eb`；旧 release：`/opt/tt-post/releases/f91a3e1ae82c9843b37145d60c3fe5c188a8fea3`。
+- 备份：`/mnt/data-disk/tt-post-publisher/backups/20260804T033644Z-f91a3e1-to-32f1f28-account-independent`；SQLite online backup `integrity_check=ok`。
+- 服务器候选版本 9 个 Python 脚本 344/344、Node 53/53，编译通过。
+- `tt-post-service.service`、主 API、runner/prepare timer 均 active；sidecar `/health` 正常，Nginx 配置通过。
+- release、主应用和 Nginx 三份静态页 SHA-256 均为 `14ee10ddc4cfa0d6e2299228a2a0212c8faaba4ff2a0863e41a9a9d824227d00`；公网 200 且 hash 一致。
+- 只读 GET：accounts=23、auto-config version=4/enabled=true、material-pool=5、direct-tests=1、tasks=5、queue=4。
+- 部署前后 10 张 TT 表所有业务字段一致；只有既有 minutely runner 对已完成行的 `updated_at/consumed_at_utc/finished_at_utc` 自然刷新。11:39、11:40 tick 均为 0 个 publish/direct/reconcile 请求。
+- 第一次切换因服务刚重启时立即探测端口而自动回滚；旧 release、旧静态页和服务核对恢复。第二次改为最多 30 秒健康轮询后成功。
+- 验收未调用 POST、未保存配置、未加入素材、未创建或消费发布任务；GPU 未修改或重启。
+
+## 精确回滚命令
+
+```bash
+ln -s /opt/tt-post/releases/f91a3e1ae82c9843b37145d60c3fe5c188a8fea3 /opt/tt-post/current.rollback-next
+mv -Tf /opt/tt-post/current.rollback-next /opt/tt-post/current
+cp -a /mnt/data-disk/tt-post-publisher/backups/20260804T033644Z-f91a3e1-to-32f1f28-account-independent/app-tt-post-pool.html /root/drama_material_service/static/tt-post-pool.html
+cp -a /mnt/data-disk/tt-post-publisher/backups/20260804T033644Z-f91a3e1-to-32f1f28-account-independent/nginx-tt-post-pool.html /usr/share/nginx/html/tt-post-pool.html
+systemctl restart tt-post-service.service
+```
+
+普通回滚不恢复 SQLite backup，因为本次无 schema 变更且生产业务数据不得倒退。

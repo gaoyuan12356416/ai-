@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-本地全量通过，具备发布条件。测试全部使用临时数据库和 fake 外部依赖，没有连接生产 TikTok 或创建 Post。
+本地与服务器候选全量通过，生产已部署并完成只读验收。自动化全部使用临时数据库和 fake 外部依赖，没有连接生产 TikTok 或创建 Post。
 
 ## 执行统计
 
@@ -40,4 +40,4 @@ Node `test_tt_drama_bridge.js` 为 53/53 断言通过；目标 Python 文件编�
 
 ## 发布建议
 
-按 GitHub-first 部署 CPU sidecar 和三份静态页；不改数据库 schema、不改 GPU。生产只读验收，不创建素材或 Post。
+已按 GitHub-first 部署 CPU sidecar 和三份静态页；未改数据库 schema 或 GPU。生产只读验收未创建素材或 Post，结论通过。
