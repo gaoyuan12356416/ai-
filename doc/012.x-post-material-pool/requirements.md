@@ -7,7 +7,7 @@
 ## 目标
 
 - 在 AI 后台提供“Post 素材池”页面，可批量录入 `ads_custom_source.id`；页面和素材池 API 的访问权与快速导航栏 `xPostMaterialPool` 配置一致。
-- 素材池全局共享，不按账号拆池；定时任务按 `created_at ASC, id ASC` 选择最早的合格素材。
+- 素材池全局共享，不按账号拆池；定时任务按 `created_at DESC, id DESC` 选择最新上传的合格素材。
 - 素材池主状态只保存 `unpublished`、`published`，其他运行态从 queue/log 派生。
 - 任何素材一旦进入任意 X 发布队列即永久占用，不能删除、重新入池或自动换账号补发。
 - 只有 X 明确返回成功且本地发布日志成功落库时，素材池主状态才变为 `published`。
@@ -49,7 +49,7 @@
 13. known failure 保持池主状态 `unpublished`，派生状态为 `failed`；unknown 或残留 `post_creating` 派生为 `needs_review`，两者均不能再次选择。
 14. X 明确成功后，queue、publish log 和 pool 在同一事务中更新；池主状态变为 `published` 并记录 `published_at`。
 15. 只有未发布且不存在任何同池 ID/同素材 key queue 的记录可以删除；已发布和已占用记录必须保留审计。
-16. runner 按 `X_POST_DAILY_SCAN_LIMIT` 读取最老的池记录，默认和当前生产建议均为 1000、允许 3 至 1000；selector 再按 FIFO 保留最多 `X_POST_DAILY_CANDIDATE_POOL_LIMIT=50` 条可发布候选供媒体预检补位。最老 1000 条内不足三条合格素材时整批不发布。
+16. runner 按 `X_POST_DAILY_SCAN_LIMIT` 读取最新的池记录，默认和当前生产建议均为 1000、允许 3 至 1000；selector 再按上传时间倒序保留最多 `X_POST_DAILY_CANDIDATE_POOL_LIMIT=50` 条可发布候选供媒体预检补位。最新 1000 条内不足三条合格素材时整批不发布。
 17. selector/媒体拒绝结果按 Sidecar 单次上限 100 条分批回写；例如 205 条必须按 100/100/5 三批提交，避免整批审计丢失。
 18. 素材池明细将“素材预览”和“Post 预览”分列展示。管理员查询列表时，主后台按素材 ID 只读读取 `ads_custom_source.url`；绝对 `http://` 素材地址在内存中升级为 `https://` 后返回安全 `material_preview_url`，不回写源表，页面直接打开源素材，不再经后台 302。发布筛选使用相同规范化结果。素材不合规但源记录和安全 URL 存在时仍可预览；素材不存在、URL 缺失/非法或使用 HTTP(S) 以外协议时显示“无法预览”。预览不修改池、queue 或发布日志。
 19. 入池即时校验覆盖与 X selector 相同的数据库级发布标准；媒体文件下载、大小、编码、真实时长和分辨率校验仍在 daily 任务建计划前执行，不能因入池状态“可供发布”而跳过。
@@ -60,10 +60,10 @@
 1. 具备快速导航栏 `xPostMaterialPool` 访问权的登录用户进入“X 平台 > Post 素材池”，粘贴素材 ID 并提交；可在明细点击“预览素材”核对自定义素材库源文件。
 2. 主后台验证 Feishu Cookie、导航项配置和同源 JSON，规范化素材 ID，使用只读业务库复用 X selector 完成即时检查。
 3. 主后台将 actor、素材 ID 和逐素材校验结果转发给 loopback Sidecar；Sidecar 在一个事务中完成规范化、池内排重、历史 queue 排重、入池和校验状态落库。校验服务异常时 fail closed 为“不可用”，不先暴露可供发布状态。
-4. daily runner 先验证存储和当前配置的全部自动发布账号，再取得最老的未发布且未占用素材。
+4. daily runner 先验证存储和当前配置的全部自动发布账号，再取得最新上传的未发布且未占用素材。
 5. selector 直接读取 `ads_custom_source`、违规/标签审计表、剧映射表以及 Dramawave `ads_drama_info.deploy_time`，过滤尚未到可投放时间的短剧并返回合格候选和逐素材拒绝原因。
 6. runner 回写校验结果，下载并预检媒体；不足目标账号数时只记录 `failed_preflight` run，不创建 queue。
-7. 全部目标素材均通过后，Sidecar 在一个事务中再次校验 FIFO、池快照、全局排重和账号日排重，再按目标账号数冻结 queue。
+7. 全部目标素材均通过后，Sidecar 在一个事务中再次校验上传时间倒序、池快照、全局排重和账号日排重，再按目标账号数冻结 queue。
 8. runner 按账号顺序发布；成功、known failure、unknown 分别写入 publish log，池状态按本需求规则派生或转换。
 
 ## 技术设计
@@ -72,7 +72,7 @@
 
 | 模块 | 变更 |
 | --- | --- |
-| `features/x_posts/service.py` | 素材池 schema、事务、FIFO、排重、派生查询、成功态联动 |
+| `features/x_posts/service.py` | 素材池 schema、事务、最新上传优先、排重、派生查询、成功态联动 |
 | `features/x_posts/selector.py` | 手工池素材加载与合规/映射校验，不使用 insight 排名 |
 | `scripts/x_post_daily_runner.py` | 读取池、回写检查、三条成组预检与计划 |
 | `features/x_accounts/oauth_service.py` | backend/daily 两种 bearer 的素材池内部路由 |
@@ -88,7 +88,7 @@
 
 | 字段 | 规则 |
 | --- | --- |
-| `id` | SQLite 自增主键，也是相同时间下的 FIFO 次序 |
+| `id` | SQLite 自增主键，也是相同时间下的倒序次序（ID 较大者优先） |
 | `material_key` | 规范正整数文本，全局唯一 |
 | `material_id` | 展示/追踪素材 ID，与 `material_key` 一致 |
 | `status` | 仅 `unpublished`、`published` |
@@ -101,7 +101,7 @@
 `x_post_queue` 增量字段：
 
 - `pool_item_id`：关联池主键，非空时必须与 queue 的 `material_key` 匹配。
-- `pool_created_at`：冻结入池时间，计划提交时校验快照和 FIFO。
+- `pool_created_at`：冻结入池时间，计划提交时校验快照和上传时间倒序。
 - 唯一索引 `ux_x_post_queue_pool_item_id` 保证池记录只绑定一条 queue。
 - 既有 `ux_x_post_queue_material_key` 继续保证任意素材全局只进入一条 queue。
 - 触发器同时防止无效绑定、池中素材被非池 queue 绕过、以及删除已占用池记录。
@@ -168,7 +168,7 @@
 
 - `ads_custom_source.product = 'Dramawave'` 已同时在 SQL 与行级校验中 fail closed，并有其他产品负例；生产只读 schema/数据抽样已确认。
 - `summary.available` 排除真正阻塞发布的数据校验错误，但把历史 `material_has_violation`、`material_source_tag_unsafe`、`material_tag_unsafe` 错误码按可用统计，原错误字段仍保留审计。
-- 单次安全扫描明确限制为最老 1000 条，而非无界遍历全池；如果这 1000 条长期不足三条合格素材，整批不发并由管理员修复元数据或删除仍未占用的无效池记录。
+- 单次安全扫描明确限制为最新 1000 条，而非无界遍历全池；如果这 1000 条不足三条合格素材，整批不发并由管理员修复元数据或删除仍未占用的无效池记录。
 - 检查回写已按 100 条分批；205 条 100/100/5 回归通过。Sidecar 整体不可用时仍保持 best effort，不影响发布排重和主状态。
 - 生产 SQLite 的 legacy canary/queue 已在副本与正式迁移中验证兼容，原 queue/log 各 1 条均保留。
 - 生产主后台 composite 已核对并保留公网 `quick-nav.js`；只结构化修改 `navigation.json` 的 X 模块。
@@ -184,3 +184,4 @@
 | 2026-07-23 | 精确 commit `9711ef77809e53ec4159b0b7f8bd6fe86fdc23d4` 的主后台接口与素材池页面部署生产；浏览器实测有效素材 302、缺失素材 404，发布账本零变化 |
 | 2026-07-23 | 入池改为即时复用 X selector 并原子落校验状态；素材预览改为列表直接附加 `ads_custom_source.url`，页面将不合规/不存在素材明确标记为“不可用” |
 | 2026-07-23 | 精确 commit `00b5b088af76dce4a02866beaf0186713daa46fb` 部署生产；两条既有记录回填为不可用，`5503209` 可直链预览、`11761405635` 无法预览，账本计数保持 `2/1/1` |
+| 2026-08-04 | 发布候选改为 `created_at DESC, id DESC`，素材池最新上传优先；历史队列、排重与成功态规则不变 |

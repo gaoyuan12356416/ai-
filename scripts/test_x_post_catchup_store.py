@@ -117,10 +117,14 @@ class XPostCatchupStoreTests(unittest.TestCase):
                     for item in candidates
                 ],
             )
-            for candidate, pool_item in zip(
-                candidates,
-                result["items"],
-            ):
+            candidates = [
+                formal_candidate(account_id, int(pool_item["material_id"]))
+                for account_id, pool_item in zip(
+                    range(5, 11),
+                    reversed(result["items"]),
+                )
+            ]
+            for candidate, pool_item in zip(candidates, reversed(result["items"])):
                 candidate["pool_item_id"] = pool_item["id"]
                 candidate["pool_created_at"] = pool_item["created_at"]
         return candidates

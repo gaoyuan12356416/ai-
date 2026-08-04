@@ -893,21 +893,21 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 {"material_id": "102", "error_code": ""},
             ],
         )
-        first_pool, second_pool = added["items"]
+        oldest_pool, newest_pool = added["items"]
 
         first = self.store.create_schedule_plan(
             "material",
             "2026-07-27",
             "09:00",
             2,
-            [self.material_candidate(first_pool, 2)],
+            [self.material_candidate(newest_pool, 2)],
         )
         second = self.store.create_schedule_plan(
             "material",
             "2026-07-27",
             "10:00",
             2,
-            [self.material_candidate(second_pool, 2)],
+            [self.material_candidate(oldest_pool, 2)],
         )
 
         self.assertNotEqual(first["id"], second["id"])
@@ -918,7 +918,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             second["queues"][0]["material_key"],
         )
 
-    def test_material_schedule_cannot_skip_the_oldest_available_pool_item(self):
+    def test_material_schedule_cannot_skip_the_newest_available_pool_item(self):
         self.save_schedule("material", [2], ["09:00"])
         added = self.store.add_pool_materials(
             ["201", "202"],
@@ -935,14 +935,14 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 "2026-07-27",
                 "09:00",
                 2,
-                [self.material_candidate(added["items"][1], 2)],
+                [self.material_candidate(added["items"][0], 2)],
             )
         self.assertEqual(
             rejected.exception.code,
             "x_post_pool_fifo_conflict",
         )
 
-    def test_material_schedule_accepts_oldest_violation_audit_record(self):
+    def test_material_schedule_accepts_newest_violation_audit_record(self):
         self.save_schedule("material", [2], ["09:00"])
         pool = self.store.add_pool_materials(
             ["211"],
@@ -975,12 +975,12 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_drama_plan_keeps_each_unfinished_drama_on_one_account(self):
         self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
-        first_pool = self.add_drama(free_episode_count=2, labels="")
         second_pool = self.add_drama(
             content_id="D2",
             free_episode_count=2,
             labels="",
         )
+        first_pool = self.add_drama(free_episode_count=2, labels="")
         first_plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1052,8 +1052,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_reordering_accounts_keeps_existing_drama_bindings(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         first_plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1211,10 +1211,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     (pool["id"],),
                 )
 
-    def test_new_account_receives_oldest_unassigned_drama(self):
+    def test_new_account_receives_newest_unassigned_drama(self):
         self.save_schedule("drama", [2], ["09:00"])
-        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         first_plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1223,6 +1223,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [self.drama_candidate(first_pool, 2, 1)],
         )
         self.publish_queue(first_plan["queues"][0], 1)
+        newest_pool = self.add_drama(content_id="D3", free_episode_count=2)
         updated = self.store.save_schedule_config(
             "drama",
             {
@@ -1251,7 +1252,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             updated["version"],
             [
                 self.drama_candidate(first_pool, 2, 2),
-                self.drama_candidate(second_pool, 3, 1),
+                self.drama_candidate(newest_pool, 3, 1),
             ],
         )
         self.assertEqual(
@@ -1259,7 +1260,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 (item["account_id"], item["content_id"])
                 for item in second_plan["queues"]
             ],
-            [(2, "D1"), (3, "D2")],
+            [(2, "D1"), (3, "D3")],
         )
 
     def test_drama_shortage_creates_no_partial_queue(self):
@@ -1290,8 +1291,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_drama_assignment_rejects_cross_account_continuation(self):
         self.save_schedule("drama", [2, 3], ["09:00", "10:00"])
-        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         first_plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1349,8 +1350,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_legacy_frozen_cross_account_queue_is_blocked_before_publish(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1396,8 +1397,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_storage_migration_uses_earliest_confirmed_account_as_owner(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         second_pool = self.add_drama(content_id="D2", free_episode_count=1)
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1525,14 +1526,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_storage_conflict",
         )
 
-    def test_completed_drama_releases_account_to_oldest_unassigned_drama(self):
+    def test_completed_drama_releases_account_to_newest_unassigned_drama(self):
         self.save_schedule("drama", [2], ["09:00", "10:00"])
         completed_pool = self.add_drama(
             content_id="DONE",
-            free_episode_count=1,
-        )
-        next_pool = self.add_drama(
-            content_id="NEXT",
             free_episode_count=1,
         )
         first_plan = self.store.create_schedule_plan(
@@ -1543,6 +1540,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [self.drama_candidate(completed_pool, 2, 1)],
         )
         self.publish_queue(first_plan["queues"][0], 1)
+        self.add_drama(content_id="OLDER", free_episode_count=1)
+        next_pool = self.add_drama(content_id="NEXT", free_episode_count=1)
 
         second_plan = self.store.create_schedule_plan(
             "drama",
@@ -1565,8 +1564,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_enabled_schedule_cannot_remove_unfinished_drama_owner(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
+        first_pool = self.add_drama(content_id="D1", free_episode_count=2)
         self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1642,11 +1641,11 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_known_drama_failure_blocks_later_episodes(self):
         self.save_schedule("drama", [2], ["09:00", "10:00"])
-        pool = self.add_drama(free_episode_count=2)
         later_pool = self.add_drama(
             content_id="D2",
             free_episode_count=1,
         )
+        pool = self.add_drama(free_episode_count=2)
         plan = self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1713,8 +1712,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_drama_pool_batch_delete_rolls_back_when_any_item_has_history(self):
         self.save_schedule("drama", [2], ["09:00"])
-        occupied = self.add_drama(content_id="OCCUPIED")
         deletable = self.add_drama(content_id="DELETABLE")
+        occupied = self.add_drama(content_id="OCCUPIED")
         self.store.create_schedule_plan(
             "drama",
             "2026-07-27",
@@ -1853,12 +1852,12 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_first_drama_failure_stops_batch_with_later_queues_unexecuted(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
-        first_pool = self.add_drama(
-            content_id="FIRST",
-            free_episode_count=2,
-        )
         second_pool = self.add_drama(
             content_id="SECOND",
+            free_episode_count=2,
+        )
+        first_pool = self.add_drama(
+            content_id="FIRST",
             free_episode_count=2,
         )
         plan = self.store.create_schedule_plan(
@@ -1892,12 +1891,12 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_exact_pre_x_config_failure_can_restore_the_frozen_batch(self):
         self.save_schedule("drama", [2, 3], ["07:00", "09:00"])
-        first_pool = self.add_drama(
-            content_id="FIRST",
-            free_episode_count=2,
-        )
         second_pool = self.add_drama(
             content_id="SECOND",
+            free_episode_count=2,
+        )
+        first_pool = self.add_drama(
+            content_id="FIRST",
             free_episode_count=2,
         )
         published_plan = self.store.create_schedule_plan(

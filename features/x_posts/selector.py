@@ -740,9 +740,10 @@ class DramawaveCandidateSelector:
         return selected
 
     def select_pool(self, pool_items, source_date, limit=3):
-        """Hydrate the oldest publishable manual-pool items.
+        """Hydrate the newest publishable manual-pool items.
 
-        Pool order is determined exclusively by ``created_at`` then ``id``.
+        Pool order is determined exclusively by descending ``created_at`` then
+        descending ``id``.
         A data-quality rejection is returned per item, while violation and
         dangerous-tag evidence is audit-only for X. A database query failure
         still aborts the whole operation.
@@ -808,7 +809,7 @@ class DramawaveCandidateSelector:
                     "sort_key": (created_timestamp, pool_item_id, position),
                 }
             )
-        prepared.sort(key=lambda item: item["sort_key"])
+        prepared.sort(key=lambda item: item["sort_key"], reverse=True)
 
         selected = []
         seen_pool_ids = set()
@@ -894,7 +895,7 @@ def select_pool_candidates(
     schema=DEFAULT_SCHEMA,
     now=None,
 ):
-    """Hydrate manual-pool materials in oldest-first order.
+    """Hydrate manual-pool materials in newest-first order.
 
     Returns ``(candidates, rejections)``. Rejections are safe item-level
     outcomes; a :class:`CandidateQueryError` still aborts the whole call.

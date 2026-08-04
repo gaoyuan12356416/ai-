@@ -113,6 +113,6 @@
 - 新字段为 SQLite 加法迁移，旧历史队列和日志不删除。
 - `account_ids` 是新版短剧 runner 的必填内部契约。
 - `drama-pool/check` 仅对受信任内部调用方开放，并复用现有内部鉴权；不得暴露为页面匿名能力。
-- `drama-pool/check` 的 FIFO 顺延由 runner 在成功写入 `validation_failed` 后重新请求候选完成。
+- `drama-pool/check` 的最新上传优先顺延由 runner 在成功写入 `validation_failed` 后重新请求候选完成。
 - 本需求不提供失败批次恢复或补发 API。10:06 不补跑；若需补发必须另立包含管理员审批、不可变审计和停用配置门禁的需求。
 - 旧版 runner 不具备粘性分配能力，数据库升级后不得与新版 schema 混用运行。

@@ -143,7 +143,7 @@ class PoolConnection:
 
 
 class ManualPoolSelectorTests(unittest.TestCase):
-    def test_pool_order_is_created_at_then_id_and_does_not_use_insight(self):
+    def test_pool_order_is_created_at_then_id_desc_and_does_not_use_insight(self):
         connection = PoolConnection([10, 20, 30])
         selected, rejections = select_pool_candidates(
             connection,
@@ -157,8 +157,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
         )
 
         self.assertEqual(rejections, [])
-        self.assertEqual([item["material_id"] for item in selected], ["10", "20"])
-        self.assertEqual([item["pool_item_id"] for item in selected], [1, 2])
+        self.assertEqual([item["material_id"] for item in selected], ["30", "20"])
+        self.assertEqual([item["pool_item_id"] for item in selected], [3, 2])
         self.assertEqual([item["spend"] for item in selected], [0.0, 0.0])
         statements = [sql for sql, _params in connection.calls]
         self.assertTrue(all("ads_custom_source_insight" not in sql for sql in statements))
@@ -167,24 +167,24 @@ class ManualPoolSelectorTests(unittest.TestCase):
             for sql, params in connection.calls
             if "ads_custom_source cs" in sql
         ]
-        self.assertEqual([params[0] for _sql, params in material_calls], ["10", "20"])
+        self.assertEqual([params[0] for _sql, params in material_calls], ["30", "20"])
         material_sql, material_params = material_calls[0]
         self.assertIn("cs.id = %s", material_sql)
         self.assertIn("cs.type = %s", material_sql)
         self.assertIn("cs.product = %s", material_sql)
-        self.assertEqual(material_params, ("10", "Dramawave", 2, 0, 1, 140))
+        self.assertEqual(material_params, ("30", "Dramawave", 2, 0, 1, 140))
         drama_calls = [
             (sql, params)
             for sql, params in connection.calls
             if "ads_drama_resource" in sql
         ]
-        self.assertEqual(drama_calls[0][1], ("C10", "en"))
+        self.assertEqual(drama_calls[0][1], ("C30", "en"))
         deploy_calls = [
             (sql, params)
             for sql, params in connection.calls
             if "ads_drama_info i" in sql
         ]
-        self.assertEqual(deploy_calls[0][1], ("C10", 1479, "en"))
+        self.assertEqual(deploy_calls[0][1], ("C30", 1479, "en"))
 
     def test_future_deploy_time_is_skipped_until_the_boundary_passes(self):
         shanghai = timezone(timedelta(hours=8))
@@ -202,8 +202,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
         selected, rejections = select_pool_candidates(
             connection,
             [
-                pool_item(1, 1, "2026-07-23T00:00:00Z"),
-                pool_item(2, 2, "2026-07-23T00:00:01Z"),
+                pool_item(1, 1, "2026-07-23T00:00:01Z"),
+                pool_item(2, 2, "2026-07-23T00:00:00Z"),
             ],
             "2026-07-22",
             limit=1,
@@ -263,9 +263,9 @@ class ManualPoolSelectorTests(unittest.TestCase):
         selected, rejections = select_pool_candidates(
             connection,
             [
-                pool_item(1, 1, "2026-07-23T00:00:00Z"),
+                pool_item(1, 1, "2026-07-23T00:00:02Z"),
                 pool_item(2, 2, "2026-07-23T00:00:01Z"),
-                pool_item(3, 3, "2026-07-23T00:00:02Z"),
+                pool_item(3, 3, "2026-07-23T00:00:00Z"),
             ],
             "2026-07-22",
             limit=1,
@@ -301,7 +301,7 @@ class ManualPoolSelectorTests(unittest.TestCase):
 
         self.assertEqual(
             [item["material_id"] for item in selected],
-            ["1", "2", "3", "6"],
+            ["6", "3", "2", "1"],
         )
         selected_by_id = {item["material_id"]: item for item in selected}
         self.assertEqual(selected_by_id["1"]["facebook_violation_count"], 1)
@@ -310,8 +310,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
         self.assertEqual(
             [item["error_code"] for item in rejections],
             [
-                "drama_mapping_ambiguous",
                 "material_url_not_https",
+                "drama_mapping_ambiguous",
             ],
         )
         self.assertTrue(
@@ -408,8 +408,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
         selected, rejections = select_pool_candidates(
             connection,
             [
-                pool_item(1, 11, "2026-07-23T00:00:00Z"),
-                pool_item(2, 12, "2026-07-23T00:00:01Z"),
+                pool_item(1, 11, "2026-07-23T00:00:01Z"),
+                pool_item(2, 12, "2026-07-23T00:00:00Z"),
             ],
             "2026-07-22",
             limit=1,
@@ -429,8 +429,8 @@ class ManualPoolSelectorTests(unittest.TestCase):
             select_pool_candidates(
                 connection,
                 [
-                    pool_item(1, 9, "2026-07-23T00:00:00Z"),
-                    pool_item(2, 10, "2026-07-23T00:00:01Z"),
+                    pool_item(1, 9, "2026-07-23T00:00:01Z"),
+                    pool_item(2, 10, "2026-07-23T00:00:00Z"),
                 ],
                 "2026-07-22",
                 limit=1,

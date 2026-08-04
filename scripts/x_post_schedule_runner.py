@@ -736,7 +736,7 @@ class ScheduleSidecarClient(SidecarClient):
                 "x_post_drama_pool_invalid_response",
                 "Drama pool response is invalid",
             )
-        # The selector performs the full identity/FIFO validation.
+        # The selector performs the full identity/newest-first validation.
         return [dict(item) if isinstance(item, dict) else item for item in items]
 
     def record_drama_pool_checks(
@@ -959,7 +959,7 @@ def _material_candidates(
     )
     if len(planned) != len(accounts):
         raise ScheduleRunError(
-            "not enough FIFO material candidates passed media preflight",
+            "not enough newest-first material candidates passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
     for item in planned:

@@ -141,14 +141,17 @@ class XPostMaterialPoolTests(unittest.TestCase):
             0,
         )
 
-    def test_add_fifo_validation_and_delete_available_item(self):
+    def test_add_newest_first_validation_and_delete_available_item(self):
         items = self.add("00101", "102", "103", "104")
         self.assertEqual([item["material_id"] for item in items], ["101", "102", "103", "104"])
         available = self.store.available_pool_items(10)
-        self.assertEqual([item["material_id"] for item in available], ["101", "102", "103", "104"])
+        self.assertEqual([item["material_id"] for item in available], ["104", "103", "102", "101"])
         self.assertEqual(
             [(item["created_at"], item["id"]) for item in available],
-            sorted((item["created_at"], item["id"]) for item in available),
+            sorted(
+                ((item["created_at"], item["id"]) for item in available),
+                reverse=True,
+            ),
         )
 
         duplicate = self.store.add_pool_materials(
@@ -201,7 +204,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.assertTrue(deleted["deleted"])
         self.assertEqual(
             [item["material_id"] for item in self.store.available_pool_items(10)],
-            ["102", "103"],
+            ["103", "102"],
         )
 
     def test_historical_violation_and_content_tag_errors_remain_selectable(self):
@@ -236,7 +239,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.assertEqual(result["validation_failed_count"], 1)
         self.assertEqual(
             [item["material_id"] for item in self.store.available_pool_items(10)],
-            ["111", "112", "113"],
+            ["113", "112", "111"],
         )
         queried = {
             item["material_id"]: item
@@ -252,17 +255,17 @@ class XPostMaterialPoolTests(unittest.TestCase):
         )
         self.assertEqual(self.store.query_pool({})["summary"]["available"], 3)
 
-    def test_pool_plan_is_atomic_fifo_and_success_only_marks_published(self):
+    def test_pool_plan_is_atomic_newest_first_and_success_only_marks_published(self):
         items = self.add("201", "202", "203", "204")
-        reversed_candidates = [
+        ascending_candidates = [
             plan_candidate(account_id, pool_item)
-            for account_id, pool_item in zip((2, 3, 4), reversed(items[:3]))
+            for account_id, pool_item in zip((2, 3, 4), items[:3])
         ]
         with self.assertRaises(service.XPostError) as out_of_order:
             self.store.create_daily_plan(
                 "2026-07-23",
                 "2026-07-22",
-                reversed_candidates,
+                ascending_candidates,
                 require_pool=True,
             )
         self.assertEqual(out_of_order.exception.code, "invalid_request")
@@ -272,7 +275,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
 
         candidates = [
             plan_candidate(account_id, pool_item)
-            for account_id, pool_item in zip((2, 3, 4), items[:3])
+            for account_id, pool_item in zip((2, 3, 4), reversed(items[1:]))
         ]
         plan = self.store.create_daily_plan(
             "2026-07-23",
@@ -282,11 +285,11 @@ class XPostMaterialPoolTests(unittest.TestCase):
         )
         self.assertEqual(
             [queue["pool_item_id"] for queue in plan["queues"]],
-            [item["id"] for item in items[:3]],
+            [item["id"] for item in reversed(items[1:])],
         )
         self.assertEqual(
             [item["material_id"] for item in self.store.available_pool_items(10)],
-            ["204"],
+            ["201"],
         )
 
         first_queue = plan["queues"][0]
@@ -305,7 +308,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
             "9000201",
             "https://x.com/account2/status/9000201",
         )
-        published = self.store.query_pool({"material_id": "201"})["items"][0]
+        published = self.store.query_pool({"material_id": "204"})["items"][0]
         self.assertEqual(published["status"], "published")
         self.assertEqual(published["availability"], "published")
         self.assertTrue(published["published_at"])
@@ -319,7 +322,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         )
         self.store.mark_publishing(second_log["id"])
         self.store.mark_failed(second_log["id"], "x_upstream_error", "known failure")
-        failed = self.store.query_pool({"material_id": "202"})["items"][0]
+        failed = self.store.query_pool({"material_id": "203"})["items"][0]
         self.assertEqual(failed["status"], "unpublished")
         self.assertEqual(failed["availability"], "failed")
 
@@ -337,11 +340,11 @@ class XPostMaterialPoolTests(unittest.TestCase):
             "transport interrupted",
             unknown_outcome=True,
         )
-        unknown = self.store.query_pool({"material_id": "203"})["items"][0]
+        unknown = self.store.query_pool({"material_id": "202"})["items"][0]
         self.assertEqual(unknown["status"], "unpublished")
         self.assertEqual(unknown["availability"], "needs_review")
 
-        for pool_item in items[:3]:
+        for pool_item in items[1:]:
             with self.assertRaises(service.XPostError) as occupied:
                 self.store.delete_pool_material(pool_item["id"])
             self.assertIn(

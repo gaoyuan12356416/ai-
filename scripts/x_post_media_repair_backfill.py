@@ -478,7 +478,7 @@ def _execute_locked_backfill(
                 )
                 continue
             try:
-                # The daily cap bounds automatic FIFO replenishment. This
+                # The daily cap bounds automatic newest-first replenishment. This
                 # operator command already has an explicit, bounded ID list,
                 # so keep the one-attempt guard per material without making
                 # later requested IDs depend on an earlier material's result.

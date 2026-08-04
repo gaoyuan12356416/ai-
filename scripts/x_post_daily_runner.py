@@ -80,7 +80,7 @@ class SidecarError(DailyRunError):
 
 
 class CandidatePreflightError(DailyRunError):
-    """A known candidate-local failure that may safely replenish from FIFO."""
+    """A known candidate-local failure that may use the next newest candidate."""
 
 
 class MediaRepairError(CandidatePreflightError):
@@ -831,10 +831,10 @@ class SidecarClient:
                     "Material pool item identity is invalid",
                 )
             order = (created_at, pool_item_id)
-            if previous_order is not None and order <= previous_order:
+            if previous_order is not None and order >= previous_order:
                 raise SidecarError(
                     "x_post_pool_invalid_response",
-                    "Material pool FIFO order is invalid",
+                    "Material pool newest-first order is invalid",
                 )
             previous_order = order
             seen_ids.add(pool_item_id)
@@ -1412,7 +1412,7 @@ def _preflight_candidate(
     repair_client=None,
     repair_state=None,
 ):
-    """Validate one FIFO candidate and perform at most one repair attempt."""
+    """Validate one newest-first candidate and perform at most one repair attempt."""
     try:
         item = _plan_candidate(
             account,

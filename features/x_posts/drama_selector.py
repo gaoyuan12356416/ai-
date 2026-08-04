@@ -40,7 +40,7 @@ class DramaQueryError(DramaSelectionError):
 
 
 class DramaPoolRejection(DramaSelectionError):
-    """The current FIFO drama is incomplete or ambiguous."""
+    """The current selected drama is incomplete or ambiguous."""
 
     def __init__(self, code, message, pool_item_id=None, content_id=""):
         self.code = str(code or "x_post_drama_invalid")[:64]
@@ -218,7 +218,7 @@ def _created_order(value, pool_item_id):
 
 
 class DramawaveDramaSelector:
-    """Audit and expand FIFO drama-pool rows into immutable episode candidates."""
+    """Audit and expand newest-first drama-pool rows into episode candidates."""
 
     def __init__(
         self,

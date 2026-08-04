@@ -131,7 +131,7 @@ COMPLIANCE_FIELD_ALIASES = {
 }
 
 # X keeps these historical validation results as audit evidence, but they no
-# longer make a material unavailable or change FIFO ordering.
+# longer make a material unavailable or change newest-first ordering.
 NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
     {
         "material_has_violation",
@@ -3242,7 +3242,7 @@ class XPostStore:
                 "AND (p.last_error_code='' OR p.last_error_code IN %s) "
                 "AND NOT EXISTS(SELECT 1 FROM x_post_queue q "
                 "WHERE q.pool_item_id=p.id OR q.material_key=p.material_key) "
-                "ORDER BY p.created_at ASC,p.id ASC LIMIT ?"
+                "ORDER BY p.created_at DESC,p.id DESC LIMIT ?"
                 % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                 (limit,),
             ).fetchall()
@@ -3377,7 +3377,7 @@ class XPostStore:
             rows = conn.execute(
                 select_sql
                 + where
-                + " ORDER BY p.created_at ASC,p.id ASC LIMIT ? OFFSET ?",
+                + " ORDER BY p.created_at DESC,p.id DESC LIMIT ? OFFSET ?",
                 tuple(values) + (page_size, offset),
             ).fetchall()
             summary = conn.execute(
@@ -3776,7 +3776,7 @@ class XPostStore:
             "AND free_episode_count>0 "
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id=0 "
-            "ORDER BY created_at,id LIMIT ?",
+            "ORDER BY created_at DESC,id DESC LIMIT ?",
             (unassigned_limit,),
         ).fetchall()
         unassigned = iter(unassigned_rows)
@@ -3831,7 +3831,7 @@ class XPostStore:
                 "AND last_error_code='' "
                 "AND free_episode_count>0 "
                 "AND next_sub_number<=free_episode_count "
-                "ORDER BY created_at,id LIMIT ?",
+                "ORDER BY created_at DESC,id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             return [_row_dict(row) for row in rows]
@@ -4116,7 +4116,7 @@ class XPostStore:
             rows = conn.execute(
                 select_sql
                 + where
-                + " ORDER BY p.created_at,p.id LIMIT ? OFFSET ?",
+                + " ORDER BY p.created_at DESC,p.id DESC LIMIT ? OFFSET ?",
                 tuple(values) + (page_size, offset),
             ).fetchall()
             summary = conn.execute(
@@ -5290,7 +5290,7 @@ class XPostStore:
                     "WHERE q.pool_item_id=p.id "
                     "OR q.material_key=p.material_key"
                     ") "
-                    "ORDER BY p.created_at,p.id LIMIT ?"
+                    "ORDER BY p.created_at DESC,p.id DESC LIMIT ?"
                     % _NONBLOCKING_MATERIAL_VALIDATION_SQL,
                     (len(prepared),),
                 ).fetchall()
@@ -5304,7 +5304,7 @@ class XPostStore:
                     conn.rollback()
                     raise XPostError(
                         "x_post_pool_fifo_conflict",
-                        "素材计划必须使用当前素材池最早的可用记录",
+                        "素材计划必须使用当前素材池最新的可用记录",
                         409,
                     )
                 previous_order = None
@@ -5340,11 +5340,11 @@ class XPostStore:
                             409,
                         )
                     order_key = (str(pool["created_at"]), int(pool["id"]))
-                    if previous_order is not None and order_key <= previous_order:
+                    if previous_order is not None and order_key >= previous_order:
                         conn.rollback()
                         raise XPostError(
                             "invalid_request",
-                            "素材计划必须按素材池加入顺序提交",
+                            "素材计划必须按素材池加入时间倒序提交",
                             400,
                         )
                     previous_order = order_key
@@ -5719,11 +5719,11 @@ class XPostStore:
                             409,
                         )
                     pool_order = (str(pool["created_at"]), int(pool["id"]))
-                    if previous_pool_order is not None and pool_order <= previous_pool_order:
+                    if previous_pool_order is not None and pool_order >= previous_pool_order:
                         conn.rollback()
                         raise XPostError(
                             "invalid_request",
-                            "每日计划必须按素材池创建时间正序提交",
+                            "每日计划必须按素材池创建时间倒序提交",
                             400,
                         )
                     previous_pool_order = pool_order
@@ -6269,12 +6269,12 @@ class XPostStore:
                     )
                     if (
                         previous_pool_order is not None
-                        and pool_order <= previous_pool_order
+                        and pool_order >= previous_pool_order
                     ):
                         conn.rollback()
                         raise XPostError(
                             "invalid_request",
-                            "补发计划必须按素材池创建时间正序提交",
+                            "补发计划必须按素材池创建时间倒序提交",
                             400,
                         )
                     previous_pool_order = pool_order

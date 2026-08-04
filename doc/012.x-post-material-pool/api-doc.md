@@ -208,7 +208,7 @@ backend 或 daily bearer。请求：
 {"limit": 1000}
 ```
 
-`limit` 为 1 至 1000。daily runner 传 `X_POST_DAILY_SCAN_LIMIT`，默认 1000。接口只返回主状态未发布、且无任何同池 ID/同素材 key queue 的记录，严格按 `created_at ASC, id ASC`：
+`limit` 为 1 至 1000。daily runner 传 `X_POST_DAILY_SCAN_LIMIT`，默认 1000。接口只返回主状态未发布、且无任何同池 ID/同素材 key queue 的记录，严格按 `created_at DESC, id DESC`：
 
 ```json
 {
@@ -257,7 +257,7 @@ backend 或 daily bearer。请求 1 至 100 条互异池 ID：
 
 - daily bearer 必须一次提交恰好三条候选。
 - 每条必须包含互异的 `pool_item_id`、匹配的 `material_key` 和原始 `pool_created_at`。
-- Sidecar 事务内重新校验池记录仍未发布、快照未变、未占用，且三条按 FIFO 正序。
+- Sidecar 事务内重新校验池记录仍未发布、快照未变、未占用，且候选按上传时间倒序。
 - 任何一项失败，run/三条 queue 全部回滚。
 - backend bearer 保留 legacy 管理能力；正式 daily bearer 强制 `require_pool=true`。
 
