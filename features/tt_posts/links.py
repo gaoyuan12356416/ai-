@@ -33,6 +33,16 @@ TT_W2A_QUERY_FIELDS = (
     "af_c_id",
     "af_dp",
 )
+TT_W2A_QUERY_FIELDS_DP_FIRST = (
+    "af_dp",
+    "c",
+    "af_adset",
+    "af_adset_id",
+    "af_ad",
+    "af_ad_id",
+    "af_channel",
+    "af_c_id",
+)
 
 
 class TTPostLinkError(ValueError):
@@ -171,7 +181,7 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
         "queue_id",
         "content_id",
     }
-    allowed = required | {"channel"}
+    allowed = required | {"channel", "af_dp_first"}
     if not required.issubset(params) or not set(params).issubset(allowed):
         raise TTPostLinkError(
             "invalid_request",
@@ -206,9 +216,14 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
     material_id = _clean_token(params["material_id"], "素材ID", 128)
     queue_id = _positive_int(params["queue_id"], "队列ID")
     content_id = _clean_token(params["content_id"], "content_id", 128)
-    channel = str(params.get("channel") or "TT").strip()
+    # Preserve the historical direct-test/legacy queue contract. New formal
+    # code routes pass ``channel=TT`` explicitly at queue-freeze time.
+    channel = str(params.get("channel") or "AIpost").strip()
     if channel not in {"TT", "Search", "Featured", "AIpost"}:
         raise TTPostLinkError("invalid_request", "TikTok归因渠道无效")
+    af_dp_first = params.get("af_dp_first", False)
+    if not isinstance(af_dp_first, bool):
+        raise TTPostLinkError("invalid_request", "TikTok归因参数顺序无效")
 
     campaign = "yingliang_post_CLV_VL_%s*%snone%s*%s*%s*%s" % (
         username,
@@ -218,17 +233,20 @@ def build_w2a_url(params: Mapping[str, Any]) -> str:
         tag,
         link_id,
     )
+    pairs = (
+        ("c", campaign),
+        ("af_adset", page_name),
+        ("af_adset_id", page_id),
+        ("af_ad", "%s_contentid[%s]" % (material_name, content_id)),
+        ("af_ad_id", material_id),
+        ("af_channel", channel),
+        ("af_c_id", str(queue_id)),
+        ("af_dp", content_id),
+    )
+    if af_dp_first:
+        pairs = (pairs[-1], *pairs[:-1])
     query = urllib.parse.urlencode(
-        (
-            ("c", campaign),
-            ("af_adset", page_name),
-            ("af_adset_id", page_id),
-            ("af_ad", "%s_contentid[%s]" % (material_name, content_id)),
-            ("af_ad_id", material_id),
-            ("af_channel", channel),
-            ("af_c_id", str(queue_id)),
-            ("af_dp", content_id),
-        ),
+        pairs,
         quote_via=urllib.parse.quote,
         safe="*",
     )
@@ -262,6 +280,7 @@ def build_w2a_url_from_fields(
     }
     query = urllib.parse.urlencode(
         (
+            ("af_dp", normalized["af_dp"]),
             ("c", normalized["c"]),
             ("af_adset", normalized["af_adset"]),
             ("af_adset_id", normalized["af_adset_id"]),
@@ -269,7 +288,6 @@ def build_w2a_url_from_fields(
             ("af_ad_id", normalized["af_ad_id"]),
             ("af_channel", normalized_channel),
             ("af_c_id", normalized["af_c_id"]),
-            ("af_dp", normalized["af_dp"]),
         ),
         quote_via=urllib.parse.quote,
         safe="*",
@@ -335,7 +353,8 @@ def validate_w2a_url(value: Any) -> str:
         )
     pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     if (
-        tuple(key for key, _value in pairs) != TT_W2A_QUERY_FIELDS
+        tuple(key for key, _value in pairs)
+        not in {TT_W2A_QUERY_FIELDS, TT_W2A_QUERY_FIELDS_DP_FIRST}
         or any(not value for _key, value in pairs)
         or dict(pairs).get("af_channel")
         not in {"AIpost", "TT", "Search", "Featured"}

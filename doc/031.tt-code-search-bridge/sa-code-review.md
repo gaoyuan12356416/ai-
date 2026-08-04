@@ -2,58 +2,62 @@
 
 ## 结论
 
-待评审。当前仅有需求、API、开发、测试和部署文档；业务代码尚未由本评审确认，不能给出“通过”或发布建议。
+多轮独立评审发现的兼容性和边界问题已按下表修订；当前最终 diff 已完成收口复审与 394 项全量回归，没有未关闭的 P0/P1/P2。此结论批准进入受控生产候选验证，不替代 DB/Redis/Nginx/systemd 与线上回滚门禁。
 
-## 计划评审范围
+## 评审范围
 
-- `features/tt_posts/core.py`
-- `features/tt_posts/code_routes.py`
-- `features/tt_posts/links.py`
-- `features/tt_posts/service.py`
+- `features/tt_posts/code_routes.py`, `core.py`, `links.py`, `service.py`
 - `app.py`
-- `static/tt-drama-code-search.html`
-- `static/tt-drama-code-search.js`
-- `deploy/nginx/tt-drama-code-search.conf`
-- `deploy/tt-post*.env.example` 及 Redis/systemd 资产
+- `static/tt-drama-code-search.html/js`, `static/tt-post-pool.html`
+- Nginx、Redis config/unit、env examples
 - 新增/修改的 `scripts/test_tt_*`
 
-## 必查清单
+## 独立评审发现与关闭记录
 
-| 编号 | 严重级别 | 检查项 | 通过条件 | 状态 |
+| 编号 | 级别 | 发现 | 修订 | 状态 |
 | --- | --- | --- | --- | --- |
-| CR-01 | P0 | 原 `/tt` 隔离 | 原 HTML/JS 无 diff，新 route 不抢占旧 route | 待评审 |
-| CR-02 | P0 | schema 加法迁移 | 幂等建表/索引，不重建旧表，不改历史行 | 待评审 |
-| CR-03 | P0 | code DB 约束 | 大写四位、PK、queue unique、状态与 channel 约束完整 | 待评审 |
-| CR-04 | P0 | 分配事务 | queue 幂等检查、code 分配、route、caption 位于同一 `BEGIN IMMEDIATE` | 待评审 |
-| CR-05 | P0 | 碰撞处理 | 普通 INSERT + PK 冲突重试，不使用 `INSERT OR REPLACE` | 待评审 |
-| CR-06 | P0 | 全容量判断 | 只有精确全满才回收；最早排序确定；有审计 | 待评审 |
-| CR-07 | P0 | `{code}` tokenizer | 精确 token、一次非递归、preview 不消耗、UTF-16 限制 | 待评审 |
-| CR-08 | P0 | 发布幂等/unknown | 同 queue 重试复用 code，不因未知结果二次分配 | 待评审 |
-| CR-09 | P0 | 正式 URL | `c` 尾部 queue ID、channel TT、字段映射和标准编码正确 | 待评审 |
-| CR-10 | P0 | 最新 published | `published_at DESC, queue_id DESC`，clone 只改 channel且不写库 | 待评审 |
-| CR-11 | P0 | generic fallback | `af_dp,c=TTpost,af_c_id=0001,af_channel=source`，不伪造其他字段 | 待评审 |
-| CR-12 | P0 | Redis 事实边界 | DB commit 不依赖 Redis；任何缓存故障回退 SQLite | 待评审 |
-| CR-13 | P0 | 陈旧缓存 | 回收后绝不返回旧值；`DEL`/覆盖失败时旋转 namespace 并旁路 | 待评审 |
-| CR-14 | P0 | 公共输入/输出 | exact GET、参数唯一、source 枚举、无 secret/内部异常泄漏 | 待评审 |
-| CR-15 | P0 | target 校验 | HTTPS、精确 host/path、无端口/userinfo、af_dp 一致 | 待评审 |
-| CR-16 | P0 | 页面导航 | 只有 resolver 成功且 URL 校验通过才设置 CTA/导航 | 待评审 |
-| CR-17 | P0 | 横滑不误触 | pointer/touch/mouse 状态机有位移阈值、取消与清理 | 待评审 |
-| CR-18 | P1 | 五条完整性 | 动态或 fallback 都恰好五条，不混成任意数量 | 待评审 |
-| CR-19 | P1 | 可访问性 | 按钮 aria、键盘、焦点、首尾禁用、reduced motion | 待评审 |
-| CR-20 | P0 | 测试安全 | 全部 fake/临时数据，无 publish/canary/run-now 调用 | 待评审 |
+| CR-F01 | P0 | 迁移前已冻结但尚未发布的 `{url}` queue 没有 route/code，升级后可能无法继续 | 无 code 的历史 queue 在生成缺失 long URL 时走原 `AIpost` 兼容路径；不强制补 route | 已关闭，全量回归通过 |
+| CR-F02 | P0 | 改动 `build_w2a_url` 默认 channel 会让直接测试和旧调用从 AIpost 漂移到 TT | 默认恢复 `AIpost`；只有新正式 queue 显式传 `channel=TT, af_dp_first=True` | 已关闭，全量回归通过 |
+| CR-F03 | P0 | 将 sidecar resolver 直接公开会绕过既有 content 校验、限流和并发门 | Nginx 改为主 app 8787；sidecar 改成 loopback bearer `/internal/tt-posts/code-resolve`；主 app 合并 DramaWave 元数据 | 已关闭，全量回归通过 |
+| CR-F04 | P1 | Redis 网络阻塞可能占用 queue/route 的共享写锁 | lookup 在锁外做 GET/SET；两阶段失效在事务共享锁内先旋转 namespace，再在锁外 best-effort DELETE；publish reconcile 释放共享锁后才执行网络失效；增加慢读/慢删并发测试 | 已关闭，全量回归通过 |
+| CR-F05 | P1 | 高占用兜底若逐 code 发 SQL，最坏会执行 1,679,616 次查询 | 一次读取占用 code 并构建 bytearray 位图，O(capacity) 内存扫描空槽 | 已关闭，全量回归通过 |
+| CR-F06 | P1 | 新正式 URL 与需求给定的 `af_dp` 第一顺序不一致 | 新正式和 clone URL 都使用 `af_dp,c,...,af_c_id`；validator 同时兼容历史 c-first | 已关闭，全量回归通过 |
+| CR-F07 | P1 | Redis unit 启动时 data dir 可能不存在 | unit `ExecStartPre` 以 root 创建并设置 `tt-post:tt-post 0700` 数据目录 | 已关闭，待候选验证 |
+| CR-F08 | P1 | `executescript` 会隐式提交，route 表和 queue.code 迁移可能不在同一事务 | baseline script 后显式新开 `BEGIN IMMEDIATE`，其后的加法迁移一起提交/回滚 | 已关闭，待 DB 副本演练 |
+| CR-F09 | P1 | 满池回收只有结果、缺少持久审计 | 增加 `tt_post_code_recycle_audit`，同事务记录旧 code/queue/content 与新 queue/time | 已关闭，全量回归通过 |
+| CR-F10 | P0 | 含 `{code}` 的正式 queue 使用相同 payload/idempotency_key 重试时被误判为事实冲突 | 幂等校验只在其他冻结事实完全一致时，允许 caption 等于 deterministic pre-freeze 形态或该 queue 已冻结 code 渲染后的 caption；新增 exact replay 测试，差异 payload 仍 409 | 已关闭，全量回归通过 |
+| CR-F11 | P1 | 用户修改搜索输入后，旧结果和旧 `href` 仍暂时可点击，pending 响应还可能覆盖新输入状态 | 新增 input handler：输入变化立即递增请求序列、abort pending request、隐藏/清空旧结果与 href/data；过期响应受序列门禁阻止覆盖 | 已关闭，Chrome 已复验 |
 
-## 待填写问题清单
+## 当前检查结论
 
-代码可用后逐条填写，格式如下；不得提前写“无问题”：
+| 编号 | 检查项 | 结论 |
+| --- | --- | --- |
+| CR-01 | 原 `/tt` 隔离 | 旧 HTML/JS/Nginx 源文件在当前工作树保持零 diff；生产 hash 待验收 |
+| CR-02 | schema | route/audit 表、索引、trigger、queue.code 均为加法；旧表不重建 |
+| CR-03 | code 约束 | code PK、大写四位 CHECK、queue unique、channel TT CHECK |
+| CR-04 | 分配原子性 | queue insert、route/code、最终 caption 在同一写事务 |
+| CR-05 | 碰撞/回收 | 有界随机、位图空槽、只在满池回收；无 `INSERT OR REPLACE` |
+| CR-06 | `{code}` | 一次非递归、preview 不分配、所有正式 queue 冻结、直接测试拒绝 |
+| CR-07 | URL 兼容 | 新正式 TT/af_dp-first；历史 pending 和直接测试 AIpost |
+| CR-08 | latest clone | published-only，`published_at,created_at,queue_id` 降序，只改 channel |
+| CR-09 | 公共边界 | main app 限流/gate/剧校验；private bearer sidecar；目标二次校验 |
+| CR-10 | Redis 事实边界 | SQLite 写不依赖 Redis；缓存行严格验证；异常回 SQLite |
+| CR-11 | 页面 | 一次组合 API、五条 Featured、drag click suppression、safe URL navigation |
+| CR-12 | 测试安全 | 自动化使用临时 DB/fake Redis/fake resolver；不调用真实 publish |
+| CR-13 | 幂等重放 | 相同 formal payload/idempotency_key 接受 pre-freeze 或 frozen exact caption；任何其他事实差异仍冲突 |
+| CR-14 | 输入失效 | input 变化立即清空旧 CTA/href并中止 pending request；旧响应不能覆盖当前输入 |
 
-| 编号 | 严重级别 | 文件/位置 | 问题 | 建议 | 状态 |
-| --- | --- | --- | --- | --- | --- |
-| 待补录 | - | - | 尚未开始代码评审 | 完成实现后评审 exact diff | Open |
+## 最终复审重点
 
-## 编译与验证结果
-
-待代码完成后补录实际命令、退出码、断言数量和失败项。当前无业务代码验证结果。
+1. 在当前最终代码上确认 CR-F04 的 GET/SET/DEL 均不在共享 queue 写锁内等待网络，并运行慢 Redis 读/失效并发测试。
+2. 确认 storage migration failure 会完整回滚 route/audit/queue.code 加法，不留下半迁移状态。
+3. 确认 code exact 对非 published 状态仍可读取，同时公共主 app 对已下架剧 fail closed。
+4. 确认所有新正式 queue（无论是否含 `{code}`）都有同一 code/route/queue.code；历史无 code queue 不被误判损坏。
+5. 确认 Nginx 没有把 `/internal/tt-posts/code-resolve` 暴露，并且 `/api/public/tt-code/resolve` 只代理 8787。
+6. 确认 Redis config/unit 与目标 Redis 5/systemd 239 语法兼容，6381 只监听 loopback。
+7. 确认 `{code}` exact replay 只放行同一 queue 的 deterministic pre-freeze/frozen caption，不放宽其他 idempotency facts。
+8. 确认输入变化清空 href 和 active result、abort pending fetch，且 race 中的旧响应无法恢复旧 CTA。
 
 ## 发布门禁
 
-存在任一 P0/P1 open finding、自动化未执行、真实浏览器手势未验证、Redis 陈旧缓存未覆盖或原 `/tt` 出现 diff 时，结论必须保持“不通过”。
+任何 P0/P1 finding 仍 open、最终全量自动化未通过、真实浏览器未验证、DB 副本迁移未通过、原 `/tt` 出现 diff，或验收需要真实 TikTok 发布时，均不得上线。

@@ -2,34 +2,26 @@
 
 ## 状态
 
-合同已冻结，代码与实测待完成。示例 ID、名称、时间和 URL 均为测试占位，不是生产凭据。
+接口已实现并完成阶段性本地验证；生产尚未部署。示例均为占位数据，不是生产凭据或线上结果。
 
-## 新公开接口
+## 公共组合接口
 
 ```http
 GET /api/public/tt-code/resolve?query=<code-or-content_id>&source=Search|Featured
 ```
 
-### 访问与缓存
+Nginx 将该 exact route 转发到主 app `127.0.0.1:8787`。主 app 负责公开输入校验、既有 token bucket、in-flight gate、目标校验和 DramaWave 剧目存在性/元数据校验，并以现有内部 bearer 调用 sidecar 的私有 resolver。前端一次请求即可得到 route 与剧目元数据，不再串行调用 `/api/public/tt-drama/resolve`。
 
-- 无登录公开 GET，沿用 TT public resolver 的限流、并发上限和超时。
-- 只接受精确两个 query 参数 `query`、`source`，各出现一次；未知/重复参数拒绝。
-- 响应包含 `Cache-Control: no-store`。
-- 可返回 `X-TT-Code-Cache: HIT|MISS|BYPASS`；该头只描述 code-route 读缓存，不得泄露 Redis 配置。
-- 原 `GET /api/public/tt-drama/resolve` 和 `GET /api/public/tt-drama/featured` 保持原合同。
-
-## 请求参数
+### 请求参数
 
 | 参数 | 必填 | 规则 |
 | --- | --- | --- |
-| `query` | 是 | trim 后若为四位 ASCII 字母数字则作为 code 并转大写；否则必须满足现有完整 `content_id` 规则且保持大小写 |
-| `source` | 是 | 精确枚举 `Search` 或 `Featured`，区分大小写 |
+| `query` | 是 | 四位 ASCII 字母数字按 code 处理并转大写；否则必须是现有 resolver 接受的 10..32 位 `[A-Za-z0-9_-]` content ID |
+| `source` | 是 | 区分大小写，只接受 `Search` 或 `Featured` |
 
-页面搜索框始终发送 `source=Search`；Featured 卡片始终发送 `source=Featured`。code exact 的冻结 `af_channel=TT` 不受 source 覆盖。
+只接受这两个参数且各出现一次。搜索框发送 `Search`，Featured 卡片发送 `Featured`。code exact 的冻结 channel 始终为 `TT`，不受 `source` 覆盖。
 
-## 成功响应
-
-顶层与 item 形状：
+### 成功响应
 
 ```json
 {
@@ -38,9 +30,11 @@ GET /api/public/tt-code/resolve?query=<code-or-content_id>&source=Search|Feature
     "content_id": "LZ4b4w5k3h",
     "title": "Example Drama",
     "description": "Example description",
+    "cover_url": "https://cdn.example/cover.jpg",
+    "country": "US",
     "language": "en",
     "episode_count": 60,
-    "cover_url": "https://cdn.example/cover.jpg",
+    "source_updated_at": "2026-08-04T00:00:00Z",
     "target_url": "https://www.dramawavew2a.com/ads/101/2250/view?...",
     "query_type": "code",
     "route_mode": "code_exact",
@@ -49,188 +43,138 @@ GET /api/public/tt-code/resolve?query=<code-or-content_id>&source=Search|Feature
 }
 ```
 
-### 枚举
+`code` 只在 `query_type=code` 时返回。content ID 的 `published_clone` 虽然来自某条 code route，主 app 会移除该 code，避免把非查询主键暴露给前端。
 
-| 字段 | 枚举 | 含义 |
-| --- | --- | --- |
-| `query_type` | `code` | 四位 code 查询，输入统一大写 |
-| `query_type` | `content_id` | 完整剧 ID 查询 |
-| `route_mode` | `code_exact` | 按主键命中该 code 的冻结 URL，不受 queue 当前状态限制 |
-| `route_mode` | `published_clone` | 命中同剧最新 published 路由并只替换 channel |
-| `route_mode` | `generic_fallback` | 同剧无 published 路由，使用旧 generic 参数加入口 channel |
+| 字段 | 取值 |
+| --- | --- |
+| `query_type` | `code` 或 `content_id` |
+| `route_mode` | `code_exact`、`published_clone` 或 `generic_fallback` |
 
-`code` 只在 `query_type=code` 时返回；content ID 查询应省略或返回空值，前后端实现需固定一种并测试。
+响应始终 `Cache-Control: no-store`，并使用现有 `X-TT-Drama-Cache` 和 `Server-Timing`。当前实现没有 `X-TT-Code-Cache` 响应头。
 
-## 路由规则
+## 路由语义
 
-### 1. code exact
-
-请求：
+### code exact
 
 ```http
 GET /api/public/tt-code/resolve?query=ab12&source=Search
 ```
 
-处理：
+- 输入转为 `AB12`，只按 `tt_post_code_route.code` 主键查询，不按 `state` 过滤。
+- 返回该队列冻结的完整 URL，`af_channel=TT`。
+- 主 app 再用 route 中的 `content_id` 做现有 DramaWave 校验；剧已不存在时公共响应 404，不输出 CTA。
+- 正式冻结 URL 参数顺序为：
 
-1. `ab12 -> AB12`。
-2. 只按主键查 `tt_post_code_route.code='AB12'`，不以 `state` 过滤。
-3. 用现有剧 resolver 确认 `content_id` 并补齐公开剧元数据。
-4. 返回数据库冻结 `target_url`；`af_channel` 保持 `TT`，不改为 Search。
-
-响应关键字段：
-
-```json
-{
-  "found": true,
-  "item": {
-    "content_id": "LZ4b4w5k3h",
-    "target_url": "https://www.dramawavew2a.com/ads/101/2250/view?af_dp=LZ4b4w5k3h&c=yingliang_post_CLV_VL_creator%2A...%2A101&af_adset=Page&af_adset_id=640&af_ad=Material_contentid%5BLZ4b4w5k3h%5D&af_ad_id=5801636&af_channel=TT&af_c_id=101",
-    "query_type": "code",
-    "route_mode": "code_exact",
-    "code": "AB12"
-  }
-}
+```text
+af_dp,c,af_adset,af_adset_id,af_ad,af_ad_id,af_channel,af_c_id
 ```
 
-具体 URL encoder 可保留业务分隔星号，但解码后的 `c` 必须严格符合需求。
-
-### 2. 直接 content ID：published clone
-
-请求：
+### content ID / Featured published clone
 
 ```http
 GET /api/public/tt-code/resolve?query=LZ4b4w5k3h&source=Search
-```
-
-处理：
-
-1. 先确认剧存在。
-2. 在同剧 published route 中按 `published_at DESC, queue_id DESC` 取一条。
-3. 克隆该行所有归因字段，唯一变化是 `af_channel=Search`。
-4. 不新增或修改 `tt_post_code_route`。
-
-响应：`query_type=content_id`、`route_mode=published_clone`。
-
-### 3. Featured：published clone
-
-```http
 GET /api/public/tt-code/resolve?query=LZ4b4w5k3h&source=Featured
 ```
 
-选择规则同上，唯一变化是 `af_channel=Featured`。响应为 `query_type=content_id`、`route_mode=published_clone`。
-
-### 4. generic fallback
-
-当 content ID 有效且剧存在，但没有任何 published route：
+在同剧 `state='published'` 的 route 中按以下顺序只取一条：
 
 ```text
-https://www.dramawavew2a.com/ads/101/2250/view
-  ?af_dp=<content_id>
-  &c=TTpost
-  &af_c_id=0001
-  &af_channel=Search|Featured
+published_at DESC, created_at DESC, queue_id DESC
 ```
 
-响应为 `query_type=content_id`、`route_mode=generic_fallback`。fallback 不伪造 `af_adset`、素材或 queue 信息。
+重建 URL 时保留所有冻结归因值，只把 `af_channel` 改为请求的 `Search` 或 `Featured`；不更新数据库、不生成 code。
+
+### generic fallback
+
+剧存在但从未有 published route 时返回：
+
+```text
+https://www.dramawavew2a.com/ads/101/2250/view?af_dp=<content_id>&c=TTpost&af_c_id=0001&af_channel=Search|Featured
+```
+
+fallback 不伪造 page、素材或 queue 参数。若 content ID 本身不存在，虽然 sidecar 可构造 fallback，主 app 的剧目校验仍会把公共结果收敛为 404。
 
 ## 目标 URL 校验
 
-返回前必须逐项验证：
+主 app 在返回前验证：
 
-- scheme `https`
-- hostname 精确 `www.dramawavew2a.com`
-- 无 username/password、自定义端口和 fragment
-- path 精确 `/ads/101/2250/view`
-- query 参数无关键字段重复
-- `af_dp` 精确等于解析出的 `content_id`
-- code exact 的 channel 为 `TT`
-- published clone 的 channel 精确等于请求 source
-- generic fallback 的 `c=TTpost`、`af_c_id=0001` 和 source 正确
+- scheme 为 `https`；host 精确 `www.dramawavew2a.com`；path 精确 `/ads/101/2250/view`
+- 无 username/password、自定义端口、fragment 或重复/空参数
+- `af_dp` 与被验证的 `content_id` 一致
+- code exact 的完整参数集合和 `af_channel=TT`
+- published clone 的完整参数集合和 `af_channel=source`
+- generic fallback 只有 `af_dp,c,af_c_id,af_channel`，且 `c=TTpost`、`af_c_id=0001`
 
-校验失败必须 500/503 fail closed，不得把不可信 URL 交给前端。
-
-## 未找到响应
-
-未知 code 或不存在的剧：
-
-```json
-{
-  "found": false,
-  "error": "not_found",
-  "message": "Story not found"
-}
-```
-
-HTTP 404。命中 code 时不得返回或暗示 queue 内部状态；`unknown` 等已冻结 route 仍可搜索，以保护可能已经存在的帖子。
+任何内部 route 形状或目标不一致均 fail closed，不把 URL 交给前端。
 
 ## 错误响应
 
-统一形状：
+公开错误最小形状：
 
 ```json
 {
   "found": false,
-  "error": "invalid_query",
-  "message": "Invalid search value"
+  "error": "invalid_request",
+  "message": "Enter a four-character code or complete Content ID."
 }
 ```
 
-| HTTP | `error` | 条件 |
+来自 sidecar 的稳定错误还会同时包含同值的 `code` 字段。
+
+| HTTP | `error` / `code` | 条件 |
 | ---: | --- | --- |
-| 400 | `invalid_query` | query 既不是四位 code，也不是合法完整 content ID |
-| 400 | `invalid_source` | source 不是精确 `Search|Featured` |
-| 400 | `invalid_request` | 缺参、重复关键参数或未知参数 |
-| 404 | `not_found` | code 不存在，或剧不存在 |
-| 429 | `rate_limited` | 超过 token bucket |
-| 503 | `resolver_busy` | 并发上限已满 |
-| 503 | `resolver_unavailable` | SQLite 或剧 resolver 故障/超时 |
-| 500/503 | `target_invalid` | 冻结/克隆目标未通过安全校验 |
+| 400 | `invalid_request` | 缺参、未知/重复参数、非法 query 或 source |
+| 404 | `tt_code_not_found` | 四位 code 不存在 |
+| 404 | `not_found` | route 对应剧或直接查询的剧不存在 |
+| 429 | `rate_limited` | 既有 token bucket 拒绝 |
+| 503 | `resolver_overloaded` | 既有 in-flight gate 已满 |
+| 503 | `tt_post_service_unavailable` | sidecar 连接失败或 3 秒调用超时 |
+| 503 | `resolver_unavailable` | DramaWave resolver 不可用 |
+| 500 | `tt_post_internal_error` | sidecar 未预期的 SQLite/运行时错误，消息已清洗 |
+| 500/502 | `tt_code_route_invalid` | sidecar 存储 route 或主 app 二次校验失败 |
 
-Redis 故障本身不得产生 5xx；只有 SQLite 事实源或剧 resolver 也失败时才返回 503。
+Redis 失败本身不会产生 5xx；resolver 会回退 SQLite。错误响应不得泄露内部 bearer、Redis 地址/key、SQLite 路径、SQL 或堆栈。
 
-## 发布侧加法合同
+## 私有 sidecar 接口
+
+```http
+GET http://127.0.0.1:18829/internal/tt-posts/code-resolve?query=<value>&source=Search|Featured
+Authorization: Bearer <TT_POST_INTERNAL_TOKEN>
+```
+
+- 只允许 loopback，且 bearer 必须与主 app 配置匹配；未授权返回 403。
+- 返回 route-only item：`content_id`、`target_url`、`query_type`、`route_mode`、可选 `code`、`source`、`af_channel`。
+- 该接口不负责公共 DramaWave 元数据，也不应由 Nginx 暴露。
+- 主 app 通过 `TT_POST_CODE_RESOLVER_TIMEOUT` 控制调用超时，示例和默认值为 3 秒。
+
+## 发布侧合同
 
 ### `{code}`
 
-允许的精确 single-brace 宏增加：
+正式自动/排期队列支持：
 
 ```text
 {url}
 {desc}
 {code}
-```
-
-Drama ID 双花括号别名保持：
-
-```text
 {{contect_id}}
 {{content_id}}
 ```
 
-queue 最终渲染前 code 必须已冻结。GPU 和 TikTok publish payload 只接收完全渲染 caption，不解释宏。
+所有新正式 queue 都先冻结 code/route，再一次渲染 caption；GPU 和 TikTok publish payload 只接收最终文本。预览显示 `A1B2`，不分配 code。直接测试使用 `{code}` 返回 `tt_post_code_macro_queue_only`。
 
-### queue/list 响应
+历史无 code 队列和直接测试继续使用 `AIpost`；新正式队列明确使用 `TT`。
 
-建议加法公开安全字段：
+### queue 响应
 
-```json
-{
-  "id": 101,
-  "content_id": "LZ4b4w5k3h",
-  "code": "AB12",
-  "code_route_status": "published"
-}
-```
+queue 的安全 DTO 已加法包含 `code`。route 表的完整归因字段、Redis 信息与内部 token 不通过管理端或公共接口返回。
 
-不得返回 Redis key、缓存原文、内部 token、SQLite 路径或未清洗异常。
+## Featured 数据
 
-## Featured 数据接口
-
-新页面继续读取既有：
+新页面仍用既有接口填充卡片：
 
 ```http
 GET /api/public/tt-drama/featured
 ```
 
-新页面只接受 schema 合法、未过期且 `items.length === 5` 的结果；任何其他数量整体降级为恰好五条本地 fallback，不拼接成 4/6 条。
+新页面只接受 schema 合法、未过期且恰好五条的数据；其他情况整体使用五条本地 fallback。卡片点击后只调用公共组合 resolver 一次。

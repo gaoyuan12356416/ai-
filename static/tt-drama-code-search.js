@@ -2,7 +2,6 @@
   "use strict";
 
   const CODE_RESOLVER_PATH = "/api/public/tt-code/resolve";
-  const DRAMA_RESOLVER_PATH = "/api/public/tt-drama/resolve";
   const FEATURED_PATH = "/api/public/tt-drama/featured";
   const TARGET_ORIGIN = "https://www.dramawavew2a.com";
   const TARGET_PATH = "/ads/101/2250/view";
@@ -118,12 +117,6 @@
     return url.href;
   }
 
-  function buildDramaResolverUrl(contentId, origin) {
-    const url = new URL(DRAMA_RESOLVER_PATH, normalizeOrigin(origin));
-    url.searchParams.set("content_id", requireContentId(contentId));
-    return url.href;
-  }
-
   function buildFeaturedUrl(origin) {
     return new URL(FEATURED_PATH, normalizeOrigin(origin)).href;
   }
@@ -223,11 +216,20 @@
     if (queryType === "content_id" && channel !== source) {
       throw new TypeError("Content ID result source mismatch");
     }
+    const drama = normalizeDramaPayload({
+      found: true,
+      data: payload.item
+    }, contentId);
     return Object.freeze({
       content_id: contentId,
       target_url: targetUrl,
       query_type: queryType,
-      route_mode: routeMode
+      route_mode: routeMode,
+      title: drama.title,
+      description: drama.description,
+      cover_url: drama.cover_url,
+      language: drama.language,
+      episode_count: drama.episode_count
     });
   }
 
@@ -607,25 +609,22 @@
     );
   }
 
-  async function resolveDrama(contentId, signal) {
-    const result = await fetchPayload(
-      buildDramaResolverUrl(contentId, root.location.origin),
-      signal,
-      "no-store"
-    );
-    if (!result.response.ok || result.payload.found !== true) {
-      throw responseError(
-        result.response,
-        result.payload,
-        "Story verification failed"
-      );
-    }
-    return normalizeDramaPayload(result.payload, contentId);
-  }
-
   async function resolveAndVerify(query, source, signal) {
-    const route = await resolveCodeQuery(query, source, signal);
-    const drama = await resolveDrama(route.content_id, signal);
+    const resolved = await resolveCodeQuery(query, source, signal);
+    const route = Object.freeze({
+      content_id: resolved.content_id,
+      target_url: resolved.target_url,
+      query_type: resolved.query_type,
+      route_mode: resolved.route_mode
+    });
+    const drama = Object.freeze({
+      content_id: resolved.content_id,
+      title: resolved.title,
+      description: resolved.description,
+      cover_url: resolved.cover_url,
+      language: resolved.language,
+      episode_count: resolved.episode_count
+    });
     return Object.freeze({ route, drama });
   }
 
@@ -914,6 +913,18 @@
       event.preventDefault();
       prepareDrama();
     });
+    queryInput.addEventListener("input", function () {
+      activeRequest += 1;
+      if (activeController) {
+        activeController.abort();
+        activeController = null;
+      }
+      setLoading(false);
+      hideResult();
+      helper.classList.remove("error");
+      helper.textContent =
+        "Enter a four-character code or the complete Content ID.";
+    });
     queryInput.addEventListener("blur", function () {
       const raw = queryInput.value.trim();
       if (/^[A-Za-z0-9]{4}$/.test(raw)) {
@@ -989,7 +1000,6 @@
 
   const api = Object.freeze({
     CODE_RESOLVER_PATH,
-    DRAMA_RESOLVER_PATH,
     FEATURED_PATH,
     TARGET_ORIGIN,
     TARGET_PATH,
@@ -1005,7 +1015,6 @@
     requireContentId,
     normalizeSource,
     buildCodeResolverUrl,
-    buildDramaResolverUrl,
     buildFeaturedUrl,
     validateTargetUrl,
     normalizeCodeResolvePayload,

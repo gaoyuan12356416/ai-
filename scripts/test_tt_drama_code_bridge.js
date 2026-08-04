@@ -61,7 +61,6 @@ function targetUrl(contentId, channel, extras) {
 }
 
 equal(bridge.CODE_RESOLVER_PATH, "/api/public/tt-code/resolve");
-equal(bridge.DRAMA_RESOLVER_PATH, "/api/public/tt-drama/resolve");
 equal(bridge.FEATURED_PATH, "/api/public/tt-drama/featured");
 equal(bridge.TARGET_ORIGIN, "https://www.dramawavew2a.com");
 equal(bridge.TARGET_PATH, "/ads/101/2250/view");
@@ -104,13 +103,6 @@ equal(
   "https://ai.yingliangads.com/api/public/tt-code/resolve?query=l9rP6ey2CB&source=Featured"
 );
 equal(
-  bridge.buildDramaResolverUrl(
-    "l9rP6ey2CB",
-    "https://ai.yingliangads.com"
-  ),
-  "https://ai.yingliangads.com/api/public/tt-drama/resolve?content_id=l9rP6ey2CB"
-);
-equal(
   bridge.buildFeaturedUrl("https://ai.yingliangads.com"),
   "https://ai.yingliangads.com/api/public/tt-drama/featured"
 );
@@ -133,6 +125,13 @@ throws(
 
 const contentId = "l9rP6ey2CB";
 const codeTarget = targetUrl(contentId, "TT");
+const dramaMetadata = {
+  title: "The Contract Bride",
+  description: "A frozen drama description.",
+  cover_url: "https://cdn.usrgrow.com/drama/contract-bride.jpg",
+  language: "en",
+  episode_count: 60
+};
 equal(
   bridge.validateTargetUrl(codeTarget, contentId),
   codeTarget,
@@ -145,7 +144,8 @@ const codePayload = {
     content_id: contentId,
     target_url: codeTarget,
     query_type: "code",
-    route_mode: "code_exact"
+    route_mode: "code_exact",
+    ...dramaMetadata
   }
 };
 deepEqual(
@@ -154,7 +154,8 @@ deepEqual(
     content_id: contentId,
     target_url: codeTarget,
     query_type: "code",
-    route_mode: "code_exact"
+    route_mode: "code_exact",
+    ...dramaMetadata
   }
 );
 
@@ -166,14 +167,16 @@ deepEqual(
       content_id: contentId,
       target_url: searchTarget,
       query_type: "content_id",
-      route_mode: "published_clone"
+      route_mode: "published_clone",
+      ...dramaMetadata
     }
   }, contentId, "Search"),
   {
     content_id: contentId,
     target_url: searchTarget,
     query_type: "content_id",
-    route_mode: "published_clone"
+    route_mode: "published_clone",
+    ...dramaMetadata
   }
 );
 
@@ -185,7 +188,8 @@ equal(
       content_id: contentId,
       target_url: featuredTarget,
       query_type: "content_id",
-      route_mode: "generic_fallback"
+      route_mode: "generic_fallback",
+      ...dramaMetadata
     }
   }, contentId, "Featured").route_mode,
   "generic_fallback"
@@ -432,20 +436,22 @@ ok(script.includes('addEventListener("pointerdown"'));
 ok(script.includes('addEventListener("pointermove"'));
 ok(script.includes('addEventListener("pointerup"'));
 ok(script.includes('addEventListener("pointercancel"'));
+ok(script.includes('queryInput.addEventListener("input"'));
+ok(script.includes("activeController.abort()"));
+ok(script.includes("continueLink.removeAttribute(\"href\")"));
 ok(script.includes("setPointerCapture(event.pointerId)"));
 ok(script.includes("event.stopImmediatePropagation()"));
 ok(script.includes("payload.code || payload.error"));
 ok(script.includes("resolveAndVerify("));
 ok(script.includes("root.location.assign(resolved.route.target_url)"));
 ok(
-  script.indexOf("const route = await resolveCodeQuery") <
-  script.indexOf("const drama = await resolveDrama"),
-  "the route lookup must be followed by the legacy drama verification"
+  script.includes("const resolved = await resolveCodeQuery"),
+  "the public code endpoint must return the verified route and drama together"
 );
 ok(nginx.includes("location = /tt-code {"));
 ok(nginx.includes("location = /tt-drama-code-search.js {"));
 ok(nginx.includes("location = /api/public/tt-code/resolve {"));
-ok(nginx.includes("proxy_pass http://127.0.0.1:18829;"));
+ok(nginx.includes("proxy_pass http://127.0.0.1:8787;"));
 ok(nginx.includes('Cache-Control "no-store" always;'));
 ok(nginx.includes("connect-src 'self'"));
 ok(!nginx.includes("location = /tt {"));

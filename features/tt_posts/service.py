@@ -2051,12 +2051,15 @@ class TTPostService:
         except TTCodeRouteError as exc:
             raise TTPostServiceError(exc.code, str(exc), exc.status) from None
 
-    def _invalidate_published_code_route(
+    def _prepare_published_code_route_invalidation(
         self,
         queue: Mapping[str, Any],
-    ) -> None:
+    ) -> Optional[str]:
         if str(queue.get("status") or "") == "published":
-            self.code_resolver.invalidate_latest(queue.get("content_id"))
+            return self.code_resolver.prepare_latest_invalidation(
+                queue.get("content_id")
+            )
+        return None
 
     def _freeze_queue_and_invalidate_code(
         self,
@@ -2078,8 +2081,13 @@ class TTPostService:
                 publish_id,
                 publish_url=publish_url,
             )
-            self._invalidate_published_code_route(queue)
-            return queue
+            old_cache_key = (
+                self._prepare_published_code_route_invalidation(queue)
+            )
+        # Redis invalidation performs best-effort network I/O and must never
+        # extend the shared SQLite mutation critical section.
+        self.code_resolver.complete_invalidation(old_cache_key)
+        return queue
 
     def _is_manual_canary_queue(
         self,
@@ -5257,9 +5265,19 @@ class TTPostService:
                 "发布描述",
                 2200,
             )
-            if not secrets.compare_digest(
-                str(existing.get("caption") or "").encode("utf-8"),
-                normalized_submitted.encode("utf-8"),
+            acceptable_captions = [str(existing.get("caption") or "")]
+            if caption_template is not None:
+                # A formal queue freezes deferred macros such as ``{code}``
+                # after allocating its immutable route. An exact HTTP retry
+                # still carries the pre-freeze caption text, so accept either
+                # that deterministic candidate or the frozen caption.
+                acceptable_captions.append(str(caption or ""))
+            if not any(
+                secrets.compare_digest(
+                    candidate.encode("utf-8"),
+                    normalized_submitted.encode("utf-8"),
+                )
+                for candidate in acceptable_captions
             ):
                 raise TTPostServiceError(
                     "tt_post_idempotency_conflict",
@@ -5728,8 +5746,37 @@ class TTPostService:
                     409,
                 )
             if not str(current.get("long_url") or ""):
-                route = self.store.get_code_route_for_queue(current["id"])
-                long_url = validate_w2a_url(route.get("long_url"))
+                if str(current.get("code") or ""):
+                    route = self.store.get_code_route_for_queue(current["id"])
+                    long_url = validate_w2a_url(route.get("long_url"))
+                else:
+                    # Queues frozen before the code-route migration have no
+                    # route row. Preserve their immutable caption and legacy
+                    # AIpost link behavior instead of failing a pending post.
+                    long_url = build_w2a_url(
+                        {
+                            "username": (
+                                current.get("creator_username_snapshot")
+                                or current.get("account_username")
+                            ),
+                            "timestamp": int(_now_utc(self._now_fn).timestamp()),
+                            "material_language": current.get("material_language"),
+                            "drama_name": current.get("drama_name"),
+                            "tag": current.get("material_tag"),
+                            "link_id": current.get("short_link_id"),
+                            "page_name": (
+                                current.get("creator_nickname_snapshot")
+                                or current.get("account_display_name")
+                                or current.get("account_username")
+                            ),
+                            "page_id": current.get("account_id"),
+                            "material_name": current.get("material_name"),
+                            "material_id": current.get("material_id"),
+                            "queue_id": current.get("id"),
+                            "content_id": current.get("content_id"),
+                            "channel": "AIpost",
+                        }
+                    )
                 current = self.store.prepare_short_link(
                     current["id"],
                     claim_token,
@@ -5868,6 +5915,7 @@ class TTPostService:
                         "material_id": current.get("material_id"),
                         "queue_id": current.get("id"),
                         "content_id": current.get("content_id"),
+                        "channel": "AIpost",
                     }
                 )
                 current = self.store.prepare_direct_test_short_link(
@@ -6698,7 +6746,9 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
         service = self.server.tt_service
         if self.command == "GET" and path == "/health":
             return {"ok": True, "gates": service.gates.as_dict()}
-        if self.command == "GET" and path == "/api/public/tt-code/resolve":
+        if not self._authorized():
+            raise PermissionError
+        if self.command == "GET" and path == "/internal/tt-posts/code-resolve":
             query_params = urllib.parse.parse_qs(
                 parsed.query,
                 keep_blank_values=True,
@@ -6718,8 +6768,6 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
                 query_params["query"][0],
                 query_params["source"][0],
             )
-        if not self._authorized():
-            raise PermissionError
         if self.command == "GET" and path == "/api/admin/tt-posts/accounts":
             return service.accounts()
         if self.command == "GET" and path == "/api/admin/tt-posts/auto-config":

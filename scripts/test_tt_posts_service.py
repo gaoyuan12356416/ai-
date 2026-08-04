@@ -3998,6 +3998,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(
             [key for key, _value in pairs],
             [
+                "af_dp",
                 "c",
                 "af_adset",
                 "af_adset_id",
@@ -4005,7 +4006,6 @@ class ServiceLifecycleTests(unittest.TestCase):
                 "af_ad_id",
                 "af_channel",
                 "af_c_id",
-                "af_dp",
             ],
         )
         tracking = dict(pairs)
@@ -4024,6 +4024,78 @@ class ServiceLifecycleTests(unittest.TestCase):
             "https://www.dramawavew2a.com/ads/101/2250/view",
             wrapper.read_text(encoding="utf-8"),
         )
+
+    def test_code_macro_exact_replay_reuses_frozen_queue_and_code(self):
+        service = self.service(CLOSED_GATES)
+        payload = queue_payload(
+            self.clock,
+            key="tt-post:test-code-macro-replay",
+        )
+        payload["caption_template"] = (
+            "Drama ID: {{content_id}}\nCode: {code}"
+        )
+        payload["caption_text"] = "Drama ID: ABCD1234\nCode: {code}"
+
+        created = service.queue_create(dict(payload))["item"]
+        self.assertRegex(created["code"], r"^[A-Z0-9]{4}$")
+        self.assertEqual(
+            "Drama ID: ABCD1234\nCode: " + created["code"],
+            created["caption_text"],
+        )
+
+        replay = service.queue_create(dict(payload))["item"]
+        self.assertEqual(created["id"], replay["id"])
+        self.assertEqual(created["code"], replay["code"])
+        self.assertEqual(created["caption_text"], replay["caption_text"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
+
+    def test_historical_pending_url_queue_keeps_legacy_aipost_fallback(self):
+        service = self.service(OPEN_GATES)
+        payload = queue_payload(
+            self.clock,
+            publish_mode="direct_post",
+            key="tt-post:test-legacy-url-queue",
+        )
+        payload.pop("caption_text")
+        payload["caption_template"] = "Drama {{content_id}}\n{url}"
+        created = service.queue_create(payload)["item"]
+        with contextlib.closing(sqlite3.connect(service.store.db_path)) as conn:
+            conn.execute(
+                "DELETE FROM tt_post_code_route WHERE queue_id=?",
+                (created["id"],),
+            )
+            conn.execute(
+                "UPDATE tt_post_queue SET code='',long_url='' WHERE id=?",
+                (created["id"],),
+            )
+            conn.commit()
+
+        self.clock.value += timedelta(minutes=30)
+        claim = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-primary",
+                "grace_seconds": DEFAULT_GRACE_SECONDS,
+                "limit": 1,
+            }
+        )["items"][0]
+        published = service.publish_claimed(
+            created["id"],
+            claim["claim_token"],
+        )["item"]
+
+        self.assertEqual("reconciling", published["status"])
+        frozen = service.store.get_queue(created["id"])
+        tracking = dict(
+            urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(frozen["long_url"]).query,
+                keep_blank_values=True,
+            )
+        )
+        self.assertEqual("AIpost", tracking["af_channel"])
+        self.assertEqual("", frozen["code"])
+        with self.assertRaises(TTPostError) as missing:
+            service.store.get_code_route_for_queue(created["id"])
+        self.assertEqual("tt_post_code_route_not_found", missing.exception.code)
 
     def test_desc_macro_is_frozen_and_exact_replay_skips_gpu(self):
         service = self.service(CLOSED_GATES)

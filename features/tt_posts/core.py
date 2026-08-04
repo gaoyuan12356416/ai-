@@ -1899,6 +1899,10 @@ def ensure_storage(db_path: Any) -> None:
                     ON tt_post_random_daily_plan(shanghai_date,account_id);
                 """
             )
+            # ``executescript`` commits any pending transaction. Start a new
+            # write transaction so every additive migration below (including
+            # code routes and queue.code) commits or rolls back together.
+            conn.execute("BEGIN IMMEDIATE")
             ensure_code_route_storage(conn)
             schedule_run_columns = {
                 str(row["name"])
@@ -8379,6 +8383,7 @@ class TTPostStore:
                         "queue_id": predicted_queue_id,
                         "content_id": resolution.content_id,
                         "channel": "TT",
+                        "af_dp_first": True,
                     }
                 )
             except Exception as exc:

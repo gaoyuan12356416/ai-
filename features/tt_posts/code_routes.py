@@ -28,6 +28,7 @@ POSITIVE_CACHE_TTL_SECONDS = 24 * 60 * 60
 NEGATIVE_CACHE_TTL_SECONDS = 30
 _CODE_RE = re.compile(r"^[A-Z0-9]{4}$")
 _CONTENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_PUBLIC_CONTENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,32}$")
 _NEGATIVE_SENTINEL = {"missing": True}
 _ROUTE_ROW_FIELDS = {
     "code",
@@ -69,7 +70,7 @@ def ensure_code_route_storage(
     normalized_length = int(code_length)
     if normalized_length < 1 or normalized_length > 8:
         raise ValueError("code length is invalid")
-    conn.executescript(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS tt_post_code_route (
             code TEXT PRIMARY KEY
@@ -92,16 +93,38 @@ def ensure_code_route_storage(
             created_at TEXT NOT NULL,
             published_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
-        );
-
+        )
+        """.format(code_length=normalized_length)
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_tt_post_code_route_content_latest
             ON tt_post_code_route(
                 content_id,state,published_at DESC,created_at DESC,
                 queue_id DESC
-            );
+            )
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_tt_post_code_route_oldest
-            ON tt_post_code_route(created_at,code);
-
+            ON tt_post_code_route(created_at,code)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tt_post_code_recycle_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            old_queue_id INTEGER NOT NULL,
+            old_content_id TEXT NOT NULL,
+            new_queue_id INTEGER NOT NULL,
+            recycled_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TRIGGER IF NOT EXISTS trg_tt_post_queue_code_route_state
         AFTER UPDATE OF status ON tt_post_queue
         FOR EACH ROW WHEN OLD.status<>NEW.status
@@ -115,8 +138,8 @@ def ensure_code_route_storage(
                 END,
                 updated_at=NEW.updated_at
             WHERE queue_id=NEW.id;
-        END;
-        """.format(code_length=normalized_length)
+        END
+        """
     )
 
 
@@ -238,16 +261,22 @@ def allocate_code_route(
         conn.execute("SELECT COUNT(*) FROM tt_post_code_route").fetchone()[0]
     )
     selected = ""
+    recycled = None
     if used >= capacity:
         oldest = conn.execute(
             """
-            SELECT code FROM tt_post_code_route
+            SELECT code,queue_id,content_id FROM tt_post_code_route
             ORDER BY created_at ASC,code ASC LIMIT 1
             """
         ).fetchone()
         if oldest is None:
             raise RuntimeError("code capacity accounting is inconsistent")
         selected = str(oldest["code"])
+        recycled = {
+            "code": selected,
+            "queue_id": int(oldest["queue_id"]),
+            "content_id": str(oldest["content_id"]),
+        }
         conn.execute("DELETE FROM tt_post_code_route WHERE code=?", (selected,))
     else:
         attempts = max(1, min(int(random_attempts), capacity))
@@ -314,6 +343,21 @@ def allocate_code_route(
             values["updated_at"],
         ),
     )
+    if recycled is not None:
+        conn.execute(
+            """
+            INSERT INTO tt_post_code_recycle_audit(
+                code,old_queue_id,old_content_id,new_queue_id,recycled_at
+            ) VALUES(?,?,?,?,?)
+            """,
+            (
+                recycled["code"],
+                recycled["queue_id"],
+                recycled["content_id"],
+                normalized_queue_id,
+                values["created_at"],
+            ),
+        )
     row = conn.execute(
         "SELECT * FROM tt_post_code_route WHERE code=?",
         (selected,),
@@ -399,13 +443,35 @@ class TTCodeRouteResolver:
         self.lock = lock or threading.RLock()
         self.cache_namespace = str(cache_namespace or secrets.token_hex(12))
 
-    def _key(self, kind: str, identity: str) -> str:
+    @staticmethod
+    def _key_for_namespace(namespace: str, kind: str, identity: str) -> str:
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return "tt-post-code:%s:%s:%s" % (
-            self.cache_namespace,
+            namespace,
             kind,
             digest,
         )
+
+    def _key(self, kind: str, identity: str) -> str:
+        with self.lock:
+            return self._key_for_namespace(
+                self.cache_namespace,
+                kind,
+                identity,
+            )
+
+    def _namespace_key(self, kind: str, identity: str) -> tuple[str, str]:
+        with self.lock:
+            namespace = self.cache_namespace
+            return namespace, self._key_for_namespace(
+                namespace,
+                kind,
+                identity,
+            )
+
+    def _namespace_current(self, namespace: str) -> bool:
+        with self.lock:
+            return secrets.compare_digest(self.cache_namespace, namespace)
 
     def _rotate_namespace(self) -> None:
         self.cache_namespace = secrets.token_hex(12)
@@ -491,33 +557,82 @@ class TTCodeRouteResolver:
         return route
 
     def invalidate_latest(self, content_id: Any) -> None:
+        old_key = self.prepare_latest_invalidation(content_id)
+        self.complete_invalidation(old_key)
+
+    def prepare_latest_invalidation(self, content_id: Any) -> Optional[str]:
+        """Rotate cache truth under the caller's mutation lock, without I/O."""
+
         normalized = str(content_id or "").strip()
         if not _CONTENT_ID_RE.fullmatch(normalized) or self.redis is None:
-            return
+            return None
         with self.lock:
-            try:
-                self.redis.delete(self._key("latest", normalized))
-            except Exception:
-                self._rotate_namespace()
+            old_namespace = self.cache_namespace
+            old_key = self._key_for_namespace(
+                old_namespace,
+                "latest",
+                normalized,
+            )
+            # Make stale keys unreachable before any best-effort network I/O.
+            self._rotate_namespace()
+        return old_key
+
+    def complete_invalidation(self, old_key: Optional[str]) -> None:
+        """Best-effort removal of an unreachable key, always outside the lock."""
+
+        if not old_key or self.redis is None:
+            return
+        try:
+            self.redis.delete(old_key)
+        except Exception:
+            return
 
     def invalidate_code(self, code: Any) -> None:
         normalized = str(code or "").strip().upper()
         if not _CODE_RE.fullmatch(normalized) or self.redis is None:
             return
         with self.lock:
-            try:
-                self.redis.delete(self._key("code", normalized))
-            except Exception:
-                self._rotate_namespace()
+            old_namespace = self.cache_namespace
+            old_key = self._key_for_namespace(
+                old_namespace,
+                "code",
+                normalized,
+            )
+            self._rotate_namespace()
+        self.complete_invalidation(old_key)
 
     def _lookup_code(self, code: str) -> Optional[Dict[str, Any]]:
-        key = self._key("code", code)
-        cached = self._cache_get(key)
-        if cached == _NEGATIVE_SENTINEL:
-            return None
-        cached_route = self._cached_route(cached, code=code)
-        if cached_route is not None:
-            return cached_route
+        for _attempt in range(3):
+            namespace, key = self._namespace_key("code", code)
+            cached = self._cache_get(key)
+            if cached == _NEGATIVE_SENTINEL:
+                if self._namespace_current(namespace):
+                    return None
+                continue
+            cached_route = self._cached_route(cached, code=code)
+            if cached_route is not None:
+                if self._namespace_current(namespace):
+                    return cached_route
+                continue
+            row = self._read_code_row(code)
+            if row is None:
+                self._cache_set(
+                    key,
+                    _NEGATIVE_SENTINEL,
+                    NEGATIVE_CACHE_TTL_SECONDS,
+                )
+                if self._namespace_current(namespace):
+                    return None
+                continue
+            self._cache_set(key, row, POSITIVE_CACHE_TTL_SECONDS)
+            if self._namespace_current(namespace):
+                return row
+        # Continuous route mutations are rare. The bounded final read holds
+        # only the in-process mutation lock and performs no Redis I/O.
+        with self.lock:
+            return self._read_code_row(code)
+
+    def _read_code_row(self, code: str) -> Optional[Dict[str, Any]]:
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -525,24 +640,50 @@ class TTCodeRouteResolver:
                 (code,),
             ).fetchone()
         if row is None:
-            self._cache_set(key, _NEGATIVE_SENTINEL, NEGATIVE_CACHE_TTL_SECONDS)
             return None
-        result = dict(row)
-        self._cache_set(key, result, POSITIVE_CACHE_TTL_SECONDS)
-        return result
+        route = self._cached_route(dict(row), code=code)
+        if route is None:
+            raise TTCodeRouteError(
+                "tt_code_route_invalid",
+                "stored code route is invalid",
+                500,
+            )
+        return route
 
     def _lookup_latest(self, content_id: str) -> Optional[Dict[str, Any]]:
-        key = self._key("latest", content_id)
-        cached = self._cache_get(key)
-        if cached == _NEGATIVE_SENTINEL:
-            return None
-        cached_route = self._cached_route(
-            cached,
-            content_id=content_id,
-            published_only=True,
-        )
-        if cached_route is not None:
-            return cached_route
+        for _attempt in range(3):
+            namespace, key = self._namespace_key("latest", content_id)
+            cached = self._cache_get(key)
+            if cached == _NEGATIVE_SENTINEL:
+                if self._namespace_current(namespace):
+                    return None
+                continue
+            cached_route = self._cached_route(
+                cached,
+                content_id=content_id,
+                published_only=True,
+            )
+            if cached_route is not None:
+                if self._namespace_current(namespace):
+                    return cached_route
+                continue
+            row = self._read_latest_row(content_id)
+            if row is None:
+                self._cache_set(
+                    key,
+                    _NEGATIVE_SENTINEL,
+                    NEGATIVE_CACHE_TTL_SECONDS,
+                )
+                if self._namespace_current(namespace):
+                    return None
+                continue
+            self._cache_set(key, row, POSITIVE_CACHE_TTL_SECONDS)
+            if self._namespace_current(namespace):
+                return row
+        with self.lock:
+            return self._read_latest_row(content_id)
+
+    def _read_latest_row(self, content_id: str) -> Optional[Dict[str, Any]]:
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -555,11 +696,19 @@ class TTCodeRouteResolver:
                 (content_id,),
             ).fetchone()
         if row is None:
-            self._cache_set(key, _NEGATIVE_SENTINEL, NEGATIVE_CACHE_TTL_SECONDS)
             return None
-        result = dict(row)
-        self._cache_set(key, result, POSITIVE_CACHE_TTL_SECONDS)
-        return result
+        route = self._cached_route(
+            dict(row),
+            content_id=content_id,
+            published_only=True,
+        )
+        if route is None:
+            raise TTCodeRouteError(
+                "tt_code_route_invalid",
+                "stored drama route is invalid",
+                500,
+            )
+        return route
 
     @staticmethod
     def _frozen_target(row: Mapping[str, Any], channel: str) -> str:
@@ -577,90 +726,93 @@ class TTCodeRouteResolver:
         )
 
     def resolve(self, query: Any, source: Any) -> Dict[str, Any]:
-        normalized_query = str(query or "").strip()
-        normalized_source = str(source or "").strip()
+        normalized_query = str(query or "")
+        normalized_source = str(source or "")
         if normalized_source not in {"Search", "Featured"}:
             raise TTCodeRouteError(
                 "tt_code_source_invalid",
                 "source must be Search or Featured",
                 400,
             )
-        if not _CONTENT_ID_RE.fullmatch(normalized_query):
+        is_code = bool(
+            len(normalized_query) == CODE_LENGTH
+            and normalized_query.isalnum()
+        )
+        if not is_code and not _PUBLIC_CONTENT_ID_RE.fullmatch(normalized_query):
             raise TTCodeRouteError(
                 "tt_code_query_invalid",
                 "query is invalid",
                 400,
             )
-        with self.lock:
-            if len(normalized_query) == CODE_LENGTH and normalized_query.isalnum():
-                code = normalized_query.upper()
-                if not _CODE_RE.fullmatch(code):
-                    raise TTCodeRouteError(
-                        "tt_code_query_invalid",
-                        "code is invalid",
-                        400,
-                    )
-                row = self._lookup_code(code)
-                if row is None:
-                    raise TTCodeRouteError(
-                        "tt_code_not_found",
-                        "code was not found",
-                        404,
-                    )
-                try:
-                    target = validate_w2a_url(row["long_url"])
-                except (TTPostLinkError, KeyError, TypeError):
-                    raise TTCodeRouteError(
-                        "tt_code_route_invalid",
-                        "stored code route is invalid",
-                        500,
-                    ) from None
-                return {
-                    "found": True,
-                    "item": {
-                        "content_id": str(row["content_id"]),
-                        "target_url": target,
-                        "query_type": "code",
-                        "route_mode": "code_exact",
-                        "code": code,
-                        "source": normalized_source,
-                        "af_channel": "TT",
-                    },
-                }
-            row = self._lookup_latest(normalized_query)
-            if row is None:
-                target = build_generic_w2a_url(
-                    normalized_query,
-                    normalized_source,
+        if is_code:
+            code = normalized_query.upper()
+            if not _CODE_RE.fullmatch(code):
+                raise TTCodeRouteError(
+                    "tt_code_query_invalid",
+                    "code is invalid",
+                    400,
                 )
-                return {
-                    "found": True,
-                    "item": {
-                        "content_id": normalized_query,
-                        "target_url": target,
-                        "query_type": "content_id",
-                        "route_mode": "generic_fallback",
-                        "source": normalized_source,
-                        "af_channel": normalized_source,
-                    },
-                }
+            row = self._lookup_code(code)
+            if row is None:
+                raise TTCodeRouteError(
+                    "tt_code_not_found",
+                    "code was not found",
+                    404,
+                )
             try:
-                target = self._frozen_target(row, normalized_source)
+                target = validate_w2a_url(row["long_url"])
             except (TTPostLinkError, KeyError, TypeError):
                 raise TTCodeRouteError(
                     "tt_code_route_invalid",
-                    "stored drama route is invalid",
+                    "stored code route is invalid",
                     500,
                 ) from None
+            return {
+                "found": True,
+                "item": {
+                    "content_id": str(row["content_id"]),
+                    "target_url": target,
+                    "query_type": "code",
+                    "route_mode": "code_exact",
+                    "code": code,
+                    "source": normalized_source,
+                    "af_channel": "TT",
+                },
+            }
+        row = self._lookup_latest(normalized_query)
+        if row is None:
+            target = build_generic_w2a_url(
+                normalized_query,
+                normalized_source,
+            )
             return {
                 "found": True,
                 "item": {
                     "content_id": normalized_query,
                     "target_url": target,
                     "query_type": "content_id",
-                    "route_mode": "published_clone",
-                    "code": str(row["code"]),
+                    "route_mode": "generic_fallback",
                     "source": normalized_source,
                     "af_channel": normalized_source,
                 },
             }
+        try:
+            target = self._frozen_target(row, normalized_source)
+        except (TTPostLinkError, KeyError, TypeError):
+            raise TTCodeRouteError(
+                "tt_code_route_invalid",
+                "stored drama route is invalid",
+                500,
+            ) from None
+        return {
+            "found": True,
+            "item": {
+                "content_id": normalized_query,
+                "target_url": target,
+                "query_type": "content_id",
+                "route_mode": "published_clone",
+                "code": str(row["code"]),
+                "source": normalized_source,
+                "af_channel": normalized_source,
+            },
+        }

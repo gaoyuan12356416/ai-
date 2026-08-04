@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
+from features.tt_drama_resolver import normalize_content_id
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "app.py"
@@ -41,6 +43,7 @@ def _client_namespace():
         "_tt_post_safe_error_message",
         "_tt_post_public_payload",
         "_tt_post_query_params",
+        "_tt_code_public_route_item",
         "_tt_post_service_request",
         "tt_posts_error_payload",
     }
@@ -68,6 +71,8 @@ def _client_namespace():
         "TT_POST_ADMIN_INTERNAL_TOKEN": "i" * 48,
         "TT_POST_ADMIN_TIMEOUT": 360,
         "TT_POST_ADMIN_PREVIEW_TIMEOUT": 60,
+        "TT_POST_CODE_RESOLVER_TIMEOUT": 3.0,
+        "normalize_content_id": normalize_content_id,
         "TT_POST_ADMIN_ROUTE_METHODS": {
             "/api/admin/tt-posts/accounts": {"GET"},
             "/api/admin/tt-posts/account-settings": {"GET", "POST"},
@@ -85,6 +90,7 @@ def _client_namespace():
             "/api/admin/tt-posts/tasks": {"GET"},
             "/api/admin/tt-posts/queue": {"GET"},
             "/api/admin/tt-posts/events": {"GET"},
+            "/internal/tt-posts/code-resolve": {"GET"},
         },
         "TT_POST_SENSITIVE_KEYS": {
             "accesstoken",
@@ -310,6 +316,10 @@ class TTPostsAppContractTest(unittest.TestCase):
             {"GET"},
             methods["/api/admin/tt-posts/tasks"],
         )
+        self.assertEqual(
+            {"GET"},
+            methods["/internal/tt-posts/code-resolve"],
+        )
         start = APP_SOURCE.index(
             '        if parsed.path in {\n'
             '            "/api/admin/tt-posts/account-settings",'
@@ -323,6 +333,60 @@ class TTPostsAppContractTest(unittest.TestCase):
             '"/api/admin/tt-posts/queue": "create_tt_post_queue"',
             route,
         )
+
+    def test_public_code_route_uses_existing_drama_guards_and_private_sidecar(self):
+        self.assertIn(
+            'if parsed.path == "/api/public/tt-code/resolve":',
+            APP_SOURCE,
+        )
+        start = APP_SOURCE.index("    def _dispatch_tt_code_resolver(self, parsed):")
+        end = APP_SOURCE.index("    def _require_any_module(self, module_keys):", start)
+        route = APP_SOURCE[start:end]
+        self.assertIn("TT_DRAMA_RESOLVER_RATE_LIMITER.allow", route)
+        self.assertIn("TT_DRAMA_RESOLVER_REQUEST_GATE.acquire", route)
+        self.assertIn('"/internal/tt-posts/code-resolve"', route)
+        self.assertIn("TT_DRAMA_RESOLVER.resolve", route)
+        self.assertIn("_tt_code_public_route_item", route)
+
+    def test_code_route_validator_locks_target_and_source(self):
+        namespace, _fake_requests = _client_namespace()
+        validate = namespace["_tt_code_public_route_item"]
+        content_id = "l9rP6ey2CB"
+        target = (
+            "https://www.dramawavew2a.com/ads/101/2250/view"
+            "?c=campaign&af_adset=page&af_adset_id=101"
+            "&af_ad=material&af_ad_id=9001&af_channel=TT"
+            "&af_c_id=7&af_dp=" + content_id
+        )
+        item = validate(
+            {
+                "content_id": content_id,
+                "target_url": target,
+                "query_type": "code",
+                "route_mode": "code_exact",
+                "code": "AB12",
+                "source": "Search",
+                "af_channel": "TT",
+            },
+            "ab12",
+            "Search",
+        )
+        self.assertEqual("AB12", item["code"])
+        self.assertEqual(content_id, item["content_id"])
+        with self.assertRaises(namespace["TTPostAdminClientError"]):
+            validate(
+                {
+                    **item,
+                    "source": "Search",
+                    "af_channel": "TT",
+                    "target_url": target.replace(
+                        "www.dramawavew2a.com",
+                        "www.dramawavew2a.com.evil.example",
+                    ),
+                },
+                "AB12",
+                "Search",
+            )
 
     def test_queue_actions_use_dynamic_sidecar_routes_and_safe_audit(self):
         start = APP_SOURCE.index(
@@ -514,6 +578,7 @@ class TTPostsAppContractTest(unittest.TestCase):
         fake_requests.request.side_effect = [
             FakeResponse(200, {"item": {"material_id": "4665764"}}),
             FakeResponse(200, {"items": []}),
+            FakeResponse(200, {"found": True, "item": {"content_id": "DRAMA10000"}}),
         ]
         namespace["_tt_post_service_request"](
             "POST",
@@ -524,9 +589,15 @@ class TTPostsAppContractTest(unittest.TestCase):
             "GET",
             "/api/admin/tt-posts/accounts",
         )
+        namespace["_tt_post_service_request"](
+            "GET",
+            "/internal/tt-posts/code-resolve",
+            query={"query": "DRAMA10000", "source": "Search"},
+        )
         calls = fake_requests.request.call_args_list
         self.assertEqual(calls[0].kwargs["timeout"], 60)
         self.assertEqual(calls[1].kwargs["timeout"], 360)
+        self.assertEqual(calls[2].kwargs["timeout"], 3.0)
 
     def test_query_parser_rejects_duplicates_and_secret_names(self):
         namespace, _fake_requests = _client_namespace()

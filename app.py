@@ -41493,6 +41493,16 @@ TT_POST_ADMIN_PREVIEW_TIMEOUT = max(
     5,
     min(TT_POST_ADMIN_PREVIEW_TIMEOUT, 120),
 )
+try:
+    TT_POST_CODE_RESOLVER_TIMEOUT = float(
+        os.environ.get("TT_POST_CODE_RESOLVER_TIMEOUT", "3") or "3"
+    )
+except (TypeError, ValueError):
+    TT_POST_CODE_RESOLVER_TIMEOUT = 3.0
+TT_POST_CODE_RESOLVER_TIMEOUT = max(
+    0.5,
+    min(TT_POST_CODE_RESOLVER_TIMEOUT, 10.0),
+)
 
 TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/accounts": {"GET"},
@@ -41511,6 +41521,7 @@ TT_POST_ADMIN_ROUTE_METHODS = {
     "/api/admin/tt-posts/tasks": {"GET"},
     "/api/admin/tt-posts/queue": {"GET"},
     "/api/admin/tt-posts/events": {"GET"},
+    "/internal/tt-posts/code-resolve": {"GET"},
 }
 TT_POST_SENSITIVE_KEYS = {
     "accesstoken",
@@ -41632,6 +41643,155 @@ def _tt_post_query_params(raw_query, allowed, required=()):
     return result
 
 
+def _tt_code_public_route_item(value, expected_query, source):
+    """Validate and reduce the sidecar response before public composition."""
+
+    if not isinstance(value, dict) or set(value) - {
+        "content_id",
+        "target_url",
+        "query_type",
+        "route_mode",
+        "code",
+        "source",
+        "af_channel",
+    }:
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    raw_query = str(expected_query or "")
+    normalized_source = str(source or "")
+    if normalized_source not in {"Search", "Featured"}:
+        raise TTPostAdminClientError(
+            "tt_code_source_invalid",
+            "搜索来源无效",
+            400,
+        )
+    is_code = bool(re.fullmatch(r"[A-Za-z0-9]{4}", raw_query))
+    normalized_query = raw_query.upper() if is_code else normalize_content_id(raw_query)
+    expected_query_type = "code" if is_code else "content_id"
+    query_type = str(value.get("query_type") or "")
+    route_mode = str(value.get("route_mode") or "")
+    content_id = normalize_content_id(value.get("content_id"))
+    if (
+        query_type != expected_query_type
+        or (not is_code and content_id != normalized_query)
+        or str(value.get("source") or "") != normalized_source
+    ):
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    if is_code:
+        if (
+            route_mode != "code_exact"
+            or str(value.get("code") or "") != normalized_query
+            or str(value.get("af_channel") or "") != "TT"
+        ):
+            raise TTPostAdminClientError(
+                "tt_code_route_invalid",
+                "剧情跳转信息无效",
+                502,
+            )
+        expected_channel = "TT"
+        expected_keys = {
+            "c",
+            "af_adset",
+            "af_adset_id",
+            "af_ad",
+            "af_ad_id",
+            "af_channel",
+            "af_c_id",
+            "af_dp",
+        }
+    elif route_mode == "published_clone":
+        if str(value.get("af_channel") or "") != normalized_source:
+            raise TTPostAdminClientError(
+                "tt_code_route_invalid",
+                "剧情跳转信息无效",
+                502,
+            )
+        expected_channel = normalized_source
+        expected_keys = {
+            "c",
+            "af_adset",
+            "af_adset_id",
+            "af_ad",
+            "af_ad_id",
+            "af_channel",
+            "af_c_id",
+            "af_dp",
+        }
+    elif route_mode == "generic_fallback":
+        if str(value.get("af_channel") or "") != normalized_source:
+            raise TTPostAdminClientError(
+                "tt_code_route_invalid",
+                "剧情跳转信息无效",
+                502,
+            )
+        expected_channel = normalized_source
+        expected_keys = {"af_dp", "c", "af_c_id", "af_channel"}
+    else:
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+
+    target_url = str(value.get("target_url") or "")
+    if not target_url or len(target_url) > 8192 or target_url != target_url.strip():
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    parsed = urlparse(target_url)
+    try:
+        target_port = parsed.port
+    except ValueError:
+        target_port = -1
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "www.dramawavew2a.com"
+        or target_port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/ads/101/2250/view"
+        or parsed.params
+        or parsed.fragment
+        or set(params) != expected_keys
+        or any(len(values) != 1 or not values[0] for values in params.values())
+        or params.get("af_dp") != [content_id]
+        or params.get("af_channel") != [expected_channel]
+    ):
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    if route_mode == "generic_fallback" and (
+        params.get("c") != ["TTpost"]
+        or params.get("af_c_id") != ["0001"]
+    ):
+        raise TTPostAdminClientError(
+            "tt_code_route_invalid",
+            "剧情跳转信息无效",
+            502,
+        )
+    result = {
+        "content_id": content_id,
+        "target_url": target_url,
+        "query_type": query_type,
+        "route_mode": route_mode,
+    }
+    if is_code:
+        result["code"] = normalized_query
+    return result
+
+
 def _tt_post_service_request(method, path, payload=None, query=None):
     method = str(method or "").upper()
     allowed_methods = TT_POST_ADMIN_ROUTE_METHODS.get(str(path or ""))
@@ -41693,11 +41853,12 @@ def _tt_post_service_request(method, path, payload=None, query=None):
                     400,
                 )
             safe_query[normalized_key] = str(value)
-    request_timeout = (
-        TT_POST_ADMIN_PREVIEW_TIMEOUT
-        if path == "/api/admin/tt-posts/materials/preview"
-        else TT_POST_ADMIN_TIMEOUT
-    )
+    if path == "/api/admin/tt-posts/materials/preview":
+        request_timeout = TT_POST_ADMIN_PREVIEW_TIMEOUT
+    elif path == "/internal/tt-posts/code-resolve":
+        request_timeout = TT_POST_CODE_RESOLVER_TIMEOUT
+    else:
+        request_timeout = TT_POST_ADMIN_TIMEOUT
     try:
         response = requests.request(
             method,
@@ -93411,6 +93572,138 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 },
             )
 
+    def _dispatch_tt_code_resolver(self, parsed):
+        """Compose the private code route with verified public drama data."""
+
+        started_at = time.perf_counter()
+        cache_state = "BYPASS"
+
+        def respond(status_code, payload):
+            elapsed_ms = max(
+                0.0,
+                (time.perf_counter() - started_at) * 1000.0,
+            )
+            json_response(
+                self,
+                status_code,
+                payload,
+                no_store=True,
+                extra_headers={
+                    "X-TT-Drama-Cache": cache_state,
+                    "Server-Timing": "tt-code-resolver;dur=%.2f" % elapsed_ms,
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        acquired = False
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            if set(params) != {"query", "source"}:
+                raise InvalidContentIdError("query and source are required")
+            query_values = params.get("query") or []
+            source_values = params.get("source") or []
+            if len(query_values) != 1 or len(source_values) != 1:
+                raise InvalidContentIdError("query and source must be unique")
+            raw_query = str(query_values[0] or "")
+            source = str(source_values[0] or "")
+            if source not in {"Search", "Featured"}:
+                raise InvalidContentIdError("source is invalid")
+            if re.fullmatch(r"[A-Za-z0-9]{4}", raw_query):
+                normalized_query = raw_query.upper()
+            else:
+                normalized_query = normalize_content_id(raw_query)
+            if not TT_DRAMA_RESOLVER_RATE_LIMITER.allow(
+                self._tt_drama_client_key()
+            ):
+                cache_state = "RATE_LIMITED"
+                respond(
+                    429,
+                    {
+                        "found": False,
+                        "error": "rate_limited",
+                        "message": "Too many searches. Please wait a moment and try again.",
+                    },
+                )
+                return
+            acquired = TT_DRAMA_RESOLVER_REQUEST_GATE.acquire(blocking=False)
+            if not acquired:
+                cache_state = "OVERLOADED"
+                respond(
+                    503,
+                    {
+                        "found": False,
+                        "error": "resolver_overloaded",
+                        "message": "Story search is busy. Please try again.",
+                    },
+                )
+                return
+            route_payload = _tt_post_service_request(
+                "GET",
+                "/internal/tt-posts/code-resolve",
+                query={"query": normalized_query, "source": source},
+            )
+            route = _tt_code_public_route_item(
+                route_payload.get("item"),
+                normalized_query,
+                source,
+            )
+            outcome = TT_DRAMA_RESOLVER.resolve(route["content_id"])
+            cache_state = TT_DRAMA_RESOLVER_PUBLIC_CACHE_STATES.get(
+                str(outcome.cache_state or ""),
+                "MISS",
+            )
+            if not outcome.found:
+                respond(
+                    404,
+                    {
+                        "found": False,
+                        "error": "not_found",
+                        "message": "No matching DramaWave story was found.",
+                    },
+                )
+                return
+            public_drama = {
+                key: outcome.item.get(key)
+                for key in TT_DRAMA_RESOLVER_PUBLIC_FIELDS
+            }
+            respond(200, {"found": True, "item": {**public_drama, **route}})
+        except (InvalidContentIdError, ResourceInvalidContentIdError):
+            respond(
+                400,
+                {
+                    "found": False,
+                    "error": "invalid_request",
+                    "message": "Enter a four-character code or complete Content ID.",
+                },
+            )
+        except TTPostAdminClientError as exc:
+            status, payload = tt_posts_error_payload(exc)
+            respond(status, {"found": False, **payload})
+        except (ResolverUnavailableError, ResourceSourceError):
+            cache_state = "ERROR"
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+        except Exception:
+            cache_state = "ERROR"
+            logging.exception("unexpected TT code resolver failure")
+            respond(
+                503,
+                {
+                    "found": False,
+                    "error": "resolver_unavailable",
+                    "message": "Story search is temporarily unavailable. Please try again.",
+                },
+            )
+        finally:
+            if acquired:
+                TT_DRAMA_RESOLVER_REQUEST_GATE.release()
+
     def _require_any_module(self, module_keys):
         if not self._require_auth():
             return False
@@ -93756,6 +94049,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/public/tt-code/resolve":
+            self._dispatch_tt_code_resolver(parsed)
+            return
 
         if parsed.path == "/api/public/tt-drama/resolve":
             self._dispatch_tt_drama_resolver(parsed)

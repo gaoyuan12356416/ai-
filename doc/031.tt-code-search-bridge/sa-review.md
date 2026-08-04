@@ -2,44 +2,62 @@
 
 ## 结论
 
-有条件通过，可进入实现。关键业务歧义已由产品确认并写入 `requirements.md`：新旧页面隔离、四位 code 全容量回收、`c` 尾部 queue ID、正式渠道 `TT`、Search/Featured 最新 published clone、generic fallback，以及 SQLite 为事实源、Redis 仅缓存。
+需求与技术设计通过，已进入实现完成后的本地验证阶段。生产部署和线上验收尚未执行，本结论不是发布批准。
 
-代码和生产实测尚未完成，本评审不构成发布批准。
+## 已闭环问题
 
-## 问题与闭环
+| 编号 | 级别 | 问题 | 落地结论 | 状态 |
+| --- | --- | --- | --- | --- |
+| SA-01 | P0 | 满池删除会让历史 code 改指向 | 仅精确确认 `36^4` 全满时按 `created_at,code` 回收；同事务写 recycle audit | 已实现 |
+| SA-02 | P0 | code 与 caption 互相依赖 | queue、route、code、最终 caption 同一个 `BEGIN IMMEDIATE` 事务；失败整体回滚 | 已实现 |
+| SA-03 | P0 | 同剧多 published 选择不确定 | `published_at DESC, created_at DESC, queue_id DESC` | 已实现 |
+| SA-04 | P0 | Redis 可能成为事实源或返回陈旧 route | cache 完整校验、随机 namespace、失效异常旋转、任何缓存异常回退 SQLite | 已实现 |
+| SA-05 | P0 | 公共接口绕过既有保护 | 公共 route 经主 app 8787，复用 token bucket/in-flight gate/DramaWave resolver；sidecar 只暴露 bearer 内部接口 | 已实现 |
+| SA-06 | P0 | 原 `/tt` 可能被覆盖 | 新页面/JS/Nginx snippet 独立；旧文件零 diff，部署前后 hash 门禁 | 已实现，待线上验证 |
+| SA-07 | P1 | 横滑误触卡片 | 7px drag threshold、click 抑制、scroll snap、按钮与键盘行为 | 已实现，待最终浏览器回归 |
+| SA-08 | P1 | 旧队列/直接测试 channel 漂移 | 新正式队列 TT；历史无 route pending 和直接测试继续 AIpost | 已实现 |
+| SA-09 | P1 | `{code}` 用在直接测试没有 durable identity | 只允许正式队列；直接测试稳定拒绝 `tt_post_code_macro_queue_only` | 已实现 |
 
-| 编号 | 严重级别 | 位置 | 问题 | 结论 / 建议 | 状态 |
-| --- | --- | --- | --- | --- | --- |
-| SA-01 | P0 | code 生命周期 | 删除最早映射会使历史 code 改指向 | 仅在精确确认 `36^4` 全占用时执行；写审计事件，普通碰撞禁止回收 | 已确认 |
-| SA-02 | P0 | Redis | 回收后旧缓存可能误路由 | SQLite 为事实源；`DEL`/覆盖失败旋转 namespace 并旁路 Redis，专项陈旧缓存测试 | 已确认 |
-| SA-03 | P0 | 发布幂等 | caption 需要 code，但 code 又属于发布记录 | queue freeze 事务先分配/持久化 code，再一次渲染 caption；同 queue 重试复用 | 已确认 |
-| SA-04 | P0 | 同剧搜索 | 同一 content ID 可有多条发布映射 | `published_at DESC, queue_id DESC` 选最新；只 clone 后改 channel | 已确认 |
-| SA-05 | P0 | 原页面 | 新需求可能覆盖 `/tt` 文件或路由 | 新 `/tt-code` 文件与 exact route；原文件 hash 作为部署门禁 | 已确认 |
-| SA-06 | P1 | Featured UX | 横滑可能触发卡片 click | 触摸/鼠标位移阈值抑制 click；按钮和键盘单独测试 | 已确认 |
-| SA-07 | P1 | URL 构造 | 中文、`&`、方括号可破坏参数 | 统一标准 encoder，固定 host/path/参数序和 `af_dp` 一致性校验 | 已确认 |
-| SA-08 | P1 | Redis 部署 | 生产当前没有独立 code Redis | 新实例仅 `127.0.0.1:6381`，无公网监听，缓存故障不影响查询 | 已确认 |
-
-## 架构决策记录
+## 架构决策
 
 | ADR | 决策 |
 | --- | --- |
-| ADR-01 | 新公开入口为 `/tt-code`，原 `/tt` 完全不动 |
-| ADR-02 | 新公开接口为 `GET /api/public/tt-code/resolve?query=...&source=Search|Featured` |
-| ADR-03 | 数据表名为 `tt_post_code_route`，保存在现有数据盘 TT SQLite |
-| ADR-04 | code 存储统一大写，正则 `^[A-Z0-9]{4}$`，主键唯一 |
-| ADR-05 | 正式发布 `af_channel=TT`；直接搜索/Featured clone 仅改为 `Search`/`Featured` |
-| ADR-06 | 无 published 映射时使用旧 generic `c=TTpost`、`af_c_id=0001` 并增加对应 channel |
-| ADR-07 | Redis env 统一使用 `TT_POST_CODE_REDIS_*`，生产监听 `127.0.0.1:6381` |
-| ADR-08 | 成功响应 `query_type=code|content_id`，`route_mode=code_exact|published_clone|generic_fallback` |
+| ADR-01 | 新入口 `/tt-code`，原 `/tt` 完全不动 |
+| ADR-02 | 公共 API 是主 app 的组合接口，不将 sidecar 直接暴露公网 |
+| ADR-03 | sidecar 使用 `/internal/tt-posts/code-resolve`、loopback 和现有内部 bearer |
+| ADR-04 | SQLite `tt_post_code_route` 是事实源，code PK、queue unique；Redis 仅缓存 |
+| ADR-05 | Redis 只允许 loopback，生产目标 6381；24h/30s TTL 当前为代码常量 |
+| ADR-06 | 所有新正式队列生成 code；`{code}` 是否出现在 caption 不影响分配 |
+| ADR-07 | 新正式 URL `af_dp` 第一、channel TT；历史/直接测试保持 AIpost |
+| ADR-08 | 直接 ID/Featured 使用最新 published clone；无历史使用 TTpost fallback |
+| ADR-09 | code exact 不按 state 过滤，但公共层仍必须确认对应剧存在 |
 
-## 实施门禁
+## 数据与调用流评审
 
-- 表迁移必须在数据库副本演练并通过 `PRAGMA integrity_check`。
-- code 分配、queue 创建和最终 caption 冻结必须位于同一 SQLite 写事务。
-- Redis 故障和陈旧值专项测试未通过前不得部署。
-- 原 `/tt` 文件 hash 或浏览器回归不一致时停止部署。
-- 不得通过真实 publish/canary/run-now 验收。
+```text
+正式 queue freeze
+  -> BEGIN IMMEDIATE
+  -> queue insert
+  -> code 分配 / 满池回收 + audit
+  -> route insert + queue.code + 最终 caption
+  -> commit
 
-## PM 修订确认
+公共查询
+  -> Nginx exact route
+  -> 主 app 输入/限流/并发门
+  -> bearer sidecar 读取 Redis/SQLite route
+  -> 主 app DramaWave 剧目校验 + target 二次校验
+  -> 一次组合 JSON
+```
 
-`requirements.md` v1 已吸收全部 P0/P1 结论。代码评审、测试报告和生产证据待实现后补录。
+该边界确保 Redis 不参与唯一性，sidecar 不直接处理公网流量，前端也不需要自己拼接或信任两次异步请求。
+
+## 尚未关闭的发布门禁
+
+- 最终全量 TT 回归和当前 diff 的独立 P0/P1 复审。
+- 服务器 DB online backup 副本迁移与 `integrity_check=ok`。
+- Redis unit/config 在目标 systemd/Redis 版本的验证，及 6381 仅 loopback 监听。
+- 公网 `/tt-code` 的移动/桌面手势、一次请求、fallback 和 fail-closed 验证。
+- 原 `/tt` 部署前后 hash/行为证明。
+- GitHub exact commit、不可变 release、备份 manifest 与可执行回滚点。
+- queue/publish ledger 基线证明验收没有触发真实 TikTok 发布。

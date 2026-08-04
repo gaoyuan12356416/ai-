@@ -27,7 +27,7 @@ from features.tt_posts.service import TTPostHTTPServer
 INTERNAL_TOKEN = "test-internal-token-that-is-long-enough-123456"
 
 
-def tracking_url(queue_id, content_id="DRAMA100", channel="TT"):
+def tracking_url(queue_id, content_id="DRAMA10000", channel="TT"):
     return build_w2a_url(
         {
             "username": "creator_101",
@@ -43,11 +43,12 @@ def tracking_url(queue_id, content_id="DRAMA100", channel="TT"):
             "queue_id": queue_id,
             "content_id": content_id,
             "channel": channel,
+            "af_dp_first": True,
         }
     )
 
 
-def route_values(queue_id, *, content_id="DRAMA100", created_at=None):
+def route_values(queue_id, *, content_id="DRAMA10000", created_at=None):
     target = tracking_url(queue_id, content_id)
     query = dict(
         urllib.parse.parse_qsl(
@@ -101,6 +102,19 @@ class FakeRedis:
         self.values.pop(key, None)
 
 
+class PausingRedis(FakeRedis):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.resume = threading.Event()
+
+    def get(self, key):
+        self.started.set()
+        if not self.resume.wait(3):
+            raise OSError("test Redis pause timed out")
+        return super().get(key)
+
+
 class CodeRouteCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -141,6 +155,23 @@ class CodeRouteCase(unittest.TestCase):
 
 
 class AllocatorTests(CodeRouteCase):
+    def test_code_route_schema_participates_in_the_caller_transaction(self):
+        with self.connection() as conn:
+            conn.execute("DROP TRIGGER IF EXISTS trg_tt_post_queue_code_route_state")
+            conn.execute("DROP TABLE tt_post_code_route")
+            conn.execute("DROP TABLE tt_post_code_recycle_audit")
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            ensure_code_route_storage(conn)
+            conn.rollback()
+            objects = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name LIKE 'tt_post_code_%'"
+                )
+            }
+        self.assertEqual(set(), objects)
+
     def test_collision_falls_back_and_queue_is_idempotent(self):
         self.reset_code_table(2)
         always_a = lambda _alphabet: "A"
@@ -210,6 +241,13 @@ class AllocatorTests(CodeRouteCase):
                     "SELECT 1 FROM tt_post_code_route WHERE queue_id=1"
                 ).fetchone()
             )
+            audit = conn.execute(
+                "SELECT * FROM tt_post_code_recycle_audit"
+            ).fetchone()
+        self.assertEqual("A", audit["code"])
+        self.assertEqual(1, audit["old_queue_id"])
+        self.assertEqual("DRAMA10000", audit["old_content_id"])
+        self.assertEqual(3, audit["new_queue_id"])
 
     def test_database_rejects_lowercase_semantic_duplicate(self):
         allocated = self.allocate(1)
@@ -246,26 +284,26 @@ class CaptionCodeTests(unittest.TestCase):
     def test_exact_code_macro_renders_and_can_be_deferred(self):
         template = "Drama ID: {{content_id}}\nCode: {code}"
         self.assertEqual(
-            "Drama ID: DRAMA100\nCode: AB12",
-            render_caption_template(template, "DRAMA100", code="AB12"),
+            "Drama ID: DRAMA10000\nCode: AB12",
+            render_caption_template(template, "DRAMA10000", code="AB12"),
         )
         self.assertEqual(
-            template.replace("{{content_id}}", "DRAMA100"),
-            render_caption_template(template, "DRAMA100", defer_code=True),
+            template.replace("{{content_id}}", "DRAMA10000"),
+            render_caption_template(template, "DRAMA10000", defer_code=True),
         )
 
     def test_code_macro_rejects_lowercase_and_unknown_macro(self):
         with self.assertRaises(TTPostError) as lowercase:
             render_caption_template(
                 "Drama {{content_id}} {code}",
-                "DRAMA100",
+                "DRAMA10000",
                 code="ab12",
             )
         self.assertEqual("caption_code_required", lowercase.exception.code)
         with self.assertRaises(TTPostError) as unknown:
             render_caption_template(
                 "Drama {{content_id}} {Code}",
-                "DRAMA100",
+                "DRAMA10000",
                 code="AB12",
             )
         self.assertEqual("caption_placeholder_invalid", unknown.exception.code)
@@ -302,7 +340,7 @@ class ResolverTests(CodeRouteCase):
         )
         self.assertEqual("TT", exact_query["af_channel"])
 
-        cloned = resolver.resolve("DRAMA100", "Featured")["item"]
+        cloned = resolver.resolve("DRAMA10000", "Featured")["item"]
         self.assertEqual("published_clone", cloned["route_mode"])
         self.assertEqual(latest["code"], cloned["code"])
         cloned_query = dict(
@@ -332,6 +370,16 @@ class ResolverTests(CodeRouteCase):
             resolver.resolve("ab12", "Search")
         self.assertEqual(404, caught.exception.status)
         self.assertEqual("tt_code_not_found", caught.exception.code)
+
+    def test_public_content_id_shape_matches_the_existing_resolver(self):
+        resolver = TTCodeRouteResolver(self.db_path)
+        for query in ("SHORT", " DRAMA10000", "DRAMA10000 ", "x" * 33):
+            with self.subTest(query=query), self.assertRaises(
+                TTCodeRouteError
+            ) as caught:
+                resolver.resolve(query, "Search")
+            self.assertEqual(400, caught.exception.status)
+            self.assertEqual("tt_code_query_invalid", caught.exception.code)
 
     def test_redis_positive_negative_and_failure_fallback(self):
         row = self.allocate(1)
@@ -396,11 +444,69 @@ class ResolverTests(CodeRouteCase):
         resolver.invalidate_code("AB12")
         after_code = resolver.cache_namespace
         self.assertNotEqual("before", after_code)
-        resolver.invalidate_latest("DRAMA100")
+        resolver.invalidate_latest("DRAMA10000")
         self.assertNotEqual(after_code, resolver.cache_namespace)
 
+    def test_slow_redis_read_does_not_hold_the_queue_write_lock(self):
+        row = self.allocate(1)
+        redis = PausingRedis()
+        shared_lock = threading.RLock()
+        resolver = TTCodeRouteResolver(
+            self.db_path,
+            redis_client=redis,
+            lock=shared_lock,
+            cache_namespace="test",
+        )
+        result = []
+        worker = threading.Thread(
+            target=lambda: result.append(
+                resolver.resolve(row["code"], "Search")["item"]
+            )
+        )
+        worker.start()
+        self.assertTrue(redis.started.wait(2))
+        self.assertTrue(shared_lock.acquire(timeout=0.2))
+        shared_lock.release()
+        redis.resume.set()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(row["code"], result[0]["code"])
 
-class PublicHTTPTests(unittest.TestCase):
+    def test_slow_redis_invalidation_does_not_hold_queue_write_lock(self):
+        class PausingDeleteRedis(FakeRedis):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+                self.resume = threading.Event()
+
+            def delete(self, key):
+                self.started.set()
+                if not self.resume.wait(5):
+                    raise TimeoutError("test delete timed out")
+                return super().delete(key)
+
+        redis = PausingDeleteRedis()
+        shared_lock = threading.RLock()
+        resolver = TTCodeRouteResolver(
+            self.db_path,
+            redis_client=redis,
+            lock=shared_lock,
+            cache_namespace="test",
+        )
+        worker = threading.Thread(
+            target=lambda: resolver.invalidate_latest("DRAMA10000")
+        )
+        worker.start()
+        self.assertTrue(redis.started.wait(2))
+        self.assertTrue(shared_lock.acquire(timeout=0.2))
+        shared_lock.release()
+        redis.resume.set()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertNotEqual("test", resolver.cache_namespace)
+
+
+class InternalHTTPTests(unittest.TestCase):
     class Facade:
         class Gates:
             @staticmethod
@@ -441,14 +547,24 @@ class PublicHTTPTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(5)
 
-    def test_public_route_needs_no_bearer_but_admin_still_does(self):
-        with urllib.request.urlopen(
+    def test_code_route_and_admin_both_require_the_internal_bearer(self):
+        url = (
             self.base
-            + "/api/public/tt-code/resolve?query=DRAMA100&source=Search"
-        ) as response:
+            + "/internal/tt-posts/code-resolve?query=DRAMA10000&source=Search"
+        )
+        with self.assertRaises(urllib.error.HTTPError) as denied_code:
+            urllib.request.urlopen(url)
+        self.assertEqual(403, denied_code.exception.code)
+        denied_code.exception.close()
+
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": "Bearer " + INTERNAL_TOKEN},
+        )
+        with urllib.request.urlopen(request) as response:
             payload = json.loads(response.read().decode("utf-8"))
         self.assertTrue(payload["found"])
-        self.assertEqual("DRAMA100", payload["item"]["content_id"])
+        self.assertEqual("DRAMA10000", payload["item"]["content_id"])
         with self.assertRaises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(self.base + "/api/admin/tt-posts/accounts")
         self.assertEqual(403, denied.exception.code)

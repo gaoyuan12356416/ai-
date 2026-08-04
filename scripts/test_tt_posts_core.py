@@ -223,6 +223,7 @@ class StorageTests(CoreTestCase):
                 "tt_post_material_pool",
                 "tt_post_queue",
                 "tt_post_code_route",
+                "tt_post_code_recycle_audit",
                 "tt_post_event",
                 "tt_post_account_setting",
                 "tt_post_daily_schedule",
