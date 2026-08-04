@@ -582,6 +582,7 @@ class RedisDeploymentContractTests(unittest.TestCase):
         )
 
         self.assertIn("ConditionPathIsMountPoint=/mnt/data-disk", prepare)
+        self.assertIn("RequiresMountsFor=/mnt/data-disk", prepare)
         self.assertIn("Before=tt-code-redis.service", prepare)
         self.assertIn("User=tt-post", prepare)
         self.assertIn("Group=tt-post", prepare)

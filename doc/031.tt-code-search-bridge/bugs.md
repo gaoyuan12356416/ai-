@@ -14,7 +14,7 @@
 | BUG-004 | P1 | 慢 Redis 占用 queue 写锁 | cache GET/DELETE 网络等待若持有共享锁，会阻塞正式 queue 写事务 | 两阶段失效在事务共享锁内 rotate namespace，锁外 best-effort Redis DEL；reconcile 释放共享锁后再做网络失效；新增慢读/慢删测试 | 已关闭，全量回归通过 |
 | BUG-005 | P1 | 高占用空槽兜底 SQL 放大 | 逐候选 SQL 最坏超过百万次 | 一次读取 code，bytearray 位图 O(capacity) 找空槽 | 已关闭，全量回归通过 |
 | BUG-006 | P1 | 新正式 URL 参数顺序不符合合同 | builder 历史 c-first 与新需求 af_dp-first 冲突 | 新正式和 clone 显式 af_dp-first；validator 保留历史兼容 | 已关闭，全量回归通过 |
-| BUG-007 | P1 | Redis data dir 启动前不存在 | 候选机首次启动证实主 unit 的 mount namespace 先于 `ExecStartPre` 建立，命令以 `226/NAMESPACE` 失败 | 拆成最小权限 `tt-post` prepare oneshot，在数据盘 mount condition 后于既有父目录创建 0700 子目录；主 unit `Requires/After` prepare，仍只写 Redis 子目录 | 已关闭，待新 commit 候选复验 |
+| BUG-007 | P1 | Redis data dir 启动前不存在 | 候选机首次启动证实主 unit 的 mount namespace 先于 `ExecStartPre` 建立，命令以 `226/NAMESPACE` 失败 | 拆成最小权限 `tt-post` prepare oneshot，以 `RequiresMountsFor` 等待数据盘并通过 mount condition 后创建 0700 子目录；主 unit `Requires/After` prepare，仍只写 Redis 子目录 | 已关闭，待新 commit 候选复验 |
 | BUG-008 | P1 | 加法迁移可能半完成 | `executescript` 隐式提交导致 route 与 queue.code 不在同一事务 | baseline script 后显式开启新的 `BEGIN IMMEDIATE` | 已关闭，待 DB 副本演练 |
 | BUG-009 | P1 | 满池回收缺少持久审计 | 旧 code 改指向只能从现状推断 | 增加 `tt_post_code_recycle_audit`，回收同事务写审计 | 已关闭，全量回归通过 |
 | BUG-010 | P0 | `{code}` formal queue exact retry 误冲突 | 首次 freeze 后 caption 已含真实 code，重放请求仍携带 deterministic pre-freeze caption，单一字符串比较误判相同 idempotency_key 为不同事实 | 其他冻结事实完全一致时同时接受 deterministic pre-freeze caption 与已冻结 code caption；新增 exact replay/差异 payload 回归 | 已关闭，全量回归通过 |

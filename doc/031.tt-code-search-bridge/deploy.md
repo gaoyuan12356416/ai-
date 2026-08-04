@@ -88,7 +88,7 @@ UUID、挂载或空间异常时停止；不得让 `/mnt/data-disk/...` 静默落
 
 - bind `127.0.0.1`，port `6381`，`protected-mode yes`
 - 无 RDB/AOF；SQLite 才是恢复源
-- data dir `/mnt/data-disk/tt-post-publisher/redis`；独立 prepare oneshot 在确认数据盘已挂载后创建为 `tt-post:tt-post 0700`，主 Redis unit 通过 `Requires/After` 等待准备成功
+- data dir `/mnt/data-disk/tt-post-publisher/redis`；独立 prepare oneshot 通过 `RequiresMountsFor` 拉起并等待数据盘、再确认 mount condition 后创建为 `tt-post:tt-post 0700`，主 Redis unit 通过 `Requires/After` 等待准备成功
 - `maxmemory 128mb`、`allkeys-lru`
 - 禁用 `FLUSHALL`、`FLUSHDB`、`CONFIG`
 - systemd 限制网络为 `AF_UNIX AF_INET`，不开放安全组/防火墙公网端口

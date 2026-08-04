@@ -1,5 +1,6 @@
 [Unit]
 Description=Prepare TikTok code-route Redis data directory
+RequiresMountsFor=/mnt/data-disk
 ConditionPathIsMountPoint=/mnt/data-disk
 Before=tt-code-redis.service
 
