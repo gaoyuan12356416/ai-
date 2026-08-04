@@ -1,0 +1,27 @@
+[Unit]
+Description=Prepare TikTok code-route Redis data directory
+ConditionPathIsMountPoint=/mnt/data-disk
+Before=tt-code-redis.service
+
+[Service]
+Type=oneshot
+User=tt-post
+Group=tt-post
+ExecStart=/usr/bin/install -d -m 0700 /mnt/data-disk/tt-post-publisher/redis
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadWritePaths=/mnt/data-disk/tt-post-publisher
+UMask=0077

@@ -10,7 +10,7 @@
 - `/root/drama_material_service/app.py`：公共组合 resolver、既有限流/并发门、sidecar bearer 调用、剧目和 target 校验。
 - 静态：新增 `tt-drama-code-search.html/js`；更新管理页对 `{code}` 的说明/preview；原 `tt-drama-search.html/js` 不改。
 - Nginx：新增 `/tt-code`、新 JS 和公共 API exact locations；公共 API 代理 `127.0.0.1:8787`。
-- Redis：新增独立 `tt-code-redis.service` 和 `/etc/tt-code-redis.conf`，只监听 `127.0.0.1:6381`。
+- Redis：新增目录准备 `tt-code-redis-prepare.service`、独立 `tt-code-redis.service` 和 `/etc/tt-code-redis.conf`，只监听 `127.0.0.1:6381`。
 - SQLite：在数据盘现有 DB 做加法迁移。
 
 ## GitHub-first 门禁
@@ -82,13 +82,13 @@ UUID、挂载或空间异常时停止；不得让 `/mnt/data-disk/...` 静默落
 
 ## Redis 部署合同
 
-仓库资产：`deploy/tt-code-redis.conf`、`deploy/tt-code-redis.service`。
+仓库资产：`deploy/tt-code-redis.conf`、`deploy/tt-code-redis-prepare.service`、`deploy/tt-code-redis.service`。
 
 实际配置：
 
 - bind `127.0.0.1`，port `6381`，`protected-mode yes`
 - 无 RDB/AOF；SQLite 才是恢复源
-- data dir `/mnt/data-disk/tt-post-publisher/redis`，unit 启动前创建为 `tt-post:tt-post 0700`
+- data dir `/mnt/data-disk/tt-post-publisher/redis`；独立 prepare oneshot 在确认数据盘已挂载后创建为 `tt-post:tt-post 0700`，主 Redis unit 通过 `Requires/After` 等待准备成功
 - `maxmemory 128mb`、`allkeys-lru`
 - 禁用 `FLUSHALL`、`FLUSHDB`、`CONFIG`
 - systemd 限制网络为 `AF_UNIX AF_INET`，不开放安全组/防火墙公网端口
@@ -109,7 +109,7 @@ TT_POST_CODE_RESOLVER_TIMEOUT=3
 
 正缓存 24 小时、负缓存 30 秒和随机 namespace 是当前代码常量，不配置 Redis DB、ACL/password、TTL 或 namespace env。
 
-安装前在目标机验证 Redis 包版本、`redis-server`/`redis-cli` 路径和 `systemd-analyze verify`。启动后检查：
+安装前在目标机验证 Redis 包版本、`redis-server`/`redis-cli` 路径，并对 prepare/main 两个 unit 执行 `systemd-analyze verify`。主 unit 只需 enable；每次启动会先运行 prepare oneshot。启动后检查：
 
 ```bash
 redis-cli -h 127.0.0.1 -p 6381 ping
@@ -130,7 +130,7 @@ ss -lnt '( sport = :6381 )'
 ## 生产部署步骤
 
 1. 再次确认 exact SHA、backup manifest、数据盘和零真实发布边界。
-2. 安装 Redis 软件包；安装 config/unit，`daemon-reload`，启动并 enable 独立 6381，验证 PING/loopback。
+2. 安装 Redis 软件包；安装 config、prepare/main units，`daemon-reload`，启动并仅 enable 主 6381 unit，验证 prepare 成功、PING/loopback。
 3. 以保留 owner/mode 的原子方式更新 `/etc/tt-post.env` 和 `/etc/tt-post-app.env`；不输出 secrets。
 4. 准备新 Nginx snippet 和静态文件，先在临时位置检查；不得写旧 `/tt` 两文件。
 5. 原子切换 `/opt/tt-post/current` 到 exact release。

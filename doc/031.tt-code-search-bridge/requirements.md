@@ -165,7 +165,7 @@ CREATE TABLE tt_post_code_recycle_audit (
 | 存储/业务 | `features/tt_posts/code_routes.py`, `core.py`, `links.py`, `service.py` |
 | 公共组合接口 | `app.py` |
 | 页面 | `static/tt-drama-code-search.html`, `static/tt-drama-code-search.js` |
-| 部署 | `deploy/nginx/tt-drama-code-search.conf`, `deploy/tt-code-redis.conf`, `deploy/tt-code-redis.service`, env examples |
+| 部署 | `deploy/nginx/tt-drama-code-search.conf`, `deploy/tt-code-redis.conf`, `deploy/tt-code-redis-prepare.service`, `deploy/tt-code-redis.service`, env examples |
 | 测试 | `scripts/test_tt_post_code_routes.py`, `scripts/test_tt_drama_code_bridge.js` 及既有 TT 回归 |
 
 ## 验收门禁

@@ -2,7 +2,7 @@
 
 ## 结论
 
-多轮独立评审发现的兼容性和边界问题已按下表修订；当前最终 diff 已完成收口复审与 394 项全量回归，没有未关闭的 P0/P1/P2。此结论批准进入受控生产候选验证，不替代 DB/Redis/Nginx/systemd 与线上回滚门禁。
+多轮独立评审发现的兼容性和边界问题已按下表修订；当前最终 diff 已完成收口复审与 395 项全量回归，没有未关闭的 P0/P1/P2。此结论批准进入受控生产候选验证，不替代 DB/Redis/Nginx/systemd 与线上回滚门禁。
 
 ## 评审范围
 
@@ -22,7 +22,7 @@
 | CR-F04 | P1 | Redis 网络阻塞可能占用 queue/route 的共享写锁 | lookup 在锁外做 GET/SET；两阶段失效在事务共享锁内先旋转 namespace，再在锁外 best-effort DELETE；publish reconcile 释放共享锁后才执行网络失效；增加慢读/慢删并发测试 | 已关闭，全量回归通过 |
 | CR-F05 | P1 | 高占用兜底若逐 code 发 SQL，最坏会执行 1,679,616 次查询 | 一次读取占用 code 并构建 bytearray 位图，O(capacity) 内存扫描空槽 | 已关闭，全量回归通过 |
 | CR-F06 | P1 | 新正式 URL 与需求给定的 `af_dp` 第一顺序不一致 | 新正式和 clone URL 都使用 `af_dp,c,...,af_c_id`；validator 同时兼容历史 c-first | 已关闭，全量回归通过 |
-| CR-F07 | P1 | Redis unit 启动时 data dir 可能不存在 | unit `ExecStartPre` 以 root 创建并设置 `tt-post:tt-post 0700` 数据目录 | 已关闭，待候选验证 |
+| CR-F07 | P1 | Redis unit 启动时 data dir 可能不存在；候选机进一步证明主 unit 的 mount namespace 会先于 `ExecStartPre` 建立，首次启动返回 `226/NAMESPACE` | 拆分最小权限 `tt-post` oneshot prepare unit：在数据盘 mount condition 成立后于既有 `tt-post` 父目录创建 0700 子目录；主 Redis unit 通过 `Requires/After` 等待，且仍只写子目录 | 已关闭，待新 commit 候选复验 |
 | CR-F08 | P1 | `executescript` 会隐式提交，route 表和 queue.code 迁移可能不在同一事务 | baseline script 后显式新开 `BEGIN IMMEDIATE`，其后的加法迁移一起提交/回滚 | 已关闭，待 DB 副本演练 |
 | CR-F09 | P1 | 满池回收只有结果、缺少持久审计 | 增加 `tt_post_code_recycle_audit`，同事务记录旧 code/queue/content 与新 queue/time | 已关闭，全量回归通过 |
 | CR-F10 | P0 | 含 `{code}` 的正式 queue 使用相同 payload/idempotency_key 重试时被误判为事实冲突 | 幂等校验只在其他冻结事实完全一致时，允许 caption 等于 deterministic pre-freeze 形态或该 queue 已冻结 code 渲染后的 caption；新增 exact replay 测试，差异 payload 仍 409 | 已关闭，全量回归通过 |

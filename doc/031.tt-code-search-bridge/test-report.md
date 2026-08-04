@@ -22,7 +22,7 @@
 
 2026-08-04 当前最终 diff 的本地证据：
 
-- `python -m unittest discover -s scripts -p "test_tt*.py"`：394 tests，failures/errors=0。
+- `python -m unittest discover -s scripts -p "test_tt*.py"`：395 tests，failures/errors=0。
 - 新页面 Node bridge：84 assertions；原 `/tt` bridge：53 assertions；均退出 0。
 - `compileall`、`py_compile app.py`、`node --check`、`git diff --check` 均退出 0。
 - 原 `/tt` HTML/JS/Nginx 三个受保护文件相对基线零 diff。
@@ -36,7 +36,7 @@
 
 | 分层 | 当前状态 | 最终证据要求 |
 | --- | --- | --- |
-| Python 单元/合同 | 最终全量通过：394 tests，failures/errors=0 | 生产候选按 exact commit 重跑 |
+| Python 单元/合同 | 最终全量通过：395 tests，failures/errors=0 | 生产候选按 exact commit 重跑 |
 | Node bridge | 最终通过：新 84、旧 53 assertions | 生产候选按 exact commit 重跑 |
 | 编译/静态检查 | 全部退出 0 | 候选环境继续执行配置/服务验证 |
 | 浏览器 | 当前组合合同 Chrome 390x844 已通过；桌面/生产待验收 | 1440x900、线上一次 API、五条、drag 不误触、输入失效/race、无 console/page error |

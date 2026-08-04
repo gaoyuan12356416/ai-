@@ -1,13 +1,13 @@
 [Unit]
 Description=TikTok code-route loopback Redis cache
-After=network.target
+Requires=tt-code-redis-prepare.service
+After=network.target tt-code-redis-prepare.service
 ConditionPathIsMountPoint=/mnt/data-disk
 
 [Service]
 Type=simple
 User=tt-post
 Group=tt-post
-ExecStartPre=+/usr/bin/install -d -o tt-post -g tt-post -m 0700 /mnt/data-disk/tt-post-publisher/redis
 ExecStart=/usr/bin/redis-server /etc/tt-code-redis.conf
 ExecStop=/usr/bin/redis-cli -h 127.0.0.1 -p 6381 shutdown nosave
 Restart=on-failure

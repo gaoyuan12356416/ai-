@@ -571,5 +571,36 @@ class InternalHTTPTests(unittest.TestCase):
         denied.exception.close()
 
 
+class RedisDeploymentContractTests(unittest.TestCase):
+    def test_prepare_unit_creates_data_dir_before_hardened_redis_unit(self):
+        root = Path(__file__).resolve().parents[1]
+        prepare = (root / "deploy" / "tt-code-redis-prepare.service").read_text(
+            encoding="utf-8"
+        )
+        service = (root / "deploy" / "tt-code-redis.service").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("ConditionPathIsMountPoint=/mnt/data-disk", prepare)
+        self.assertIn("Before=tt-code-redis.service", prepare)
+        self.assertIn("User=tt-post", prepare)
+        self.assertIn("Group=tt-post", prepare)
+        self.assertIn("ExecStart=/usr/bin/install -d -m 0700", prepare)
+        self.assertIn(
+            "ReadWritePaths=/mnt/data-disk/tt-post-publisher",
+            prepare,
+        )
+        self.assertIn("Requires=tt-code-redis-prepare.service", service)
+        self.assertIn(
+            "After=network.target tt-code-redis-prepare.service",
+            service,
+        )
+        self.assertNotIn("ExecStartPre=", service)
+        self.assertIn(
+            "ReadWritePaths=/mnt/data-disk/tt-post-publisher/redis",
+            service,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
