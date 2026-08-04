@@ -148,7 +148,7 @@
     }
     .batch-toolbar .button { min-height: 34px; padding: 0 11px; font-size: 12px; }
     .batch-status strong { color: #285ed8; font-size: 12px; white-space: nowrap; }
-    input[type="search"], select {
+    input[type="search"], input[type="text"], select {
       min-height: 42px;
       width: 100%;
       border: 1px solid #ccd7e6;
@@ -158,7 +158,7 @@
       padding: 0 12px;
       outline: none;
     }
-    input[type="search"]:focus, select:focus {
+    input[type="search"]:focus, input[type="text"]:focus, select:focus {
       border-color: #5a83ec;
       box-shadow: 0 0 0 3px rgba(47, 102, 255, .12);
     }
@@ -285,6 +285,13 @@
       color: #31435b;
       font-size: 13px;
       font-weight: 800;
+    }
+    .field-help {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
     }
     .check-grid {
       display: grid;
@@ -482,6 +489,25 @@
                     </select>
                   </div>
                   <div class="field">
+                    <label for="dramaLanguage">剧语言</label>
+                    <input id="dramaLanguage" type="text" list="dramaLanguageOptions" maxlength="32" autocomplete="off" value="en" placeholder="en" />
+                    <datalist id="dramaLanguageOptions">
+                      <option value="en"></option>
+                      <option value="es"></option>
+                      <option value="pt-BR"></option>
+                      <option value="fr"></option>
+                      <option value="de"></option>
+                      <option value="ru"></option>
+                      <option value="ja"></option>
+                      <option value="ko"></option>
+                      <option value="ar"></option>
+                      <option value="th"></option>
+                      <option value="id"></option>
+                      <option value="vi"></option>
+                    </datalist>
+                    <span id="dramaLanguageHelp" class="field-help">用于自动发布时匹配素材剧语言；留空按 en 保存。</span>
+                  </div>
+                  <div class="field">
                     <span class="field-label">当前配置版本</span>
                     <div id="versionText" class="notice" style="margin-top:0">尚未保存</div>
                   </div>
@@ -588,6 +614,15 @@
           ? value
           : { configured: false };
       };
+      const normalizeDramaLanguage = value => (
+        String(value == null ? "" : value).trim() || "en"
+      ).toLowerCase().replace(/_/g, "-");
+      const accountDramaLanguage = item => normalizeDramaLanguage(
+        accountSettings(item).drama_language
+      );
+      const selectedDramaLanguage = () => normalizeDramaLanguage(
+        byId("dramaLanguage").value
+      );
       const accountEligible = item => boolValue(item && item.publish_eligible) === true;
       const selectedAccount = () => state.accounts.find(item => accountId(item) === state.selectedAccountId) || null;
       const filteredAccounts = () => {
@@ -760,7 +795,10 @@
           setText(name, accountName(item));
           const meta = document.createElement("span");
           const fans = Number(item.fan_count || 0);
-          setText(meta, `ID ${id}${fans > 0 ? ` · 粉丝 ${fans.toLocaleString("zh-CN")}` : ""}`);
+          setText(
+            meta,
+            `ID ${id}${fans > 0 ? ` · 粉丝 ${fans.toLocaleString("zh-CN")}` : ""} · 剧语言 ${accountDramaLanguage(item)}`
+          );
           copy.append(name, meta);
           row.append(avatar, copy, statusBadge(item));
           list.appendChild(row);
@@ -812,6 +850,11 @@
         byId("ownBrand").checked = false;
         byId("brandedContent").checked = false;
         byId("isAigc").checked = false;
+        byId("dramaLanguage").value = "en";
+        setText(
+          byId("dramaLanguageHelp"),
+          "用于自动发布时匹配素材剧语言；留空按 en 保存。"
+        );
         applyCommercialVisibility();
         setText(byId("versionText"), "等待实时检测");
         updateValidation();
@@ -881,6 +924,15 @@
         byId("brandedContent").checked = configured &&
           boolValue(saved.brand_content_toggle) === true;
         byId("isAigc").checked = configured && boolValue(saved.is_aigc) === true;
+        byId("dramaLanguage").value = configured
+          ? accountDramaLanguage(item)
+          : "en";
+        setText(
+          byId("dramaLanguageHelp"),
+          configured
+            ? `当前剧语言 ${accountDramaLanguage(item)}；自动发布只领取同语言素材。`
+            : "尚未设置剧语言；保存时留空将使用 en。"
+        );
         applyCommercialVisibility();
         setText(
           byId("versionText"),
@@ -932,6 +984,16 @@
           `${maximum > 0 ? ` · 共同最长视频 ${maximum} 秒` : ""}`
         );
         renderSavedValues(common);
+        const languages = Array.from(new Set(items.map(accountDramaLanguage)));
+        byId("dramaLanguage").value = languages.length === 1
+          ? languages[0]
+          : "en";
+        setText(
+          byId("dramaLanguageHelp"),
+          languages.length === 1
+            ? `选中账号当前均为 ${languages[0]}；批量保存会统一使用该剧语言。`
+            : "选中账号当前剧语言不一致；批量保存会统一使用所填值，留空按 en。"
+        );
         updateValidation();
       }
 
@@ -1052,6 +1114,15 @@
         }
         if (!state.creatorInfo) return "请等待 TikTok 实时检测完成。";
         if (!byId("privacyLevel").value) return "请手动选择谁可以观看。";
+        const dramaLanguage = selectedDramaLanguage();
+        if (
+          dramaLanguage.length > 32 ||
+          !dramaLanguage.split("-").every(
+            segment => segment && Array.from(segment).every(
+              char => /[\p{L}\p{N}]/u.test(char)
+            )
+          )
+        ) return "剧语言格式无效，请使用 en、es 或 pt-br 等语言标签。";
         if (
           byId("allowComment").checked &&
           boolValue(state.creatorInfo.comment_disabled) !== false
@@ -1102,6 +1173,7 @@
           brand_organic_toggle: commercial && byId("ownBrand").checked,
           brand_content_toggle: commercial && byId("brandedContent").checked,
           is_aigc: byId("isAigc").checked,
+          drama_language: selectedDramaLanguage(),
           expected_version: boolValue(saved.configured) === true
             ? Number(saved.version || 0)
             : 0,
@@ -1134,6 +1206,7 @@
           brand_organic_toggle: commercial && byId("ownBrand").checked,
           brand_content_toggle: commercial && byId("brandedContent").checked,
           is_aigc: byId("isAigc").checked,
+          drama_language: selectedDramaLanguage(),
         };
       }
 
@@ -1325,6 +1398,7 @@
       byId("settingsForm").addEventListener("submit", saveSettings);
       [
         "privacyLevel",
+        "dramaLanguage",
         "allowComment",
         "allowDuet",
         "allowStitch",

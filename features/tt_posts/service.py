@@ -61,6 +61,7 @@ from .core import (
     beijing_to_utc,
     caption_uses_desc_macro,
     caption_uses_url_macro,
+    normalize_drama_language,
     redact_text,
     render_fixed_caption,
     render_caption_template,
@@ -108,6 +109,7 @@ ACCOUNT_SETTINGS_VALUE_FIELDS = frozenset(
         "brand_organic_toggle",
         "brand_content_toggle",
         "is_aigc",
+        "drama_language",
     }
 )
 PRIVACY_LEVEL_ORDER = (
@@ -2144,7 +2146,7 @@ class TTPostService:
             account_id = str(account["source_account_id"])
             item["account_settings"] = (
                 self.store.get_account_settings(account_id)
-                or {"configured": False}
+                or {"configured": False, "drama_language": "en"}
             )
             items.append(item)
             listed_account_ids.add(account_id)
@@ -2155,7 +2157,7 @@ class TTPostService:
             item = self._scheduled_account_placeholder(account_id)
             item["account_settings"] = (
                 self.store.get_account_settings(account_id)
-                or {"configured": False}
+                or {"configured": False, "drama_language": "en"}
             )
             items.append(item)
             listed_account_ids.add(account_id)
@@ -2508,7 +2510,7 @@ class TTPostService:
             item = dict(account)
             item["account_settings"] = (
                 self.store.get_account_settings(account_id)
-                or {"configured": False}
+                or {"configured": False, "drama_language": "en"}
             )
             item["creator_info"] = creator
             items.append(item)
@@ -2816,6 +2818,7 @@ class TTPostService:
                     "brand_content_toggle",
                     "brand_organic_toggle",
                     "is_aigc",
+                    "drama_language",
                 )
             }
         )
@@ -3011,6 +3014,9 @@ class TTPostService:
                     payload.get("is_aigc"),
                     "AI内容声明",
                 ),
+                "drama_language": normalize_drama_language(
+                    payload.get("drama_language", "en")
+                ),
             }
         )
 
@@ -3172,6 +3178,9 @@ class TTPostService:
     @staticmethod
     def _recurring_pool_api_item(item: Mapping[str, Any]) -> Dict[str, Any]:
         result = dict(item)
+        result["material_language"] = str(
+            result.get("material_language") or "en"
+        )
         result["source_account_id"] = str(result.get("account_id") or "")
         result["caption_text"] = str(result.get("caption") or "")
         result["duration_sec"] = float(
@@ -3193,6 +3202,9 @@ class TTPostService:
             or "queued"
         )
         result["preparation_status"] = preparation_status
+        result["material_language"] = str(
+            result.get("material_language") or "en"
+        )
         result["source_account_id"] = str(result.get("account_id") or "")
         result["caption_text"] = str(result.get("caption") or "")
         result["duration_sec"] = float(
@@ -3292,7 +3304,24 @@ class TTPostService:
         item["publish_time"] = publish_times[0] if publish_times else ""
         item["configured"] = int(item.get("version") or 0) > 0
         item["next_run_at"] = self._next_schedule_at(item)
+        saved_settings = (
+            self.store.get_account_settings(account_id)
+            if account_id
+            else None
+        )
+        drama_language = normalize_drama_language(
+            (saved_settings or {}).get("drama_language", "en")
+        )
+        item["drama_language"] = drama_language
         item["available_material_count"] = (
+            self.store.count_recurring_materials(
+                status="available",
+                drama_language=drama_language,
+            )
+            if account_id and saved_settings is not None
+            else 0
+        )
+        item["manual_available_material_count"] = (
             self.store.count_recurring_materials(
                 account_id=account_id,
                 status="available",
@@ -3306,7 +3335,7 @@ class TTPostService:
                 status="available",
                 limit=1,
             )
-            if account_id and item["available_material_count"] > 0
+            if account_id
             else []
         )
         manual_canary_ready = bool(
@@ -3323,9 +3352,18 @@ class TTPostService:
             now=_now_utc(self._now_fn),
         )
         item["manual_canary_ready"] = manual_canary_ready
+        active_manual_canary_account = bool(
+            account_id
+            and account_id == self.manual_canary.account_id
+            and self.manual_canary.is_active(_now_utc(self._now_fn))
+        )
         item["can_publish_now"] = bool(
-            item["available_material_count"] > 0
-            and (self.gates.is_open or manual_canary_ready)
+            manual_canary_ready
+            if active_manual_canary_account
+            else (
+                item["manual_available_material_count"] > 0
+                and self.gates.is_open
+            )
         )
         return item
 
@@ -3347,16 +3385,19 @@ class TTPostService:
         account_filter = self._query_first(query, "source_account_id")
         material_filter = self._query_first(query, "material_id")
         status_filter = self._query_first(query, "status")
-        intake_rows = self.store.list_material_intakes(
-            account_id=account_filter or None,
-            limit=1000,
-            offset=0,
-        )
-        recurring_rows = self.store.list_recurring_materials(
-            account_id=account_filter or None,
-            limit=1000,
-            offset=0,
-        )
+
+        def load_all(loader: Any) -> List[Dict[str, Any]]:
+            loaded: List[Dict[str, Any]] = []
+            offset = 0
+            while True:
+                batch = loader(limit=1000, offset=offset)
+                loaded.extend(batch)
+                if len(batch) < 1000:
+                    return loaded
+                offset += len(batch)
+
+        intake_rows = load_all(self.store.list_material_intakes)
+        recurring_rows = load_all(self.store.list_recurring_materials)
         recurring_by_id = {
             int(row["id"]): row
             for row in recurring_rows
@@ -3373,6 +3414,17 @@ class TTPostService:
                 int(intake_row.get("recurring_pool_id") or 0)
             )
             if recurring is not None:
+                preparation_account_id = str(
+                    item.get("source_account_id") or ""
+                )
+                publish_account_id = str(
+                    recurring.get("account_id") or ""
+                )
+                item["preparation_account_id"] = preparation_account_id
+                item["account_id"] = publish_account_id
+                item["source_account_id"] = publish_account_id
+                if publish_account_id != preparation_account_id:
+                    item["account_name_snapshot"] = ""
                 item["status"] = str(recurring.get("status") or "")
                 item["run_id"] = recurring.get("run_id")
                 item["queue_id"] = recurring.get("queue_id")
@@ -3382,20 +3434,17 @@ class TTPostService:
             for row in recurring_rows
             if int(row.get("id") or 0) not in linked_pool_ids
         )
-        publication_states = self.store.get_material_publication_states(
-            [str(row.get("material_id") or "") for row in rows]
-        )
-        for row in rows:
-            row.update(
-                publication_states.get(
-                    str(row.get("material_id") or ""),
-                    {
-                        "publication_status": "unpublished",
-                        "publish_count": 0,
-                        "unknown_count": 0,
-                    },
-                )
+        if account_filter:
+            normalized_account_filter = _positive_decimal(
+                account_filter,
+                "TikTok账号ID",
             )
+            rows = [
+                row
+                for row in rows
+                if str(row.get("source_account_id") or "")
+                == normalized_account_filter
+            ]
         if material_filter:
             material_id = _positive_decimal(
                 material_filter,
@@ -3415,6 +3464,31 @@ class TTPostService:
                     or str(row.get("status") or "") == status_filter
                 )
             ]
+        material_ids = list(
+            dict.fromkeys(
+                str(row.get("material_id") or "")
+                for row in rows
+                if str(row.get("material_id") or "")
+            )
+        )
+        publication_states: Dict[str, Dict[str, Any]] = {}
+        for index in range(0, len(material_ids), 1000):
+            publication_states.update(
+                self.store.get_material_publication_states(
+                    material_ids[index : index + 1000]
+                )
+            )
+        for row in rows:
+            row.update(
+                publication_states.get(
+                    str(row.get("material_id") or ""),
+                    {
+                        "publication_status": "unpublished",
+                        "publish_count": 0,
+                        "unknown_count": 0,
+                    },
+                )
+            )
         rows.sort(
             key=lambda row: (
                 str(row.get("created_at") or ""),
@@ -3572,6 +3646,7 @@ class TTPostService:
                     "brand_content_toggle",
                     "brand_organic_toggle",
                     "is_aigc",
+                    "drama_language",
                 )
             }
         )
@@ -3649,8 +3724,8 @@ class TTPostService:
         return {
             "item": result,
             "available_material_count": self.store.count_recurring_materials(
-                account_id=account_id,
                 status="available",
+                drama_language=resolved.get("material_language"),
             ),
             "preparation_wakeup_requested": kicked,
             "preparation_timer_fallback_seconds": 60,
@@ -3963,6 +4038,7 @@ class TTPostService:
                         "brand_content_toggle",
                         "brand_organic_toggle",
                         "is_aigc",
+                        "drama_language",
                     )
                 }
             )
@@ -4151,6 +4227,7 @@ class TTPostService:
                     "brand_content_toggle",
                     "brand_organic_toggle",
                     "is_aigc",
+                    "drama_language",
                 )
             }
         )
@@ -4202,6 +4279,12 @@ class TTPostService:
                 self.manual_canary.canary_id,
                 self.manual_canary.account_id,
             )
+        )
+        excluded_canary_pool_id = (
+            self.manual_canary.pool_id
+            if trigger_type == "auto"
+            and self.manual_canary.is_active(_now_utc(self._now_fn))
+            else None
         )
 
         def terminal_or_bound(
@@ -4267,6 +4350,7 @@ class TTPostService:
                     scheduled_at_utc,
                     config_version=existing_version,
                     manual_request_key=manual_request_key,
+                    excluded_pool_item_id=excluded_canary_pool_id,
                 )
                 resumed = terminal_or_bound(claimed)
                 if resumed is not None:
@@ -4319,6 +4403,7 @@ class TTPostService:
                         "brand_content_toggle",
                         "brand_organic_toggle",
                         "is_aigc",
+                        "drama_language",
                     )
                 }
             )
@@ -4338,6 +4423,7 @@ class TTPostService:
                     scheduled_at_utc,
                     config_version=config_version,
                     manual_request_key=manual_request_key,
+                    excluded_pool_item_id=excluded_canary_pool_id,
                 )
                 resumed = terminal_or_bound(claimed)
                 if resumed is not None:
@@ -4651,6 +4737,11 @@ class TTPostService:
                         publish_time,
                         scheduled_at_utc,
                         config_version=config_version,
+                        excluded_pool_item_id=(
+                            self.manual_canary.pool_id
+                            if self.manual_canary.is_active(now_utc)
+                            else None
+                        ),
                     )
                     preclaimed_run_keys.add(run_key)
                 except TTPostError as exc:
@@ -5248,6 +5339,7 @@ class TTPostService:
                     "brand_content_toggle",
                     "brand_organic_toggle",
                     "is_aigc",
+                    "drama_language",
                 )
             }
         )

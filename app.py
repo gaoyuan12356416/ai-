@@ -97545,6 +97545,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             else {}
                         )
                         for key in (
+                            "drama_language",
                             "privacy_level",
                             "allow_comment",
                             "allow_duet",
@@ -97576,6 +97577,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                             result.get("saved_count") or len(result_items)
                         )
                         for key in (
+                            "drama_language",
                             "privacy_level",
                             "allow_comment",
                             "allow_duet",

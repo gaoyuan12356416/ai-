@@ -432,7 +432,9 @@ class TtPostPoolUiTest(unittest.TestCase):
     def test_page_copy_limits_operation_account_to_direct_test(self):
         self.assertIn("本次测试账号（单选，仅用于立即发布）", PAGE)
         self.assertIn("素材校验通过后可直接入池", PAGE)
-        self.assertIn("按已保存自动发布账号稳定分配", PAGE)
+        self.assertIn("发布时由剧语言匹配的自动发布账号领取", PAGE)
+        self.assertIn("同剧语言账号领取最早可用素材", PAGE)
+        self.assertNotIn("按已保存自动发布账号稳定分配", PAGE)
         self.assertNotIn("本次测试账号 / 素材入池账号", PAGE)
 
     def test_publication_status_is_independent_from_pool_availability(self):
@@ -458,9 +460,19 @@ class TtPostPoolUiTest(unittest.TestCase):
 
     def test_pool_table_shows_publication_availability_and_preparation_columns(self):
         table_source = source_between('<table class="preparation-table">', "</table>")
-        for heading in ("发布状态", "可用状态", "预制作状态"):
+        empty_source = source_between(
+            "function setPreparationEmpty(message)",
+            "function preparationAccountCopy(item)",
+        )
+        for heading in ("领取账号", "剧语言", "发布状态", "可用状态", "预制作状态"):
             self.assertIn(f"<th>{heading}</th>", table_source)
-        self.assertIn("cell.colSpan = 8", PAGE)
+        self.assertIn('colspan="9"', table_source)
+        self.assertIn("cell.colSpan = 9", empty_source)
+        self.assertNotIn("cell.colSpan = 8", empty_source)
+        self.assertIn('String(item.material_language || "").trim() || "en"', PAGE)
+        self.assertIn("等待同剧语言账号领取", PAGE)
+        self.assertIn("item.run_id", PAGE)
+        self.assertIn('["reserved", "consumed"].includes(poolStatus)', PAGE)
         self.assertIn("publicationCounts", PAGE)
         self.assertIn("summary.unknown_publication", PAGE)
         self.assertIn("allPublicationCounts.unpublished", PAGE)

@@ -214,6 +214,61 @@ def _optional_text(value: Any, label: str, limit: int) -> str:
     return text
 
 
+def normalize_drama_language(value: Any) -> str:
+    """Return one canonical drama-language label for routing.
+
+    Historic rows predate the language field and therefore store an empty
+    string.  They intentionally remain compatible with the product default
+    (English) instead of becoming stranded in the recurring pool.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return "en"
+    normalized = text.casefold().replace("_", "-")
+    segments = normalized.split("-")
+    if (
+        len(normalized) > 32
+        or "\x00" in normalized
+        or not all(
+            segment and all(char.isalnum() for char in segment)
+            for segment in segments
+        )
+    ):
+        raise TTPostError(
+            "invalid_drama_language",
+            "剧语言格式无效，请使用 en、es 或 pt-br 等语言标签",
+            400,
+        )
+    return normalized
+
+
+INVALID_ROUTING_LANGUAGE = "__invalid__"
+
+
+def _routing_drama_language(value: Any) -> str:
+    """Return the indexed routing key without letting legacy bad data block work."""
+
+    try:
+        return normalize_drama_language(value)
+    except TTPostError as exc:
+        if exc.code != "invalid_drama_language":
+            raise
+        return INVALID_ROUTING_LANGUAGE
+
+
+def _public_drama_language(value: Any) -> str:
+    """Keep invalid historic labels visible while valid labels stay canonical."""
+
+    try:
+        return normalize_drama_language(value)
+    except TTPostError as exc:
+        if exc.code != "invalid_drama_language":
+            raise
+        text = str(value or "").strip()
+        return redact_text(text, 32) or "invalid"
+
+
 def _normalize_description(value: Any) -> str:
     """Normalize one authoritative drama description without expanding macros."""
 
@@ -932,7 +987,7 @@ def render_fixed_caption(content_id: Any) -> str:
 
 @dataclass(frozen=True)
 class TTPostAccountSettings:
-    """Account-level defaults frozen into each new TikTok Post queue item."""
+    """Account publishing defaults plus the automatic drama-language route."""
 
     privacy_level: str
     allow_comment: bool
@@ -941,6 +996,7 @@ class TTPostAccountSettings:
     brand_content_toggle: bool
     brand_organic_toggle: bool
     is_aigc: bool
+    drama_language: str = "en"
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "TTPostAccountSettings":
@@ -956,7 +1012,8 @@ class TTPostAccountSettings:
             "is_aigc",
         }
         missing = sorted(required.difference(raw))
-        unknown = sorted(set(raw).difference(required))
+        allowed = required | {"drama_language"}
+        unknown = sorted(set(raw).difference(allowed))
         if missing or unknown:
             raise TTPostError(
                 "invalid_account_settings",
@@ -980,6 +1037,9 @@ class TTPostAccountSettings:
                 "自有品牌开关",
             ),
             is_aigc=_exact_bool(raw.get("is_aigc"), "AI内容声明"),
+            drama_language=normalize_drama_language(
+                raw.get("drama_language", "en")
+            ),
         )
 
     @property
@@ -996,6 +1056,9 @@ class TTPostAccountSettings:
             "brand_organic_toggle": self.brand_organic_toggle,
             "commercial_disclosure": self.commercial_disclosure,
             "is_aigc": self.is_aigc,
+            "drama_language": normalize_drama_language(
+                self.drama_language
+            ),
         }
 
 
@@ -1301,6 +1364,7 @@ def ensure_storage(db_path: Any) -> None:
 
                 CREATE TABLE IF NOT EXISTS tt_post_account_setting (
                     account_id TEXT PRIMARY KEY,
+                    drama_language TEXT NOT NULL DEFAULT 'en',
                     privacy_level TEXT NOT NULL
                         CHECK(privacy_level IN (
                             'PUBLIC_TO_EVERYONE',
@@ -1477,6 +1541,7 @@ def ensure_storage(db_path: Any) -> None:
                     material_name TEXT NOT NULL DEFAULT '',
                     drama_name TEXT NOT NULL DEFAULT '',
                     material_language TEXT NOT NULL DEFAULT '',
+                    routing_language TEXT NOT NULL DEFAULT '',
                     material_tag TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
                     source_media_url TEXT NOT NULL,
@@ -1813,6 +1878,9 @@ def ensure_storage(db_path: Any) -> None:
                     """
                 )
             additive_columns = {
+                "tt_post_account_setting": {
+                    "drama_language": "TEXT NOT NULL DEFAULT 'en'",
+                },
                 "tt_post_daily_schedule": {
                     "schedule_mode": "TEXT NOT NULL DEFAULT 'fixed'",
                     "random_daily_count": "INTEGER NOT NULL DEFAULT 0",
@@ -1830,6 +1898,7 @@ def ensure_storage(db_path: Any) -> None:
                     "material_name": "TEXT NOT NULL DEFAULT ''",
                     "drama_name": "TEXT NOT NULL DEFAULT ''",
                     "material_language": "TEXT NOT NULL DEFAULT ''",
+                    "routing_language": "TEXT NOT NULL DEFAULT ''",
                     "material_tag": "TEXT NOT NULL DEFAULT ''",
                     "description": "TEXT NOT NULL DEFAULT ''",
                 },
@@ -1857,6 +1926,52 @@ def ensure_storage(db_path: Any) -> None:
                             "ALTER TABLE %s ADD COLUMN %s %s"
                             % (table_name, column_name, definition)
                         )
+            pending_language_rows = conn.execute(
+                """
+                SELECT id,material_language
+                FROM tt_post_recurring_pool
+                WHERE routing_language=''
+                ORDER BY id
+                """
+            ).fetchall()
+            for pending_language_row in pending_language_rows:
+                conn.execute(
+                    """
+                    UPDATE tt_post_recurring_pool
+                    SET routing_language=?
+                    WHERE id=? AND routing_language=''
+                    """,
+                    (
+                        _routing_drama_language(
+                            pending_language_row["material_language"]
+                        ),
+                        int(pending_language_row["id"]),
+                    ),
+                )
+            language_index_columns = [
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA index_info(idx_tt_post_recurring_pool_language_fifo)"
+                ).fetchall()
+            ]
+            expected_language_index_columns = [
+                "status",
+                "routing_language",
+                "created_at",
+                "id",
+            ]
+            if language_index_columns != expected_language_index_columns:
+                conn.execute(
+                    "DROP INDEX IF EXISTS idx_tt_post_recurring_pool_language_fifo"
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX idx_tt_post_recurring_pool_language_fifo
+                    ON tt_post_recurring_pool(
+                        status,routing_language,created_at,id
+                    )
+                    """
+                )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -1921,6 +2036,9 @@ def _public_queue(row: sqlite3.Row) -> Dict[str, Any]:
 
 def _public_account_settings(row: sqlite3.Row) -> Dict[str, Any]:
     result = dict(row)
+    result["drama_language"] = normalize_drama_language(
+        result.get("drama_language")
+    )
     for field in (
         "allow_comment",
         "allow_duet",
@@ -2064,6 +2182,10 @@ def _public_random_daily_plan(row: sqlite3.Row) -> Dict[str, Any]:
 
 def _public_recurring_pool(row: sqlite3.Row) -> Dict[str, Any]:
     result = dict(row)
+    result.pop("routing_language", None)
+    result["material_language"] = _public_drama_language(
+        result.get("material_language")
+    )
     result["is_aigc"] = bool(result.get("is_aigc"))
     result["user_consent"] = bool(result.get("user_consent"))
     return result
@@ -2075,6 +2197,9 @@ def _public_material_intake(row: sqlite3.Row) -> Dict[str, Any]:
     result.pop("lease_expires_at_utc", None)
     result["is_aigc"] = bool(result.get("is_aigc"))
     result["user_consent"] = bool(result.get("user_consent"))
+    result["material_language"] = _public_drama_language(
+        result.get("material_language")
+    )
     return result
 
 
@@ -2322,14 +2447,18 @@ class TTPostStore:
                     conn.execute(
                         """
                         INSERT INTO tt_post_account_setting(
-                            account_id,privacy_level,allow_comment,allow_duet,
+                            account_id,drama_language,privacy_level,
+                            allow_comment,allow_duet,
                             allow_stitch,brand_content_toggle,
                             brand_organic_toggle,is_aigc,version,
                             created_at,updated_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             normalized_account_id,
+                            normalize_drama_language(
+                                normalized_settings.drama_language
+                            ),
                             normalized_settings.privacy_level,
                             int(normalized_settings.allow_comment),
                             int(normalized_settings.allow_duet),
@@ -2346,13 +2475,17 @@ class TTPostStore:
                     conn.execute(
                         """
                         UPDATE tt_post_account_setting
-                        SET privacy_level=?,allow_comment=?,allow_duet=?,
+                        SET drama_language=?,privacy_level=?,
+                            allow_comment=?,allow_duet=?,
                             allow_stitch=?,brand_content_toggle=?,
                             brand_organic_toggle=?,is_aigc=?,version=?,
                             updated_at=?
                         WHERE account_id=?
                         """,
                         (
+                            normalize_drama_language(
+                                normalized_settings.drama_language
+                            ),
                             normalized_settings.privacy_level,
                             int(normalized_settings.allow_comment),
                             int(normalized_settings.allow_duet),
@@ -3593,6 +3726,7 @@ class TTPostStore:
             "素材语言",
             32,
         )
+        normalize_drama_language(normalized_language)
         normalized_tag = _optional_text(material_tag, "素材标签", 255)
         normalized_account_username = _optional_text(
             account_username,
@@ -5345,6 +5479,7 @@ class TTPostStore:
             "素材语言",
             32,
         )
+        normalize_drama_language(normalized_language)
         normalized_tag = _optional_text(
             material_tag,
             "素材标签",
@@ -5919,8 +6054,9 @@ class TTPostStore:
                     """
                     INSERT INTO tt_post_recurring_pool(
                         material_id,account_id,content_id,source_media_url,
-                        material_name,drama_name,material_language,material_tag,
-                        description,prepared_media_url,gpu_job_id,
+                        material_name,drama_name,material_language,
+                        routing_language,material_tag,description,
+                        prepared_media_url,gpu_job_id,
                         prepared_output_sha256,
                         prepared_output_size,prepared_duration_sec,
                         source_trim_tail_seconds,preparation_profile,
@@ -5928,7 +6064,7 @@ class TTPostStore:
                         consented_at_utc,is_aigc,user_consent,status,
                         created_by_user_id,created_by_name,
                         updated_by_user_id,updated_by_name,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
                         ?,?,?,?,?,?)
                     """,
                     (
@@ -5939,6 +6075,7 @@ class TTPostStore:
                         str(row["material_name"]),
                         str(row["drama_name"]),
                         str(row["material_language"]),
+                        _routing_drama_language(row["material_language"]),
                         str(row["material_tag"]),
                         str(row["description"]),
                         normalized_url,
@@ -6224,6 +6361,9 @@ class TTPostStore:
             "素材语言",
             32,
         )
+        normalized_routing_language = normalize_drama_language(
+            normalized_language
+        )
         normalized_tag = _optional_text(
             material_tag,
             "素材标签",
@@ -6246,6 +6386,7 @@ class TTPostStore:
             normalized_material_name,
             normalized_drama_name,
             normalized_language,
+            normalized_routing_language,
             normalized_tag,
             normalized_description,
             normalized_prepared_url,
@@ -6275,6 +6416,7 @@ class TTPostStore:
                     str(existing["material_name"]),
                     str(existing["drama_name"]),
                     str(existing["material_language"]),
+                    str(existing["routing_language"]),
                     str(existing["material_tag"]),
                     str(existing["description"]),
                     str(existing["prepared_media_url"]),
@@ -6325,8 +6467,9 @@ class TTPostStore:
                     """
                     INSERT INTO tt_post_recurring_pool(
                         material_id,account_id,content_id,source_media_url,
-                        material_name,drama_name,material_language,material_tag,
-                        description,prepared_media_url,gpu_job_id,
+                        material_name,drama_name,material_language,
+                        routing_language,material_tag,description,
+                        prepared_media_url,gpu_job_id,
                         prepared_output_sha256,
                         prepared_output_size,prepared_duration_sec,
                         source_trim_tail_seconds,preparation_profile,
@@ -6334,7 +6477,7 @@ class TTPostStore:
                         consented_at_utc,is_aigc,user_consent,status,
                         created_by_user_id,created_by_name,
                         updated_by_user_id,updated_by_name,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'available',
                         ?,?,?,?,?,?)
                     """,
                     (
@@ -6365,6 +6508,7 @@ class TTPostStore:
         *,
         account_id: Any = None,
         status: Any = None,
+        drama_language: Any = None,
         limit: int = 500,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
@@ -6376,6 +6520,11 @@ class TTPostStore:
         )
         clauses = []
         params: List[Any] = []
+        normalized_language = (
+            normalize_drama_language(drama_language)
+            if drama_language is not None
+            else None
+        )
         if account_id is not None:
             clauses.append("account_id=?")
             params.append(_account_id(account_id))
@@ -6389,8 +6538,10 @@ class TTPostStore:
                 )
             clauses.append("status=?")
             params.append(normalized_status)
+        if normalized_language is not None:
+            clauses.append("routing_language=?")
+            params.append(normalized_language)
         where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.extend((normalized_limit, normalized_offset))
         with contextlib.closing(_connect(self.db_path)) as conn:
             rows = conn.execute(
                 """
@@ -6398,7 +6549,7 @@ class TTPostStore:
                 ORDER BY created_at,id LIMIT ? OFFSET ?
                 """
                 % where_sql,
-                params,
+                (*params, normalized_limit, normalized_offset),
             ).fetchall()
         return [_public_recurring_pool(row) for row in rows]
 
@@ -6407,6 +6558,7 @@ class TTPostStore:
         *,
         account_id: Any = None,
         status: Any = None,
+        drama_language: Any = None,
     ) -> int:
         clauses = []
         params: List[Any] = []
@@ -6423,6 +6575,14 @@ class TTPostStore:
                 )
             clauses.append("status=?")
             params.append(normalized_status)
+        normalized_language = (
+            normalize_drama_language(drama_language)
+            if drama_language is not None
+            else None
+        )
+        if normalized_language is not None:
+            clauses.append("routing_language=?")
+            params.append(normalized_language)
         where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
         with contextlib.closing(_connect(self.db_path)) as conn:
             row = conn.execute(
@@ -6522,6 +6682,7 @@ class TTPostStore:
         *,
         config_version: Any,
         manual_request_key: Any = "",
+        excluded_pool_item_id: Any = None,
     ) -> Dict[str, Any]:
         normalized_run_key = _required_text(
             run_key,
@@ -6560,6 +6721,14 @@ class TTPostStore:
             manual_request_key,
             "手动发布请求键",
             255,
+        )
+        normalized_excluded_pool_item_id = (
+            _positive_int(
+                excluded_pool_item_id,
+                "自动发布排除素材池ID",
+            )
+            if excluded_pool_item_id not in (None, "")
+            else 0
         )
         if normalized_trigger == "manual" and not normalized_manual_key:
             raise TTPostError(
@@ -6716,16 +6885,53 @@ class TTPostStore:
                     "该TikTok账号已有活跃每日发布运行",
                     409,
                 )
-            pool = conn.execute(
-                """
-                SELECT * FROM tt_post_recurring_pool
-                WHERE account_id=? AND status='available'
-                ORDER BY created_at,id
-                LIMIT 1
-                """,
-                (normalized_account_id,),
-            ).fetchone()
+            account_settings = None
+            if normalized_trigger == "auto":
+                account_settings = conn.execute(
+                    """
+                    SELECT * FROM tt_post_account_setting
+                    WHERE account_id=?
+                    """,
+                    (normalized_account_id,),
+                ).fetchone()
+                target_language = normalize_drama_language(
+                    account_settings["drama_language"]
+                    if account_settings is not None
+                    else "en"
+                )
+                exclusion_sql = (
+                    " AND id<>?" if normalized_excluded_pool_item_id else ""
+                )
+                claim_params: List[Any] = [target_language]
+                if normalized_excluded_pool_item_id:
+                    claim_params.append(normalized_excluded_pool_item_id)
+                pool = conn.execute(
+                    """
+                    SELECT * FROM tt_post_recurring_pool
+                    WHERE status='available' AND routing_language=?%s
+                    ORDER BY created_at,id
+                    LIMIT 1
+                    """
+                    % exclusion_sql,
+                    claim_params,
+                ).fetchone()
+            else:
+                pool = conn.execute(
+                    """
+                    SELECT * FROM tt_post_recurring_pool
+                    WHERE account_id=? AND status='available'
+                    ORDER BY created_at,id
+                    LIMIT 1
+                    """,
+                    (normalized_account_id,),
+                ).fetchone()
             if pool is None:
+                if normalized_trigger == "auto":
+                    raise TTPostError(
+                        "tt_post_recurring_pool_language_empty",
+                        "该TikTok账号当前剧语言没有可用的每日发布素材",
+                        409,
+                    )
                 raise TTPostError(
                     "tt_post_recurring_pool_empty",
                     "该TikTok账号没有可用的每日发布素材",
@@ -6786,15 +6992,49 @@ class TTPostStore:
                     409,
                 ) from None
             run_id = int(cursor.lastrowid)
-            updated = conn.execute(
-                """
-                UPDATE tt_post_recurring_pool
-                SET status='reserved',run_id=?,updated_at=?,
-                    reserved_at_utc=?
-                WHERE id=? AND status='available' AND run_id IS NULL
-                """,
-                (run_id, timestamp, timestamp, int(pool["id"])),
-            )
+            if normalized_trigger == "auto" and account_settings is not None:
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_recurring_pool
+                    SET account_id=?,is_aigc=?,status='reserved',run_id=?,
+                        updated_at=?,reserved_at_utc=?
+                    WHERE id=? AND status='available' AND run_id IS NULL
+                    """,
+                    (
+                        normalized_account_id,
+                        int(account_settings["is_aigc"]),
+                        run_id,
+                        timestamp,
+                        timestamp,
+                        int(pool["id"]),
+                    ),
+                )
+            elif normalized_trigger == "auto":
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_recurring_pool
+                    SET account_id=?,status='reserved',run_id=?,
+                        updated_at=?,reserved_at_utc=?
+                    WHERE id=? AND status='available' AND run_id IS NULL
+                    """,
+                    (
+                        normalized_account_id,
+                        run_id,
+                        timestamp,
+                        timestamp,
+                        int(pool["id"]),
+                    ),
+                )
+            else:
+                updated = conn.execute(
+                    """
+                    UPDATE tt_post_recurring_pool
+                    SET status='reserved',run_id=?,updated_at=?,
+                        reserved_at_utc=?
+                    WHERE id=? AND status='available' AND run_id IS NULL
+                    """,
+                    (run_id, timestamp, timestamp, int(pool["id"])),
+                )
             if updated.rowcount != 1:
                 raise TTPostError(
                     "tt_post_recurring_pool_conflict",

@@ -575,6 +575,7 @@ class FakeMaterialResolver:
     def __init__(self):
         self.source_url = "https://cdn.example.com/source-a.mp4"
         self.description = "A frozen drama description."
+        self.language = "en"
 
     def resolve(self, material_id):
         return {
@@ -584,7 +585,7 @@ class FakeMaterialResolver:
             "source_media_url": self.source_url,
             "material_name": "Material",
             "drama_name": "Drama",
-            "material_language": "en",
+            "material_language": self.language,
             "material_tag": "romance",
             "description": self.description,
         }
@@ -748,6 +749,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                         "brand_content_toggle": False,
                         "brand_organic_toggle": False,
                         "is_aigc": True,
+                        "drama_language": "en",
                     }
                 ),
                 expected_version=0,
@@ -853,6 +855,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         *,
         allow_comment=True,
         privacy_level="PUBLIC_TO_EVERYONE",
+        drama_language="en",
     ):
         current = service.store.get_account_settings(account_id)
         return service.store.save_account_settings(
@@ -866,6 +869,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                     "brand_content_toggle": False,
                     "brand_organic_toggle": False,
                     "is_aigc": True,
+                    "drama_language": drama_language,
                 }
             ),
             expected_version=(
@@ -1662,6 +1666,32 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(fetched["publish_times"], ["11:00"])
         self.assertTrue(fetched["next_run_at"])
 
+    def test_manual_readiness_stays_exact_when_auto_language_pool_is_global(self):
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        self.save_public_settings(service, "101", drama_language="en")
+        self.save_public_settings(service, "102", drama_language="en")
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:manual-readiness"
+        )
+        payload["source_account_id"] = "102"
+        payload["material_id"] = "9002"
+        self.add_ready(service, payload)
+
+        schedule = service.schedule_save(self.schedule_payload())["item"]
+
+        self.assertEqual(1, schedule["available_material_count"])
+        self.assertEqual(0, schedule["manual_available_material_count"])
+        self.assertFalse(schedule["can_publish_now"])
+        with self.assertRaises(TTPostError) as empty:
+            service.run_now(
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "tt-post-manual:exact-readiness",
+                }
+            )
+        self.assertEqual("tt_post_recurring_pool_empty", empty.exception.code)
+
     def test_config_bound_material_intake_assigns_saved_account_without_live_account_checks(self):
         self.accounts.add_account("102")
         service = self.service(CLOSED_GATES)
@@ -1717,6 +1747,143 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual("tt_post_auto_accounts_required", caught.exception.code)
         self.assertEqual([], service.store.list_material_intakes())
         self.assertEqual([], self.gpu.creator_info_calls)
+
+    def test_auto_due_waits_then_routes_language_across_preparation_accounts(self):
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        self.save_public_settings(
+            service,
+            "101",
+            drama_language="es",
+        )
+        self.save_public_settings(
+            service,
+            "102",
+            drama_language="es",
+        )
+        self.materials.language = "EN"
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:language-routing"
+        )
+        payload["source_account_id"] = "102"
+        queued = service.material_pool_add(payload)["item"]
+        self.assertEqual("102", queued["source_account_id"])
+        self.assertEqual("en", queued["material_language"])
+        prepared = self.process_one_preparation(service)["item"]
+        self.assertEqual("ready", prepared["preparation_status"])
+
+        schedule = service.store.save_daily_schedule(
+            "101",
+            ["11:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-language-v1",
+            consented_at=self.clock.value.isoformat(),
+        )
+        self.assertEqual(1, schedule["version"])
+        no_match = service.schedules_due({"limit": 1})["items"]
+        self.assertEqual(1, len(no_match))
+        self.assertEqual(
+            "tt_post_recurring_pool_language_empty",
+            no_match[0]["error_code"],
+        )
+        self.assertEqual([], self.gpu.creator_info_calls)
+        self.assertEqual(
+            1,
+            service.store.count_recurring_materials(
+                status="available",
+                drama_language="en",
+            ),
+        )
+
+        self.save_public_settings(
+            service,
+            "101",
+            drama_language="en",
+        )
+        routed = service.schedules_due({"limit": 1})["items"]
+        self.assertEqual(1, len(routed))
+        self.assertEqual("101", routed[0]["source_account_id"])
+        self.assertEqual("9001", routed[0]["material_id"])
+        queue = service.store.get_queue(routed[0]["queue_id"])
+        self.assertEqual("101", queue["account_id"])
+        self.assertEqual("en", queue["material_language"])
+        listed = service.material_pool_list(
+            {"source_account_id": ["101"]}
+        )["items"][0]
+        self.assertEqual("102", listed["preparation_account_id"])
+        self.assertEqual("101", listed["source_account_id"])
+        self.assertEqual("", listed["account_name_snapshot"])
+        self.assertEqual(
+            [],
+            service.material_pool_list(
+                {"source_account_id": ["102"]}
+            )["items"],
+        )
+
+    def test_material_pool_account_filter_paginates_before_final_assignment(self):
+        service = self.service(CLOSED_GATES)
+        intakes = []
+        for index in range(1001):
+            account_id = "101" if index == 1000 else "999"
+            intakes.append(
+                {
+                    "id": index + 1,
+                    "recurring_pool_id": None,
+                    "account_id": account_id,
+                    "material_id": str(100000 + index),
+                    "status": "queued",
+                    "material_language": "en",
+                    "caption": "",
+                    "prepared_duration_sec": 0,
+                    "created_at": "2026-08-04T00:00:%02dZ"
+                    % (index % 60),
+                }
+            )
+        intake_offsets = []
+        recurring_offsets = []
+
+        def list_intakes(*, limit, offset, **_kwargs):
+            intake_offsets.append(offset)
+            return intakes[offset : offset + limit]
+
+        def list_recurring(*, limit, offset, **_kwargs):
+            recurring_offsets.append(offset)
+            return []
+
+        with mock.patch.object(
+            service.store,
+            "list_material_intakes",
+            side_effect=list_intakes,
+        ), mock.patch.object(
+            service.store,
+            "list_recurring_materials",
+            side_effect=list_recurring,
+        ), mock.patch.object(
+            service.store,
+            "get_material_publication_states",
+            return_value={},
+        ) as publication_states:
+            result = service.material_pool_list(
+                {"source_account_id": ["101"], "page_size": ["20"]}
+            )
+            unfiltered = service.material_pool_list(
+                {"page_size": ["20"]}
+            )
+
+        self.assertEqual([0, 1000, 0, 1000], intake_offsets)
+        self.assertEqual([0, 0], recurring_offsets)
+        self.assertEqual(1, result["pagination"]["total"])
+        self.assertEqual("101", result["items"][0]["source_account_id"])
+        self.assertEqual("101000", result["items"][0]["material_id"])
+        self.assertEqual(1001, unfiltered["pagination"]["total"])
+        self.assertEqual(
+            [1, 1000, 1],
+            [
+                len(call.args[0])
+                for call in publication_states.call_args_list
+            ],
+        )
 
     def test_recurring_pool_exact_retry_is_idempotent(self):
         service = self.service(CLOSED_GATES)
@@ -2167,6 +2334,76 @@ class ServiceLifecycleTests(unittest.TestCase):
             )[0]["status"],
             "available",
         )
+
+    def test_active_canary_with_enabled_schedule_never_enables_run_now(self):
+        service = self.service(OPEN_GATES)
+        self.add_ready(service)
+        service.schedule_save(self.schedule_payload())
+        self.arm_manual_canary(service)
+
+        schedule = service.schedule_get(
+            {"source_account_id": ["101"]}
+        )["item"]
+
+        self.assertEqual(1, schedule["manual_available_material_count"])
+        self.assertFalse(schedule["manual_canary_ready"])
+        self.assertFalse(schedule["can_publish_now"])
+        with self.assertRaises(TTPostServiceError) as locked:
+            service.run_now(
+                {
+                    "source_account_id": "101",
+                    "idempotency_key": "tt-post-manual:canary-schedule-lock",
+                }
+            )
+        self.assertEqual(
+            "tt_post_manual_canary_schedule_locked",
+            locked.exception.code,
+        )
+
+    def test_active_manual_canary_pool_is_excluded_from_other_auto_account(self):
+        self.accounts.add_account("102")
+        service = self.service(OPEN_GATES)
+        ready = self.add_ready(service)
+        canary_pool = self.arm_manual_canary(service)
+        self.save_public_settings(
+            service,
+            "102",
+            drama_language="en",
+        )
+        service.store.save_daily_schedule(
+            "102",
+            ["11:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-language-v1",
+            consented_at=self.clock.value.isoformat(),
+        )
+
+        due = service.schedules_due({"limit": 1})["items"]
+
+        self.assertEqual(1, len(due))
+        self.assertEqual(
+            "tt_post_recurring_pool_language_empty",
+            due[0]["error_code"],
+        )
+        self.assertEqual([], service.store.list_queues())
+        preserved = next(
+            item
+            for item in service.store.list_recurring_materials()
+            if int(item["id"]) == int(canary_pool["id"])
+        )
+        self.assertEqual("available", preserved["status"])
+        self.assertEqual("101", preserved["account_id"])
+        self.assertEqual(ready["material_id"], preserved["material_id"])
+
+        manual = service.run_now(
+            {
+                "source_account_id": "101",
+                "idempotency_key": "tt-post-manual:preserved-canary",
+            }
+        )["item"]
+        self.assertEqual(canary_pool["id"], manual["pool_item_id"])
+        self.assertEqual("101", manual["source_account_id"])
 
     def test_manual_canary_target_mismatch_releases_preflight_material(self):
         service = self.service(CLOSED_GATES)
@@ -2754,7 +2991,10 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertTrue(initial_result["account_source_available"])
         self.assertNotIn("warning", initial_result)
         initial = initial_result["items"][0]
-        self.assertEqual(initial["account_settings"], {"configured": False})
+        self.assertEqual(
+            initial["account_settings"],
+            {"configured": False, "drama_language": "en"},
+        )
         rendered = json.dumps(initial)
         self.assertNotIn("access_token", rendered)
 
@@ -2769,11 +3009,13 @@ class ServiceLifecycleTests(unittest.TestCase):
                 "brand_organic_toggle": True,
                 "brand_content_toggle": False,
                 "is_aigc": True,
+                "drama_language": "ES",
                 "expected_version": 0,
             }
         )["item"]
         self.assertEqual(saved["account_settings"]["version"], 1)
         self.assertTrue(saved["account_settings"]["allow_comment"])
+        self.assertEqual("es", saved["account_settings"]["drama_language"])
         self.assertEqual(
             saved["creator_info"]["creator_username"],
             "creator_live_101",
@@ -2819,7 +3061,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             self.assertEqual("unavailable", item["status"])
             self.assertIn("只能查看并停用", item["eligibility_reason"])
             self.assertEqual(
-                {"configured": False},
+                {"configured": False, "drama_language": "en"},
                 item["account_settings"],
             )
             for forbidden in (

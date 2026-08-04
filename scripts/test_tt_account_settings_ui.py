@@ -62,6 +62,9 @@ class TTAccountSettingsUiTest(unittest.TestCase):
             "accountList",
             "settingsForm",
             "privacyLevel",
+            "dramaLanguage",
+            "dramaLanguageOptions",
+            "dramaLanguageHelp",
             "allowComment",
             "allowDuet",
             "allowStitch",
@@ -75,6 +78,7 @@ class TTAccountSettingsUiTest(unittest.TestCase):
         ):
             self.assertIn(f'id="{element_id}"', PAGE)
         self.assertIn("互动偏好", PAGE)
+        self.assertIn("剧语言", PAGE)
         self.assertIn("内容披露", PAGE)
         self.assertIn("不会反向修改 TikTok App 内的隐私设置", PAGE)
         self.assertIn("Music Usage Confirmation 仍需在发布池单独确认", PAGE)
@@ -157,12 +161,30 @@ class TTAccountSettingsUiTest(unittest.TestCase):
             "brand_organic_toggle",
             "brand_content_toggle",
             "is_aigc",
+            "drama_language",
             "expected_version",
         ):
             self.assertRegex(PAGE, rf"\b{field}\s*:")
         self.assertIn("Number(saved.version || 0)", PAGE)
         self.assertIn("commercial && byId(\"ownBrand\").checked", PAGE)
         self.assertIn("commercial && byId(\"brandedContent\").checked", PAGE)
+
+    def test_drama_language_defaults_refills_and_batch_saves(self):
+        self.assertIn('id="dramaLanguage"', PAGE)
+        self.assertIn('list="dramaLanguageOptions"', PAGE)
+        self.assertIn('value="en"', PAGE)
+        self.assertIn('String(value == null ? "" : value).trim() || "en"', PAGE)
+        self.assertIn('.toLowerCase().replace(/_/g, "-")', PAGE)
+        self.assertIn("剧语言格式无效", PAGE)
+        self.assertIn("accountSettings(item).drama_language", PAGE)
+        self.assertIn("剧语言 ${accountDramaLanguage(item)}", PAGE)
+        self.assertIn("items.map(accountDramaLanguage)", PAGE)
+        self.assertIn("languages.length === 1", PAGE)
+        self.assertGreaterEqual(
+            PAGE.count("drama_language: selectedDramaLanguage()"),
+            2,
+        )
+        self.assertIn("自动发布只领取同语言素材", PAGE)
 
     def test_commercial_disclosure_requires_a_brand_type(self):
         self.assertIn(

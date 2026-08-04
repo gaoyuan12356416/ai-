@@ -736,7 +736,7 @@
                 <select id="operationAccountId" class="operation-account" aria-describedby="operationAccountHelp">
                   <option value="">请明确选择一个账号</option>
                 </select>
-                <span id="operationAccountHelp" class="helper">该选择只用于本次立即发布测试。素材校验通过后可直接入池，系统会在已保存的自动发布账号中稳定分配。</span>
+                <span id="operationAccountHelp" class="helper">该选择只用于本次立即发布测试。素材校验通过后可直接入池；发布时由剧语言匹配的自动发布账号领取。</span>
               </div>
 
               <div id="creatorCard" class="info-card" aria-live="polite">
@@ -871,8 +871,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               <thead>
                 <tr>
                   <th>入池时间</th>
-                  <th>TikTok账号</th>
+                  <th>领取账号</th>
                   <th>素材 / Drama ID</th>
+                  <th>剧语言</th>
                   <th>发布状态</th>
                   <th>可用状态</th>
                   <th>预制作状态</th>
@@ -880,7 +881,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <th>更新时间</th>
                 </tr>
               </thead>
-              <tbody id="preparationRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
+              <tbody id="preparationRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -2633,7 +2634,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           const detail = document.createElement("span");
           const pieces = [];
           if (item.message) pieces.push(item.message);
-          setText(detail, pieces.join(" · ") || "等待加入该账号素材池");
+          setText(detail, pieces.join(" · ") || "等待加入自动发布素材池");
           copy.append(title, detail);
           const status = document.createElement("span");
           status.className = "material-result-state";
@@ -2895,7 +2896,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         } else {
           setText(
             formState,
-            `信息完整，将把 ${state.materials.length} 条素材加入素材池，并按已保存自动发布账号稳定分配。`
+            `信息完整，将把 ${state.materials.length} 条素材加入素材池；发布时由同剧语言账号领取最早可用素材。`
           );
         }
         const count = state.materials.length;
@@ -3100,7 +3101,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         body.replaceChildren();
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 8;
+        cell.colSpan = 9;
         cell.className = "empty";
         setText(cell, message);
         row.appendChild(cell);
@@ -3108,6 +3109,18 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       }
       function preparationAccountCopy(item) {
         const id = cleanId(item.source_account_id || item.account_id);
+        const poolStatus = String(item.status || "").trim();
+        const claimed = Boolean(
+          item.run_id ||
+          item.queue_id ||
+          ["reserved", "consumed"].includes(poolStatus)
+        );
+        if (!id || !claimed) {
+          return {
+            primary: "等待同剧语言账号领取",
+            secondary: `剧语言 ${String(item.material_language || "").trim() || "en"}`,
+          };
+        }
         const account = state.accounts.find(candidate => accountId(candidate) === id);
         return {
           primary: String(
@@ -3163,6 +3176,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             `素材 ${item.material_id || "—"}`,
             `Drama ID ${item.content_id || "—"}`
           );
+          appendCell(row, String(item.material_language || "").trim() || "en");
           const publicationCell = document.createElement("td");
           const publication = publicationStatusMeta(item);
           publicationCell.appendChild(badge(publication.label, publication.kind));

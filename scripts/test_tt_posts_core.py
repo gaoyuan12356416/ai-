@@ -27,6 +27,7 @@ from features.tt_posts import (  # noqa: E402
     TTPostPolicy,
     TTPostStore,
     beijing_to_utc,
+    normalize_drama_language,
     render_fixed_caption,
     render_caption_template,
 )
@@ -80,6 +81,7 @@ def account_settings(**overrides):
         "brand_content_toggle": False,
         "brand_organic_toggle": True,
         "is_aigc": True,
+        "drama_language": "en",
     }
     values.update(overrides)
     return TTPostAccountSettings.from_mapping(values)
@@ -543,6 +545,39 @@ class StorageTests(CoreTestCase):
         self.assertEqual(
             "tt_account_settings_version_conflict",
             conflict.exception.code,
+        )
+
+    def test_drama_language_defaults_normalizes_and_migrates_additively(self):
+        self.assertEqual("en", normalize_drama_language(None))
+        self.assertEqual("pt-br", normalize_drama_language(" PT_BR "))
+        self.assertEqual("english", normalize_drama_language("English"))
+        with self.assertRaises(TTPostError) as invalid:
+            normalize_drama_language("en us")
+        self.assertEqual("invalid_drama_language", invalid.exception.code)
+        with self.assertRaises(TTPostError) as expanded:
+            normalize_drama_language("ß" * 32)
+        self.assertEqual("invalid_drama_language", expanded.exception.code)
+
+        created = self.store.save_account_settings(
+            "acct-1",
+            account_settings(drama_language="ES"),
+            expected_version=0,
+        )
+        self.assertEqual("es", created["drama_language"])
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "ALTER TABLE tt_post_account_setting "
+                "DROP COLUMN drama_language"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        migrated = TTPostStore(self.db_path, now_fn=self.clock)
+        self.assertEqual(
+            "en",
+            migrated.get_account_settings("acct-1")["drama_language"],
         )
 
     def test_account_settings_batch_is_atomic_and_versioned(self):
@@ -1329,6 +1364,7 @@ class RecurringStorageTests(CoreTestCase):
         account_id="acct-1",
         *,
         description="",
+        material_language="en",
         template=None,
     ):
         content_id = "CONTENT_%s" % material_id
@@ -1354,6 +1390,7 @@ class RecurringStorageTests(CoreTestCase):
             consent_version="tt-post-recurring-v1",
             consented_at="2026-07-29 10:00:00",
             is_aigc=False,
+            material_language=material_language,
             description=description,
             actor_user_id="operator-1",
             actor_name="Operator",
@@ -1658,6 +1695,425 @@ class RecurringStorageTests(CoreTestCase):
                     status="available",
                 )
             ],
+        )
+
+    def test_auto_claim_uses_language_fifo_across_preparation_accounts(self):
+        spanish = self.add_recurring(
+            "1110", "acct-1", material_language="es"
+        )
+        english = self.add_recurring(
+            "1111", "acct-2", material_language="EN"
+        )
+        self.store.save_account_settings(
+            "acct-1",
+            account_settings(drama_language="en", is_aigc=True),
+            expected_version=0,
+        )
+        schedule = self.store.save_daily_schedule(
+            "acct-1",
+            ["10:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-language-v1",
+            consented_at="2026-07-29 09:00:00",
+        )
+        self.assertEqual(
+            1,
+            self.store.count_recurring_materials(
+                status="available", drama_language="en"
+            ),
+        )
+        self.assertEqual(
+            [english["id"]],
+            [
+                item["id"]
+                for item in self.store.list_recurring_materials(
+                    status="available", drama_language="EN"
+                )
+            ],
+        )
+
+        claimed = self.store.claim_recurring_run(
+            "tt-post:auto:v1:acct-1:2026-07-29:1000",
+            "auto",
+            "acct-1",
+            "2026-07-29",
+            "10:00",
+            beijing_to_utc("2026-07-29 10:00:00"),
+            config_version=schedule["version"],
+        )
+
+        self.assertEqual(english["id"], claimed["pool_item_id"])
+        self.assertEqual("acct-1", claimed["pool_item"]["account_id"])
+        self.assertEqual("en", claimed["pool_item"]["material_language"])
+        self.assertTrue(claimed["pool_item"]["is_aigc"])
+        self.assertEqual(
+            [spanish["id"]],
+            [
+                item["id"]
+                for item in self.store.list_recurring_materials(
+                    status="available",
+                    drama_language="es",
+                )
+            ],
+        )
+
+    def test_auto_claim_waits_without_match_and_uses_current_language(self):
+        historic_english = self.add_recurring(
+            "1120", "acct-2", material_language=""
+        )
+        saved_settings = self.store.save_account_settings(
+            "acct-1",
+            account_settings(drama_language="es"),
+            expected_version=0,
+        )
+        schedule = self.store.save_daily_schedule(
+            "acct-1",
+            ["10:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-language-v1",
+            consented_at="2026-07-29 09:00:00",
+        )
+        claim_args = (
+            "tt-post:auto:v1:acct-1:2026-07-29:1000",
+            "auto",
+            "acct-1",
+            "2026-07-29",
+            "10:00",
+            beijing_to_utc("2026-07-29 10:00:00"),
+        )
+
+        with self.assertRaises(TTPostError) as no_match:
+            self.store.claim_recurring_run(
+                *claim_args,
+                config_version=schedule["version"],
+            )
+        self.assertEqual(
+            "tt_post_recurring_pool_language_empty",
+            no_match.exception.code,
+        )
+        self.assertEqual(
+            "available",
+            self.store.list_recurring_materials(status="available")[0][
+                "status"
+            ],
+        )
+
+        self.store.save_account_settings(
+            "acct-1",
+            account_settings(drama_language="EN"),
+            expected_version=saved_settings["version"],
+        )
+        claimed = self.store.claim_recurring_run(
+            *claim_args,
+            config_version=schedule["version"],
+        )
+        self.assertEqual(historic_english["id"], claimed["pool_item_id"])
+        self.assertEqual("en", claimed["pool_item"]["material_language"])
+
+    def test_language_index_migrates_and_invalid_legacy_row_cannot_block_fifo(self):
+        invalid = self.add_recurring(
+            "1121", "acct-9", material_language="en"
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE tt_post_recurring_pool "
+                "SET material_language='en us' WHERE id=?",
+                (invalid["id"],),
+            )
+            conn.execute(
+                "DROP INDEX IF EXISTS "
+                "idx_tt_post_recurring_pool_language_fifo"
+            )
+            conn.execute(
+                "ALTER TABLE tt_post_recurring_pool "
+                "DROP COLUMN routing_language"
+            )
+            conn.execute(
+                "CREATE INDEX idx_tt_post_recurring_pool_language_fifo "
+                "ON tt_post_recurring_pool(status,created_at,id)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.store = TTPostStore(self.db_path, now_fn=self.clock)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            self.assertIn(
+                "routing_language",
+                {
+                    str(row["name"])
+                    for row in conn.execute(
+                        "PRAGMA table_info(tt_post_recurring_pool)"
+                    ).fetchall()
+                },
+            )
+            self.assertEqual(
+                "__invalid__",
+                conn.execute(
+                    "SELECT routing_language FROM tt_post_recurring_pool "
+                    "WHERE id=?",
+                    (invalid["id"],),
+                ).fetchone()["routing_language"],
+            )
+            self.assertEqual(
+                ["status", "routing_language", "created_at", "id"],
+                [
+                    str(row["name"])
+                    for row in conn.execute(
+                        "PRAGMA index_info("
+                        "idx_tt_post_recurring_pool_language_fifo)"
+                    ).fetchall()
+                ],
+            )
+        finally:
+            conn.close()
+
+        valid = self.add_recurring(
+            "1122", "acct-8", material_language="EN"
+        )
+        conn = sqlite3.connect(self.db_path)
+        try:
+            query_plan = " ".join(
+                str(row[3])
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT * FROM tt_post_recurring_pool "
+                    "WHERE status='available' AND routing_language=? "
+                    "AND id<>? ORDER BY created_at,id LIMIT 1",
+                    ("en", invalid["id"]),
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+        self.assertIn(
+            "idx_tt_post_recurring_pool_language_fifo",
+            query_plan,
+        )
+        self.assertEqual(
+            "en us",
+            self.store.list_recurring_materials()[0]["material_language"],
+        )
+        self.assertEqual(
+            1,
+            self.store.count_recurring_materials(
+                status="available", drama_language="en"
+            ),
+        )
+        self.store.save_account_settings(
+            "acct-1",
+            account_settings(drama_language="en"),
+            expected_version=0,
+        )
+        schedule = self.store.save_daily_schedule(
+            "acct-1",
+            ["10:00"],
+            enabled=True,
+            expected_version=0,
+            consent_version="tt-post-language-v1",
+            consented_at="2026-07-29 09:00:00",
+        )
+        claimed = self.store.claim_recurring_run(
+            "tt-post:auto:v1:acct-1:2026-07-29:1000",
+            "auto",
+            "acct-1",
+            "2026-07-29",
+            "10:00",
+            beijing_to_utc("2026-07-29 10:00:00"),
+            config_version=schedule["version"],
+        )
+        self.assertEqual(valid["id"], claimed["pool_item_id"])
+
+    def test_manual_claim_keeps_the_exact_account_pool(self):
+        spanish = self.add_recurring(
+            "1130", "acct-1", material_language="es"
+        )
+        self.add_recurring("1131", "acct-2", material_language="en")
+        self.store.save_account_settings(
+            "acct-1",
+            account_settings(drama_language="en"),
+            expected_version=0,
+        )
+
+        claimed = self.claim_manual("language-exact", "acct-1")
+
+        self.assertEqual(spanish["id"], claimed["pool_item_id"])
+        self.assertEqual("es", claimed["pool_item"]["material_language"])
+
+    def test_concurrent_auto_language_claims_never_share_one_material(self):
+        first = self.add_recurring("1140", "acct-9", material_language="en")
+        second = self.add_recurring("1141", "acct-8", material_language="en")
+        for account_id, publish_time in (("acct-1", "10:00"), ("acct-2", "10:01")):
+            self.store.save_account_settings(
+                account_id,
+                account_settings(drama_language="en"),
+                expected_version=0,
+            )
+            self.store.save_daily_schedule(
+                account_id,
+                [publish_time],
+                enabled=True,
+                expected_version=0,
+                consent_version="tt-post-language-v1",
+                consented_at="2026-07-29 09:00:00",
+            )
+
+        stores = [
+            TTPostStore(self.db_path, now_fn=self.clock),
+            TTPostStore(self.db_path, now_fn=self.clock),
+        ]
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def claim(store, account_id, publish_time):
+            try:
+                result = store.claim_recurring_run(
+                    "tt-post:auto:v1:%s:2026-07-29:%s"
+                    % (account_id, publish_time.replace(":", "")),
+                    "auto",
+                    account_id,
+                    "2026-07-29",
+                    publish_time,
+                    beijing_to_utc(
+                        "2026-07-29 %s:00" % publish_time
+                    ),
+                    config_version=1,
+                )
+                with lock:
+                    results.append(result)
+            except Exception as exc:  # pragma: no cover - asserted below
+                with lock:
+                    errors.append(exc)
+
+        workers = [
+            threading.Thread(target=claim, args=(stores[0], "acct-1", "10:00")),
+            threading.Thread(target=claim, args=(stores[1], "acct-2", "10:01")),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(
+            {first["id"], second["id"]},
+            {item["pool_item_id"] for item in results},
+        )
+
+    def test_concurrent_auto_claims_leave_one_waiting_when_only_one_matches(self):
+        material = self.add_recurring(
+            "1142", "acct-9", material_language="en"
+        )
+        for account_id, publish_time in (("acct-1", "10:00"), ("acct-2", "10:01")):
+            self.store.save_account_settings(
+                account_id,
+                account_settings(drama_language="en"),
+                expected_version=0,
+            )
+            self.store.save_daily_schedule(
+                account_id,
+                [publish_time],
+                enabled=True,
+                expected_version=0,
+                consent_version="tt-post-language-v1",
+                consented_at="2026-07-29 09:00:00",
+            )
+        stores = [
+            TTPostStore(self.db_path, now_fn=self.clock),
+            TTPostStore(self.db_path, now_fn=self.clock),
+        ]
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def claim(store, account_id, publish_time):
+            try:
+                claimed = store.claim_recurring_run(
+                    "tt-post:auto:v1:%s:2026-07-29:%s"
+                    % (account_id, publish_time.replace(":", "")),
+                    "auto",
+                    account_id,
+                    "2026-07-29",
+                    publish_time,
+                    beijing_to_utc(
+                        "2026-07-29 %s:00" % publish_time
+                    ),
+                    config_version=1,
+                )
+                with lock:
+                    results.append(claimed)
+            except TTPostError as exc:
+                with lock:
+                    errors.append(exc)
+
+        workers = [
+            threading.Thread(target=claim, args=(stores[0], "acct-1", "10:00")),
+            threading.Thread(target=claim, args=(stores[1], "acct-2", "10:01")),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(1, len(results))
+        self.assertEqual(material["id"], results[0]["pool_item_id"])
+        self.assertEqual(1, len(errors))
+        self.assertEqual(
+            "tt_post_recurring_pool_language_empty",
+            errors[0].code,
+        )
+
+    def test_auto_language_fifo_is_global_across_preparation_accounts(self):
+        materials = [
+            self.add_recurring("1143", "acct-9", material_language="en"),
+            self.add_recurring("1144", "acct-8", material_language="EN"),
+            self.add_recurring("1145", "acct-7", material_language="en"),
+        ]
+        claims = []
+        for account_id, publish_time in (
+            ("acct-1", "10:00"),
+            ("acct-2", "10:01"),
+            ("acct-3", "10:02"),
+        ):
+            self.store.save_account_settings(
+                account_id,
+                account_settings(drama_language="en"),
+                expected_version=0,
+            )
+            schedule = self.store.save_daily_schedule(
+                account_id,
+                [publish_time],
+                enabled=True,
+                expected_version=0,
+                consent_version="tt-post-language-v1",
+                consented_at="2026-07-29 09:00:00",
+            )
+            claims.append(
+                self.store.claim_recurring_run(
+                    "tt-post:auto:v1:%s:2026-07-29:%s"
+                    % (account_id, publish_time.replace(":", "")),
+                    "auto",
+                    account_id,
+                    "2026-07-29",
+                    publish_time,
+                    beijing_to_utc(
+                        "2026-07-29 %s:00" % publish_time
+                    ),
+                    config_version=schedule["version"],
+                )
+            )
+
+        self.assertEqual(
+            [item["id"] for item in materials],
+            [item["pool_item_id"] for item in claims],
         )
 
     def test_legacy_recurring_without_intake_can_create_queue_bridge(self):

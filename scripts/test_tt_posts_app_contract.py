@@ -282,6 +282,7 @@ class TTPostsAppContractTest(unittest.TestCase):
         )
         self.assertIn('"source_account_ids"', route)
         self.assertIn('"saved_count"', route)
+        self.assertGreaterEqual(route.count('"drama_language"'), 2)
         self.assertIn('"privacy_level"', route)
         self.assertIn('"version"', route)
         self.assertNotIn('"caption_text":', route)
@@ -362,6 +363,10 @@ class TTPostsAppContractTest(unittest.TestCase):
                         "main_account_id": 123456789012345678,
                         "external_account_id": "external-7",
                         "token_status": 2,
+                        "account_settings": {
+                            "configured": True,
+                            "drama_language": "en",
+                        },
                     }
                 ],
                 "gates": {"live_enabled": False},
@@ -378,6 +383,10 @@ class TTPostsAppContractTest(unittest.TestCase):
             "123456789012345678",
         )
         self.assertEqual(result["items"][0]["token_status"], 2)
+        self.assertEqual(
+            result["items"][0]["account_settings"]["drama_language"],
+            "en",
+        )
         call = fake_requests.request.call_args
         self.assertEqual(call.args[:2], ("GET", "http://127.0.0.1:18829/api/admin/tt-posts/accounts"))
         self.assertEqual(call.kwargs["params"], None)
