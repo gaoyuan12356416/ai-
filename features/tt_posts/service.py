@@ -368,6 +368,27 @@ def _auto_config_account_ids(value: Any) -> List[str]:
     return result
 
 
+def _assigned_auto_account_id(
+    material_id: str,
+    account_ids: Sequence[Any],
+) -> str:
+    """Choose one saved auto account deterministically for a material."""
+
+    normalized = [
+        _positive_decimal(value, "TikTok账号ID")
+        for value in account_ids
+    ]
+    if not normalized:
+        raise TTPostServiceError(
+            "tt_post_auto_accounts_required",
+            "自动发布配置至少需要一个账号才能加入素材",
+            409,
+        )
+    seed = "%s|%s" % (material_id, ",".join(normalized))
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    return normalized[int.from_bytes(digest[:8], "big") % len(normalized)]
+
+
 def _batch_targets(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         raise TTPostServiceError(
@@ -2263,54 +2284,47 @@ class TTPostService:
         # when disabling; ignore it and let the core preserve prior consent.
         consent = self._consent_from_payload(payload) if enabled else None
 
-        # Stopping automatic publication is dependency-light, but it must not
-        # become a way to persist arbitrary account IDs. Existing members can
-        # be kept or removed without live TikTok calls; newly added members
-        # must exist in the current trusted account snapshot and already have
-        # locally saved publication settings.
-        if not enabled:
-            current_config = self.store.get_auto_publish_config()
-            if expected_version != int(current_config.get("version") or 0):
+        # Configuration membership is metadata-only. TikTok Creator Info is a
+        # volatile publish-time capability and must not block saving a draft
+        # or enabling a configuration. New/active members still have to exist
+        # in the trusted snapshot and have local publication settings.
+        current_config = self.store.get_auto_publish_config()
+        if expected_version != int(current_config.get("version") or 0):
+            raise TTPostServiceError(
+                "tt_post_auto_config_version_conflict",
+                "Automatic publish config changed; refresh and retry",
+                409,
+            )
+        existing_ids = {
+            str(value)
+            for value in current_config.get("account_ids") or []
+        }
+        ids_to_validate = account_ids if enabled else [
+            account_id
+            for account_id in account_ids
+            if account_id not in existing_ids
+        ]
+        if ids_to_validate:
+            trusted_ids = {
+                str(item.get("source_account_id") or "")
+                for item in self.account_repository.list_public_accounts()
+                if isinstance(item, Mapping)
+            }
+            missing_ids = [
+                account_id
+                for account_id in ids_to_validate
+                if account_id not in trusted_ids
+            ]
+            if missing_ids:
                 raise TTPostServiceError(
-                    "tt_post_auto_config_version_conflict",
-                    "Automatic publish config changed; refresh and retry",
+                    "tt_post_auto_account_not_found",
+                    "Automatic publish account is not in the trusted account snapshot",
                     409,
                 )
-            existing_ids = {
-                str(value)
-                for value in current_config.get("account_ids") or []
-            }
-            added_ids = [
-                account_id
-                for account_id in account_ids
-                if account_id not in existing_ids
-            ]
-            if added_ids:
-                trusted_ids = {
-                    str(item.get("source_account_id") or "")
-                    for item in self.account_repository.list_public_accounts()
-                    if isinstance(item, Mapping)
-                }
-                missing_ids = [
-                    account_id
-                    for account_id in added_ids
-                    if account_id not in trusted_ids
-                ]
-                if missing_ids:
-                    raise TTPostServiceError(
-                        "tt_post_auto_account_not_found",
-                        "Automatic publish account is not in the trusted account snapshot",
-                        409,
-                    )
-                for account_id in added_ids:
-                    self.store.get_account_settings(account_id, required=True)
+            for account_id in ids_to_validate:
+                self.store.get_account_settings(account_id, required=True)
 
         if enabled:
-            detected = self._batch_creator_info(account_ids)
-            creators = {
-                str(item["source_account_id"]): item
-                for item in detected["items"]
-            }
             for account_id in account_ids:
                 if self.manual_canary.allows_manual_account(
                     "manual",
@@ -2322,28 +2336,6 @@ class TTPostService:
                         "一次性私密测试期间不能启用该账号自动发布",
                         409,
                     )
-                saved_settings = self.store.get_account_settings(
-                    account_id,
-                    required=True,
-                )
-                settings = TTPostAccountSettings.from_mapping(
-                    {
-                        key: saved_settings[key]
-                        for key in (
-                            "privacy_level",
-                            "allow_comment",
-                            "allow_duet",
-                            "allow_stitch",
-                            "brand_content_toggle",
-                            "brand_organic_toggle",
-                            "is_aigc",
-                        )
-                    }
-                )
-                self._assert_creator_settings(
-                    creators[account_id]["creator_info"],
-                    settings,
-                )
 
         saved = self.store.save_auto_publish_config(
             expected_version=expected_version,
@@ -3456,12 +3448,14 @@ class TTPostService:
             "幂等键",
             255,
         )
-        account_id = _positive_decimal(
-            payload.get("source_account_id"),
-            "TikTok账号ID",
+        material_id = _positive_decimal(
+            payload.get("material_id"),
+            "素材ID",
+            19,
         )
         expected_config_version = payload.get("expected_config_version")
         auto_config = None
+        account = None
         if expected_config_version is not None:
             auto_config = self.store.get_auto_publish_config()
             if (
@@ -3475,26 +3469,38 @@ class TTPostService:
                     "自动发布配置已变化，请刷新并保存后再加入素材",
                     409,
                 )
-            if account_id not in {
+            configured_account_ids = [
                 str(value) for value in auto_config.get("account_ids") or []
-            }:
+            ]
+            supplied_account_id = payload.get("source_account_id")
+            if supplied_account_id in (None, ""):
+                account_id = _assigned_auto_account_id(
+                    material_id,
+                    configured_account_ids,
+                )
+            else:
+                account_id = _positive_decimal(
+                    supplied_account_id,
+                    "TikTok账号ID",
+                )
+            if account_id not in set(configured_account_ids):
                 raise TTPostServiceError(
                     "tt_post_auto_account_not_selected",
                     "该TikTok账号尚未加入自动发布配置",
                     409,
                 )
-        material_id = _positive_decimal(
-            payload.get("material_id"),
-            "素材ID",
-            19,
-        )
+        else:
+            account_id = _positive_decimal(
+                payload.get("source_account_id"),
+                "TikTok账号ID",
+            )
+            account = self.account_repository.get_public_account(account_id)
         requested_content_id = _bounded_text(
             payload.get("content_id"),
             "Drama ID",
             128,
         )
         consent = self._consent_from_payload(payload)
-        account = self.account_repository.get_public_account(account_id)
         saved_settings = self.store.get_account_settings(
             account_id,
             required=True,
@@ -3540,8 +3546,8 @@ class TTPostService:
         submitted_template = payload.get("caption_template")
         submitted_caption = payload.get("caption_text")
         if auto_config is not None and submitted_template not in (None, "") and not secrets.compare_digest(
-            str(submitted_template),
-            caption_template,
+            str(submitted_template).encode("utf-8"),
+            caption_template.encode("utf-8"),
         ):
             raise TTPostServiceError(
                 "tt_post_auto_config_version_conflict",
@@ -3549,8 +3555,8 @@ class TTPostService:
                 409,
             )
         if auto_config is not None and submitted_caption not in (None, "") and not secrets.compare_digest(
-            str(submitted_caption).strip(),
-            caption,
+            str(submitted_caption).strip().encode("utf-8"),
+            caption.encode("utf-8"),
         ):
             raise TTPostServiceError(
                 "tt_caption_template_render_mismatch",
@@ -3579,9 +3585,9 @@ class TTPostService:
         )
         result = self._material_intake_api_item(item)
         result["account_name_snapshot"] = str(
-            account.get("display_name")
-            or account.get("account_name")
-            or ""
+            (account or {}).get("display_name")
+            or (account or {}).get("account_name")
+            or account_id
         )
         kicked = self._kick_preparation_runner()
         return {
@@ -3720,30 +3726,6 @@ class TTPostService:
                 claim_token,
                 lease_seconds=DEFAULT_PREPARATION_LEASE_SECONDS,
             )
-            account_id = str(intake["account_id"])
-            self.account_repository.get_public_account(account_id)
-            saved_settings = self.store.get_account_settings(
-                account_id,
-                required=True,
-            )
-            settings = TTPostAccountSettings.from_mapping(
-                {
-                    key: saved_settings[key]
-                    for key in (
-                        "privacy_level",
-                        "allow_comment",
-                        "allow_duet",
-                        "allow_stitch",
-                        "brand_content_toggle",
-                        "brand_organic_toggle",
-                        "is_aigc",
-                    )
-                }
-            )
-            creator = self.creator_info(
-                {"source_account_id": account_id}
-            )["item"]
-            self._assert_creator_settings(creator, settings)
             prepared = self._prepare_resolved(
                 {
                     "material_id": str(intake["material_id"]),
@@ -3754,13 +3736,10 @@ class TTPostService:
                 gpu_job_id=str(intake["gpu_job_id"]),
             )
             duration = float(prepared.get("duration_sec") or 0)
-            maximum_duration = int(
-                creator.get("max_video_post_duration_sec") or 0
-            )
-            if duration <= 0 or duration > maximum_duration:
+            if duration <= 0:
                 raise TTPostServiceError(
                     "tt_prepared_media_duration_invalid",
-                    "最终成片时长不满足目标账号实时限制",
+                    "最终成片时长无效",
                     409,
                 )
             item = self.store.complete_material_intake(

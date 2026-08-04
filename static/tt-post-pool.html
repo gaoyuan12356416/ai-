@@ -689,11 +689,11 @@
               </div>
 
               <div class="field">
-                <label for="operationAccountId">本次测试账号 / 素材入池账号（单选）</label>
+                <label for="operationAccountId">本次测试账号（单选，仅用于立即发布）</label>
                 <select id="operationAccountId" class="operation-account" aria-describedby="operationAccountHelp">
                   <option value="">请明确选择一个账号</option>
                 </select>
-                <span id="operationAccountHelp" class="helper">该选择只用于本次立即测试与素材入池，不会静默取自动发布多选列表中的第一个账号。</span>
+                <span id="operationAccountHelp" class="helper">该选择只用于本次立即发布测试。素材校验通过后可直接入池，系统会在已保存的自动发布账号中稳定分配。</span>
               </div>
 
               <div id="creatorCard" class="info-card" aria-live="polite">
@@ -779,7 +779,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               <div class="consent">
                 <label class="inline-check">
                   <input id="publishConsent" type="checkbox" />
-                  <span id="consentText">我已核对自动发布账号、描述、时间、开关、本次测试账号、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试不会从素材池选择素材。</span>
+                  <span id="consentText">我已核对自动发布账号、描述、时间、开关、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试另需明确选择账号，且不会从素材池选择素材。</span>
                 </label>
               </div>
 
@@ -789,7 +789,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               </div>
 
               <div class="form-footer">
-                <div id="formState" class="form-state" role="status" aria-live="polite">请依次完成账号确认和素材校验。</div>
+                <div id="formState" class="form-state" role="status" aria-live="polite">请先保存自动发布配置并校验素材。</div>
                 <button id="addMaterialsToPool" class="button primary" type="button" disabled>加入素材池</button>
               </div>
             </div>
@@ -1157,14 +1157,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           setText(byId("modeGateText"), "允许自动发布与手动测试");
           setText(
             byId("consentText"),
-            "我已核对自动发布账号、描述、时间、开关、本次测试账号、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试不会从素材池选择素材。"
+            "我已核对自动发布账号、描述、时间、开关、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试另需明确选择账号，且不会从素材池选择素材。"
           );
         } else {
           modeCard.classList.add("blocked");
           setText(byId("modeGateText"), "已阻断，不发送");
           setText(
             byId("consentText"),
-            "我已核对自动发布账号、描述、时间、开关、本次测试账号、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。当前门禁未全部开放，不会自动或立即发送到 TikTok。"
+            "我已核对自动发布账号、描述、时间、开关、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。当前门禁未全部开放，不会自动或立即发送到 TikTok。"
           );
         }
         validateForm();
@@ -2665,16 +2665,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         validateForm();
       }
       function formValidationError() {
-        const item = selectedAccount();
-        if (!item) return "请明确选择本次素材入池账号。";
-        if (!accountEligible(item)) return "所选账号当前不可用于发布。";
-        if (!selectedAccountSettings()) return "所选账号尚未配置，请先前往“TT 个号管理”保存发布设置。";
         if (!state.schedule) return "请等待自动发布配置加载完成。";
         if (Number(state.schedule.version || 0) <= 0) return "请先保存自动发布配置，再加入素材池。";
         if (state.scheduleDraftDirty || state.scheduleStale) return "描述或自动发布配置有未保存变更，请先保存配置。";
-        if (!state.savedAutoAccountIds.has(accountId(item))) {
-          return "所选账号尚未加入已保存的自动发布配置，不能加入素材池。";
-        }
+        if (!state.savedAutoAccountIds.size) return "请先保存至少一个自动发布账号，再加入素材池。";
         if (!state.materials.length) return "请先批量校验素材，并至少确认一个真实 Drama ID。";
         const captionValidation = captionTemplateValidation();
         if (captionValidation.error) return captionValidation.error;
@@ -2694,7 +2688,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         } else {
           setText(
             formState,
-            `信息完整，将按顺序把 ${state.materials.length} 条素材加入所选账号的待发池。`
+            `信息完整，将把 ${state.materials.length} 条素材加入素材池，并按已保存自动发布账号稳定分配。`
           );
         }
         const count = state.materials.length;
@@ -2722,7 +2716,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       function materialPoolPayload(material) {
         return {
           idempotency_key: `${ensureFormKey()}:${material.material_id}`,
-          source_account_id: state.selectedAccountId,
           material_id: material.material_id,
           content_id: material.content_id,
           expected_config_version: Number(state.schedule && state.schedule.version || 0),

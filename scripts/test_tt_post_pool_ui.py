@@ -240,7 +240,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, reason_source)
 
-    def test_pool_add_requires_saved_auto_publish_membership_but_direct_test_does_not(self):
+    def test_pool_add_requires_saved_auto_accounts_but_not_a_selected_test_account(self):
         pool_validation = source_between(
             "function formValidationError()", "function validateForm()"
         )
@@ -248,7 +248,10 @@ class TtPostPoolUiTest(unittest.TestCase):
             "function runNowDisabledReason()", "function updateScheduleActions()"
         )
         self.assertIn("Number(state.schedule.version || 0) <= 0", pool_validation)
-        self.assertIn("state.savedAutoAccountIds.has(accountId(item))", pool_validation)
+        self.assertIn("!state.savedAutoAccountIds.size", pool_validation)
+        self.assertNotIn("selectedAccount()", pool_validation)
+        self.assertNotIn("accountEligible", pool_validation)
+        self.assertNotIn("selectedAccountSettings", pool_validation)
         self.assertNotIn("savedAutoAccountIds", direct_validation)
 
     def test_page_copy_distinguishes_pool_consumption_from_direct_test(self):
@@ -374,11 +377,17 @@ class TtPostPoolUiTest(unittest.TestCase):
         payload_source = source_between(
             "function materialPoolPayload(material)", "function resetMaterialPoolForm()"
         )
-        self.assertIn("source_account_id: state.selectedAccountId", payload_source)
+        self.assertNotIn("source_account_id", payload_source)
         self.assertIn("material_id: material.material_id", payload_source)
         self.assertIn("expected_config_version:", payload_source)
         self.assertIn('caption_template: byId("caption").value', payload_source)
         self.assertIn("consent:", payload_source)
+
+    def test_page_copy_limits_operation_account_to_direct_test(self):
+        self.assertIn("本次测试账号（单选，仅用于立即发布）", PAGE)
+        self.assertIn("素材校验通过后可直接入池", PAGE)
+        self.assertIn("按已保存自动发布账号稳定分配", PAGE)
+        self.assertNotIn("本次测试账号 / 素材入池账号", PAGE)
 
     def test_publication_status_is_independent_from_pool_availability(self):
         publication_source = source_between(

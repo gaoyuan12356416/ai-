@@ -1165,6 +1165,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(1, saved["version"])
         self.assertTrue(saved["enabled"])
         self.assertEqual(["101", "102"], saved["account_ids"])
+        self.assertEqual([], self.gpu.creator_info_calls)
         first_schedule = service.store.get_daily_schedule("101")
         second_schedule = service.store.get_daily_schedule("102")
         self.assertTrue(first_schedule["enabled"])
@@ -1219,7 +1220,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                     account_ids=["101", "999"],
                 )
             )
-        self.assertEqual("tt_batch_creator_info_failed", invalid.exception.code)
+        self.assertEqual("tt_post_auto_account_not_found", invalid.exception.code)
         self.assertEqual(saved, service.store.get_auto_publish_config())
         self.assertEqual(before_first, service.store.get_daily_schedule("101"))
         self.assertEqual(before_second, service.store.get_daily_schedule("102"))
@@ -1577,6 +1578,62 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(fetched["version"], 1)
         self.assertEqual(fetched["publish_times"], ["11:00"])
         self.assertTrue(fetched["next_run_at"])
+
+    def test_config_bound_material_intake_assigns_saved_account_without_live_account_checks(self):
+        self.accounts.add_account("102")
+        service = self.service(CLOSED_GATES)
+        config = self.configure_auto(service, ["101", "102"])
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:account-independent"
+        )
+        payload.pop("source_account_id")
+        payload["expected_config_version"] = config["version"]
+        payload["caption_template"] = config["caption_template"]
+
+        with mock.patch.object(
+            self.accounts,
+            "get_public_account",
+            side_effect=AssertionError("material intake must not fetch an account"),
+        ):
+            first = service.material_pool_add(payload)["item"]
+            second = service.material_pool_add(payload)["item"]
+
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(first["source_account_id"], second["source_account_id"])
+        self.assertIn(first["source_account_id"], {"101", "102"})
+        self.assertEqual(first["source_account_id"], first["account_name_snapshot"])
+        self.assertEqual([], self.gpu.creator_info_calls)
+
+        with mock.patch.object(
+            self.accounts,
+            "get_public_account",
+            side_effect=AssertionError("preparation must not fetch an account"),
+        ), mock.patch.object(
+            self.accounts,
+            "list_public_accounts",
+            side_effect=AssertionError("preparation must not list accounts"),
+        ):
+            prepared = self.process_one_preparation(service)["item"]
+        self.assertEqual("ready", prepared["preparation_status"])
+        self.assertEqual([], self.gpu.creator_info_calls)
+
+    def test_config_bound_material_intake_requires_at_least_one_saved_account(self):
+        service = self.service(CLOSED_GATES)
+        config_payload = self.auto_config_payload(enabled=False, accepted=False)
+        config_payload["source_account_ids"] = []
+        config = service.auto_config_save(config_payload)["item"]
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:no-saved-account"
+        )
+        payload.pop("source_account_id")
+        payload["expected_config_version"] = config["version"]
+        payload["caption_template"] = config["caption_template"]
+
+        with self.assertRaises(TTPostError) as caught:
+            service.material_pool_add(payload)
+        self.assertEqual("tt_post_auto_accounts_required", caught.exception.code)
+        self.assertEqual([], service.store.list_material_intakes())
+        self.assertEqual([], self.gpu.creator_info_calls)
 
     def test_recurring_pool_exact_retry_is_idempotent(self):
         service = self.service(CLOSED_GATES)
@@ -2230,7 +2287,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(2, len(result["items"]))
         self.assertTrue(service.store.get_recurring_run_by_key(due_key)["queue_id"])
 
-    def test_material_pool_rejects_media_over_current_account_limit(self):
+    def test_material_preparation_defers_account_duration_limit_to_publish(self):
         service = self.service(OPEN_GATES)
         self.gpu.prepared_duration = 700
         queued = service.material_pool_add(
@@ -2238,18 +2295,13 @@ class ServiceLifecycleTests(unittest.TestCase):
         )["item"]
         self.assertEqual(queued["preparation_status"], "queued")
         processed = self.process_one_preparation(service)
-        self.assertEqual(
-            processed["processing_error"]["code"],
-            "tt_prepared_media_duration_invalid",
-        )
-        self.assertEqual(
-            processed["item"]["preparation_status"],
-            "failed",
-        )
+        self.assertNotIn("processing_error", processed)
+        self.assertEqual(processed["item"]["preparation_status"], "ready")
         self.assertEqual(
             service.store.count_recurring_materials(account_id="101"),
-            0,
+            1,
         )
+        self.assertEqual([], self.gpu.creator_info_calls)
 
     def test_transient_prepare_failure_is_persisted_for_background_retry(self):
         service = self.service(OPEN_GATES)
