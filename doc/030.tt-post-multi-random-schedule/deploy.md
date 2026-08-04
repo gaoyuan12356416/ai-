@@ -45,3 +45,25 @@
 2. 从上述 backup 的 `static/app-tt-post-pool.html` 与 `static/nginx-tt-post-pool.html` 恢复两处页面。
 3. 只重启 `tt-post-service.service`；加法字段和空计划表可安全保留。
 4. 只有数据库本身损坏时，停服务后才使用 `tt-post.sqlite3.pre`；该 pristine 副本 `integrity_check=ok` 且未执行新迁移。
+
+## 2026-08-04 UI 布局修复发布记录
+
+- GitHub/生产提交：`aadbd95358cca632bb3e8764d633c2e1732d165b`
+- 前一 release：`/opt/tt-post/releases/139a7c477f7336a10a9daece950c397d18f5a4e5`
+- 当前 release：`/opt/tt-post/releases/aadbd95358cca632bb3e8764d633c2e1732d165b`
+- online backup：`/mnt/data-disk/tt-post-publisher/backups/20260804T164744+0800-random-layout-pre-aadbd95`
+- 运行时代码、unit、API 和数据库 schema 均未修改；相对前一运行提交仅更新页面 CSS、页面契约测试和 requirement 文档。
+- 本地完整回归：358 个 Python 测试、TT bridge 53 项断言、编译和 `git diff --check` 均通过；候选 release 页面测试 36/36 通过。
+- 2026-08-04 16:48:53 CST 完成原子切换；只重启 `tt-post-service` 以使进程 cwd 对齐新 release，Nginx、GPU、runner/prepare timer 与 path 均未重启或手工触发。
+- sidecar MainPID 从 `1869843` 更新为 `1922749`，cwd 指向新 release；`127.0.0.1:18829/health` 返回 `ok=true`，service、两个 timer、两个 path 与 Nginx 均为 active。
+- release、应用 static、Nginx static 和公网无缓存页面 SHA-256 均为 `774dc80027a1322e9eec584946624805dbb1c1323d43cfcd0b55a4d15f04217c`。
+- 切换前后数据库均为 `integrity_check=ok`，基线保持：队列 `7`、最大队列 ID `7`、非空 `publish_id` `6`；运行 `7`、最大运行 ID `7`；随机日计划 `7`。
+- 16:49 CST 自然 runner 返回 `status=ok`、`schedule_due_count=0`、`publish_request_count=0`；未人工触发 runner 或真实发布。
+- 生产静态页与已在 100% 缩放下验证的 GitHub blob 完全同 SHA；2560 至 820px 多宽度无横向溢出或保存按钮/账号设置重叠。
+
+### UI 修复精确回滚
+
+1. 将 `/opt/tt-post/current` 原子切回 `/opt/tt-post/releases/139a7c477f7336a10a9daece950c397d18f5a4e5`。
+2. 从上述 backup 的 `static/app-tt-post-pool.html` 与 `static/nginx-tt-post-pool.html` 恢复两处外部页面。
+3. 只重启 `tt-post-service.service`；Nginx 配置未变化，无需 reload。
+4. 本次没有数据迁移；只有数据库本身损坏时，停服务后才使用 backup 中 `tt-post.sqlite3.pre`。
