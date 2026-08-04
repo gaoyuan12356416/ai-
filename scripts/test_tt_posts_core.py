@@ -87,6 +87,80 @@ def account_settings(**overrides):
     return TTPostAccountSettings.from_mapping(values)
 
 
+def rebuild_table_without_column(conn, table_name, column_name):
+    """Simulate a legacy table on SQLite versions without DROP COLUMN."""
+
+    def quoted(identifier):
+        return '"%s"' % str(identifier).replace('"', '""')
+
+    table = quoted(table_name)
+    columns = conn.execute(
+        "PRAGMA table_info(%s)" % table
+    ).fetchall()
+    kept = [row for row in columns if str(row[1]) != column_name]
+    if len(kept) == len(columns):
+        raise AssertionError("column %s is missing" % column_name)
+    primary_keys = sorted(
+        (int(row[5]), str(row[1])) for row in kept if int(row[5]) > 0
+    )
+    single_primary_key = (
+        primary_keys[0][1] if len(primary_keys) == 1 else ""
+    )
+    original_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    original_sql = str(original_sql_row[0] or "")
+    definitions = []
+    for row in kept:
+        name = str(row[1])
+        data_type = str(row[2] or "")
+        definition = "%s %s" % (quoted(name), data_type)
+        if int(row[3]):
+            definition += " NOT NULL"
+        if row[4] is not None:
+            definition += " DEFAULT %s" % str(row[4])
+        if name == single_primary_key:
+            definition += " PRIMARY KEY"
+            if (
+                data_type.upper() == "INTEGER"
+                and "AUTOINCREMENT" in original_sql.upper()
+            ):
+                definition += " AUTOINCREMENT"
+        definitions.append(definition)
+    if len(primary_keys) > 1:
+        definitions.append(
+            "PRIMARY KEY(%s)"
+            % ",".join(quoted(name) for _, name in primary_keys)
+        )
+    index_sql = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+            (table_name,),
+        ).fetchall()
+        if column_name.casefold() not in str(row[0]).casefold()
+    ]
+    replacement_name = "%s_legacy_rebuild" % table_name
+    replacement = quoted(replacement_name)
+    conn.execute("DROP TABLE IF EXISTS %s" % replacement)
+    conn.execute(
+        "CREATE TABLE %s (%s)" % (replacement, ",".join(definitions))
+    )
+    column_sql = ",".join(quoted(str(row[1])) for row in kept)
+    conn.execute(
+        "INSERT INTO %s (%s) SELECT %s FROM %s"
+        % (replacement, column_sql, column_sql, table)
+    )
+    conn.execute("DROP TABLE %s" % table)
+    conn.execute(
+        "ALTER TABLE %s RENAME TO %s" % (replacement, table)
+    )
+    for statement in index_sql:
+        conn.execute(statement)
+
+
 class MutableClock:
     def __init__(self, current):
         self.current = current
@@ -567,9 +641,10 @@ class StorageTests(CoreTestCase):
 
         conn = sqlite3.connect(self.db_path)
         try:
-            conn.execute(
-                "ALTER TABLE tt_post_account_setting "
-                "DROP COLUMN drama_language"
+            rebuild_table_without_column(
+                conn,
+                "tt_post_account_setting",
+                "drama_language",
             )
             conn.commit()
         finally:
@@ -1827,9 +1902,10 @@ class RecurringStorageTests(CoreTestCase):
                 "DROP INDEX IF EXISTS "
                 "idx_tt_post_recurring_pool_language_fifo"
             )
-            conn.execute(
-                "ALTER TABLE tt_post_recurring_pool "
-                "DROP COLUMN routing_language"
+            rebuild_table_without_column(
+                conn,
+                "tt_post_recurring_pool",
+                "routing_language",
             )
             conn.execute(
                 "CREATE INDEX idx_tt_post_recurring_pool_language_fifo "

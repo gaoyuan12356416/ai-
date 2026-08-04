@@ -50,4 +50,5 @@ python -m unittest scripts.test_tt_posts_app_contract scripts.test_tt_posts_core
 - 2026-08-04：修复 active canary 被自动任务抢占、手动 readiness 误判、全池扫描和非法历史语言阻塞；增加持久规范路由键及复合索引。
 - 2026-08-04：补齐超过 1000 条的素材池最终账号筛选，以及 active canary + 已启用排期的按钮/执行一致性。
 - 2026-08-04：Python 完整 TT 回归 372/372 通过（Core 83、Service 130）；Drama bridge 53 项断言通过；py_compile 与 `git diff --check` 通过。
+- 2026-08-04：候选机旧 SQLite 不支持测试用 `DROP COLUMN`；生产迁移未受影响，测试已改为兼容式重建旧表并完成本地 372/372 复验，详见 `bugs/BUG-002.md`。
 - 生产副本迁移、浏览器登录态只读验收和部署证据仍须在正式部署窗口回填；不得用真实发布验证。
