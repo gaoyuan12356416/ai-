@@ -46,6 +46,7 @@
 | CR-12 | 测试安全 | 自动化使用临时 DB/fake Redis/fake resolver；不调用真实 publish |
 | CR-13 | 幂等重放 | 相同 formal payload/idempotency_key 接受 pre-freeze 或 frozen exact caption；任何其他事实差异仍冲突 |
 | CR-14 | 输入失效 | input 变化立即清空旧 CTA/href并中止 pending request；旧响应不能覆盖当前输入 |
+| CR-15 | 日志短码展示 | 只读 `item.code`，四位大写字母数字才展示；空值/非法值为“—”，不从 caption 推导、不写库 |
 
 ## 最终复审完成证据
 
@@ -57,6 +58,7 @@
 6. 确认 Redis config/unit 与目标 Redis 5/systemd 239 语法兼容，6381 只监听 loopback。
 7. 确认 `{code}` exact replay 只放行同一 queue 的 deterministic pre-freeze/frozen caption，不放宽其他 idempotency facts。
 8. 确认输入变化清空 href 和 active result、abort pending fetch，且 race 中的旧响应无法恢复旧 CTA。
+9. 确认发布任务新增列不改变统一任务 API、SQLite/Redis、队列状态与发布动作，并且 loading/empty 行同步为十列。
 
 ## 发布门禁
 

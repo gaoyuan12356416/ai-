@@ -215,3 +215,11 @@ ss -lnt '( sport = :6381 )'
 - 公共 API 2xx/4xx/5xx、p95、限流/overloaded 和 DramaWave 上游错误。
 - `/tt` 与 `/tt-code` 可用性、Featured 五条完整率。
 - 不以监控为由触发真实 TikTok 发布。
+
+## 2026-08-05 发布任务短码列增量
+
+- 变更范围仅为 `static/tt-post-pool.html` 及其只读合同测试；不迁移 DB、不改 Redis、不重启发布 runner，也不触发 publish/canary/`run-now`。
+- 服务器部署必须从 GitHub exact commit 取得该静态文件，先备份当前公网文件和 `/root/drama_material_service/static` 对应文件，再以保留 owner/mode 的原子方式替换。
+- 替换前后核对生产队列总数、最大 queue ID 和非空 publish ID 数；验收只读取已有任务。
+- 回滚只恢复本次备份的 `tt-post-pool.html`，无需回滚数据库或 Redis。
+- 当前状态：本地候选已通过定向回归和隔离浏览器验证，待 GitHub 提交与生产静态部署。

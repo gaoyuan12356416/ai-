@@ -549,7 +549,7 @@
       margin-bottom: 15px;
     }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
-    table { width: 100%; min-width: 1420px; border-collapse: collapse; background: #fff; }
+    table { width: 100%; min-width: 1500px; border-collapse: collapse; background: #fff; }
     th, td {
       padding: 12px 13px;
       border-bottom: 1px solid #e8eef6;
@@ -577,6 +577,13 @@
     .subtle { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
     .error-copy { max-width: 300px; color: #a62f3a; line-height: 1.45; overflow-wrap: anywhere; }
     .caption-cell { max-width: 300px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .code-cell {
+      min-width: 76px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 800;
+      letter-spacing: .08em;
+      white-space: nowrap;
+    }
     .empty { padding: 38px 18px; text-align: center; color: var(--muted); }
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 13px; }
     .pager-actions { display: flex; gap: 8px; }
@@ -934,6 +941,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <th>任务时间</th>
                   <th>TikTok账号</th>
                   <th>素材 / Drama ID</th>
+                  <th>短码</th>
                   <th>描述</th>
                   <th>发布设置</th>
                   <th>任务状态</th>
@@ -942,7 +950,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <th>操作</th>
                 </tr>
               </thead>
-              <tbody id="queueRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+              <tbody id="queueRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
           <div class="pager">
@@ -3377,7 +3385,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         body.replaceChildren();
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 9;
+        cell.colSpan = 10;
         cell.className = "empty";
         setText(cell, message);
         row.appendChild(cell);
@@ -3426,6 +3434,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         button.disabled = !button.dataset.taskKey;
         return button;
       }
+      function displayQueueCode(item) {
+        const code = String(item && item.code || "").trim().toUpperCase();
+        return /^[A-Z0-9]{4}$/.test(code) ? code : "—";
+      }
       function renderQueueRows(items) {
         const body = byId("queueRows");
         body.replaceChildren();
@@ -3452,6 +3464,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             `素材 ${item.material_id || "—"}`,
             `Drama ID ${item.content_id || "—"}`
           );
+          appendCell(row, displayQueueCode(item), "", "code-cell");
           appendCell(row, item.caption_text || item.caption || "—", "", "caption-cell");
           const commercial = boolValue(item.commercial_disclosure) === true
             ? (boolValue(item.brand_content_toggle) === true ? "第三方品牌披露" : "自有品牌披露")

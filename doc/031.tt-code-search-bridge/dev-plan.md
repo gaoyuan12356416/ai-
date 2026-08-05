@@ -18,6 +18,7 @@
 | D8 部署资产 | Nginx、Redis config/unit、env examples | `/tt-code`/JS/API exact routes，Redis 独立 unit，原 `/tt` 不动 | 已完成生产部署 |
 | D9 自动化 | `scripts/test_tt_*` | allocator/schema/cache/API/link/UI/bridge 及既有 TT 回归 | 已完成：Python 395、Node 84/53 |
 | D10 文档与上线证据 | 本目录 | 需求/API/评审/测试/部署合同及生产证据 | 已完成 |
+| D11 发布任务短码列 | `static/tt-post-pool.html`、UI/服务合同测试 | 自动任务显示冻结的四位大写字母数字短码；无值或非法值显示“—” | 已完成开发，待上线复验 |
 
 ## 最终实现顺序
 
@@ -81,3 +82,4 @@ git diff --exit-code -- static/tt-drama-search.html static/tt-drama-search.js de
 - 运行代码 exact commit：`b01dabe22d9da1571c68b6fb0775a61bb48e18de`。
 - 服务器 release、DB 副本迁移、备份 manifest、Redis/Nginx/systemd、公共 API、浏览器和旧 `/tt` 隔离均已验证。
 - 发布前后 queue、run、plan、publish ID 计数一致；没有调用 publish、canary、`run-now` 或人工 scheduler。
+- 2026-08-05 增量仅调整发布任务表格展示和合同测试；不改变 DB、Redis、队列冻结、发布或跳转链路。

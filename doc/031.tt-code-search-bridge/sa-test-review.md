@@ -2,7 +2,7 @@
 
 ## 结论
 
-测试设计按最终实现扩充到 91 条并作为发布验收基线。最终 diff 全量运行、移动/桌面浏览器和生产 H 类只读证据均已完成；生产回滚未实际切换旧代码，以现成旧 release、备份 manifest 和 Redis 停机降级证明可回退。
+测试设计按最终实现扩充到 96 条并作为发布验收基线。最终 diff 全量运行、移动/桌面浏览器和生产 H 类只读证据均已完成；生产回滚未实际切换旧代码，以现成旧 release、备份 manifest 和 Redis 停机降级证明可回退。
 
 ## 覆盖检查
 
@@ -16,6 +16,7 @@
 | TR-06 | 公共组合 API | F01-F16 | 覆盖三种 mode、最新排序、一次元数据组合、限流/gate/错误/target |
 | TR-07 | Redis | G01-G11 | 覆盖完整 cache row、负缓存、namespace、陈旧值、停止和慢 I/O 锁边界 |
 | TR-08 | 部署/回滚/零发布 | H01-H09 | 覆盖 GitHub exact、数据盘、DB 副本、备份、服务、回滚和 ledger |
+| TR-09 | 发布任务短码展示 | I01-I05 | 覆盖冻结短码、大小写规范化、空值/非法值/直接测试占位及空表列对齐 |
 
 ## 评审要求
 
@@ -28,10 +29,11 @@
 7. G11 必须分别暂停 Redis GET 和 DELETE，并在暂停期间成功获取共享 queue write lock。
 8. D11 直接测试 `{code}` 必须在任何 publish 调用前拒绝；D12 必须证明历史无 code queue 仍走 AIpost。
 9. H07 要用 queue/run/publish ID 和发布调用基线证明零真实发布，不能只凭“未看到帖子”。
+10. I01-I05 只能读取任务 DTO 的 `code`；不得解析 caption、补写历史任务或触发短码分配。
 
 ## 当前执行判定
 
-- 最终 Python discover 为 395 tests，Node 新旧 bridge 为 84/53 assertions，编译与 diff 检查均通过。
+- 2026-08-05 当前候选 Python discover 为 396 tests；Node 新旧 bridge 既有基线为 84/53 assertions，编译与 diff 检查均通过。
 - 390x844 与 1440x900 生产资源浏览器验证通过，无 console/page error。
 - H01-H07 已有完整生产证据；H08 的破坏性生产代码切回未执行。H09 只实际验证了停止/恢复 Redis 与 SQLite 降级，未恢复 unit/config 或切旧代码；旧 release、备份 manifest 和回滚步骤已核验。
 

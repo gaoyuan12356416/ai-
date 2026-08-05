@@ -17,6 +17,7 @@
 | SA-07 | P1 | 横滑误触卡片 | 7px drag threshold、click 抑制、scroll snap、按钮与键盘行为 | 已实现，浏览器回归通过 |
 | SA-08 | P1 | 旧队列/直接测试 channel 漂移 | 新正式队列 TT；历史无 route pending 和直接测试继续 AIpost | 已实现 |
 | SA-09 | P1 | `{code}` 用在直接测试没有 durable identity | 只允许正式队列；直接测试稳定拒绝 `tt_post_code_macro_queue_only` | 已实现 |
+| SA-10 | P1 | 发布日志无法直接核对任务已冻结的短码 | 管理页新增“短码”列，只读取任务 DTO 的 `code`；历史无值、直接测试和非法格式统一显示“—”，不解析描述 | 已实现，待上线复验 |
 
 ## 架构决策
 
@@ -31,6 +32,7 @@
 | ADR-07 | 新正式 URL `af_dp` 第一、channel TT；历史/直接测试保持 AIpost |
 | ADR-08 | 直接 ID/Featured 使用最新 published clone；无历史使用 TTpost fallback |
 | ADR-09 | code exact 不按 state 过滤，但公共层仍必须确认对应剧存在 |
+| ADR-10 | 发布日志短码为只读展示；不新增 API/表字段，不重新分配、不补写历史任务，也不从 caption 提取 |
 
 ## 数据与调用流评审
 

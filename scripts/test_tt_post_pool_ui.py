@@ -538,6 +538,25 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertNotIn('api(`${API_BASE}/queue?${queueQuery()}`)', load_source)
         self.assertIn("state.publishTasks = items", load_source)
 
+    def test_publish_task_table_displays_the_frozen_four_character_code(self):
+        table_source = source_between('<h2>发布任务</h2>', '</section>')
+        rows_source = source_between(
+            "function displayQueueCode(item)", "function queueQuery()"
+        )
+        empty_source = source_between(
+            "function setQueueEmpty(message)", "function badge(label, kind)"
+        )
+        self.assertIn("<th>短码</th>", table_source)
+        self.assertIn('colspan="10"', table_source)
+        self.assertIn("cell.colSpan = 10", empty_source)
+        self.assertIn('String(item && item.code || "")', rows_source)
+        self.assertIn('/^[A-Z0-9]{4}$/.test(code)', rows_source)
+        self.assertIn(
+            'appendCell(row, displayQueueCode(item), "", "code-cell")',
+            rows_source,
+        )
+        self.assertNotIn("item.caption_text.match", rows_source)
+
     def test_direct_rows_are_namespaced_and_never_receive_queue_actions(self):
         rows_source = source_between(
             "function renderQueueRows(items)", "function queueQuery()"

@@ -87,3 +87,11 @@ git diff --exit-code -- static/tt-drama-search.html static/tt-drama-search.js de
 ## 发布门禁
 
 本地与生产上线门禁均已通过：DB 副本迁移、Redis/Nginx/systemd、原 `/tt` 线上 hash、回滚材料/回滚点和零真实发布基线均有证据。为避免额外生产风险，未执行 H08 生产代码切回，也未执行 H09 的 unit/config 恢复；只实际验证了 Redis 停机降级与恢复。后续变更仍须重复执行同一门禁。
+
+## 2026-08-05 发布任务短码列增量证据
+
+- `python -m unittest discover -s scripts -p "test_tt*.py"`：396 tests，failures/errors=0。
+- `python -m unittest scripts.test_tt_post_pool_ui scripts.test_tt_posts_service scripts.test_tt_posts_app_contract`：184 tests，failures/errors=0。
+- `py_compile` 与 `git diff --check` 均退出 0。
+- 隔离 Chromium 使用 mock 统一任务 DTO 验证：自动任务 `code=RSTN` 显示 `RSTN`；direct-test 无 code 显示“—”；表头共十列，console errors=0。
+- 本增量不调用任何写接口，不创建任务、不修改 SQLite/Redis，也不触发真实 TikTok 发布。
