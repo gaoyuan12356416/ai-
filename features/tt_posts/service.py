@@ -4424,6 +4424,7 @@ class TTPostService:
                     config_version=existing_version,
                     manual_request_key=manual_request_key,
                     excluded_pool_item_id=excluded_canary_pool_id,
+                    required_preparation_profile=self.media_profile_version,
                 )
                 resumed = terminal_or_bound(claimed)
                 if resumed is not None:
@@ -4497,6 +4498,7 @@ class TTPostService:
                     config_version=config_version,
                     manual_request_key=manual_request_key,
                     excluded_pool_item_id=excluded_canary_pool_id,
+                    required_preparation_profile=self.media_profile_version,
                 )
                 resumed = terminal_or_bound(claimed)
                 if resumed is not None:
@@ -4814,6 +4816,9 @@ class TTPostService:
                             self.manual_canary.pool_id
                             if self.manual_canary.is_active(now_utc)
                             else None
+                        ),
+                        required_preparation_profile=(
+                            self.media_profile_version
                         ),
                     )
                     preclaimed_run_keys.add(run_key)

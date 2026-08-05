@@ -6559,6 +6559,320 @@ class TTPostStore:
             ).fetchone()
         return _public_recurring_pool(row)
 
+    def list_available_recurring_profile_upgrades(
+        self,
+        source_profile: Any,
+        target_profile: Any,
+        *,
+        limit: Any = 500,
+    ) -> List[Dict[str, Any]]:
+        normalized_source = _required_text(
+            source_profile,
+            "TT source preparation profile",
+            128,
+        )
+        normalized_target = _required_text(
+            target_profile,
+            "TT target preparation profile",
+            128,
+        )
+        if secrets.compare_digest(normalized_source, normalized_target):
+            raise TTPostError(
+                "tt_post_profile_upgrade_invalid",
+                "TT source and target preparation profiles must differ",
+                400,
+            )
+        normalized_limit = _positive_int(
+            limit,
+            "TT profile upgrade limit",
+            1000,
+        )
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tt_post_recurring_pool
+                WHERE status='available' AND run_id IS NULL
+                    AND queue_id IS NULL AND preparation_profile=?
+                ORDER BY created_at,id
+                LIMIT ?
+                """,
+                (normalized_source, normalized_limit),
+            ).fetchall()
+        return [_public_recurring_pool(row) for row in rows]
+
+    def upgrade_available_recurring_artifact(
+        self,
+        pool_item_id: Any,
+        *,
+        expected_preparation_profile: Any,
+        expected_gpu_job_id: Any,
+        expected_output_sha256: Any,
+        prepared_media_url: Any,
+        gpu_job_id: Any,
+        prepared_output_sha256: Any,
+        prepared_output_size: Any,
+        prepared_duration_sec: Any,
+        source_trim_tail_seconds: Any,
+        preparation_profile: Any,
+    ) -> Dict[str, Any]:
+        normalized_id = _positive_int(
+            pool_item_id,
+            "TT recurring pool item ID",
+        )
+        normalized_expected_profile = _required_text(
+            expected_preparation_profile,
+            "TT expected preparation profile",
+            128,
+        )
+        normalized_expected_job_id = str(expected_gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_expected_job_id):
+            raise TTPostError(
+                "invalid_gpu_job_id",
+                "TT expected GPU job ID is invalid",
+                400,
+            )
+        normalized_expected_sha = str(
+            expected_output_sha256 or ""
+        ).strip().lower()
+        if not _SHA256_RE.fullmatch(normalized_expected_sha):
+            raise TTPostError(
+                "invalid_prepared_output_sha",
+                "TT expected prepared output SHA256 is invalid",
+                400,
+            )
+        normalized_url = _https_url(
+            prepared_media_url,
+            "TT upgraded prepared media URL",
+        )
+        normalized_job_id = str(gpu_job_id or "").strip()
+        if not _GPU_JOB_ID_RE.fullmatch(normalized_job_id):
+            raise TTPostError(
+                "invalid_gpu_job_id",
+                "TT upgraded GPU job ID is invalid",
+                400,
+            )
+        normalized_sha = str(prepared_output_sha256 or "").strip().lower()
+        if not _SHA256_RE.fullmatch(normalized_sha):
+            raise TTPostError(
+                "invalid_prepared_output_sha",
+                "TT upgraded prepared output SHA256 is invalid",
+                400,
+            )
+        normalized_size = _positive_int(
+            prepared_output_size,
+            "TT upgraded prepared output size",
+        )
+        try:
+            normalized_duration = float(prepared_duration_sec)
+            normalized_trim = float(source_trim_tail_seconds)
+        except (TypeError, ValueError, OverflowError):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT upgraded prepared media metrics are invalid",
+                400,
+            ) from None
+        if (
+            not math.isfinite(normalized_duration)
+            or normalized_duration <= 0
+            or normalized_duration > 86400
+            or not math.isfinite(normalized_trim)
+            or normalized_trim < 0
+            or normalized_trim >= normalized_duration
+        ):
+            raise TTPostError(
+                "invalid_prepared_media_metrics",
+                "TT upgraded prepared media metrics are invalid",
+                400,
+            )
+        normalized_duration = round(normalized_duration, 6)
+        normalized_trim = round(normalized_trim, 6)
+        normalized_profile = _required_text(
+            preparation_profile,
+            "TT upgraded preparation profile",
+            128,
+        )
+        if secrets.compare_digest(
+            normalized_expected_profile,
+            normalized_profile,
+        ):
+            raise TTPostError(
+                "tt_post_profile_upgrade_invalid",
+                "TT source and target preparation profiles must differ",
+                400,
+            )
+        timestamp = self._now_iso()
+        with self._transaction() as conn:
+            pool = conn.execute(
+                "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+            if pool is None:
+                raise TTPostError(
+                    "tt_post_recurring_pool_not_found",
+                    "TT recurring pool item was not found",
+                    404,
+                )
+            if (
+                str(pool["status"]) != "available"
+                or pool["run_id"] is not None
+                or pool["queue_id"] is not None
+                or not secrets.compare_digest(
+                    str(pool["preparation_profile"]),
+                    normalized_expected_profile,
+                )
+                or not secrets.compare_digest(
+                    str(pool["gpu_job_id"]),
+                    normalized_expected_job_id,
+                )
+                or not secrets.compare_digest(
+                    str(pool["prepared_output_sha256"]).lower(),
+                    normalized_expected_sha,
+                )
+            ):
+                raise TTPostError(
+                    "tt_post_profile_upgrade_race",
+                    "TT recurring pool item changed before profile upgrade",
+                    409,
+                )
+            if secrets.compare_digest(
+                str(pool["source_media_url"]),
+                normalized_url,
+            ):
+                raise TTPostError(
+                    "tt_prepared_media_matches_source",
+                    "TT upgraded media URL must differ from source media",
+                    409,
+                )
+            intake = conn.execute(
+                """
+                SELECT * FROM tt_post_material_intake
+                WHERE recurring_pool_id=?
+                """,
+                (normalized_id,),
+            ).fetchone()
+            if (
+                intake is None
+                or str(intake["status"]) != "ready"
+                or not secrets.compare_digest(
+                    str(intake["preparation_profile"]),
+                    normalized_expected_profile,
+                )
+                or not secrets.compare_digest(
+                    str(intake["gpu_job_id"]),
+                    normalized_expected_job_id,
+                )
+                or not secrets.compare_digest(
+                    str(intake["prepared_output_sha256"]).lower(),
+                    normalized_expected_sha,
+                )
+            ):
+                raise TTPostError(
+                    "tt_post_profile_upgrade_link_invalid",
+                    "TT recurring pool item has no matching ready intake",
+                    409,
+                )
+            frozen_payload = {
+                "account_id": str(intake["account_id"]),
+                "caption": str(intake["caption"]),
+                "caption_template": str(intake["caption_template"]),
+                "consent_version": str(intake["consent_version"]),
+                "consented_at_utc": str(intake["consented_at_utc"]),
+                "content_id": str(intake["content_id"]),
+                "description": str(intake["description"]),
+                "drama_name": str(intake["drama_name"]),
+                "gpu_job_id": normalized_job_id,
+                "is_aigc": bool(intake["is_aigc"]),
+                "material_id": str(intake["material_id"]),
+                "material_language": str(intake["material_language"]),
+                "material_name": str(intake["material_name"]),
+                "material_tag": str(intake["material_tag"]),
+                "preparation_profile": normalized_profile,
+                "source_media_url": str(intake["source_media_url"]),
+                "source_trim_tail_seconds": normalized_trim,
+            }
+            request_sha256 = hashlib.sha256(
+                json.dumps(
+                    frozen_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            try:
+                pool_updated = conn.execute(
+                    """
+                    UPDATE tt_post_recurring_pool
+                    SET prepared_media_url=?,gpu_job_id=?,
+                        prepared_output_sha256=?,prepared_output_size=?,
+                        prepared_duration_sec=?,source_trim_tail_seconds=?,
+                        preparation_profile=?,updated_at=?
+                    WHERE id=? AND status='available' AND run_id IS NULL
+                        AND queue_id IS NULL AND preparation_profile=?
+                        AND gpu_job_id=? AND prepared_output_sha256=?
+                    """,
+                    (
+                        normalized_url,
+                        normalized_job_id,
+                        normalized_sha,
+                        normalized_size,
+                        normalized_duration,
+                        normalized_trim,
+                        normalized_profile,
+                        timestamp,
+                        normalized_id,
+                        normalized_expected_profile,
+                        normalized_expected_job_id,
+                        normalized_expected_sha,
+                    ),
+                )
+                intake_updated = conn.execute(
+                    """
+                    UPDATE tt_post_material_intake
+                    SET request_sha256=?,gpu_job_id=?,
+                        source_trim_tail_seconds=?,preparation_profile=?,
+                        prepared_media_url=?,prepared_output_sha256=?,
+                        prepared_output_size=?,prepared_duration_sec=?,
+                        ready_at_utc=?,updated_at=?
+                    WHERE id=? AND status='ready' AND recurring_pool_id=?
+                        AND preparation_profile=? AND gpu_job_id=?
+                        AND prepared_output_sha256=?
+                    """,
+                    (
+                        request_sha256,
+                        normalized_job_id,
+                        normalized_trim,
+                        normalized_profile,
+                        normalized_url,
+                        normalized_sha,
+                        normalized_size,
+                        normalized_duration,
+                        timestamp,
+                        timestamp,
+                        int(intake["id"]),
+                        normalized_id,
+                        normalized_expected_profile,
+                        normalized_expected_job_id,
+                        normalized_expected_sha,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise TTPostError(
+                    "tt_post_profile_upgrade_conflict",
+                    "TT recurring profile upgrade hit a uniqueness conflict",
+                    409,
+                ) from None
+            if pool_updated.rowcount != 1 or intake_updated.rowcount != 1:
+                raise TTPostError(
+                    "tt_post_profile_upgrade_race",
+                    "TT recurring pool item changed during profile upgrade",
+                    409,
+                )
+            upgraded = conn.execute(
+                "SELECT * FROM tt_post_recurring_pool WHERE id=?",
+                (normalized_id,),
+            ).fetchone()
+        return _public_recurring_pool(upgraded)
+
     def list_recurring_materials(
         self,
         *,
@@ -6739,6 +7053,7 @@ class TTPostStore:
         config_version: Any,
         manual_request_key: Any = "",
         excluded_pool_item_id: Any = None,
+        required_preparation_profile: Any = "",
     ) -> Dict[str, Any]:
         normalized_run_key = _required_text(
             run_key,
@@ -6777,6 +7092,11 @@ class TTPostStore:
             manual_request_key,
             "手动发布请求键",
             255,
+        )
+        normalized_required_profile = _optional_text(
+            required_preparation_profile,
+            "TT material preparation profile",
+            128,
         )
         normalized_excluded_pool_item_id = (
             _positive_int(
@@ -6958,28 +7278,44 @@ class TTPostStore:
                 exclusion_sql = (
                     " AND id<>?" if normalized_excluded_pool_item_id else ""
                 )
+                profile_sql = (
+                    " AND preparation_profile=?"
+                    if normalized_required_profile
+                    else ""
+                )
                 claim_params: List[Any] = [target_language]
+                if normalized_required_profile:
+                    claim_params.append(normalized_required_profile)
                 if normalized_excluded_pool_item_id:
                     claim_params.append(normalized_excluded_pool_item_id)
                 pool = conn.execute(
                     """
                     SELECT * FROM tt_post_recurring_pool
-                    WHERE status='available' AND routing_language=?%s
+                    WHERE status='available' AND routing_language=?%s%s
                     ORDER BY created_at,id
                     LIMIT 1
                     """
-                    % exclusion_sql,
+                    % (profile_sql, exclusion_sql),
                     claim_params,
                 ).fetchone()
             else:
+                profile_sql = (
+                    " AND preparation_profile=?"
+                    if normalized_required_profile
+                    else ""
+                )
+                claim_params = [normalized_account_id]
+                if normalized_required_profile:
+                    claim_params.append(normalized_required_profile)
                 pool = conn.execute(
                     """
                     SELECT * FROM tt_post_recurring_pool
-                    WHERE account_id=? AND status='available'
+                    WHERE account_id=? AND status='available'%s
                     ORDER BY created_at,id
                     LIMIT 1
-                    """,
-                    (normalized_account_id,),
+                    """
+                    % profile_sql,
+                    claim_params,
                 ).fetchone()
             if pool is None:
                 if normalized_trigger == "auto":

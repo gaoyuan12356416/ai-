@@ -1042,6 +1042,8 @@ class MaterialIntakeStorageTests(CoreTestCase):
         *,
         idempotency_key=None,
         description=None,
+        preparation_profile="tt-post-hevc-720x1280-v2",
+        source_trim_tail_seconds=4.333333,
         template=None,
     ):
         content_id = "CONTENT_%s" % material_id
@@ -1060,8 +1062,8 @@ class MaterialIntakeStorageTests(CoreTestCase):
                 idempotency_key or "tt-post-intake:%s" % material_id
             ),
             gpu_job_id="gpu-intake-job-%s" % material_id,
-            source_trim_tail_seconds=4.333333,
-            preparation_profile="tt-post-hevc-720x1280-v2",
+            source_trim_tail_seconds=source_trim_tail_seconds,
+            preparation_profile=preparation_profile,
             caption_template=frozen_template,
             caption=render_caption_template(
                 frozen_template,
@@ -1478,6 +1480,7 @@ class RecurringStorageTests(CoreTestCase):
         *,
         description="",
         material_language="en",
+        preparation_profile="tt-post-outro-v1",
         template=None,
     ):
         content_id = "CONTENT_%s" % material_id
@@ -1493,7 +1496,7 @@ class RecurringStorageTests(CoreTestCase):
             prepared_output_size=123456,
             prepared_duration_sec=120.25,
             source_trim_tail_seconds=4.333333,
-            preparation_profile="tt-post-outro-v1",
+            preparation_profile=preparation_profile,
             caption_template=frozen_template,
             caption=render_caption_template(
                 frozen_template,
@@ -1554,6 +1557,7 @@ class RecurringStorageTests(CoreTestCase):
         suffix,
         account_id="acct-1",
         publish_time="10:00",
+        required_preparation_profile="",
     ):
         return self.store.claim_recurring_run(
             "tt-post:manual:%s" % suffix,
@@ -1564,6 +1568,36 @@ class RecurringStorageTests(CoreTestCase):
             beijing_to_utc("2026-07-29 %s:00" % publish_time),
             config_version=0,
             manual_request_key="manual-request-%s" % suffix,
+            required_preparation_profile=required_preparation_profile,
+        )
+
+    def test_manual_claim_skips_material_from_an_old_preparation_profile(self):
+        old = self.add_recurring(
+            "98001",
+            preparation_profile="tt-post-direct-outro-hevc-720x1280-v1",
+        )
+        current = self.add_recurring(
+            "98002",
+            preparation_profile="tt-post-direct-outro-hevc-720x1280-v2",
+        )
+
+        claimed = self.claim_manual(
+            "profile-filter",
+            required_preparation_profile=(
+                "tt-post-direct-outro-hevc-720x1280-v2"
+            ),
+        )
+
+        self.assertEqual(current["id"], claimed["pool_item_id"])
+        remaining = {
+            item["id"]: item
+            for item in self.store.list_recurring_materials(
+                account_id="acct-1"
+            )
+        }
+        self.assertEqual(
+            "available",
+            remaining[old["id"]]["status"],
         )
 
     def acquire_execution(self, run):

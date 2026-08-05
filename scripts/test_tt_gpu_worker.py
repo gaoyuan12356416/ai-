@@ -347,9 +347,6 @@ def make_direct_outro_config(root, gates=False, **overrides):
         fixed_outro_sha256=hashlib.sha256(
             base.fixed_outro_path.read_bytes()
         ).hexdigest(),
-        logo_sha256=hashlib.sha256(
-            base.logo_path.read_bytes()
-        ).hexdigest(),
         media_mode=worker.DIRECT_OUTRO_MEDIA_MODE,
         profile=worker.DIRECT_OUTRO_PROFILE,
     )
@@ -467,10 +464,6 @@ def seed_prepared(
     if config.media_mode == worker.DIRECT_OUTRO_MEDIA_MODE:
         request.update(
             {
-                "logo_sha256": hashlib.sha256(
-                    config.logo_path.read_bytes()
-                ).hexdigest(),
-                "logo_size": config.logo_path.stat().st_size,
                 "outro_sha256": hashlib.sha256(
                     config.fixed_outro_path.read_bytes()
                 ).hexdigest(),
@@ -519,7 +512,7 @@ def seed_prepared(
         "storage": {"backend": "cos", "key": cos_key},
         "status": "ready",
         "version": (
-            4
+            5
             if config.media_mode == worker.DIRECT_OUTRO_MEDIA_MODE
             else 3
             if config.media_mode == worker.DIRECT_CLEAN_MEDIA_MODE
@@ -1024,9 +1017,6 @@ class TTGPUWorkerTests(unittest.TestCase):
             TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS="0",
             TT_POST_GPU_FIXED_OUTRO_SHA256=hashlib.sha256(
                 config.fixed_outro_path.read_bytes()
-            ).hexdigest(),
-            TT_POST_GPU_LOGO_SHA256=hashlib.sha256(
-                config.logo_path.read_bytes()
             ).hexdigest(),
         )
         with mock.patch.dict(
@@ -1671,7 +1661,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(result["storage_backend"], "cos")
         self.assertFalse(result["direct_post_eligible"])
 
-    def test_direct_outro_prepare_uses_phone_match_and_freezes_assets(self):
+    def test_direct_outro_prepare_uses_phone_match_without_logo(self):
         config = make_direct_outro_config(self.root)
         runner = FakeRunner(
             [
@@ -1701,8 +1691,6 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(
             result["assets"],
             {
-                "logo_sha256": config.logo_sha256,
-                "logo_size": len(b"logo"),
                 "outro_sha256": config.fixed_outro_sha256,
                 "outro_size": len(b"outro"),
             },
@@ -1710,7 +1698,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         manifest = worker._read_json(
             processor._prepare_manifest_path(JOB_ID)
         )
-        self.assertEqual(manifest["version"], 4)
+        self.assertEqual(manifest["version"], 5)
         self.assertEqual(
             manifest["request"]["media_mode"],
             worker.DIRECT_OUTRO_MEDIA_MODE,
@@ -1719,11 +1707,8 @@ class TTGPUWorkerTests(unittest.TestCase):
             manifest["request"]["transition"],
             "phone-match-0.9s",
         )
-        self.assertEqual(
-            manifest["request"]["logo_sha256"],
-            hashlib.sha256(b"logo").hexdigest(),
-        )
-        self.assertEqual(manifest["request"]["logo_size"], len(b"logo"))
+        self.assertNotIn("logo_sha256", manifest["request"])
+        self.assertNotIn("logo_size", manifest["request"])
         self.assertEqual(
             manifest["request"]["outro_sha256"],
             hashlib.sha256(b"outro").hexdigest(),
@@ -1743,8 +1728,11 @@ class TTGPUWorkerTests(unittest.TestCase):
         composed = " ".join(ffmpeg_commands[1])
         self.assertIn("source.mp4", composed)
         self.assertIn("outro-normalized.mp4", composed)
-        self.assertIn("approved-logo.png", composed)
+        self.assertNotIn("approved-logo.png", composed)
         self.assertNotIn(str(config.logo_path), composed)
+        self.assertNotIn("scale=132:132", composed)
+        self.assertNotIn("overlay=48:72", composed)
+        self.assertIn("overlay=x=(W-w)/2:y=(H-h)/2", composed)
         self.assertIn("-filter_complex", ffmpeg_commands[1])
         reused = processor.prepare(
             make_prepare(
@@ -1755,7 +1743,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertTrue(reused["reused"])
         self.assertEqual(len(calls), 1)
 
-    def test_direct_outro_reuse_rejects_changed_assets_or_media_mode(self):
+    def test_direct_outro_reuse_ignores_logo_but_rejects_outro_or_mode(self):
         config = make_direct_outro_config(self.root)
         calls = []
         processor = self.processor(
@@ -1780,12 +1768,8 @@ class TTGPUWorkerTests(unittest.TestCase):
         original_outro = config.fixed_outro_path.read_bytes()
 
         config.logo_path.write_bytes(original_logo + b"-changed")
-        with self.assertRaises(worker.TTGPUError) as changed_logo:
-            processor.prepare(request)
-        self.assertEqual(
-            changed_logo.exception.code,
-            "prepare_idempotency_conflict",
-        )
+        reused = processor.prepare(request)
+        self.assertTrue(reused["reused"])
 
         config.logo_path.write_bytes(original_logo)
         config.fixed_outro_path.write_bytes(original_outro + b"-changed")
@@ -1837,7 +1821,7 @@ class TTGPUWorkerTests(unittest.TestCase):
 
     def test_direct_outro_unapproved_asset_fails_before_external_work(self):
         config = make_direct_outro_config(self.root)
-        config.logo_path.write_bytes(b"unapproved-logo")
+        config.fixed_outro_path.write_bytes(b"unapproved-outro")
         calls = []
         runner = FakeRunner()
         object_store = FakeObjectStore()
@@ -1930,11 +1914,10 @@ class TTGPUWorkerTests(unittest.TestCase):
         processor = self.processor(config=config, api=api)
         manifest_path = processor._prepare_manifest_path(JOB_ID)
         cases = (
-            (("version",), 3),
+            (("version",), 4),
             (("request", "media_mode"), worker.DIRECT_CLEAN_MEDIA_MODE),
             (("request", "profile"), worker.DIRECT_CLEAN_PROFILE),
             (("request", "transition"), "none"),
-            (("request", "logo_sha256"), "0" * 64),
             (("request", "outro_sha256"), "0" * 64),
             (("request", "source_sha256"), "g" * 64),
             (("request", "source_size"), 0),
@@ -1964,7 +1947,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         api = FakeTikTokAPI()
         processor = self.processor(config=config, api=api)
         seed_prepared(processor, direct_post_eligible=True)
-        config.logo_path.write_bytes(b"drifted-after-prepare")
+        config.fixed_outro_path.write_bytes(b"drifted-after-prepare")
         with self.assertRaises(worker.TTGPUError) as caught:
             processor.publish(make_publish(config))
         self.assertEqual(caught.exception.code, "prepared_media_invalid")
@@ -2508,7 +2491,7 @@ class TTGPUWorkerTests(unittest.TestCase):
         repeated = processor.cleanup_due_media()
         self.assertEqual(repeated["released"], 0)
 
-    def test_phone_match_filter_overlaps_point_nine_and_shrinks_to_phone_size(self):
+    def test_phone_match_filter_is_logo_free_and_shrinks_to_phone_size(self):
         config = make_config(self.root)
         command = worker.build_phone_match_command(
             config,
@@ -2522,8 +2505,9 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertIn("scale=w=720:h=1280", graph)
         self.assertIn("720-214*", graph)
         self.assertIn("1280-378*", graph)
-        self.assertIn("scale=132:132", graph)
-        self.assertIn("overlay=48:72", graph)
+        self.assertNotIn("scale=132:132", graph)
+        self.assertNotIn("overlay=48:72", graph)
+        self.assertNotIn(str(config.logo_path), command)
         self.assertIn("overlay=x=(W-w)/2:y=(H-h)/2", graph)
         self.assertIn("d=0.900000", graph)
         self.assertIn("afade=t=out", graph)
@@ -2531,6 +2515,22 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-b:a") + 1], "128k")
         self.assertNotIn("1080", graph)
         self.assertNotIn("-f concat", " ".join(command))
+
+    def test_phone_match_can_still_render_the_legacy_branded_preview_logo(self):
+        config = make_config(self.root)
+        command = worker.build_phone_match_command(
+            config,
+            self.root / "source.mp4",
+            self.root / "outro.mp4",
+            self.root / "out.mp4",
+            34.766667,
+            11.933333,
+            logo_path=config.logo_path,
+        )
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("scale=132:132", graph)
+        self.assertIn("overlay=48:72", graph)
+        self.assertIn(str(config.logo_path), command)
 
     def test_phone_match_synthesizes_audio_when_source_is_silent(self):
         config = make_config(self.root)
@@ -3056,7 +3056,7 @@ class TTGPUWorkerTests(unittest.TestCase):
             self.assertEqual(payload["transition"], "phone-match-0.9s")
             self.assertTrue(payload["asset_identity_ready"])
             self.assertTrue(payload["gates"]["ready"])
-            config.logo_path.write_bytes(b"health-drift")
+            config.fixed_outro_path.write_bytes(b"health-drift")
             connection = http.client.HTTPConnection(host, port, timeout=5)
             connection.request("GET", worker.HEALTH_PATH)
             drifted_response = connection.getresponse()
