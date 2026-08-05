@@ -439,7 +439,37 @@ ok(script.includes('addEventListener("pointercancel"'));
 ok(script.includes('queryInput.addEventListener("input"'));
 ok(script.includes("activeController.abort()"));
 ok(script.includes("continueLink.removeAttribute(\"href\")"));
-ok(script.includes("setPointerCapture(event.pointerId)"));
+const pointerDownSource = script.slice(
+  script.indexOf('container.addEventListener("pointerdown"'),
+  script.indexOf('root.addEventListener("pointermove"')
+);
+const pointerMoveSource = script.slice(
+  script.indexOf('root.addEventListener("pointermove"'),
+  script.indexOf('root.addEventListener("pointerup"')
+);
+ok(
+  !pointerDownSource.includes("setPointerCapture(event.pointerId)"),
+  "ordinary card presses must not change the eventual click target"
+);
+ok(
+  pointerMoveSource.includes("event.buttons === 0") &&
+    pointerMoveSource.includes("finishPointer(event, true)"),
+  "a released pointer returning from outside must clear stale drag state"
+);
+ok(
+  pointerMoveSource.includes("container.setPointerCapture(event.pointerId)"),
+  "the carousel may capture only after the drag threshold is crossed"
+);
+ok(script.includes('root.addEventListener("pointercancel"'));
+const lostCaptureSource = script.slice(
+  script.indexOf('container.addEventListener("lostpointercapture"'),
+  script.indexOf('container.addEventListener("click"')
+);
+ok(
+  lostCaptureSource.includes("finishPointer(event, false)"),
+  "losing capture after a real drag must retain click suppression"
+);
+ok(script.includes("container.releasePointerCapture(event.pointerId)"));
 ok(script.includes("event.stopImmediatePropagation()"));
 ok(script.includes("payload.code || payload.error"));
 ok(script.includes("resolveAndVerify("));
