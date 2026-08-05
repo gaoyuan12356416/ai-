@@ -13,7 +13,7 @@
 | 分语言排名与原子缓存 | Codex | `features/tt_drama_featured`、refresh script | 已完成 |
 | 静态路由与服务配置 | Codex | Nginx、systemd | 已完成 |
 | 自动化与浏览器回归 | Codex | tests、scripts、Playwright | 已完成 |
-| GitHub-first 部署与线上验收 | Codex | 43.166.187.96 | 待部署 |
+| GitHub-first 部署与线上验收 | Codex | 43.166.187.96 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -38,4 +38,5 @@ python -m compileall -q features scripts tests
 - 2026-08-05 完成 22 个生产语言值域审计；榜单语言只取 `ads_custom_source_insight.drama_language`。
 - 完成 23 套页面 UI 文案（22 个生产语言加独立简体中文），未知语言回退英文。
 - 完成 schema v2 分语言榜单、原子写入、last-known-good 与前后端严格校验。
-- 完成 Featured 点击/拖动、搜索和旧 `/tt` 本地回归；生产部署与线上验收待记录。
+- 完成 Featured 点击/拖动、搜索和旧 `/tt` 本地回归。
+- 2026-08-05 以 GitHub 精确提交 `f1c7c1c367c5f32cc79c5ffd704897cf1f09cd61` 部署生产；真实 Chrome、公网 schema、新旧端点和定时器验收通过。

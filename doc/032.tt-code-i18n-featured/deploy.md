@@ -43,7 +43,38 @@
 3. 执行 `systemctl daemon-reload`、`nginx -t`，成功后 reload Nginx。
 4. 重新启动一次 Featured 服务并验证旧 v1 端点；新 v2 文件可保留为无引用产物。
 
-生产备份路径、提交 SHA 和精确回滚命令在部署完成后补录。
+### 生产执行记录（2026-08-05）
+
+- GitHub 分支：`codex/tt-code-i18n-featured-20260805`。
+- 精确提交：`f1c7c1c367c5f32cc79c5ffd704897cf1f09cd61`。
+- release：`/mnt/data-disk/tt-drama-resource-cache/releases/f1c7c1c367c5f32cc79c5ffd704897cf1f09cd61`。
+- 备份：`/mnt/data-disk/tt-code-i18n-featured-backups/20260805T121517+0800-f1c7c1c367c5`。
+- `/opt/tt-post/current` 全程保持 `/opt/tt-post/releases/f1a0434443751646b848a5d931781ce9a404e511`，未覆盖并行 TT 发布。
+- 首次刷新于 12:15:50 遇到一次只读源 `OperationalError`；LKG 保持有效且未生成半文件。相同生产查询随即成功返回 2,197 行/22 桶，12:17:03 受控重试后于 12:17:16 成功，耗时 13 秒。
+- v2 产物 24,274 bytes，`source_date=2026-08-04`，22 桶、每桶 5 条、全局 110 个唯一剧 ID。
+
+### 精确回滚命令
+
+在确认 `tt-drama-featured.service` 未运行后，以 root 执行：
+
+```bash
+backup=/mnt/data-disk/tt-code-i18n-featured-backups/20260805T121517+0800-f1c7c1c367c5
+old_release=/mnt/data-disk/tt-drama-resource-cache/releases/ai-tt-w2a-cache-e77dba9c5d74
+rollback_link=/mnt/data-disk/tt-drama-resource-cache/.current-f1c7c1c367c5.rollback
+
+cp -a "$backup/tt-drama-code-search.html" /usr/share/nginx/html/tt-drama-code-search.html
+cp -a "$backup/tt-drama-code-search.js" /usr/share/nginx/html/tt-drama-code-search.js
+cp -a "$backup/tt-drama-code-search.conf" /etc/nginx/default.d/tt-drama-code-search.conf
+cp -a "$backup/tt-drama-featured.service" /etc/systemd/system/tt-drama-featured.service
+cp -a "$backup/current.json" /mnt/data-disk/tt-drama-featured/public/current.json
+ln -s "$old_release" "$rollback_link"
+mv -Tf "$rollback_link" /mnt/data-disk/tt-drama-resource-cache/current
+systemctl daemon-reload
+nginx -t
+systemctl reload nginx
+```
+
+回滚后复核 old release、旧 v1 端点、`/tt-code` 静态哈希、Nginx 和定时器；`current-by-language.json` 可保留为无路由引用的惰性文件。
 
 ## 注意事项
 
