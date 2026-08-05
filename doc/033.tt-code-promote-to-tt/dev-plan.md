@@ -10,7 +10,7 @@
 | `/tt` 真实浏览器主流程与 `/tt-code` 兼容 smoke | browser regression | 已完成 |
 | `{code}` 正式自动排期到 GPU 请求闭环 | TT Post service tests | 已完成 |
 | 代码评审与完整回归 | 相关测试集 | 已完成 |
-| GitHub-first 发布、备份、线上验收 | 43.166.187.96 | 待执行 |
+| GitHub-first 发布、备份、线上验收 | 43.166.187.96 | 已完成 |
 
 ## 实施顺序
 

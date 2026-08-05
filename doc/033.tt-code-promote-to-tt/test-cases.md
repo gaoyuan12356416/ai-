@@ -13,15 +13,15 @@
 | TC-009 | 未支持语言 | UI 与榜单回退英文 | P0 | 本地通过 |
 | TC-010 | Featured 拖动 | 左右可滑动且不误跳转 | P0 | 本地通过 |
 | TC-011 | Featured 单击 | 只解析一次，拦截目标中 `af_channel=Featured` | P0 | 本地通过 |
-| TC-012 | 搜索四字符 code | 大小写规范化，已发布记录保持 `af_channel=TT` | P0 | 待线上验收 |
-| TC-013 | 搜索剧 ID | 最新记录或通用 fallback，`af_channel=Search` | P0 | 待线上验收 |
+| TC-012 | 搜索四字符 code | 大小写规范化，已发布记录保持 `af_channel=TT` | P0 | 线上通过 |
+| TC-013 | 搜索剧 ID | 最新记录或通用 fallback，`af_channel=Search` | P0 | 线上通过 |
 | TC-014 | 自动排期含 `{code}` | queue 分配 `[A-Z0-9]{4}`，caption 替换且无宏残留 | P0 | 本地通过 |
 | TC-015 | 正式发布请求 | Fake GPU queue.caption 等于冻结 caption | P0 | 本地通过 |
 | TC-016 | GPUClient 序列化 | HTTP payload.title 原样等于 caption 且无宏残留 | P0 | 本地通过 |
 | TC-017 | 立即测试含 `{code}` | 409 `tt_post_code_macro_queue_only`，不创建任务、不调用 publish | P0 | 本地通过 |
-| TC-018 | 生产配置语法 | `nginx -t` 成功后才 reload | P0 | 待部署 |
-| TC-019 | 生产双入口一致 | `/tt` 与 `/tt-code` HTML 哈希一致、旧 JS 未覆盖 | P0 | 待部署 |
-| TC-020 | 生产服务边界 | TT current、resource current、Redis/服务状态未改变 | P0 | 待部署 |
+| TC-018 | 生产配置语法 | `nginx -t` 成功后才 reload | P0 | 线上通过 |
+| TC-019 | 生产双入口一致 | `/tt` 与 `/tt-code` HTML 哈希一致、旧 JS 未覆盖 | P0 | 线上通过 |
+| TC-020 | 生产服务边界 | TT current、resource current、Redis/服务状态未改变 | P0 | 线上通过 |
 
 ## 真实浏览器约束
 
