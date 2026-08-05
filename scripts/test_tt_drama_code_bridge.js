@@ -606,8 +606,12 @@ const script = fs.readFileSync(
   path.join(ROOT, "static", "tt-drama-code-search.js"),
   "utf8"
 );
-const nginx = fs.readFileSync(
+const codeNginx = fs.readFileSync(
   path.join(ROOT, "deploy", "nginx", "tt-drama-code-search.conf"),
+  "utf8"
+);
+const primaryNginx = fs.readFileSync(
+  path.join(ROOT, "deploy", "nginx", "tt-drama-search.conf"),
   "utf8"
 );
 
@@ -668,15 +672,30 @@ ok(
   script.includes("const resolved = await resolveCodeQuery"),
   "the public code endpoint must return the verified route and drama together"
 );
-ok(nginx.includes("location = /tt-code {"));
-ok(nginx.includes("location = /tt-drama-code-search.js {"));
-ok(nginx.includes("location = /api/public/tt-code/resolve {"));
-ok(nginx.includes("location = /api/public/tt-drama/featured-by-language {"));
-ok(nginx.includes("proxy_pass http://127.0.0.1:8787;"));
-ok(nginx.includes('Cache-Control "no-store" always;'));
-ok(nginx.includes("connect-src 'self'"));
-ok(!nginx.includes("location = /tt {"));
-ok(!nginx.includes("location = /tt-drama-search.js {"));
+ok(codeNginx.includes("location = /tt-code {"));
+ok(codeNginx.includes("location = /tt-drama-code-search.js {"));
+ok(codeNginx.includes("location = /api/public/tt-code/resolve {"));
+ok(codeNginx.includes("location = /api/public/tt-drama/featured-by-language {"));
+ok(codeNginx.includes("proxy_pass http://127.0.0.1:8787;"));
+ok(codeNginx.includes('Cache-Control "no-store" always;'));
+ok(codeNginx.includes("connect-src 'self'"));
+ok(!codeNginx.includes("location = /tt {"));
+ok(!codeNginx.includes("location = /tt-drama-search.js {"));
+ok(primaryNginx.includes("location = /tt {"));
+ok(
+  primaryNginx.includes(
+    "alias /usr/share/nginx/html/tt-drama-code-search.html;"
+  )
+);
+ok(!primaryNginx.includes("alias /usr/share/nginx/html/tt-drama-search.html;"));
+ok(primaryNginx.includes('add_header Pragma "no-cache" always;'));
+ok(primaryNginx.includes('add_header X-Frame-Options "DENY" always;'));
+ok(primaryNginx.includes("limit_except GET"));
+equal(
+  (primaryNginx + "\n" + codeNginx).match(/location = \/tt \{/g).length,
+  1,
+  "the exact /tt location must be declared once"
+);
 
 for (const args of [
   [
@@ -684,8 +703,7 @@ for (const args of [
     "--exit-code",
     "--",
     "static/tt-drama-search.html",
-    "static/tt-drama-search.js",
-    "deploy/nginx/tt-drama-search.conf"
+    "static/tt-drama-search.js"
   ],
   [
     "diff",
@@ -693,8 +711,7 @@ for (const args of [
     "--exit-code",
     "--",
     "static/tt-drama-search.html",
-    "static/tt-drama-search.js",
-    "deploy/nginx/tt-drama-search.conf"
+    "static/tt-drama-search.js"
   ]
 ]) {
   doesNotThrow(
@@ -703,7 +720,7 @@ for (const args of [
       encoding: "utf8",
       stdio: "pipe"
     }),
-    "legacy /tt files must remain unchanged"
+    "legacy /tt static rollback files must remain unchanged"
   );
 }
 
@@ -714,6 +731,7 @@ match(
 console.log(JSON.stringify({
   status: "ok",
   assertions,
-  page: "/tt-code",
+  page: "/tt",
+  compatibility_page: "/tt-code",
   code_api: bridge.CODE_RESOLVER_PATH
 }));

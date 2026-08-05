@@ -106,6 +106,42 @@ class ResolverAppContractTests(unittest.TestCase):
         self.assertNotIn("proxy_pass", featured_location)
         self.assertIn("public, max-age=300", featured_location)
 
+    def test_tt_is_the_primary_code_aware_page_and_tt_code_stays_compatible(self):
+        primary_nginx = (
+            ROOT / "deploy" / "nginx" / "tt-drama-search.conf"
+        ).read_text(encoding="utf-8")
+        code_nginx = (
+            ROOT / "deploy" / "nginx" / "tt-drama-code-search.conf"
+        ).read_text(encoding="utf-8")
+        primary_block = primary_nginx.split("location = /tt {", 1)[1].split(
+            "location =", 1
+        )[0]
+
+        self.assertEqual(
+            (primary_nginx + "\n" + code_nginx).count("location = /tt {"),
+            1,
+        )
+        self.assertIn(
+            "alias /usr/share/nginx/html/tt-drama-code-search.html;",
+            primary_block,
+        )
+        self.assertNotIn(
+            "alias /usr/share/nginx/html/tt-drama-search.html;",
+            primary_block,
+        )
+        self.assertIn('add_header Cache-Control "no-store" always;', primary_block)
+        self.assertIn('add_header Pragma "no-cache" always;', primary_block)
+        self.assertIn('add_header X-Frame-Options "DENY" always;', primary_block)
+        self.assertIn("connect-src 'self'", primary_block)
+        self.assertIn("limit_except GET", primary_block)
+        self.assertEqual(code_nginx.count("location = /tt-code {"), 1)
+
+        # Old static and API routes stay available as one-step rollback assets.
+        self.assertTrue((ROOT / "static" / "tt-drama-search.html").is_file())
+        self.assertTrue((ROOT / "static" / "tt-drama-search.js").is_file())
+        self.assertIn("location = /tt-drama-search.js", primary_nginx)
+        self.assertIn("location = /api/public/tt-drama/resolve", primary_nginx)
+
     def test_result_link_has_no_seed_href(self):
         html = (ROOT / "static" / "tt-drama-search.html").read_text(
             encoding="utf-8"

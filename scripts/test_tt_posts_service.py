@@ -350,6 +350,7 @@ class GPUClientTests(unittest.TestCase):
         caption = (
             "Watch the full story\n\n"
             "Drama ID: ABCD1234\n\n"
+            "Code: A7K2\n\n"
             "https://gy.g2flow.com/s2l/8000000000000000009.html"
         )
         client.publish(
@@ -374,6 +375,7 @@ class GPUClientTests(unittest.TestCase):
         self.assertFalse(payload["disable_stitch"])
         self.assertTrue(payload["is_aigc"])
         self.assertEqual(payload["title"], caption)
+        self.assertNotIn("{code}", payload["title"])
         self.assertNotIn("media_url", payload)
 
     def test_manual_canary_uses_dedicated_gpu_route_and_envelope_operation(self):
@@ -1466,6 +1468,25 @@ class ServiceLifecycleTests(unittest.TestCase):
             conflict.exception.code,
         )
 
+    def test_direct_test_rejects_code_macro_before_creating_publish_task(self):
+        service = self.service(OPEN_GATES)
+        self.save_public_settings(service)
+        config_payload = self.auto_config_payload()
+        config_payload["caption_template"] = (
+            "Drama ID: {{content_id}}\nCode: {code}"
+        )
+        config = service.auto_config_save(config_payload)["item"]
+
+        with self.assertRaises(TTPostServiceError) as caught:
+            service.direct_test_create(
+                self.direct_test_payload(config["version"])
+            )
+
+        self.assertEqual("tt_post_code_macro_queue_only", caught.exception.code)
+        self.assertEqual(409, caught.exception.status)
+        self.assertEqual([], service.store.list_direct_tests())
+        self.assertEqual([], self.gpu.publish_requests)
+
     def test_direct_requires_public_comments_and_blocks_active_or_unknown(self):
         service = self.service(OPEN_GATES)
         config = self.configure_auto(service)
@@ -1938,6 +1959,47 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual("Drama", queue["drama_name"])
         self.assertEqual("en", queue["material_language"])
         self.assertEqual("romance", queue["material_tag"])
+
+    def test_automatic_schedule_freezes_code_macro_before_gpu_publish(self):
+        service = self.service(OPEN_GATES)
+        self.save_public_settings(service)
+        payload = self.recurring_material_payload(
+            "tt-post-pool:test:automatic-code-macro"
+        )
+        payload["caption_template"] = (
+            "Drama ID: {{content_id}}\nCode: {code}"
+        )
+        self.add_ready(service, payload)
+        service.schedule_save(self.schedule_payload())
+
+        due = service.schedules_due({"limit": 1})["items"]
+        self.assertEqual(1, len(due))
+        queue = service.store.get_queue(due[0]["queue_id"])
+        self.assertRegex(queue["code"], r"^[A-Z0-9]{4}$")
+        expected_caption = (
+            "Drama ID: ABCD1234\nCode: " + queue["code"]
+        )
+        self.assertEqual(expected_caption, queue["caption"])
+        self.assertNotIn("{code}", queue["caption"])
+
+        claimed = service.claim_due(
+            {
+                "worker_id": "tt-post-runner-code-macro",
+                "grace_seconds": DEFAULT_GRACE_SECONDS,
+                "limit": 1,
+            }
+        )["items"]
+        self.assertEqual(1, len(claimed))
+        published = service.publish_claimed(
+            queue["id"],
+            claimed[0]["claim_token"],
+        )["item"]
+
+        self.assertEqual("reconciling", published["status"])
+        self.assertEqual(1, len(self.gpu.publish_requests))
+        sent_caption = self.gpu.publish_requests[0]["queue"]["caption"]
+        self.assertEqual(expected_caption, sent_caption)
+        self.assertNotIn("{code}", sent_caption)
 
     def test_recurring_pool_freezes_desc_and_url_macros_for_later_run(self):
         service = self.service(OPEN_GATES)

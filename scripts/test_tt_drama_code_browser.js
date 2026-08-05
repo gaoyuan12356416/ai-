@@ -98,7 +98,7 @@ function startServer() {
     requests.push(url.pathname + url.search);
     if (request.method !== "GET") {
       send(response, 405, "text/plain", "method not allowed");
-    } else if (url.pathname === "/tt-code") {
+    } else if (url.pathname === "/tt" || url.pathname === "/tt-code") {
       send(response, 200, "text/html; charset=utf-8", HTML);
     } else if (url.pathname === "/tt-drama-code-search.js") {
       send(response, 200, "application/javascript; charset=utf-8", SCRIPT);
@@ -128,10 +128,16 @@ function startServer() {
   });
 }
 
-async function openPage(browser, origin, locale) {
+async function openPage(
+  browser,
+  origin,
+  locale,
+  entryPath = "/tt",
+  viewport = { width: 720, height: 900 }
+) {
   const context = await browser.newContext({
     locale,
-    viewport: { width: 720, height: 900 }
+    viewport
   });
   await context.route("https://static-v1.mydramawave.com/**", route => {
     route.abort();
@@ -140,7 +146,7 @@ async function openPage(browser, origin, locale) {
     route.fulfill({ status: 200, contentType: "text/html", body: "redirect ok" });
   });
   const page = await context.newPage();
-  await page.goto(origin + "/tt-code", { waitUntil: "networkidle" });
+  await page.goto(origin + entryPath, { waitUntil: "networkidle" });
   await page.waitForFunction(() => {
     const stories = document.querySelector("#stories");
     return stories && stories.dataset.cacheState === "dynamic";
@@ -230,13 +236,38 @@ async function main() {
     });
     await chinese.page.mouse.up();
     await chinese.page.waitForTimeout(100);
-    assert.equal(new URL(chinese.page.url()).pathname, "/tt-code");
+    assert.equal(new URL(chinese.page.url()).pathname, "/tt");
     checks += 1;
     await chinese.page.locator("#stories .story-link").first().click();
     await chinese.page.waitForURL("https://www.dramawavew2a.com/**");
     assert.equal(new URL(chinese.page.url()).searchParams.get("af_channel"), "Featured");
     checks += 1;
     await chinese.context.close();
+
+    const traditionalChinese = await openPage(browser, origin, "zh-TW");
+    assert.equal(
+      await traditionalChinese.page.locator("html").getAttribute("lang"),
+      "zh-Hant"
+    );
+    checks += 1;
+    assert.equal(
+      await traditionalChinese.page.locator("#page-title").textContent(),
+      "輸入代碼，繼續觀看"
+    );
+    checks += 1;
+    assert.equal(
+      await traditionalChinese.page.locator("#recent-title").textContent(),
+      "昨日熱門短劇"
+    );
+    checks += 1;
+    assert.equal(
+      await traditionalChinese.page.locator("#stories").getAttribute(
+        "data-language"
+      ),
+      "zh-tw"
+    );
+    checks += 1;
+    await traditionalChinese.context.close();
 
     const arabic = await openPage(browser, origin, "ar");
     assert.equal(await arabic.page.locator("html").getAttribute("dir"), "rtl");
@@ -273,12 +304,50 @@ async function main() {
     checks += 1;
     await fallback.context.close();
 
+    const compatibility = await openPage(browser, origin, "en-US", "/tt-code");
+    assert.equal(
+      await compatibility.page.locator("#page-title").textContent(),
+      "Enter the code and keep watching"
+    );
+    checks += 1;
+    assert.equal(
+      await compatibility.page.locator("#stories .story").count(),
+      5
+    );
+    checks += 1;
+    assert.equal(new URL(compatibility.page.url()).pathname, "/tt-code");
+    checks += 1;
+    await compatibility.context.close();
+
+    const mobile = await openPage(
+      browser,
+      origin,
+      "en-US",
+      "/tt",
+      { width: 390, height: 844 }
+    );
+    assert.equal(await mobile.page.locator("#stories .story").count(), 5);
+    checks += 1;
+    assert.equal(
+      await mobile.page.evaluate(() =>
+        document.documentElement.scrollWidth <= window.innerWidth
+      ),
+      true
+    );
+    checks += 1;
+    await mobile.context.close();
+
     const featuredRequests = local.requests.filter(value =>
       value.includes("source=Featured")
     );
     assert.equal(featuredRequests.length, 1);
     checks += 1;
-    console.log(JSON.stringify({ status: "ok", checks, page: "/tt-code" }));
+    console.log(JSON.stringify({
+      status: "ok",
+      checks,
+      page: "/tt",
+      compatibility_page: "/tt-code"
+    }));
   } finally {
     if (browser) {
       await browser.close();
