@@ -29,6 +29,14 @@ VERIFIED_INSIGHT_INDEX = "as"
 MAX_CANDIDATE_LIMIT = 20
 SNAPSHOT_VERSION = 1
 MAX_PUBLIC_SNAPSHOT_BYTES = 32 * 1024
+LANGUAGE_SNAPSHOT_VERSION = 2
+DEFAULT_FEATURED_LANGUAGE = "en"
+MAX_LANGUAGE_CANDIDATES = 5000
+MAX_LANGUAGE_BUCKETS = 32
+MAX_LANGUAGE_SNAPSHOT_BYTES = 256 * 1024
+# Keep this compatible with the verified MySQL 5.7 REGEXP engine as well as
+# Python; MySQL 5.7 does not support non-capturing groups.
+LANGUAGE_PATTERN = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})?$")
 
 
 class FeaturedRefreshError(RuntimeError):
@@ -140,6 +148,14 @@ def _positive_integer(value):
     except (TypeError, ValueError, OverflowError):
         return 0
     return number if number > 0 else 0
+
+
+def normalize_featured_language(value):
+    """Return one bounded language key used by ranking bundles."""
+    normalized = str(value or "").strip().casefold().replace("_", "-")
+    if not LANGUAGE_PATTERN.fullmatch(normalized):
+        raise FeaturedRefreshError("featured drama language is invalid")
+    return normalized
 
 
 class FeaturedDramaRepository:
@@ -316,11 +332,121 @@ class FeaturedDramaRepository:
             )
         return result
 
+    def _language_spend_rows(self, connection, source_date):
+        """Fetch one bounded, stable ranking source for every drama language."""
+        cfg = self.config
+        sql = """
+            SELECT /*+ MAX_EXECUTION_TIME(10000) */
+                MIN(i.data_source_id) AS content_id,
+                MIN(
+                    LOWER(REPLACE(TRIM(i.drama_language), '_', '-'))
+                ) AS drama_language,
+                SUM(COALESCE(i.spend, 0)) AS spend_n,
+                COUNT(
+                    DISTINCT BINARY LOWER(
+                        REPLACE(TRIM(i.drama_language), '_', '-')
+                    )
+                ) AS language_count
+              FROM {insight} i FORCE INDEX (`{index_name}`)
+             WHERE i.app_id = %s
+               AND i.dt = %s
+               AND i.product = %s
+               AND i.data_source = %s
+               AND i.data_source_id <> ''
+               AND BINARY i.data_source_id REGEXP %s
+             GROUP BY BINARY i.data_source_id
+            HAVING SUM(COALESCE(i.spend, 0)) > 0
+               AND language_count = 1
+               AND MIN(
+                    LOWER(REPLACE(TRIM(i.drama_language), '_', '-'))
+               ) REGEXP %s
+             ORDER BY drama_language ASC,
+                      spend_n DESC,
+                      MIN(BINARY i.data_source_id) ASC
+             LIMIT %s
+        """.format(
+            insight=_qualified(cfg.database, cfg.insight_table),
+            index_name=cfg.insight_index,
+        )
+        rows = self._rows(
+            connection,
+            sql,
+            (
+                cfg.source_app_id,
+                source_date,
+                cfg.product,
+                cfg.data_source,
+                CONTENT_ID_SQL_PATTERN,
+                LANGUAGE_PATTERN.pattern,
+                MAX_LANGUAGE_CANDIDATES + 1,
+            ),
+        )
+        if len(rows) > MAX_LANGUAGE_CANDIDATES:
+            raise FeaturedRefreshError(
+                "language ranking exceeds %d candidates"
+                % MAX_LANGUAGE_CANDIDATES
+            )
+
+        result = {}
+        content_languages = {}
+        for row in rows:
+            try:
+                content_id = normalize_content_id(row.get("content_id"))
+                language = normalize_featured_language(
+                    row.get("drama_language")
+                )
+                language_count = int(row.get("language_count") or 0)
+            except (TypeError, ValueError, FeaturedRefreshError):
+                raise FeaturedRefreshError(
+                    "language ranking returned an invalid row"
+                ) from None
+            if language_count != 1:
+                raise FeaturedRefreshError(
+                    "language ranking returned an ambiguous drama"
+                )
+            previous = content_languages.setdefault(content_id, language)
+            if previous != language:
+                raise FeaturedRefreshError(
+                    "one drama appeared in multiple language rankings"
+                )
+            bucket = result.setdefault(language, [])
+            if len(bucket) >= cfg.candidate_limit:
+                continue
+            bucket.append(
+                {
+                    "content_id": content_id,
+                    "drama_language": language,
+                    "spend_n": row.get("spend_n"),
+                }
+            )
+        if len(result) > MAX_LANGUAGE_BUCKETS:
+            raise FeaturedRefreshError(
+                "language ranking exceeds %d buckets" % MAX_LANGUAGE_BUCKETS
+            )
+        default_rows = result.get(DEFAULT_FEATURED_LANGUAGE) or []
+        if len(default_rows) < cfg.item_limit:
+            raise FeaturedRefreshError(
+                "fewer than %d ranked English content IDs were found"
+                % cfg.item_limit
+            )
+        return {
+            language: result[language]
+            for language in sorted(result)
+        }
+
     def fetch_ranked(self, source_date):
         source_date = normalize_source_date(source_date)
         connection = self._connect()
         try:
             return self._spend_rows(connection, source_date)
+        finally:
+            _close_quietly(connection)
+
+    def fetch_ranked_by_language(self, source_date):
+        source_date = normalize_source_date(source_date)
+        connection = self._connect()
+        try:
+            return self._language_spend_rows(connection, source_date)
         finally:
             _close_quietly(connection)
 
@@ -335,6 +461,7 @@ def resolve_ranked_resources(
     *,
     item_limit=5,
     allowed_cover_hosts=None,
+    require_complete=True,
 ):
     """Resolve ranked IDs in order, skipping only explicit not-found results."""
     if resource_service is None or not callable(
@@ -396,12 +523,83 @@ def resolve_ranked_resources(
         )
         if len(selected) >= limit:
             break
-    if len(selected) != limit:
+    if require_complete and len(selected) != limit:
         raise FeaturedRefreshError(
             "only %d of %d required featured dramas were valid"
             % (len(selected), limit)
         )
     return selected
+
+
+def resolve_ranked_resources_by_language(
+    ranked_by_language,
+    resource_service,
+    *,
+    item_limit=5,
+    allowed_cover_hosts=None,
+    default_language=DEFAULT_FEATURED_LANGUAGE,
+):
+    """Resolve complete language buckets, requiring the English fallback."""
+    if not isinstance(ranked_by_language, dict):
+        raise FeaturedRefreshError("language rankings are invalid")
+    default_key = normalize_featured_language(default_language)
+    if len(ranked_by_language) > MAX_LANGUAGE_BUCKETS:
+        raise FeaturedRefreshError(
+            "language ranking exceeds %d buckets" % MAX_LANGUAGE_BUCKETS
+        )
+    limit = max(1, min(int(item_limit), 10))
+    resolved = {}
+    content_languages = {}
+    for raw_language in sorted(ranked_by_language):
+        language = normalize_featured_language(raw_language)
+        if language != raw_language:
+            raise FeaturedRefreshError("language ranking key is not canonical")
+        rows = ranked_by_language.get(raw_language)
+        if not isinstance(rows, list):
+            raise FeaturedRefreshError("language ranking bucket is invalid")
+        for ranked in rows:
+            row = dict(ranked or {})
+            row_language = normalize_featured_language(
+                row.get("drama_language", language)
+            )
+            if row_language != language:
+                raise FeaturedRefreshError(
+                    "language ranking row does not match its bucket"
+                )
+            try:
+                content_id = normalize_content_id(row.get("content_id"))
+            except ValueError:
+                raise FeaturedRefreshError(
+                    "language ranking contains an invalid content ID"
+                ) from None
+            previous = content_languages.setdefault(content_id, language)
+            if previous != language:
+                raise FeaturedRefreshError(
+                    "one drama appeared in multiple language rankings"
+                )
+        selected = resolve_ranked_resources(
+            rows,
+            resource_service,
+            item_limit=limit,
+            allowed_cover_hosts=allowed_cover_hosts,
+            require_complete=False,
+        )
+        if len(selected) != limit:
+            if language == default_key:
+                raise FeaturedRefreshError(
+                    "only %d of %d required English dramas were valid"
+                    % (len(selected), limit)
+                )
+            continue
+        normalized_items = []
+        for source_item in selected:
+            item = dict(source_item)
+            item["language"] = language
+            normalized_items.append(item)
+        resolved[language] = normalized_items
+    if default_key not in resolved:
+        raise FeaturedRefreshError("English featured ranking is unavailable")
+    return resolved
 
 
 def _deterministic_public_order(items, source_date):
@@ -492,6 +690,106 @@ def build_snapshot(
     return snapshot
 
 
+def build_language_snapshot(
+    *,
+    source_date,
+    generated_at,
+    rankings,
+    item_limit=5,
+    allowed_cover_hosts=None,
+    default_language=DEFAULT_FEATURED_LANGUAGE,
+):
+    """Build a public-safe v2 bundle containing complete language rankings."""
+    source_date = normalize_source_date(source_date)
+    generated = shanghai_now(generated_at)
+    default_key = normalize_featured_language(default_language)
+    limit = max(1, min(int(item_limit), 10))
+    if not isinstance(rankings, dict) or len(rankings) > MAX_LANGUAGE_BUCKETS:
+        raise FeaturedRefreshError("language rankings are invalid")
+
+    public_rankings = {}
+    content_languages = {}
+    for raw_language in sorted(rankings):
+        language = normalize_featured_language(raw_language)
+        if language != raw_language:
+            raise FeaturedRefreshError("language ranking key is not canonical")
+        source_items = rankings.get(raw_language)
+        if not isinstance(source_items, list) or len(source_items) != limit:
+            raise FeaturedRefreshError(
+                "language ranking must contain exactly %d dramas" % limit
+            )
+        selected = []
+        seen = set()
+        for source_item in source_items:
+            item = dict(source_item or {})
+            try:
+                content_id = normalize_content_id(item.get("content_id"))
+            except ValueError:
+                raise FeaturedRefreshError(
+                    "language ranking contains an invalid content ID"
+                ) from None
+            if content_id in seen:
+                raise FeaturedRefreshError(
+                    "language ranking contains a duplicate content ID"
+                )
+            previous = content_languages.setdefault(content_id, language)
+            if previous != language:
+                raise FeaturedRefreshError(
+                    "one drama appeared in multiple language rankings"
+                )
+            title = compact_text(item.get("title"), 240)
+            cover_url = sanitize_cover_url(
+                item.get("cover_url"),
+                allowed_cover_hosts,
+            )
+            if not title or not cover_url:
+                raise FeaturedRefreshError(
+                    "W2A resource omitted required featured fields"
+                )
+            seen.add(content_id)
+            selected.append(
+                {
+                    "content_id": content_id,
+                    "title": title,
+                    "cover_url": cover_url,
+                    # The W2A resource cache does not carry language metadata.
+                    # The verified spend bucket is the source of this field.
+                    "language": language,
+                    "episode_count": max(
+                        0,
+                        _positive_integer(item.get("episode_count")),
+                    ),
+                }
+            )
+        public_rankings[language] = _deterministic_public_order(
+            selected,
+            "%s:%s" % (source_date, language),
+        )
+    if default_key not in public_rankings:
+        raise FeaturedRefreshError("English featured ranking is unavailable")
+
+    snapshot = {
+        "schema_version": LANGUAGE_SNAPSHOT_VERSION,
+        "source_date": source_date,
+        "generated_at": generated.isoformat(timespec="seconds"),
+        "default_language": default_key,
+        "rankings": public_rankings,
+    }
+    payload = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > MAX_LANGUAGE_SNAPSHOT_BYTES:
+        raise FeaturedRefreshError("language snapshot exceeds 256 KiB")
+    if _contains_private_spend_key(snapshot):
+        raise FeaturedRefreshError(
+            "language snapshot contains private spend data"
+        )
+    return snapshot
+
+
 def _snapshot_content(value):
     if not isinstance(value, dict):
         return None
@@ -536,6 +834,89 @@ def _snapshot_content(value):
     }
 
 
+def _language_snapshot_content(value):
+    if not isinstance(value, dict):
+        return None
+    if set(value) != {
+        "schema_version",
+        "source_date",
+        "generated_at",
+        "default_language",
+        "rankings",
+    }:
+        return None
+    if value.get("schema_version") != LANGUAGE_SNAPSHOT_VERSION:
+        return None
+    try:
+        if normalize_source_date(value.get("source_date")) != value.get(
+            "source_date"
+        ):
+            return None
+        generated_at = datetime.fromisoformat(str(value.get("generated_at") or ""))
+        default_language = normalize_featured_language(
+            value.get("default_language")
+        )
+    except (FeaturedRefreshError, TypeError, ValueError):
+        return None
+    if generated_at.tzinfo is None or default_language != DEFAULT_FEATURED_LANGUAGE:
+        return None
+
+    rankings = value.get("rankings")
+    if (
+        not isinstance(rankings, dict)
+        or not rankings
+        or len(rankings) > MAX_LANGUAGE_BUCKETS
+        or default_language not in rankings
+    ):
+        return None
+    expected_item_keys = {
+        "content_id",
+        "title",
+        "cover_url",
+        "language",
+        "episode_count",
+    }
+    seen_content_ids = set()
+    for raw_language, items in rankings.items():
+        try:
+            language = normalize_featured_language(raw_language)
+        except FeaturedRefreshError:
+            return None
+        if language != raw_language:
+            return None
+        if not isinstance(items, list) or len(items) != 5:
+            return None
+        bucket_ids = set()
+        for item in items:
+            if not isinstance(item, dict) or set(item) != expected_item_keys:
+                return None
+            try:
+                content_id = normalize_content_id(item.get("content_id"))
+            except ValueError:
+                return None
+            if (
+                item.get("content_id") != content_id
+                or item.get("language") != language
+                or not isinstance(item.get("title"), str)
+                or not item.get("title")
+                or not isinstance(item.get("cover_url"), str)
+                or not item.get("cover_url").startswith("https://")
+                or not isinstance(item.get("episode_count"), int)
+                or item.get("episode_count") < 0
+                or content_id in bucket_ids
+                or content_id in seen_content_ids
+            ):
+                return None
+            bucket_ids.add(content_id)
+            seen_content_ids.add(content_id)
+    return {
+        "schema_version": value.get("schema_version"),
+        "source_date": value.get("source_date"),
+        "default_language": default_language,
+        "rankings": rankings,
+    }
+
+
 def _contains_private_spend_key(value):
     if isinstance(value, dict):
         for key, item in value.items():
@@ -548,8 +929,14 @@ def _contains_private_spend_key(value):
     return False
 
 
-def atomic_write_snapshot(path, snapshot):
-    """Atomically replace a public JSON file; return True only when changed."""
+def _atomic_write_validated_snapshot(
+    path,
+    snapshot,
+    *,
+    maximum_bytes,
+    snapshot_content,
+    size_error,
+):
     target = Path(path)
     parent = target.parent
     if target.is_symlink() or parent.is_symlink():
@@ -563,10 +950,13 @@ def atomic_write_snapshot(path, snapshot):
         )
         + "\n"
     ).encode("utf-8")
-    if len(payload) > MAX_PUBLIC_SNAPSHOT_BYTES:
-        raise FeaturedCacheError("featured cache exceeds 32 KiB")
+    if len(payload) > int(maximum_bytes):
+        raise FeaturedCacheError(size_error)
     if _contains_private_spend_key(snapshot):
         raise FeaturedCacheError("featured cache contains private spend data")
+    normalized_snapshot = snapshot_content(snapshot)
+    if normalized_snapshot is None:
+        raise FeaturedCacheError("featured cache snapshot is invalid")
 
     try:
         existing = json.loads(target.read_text(encoding="utf-8"))
@@ -574,7 +964,7 @@ def atomic_write_snapshot(path, snapshot):
         existing = None
     except (OSError, ValueError, TypeError):
         existing = None
-    if _snapshot_content(existing) == _snapshot_content(snapshot):
+    if snapshot_content(existing) == normalized_snapshot:
         return False
 
     descriptor = -1
@@ -631,6 +1021,28 @@ def atomic_write_snapshot(path, snapshot):
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def atomic_write_snapshot(path, snapshot):
+    """Atomically replace the public v1 JSON; return True only when changed."""
+    return _atomic_write_validated_snapshot(
+        path,
+        snapshot,
+        maximum_bytes=MAX_PUBLIC_SNAPSHOT_BYTES,
+        snapshot_content=_snapshot_content,
+        size_error="featured cache exceeds 32 KiB",
+    )
+
+
+def atomic_write_language_snapshot(path, snapshot):
+    """Atomically replace the public v2 language bundle."""
+    return _atomic_write_validated_snapshot(
+        path,
+        snapshot,
+        maximum_bytes=MAX_LANGUAGE_SNAPSHOT_BYTES,
+        snapshot_content=_language_snapshot_content,
+        size_error="featured language cache exceeds 256 KiB",
+    )
 
 
 def ensure_safe_data_disk_target(

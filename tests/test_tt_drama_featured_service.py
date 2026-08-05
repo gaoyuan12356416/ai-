@@ -8,14 +8,21 @@ from unittest import mock
 
 from features.tt_drama_featured.service import (
     CONTENT_ID_SQL_PATTERN,
+    DEFAULT_FEATURED_LANGUAGE,
     FeaturedCacheError,
     FeaturedConfig,
     FeaturedDramaRepository,
     FeaturedRefreshError,
+    LANGUAGE_PATTERN,
+    MAX_LANGUAGE_CANDIDATES,
+    atomic_write_language_snapshot,
     atomic_write_snapshot,
+    build_language_snapshot,
     build_snapshot,
+    normalize_featured_language,
     previous_source_date,
     resolve_ranked_resources,
+    resolve_ranked_resources_by_language,
 )
 from features.tt_drama_resources import (
     ResourceOutcome,
@@ -32,6 +39,10 @@ CONTENT_IDS = [
     "DRAMA00005",
     "DRAMA00006",
 ]
+LANGUAGE_CONTENT_IDS = {
+    "en": ["ENGLISH%03d" % index for index in range(1, 7)],
+    "es": ["SPANISH%03d" % index for index in range(1, 7)],
+}
 FIXED_TIME = datetime(
     2026,
     7,
@@ -47,6 +58,28 @@ def spend_rows(content_ids=CONTENT_IDS):
         {"content_id": content_id, "spend_n": 1000 - index}
         for index, content_id in enumerate(content_ids)
     ]
+
+
+def language_spend_rows(content_ids_by_language=LANGUAGE_CONTENT_IDS):
+    rows = []
+    for language in sorted(content_ids_by_language):
+        for index, content_id in enumerate(content_ids_by_language[language]):
+            rows.append(
+                {
+                    "content_id": content_id,
+                    "drama_language": language,
+                    "language_count": 1,
+                    "spend_n": 1000 - index,
+                }
+            )
+    return rows
+
+
+def ranked_by_language(content_ids_by_language=LANGUAGE_CONTENT_IDS):
+    result = {}
+    for row in language_spend_rows(content_ids_by_language):
+        result.setdefault(row["drama_language"], []).append(dict(row))
+    return result
 
 
 def resource_item(content_id, *, title=None, cover_url=None):
@@ -85,7 +118,10 @@ class _FakeCursor:
             self.row = {"read_only": self.connection.read_only}
             self.rows = [self.row]
         elif "ads_custom_source_insight" in sql:
-            self.rows = list(self.connection.spend)
+            if "AS drama_language" in sql:
+                self.rows = list(self.connection.language_spend)
+            else:
+                self.rows = list(self.connection.spend)
             self.row = self.rows[0] if self.rows else None
         else:
             raise AssertionError("unexpected SQL")
@@ -104,6 +140,7 @@ class _FakeConnection:
     def __init__(self, *, read_only=1):
         self.read_only = read_only
         self.spend = spend_rows()
+        self.language_spend = language_spend_rows()
         self.statements = []
         self.closed = False
 
@@ -138,13 +175,22 @@ class _FakeResourceService:
 
 
 class _FakeRankingRepository:
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, language_rows=None):
         self.rows = list(rows or spend_rows())
+        self.language_rows = dict(language_rows or ranked_by_language())
         self.calls = []
+        self.language_calls = []
 
     def fetch_ranked(self, source_date):
         self.calls.append(source_date)
         return list(self.rows)
+
+    def fetch_ranked_by_language(self, source_date):
+        self.language_calls.append(source_date)
+        return {
+            language: [dict(row) for row in rows]
+            for language, rows in self.language_rows.items()
+        }
 
 
 def complete_snapshot(source_date="2026-07-26"):
@@ -205,6 +251,85 @@ class FeaturedDramaServiceTests(unittest.TestCase):
                 20,
             ),
         )
+
+    def test_repository_queries_one_bounded_ranking_for_all_languages(self):
+        connection = _FakeConnection()
+        repository = FeaturedDramaRepository(
+            host="readonly.example",
+            port=63350,
+            user="reader",
+            password="secret",
+            config=FeaturedConfig(),
+            connection_factory=lambda: connection,
+        )
+        ranked = repository.fetch_ranked_by_language("2026-07-26")
+        self.assertEqual(set(ranked), {"en", "es"})
+        self.assertTrue(connection.closed)
+        self.assertTrue(
+            all(
+                row["drama_language"] == language
+                for language, rows in ranked.items()
+                for row in rows
+            )
+        )
+
+        language_sql, language_params = next(
+            statement
+            for statement in connection.statements
+            if "AS drama_language" in statement[0]
+        )
+        self.assertIn("FORCE INDEX (`as`)", language_sql)
+        self.assertIn("GROUP BY BINARY i.data_source_id", language_sql)
+        self.assertIn("language_count = 1", language_sql)
+        self.assertIn(
+            "ORDER BY drama_language ASC,",
+            language_sql,
+        )
+        self.assertIn("spend_n DESC", language_sql)
+        self.assertEqual(
+            language_params,
+            (
+                "[w2a]drama-double",
+                "2026-07-26",
+                "Dramawave",
+                6,
+                CONTENT_ID_SQL_PATTERN,
+                LANGUAGE_PATTERN.pattern,
+                MAX_LANGUAGE_CANDIDATES + 1,
+            ),
+        )
+
+    def test_repository_rejects_unbounded_language_candidate_result(self):
+        connection = _FakeConnection()
+        connection.language_spend = [
+            {
+                "content_id": "L%09d" % index,
+                "drama_language": "en",
+                "language_count": 1,
+                "spend_n": 1,
+            }
+            for index in range(MAX_LANGUAGE_CANDIDATES + 1)
+        ]
+        repository = FeaturedDramaRepository(
+            host="readonly.example",
+            port=63350,
+            user="reader",
+            password="secret",
+            config=FeaturedConfig(),
+            connection_factory=lambda: connection,
+        )
+        with self.assertRaisesRegex(
+            FeaturedRefreshError,
+            "exceeds 5000 candidates",
+        ):
+            repository.fetch_ranked_by_language("2026-07-26")
+
+    def test_featured_language_normalization_is_bounded_and_canonical(self):
+        self.assertNotIn("?:", LANGUAGE_PATTERN.pattern)
+        self.assertEqual(normalize_featured_language(" ZH_TW "), "zh-tw")
+        for invalid in (None, "", "en us", "../../en", "x", "english-language"):
+            with self.assertRaises(FeaturedRefreshError):
+                normalize_featured_language(invalid)
 
     def test_repository_fetch_alias_returns_ranked_rows_only(self):
         connection = _FakeConnection()
@@ -372,6 +497,142 @@ class FeaturedDramaServiceTests(unittest.TestCase):
                 allowed_cover_hosts=("cdn.usrgrow.com",),
             )
 
+    def test_language_resolution_overrides_empty_resource_language_and_skips_incomplete_non_default(self):
+        rankings = ranked_by_language()
+        service = _FakeResourceService(
+            {
+                content_id: ResourceOutcome(False, None, "NEGATIVE_HIT")
+                for content_id in LANGUAGE_CONTENT_IDS["es"][4:]
+            }
+        )
+        resolved = resolve_ranked_resources_by_language(
+            rankings,
+            service,
+            allowed_cover_hosts=("cdn.usrgrow.com",),
+        )
+        self.assertEqual(set(resolved), {"en"})
+        self.assertEqual(len(resolved["en"]), 5)
+        self.assertTrue(
+            all(item["language"] == "en" for item in resolved["en"])
+        )
+
+    def test_language_resolution_requires_complete_english_fallback(self):
+        rankings = ranked_by_language()
+        service = _FakeResourceService(
+            {
+                content_id: ResourceOutcome(False, None, "NEGATIVE_HIT")
+                for content_id in LANGUAGE_CONTENT_IDS["en"][4:]
+            }
+        )
+        with self.assertRaisesRegex(FeaturedRefreshError, "required English"):
+            resolve_ranked_resources_by_language(
+                rankings,
+                service,
+                allowed_cover_hosts=("cdn.usrgrow.com",),
+            )
+
+    def test_language_snapshot_has_v2_schema_bucket_language_and_no_spend(self):
+        rankings = {
+            language: [
+                resource_item(content_id)
+                for content_id in content_ids[:5]
+            ]
+            for language, content_ids in LANGUAGE_CONTENT_IDS.items()
+        }
+        snapshot = build_language_snapshot(
+            source_date="2026-07-26",
+            generated_at=FIXED_TIME,
+            rankings=rankings,
+            allowed_cover_hosts=("cdn.usrgrow.com",),
+        )
+        self.assertEqual(
+            set(snapshot),
+            {
+                "schema_version",
+                "source_date",
+                "generated_at",
+                "default_language",
+                "rankings",
+            },
+        )
+        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["default_language"], "en")
+        self.assertEqual(set(snapshot["rankings"]), {"en", "es"})
+        for language, items in snapshot["rankings"].items():
+            self.assertEqual(len(items), 5)
+            self.assertTrue(
+                all(item["language"] == language for item in items)
+            )
+        self.assertNotIn(
+            "spend",
+            json.dumps(snapshot, ensure_ascii=False).lower(),
+        )
+
+    def test_language_snapshot_requires_english_and_rejects_cross_bucket_duplicate(self):
+        spanish_only = {
+            "es": [
+                resource_item(content_id)
+                for content_id in LANGUAGE_CONTENT_IDS["es"][:5]
+            ]
+        }
+        with self.assertRaisesRegex(FeaturedRefreshError, "English"):
+            build_language_snapshot(
+                source_date="2026-07-26",
+                generated_at=FIXED_TIME,
+                rankings=spanish_only,
+                allowed_cover_hosts=("cdn.usrgrow.com",),
+            )
+
+        duplicate = {
+            "en": [
+                resource_item(content_id)
+                for content_id in LANGUAGE_CONTENT_IDS["en"][:5]
+            ],
+            "es": [
+                resource_item(content_id)
+                for content_id in LANGUAGE_CONTENT_IDS["es"][:4]
+            ]
+            + [resource_item(LANGUAGE_CONTENT_IDS["en"][0])],
+        }
+        with self.assertRaisesRegex(FeaturedRefreshError, "multiple language"):
+            build_language_snapshot(
+                source_date="2026-07-26",
+                generated_at=FIXED_TIME,
+                rankings=duplicate,
+                allowed_cover_hosts=("cdn.usrgrow.com",),
+            )
+
+    def test_language_snapshot_atomic_write_is_idempotent_and_bounded(self):
+        rankings = {
+            language: [
+                resource_item(content_id)
+                for content_id in content_ids[:5]
+            ]
+            for language, content_ids in LANGUAGE_CONTENT_IDS.items()
+        }
+        snapshot = build_language_snapshot(
+            source_date="2026-07-26",
+            generated_at=FIXED_TIME,
+            rankings=rankings,
+            allowed_cover_hosts=("cdn.usrgrow.com",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "current-by-language.json"
+            self.assertTrue(atomic_write_language_snapshot(target, snapshot))
+            original = target.read_bytes()
+            repeated = json.loads(json.dumps(snapshot))
+            repeated["generated_at"] = "2026-07-27T19:00:00+08:00"
+            self.assertFalse(
+                atomic_write_language_snapshot(target, repeated)
+            )
+            self.assertEqual(target.read_bytes(), original)
+
+            oversized = json.loads(json.dumps(snapshot))
+            oversized["rankings"]["en"][0]["title"] = "x" * (256 * 1024)
+            with self.assertRaisesRegex(FeaturedCacheError, "256 KiB"):
+                atomic_write_language_snapshot(target, oversized)
+            self.assertEqual(target.read_bytes(), original)
+
     def test_snapshot_preserves_public_v1_schema_and_omits_spend(self):
         snapshot = complete_snapshot()
         self.assertEqual(
@@ -502,13 +763,67 @@ class FeaturedDramaServiceTests(unittest.TestCase):
             generated_at=FIXED_TIME,
         )
         self.assertEqual(result["item_count"], 5)
+        self.assertEqual(result["language_count"], 2)
         self.assertTrue(result["dry_run"])
         self.assertFalse(result["changed"])
+        self.assertFalse(result["language_changed"])
         self.assertEqual(repository.calls, ["2026-07-26"])
+        self.assertEqual(repository.language_calls, ["2026-07-26"])
         self.assertEqual(
             [content_id for content_id, _allow_stale in resources.calls],
-            CONTENT_IDS[:5],
+            CONTENT_IDS[:5]
+            + LANGUAGE_CONTENT_IDS["en"][:5]
+            + LANGUAGE_CONTENT_IDS["es"][:5],
         )
+
+    def test_refresh_rejects_one_path_for_both_public_schemas(self):
+        with self.assertRaisesRegex(FeaturedCacheError, "must be different"):
+            refresh_script.refresh(
+                source_date="2026-07-26",
+                cache_path="/same/current.json",
+                language_cache_path="/same/current.json",
+                dry_run=True,
+                repository=_FakeRankingRepository(),
+                resource_service=_FakeResourceService(),
+                generated_at=FIXED_TIME,
+            )
+
+    def test_language_refresh_failure_does_not_block_legacy_v1_publish(self):
+        repository = _FakeRankingRepository()
+
+        def fail_language(_source_date):
+            raise FeaturedRefreshError("language query failed")
+
+        repository.fetch_ranked_by_language = fail_language
+        with mock.patch.object(
+            refresh_script,
+            "ensure_safe_data_disk_target",
+            return_value=Path("/safe/current.json"),
+        ), mock.patch.object(
+            refresh_script,
+            "_make_public_parent",
+        ), mock.patch.object(
+            refresh_script,
+            "atomic_write_snapshot",
+            return_value=True,
+        ) as write_snapshot, mock.patch.object(
+            refresh_script,
+            "atomic_write_language_snapshot",
+        ) as write_language_snapshot:
+            with self.assertRaisesRegex(
+                FeaturedRefreshError,
+                "language query failed",
+            ):
+                refresh_script.refresh(
+                    source_date="2026-07-26",
+                    cache_path="/safe/current.json",
+                    language_cache_path="/safe/current-by-language.json",
+                    repository=repository,
+                    resource_service=_FakeResourceService(),
+                    generated_at=FIXED_TIME,
+                )
+        write_snapshot.assert_called_once()
+        write_language_snapshot.assert_not_called()
 
     def test_featured_resource_builder_rejects_other_landing_id(self):
         with mock.patch.dict(
@@ -536,15 +851,20 @@ class FeaturedDramaServiceTests(unittest.TestCase):
             refresh_script,
             "atomic_write_snapshot",
         ) as write_snapshot:
-            with self.assertRaisesRegex(FeaturedRefreshError, "only 4 of 5"):
-                refresh_script.refresh(
-                    source_date="2026-07-26",
-                    cache_path="/unused/current.json",
-                    repository=repository,
-                    resource_service=resources,
-                    generated_at=FIXED_TIME,
-                )
+            with mock.patch.object(
+                refresh_script,
+                "atomic_write_language_snapshot",
+            ) as write_language_snapshot:
+                with self.assertRaisesRegex(FeaturedRefreshError, "only 4 of 5"):
+                    refresh_script.refresh(
+                        source_date="2026-07-26",
+                        cache_path="/unused/current.json",
+                        repository=repository,
+                        resource_service=resources,
+                        generated_at=FIXED_TIME,
+                    )
         write_snapshot.assert_not_called()
+        write_language_snapshot.assert_not_called()
 
     def test_featured_unit_runs_shared_release_and_grants_both_state_paths(self):
         root = Path(__file__).resolve().parents[1]
@@ -567,6 +887,12 @@ class FeaturedDramaServiceTests(unittest.TestCase):
             unit,
         )
         self.assertIn(
+            "TT_DRAMA_FEATURED_LANGUAGE_CACHE_PATH="
+            "/mnt/data-disk/tt-drama-featured/public/"
+            "current-by-language.json",
+            unit,
+        )
+        self.assertIn(
             "/mnt/data-disk/tt-drama-resource-cache/state",
             unit,
         )
@@ -577,7 +903,7 @@ class FeaturedDramaServiceTests(unittest.TestCase):
             unit,
         )
         self.assertIn("/mnt/data-disk/tt-drama-featured/public", unit)
-        self.assertIn("TimeoutStartSec=180s", unit)
+        self.assertIn("TimeoutStartSec=15min", unit)
         self.assertNotIn(
             "WorkingDirectory=/mnt/data-disk/tt-drama-featured/current",
             unit,

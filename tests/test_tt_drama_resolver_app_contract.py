@@ -167,6 +167,41 @@ class ResolverAppContractTests(unittest.TestCase):
         self.assertIn("18:00:00 Asia/Shanghai", timer)
         self.assertIn("Persistent=true", timer)
 
+    def test_tt_code_language_bundle_is_a_separate_static_exact_route(self):
+        legacy_nginx = (
+            ROOT / "deploy" / "nginx" / "tt-drama-search.conf"
+        ).read_text(encoding="utf-8")
+        code_nginx = (
+            ROOT / "deploy" / "nginx" / "tt-drama-code-search.conf"
+        ).read_text(encoding="utf-8")
+        location = (
+            "location = /api/public/tt-drama/featured-by-language"
+        )
+        self.assertNotIn(location, legacy_nginx)
+        self.assertEqual(code_nginx.count(location), 1)
+        language_block = code_nginx.split(location, 1)[1].split(
+            "location =",
+            1,
+        )[0]
+        self.assertIn(
+            "alias /mnt/data-disk/tt-drama-featured/public/"
+            "current-by-language.json",
+            language_block,
+        )
+        self.assertIn("public, max-age=300", language_block)
+        self.assertNotIn("proxy_pass", language_block)
+        self.assertIn("limit_except GET", language_block)
+
+        # The legacy endpoint remains byte-for-byte routed to the v1 file.
+        self.assertIn(
+            "location = /api/public/tt-drama/featured",
+            legacy_nginx,
+        )
+        self.assertIn(
+            "alias /mnt/data-disk/tt-drama-featured/public/current.json",
+            legacy_nginx,
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

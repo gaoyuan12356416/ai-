@@ -12,6 +12,7 @@ Group=tt-drama-featured
 WorkingDirectory=/mnt/data-disk/tt-drama-resource-cache/current
 EnvironmentFile=/etc/tt-drama-featured.env
 Environment=TT_DRAMA_FEATURED_CACHE_PATH=/mnt/data-disk/tt-drama-featured/public/current.json
+Environment=TT_DRAMA_FEATURED_LANGUAGE_CACHE_PATH=/mnt/data-disk/tt-drama-featured/public/current-by-language.json
 Environment=TT_DRAMA_FEATURED_LOCK_PATH=/run/tt-drama-featured/refresh.lock
 Environment=TT_DRAMA_RESOURCE_DB_PATH=/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -20,7 +21,7 @@ ExecStart=/usr/bin/python3 /mnt/data-disk/tt-drama-resource-cache/current/script
 RuntimeDirectory=tt-drama-featured
 RuntimeDirectoryMode=0700
 UMask=0027
-TimeoutStartSec=180s
+TimeoutStartSec=15min
 Nice=10
 PrivateTmp=true
 PrivateDevices=true

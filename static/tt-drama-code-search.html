@@ -10,7 +10,7 @@
     http-equiv="Content-Security-Policy"
     content="default-src 'self'; img-src 'self' https://ads-cdn.yingliang.tech https://cdn.usrgrow.com https://static.mydramawave.com https://static-v1.mydramawave.com https://static-v2.mydramawave.com data:; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
   >
-  <title>Find your DramaWave story</title>
+  <title>Enter the code and keep watching | DramaWave</title>
   <script src="/tt-drama-code-search.js" defer></script>
   <style>
     :root {
@@ -143,7 +143,7 @@
 
     h1 {
       max-width: 440px;
-      margin: 0;
+      margin: 0 0 21px;
       font-size: clamp(35px, 10vw, 50px);
       line-height: .98;
       letter-spacing: -2.25px;
@@ -156,12 +156,11 @@
       -webkit-background-clip: text;
     }
 
-    .intro {
-      max-width: 430px;
-      margin: 14px 0 21px;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.55;
+    [dir="rtl"] h1,
+    [dir="rtl"] .eyebrow,
+    [dir="rtl"] .brand-pill,
+    [dir="rtl"] .search-label {
+      letter-spacing: 0px;
     }
 
     .search-card {
@@ -598,7 +597,7 @@
     @media (max-height: 720px) {
       .brand { margin-bottom: 20px; }
       h1 { font-size: 34px; }
-      .intro { margin: 10px 0 16px; }
+      h1 { margin-bottom: 16px; }
       .section-head { margin-top: 20px; }
       .story { height: 151px; }
     }
@@ -627,20 +626,19 @@
           </div>
           <div class="brand-name">DramaWave</div>
         </div>
-        <div class="brand-pill">Code search</div>
+        <div class="brand-pill" id="brand-pill">Code search</div>
       </header>
 
       <section aria-labelledby="page-title">
-        <div class="eyebrow">Continue the story</div>
-        <h1 id="page-title">Find the drama you <span>were watching.</span></h1>
-        <p class="intro">Enter the four-character code or the Content ID shown with the video. We’ll confirm the matching story before opening DramaWave.</p>
+        <div class="eyebrow" id="page-eyebrow">Continue the story</div>
+        <h1 id="page-title">Enter the code and <span id="page-title-accent">keep watching</span></h1>
       </section>
 
-      <section class="search-card" aria-label="Search by short code or DramaWave Content ID">
+      <section class="search-card" id="search-card" aria-label="Search by short code or DramaWave Content ID">
         <form id="search-form" novalidate>
           <label class="search-label" for="drama-query">
-            <span>Short code or Content ID</span>
-            <span>Exact match</span>
+            <span id="search-label-primary">Short code or Content ID</span>
+            <span id="search-label-exact">Exact match</span>
           </label>
           <div class="search-row">
             <div class="input-wrap">
@@ -656,6 +654,7 @@
                 autocomplete="off"
                 autocapitalize="characters"
                 spellcheck="false"
+                dir="auto"
                 placeholder="e.g. A7K2 or Content ID"
                 aria-describedby="search-helper"
               >
@@ -677,10 +676,10 @@
               <img class="result-cover" id="result-cover" alt="" hidden>
             </div>
             <div class="result-copy">
-              <div class="match-badge">Match confirmed</div>
-              <strong class="result-title" id="result-title"></strong>
-              <div class="result-meta" id="result-meta"></div>
-              <p class="result-description" id="result-description"></p>
+              <div class="match-badge" id="match-badge">Match confirmed</div>
+              <strong class="result-title" id="result-title" dir="auto"></strong>
+              <div class="result-meta" id="result-meta" dir="ltr"></div>
+              <p class="result-description" id="result-description" dir="auto"></p>
             </div>
           </div>
           <a class="continue" id="continue-link" rel="noreferrer">
@@ -698,7 +697,7 @@
             <h2 id="recent-title">Recently featured</h2>
             <p id="recent-note">Swipe, drag, or use the arrows</p>
           </div>
-          <div class="carousel-controls" aria-label="Featured story controls">
+          <div class="carousel-controls" id="carousel-controls" aria-label="Featured story controls">
             <button class="carousel-control" id="stories-previous" type="button" aria-label="Previous featured stories">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
                 <path d="m15 18-6-6 6-6"></path>
@@ -711,14 +710,14 @@
             </button>
           </div>
         </div>
-        <div class="stories" id="stories" role="list" tabindex="0" aria-label="Featured stories"></div>
+        <div class="stories" id="stories" role="list" tabindex="0" dir="ltr" aria-label="Featured stories"></div>
       </section>
 
       <footer class="footer">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
         </svg>
-        Story and destination are verified before DramaWave opens
+        <span id="footer-copy">Story and destination are verified before DramaWave opens</span>
       </footer>
     </div>
   </main>

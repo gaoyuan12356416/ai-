@@ -61,7 +61,10 @@ function targetUrl(contentId, channel, extras) {
 }
 
 equal(bridge.CODE_RESOLVER_PATH, "/api/public/tt-code/resolve");
-equal(bridge.FEATURED_PATH, "/api/public/tt-drama/featured");
+equal(
+  bridge.FEATURED_PATH,
+  "/api/public/tt-drama/featured-by-language"
+);
 equal(bridge.TARGET_ORIGIN, "https://www.dramawavew2a.com");
 equal(bridge.TARGET_PATH, "/ads/101/2250/view");
 equal(bridge.SEARCH_SOURCE, "Search");
@@ -104,7 +107,7 @@ equal(
 );
 equal(
   bridge.buildFeaturedUrl("https://ai.yingliangads.com"),
-  "https://ai.yingliangads.com/api/public/tt-drama/featured"
+  "https://ai.yingliangads.com/api/public/tt-drama/featured-by-language"
 );
 throws(
   () => bridge.buildCodeResolverUrl(
@@ -397,6 +400,190 @@ equal(
   "2026-08-03"
 );
 
+equal(bridge.normalizeLanguageTag(" PT_BR "), "pt-br");
+equal(bridge.normalizeLanguageTag("bad tag"), "");
+deepEqual(bridge.localeCandidates("zh-CN"), ["zh-hans"]);
+deepEqual(bridge.localeCandidates("zh-HK"), ["zh-tw"]);
+deepEqual(bridge.localeCandidates("pt-BR"), ["pt-br", "pt"]);
+deepEqual(bridge.localeCandidates("fil-PH"), ["fil-ph", "tl"]);
+deepEqual(
+  bridge.getBrowserLanguages({
+    languages: [" ES_MX ", "en-US", "es-MX"],
+    language: "en-US"
+  }),
+  ["es-mx", "en-us"]
+);
+equal(bridge.resolveUiLocale(["zh-CN", "en-US"]), "zh-hans");
+equal(bridge.resolveUiLocale(["zh-TW", "en-US"]), "zh-tw");
+equal(bridge.resolveUiLocale(["xx-ZZ"]), "en");
+deepEqual(
+  bridge.rankingLanguageCandidates(["zh-CN", "en-US"]),
+  ["zh-tw", "en-us", "en"]
+);
+deepEqual(
+  bridge.rankingLanguageCandidates(["fil-PH"]),
+  ["fil-ph", "tl", "en"]
+);
+deepEqual(
+  bridge.rankingLanguageCandidates(["nl-NL"]),
+  ["en"],
+  "a browser language without UI copy must use the English ranking"
+);
+equal(
+  bridge.copyText("zh-hans", "episodes", { count: 12 }),
+  "12 集"
+);
+deepEqual(
+  Object.keys(bridge.COPY).sort(),
+  [
+    "ar", "cs", "de", "el", "en", "es", "fr", "hi", "id", "it",
+    "ja", "ko", "ms", "pl", "pt", "ro", "ru", "th", "tl", "tr",
+    "vi", "zh-hans", "zh-tw"
+  ],
+  "all production drama languages plus Simplified Chinese UI must exist"
+);
+for (const [locale, copy] of Object.entries(bridge.COPY)) {
+  deepEqual(
+    Object.keys(copy).sort(),
+    Object.keys(bridge.COPY.en).sort(),
+    locale + " must define every UI copy key"
+  );
+}
+
+function languageItems(language, prefix) {
+  return Array.from({ length: 5 }, (_unused, index) => ({
+    content_id: prefix + "DRAMA00" + (index + 1),
+    title: language.toUpperCase() + " Drama " + (index + 1),
+    cover_url:
+      "https://static-v1.mydramawave.com/" + language + "-" +
+      (index + 1) + ".jpg",
+    language,
+    episode_count: 80
+  }));
+}
+
+const featuredBundle = {
+  schema_version: 2,
+  source_date: "2026-08-03",
+  generated_at: "2026-08-04T15:30:00+08:00",
+  default_language: "en",
+  rankings: {
+    en: languageItems("en", "EN"),
+    es: languageItems("es", "ES"),
+    nl: languageItems("nl", "NL"),
+    pt: languageItems("pt", "PT"),
+    "pt-br": languageItems("pt-br", "PB"),
+    "zh-tw": languageItems("zh-tw", "ZH")
+  }
+};
+const englishBundle = bridge.normalizeFeaturedBundle(
+  featuredBundle,
+  ["en-US"],
+  featuredNow
+);
+equal(englishBundle.language, "en");
+equal(englishBundle.items.length, 5);
+equal(englishBundle.fallback, false);
+const chineseBundle = bridge.normalizeFeaturedBundle(
+  featuredBundle,
+  ["zh-CN"],
+  featuredNow
+);
+equal(chineseBundle.requested_language, "zh-tw");
+equal(chineseBundle.language, "zh-tw");
+equal(chineseBundle.items[0].language, "zh-tw");
+equal(chineseBundle.fallback, false);
+equal(
+  bridge.normalizeFeaturedBundle(
+    featuredBundle,
+    ["pt-BR"],
+    featuredNow
+  ).language,
+  "pt-br",
+  "an exact regional bucket must win before its base language"
+);
+const missingBundle = bridge.normalizeFeaturedBundle(
+  featuredBundle,
+  ["de-DE"],
+  featuredNow
+);
+equal(missingBundle.language, "en");
+equal(missingBundle.fallback, true);
+equal(
+  bridge.normalizeFeaturedBundle(
+    featuredBundle,
+    ["nl-NL"],
+    featuredNow
+  ).language,
+  "en",
+  "an untranslated browser language must ignore a matching future bucket"
+);
+throws(
+  () => bridge.normalizeFeaturedBundle({
+    ...featuredBundle,
+    rankings: {
+      ...featuredBundle.rankings,
+      x: languageItems("x", "XX")
+    }
+  }, ["en"], featuredNow),
+  /bucket/
+);
+throws(
+  () => bridge.normalizeFeaturedBundle({
+    ...featuredBundle,
+    rankings: {
+      ...featuredBundle.rankings,
+      es: featuredBundle.rankings.es.slice(0, 4)
+    }
+  }, ["es"], featuredNow),
+  /bucket/
+);
+throws(
+  () => bridge.normalizeFeaturedBundle({
+    ...featuredBundle,
+    rankings: {
+      ...featuredBundle.rankings,
+      es: featuredBundle.rankings.es.map((item, index) => (
+        index === 0 ? { ...item, spend_n: 100 } : item
+      ))
+    }
+  }, ["es"], featuredNow),
+  /bundle/
+);
+throws(
+  () => bridge.normalizeFeaturedBundle({
+    ...featuredBundle,
+    rankings: {
+      ...featuredBundle.rankings,
+      es: featuredBundle.rankings.es.map((item, index) => (
+        index === 0
+          ? { ...item, content_id: featuredBundle.rankings.en[0].content_id }
+          : item
+      ))
+    }
+  }, ["es"], featuredNow),
+  /invalid/
+);
+throws(
+  () => bridge.normalizeFeaturedBundle({
+    ...featuredBundle,
+    rankings: {
+      ...featuredBundle.rankings,
+      es: featuredBundle.rankings.es.map((item, index) => (
+        index === 0 ? { ...item, language: "en" } : item
+      ))
+    }
+  }, ["es"], featuredNow),
+  /invalid/
+);
+throws(
+  () => bridge.normalizeFeaturedBundle({
+    ...featuredBundle,
+    generated_at: "2026-07-31T15:29:59+08:00"
+  }, ["en"], featuredNow),
+  /stale/
+);
+
 const tracker = bridge.createDragTracker(7);
 tracker.begin(100, 200);
 deepEqual(tracker.move(96), { dragged: false, scrollLeft: 200 });
@@ -428,6 +615,9 @@ ok(html.includes('src="/tt-drama-code-search.js"'));
 ok(!html.includes('src="/tt-drama-search.js"'));
 ok(html.includes('id="stories-previous"'));
 ok(html.includes('id="stories-next"'));
+ok(html.includes("Enter the code and"));
+ok(html.includes('id="page-title-accent">keep watching</span>'));
+ok(!html.includes('class="intro"'));
 ok(html.includes("overflow-x: auto;"));
 ok(html.includes("scroll-snap-type: x proximity;"));
 ok(html.includes("touch-action: pan-x pan-y;"));
@@ -481,6 +671,7 @@ ok(
 ok(nginx.includes("location = /tt-code {"));
 ok(nginx.includes("location = /tt-drama-code-search.js {"));
 ok(nginx.includes("location = /api/public/tt-code/resolve {"));
+ok(nginx.includes("location = /api/public/tt-drama/featured-by-language {"));
 ok(nginx.includes("proxy_pass http://127.0.0.1:8787;"));
 ok(nginx.includes('Cache-Control "no-store" always;'));
 ok(nginx.includes("connect-src 'self'"));

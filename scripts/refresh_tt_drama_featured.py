@@ -19,11 +19,14 @@ from features.tt_drama_featured import (  # noqa: E402
     FeaturedConfig,
     FeaturedDramaRepository,
     FeaturedRefreshError,
+    atomic_write_language_snapshot,
     atomic_write_snapshot,
+    build_language_snapshot,
     build_snapshot,
     ensure_safe_data_disk_target,
     previous_source_date,
     resolve_ranked_resources,
+    resolve_ranked_resources_by_language,
     shanghai_now,
 )
 from features.tt_drama_resources import (  # noqa: E402
@@ -37,6 +40,9 @@ from features.tt_drama_resources import (  # noqa: E402
 
 DEFAULT_CACHE_PATH = (
     "/mnt/data-disk/tt-drama-featured/public/current.json"
+)
+DEFAULT_LANGUAGE_CACHE_PATH = (
+    "/mnt/data-disk/tt-drama-featured/public/current-by-language.json"
 )
 DEFAULT_RESOURCE_DB_PATH = (
     "/mnt/data-disk/tt-drama-resource-cache/state/resources.sqlite3"
@@ -269,10 +275,17 @@ def refresh(
     cache_path,
     dry_run=False,
     *,
+    language_cache_path=DEFAULT_LANGUAGE_CACHE_PATH,
     repository=None,
     resource_service=None,
     generated_at=None,
 ):
+    if os.path.realpath(str(cache_path)) == os.path.realpath(
+        str(language_cache_path)
+    ):
+        raise FeaturedCacheError(
+            "v1 and language featured cache paths must be different"
+        )
     settings = _mysql_settings()
     config = _build_config(settings)
     ranking_repository = repository or FeaturedDramaRepository(
@@ -308,9 +321,10 @@ def refresh(
             item_limit=config.item_limit,
             allowed_cover_hosts=cover_hosts,
         )
+        generated = generated_at or shanghai_now()
         snapshot = build_snapshot(
             source_date=source_date,
-            generated_at=generated_at or shanghai_now(),
+            generated_at=generated,
             spend_rows=spend_rows,
             resource_items=resource_items,
             item_limit=config.item_limit,
@@ -332,6 +346,45 @@ def refresh(
                 mount_info=_mount_info,
             )
             changed = atomic_write_snapshot(target, snapshot)
+
+        # Keep the legacy v1 refresh independent: the original file is fully
+        # generated (and, outside dry-run, published) before the new language
+        # ranking performs any extra query or resource validation.
+        ranked_by_language = ranking_repository.fetch_ranked_by_language(
+            source_date
+        )
+        language_resource_items = resolve_ranked_resources_by_language(
+            ranked_by_language,
+            resources,
+            item_limit=config.item_limit,
+            allowed_cover_hosts=cover_hosts,
+        )
+        language_snapshot = build_language_snapshot(
+            source_date=source_date,
+            generated_at=generated,
+            rankings=language_resource_items,
+            item_limit=config.item_limit,
+            allowed_cover_hosts=cover_hosts,
+        )
+        language_changed = False
+        if not dry_run:
+            language_target = ensure_safe_data_disk_target(
+                language_cache_path,
+                mount_path="/mnt/data-disk",
+                expected_uuid=DATA_DISK_UUID,
+                mount_info=_mount_info,
+            )
+            _make_public_parent(language_target)
+            ensure_safe_data_disk_target(
+                language_target,
+                mount_path="/mnt/data-disk",
+                expected_uuid=DATA_DISK_UUID,
+                mount_info=_mount_info,
+            )
+            language_changed = atomic_write_language_snapshot(
+                language_target,
+                language_snapshot,
+            )
     finally:
         if owns_resource_service:
             resources.close()
@@ -341,6 +394,8 @@ def refresh(
         "generated_at": snapshot["generated_at"],
         "item_count": len(snapshot["items"]),
         "changed": bool(changed),
+        "language_count": len(language_snapshot["rankings"]),
+        "language_changed": bool(language_changed),
         "dry_run": bool(dry_run),
     }
 
@@ -359,6 +414,13 @@ def _parser():
         default=_env("TT_DRAMA_FEATURED_CACHE_PATH", DEFAULT_CACHE_PATH),
     )
     parser.add_argument(
+        "--language-cache-path",
+        default=_env(
+            "TT_DRAMA_FEATURED_LANGUAGE_CACHE_PATH",
+            DEFAULT_LANGUAGE_CACHE_PATH,
+        ),
+    )
+    parser.add_argument(
         "--lock-path",
         default=_env("TT_DRAMA_FEATURED_LOCK_PATH", DEFAULT_LOCK_PATH),
     )
@@ -366,7 +428,7 @@ def _parser():
         "--dry-run",
         action="store_true",
         help=(
-            "Query and validate without replacing the public featured JSON; "
+            "Query and validate without replacing the public featured JSON files; "
             "the shared resource cache may still be filled."
         ),
     )
@@ -381,6 +443,7 @@ def main(argv=None):
             result = refresh(
                 source_date=source_date,
                 cache_path=args.cache_path,
+                language_cache_path=args.language_cache_path,
                 dry_run=args.dry_run,
             )
     except (
