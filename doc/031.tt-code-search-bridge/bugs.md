@@ -19,6 +19,7 @@
 | BUG-009 | P1 | 满池回收缺少持久审计 | 旧 code 改指向只能从现状推断 | 增加 `tt_post_code_recycle_audit`，回收同事务写审计 | 已关闭，全量回归通过 |
 | BUG-010 | P0 | `{code}` formal queue exact retry 误冲突 | 首次 freeze 后 caption 已含真实 code，重放请求仍携带 deterministic pre-freeze caption，单一字符串比较误判相同 idempotency_key 为不同事实 | 其他冻结事实完全一致时同时接受 deterministic pre-freeze caption 与已冻结 code caption；新增 exact replay/差异 payload 回归 | 已关闭，全量回归通过 |
 | BUG-011 | P1 | 输入修改后旧 CTA 与旧响应可复活 | input 变化没有立即撤销旧 href，也没有 abort/作废在途 resolver | input handler 立即清结果/href/data、递增序列并 abort；响应提交前校验最新序列 | 已关闭，Chrome 已复验 |
+| BUG-012 | P1 | Featured 鼠标点击不跳转 | carousel 在 `pointerdown` 立即对容器执行 pointer capture，浏览器把后续 click target 改成 `#stories`，委托点击处理器无法找到卡片，因此不会请求 resolver；延迟 capture 的初版修复另有出界松手和意外丢 capture 边界 | 普通按下不 capture；仅越过 7px 拖动阈值后 capture；在 window 级 move/up/cancel、`buttons===0` 和 `lostpointercapture` 上闭合状态，并在真实拖动后保留 click suppression | 已关闭；commit `20ceee877541ea10b11e4a63420ffdbca43d4cec` 已上线，395 项、Node 89/53、真实 Chrome 与独立 P0/P1/P2 终审通过 |
 
 ## 发布阻断条件
 
@@ -29,6 +30,7 @@
 - 历史 pending/direct-test AIpost 兼容回归失败。
 - 公共 Nginx route 可直接到 sidecar或 internal route 可在公网访问。
 - 横向拖动触发卡片跳转，或前端需发两次 resolver 请求。
+- 普通鼠标/触控笔点击不发 resolver，或阈值前出界/意外丢 capture 后产生幽灵拖动或误跳。
 - 相同 formal payload/idempotency_key 无法 exact replay，或修复错误放宽了差异 payload 的冲突保护。
 - 输入变化后旧 href 仍可点击，或过期 resolver 响应能覆盖当前输入。
 - 原 `/tt` 文件/路由/行为变化。
@@ -36,4 +38,4 @@
 
 ## 上线后要求
 
-如生产验证出现新问题，使用 `BUG-012` 起连续编号，记录 exact commit/release、时间、环境、最小复现、影响、回滚/修复和复验结果；不得覆盖上述历史记录。
+如生产验证出现新问题，使用 `BUG-013` 起连续编号，记录 exact commit/release、时间、环境、最小复现、影响、回滚/修复和复验结果；不得覆盖上述历史记录。
