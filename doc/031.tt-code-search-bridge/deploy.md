@@ -208,6 +208,18 @@ ss -lnt '( sport = :6381 )'
 | 零发布证据 | 部署前后 queue `7`、max queue `7`、非空 publish ID `6`；schedule runs `7`、random plans `7`；未调用 publish/canary/run-now/schedule-save |
 | 回滚点 | 旧 release、完整备份和 manifest 可用；未做破坏性生产代码切回，Redis 停机降级已实际验证 |
 
+## 2026-08-05 Featured 点击静态热修
+
+- 根因：carousel 在普通鼠标/触控笔 `pointerdown` 就 capture 到 `#stories`，导致 click target 不再是卡片，委托处理器不发 resolver。
+- GitHub exact commit：`20ceee877541ea10b11e4a63420ffdbca43d4cec`；候选 release：`/opt/tt-post/releases/20ceee877541ea10b11e4a63420ffdbca43d4cec`。
+- 本次仅原子替换 `/usr/share/nginx/html/tt-drama-code-search.js`。后端 current symlink 保持 `b01dabe22d9da1571c68b6fb0775a61bb48e18de`，没有重启 Nginx、主 app、sidecar、Redis 或 timer；检测到另一个未激活候选 `/opt/tt-post/releases/59c2cdb6878b5f4bf50fe4b82e73dd3541b45530` 后也未覆盖、未切换它。
+- 备份与 GitHub source checkout：`/mnt/data-disk/tt-post-publisher/backups/20260805T023820Z-tt-code-featured-click-pre-b01dabe2/`；`SHA256SUMS` 已复核。
+- 新 JS SHA-256：`e3063f9a872cfa07eb56f1b9ea54751b96532508244893c67b15b70672db2ba0`，公网 no-cache 下载一致且 `Cache-Control: no-store`。
+- 原 `/tt` HTML/JS SHA-256 仍为 `abce427bde5e1777020e87291e5f3bc0bc30c2507df2837c5ce5bd516ec6b88b` / `635d50a21aa69fcf68f84611e08ac4e9195957476739fcd40a5bf75a957e1a80`，部署前后完全一致。
+- 热修前后 DB 均为 queue `19`、max queue `19`、非空 publish ID `18`、schedule runs `19`、random plans `14`、route `12`、recycle audit `0`，`integrity_check=ok`；未调用 publish/canary/run-now/schedule-save。
+- 生产 Chrome 390x844 与 1440x900：均恰好 5 卡，点击第一卡各 1 次 resolver 并跳到 `af_dp=ZZ4b4w5k3h&af_channel=Featured`；100px 横拖与阈值前出界松手均 0 resolver、无残留状态；console/page error 为 0。
+- 热修回滚只需从上述备份恢复 `published_static/tt-drama-code-search.js` 并复核 SHA-256；不得切换后端 current、恢复数据库或触发 timer。
+
 ## 观察项
 
 - code 分配碰撞、位图 fallback、总占用率、`tt_post_code_recycle_audit`。
