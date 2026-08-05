@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TT 自动发布模板 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/tt-auto-publish.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>TT 自动发布模板</h1>
+          <p>为不同账号组合维护独立的选剧、选素材和发布时间规则。新模板默认停用，启用或手动执行前均需明确确认。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button link-button" href="/tt-auto-publish-runs.html">运行记录</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能查看 TT 自动发布模板。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 TT 自动发布权限</strong>
+        <span>请联系管理员在用户管理中开启 tt_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="notice warning">
+          <div class="notice-mark">!</div>
+          <div>
+            <strong>这里创建的是独立自动发布任务，不会改动现有 TT 发布池。</strong>
+            手动执行会为模板内每个账号立即创建一次真实发布任务；任务进入异步准备后不会因关闭模板而取消。
+          </div>
+        </section>
+
+        <section class="stats" aria-label="模板统计">
+          <article class="stat"><span>模板总数</span><strong id="totalCount">—</strong></article>
+          <article class="stat"><span>已启用</span><strong id="enabledCount">—</strong></article>
+          <article class="stat"><span>已停用</span><strong id="disabledCount">—</strong></article>
+          <article class="stat"><span>运行中</span><strong id="runningCount">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>模板列表</h2>
+              <p>账号可以同时绑定多个启用模板；同账号任务由服务端按优先级串行执行。</p>
+            </div>
+            <div class="actions">
+              <button id="reloadTemplates" class="button" type="button">刷新列表</button>
+              <a class="button primary link-button" href="/tt-auto-publish-template.html">创建模板</a>
+            </div>
+          </div>
+
+          <form id="templateFilters" class="filters">
+            <div class="field">
+              <label for="filterQuery">模板名称</label>
+              <input id="filterQuery" type="search" autocomplete="off" placeholder="搜索模板名称" />
+            </div>
+            <div class="field">
+              <label for="filterStatus">模板状态</label>
+              <select id="filterStatus">
+                <option value="">全部状态</option>
+                <option value="enabled">已启用</option>
+                <option value="disabled">已停用</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button class="button primary" type="submit">查询</button>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button id="resetFilters" class="button" type="button">重置</button>
+            </div>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>模板</th>
+                  <th>状态</th>
+                  <th>账号</th>
+                  <th>发布时间</th>
+                  <th>两层排序</th>
+                  <th>下次执行</th>
+                  <th>最近运行</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="templateRows">
+                <tr><td colspan="8" class="empty">正在加载模板…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pager">
+            <span id="pageInfo">第 1 页</span>
+            <div class="pager-actions">
+              <button id="prevPage" class="button" type="button">上一页</button>
+              <button id="nextPage" class="button" type="button">下一页</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="confirmDialog">
+    <div class="dialog-head"><h2 id="confirmTitle">请确认操作</h2></div>
+    <div class="dialog-body"><p id="confirmMessage"></p></div>
+    <div class="dialog-foot">
+      <button id="confirmCancel" class="button" type="button">取消</button>
+      <button id="confirmAccept" class="button primary" type="button">确认</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script src="/tt-auto-publish-common.js"></script>
+  <script src="/tt-auto-publish-templates.js"></script>
+</body>
+</html>

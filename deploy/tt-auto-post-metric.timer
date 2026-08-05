@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh TT automatic publishing metric cache every hour
+
+[Timer]
+OnCalendar=*-*-* *:12:00 Asia/Shanghai
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=30s
+Unit=tt-auto-post-metric.service
+
+[Install]
+WantedBy=timers.target

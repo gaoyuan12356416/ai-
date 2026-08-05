@@ -1,0 +1,426 @@
+(function () {
+  "use strict";
+
+  const ui = window.TtAutoPublish;
+  const templateId = ui.pageIdFromQuery("id");
+  const state = {
+    accounts: [],
+    selectedAccountIds: new Set(),
+    template: null,
+    version: 0,
+    busy: false,
+    dirty: false,
+  };
+
+  function accountId(item) {
+    return String(item && (item.id || item.account_id || item.source_account_id) || "").trim();
+  }
+
+  function accountName(item) {
+    return String(item && (item.display_name || item.account_name || item.creator_nickname || item.nickname) || `账号 ${accountId(item)}`);
+  }
+
+  function accountLanguage(item) {
+    return String(item && (item.drama_language || item.language) || "").trim();
+  }
+
+  function accountSettingsReady(item) {
+    if (item && item.settings_ready !== undefined) return ui.boolValue(item.settings_ready);
+    if (item && item.account_settings_configured !== undefined) return ui.boolValue(item.account_settings_configured);
+    if (item && item.configured !== undefined) return ui.boolValue(item.configured);
+    return !!accountLanguage(item);
+  }
+
+  function statusText(item) {
+    if (!item || !item.id) return "新模板";
+    return ui.boolValue(item.enabled) || item.status === "enabled" ? "已启用" : "已停用";
+  }
+
+  function renderAccounts() {
+    const list = ui.byId("accountList");
+    ui.clear(list);
+    const query = ui.byId("accountSearch").value.trim().toLowerCase();
+    const visible = state.accounts.filter(item => {
+      if (!query) return true;
+      return `${accountId(item)} ${accountName(item)} ${accountLanguage(item)}`.toLowerCase().includes(query);
+    });
+    if (!visible.length) {
+      list.appendChild(ui.element("div", { className: "empty", text: "没有匹配的账号。" }));
+      updateSummary();
+      return;
+    }
+    visible.forEach(item => {
+      const id = accountId(item);
+      if (!id) return;
+      const label = ui.element("label", { className: "account-option" });
+      const checkbox = ui.element("input", { type: "checkbox", attributes: { "aria-label": `选择 ${accountName(item)}` }, dataset: { accountId: id } });
+      checkbox.checked = state.selectedAccountIds.has(id);
+      const details = ui.element("div");
+      details.appendChild(ui.element("strong", { text: accountName(item) }));
+      details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
+      const meta = ui.element("div");
+      const language = accountLanguage(item);
+      meta.appendChild(ui.element("span", {
+        className: `language-chip${language && accountSettingsReady(item) ? "" : " badge warning"}`,
+        text: language ? `剧语言 ${language}` : "未设置剧语言",
+      }));
+      if (!accountSettingsReady(item)) meta.appendChild(ui.element("span", { className: "secondary", text: "账号设置不可用" }));
+      label.append(checkbox, details, meta);
+      list.appendChild(label);
+    });
+    updateSummary();
+  }
+
+  function selectedScheduleMode() {
+    return ui.byId("scheduleModeRandom").checked ? "random" : "fixed";
+  }
+
+  function timeValues() {
+    return Array.from(ui.byId("publishTimes").querySelectorAll("input[data-publish-time]"))
+      .map(input => input.value.trim())
+      .filter(Boolean);
+  }
+
+  function addTimeRow(value) {
+    const container = ui.byId("publishTimes");
+    const row = ui.element("div", { className: "time-row" });
+    const input = ui.element("input", {
+      type: "time",
+      attributes: { step: "60", "data-publish-time": "1", "aria-label": "固定发布时间" },
+    });
+    input.value = /^\d{2}:\d{2}$/.test(String(value || "")) ? String(value) : "11:00";
+    const remove = ui.element("button", { className: "button small", text: "删除", type: "button", dataset: { removeTime: "1" } });
+    row.append(input, remove);
+    container.appendChild(row);
+    syncTimeRemoveButtons();
+  }
+
+  function syncTimeRemoveButtons() {
+    const buttons = ui.byId("publishTimes").querySelectorAll("button[data-remove-time]");
+    buttons.forEach(button => { button.disabled = buttons.length <= 1; });
+  }
+
+  function setTimeRows(values) {
+    ui.clear(ui.byId("publishTimes"));
+    const times = Array.isArray(values) && values.length ? values : ["11:00"];
+    times.forEach(addTimeRow);
+  }
+
+  function setValue(id, value, fallback) {
+    const node = ui.byId(id);
+    if (!node) return;
+    node.value = value == null || value === "" ? (fallback == null ? "" : fallback) : String(value);
+  }
+
+  function ruleValue(rule, key) {
+    const value = ui.objectValue(rule)[key];
+    return value == null ? "" : value;
+  }
+
+  function hydrateTemplate(item) {
+    state.template = ui.objectValue(item);
+    const config = ui.objectValue(state.template.config);
+    const configValue = (key, fallback) => state.template[key] !== undefined ? state.template[key] : config[key] !== undefined ? config[key] : fallback;
+    state.version = Math.max(0, ui.numberValue(state.template.version || state.template.current_version, 0));
+    setValue("templateName", state.template.name);
+    setValue("platform", configValue("platform", 0), "0");
+    setValue("metricWindowDays", configValue("metric_window_days", 7), "7");
+    setValue("captionTemplate", configValue("caption_template", ""));
+    setValue("dramaLaunchWindowDays", configValue("drama_launch_window_days", 0), "0");
+    setValue("cooldownDays", configValue("cooldown_days", 0), "0");
+
+    const drama = ui.objectValue(configValue("drama_rule", {}));
+    const material = ui.objectValue(configValue("material_rule", {}));
+    const resourceTypes = Array.isArray(drama.resource_type_v2) ? drama.resource_type_v2 : [];
+    setValue("dramaResourceTypes", resourceTypes.join(", "));
+    setValue("dramaRoasMin", ruleValue(drama, "roas_min"));
+    setValue("dramaRoasMax", ruleValue(drama, "roas_max"));
+    setValue("dramaSpendMin", ruleValue(drama, "spend_min"));
+    setValue("dramaSpendMax", ruleValue(drama, "spend_max"));
+    setValue("dramaSortBy", drama.sort_by, "roas");
+    setValue("dramaSortDirection", drama.sort_direction, "desc");
+    setValue("materialDurationMin", ruleValue(material, "duration_min_seconds"));
+    setValue("materialDurationMax", ruleValue(material, "duration_max_seconds"));
+    setValue("materialRoasMin", ruleValue(material, "roas_min"));
+    setValue("materialRoasMax", ruleValue(material, "roas_max"));
+    setValue("materialSpendMin", ruleValue(material, "spend_min"));
+    setValue("materialSpendMax", ruleValue(material, "spend_max"));
+    setValue("materialSortBy", material.sort_by, "roas");
+    setValue("materialSortDirection", material.sort_direction, "desc");
+
+    const rawAccountIds = configValue("account_ids", []);
+    const accountIds = Array.isArray(rawAccountIds) ? rawAccountIds : [];
+    state.selectedAccountIds = new Set(accountIds.map(String));
+    const schedule = ui.objectValue(configValue("schedule", {}));
+    const randomMode = schedule.mode === "random";
+    ui.byId("scheduleModeRandom").checked = randomMode;
+    ui.byId("scheduleModeFixed").checked = !randomMode;
+    setTimeRows(schedule.times);
+    setValue("randomDailyCount", schedule.daily_count || schedule.random_daily_count, "1");
+    renderScheduleMode();
+
+    ui.setText(ui.byId("pageTitle"), `编辑 TT 自动发布模板 · ${state.template.name || templateId}`, "");
+    const badge = ui.byId("templateStatusBadge");
+    ui.setText(badge, statusText(state.template), "");
+    badge.className = `badge ${ui.boolValue(state.template.enabled) || state.template.status === "enabled" ? "success" : "warning"}`;
+    renderAccounts();
+    updateSummary();
+    state.dirty = false;
+  }
+
+  function renderScheduleMode() {
+    const random = selectedScheduleMode() === "random";
+    ui.byId("fixedScheduleFields").classList.toggle("hidden", random);
+    ui.byId("randomScheduleFields").classList.toggle("hidden", !random);
+    updateSummary();
+  }
+
+  function sortSummary(prefix) {
+    const metric = ui.byId(`${prefix}SortBy`).value === "spend" ? "消耗" : "D0 ROAS";
+    const direction = ui.byId(`${prefix}SortDirection`).value === "asc" ? "正序" : "倒序";
+    return `${metric} / ${direction}`;
+  }
+
+  function updateSummary() {
+    const count = state.selectedAccountIds.size;
+    ui.setText(ui.byId("selectedAccountCount"), `已选 ${count} 个`, "");
+    ui.setText(ui.byId("summaryVersion"), state.version ? `v${state.version}` : "新模板", "");
+    ui.setText(ui.byId("summaryAccounts"), `${count} 个`, "");
+    ui.setText(ui.byId("summaryMetric"), `platform=${ui.byId("platform").value || "0"} / ${ui.byId("metricWindowDays").value || "7"} 天`, "");
+    ui.setText(ui.byId("summaryDramaSort"), sortSummary("drama"), "");
+    ui.setText(ui.byId("summaryMaterialSort"), sortSummary("material"), "");
+    if (selectedScheduleMode() === "random") {
+      ui.setText(ui.byId("summarySchedule"), `每天随机 ${ui.byId("randomDailyCount").value || "1"} 次`, "");
+    } else {
+      const times = timeValues();
+      ui.setText(ui.byId("summarySchedule"), times.length ? `每天 ${times.join("、")}` : "未设置", "");
+    }
+    const caption = ui.byId("captionTemplate").value;
+    ui.setText(ui.byId("captionCount"), `${caption.length} / 2200`, "");
+  }
+
+  function parseResourceTypes() {
+    const raw = ui.byId("dramaResourceTypes").value.trim();
+    if (!raw) throw new Error("请至少填写一种短剧类型。");
+    const values = raw.split(/[,，;；\s]+/).filter(Boolean);
+    if (values.some(value => value.length > 64 || /[\u0000-\u0020]/.test(value))) throw new Error("短剧类型包含无效值。");
+    return Array.from(new Set(values));
+  }
+
+  function decimalOrNull(id) {
+    const raw = ui.byId(id).value.trim();
+    return raw === "" ? null : raw;
+  }
+
+  function integerValue(id, fallback) {
+    const raw = ui.byId(id).value.trim();
+    if (raw === "" && fallback !== undefined) return fallback;
+    return Number(raw);
+  }
+
+  function validateRange(minId, maxId, label) {
+    const min = decimalOrNull(minId);
+    const max = decimalOrNull(maxId);
+    if (min != null && Number(min) < 0 || max != null && Number(max) < 0) throw new Error(`${label}不能小于 0。`);
+    if (min != null && max != null && Number(min) > Number(max)) throw new Error(`${label}最小值不能大于最大值。`);
+  }
+
+  function buildPayload() {
+    const name = ui.byId("templateName").value.trim();
+    if (!name) throw new Error("请填写模板名称。");
+    if (!state.selectedAccountIds.size) throw new Error("请至少选择一个 TT 个号。");
+    const caption = ui.byId("captionTemplate").value.trim();
+    if (!caption) throw new Error("请填写发布文案模板。");
+    if (caption.length > 2200) throw new Error("发布文案模板不能超过 2200 个 UTF-16 字符单元。");
+    if (!/\{\{(?:content_id|contect_id)\}\}/.test(caption)) throw new Error("发布文案模板必须包含 {{content_id}} 或 {{contect_id}}。");
+    const metricWindowDays = integerValue("metricWindowDays", 7);
+    if (!Number.isInteger(metricWindowDays) || metricWindowDays < 1 || metricWindowDays > 30) throw new Error("指标统计窗口必须为 1–30 天。");
+    const launchWindow = integerValue("dramaLaunchWindowDays", 0);
+    const cooldown = integerValue("cooldownDays", 0);
+    if (!Number.isInteger(launchWindow) || launchWindow < 0) throw new Error("剧上线窗口必须为大于等于 0 的整数。");
+    if (!Number.isInteger(cooldown) || cooldown < 0) throw new Error("同剧冷却窗口必须为大于等于 0 的整数。");
+
+    validateRange("dramaRoasMin", "dramaRoasMax", "剧 D0 ROAS");
+    validateRange("dramaSpendMin", "dramaSpendMax", "剧消耗");
+    validateRange("materialRoasMin", "materialRoasMax", "素材 D0 ROAS");
+    validateRange("materialSpendMin", "materialSpendMax", "素材消耗");
+    validateRange("materialDurationMin", "materialDurationMax", "素材时长");
+    const durationMin = integerValue("materialDurationMin");
+    const durationMax = integerValue("materialDurationMax");
+    if (!Number.isInteger(durationMin) || durationMin < 0 || durationMin > 3600) throw new Error("素材最小时长必须为 0–3600 秒的整数。");
+    if (!Number.isInteger(durationMax) || durationMax < 1 || durationMax > 3600) throw new Error("素材最长时长必须为 1–3600 秒的整数。");
+    if (durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
+
+    const mode = selectedScheduleMode();
+    let schedule;
+    if (mode === "random") {
+      const dailyCount = integerValue("randomDailyCount");
+      if (!Number.isInteger(dailyCount) || dailyCount < 1 || dailyCount > 24) throw new Error("每天随机发布次数必须为 1–24。");
+      schedule = { mode: "random", daily_count: dailyCount };
+    } else {
+      const times = Array.from(new Set(timeValues())).sort();
+      if (!times.length) throw new Error("请至少设置一个固定发布时间。");
+      if (times.some(value => !/^([01]\d|2[0-3]):[0-5]\d$/.test(value))) throw new Error("固定发布时间格式无效。");
+      schedule = { mode: "fixed", times };
+    }
+
+    const payload = {
+      name,
+      account_ids: Array.from(state.selectedAccountIds),
+      caption_template: caption,
+      metric_window_days: metricWindowDays,
+      drama_launch_window_days: launchWindow,
+      cooldown_days: cooldown,
+      platform: integerValue("platform", 0),
+      drama_rule: {
+        resource_type_v2: parseResourceTypes(),
+        spend_min: decimalOrNull("dramaSpendMin"),
+        spend_max: decimalOrNull("dramaSpendMax"),
+        roas_min: decimalOrNull("dramaRoasMin"),
+        roas_max: decimalOrNull("dramaRoasMax"),
+        sort_by: ui.byId("dramaSortBy").value,
+        sort_direction: ui.byId("dramaSortDirection").value,
+      },
+      material_rule: {
+        duration_min_seconds: durationMin,
+        duration_max_seconds: durationMax,
+        spend_min: decimalOrNull("materialSpendMin"),
+        spend_max: decimalOrNull("materialSpendMax"),
+        roas_min: decimalOrNull("materialRoasMin"),
+        roas_max: decimalOrNull("materialRoasMax"),
+        sort_by: ui.byId("materialSortBy").value,
+        sort_direction: ui.byId("materialSortDirection").value,
+      },
+      schedule,
+    };
+    if (templateId) payload.expected_version = state.version;
+    return payload;
+  }
+
+  async function loadAccounts() {
+    const payload = await ui.api(`${ui.API_BASE}/accounts`);
+    state.accounts = ui.readItems(payload, ["accounts", "items"]);
+  }
+
+  async function loadTemplate() {
+    if (!templateId) return null;
+    const payload = await ui.api(`${ui.API_BASE}/templates/${templateId}`);
+    return ui.readItem(payload, ["template", "item"]);
+  }
+
+  async function saveTemplate(event) {
+    event.preventDefault();
+    if (state.busy) return;
+    let payload;
+    try {
+      payload = buildPayload();
+    } catch (error) {
+      ui.setText(ui.byId("formStatus"), error.message, "");
+      ui.byId("formStatus").className = "status-line error";
+      ui.showToast(error.message, true);
+      return;
+    }
+    state.busy = true;
+    ui.byId("saveTemplate").disabled = true;
+    ui.setText(ui.byId("formStatus"), "正在保存模板…", "");
+    ui.byId("formStatus").className = "status-line";
+    try {
+      const path = templateId ? `${ui.API_BASE}/templates/${templateId}` : `${ui.API_BASE}/templates`;
+      const response = await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
+      const saved = ui.readItem(response, ["template", "item"]);
+      const savedId = ui.positiveId(saved.id || saved.template_id || response.template_id || templateId);
+      state.dirty = false;
+      ui.setText(ui.byId("formStatus"), "模板已保存。", "");
+      ui.byId("formStatus").className = "status-line success";
+      ui.showToast("模板已保存；新模板默认保持关闭。", false);
+      location.href = savedId ? `/tt-auto-publish-template.html?id=${encodeURIComponent(savedId)}` : "/tt-auto-publish-templates.html";
+    } catch (error) {
+      ui.setText(ui.byId("formStatus"), error.message || "模板保存失败。", "");
+      ui.byId("formStatus").className = "status-line error";
+      ui.showToast(error.message || "模板保存失败", true);
+    } finally {
+      state.busy = false;
+      ui.byId("saveTemplate").disabled = false;
+    }
+  }
+
+  function bindEvents() {
+    ui.byId("templateForm").addEventListener("submit", event => void saveTemplate(event));
+    ui.byId("accountSearch").addEventListener("input", renderAccounts);
+    ui.byId("accountList").addEventListener("change", event => {
+      const checkbox = event.target.closest("input[data-account-id]");
+      if (!checkbox) return;
+      if (checkbox.checked) state.selectedAccountIds.add(checkbox.dataset.accountId);
+      else state.selectedAccountIds.delete(checkbox.dataset.accountId);
+      state.dirty = true;
+      updateSummary();
+    });
+    ui.byId("selectVisibleAccounts").addEventListener("click", () => {
+      ui.byId("accountList").querySelectorAll("input[data-account-id]").forEach(checkbox => {
+        checkbox.checked = true;
+        state.selectedAccountIds.add(checkbox.dataset.accountId);
+      });
+      state.dirty = true;
+      updateSummary();
+    });
+    ui.byId("clearAccounts").addEventListener("click", () => {
+      state.selectedAccountIds.clear();
+      state.dirty = true;
+      renderAccounts();
+    });
+    ui.byId("addPublishTime").addEventListener("click", () => {
+      addTimeRow("11:00");
+      state.dirty = true;
+      updateSummary();
+    });
+    ui.byId("publishTimes").addEventListener("click", event => {
+      const button = event.target.closest("button[data-remove-time]");
+      if (!button || button.disabled) return;
+      button.closest(".time-row")?.remove();
+      syncTimeRemoveButtons();
+      state.dirty = true;
+      updateSummary();
+    });
+    ui.byId("scheduleModeFixed").addEventListener("change", renderScheduleMode);
+    ui.byId("scheduleModeRandom").addEventListener("change", renderScheduleMode);
+    ui.byId("templateForm").addEventListener("input", () => {
+      state.dirty = true;
+      updateSummary();
+    });
+    ui.byId("templateForm").addEventListener("change", () => {
+      state.dirty = true;
+      updateSummary();
+    });
+    window.addEventListener("beforeunload", event => {
+      if (!state.dirty || state.busy) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+  }
+
+  void ui.initShell({
+    activeKey: "ttAutoPublishTemplates",
+    onReady: async () => {
+      bindEvents();
+      setTimeRows(["11:00"]);
+      try {
+        const [accountsResult, templateResult] = await Promise.all([loadAccounts(), loadTemplate()]);
+        void accountsResult;
+        if (templateId) {
+          if (!templateResult || !templateResult.id && !templateResult.template_id) throw new Error("模板不存在或不可访问。");
+          hydrateTemplate(templateResult);
+        } else {
+          renderAccounts();
+          renderScheduleMode();
+          updateSummary();
+          state.dirty = false;
+        }
+      } catch (error) {
+        ui.setText(ui.byId("formStatus"), error.message || "页面数据加载失败。", "");
+        ui.byId("formStatus").className = "status-line error";
+        ui.byId("saveTemplate").disabled = true;
+        ui.showToast(error.message || "页面数据加载失败", true);
+      }
+    },
+  });
+})();

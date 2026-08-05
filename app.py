@@ -41457,6 +41457,15 @@ def post_ad_material_source(task, asset):
     return source_id or str(data.get("id") or "")
 
 
+from features.tt_auto_posts.client import (
+    TT_AUTO_ADMIN_PREFIX,
+    TTAutoPostAdminClientError,
+    error_payload as tt_auto_posts_error_payload,
+    parse_admin_query as tt_auto_posts_query_params,
+    request_admin as tt_auto_post_service_request,
+)
+
+
 class TTPostAdminClientError(RuntimeError):
     """Secret-safe failure returned by the CPU-side TT Post service."""
 
@@ -94166,6 +94175,38 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             json_response(self, 200, self._auth_payload())
             return
 
+        if (
+            parsed.path in {
+                TT_AUTO_ADMIN_PREFIX + "/accounts",
+                TT_AUTO_ADMIN_PREFIX + "/templates",
+                TT_AUTO_ADMIN_PREFIX + "/runs",
+            }
+            or re.fullmatch(
+                re.escape(TT_AUTO_ADMIN_PREFIX)
+                + r"/(?:templates|runs)/[1-9][0-9]*",
+                parsed.path,
+            )
+        ):
+            navigation_key = (
+                "ttAutoPublishRuns"
+                if parsed.path.startswith(TT_AUTO_ADMIN_PREFIX + "/runs")
+                else "ttAutoPublishTemplates"
+            )
+            if not self._require_cookie_navigation_item(navigation_key):
+                return
+            try:
+                query = tt_auto_posts_query_params(parsed.path, parsed.query)
+                result = tt_auto_post_service_request(
+                    "GET",
+                    parsed.path,
+                    query=query,
+                )
+                json_response(self, 200, result, no_store=True)
+            except TTAutoPostAdminClientError as exc:
+                status, payload = tt_auto_posts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
         if parsed.path in {
             "/api/admin/tt-posts/accounts",
             "/api/admin/tt-posts/account-settings",
@@ -97559,6 +97600,115 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         parsed = urlparse(self.path)
+
+        tt_auto_template_match = re.fullmatch(
+            re.escape(TT_AUTO_ADMIN_PREFIX)
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?)?",
+            parsed.path,
+        )
+        if tt_auto_template_match:
+            if not self._require_cookie_navigation_item(
+                "ttAutoPublishTemplates"
+            ):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            request_payload = {}
+            action_suffix = parsed.path.rsplit("/", 1)[-1]
+            action = {
+                "copy": "copy_tt_auto_publish_template",
+                "enable": "enable_tt_auto_publish_template",
+                "disable": "disable_tt_auto_publish_template",
+                "preview": "preview_tt_auto_publish_template",
+                "run-now": "run_tt_auto_publish_template",
+                "templates": "create_tt_auto_publish_template",
+            }.get(action_suffix, "update_tt_auto_publish_template")
+            template_match = re.search(r"/templates/([1-9][0-9]*)", parsed.path)
+            target_id = template_match.group(1) if template_match else "new"
+            try:
+                request_payload = self._read_json()
+                if not isinstance(request_payload, dict):
+                    raise TTAutoPostAdminClientError(
+                        "invalid_request",
+                        "请求体必须是对象",
+                        400,
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = {
+                    "user_id": str(session.get("user_id") or "")[:128],
+                    "name": str(session.get("name") or "")[:200],
+                }
+                result = tt_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=outbound_payload,
+                )
+                result_template = (
+                    result.get("template")
+                    if isinstance(result, dict)
+                    and isinstance(result.get("template"), dict)
+                    else {}
+                )
+                result_run_id = str(
+                    (result.get("run_id") if isinstance(result, dict) else "")
+                    or ""
+                )
+                if target_id == "new":
+                    target_id = str(result_template.get("id") or "new")
+                try:
+                    append_audit_log(
+                        session,
+                        action,
+                        "tt_auto_publish_template",
+                        target_id,
+                        {
+                            "template_id": target_id,
+                            "run_id": result_run_id,
+                            "expected_version": str(
+                                request_payload.get("expected_version") or ""
+                            ),
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT auto publish template audit write failed"
+                    )
+                json_response(
+                    self,
+                    202 if action_suffix == "run-now" else 200,
+                    result,
+                    no_store=True,
+                )
+            except TTAutoPostAdminClientError as exc:
+                status, payload = tt_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        action + "_failed",
+                        "tt_auto_publish_template",
+                        target_id,
+                        {"template_id": target_id, "error": payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT auto publish template failure audit write failed"
+                    )
+                json_response(self, status, payload, no_store=True)
+            except Exception:
+                logging.exception("TT auto publish template request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "请求参数无效",
+                    },
+                    no_store=True,
+                )
+            return
 
         tt_post_queue_action_match = re.fullmatch(
             r"/api/admin/tt-posts/queue/([1-9][0-9]*)/(cancel|reconcile)",

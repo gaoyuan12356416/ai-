@@ -188,6 +188,28 @@
           enabled: true,
           order: 20,
         },
+        {
+          key: "ttAutoPublishTemplates",
+          label: "TT 自动发布模板",
+          description: "创建、复制、启停和手动执行自动选材发布模板",
+          kind: "page",
+          href: "/tt-auto-publish-templates.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 30,
+        },
+        {
+          key: "ttAutoPublishRuns",
+          label: "TT 自动发布记录",
+          description: "查看模板触发、账号任务、选材和发布结果",
+          kind: "page",
+          href: "/tt-auto-publish-runs.html",
+          module: "tt_posts",
+          adminOnly: false,
+          enabled: true,
+          order: 40,
+        },
       ],
     },
     {
@@ -428,6 +450,8 @@
     voiceoverTasks: "/voiceover-drama.html",
     ttAccountSettings: "/tt-account-settings.html",
     ttPostPool: "/tt-post-pool.html",
+    ttAutoPublishTemplates: "/tt-auto-publish-templates.html",
+    ttAutoPublishRuns: "/tt-auto-publish-runs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
     xPostMaterialPool: "/x-post-material-pool.html",
@@ -505,6 +529,38 @@
     );
     if (ttPostPool && Number(ttPostPool.order || 0) <= 10) {
       ttPostPool.order = 20;
+    }
+    const ttAutoPublishTemplatesExists = tiktokPlatform.items.some(
+      item => item && item.key === "ttAutoPublishTemplates"
+    );
+    if (!ttAutoPublishTemplatesExists) {
+      tiktokPlatform.items.push({
+        key: "ttAutoPublishTemplates",
+        label: "TT 自动发布模板",
+        description: "创建、复制、启停和手动执行自动选材发布模板",
+        kind: "page",
+        href: "/tt-auto-publish-templates.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 30,
+      });
+    }
+    const ttAutoPublishRunsExists = tiktokPlatform.items.some(
+      item => item && item.key === "ttAutoPublishRuns"
+    );
+    if (!ttAutoPublishRunsExists) {
+      tiktokPlatform.items.push({
+        key: "ttAutoPublishRuns",
+        label: "TT 自动发布记录",
+        description: "查看模板触发、账号任务、选材和发布结果",
+        kind: "page",
+        href: "/tt-auto-publish-runs.html",
+        module: "tt_posts",
+        adminOnly: false,
+        enabled: true,
+        order: 40,
+      });
     }
     const xPlatform = normalized.find(group => group && group.key === "x_platform");
     if (xPlatform) {

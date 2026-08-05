@@ -7,3 +7,5 @@ data/
 *.log
 .drama_material_jobs/
 .test_screenshot_batch/
+.playwright-cli/
+output/playwright/

@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Static UI contracts for independent TT automatic publishing templates."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import unittest
+from html.parser import HTMLParser
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STATIC = ROOT / "static"
+PAGE_PATHS = {
+    "templates": STATIC / "tt-auto-publish-templates.html",
+    "template": STATIC / "tt-auto-publish-template.html",
+    "runs": STATIC / "tt-auto-publish-runs.html",
+}
+SCRIPT_PATHS = {
+    "common": STATIC / "tt-auto-publish-common.js",
+    "templates": STATIC / "tt-auto-publish-templates.js",
+    "template": STATIC / "tt-auto-publish-template.js",
+    "runs": STATIC / "tt-auto-publish-runs.js",
+}
+PAGES = {name: path.read_text(encoding="utf-8") for name, path in PAGE_PATHS.items()}
+SCRIPTS = {name: path.read_text(encoding="utf-8") for name, path in SCRIPT_PATHS.items()}
+QUICK_NAV = (STATIC / "quick-nav.js").read_text(encoding="utf-8")
+NAVIGATION = json.loads((STATIC / "navigation.json").read_text(encoding="utf-8"))
+
+
+class IdParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids: set[str] = set()
+        self.scripts: list[str] = []
+        self.stylesheets: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if values.get("id"):
+            self.ids.add(values["id"])
+        if tag == "script" and values.get("src"):
+            self.scripts.append(values["src"])
+        if tag == "link" and values.get("rel") == "stylesheet" and values.get("href"):
+            self.stylesheets.append(values["href"])
+
+
+def parse_page(source: str) -> IdParser:
+    parser = IdParser()
+    parser.feed(source)
+    return parser
+
+
+class TtAutoPublishUiTest(unittest.TestCase):
+    def test_javascript_files_parse(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        for path in [*SCRIPT_PATHS.values(), STATIC / "quick-nav.js"]:
+            with self.subTest(path=path.name):
+                result = subprocess.run(
+                    [node, "--check", str(path)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pages_reuse_shared_shell_and_tt_permission(self):
+        active_keys = {
+            "templates": 'activeKey: "ttAutoPublishTemplates"',
+            "template": 'activeKey: "ttAutoPublishTemplates"',
+            "runs": 'activeKey: "ttAutoPublishRuns"',
+        }
+        for name, source in PAGES.items():
+            with self.subTest(page=name):
+                parser = parse_page(source)
+                self.assertIn("/ui-topbar.css", parser.stylesheets)
+                self.assertIn("/tt-auto-publish.css", parser.stylesheets)
+                self.assertIn("/ui-topbar.js", parser.scripts)
+                self.assertIn("/quick-nav.js", parser.scripts)
+                self.assertIn("/tt-auto-publish-common.js", parser.scripts)
+                self.assertIn("quickNav", parser.ids)
+                self.assertIn("userCard", parser.ids)
+                self.assertIn("authButton", parser.ids)
+                self.assertIn("loginGate", parser.ids)
+                self.assertIn("permissionGate", parser.ids)
+                self.assertIn("pageRoot", parser.ids)
+                self.assertIn("tt_posts", source)
+                self.assertIn(active_keys[name], SCRIPTS[name])
+        self.assertIn('api("/api/ui/topbar")', SCRIPTS["common"])
+        self.assertIn("user.permissions.tt_posts", SCRIPTS["common"])
+        self.assertIn("window.QuickNav.render", SCRIPTS["common"])
+        self.assertIn("window.UiTopbar.render", SCRIPTS["common"])
+        self.assertIn("window.UiTopbar.handleAuthAction", SCRIPTS["common"])
+
+    def test_navigation_registers_both_independent_pages(self):
+        group = next(item for item in NAVIGATION if item.get("key") == "tiktok_platform")
+        items = {item["key"]: item for item in group["items"]}
+        expected = {
+            "ttAutoPublishTemplates": "/tt-auto-publish-templates.html",
+            "ttAutoPublishRuns": "/tt-auto-publish-runs.html",
+        }
+        for key, href in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(items[key]["href"], href)
+                self.assertEqual(items[key]["module"], "tt_posts")
+                self.assertTrue(items[key]["enabled"])
+                self.assertIn(f'key: "{key}"', QUICK_NAV)
+                self.assertIn(f'{key}: "{href}"', QUICK_NAV)
+        self.assertIn("ttAutoPublishTemplatesExists", QUICK_NAV)
+        self.assertIn("ttAutoPublishRunsExists", QUICK_NAV)
+
+    def test_new_pages_use_only_the_new_api_namespace(self):
+        combined = "\n".join(SCRIPTS.values())
+        self.assertIn('const API_BASE = "/api/admin/tt-auto-publish"', SCRIPTS["common"])
+        self.assertNotIn("/api/admin/tt-posts", combined)
+        self.assertNotIn("/material-pool", combined)
+        self.assertNotIn("/auto-config", combined)
+        self.assertNotIn("/api/admin/tt-posts/run-now", combined)
+
+    def test_untrusted_content_is_rendered_without_inner_html(self):
+        for name, source in {**PAGES, **SCRIPTS}.items():
+            with self.subTest(source=name):
+                self.assertNotIn(".innerHTML", source)
+                self.assertNotIn("document.write", source)
+        self.assertIn("node.textContent", SCRIPTS["common"])
+        self.assertIn("node.replaceChildren()", SCRIPTS["common"])
+
+    def test_template_list_supports_required_actions_and_real_run_confirmation(self):
+        page_ids = parse_page(PAGES["templates"]).ids
+        for required in (
+            "templateRows",
+            "reloadTemplates",
+            "filterQuery",
+            "filterStatus",
+            "prevPage",
+            "nextPage",
+            "confirmDialog",
+        ):
+            self.assertIn(required, page_ids)
+        source = SCRIPTS["templates"]
+        for action in ('"edit"', '"copy"', '"enable"', '"disable"', '"run"'):
+            self.assertIn(action, source)
+        self.assertIn('"run-now"', source)
+        self.assertIn("body.confirmed = true", source)
+        self.assertIn("expected_version: version", source)
+        self.assertIn("确认真实执行", source)
+        self.assertIn("视频准备完成后自动发布", source)
+
+    def test_editor_contains_two_sequential_filter_layers(self):
+        ids = parse_page(PAGES["template"]).ids
+        required = {
+            "accountList",
+            "metricWindowDays",
+            "platform",
+            "dramaLaunchWindowDays",
+            "cooldownDays",
+            "dramaResourceTypes",
+            "dramaRoasMin",
+            "dramaRoasMax",
+            "dramaSpendMin",
+            "dramaSpendMax",
+            "dramaSortBy",
+            "dramaSortDirection",
+            "materialDurationMin",
+            "materialDurationMax",
+            "materialRoasMin",
+            "materialRoasMax",
+            "materialSpendMin",
+            "materialSpendMax",
+            "materialSortBy",
+            "materialSortDirection",
+            "captionTemplate",
+        }
+        self.assertFalse(required - ids, required - ids)
+        source = PAGES["template"]
+        self.assertLess(source.index("先筛选剧"), source.index("再筛选素材"))
+        script = SCRIPTS["template"]
+        for field in (
+            "metric_window_days",
+            "drama_launch_window_days",
+            "cooldown_days",
+            "resource_type_v2",
+            "duration_min_seconds",
+            "duration_max_seconds",
+            "drama_rule",
+            "material_rule",
+            "sort_by",
+            "sort_direction",
+        ):
+            self.assertIn(field, script)
+        self.assertIn("account_ids", script)
+        self.assertIn("drama_language", script)
+        self.assertIn("ads_setting.ads_facebook_post_blacklist", source)
+        self.assertIn("历史素材永久排除", source)
+        self.assertIn("{{content_id}}", source)
+        self.assertIn("{desc}", source)
+        self.assertIn("{url}", source)
+        self.assertNotIn("{code}", source)
+
+    def test_editor_has_fixed_and_random_schedules(self):
+        ids = parse_page(PAGES["template"]).ids
+        for required in (
+            "scheduleModeFixed",
+            "scheduleModeRandom",
+            "publishTimes",
+            "addPublishTime",
+            "randomDailyCount",
+        ):
+            self.assertIn(required, ids)
+        source = SCRIPTS["template"]
+        self.assertIn('{ mode: "fixed", times }', source)
+        self.assertIn('{ mode: "random", daily_count: dailyCount }', source)
+        self.assertIn("dailyCount < 1 || dailyCount > 24", source)
+        self.assertIn("Array.from(new Set(timeValues())).sort()", source)
+
+    def test_editor_does_not_offer_interaction_or_disclosure_settings(self):
+        combined = PAGES["template"] + SCRIPTS["template"]
+        forbidden_fields = (
+            "allow_comment",
+            "allow_duet",
+            "allow_stitch",
+            "commercial_disclosure",
+            "brand_organic_toggle",
+            "brand_content_toggle",
+            "privacy_level",
+            "is_aigc",
+        )
+        for field in forbidden_fields:
+            self.assertNotIn(field, combined)
+        self.assertIn("不在这里覆盖评论、Duet、Stitch 或内容披露配置", PAGES["template"])
+
+    def test_runs_page_lists_and_renders_account_task_details(self):
+        ids = parse_page(PAGES["runs"]).ids
+        for required in (
+            "runRows",
+            "runDetailDialog",
+            "runDetailFacts",
+            "runTaskRows",
+            "runSnapshot",
+            "runEvents",
+            "filterTemplateId",
+            "filterTriggerType",
+            "filterStatus",
+        ):
+            self.assertIn(required, ids)
+        source = SCRIPTS["runs"]
+        self.assertIn('ui.readItems(payload, ["runs", "items"])', source)
+        self.assertIn('ui.readItem(payload, ["run", "item"])', source)
+        self.assertIn('ui.readItems(payload, ["tasks", "account_tasks"])', source)
+        self.assertIn('ui.readItems(payload, ["events"])', source)
+        self.assertIn("template_snapshot", source)
+        self.assertIn("blacklist_snapshot", source)
+        self.assertIn("publish_id", source)
+        self.assertIn("needs_review", source)
+        self.assertIn("item.account_display_name || item.account_username", source)
+
+    def test_template_write_contract_matches_api_document(self):
+        source = SCRIPTS["template"]
+        self.assertIn('method: "POST"', source)
+        self.assertIn("payload.expected_version = state.version", source)
+        self.assertIn('ui.readItem(response, ["template", "item"])', source)
+        self.assertIn('ui.readItems(payload, ["accounts", "items"])', source)
+        self.assertIn("caption_template", source)
+        self.assertIn("platform: integerValue", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,42 @@
+[Unit]
+Description=Dramawave TikTok automatic publishing-template sidecar
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=simple
+User=tt-post
+Group=tt-post
+WorkingDirectory=/opt/tt-auto-post/current
+EnvironmentFile=/etc/tt-auto-post.env
+EnvironmentFile=/etc/tt-auto-post.secrets
+EnvironmentFile=/etc/tt-post.secrets
+ExecStart=/usr/bin/python3 /opt/tt-auto-post/current/scripts/tt_auto_post_service.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=tt-auto-post
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/tt-auto-post/current /mnt/data-disk/tt-post-publisher
+ReadWritePaths=/mnt/data-disk/tt-auto-post-publisher /mnt/data-disk/tt-auto-post-public /run/tt-auto-post
+UMask=0077
+TimeoutStopSec=9600s
+
+[Install]
+WantedBy=multi-user.target

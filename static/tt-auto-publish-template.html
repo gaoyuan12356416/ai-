@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>编辑 TT 自动发布模板 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/tt-auto-publish.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1 id="pageTitle">创建 TT 自动发布模板</h1>
+          <p>先按剧维度筛选和排序，再在入选剧中按素材维度筛选和排序；账号剧语言由现有个号设置决定。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button link-button" href="/tt-auto-publish-templates.html">返回模板列表</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能创建或编辑 TT 自动发布模板。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 TT 自动发布权限</strong>
+        <span>请联系管理员在用户管理中开启 tt_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="notice">
+          <div class="notice-mark">i</div>
+          <div>
+            <strong>个号互动、隐私和内容披露设置在「TT 个号管理」中维护。</strong>
+            本模板只选择个号并读取其剧语言，不在这里覆盖评论、Duet、Stitch 或内容披露配置。新建模板保存后默认停用。
+          </div>
+        </section>
+
+        <form id="templateForm" novalidate>
+          <div class="form-layout">
+            <div class="form-main">
+              <section class="panel">
+                <div class="section-head">
+                  <div><h2>基础信息</h2><p>模板名称用于列表识别，发布文案会在任务冻结时按素材信息渲染。</p></div>
+                  <span id="templateStatusBadge" class="badge warning">新模板</span>
+                </div>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label class="required" for="templateName">模板名称</label>
+                    <input id="templateName" maxlength="100" autocomplete="off" placeholder="例如：英语剧 ROAS 优先" required />
+                  </div>
+                  <div class="field">
+                    <label for="platform">指标平台</label>
+                    <select id="platform">
+                      <option value="0">platform=0（默认）</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="metricWindowDays">指标统计窗口</label>
+                    <input id="metricWindowDays" type="number" min="1" max="30" step="1" value="7" />
+                    <span class="helper">未填写时按最近 7 个完整北京时间自然日。</span>
+                  </div>
+                  <div class="field span-2">
+                    <label class="required" for="captionTemplate">发布文案模板</label>
+                    <textarea id="captionTemplate" maxlength="2200" aria-describedby="captionHelp">Watch the full story in the app 🎬
+
+Drama ID: {{content_id}}
+
+Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
+                    <span id="captionHelp" class="helper">支持 {{content_id}} / {{contect_id}}、{desc} 和 {url}；必须包含一个剧 ID 宏。<span id="captionCount">0 / 2200</span></span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="section-head">
+                  <div><h2>选择 TT 个号</h2><p>支持多选；筛选时会分别使用每个账号已保存的剧语言。</p></div>
+                  <span id="selectedAccountCount" class="badge">已选 0 个</span>
+                </div>
+                <div class="account-toolbar">
+                  <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称、账号 ID 或剧语言" />
+                  <button id="selectVisibleAccounts" class="button small" type="button">选择当前结果</button>
+                  <button id="clearAccounts" class="button small" type="button">清空</button>
+                </div>
+                <div id="accountList" class="account-list" role="group" aria-label="选择 TT 个号">
+                  <div class="empty">正在加载账号…</div>
+                </div>
+                <p class="helper">账号设置不可用或剧语言缺失时会明确标记；启用模板前服务端会再次校验。</p>
+              </section>
+
+              <section class="panel">
+                <div class="section-head">
+                  <div><h2>两层筛选与排序</h2><p>所有范围条件均包含边界；留空表示该指标范围不限制。D0 ROAS = SUM(af_revenue0) / SUM(spend) × 100%，消耗为 0 时视为无值。</p></div>
+                </div>
+                <div class="notice warning">
+                  <div class="notice-mark">!</div>
+                  <div><strong>黑名单和历史素材永久排除属于强制安全条件。</strong>系统会在筛选和最终冻结前排除 ads_setting.ads_facebook_post_blacklist 中的剧/资源，以及旧发布池或新系统已经出现的素材；模板不能关闭这些条件。</div>
+                </div>
+                <div class="compact-grid" style="margin-bottom: 15px;">
+                  <div class="field">
+                    <label for="dramaLaunchWindowDays">剧上线窗口（天）</label>
+                    <input id="dramaLaunchWindowDays" type="number" min="0" max="3650" step="1" value="0" />
+                    <span class="helper">填 0 不限制。</span>
+                  </div>
+                  <div class="field">
+                    <label for="cooldownDays">同剧冷却窗口（天）</label>
+                    <input id="cooldownDays" type="number" min="0" max="3650" step="1" value="0" />
+                    <span class="helper">仅在当前模板内按 content_id 冷却；填 0 不限制。</span>
+                  </div>
+                </div>
+
+                <div class="rule-flow">
+                  <article class="rule-card">
+                    <div class="rule-card-head"><span class="step">1</span><strong>先筛选剧</strong></div>
+                    <div class="field" style="margin-bottom: 11px;">
+                      <label class="required" for="dramaResourceTypes">短剧类型 resource_type_v2</label>
+                      <input id="dramaResourceTypes" autocomplete="off" placeholder="例如：1, 2" />
+                      <span class="helper">至少填写一种，多个类型用逗号分隔。</span>
+                    </div>
+                    <div class="field" style="margin-bottom: 11px;">
+                      <span class="field-label">剧维度 D0 ROAS（%）</span>
+                      <div class="range-grid">
+                        <input id="dramaRoasMin" type="number" min="0" step="0.01" placeholder="最小值" aria-label="剧 D0 ROAS 最小值" />
+                        <input id="dramaRoasMax" type="number" min="0" step="0.01" placeholder="最大值" aria-label="剧 D0 ROAS 最大值" />
+                      </div>
+                    </div>
+                    <div class="field" style="margin-bottom: 11px;">
+                      <span class="field-label">剧维度消耗</span>
+                      <div class="range-grid">
+                        <input id="dramaSpendMin" type="number" min="0" step="0.01" placeholder="最小值" aria-label="剧消耗最小值" />
+                        <input id="dramaSpendMax" type="number" min="0" step="0.01" placeholder="最大值" aria-label="剧消耗最大值" />
+                      </div>
+                    </div>
+                    <div class="compact-grid">
+                      <div class="field">
+                        <label for="dramaSortBy">排序指标</label>
+                        <select id="dramaSortBy"><option value="roas">D0 ROAS</option><option value="spend">消耗</option></select>
+                      </div>
+                      <div class="field">
+                        <label for="dramaSortDirection">排序方向</label>
+                        <select id="dramaSortDirection"><option value="desc">倒序（高到低）</option><option value="asc">正序（低到高）</option></select>
+                      </div>
+                    </div>
+                  </article>
+
+                  <div class="rule-arrow" aria-hidden="true">→</div>
+
+                  <article class="rule-card">
+                    <div class="rule-card-head"><span class="step">2</span><strong>再筛选素材</strong></div>
+                    <div class="field" style="margin-bottom: 11px;">
+                      <span class="field-label">素材时长（秒）</span>
+                      <div class="range-grid">
+                        <input id="materialDurationMin" type="number" min="0" max="3600" step="1" value="1" placeholder="最短时长" aria-label="素材最短时长" />
+                        <input id="materialDurationMax" type="number" min="1" max="3600" step="1" value="180" placeholder="最长时长" aria-label="素材最长时长" />
+                      </div>
+                    </div>
+                    <div class="field" style="margin-bottom: 11px;">
+                      <span class="field-label">素材维度 D0 ROAS（%）</span>
+                      <div class="range-grid">
+                        <input id="materialRoasMin" type="number" min="0" step="0.01" placeholder="最小值" aria-label="素材 D0 ROAS 最小值" />
+                        <input id="materialRoasMax" type="number" min="0" step="0.01" placeholder="最大值" aria-label="素材 D0 ROAS 最大值" />
+                      </div>
+                    </div>
+                    <div class="field" style="margin-bottom: 11px;">
+                      <span class="field-label">素材维度消耗</span>
+                      <div class="range-grid">
+                        <input id="materialSpendMin" type="number" min="0" step="0.01" placeholder="最小值" aria-label="素材消耗最小值" />
+                        <input id="materialSpendMax" type="number" min="0" step="0.01" placeholder="最大值" aria-label="素材消耗最大值" />
+                      </div>
+                    </div>
+                    <div class="compact-grid">
+                      <div class="field">
+                        <label for="materialSortBy">排序指标</label>
+                        <select id="materialSortBy"><option value="roas">D0 ROAS</option><option value="spend">消耗</option></select>
+                      </div>
+                      <div class="field">
+                        <label for="materialSortDirection">排序方向</label>
+                        <select id="materialSortDirection"><option value="desc">倒序（高到低）</option><option value="asc">正序（低到高）</option></select>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="section-head"><div><h2>发布时间</h2><p>使用北京时间；固定时间支持多个时间点，随机模式按每天 N 次生成。</p></div></div>
+                <div class="schedule-mode" role="radiogroup" aria-label="发布时间模式">
+                  <label class="radio-card"><input id="scheduleModeFixed" type="radio" name="scheduleMode" value="fixed" checked />固定时间</label>
+                  <label class="radio-card"><input id="scheduleModeRandom" type="radio" name="scheduleMode" value="random" />随机 N 次/天</label>
+                </div>
+                <div id="fixedScheduleFields" class="field" style="margin-top: 15px;">
+                  <label>每天固定发布时间</label>
+                  <div id="publishTimes" class="time-list"></div>
+                  <button id="addPublishTime" class="button small" type="button">添加时间点</button>
+                </div>
+                <div id="randomScheduleFields" class="field hidden" style="margin-top: 15px; max-width: 320px;">
+                  <label for="randomDailyCount">每天随机发布次数</label>
+                  <input id="randomDailyCount" type="number" min="1" max="24" step="1" value="1" />
+                  <span class="helper">模板每天生成一组稳定的随机时刻；每个时刻为所选账号分别创建任务，同账号保持串行。</span>
+                </div>
+              </section>
+            </div>
+
+            <aside class="form-side">
+              <section class="panel">
+                <div class="section-head"><div><h2>保存摘要</h2><p>保存只更新模板配置，不会立即执行。</p></div></div>
+                <div class="summary-list">
+                  <div class="summary-item"><span>模板版本</span><strong id="summaryVersion">新模板</strong></div>
+                  <div class="summary-item"><span>已选账号</span><strong id="summaryAccounts">0 个</strong></div>
+                  <div class="summary-item"><span>指标口径</span><strong id="summaryMetric">platform=0 / 7 天</strong></div>
+                  <div class="summary-item"><span>剧排序</span><strong id="summaryDramaSort">D0 ROAS / 倒序</strong></div>
+                  <div class="summary-item"><span>素材排序</span><strong id="summaryMaterialSort">D0 ROAS / 倒序</strong></div>
+                  <div class="summary-item"><span>发布时间</span><strong id="summarySchedule">每天 11:00</strong></div>
+                </div>
+                <div class="sticky-actions">
+                  <button id="saveTemplate" class="button primary" type="submit">保存模板</button>
+                  <a class="button link-button" href="/tt-auto-publish-templates.html">取消并返回</a>
+                </div>
+                <p id="formStatus" class="status-line" role="status" aria-live="polite">请填写模板配置。</p>
+              </section>
+            </aside>
+          </div>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="confirmDialog">
+    <div class="dialog-head"><h2 id="confirmTitle">请确认操作</h2></div>
+    <div class="dialog-body"><p id="confirmMessage"></p></div>
+    <div class="dialog-foot">
+      <button id="confirmCancel" class="button" type="button">取消</button>
+      <button id="confirmAccept" class="button primary" type="button">确认</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script src="/tt-auto-publish-common.js"></script>
+  <script src="/tt-auto-publish-template.js"></script>
+</body>
+</html>

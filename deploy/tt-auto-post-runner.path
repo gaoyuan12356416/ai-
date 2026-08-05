@@ -1,0 +1,11 @@
+[Unit]
+Description=Wake the TT automatic publishing runner for a manual request
+After=tt-auto-post-service.service
+Requires=tt-auto-post-service.service
+
+[Path]
+PathChanged=/run/tt-auto-post/manual-kick
+Unit=tt-auto-post-runner.service
+
+[Install]
+WantedBy=multi-user.target
