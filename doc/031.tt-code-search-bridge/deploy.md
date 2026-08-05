@@ -222,4 +222,6 @@ ss -lnt '( sport = :6381 )'
 - 服务器部署必须从 GitHub exact commit 取得该静态文件，先备份当前公网文件和 `/root/drama_material_service/static` 对应文件，再以保留 owner/mode 的原子方式替换。
 - 替换前后核对生产队列总数、最大 queue ID 和非空 publish ID 数；验收只读取已有任务。
 - 回滚只恢复本次备份的 `tt-post-pool.html`，无需回滚数据库或 Redis。
-- 当前状态：本地候选已通过定向回归和隔离浏览器验证，待 GitHub 提交与生产静态部署。
+- 上线结果：GitHub/runtime static commit `59c2cdb6878b5f4bf50fe4b82e73dd3541b45530`；线上及 root source hash 均为 `64053afb286905dc792232427eea6463b72dc24faf48b17525f555cc0bb9cfdb`。
+- 回滚备份：`/mnt/data-disk/tt-post-publisher/backups/20260805T022241Z-tt-post-code-column-pre-b01dabe2/`；部署前后 ledger 均为 `19|19|18|12`（总数|max ID|publish ID 非空|code 非空）。
+- 公网 HTML 200 且 hash 与候选一致；`tt-post-service.service` 保持 active，未 restart、未 reload Nginx、未触发真实发布。

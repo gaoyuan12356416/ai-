@@ -95,3 +95,5 @@ git diff --exit-code -- static/tt-drama-search.html static/tt-drama-search.js de
 - `py_compile` 与 `git diff --check` 均退出 0。
 - 隔离 Chromium 使用 mock 统一任务 DTO 验证：自动任务 `code=RSTN` 显示 `RSTN`；direct-test 无 code 显示“—”；表头共十列，console errors=0。
 - 本增量不调用任何写接口，不创建任务、不修改 SQLite/Redis，也不触发真实 TikTok 发布。
+- 生产从 GitHub exact commit `59c2cdb6878b5f4bf50fe4b82e73dd3541b45530` 部署；公网、Nginx 静态目录与 root source hash 均为 `64053afb286905dc792232427eea6463b72dc24faf48b17525f555cc0bb9cfdb`。
+- 部署前后 ledger 均为 `19|19|18|12`；真实库 12 个非空 code 全部满足四位大写字母数字格式，服务保持 active，HTTP 200。

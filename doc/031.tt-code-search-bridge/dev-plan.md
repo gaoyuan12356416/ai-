@@ -18,7 +18,7 @@
 | D8 部署资产 | Nginx、Redis config/unit、env examples | `/tt-code`/JS/API exact routes，Redis 独立 unit，原 `/tt` 不动 | 已完成生产部署 |
 | D9 自动化 | `scripts/test_tt_*` | allocator/schema/cache/API/link/UI/bridge 及既有 TT 回归 | 已完成：Python 395、Node 84/53 |
 | D10 文档与上线证据 | 本目录 | 需求/API/评审/测试/部署合同及生产证据 | 已完成 |
-| D11 发布任务短码列 | `static/tt-post-pool.html`、UI/服务合同测试 | 自动任务显示冻结的四位大写字母数字短码；无值或非法值显示“—” | 已完成开发，待上线复验 |
+| D11 发布任务短码列 | `static/tt-post-pool.html`、UI/服务合同测试 | 自动任务显示冻结的四位大写字母数字短码；无值或非法值显示“—” | 已完成并上线复验 |
 
 ## 最终实现顺序
 
