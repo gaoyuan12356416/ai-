@@ -473,6 +473,7 @@
       if (cancelled) {
         tracker.cancel();
       }
+      activePointerId = null;
       try {
         if (container.hasPointerCapture(event.pointerId)) {
           container.releasePointerCapture(event.pointerId);
@@ -480,7 +481,6 @@
       } catch (_error) {
         // Pointer capture may already have been released by the browser.
       }
-      activePointerId = null;
       container.classList.remove("is-dragging");
       if (wasDragged) {
         snapToNearestCard();
@@ -515,10 +515,13 @@
       }
       activePointerId = event.pointerId;
       tracker.begin(event.clientX, container.scrollLeft);
-      container.setPointerCapture(event.pointerId);
     });
-    container.addEventListener("pointermove", function (event) {
+    root.addEventListener("pointermove", function (event) {
       if (activePointerId === null || event.pointerId !== activePointerId) {
+        return;
+      }
+      if (event.buttons === 0) {
+        finishPointer(event, true);
         return;
       }
       const movement = tracker.move(event.clientX);
@@ -526,17 +529,27 @@
         return;
       }
       if (movement.dragged) {
+        try {
+          if (!container.hasPointerCapture(event.pointerId)) {
+            container.setPointerCapture(event.pointerId);
+          }
+        } catch (_error) {
+          // Window-level pointer events still keep the drag state bounded.
+        }
         container.classList.add("is-dragging");
         event.preventDefault();
       }
       container.scrollLeft = movement.scrollLeft;
       queueButtonUpdate();
-    });
-    container.addEventListener("pointerup", function (event) {
+    }, { passive: false });
+    root.addEventListener("pointerup", function (event) {
       finishPointer(event, false);
     });
-    container.addEventListener("pointercancel", function (event) {
+    root.addEventListener("pointercancel", function (event) {
       finishPointer(event, true);
+    });
+    container.addEventListener("lostpointercapture", function (event) {
+      finishPointer(event, false);
     });
     container.addEventListener("click", function (event) {
       if (!tracker.consumeSuppressedClick()) {
