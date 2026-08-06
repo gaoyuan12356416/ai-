@@ -273,6 +273,10 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         task = self.reserved_task(suffix="success")
         gpu = FakeGPU()
         executor = self.executor(gpu)
+        self.assertEqual(
+            executor.media_profile_version,
+            "tt-post-direct-outro-hevc-720x1280-v2",
+        )
         prepared = executor.execute_next("worker-1")
         self.assertTrue(prepared["claimed"])
         self.assertEqual(prepared["task"]["status"], "ready")

@@ -1207,7 +1207,10 @@ def build_service_from_env(
             source.get("TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS", "4.333333")
         ),
         media_profile_version=str(
-            source.get("TT_POST_MEDIA_PROFILE_VERSION", "tt-post-hevc-720x1280-v2")
+            source.get(
+                "TT_POST_MEDIA_PROFILE_VERSION",
+                "tt-post-direct-outro-hevc-720x1280-v2",
+            )
         ),
         max_concurrent_tasks=int(source.get("TT_AUTO_POST_WORKER_COUNT", "4")),
     )

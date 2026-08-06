@@ -261,7 +261,7 @@ class AutoPostExecutor:
         now_fn=lambda: datetime.now(UTC),
         short_link_root: Any = "/mnt/data-disk/tt-auto-post-public/s2l",
         source_trim_tail_seconds: float = 4.333333,
-        media_profile_version: str = "tt-post-hevc-720x1280-v2",
+        media_profile_version: str = "tt-post-direct-outro-hevc-720x1280-v2",
         lease_seconds: int = 10800,
         max_concurrent_tasks: int = 4,
     ):
