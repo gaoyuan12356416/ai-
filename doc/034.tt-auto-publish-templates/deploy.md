@@ -128,3 +128,39 @@ install -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-160626-capti
 systemctl restart tt-auto-post-service.service
 curl -fsS http://127.0.0.1:18831/health
 ```
+
+## 2026-08-06 `{code}` 四位码增量部署
+
+- GitHub 代码提交：`5b18d1ef68614ae01bf97a7e092bcd0d9c345d3f`；生产 release：`/opt/tt-auto-post/releases/5b18d1ef68614ae01bf97a7e092bcd0d9c345d3f`；原 release：`/opt/tt-auto-post/releases/62e2f0b0e051ef875bdeb4237e9101688a3a600e`。
+- 切换前备份：`/mnt/data-disk/tt-auto-post-deploy/backups/20260806-164548-code-macro-pre`。备份包含自动/旧 TT 两个 SQLite 的在线副本、环境文件、受影响 systemd 单元、页面、release/PID/门禁元数据和通过校验的 `SHA256SUMS`；两个备份库 `quick_check=ok`。
+- 新增 `tt-auto-code-route.service`，仅监听 `127.0.0.1:18832`，以单独 systemd 沙箱写共享 `tt_post_code_route`；普通 `tt-auto-post-service.service` 对 `/mnt/data-disk/tt-post-publisher` 仍为只读。自动任务使用 `7_000_000_000_000_000_000 + task_id` 作为共享路由身份，不写旧队列、素材或调度表。
+- 自动发布模板校验已允许 `{code}`；任务在 GPU prepare 前冻结码、短链和最终 caption，任务 caption 设为一次写入不可变，发布重试继续复用相同 caption。模板不使用 `{code}` 时不调用 broker。
+- Windows 全套 117/117 通过；Linux release 上按锁目录拆分为 113/113 加 runner 4/4 通过，Git blob 逐文件校验 814 个文件一致。旧 TT 页面/API 64/64、旧 TT core/service/pool 258/258 通过。
+- 新 broker、自动发布 sidecar、scheduler/runner timers、runner path、metric timer 全部 active；broker `/health` 与自动 sidecar `/health` 均为 200。公开模板 HTML SHA-256 为 `54d6be53744d10404077e30731eb3cba2468734dd1f00680edd8b00678531946`，磁盘与 HTTPS 响应一致。
+- 三重发布门禁保持 0，自动模板/run/task/material ledger 均为 0，共享码路由保持 52 行，自动高位命名空间仍为 0；验收未保存模板、未分配生产四位码、未调用 GPU/TikTok。
+- 旧 `tt-post-service.service` 保持 release `4362f3928e8c5c3f437917585b9f645e51986536` 和 PID `3055551`；主 API PID `3062660` 未变化，未重启主 API、旧 TT、Nginx 或 GPU。
+- 首次尝试因 root 用户的 `test -w` 不能用于只读 release 权限判断而在前置校验回滚；第二次尝试因 `Type=simple` broker 启动后的单次即时探针发生监听竞态而回滚。两次均恢复原 release、环境、单元和页面，未启动新自动代码。最终改为校验实际 `0444` 权限并有界轮询健康检查后成功。
+- `16:51` 的 scheduler/runner 自然触发与最终 sidecar 重启窗口重叠，各失败 1 次；`16:52`、`16:53`、`16:54` 连续 3 轮自然触发均成功，最终 `Result=success`、`ExecMainStatus=0`，账本与自动码命名空间仍为空。重启期间 runner path 被依赖停止后已显式恢复为 `active (waiting)`。
+
+当前精确回滚必须先按上文账本检查确认无非终态任务，再执行：
+
+```bash
+systemctl stop tt-auto-post-scheduler.timer
+# 再次确认 publishing/unknown/reconciling 等非终态任务为 0
+systemctl stop tt-auto-post-runner.timer tt-auto-post-runner.path
+systemctl stop tt-auto-post-service.service
+systemctl disable --now tt-auto-code-route.service
+install -o root -g root -m 0400 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-164548-code-macro-pre/config/tt-auto-post.env /etc/tt-auto-post.env
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-164548-code-macro-pre/systemd/tt-auto-post-service.service /etc/systemd/system/tt-auto-post-service.service
+unlink /etc/systemd/system/tt-auto-code-route.service
+ln -s /opt/tt-auto-post/releases/62e2f0b0e051ef875bdeb4237e9101688a3a600e /opt/tt-auto-post/current.rollback-code-macro
+mv -Tf /opt/tt-auto-post/current.rollback-code-macro /opt/tt-auto-post/current
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-164548-code-macro-pre/root-static/tt-auto-publish-template.html /root/drama_material_service/static/tt-auto-publish-template.html
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-164548-code-macro-pre/published-static/tt-auto-publish-template.html /usr/share/nginx/html/tt-auto-publish-template.html
+systemctl daemon-reload
+systemctl restart tt-auto-post-service.service
+systemctl start tt-auto-post-scheduler.timer tt-auto-post-runner.timer tt-auto-post-runner.path tt-auto-post-metric.timer
+curl -fsS http://127.0.0.1:18831/health
+```
+
+回滚只停止新的 broker，不删除已经分配的 `tt_post_code_route` 行；已进入发布文案的四位码必须永久保留可查询。
