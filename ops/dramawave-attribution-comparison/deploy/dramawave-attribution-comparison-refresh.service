@@ -12,8 +12,9 @@ WorkingDirectory=/opt/dramawave-attribution-comparison/current
 EnvironmentFile=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env
 EnvironmentFile=/root/drama_material_service/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/flock -xn /tmp/tt_minis_multi_dim_dashboard.lock /opt/dramawave-attribution-comparison/venv/bin/python /opt/dramawave-attribution-comparison/current/refresh_cache.py
+ExecStart=/usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock /opt/dramawave-attribution-comparison/venv/bin/python /opt/dramawave-attribution-comparison/current/refresh_cache.py
 ExecStartPost=-/opt/dramawave-attribution-comparison/venv/bin/python /opt/dramawave-attribution-comparison/current/warm_cache.py
+SuccessExitStatus=75
 TimeoutStartSec=25min
 MemoryAccounting=true
 MemoryHigh=800M
@@ -26,4 +27,5 @@ ProtectHome=read-only
 ProtectSystem=strict
 ReadOnlyPaths=/opt/dramawave-attribution-comparison/current
 ReadOnlyPaths=/root/drama_material_service/.env
+ReadWritePaths=/tmp
 ReadWritePaths=/mnt/data-disk/dramawave-attribution-comparison

@@ -334,14 +334,15 @@ systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
   --property=ProtectHome=read-only \
   --property=ReadOnlyPaths=/opt/dramawave-attribution-comparison/current \
   --property=ReadOnlyPaths=/root/drama_material_service/.env \
+  --property=ReadWritePaths=/tmp \
   --property=ReadWritePaths=/mnt/data-disk/dramawave-attribution-comparison \
-  /usr/bin/flock -xn /tmp/tt_minis_multi_dim_dashboard.lock \
+  /usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock \
   /opt/dramawave-attribution-comparison/venv/bin/python \
   /opt/dramawave-attribution-comparison/current/refresh_cache.py \
   --bootstrap-start "$BOOTSTRAP_START" --bootstrap-end "$BOOTSTRAP_END"
 ```
 
-执行前必须确认现有 TT 进程已经退出且共享锁空闲；非阻塞 flock 在锁被占用时直接拒绝启动，不得移除锁后重试。bootstrap 受与定时 refresh 相同的 1GB cgroup 硬上限保护，并显式保持主机 `/tmp` 可见，以确保共享锁真实生效。bootstrap 只有全部目标日期完成 staging 后，才会在一个 `BEGIN IMMEDIATE` 事务中替换事实数据并推进 `data_version`。任一天源查询或映射校验失败都会清除本轮 staging、把已创建日志标成 failed，并保留旧事实和旧版本。
+执行前必须确认现有 TT 进程已经退出且共享锁空闲；非阻塞 flock 在锁被占用时以专用退出码 `75` 拒绝启动，不得移除锁后重试。bootstrap 受与定时 refresh 相同的 1GB cgroup 硬上限保护，并显式保持主机 `/tmp` 可见、可创建锁文件，以确保共享锁真实生效。bootstrap 只有全部目标日期完成 staging 后，才会在一个 `BEGIN IMMEDIATE` 事务中替换事实数据并推进 `data_version`。任一天源查询或映射校验失败都会清除本轮 staging、把已创建日志标成 failed，并保留旧事实和旧版本。
 
 成功后核验：
 
@@ -382,7 +383,9 @@ systemctl status dramawave-attribution-comparison-refresh.timer --no-pager
 systemctl list-timers dramawave-attribution-comparison-refresh.timer --all --no-pager
 ```
 
-timer 在每小时 `:22` 和 `:52` 触发，允许最多 5 秒随机延迟；`Persistent=true` 会补跑错过的计划。该错峰仍严格保持 30 分钟频率。refresh 还与现有 TT 多维看板共用 `/tmp/tt_minis_multi_dim_dashboard.lock`：任一重任务正在运行时另一方不得并发，避免 3.67GiB 共享主机进入换页风暴。refresh cgroup 同时设置 `MemoryHigh=800M`、`MemoryMax=1G`；触顶时保留上一成功版本，不允许拖垮既有服务。普通运行不带参数，刷新北京今天、昨天，并按 `history_cursor` 轮转一个更早日期。
+timer 在每小时 `:22` 和 `:52` 触发，允许最多 5 秒随机延迟；`Persistent=true` 会补跑错过的计划。该错峰仍严格保持 30 分钟频率。refresh 还与现有 TT 多维看板共用 `/tmp/tt_minis_multi_dim_dashboard.lock`：任一重任务正在运行时另一方不得并发，避免 3.67GiB 共享主机进入换页风暴。flock 的专用退出码 `75` 仅表示本轮因锁忙正常跳过；Python 的退出码 `1` 仍是 refresh 失败，不能被吞掉。refresh cgroup 同时设置 `MemoryHigh=800M`、`MemoryMax=1G`；触顶时保留上一成功版本，不允许拖垮既有服务。普通运行不带参数，刷新北京今天、昨天，并按 `history_cursor` 轮转一个更早日期。
+
+目标机是 systemd 239 + cgroup v1；发布前瞬态单元实测 `MemoryMax=1G` 写入 `memory.limit_in_bytes=1073741824`，因此 1GB 是有效硬限制。`MemoryHigh` 在该主机仅保留为迁移到 cgroup v2 后的软门槛，当前不能把它当作已生效的 800MB 限制。
 
 ## 9. 发布验证
 
@@ -470,13 +473,14 @@ install -o root -g root -m 0644 "$BACKUP_DIR/dramawave-attribution-comparison.co
 
 systemctl daemon-reload
 nginx -t
+systemctl reload nginx
 systemctl restart dramawave-attribution-comparison.service
 curl -fsS http://127.0.0.1:8832/healthz
 /opt/dramawave-attribution-comparison/venv/bin/python \
   /opt/dramawave-attribution-comparison/current/warm_cache.py --attempts 3 --retry-delay 1
 ```
 
-按发布前记录恢复 Nginx reload 和 timer 的 enabled/active 状态。不得假设发布前 timer 已启用。
+按发布前记录恢复 Nginx 配置并在 `nginx -t` 通过后执行安全 reload，再恢复 timer 的 enabled/active 状态。不得假设发布前 timer 已启用。
 
 ### 10.2 首次上线且不存在旧 release
 

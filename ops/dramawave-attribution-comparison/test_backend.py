@@ -636,10 +636,12 @@ class DeploymentContractTests(unittest.TestCase):
             deploy_dir / "dramawave-attribution-comparison-refresh.timer"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "/usr/bin/flock -xn /tmp/tt_minis_multi_dim_dashboard.lock",
+            "/usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock",
             service_unit,
         )
         self.assertNotIn("PrivateTmp=true", service_unit)
+        self.assertIn("SuccessExitStatus=75", service_unit)
+        self.assertIn("ReadWritePaths=/tmp", service_unit)
         self.assertIn("MemoryHigh=800M", service_unit)
         self.assertIn("MemoryMax=1G", service_unit)
         self.assertIn("OnCalendar=*-*-* *:22,52:00", timer_unit)
