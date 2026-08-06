@@ -230,6 +230,11 @@ class ReadOnlyRepositoryTests(unittest.TestCase):
         self.assertRegex(sql.lstrip(), r"^SELECT\b")
         self.assertIn("s.dt=%s", sql)
         self.assertIn("GROUP BY TRIM(s.data_source_id),TRIM(s.resource_id)", sql)
+        self.assertIn(
+            "ORDER BY TRIM(s.data_source_id),\n                      TRIM(s.resource_id)",
+            sql,
+        )
+        self.assertNotIn("CAST(TRIM(s.resource_id) AS UNSIGNED)", sql)
         self.assertNotIn("2026-08-04", sql)
         self.assertEqual(params, (DEFAULT_PRODUCT, DEFAULT_PLATFORM, "2026-08-04"))
         self.assertGreaterEqual(len(connection.cursor_value.fetchmany_sizes), 3)

@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | 新系统单元、契约与 UI 测试 | `python -m unittest scripts.test_tt_auto_post_store scripts.test_tt_auto_post_selector scripts.test_tt_auto_post_metrics scripts.test_tt_auto_publish_ui scripts.test_tt_auto_post_service scripts.test_tt_auto_post_publisher scripts.test_tt_auto_post_links scripts.test_tt_auto_publish_app_contract scripts.test_tt_auto_post_runner -v` | 108/108 通过 |
 | 旧 TT 回归 | `python -m unittest scripts.test_tt_post_pool_ui scripts.test_tt_account_settings_ui scripts.test_tt_posts_app_contract -v` | 64/64 通过 |
+| 生产 MySQL 5.7 兼容 | 在 `ONLY_FULL_GROUP_BY` 开启的只读生产连接上执行指标 SQL `EXPLAIN` | 通过；使用 `pss` 索引，无 errno 1055 |
 | 旧系统文件边界 | `git diff --exit-code -- features/tt_posts static/tt-post-pool.html static/tt-account-settings.html` | 通过，无差异 |
 | 新前端语法 | 四个新 JS 与 `quick-nav.js` 执行 `node --check` | 通过 |
 | 浏览器无发布验收 | Playwright CLI + 本地 mock-only harness；桌面/移动端创建、编辑、筛选、计划、手动确认、运行详情 | 通过；控制台 0 error，未连接真实 sidecar/GPU/TikTok |

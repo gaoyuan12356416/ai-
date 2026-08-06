@@ -60,6 +60,10 @@ systemd-run --unit=tt-auto-post-metric-backfill-30d \
   /usr/bin/python3 /opt/tt-auto-post/current/scripts/tt_auto_post_metric_runner.py --lookback-days 30
 ```
 
+首次回填前必须使用生产同版本 MySQL 的只读连接对日指标 SQL 执行
+`EXPLAIN`。生产 MySQL 5.7 开启 `ONLY_FULL_GROUP_BY` 时，排序表达式必须与
+分组表达式一致；出现 errno 1055 时不得启用指标 timer 或模板。
+
 回填失败不得启用模板；确认每个完成日都存在 READY active generation，失败 generation 没有切换 active。日常 timer 继续按 `TT_AUTO_POST_METRIC_LOOKBACK_DAYS=7` 保温默认窗口。
 
 日常指标定时器在每小时 `:12` 刷新。北京时间 `00:00` 至当日首轮刷新完成前，包含“昨天”这一新完整日的窗口尚未 READY；此时选择会 fail-closed 进入 `retry_wait`，在刷新完成后的下一次重试继续，不会降级使用不完整日或旧窗口。因此设置在午夜前 12 分钟内的模板可能延后执行，属于可预期等待而非终态失败；若业务要求更贴近计划时刻，应把模板时间设在 `00:20` 以后。

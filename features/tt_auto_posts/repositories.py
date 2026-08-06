@@ -656,7 +656,6 @@ class ReadOnlyMySQLRepository:
                AND s.resource_id REGEXP '^[1-9][0-9]*$'
              GROUP BY TRIM(s.data_source_id),TRIM(s.resource_id)
              ORDER BY TRIM(s.data_source_id),
-                      CAST(TRIM(s.resource_id) AS UNSIGNED),
                       TRIM(s.resource_id)
         """.format(
             timeout_ms=self.metric_query_timeout_ms,
