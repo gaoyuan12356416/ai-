@@ -201,6 +201,59 @@ class TtAutoPublishUiTest(unittest.TestCase):
         self.assertIn("{url}", source)
         self.assertNotIn("{code}", source)
 
+    def test_resource_type_v2_is_optional_chinese_enum_multiselect(self):
+        page = PAGES["template"]
+        script = SCRIPTS["template"]
+        ids = parse_page(page).ids
+        for required in (
+            "dramaResourceTypes",
+            "dramaResourceTypeMenu",
+            "dramaResourceTypeOptions",
+            "clearDramaResourceTypes",
+        ):
+            self.assertIn(required, ids)
+        self.assertIn("非必选；不选择时不限制短剧类型。", page)
+        self.assertNotIn(
+            'class="required" for="dramaResourceTypes"',
+            page,
+        )
+        expected = {
+            "0": "其他",
+            "1": "翻译剧非首发",
+            "2": "本土首发",
+            "3": "本土对投",
+            "4": "本土二轮采买",
+            "5": "本土自制",
+            "6": "翻译剧首发",
+            "7": "首发本土动态漫",
+            "8": "二轮本土动态漫",
+            "9": "首发翻译动态漫",
+            "10": "二轮翻译动态漫",
+            "11": "翻译剧自制",
+            "12": "漫剧自制",
+            "13": "AI本土真人剧自制",
+            "14": "AI本土真人剧首发",
+            "15": "二轮本土AI真人剧",
+            "16": "翻译AI真人剧首发",
+            "17": "二轮翻译AI真人剧",
+            "18": "AI本土解说剧自制",
+            "19": "AI本土解说剧首发",
+            "20": "AI本土解说剧二轮",
+            "21": "AI翻译解说剧首发",
+            "22": "AI翻译解说剧首发",
+            "100": "小说",
+        }
+        for value, label in expected.items():
+            with self.subTest(value=value):
+                self.assertIn(
+                    f'{{ value: "{value}", label: "{label}" }}',
+                    script,
+                )
+        self.assertNotIn('{ value: "-1"', script)
+        self.assertIn('let text = "不限类型"', script)
+        self.assertIn("state.selectedResourceTypes.clear()", script)
+        self.assertIn("resource_type_v2: parseResourceTypes()", script)
+
     def test_editor_has_fixed_and_random_schedules(self):
         ids = parse_page(PAGES["template"]).ids
         for required in (

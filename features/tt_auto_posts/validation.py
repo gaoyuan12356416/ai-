@@ -11,6 +11,34 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 from features.tt_posts.core import TTPostError, caption_uses_code_macro, render_caption_template
 
 
+RESOURCE_TYPE_V2_LABELS = {
+    "0": "其他",
+    "1": "翻译剧非首发",
+    "2": "本土首发",
+    "3": "本土对投",
+    "4": "本土二轮采买",
+    "5": "本土自制",
+    "6": "翻译剧首发",
+    "7": "首发本土动态漫",
+    "8": "二轮本土动态漫",
+    "9": "首发翻译动态漫",
+    "10": "二轮翻译动态漫",
+    "11": "翻译剧自制",
+    "12": "漫剧自制",
+    "13": "AI本土真人剧自制",
+    "14": "AI本土真人剧首发",
+    "15": "二轮本土AI真人剧",
+    "16": "翻译AI真人剧首发",
+    "17": "二轮翻译AI真人剧",
+    "18": "AI本土解说剧自制",
+    "19": "AI本土解说剧首发",
+    "20": "AI本土解说剧二轮",
+    "21": "AI翻译解说剧首发",
+    "22": "AI翻译解说剧首发",
+    "100": "小说",
+}
+
+
 class ValidationError(ValueError):
     def __init__(self, code: str, message: str, status: int = 400):
         self.code = str(code or "invalid_request")
@@ -167,16 +195,16 @@ def _drama_rule(raw: Any) -> Dict[str, Any]:
     result = _range_rule(
         value,
         label="剧筛选",
-        extra_required={"resource_type_v2"},
+        extra_optional={"resource_type_v2"},
     )
-    types = value.get("resource_type_v2")
-    if not isinstance(types, list) or not types or len(types) > 50:
-        raise ValidationError("invalid_request", "剧类型必须是非空数组")
+    types = value.get("resource_type_v2", [])
+    if not isinstance(types, list) or len(types) > len(RESOURCE_TYPE_V2_LABELS):
+        raise ValidationError("invalid_request", "剧类型必须是数组")
     normalized = []
     for item in types:
         text = str(item).strip()
-        if not text or len(text) > 64 or any(ord(char) < 33 for char in text):
-            raise ValidationError("invalid_request", "剧类型包含无效值")
+        if isinstance(item, bool) or text not in RESOURCE_TYPE_V2_LABELS:
+            raise ValidationError("invalid_request", "剧类型不在允许枚举中")
         if text not in normalized:
             normalized.append(text)
     result["resource_type_v2"] = normalized

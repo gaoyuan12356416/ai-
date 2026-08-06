@@ -3,9 +3,37 @@
 
   const ui = window.TtAutoPublish;
   const templateId = ui.pageIdFromQuery("id");
+  const RESOURCE_TYPE_V2_OPTIONS = Object.freeze([
+    { value: "0", label: "其他" },
+    { value: "1", label: "翻译剧非首发" },
+    { value: "2", label: "本土首发" },
+    { value: "3", label: "本土对投" },
+    { value: "4", label: "本土二轮采买" },
+    { value: "5", label: "本土自制" },
+    { value: "6", label: "翻译剧首发" },
+    { value: "7", label: "首发本土动态漫" },
+    { value: "8", label: "二轮本土动态漫" },
+    { value: "9", label: "首发翻译动态漫" },
+    { value: "10", label: "二轮翻译动态漫" },
+    { value: "11", label: "翻译剧自制" },
+    { value: "12", label: "漫剧自制" },
+    { value: "13", label: "AI本土真人剧自制" },
+    { value: "14", label: "AI本土真人剧首发" },
+    { value: "15", label: "二轮本土AI真人剧" },
+    { value: "16", label: "翻译AI真人剧首发" },
+    { value: "17", label: "二轮翻译AI真人剧" },
+    { value: "18", label: "AI本土解说剧自制" },
+    { value: "19", label: "AI本土解说剧首发" },
+    { value: "20", label: "AI本土解说剧二轮" },
+    { value: "21", label: "AI翻译解说剧首发" },
+    { value: "22", label: "AI翻译解说剧首发" },
+    { value: "100", label: "小说" },
+  ]);
+  const RESOURCE_TYPE_V2_VALUES = new Set(RESOURCE_TYPE_V2_OPTIONS.map(item => item.value));
   const state = {
     accounts: [],
     selectedAccountIds: new Set(),
+    selectedResourceTypes: new Set(),
     template: null,
     version: 0,
     busy: false,
@@ -112,6 +140,49 @@
     node.value = value == null || value === "" ? (fallback == null ? "" : fallback) : String(value);
   }
 
+  function resourceTypeText(item) {
+    return `${item.label}（${item.value}）`;
+  }
+
+  function setResourceTypeMenuOpen(open) {
+    ui.byId("dramaResourceTypeMenu").classList.toggle("hidden", !open);
+    ui.byId("dramaResourceTypes").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function updateResourceTypeLabel() {
+    const selected = RESOURCE_TYPE_V2_OPTIONS.filter(item => state.selectedResourceTypes.has(item.value));
+    let text = "不限类型";
+    if (selected.length === 1) text = resourceTypeText(selected[0]);
+    else if (selected.length === 2) text = selected.map(resourceTypeText).join("、");
+    else if (selected.length > 2) text = `已选择 ${selected.length} 种类型`;
+    ui.setText(ui.byId("dramaResourceTypeLabel"), text, "不限类型");
+  }
+
+  function renderResourceTypes() {
+    const options = ui.byId("dramaResourceTypeOptions");
+    ui.clear(options);
+    RESOURCE_TYPE_V2_OPTIONS.forEach(item => {
+      const label = ui.element("label", { className: "multi-select-option" });
+      const checkbox = ui.element("input", {
+        type: "checkbox",
+        attributes: { "aria-label": resourceTypeText(item) },
+        dataset: { resourceType: item.value },
+      });
+      checkbox.checked = state.selectedResourceTypes.has(item.value);
+      label.append(checkbox, ui.element("span", { text: resourceTypeText(item) }));
+      options.appendChild(label);
+    });
+    updateResourceTypeLabel();
+  }
+
+  function setResourceTypes(values) {
+    const normalized = Array.isArray(values)
+      ? values.map(value => String(value).trim()).filter(value => RESOURCE_TYPE_V2_VALUES.has(value))
+      : [];
+    state.selectedResourceTypes = new Set(normalized);
+    renderResourceTypes();
+  }
+
   function ruleValue(rule, key) {
     const value = ui.objectValue(rule)[key];
     return value == null ? "" : value;
@@ -132,7 +203,7 @@
     const drama = ui.objectValue(configValue("drama_rule", {}));
     const material = ui.objectValue(configValue("material_rule", {}));
     const resourceTypes = Array.isArray(drama.resource_type_v2) ? drama.resource_type_v2 : [];
-    setValue("dramaResourceTypes", resourceTypes.join(", "));
+    setResourceTypes(resourceTypes);
     setValue("dramaRoasMin", ruleValue(drama, "roas_min"));
     setValue("dramaRoasMax", ruleValue(drama, "roas_max"));
     setValue("dramaSpendMin", ruleValue(drama, "spend_min"));
@@ -200,11 +271,9 @@
   }
 
   function parseResourceTypes() {
-    const raw = ui.byId("dramaResourceTypes").value.trim();
-    if (!raw) throw new Error("请至少填写一种短剧类型。");
-    const values = raw.split(/[,，;；\s]+/).filter(Boolean);
-    if (values.some(value => value.length > 64 || /[\u0000-\u0020]/.test(value))) throw new Error("短剧类型包含无效值。");
-    return Array.from(new Set(values));
+    return RESOURCE_TYPE_V2_OPTIONS
+      .filter(item => state.selectedResourceTypes.has(item.value))
+      .map(item => item.value);
   }
 
   function decimalOrNull(id) {
@@ -346,6 +415,32 @@
 
   function bindEvents() {
     ui.byId("templateForm").addEventListener("submit", event => void saveTemplate(event));
+    ui.byId("dramaResourceTypes").addEventListener("click", () => {
+      const expanded = ui.byId("dramaResourceTypes").getAttribute("aria-expanded") === "true";
+      setResourceTypeMenuOpen(!expanded);
+    });
+    ui.byId("dramaResourceTypeOptions").addEventListener("change", event => {
+      const checkbox = event.target.closest("input[data-resource-type]");
+      if (!checkbox) return;
+      if (checkbox.checked) state.selectedResourceTypes.add(checkbox.dataset.resourceType);
+      else state.selectedResourceTypes.delete(checkbox.dataset.resourceType);
+      state.dirty = true;
+      updateResourceTypeLabel();
+    });
+    ui.byId("clearDramaResourceTypes").addEventListener("click", () => {
+      state.selectedResourceTypes.clear();
+      ui.byId("dramaResourceTypeOptions").querySelectorAll("input[data-resource-type]").forEach(checkbox => {
+        checkbox.checked = false;
+      });
+      state.dirty = true;
+      updateResourceTypeLabel();
+    });
+    document.addEventListener("click", event => {
+      if (!event.target.closest("#dramaResourceTypePicker")) setResourceTypeMenuOpen(false);
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") setResourceTypeMenuOpen(false);
+    });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
@@ -403,6 +498,7 @@
     onReady: async () => {
       bindEvents();
       setTimeRows(["11:00"]);
+      setResourceTypes([]);
       try {
         const [accountsResult, templateResult] = await Promise.all([loadAccounts(), loadTemplate()]);
         void accountsResult;

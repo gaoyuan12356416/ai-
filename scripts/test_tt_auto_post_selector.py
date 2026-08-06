@@ -340,6 +340,17 @@ class RuleAndWindowTests(unittest.TestCase):
 
 
 class TwoStageSelectionTests(unittest.TestCase):
+    def test_empty_resource_types_does_not_limit_drama_type(self):
+        source = FakeSource(
+            [drama("C1", resource_type="2")],
+            {"C1": [material("101", "C1")]},
+        )
+        selected = selector(source, FakeMetricStore([])).select_and_reserve(
+            request(rules(drama={"resource_types": []}))
+        )
+        self.assertEqual(selected.drama.content_id, "C1")
+        self.assertEqual(source.drama_call["resource_types"], ())
+
     def test_independent_rankings_and_first_drama_without_material_falls_through(self):
         dates = complete_beijing_dates(NOW, 7)
         metric_store = FakeMetricStore(

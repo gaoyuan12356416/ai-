@@ -57,7 +57,7 @@
 
 1. 基础条件：`ads_drama_info.app_id=1479`、`release_status=1`、`deploy_time>0` 且不晚于当前时间。
 2. 剧语言必须等于当前账号已保存的剧语言。
-3. 剧类型使用 `resource_type_v2`；不使用题材标签。
+3. 剧类型使用 `resource_type_v2` 中文枚举多选；该项非必选，未选择时不限制剧类型；不使用题材标签。
 4. 剧唯一键和指标维度均为 `content_id`（兼容旧字段拼写 `contect_id` 仅限文案变量）。
 5. 黑名单 `type=0` 精确匹配 `series_code`，排除该系列下全部本地化 `content_id`。
 6. 按窗口聚合剧下全部素材的 `SUM(spend)`、`SUM(af_revenue0)`；D0 ROAS 为 `SUM(af_revenue0)/SUM(spend)*100%`。

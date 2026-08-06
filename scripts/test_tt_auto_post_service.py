@@ -30,6 +30,7 @@ from features.tt_auto_posts.service import (  # noqa: E402
     build_service_from_env,
 )
 from features.tt_auto_posts.validation import (  # noqa: E402
+    RESOURCE_TYPE_V2_LABELS,
     ValidationError,
     normalize_template_payload,
 )
@@ -247,6 +248,32 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         invalid["unexpected"] = True
         with self.assertRaises(ValidationError):
             normalize_template_payload(invalid)
+
+    def test_resource_type_v2_is_optional_and_enum_limited(self):
+        empty = template_payload()
+        empty["drama_rule"]["resource_type_v2"] = []
+        normalized = normalize_template_payload(empty)
+        self.assertEqual(normalized["drama_rule"]["resource_type_v2"], [])
+
+        omitted = template_payload()
+        omitted["drama_rule"].pop("resource_type_v2")
+        normalized = normalize_template_payload(omitted)
+        self.assertEqual(normalized["drama_rule"]["resource_type_v2"], [])
+
+        self.assertEqual(
+            set(RESOURCE_TYPE_V2_LABELS),
+            {"0", *(str(value) for value in range(1, 23)), "100"},
+        )
+        self.assertEqual(RESOURCE_TYPE_V2_LABELS["21"], "AI翻译解说剧首发")
+        self.assertEqual(RESOURCE_TYPE_V2_LABELS["22"], "AI翻译解说剧首发")
+
+        for invalid_value in (-1, 23, "01", True, None):
+            with self.subTest(invalid_value=invalid_value):
+                invalid = template_payload()
+                invalid["drama_rule"]["resource_type_v2"] = [invalid_value]
+                with self.assertRaises(ValidationError) as caught:
+                    normalize_template_payload(invalid)
+                self.assertEqual(caught.exception.code, "invalid_request")
 
     def test_crud_copy_enable_disable_and_version_checks(self):
         service, executor = self.service()

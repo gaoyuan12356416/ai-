@@ -126,9 +126,28 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <article class="rule-card">
                     <div class="rule-card-head"><span class="step">1</span><strong>先筛选剧</strong></div>
                     <div class="field" style="margin-bottom: 11px;">
-                      <label class="required" for="dramaResourceTypes">短剧类型 resource_type_v2</label>
-                      <input id="dramaResourceTypes" autocomplete="off" placeholder="例如：1, 2" />
-                      <span class="helper">至少填写一种，多个类型用逗号分隔。</span>
+                      <label for="dramaResourceTypes">短剧类型 resource_type_v2</label>
+                      <div class="multi-select" id="dramaResourceTypePicker">
+                        <button
+                          class="multi-select-trigger"
+                          id="dramaResourceTypes"
+                          type="button"
+                          aria-haspopup="true"
+                          aria-expanded="false"
+                          aria-controls="dramaResourceTypeMenu"
+                        >
+                          <span id="dramaResourceTypeLabel">不限类型</span>
+                          <span class="multi-select-arrow" aria-hidden="true">⌄</span>
+                        </button>
+                        <div class="multi-select-menu hidden" id="dramaResourceTypeMenu" aria-label="短剧类型选项">
+                          <div class="multi-select-menu-head">
+                            <span>可多选</span>
+                            <button class="button ghost small" id="clearDramaResourceTypes" type="button">清空（不限）</button>
+                          </div>
+                          <div class="multi-select-options" id="dramaResourceTypeOptions"></div>
+                        </div>
+                      </div>
+                      <span class="helper">非必选；不选择时不限制短剧类型。</span>
                     </div>
                     <div class="field" style="margin-bottom: 11px;">
                       <span class="field-label">剧维度 D0 ROAS（%）</span>
