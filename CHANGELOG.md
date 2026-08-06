@@ -1,3 +1,10 @@
+## 2026-08-06 unified TT publishing logs
+
+- Added a standalone TT publishing-log page that combines material-pool and automatic-template tasks while keeping source and trigger semantics separate.
+- Added a read-only cross-ledger API with source/status/date filters, global ordering, bounded pagination, aggregate counts, and public-safe task projections.
+- Removed the publishing-task log section and polling from the TT Post pool page while preserving the existing publishing backends and task actions through the new page.
+- Added focused unified-log coverage and kept all existing TT Post and automatic-template regressions passing.
+
 ## 2026-07-23 X Post canary
 
 - Added an internal-only, one-shot X Post canary flow with account-lock token refresh, current X v2 chunked media upload, Create Post, and fail-closed unknown-outcome handling.

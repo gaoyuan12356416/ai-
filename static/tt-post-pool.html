@@ -676,6 +676,7 @@
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
+          <a class="button" href="/tt-publish-logs.html?publish_source=material_pool">发布日志</a>
           <button id="refreshPage" class="button" type="button">刷新页面</button>
           <button id="authButton" class="button" type="button">登录</button>
         </div>
@@ -893,87 +894,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           </div>
         </section>
 
-        <section class="panel">
-          <div class="stats">
-            <article class="stat"><span>任务总数</span><strong id="totalCount">—</strong></article>
-            <article class="stat"><span>等待发布时间</span><strong id="scheduledCount">—</strong></article>
-            <article class="stat"><span>发布处理中</span><strong id="processingCount">—</strong></article>
-            <article class="stat"><span>需要人工确认</span><strong id="reviewCount">—</strong></article>
-            <article class="stat"><span>已发布</span><strong id="publishedCount">—</strong></article>
-          </div>
-
-          <div class="section-head">
-            <div>
-              <h2>发布任务</h2>
-              <p>自动/排期发布与立即测试统一展示；“处理中”和“结果待确认”都不会自动创建第二条发布请求。</p>
-            </div>
-          </div>
-
-          <form id="queueFilters" class="filters">
-            <input id="filterMaterialId" inputmode="numeric" placeholder="素材 ID" aria-label="筛选素材 ID" />
-            <select id="filterAccountId" aria-label="筛选 TikTok 账号">
-              <option value="">全部账号</option>
-            </select>
-            <select id="filterTaskType" aria-label="筛选任务类型">
-              <option value="all">全部任务类型</option>
-              <option value="automatic">自动/排期发布</option>
-              <option value="direct_test">立即测试</option>
-            </select>
-            <select id="filterStatus" aria-label="筛选任务状态">
-              <option value="">全部状态</option>
-              <option value="scheduled">等待发布时间</option>
-              <option value="preparing">视频准备中</option>
-              <option value="processing_download">发布处理中</option>
-              <option value="published">已发布</option>
-              <option value="failed">发布失败</option>
-              <option value="needs_review">结果待确认</option>
-              <option value="missed">已错过时间</option>
-              <option value="hold">安全待处理</option>
-            </select>
-            <button class="button primary" type="submit">查询</button>
-            <button id="resetQueueFilters" class="button" type="button">重置</button>
-          </form>
-
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>任务时间</th>
-                  <th>TikTok账号</th>
-                  <th>素材 / Drama ID</th>
-                  <th>短码</th>
-                  <th>描述</th>
-                  <th>发布设置</th>
-                  <th>任务状态</th>
-                  <th>TikTok状态</th>
-                  <th>错误</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody id="queueRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
-            </table>
-          </div>
-          <div class="pager">
-            <span id="pageInfo">第 1 页</span>
-            <div class="pager-actions">
-              <button id="prevPage" class="button" type="button">上一页</button>
-              <button id="nextPage" class="button" type="button">下一页</button>
-            </div>
-          </div>
-        </section>
       </div>
     </main>
   </div>
-
-  <dialog id="eventDialog">
-    <div class="dialog-head">
-      <div><h2 id="eventTitle">任务事件</h2><div id="eventSubtitle" class="subtle">—</div></div>
-      <button id="closeEvents" class="button" type="button">关闭</button>
-    </div>
-    <div class="dialog-body">
-      <div id="eventList" class="event-list"><div class="empty">正在加载…</div></div>
-    </div>
-  </dialog>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
@@ -992,10 +915,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       const CAPTION_URL_PREVIEW = "https://gy.g2flow.com/s2l/tt/123.html";
       const CAPTION_CODE_PREVIEW = "A1B2";
       const CONSENT_VERSION = "tt-direct-post-consent-20260729";
-      const PROCESSING_STATUSES = new Set([
-        "queued", "preparing", "ready", "claimed", "creator_recheck", "initializing",
-        "processing_download", "publishing", "reconciling",
-      ]);
       const RUN_NOW_NOT_PUBLISHED_STATUSES = new Set([
         "preflight_failed", "failed", "canceled", "cancelled", "missed", "blocked_compliance",
       ]);
@@ -1047,20 +966,14 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         directTests: [],
         directTestsLoading: false,
         directTestPollTimer: null,
-        publishTasks: [],
-        queueRequestVersion: 0,
         gates: {
           liveEnabled: undefined,
           auditApproved: undefined,
           urlVerified: undefined,
         },
-        page: 1,
-        pageSize: 20,
-        total: 0,
         formKey: "",
         consentAcceptedAt: "",
         busy: false,
-        queueActionsBusy: new Set(),
         toastTimer: null,
       };
 
@@ -1325,24 +1238,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         empty.className = "empty";
         setText(empty, message);
         list.appendChild(empty);
-      }
-      function renderAccountFilters() {
-        const select = byId("filterAccountId");
-        const current = select.value;
-        select.replaceChildren();
-        const all = document.createElement("option");
-        all.value = "";
-        setText(all, "全部账号");
-        select.appendChild(all);
-        state.accounts.forEach(item => {
-          const id = accountId(item);
-          if (!id) return;
-          const option = document.createElement("option");
-          option.value = id;
-          setText(option, `${accountName(item)} · ${id}`);
-          select.appendChild(option);
-        });
-        if (Array.from(select.options).some(option => option.value === current)) select.value = current;
       }
       function autoAccountStatus(id) {
         const selected = state.autoAccountIds.has(id);
@@ -2361,10 +2256,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (document.hidden || !directTestPollingNeeded()) return;
         state.directTestPollTimer = window.setTimeout(() => {
           state.directTestPollTimer = null;
-          void Promise.all([
-            loadDirectTests({ quiet: true, reschedule: false }),
-            loadQueue(),
-          ]).finally(syncDirectTestPolling);
+          void loadDirectTests({ quiet: true, reschedule: false })
+            .finally(syncDirectTestPolling);
         }, DIRECT_TEST_POLL_INTERVAL_MS);
       }
       async function runNow() {
@@ -2437,7 +2330,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               { status: outcome.status, direct_test_id: String(runId || "") }
             );
             showToast(
-              `“${requestedAccountName}”立即发布已提交${runId ? `（${runId}）` : ""}，请在下方任务中查看进度。`
+              `“${requestedAccountName}”立即发布已提交${runId ? `（${runId}）` : ""}，请到 TT 发布日志查看进度。`
             );
           } else {
             throw new Error(
@@ -2446,7 +2339,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 : "服务端未返回可确认的立即发布状态"
             );
           }
-          await Promise.all([loadDirectTests(), loadQueue()]);
+          await loadDirectTests();
         } catch (error) {
           if (Number(error.status) >= 400 && Number(error.status) < 500) {
             clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
@@ -2458,7 +2351,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
               true
             );
           }
-          await Promise.all([loadDirectTests(), loadQueue()]);
+          await loadDirectTests();
         } finally {
           state.runNowBusy = false;
           setText(button, "立即发布所选素材");
@@ -2512,7 +2405,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           renderAccounts();
           renderOperationAccountOptions();
           renderAccountSettings();
-          renderAccountFilters();
           if (boolValue(result.account_source_available) === false) {
             setText(
               byId("accountHelp"),
@@ -3374,397 +3266,11 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         row.appendChild(cell);
         return cell;
       }
-      function setQueueEmpty(message) {
-        const body = byId("queueRows");
-        body.replaceChildren();
-        const row = document.createElement("tr");
-        const cell = document.createElement("td");
-        cell.colSpan = 10;
-        cell.className = "empty";
-        setText(cell, message);
-        row.appendChild(cell);
-        body.appendChild(row);
-      }
       function badge(label, kind) {
         const node = document.createElement("span");
         node.className = `badge ${kind || "neutral"}`;
         setText(node, label);
         return node;
-      }
-      function interactionCopy(item) {
-        const enabled = [];
-        if (boolValue(item.allow_comment) === true) enabled.push("评论");
-        if (boolValue(item.allow_duet) === true) enabled.push("Duet");
-        if (boolValue(item.allow_stitch) === true) enabled.push("Stitch");
-        return enabled.length ? `互动：${enabled.join("、")}` : "互动全部关闭";
-      }
-      function rawQueueStatus(item) {
-        return String(item.queue_status || item.status || "").toLowerCase();
-      }
-      function canCancelQueue(item) {
-        return ["scheduled", "claimed"].includes(rawQueueStatus(item));
-      }
-      function canManuallyReconcileQueue(item) {
-        return Number(item.unknown_outcome || 0) === 1 ||
-          ["unknown", "needs_review", "reconciling"].includes(rawQueueStatus(item));
-      }
-      function queueActionButton(action, queueId, label, className = "") {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = `button small ${className}`.trim();
-        button.dataset.action = action;
-        button.dataset.queueId = queueId;
-        setText(button, label);
-        button.disabled = !queueId;
-        return button;
-      }
-      function directDetailsButton(item) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "button small";
-        button.dataset.action = "direct-details";
-        button.dataset.taskKey = String(item.task_key || "");
-        setText(button, "查看详情");
-        button.disabled = !button.dataset.taskKey;
-        return button;
-      }
-      function displayQueueCode(item) {
-        const code = String(item && item.code || "").trim().toUpperCase();
-        return /^[A-Z0-9]{4}$/.test(code) ? code : "—";
-      }
-      function renderQueueRows(items) {
-        const body = byId("queueRows");
-        body.replaceChildren();
-        if (!items.length) {
-          setQueueEmpty("没有符合当前筛选条件的任务。");
-          return;
-        }
-        items.forEach(item => {
-          const row = document.createElement("tr");
-          const directTest = item.task_type === "direct_test";
-          const taskId = item.task_id || item.direct_test_id || item.queue_id || item.id || "—";
-          appendCell(
-            row,
-            formatTime(item.task_at_utc || item.scheduled_at || item.scheduled_at_utc),
-            `${item.timezone || "Asia/Shanghai"} · ${directTest ? "立即测试" : "任务"} ${taskId}`
-          );
-          appendCell(
-            row,
-            item.creator_nickname_snapshot || item.account_name_snapshot || item.account_name || `账号 ${item.source_account_id || "—"}`,
-            item.creator_username_snapshot ? `@${String(item.creator_username_snapshot).replace(/^@/, "")}` : `账号 ID ${item.source_account_id || "—"}`
-          );
-          appendCell(
-            row,
-            `素材 ${item.material_id || "—"}`,
-            `Drama ID ${item.content_id || "—"}`
-          );
-          appendCell(row, displayQueueCode(item), "", "code-cell");
-          appendCell(row, item.caption_text || item.caption || "—", "", "caption-cell");
-          const commercial = boolValue(item.commercial_disclosure) === true
-            ? (boolValue(item.brand_content_toggle) === true ? "第三方品牌披露" : "自有品牌披露")
-            : "未开启商业披露";
-          appendCell(
-            row,
-            item.privacy_level || "未选择",
-            `${interactionCopy(item)} · ${commercial}${boolValue(item.is_aigc) === true ? " · AI内容声明" : ""}`
-          );
-
-          const statusCell = document.createElement("td");
-          const meta = statusMeta(item);
-          statusCell.appendChild(badge(meta.label, meta.kind));
-          if (directTest) {
-            const taskType = document.createElement("div");
-            taskType.className = "subtle";
-            setText(taskType, "立即测试");
-            statusCell.appendChild(taskType);
-          }
-          if (item.publish_mode === "hold") {
-            const hold = document.createElement("div");
-            hold.className = "subtle";
-            setText(hold, "不会自动发送");
-            statusCell.appendChild(hold);
-          }
-          row.appendChild(statusCell);
-
-          appendCell(
-            row,
-            item.remote_status || item.tiktok_status || "—",
-            item.publish_id ? "已获得 TikTok 发布标识" : ""
-          );
-          const errorCell = appendCell(
-            row,
-            item.error_code || item.fail_reason || "—",
-            item.error_message || item.safe_message || "",
-            (item.error_code || item.fail_reason || item.error_message) ? "error-copy" : ""
-          );
-          if (!errorCell.textContent) setText(errorCell, "—");
-
-          const actionCell = document.createElement("td");
-          const actionList = document.createElement("div");
-          actionList.className = "queue-actions";
-          if (directTest) {
-            actionList.appendChild(directDetailsButton(item));
-          } else {
-            const queueId = String(item.queue_id || item.id || "");
-            const events = queueActionButton("events", queueId, "查看事件");
-            events.dataset.materialId = String(item.material_id || "");
-            actionList.appendChild(events);
-            if (canCancelQueue(item)) {
-              actionList.appendChild(
-                queueActionButton("cancel", queueId, "取消任务", "danger")
-              );
-            }
-            if (canManuallyReconcileQueue(item)) {
-              actionList.appendChild(
-                queueActionButton("reconcile", queueId, "人工核对", "warning")
-              );
-            }
-          }
-          actionCell.appendChild(actionList);
-          row.appendChild(actionCell);
-          body.appendChild(row);
-        });
-      }
-      function queueQuery() {
-        const params = new URLSearchParams({
-          page: String(state.page),
-          page_size: String(state.pageSize),
-          task_type: byId("filterTaskType").value || "all",
-        });
-        [
-          ["material_id", "filterMaterialId"],
-          ["source_account_id", "filterAccountId"],
-          ["status", "filterStatus"],
-        ].forEach(([key, id]) => {
-          const value = byId(id).value.trim();
-          if (value) params.set(key, value);
-        });
-        return params.toString();
-      }
-      function updateStats(result, items, pagination) {
-        const summary = asObject(result.summary);
-        const total = Number(firstDefined(summary.total, pagination.total, 0) || 0);
-        const counts = {
-          scheduled: Number(firstDefined(summary.scheduled, summary.scheduled_count, 0) || 0),
-          processing: Number(firstDefined(summary.processing, summary.processing_count, 0) || 0),
-          review: Number(firstDefined(summary.needs_review, summary.review_count, summary.unknown_count, 0) || 0),
-          published: Number(firstDefined(summary.published, summary.published_count, 0) || 0),
-        };
-        if (!Object.keys(summary).length) {
-          items.forEach(item => {
-            const status = statusMeta(item).status;
-            if (status === "scheduled") counts.scheduled += 1;
-            if (PROCESSING_STATUSES.has(status)) counts.processing += 1;
-            if (status === "needs_review") counts.review += 1;
-            if (status === "published") counts.published += 1;
-          });
-        }
-        setText(byId("totalCount"), total);
-        setText(byId("scheduledCount"), counts.scheduled);
-        setText(byId("processingCount"), counts.processing);
-        setText(byId("reviewCount"), counts.review);
-        setText(byId("publishedCount"), counts.published);
-      }
-      async function loadQueue() {
-        const requestVersion = ++state.queueRequestVersion;
-        setQueueEmpty("正在加载…");
-        try {
-          const result = await api(`${API_BASE}/tasks?${queueQuery()}`);
-          if (requestVersion !== state.queueRequestVersion) return false;
-          applyGates(result);
-          const items = Array.isArray(result.items)
-            ? result.items
-            : [];
-          state.publishTasks = items;
-          const pagination = asObject(result.pagination);
-          state.total = Number(firstDefined(pagination.total, result.total, items.length) || 0);
-          state.page = Number(firstDefined(pagination.page, result.page, state.page) || 1);
-          state.pageSize = Number(firstDefined(pagination.page_size, result.page_size, state.pageSize) || 20);
-          renderQueueRows(items);
-          updateStats(result, items, { total: state.total });
-          const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
-          setText(byId("pageInfo"), `第 ${state.page} / ${pages} 页，共 ${state.total} 条`);
-          byId("prevPage").disabled = state.page <= 1;
-          byId("nextPage").disabled = state.page >= pages;
-          return true;
-        } catch (error) {
-          if (requestVersion !== state.queueRequestVersion) return false;
-          state.publishTasks = [];
-          setQueueEmpty(`任务加载失败：${error.message}`);
-          ["totalCount", "scheduledCount", "processingCount", "reviewCount", "publishedCount"]
-            .forEach(id => setText(byId(id), "—"));
-          return false;
-        }
-      }
-      function setEventsEmpty(message) {
-        const list = byId("eventList");
-        list.replaceChildren();
-        const empty = document.createElement("div");
-        empty.className = "empty";
-        setText(empty, message);
-        list.appendChild(empty);
-      }
-      function renderEvents(items) {
-        const list = byId("eventList");
-        list.replaceChildren();
-        if (!items.length) {
-          setEventsEmpty("暂无事件记录。");
-          return;
-        }
-        items.forEach(item => {
-          const event = document.createElement("article");
-          event.className = "event-item";
-          const time = document.createElement("div");
-          const timeStrong = document.createElement("strong");
-          setText(timeStrong, formatTime(item.created_at || item.occurred_at));
-          const stage = document.createElement("div");
-          stage.className = "subtle";
-          setText(stage, item.stage || item.local_status || "状态变化");
-          time.append(timeStrong, stage);
-
-          const detail = document.createElement("div");
-          const title = document.createElement("strong");
-          setText(title, item.event_type || item.remote_status || item.status || "任务事件");
-          const message = document.createElement("div");
-          message.className = "subtle";
-          const pieces = [
-            item.tiktok_error_code || item.error_code,
-            item.fail_reason,
-            item.safe_message || item.message,
-          ].filter(Boolean);
-          setText(message, pieces.length ? pieces.join(" · ") : "状态已记录");
-          detail.append(title, message);
-          event.append(time, detail);
-          list.appendChild(event);
-        });
-      }
-      function directTaskTimeline(item) {
-        const events = [];
-        const add = (createdAt, eventType, stage, message = "") => {
-          if (!createdAt) return;
-          events.push({
-            created_at: createdAt,
-            event_type: eventType,
-            stage,
-            message,
-          });
-        };
-        add(item.created_at, "立即测试已创建", "queued", "任务已进入独立测试流程");
-        add(item.prepared_at_utc, "成片制作完成", "ready");
-        add(item.publish_started_at_utc, "已提交 TikTok", "publishing");
-        add(item.published_at_utc, "TikTok 发布完成", "published");
-        add(
-          item.failed_at_utc,
-          "立即测试失败",
-          "failed",
-          item.error_message || item.error_code || ""
-        );
-        add(item.canceled_at_utc, "立即测试已取消", "canceled");
-        if (
-          (item.status === "unknown" || Number(item.unknown_outcome || 0) === 1)
-          && item.updated_at
-        ) {
-          add(
-            item.updated_at,
-            "发布结果待确认",
-            "needs_review",
-            item.error_message || item.error_code || ""
-          );
-        }
-        return events.sort((left, right) => (
-          String(left.created_at).localeCompare(String(right.created_at))
-        ));
-      }
-      function openDirectTaskDetails(taskKey) {
-        const item = state.publishTasks.find(task => (
-          task.task_type === "direct_test" && task.task_key === taskKey
-        ));
-        if (!item) {
-          showToast("立即测试详情已变化，请刷新后重试。", true);
-          return;
-        }
-        setText(byId("eventTitle"), `立即测试 ${item.direct_test_id || item.task_id} 详情`);
-        setText(
-          byId("eventSubtitle"),
-          `素材 ${item.material_id || "—"} · ${item.task_label || "立即测试"}`
-        );
-        renderEvents(directTaskTimeline(item));
-        const dialog = byId("eventDialog");
-        if (typeof dialog.showModal === "function") dialog.showModal();
-        else dialog.setAttribute("open", "");
-      }
-      async function runQueueAction(action, queueId, button) {
-        const normalizedQueueId = String(queueId || "").trim();
-        if (!/^[1-9][0-9]*$/.test(normalizedQueueId)) {
-          showToast("任务 ID 无效，请刷新后重试。", true);
-          return;
-        }
-        if (!["cancel", "reconcile"].includes(action)) return;
-        const operationKey = `${action}:${normalizedQueueId}`;
-        if (state.queueActionsBusy.has(operationKey)) return;
-        const isCancel = action === "cancel";
-        const confirmed = window.confirm(
-          isCancel
-            ? `确定取消任务 ${normalizedQueueId}？取消后不会继续进入发布流程。`
-            : `确定人工核对任务 ${normalizedQueueId}？系统只会查询并核对已有结果，不会创建第二条发布请求。`
-        );
-        if (!confirmed) return;
-        state.queueActionsBusy.add(operationKey);
-        const originalLabel = button.textContent;
-        button.disabled = true;
-        setText(button, isCancel ? "正在取消…" : "正在核对…");
-        try {
-          const result = await api(
-            `${API_BASE}/queue/${encodeURIComponent(normalizedQueueId)}/${action}`,
-            {
-              method: "POST",
-              body: JSON.stringify(
-                isCancel ? { reason: "由AI后台操作人员人工取消" } : {}
-              ),
-            }
-          );
-          applyGates(result);
-          showToast(
-            isCancel
-              ? "任务已取消。"
-              : "人工核对完成，任务状态已刷新。"
-          );
-          await loadQueue();
-        } catch (error) {
-          showToast(
-            `${isCancel ? "取消" : "人工核对"}失败：${error.message}`,
-            true
-          );
-        } finally {
-          state.queueActionsBusy.delete(operationKey);
-          if (button.isConnected) {
-            button.disabled = false;
-            setText(button, originalLabel);
-          }
-        }
-      }
-      async function openEvents(queueId, materialId) {
-        setText(byId("eventTitle"), `任务 ${queueId} 事件`);
-        setText(byId("eventSubtitle"), materialId ? `素材 ${materialId}` : "状态变化记录");
-        setEventsEmpty("正在加载…");
-        const dialog = byId("eventDialog");
-        if (typeof dialog.showModal === "function") dialog.showModal();
-        else dialog.setAttribute("open", "");
-        try {
-          const params = new URLSearchParams({ queue_id: String(queueId) });
-          const result = await api(`${API_BASE}/events?${params.toString()}`);
-          const items = Array.isArray(result.items)
-            ? result.items
-            : (Array.isArray(result.events) ? result.events : []);
-          renderEvents(items);
-        } catch (error) {
-          setEventsEmpty(`事件加载失败：${error.message}`);
-        }
-      }
-      function closeEvents() {
-        const dialog = byId("eventDialog");
-        if (typeof dialog.close === "function") dialog.close();
-        else dialog.removeAttribute("open");
       }
       async function init() {
         loadPendingRunNowState();
@@ -3804,7 +3310,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           loadAccounts(),
           loadSchedule(),
           loadDirectTests(),
-          loadQueue(),
           loadPreparationStatus(),
         ]);
       }
@@ -3843,7 +3348,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       byId("refreshGates").addEventListener("click", async () => {
         await Promise.all([
           loadAccounts(),
-          loadQueue(),
           loadSchedule({ preserveDraft: true }),
           loadDirectTests(),
           loadPreparationStatus(),
@@ -3916,45 +3420,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         }
         if (!document.hidden) syncDirectTestPolling();
       });
-      byId("queueFilters").addEventListener("submit", event => {
-        event.preventDefault();
-        state.page = 1;
-        loadQueue();
-      });
-      byId("resetQueueFilters").addEventListener("click", () => {
-        byId("queueFilters").reset();
-        state.page = 1;
-        loadQueue();
-      });
-      byId("prevPage").addEventListener("click", () => {
-        if (state.page > 1) {
-          state.page -= 1;
-          loadQueue();
-        }
-      });
-      byId("nextPage").addEventListener("click", () => {
-        if (state.page * state.pageSize < state.total) {
-          state.page += 1;
-          loadQueue();
-        }
-      });
-      byId("queueRows").addEventListener("click", event => {
-        const button = event.target.closest("button[data-action]");
-        if (!button || button.disabled) return;
-        const action = button.dataset.action;
-        if (action === "direct-details") {
-          openDirectTaskDetails(button.dataset.taskKey);
-        } else if (action === "events") {
-          openEvents(button.dataset.queueId, button.dataset.materialId);
-        } else if (action === "cancel" || action === "reconcile") {
-          runQueueAction(action, button.dataset.queueId, button);
-        }
-      });
-      byId("closeEvents").addEventListener("click", closeEvents);
-      byId("eventDialog").addEventListener("click", event => {
-        if (event.target === byId("eventDialog")) closeEvents();
-      });
-
       init();
     })();
   </script>

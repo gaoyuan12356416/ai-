@@ -94180,6 +94180,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 TT_AUTO_ADMIN_PREFIX + "/accounts",
                 TT_AUTO_ADMIN_PREFIX + "/templates",
                 TT_AUTO_ADMIN_PREFIX + "/runs",
+                TT_AUTO_ADMIN_PREFIX + "/publish-logs",
             }
             or re.fullmatch(
                 re.escape(TT_AUTO_ADMIN_PREFIX)
@@ -94190,6 +94191,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             navigation_key = (
                 "ttAutoPublishRuns"
                 if parsed.path.startswith(TT_AUTO_ADMIN_PREFIX + "/runs")
+                or parsed.path == TT_AUTO_ADMIN_PREFIX + "/publish-logs"
                 else "ttAutoPublishTemplates"
             )
             if not self._require_cookie_navigation_item(navigation_key):

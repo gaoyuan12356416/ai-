@@ -30,7 +30,7 @@ from .client import (
     safe_public_message,
 )
 from .code_broker_client import AutoCodeBrokerClient, DEFAULT_BROKER_URL
-from .core import AuditActor, TTPostAutoStore
+from .core import AuditActor, PUBLISH_LOG_STATUS_GROUPS, TTPostAutoStore
 from .legacy_reader import LegacyTTPostReader
 from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
 from .repositories import (
@@ -104,6 +104,17 @@ def _limit_offset(query: Mapping[str, Sequence[str]]) -> Tuple[int, int]:
     return limit, offset
 
 
+def _publish_log_limit_offset(
+    query: Mapping[str, Sequence[str]],
+) -> Tuple[int, int]:
+    limit, offset = _limit_offset(query)
+    if offset > 10_000:
+        raise AutoPostServiceError(
+            "invalid_request", "发布日志最多翻阅前10000条", 400
+        )
+    return limit, offset
+
+
 def _beijing_date_boundary(value: str, *, next_day: bool = False) -> str:
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(value or "")):
         raise AutoPostServiceError("invalid_request", "运行日期筛选无效", 400)
@@ -114,6 +125,22 @@ def _beijing_date_boundary(value: str, *, next_day: bool = False) -> str:
     if next_day:
         local += timedelta(days=1)
     return local.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _publish_log_order(item: Mapping[str, Any]) -> Tuple[float, str, int]:
+    raw = str(item.get("task_at_utc") or "").strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timezone is required")
+        timestamp = parsed.astimezone(UTC).timestamp()
+    except (OverflowError, TypeError, ValueError):
+        timestamp = float("-inf")
+    return (
+        timestamp,
+        str(item.get("publish_source") or ""),
+        int(item.get("task_id") or 0),
+    )
 
 
 def _blacklist_dict(snapshot: Any) -> Dict[str, Any]:
@@ -828,6 +855,155 @@ class TTAutoPostService:
             },
         }
 
+    def publish_logs(
+        self, query: Mapping[str, Sequence[str]]
+    ) -> Dict[str, Any]:
+        """Merge both immutable ledgers into one task-level read model."""
+
+        source = _query_one(query, "publish_source")
+        if source not in {"", "material_pool", "auto_template"}:
+            raise AutoPostServiceError("invalid_request", "发布来源无效", 400)
+        trigger = _query_one(query, "trigger_type")
+        if trigger not in {"", "scheduled", "direct_test", "auto", "manual"}:
+            raise AutoPostServiceError("invalid_request", "触发方式无效", 400)
+        status = _query_one(query, "status")
+        if status and status not in PUBLISH_LOG_STATUS_GROUPS:
+            raise AutoPostServiceError("invalid_request", "发布状态无效", 400)
+        limit, offset = _publish_log_limit_offset(query)
+        fetch_limit = offset + limit
+        account_id = _query_one(query, "source_account_id")
+        material_id = _query_one(query, "material_id")
+        content_id = _query_one(query, "content_id")
+        raw_template_id = _query_one(query, "template_id")
+        template_id = (
+            None if not raw_template_id else _positive_id(raw_template_id, "模板ID")
+        )
+        from_value = _query_one(query, "from")
+        to_value = _query_one(query, "to")
+        from_utc = _beijing_date_boundary(from_value) if from_value else ""
+        to_utc = (
+            _beijing_date_boundary(to_value, next_day=True) if to_value else ""
+        )
+        if from_utc and to_utc and from_utc >= to_utc:
+            raise AutoPostServiceError("invalid_request", "发布日期范围无效", 400)
+
+        empty = {
+            "items": [],
+            "total": 0,
+            "summary": {
+                key: 0
+                for key in (
+                    "total",
+                    "scheduled",
+                    "processing",
+                    "published",
+                    "needs_review",
+                    "failed",
+                    "canceled",
+                    "no_candidate",
+                    "hold",
+                )
+            },
+        }
+        legacy_trigger = trigger if trigger in {"scheduled", "direct_test"} else ""
+        auto_trigger = trigger if trigger in {"auto", "manual"} else ""
+        include_legacy = (
+            source != "auto_template"
+            and template_id is None
+            and trigger not in {"auto", "manual"}
+        )
+        include_auto = source != "material_pool" and trigger not in {
+            "scheduled",
+            "direct_test",
+        }
+        legacy = (
+            self.legacy_reader.list_publish_logs(
+                trigger_type=legacy_trigger,
+                account_id=account_id,
+                material_id=material_id,
+                content_id=content_id,
+                status_group=status,
+                from_utc=from_utc,
+                to_utc=to_utc,
+                limit=fetch_limit,
+            )
+            if include_legacy
+            else dict(empty)
+        )
+        automatic = (
+            self.store.list_publish_logs(
+                trigger_type=auto_trigger,
+                account_id=account_id,
+                template_id=template_id,
+                material_id=material_id,
+                content_id=content_id,
+                status_group=status,
+                from_utc=from_utc,
+                to_utc=to_utc,
+                limit=fetch_limit,
+            )
+            if include_auto
+            else dict(empty)
+        )
+
+        values = [
+            dict(item)
+            for result in (legacy, automatic)
+            for item in result.get("items", [])
+        ]
+        for item in values:
+            item["selection"] = _public_selection(item.get("selection", {}))
+            publish_url = str(item.get("publish_url") or "").strip()
+            if publish_url:
+                try:
+                    parsed = urlsplit(publish_url)
+                    host = str(parsed.hostname or "").lower()
+                    trusted = (
+                        parsed.scheme == "https"
+                        and (host == "tiktok.com" or host.endswith(".tiktok.com"))
+                        and parsed.username is None
+                        and parsed.password is None
+                        and parsed.port in (None, 443)
+                        and not parsed.query
+                        and not parsed.fragment
+                    )
+                except ValueError:
+                    trusted = False
+                if not trusted:
+                    item["publish_url"] = ""
+        values.sort(key=_publish_log_order, reverse=True)
+        page = values[offset : offset + limit]
+        summary_keys = (
+            "total",
+            "scheduled",
+            "processing",
+            "published",
+            "needs_review",
+            "failed",
+            "canceled",
+            "no_candidate",
+            "hold",
+        )
+        summary = {
+            key: sum(
+                int((result.get("summary") or {}).get(key) or 0)
+                for result in (legacy, automatic)
+            )
+            for key in summary_keys
+        }
+        total = int(legacy.get("total") or 0) + int(automatic.get("total") or 0)
+        summary["total"] = total
+        return {
+            "ok": True,
+            "items": page,
+            "pagination": {"limit": limit, "offset": offset, "total": total},
+            "summary": summary,
+            "sources": {
+                "material_pool": int(legacy.get("total") or 0),
+                "auto_template": int(automatic.get("total") or 0),
+            },
+        }
+
     def run(self, run_id: Any) -> Dict[str, Any]:
         run = self.store.get_run(run_id)
         template = self.store.get_template(
@@ -1169,6 +1345,8 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
             return 200, service.template(match.group(1))
         if self.command == "GET" and path == TT_AUTO_ADMIN_PREFIX + "/runs":
             return 200, service.runs(query)
+        if self.command == "GET" and path == TT_AUTO_ADMIN_PREFIX + "/publish-logs":
+            return 200, service.publish_logs(query)
         match = re.fullmatch(
             re.escape(TT_AUTO_ADMIN_PREFIX) + r"/runs/([1-9][0-9]*)", path
         )

@@ -514,102 +514,37 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("settings.configured === true", PAGE)
         self.assertNotIn('api(`${API_BASE}/account-settings`, {', PAGE)
 
-    def test_initial_load_fetches_config_direct_tests_pool_and_preparation(self):
+    def test_initial_load_fetches_config_direct_tests_and_preparation_only(self):
         init_source = source_between("async function init()", 'byId("accountSearch")')
         for loader in (
             "loadAccounts()",
             "loadSchedule()",
             "loadDirectTests()",
-            "loadQueue()",
             "loadPreparationStatus()",
         ):
             self.assertIn(loader, init_source)
+        self.assertNotIn("loadQueue()", init_source)
 
-    def test_publish_task_table_uses_the_unified_server_projection(self):
-        query_source = source_between(
-            "function queueQuery()", "function updateStats"
-        )
-        load_source = source_between(
-            "async function loadQueue()", "function setEventsEmpty"
-        )
-        self.assertIn('id="filterTaskType"', PAGE)
-        self.assertIn('value="automatic"', PAGE)
-        self.assertIn('value="direct_test"', PAGE)
-        self.assertIn('task_type: byId("filterTaskType").value || "all"', query_source)
-        self.assertIn('api(`${API_BASE}/tasks?${queueQuery()}`)', load_source)
-        self.assertNotIn('api(`${API_BASE}/queue?${queueQuery()}`)', load_source)
-        self.assertIn("state.publishTasks = items", load_source)
-
-    def test_publish_task_table_displays_the_frozen_four_character_code(self):
-        table_source = source_between('<h2>发布任务</h2>', '</section>')
-        rows_source = source_between(
-            "function displayQueueCode(item)", "function queueQuery()"
-        )
-        empty_source = source_between(
-            "function setQueueEmpty(message)", "function badge(label, kind)"
-        )
-        self.assertIn("<th>短码</th>", table_source)
-        self.assertIn('colspan="10"', table_source)
-        self.assertIn("cell.colSpan = 10", empty_source)
-        self.assertIn('String(item && item.code || "")', rows_source)
-        self.assertIn('/^[A-Z0-9]{4}$/.test(code)', rows_source)
+    def test_publish_task_log_is_removed_and_links_to_standalone_page(self):
+        self.assertNotIn('<h2>发布任务</h2>', PAGE)
+        self.assertNotIn('id="queueFilters"', PAGE)
+        self.assertNotIn('id="queueRows"', PAGE)
+        self.assertNotIn('/tasks?', PAGE)
         self.assertIn(
-            'appendCell(row, displayQueueCode(item), "", "code-cell")',
-            rows_source,
+            'href="/tt-publish-logs.html?publish_source=material_pool"',
+            PAGE,
         )
-        self.assertNotIn("item.caption_text.match", rows_source)
 
-    def test_direct_rows_are_namespaced_and_never_receive_queue_actions(self):
-        rows_source = source_between(
-            "function renderQueueRows(items)", "function queueQuery()"
-        )
-        action_start = rows_source.index('actionList.className = "queue-actions"')
-        action_source = rows_source[action_start:]
-        direct_start = action_source.index("if (directTest)")
-        automatic_start = action_source.index("} else {", direct_start)
-        direct_branch = action_source[direct_start:automatic_start]
-        automatic_branch = action_source[automatic_start:]
-        self.assertIn('item.task_type === "direct_test"', rows_source)
-        self.assertIn("directDetailsButton(item)", direct_branch)
-        self.assertNotIn("queueActionButton", direct_branch)
-        for operation in ('"events"', '"cancel"', '"reconcile"'):
-            self.assertIn(operation, automatic_branch)
-
-        details_source = source_between(
-            "function directDetailsButton(item)", "function renderQueueRows(items)"
-        )
-        self.assertIn("button.dataset.taskKey", details_source)
-        self.assertNotIn("dataset.queueId", details_source)
-
-    def test_direct_task_details_are_read_only_and_poll_with_the_table(self):
-        detail_source = source_between(
-            "function directTaskTimeline(item)", "async function runQueueAction"
-        )
-        click_source = source_between(
-            'byId("queueRows").addEventListener', 'byId("closeEvents")'
-        )
+    def test_direct_test_polling_no_longer_refreshes_removed_log_table(self):
         polling_source = source_between(
             "function syncDirectTestPolling()", "async function runNow()"
         )
-        self.assertIn('task.task_type === "direct_test"', detail_source)
-        self.assertIn("task.task_key === taskKey", detail_source)
-        self.assertIn("item.created_at", detail_source)
-        self.assertIn("item.published_at_utc", detail_source)
-        self.assertIn('action === "direct-details"', click_source)
-        self.assertIn("openDirectTaskDetails(button.dataset.taskKey)", click_source)
         self.assertIn(
             "loadDirectTests({ quiet: true, reschedule: false })",
             polling_source,
         )
-        self.assertIn("loadQueue()", polling_source)
-        load_source = source_between(
-            "async function loadQueue()", "function setEventsEmpty"
-        )
-        self.assertIn("const requestVersion = ++state.queueRequestVersion", load_source)
-        self.assertGreaterEqual(
-            load_source.count("requestVersion !== state.queueRequestVersion"),
-            2,
-        )
+        self.assertNotIn("loadQueue()", polling_source)
+        self.assertIn("请到 TT 发布日志查看进度", PAGE)
 
 
 if __name__ == "__main__":
