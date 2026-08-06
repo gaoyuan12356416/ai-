@@ -24,6 +24,17 @@ LEGACY_MATERIAL_TABLES: Tuple[str, ...] = (
 )
 LEGACY_ACCOUNT_SETTINGS_TABLE = "tt_post_account_setting"
 MAX_BATCH_MATERIAL_IDS = 10_000
+PUBLISH_LOG_STATUS_GROUPS: Tuple[str, ...] = (
+    "scheduled",
+    "processing",
+    "published",
+    "needs_review",
+    "failed",
+    "canceled",
+    "no_candidate",
+    "hold",
+    "other",
+)
 
 
 class LegacyTTPostReaderError(RuntimeError):
@@ -326,9 +337,215 @@ class LegacyTTPostReader:
                     seen.update(str(row["material_id"]) for row in rows)
         return seen
 
+    def list_publish_logs(
+        self,
+        *,
+        trigger_type: str = "",
+        account_id: str = "",
+        material_id: str = "",
+        content_id: str = "",
+        status_group: str = "",
+        from_utc: str = "",
+        to_utc: str = "",
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Return a bounded, public-safe task view from the legacy ledger.
+
+        This deliberately repeats the minimum read projection instead of
+        constructing ``TTPostStore``.  The latter performs additive migrations
+        and would violate the automatic publisher's read-only boundary.
+        """
+
+        if trigger_type and trigger_type not in {"scheduled", "direct_test"}:
+            raise LegacyTTPostReaderError(
+                "tt_auto_publish_log_trigger_invalid",
+                "publish log trigger type is invalid",
+                400,
+            )
+        if status_group and status_group not in PUBLISH_LOG_STATUS_GROUPS:
+            raise LegacyTTPostReaderError(
+                "tt_auto_publish_log_status_invalid",
+                "publish log status is invalid",
+                400,
+            )
+        try:
+            bounded_limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            bounded_limit = 0
+        if not 1 <= bounded_limit <= 10_200:
+            raise LegacyTTPostReaderError(
+                "tt_auto_publish_log_limit_invalid",
+                "publish log limit is invalid",
+                400,
+            )
+
+        normalized_account = _identity(account_id, "account id", 64) if account_id else ""
+        normalized_material = _identity(material_id, "material id") if material_id else ""
+        normalized_content = _identity(content_id, "content id") if content_id else ""
+        clauses: List[str] = []
+        params: List[Any] = []
+        for column, value in (
+            ("trigger_type", trigger_type),
+            ("account_id", normalized_account),
+            ("material_id", normalized_material),
+            ("content_id", normalized_content),
+            ("status_group", status_group),
+        ):
+            if value:
+                clauses.append("%s=?" % column)
+                params.append(value)
+        if from_utc:
+            clauses.append("task_at_utc>=?")
+            params.append(str(from_utc))
+        if to_utc:
+            clauses.append("task_at_utc<?")
+            params.append(str(to_utc))
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        cte = """
+            WITH publish_logs AS (
+                SELECT
+                    'scheduled' AS trigger_type,
+                    'automatic' AS source_task_type,
+                    id AS task_id,
+                    scheduled_at_utc AS task_at_utc,
+                    scheduled_at_utc,
+                    account_id,account_username,account_display_name,
+                    creator_nickname_snapshot,creator_username_snapshot,
+                    content_id,material_id,material_name,drama_name,
+                    material_language,caption,code,privacy_level,
+                    allow_comment,allow_duet,allow_stitch,
+                    brand_content_toggle,brand_organic_toggle,is_aigc,
+                    status,publish_id,publish_url,error_code,error_message,
+                    unknown_outcome,created_at,updated_at,
+                    '' AS prepared_at_utc,'' AS publish_started_at_utc,
+                    '' AS published_at_utc,'' AS failed_at_utc,
+                    '' AS canceled_at_utc
+                FROM tt_post_queue
+                UNION ALL
+                SELECT
+                    'direct_test' AS trigger_type,
+                    'direct_test' AS source_task_type,
+                    id AS task_id,
+                    created_at AS task_at_utc,
+                    created_at AS scheduled_at_utc,
+                    account_id,account_username,account_display_name,
+                    creator_nickname_snapshot,creator_username_snapshot,
+                    content_id,material_id,material_name,drama_name,
+                    material_language,caption,'' AS code,privacy_level,
+                    allow_comment,allow_duet,allow_stitch,
+                    brand_content_toggle,brand_organic_toggle,is_aigc,
+                    status,publish_id,publish_url,error_code,error_message,
+                    unknown_outcome,created_at,updated_at,
+                    prepared_at_utc,publish_started_at_utc,published_at_utc,
+                    failed_at_utc,canceled_at_utc
+                FROM tt_post_direct_test
+            ), classified AS (
+                SELECT *,
+                    CASE
+                        WHEN unknown_outcome=1 OR status='unknown'
+                            THEN 'needs_review'
+                        WHEN status='published' THEN 'published'
+                        WHEN trigger_type='scheduled' AND status='scheduled'
+                            THEN 'scheduled'
+                        WHEN (
+                            trigger_type='scheduled'
+                            AND status IN ('claimed','publishing','reconciling')
+                        ) OR (
+                            trigger_type='direct_test'
+                            AND status IN (
+                                'queued','preparing','ready',
+                                'publishing','reconciling'
+                            )
+                        ) THEN 'processing'
+                        WHEN status IN ('failed','missed') THEN 'failed'
+                        WHEN status='canceled' THEN 'canceled'
+                        WHEN status='blocked_compliance' THEN 'hold'
+                        ELSE 'other'
+                    END AS status_group
+                FROM publish_logs
+            )
+        """
+        with self.connection() as conn:
+            conn.execute("BEGIN")
+            summary_row = conn.execute(
+                cte
+                + """
+                    SELECT COUNT(*) AS total,
+                           COALESCE(SUM(status_group='scheduled'),0) AS scheduled,
+                           COALESCE(SUM(status_group='processing'),0) AS processing,
+                           COALESCE(SUM(status_group='published'),0) AS published,
+                           COALESCE(SUM(status_group='needs_review'),0) AS needs_review,
+                           COALESCE(SUM(status_group='failed'),0) AS failed,
+                           COALESCE(SUM(status_group='canceled'),0) AS canceled,
+                           0 AS no_candidate,
+                           COALESCE(SUM(status_group='hold'),0) AS hold
+                    FROM classified
+                """
+                + where_sql,
+                tuple(params),
+            ).fetchone()
+            rows = conn.execute(
+                cte
+                + "SELECT * FROM classified"
+                + where_sql
+                + " ORDER BY task_at_utc DESC,trigger_type,task_id DESC LIMIT ?",
+                tuple([*params, bounded_limit]),
+            ).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for key in (
+                "allow_comment",
+                "allow_duet",
+                "allow_stitch",
+                "brand_content_toggle",
+                "brand_organic_toggle",
+                "is_aigc",
+                "unknown_outcome",
+            ):
+                item[key] = bool(item.get(key))
+            task_id = int(item.pop("task_id"))
+            source_task_type = str(item.get("source_task_type") or "")
+            item.update(
+                {
+                    "publish_source": "material_pool",
+                    "task_id": task_id,
+                    "task_key": "material_pool:%s:%s"
+                    % (source_task_type, task_id),
+                    "source_account_id": str(item.get("account_id") or ""),
+                    "template_id": None,
+                    "template_version": None,
+                    "template_name": "",
+                    "run_id": None,
+                    "series_code": "",
+                }
+            )
+            items.append(item)
+        summary = dict(summary_row or {})
+        return {
+            "items": items,
+            "total": int(summary.get("total") or 0),
+            "summary": {
+                key: int(summary.get(key) or 0)
+                for key in (
+                    "total",
+                    "scheduled",
+                    "processing",
+                    "published",
+                    "needs_review",
+                    "failed",
+                    "canceled",
+                    "no_candidate",
+                    "hold",
+                )
+            },
+        }
+
 
 __all__ = [
     "LEGACY_MATERIAL_TABLES",
+    "PUBLISH_LOG_STATUS_GROUPS",
     "LegacyAccountSetting",
     "LegacyTTPostReader",
     "LegacyTTPostReaderError",

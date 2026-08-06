@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TT 发布日志 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/tt-auto-publish.css" />
+  <link rel="stylesheet" href="/tt-publish-logs.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>TT 发布日志</h1>
+          <p>统一查看素材池发布和自动发布任务。发布来源与触发方式分别记录，历史数据保持在原账本中，不做迁移或改写。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button link-button" href="/tt-post-pool.html">素材池</a>
+          <a class="button link-button" href="/tt-auto-publish-templates.html">自动发布模板</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能查看 TT 发布日志。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 TT 发布日志权限</strong>
+        <span>请联系管理员开启 tt_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="stats stats-six" aria-label="发布任务统计">
+          <article class="stat"><span>任务总数</span><strong id="totalCount">—</strong></article>
+          <article class="stat"><span>等待执行</span><strong id="scheduledCount">—</strong></article>
+          <article class="stat"><span>发布处理中</span><strong id="processingCount">—</strong></article>
+          <article class="stat"><span>需要人工确认</span><strong id="reviewCount">—</strong></article>
+          <article class="stat"><span>已发布</span><strong id="publishedCount">—</strong></article>
+          <article class="stat"><span>失败</span><strong id="failedCount">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>发布任务</h2>
+              <p><span class="source-chip material">素材池发布</span> 为旧发布池排期/立即测试；<span class="source-chip automatic">自动发布</span> 为模板定时/手动执行。</p>
+            </div>
+            <button id="reloadLogs" class="button" type="button">刷新日志</button>
+          </div>
+
+          <form id="logFilters" class="filters log-filters">
+            <div class="field">
+              <label for="filterSource">发布来源</label>
+              <select id="filterSource">
+                <option value="">全部来源</option>
+                <option value="material_pool">素材池发布</option>
+                <option value="auto_template">自动发布</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterTrigger">触发方式</label>
+              <select id="filterTrigger">
+                <option value="">全部方式</option>
+                <option value="scheduled">排期发布</option>
+                <option value="direct_test">立即测试</option>
+                <option value="auto">自动定时</option>
+                <option value="manual">手动执行</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterAccount">TikTok 账号</label>
+              <select id="filterAccount"><option value="">全部账号</option></select>
+            </div>
+            <div class="field">
+              <label for="filterTemplate">自动发布模板</label>
+              <select id="filterTemplate"><option value="">全部模板</option></select>
+            </div>
+            <div class="field">
+              <label for="filterStatus">任务状态</label>
+              <select id="filterStatus">
+                <option value="">全部状态</option>
+                <option value="scheduled">等待执行</option>
+                <option value="processing">处理中</option>
+                <option value="published">已发布</option>
+                <option value="needs_review">结果待确认</option>
+                <option value="failed">失败</option>
+                <option value="canceled">已取消</option>
+                <option value="no_candidate">无可投素材</option>
+                <option value="hold">安全待处理</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterMaterialId">素材 ID</label>
+              <input id="filterMaterialId" inputmode="numeric" placeholder="精确素材 ID" />
+            </div>
+            <div class="field">
+              <label for="filterContentId">Drama ID</label>
+              <input id="filterContentId" placeholder="精确 contect_id" />
+            </div>
+            <div class="field">
+              <label for="filterFrom">开始日期</label>
+              <input id="filterFrom" type="date" />
+            </div>
+            <div class="field">
+              <label for="filterTo">结束日期</label>
+              <input id="filterTo" type="date" />
+            </div>
+            <div class="actions filter-actions">
+              <button class="button primary" type="submit">查询</button>
+              <button id="resetFilters" class="button" type="button">重置</button>
+            </div>
+          </form>
+
+          <div class="source-summary" aria-live="polite">
+            <span>素材池发布 <strong id="materialSourceCount">—</strong></span>
+            <span>自动发布 <strong id="autoSourceCount">—</strong></span>
+          </div>
+
+          <div class="table-wrap log-table-wrap">
+            <table class="log-table">
+              <thead>
+                <tr>
+                  <th>任务时间</th>
+                  <th>发布来源</th>
+                  <th>触发方式</th>
+                  <th>TikTok 账号</th>
+                  <th>模板 / 运行</th>
+                  <th>素材 / Drama ID</th>
+                  <th>发布文案</th>
+                  <th>任务状态</th>
+                  <th>TikTok 结果 / 错误</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="logRows"><tr><td colspan="10" class="empty">正在加载发布日志…</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <span id="pageInfo">第 1 页</span>
+            <div class="pager-actions">
+              <button id="prevPage" class="button" type="button">上一页</button>
+              <button id="nextPage" class="button" type="button">下一页</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="detailDialog" class="detail-dialog publish-detail-dialog">
+    <div class="dialog-head">
+      <div><h2 id="detailTitle">发布任务详情</h2><span id="detailSubtitle" class="secondary">—</span></div>
+      <button id="closeDetail" class="button" type="button">关闭</button>
+    </div>
+    <div class="dialog-body">
+      <div id="detailFacts" class="detail-grid"></div>
+      <h3>任务事件</h3>
+      <div id="detailEvents" class="summary-list"><div class="empty">正在加载…</div></div>
+      <h3 id="detailSnapshotTitle">任务快照</h3>
+      <pre id="detailSnapshot" class="json-view">—</pre>
+    </div>
+  </dialog>
+
+  <dialog id="confirmDialog">
+    <div class="dialog-head"><h2 id="confirmTitle">请确认操作</h2></div>
+    <div class="dialog-body"><p id="confirmMessage"></p></div>
+    <div class="dialog-foot">
+      <button id="confirmCancel" class="button" type="button">取消</button>
+      <button id="confirmAccept" class="button primary" type="button">确认</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script src="/tt-auto-publish-common.js"></script>
+  <script src="/tt-publish-logs.js"></script>
+</body>
+</html>

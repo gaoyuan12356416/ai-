@@ -54,7 +54,7 @@ class TTAutoPublishAppContractTests(unittest.TestCase):
         )
         self.assertEqual(
             entries["ttAutoPublishRuns"]["href"],
-            "/tt-auto-publish-runs.html",
+            "/tt-publish-logs.html",
         )
 
     def test_get_proxy_routes_are_allowlisted_navigation_gated_and_no_store(self):
@@ -74,6 +74,7 @@ class TTAutoPublishAppContractTests(unittest.TestCase):
         self.assertIn('r"/(?:templates|runs)/[1-9][0-9]*"', route)
         self.assertIn('"ttAutoPublishTemplates"', route)
         self.assertIn('"ttAutoPublishRuns"', route)
+        self.assertIn('TT_AUTO_ADMIN_PREFIX + "/publish-logs"', APP_SOURCE)
         self.assertIn("self._require_cookie_navigation_item(navigation_key)", route)
         self.assertIn("tt_auto_posts_query_params(parsed.path, parsed.query)", route)
         self.assertIn("tt_auto_post_service_request(", route)
@@ -108,6 +109,18 @@ class TTAutoPublishAppContractTests(unittest.TestCase):
                 "status=enabled&q=alpha&limit=20&offset=0",
             ),
             {"status": "enabled", "q": "alpha", "limit": "20", "offset": "0"},
+        )
+        self.assertEqual(
+            parse_admin_query(
+                TT_AUTO_ADMIN_PREFIX + "/publish-logs",
+                "publish_source=material_pool&trigger_type=scheduled&limit=20&offset=0",
+            ),
+            {
+                "publish_source": "material_pool",
+                "trigger_type": "scheduled",
+                "limit": "20",
+                "offset": "0",
+            },
         )
         with self.assertRaises(TTAutoPostAdminClientError):
             parse_admin_query(

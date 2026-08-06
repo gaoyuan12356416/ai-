@@ -283,7 +283,7 @@
         const runId = ui.positiveId(payload.run_id || (payload.run && payload.run.id));
         forgetManualRunKey(id, version);
         ui.showToast("手动执行任务已创建。", false);
-        location.href = runId ? `/tt-auto-publish-runs.html?run_id=${encodeURIComponent(runId)}` : "/tt-auto-publish-runs.html";
+        location.href = runId ? `/tt-publish-logs.html?publish_source=auto_template&run_id=${encodeURIComponent(runId)}` : "/tt-publish-logs.html?publish_source=auto_template";
         return;
       }
       if (action === "copy") {
@@ -325,7 +325,7 @@
       return;
     }
     if (action === "runs") {
-      location.href = `/tt-auto-publish-runs.html?template_id=${encodeURIComponent(id)}`;
+      location.href = `/tt-publish-logs.html?publish_source=auto_template&template_id=${encodeURIComponent(id)}`;
       return;
     }
     if (["copy", "enable", "disable", "run"].includes(action)) await mutateTemplate(item, action);

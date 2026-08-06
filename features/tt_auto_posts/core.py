@@ -104,6 +104,19 @@ TERMINAL_TASK_STATUSES = frozenset(
     }
 )
 TRIGGER_TYPES = frozenset({"auto", "manual"})
+PUBLISH_LOG_STATUS_GROUPS = frozenset(
+    {
+        "scheduled",
+        "processing",
+        "published",
+        "needs_review",
+        "failed",
+        "canceled",
+        "no_candidate",
+        "hold",
+        "other",
+    }
+)
 METRIC_GENERATION_STATUSES = frozenset({"building", "ready", "failed"})
 METRIC_DIMENSION_TYPES = frozenset({"drama", "material"})
 
@@ -1718,6 +1731,199 @@ class TTAutoPostStore:
         with self._reader() as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
         return [_task_from_row(row) for row in rows]
+
+    def list_publish_logs(
+        self,
+        *,
+        trigger_type: str = "",
+        account_id: str = "",
+        template_id: Optional[Any] = None,
+        material_id: str = "",
+        content_id: str = "",
+        status_group: str = "",
+        from_utc: str = "",
+        to_utc: str = "",
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Return a bounded task-level projection for the unified log page."""
+
+        if trigger_type and trigger_type not in TRIGGER_TYPES:
+            raise TTAutoPostStoreError(
+                "tt_auto_publish_log_trigger_invalid",
+                "publish log trigger type is invalid",
+                400,
+            )
+        if status_group and status_group not in PUBLISH_LOG_STATUS_GROUPS:
+            raise TTAutoPostStoreError(
+                "tt_auto_publish_log_status_invalid",
+                "publish log status is invalid",
+                400,
+            )
+        try:
+            bounded_limit = int(limit)
+        except (TypeError, ValueError, OverflowError):
+            bounded_limit = 0
+        if not 1 <= bounded_limit <= 10_200:
+            raise TTAutoPostStoreError(
+                "tt_auto_publish_log_limit_invalid",
+                "publish log limit is invalid",
+                400,
+            )
+
+        clauses: List[str] = []
+        params: List[Any] = []
+        if trigger_type:
+            clauses.append("t.trigger_type=?")
+            params.append(trigger_type)
+        if account_id:
+            clauses.append("t.account_id=?")
+            params.append(_bounded_text(account_id, "account id", MAX_ACCOUNT_ID_CHARS))
+        if template_id is not None:
+            clauses.append("t.template_id=?")
+            params.append(_positive_int(template_id, "template id"))
+        if material_id:
+            clauses.append("t.material_id=?")
+            params.append(_bounded_text(material_id, "material id", 128))
+        if content_id:
+            clauses.append("t.content_id=?")
+            params.append(_bounded_text(content_id, "content id", 128))
+        if status_group:
+            clauses.append("status_group=?")
+            params.append(status_group)
+        if from_utc:
+            clauses.append("t.scheduled_at_utc>=?")
+            params.append(str(from_utc))
+        if to_utc:
+            clauses.append("t.scheduled_at_utc<?")
+            params.append(str(to_utc))
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        cte = """
+            WITH classified AS (
+                SELECT
+                    t.*,
+                    r.trigger_type,
+                    r.publish_time,
+                    r.status AS run_status,
+                    r.created_at AS run_created_at,
+                    p.name AS template_name,
+                    CASE
+                        WHEN t.unknown_outcome=1 OR t.status='unknown'
+                            THEN 'needs_review'
+                        WHEN t.status='pending' THEN 'scheduled'
+                        WHEN t.status IN (
+                            'selecting','reserved','preparing','retry_wait',
+                            'ready','publishing','reconciling'
+                        ) THEN 'processing'
+                        WHEN t.status='published' THEN 'published'
+                        WHEN t.status='failed' THEN 'failed'
+                        WHEN t.status='canceled' THEN 'canceled'
+                        WHEN t.status IN ('no_candidate','skipped')
+                            THEN 'no_candidate'
+                        ELSE 'other'
+                    END AS status_group
+                FROM tt_auto_task t
+                JOIN tt_auto_run r ON r.id=t.run_id
+                JOIN tt_auto_template p ON p.id=t.template_id
+            )
+        """
+        with self._reader() as conn:
+            conn.execute("BEGIN")
+            summary_row = conn.execute(
+                cte
+                + """
+                    SELECT COUNT(*) AS total,
+                           COALESCE(SUM(status_group='scheduled'),0) AS scheduled,
+                           COALESCE(SUM(status_group='processing'),0) AS processing,
+                           COALESCE(SUM(status_group='published'),0) AS published,
+                           COALESCE(SUM(status_group='needs_review'),0) AS needs_review,
+                           COALESCE(SUM(status_group='failed'),0) AS failed,
+                           COALESCE(SUM(status_group='canceled'),0) AS canceled,
+                           COALESCE(SUM(status_group='no_candidate'),0) AS no_candidate,
+                           0 AS hold
+                    FROM classified t
+                """
+                + where_sql,
+                tuple(params),
+            ).fetchone()
+            rows = conn.execute(
+                cte
+                + "SELECT * FROM classified t"
+                + where_sql
+                + " ORDER BY scheduled_at_utc DESC,id DESC LIMIT ?",
+                tuple([*params, bounded_limit]),
+            ).fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            task_id = int(item.pop("id"))
+            try:
+                selection = _json_object(item.pop("selection_json"))
+                settings = _json_object(item.pop("account_settings_json"))
+            except TTAutoPostStoreError:
+                raise
+            drama = selection.get("drama") if isinstance(selection.get("drama"), Mapping) else {}
+            material = selection.get("material") if isinstance(selection.get("material"), Mapping) else {}
+            item.update(
+                {
+                    "publish_source": "auto_template",
+                    "source_task_type": "auto_task",
+                    "task_id": task_id,
+                    "task_key": "auto_template:auto_task:%s" % task_id,
+                    "task_at_utc": str(item.get("scheduled_at_utc") or ""),
+                    "source_account_id": str(item.get("account_id") or ""),
+                    "drama_name": str(drama.get("name") or ""),
+                    "material_name": str(material.get("material_name") or ""),
+                    "material_language": str(
+                        material.get("language")
+                        or drama.get("language")
+                        or item.get("drama_language")
+                        or ""
+                    ),
+                    "code": "",
+                    "privacy_level": str(settings.get("privacy_level") or ""),
+                    "allow_comment": bool(settings.get("allow_comment")),
+                    "allow_duet": bool(settings.get("allow_duet")),
+                    "allow_stitch": bool(settings.get("allow_stitch")),
+                    "brand_content_toggle": bool(
+                        settings.get("brand_content_toggle")
+                    ),
+                    "brand_organic_toggle": bool(
+                        settings.get("brand_organic_toggle")
+                    ),
+                    "is_aigc": bool(settings.get("is_aigc")),
+                    "selection": selection,
+                    "unknown_outcome": bool(item.get("unknown_outcome")),
+                }
+            )
+            for key in (
+                "source_media_url",
+                "prepared_media_url",
+                "claim_token",
+                "claim_worker",
+                "lease_expires_at_utc",
+            ):
+                item.pop(key, None)
+            items.append(item)
+        summary = dict(summary_row or {})
+        return {
+            "items": items,
+            "total": int(summary.get("total") or 0),
+            "summary": {
+                key: int(summary.get(key) or 0)
+                for key in (
+                    "total",
+                    "scheduled",
+                    "processing",
+                    "published",
+                    "needs_review",
+                    "failed",
+                    "canceled",
+                    "no_candidate",
+                    "hold",
+                )
+            },
+        }
 
     def claim_next_pending_task(
         self,

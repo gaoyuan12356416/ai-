@@ -46,6 +46,19 @@ _GET_ROUTES = {
         "limit",
         "offset",
     },
+    f"{TT_AUTO_ADMIN_PREFIX}/publish-logs": {
+        "publish_source",
+        "trigger_type",
+        "source_account_id",
+        "template_id",
+        "material_id",
+        "content_id",
+        "status",
+        "from",
+        "to",
+        "limit",
+        "offset",
+    },
 }
 
 

@@ -101,7 +101,7 @@ class TtAutoPublishUiTest(unittest.TestCase):
         items = {item["key"]: item for item in group["items"]}
         expected = {
             "ttAutoPublishTemplates": "/tt-auto-publish-templates.html",
-            "ttAutoPublishRuns": "/tt-auto-publish-runs.html",
+            "ttAutoPublishRuns": "/tt-publish-logs.html",
         }
         for key, href in expected.items():
             with self.subTest(key=key):

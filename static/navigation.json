@@ -228,10 +228,10 @@
       },
       {
         "key": "ttAutoPublishRuns",
-        "label": "TT 自动发布记录",
-        "description": "查看模板触发、账号任务、选材和发布结果",
+        "label": "TT 发布日志",
+        "description": "统一查看素材池发布与自动发布任务、状态和结果",
         "kind": "page",
-        "href": "/tt-auto-publish-runs.html",
+        "href": "/tt-publish-logs.html",
         "enabled": true,
         "order": 40,
         "module": "tt_posts",
