@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import gc
 import gzip
 import json
 import os
@@ -711,6 +712,11 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
                         )
                         conn.commit()
                     print(f"staged {day.isoformat()}: {len(facts)} facts", flush=True)
+                    # The next day can be larger than the previous one. Drop
+                    # all row graphs before starting its three source reads so
+                    # their peaks never overlap on the small production host.
+                    del custom_rows, old_rows, new_rows, facts, stats, payload
+                    gc.collect()
             version = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + run_id[:8]
             generated_at = iso_now()
             source_max: dict[str, str] = {}
