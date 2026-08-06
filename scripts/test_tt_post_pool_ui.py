@@ -479,6 +479,7 @@ class TtPostPoolUiTest(unittest.TestCase):
 
     def test_caption_supports_url_desc_and_both_drama_id_macros(self):
         self.assertIn('new Set(["contect_id", "content_id"])', PAGE)
+        self.assertIn("可选使用 {{contect_id}} 或 {{content_id}}", PAGE)
         self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}"', PAGE)
         self.assertIn('const CAPTION_DESC_PLACEHOLDER = "{desc}"', PAGE)
         self.assertIn('const CAPTION_CODE_PLACEHOLDER = "{code}"', PAGE)
@@ -495,6 +496,7 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn('if (name === "desc") return normalizedDescription', render_source)
         self.assertIn('["url", "desc", "code"].includes(name)', validation_source)
         self.assertIn("缺少有效剧描述", validation_source)
+        self.assertNotIn("必须至少包含 {{contect_id}}", validation_source)
 
     def test_material_validation_is_sequential_and_bounded(self):
         parse_source = source_between("function parseMaterialIds()", "function updateMaterialProgress")

@@ -323,7 +323,7 @@ CPU 统一形状：
 | 400 | `invalid_request` | 未知字段（含客户端 description）、格式或类型无效 |
 | 400 | `invalid_caption_template` | 模板为空、NUL 或超模板上限 |
 | 400 | `caption_placeholder_invalid` | 大小写/括号/空格错误或未知宏 |
-| 400 | `caption_content_id_required` | 缺少合法 Drama ID 宏 |
+| 400 | `caption_content_id_required` | 仅旧 `caption_text` 兼容接口缺少准确 Drama ID；模板接口可不含 Drama ID 宏 |
 | 400 | `caption_desc_required` | 模板含 `{desc}` 但 frozen description 为空/无效 |
 | 400 | `caption_url_required` | 模板含 `{url}` 但没有合法 TT 短链 |
 | 400 | `caption_length_invalid` | 最终 caption 为空或超过 2200 UTF-16 units |

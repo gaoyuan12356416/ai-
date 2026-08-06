@@ -770,7 +770,7 @@ Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">必须保留 {{contect_id}} 或 {{content_id}}；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。模板会与账号、时间和开关一起保存。</span>
+                  <span id="captionHelp">可选使用 {{contect_id}} 或 {{content_id}} 填入当前剧 ID；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。模板会与账号、时间和开关一起保存。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -2826,12 +2826,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         if (unknownSingle.length) {
           return {
             error: `发布描述模板包含未知占位符：${unknownSingle.slice(0, 5).join("、")}`,
-            maxRenderedUnits: 0,
-          };
-        }
-        if (!placeholders.some(name => CAPTION_PLACEHOLDERS.has(name))) {
-          return {
-            error: "发布描述模板必须至少包含 {{contect_id}} 或 {{content_id}}。",
             maxRenderedUnits: 0,
           };
         }

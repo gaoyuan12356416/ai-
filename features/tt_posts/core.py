@@ -870,12 +870,6 @@ def render_caption_template(
         raise TTPostError("tt_content_id_invalid", "content_id无效", 400)
     matches = list(_PLACEHOLDER_RE.finditer(text))
     placeholders = [match.group(1).strip() for match in matches]
-    if not placeholders:
-        raise TTPostError(
-            "caption_content_id_required",
-            "发布描述模板必须包含{{contect_id}}",
-            400,
-        )
     remainder = _PLACEHOLDER_RE.sub("", text)
     if "{{" in remainder or "}}" in remainder:
         raise TTPostError(
