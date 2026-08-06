@@ -34,4 +34,17 @@
 
 ## 注意事项
 
-本开发任务默认只提交和推送分支，未经用户再次授权不部署生产。
+生产验收只允许读取账本和页面；不得为了验证本功能创建发布请求或触发真实 TikTok 发布。
+
+## 2026-08-06 生产部署记录
+
+- 代码 release：`74ad5639bb90cd0c1d6777a1fc3862e0f063ecec`；路径：`/opt/tt-auto-post/releases/74ad5639bb90cd0c1d6777a1fc3862e0f063ecec`。
+- 上一 release：`5b18d1ef68614ae01bf97a7e092bcd0d9c345d3f`。
+- 回滚备份：`/mnt/data-disk/tt-auto-post-deploy/backups/20260806-170753-unified-publish-logs-pre`；包含两个 SQLite 在线副本、切换前自动任务快照、主 API 受影响文件、两套静态文件、Nginx 配置、release/PID/门禁状态和已通过的 `SHA256SUMS`。数据库副本 `quick_check=ok`。
+- 最终切换前临时暂停 runner timer/path，确认没有已 claim 或处于准备/发布关键阶段的自动任务后切换；完成后恢复为 `active` / `active (waiting)`。
+- 新页面 `https://ai.yingliangads.com/tt-publish-logs.html` 返回 200，并带 `no-cache, no-store`；内部只读接口验收为总计 62、素材池 61、自动发布 1。
+- 登录态浏览器验收显示 20 行首屏数据及相同来源统计；旧发布池中 `queueFilters`、`queueRows` 和“发布任务”区域已移除，保留指向新页面的“发布日志”入口。
+- `tt-post-service.service` 未重启，PID 保持 `3055551`；自动发布三重门禁保持 0。未执行真实发布，也未迁移或改写任一账本。
+- 两次正式切换前的验收误判均按预案自动回滚：一次是 `curl | grep` 在 `pipefail` 下的提前关闭，另一次是 PowerShell 传递中文 grep 模式发生编码失真。最终改为落盘后读取和 Unicode 转义校验，业务文件无需因此修改。
+
+精确回滚时，先暂停 runner timer/path并确认无 claim/准备/发布中的自动任务，再恢复备份中的主 API、静态文件及 Nginx 配置，把 `/opt/tt-auto-post/current` 原子指回上一 release，依次重启 `tt-auto-post-service.service` 与 `drama-material-api.service`，执行 `nginx -t` 后 reload，最后恢复 runner timer/path。数据库没有变更，不得用备份覆盖线上账本。
