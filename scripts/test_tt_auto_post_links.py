@@ -108,6 +108,42 @@ class TTAutoPostLinksTests(unittest.TestCase):
         self.assertEqual(query["af_channel"], ["TT"])
         self.assertIn("*88", query["c"][0])
 
+    def test_w2a_url_normalizes_snapshot_external_identity_like_legacy_pool(self):
+        url = build_auto_w2a_url(
+            link_id=89,
+            username="-000iaALn26DdasX2CjKe_cxuOJ-2etojsT_",
+            timestamp=1_754_300_000,
+            language="en",
+            drama_name="Drama Nine",
+            tag="hook",
+            page_name="Account Nine",
+            page_id="640",
+            material_name="clip.mp4",
+            material_id="M89",
+            content_id="C89",
+        )
+        query = parse_qs(urlsplit(url).query)
+        self.assertIn(
+            "_000iaALn26DdasX2CjKe_cxuOJ_2etojsT*",
+            query["c"][0],
+        )
+        self.assertEqual(query["af_adset_id"], ["640"])
+
+        fallback = build_auto_w2a_url(
+            link_id=90,
+            username="---",
+            timestamp=1_754_300_000,
+            language="en",
+            drama_name="Drama Ten",
+            tag="hook",
+            page_name="Account Ten",
+            page_id="640",
+            material_name="clip.mp4",
+            material_id="M90",
+            content_id="C90",
+        )
+        self.assertIn("_640*", parse_qs(urlsplit(fallback).query)["c"][0])
+
     def test_caption_renders_supported_macros_including_code(self):
         short_url = build_auto_short_url(9)
         rendered = render_auto_caption(

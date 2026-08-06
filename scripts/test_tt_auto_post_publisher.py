@@ -193,7 +193,13 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         )
         self.account_source = FakeAccountSource()
 
-    def reserved_task(self, *, suffix="1", caption_template=None):
+    def reserved_task(
+        self,
+        *,
+        suffix="1",
+        caption_template=None,
+        account_username="account640",
+    ):
         config = template_config()
         if caption_template is not None:
             config["caption_template"] = caption_template
@@ -217,7 +223,7 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         task = self.store.create_task(
             run_id=run.id,
             account_id="640",
-            account_username="account640",
+            account_username=account_username,
             account_display_name="Account 640",
             drama_language="en",
             account_setting_version=3,
@@ -291,6 +297,16 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         self.assertTrue(
             (Path(self.temp.name) / "s2l" / "tt-auto" / ("%d.html" % task.id)).is_file()
         )
+
+    def test_snapshot_external_account_identity_does_not_block_preparation(self):
+        task = self.reserved_task(
+            suffix="snapshot-external-id",
+            account_username="-000iaALn26DdasX2CjKe_cxuOJ-2etojsT_",
+        )
+        result = self.executor(FakeGPU()).execute_next("worker-snapshot-id")
+        self.assertTrue(result["claimed"])
+        self.assertEqual(result["task"]["status"], "ready")
+        self.assertEqual(self.store.get_task(task.id).error_code, "")
 
     def test_code_is_frozen_before_prepare_and_reused_for_publish_retry(self):
         task = self.reserved_task(

@@ -186,9 +186,26 @@ def build_auto_w2a_url(
     content_id: Any,
 ) -> str:
     normalized_id = _positive_id(link_id)
+    # The read-only TikTok account snapshot exposes an external account
+    # identity rather than a guaranteed public handle.  Keep the automatic
+    # flow aligned with the legacy TT pool by normalizing that identity into
+    # the conservative character set accepted by the W2A campaign contract.
+    # Page ID remains the stable fallback and is also carried separately as
+    # af_adset_id, so attribution does not depend on a guessed public handle.
+    tracking_username = re.sub(
+        r"[^A-Za-z0-9._]",
+        "_",
+        str(username or "").lstrip("@"),
+    ).strip("_")
+    if not tracking_username or len(tracking_username) > 50:
+        tracking_username = re.sub(
+            r"[^A-Za-z0-9._]",
+            "_",
+            str(page_id or ""),
+        ).strip("_")
     return build_w2a_url(
         {
-            "username": username,
+            "username": tracking_username,
             "timestamp": timestamp,
             "material_language": language,
             "drama_name": drama_name,
