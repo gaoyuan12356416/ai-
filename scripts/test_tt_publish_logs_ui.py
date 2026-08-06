@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
+DEPLOY = ROOT / "deploy"
 
 
 class TTPublishLogsUiTests(unittest.TestCase):
@@ -20,6 +21,9 @@ class TTPublishLogsUiTests(unittest.TestCase):
         cls.pool = (STATIC / "tt-post-pool.html").read_text(encoding="utf-8")
         cls.quick_nav = (STATIC / "quick-nav.js").read_text(encoding="utf-8")
         cls.navigation = json.loads((STATIC / "navigation.json").read_text(encoding="utf-8"))
+        cls.nginx = (DEPLOY / "nginx-tt-auto-publish.conf").read_text(
+            encoding="utf-8"
+        )
 
     def test_page_exposes_source_trigger_filters_and_task_columns(self):
         for text in (
@@ -60,6 +64,10 @@ class TTPublishLogsUiTests(unittest.TestCase):
         self.assertEqual(item["label"], "TT 发布日志")
         self.assertEqual(item["href"], "/tt-publish-logs.html")
         self.assertIn('ttAutoPublishRuns: "/tt-publish-logs.html"', self.quick_nav)
+
+    def test_nginx_serves_unified_log_page_without_cache(self):
+        self.assertIn("location = /tt-publish-logs.html", self.nginx)
+        self.assertIn('Cache-Control "no-cache, no-store, must-revalidate"', self.nginx)
 
     def test_dom_writes_are_text_only(self):
         self.assertNotIn("innerHTML", self.js)

@@ -17,8 +17,9 @@
 1. 合并并拉取已验证 GitHub commit。
 2. 备份当前主 API 和 TT auto sidecar release 指针及相关静态文件。
 3. 建立新不可变 release，运行 Python 编译与 TT 发布日志测试。
-4. 先切换 `tt-auto-post-service`，确认 `/health`；再切换并重启 `drama-material-api.service`。
-5. 仅通过后台页面和只读 GET 验证，不触发真实发布。
+4. 安装 `deploy/nginx-tt-auto-publish.conf` 中新增的 `/tt-publish-logs.html` 精确 location，执行 `nginx -t` 后 reload。
+5. 先切换 `tt-auto-post-service`，确认 `/health`；再切换并重启 `drama-material-api.service`。
+6. 仅通过后台页面和只读 GET 验证，不触发真实发布。
 
 ## 验证步骤
 
