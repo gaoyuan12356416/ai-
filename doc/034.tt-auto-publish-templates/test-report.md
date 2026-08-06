@@ -15,7 +15,7 @@
 | 新前端语法 | 四个新 JS 与 `quick-nav.js` 执行 `node --check` | 通过 |
 | 浏览器无发布验收 | Playwright CLI + 本地 mock-only harness；桌面/移动端创建、编辑、筛选、计划、手动确认、运行详情；`resource_type_v2` 中文枚举多选、清空和保存请求 | 通过；24 个选项完整，空选提交 `[]`，390px 下拉无溢出，控制台 0 error，未连接真实 sidecar/GPU/TikTok |
 | 最终安全复核 | 发布状态机、竞态、凭据、关闭流程与公开 DTO 复核 | 通过；无未关闭 P0/P1 |
-| 生产关闭默认验收 | 三重门禁均为 0、模板为空、无 run/task/publish | 待部署后记录 |
+| 生产关闭默认验收 | 三重门禁均为 0、模板/run/task/material ledger 均为空，公开页面与 release 哈希一致，旧 TT PID 未变化 | 通过；未创建模板或触发真实发布 |
 
 ## 已覆盖的高风险行为
 

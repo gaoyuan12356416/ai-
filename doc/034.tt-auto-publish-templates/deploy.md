@@ -102,3 +102,27 @@ systemd-run --unit=tt-auto-post-metric-backfill-30d \
    - `gy.g2flow.com` 的 `/s2l/tt-auto/<task_id>.html` Nginx location 和访问能力。
 5. 不得因应用回滚删除、改写或重新分配既有 task ID 短链；已发布 TT 帖子依赖这些不可变 URL。恢复 Nginx 备份时必须把该短链 location 合并保留并先执行 `nginx -t`。
 6. 回滚不修改或迁移旧 TT 发布池数据，也不释放新系统已冻结素材。记录停止时间、最后 run/task 状态和保留目录校验值，供后续 reconcile/审计。
+
+## 2026-08-06 发布文案剧 ID 宏可选增量部署
+
+- GitHub 代码提交：`62e2f0b0e051ef875bdeb4237e9101688a3a600e`；组合基线同时包含通用渲染器修复提交 `837abc9` 和原生产自动模板提交 `bac0885`。
+- 生产 release：`/opt/tt-auto-post/releases/62e2f0b0e051ef875bdeb4237e9101688a3a600e`；原 release：`/opt/tt-auto-post/releases/bac0885bec894b6d66d6bb5fdf0a81b7478b43f6`。
+- 切换前备份：`/mnt/data-disk/tt-auto-post-deploy/backups/20260806-160626-caption-optional-pre`。`SHA256SUMS`、在线 SQLite 备份 `quick_check`、原 release/静态文件/systemd/门禁元数据均已校验。
+- 部署仅切换 `tt-auto-post-service.service` 的不可变 release，并原子替换 `/root/drama_material_service/static` 与 `/usr/share/nginx/html` 下两个自动模板页面文件；未重启主 API、Nginx 或旧 `tt-post-service.service`。
+- 新 sidecar `GET /health` 返回 200；公开 HTML/JS 返回 200，SHA-256 分别为 `df54ed403847bf3d7257ff665fea945925b6208a39aa511f4be01647ec042b94`、`93354fb3e8d80e8cc1fe764e527aea2185cdcf99435891a9746328d157bdc429`。
+- 生产 release 上的只读验证确认不含剧 ID 宏、仅含 `{desc}` / `{url}` 的模板可通过归一化；未创建生产模板。三重门禁保持 0，模板/run/task/material ledger 均为 0，SQLite `quick_check=ok`。
+- 旧 TT release 保持 `4362f3928e8c5c3f437917585b9f645e51986536`，PID `3055551` 未变化。scheduler、runner、runner path、metric timer 及新 sidecar 全部 active。
+- 首次切换验收误用了不存在的 `/healthz`，因得到非 200 按预案自动回滚，且未替换页面或写入账本；确认正确健康路径为 `/health` 后重新切换并通过。该探针错误不是应用启动失败。
+
+当前精确回滚必须先按上文账本检查确认无非终态任务，再执行：
+
+```bash
+ln -s /opt/tt-auto-post/releases/bac0885bec894b6d66d6bb5fdf0a81b7478b43f6 /opt/tt-auto-post/current.rollback-caption-optional
+mv -Tf /opt/tt-auto-post/current.rollback-caption-optional /opt/tt-auto-post/current
+install -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-160626-caption-optional-pre/root-static/tt-auto-publish-template.html /root/drama_material_service/static/tt-auto-publish-template.html
+install -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-160626-caption-optional-pre/root-static/tt-auto-publish-template.js /root/drama_material_service/static/tt-auto-publish-template.js
+install -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-160626-caption-optional-pre/published-static/tt-auto-publish-template.html /usr/share/nginx/html/tt-auto-publish-template.html
+install -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260806-160626-caption-optional-pre/published-static/tt-auto-publish-template.js /usr/share/nginx/html/tt-auto-publish-template.js
+systemctl restart tt-auto-post-service.service
+curl -fsS http://127.0.0.1:18831/health
+```
