@@ -126,9 +126,9 @@
 ```
 
 - `publish_times` 在当前版本最多一个值；账号最多 50 个。
-- `enabled=true` 要求非空账号列表、有效 consent，并实时校验全部成员的设置/creator-info。
+- `enabled=true` 要求非空账号列表和有效 consent；保存配置不校验账号当前发布状态或 creator-info。
 - `enabled=false` 不要求新 consent。UI 可发送 `accepted=false` 占位；服务端忽略它并由 core 保留已有 consent。
-- 关闭态可无远端依赖地保留/移除已有成员；若新增成员，新 ID 必须出现在当前可信账号快照且已有本地发布设置，否则整次保存 0 写入。
+- 保存时可无远端账号状态依赖地保留、移除或编辑成员；新增 ID 必须已有本地发布设置，否则整次保存 0 写入。真正执行发布时仍重新校验账号状态、凭证、creator-info 和发布门禁。
 - mixed legacy 首次保存必须显式提交统一时间且 `enabled=false`；保存成功后下一版本才可启用。
 - 成功响应为 `{"item": saved, "gates": ...}`；core 在同一事务写单例配置并同步/禁用兼容 schedule。
 
@@ -383,7 +383,7 @@ summary 口径：
 | 409 | `tt_post_auto_config_version_required` | 立即测试尚无已保存版本 |
 | 409 | `tt_post_auto_config_version_conflict` | expected version 已过期 |
 | 409 | `tt_post_auto_config_legacy_review_required` | mixed legacy 尚未按两步迁移 |
-| 409 | `tt_post_auto_account_not_found` | 关闭态新增成员不在可信账号快照 |
+| 409 | `tt_account_settings_required` | 新增成员没有已保存的本地发布设置 |
 | 409 | `tt_post_auto_account_not_selected` | 自动素材入池账号不属于配置；不用于立即测试 |
 | 409 | `tt_post_live_gates_closed` | 正式发布门禁关闭 |
 | 409 | `tt_post_direct_test_public_comment_required` | 测试账号非所有人可见或未允许评论 |

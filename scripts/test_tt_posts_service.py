@@ -1300,7 +1300,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(before, service.store.get_auto_publish_config())
 
-    def test_auto_config_version_or_invalid_account_failure_writes_nothing(self):
+    def test_auto_config_version_or_unconfigured_account_failure_writes_nothing(self):
         self.accounts.add_account("102")
         service = self.service(OPEN_GATES)
         saved = self.configure_auto(service, ["101", "102"])
@@ -1325,13 +1325,13 @@ class ServiceLifecycleTests(unittest.TestCase):
                     account_ids=["101", "999"],
                 )
             )
-        self.assertEqual("tt_post_auto_account_not_found", invalid.exception.code)
+        self.assertEqual("tt_account_settings_required", invalid.exception.code)
         self.assertEqual(saved, service.store.get_auto_publish_config())
         self.assertEqual(before_first, service.store.get_daily_schedule("101"))
         self.assertEqual(before_second, service.store.get_daily_schedule("102"))
         self.assertEqual(0, service.store.get_daily_schedule("999")["version"])
 
-    def test_disabled_auto_config_cannot_add_untrusted_or_unconfigured_account(self):
+    def test_disabled_auto_config_cannot_add_unconfigured_account(self):
         service = self.service(OPEN_GATES)
         saved = self.configure_auto(service, ["101"])
         before_config = service.store.get_auto_publish_config()
@@ -1346,10 +1346,7 @@ class ServiceLifecycleTests(unittest.TestCase):
                     accepted=False,
                 )
             )
-        self.assertEqual(
-            "tt_post_auto_account_not_found",
-            unknown.exception.code,
-        )
+        self.assertEqual("tt_account_settings_required", unknown.exception.code)
         self.assertEqual(before_config, service.store.get_auto_publish_config())
         self.assertEqual(before_schedule, service.store.get_daily_schedule("101"))
         self.assertEqual(0, service.store.get_daily_schedule("999")["version"])
@@ -1386,7 +1383,36 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertFalse(service.store.get_daily_schedule("102")["enabled"])
         self.assertEqual(creator_calls, len(self.gpu.creator_info_calls))
 
-    def test_first_disabled_config_accepts_trusted_configured_account_without_consent(self):
+    def test_auto_config_edit_ignores_account_status_but_due_rechecks_it(self):
+        service = self.service(OPEN_GATES)
+        saved = self.configure_auto(service, ["101"])
+        self.add_ready(service)
+        self.accounts.accounts.pop("101")
+        self.gpu.creator_info_calls.clear()
+
+        payload = self.auto_config_payload(
+            version=saved["version"],
+            account_ids=["101"],
+        )
+        payload["caption_template"] = "Edited caption\n{url}\n{desc}"
+        edited = service.auto_config_save(payload)["item"]
+
+        self.assertEqual(saved["version"] + 1, edited["version"])
+        self.assertEqual(["101"], edited["account_ids"])
+        self.assertEqual("Edited caption\n{url}\n{desc}", edited["caption_template"])
+        self.assertEqual([], self.gpu.creator_info_calls)
+
+        due = service.schedules_due({"limit": 1})["items"]
+        self.assertEqual(1, len(due))
+        self.assertEqual("tt_account_not_found", due[0]["error_code"])
+        self.assertEqual([], service.store.list_queues())
+        self.assertEqual([], self.gpu.creator_info_calls)
+        self.assertEqual(
+            "available",
+            service.store.list_recurring_materials(account_id="101")[0]["status"],
+        )
+
+    def test_first_disabled_config_accepts_locally_configured_account_without_consent(self):
         service = self.service(OPEN_GATES)
         self.save_public_settings(service, "101")
         creator_calls = len(self.gpu.creator_info_calls)

@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 两张 additive 表与幂等初始化 | `features/tt_posts/core.py` | 已实现，待完整回归 |
 | version-0 legacy 投影与 mixed 两步迁移 | `core.py` | 已实现，待完整回归 |
-| 描述、开关/时间、账号集合单版本原子保存 | `core.py`、`service.py` | 已实现；关闭不要求新 consent，新增成员校验可信快照/本地设置 |
+| 描述、开关/时间、账号集合单版本原子保存 | `core.py`、`service.py` | 已实现；保存不校验账号当前状态，新增成员校验本地设置，发布时再实时校验 |
 | 独立立即测试创建、幂等与冻结 | `core.py`、`service.py` | 已实现；账号独立于自动成员合同需最终测试锁定 |
 | direct-test prepare/publish/reconcile | `service.py`、两个 runner | 已实现，待 fake GPU/TT 回归 |
 | 三态素材发布投影 | `core.py`、`service.py`、UI | 已实现，待 fixture 回归 |

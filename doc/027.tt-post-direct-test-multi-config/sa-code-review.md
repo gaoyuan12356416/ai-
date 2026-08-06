@@ -11,7 +11,7 @@
 | 编号 | 核对项 | 通过条件 |
 | --- | --- | --- |
 | CR-01 | Schema | 只新增 auto-config/direct-test 两表及实际索引；无 direct-test event/auto-due 新表，既有 event 不变 |
-| CR-02 | Auto config | GET/POST 顶层 `item`；POST 使用 `publish_times/source_account_ids/consent`；关闭不解析 accepted=false，新增成员仍校验可信快照/本地设置 |
+| CR-02 | Auto config | GET/POST 顶层 `item`；POST 使用 `publish_times/source_account_ids/consent`；保存不校验账号当前状态，新增成员校验本地设置，发布时重新校验 |
 | CR-03 | 立即测试路由 | POST `/test-publish`、GET `/direct-tests`；无管理端 detail/reconcile |
 | CR-04 | 测试账号边界 | 显式单选，可不在 `account_ids`；版本只冻结模板；设置/creator/gate/consent 仍校验 |
 | CR-04A | 客户端幂等 | submitted/unknown 非终态保留 key+version+consent；终态后的显式再测才换 key |
