@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<meta name="color-scheme" content="light">
+<title>DramaWave D7 / D30 归因对比看板</title>
+<style>
+:root{--bg:#f3f6fa;--panel:#fff;--line:#d8e0ea;--text:#172033;--muted:#667085;--blue:#245ea8;--blue-soft:#eaf2ff;--teal:#0f766e;--purple:#7651a6;--green:#08783e;--orange:#b45f06;--red:#c52d35;--shadow:0 1px 3px rgba(16,24,40,.08)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,"Microsoft YaHei",sans-serif;line-height:1.45}
+button,input,select{font:inherit}
+button{cursor:pointer}
+button:disabled{cursor:not-allowed;opacity:.55}
+.skip-link{position:absolute;left:-9999px;top:8px;background:#fff;color:#000;padding:8px;z-index:100}
+.skip-link:focus{left:8px}
+header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.16)}
+.head{max-width:1720px;margin:auto;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+.head h1{font-size:19px;margin:0 0 4px}.head-meta{font-size:12px;color:#cbd5e1;overflow-wrap:anywhere}
+.head-actions{display:flex;gap:8px;flex-wrap:wrap;flex:0 0 auto}
+.btn{min-height:36px;border:1px solid #cbd5e1;border-radius:7px;background:#fff;color:#172033;padding:6px 12px;font-weight:700}
+.btn.primary{background:#3272c6;border-color:#3272c6;color:#fff}.btn:hover:not(:disabled){filter:brightness(.97)}
+.btn:focus-visible,input:focus-visible,select:focus-visible,.chip:focus-within,.basis-btn:focus-visible,.sort-btn:focus-visible{outline:3px solid #85b9ff;outline-offset:2px}
+.wrap{max-width:1720px;margin:auto;padding:16px 18px 30px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow)}
+.notice{padding:11px 13px;margin-bottom:12px;font-size:13px}.notice.info{border-left:4px solid var(--blue)}.notice.warn{border-left:4px solid var(--orange);background:#fff9ee}.notice.error{border-left:4px solid var(--red);background:#fff4f4;color:#7b151b}.notice[hidden]{display:none}
+.loading{display:flex;align-items:center;gap:10px}.spinner{width:18px;height:18px;border:2px solid #cbd5e1;border-top-color:var(--blue);border-radius:50%;animation:spin .75s linear infinite;flex:0 0 auto}@keyframes spin{to{transform:rotate(360deg)}}
+.meta-grid{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:10px;margin-bottom:12px}.meta-card{padding:11px 12px;min-width:0}.meta-label{font-size:11px;color:var(--muted);margin-bottom:4px}.meta-value{font-size:13px;font-weight:700;overflow-wrap:anywhere}.meta-sub{font-size:11px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+.controls{padding:13px;display:grid;grid-template-columns:repeat(6,minmax(150px,1fr));gap:10px;align-items:end}.field{min-width:0}.field label,.field .field-label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.field input,.field select{width:100%;height:36px;border:1px solid #c8d2df;border-radius:7px;background:#fff;color:var(--text);padding:0 9px;min-width:0}.field-wide{grid-column:span 2}
+.presets{display:flex;gap:6px;flex-wrap:wrap}.preset-btn{min-height:30px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:999px;padding:4px 10px;color:#253044}.preset-btn.active{border-color:#6ca2e6;background:var(--blue-soft);color:#154986;font-weight:700}
+.basis-fieldset{border:0;padding:0;margin:0;min-width:0}.basis-fieldset legend{font-size:12px;color:var(--muted);margin-bottom:5px}.basis-toggle{display:flex}.basis-btn{height:36px;border:1px solid #bfcbd9;background:#fff;color:#344054;padding:0 14px;font-weight:700}.basis-btn:first-child{border-radius:7px 0 0 7px}.basis-btn:last-child{border-radius:0 7px 7px 0;border-left:0}.basis-btn.active{background:#234f8c;color:#fff;border-color:#234f8c}
+.basis-note{grid-column:span 3;align-self:center;font-size:12px;color:var(--muted);padding:4px 0}.basis-note strong{color:#344054}
+.section{margin-top:14px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px}.section-head h2{font-size:15px;margin:0}.muted{font-size:12px;color:var(--muted)}
+.dimension-box{padding:12px}.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{display:inline-flex;align-items:center;gap:5px;min-height:31px;border:1px solid #cdd7e4;border-radius:999px;background:#fff;padding:4px 10px;font-size:12px;cursor:pointer}.chip.active{border-color:#3478cb;background:#edf5ff;color:#154986;font-weight:700}.chip input{margin:0}
+.kpis{display:grid;grid-template-columns:repeat(7,minmax(145px,1fr));gap:10px;margin-top:12px}.kpi{padding:13px;min-width:0;border-top:3px solid #dbe3ed}.kpi.old{border-top-color:var(--teal)}.kpi.new{border-top-color:var(--purple)}.kpi.diff{border-top-color:var(--blue)}.kpi-label{font-size:12px;color:var(--muted)}.kpi-value{font-size:22px;font-weight:760;margin-top:7px;white-space:nowrap}.kpi-sub{font-size:11px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}.positive{color:var(--green)!important}.negative{color:var(--red)!important}.neutral{color:var(--muted)!important}
+.chart{padding:12px 14px;min-height:300px;overflow:hidden}.chart svg{display:block;width:100%;height:250px}.legend{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px}.legend span::before{content:"";display:inline-block;width:12px;height:4px;border-radius:4px;margin-right:5px;vertical-align:middle}.legend .spend::before{background:#c6d5e9}.legend .old::before{background:var(--teal)}.legend .new::before{background:var(--purple)}
+.rankings{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.rank{padding:12px;min-height:270px;min-width:0}.rank h3{font-size:13px;margin:0 0 9px}.rank-row{display:grid;grid-template-columns:minmax(80px,1fr) 110px;gap:8px;align-items:center;margin:8px 0;font-size:12px}.rank-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650}.rank-sub{font-size:11px;color:var(--muted)}.rank-value{text-align:right;white-space:nowrap}.bar{height:7px;background:#e8edf4;border-radius:99px;overflow:hidden;margin-top:4px}.bar-fill{height:100%;background:linear-gradient(90deg,var(--teal),var(--purple));border-radius:99px}
+.table-panel{overflow:hidden}.table-tools{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:11px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}.table-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.table-actions label{font-size:12px;color:var(--muted)}.table-actions select{height:32px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 7px}.table-wrap{overflow:auto;max-height:680px;width:100%}table{width:100%;min-width:1100px;border-collapse:separate;border-spacing:0;background:#fff}th,td{border-bottom:1px solid #edf1f5;padding:8px 9px;font-size:12px;text-align:right;white-space:nowrap;vertical-align:middle}th{position:sticky;top:0;background:#eef3f9;color:#2c3646;z-index:4;font-weight:700}th.dim,td.dim{text-align:left}.sort-btn{border:0;background:transparent;color:inherit;padding:0;font-weight:700;cursor:pointer}.dim-name{font-weight:650;max-width:300px;overflow:hidden;text-overflow:ellipsis}.id-text{font-family:Consolas,"SFMono-Regular",monospace;font-size:11px;color:var(--muted);user-select:all}.empty{padding:28px 14px;text-align:center;color:var(--muted)}
+.pagination{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.page-actions{display:flex;gap:7px}.page-actions button{min-height:32px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#253044;padding:4px 10px}
+.quality{padding:11px 12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);line-height:1.65}.quality strong{color:#344054}
+.stale-data{opacity:.46;filter:grayscale(.25);transition:opacity .15s ease}.stale-data .sort-btn{pointer-events:none}
+@media(max-width:1300px){.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.field-wide{grid-column:span 1}.basis-note{grid-column:span 2}.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.meta-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.rankings{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.head{align-items:flex-start;flex-direction:column}.head-actions{width:100%}.wrap{padding:12px 10px 22px}.controls{grid-template-columns:1fr}.basis-note{grid-column:span 1}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.meta-grid{grid-template-columns:1fr 1fr}.rankings{grid-template-columns:1fr}.kpi-value{font-size:19px}.table-tools{align-items:flex-start}.pagination{align-items:flex-start;flex-direction:column}.chart{padding:10px;min-height:270px}.chart svg{height:225px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.spinner{animation:none}}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#dashboardMain">跳到主要内容</a>
+<header>
+  <div class="head">
+    <div>
+      <h1>DramaWave D7 / D30 归因对比看板</h1>
+      <div class="head-meta" id="headerMeta">正在读取缓存元数据…</div>
+    </div>
+    <div class="head-actions">
+      <button class="btn" id="resetBtn" type="button">重置筛选</button>
+      <button class="btn" id="refreshBtn" type="button">刷新页面数据</button>
+      <button class="btn primary" id="exportBtn" type="button">后端导出 CSV</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" id="dashboardMain">
+  <div class="panel notice info loading" id="loadingPanel" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="loadingText">正在加载服务端聚合结果，不会下载全量明细…</span>
+  </div>
+  <div class="panel notice error" id="errorPanel" role="alert" hidden></div>
+  <div class="panel notice warn" id="warningPanel" role="status" aria-live="polite" hidden></div>
+
+  <section class="meta-grid" id="metaGrid" aria-label="缓存和数据质量状态">
+    <div class="panel meta-card"><div class="meta-label">缓存版本</div><div class="meta-value" id="metaVersion">—</div><div class="meta-sub" id="metaGenerated">生成时间 —</div></div>
+    <div class="panel meta-card"><div class="meta-label">旧口径源表</div><div class="meta-value">app_revenues</div><div class="meta-sub" id="metaOldSource">最大更新时间 —</div></div>
+    <div class="panel meta-card"><div class="meta-label">新口径源表</div><div class="meta-value">app_revenues_30d</div><div class="meta-sub" id="metaNewSource">最大更新时间 —</div></div>
+    <div class="panel meta-card"><div class="meta-label">共同花费源</div><div class="meta-value">custom_source_insight</div><div class="meta-sub" id="metaSpendSource">最大更新时间 —</div></div>
+    <div class="panel meta-card"><div class="meta-label">映射质量</div><div class="meta-value" id="metaCoverage">覆盖率 —</div><div class="meta-sub" id="metaAmbiguity">歧义 —</div></div>
+  </section>
+
+  <section class="panel controls" aria-label="筛选条件">
+    <div class="field"><label for="startDate">开始日期</label><input type="date" id="startDate" min="2026-07-29"></div>
+    <div class="field"><label for="endDate">结束日期</label><input type="date" id="endDate" min="2026-07-29"></div>
+    <div class="field field-wide"><span class="field-label">日期快捷选择</span><div class="presets" id="datePresets" aria-label="日期快捷选择"></div></div>
+    <div class="field"><label for="channelFilter">渠道</label><select id="channelFilter"><option value="">全部渠道</option></select></div>
+    <div class="field"><label for="appFilter">投放产品（App ID）</label><select id="appFilter"><option value="">全部投放产品</option></select></div>
+    <div class="field"><label for="optimizerFilter">广告优化师</label><select id="optimizerFilter"><option value="">全部优化师</option></select></div>
+    <div class="field"><label for="countryGroupFilter">国家组</label><select id="countryGroupFilter"><option value="">全部国家组</option></select></div>
+    <div class="field"><label for="accountFilter">广告账户</label><select id="accountFilter"><option value="">全部账户</option></select></div>
+    <div class="field"><label for="campaignKeyword">Campaign 名称 / ID</label><input type="search" id="campaignKeyword" autocomplete="off" placeholder="输入关键词"></div>
+    <div class="field"><label for="adsetKeyword">Ad Set 名称 / ID</label><input type="search" id="adsetKeyword" autocomplete="off" placeholder="输入关键词"></div>
+    <fieldset class="basis-fieldset">
+      <legend>收入指标基准</legend>
+      <div class="basis-toggle" id="basisToggle">
+        <button class="basis-btn active" type="button" data-basis="d0" aria-pressed="true">D0 指标</button>
+        <button class="basis-btn" type="button" data-basis="d7" aria-pressed="false">D7 指标</button>
+      </div>
+    </fieldset>
+    <div class="basis-note"><strong>D7 / D30 表示归因窗口。</strong>“D0 / D7 指标”切换的是两张归因表内要比较的收入成熟口径。</div>
+  </section>
+
+  <section class="section panel dimension-box" aria-labelledby="dimensionTitle">
+    <div class="section-head"><h2 id="dimensionTitle">聚合维度</h2><span class="muted">勾选后由服务端重新 GROUP BY；至少保留一个维度</span></div>
+    <div class="chips" id="dimensionChips"></div>
+  </section>
+
+  <section class="kpis" id="kpis" aria-label="核心对比指标"></section>
+
+  <section class="section panel" aria-labelledby="trendTitle">
+    <div class="section-head" style="padding:12px 14px 0"><h2 id="trendTitle">按日归因收入趋势</h2><span class="muted">共同花费与两种归因窗口收入均来自服务端按日聚合</span></div>
+    <div class="chart" id="trendChart" aria-live="polite"><div class="empty">等待数据…</div></div>
+  </section>
+
+  <section class="section rankings" id="rankings" aria-label="多维排行"></section>
+
+  <section class="section panel table-panel" aria-labelledby="tableTitle">
+    <div class="table-tools">
+      <div><strong id="tableTitle">多维聚合表</strong> <span class="muted" id="tableHint">等待数据…</span></div>
+      <div class="table-actions">
+        <label for="pageLimit">每页行数</label>
+        <select id="pageLimit"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>
+      </div>
+    </div>
+    <div class="table-wrap" id="tableWrap" aria-busy="true"><div class="empty">正在加载服务端聚合结果…</div></div>
+    <div class="pagination">
+      <span id="pageSummary" role="status" aria-live="polite">第 0 页，共 0 行</span>
+      <div class="page-actions"><button id="prevPage" type="button" disabled>上一页</button><button id="nextPage" type="button" disabled>下一页</button></div>
+    </div>
+    <div class="quality" id="qualityLine">数据质量信息将在查询完成后显示。</div>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  const API = Object.freeze({meta:'./api/meta', options:'./api/options', query:'./api/query', rankings:'./api/rankings', exportCsv:'./api/export.csv'});
+  const MIN_DATE = '2026-07-29';
+  const DIMENSIONS = Object.freeze([
+    {key:'dt',label:'时间'},
+    {key:'campaign',label:'Campaign'},
+    {key:'adset',label:'Ad Set'},
+    {key:'optimizer',label:'广告优化师'},
+    {key:'country_group',label:'国家组'},
+    {key:'channel',label:'渠道'},
+    {key:'delivery_product',label:'投放产品'},
+    {key:'account',label:'广告账户'},
+    {key:'matched_grain',label:'匹配粒度'}
+  ]);
+  const DIMENSION_LABELS = Object.fromEntries(DIMENSIONS.map(item => [item.key,item.label]));
+  const RANK_CONFIGS = Object.freeze([
+    {key:'campaign',aliases:['campaign','campaign_id'],title:'Campaign 排行'},
+    {key:'adset',aliases:['adset','adset_id'],title:'Ad Set 排行'},
+    {key:'optimizer',aliases:['optimizer','optimizer_id'],title:'优化师排行'},
+    {key:'country_group',aliases:['country_group'],title:'国家组排行'}
+  ]);
+  const FILTERS = Object.freeze([
+    {id:'channelFilter',param:'channel'},
+    {id:'appFilter',param:'app_id'},
+    {id:'optimizerFilter',param:'optimizer_id'},
+    {id:'countryGroupFilter',param:'country_group'},
+    {id:'accountFilter',param:'account_id'}
+  ]);
+  const state = {
+    meta:{}, options:{}, metricBasis:'d0', dimensions:['dt','campaign'],
+    sortBy:'spend', sortDir:'desc', limit:50, page:1, availableStart:MIN_DATE,
+    availableEnd:'', today:'', controller:null, requestSeq:0, rankingController:null, rankingSeq:0,
+    rankingKey:'', rankingStatus:'idle', hasData:false,
+    debounceTimer:0, lastPayload:null, dataVersion:'', resultsStale:false,
+    recoveringVersion:false
+  };
+  const get = id => document.getElementById(id);
+  const asText = value => String(value == null ? '' : value);
+  const safe = value => asText(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const finite = value => value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+  const pick = (object,names) => {for(const name of names){const value=object && object[name];if(value !== null && value !== undefined && value !== '')return value;}return null;};
+  const money = value => finite(value) === null ? '—' : '$' + finite(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const ratio = value => finite(value) === null ? '—' : finite(value).toFixed(3);
+  const integer = value => finite(value) === null ? '—' : Math.round(finite(value)).toLocaleString('en-US');
+  const percent = value => finite(value) === null ? '—' : (finite(value) * 100).toFixed(1) + '%';
+  const signClass = value => finite(value) === null || finite(value) === 0 ? 'neutral' : finite(value) > 0 ? 'positive' : 'negative';
+
+  function bjToday(){
+    try{
+      const parts = new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).reduce((out,part)=>(out[part.type]=part.value,out),{});
+      if(parts.year && parts.month && parts.day)return `${parts.year}-${parts.month}-${parts.day}`;
+    }catch(error){void error;}
+    return new Date(Date.now()+8*3600*1000).toISOString().slice(0,10);
+  }
+  function addDays(dateText,delta){
+    const parts=asText(dateText).split('-').map(Number);
+    const date=new Date(Date.UTC(parts[0],parts[1]-1,parts[2]+delta));
+    return date.toISOString().slice(0,10);
+  }
+  function clampDate(value,min,max){return value < min ? min : value > max ? max : value;}
+  function basisLabel(){return state.metricBasis === 'd7' ? 'D7' : 'D0';}
+  function metricModel(source){
+    const item=source || {};
+    const spend=finite(pick(item,['spend','common_spend']));
+    const oldRevenue=finite(pick(item,['d7_revenue','old_revenue','revenue_d7_attribution']));
+    const newRevenue=finite(pick(item,['d30_revenue','new_revenue','revenue_d30_attribution']));
+    const oldRoas=finite(pick(item,['d7_roas','old_roas'])) ?? (spend && oldRevenue !== null ? oldRevenue / spend : null);
+    const newRoas=finite(pick(item,['d30_roas','new_roas'])) ?? (spend && newRevenue !== null ? newRevenue / spend : null);
+    const revenueDiff=finite(pick(item,['revenue_diff','revenue_delta'])) ?? (oldRevenue !== null && newRevenue !== null ? newRevenue-oldRevenue : null);
+    const roasDiff=finite(pick(item,['roas_diff'])) ?? (oldRoas !== null && newRoas !== null ? newRoas-oldRoas : null);
+    let liftRate=finite(pick(item,['lift_rate','revenue_lift_rate']));
+    if(liftRate === null && oldRevenue !== null && newRevenue !== null && oldRevenue !== 0)liftRate=(newRevenue-oldRevenue)/oldRevenue;
+    return {spend,oldRevenue,newRevenue,oldRoas,newRoas,revenueDiff,roasDiff,liftRate};
+  }
+  function liftText(model){
+    if(model.oldRevenue === 0 && finite(model.newRevenue) > 0)return '新增';
+    if(model.oldRevenue === 0 && model.newRevenue === 0)return '—';
+    return percent(model.liftRate);
+  }
+
+  async function fetchJson(path,params,signal,cacheMode='default'){
+    const url=new URL(path,document.baseURI);
+    if(params)for(const [key,value] of params.entries())url.searchParams.append(key,value);
+    const response=await fetch(url.toString(),{method:'GET',headers:{Accept:'application/json'},credentials:'same-origin',cache:cacheMode,signal});
+    if(!response.ok){
+      let detail='';
+      try{const body=await response.json();detail=body.error||body.message||'';}catch(error){void error;}
+      const error=new Error(`HTTP ${response.status}${detail ? '：'+detail : ''}`);
+      error.status=response.status;
+      throw error;
+    }
+    return response.json();
+  }
+  function currentDateRange(){return {start:get('startDate').value,end:get('endDate').value};}
+  function validateDates(){
+    const {start,end}=currentDateRange();
+    if(!start || !end)throw new Error('请选择完整的开始和结束日期');
+    if(start < state.availableStart || end < state.availableStart)throw new Error(`最早只能查询 ${state.availableStart}`);
+    if(start > end)throw new Error('开始日期不能晚于结束日期');
+    if(end > state.availableEnd)throw new Error(`结束日期不能晚于 ${state.availableEnd}`);
+  }
+  function buildQueryParams(includePaging=true){
+    validateDates();
+    const {start,end}=currentDateRange();
+    const params=new URLSearchParams();
+    params.set('start_date',start);
+    params.set('end_date',end);
+    params.set('dimensions',state.dimensions.join(','));
+    params.set('metric_basis',state.metricBasis);
+    for(const item of FILTERS){const value=get(item.id).value;if(value)params.append(item.param,asText(value));}
+    const campaign=get('campaignKeyword').value.trim();
+    const adset=get('adsetKeyword').value.trim();
+    if(campaign)params.set('campaign',campaign);
+    if(adset)params.set('adset',adset);
+    params.set('sort_by',state.sortBy);
+    params.set('sort_dir',state.sortDir);
+    if(state.dataVersion)params.set('data_version',state.dataVersion);
+    if(includePaging){params.set('limit',asText(state.limit));params.set('offset',asText((state.page-1)*state.limit));}
+    return params;
+  }
+  function buildOptionsParams(){
+    const {start,end}=currentDateRange();
+    const params=new URLSearchParams({start_date:start,end_date:end});
+    if(state.dataVersion)params.set('data_version',state.dataVersion);
+    return params;
+  }
+  function buildRankingParams(){
+    validateDates();
+    const {start,end}=currentDateRange(),params=new URLSearchParams({start_date:start,end_date:end,metric_basis:state.metricBasis});
+    for(const item of FILTERS){const value=get(item.id).value;if(value)params.append(item.param,asText(value));}
+    const campaign=get('campaignKeyword').value.trim(),adset=get('adsetKeyword').value.trim();
+    if(campaign)params.set('campaign',campaign);
+    if(adset)params.set('adset',adset);
+    if(state.dataVersion)params.set('data_version',state.dataVersion);
+    return params;
+  }
+
+  function setResultsStale(stale){
+    state.resultsStale=Boolean(stale);
+    for(const id of ['kpis','trendChart','rankings','tableWrap'])get(id).classList.toggle('stale-data',state.resultsStale);
+    if(state.resultsStale)get('tableWrap').setAttribute('aria-describedby','errorPanel');
+    else get('tableWrap').removeAttribute('aria-describedby');
+  }
+  function showLoading(message){
+    get('loadingText').textContent=message || '正在加载服务端聚合结果，不会下载全量明细…';
+    get('loadingPanel').hidden=false;
+    get('errorPanel').hidden=true;
+    if(state.hasData)setResultsStale(true);
+    get('tableWrap').setAttribute('aria-busy','true');
+    get('refreshBtn').disabled=true;get('exportBtn').disabled=true;
+  }
+  function hideLoading(){get('loadingPanel').hidden=true;get('tableWrap').setAttribute('aria-busy','false');get('refreshBtn').disabled=false;get('exportBtn').disabled=false;}
+  function showError(error){
+    hideLoading();
+    if(state.rankingStatus==='waiting'){
+      state.rankingStatus='error';
+      showRankingsError({message:'主查询失败，排行未请求'});
+    }
+    const staleNote=state.hasData?'；下方内容是上次成功查询结果，不对应当前筛选条件。':'';
+    get('errorPanel').textContent='加载失败：'+(error && error.message ? error.message : asText(error))+staleNote;
+    get('errorPanel').hidden=false;
+    if(!state.hasData){
+      get('kpis').innerHTML='<div class="panel empty" style="grid-column:1/-1">暂无可展示数据，请稍后重试。</div>';
+      get('trendChart').innerHTML='<div class="empty">趋势加载失败</div>';
+      get('rankings').innerHTML=RANK_CONFIGS.map(item=>`<article class="panel rank"><h3>${safe(item.title)}</h3><div class="empty">排行加载失败</div></article>`).join('');
+      get('tableWrap').innerHTML='<div class="empty">聚合表加载失败</div>';
+    }
+  }
+  function showRankingsLoading(message='排行正在后台计算，主表可先使用…'){
+    get('rankings').innerHTML=RANK_CONFIGS.map(item=>`<article class="panel rank"><h3>${safe(item.title)}</h3><div class="empty">${safe(message)}</div></article>`).join('');
+  }
+  function showRankingsError(error){
+    const message=error&&error.message?error.message:'排行加载失败';
+    get('rankings').innerHTML=RANK_CONFIGS.map(item=>`<article class="panel rank"><h3>${safe(item.title)}</h3><div class="empty">排行暂不可用：${safe(message)}</div></article>`).join('');
+  }
+  function prepareRankingScope(params,message='排行正在后台计算，主表可先使用…'){
+    const key=params.toString();
+    if(key===state.rankingKey)return key;
+    if(state.rankingController)state.rankingController.abort();
+    state.rankingController=null;++state.rankingSeq;
+    state.rankingKey=key;state.rankingStatus='waiting';showRankingsLoading(message);
+    return key;
+  }
+  function setWarnings(meta,quality){
+    const messages=[];
+    const cache=(meta && meta.cache)||{};
+    if(cache.stale)messages.push('当前缓存已超过预期刷新周期，页面仍展示最近一次成功版本。');
+    if(cache.range_complete===false||cache.complete===false)messages.push(`缓存日期存在缺口：${(cache.missing_dates||[]).join('、')||'请查看健康检查'}。缺失日不会按 0 处理。`);
+    if(cache.rollups_current===false)messages.push('日级汇总版本落后于事实版本；服务已安全回退最细事实，但查询性能不满足上线标准。');
+    if(cache.current_date_present===false)messages.push('缓存尚未覆盖北京时间今天；“最新可用日”以缓存上限为准。');
+    const scoped=[windowQuality(quality,'d7'),windowQuality(quality,'d30')].filter(item=>item.hasAny);
+    if(scoped.length){
+      for(const item of scoped){
+        if((item.ambiguous||0)>0)messages.push(`${item.label}存在 ${integer(item.ambiguous)} 条映射歧义记录，已保留为歧义而未强行归属。`);
+        if((item.unmapped||0)>0)messages.push(`${item.label}存在 ${integer(item.unmapped)} 条候选范围内未匹配收入记录，请结合“匹配粒度”维度核查。`);
+      }
+    }else{
+      const overall=overallQuality(quality);
+      if((overall.ambiguous||0)>0)messages.push(`存在 ${integer(overall.ambiguous)} 条映射歧义记录，已保留为歧义而未强行归属。`);
+      if((overall.unmapped||0)>0)messages.push(`存在 ${integer(overall.unmapped)} 条候选范围内未匹配收入记录，请结合“匹配粒度”维度核查。`);
+    }
+    const excluded=(quality&&quality.source_scope_exclusions)||{};
+    const excludedD7=finite(excluded.d7_rows)||0,excludedD30=finite(excluded.d30_rows)||0;
+    if(excludedD7||excludedD30){
+      const filterNote=excluded.business_filters_applied?'；这是整段日期的全局审计量，不能归属到当前业务筛选':'';
+      messages.push(`源收入表另有旧D7 ${integer(excludedD7)} / 新D30 ${integer(excludedD30)} 个键未命中任何 Dramawave custom 候选，因无法判定产品归属而未计入看板${filterNote}。`);
+    }
+    const range=currentDateRange();
+    if(range.end && range.end===state.today)messages.push(`${state.today} 为未完结当日，指标仍会继续变化。`);
+    const panel=get('warningPanel');panel.hidden=!messages.length;panel.innerHTML=messages.map(message=>`<div>${safe(message)}</div>`).join('');
+  }
+
+  function sourceTime(source,names){return asText(pick(source||{},names)) || '—';}
+  function overallQuality(quality){
+    const item=quality||{},total=finite(pick(item,['total_revenue_rows','total_rows'])),mapped=finite(pick(item,['mapped_revenue_rows','mapped_rows'])),unmapped=finite(pick(item,['unmapped_revenue_rows','unmapped_rows'])),ambiguous=finite(pick(item,['ambiguous_revenue_rows','ambiguous_rows']));
+    const coverage=finite(pick(item,['mapped_ratio','coverage_ratio'])) ?? (total ? mapped/total : null);
+    return {label:'综合',hasAny:[total,mapped,unmapped,ambiguous,coverage].some(value=>value!==null),total,mapped,unmapped,ambiguous,coverage};
+  }
+  function windowQuality(quality,windowName){
+    const item=quality||{},legacy=windowName==='d7'?'old':'new',label=windowName==='d7'?'旧D7归因':'新D30归因';
+    const nested=(item[windowName]&&typeof item[windowName]==='object'?item[windowName]:null)||(item[legacy]&&typeof item[legacy]==='object'?item[legacy]:null)||{};
+    const fromNested=names=>finite(pick(nested,names));
+    const fromFlat=suffixes=>finite(pick(item,suffixes.flatMap(suffix=>[`${windowName}_${suffix}`,`${legacy}_${suffix}`])));
+    const total=fromNested(['total_revenue_rows','total_rows']) ?? fromFlat(['total_revenue_rows','total_rows']);
+    const mapped=fromNested(['mapped_revenue_rows','mapped_rows']) ?? fromFlat(['mapped_revenue_rows','mapped_rows']);
+    const unmapped=fromNested(['unmapped_revenue_rows','unmapped_rows']) ?? fromFlat(['unmapped_revenue_rows','unmapped_rows']);
+    const ambiguous=fromNested(['ambiguous_revenue_rows','ambiguous_rows']) ?? fromFlat(['ambiguous_revenue_rows','ambiguous_rows']);
+    const coverage=fromNested(['mapped_ratio','coverage_ratio']) ?? fromFlat(['mapped_ratio','coverage_ratio']) ?? (total ? mapped/total : null);
+    return {label,hasAny:[total,mapped,unmapped,ambiguous,coverage].some(value=>value!==null),total,mapped,unmapped,ambiguous,coverage};
+  }
+  function renderMeta(extra){
+    const extraMeta=extra&&extra.meta&&typeof extra.meta==='object'?extra.meta:(extra||{});
+    const meta=Object.assign({},state.meta,extraMeta);
+    const quality=(extra&&extra.mapping_quality)||extraMeta.mapping_quality||meta.mapping_quality||{};
+    const sources=meta.source_max_updated_at||{};
+    const version=asText(meta.data_version)||'—';
+    const generated=asText(meta.generated_at)||'—';
+    if(version!=='—')state.dataVersion=version;
+    get('metaVersion').textContent=version;
+    get('metaGenerated').textContent='生成时间 '+generated;
+    get('metaOldSource').textContent='最大更新时间 '+sourceTime(sources,['app_revenues','old_revenue']);
+    get('metaNewSource').textContent='最大更新时间 '+sourceTime(sources,['app_revenues_30d','new_revenue']);
+    get('metaSpendSource').textContent='最大更新时间 '+sourceTime(sources,['custom_source_insight','ads_custom_source_insight','spend']);
+    const d7=windowQuality(quality,'d7'),d30=windowQuality(quality,'d30'),overall=overallQuality(quality);
+    get('metaCoverage').textContent=d7.hasAny||d30.hasAny?`旧D7 ${percent(d7.coverage)}｜新D30 ${percent(d30.coverage)}`:'综合覆盖率 '+percent(overall.coverage);
+    get('metaAmbiguity').textContent=d7.hasAny||d30.hasAny?`D7歧义 ${integer(d7.ambiguous)} / 候选内未匹配 ${integer(d7.unmapped)}｜D30歧义 ${integer(d30.ambiguous)} / 候选内未匹配 ${integer(d30.unmapped)}`:`歧义 ${integer(overall.ambiguous)}｜候选内未匹配 ${integer(overall.unmapped)}`;
+    get('headerMeta').textContent=`生成 ${generated}｜版本 ${version}｜每 ${finite(meta.cache&&meta.cache.refresh_interval_minutes)||30} 分钟刷新｜保留 ${finite(meta.cache&&meta.cache.retention_days)||60} 天`;
+    setWarnings(meta,quality);
+  }
+
+  function normalizedOption(item){
+    if(item && typeof item==='object')return {value:asText(item.value ?? item.id ?? item.key),label:asText(item.label ?? item.name ?? item.value ?? item.id ?? item.key)};
+    return {value:asText(item),label:asText(item)};
+  }
+  function fillSelect(id,label,items){
+    const select=get(id),previous=asText(select.value),options=(Array.isArray(items)?items:[]).map(normalizedOption).filter(item=>item.value!==''),seen=new Set();
+    const unique=options.filter(item=>seen.has(item.value)?false:(seen.add(item.value),true));
+    if(previous&&!seen.has(previous))unique.unshift({value:previous,label:'当前选择（该日期范围无可用项）'});
+    select.innerHTML=`<option value="">${safe(label)}</option>`+unique.map(item=>`<option value="${safe(item.value)}">${safe(item.label)}${item.label!==item.value?' · '+safe(item.value):''}</option>`).join('');
+    if(previous)select.value=previous;
+  }
+  function applyOptions(payload){
+    const options=(payload&&payload.options)||payload||{};state.options=options;
+    fillSelect('channelFilter','全部渠道',options.channel);
+    fillSelect('appFilter','全部投放产品',options.app_id||options.delivery_product);
+    fillSelect('optimizerFilter','全部优化师',options.optimizer_id||options.optimizer);
+    fillSelect('countryGroupFilter','全部国家组',options.country_group);
+    fillSelect('accountFilter','全部账户',options.ad_account_id||options.account_id||options.account);
+  }
+
+  function buildDimensionChips(){
+    get('dimensionChips').innerHTML=DIMENSIONS.map(item=>`<label class="chip ${state.dimensions.includes(item.key)?'active':''}"><input type="checkbox" value="${safe(item.key)}" ${state.dimensions.includes(item.key)?'checked':''}>${safe(DIMENSION_LABELS[item.key])}</label>`).join('');
+    get('dimensionChips').querySelectorAll('input').forEach(input=>input.addEventListener('change',()=>{
+      const selected=[...get('dimensionChips').querySelectorAll('input:checked')].map(item=>item.value);
+      if(!selected.length){input.checked=true;return;}
+      state.dimensions=selected;state.page=1;state.sortBy='spend';state.sortDir='desc';buildDimensionChips();loadDashboard();
+    }));
+  }
+  function setBasis(basis,load=true){
+    state.metricBasis=basis==='d7'?'d7':'d0';
+    get('basisToggle').querySelectorAll('button').forEach(button=>{const active=button.dataset.basis===state.metricBasis;button.classList.toggle('active',active);button.setAttribute('aria-pressed',active?'true':'false');});
+    if(load){state.page=1;loadDashboard();}
+  }
+  function buildPresets(){
+    const hasToday=state.availableEnd===state.today;
+    const presets=[[hasToday?'today':'latest',hasToday?'今天':`最新可用日 ${state.availableEnd}`],[hasToday?'yesterday':'latest_previous',hasToday?'昨天':'最新可用日前一日'],['3','近3天'],['7','近7天'],['30','近30天'],['all','全部']];
+    get('datePresets').innerHTML=presets.map(item=>`<button type="button" class="preset-btn" data-kind="${item[0]}">${item[1]}</button>`).join('');
+    get('datePresets').querySelectorAll('button').forEach(button=>button.addEventListener('click',async()=>{
+      const kind=button.dataset.kind;let start=state.availableEnd,end=state.availableEnd;
+      if(kind==='yesterday'||kind==='latest_previous'){start=clampDate(addDays(end,-1),state.availableStart,state.availableEnd);end=start;}
+      else if(kind==='all')start=state.availableStart;
+      else if(kind!=='today'&&kind!=='latest')start=clampDate(addDays(end,-Number(kind)+1),state.availableStart,state.availableEnd);
+      get('startDate').value=start;get('endDate').value=end;
+      state.page=1;markActivePreset(kind);await reloadOptionsAndDashboard();
+    }));
+  }
+  function markActivePreset(kind){get('datePresets').querySelectorAll('button').forEach(button=>button.classList.toggle('active',button.dataset.kind===kind));}
+
+  function renderKpis(totals){
+    const model=metricModel(totals),basis=basisLabel(),lift=liftText(model);
+    const cards=[
+      {label:'共同花费',value:money(model.spend),sub:'两种归因窗口共用同一花费分母',kind:''},
+      {label:`旧D7归因 · ${basis}收入`,value:money(model.oldRevenue),sub:'来源 app_revenues',kind:'old'},
+      {label:`旧D7归因 · ${basis} ROAS`,value:ratio(model.oldRoas),sub:'旧口径收入 ÷ 共同花费',kind:'old'},
+      {label:`新D30归因 · ${basis}收入`,value:money(model.newRevenue),sub:'来源 app_revenues_30d',kind:'new'},
+      {label:`新D30归因 · ${basis} ROAS`,value:ratio(model.newRoas),sub:'新口径收入 ÷ 共同花费',kind:'new'},
+      {label:'收入差额',value:money(model.revenueDiff),sub:'新D30归因 − 旧D7归因',kind:'diff '+signClass(model.revenueDiff)},
+      {label:'收入提升率',value:lift,sub:model.oldRevenue===0&&finite(model.newRevenue)>0?'旧口径为0，新口径产生收入':'收入差额 ÷ 旧D7归因收入',kind:'diff '+signClass(model.liftRate)}
+    ];
+    get('kpis').innerHTML=cards.map(card=>`<article class="panel kpi ${card.kind}"><div class="kpi-label">${safe(card.label)}</div><div class="kpi-value">${safe(card.value)}</div><div class="kpi-sub">${safe(card.sub)}</div></article>`).join('');
+  }
+
+  function renderTrend(rows){
+    const data=Array.isArray(rows)?rows:[];
+    if(!data.length){get('trendChart').innerHTML='<div class="empty">当前筛选没有按日趋势数据</div>';return;}
+    const points=data.map(row=>({dt:asText(row.dt||row.date),...metricModel(row)})).filter(item=>item.dt);
+    if(!points.length){get('trendChart').innerHTML='<div class="empty">当前筛选没有按日趋势数据</div>';return;}
+    const width=1120,height=250,left=50,right=24,top=22,bottom=38,innerWidth=width-left-right,innerHeight=height-top-bottom;
+    const maxValue=Math.max(1,...points.flatMap(item=>[item.spend||0,item.oldRevenue||0,item.newRevenue||0]));
+    const x=index=>left+(points.length===1?innerWidth/2:index*innerWidth/(points.length-1));
+    const y=value=>top+innerHeight-(finite(value)||0)/maxValue*innerHeight;
+    const pathFor=key=>points.map((item,index)=>`${index?'L':'M'} ${x(index).toFixed(1)} ${y(item[key]).toFixed(1)}`).join(' ');
+    const barWidth=Math.max(3,Math.min(18,innerWidth/Math.max(points.length,1)*.38));
+    const bars=points.map((item,index)=>{const yy=y(item.spend),xx=x(index)-barWidth/2;return `<rect x="${xx.toFixed(1)}" y="${yy.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(top+innerHeight-yy).toFixed(1)}" fill="#c6d5e9"><title>${safe(item.dt)} 共同花费 ${safe(money(item.spend))}</title></rect>`;}).join('');
+    const oldDots=points.map((item,index)=>`<circle cx="${x(index).toFixed(1)}" cy="${y(item.oldRevenue).toFixed(1)}" r="3" fill="#0f766e"><title>${safe(item.dt)} 旧D7归因${basisLabel()}收入 ${safe(money(item.oldRevenue))}</title></circle>`).join('');
+    const newDots=points.map((item,index)=>`<circle cx="${x(index).toFixed(1)}" cy="${y(item.newRevenue).toFixed(1)}" r="3" fill="#7651a6"><title>${safe(item.dt)} 新D30归因${basisLabel()}收入 ${safe(money(item.newRevenue))}</title></circle>`).join('');
+    const labelEvery=Math.max(1,Math.ceil(points.length/10));
+    const labels=points.map((item,index)=>index%labelEvery===0||index===points.length-1?`<text x="${x(index).toFixed(1)}" y="${height-13}" text-anchor="middle" font-size="11" fill="#667085">${safe(item.dt.slice(5))}</text>`:'').join('');
+    get('trendChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="共同花费、旧D7归因收入和新D30归因收入按日趋势"><line x1="${left}" y1="${top+innerHeight}" x2="${width-right}" y2="${top+innerHeight}" stroke="#cfd8e5"/><text x="${left}" y="14" font-size="11" fill="#667085">${safe(money(maxValue))}</text>${bars}<path d="${pathFor('oldRevenue')}" fill="none" stroke="#0f766e" stroke-width="3" vector-effect="non-scaling-stroke"/>${oldDots}<path d="${pathFor('newRevenue')}" fill="none" stroke="#7651a6" stroke-width="3" vector-effect="non-scaling-stroke"/>${newDots}${labels}</svg><div class="legend"><span class="spend">共同花费</span><span class="old">旧D7归因 ${basisLabel()}收入</span><span class="new">新D30归因 ${basisLabel()}收入</span></div>`;
+  }
+
+  function rawDimension(row,key){
+    const nested=row&&row.dimensions&&typeof row.dimensions==='object'?row.dimensions:{};
+    const aliases={dt:['dt','date'],campaign:['campaign','campaign_id'],adset:['adset','adset_id'],optimizer:['optimizer','optimizer_id'],country_group:['country_group'],channel:['channel'],delivery_product:['delivery_product','product','app_id'],account:['account','account_id','ad_account_id'],matched_grain:['matched_grain','mapping_level']};
+    return pick(Object.assign({},row||{},nested),aliases[key]||[key]);
+  }
+  function dimensionParts(row,key){
+    const value=asText(rawDimension(row,key));
+    const nameAliases={campaign:['campaign_name'],adset:['adset_name'],optimizer:['optimizer_name'],delivery_product:['product_name','app_name'],account:['account_name','ad_account_name']};
+    const name=asText(pick(row||{},nameAliases[key]||[]));
+    return {name:name||value,id:name&&value&&name!==value?value:''};
+  }
+  function dimensionCell(row,key){const part=dimensionParts(row,key);return `<div class="dim-name" title="${safe(part.name)}">${safe(part.name||'未填')}</div>${part.id?`<div class="id-text">${safe(part.id)}</div>`:''}`;}
+  function rankingData(rankings,aliases){for(const key of aliases){if(Array.isArray(rankings&&rankings[key]))return rankings[key];}return [];}
+  function renderRankings(rankings){
+    const source=rankings||{};
+    get('rankings').innerHTML=RANK_CONFIGS.map(config=>{
+      const rows=rankingData(source,config.aliases).slice(0,8),models=rows.map(metricModel),maxSpend=Math.max(1,...models.map(model=>model.spend||0));
+      const body=rows.map((row,index)=>{const part=dimensionParts(row,config.key),model=models[index],width=Math.max(model.spend?3:0,(model.spend||0)/maxSpend*100);return `<div class="rank-row"><div><div class="rank-name" title="${safe(part.name)}">${safe(part.name||'未填')}</div>${part.id?`<div class="id-text">${safe(part.id)}</div>`:''}<div class="bar"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div></div><div class="rank-value"><strong>${safe(money(model.spend))}</strong><div class="rank-sub">ROAS ${safe(ratio(model.oldRoas))} → ${safe(ratio(model.newRoas))}</div></div></div>`;}).join('');
+      return `<article class="panel rank"><h3>${safe(config.title)}</h3>${body||'<div class="empty">当前筛选无排行数据</div>'}</article>`;
+    }).join('');
+  }
+
+  function metricColumns(){
+    const basis=basisLabel();
+    return [
+      {key:'spend',label:'共同花费',format:model=>money(model.spend)},
+      {key:'d7_revenue',label:`旧D7归因 ${basis}收入`,format:model=>money(model.oldRevenue)},
+      {key:'d7_roas',label:`旧D7归因 ${basis} ROAS`,format:model=>ratio(model.oldRoas)},
+      {key:'d30_revenue',label:`新D30归因 ${basis}收入`,format:model=>money(model.newRevenue)},
+      {key:'d30_roas',label:`新D30归因 ${basis} ROAS`,format:model=>ratio(model.newRoas)},
+      {key:'revenue_diff',label:'收入差额',format:model=>money(model.revenueDiff),className:model=>signClass(model.revenueDiff)},
+      {key:'lift_rate',label:'提升率',format:model=>liftText(model),className:model=>signClass(model.liftRate)}
+    ];
+  }
+  function sortHeader(key,label,isDimension){
+    const active=state.sortBy===key,arrow=active?(state.sortDir==='asc'?' ↑':' ↓'):'';
+    return `<th class="${isDimension?'dim':''}" scope="col"><button class="sort-btn" type="button" data-sort="${safe(key)}" aria-label="按${safe(label)}排序">${safe(label+arrow)}</button></th>`;
+  }
+  function renderTable(payload){
+    const rows=Array.isArray(payload.rows)?payload.rows:[],metrics=metricColumns(),pagination=payload.pagination||{},total=finite(pagination.total)??finite(payload.total)??rows.length,offset=finite(pagination.offset)??((state.page-1)*state.limit),returned=finite(pagination.returned)??rows.length;
+    const headers=state.dimensions.map(key=>sortHeader(key,DIMENSION_LABELS[key]||key,true)).join('')+metrics.map(metric=>sortHeader(metric.key,metric.label,false)).join('');
+    const body=rows.map(row=>{const model=metricModel(row);return `<tr>${state.dimensions.map(key=>`<td class="dim">${dimensionCell(row,key)}</td>`).join('')}${metrics.map(metric=>`<td class="${metric.className?metric.className(model):''}">${safe(metric.format(model))}</td>`).join('')}</tr>`;}).join('');
+    get('tableWrap').innerHTML=`<table><thead><tr>${headers}</tr></thead><tbody>${body||`<tr><td colspan="${state.dimensions.length+metrics.length}"><div class="empty">当前筛选没有聚合数据</div></td></tr>`}</tbody></table>`;
+    get('tableWrap').querySelectorAll('[data-sort]').forEach(button=>button.addEventListener('click',()=>{const key=button.dataset.sort;if(state.sortBy===key)state.sortDir=state.sortDir==='asc'?'desc':'asc';else{state.sortBy=key;state.sortDir=state.dimensions.includes(key)?'asc':'desc';}state.page=1;loadDashboard();}));
+    const pageCount=total?Math.ceil(total/state.limit):0,current=total?Math.floor(offset/state.limit)+1:0;
+    state.page=current||1;
+    get('tableHint').textContent=`服务端聚合 ${integer(total)} 行，本页返回 ${integer(returned)} 行`;
+    get('pageSummary').textContent=`第 ${current} / ${pageCount} 页，共 ${integer(total)} 行`;
+    get('prevPage').disabled=current<=1;
+    get('nextPage').disabled=!total || offset+returned>=total;
+  }
+  function renderQuality(quality){
+    const d7=windowQuality(quality,'d7'),d30=windowQuality(quality,'d30'),overall=overallQuality(quality);
+    const summary=item=>`<strong>${safe(item.label)}覆盖率 ${safe(percent(item.coverage))}</strong>｜收入候选 ${safe(integer(item.total))}｜已匹配 ${safe(integer(item.mapped))}｜候选内未匹配 ${safe(integer(item.unmapped))}｜映射歧义 ${safe(integer(item.ambiguous))}`;
+    const parts=d7.hasAny||d30.hasAny?[summary(d7),summary(d30)]:[summary(overall)];
+    const excluded=(quality&&quality.source_scope_exclusions)||{};
+    const excludedLine=(finite(excluded.d7_rows)||finite(excluded.d30_rows))?` 日期级全源排除：旧D7 ${safe(integer(excluded.d7_rows))} 条 / ${safe(money(excluded.d7_revenue))}，新D30 ${safe(integer(excluded.d30_rows))} 条 / ${safe(money(excluded.d30_revenue))}；这些键未命中任何 Dramawave custom 候选，无法判定产品归属${excluded.business_filters_applied?'，且不能归属到当前业务筛选':''}。`:'';
+    get('qualityLine').innerHTML=parts.join('。<br>')+'。覆盖率分母仅含至少命中一条 Dramawave 维度候选的收入键；“候选内未匹配”不包含全源范围外排除。'+excludedLine+' ID 全程按字符串展示；歧义记录不会被强行归属。';
+  }
+  function renderPayload(payload){
+    state.lastPayload=payload;state.hasData=true;
+    const payloadMeta=payload&&payload.meta&&typeof payload.meta==='object'?payload.meta:payload;
+    if(payload&&payload.meta&&typeof payload.meta==='object')state.meta=Object.assign({},state.meta,payload.meta);
+    const version=asText(payloadMeta&&payloadMeta.data_version);
+    if(version)state.dataVersion=version;
+    renderMeta(payload);
+    renderKpis(payload.totals||payload.summary||{});
+    renderTrend(payload.trend||[]);
+    if(payload.rankings&&Object.keys(payload.rankings).length)renderRankings(payload.rankings);
+    renderTable(payload);
+    renderQuality(payload.mapping_quality||(payload.meta&&payload.meta.mapping_quality)||state.meta.mapping_quality||{});
+    setResultsStale(false);
+  }
+
+  function beginRequest(message){
+    clearTimeout(state.debounceTimer);state.debounceTimer=0;
+    const seq=++state.requestSeq;
+    if(state.controller)state.controller.abort();
+    state.controller=new AbortController();
+    showLoading(message);
+    return {seq,signal:state.controller.signal};
+  }
+  async function loadRankings(params,allowVersionRecovery=true){
+    const key=params.toString();
+    if(key!==state.rankingKey||state.rankingStatus==='loading'||state.rankingStatus==='loaded')return;
+    const seq=++state.rankingSeq;
+    if(state.rankingController)state.rankingController.abort();
+    state.rankingController=new AbortController();
+    state.rankingStatus='loading';showRankingsLoading();
+    try{
+      const payload=await fetchJson(API.rankings,params,state.rankingController.signal);
+      if(key!==state.rankingKey||seq!==state.rankingSeq)return;
+      renderRankings((payload&&payload.rankings)||payload||{});state.rankingStatus='loaded';
+    }catch(error){
+      if(error&&error.name==='AbortError')return;
+      if(key!==state.rankingKey||seq!==state.rankingSeq)return;
+      if(allowVersionRecovery&&await recoverFromVersionConflict(error))return;
+      state.rankingStatus='error';showRankingsError(error);
+    }
+  }
+  function applyMeta(meta,initialize=false){
+    state.meta=meta||{};
+    const version=asText(state.meta.data_version);
+    if(version)state.dataVersion=version;
+    else if(initialize)state.dataVersion='';
+    state.today=bjToday();
+    const cache=state.meta.cache||{},cacheStart=asText(cache.start_date)||MIN_DATE,cacheEnd=asText(cache.end_date)||state.today;
+    state.availableStart=cacheStart>MIN_DATE?cacheStart:MIN_DATE;
+    state.availableEnd=cacheEnd<state.today?cacheEnd:state.today;
+    if(state.availableEnd<state.availableStart)throw new Error('缓存日期范围尚未覆盖 2026-07-29 之后的数据');
+    for(const id of ['startDate','endDate']){get(id).min=state.availableStart;get(id).max=state.availableEnd;}
+    const defaults=state.meta.defaults||{};
+    if(initialize){
+      const defaultEnd=clampDate(asText(defaults.end_date)||state.availableEnd,state.availableStart,state.availableEnd);
+      const defaultStart=clampDate(asText(defaults.start_date)||addDays(defaultEnd,-6),state.availableStart,defaultEnd);
+      get('startDate').value=defaultStart;get('endDate').value=defaultEnd;
+      state.metricBasis=defaults.basis==='d7'?'d7':'d0';
+      const defaultDims=(defaults.group_by||defaults.dimensions||['dt','campaign']).filter(key=>DIMENSION_LABELS[key]);
+      state.dimensions=defaultDims.length?defaultDims:['dt','campaign'];
+    }else{
+      const end=clampDate(get('endDate').value||state.availableEnd,state.availableStart,state.availableEnd);
+      const start=clampDate(get('startDate').value||addDays(end,-6),state.availableStart,end);
+      get('startDate').value=start;get('endDate').value=end;
+    }
+    setBasis(state.metricBasis,false);buildDimensionChips();buildPresets();renderMeta();
+  }
+  async function recoverFromVersionConflict(error){
+    if(!error||error.status!==409||state.recoveringVersion)return false;
+    state.recoveringVersion=true;
+    state.dataVersion='';
+    try{await loadAll(false,false,'缓存版本已更新，正在重新加载筛选项与结果…');}
+    finally{state.recoveringVersion=false;}
+    return true;
+  }
+  async function loadDashboard(allowVersionRecovery=true){
+    const request=beginRequest('正在请求当前筛选条件的服务端聚合结果…');
+    try{
+      const queryParams=buildQueryParams(true),rankingParams=buildRankingParams();
+      prepareRankingScope(rankingParams);
+      queryParams.set('include_rankings','0');
+      const payload=await fetchJson(API.query,queryParams,request.signal);
+      if(request.seq!==state.requestSeq)return;
+      renderPayload(payload);hideLoading();void loadRankings(rankingParams,allowVersionRecovery);
+    }catch(error){
+      if(error&&error.name==='AbortError')return;
+      if(request.seq!==state.requestSeq)return;
+      if(allowVersionRecovery&&await recoverFromVersionConflict(error))return;
+      showError(error);
+    }
+  }
+  async function reloadOptionsAndDashboard(allowVersionRecovery=true){
+    const request=beginRequest('正在并行更新日期范围内的筛选项与聚合结果…');
+    try{
+      validateDates();
+      const queryParams=buildQueryParams(true),rankingParams=buildRankingParams();prepareRankingScope(rankingParams);queryParams.set('include_rankings','0');
+      const [options,payload]=await Promise.all([
+        fetchJson(API.options,buildOptionsParams(),request.signal),
+        fetchJson(API.query,queryParams,request.signal)
+      ]);
+      if(request.seq!==state.requestSeq)return;
+      applyOptions(options);renderPayload(payload);hideLoading();void loadRankings(rankingParams,allowVersionRecovery);
+    }catch(error){
+      if(error&&error.name==='AbortError')return;
+      if(request.seq!==state.requestSeq)return;
+      if(allowVersionRecovery&&await recoverFromVersionConflict(error))return;
+      showError(error);
+    }
+  }
+  async function loadAll(initialize=false,allowVersionRecovery=true,message='正在读取最新缓存元数据…'){
+    const request=beginRequest(message);
+    try{
+      const meta=await fetchJson(API.meta,null,request.signal,'no-store');
+      if(request.seq!==state.requestSeq)return;
+      applyMeta(meta,initialize);
+      const queryParams=buildQueryParams(true),rankingParams=buildRankingParams();prepareRankingScope(rankingParams);queryParams.set('include_rankings','0');
+      const [options,payload]=await Promise.all([
+        fetchJson(API.options,buildOptionsParams(),request.signal),
+        fetchJson(API.query,queryParams,request.signal)
+      ]);
+      if(request.seq!==state.requestSeq)return;
+      applyOptions(options);renderPayload(payload);hideLoading();void loadRankings(rankingParams,allowVersionRecovery);
+    }catch(error){
+      if(error&&error.name==='AbortError')return;
+      if(request.seq!==state.requestSeq)return;
+      if(allowVersionRecovery&&await recoverFromVersionConflict(error))return;
+      showError(error);
+    }
+  }
+  function scheduleKeywordQuery(){
+    clearTimeout(state.debounceTimer);
+    ++state.requestSeq;if(state.controller)state.controller.abort();state.controller=null;
+    if(state.hasData)setResultsStale(true);
+    prepareRankingScope(buildRankingParams(),'等待关键词输入完成…');
+    state.debounceTimer=setTimeout(()=>{state.page=1;loadDashboard();},350);
+  }
+  async function exportCsv(){
+    try{
+      const params=buildQueryParams(false),url=new URL(API.exportCsv,document.baseURI);
+      for(const [key,value] of params.entries())url.searchParams.append(key,value);
+      get('exportBtn').disabled=true;
+      const response=await fetch(url.toString(),{method:'GET',headers:{Accept:'text/csv'},credentials:'same-origin',cache:'default'});
+      if(response.status===409){const error=new Error('HTTP 409：缓存版本已更新');error.status=409;await recoverFromVersionConflict(error);return;}
+      if(!response.ok)throw new Error(`导出失败：HTTP ${response.status}`);
+      const blob=await response.blob(),objectUrl=URL.createObjectURL(blob);
+      const link=document.createElement('a');link.href=objectUrl;link.download='dramawave-attribution-comparison.csv';document.body.appendChild(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(objectUrl),0);
+    }catch(error){
+      get('errorPanel').textContent=error&&error.message?error.message:asText(error);get('errorPanel').hidden=false;
+    }finally{get('exportBtn').disabled=false;}
+  }
+  function resetFilters(){
+    for(const item of FILTERS)get(item.id).value='';
+    get('campaignKeyword').value='';get('adsetKeyword').value='';
+    const defaultStart=clampDate((state.meta.defaults&&state.meta.defaults.start_date)||addDays(state.availableEnd,-6),state.availableStart,state.availableEnd);
+    get('startDate').value=defaultStart;get('endDate').value=state.availableEnd;
+    state.metricBasis=(state.meta.defaults&&state.meta.defaults.basis)==='d7'?'d7':'d0';
+    const defaultDims=(state.meta.defaults&&(state.meta.defaults.group_by||state.meta.defaults.dimensions))||['dt','campaign'];
+    state.dimensions=defaultDims.filter(key=>DIMENSION_LABELS[key]);if(!state.dimensions.length)state.dimensions=['dt','campaign'];
+    state.sortBy='spend';state.sortDir='desc';state.limit=50;state.page=1;get('pageLimit').value='50';
+    setBasis(state.metricBasis,false);buildDimensionChips();markActivePreset('');reloadOptionsAndDashboard();
+  }
+  function bindControls(){
+    get('basisToggle').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>setBasis(button.dataset.basis)));
+    FILTERS.forEach(item=>get(item.id).addEventListener('change',()=>{state.page=1;loadDashboard();}));
+    get('campaignKeyword').addEventListener('input',scheduleKeywordQuery);get('adsetKeyword').addEventListener('input',scheduleKeywordQuery);
+    for(const id of ['startDate','endDate'])get(id).addEventListener('change',()=>{state.page=1;markActivePreset('');reloadOptionsAndDashboard();});
+    get('pageLimit').addEventListener('change',()=>{state.limit=Number(get('pageLimit').value)||50;state.page=1;loadDashboard();});
+    get('prevPage').addEventListener('click',()=>{if(state.page>1){state.page-=1;loadDashboard();}});
+    get('nextPage').addEventListener('click',()=>{state.page+=1;loadDashboard();});
+    get('resetBtn').addEventListener('click',resetFilters);get('refreshBtn').addEventListener('click',()=>loadAll(false));get('exportBtn').addEventListener('click',exportCsv);
+  }
+  async function bootstrap(){
+    bindControls();buildDimensionChips();await loadAll(true,true,'正在读取缓存元数据…');
+  }
+  bootstrap();
+})();
+</script>
+</body>
+</html>

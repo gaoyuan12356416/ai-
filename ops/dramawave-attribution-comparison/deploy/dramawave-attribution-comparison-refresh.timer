@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Dramawave D7/D30 attribution comparison cache every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:07,37:00
+Persistent=true
+AccuracySec=30s
+RandomizedDelaySec=5s
+Unit=dramawave-attribution-comparison-refresh.service
+
+[Install]
+WantedBy=timers.target

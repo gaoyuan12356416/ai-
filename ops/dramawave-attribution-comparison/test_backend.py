@@ -1,0 +1,735 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import json
+import os
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+from urllib.parse import parse_qs
+
+import common
+import refresh_cache
+import service
+import warm_cache
+
+
+def custom_row(**overrides):
+    row = {
+        "dt": "2026-07-29",
+        "channel": "Meta",
+        "channel_id": "0",
+        "product": "Dramawave",
+        "app_id": "Dramawave",
+        "optimizer_id": "123",
+        "optimizer_name": "Alice",
+        "country_group": "US",
+        "ad_account_id": "9000000000000000001",
+        "campaign_id": "1200000000000000001",
+        "campaign_name": "Campaign A",
+        "adset_id": "1200000000000000011",
+        "adset_name": "Ad Set A",
+        "ad_id": "1200000000000000111",
+        "ad_name": "Ad A",
+        "spend": 100.0,
+        "impressions": 1000,
+        "clicks": 100,
+        "installs": 20,
+        "af_installs": 18,
+    }
+    row.update(overrides)
+    return row
+
+
+def revenue_row(**overrides):
+    row = {
+        "campaign_id": "1200000000000000001",
+        "campaign_name": "Campaign A",
+        "adset_id": "1200000000000000011",
+        "adset_name": "Ad Set A",
+        "ad_id": "1200000000000000111",
+        "ad_name": "Ad A",
+        "users": 18,
+        "purchase_d0": 2,
+        "purchase_d7": 3,
+        "revenue_iaa_d0": 10.0,
+        "revenue_iap_d0": 20.0,
+        "revenue_iaa_d7": 12.0,
+        "revenue_iap_d7": 24.0,
+        "ad_impression_count": 500,
+    }
+    row.update(overrides)
+    return row
+
+
+class MappingTests(unittest.TestCase):
+    def test_cache_warmer_uses_exact_frontend_default_keys(self):
+        plan = dict(
+            warm_cache.request_plan(
+                {
+                    "data_version": "v1",
+                    "defaults": {
+                        "start_date": "2026-07-29",
+                        "end_date": "2026-08-06",
+                        "basis": "d0",
+                        "dimensions": ["dt", "campaign"],
+                    },
+                }
+            )
+        )
+        self.assertEqual(plan["/api/query"]["include_rankings"], "0")
+        self.assertEqual(plan["/api/query"]["dimensions"], "dt,campaign")
+        self.assertEqual(plan["/api/rankings"]["data_version"], "v1")
+        self.assertNotIn("limit", plan["/api/rankings"])
+
+    def test_custom_sql_uses_live_schema_and_pss_index(self):
+        self.assertIn("FORCE INDEX (pss)", refresh_cache.CUSTOM_SQL)
+        self.assertNotIn("c.campaign_name", refresh_cache.CUSTOM_SQL)
+        self.assertNotIn("c.adset_name", refresh_cache.CUSTOM_SQL)
+        self.assertNotIn("c.ad_name", refresh_cache.CUSTOM_SQL)
+
+    def test_os_like_duplicate_rows_are_merged_once(self):
+        day = dt.date(2026, 7, 29)
+        old = [revenue_row(), revenue_row(users=2, revenue_iaa_d0=1, revenue_iap_d0=4)]
+        new = [revenue_row(revenue_iaa_d0=25, revenue_iap_d0=25)]
+        facts, stats = refresh_cache.map_day(day, [custom_row()], old, new)
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["d7_users"], 20)
+        self.assertAlmostEqual(facts[0]["d7_revenue_iaa_d0"] + facts[0]["d7_revenue_iap_d0"], 35.0)
+        self.assertAlmostEqual(facts[0]["d30_revenue_iaa_d0"] + facts[0]["d30_revenue_iap_d0"], 50.0)
+        self.assertEqual(facts[0]["mapping_status"], "mapped")
+        self.assertEqual(facts[0]["matched_grain"], "ad")
+        self.assertEqual(stats["d7_candidate_keys"], 1)
+
+    def test_adset_fallback_and_ambiguity_are_not_allocated(self):
+        day = dt.date(2026, 7, 29)
+        unique = custom_row(ad_id="", adset_id="set-unique", spend=40)
+        ambiguous_a = custom_row(ad_id="a", adset_id="set-shared", country_group="US", spend=50)
+        ambiguous_b = custom_row(ad_id="b", adset_id="set-shared", country_group="CA", spend=60)
+        old = [
+            revenue_row(ad_id="", adset_id="set-unique", revenue_iaa_d0=4, revenue_iap_d0=6),
+            revenue_row(ad_id="", adset_id="set-shared", revenue_iaa_d0=8, revenue_iap_d0=12),
+        ]
+        facts, stats = refresh_cache.map_day(day, [unique, ambiguous_a, ambiguous_b], old, [])
+        mapped = [row for row in facts if row["mapping_status"] == "mapped"]
+        ambiguous = [row for row in facts if row["mapping_status"] == "ambiguous"]
+        self.assertEqual(len(mapped), 1)
+        self.assertEqual(mapped[0]["matched_grain"], "adset")
+        self.assertEqual(len(ambiguous), 1)
+        self.assertEqual(ambiguous[0]["country_group"], "")
+        self.assertEqual(ambiguous[0]["spend"], 0)
+        self.assertAlmostEqual(sum(row["d7_revenue_iaa_d0"] + row["d7_revenue_iap_d0"] for row in facts), 30.0)
+        self.assertEqual(stats["d7_mapped_keys"], 1)
+        self.assertEqual(stats["d7_ambiguous_keys"], 1)
+
+    def test_unmatched_global_revenue_is_excluded_from_dramawave_scope(self):
+        day = dt.date(2026, 7, 29)
+        facts, stats = refresh_cache.map_day(
+            day,
+            [custom_row()],
+            [
+                revenue_row(revenue_iaa_d0=4, revenue_iap_d0=6),
+                revenue_row(campaign_id="other", adset_id="other", ad_id="other", revenue_iaa_d0=8, revenue_iap_d0=12),
+            ],
+            [],
+        )
+        self.assertEqual(sum(row["d7_candidate_keys"] for row in facts), 1)
+        self.assertEqual(stats["excluded_unmatched_d7_rows"], 1)
+        self.assertEqual(stats["d7_source_revenue_iaa_d0"] + stats["d7_source_revenue_iap_d0"], 30)
+        self.assertEqual(stats["d7_merged_revenue_iaa_d0"] + stats["d7_merged_revenue_iap_d0"], 30)
+        self.assertEqual(stats["d7_candidate_revenue_iaa_d0"] + stats["d7_candidate_revenue_iap_d0"], 10)
+        self.assertEqual(
+            stats["d7_excluded_unscoped_revenue_iaa_d0"] + stats["d7_excluded_unscoped_revenue_iap_d0"],
+            20,
+        )
+        self.assertEqual(stats["d7_fact_revenue_iaa_d0"] + stats["d7_fact_revenue_iap_d0"], 10)
+
+    def test_campaign_fallback(self):
+        day = dt.date(2026, 7, 29)
+        custom = custom_row(ad_id="", adset_id="")
+        old = [revenue_row(ad_id="", adset_id="")]
+        facts, _ = refresh_cache.map_day(day, [custom], old, [])
+        self.assertEqual(facts[0]["matched_grain"], "campaign")
+
+    def test_present_but_missing_ad_does_not_fall_back_to_adset(self):
+        day = dt.date(2026, 7, 29)
+        custom = custom_row(ad_id="known-ad", adset_id="shared-set")
+        old = [revenue_row(ad_id="unknown-ad", adset_id="shared-set")]
+        facts, stats = refresh_cache.map_day(day, [custom], old, [])
+        self.assertEqual(facts[0]["mapping_status"], "spend_only")
+        self.assertEqual(stats["d7_candidate_keys"], 0)
+        self.assertEqual(stats["excluded_unmatched_d7_rows"], 1)
+        self.assertGreater(stats["d7_excluded_unscoped_revenue_iaa_d0"], 0)
+
+    def test_adset_fallback_is_unique_when_only_lower_ad_ids_differ(self):
+        day = dt.date(2026, 7, 29)
+        custom_a = custom_row(ad_id="ad-a", ad_name="A", adset_id="shared", spend=30)
+        custom_b = custom_row(ad_id="ad-b", ad_name="B", adset_id="shared", spend=70)
+        old = [revenue_row(ad_id="", adset_id="shared", revenue_iaa_d0=10, revenue_iap_d0=20)]
+        facts, stats = refresh_cache.map_day(day, [custom_a, custom_b], old, [])
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["spend"], 100)
+        self.assertEqual(facts[0]["impressions"], 2000)
+        self.assertEqual(stats["custom_source_spend"], 100)
+        self.assertEqual(stats["custom_merged_spend"], 100)
+        self.assertEqual(stats["custom_fact_spend"], 100)
+        self.assertEqual(facts[0]["mapping_status"], "mapped")
+        self.assertEqual(facts[0]["matched_grain"], "adset")
+        self.assertEqual(stats["d7_ambiguous_keys"], 0)
+
+    def test_revenue_fills_campaign_and_adset_names_without_ad_name_pollution(self):
+        day = dt.date(2026, 7, 29)
+        custom_a = custom_row(campaign_name="", adset_name="", ad_id="ad-a", ad_name="")
+        custom_b = custom_row(campaign_name="", adset_name="", ad_id="ad-b", ad_name="", spend=25)
+        old = [
+            revenue_row(ad_id="ad-a", ad_name="Revenue Ad A"),
+            revenue_row(ad_id="ad-b", ad_name="Revenue Ad B"),
+        ]
+        facts, _ = refresh_cache.map_day(day, [custom_a, custom_b], old, [])
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["campaign_name"], "Campaign A")
+        self.assertEqual(facts[0]["adset_name"], "Ad Set A")
+        self.assertEqual(facts[0]["ad_name"], "")
+
+
+class ServiceTests(unittest.TestCase):
+    def setUp(self):
+        service.clear_response_cache()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tempdir.name) / "dashboard.sqlite3"
+        with common.connect_sqlite(self.path) as conn:
+            first = refresh_cache.blank_fact(dt.date(2026, 7, 29))
+            first.update(
+                custom_row(),
+            )
+            first.update(
+                {
+                    "mapping_status": "mapped",
+                    "matched_grain": "ad",
+                    "d7_revenue_iaa_d0": 10,
+                    "d7_revenue_iap_d0": 40,
+                    "d30_revenue_iaa_d0": 25,
+                    "d30_revenue_iap_d0": 50,
+                    "d7_revenue_iaa_d7": 20,
+                    "d7_revenue_iap_d7": 50,
+                    "d30_revenue_iaa_d7": 35,
+                    "d30_revenue_iap_d7": 65,
+                    "d7_candidate_keys": 1,
+                    "d7_mapped_keys": 1,
+                    "d30_candidate_keys": 1,
+                    "d30_mapped_keys": 1,
+                }
+            )
+            second = refresh_cache.blank_fact(dt.date(2026, 7, 29))
+            second.update(
+                custom_row(
+                    campaign_id="1200000000000000002",
+                    campaign_name="Campaign B",
+                    adset_id="1200000000000000022",
+                    ad_id="1200000000000000222",
+                    spend=100,
+                    country_group="CA",
+                )
+            )
+            second.update(
+                {
+                    "mapping_status": "mapped",
+                    "matched_grain": "ad",
+                    "d7_revenue_iaa_d0": 5,
+                    "d7_revenue_iap_d0": 5,
+                    "d30_revenue_iaa_d0": 10,
+                    "d30_revenue_iap_d0": 10,
+                    "d7_candidate_keys": 1,
+                    "d7_mapped_keys": 1,
+                    "d30_candidate_keys": 1,
+                    "d30_mapped_keys": 1,
+                }
+            )
+            common.insert_facts(conn, [first, second])
+            refresh_cache.rebuild_rollups_for_day(conn, "2026-07-29")
+            common.set_meta(conn, "data_version", "v-test")
+            common.set_meta(conn, "rollup_version", "v-test")
+            common.set_meta(conn, "generated_at", "2026-07-29T12:00:00+08:00")
+            conn.execute(
+                "INSERT INTO refresh_log(dt,started_at,finished_at,status,fact_rows,detail,data_version) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    "2026-07-29",
+                    "2026-07-29T11:59:00+08:00",
+                    "2026-07-29T12:00:00+08:00",
+                    "success",
+                    2,
+                    json.dumps(
+                        {
+                            "excluded_unmatched_d7_rows": 2,
+                            "excluded_unmatched_d30_rows": 3,
+                            "d7_excluded_unscoped_revenue_iaa_d0": 4,
+                            "d7_excluded_unscoped_revenue_iap_d0": 6,
+                            "d30_excluded_unscoped_revenue_iaa_d0": 8,
+                            "d30_excluded_unscoped_revenue_iap_d0": 12,
+                            "d7_excluded_unscoped_revenue_iaa_d7": 5,
+                            "d7_excluded_unscoped_revenue_iap_d7": 7,
+                            "d30_excluded_unscoped_revenue_iaa_d7": 9,
+                            "d30_excluded_unscoped_revenue_iap_d7": 13,
+                        }
+                    ),
+                    "v-test",
+                ),
+            )
+            conn.commit()
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_aggregate_recomputes_roas_after_sum_and_keeps_ids_as_text(self):
+        params = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&metric_basis=d0&sort_by=spend&sort_dir=desc&data_version=v-test"
+        )
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            conn.execute("BEGIN")
+            payload = service.query_payload(conn, params)
+        self.assertEqual(payload["pagination"]["total"], 2)
+        self.assertEqual(payload["totals"]["spend"], 200)
+        self.assertEqual(payload["totals"]["d7_revenue"], 60)
+        self.assertEqual(payload["totals"]["d30_revenue"], 95)
+        self.assertAlmostEqual(payload["totals"]["d7_roas"], 0.3)
+        self.assertIsInstance(payload["rows"][0]["campaign"], str)
+        self.assertEqual(payload["mapping_quality"]["d7_coverage_ratio"], 1)
+        self.assertEqual(payload["mapping_quality"]["d30_coverage_ratio"], 1)
+
+    def test_same_version_and_parameters_use_bounded_service_cache(self):
+        params = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&"
+            "data_version=v-test&include_rankings=0"
+        )
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            first_payload = service.query_payload(conn, params)
+            second_payload = service.query_payload(conn, params)
+        self.assertIs(first_payload, second_payload)
+        self.assertEqual(len(service._RESPONSE_CACHE), 1)
+
+    def test_rankings_can_be_deferred_and_loaded_from_independent_cache_key(self):
+        query_params = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&include_rankings=0&data_version=v-test"
+        )
+        ranking_params = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&metric_basis=d0&data_version=v-test"
+        )
+        with common.connect_sqlite(self.path, readonly=True) as conn, mock.patch.object(
+            service, "build_rankings", wraps=service.build_rankings
+        ) as builder:
+            main_payload = service.query_payload(conn, query_params)
+            self.assertEqual(main_payload["rankings"], {})
+            builder.assert_not_called()
+            ranking_payload = service.rankings_payload(conn, ranking_params)
+            self.assertEqual(ranking_payload["data_version"], "v-test")
+            self.assertEqual(set(ranking_payload["rankings"]), set(service.RANKING_DIMENSIONS))
+            self.assertEqual(builder.call_count, 1)
+            self.assertIs(ranking_payload, service.rankings_payload(conn, ranking_params))
+            alternate = parse_qs(
+                "start_date=2026-07-29&end_date=2026-07-29&metric_basis=d0&data_version=v-test&"
+                "dimensions=adset&sort_by=d30_revenue&offset=50&limit=100"
+            )
+            self.assertIs(ranking_payload, service.rankings_payload(conn, alternate))
+            self.assertEqual(builder.call_count, 1)
+        namespaces = {key[0] for key in service._RESPONSE_CACHE}
+        self.assertEqual(namespaces, {"query", "rankings"})
+
+    def test_same_ranking_key_is_singleflight_across_threads(self):
+        params = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&metric_basis=d0&data_version=v-test"
+        )
+        original = service.build_rankings
+        started = threading.Event()
+        calls = []
+
+        def delayed(*args, **kwargs):
+            calls.append(1)
+            started.set()
+            time.sleep(0.1)
+            return original(*args, **kwargs)
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                with common.connect_sqlite(self.path, readonly=True) as conn:
+                    results.append(service.rankings_payload(conn, params))
+            except Exception as exc:  # pragma: no cover - asserted below.
+                errors.append(exc)
+
+        with mock.patch.object(service, "build_rankings", side_effect=delayed):
+            first = threading.Thread(target=worker)
+            second = threading.Thread(target=worker)
+            first.start()
+            self.assertTrue(started.wait(timeout=2))
+            second.start()
+            first.join(timeout=5)
+            second.join(timeout=5)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(results[0], results[1])
+
+    def test_source_scope_exclusions_are_global_to_date_range_and_flag_filters(self):
+        unfiltered = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d0&include_rankings=0"
+        )
+        filtered = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d0&"
+            "country_group=US&include_rankings=0"
+        )
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            global_item = service.query_payload(conn, unfiltered)["mapping_quality"]["source_scope_exclusions"]
+            filtered_item = service.query_payload(conn, filtered)["mapping_quality"]["source_scope_exclusions"]
+        self.assertEqual(
+            set(global_item),
+            {"scope", "business_filters_applied", "d7_rows", "d30_rows", "d7_revenue", "d30_revenue"},
+        )
+        self.assertEqual(global_item["scope"], "date_range_global_not_filter_attributable")
+        self.assertFalse(global_item["business_filters_applied"])
+        self.assertEqual(global_item["d7_rows"], 2)
+        self.assertEqual(global_item["d30_rows"], 3)
+        self.assertEqual(global_item["d7_revenue"], 10)
+        self.assertEqual(global_item["d30_revenue"], 20)
+        self.assertTrue(filtered_item["business_filters_applied"])
+        self.assertEqual(filtered_item["d7_rows"], global_item["d7_rows"])
+        self.assertEqual(filtered_item["d30_rows"], global_item["d30_rows"])
+        self.assertEqual(filtered_item["d7_revenue"], global_item["d7_revenue"])
+        self.assertEqual(filtered_item["d30_revenue"], global_item["d30_revenue"])
+
+    def test_source_scope_exclusions_use_latest_success_per_day_and_selected_basis(self):
+        latest = {
+            "excluded_unmatched_d7_rows": 7,
+            "excluded_unmatched_d30_rows": 9,
+            "d7_excluded_unscoped_revenue_iaa_d7": 11,
+            "d7_excluded_unscoped_revenue_iap_d7": 13,
+            "d30_excluded_unscoped_revenue_iaa_d7": 17,
+            "d30_excluded_unscoped_revenue_iap_d7": 19,
+        }
+        with common.connect_sqlite(self.path) as conn:
+            conn.execute(
+                "INSERT INTO refresh_log(dt,started_at,finished_at,status,detail,data_version) VALUES(?,?,?,?,?,?)",
+                (
+                    "2026-07-29",
+                    "2026-07-29T12:29:00+08:00",
+                    "2026-07-29T12:30:00+08:00",
+                    "success",
+                    json.dumps(latest),
+                    "v-test",
+                ),
+            )
+            conn.commit()
+        service.clear_response_cache()
+        params = parse_qs(
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d7&include_rankings=0"
+        )
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            item = service.query_payload(conn, params)["mapping_quality"]["source_scope_exclusions"]
+        self.assertEqual(item["d7_rows"], 7)
+        self.assertEqual(item["d30_rows"], 9)
+        self.assertEqual(item["d7_revenue"], 24)
+        self.assertEqual(item["d30_revenue"], 36)
+
+    def test_common_filters_have_equality_first_date_indexes(self):
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list('attribution_fact')")}
+            filter_indexes = {
+                row["name"] for row in conn.execute("PRAGMA index_list('attribution_filter_daily')")
+            }
+            campaign_indexes = {
+                row["name"] for row in conn.execute("PRAGMA index_list('attribution_campaign_daily')")
+            }
+        self.assertTrue(
+            {
+                "idx_fact_dt",
+                "idx_fact_channel_dt",
+                "idx_fact_app_dt",
+                "idx_fact_optimizer_dt",
+                "idx_fact_country_dt",
+                "idx_fact_account_dt",
+            }.issubset(indexes)
+        )
+        self.assertFalse(
+            {
+                "idx_fact_dt_channel",
+                "idx_fact_dt_app",
+                "idx_fact_dt_optimizer",
+                "idx_fact_dt_country",
+                "idx_fact_dt_account",
+                "idx_fact_dt_campaign",
+                "idx_fact_dt_adset",
+            }
+            & indexes
+        )
+        self.assertEqual(len(filter_indexes), 6)
+        self.assertEqual(len(campaign_indexes), 6)
+
+    def test_rollup_routing_and_stale_version_fallback(self):
+        empty = parse_qs("start_date=2026-07-29&end_date=2026-07-29")
+        campaign_search = parse_qs("campaign_q=Campaign")
+        adset_search = parse_qs("adset_q=Ad+Set")
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            self.assertEqual(service.detail_table_for(conn, empty, ["dt"]), service.FILTER_ROLLUP_TABLE)
+            self.assertEqual(
+                service.detail_table_for(conn, empty, ["campaign"]), service.CAMPAIGN_ROLLUP_TABLE
+            )
+            self.assertEqual(service.detail_table_for(conn, empty, ["adset"]), service.FACT_TABLE)
+            self.assertEqual(service.context_table_for(conn, empty), service.FILTER_ROLLUP_TABLE)
+            self.assertEqual(service.context_table_for(conn, campaign_search), service.CAMPAIGN_ROLLUP_TABLE)
+            self.assertEqual(service.context_table_for(conn, adset_search), service.FACT_TABLE)
+            self.assertEqual(
+                service.ranking_table_for(conn, empty, "campaign"), service.CAMPAIGN_ROLLUP_TABLE
+            )
+            self.assertEqual(service.ranking_table_for(conn, empty, "adset"), service.FACT_TABLE)
+            self.assertEqual(service.ranking_table_for(conn, adset_search, "campaign"), service.FACT_TABLE)
+        with common.connect_sqlite(self.path) as conn:
+            common.set_meta(conn, "rollup_version", "stale")
+            conn.commit()
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            self.assertEqual(service.detail_table_for(conn, empty, ["dt"]), service.FACT_TABLE)
+            self.assertEqual(service.context_table_for(conn, empty), service.FACT_TABLE)
+            self.assertEqual(service.ranking_table_for(conn, empty, "campaign"), service.FACT_TABLE)
+
+    def test_meta_marks_rollup_version_mismatch_unhealthy(self):
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            self.assertTrue(service.meta_payload(conn)["cache"]["rollups_current"])
+        with common.connect_sqlite(self.path) as conn:
+            common.set_meta(conn, "rollup_version", "stale")
+            conn.commit()
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            self.assertFalse(service.meta_payload(conn)["cache"]["rollups_current"])
+
+    def test_rollup_results_exactly_match_fact_fallback(self):
+        queries = [
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&include_rankings=0",
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign",
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=adset",
+            "start_date=2026-07-29&end_date=2026-07-29&dimensions=optimizer&country_group=US",
+        ]
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            rollup_payloads = [service.query_payload(conn, parse_qs(query)) for query in queries]
+        with common.connect_sqlite(self.path) as conn:
+            common.set_meta(conn, "rollup_version", "stale")
+            conn.commit()
+        service.clear_response_cache()
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            fact_payloads = [service.query_payload(conn, parse_qs(query)) for query in queries]
+        self.assertEqual(rollup_payloads, fact_payloads)
+
+    def test_query_table_whitelist_blocks_identifier_injection(self):
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            with self.assertRaises(service.RequestError):
+                service.aggregate_rows(
+                    conn,
+                    table="attribution_fact; DROP TABLE cache_meta",
+                    where_sql="dt=?",
+                    where_values=["2026-07-29"],
+                    dimensions=["dt"],
+                    basis="d0",
+                )
+            with self.assertRaises(service.RequestError):
+                service.grouped_count(
+                    conn,
+                    "dt=?",
+                    ["2026-07-29"],
+                    ["dt"],
+                    table="not_a_table",
+                )
+            with self.assertRaises(service.RequestError):
+                service.export_csv(
+                    conn,
+                    parse_qs("start_date=2026-07-29&end_date=2026-07-29&dimensions=dt"),
+                    table="attribution_fact UNION SELECT 1",
+                )
+
+    def test_d7_cumulative_basis_is_independent_from_attribution_window(self):
+        params = parse_qs("start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d7")
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            payload = service.query_payload(conn, params)
+        self.assertEqual(payload["totals"]["d7_revenue"], 70)
+        self.assertEqual(payload["totals"]["d30_revenue"], 100)
+
+    def test_version_conflict_and_identifier_whitelist(self):
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            with self.assertRaises(service.RequestError) as conflict:
+                service.query_payload(conn, parse_qs("data_version=old&dimensions=dt"))
+            self.assertEqual(conflict.exception.status, 409)
+            with self.assertRaises(service.RequestError):
+                service.query_payload(conn, parse_qs("dimensions=dt,(SELECT+1)&start_date=2026-07-29&end_date=2026-07-29"))
+
+    def test_cutoff_and_options(self):
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            with self.assertRaises(service.RequestError):
+                service.parse_range(conn, parse_qs("start_date=2026-07-28&end_date=2026-07-29"))
+            result = service.options_payload(conn, parse_qs("start_date=2026-07-29&end_date=2026-07-29"))
+        self.assertEqual(result["options"]["channel"][0], {"value": "0", "label": "Meta"})
+
+    def test_missing_cache_day_is_not_silently_treated_as_zero(self):
+        with common.connect_sqlite(self.path) as conn:
+            row = refresh_cache.blank_fact(dt.date(2026, 7, 31))
+            row.update(custom_row(dt="2026-07-31", spend=1))
+            common.insert_facts(conn, [row])
+            conn.commit()
+        with common.connect_sqlite(self.path, readonly=True) as conn:
+            coverage = service.cache_coverage(conn)
+            self.assertFalse(coverage["complete"])
+            self.assertIn("2026-07-30", coverage["missing_dates"])
+            with self.assertRaisesRegex(service.RequestError, "missing requested dates"):
+                service.parse_range(conn, parse_qs("start_date=2026-07-29&end_date=2026-07-31"))
+
+
+class RefreshAtomicityTests(unittest.TestCase):
+    def test_data_disk_gate_rejects_paths_outside_mount(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            with self.assertRaisesRegex(RuntimeError, "cache path must stay under"):
+                common.verify_data_disk(Path(tempdir) / "dashboard.sqlite3")
+
+    def test_default_plan_always_has_today_yesterday_and_rotating_history(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            with common.connect_sqlite(path) as conn:
+                dates, historical = refresh_cache.choose_default_dates(conn, dt.date(2026, 8, 6))
+                self.assertEqual(dates, [dt.date(2026, 8, 6), dt.date(2026, 8, 5), dt.date(2026, 7, 29)])
+                self.assertEqual(historical, dt.date(2026, 7, 29))
+                common.set_meta(conn, "history_cursor", "2026-07-29")
+                conn.commit()
+            with common.connect_sqlite(path) as conn:
+                dates, historical = refresh_cache.choose_default_dates(conn, dt.date(2026, 8, 6))
+                self.assertEqual(dates[-1], dt.date(2026, 7, 30))
+                self.assertEqual(historical, dt.date(2026, 7, 30))
+
+    def test_source_port_gate_rejects_anything_except_63350(self):
+        env = {
+            "ADMIN_MAPPING_MYSQL_HOST": "db",
+            "ADMIN_MAPPING_MYSQL_PORT": "63353",
+            "ADMIN_MAPPING_MYSQL_USER": "reader",
+            "ADMIN_MAPPING_MYSQL_PASSWORD": "secret",
+            "ADMIN_MAPPING_MYSQL_DATABASE": "kunlunads_dev",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "63350"):
+                refresh_cache.require_source_config()
+
+    def test_successful_refresh_builds_conserving_rollups_and_versions_them(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            args = argparse.Namespace(
+                db_path=str(path),
+                env_file=None,
+                date=["2026-07-29"],
+                bootstrap_start=None,
+                bootstrap_end=None,
+                skip_mount_check=True,
+            )
+
+            @contextlib.contextmanager
+            def fake_connection(_config):
+                yield object()
+
+            env = {
+                "ADMIN_MAPPING_MYSQL_HOST": "readonly",
+                "ADMIN_MAPPING_MYSQL_PORT": "63350",
+                "ADMIN_MAPPING_MYSQL_USER": "reader",
+                "ADMIN_MAPPING_MYSQL_PASSWORD": "secret",
+                "ADMIN_MAPPING_MYSQL_DATABASE": "kunlunads_dev",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                refresh_cache, "mysql_connection", fake_connection
+            ), mock.patch.object(
+                refresh_cache, "source_day_snapshot", lambda _source: contextlib.nullcontext()
+            ), mock.patch.object(
+                refresh_cache,
+                "fetch_custom",
+                return_value=([custom_row(campaign_name="", adset_name="", ad_name="")], "2026-08-06 12:00:00"),
+            ), mock.patch.object(
+                refresh_cache,
+                "fetch_revenue",
+                return_value=([revenue_row()], "2026-08-06 12:00:00"),
+            ):
+                result = refresh_cache.refresh(args)
+
+            with common.connect_sqlite(path, readonly=True) as conn:
+                metadata = common.get_meta(conn)
+                self.assertEqual(metadata["data_version"], result["data_version"])
+                self.assertEqual(metadata["rollup_version"], result["data_version"])
+                fact_totals = refresh_cache.additive_totals(conn, service.FACT_TABLE, "2026-07-29")
+                for table in (service.FILTER_ROLLUP_TABLE, service.CAMPAIGN_ROLLUP_TABLE):
+                    self.assertEqual(
+                        refresh_cache.additive_totals(conn, table, "2026-07-29"),
+                        fact_totals,
+                    )
+                detail = json.loads(
+                    conn.execute(
+                        "SELECT detail FROM refresh_log WHERE dt=? AND status='success' ORDER BY id DESC LIMIT 1",
+                        ("2026-07-29",),
+                    ).fetchone()["detail"]
+                )
+                self.assertEqual(detail["attribution_filter_daily_rows"], 1)
+                self.assertEqual(detail["attribution_campaign_daily_rows"], 1)
+
+    def test_failed_multi_day_refresh_keeps_previous_facts_and_version(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            with common.connect_sqlite(path) as conn:
+                old_a = refresh_cache.blank_fact(dt.date(2026, 7, 29))
+                old_a.update(custom_row(spend=11))
+                old_b = refresh_cache.blank_fact(dt.date(2026, 7, 30))
+                old_b.update(custom_row(dt="2026-07-30", spend=22))
+                common.insert_facts(conn, [old_a, old_b])
+                common.set_meta(conn, "data_version", "old-version")
+                conn.commit()
+
+            args = argparse.Namespace(
+                db_path=str(path),
+                env_file=None,
+                date=["2026-07-29", "2026-07-30"],
+                bootstrap_start=None,
+                bootstrap_end=None,
+                skip_mount_check=True,
+            )
+
+            @contextlib.contextmanager
+            def fake_connection(_config):
+                yield object()
+
+            def fake_custom(_source, day):
+                if day == dt.date(2026, 7, 30):
+                    raise RuntimeError("injected source failure")
+                return [custom_row(spend=999)], "2026-08-06 12:00:00"
+
+            env = {
+                "ADMIN_MAPPING_MYSQL_HOST": "readonly",
+                "ADMIN_MAPPING_MYSQL_PORT": "63350",
+                "ADMIN_MAPPING_MYSQL_USER": "reader",
+                "ADMIN_MAPPING_MYSQL_PASSWORD": "secret",
+                "ADMIN_MAPPING_MYSQL_DATABASE": "kunlunads_dev",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                refresh_cache, "mysql_connection", fake_connection
+            ), mock.patch.object(
+                refresh_cache, "source_day_snapshot", lambda _source: contextlib.nullcontext()
+            ), mock.patch.object(refresh_cache, "fetch_custom", fake_custom), mock.patch.object(
+                refresh_cache,
+                "fetch_revenue",
+                return_value=([revenue_row()], "2026-08-06 12:00:00"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    refresh_cache.refresh(args)
+
+            with common.connect_sqlite(path, readonly=True) as conn:
+                self.assertEqual(common.get_meta(conn)["data_version"], "old-version")
+                rows = conn.execute("SELECT dt,spend FROM attribution_fact ORDER BY dt").fetchall()
+                self.assertEqual([(row["dt"], row["spend"]) for row in rows], [("2026-07-29", 11), ("2026-07-30", 22)])
+                self.assertEqual(conn.execute("SELECT COUNT(*) n FROM refresh_stage").fetchone()["n"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

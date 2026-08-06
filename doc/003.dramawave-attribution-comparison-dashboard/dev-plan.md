@@ -1,0 +1,54 @@
+# 开发计划
+
+## 开发范围
+
+新增独立 Dramawave 归因对比服务、缓存刷新器、页面、测试、systemd/Nginx 部署文件和完整需求文档，不修改远程业务表。
+
+## 任务拆分
+
+| 任务 | 文件/模块 | 状态 |
+| --- | --- | --- |
+| SQLite schema、白名单维度/指标和公共工具 | `ops/dramawave-attribution-comparison/common.py` | 已完成 |
+| 只读 MySQL 分层映射、事务刷新、裁剪和历史 cursor | `refresh_cache.py` | 已完成 |
+| 聚合 API、ETag/gzip、CSV 和健康检查 | `service.py` | 已完成 |
+| 响应式多维对比页面 | `index.html` | 已完成 |
+| systemd timer/service、Nginx auth location | `deploy/*` / `*.conf` | 已完成，待目标机验证 |
+| 后端、前端契约和浏览器回归 | `test_*.py` + Playwright CLI | 已完成 |
+| GitHub-first 发布、备份、线上 bootstrap/验收 | 部署记录 | 待执行 |
+
+## 构建 / 验证命令
+
+```powershell
+python -m compileall -q ops\dramawave-attribution-comparison
+python -m unittest discover -s ops\dramawave-attribution-comparison -p "test_*.py" -v
+node --check <从 index.html 抽取的内联脚本>
+git diff --check
+```
+
+服务器侧：
+
+```bash
+python3 -m compileall -q .
+python3 -m unittest discover -p 'test_*.py' -v
+python3 refresh_cache.py --bootstrap-start 2026-07-29 --bootstrap-end "$(date +%F)"
+nginx -t
+systemctl status dramawave-attribution-comparison.service --no-pager
+systemctl status dramawave-attribution-comparison-refresh.timer --no-pager
+curl -fsS http://127.0.0.1:8832/healthz
+```
+
+## 风险与依赖
+
+- 只读 MySQL 查询须保持日期有界并使用已核验索引。
+- 初次 bootstrap 数据量大于定时近两天刷新，必须单独运行并观察资源。
+- 服务端口须先核对未占用；预留默认 `127.0.0.1:8832`。
+- `/mnt/data-disk` 必须是已挂载 UUID `3e8ac4e8-7770-456d-9e89-2ec5dd405fa8` 且可写。
+- 现有 TT 刷新任务正处于异常重负载状态，新服务上线不得与其做进程级耦合。
+- 现有 TT 多维刷新在 `:00/:30` 查询同一只读库；本任务固定错峰到 `:07/:37`，仍保持每 30 分钟一次。
+
+## 完成记录
+
+- 2026-08-06：创建独立 clean worktree 和分支 `codex/dramawave-attribution-compare-20260806`。
+- 2026-08-06：完成线上只读 schema、索引、覆盖日期、样本和 TT 参考架构审计。
+- 2026-08-06：完成 D7/D30 映射、三层 SQLite 缓存、原子刷新、聚合 API、异步排行、响应式页面及 43 项自动化测试。
+- 2026-08-06：最终本地 HTTP/Playwright fixture 通过桌面、移动、D7、渠道、优化师、分页、gzip/ETag/CSV/409 与异步排行验证。
