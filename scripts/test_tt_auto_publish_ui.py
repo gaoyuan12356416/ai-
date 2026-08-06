@@ -200,6 +200,8 @@ class TtAutoPublishUiTest(unittest.TestCase):
         self.assertIn("{desc}", source)
         self.assertIn("{url}", source)
         self.assertNotIn("{code}", source)
+        self.assertIn("剧 ID 宏为可选", source)
+        self.assertNotIn("发布文案模板必须包含", script)
 
     def test_resource_type_v2_is_optional_chinese_enum_multiselect(self):
         page = PAGES["template"]

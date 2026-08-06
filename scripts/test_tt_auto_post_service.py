@@ -249,6 +249,24 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             normalize_template_payload(invalid)
 
+    def test_caption_template_allows_omitting_drama_id_macro(self):
+        payload = template_payload()
+        payload["caption_template"] = "Watch the full story\n{desc}\n{url}"
+
+        normalized = normalize_template_payload(payload)
+
+        self.assertEqual(
+            normalized["caption_template"],
+            "Watch the full story\n{desc}\n{url}",
+        )
+
+        service, _executor = self.service()
+        created = service.create_template(self.actor(payload))["template"]
+        self.assertEqual(
+            created["config"]["caption_template"],
+            "Watch the full story\n{desc}\n{url}",
+        )
+
     def test_resource_type_v2_is_optional_and_enum_limited(self):
         empty = template_payload()
         empty["drama_rule"]["resource_type_v2"] = []

@@ -301,7 +301,6 @@
     const caption = ui.byId("captionTemplate").value.trim();
     if (!caption) throw new Error("请填写发布文案模板。");
     if (caption.length > 2200) throw new Error("发布文案模板不能超过 2200 个 UTF-16 字符单元。");
-    if (!/\{\{(?:content_id|contect_id)\}\}/.test(caption)) throw new Error("发布文案模板必须包含 {{content_id}} 或 {{contect_id}}。");
     const metricWindowDays = integerValue("metricWindowDays", 7);
     if (!Number.isInteger(metricWindowDays) || metricWindowDays < 1 || metricWindowDays > 30) throw new Error("指标统计窗口必须为 1–30 天。");
     const launchWindow = integerValue("dramaLaunchWindowDays", 0);

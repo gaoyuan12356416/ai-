@@ -8,7 +8,7 @@
 
 | 范围 | 命令/方法 | 结果 |
 | --- | --- | --- |
-| 新系统单元、契约与 UI 测试 | `python -m unittest scripts.test_tt_auto_post_store scripts.test_tt_auto_post_selector scripts.test_tt_auto_post_metrics scripts.test_tt_auto_publish_ui scripts.test_tt_auto_post_service scripts.test_tt_auto_post_publisher scripts.test_tt_auto_post_links scripts.test_tt_auto_publish_app_contract scripts.test_tt_auto_post_runner -v` | 111/111 通过 |
+| 新系统单元、契约与 UI 测试 | `python -m unittest scripts.test_tt_auto_post_store scripts.test_tt_auto_post_selector scripts.test_tt_auto_post_metrics scripts.test_tt_auto_publish_ui scripts.test_tt_auto_post_service scripts.test_tt_auto_post_publisher scripts.test_tt_auto_post_links scripts.test_tt_auto_publish_app_contract scripts.test_tt_auto_post_runner -v` | 112/112 通过 |
 | 旧 TT 回归 | `python -m unittest scripts.test_tt_post_pool_ui scripts.test_tt_account_settings_ui scripts.test_tt_posts_app_contract -v` | 64/64 通过 |
 | 生产 MySQL 5.7 兼容 | 在 `ONLY_FULL_GROUP_BY` 开启的只读生产连接上执行指标 SQL `EXPLAIN` | 通过；使用 `pss` 索引，无 errno 1055 |
 | 旧系统文件边界 | `git diff --exit-code -- features/tt_posts static/tt-post-pool.html static/tt-account-settings.html` | 通过，无差异 |
@@ -28,6 +28,7 @@
 - 示例 bearer 会在主 API、sidecar 启动和 runner 三处拒绝；sidecar 停止会等待在途 HTTP 工作线程。
 - 浏览器在 1440px 桌面和 390px 移动视口验证；移动端无页面横向溢出，运行详情优先展示任务冻结的账号名称。
 - `resource_type_v2` 空数组和字段缺省均归一化为空数组且筛选不限制类型；仅接受 `0`、`1`–`22`、`100`，`-1` 和未知编号均被拒绝。
+- 发布文案可不包含 `{{content_id}}` / `{{contect_id}}`；前端不再阻止提交，服务端已验证只含 `{desc}` / `{url}` 的模板可以创建并原样冻结。空模板、未知宏、超长文案和 `{code}` 仍保持拒绝。
 
 ## 真实发布声明
 
