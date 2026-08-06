@@ -10,14 +10,46 @@ const { chromium } = require(playwrightPackage);
 const bridge = require("../static/tt-drama-code-search.js");
 
 const ROOT = path.resolve(__dirname, "..");
-const HTML = fs.readFileSync(
-  path.join(ROOT, "static", "tt-drama-code-search.html"),
-  "utf8"
-);
 const SCRIPT = fs.readFileSync(
   path.join(ROOT, "static", "tt-drama-code-search.js"),
   "utf8"
 );
+const LOCALE_DIRECTORY = path.join(
+  ROOT,
+  "static",
+  "tt-drama-code-locales"
+);
+const ASSET_DIRECTORY = path.join(
+  ROOT,
+  "static",
+  "tt-drama-code-assets"
+);
+const SCRIPT_ASSET_NAME = fs.readdirSync(ASSET_DIRECTORY).find(name => (
+  /^tt-drama-code-search\.[a-f0-9]{12}\.js$/.test(name)
+));
+assert.ok(SCRIPT_ASSET_NAME);
+
+function localeForAcceptLanguage(value) {
+  const primary = String(value || "")
+    .split(",", 1)[0]
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-");
+  if (/^zh-(?:tw|hk|mo|hant)/.test(primary)) {
+    return "zh-tw";
+  }
+  if (primary.startsWith("zh")) {
+    return "zh-hans";
+  }
+  const base = primary.split("-")[0] === "fil"
+    ? "tl"
+    : primary.split("-")[0];
+  return Object.prototype.hasOwnProperty.call(bridge.COPY, base) ? base : "en";
+}
+
+function localeHtml(locale) {
+  return fs.readFileSync(path.join(LOCALE_DIRECTORY, locale + ".html"), "utf8");
+}
 
 function languageItems(language, prefix) {
   return Array.from({ length: 5 }, (_unused, index) => ({
@@ -31,17 +63,16 @@ function languageItems(language, prefix) {
   }));
 }
 
-function featuredBundle() {
+function featuredLanguagePayload(language) {
   return {
-    schema_version: 2,
+    schema_version: 3,
     source_date: bridge.shanghaiYesterday(),
     generated_at: new Date().toISOString(),
-    default_language: "en",
-    rankings: {
-      en: languageItems("en", "EN"),
-      ar: languageItems("ar", "AR"),
-      "zh-tw": languageItems("zh-tw", "ZH")
-    }
+    language,
+    items: languageItems(
+      language,
+      language === "zh-tw" ? "ZH" : language.toUpperCase().slice(0, 2)
+    )
   };
 }
 
@@ -83,10 +114,11 @@ function resolverPayload(requestUrl) {
   };
 }
 
-function send(response, status, contentType, body) {
+function send(response, status, contentType, body, headers = {}) {
   response.writeHead(status, {
     "Content-Type": contentType,
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    ...headers
   });
   response.end(body);
 }
@@ -99,16 +131,49 @@ function startServer() {
     if (request.method !== "GET") {
       send(response, 405, "text/plain", "method not allowed");
     } else if (url.pathname === "/tt" || url.pathname === "/tt-code") {
-      send(response, 200, "text/html; charset=utf-8", HTML);
-    } else if (url.pathname === "/tt-drama-code-search.js") {
-      send(response, 200, "application/javascript; charset=utf-8", SCRIPT);
+      const locale = localeForAcceptLanguage(request.headers["accept-language"]);
+      send(
+        response,
+        200,
+        "text/html; charset=utf-8",
+        localeHtml(locale),
+        { "Content-Language": locale, Vary: "Accept-Language" }
+      );
+    } else if (
+      url.pathname === "/tt-drama-code-search.js" ||
+      url.pathname === "/tt-drama-code-assets/" + SCRIPT_ASSET_NAME
+    ) {
+      send(
+        response,
+        200,
+        "application/javascript; charset=utf-8",
+        SCRIPT,
+        url.pathname.includes("/tt-drama-code-assets/")
+          ? { "Cache-Control": "public, max-age=31536000, immutable" }
+          : {}
+      );
     } else if (url.pathname === bridge.FEATURED_PATH) {
       send(
         response,
         200,
         "application/json; charset=utf-8",
-        JSON.stringify(featuredBundle())
+        JSON.stringify({ legacy: true })
       );
+    } else if (url.pathname.startsWith(bridge.FEATURED_PATH + "/")) {
+      const match = url.pathname.match(
+        /^\/api\/public\/tt-drama\/featured-by-language\/([a-z]{2,3}(?:-[a-z0-9]{2,8})?)\.json$/
+      );
+      const language = match ? match[1] : "";
+      if (!language || !["en", "ar", "zh-tw"].includes(language)) {
+        send(response, 404, "application/json", JSON.stringify({ found: false }));
+      } else {
+        send(
+          response,
+          200,
+          "application/json; charset=utf-8",
+          JSON.stringify(featuredLanguagePayload(language))
+        );
+      }
     } else if (url.pathname === bridge.CODE_RESOLVER_PATH) {
       send(
         response,
@@ -133,12 +198,23 @@ async function openPage(
   origin,
   locale,
   entryPath = "/tt",
-  viewport = { width: 720, height: 900 }
+  viewport = { width: 720, height: 900 },
+  acceptLanguage = ""
 ) {
   const context = await browser.newContext({
     locale,
     viewport
   });
+  if (acceptLanguage) {
+    await context.route(origin + "/**", route => {
+      route.continue({
+        headers: {
+          ...route.request().headers(),
+          "accept-language": acceptLanguage
+        }
+      });
+    });
+  }
   await context.route("https://static-v1.mydramawave.com/**", route => {
     route.abort();
   });
@@ -146,12 +222,27 @@ async function openPage(
     route.fulfill({ status: 200, contentType: "text/html", body: "redirect ok" });
   });
   const page = await context.newPage();
-  await page.goto(origin + entryPath, { waitUntil: "networkidle" });
+  const response = await page.goto(origin + entryPath, { waitUntil: "networkidle" });
   await page.waitForFunction(() => {
     const stories = document.querySelector("#stories");
     return stories && stories.dataset.cacheState === "dynamic";
   });
-  return { context, page };
+  return { context, page, response };
+}
+
+async function openStaticFirstPaint(browser, origin, locale, entryPath = "/tt") {
+  const context = await browser.newContext({
+    locale,
+    viewport: { width: 390, height: 844 }
+  });
+  await context.route(origin + "/tt-drama-code-assets/**", route => {
+    route.abort();
+  });
+  const page = await context.newPage();
+  const response = await page.goto(origin + entryPath, {
+    waitUntil: "domcontentloaded"
+  });
+  return { context, page, response };
 }
 
 async function main() {
@@ -171,6 +262,8 @@ async function main() {
       "Enter the code and keep watching"
     );
     checks += 1;
+    assert.equal(english.response.headers()["content-language"], "en");
+    checks += 1;
     assert.equal(await english.page.locator("p.intro").count(), 0);
     checks += 1;
     const brandBox = await english.page.locator(".brand-lockup").boundingBox();
@@ -184,6 +277,8 @@ async function main() {
       await english.page.locator("#stories").getAttribute("data-language"),
       "en"
     );
+    checks += 1;
+    assert.equal(await english.page.locator("#stories").getAttribute("aria-busy"), "false");
     checks += 1;
     if (process.env.TT_CODE_EN_SCREENSHOT_PATH) {
       await english.page.screenshot({
@@ -200,6 +295,24 @@ async function main() {
     );
     checks += 1;
     await english.context.close();
+
+    const staticChinese = await openStaticFirstPaint(browser, origin, "zh-CN");
+    assert.equal(staticChinese.response.headers()["content-language"], "zh-hans");
+    checks += 1;
+    assert.equal(
+      await staticChinese.page.locator("#page-title").textContent(),
+      bridge.copyText("zh-hans", "titleLead") +
+        bridge.copyText("zh-hans", "titleAccent")
+    );
+    checks += 1;
+    assert.equal(
+      await staticChinese.page.locator("#stories .story-skeleton").count(),
+      5
+    );
+    checks += 1;
+    assert.equal(await staticChinese.page.locator("#drama-query").isVisible(), true);
+    checks += 1;
+    await staticChinese.context.close();
 
     const chinese = await openPage(browser, origin, "zh-CN");
     assert.equal(
@@ -243,6 +356,31 @@ async function main() {
     assert.equal(new URL(chinese.page.url()).searchParams.get("af_channel"), "Featured");
     checks += 1;
     await chinese.context.close();
+
+    const authoritativeServerLocale = await openPage(
+      browser,
+      origin,
+      "zh-CN",
+      "/tt",
+      { width: 720, height: 900 },
+      "en-US"
+    );
+    assert.equal(
+      authoritativeServerLocale.response.headers()["content-language"],
+      "en"
+    );
+    checks += 1;
+    assert.equal(
+      await authoritativeServerLocale.page.locator("html").getAttribute("lang"),
+      "en"
+    );
+    checks += 1;
+    assert.equal(
+      await authoritativeServerLocale.page.locator("#page-title").textContent(),
+      "Enter the code and keep watching"
+    );
+    checks += 1;
+    await authoritativeServerLocale.context.close();
 
     const traditionalChinese = await openPage(browser, origin, "zh-TW");
     assert.equal(
@@ -299,7 +437,7 @@ async function main() {
     checks += 1;
     assert.equal(
       await fallback.page.locator("#stories").getAttribute("data-language-fallback"),
-      "true"
+      "false"
     );
     checks += 1;
     await fallback.context.close();
@@ -316,6 +454,8 @@ async function main() {
     );
     checks += 1;
     assert.equal(new URL(compatibility.page.url()).pathname, "/tt-code");
+    checks += 1;
+    assert.equal(compatibility.response.headers()["content-language"], "en");
     checks += 1;
     await compatibility.context.close();
 
@@ -341,6 +481,21 @@ async function main() {
       value.includes("source=Featured")
     );
     assert.equal(featuredRequests.length, 1);
+    checks += 1;
+    assert.equal(
+      local.requests.filter(value => value === bridge.FEATURED_PATH).length,
+      0,
+      "the browser must not download the legacy all-language bundle"
+    );
+    checks += 1;
+    const rankingRequests = local.requests.filter(value => (
+      value.startsWith(bridge.FEATURED_PATH + "/")
+    ));
+    assert.ok(rankingRequests.some(value => value.endsWith("/en.json")));
+    checks += 1;
+    assert.ok(rankingRequests.some(value => value.endsWith("/zh-tw.json")));
+    checks += 1;
+    assert.ok(rankingRequests.some(value => value.endsWith("/ar.json")));
     checks += 1;
     console.log(JSON.stringify({
       status: "ok",

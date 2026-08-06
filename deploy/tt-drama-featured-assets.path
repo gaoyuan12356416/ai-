@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the TT featured language bundle for asset refresh
+RequiresMountsFor=/mnt/data-disk
+ConditionPathExists=/mnt/data-disk/tt-drama-featured/public/current-by-language.json
+
+[Path]
+PathChanged=/mnt/data-disk/tt-drama-featured/public/current-by-language.json
+Unit=tt-drama-featured-assets.service
+
+[Install]
+WantedBy=multi-user.target

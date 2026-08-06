@@ -1,0 +1,45 @@
+[Unit]
+Description=Build locale TT featured JSON and best-effort WebP covers
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=tt-drama-featured
+Group=tt-drama-featured
+WorkingDirectory=/mnt/data-disk/tt-code-performance/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TT_DRAMA_FEATURED_LANGUAGE_CACHE_PATH=/mnt/data-disk/tt-drama-featured/public/current-by-language.json
+Environment=TT_DRAMA_FEATURED_ASSET_LOCALE_DIR=/mnt/data-disk/tt-drama-featured/public/by-language
+Environment=TT_DRAMA_FEATURED_ASSET_COVER_DIR=/mnt/data-disk/tt-drama-featured/public/covers
+Environment=TT_DRAMA_FEATURED_ASSET_LOCK_PATH=/run/tt-drama-featured-assets/refresh.lock
+Environment=TT_DRAMA_FEATURED_ASSET_WORKERS=4
+ExecStartPre=/usr/bin/test -x /mnt/data-disk/tt-code-performance/venv-pillow-11.3.0/bin/python
+ExecStartPre=+/usr/bin/install -d -m 0755 -o tt-drama-featured -g tt-drama-featured /mnt/data-disk/tt-drama-featured/public/by-language /mnt/data-disk/tt-drama-featured/public/covers
+ExecStart=/mnt/data-disk/tt-code-performance/venv-pillow-11.3.0/bin/python /mnt/data-disk/tt-code-performance/current/scripts/refresh_tt_drama_featured_assets.py
+RuntimeDirectory=tt-drama-featured-assets
+RuntimeDirectoryMode=0700
+UMask=0027
+TimeoutStartSec=10min
+Nice=10
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/mnt/data-disk/tt-code-performance/current /mnt/data-disk/tt-code-performance/venv-pillow-11.3.0 /mnt/data-disk/tt-drama-featured/public/current-by-language.json
+ReadWritePaths=/mnt/data-disk/tt-drama-featured/public /run/tt-drama-featured-assets
+InaccessiblePaths=/root/.ssh

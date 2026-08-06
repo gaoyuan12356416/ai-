@@ -69,6 +69,8 @@ equal(bridge.TARGET_ORIGIN, "https://www.dramawavew2a.com");
 equal(bridge.TARGET_PATH, "/ads/101/2250/view");
 equal(bridge.SEARCH_SOURCE, "Search");
 equal(bridge.FEATURED_SOURCE, "Featured");
+equal(bridge.FEATURED_TIMEOUT_MS, 4000);
+equal(bridge.FEATURED_LANGUAGE_SCHEMA_VERSION, 3);
 
 deepEqual(
   bridge.normalizeQuery(" a1b2 "),
@@ -106,8 +108,16 @@ equal(
   "https://ai.yingliangads.com/api/public/tt-code/resolve?query=l9rP6ey2CB&source=Featured"
 );
 equal(
-  bridge.buildFeaturedUrl("https://ai.yingliangads.com"),
+  bridge.buildFeaturedUrl("zh-tw", "https://ai.yingliangads.com"),
+  "https://ai.yingliangads.com/api/public/tt-drama/featured-by-language/zh-tw.json"
+);
+equal(
+  bridge.buildFeaturedBundleUrl("https://ai.yingliangads.com"),
   "https://ai.yingliangads.com/api/public/tt-drama/featured-by-language"
+);
+throws(
+  () => bridge.buildFeaturedUrl("../../secret", "https://ai.yingliangads.com"),
+  /language/
 );
 throws(
   () => bridge.buildCodeResolverUrl(
@@ -416,6 +426,22 @@ deepEqual(
 equal(bridge.resolveUiLocale(["zh-CN", "en-US"]), "zh-hans");
 equal(bridge.resolveUiLocale(["zh-TW", "en-US"]), "zh-tw");
 equal(bridge.resolveUiLocale(["xx-ZZ"]), "en");
+equal(bridge.featuredLanguageForLocale("zh-hans"), "zh-tw");
+equal(bridge.featuredLanguageForLocale("zh-tw"), "zh-tw");
+equal(bridge.featuredLanguageForLocale("pt"), "pt");
+equal(bridge.featuredLanguageForLocale("nl"), "en");
+equal(
+  bridge.isSafeFeaturedThumbnail(
+    "/tt-featured-covers/" + "a".repeat(64) + ".webp"
+  ),
+  true
+);
+equal(
+  bridge.isSafeFeaturedThumbnail(
+    "/tt-featured-covers/../" + "a".repeat(64) + ".webp"
+  ),
+  false
+);
 deepEqual(
   bridge.rankingLanguageCandidates(["zh-CN", "en-US"]),
   ["zh-tw", "en-us", "en"]
@@ -461,6 +487,60 @@ function languageItems(language, prefix) {
     episode_count: 80
   }));
 }
+
+const featuredLanguagePayload = {
+  schema_version: 3,
+  source_date: "2026-08-03",
+  generated_at: "2026-08-04T15:30:00+08:00",
+  language: "en",
+  items: languageItems("en", "EN").map((item, index) => (
+    index === 0
+      ? {
+          ...item,
+          thumbnail_url:
+            "/tt-featured-covers/" + "a".repeat(64) + ".webp"
+        }
+      : item
+  ))
+};
+const normalizedLanguagePayload = bridge.normalizeFeaturedLanguagePayload(
+  featuredLanguagePayload,
+  "en",
+  featuredNow
+);
+equal(normalizedLanguagePayload.language, "en");
+equal(normalizedLanguagePayload.items.length, 5);
+equal(
+  normalizedLanguagePayload.items[0].thumbnail_url,
+  "/tt-featured-covers/" + "a".repeat(64) + ".webp"
+);
+equal(normalizedLanguagePayload.items[1].thumbnail_url, "");
+throws(
+  () => bridge.normalizeFeaturedLanguagePayload(
+    { ...featuredLanguagePayload, language: "es" },
+    "en",
+    featuredNow
+  ),
+  /payload/
+);
+throws(
+  () => bridge.normalizeFeaturedLanguagePayload({
+    ...featuredLanguagePayload,
+    items: featuredLanguagePayload.items.map((item, index) => (
+      index === 0 ? { ...item, thumbnail_url: "/unsafe.webp" } : item
+    ))
+  }, "en", featuredNow),
+  /invalid/
+);
+throws(
+  () => bridge.normalizeFeaturedLanguagePayload({
+    ...featuredLanguagePayload,
+    items: featuredLanguagePayload.items.map((item, index) => (
+      index === 0 ? { ...item, spend: 10 } : item
+    ))
+  }, "en", featuredNow),
+  /payload|fields/
+);
 
 const featuredBundle = {
   schema_version: 2,
@@ -614,13 +694,33 @@ const primaryNginx = fs.readFileSync(
   path.join(ROOT, "deploy", "nginx", "tt-drama-search.conf"),
   "utf8"
 );
+const localeMapNginx = fs.readFileSync(
+  path.join(ROOT, "deploy", "nginx", "tt-drama-code-locale-map.conf"),
+  "utf8"
+);
+const generatedLocaleDirectory = path.join(
+  ROOT,
+  "static",
+  "tt-drama-code-locales"
+);
+const generatedAssetDirectory = path.join(
+  ROOT,
+  "static",
+  "tt-drama-code-assets"
+);
 
 ok(html.includes('src="/tt-drama-code-search.js"'));
 ok(!html.includes('src="/tt-drama-search.js"'));
+ok(html.includes('data-initial-locale="en"'));
+equal(
+  (html.match(/class="story story-skeleton"/g) || []).length,
+  5,
+  "the first HTML paint must include five featured skeletons"
+);
 ok(html.includes('id="stories-previous"'));
 ok(html.includes('id="stories-next"'));
 ok(html.includes("Enter the code and"));
-ok(html.includes('id="page-title-accent">keep watching</span>'));
+ok(/id="page-title-accent"[^>]*>keep watching<\/span>/.test(html));
 ok(!html.includes('class="intro"'));
 ok(html.includes("overflow-x: auto;"));
 ok(html.includes("scroll-snap-type: x proximity;"));
@@ -668,27 +768,40 @@ ok(script.includes("event.stopImmediatePropagation()"));
 ok(script.includes("payload.code || payload.error"));
 ok(script.includes("resolveAndVerify("));
 ok(script.includes("root.location.assign(resolved.route.target_url)"));
+ok(script.includes('image.loading = index < 3 ? "eager" : "lazy"'));
+ok(script.includes('image.fetchPriority = "high"'));
+ok(script.includes("usedOriginalFallback"));
 ok(
   script.includes("const resolved = await resolveCodeQuery"),
   "the public code endpoint must return the verified route and drama together"
 );
 ok(codeNginx.includes("location = /tt-code {"));
 ok(codeNginx.includes("location = /tt-drama-code-search.js {"));
+ok(codeNginx.includes("/tt-drama-code-assets/tt-drama-code-search\\."));
 ok(codeNginx.includes("location = /api/public/tt-code/resolve {"));
 ok(codeNginx.includes("location = /api/public/tt-drama/featured-by-language {"));
+ok(codeNginx.includes("featured-by-language/(?<tt_featured_language>"));
+ok(codeNginx.includes("tt-featured-covers/"));
 ok(codeNginx.includes("proxy_pass http://127.0.0.1:8787;"));
 ok(codeNginx.includes('Cache-Control "no-store" always;'));
+ok(codeNginx.includes('max-age=31536000, immutable'));
+ok(codeNginx.includes("gzip_types application/javascript;"));
+ok(codeNginx.includes("gzip_types application/json;"));
 ok(codeNginx.includes("connect-src 'self'"));
+ok(!codeNginx.includes("script-src 'unsafe-inline'"));
 ok(!codeNginx.includes("location = /tt {"));
 ok(!codeNginx.includes("location = /tt-drama-search.js {"));
 ok(primaryNginx.includes("location = /tt {"));
 ok(
   primaryNginx.includes(
-    "alias /usr/share/nginx/html/tt-drama-code-search.html;"
+    "alias /usr/share/nginx/html/tt-drama-code-locales/$tt_drama_code_locale.html;"
   )
 );
 ok(!primaryNginx.includes("alias /usr/share/nginx/html/tt-drama-search.html;"));
 ok(primaryNginx.includes('add_header Pragma "no-cache" always;'));
+ok(primaryNginx.includes("add_header Content-Language $tt_drama_code_locale always;"));
+ok(primaryNginx.includes('add_header Vary "Accept-Language" always;'));
+ok(primaryNginx.includes("gzip on;"));
 ok(primaryNginx.includes('add_header X-Frame-Options "DENY" always;'));
 ok(primaryNginx.includes("limit_except GET"));
 equal(
@@ -696,6 +809,49 @@ equal(
   1,
   "the exact /tt location must be declared once"
 );
+
+ok(localeMapNginx.includes("map $http_accept_language $tt_drama_code_locale"));
+ok(localeMapNginx.includes("default en;"));
+ok(localeMapNginx.includes(
+  "zh-(tw|hk|mo|hant)(?:[-,;[:space:]]|$)\" zh-tw;"
+));
+ok(localeMapNginx.includes(
+  "zh(?:[-,;[:space:]]|$)\" zh-hans;"
+));
+const mappedLocales = Array.from(localeMapNginx.matchAll(
+  /^\s+(?:default|"~\*[^"]+")\s+([a-z0-9-]+);$/gm
+)).map(matchValue => matchValue[1]);
+deepEqual(
+  Array.from(new Set(mappedLocales)).sort(),
+  Object.keys(bridge.COPY).sort(),
+  "the Accept-Language map must cover every generated UI locale"
+);
+
+doesNotThrow(
+  () => childProcess.execFileSync(
+    process.execPath,
+    ["scripts/build_tt_drama_code_assets.js", "--check"],
+    { cwd: ROOT, encoding: "utf8", stdio: "pipe" }
+  ),
+  "generated locale HTML and content-addressed JS must be current"
+);
+const localeFileNames = fs.readdirSync(generatedLocaleDirectory).sort();
+deepEqual(
+  localeFileNames,
+  Object.keys(bridge.COPY).sort().map(locale => locale + ".html")
+);
+const assetFileNames = fs.readdirSync(generatedAssetDirectory).filter(name => (
+  /^tt-drama-code-search\.[a-f0-9]{12}\.js$/.test(name)
+));
+equal(assetFileNames.length, 1);
+const englishGeneratedHtml = fs.readFileSync(
+  path.join(generatedLocaleDirectory, "en.html"),
+  "utf8"
+);
+ok(englishGeneratedHtml.includes(
+  'src="/tt-drama-code-assets/' + assetFileNames[0] + '"'
+));
+ok(!englishGeneratedHtml.includes("data-i18n-"));
 
 for (const args of [
   [
