@@ -10,6 +10,9 @@ const origin = String(
 ).replace(/\/$/, "");
 const executablePath = process.env.TT_CODE_CHROMIUM_EXECUTABLE || undefined;
 const expectedTitle = "\u8f93\u5165\u4ee3\u7801\uff0c\u7ee7\u7eed\u89c2\u770b";
+const expectedDirectRouteMode = String(
+  process.env.TT_CODE_EXPECT_DIRECT_ROUTE_MODE || "generic_fallback"
+);
 const requiredParameters = [
   "af_dp",
   "c",
@@ -23,26 +26,57 @@ const publishedRecordParameters = [
   "af_ad_id"
 ];
 
-function assertTarget(targetUrl, expectedChannel) {
+assert.ok(
+  ["generic_fallback", "published_clone"].includes(expectedDirectRouteMode),
+  "TT_CODE_EXPECT_DIRECT_ROUTE_MODE must be generic_fallback or published_clone"
+);
+
+function assertTarget(targetUrl, expectedChannel, expectedContentId, routeMode) {
   const target = new URL(targetUrl);
   assert.equal(target.origin, "https://www.dramawavew2a.com");
   assert.equal(target.pathname, "/ads/101/2250/view");
+  assert.equal(target.searchParams.get("af_dp"), expectedContentId);
   assert.equal(target.searchParams.get("af_channel"), expectedChannel);
-  for (const name of requiredParameters) {
+  const expectedNames = routeMode === "generic_fallback"
+    ? requiredParameters
+    : requiredParameters.concat(publishedRecordParameters);
+  assert.deepEqual(
+    Array.from(target.searchParams.keys()).sort(),
+    expectedNames.slice().sort(),
+    "target parameter names do not match route mode"
+  );
+  for (const name of expectedNames) {
+    assert.equal(
+      target.searchParams.getAll(name).length,
+      1,
+      "target parameter must occur exactly once: " + name
+    );
     assert.ok(target.searchParams.get(name), "missing target parameter: " + name);
   }
-  const publishedValues = publishedRecordParameters.map(name => (
-    target.searchParams.get(name)
-  ));
-  assert.ok(
-    publishedValues.every(Boolean) || publishedValues.every(value => !value),
-    "published-record parameters must be complete or use the generic fallback"
+  if (routeMode === "generic_fallback") {
+    assert.equal(target.searchParams.get("c"), "TTpost");
+    assert.equal(target.searchParams.get("af_c_id"), "0001");
+  }
+}
+
+function assertResolver(payload, expectedChannel, expectedContentId) {
+  assert.equal(payload.found, true);
+  assert.equal(payload.item.query_type, "content_id");
+  assert.equal(payload.item.content_id, expectedContentId);
+  assert.equal(payload.item.route_mode, expectedDirectRouteMode);
+  assertTarget(
+    payload.item.target_url,
+    expectedChannel,
+    expectedContentId,
+    expectedDirectRouteMode
   );
+  return payload.item.target_url;
 }
 
 async function openChinesePage(browser, disableCache) {
   const requests = [];
   const redirectedTargets = [];
+  const resolverResults = [];
   const context = await browser.newContext({
     locale: "zh-CN",
     viewport: { width: 390, height: 844 }
@@ -57,6 +91,16 @@ async function openChinesePage(browser, disableCache) {
       contentType: "text/html; charset=utf-8",
       body: "redirect intercepted"
     });
+  });
+  await context.route(origin + "/api/public/tt-code/resolve?**", async route => {
+    const response = await route.fetch();
+    const body = await response.body();
+    const requestUrl = new URL(route.request().url());
+    resolverResults.push({
+      source: requestUrl.searchParams.get("source"),
+      payload: JSON.parse(body.toString("utf8"))
+    });
+    await route.fulfill({ response, body });
   });
   const page = await context.newPage();
   page.on("request", request => requests.push(request.url()));
@@ -130,6 +174,7 @@ async function openChinesePage(browser, disableCache) {
     page,
     requests,
     redirectedTargets,
+    resolverResults,
     timings: {
       response_end_ms: Math.round(firstPaint.responseEnd),
       dom_content_loaded_ms: Math.round(firstPaint.dcl),
@@ -163,8 +208,17 @@ async function main() {
       }),
       firstStory.click()
     ]);
+    const featuredResult = featured.resolverResults.find(result => (
+      result.source === "Featured"
+    ));
+    assert.ok(featuredResult, "missing Featured resolver payload");
+    const featuredTarget = assertResolver(
+      featuredResult.payload,
+      "Featured",
+      featuredContentId
+    );
     assert.equal(featured.redirectedTargets.length, 1);
-    assertTarget(featured.redirectedTargets[0], "Featured");
+    assert.equal(featured.redirectedTargets[0], featuredTarget);
     await featured.context.close();
 
     const search = await openChinesePage(browser, false);
@@ -173,9 +227,18 @@ async function main() {
       form.requestSubmit();
     });
     await search.page.locator("#result.visible").waitFor({ timeout: 15000 });
+    const searchResult = search.resolverResults.find(result => (
+      result.source === "Search"
+    ));
+    assert.ok(searchResult, "missing Search resolver payload");
+    const searchTarget = assertResolver(
+      searchResult.payload,
+      "Search",
+      featuredContentId
+    );
     const continueTarget = await search.page.locator("#continue-link").getAttribute("href");
     assert.ok(continueTarget);
-    assertTarget(continueTarget, "Search");
+    assert.equal(continueTarget, searchTarget);
     await Promise.all([
       search.page.waitForURL("https://www.dramawavew2a.com/**", {
         timeout: 15000
@@ -183,7 +246,7 @@ async function main() {
       search.page.locator("#continue-link").click()
     ]);
     assert.equal(search.redirectedTargets.length, 1);
-    assertTarget(search.redirectedTargets[0], "Search");
+    assert.equal(search.redirectedTargets[0], searchTarget);
     await search.context.close();
 
     console.log(JSON.stringify({
@@ -191,6 +254,7 @@ async function main() {
       origin,
       cold_runs: coldTimings,
       featured_content_id: featuredContentId,
+      direct_route_mode: expectedDirectRouteMode,
       featured_redirect: "intercepted",
       search_redirect: "intercepted"
     }, null, 2));

@@ -27,16 +27,16 @@ Featured 和四字符 code 路由合同未发生回归。
 
 ## 生产实机结果
 
-使用真实 Chrome、`zh-CN`、390x844 视口、禁用缓存执行 10 次独立冷启动
+使用真实 Chrome、`zh-CN`、390x844 视口、禁用缓存执行 13 次独立冷启动
 采样。中位数如下：
 
 | 指标 | 中位数 | 说明 |
 | --- | ---: | --- |
-| HTML response end | 1.024 秒 | 首屏 HTML 已是中文 |
+| HTML response end | 0.980 秒 | 首屏 HTML 已是中文 |
 | FCP | 1.284 秒 | 独立复核样本；首次可见即中文 |
-| DOMContentLoaded | 2.046 秒 | 没有标题二次切换 |
-| 5 条动态榜单完成 | 3.072 秒 | 只取 `zh-tw.json` |
-| 5 张封面完成 | 5.309 秒 | 全部为同源 WebP |
+| DOMContentLoaded | 1.991 秒 | 没有标题二次切换 |
+| 5 条动态榜单完成 | 2.997 秒 | 只取 `zh-tw.json` |
+| 5 张封面完成 | 5.286 秒 | 全部为同源 WebP |
 
 公网存在一次明显网络离群样本：HTML response end 3.774 秒、DCL 6.280 秒、
 图片完成 10.782 秒。即使该样本中，服务器返回的首屏仍直接为中文，不再
@@ -58,7 +58,8 @@ Featured 和四字符 code 路由合同未发生回归。
 - Search 与 Featured 均在 Chrome 内完成 resolver 请求并进入预期 W2A URL；
   最终域名请求被拦截，没有真实外跳。
 - Featured 首条剧没有发布历史，按已确认规则使用通用参数
-  `c=TTpost&af_c_id=0001`，并分别写入 `af_channel=Search/Featured`。
+  `c=TTpost&af_c_id=0001`，并分别写入 `af_channel=Search/Featured`；生产
+  smoke 脚本同时断言 `route_mode=generic_fallback`、`af_dp` 与精确四参数集。
 - 现网已有四字符 code 的只读解析结果为 `query_type=code`、
   `route_mode=code_exact`、八个参数完整、`af_channel=TT`。
 - 当前活动 TT Post release 直接运行 17 项 code route/macro 测试全部通过；
@@ -66,6 +67,8 @@ Featured 和四字符 code 路由合同未发生回归。
   Redis 回退及发布状态语义。
 - 没有为测试触发真实 TikTok 发布；宏结论来自活动生产代码测试和现有发布
   记录的只读解析，而不是新建 canary。
+- 浏览器最终 W2A 导航已拦截；resolver GET 可能按正常生产行为刷新 Redis
+  查询缓存，资源缓存失效时也可能执行既有服务端回源。
 
 ## 缺陷情况
 
