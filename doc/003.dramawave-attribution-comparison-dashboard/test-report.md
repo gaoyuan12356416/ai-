@@ -18,7 +18,7 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| Python 自动化 | 43 | 43 | 0 | 0 |
+| Python 自动化 | 51 | 51 | 0 | 0 |
 | 前端契约（包含于自动化） | 14 | 14 | 0 | 0 |
 | 本地浏览器场景 | 6 | 6 | 0 | 0 |
 | 生产只读 schema/样本/规模核验 | 4 | 4 | 0 | 0 |
@@ -33,13 +33,16 @@
 - 已修复：候选内未匹配为 0 时未展示日期级全源排除量。
 - 已修复：主查询与排行串行导致首屏等待，以及并发同键排行重复扫描事实表。
 - 已修复：主查询失败时新筛选口径的排行卡仍停留在“后台计算”状态。
+- 已修复：旧刷新实现同时保留 custom、D7、D30、revenue union 和最终事实的整日对象图，在 3.67GiB 主机上有换页风险；现已改为流式源读取、磁盘 revenue/fact staging 和紧凑唯一键 lookup。
 - 当前无确认未修复功能缺陷；生产验收项不是缺陷关闭证据。
 
 ## 验证证据
 
-- `python -m unittest discover -s ops\dramawave-attribution-comparison -p 'test_*.py' -v`：`43/43 OK`。
+- `python -m unittest discover -s ops\dramawave-attribution-comparison -p 'test_*.py' -v`：`51/51 OK`；新增覆盖磁盘 union 去重守恒、唯一键冲突升级、43 个非日期列往返、全部基础指标 stage 校验、多日发布中途故障完整回滚、孤儿 stage 清理，以及共享锁不被 `PrivateTmp` 隔离的部署契约。
 - `python -m compileall -q ops\dramawave-attribution-comparison`：退出码 0。
+- `ast.parse(..., feature_version=(3,9))`：全部 Python 文件通过目标服务器语法门禁。
 - `git diff --check`：退出码 0。
+- 10 万 custom + 10 万 D7 + 10 万 D30 长 ID 合成刷新：`23.776s`，`tracemalloc` 峰值 `229.6MiB`，长 ID、重复 revenue 键与全指标守恒通过；真实最大日仍必须用受限 cgroup canary 确认 RSS。
 - 最终 Playwright fixture（1170 行、9 天）：页面只请求 HTML 和聚合 API；主查询使用 `include_rankings=0`，完成后才独立请求 `/api/rankings`；D7 切换、Meta 筛选、优化师分组和分页成功，翻页/分组不重复拉排行；桌面 1920×1080 与移动 390×844 无控制台错误或整页横向溢出。
 - 最终 HTTP fixture：health/rollup version、gzip、ETag/304、CSV BOM、四维排行和旧版本 409 路径通过。
 - 真实只读点样本 `2026-07-29 / ad_id=120250136876120737`：D30 D0 `225.54`、D30 D7累计 `245.23`；旧 D7 D0 `225.73`，证明两个口径可独立对照。
@@ -54,4 +57,4 @@
 
 ## 发布建议
 
-有条件发布。仅在以下全部满足后启用公网路由与 timer：真实缓存 `quick_check=ok` 且守恒通过；默认及常用 30/60 天冷 p95<=1秒、热 p95<=300毫秒、首屏<=2秒；`nginx -t`/systemd 验证通过；飞书未登录/已授权边界通过；至少一轮自然 `:07/:37` 错峰刷新成功并推进版本。
+有条件发布。仅在以下全部满足后启用公网路由与 timer：真实缓存 `quick_check=ok` 且守恒通过；单日/三日刷新在 1GB cgroup 内完成且不与 TT 重任务并发；默认及常用 30/60 天冷 p95<=1秒、热 p95<=300毫秒、首屏<=2秒；`nginx -t`/systemd 验证通过；飞书未登录/已授权边界通过；至少一轮自然 `:22/:52` 错峰刷新成功并推进版本。

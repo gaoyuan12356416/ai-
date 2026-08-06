@@ -85,7 +85,7 @@ dt + channel + product + app_id + optimizer_id + country_group
 
 指标为可加总原子值：花费、曝光、点击、AF 安装，以及旧/新窗口各自的 users、purchase D0/D7、IAA/IAP D0/D7、广告展示。收入、ROAS、差额、提升率均在 API 聚合后计算。
 
-SQLite 使用 WAL、`busy_timeout`，保留可查询最细事实，并同步维护去除 Campaign/Ad Set 的日级筛选汇总和 Campaign 日级汇总。API 按查询维度选择最小可用汇总层，只有 Ad Set 明细/搜索才回退最细事实，避免首屏重复扫描大事实表。全部目标日期先 staging，随后在同一个事务中整体覆盖事实、重建汇总并推进 `data_version`；任一日期失败均保留完整上一版。缓存和日志默认放在 `/mnt/data-disk/dramawave-attribution-comparison/`。
+SQLite 使用 WAL、`busy_timeout`，保留可查询最细事实，并同步维护去除 Campaign/Ad Set 的日级筛选汇总和 Campaign 日级汇总。API 按查询维度选择最小可用汇总层，只有 Ad Set 明细/搜索才回退最细事实，避免首屏重复扫描大事实表。刷新器使用流式 MySQL 游标；D7/D30 合并键和待发布事实分别写入本地 `refresh_revenue_stage`、`refresh_fact_stage`，不在内存中保留整日 revenue union 或最终事实副本。三张源表的读取仍位于同一日期级一致性快照，映射与守恒检查在快照结束后执行。全部目标日期先 staging，随后在同一个事务中整体覆盖事实、重建汇总并推进 `data_version`；任一日期失败均保留完整上一版。缓存和日志默认放在 `/mnt/data-disk/dramawave-attribution-comparison/`。
 
 ### API / 接口
 
@@ -100,6 +100,7 @@ SQLite 使用 WAL、`busy_timeout`，保留可查询最细事实，并同步维�
 ### 刷新调度
 
 - systemd timer 每 30 分钟运行一次 oneshot。
+- refresh 与现有 TT 多维刷新共用重任务互斥锁，并受 `MemoryHigh=800M`、`MemoryMax=1G` cgroup 限制；锁被占用或资源门禁失败时保留上一成功缓存。
 - 每轮必须刷新北京时间今天和昨天。
 - 每轮再按 cursor 轮转刷新一个更早的缓存日期，使延迟 D30 归因在约 29 小时内被再次吸收。
 - 删除早于 `max(2026-07-29, 今天-59天)` 的事实和刷新日志。

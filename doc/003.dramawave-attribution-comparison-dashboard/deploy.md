@@ -325,18 +325,23 @@ systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
   --property=EnvironmentFile=/root/drama_material_service/.env \
   --property=RequiresMountsFor=/mnt/data-disk \
   --property=TimeoutStartSec=45min \
+  --property=MemoryAccounting=true \
+  --property=MemoryHigh=800M \
+  --property=MemoryMax=1G \
   --property=NoNewPrivileges=true \
+  --property=PrivateTmp=false \
   --property=ProtectSystem=strict \
   --property=ProtectHome=read-only \
   --property=ReadOnlyPaths=/opt/dramawave-attribution-comparison/current \
   --property=ReadOnlyPaths=/root/drama_material_service/.env \
   --property=ReadWritePaths=/mnt/data-disk/dramawave-attribution-comparison \
+  /usr/bin/flock -xn /tmp/tt_minis_multi_dim_dashboard.lock \
   /opt/dramawave-attribution-comparison/venv/bin/python \
   /opt/dramawave-attribution-comparison/current/refresh_cache.py \
   --bootstrap-start "$BOOTSTRAP_START" --bootstrap-end "$BOOTSTRAP_END"
 ```
 
-bootstrap 只有全部目标日期完成 staging 后，才会在一个 `BEGIN IMMEDIATE` 事务中替换事实数据并推进 `data_version`。任一天源查询或映射校验失败都会清除本轮 staging、把已创建日志标成 failed，并保留旧事实和旧版本。
+执行前必须确认现有 TT 进程已经退出且共享锁空闲；非阻塞 flock 在锁被占用时直接拒绝启动，不得移除锁后重试。bootstrap 受与定时 refresh 相同的 1GB cgroup 硬上限保护，并显式保持主机 `/tmp` 可见，以确保共享锁真实生效。bootstrap 只有全部目标日期完成 staging 后，才会在一个 `BEGIN IMMEDIATE` 事务中替换事实数据并推进 `data_version`。任一天源查询或映射校验失败都会清除本轮 staging、把已创建日志标成 failed，并保留旧事实和旧版本。
 
 成功后核验：
 
@@ -377,7 +382,7 @@ systemctl status dramawave-attribution-comparison-refresh.timer --no-pager
 systemctl list-timers dramawave-attribution-comparison-refresh.timer --all --no-pager
 ```
 
-timer 在每小时 `:07` 和 `:37` 触发，允许最多 5 秒随机延迟；`Persistent=true` 会补跑错过的计划。该错峰仍严格保持 30 分钟频率，同时避开现有 TT 多维看板在 `:00/:30` 对同一只读库的重查询。普通运行不带参数，刷新北京今天、昨天，并按 `history_cursor` 轮转一个更早日期。
+timer 在每小时 `:22` 和 `:52` 触发，允许最多 5 秒随机延迟；`Persistent=true` 会补跑错过的计划。该错峰仍严格保持 30 分钟频率。refresh 还与现有 TT 多维看板共用 `/tmp/tt_minis_multi_dim_dashboard.lock`：任一重任务正在运行时另一方不得并发，避免 3.67GiB 共享主机进入换页风暴。refresh cgroup 同时设置 `MemoryHigh=800M`、`MemoryMax=1G`；触顶时保留上一成功版本，不允许拖垮既有服务。普通运行不带参数，刷新北京今天、昨天，并按 `history_cursor` 轮转一个更早日期。
 
 ## 9. 发布验证
 
@@ -421,7 +426,7 @@ curl -sSI https://ai.yingliangads.com/reports/dramawave-attribution-comparison/a
 
 ### 9.4 自然 timer 证据
 
-不要用手工 `systemctl start ...refresh.service` 代替自然调度证据。等下一次 `:07` 或 `:37` 自然触发后检查：
+不要用手工 `systemctl start ...refresh.service` 代替自然调度证据。等下一次 `:22` 或 `:52` 自然触发后检查：
 
 ```bash
 systemctl list-timers dramawave-attribution-comparison-refresh.timer --all --no-pager

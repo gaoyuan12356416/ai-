@@ -68,6 +68,46 @@ def revenue_row(**overrides):
 
 
 class MappingTests(unittest.TestCase):
+    def test_lookup_stores_unique_identity_directly_and_upgrades_only_on_collision(self):
+        target = {}
+        first = ("first",)
+        second = ("second",)
+        refresh_cache.add_lookup_candidate(target, "key", first)
+        self.assertIs(target["key"], first)
+        refresh_cache.add_lookup_candidate(target, "key", first)
+        self.assertIs(target["key"], first)
+        refresh_cache.add_lookup_candidate(target, "key", second)
+        self.assertEqual(target["key"], {first, second})
+
+    def test_mapping_consumes_source_streams_sequentially(self):
+        events = []
+
+        def stream(label, rows):
+            events.append(f"{label}:start")
+            for row in rows:
+                yield row
+            events.append(f"{label}:end")
+
+        mapped = refresh_cache.map_day_state(
+            dt.date(2026, 7, 29),
+            stream("custom", [custom_row()]),
+            stream("d7", [revenue_row()]),
+            stream("d30", [revenue_row()]),
+        )
+        self.assertEqual(
+            events,
+            [
+                "custom:start",
+                "custom:end",
+                "d7:start",
+                "d7:end",
+                "d30:start",
+                "d30:end",
+            ],
+        )
+        self.assertEqual(mapped.stats["fact_rows"], 1)
+        self.assertEqual(len(list(mapped.iter_facts())), 1)
+
     def test_cache_warmer_uses_exact_frontend_default_keys(self):
         plan = dict(
             warm_cache.request_plan(
@@ -586,7 +626,123 @@ class ServiceTests(unittest.TestCase):
                 service.parse_range(conn, parse_qs("start_date=2026-07-29&end_date=2026-07-31"))
 
 
+class DeploymentContractTests(unittest.TestCase):
+    def test_refresh_unit_shares_tt_lock_and_enforces_memory_limit(self):
+        deploy_dir = Path(__file__).with_name("deploy")
+        service_unit = (
+            deploy_dir / "dramawave-attribution-comparison-refresh.service"
+        ).read_text(encoding="utf-8")
+        timer_unit = (
+            deploy_dir / "dramawave-attribution-comparison-refresh.timer"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "/usr/bin/flock -xn /tmp/tt_minis_multi_dim_dashboard.lock",
+            service_unit,
+        )
+        self.assertNotIn("PrivateTmp=true", service_unit)
+        self.assertIn("MemoryHigh=800M", service_unit)
+        self.assertIn("MemoryMax=1G", service_unit)
+        self.assertIn("OnCalendar=*-*-* *:22,52:00", timer_unit)
+
+
 class RefreshAtomicityTests(unittest.TestCase):
+    def test_43_non_date_fact_columns_round_trip_through_row_stage(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            columns = common.FACT_DIMENSIONS + common.BASE_METRICS
+            self.assertEqual(len(columns) - 1, 43)
+            row = {}
+            for index, column in enumerate(columns):
+                if column == "dt":
+                    row[column] = "2026-07-29"
+                elif column in common.BASE_METRICS:
+                    row[column] = index + 0.25 if column in common.FLOAT_BASE_METRICS else index + 1
+                else:
+                    row[column] = f"sentinel-{index}"
+            with common.connect_sqlite(path) as conn:
+                common.insert_staged_facts(conn, "run", "created", [row])
+                conn.execute(
+                    f"INSERT INTO attribution_fact({','.join(columns)}) "
+                    f"SELECT {','.join(columns)} FROM refresh_fact_stage WHERE run_id='run'"
+                )
+                actual = conn.execute(
+                    f"SELECT {','.join(columns)} FROM attribution_fact"
+                ).fetchone()
+            for column in columns:
+                self.assertEqual(actual[column], row[column], column)
+
+    def test_revenue_union_is_disk_backed_and_conserves_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            day = dt.date(2026, 7, 29)
+            with common.connect_sqlite(path) as conn:
+                d7 = refresh_cache.stage_revenue_source(
+                    conn,
+                    "run",
+                    day,
+                    "d7",
+                    iter(
+                        [
+                            revenue_row(revenue_iaa_d0=2, revenue_iap_d0=3),
+                            revenue_row(revenue_iaa_d0=5, revenue_iap_d0=7),
+                        ]
+                    ),
+                    batch_size=1,
+                )
+                d30 = refresh_cache.stage_revenue_source(
+                    conn, "run", day, "d30", iter([revenue_row(revenue_iaa_d0=11, revenue_iap_d0=13)])
+                )
+                merged = refresh_cache.revenue_stage_stats(conn, "run", day)
+                custom = refresh_cache.build_custom_day(day, iter([custom_row()]))
+                mapped = refresh_cache.map_staged_revenue(
+                    day,
+                    custom,
+                    refresh_cache.iter_staged_revenue(conn, "run", day),
+                    {"d7": d7, "d30": d30},
+                    merged,
+                )
+            fact = next(iter(mapped.iter_facts()))
+            self.assertEqual(mapped.stats["revenue_union_rows"], 1)
+            self.assertEqual(mapped.stats["d7_source_rows"], 2)
+            self.assertEqual(mapped.stats["d7_merged_keys"], 1)
+            self.assertEqual(fact["d7_revenue_iaa_d0"], 7)
+            self.assertEqual(fact["d7_revenue_iap_d0"], 10)
+            self.assertEqual(fact["d30_revenue_iaa_d0"], 11)
+            self.assertEqual(fact["d30_revenue_iap_d0"], 13)
+
+    def test_publish_validation_checks_each_staged_base_metric_against_stats(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            day = dt.date(2026, 7, 29)
+            facts, stats = refresh_cache.map_day(
+                day, [custom_row()], [revenue_row()], [revenue_row()]
+            )
+            with common.connect_sqlite(path) as conn:
+                common.insert_staged_facts(conn, "run", "created", facts)
+                self.assertEqual(refresh_cache.validate_staged_facts(conn, "run", day, stats), 1)
+                conn.execute(
+                    "UPDATE refresh_fact_stage SET d30_ad_impression_count=d30_ad_impression_count+1 "
+                    "WHERE run_id='run'"
+                )
+                with self.assertRaisesRegex(RuntimeError, "d30_ad_impression_count conservation"):
+                    refresh_cache.validate_staged_facts(conn, "run", day, stats)
+
+    def test_row_stage_schema_tracks_every_publishable_fact_column(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            with common.connect_sqlite(path) as conn:
+                fact_columns = [
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(attribution_fact)")
+                    if row["name"] != "id"
+                ]
+                stage_columns = [
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(refresh_fact_stage)")
+                    if row["name"] not in {"run_id", "created_at"}
+                ]
+            self.assertEqual(stage_columns, fact_columns)
+
     def test_data_disk_gate_rejects_paths_outside_mount(self):
         with tempfile.TemporaryDirectory() as tempdir:
             with self.assertRaisesRegex(RuntimeError, "cache path must stay under"):
@@ -629,6 +785,25 @@ class RefreshAtomicityTests(unittest.TestCase):
                 bootstrap_end=None,
                 skip_mount_check=True,
             )
+            with common.connect_sqlite(path) as conn:
+                conn.execute(
+                    "INSERT INTO refresh_stage(run_id,dt,created_at,payload) VALUES(?,?,?,?)",
+                    ("abandoned", "2026-07-29", "2026-08-06", "{}"),
+                )
+                common.insert_staged_facts(
+                    conn,
+                    "abandoned",
+                    "2026-08-06",
+                    [refresh_cache.blank_fact(dt.date(2026, 7, 29))],
+                )
+                refresh_cache.stage_revenue_source(
+                    conn,
+                    "abandoned",
+                    dt.date(2026, 7, 29),
+                    "d7",
+                    iter([revenue_row()]),
+                )
+                conn.commit()
 
             @contextlib.contextmanager
             def fake_connection(_config):
@@ -674,6 +849,13 @@ class RefreshAtomicityTests(unittest.TestCase):
                 )
                 self.assertEqual(detail["attribution_filter_daily_rows"], 1)
                 self.assertEqual(detail["attribution_campaign_daily_rows"], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) n FROM refresh_stage").fetchone()["n"], 0)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) n FROM refresh_fact_stage").fetchone()["n"], 0
+                )
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) n FROM refresh_revenue_stage").fetchone()["n"], 0
+                )
 
     def test_failed_multi_day_refresh_keeps_previous_facts_and_version(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -729,6 +911,82 @@ class RefreshAtomicityTests(unittest.TestCase):
                 rows = conn.execute("SELECT dt,spend FROM attribution_fact ORDER BY dt").fetchall()
                 self.assertEqual([(row["dt"], row["spend"]) for row in rows], [("2026-07-29", 11), ("2026-07-30", 22)])
                 self.assertEqual(conn.execute("SELECT COUNT(*) n FROM refresh_stage").fetchone()["n"], 0)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) n FROM refresh_fact_stage").fetchone()["n"], 0
+                )
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) n FROM refresh_revenue_stage").fetchone()["n"], 0
+                )
+
+    def test_mid_publish_failure_rolls_back_every_day_and_cleans_all_stages(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            with common.connect_sqlite(path) as conn:
+                for day, spend in (("2026-07-29", 11), ("2026-07-30", 22)):
+                    old = refresh_cache.blank_fact(dt.date.fromisoformat(day))
+                    old.update(custom_row(dt=day, spend=spend))
+                    common.insert_facts(conn, [old])
+                common.set_meta(conn, "data_version", "old-version")
+                common.set_meta(conn, "rollup_version", "old-version")
+                conn.commit()
+
+            args = argparse.Namespace(
+                db_path=str(path),
+                env_file=None,
+                date=["2026-07-29", "2026-07-30"],
+                bootstrap_start=None,
+                bootstrap_end=None,
+                skip_mount_check=True,
+            )
+
+            @contextlib.contextmanager
+            def fake_connection(_config):
+                yield object()
+
+            def fake_custom(_source, day):
+                return [custom_row(dt=day.isoformat(), spend=999)], "2026-08-06 12:00:00"
+
+            original_rebuild = refresh_cache.rebuild_rollups_for_day
+
+            def fail_second_publish(conn, day):
+                if str(day) == "2026-07-30":
+                    raise RuntimeError("injected publish failure")
+                return original_rebuild(conn, day)
+
+            env = {
+                "ADMIN_MAPPING_MYSQL_HOST": "readonly",
+                "ADMIN_MAPPING_MYSQL_PORT": "63350",
+                "ADMIN_MAPPING_MYSQL_USER": "reader",
+                "ADMIN_MAPPING_MYSQL_PASSWORD": "secret",
+                "ADMIN_MAPPING_MYSQL_DATABASE": "kunlunads_dev",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                refresh_cache, "mysql_connection", fake_connection
+            ), mock.patch.object(
+                refresh_cache, "source_day_snapshot", lambda _source: contextlib.nullcontext()
+            ), mock.patch.object(refresh_cache, "fetch_custom", fake_custom), mock.patch.object(
+                refresh_cache,
+                "fetch_revenue",
+                return_value=([revenue_row()], "2026-08-06 12:00:00"),
+            ), mock.patch.object(
+                refresh_cache, "rebuild_rollups_for_day", fail_second_publish
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected publish failure"):
+                    refresh_cache.refresh(args)
+
+            with common.connect_sqlite(path, readonly=True) as conn:
+                self.assertEqual(common.get_meta(conn)["data_version"], "old-version")
+                rows = conn.execute("SELECT dt,spend FROM attribution_fact ORDER BY dt").fetchall()
+                self.assertEqual(
+                    [(row["dt"], row["spend"]) for row in rows],
+                    [("2026-07-29", 11), ("2026-07-30", 22)],
+                )
+                for table in ("refresh_stage", "refresh_fact_stage", "refresh_revenue_stage"):
+                    self.assertEqual(
+                        conn.execute(f"SELECT COUNT(*) n FROM {table}").fetchone()["n"],
+                        0,
+                        table,
+                    )
 
 
 if __name__ == "__main__":

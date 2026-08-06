@@ -238,7 +238,92 @@ CREATE TABLE IF NOT EXISTS refresh_stage (
     PRIMARY KEY(run_id, dt)
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_stage_created ON refresh_stage(created_at);
-""" + ROLLUP_SCHEMA_SQL
+""" + ROLLUP_SCHEMA_SQL + """
+CREATE TABLE IF NOT EXISTS refresh_fact_stage (
+    run_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    dt TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT '',
+    channel_id TEXT NOT NULL DEFAULT '',
+    product TEXT NOT NULL DEFAULT 'Dramawave',
+    app_id TEXT NOT NULL DEFAULT '',
+    optimizer_id TEXT NOT NULL DEFAULT '',
+    optimizer_name TEXT NOT NULL DEFAULT '',
+    country_group TEXT NOT NULL DEFAULT '',
+    ad_account_id TEXT NOT NULL DEFAULT '',
+    campaign_id TEXT NOT NULL DEFAULT '',
+    campaign_name TEXT NOT NULL DEFAULT '',
+    adset_id TEXT NOT NULL DEFAULT '',
+    adset_name TEXT NOT NULL DEFAULT '',
+    ad_id TEXT NOT NULL DEFAULT '',
+    ad_name TEXT NOT NULL DEFAULT '',
+    matched_grain TEXT NOT NULL DEFAULT 'none',
+    mapping_status TEXT NOT NULL DEFAULT 'spend_only',
+    spend REAL NOT NULL DEFAULT 0,
+    impressions INTEGER NOT NULL DEFAULT 0,
+    clicks INTEGER NOT NULL DEFAULT 0,
+    installs INTEGER NOT NULL DEFAULT 0,
+    af_installs INTEGER NOT NULL DEFAULT 0,
+    d7_users INTEGER NOT NULL DEFAULT 0,
+    d7_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d7_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d7_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d7_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d7_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d7_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d7_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    d30_users INTEGER NOT NULL DEFAULT 0,
+    d30_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d30_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d30_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d30_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d30_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d30_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d30_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    d7_candidate_keys INTEGER NOT NULL DEFAULT 0,
+    d7_mapped_keys INTEGER NOT NULL DEFAULT 0,
+    d7_ambiguous_keys INTEGER NOT NULL DEFAULT 0,
+    d30_candidate_keys INTEGER NOT NULL DEFAULT 0,
+    d30_mapped_keys INTEGER NOT NULL DEFAULT 0,
+    d30_ambiguous_keys INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_fact_stage_run_day
+    ON refresh_fact_stage(run_id, dt);
+CREATE INDEX IF NOT EXISTS idx_refresh_fact_stage_created
+    ON refresh_fact_stage(created_at);
+CREATE TABLE IF NOT EXISTS refresh_revenue_stage (
+    run_id TEXT NOT NULL,
+    dt TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    campaign_id TEXT NOT NULL DEFAULT '',
+    campaign_name TEXT NOT NULL DEFAULT '',
+    adset_id TEXT NOT NULL DEFAULT '',
+    adset_name TEXT NOT NULL DEFAULT '',
+    ad_id TEXT NOT NULL DEFAULT '',
+    ad_name TEXT NOT NULL DEFAULT '',
+    d7_present INTEGER NOT NULL DEFAULT 0,
+    d30_present INTEGER NOT NULL DEFAULT 0,
+    d7_users INTEGER NOT NULL DEFAULT 0,
+    d7_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d7_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d7_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d7_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d7_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d7_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d7_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    d30_users INTEGER NOT NULL DEFAULT 0,
+    d30_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d30_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d30_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d30_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d30_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d30_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d30_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(run_id, dt, campaign_id, adset_id, ad_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_refresh_revenue_stage_created
+    ON refresh_revenue_stage(created_at);
+"""
 
 
 def db_path() -> Path:
@@ -350,8 +435,36 @@ def insert_facts(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> in
     columns = FACT_DIMENSIONS + BASE_METRICS
     placeholders = ",".join("?" for _ in columns)
     sql = f"INSERT INTO attribution_fact({','.join(columns)}) VALUES({placeholders})"
-    prepared = []
-    for row in rows:
-        prepared.append(tuple(row.get(column, 0 if column in BASE_METRICS else "") for column in columns))
-    conn.executemany(sql, prepared)
-    return len(prepared)
+    count = 0
+
+    def prepared() -> Iterator[tuple[Any, ...]]:
+        nonlocal count
+        for row in rows:
+            count += 1
+            yield tuple(row.get(column, 0 if column in BASE_METRICS else "") for column in columns)
+
+    conn.executemany(sql, prepared())
+    return count
+
+
+def insert_staged_facts(
+    conn: sqlite3.Connection,
+    run_id: str,
+    created_at: str,
+    rows: Iterable[dict[str, Any]],
+) -> int:
+    columns = FACT_DIMENSIONS + BASE_METRICS
+    insert_columns = ("run_id", "created_at") + columns
+    placeholders = ",".join("?" for _ in insert_columns)
+    sql = f"INSERT INTO refresh_fact_stage({','.join(insert_columns)}) VALUES({placeholders})"
+    count = 0
+
+    def prepared() -> Iterator[tuple[Any, ...]]:
+        nonlocal count
+        for row in rows:
+            count += 1
+            values = tuple(row.get(column, 0 if column in BASE_METRICS else "") for column in columns)
+            yield (run_id, created_at) + values
+
+    conn.executemany(sql, prepared())
+    return count
