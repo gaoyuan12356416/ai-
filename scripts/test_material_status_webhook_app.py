@@ -241,6 +241,21 @@ class MaterialStatusHTTPTests(unittest.TestCase):
         self.assertIn("drama_dubbing_type", payload["message"])
 
         status, _, payload = self.post(
+            valid_payload(language="语" * 100),
+            idempotency_key="mst-test-language-100",
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["code"], "accepted")
+
+        status, _, payload = self.post(
+            valid_payload(language="语" * 101),
+            idempotency_key="mst-test-language-101",
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(payload["code"], "invalid_payload")
+        self.assertIn("100", payload["message"])
+
+        status, _, payload = self.post(
             b"{" + (b"x" * (app.MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES + 1)),
             idempotency_key="mst-test-0003",
         )

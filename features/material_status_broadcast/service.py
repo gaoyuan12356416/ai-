@@ -40,7 +40,7 @@ _FIELD_LIMITS = {
     "task_type": 64,
     "original_material_name": 255,
     "material_name": 255,
-    "language": 32,
+    "language": 100,
     "final_status": 64,
     "optimizer_name": 100,
 }
