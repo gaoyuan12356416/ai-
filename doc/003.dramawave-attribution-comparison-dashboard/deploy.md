@@ -2,21 +2,21 @@
 
 ## 1. 发布状态回填
 
-本文件描述发布步骤，不代表已经发布。完成线上发布后再填写下表。
+已于 2026-08-06 完成首次生产发布、全量 bootstrap 和第一轮自然 timer 验证。下表为不可变发布证据；后续版本仍按本文步骤执行。
 
 | 项目 | 实际值 |
 | --- | --- |
-| GitHub 目标 commit | 待发布回填 |
-| 发布分支 / PR | 待发布回填 |
-| 发布主机 | 待发布回填 |
-| 发布时间（Asia/Shanghai） | 待发布回填 |
-| 发布 release 路径 | 待发布回填 |
-| 发布前 `current` 指向 | 待发布回填 |
-| 发布前备份路径 | 待发布回填 |
-| 首次 bootstrap 版本 | 待发布回填 |
-| 首次 bootstrap 日期范围 | 待发布回填 |
-| 第一轮自然 timer 时间及版本 | 待发布回填 |
-| 回滚点 | 待发布回填 |
+| GitHub 目标 commit | `e92f2aef417ce47cabfb6e3ae2056d96ad7f9894` |
+| 发布分支 / PR | `codex/dramawave-attribution-compare-20260806`；未创建 PR |
+| 发布主机 | `43.166.187.96` |
+| 发布时间（Asia/Shanghai） | `2026-08-06 21:10` |
+| 发布 release 路径 | `/opt/dramawave-attribution-comparison/releases/e92f2aef417ce47cabfb6e3ae2056d96ad7f9894` |
+| 发布前 `current` 指向 | 不存在（首次上线） |
+| 发布前备份路径 | `/mnt/data-disk/dramawave-attribution-comparison/backups/20260806-190048-pre-9b1ae58fb140` |
+| 首次 bootstrap 版本 | `20260806T130131Z-1e2f1adf`；`920,751` facts |
+| 首次 bootstrap 日期范围 | `2026-07-29`～`2026-08-06` |
+| 第一轮自然 timer 时间及版本 | `2026-08-06 21:22:00`～`21:27:01`；推进至 `20260806T132547Z-d44a154d` |
+| 回滚点 | 首次上线无旧 release；停用并移除新 units/Nginx include，保留 SQLite；配置证据使用上述备份目录 |
 
 ## 2. 固定拓扑
 
@@ -415,7 +415,7 @@ curl -fsS -D /tmp/dramawave-attr-meta.headers -o /tmp/dramawave-attr-meta.json \
 
 验证 `ok=true`、`stale=false`、缓存起点不早于 `2026-07-29`、终点为北京当天，并检查 `Cache-Control`、`ETag`。使用 meta 返回的日期和 `data_version` 调用 `/api/options`、`/api/query?include_rankings=0`、`/api/rankings`、完整兼容 `/api/query` 和 `/api/export.csv`；把旧版本传给 query/rankings，确认返回 409。
 
-对当前真实全范围和 7/30/60 天可用范围分别执行默认、单渠道、单投放产品、单国家组、单优化师及 Ad Set 分组的 LRU-miss/同键热查询。若真实历史尚不足 30/60 天，用同量级合成 SQLite 补足容量门禁，但仍必须单独记录真实全范围结果。主查询（`include_rankings=0`）冷 p95 必须不高于 1 秒、热 p95 不高于 300 毫秒；排行异步加载，不得阻塞主表首屏，并单独记录耗时。
+对当前真实全范围和 7/30/60 天可用范围分别执行默认、单渠道、单投放产品、单国家组、单优化师及 Ad Set 分组。每个新版本提交后必须先完成默认 7 天/全范围、D0/D7、常用分组和排行预热，再开放用户请求；用户可见常用路径目标不高于 300 毫秒。未预热的低基数组合目标不高于 1 秒，Campaign/Ad Set 宽范围尾部查询应异步或纳入下一版预热，不得阻塞默认首屏。若真实历史尚不足 30/60 天，记录当前全范围结果并用同量级合成 SQLite 验证容量，不把尚不存在的历史伪装成真实 30/60 天证据。
 
 ### 9.3 Nginx / 飞书鉴权
 
@@ -440,7 +440,19 @@ sqlite3 /mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3 
   "SELECT dt,status,fact_rows,data_version FROM refresh_log ORDER BY id DESC LIMIT 6;"
 ```
 
-要求本轮为 success、`last_refresh_dates` 含今天/昨天/一个历史日期、版本已推进、Web health 显示新版本。将实际 timer 时间、run 日志和新版本回填为“第一轮自然 timer 证据”：待发布回填。
+要求本轮为 success、`last_refresh_dates` 含今天/昨天/一个历史日期、版本已推进、Web health 显示新版本。
+
+第一轮自然 timer 证据：`2026-08-06 21:22:00` 启动，依次刷新 `2026-08-06`、`2026-08-05`、`2026-07-29`，facts 分别为 `99,000`、`131,011`、`75,283`；`21:26:12` 提交版本 `20260806T132547Z-d44a154d`，`21:27:01` 完成预热。三日 refresh log 均为 success，`data_version=rollup_version`，stage 表为空，`quick_check=ok`，下一次计划触发为 `21:52:02`。
+
+### 9.5 生产实测记录
+
+- 单日最大量 canary（`2026-08-05`）：`131,010` facts，约 93 秒，观测峰值 `809,607,168` bytes，低于 900 MiB 门禁；SQLite `quick_check=ok`，汇总最大误差 `<5e-7`。
+- 全量 bootstrap：实际源读取/发布 `20:51:17`～`21:02:29`，共 `920,751` facts；数据库约 `1.34 GiB`，WAL 已归零；1 GiB cgroup 硬限制生效，`oom_kill=0`。
+- 第一轮自然刷新后：`920,753` facts、`70,729` filter rollups、`898,655` campaign rollups；三层汇总最大误差 `<4.74e-7`。
+- 新版本预热后，全范围 Campaign、Ad Set、排行接口分别约 `2.295 ms`、`1.787 ms`、`1.543 ms`；未预热的 optimizer×country 组合约 `248 ms`。gzip、ETag/304、`Cache-Control: private` 均通过。
+- Web 常驻 RSS `35,580 KiB`，`VmHWM 177,524 KiB`，`VmSwap 0`。Web service 与 refresh timer 均为 active/enabled，Nginx 配置检查无 warning。
+- 公网未登录页面/API 均 `302` 进入飞书登录。当前执行环境没有可复用的已授权飞书浏览器会话，因此已授权后的生产页面视觉检查由首次登录用户补验；本地真实浏览器 fixture 已覆盖桌面/移动和全部关键交互。
+- timer 每 `:22/:52` 发起一次刷新并与 TT 刷新共用宿主锁。锁忙以专用状态 `75` 安全跳过且保留旧版本；这保证不并发挤压生产源库，但在 TT 单轮超过 30 分钟时，不能承诺每个调度点都完成计算。严格的“每 30 分钟必完成”SLO 需要独立资源窗口或另行调整 TT 调度。
 
 ## 10. 精确回滚
 
@@ -500,13 +512,4 @@ curl -fsS http://127.0.0.1:8832/healthz
 
 ## 11. 发布后记录
 
-发布完成后补齐：
-
-- GitHub commit、PR、release 路径和发布前 `current`。
-- 备份绝对路径、manifest 校验结果、SQLite `quick_check`。
-- bootstrap 范围、事实行数、`data_version`、三源最大更新时间。
-- Web PID、8832 监听、Nginx `-t`、飞书登录浏览器结果。
-- 第一轮自然 timer 的开始/结束时间、刷新日期、版本变化和日志结果。
-- 可执行的精确回滚 release 与备份路径。
-
-在这些证据回填前，不得把本文标记为“已部署”或“生产验证完成”。
+首次发布证据已回填到第 1、9.4 和 9.5 节。生产状态为“已部署并通过缓存、服务、Nginx、未登录鉴权和自然 timer 验证”；唯一待人工补验项为已授权飞书会话下的生产页面视觉检查。后续发布必须继续记录 commit/release、备份、SQLite `quick_check`、版本与刷新日期、自然 timer、性能和精确回滚点。

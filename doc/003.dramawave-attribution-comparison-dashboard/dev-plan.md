@@ -12,9 +12,9 @@
 | 只读 MySQL 分层映射、事务刷新、裁剪和历史 cursor | `refresh_cache.py` | 已完成 |
 | 聚合 API、ETag/gzip、CSV 和健康检查 | `service.py` | 已完成 |
 | 响应式多维对比页面 | `index.html` | 已完成 |
-| systemd timer/service、Nginx auth location | `deploy/*` / `*.conf` | 已完成，待目标机验证 |
+| systemd timer/service、Nginx auth location | `deploy/*` / `*.conf` | 已完成并通过目标机验证 |
 | 后端、前端契约和浏览器回归 | `test_*.py` + Playwright CLI | 已完成 |
-| GitHub-first 发布、备份、线上 bootstrap/验收 | 部署记录 | 待执行 |
+| GitHub-first 发布、备份、线上 bootstrap/验收 | 部署记录 | 已完成；授权飞书会话视觉补验除外 |
 
 ## 构建 / 验证命令
 
@@ -53,3 +53,6 @@ curl -fsS http://127.0.0.1:8832/healthz
 - 2026-08-06：完成 D7/D30 映射、三层 SQLite 缓存、原子刷新、聚合 API、异步排行、响应式页面及 51 项自动化测试。
 - 2026-08-06：最终本地 HTTP/Playwright fixture 通过桌面、移动、D7、渠道、优化师、分页、gzip/ETag/CSV/409 与异步排行验证。
 - 2026-08-06：将 revenue union 与事实 staging 改为磁盘承载，唯一映射键只保存单一 identity、真实冲突才升级集合；增加全指标 stage 守恒、多日发布故障回滚、43 列哨兵往返和遗留 stage 清理测试。
+- 2026-08-06：生产 canary 在 1 GiB cgroup 内完成，最大日 `131,010` facts、峰值约 772 MiB；全量 bootstrap `2026-07-29`～`2026-08-06` 写入 `920,751` facts。
+- 2026-08-06：GitHub-first 发布 commit `e92f2aef417ce47cabfb6e3ae2056d96ad7f9894`，启用独立 Web service、`:22/:52` refresh timer、飞书鉴权 Nginx 路由和共享 TT 重任务锁。
+- 2026-08-06：第一轮自然 timer 成功刷新近两天与轮转历史日，推进至 `20260806T132547Z-d44a154d`；预热后全范围常用 Campaign/Ad Set/排行接口均低于 3 ms。
