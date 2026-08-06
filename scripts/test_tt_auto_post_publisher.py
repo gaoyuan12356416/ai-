@@ -315,7 +315,7 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
     def test_code_is_frozen_before_prepare_and_reused_for_publish_retry(self):
         task = self.reserved_task(
             suffix="code-retry",
-            caption_template="Find the full story with {code}\n{desc}\n{url}",
+            caption_template="🔍 查询完整剧情 {code}\n{desc}\n{url}",
         )
         temporary = GPUClientError(
             "tt_publish_upstream_unavailable",

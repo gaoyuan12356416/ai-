@@ -2619,7 +2619,10 @@ class TTAutoPostStore:
                 stored_value = str(row[immutable_field] or "")
                 if immutable_field in supplied_updates and stored_value:
                     requested_value = str(supplied_updates[immutable_field] or "")
-                    if not secrets.compare_digest(stored_value, requested_value):
+                    if not secrets.compare_digest(
+                        stored_value.encode("utf-8"),
+                        requested_value.encode("utf-8"),
+                    ):
                         raise TTAutoPostStoreError(
                             "tt_auto_task_identity_immutable",
                             "%s cannot change once recorded" % immutable_field,
