@@ -11,28 +11,56 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+PREWARM_DIMENSION_SETS = (
+    ("dt", "campaign"),
+    ("campaign",),
+    ("adset",),
+    ("optimizer",),
+    ("country_group",),
+    ("channel",),
+    ("delivery_product",),
+)
+
+
 def request_plan(meta: dict[str, Any]) -> list[tuple[str, dict[str, str]]]:
     defaults = meta.get("defaults") or {}
+    cache = meta.get("cache") or {}
     version = str(meta.get("data_version") or "")
-    start = str(defaults.get("start_date") or "")
-    end = str(defaults.get("end_date") or "")
-    basis = str(defaults.get("basis") or "d0")
-    dimensions = defaults.get("dimensions") or ["dt", "campaign"]
-    if not version or not start or not end:
+    default_start = str(defaults.get("start_date") or "")
+    default_end = str(defaults.get("end_date") or "")
+    full_start = str(cache.get("start_date") or default_start)
+    full_end = str(cache.get("end_date") or default_end)
+    default_dimensions = tuple(str(value) for value in (defaults.get("dimensions") or ["dt", "campaign"]))
+    if not version or not default_start or not default_end:
         raise RuntimeError("meta is missing data_version/default date range")
-    common = {"start_date": start, "end_date": end, "data_version": version}
-    query = {
-        **common,
-        "dimensions": ",".join(str(value) for value in dimensions),
-        "metric_basis": basis,
-        "sort_by": "spend",
-        "sort_dir": "desc",
-        "limit": "50",
-        "offset": "0",
-        "include_rankings": "0",
-    }
-    ranking = {**common, "metric_basis": basis}
-    return [("/api/options", common), ("/api/query", query), ("/api/rankings", ranking)]
+    ranges = [(default_start, default_end)]
+    if (full_start, full_end) not in ranges:
+        ranges.append((full_start, full_end))
+    dimension_sets = [default_dimensions]
+    dimension_sets.extend(value for value in PREWARM_DIMENSION_SETS if value not in dimension_sets)
+    plan: list[tuple[str, dict[str, str]]] = []
+    for start, end in ranges:
+        common = {"start_date": start, "end_date": end, "data_version": version}
+        plan.append(("/api/options", common))
+        for basis in ("d0", "d7"):
+            for dimensions in dimension_sets:
+                plan.append(
+                    (
+                        "/api/query",
+                        {
+                            **common,
+                            "dimensions": ",".join(dimensions),
+                            "metric_basis": basis,
+                            "sort_by": "spend",
+                            "sort_dir": "desc",
+                            "limit": "50",
+                            "offset": "0",
+                            "include_rankings": "0",
+                        },
+                    )
+                )
+            plan.append(("/api/rankings", {**common, "metric_basis": basis}))
+    return plan
 
 
 def fetch_json(
@@ -63,10 +91,13 @@ def main() -> int:
             try:
                 meta = fetch_json(args.base_url, "/api/meta", None, args.timeout)
                 timings: dict[str, float] = {}
+                path_counts: dict[str, int] = {}
                 for path, params in request_plan(meta):
                     call_started = time.monotonic()
                     fetch_json(args.base_url, path, params, args.timeout)
-                    timings[path] = round(time.monotonic() - call_started, 3)
+                    path_counts[path] = path_counts.get(path, 0) + 1
+                    suffix = "" if path_counts[path] == 1 else f"#{path_counts[path]}"
+                    timings[path + suffix] = round(time.monotonic() - call_started, 3)
                 break
             except Exception:
                 if attempt >= attempts:

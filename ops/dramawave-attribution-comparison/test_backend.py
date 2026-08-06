@@ -109,23 +109,43 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(len(list(mapped.iter_facts())), 1)
 
     def test_cache_warmer_uses_exact_frontend_default_keys(self):
-        plan = dict(
-            warm_cache.request_plan(
-                {
-                    "data_version": "v1",
-                    "defaults": {
-                        "start_date": "2026-07-29",
-                        "end_date": "2026-08-06",
-                        "basis": "d0",
-                        "dimensions": ["dt", "campaign"],
-                    },
-                }
+        plan = warm_cache.request_plan(
+            {
+                "data_version": "v1",
+                "cache": {"start_date": "2026-07-29", "end_date": "2026-08-06"},
+                "defaults": {
+                    "start_date": "2026-07-31",
+                    "end_date": "2026-08-06",
+                    "basis": "d0",
+                    "dimensions": ["dt", "campaign"],
+                },
+            }
+        )
+        queries = [params for path, params in plan if path == "/api/query"]
+        rankings = [params for path, params in plan if path == "/api/rankings"]
+        options = [params for path, params in plan if path == "/api/options"]
+        self.assertTrue(
+            any(
+                params["start_date"] == "2026-07-31"
+                and params["dimensions"] == "dt,campaign"
+                and params["metric_basis"] == "d0"
+                for params in queries
             )
         )
-        self.assertEqual(plan["/api/query"]["include_rankings"], "0")
-        self.assertEqual(plan["/api/query"]["dimensions"], "dt,campaign")
-        self.assertEqual(plan["/api/rankings"]["data_version"], "v1")
-        self.assertNotIn("limit", plan["/api/rankings"])
+        self.assertTrue(
+            any(
+                params["start_date"] == "2026-07-29"
+                and params["dimensions"] == "adset"
+                and params["metric_basis"] == "d7"
+                for params in queries
+            )
+        )
+        self.assertTrue(all(params["include_rankings"] == "0" for params in queries))
+        self.assertEqual({params["metric_basis"] for params in rankings}, {"d0", "d7"})
+        self.assertTrue(all(params["data_version"] == "v1" for params in rankings))
+        self.assertTrue(all("limit" not in params for params in rankings))
+        self.assertEqual({params["start_date"] for params in options}, {"2026-07-29", "2026-07-31"})
+        self.assertLess(len(plan), service.RESPONSE_CACHE_SIZE)
 
     def test_custom_sql_uses_live_schema_and_pss_index(self):
         self.assertIn("FORCE INDEX (pss)", refresh_cache.CUSTOM_SQL)
