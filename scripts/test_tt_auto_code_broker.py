@@ -86,6 +86,34 @@ class TTAutoCodeBrokerTests(unittest.TestCase):
                 AUTO_QUEUE_ID_NAMESPACE + 17,
             )
 
+    def test_idempotent_freeze_supports_non_ascii_attribution_fields(self):
+        long_url = build_auto_w2a_url(
+            link_id=21,
+            username="account640",
+            timestamp=1_754_300_000,
+            language="en",
+            drama_name="Never Cross the Dragon Heiress 龙女",
+            tag="Fantasy 奇幻",
+            page_name="Dramawave 热门短剧",
+            page_id="640",
+            material_name="精剪素材-21.mp4",
+            material_id="M21",
+            content_id="CONTENT00021",
+        )
+        first = self.store.freeze(
+            21,
+            content_id="CONTENT00021",
+            long_url=long_url,
+            created_at="2026-08-06T08:04:00Z",
+        )
+        replay = self.store.freeze(
+            21,
+            content_id="CONTENT00021",
+            long_url=long_url,
+            created_at="2026-08-06T08:04:00Z",
+        )
+        self.assertEqual(first, replay)
+
     def test_published_state_enables_latest_drama_clone_and_cannot_downgrade(self):
         route = self.store.freeze(
             18,

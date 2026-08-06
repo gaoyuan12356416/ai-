@@ -224,7 +224,10 @@ class LegacyCodeRouteStore:
             "created_at",
         }
         return all(
-            secrets.compare_digest(str(existing.get(name) or ""), requested[name])
+            secrets.compare_digest(
+                str(existing.get(name) or "").encode("utf-8"),
+                requested[name].encode("utf-8"),
+            )
             for name in immutable
         )
 
