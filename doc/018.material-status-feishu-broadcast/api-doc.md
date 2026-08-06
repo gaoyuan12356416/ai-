@@ -35,7 +35,7 @@ Bearer Token 至少 32 个字符；真实 Token 由我方通过安全渠道单�
 | `task_type` | string | 是 | 64 | 任务类型 |
 | `original_material_name` | string | 是 | 255 | 素材原始名 |
 | `material_name` | string | 是 | 255 | 素材名 |
-| `language` | string | 是 | 32 | 语种，推荐 BCP-47，例如 `zh-CN` |
+| `language` | string | 是 | 100 | 语种，推荐 BCP-47，例如 `zh-CN` |
 | `final_status` | string | 是 | 64 | 最终状态 |
 | `optimizer_name` | string | 是 | 100 | 优化师名称；空字符串会触发兜底群提醒 |
 
