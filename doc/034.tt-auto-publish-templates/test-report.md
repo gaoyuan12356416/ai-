@@ -45,9 +45,10 @@
 
 ## 2026-08-06 账号 640 生产内测
 
-- 生产服务器按 `111 + 4 + 4` 三组执行共 119 个自动发布测试，全部通过；最后一组覆盖带中文归因字段的同任务四位码幂等重放。
-- 三个增量修复均先提交、推送 GitHub，再从精确提交构建不可变 release；Git blob 校验 829 个文件一致。最终 release 为 `2a1674d98cbb245bab0d4c0a6e83dbda092a6e69`。
+- 本地自动发布 115 项与 broker 5 项共 120 项通过；生产服务器按 `111 + 4 + 4` 三组执行共 119 项，全部通过。覆盖带中文归因字段的四位码重放，以及包含中文/Emoji 的冻结文案在失败重试后继续发布。
+- 四个增量修复均先提交、推送 GitHub，再从精确提交构建不可变 release；最终 release 为 `3d1a33a2cb701bba49949c2243cdb5dddb50cf95`。
 - 任务 3 只冻结一次素材 `6013146`、剧 `peKST2RMpC`、GPU job 和最终文案；准备结果为 13,019,687 bytes、96.767 秒，重试持续复用四位码 `Q66Y`。新 broker 的真实 loopback HTTP 重放返回同一码，未写旧 TT 队列表。
-- 截至 `18:36:03 +08:00`，任务 3 共 4 次发布阶段领取，前三次分别暴露四位码 Unicode 重试问题和账号 Token 到期；当前状态 `retry_wait`，错误 `tt_account_source_unavailable`，下一次为 `18:41:03 +08:00`。
-- 账号快照只读核验：账号仍为 active、账号状态和 Token 状态字段均为 2、`disable_publish=0`，但 `token_expires_time=2026-08-06 18:30:02 +08:00`；发布凭据查询已返回空。因此当前没有 `publish_id`、没有未知结果，也没有调用 TikTok publish init，不能绕过 Token 有效期。
+- 源表/快照对照证明 640、642 的上游 Token 已在 `18:30` 自动续期，但 `18:05` 的 `ads_ai` 快照仍保存旧到期时间；手动运行既有 snapshot oneshot 后，目标快照于 `18:50` 更新，640 和 642 均满足发布窗口。641 虽然 Token 正常，但 `disable_publish=1`，不会成为发布候选。
+- 快照恢复后的首次重试在 TikTok 调用前暴露冻结文案的非 ASCII `compare_digest` 缺陷；加入中文/Emoji 回归用例后，UTF-8 字节比较修复通过本地和生产 release 测试。该确定失败阶段没有 `publish_id`，因此继续复用原任务是安全的。
+- `19:04:39 +08:00` 任务 3 获得 `publish_id=v_pub_url~v2-1.7670872578680457224` 后只执行 reconcile；`19:05:04` 收敛为 `published`，run 3 同时为 `completed`，`unknown_outcome=0`、错误为空。四位码 `Q66Y` 状态为 `published`，旧队列表中不存在对应高位 queue ID。
 - 三重生产门禁继续为开；模板 1 继续停用，避免定时产生新任务。旧 TT PID `3055551` 未变化。

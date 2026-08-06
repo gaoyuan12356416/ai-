@@ -172,12 +172,16 @@ curl -fsS http://127.0.0.1:18831/health
   - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-180143-pre-live-internal-beta`
   - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-181712-pre-profile-alignment`
   - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-183411-pre-code-replay-fix`
+  - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-190136-pre-caption-unicode-fix`
   最后一份备份包含新旧两个 SQLite 在线副本、当前环境和服务状态，两个库 `quick_check=ok`，`SHA256SUMS` 全部通过。
 - GitHub 精确提交和部署顺序：
   - `eae6fcb9e666b53a3e89e6b576b33f47cfd7c286`：把账号快照外部身份规范化为旧池兼容的 W2A 用户名；
   - `3a8044d342d5c7bad8dc0d6472a04b7ea44fa667`：生产媒体 profile 对齐为 `tt-post-direct-outro-hevc-720x1280-v2`；
-  - `2a1674d98cbb245bab0d4c0a6e83dbda092a6e69`：四位码 broker 对非 ASCII 归因字段使用 UTF-8 字节做恒定时间比较，使同一路由重试可幂等重放。
-- 当前生产 release 为 `/opt/tt-auto-post/releases/2a1674d98cbb245bab0d4c0a6e83dbda092a6e69`；自动 sidecar 与 broker 健康检查均为 200，三重门禁仍全部开启。旧 `tt-post-service.service` PID 始终为 `3055551`，未重启、未改代码或数据。
+  - `2a1674d98cbb245bab0d4c0a6e83dbda092a6e69`：四位码 broker 对非 ASCII 归因字段使用 UTF-8 字节做恒定时间比较，使同一路由重试可幂等重放；
+  - `3d1a33a2cb701bba49949c2243cdb5dddb50cf95`：任务状态库对冻结文案等不可变文本使用 UTF-8 字节比较，允许中文和 Emoji 文案在发布重试中通过幂等校验。
+- 当前生产 release 为 `/opt/tt-auto-post/releases/3d1a33a2cb701bba49949c2243cdb5dddb50cf95`；自动 sidecar 与 broker 健康检查均为 200，三重门禁仍全部开启。旧 `tt-post-service.service` PID 始终为 `3055551`，未重启、未改代码或数据。
 - 手动任务 1 在 GPU 前因 W2A 用户名格式失败；任务 2 在 GPU prepare 前因媒体 profile 不一致失败。两项均无 `publish_id`，对应问题已由上述 GitHub 提交修复。
 - 手动任务 3 固定账号 640、素材 `6013146`、`content_id=peKST2RMpC`、四位码 `Q66Y`，GPU 成片已准备完成（13,019,687 bytes，96.767 秒）。同一路由在新 broker 上重放成功并保持原码，不新建任务、不重新准备素材。
-- 账号 640 的上游 Token 于 `2026-08-06 18:30:02 +08:00` 到期；任务 3 当前为 `retry_wait/tt_account_source_unavailable`，`publish_id` 为空，尚未调用 TikTok Direct Post。任务保留并每 5 分钟从账号资料阶段重试；重新授权并刷新现有账号快照后继续原任务，禁止新建替代任务。
+- `18:47` 复核确认 SocialKit 源表中的 640、641、642 均为 `token_status=2/account_status=2`；640 和 642 已在 `18:30` 自动续期到次日，但 `ads_ai` 小时快照仍停留在 `18:05` 的旧到期值。`18:50` 手动执行现有 snapshot oneshot 成功同步 24 行后，640/642 均通过 5 分钟发布窗口；641 的 `disable_publish=1` 仍保持不可发布。此过程不需要重新授权，也未改源表。
+- 任务 3 在账号快照恢复后暴露冻结中文/Emoji 文案的 Unicode 幂等比较缺陷；修复上线后继续同一任务，于 `2026-08-06 19:04:39 +08:00` 记录 `publish_id=v_pub_url~v2-1.7670872578680457224`，立即转入 reconcile-only，并于 `19:05:04` 确认为 `published`。run 3 为 `completed`，`unknown_outcome=0`。
+- 四位码 `Q66Y` 同步进入 `published`；共享高位 route 未在旧 `tt_post_queue` 创建碰撞行。模板 1 仍停用，旧发布池和定时逻辑保持原样。
