@@ -1451,7 +1451,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           checkbox.value = id;
           checkbox.dataset.autoAccountId = id;
           checkbox.checked = selected;
-          checkbox.disabled = state.scheduleBusy || (!eligible && !selected);
+          checkbox.disabled = state.scheduleBusy;
           label.appendChild(checkbox);
 
           const copy = document.createElement("div");
@@ -1466,7 +1466,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
 
           const status = document.createElement("span");
           status.className = `account-state ${membership.type.replace("_", "-")}`;
-          setText(status, eligible ? membership.label : (selected ? "不可发布 · 可移除" : "不可发布"));
+          setText(status, eligible ? membership.label : (selected ? "不可发布 · 配置可保存" : "不可发布 · 可加入配置"));
           status.title = accountReason(item);
           label.appendChild(status);
 
@@ -1750,10 +1750,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         }
         const invalid = selectedIds.find(id => {
           const item = state.accounts.find(account => accountId(account) === id);
-          return !item || !accountEligible(item) || !accountSettingsFor(item);
+          return !item || !accountSettingsFor(item);
         });
         if (byId("scheduleEnabled").checked && invalid) {
-          return "已选账号中存在不可发布或尚未配置的账号，请移除或完成配置。";
+          return "已选账号中存在尚未配置的账号，请移除或完成配置。";
         }
         if (byId("scheduleEnabled").checked && !byId("publishConsent").checked) {
           return "请核对内容并勾选发布确认。";
@@ -1806,9 +1806,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         byId("accountList")
           .querySelectorAll("input[data-auto-account-id]")
           .forEach(checkbox => {
-            const id = cleanId(checkbox.dataset.autoAccountId);
-            const item = state.accounts.find(account => accountId(account) === id);
-            checkbox.disabled = scheduleControlsLocked || (!accountEligible(item) && !checkbox.checked);
+            checkbox.disabled = scheduleControlsLocked;
           });
         const saveButton = byId("saveSchedule");
         const saveError = scheduleSaveError();
@@ -3814,13 +3812,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const checkbox = event.target.closest("input[data-auto-account-id]");
         if (!checkbox || checkbox.disabled) return;
         const id = cleanId(checkbox.dataset.autoAccountId);
-        const item = state.accounts.find(account => accountId(account) === id);
         if (checkbox.checked) {
-          if (!accountEligible(item)) {
-            checkbox.checked = false;
-            showToast("该账号当前不可发布，不能加入自动发布。", true);
-            return;
-          }
           state.autoAccountIds.add(id);
         } else {
           state.autoAccountIds.delete(id);

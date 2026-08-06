@@ -2404,10 +2404,10 @@ class TTPostService:
         # when disabling; ignore it and let the core preserve prior consent.
         consent = self._consent_from_payload(payload) if enabled else None
 
-        # Configuration membership is metadata-only. TikTok Creator Info is a
-        # volatile publish-time capability and must not block saving a draft
-        # or enabling a configuration. New/active members still have to exist
-        # in the trusted snapshot and have local publication settings.
+        # Configuration membership is metadata-only. Volatile account state
+        # and TikTok Creator Info are publish-time capabilities and must not
+        # block saving edited configuration. Persisted local settings remain
+        # the trust record for newly added account IDs.
         current_config = self.store.get_auto_publish_config()
         if expected_version != int(current_config.get("version") or 0):
             raise TTPostServiceError(
@@ -2419,30 +2419,13 @@ class TTPostService:
             str(value)
             for value in current_config.get("account_ids") or []
         }
-        ids_to_validate = account_ids if enabled else [
+        ids_to_validate = [
             account_id
             for account_id in account_ids
             if account_id not in existing_ids
         ]
-        if ids_to_validate:
-            trusted_ids = {
-                str(item.get("source_account_id") or "")
-                for item in self.account_repository.list_public_accounts()
-                if isinstance(item, Mapping)
-            }
-            missing_ids = [
-                account_id
-                for account_id in ids_to_validate
-                if account_id not in trusted_ids
-            ]
-            if missing_ids:
-                raise TTPostServiceError(
-                    "tt_post_auto_account_not_found",
-                    "Automatic publish account is not in the trusted account snapshot",
-                    409,
-                )
-            for account_id in ids_to_validate:
-                self.store.get_account_settings(account_id, required=True)
+        for account_id in ids_to_validate:
+            self.store.get_account_settings(account_id, required=True)
 
         if enabled:
             for account_id in account_ids:

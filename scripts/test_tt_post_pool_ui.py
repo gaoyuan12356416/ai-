@@ -239,6 +239,36 @@ class TtPostPoolUiTest(unittest.TestCase):
             validation_source,
         )
 
+    def test_config_save_ignores_account_status_but_direct_test_does_not(self):
+        render_source = source_between(
+            "function renderAccounts()", "function resetCreatorInfo"
+        )
+        validation_source = source_between(
+            "function scheduleSaveError()", "function runNowDisabledReason()"
+        )
+        action_source = source_between(
+            "function updateScheduleActions()", "function renderSchedule"
+        )
+        membership_source = source_between(
+            'byId("accountList").addEventListener',
+            'byId("operationAccountId").addEventListener',
+        )
+        direct_test_source = source_between(
+            "function runNowDisabledReason()", "function updateScheduleActions()"
+        )
+        operation_source = source_between(
+            "function renderOperationAccountOptions()", "function renderAccounts()"
+        )
+
+        self.assertIn("checkbox.disabled = state.scheduleBusy", render_source)
+        self.assertNotIn("!eligible && !selected", render_source)
+        self.assertNotIn("accountEligible(item)", validation_source)
+        self.assertNotIn("accountEligible(item)", action_source)
+        self.assertNotIn("accountEligible(item)", membership_source)
+        self.assertIn("accountEligible(item)", direct_test_source)
+        self.assertIn("option.disabled = !accountEligible(item)", operation_source)
+        self.assertIn("不可发布 · 配置可保存", render_source)
+
     def test_validated_materials_are_explicit_direct_test_choices(self):
         render_source = source_between(
             "function renderMaterialResults()", "function renderQueueSubmitResults()"

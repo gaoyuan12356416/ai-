@@ -10,7 +10,7 @@
 2. 目标账号是独立显式单选，可不属于 auto-config 账号集合；`expected_config_version` 仅锁定已保存描述模板。账号仍需所有人可见、允许评论、实时 creator-info 兼容、门禁开放和本次 consent。
 3. 历史 published 素材允许新测试；同素材活动/unknown direct-test 或 legacy queue 阻断新建。auto/direct 互斥也只覆盖同素材 active/unknown；direct `published|failed|canceled` 后自动池仍可正常消费。发布 claim 保留账号串行。
 4. 自动入池仍是一素材一请求，`source_account_id` 必须属于已保存 auto-config；多选成员不能成为隐式“第一个账号”。
-5. 自动配置以 `tt_post_auto_publish_config(id=1)` 保存描述、开关/时间、成员和 consent，一个 version 原子更新；关闭不要求新 consent/creator-info。关闭态保留/移除旧成员无需远端，新增成员仍需可信账号快照与本地设置。
+5. 自动配置以 `tt_post_auto_publish_config(id=1)` 保存描述、开关/时间、成员和 consent，一个 version 原子更新；保存不以账号当前状态或 creator-info 为前置条件，新增成员只要求已有本地设置。真正发布时仍实时校验账号和门禁。
 6. 账号状态字段锁定为 `auto_publish_selected`、`auto_publish_state(active|paused|attention_required|not_selected)`、`auto_publish_config_version`。
 7. 发布投影直接合并到素材 item，状态只有 `published|unknown|unpublished`；`consumed` 和活动任务都不推断为 published。
 8. 同分钟不新增 due 表。门禁开放时，先对全部当前 due slots 调现有 `claim_recurring_run`；每个调用独立 SQLite 原子预占 run+精确 FIFO 素材。所有尝试结束后才处理旧 claimed/unbound recovery 或新 run，任何 creator-info 都不能抢在 preclaim 前；`limit` 只限执行。
