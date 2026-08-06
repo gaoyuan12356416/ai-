@@ -164,3 +164,20 @@ curl -fsS http://127.0.0.1:18831/health
 ```
 
 回滚只停止新的 broker，不删除已经分配的 `tt_post_code_route` 行；已进入发布文案的四位码必须永久保留可查询。
+
+## 2026-08-06 生产内测真实任务增量部署
+
+- 经用户再次明确确认后，约 `18:02` 将 `TT_AUTO_POST_LIVE_ENABLED`、`TT_AUTO_POST_DIRECT_AUDIT_APPROVED`、`TT_AUTO_POST_URL_PROPERTY_VERIFIED` 全部保持为 `1`；模板 1 仍为停用，仅手动任务进入执行链路，旧 TT 发布池继续运行。
+- 切换前备份依次为：
+  - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-180143-pre-live-internal-beta`
+  - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-181712-pre-profile-alignment`
+  - `/mnt/data-disk/tt-auto-post-deploy/backups/20260806-183411-pre-code-replay-fix`
+  最后一份备份包含新旧两个 SQLite 在线副本、当前环境和服务状态，两个库 `quick_check=ok`，`SHA256SUMS` 全部通过。
+- GitHub 精确提交和部署顺序：
+  - `eae6fcb9e666b53a3e89e6b576b33f47cfd7c286`：把账号快照外部身份规范化为旧池兼容的 W2A 用户名；
+  - `3a8044d342d5c7bad8dc0d6472a04b7ea44fa667`：生产媒体 profile 对齐为 `tt-post-direct-outro-hevc-720x1280-v2`；
+  - `2a1674d98cbb245bab0d4c0a6e83dbda092a6e69`：四位码 broker 对非 ASCII 归因字段使用 UTF-8 字节做恒定时间比较，使同一路由重试可幂等重放。
+- 当前生产 release 为 `/opt/tt-auto-post/releases/2a1674d98cbb245bab0d4c0a6e83dbda092a6e69`；自动 sidecar 与 broker 健康检查均为 200，三重门禁仍全部开启。旧 `tt-post-service.service` PID 始终为 `3055551`，未重启、未改代码或数据。
+- 手动任务 1 在 GPU 前因 W2A 用户名格式失败；任务 2 在 GPU prepare 前因媒体 profile 不一致失败。两项均无 `publish_id`，对应问题已由上述 GitHub 提交修复。
+- 手动任务 3 固定账号 640、素材 `6013146`、`content_id=peKST2RMpC`、四位码 `Q66Y`，GPU 成片已准备完成（13,019,687 bytes，96.767 秒）。同一路由在新 broker 上重放成功并保持原码，不新建任务、不重新准备素材。
+- 账号 640 的上游 Token 于 `2026-08-06 18:30:02 +08:00` 到期；任务 3 当前为 `retry_wait/tt_account_source_unavailable`，`publish_id` 为空，尚未调用 TikTok Direct Post。任务保留并每 5 分钟从账号资料阶段重试；重新授权并刷新现有账号快照后继续原任务，禁止新建替代任务。
