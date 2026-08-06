@@ -357,6 +357,10 @@ class FeaturedAssetTests(unittest.TestCase):
         self.assertIn("--require-hashes", requirements)
         self.assertIn("Pillow==11.3.0", requirements)
         self.assertIn(
+            "6359a3bc43f57d5b375d1ad54a0074318a0844d11b76abccf478c37c986d3cfc",
+            requirements,
+        )
+        self.assertIn(
             "cadc9e0ea0a2431124cde7e1697106471fc4c1da01530e679b2391c37d3fbb3a",
             requirements,
         )

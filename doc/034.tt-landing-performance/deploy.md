@@ -12,7 +12,8 @@
 - locale：`/mnt/data-disk/tt-drama-featured/public/by-language`
 - WebP：`/mnt/data-disk/tt-drama-featured/public/covers`
 - 独立代码指针：`/mnt/data-disk/tt-code-performance/current`
-- 固定 Python：`/mnt/data-disk/tt-code-performance/venv-pillow-11.3.0/bin/python`
+- 固定 Python：`/mnt/data-disk/tt-code-performance/venv-pillow-11.3.0/bin/python`；
+  requirements 同时锁定官方 CPython 3.9 x86_64 glibc 2.17 与 2.27+ wheel
 - 固定公开路径：`/tt-featured-covers/<sha256>.webp`
 - 图片超时、最大字节和并发数均由代码限制；并发最大为 4。
 
