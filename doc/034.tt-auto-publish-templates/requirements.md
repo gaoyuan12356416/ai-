@@ -41,7 +41,7 @@
 3. 启用模板只影响未来调度；停用不取消已创建或执行中的任务。
 4. 一个模板可选择多个账号；同一账号可同时绑定多个启用模板。
 5. 手动执行必须确认真实执行，并携带预期模板版本与单次点击稳定幂等键；网络未知或 5xx 重试必须复用该键。API 仅入队，不同步等待发布。
-6. 文案按模板保存；`{{content_id}}` / `{{contect_id}}` 为可选剧 ID 宏，模板不包含剧 ID 宏时仍可保存和发布；账号语言和发布设置从现有账号设置读取并冻结到任务。
+6. 文案按模板保存；`{{content_id}}` / `{{contect_id}}` 为可选剧 ID 宏，模板不包含剧 ID 宏时仍可保存和发布；支持 `{desc}`、`{url}` 和 `{code}`。`{code}` 在正式自动任务冻结时分配全局唯一四位剧情查询码，最终文案在 GPU 制作前冻结，准备、发布、重试和 reconcile 均复用同一码与同一文案。账号语言和发布设置从现有账号设置读取并冻结到任务。
 
 ### 时间与顺序
 
@@ -92,6 +92,7 @@
 5. 部署后不创建启用模板，不手动执行，不进行真实发布 canary，除非另行获得精确账号和素材授权。
 6. 浏览器公开 DTO 不返回源素材 URL、GPU 准备后 URL或黑名单值明细；只返回准备完成布尔值、黑名单计数/哈希摘要和经过域名约束的 TikTok 发布链接。
 7. 手动立即执行的同模板版本、同幂等键只允许对应一个 run；前端在未知响应时不得换键重试。
+8. 使用 `{code}` 的任务必须先通过独立四位码 broker 在共享路由表完成幂等冻结，broker 或路由账本不可用时不得调用 GPU prepare 或 TikTok publish；旧发布池队列、素材和发布状态机不得被写入。
 
 ## 交互流程
 
@@ -105,6 +106,7 @@
 
 - 新模块：`features/tt_auto_posts/`。
 - 新 sidecar：`127.0.0.1:18831`，API 前缀 `/api/admin/tt-auto-publish`。
+- 新四位码 broker：`127.0.0.1:18832`，仅接受独立内部凭据；它是旧 SQLite 的唯一写入例外，只能新增/更新 `tt_post_code_route` 与容量耗尽时的 `tt_post_code_recycle_audit`，使用 `7_000_000_000_000_000_000 + task_id` 隔离自动任务身份，不得写旧队列、素材或调度表。
 - 新账本：`/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3`。
 - 新 systemd sidecar、每分钟 scheduler tick、独立有界并发 worker timer/path 和指标 timer；耗时 GPU prepare 不得占用调度 tick，GPU 仍使用现有回环 `127.0.0.1:18830`。
 - 新短链文件：`/mnt/data-disk/tt-auto-post-public/s2l/tt-auto/<task_id>.html`，由 `gy.g2flow.com` 的精确只读 location 提供。已生成文件、对应 Nginx route 和永久 ledger 在应用回滚时也不得删除。
@@ -124,6 +126,7 @@
 ### 只读依赖
 
 - 旧 SQLite 通过 URI `mode=ro` 和 `PRAGMA query_only=ON` 读取，不实例化 `TTPostStore`。
+- 唯一例外是独立、最小权限的四位码 broker；普通自动发布 sidecar 继续以 systemd `ReadOnlyPaths` 挂载旧目录。broker 单独获得旧目录写权限，并只调用经过字段/目标地址/任务命名空间校验的共享码路由操作，以保证新旧系统四位码全局不冲突。
 - 旧排除表：`tt_post_material_pool`、`tt_post_material_intake`、`tt_post_recurring_pool`、`tt_post_queue`、`tt_post_direct_test`。
 - 黑名单仅使用 `is_delete=0`、`type IN (0,1)`、非空值，保留字符串身份。
 
@@ -134,6 +137,7 @@
 - 并发抢同素材只有一个冻结成功；失败任务不释放素材。
 - 旧池页面、账号设置和 `features/tt_posts` 无差异，旧测试通过。
 - 新服务默认发布门禁关闭；首次部署关闭默认验收时模板数量必须为 0，无真实发布。
+- `{code}` 模板可保存；离线任务测试证明四位码在 GPU prepare 前冻结、同任务幂等复用、发布重试文案字节不变，且旧 `tt_post_queue` 不新增记录。
 - 浏览器响应不暴露内部媒体 URL或黑名单值；手动幂等重放与自动启停/版本竞态测试通过。
 - GitHub 提交、生产备份、服务状态、健康检查和回滚命令有记录。
 

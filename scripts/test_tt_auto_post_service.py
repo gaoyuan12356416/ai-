@@ -239,11 +239,13 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         invalid["platform"] = 9
         with self.assertRaises(ValidationError):
             normalize_template_payload(invalid)
-        invalid = template_payload()
-        invalid["caption_template"] = "{code}"
-        with self.assertRaises(ValidationError) as caught:
-            normalize_template_payload(invalid)
-        self.assertEqual(caught.exception.code, "tt_auto_caption_code_unsupported")
+        code_template = template_payload()
+        code_template["caption_template"] = "Find the ending with {code}"
+        normalized_code = normalize_template_payload(code_template)
+        self.assertEqual(
+            normalized_code["caption_template"],
+            "Find the ending with {code}",
+        )
         invalid = template_payload()
         invalid["unexpected"] = True
         with self.assertRaises(ValidationError):

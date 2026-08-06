@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 from features.tt_posts.core import (
     TTPostError,
-    caption_uses_code_macro,
     render_caption_template,
 )
 from features.tt_posts.links import build_w2a_url, validate_w2a_url
@@ -213,19 +212,15 @@ def render_auto_caption(
     *,
     short_url: Any,
     description: Any,
+    code: Any = None,
 ) -> str:
-    if caption_uses_code_macro(template):
-        raise AutoPostLinkError(
-            "tt_auto_caption_code_unsupported",
-            "自动发布模板暂不支持{code}变量",
-            400,
-        )
     normalized_url = validate_auto_short_url(short_url)
     try:
         rendered = render_caption_template(
             template,
             content_id,
             description=description,
+            code=code,
             defer_url=True,
         )
     except TTPostError as exc:

@@ -29,7 +29,7 @@
 {
   "name": "EN spend first",
   "account_ids": ["tt-account-id"],
-  "caption_template": "{desc}\n{url}",
+  "caption_template": "Use code {code} to find the full story\n{desc}\n{url}",
   "metric_window_days": 7,
   "drama_launch_window_days": 0,
   "cooldown_days": 0,
@@ -59,8 +59,10 @@
 
 `caption_template` 必填但不强制包含剧 ID 宏。`{{content_id}}` 与
 `{{contect_id}}` 均为可选兼容宏；模板可仅使用 `{desc}`、`{url}`，也可使用
-不含任何宏的固定文案。空模板、未知或不完整宏、超过长度限制的文案仍会被拒绝；
-自动发布模板继续不支持 `{code}`。
+不含任何宏的固定文案。`{code}` 为可选宏：正式自动任务选中并冻结素材后，系统
+在共享码路由命名空间幂等分配四位大写字母/数字码，并在 GPU prepare 前把最终
+文案冻结到任务；同任务重试和 reconcile 不重新分配。空模板、未知或不完整宏、
+超过长度限制的文案仍会被拒绝。
 
 `drama_rule.resource_type_v2` 可省略或传空数组，表示不限制短剧类型。非空时仅允许生产字段备注中的 `0`、`1`–`22`、`100`；响应统一为字符串数组。中文含义如下：
 

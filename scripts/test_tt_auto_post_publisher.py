@@ -136,6 +136,21 @@ class FakeGPU:
         return dict(self.reconcile_result)
 
 
+class FakeCodeBroker:
+    def __init__(self, code="AB12"):
+        self.code = code
+        self.freeze_calls = []
+        self.state_calls = []
+
+    def freeze_route(self, task_id, **kwargs):
+        self.freeze_calls.append({"task_id": int(task_id), **dict(kwargs)})
+        return self.code
+
+    def set_state(self, task_id, **kwargs):
+        self.state_calls.append({"task_id": int(task_id), **dict(kwargs)})
+        return {"task_id": int(task_id), "code": self.code, "state": kwargs["state"]}
+
+
 def template_config():
     return {
         "account_ids": ["640"],
@@ -178,10 +193,13 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         )
         self.account_source = FakeAccountSource()
 
-    def reserved_task(self, *, suffix="1"):
+    def reserved_task(self, *, suffix="1", caption_template=None):
+        config = template_config()
+        if caption_template is not None:
+            config["caption_template"] = caption_template
         template = self.store.create_template(
             name="Template " + suffix,
-            config=template_config(),
+            config=config,
             actor=AuditActor("803", "operator"),
             confirmation={"accepted": True},
         )
@@ -232,12 +250,13 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         )
         return self.store.get_task(task.id)
 
-    def executor(self, gpu):
+    def executor(self, gpu, code_broker=None):
         return AutoPostExecutor(
             self.store,
             UnusedSelector(),
             self.account_source,
             gpu,
+            code_route_broker=code_broker,
             gates=AutoLiveGates(True, True, True),
             now_fn=self.clock,
             short_link_root=Path(self.temp.name).resolve() / "s2l",
@@ -271,6 +290,45 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         self.assertIn("/s2l/tt-auto/%d.html" % task.id, final.caption)
         self.assertTrue(
             (Path(self.temp.name) / "s2l" / "tt-auto" / ("%d.html" % task.id)).is_file()
+        )
+
+    def test_code_is_frozen_before_prepare_and_reused_for_publish_retry(self):
+        task = self.reserved_task(
+            suffix="code-retry",
+            caption_template="Find the full story with {code}\n{desc}\n{url}",
+        )
+        temporary = GPUClientError(
+            "tt_publish_upstream_unavailable",
+            "publish was definitely not initialized",
+            503,
+            publish_was_not_created=True,
+        )
+        gpu = FakeGPU(publish_results=[temporary])
+        broker = FakeCodeBroker("Q7M2")
+        executor = self.executor(gpu, broker)
+
+        prepared = executor.execute_next("worker-code-prepare")["task"]
+        self.assertEqual(prepared["status"], "ready")
+        self.assertIn("Q7M2", prepared["caption"])
+        self.assertNotIn("{code}", prepared["caption"])
+        frozen_caption = prepared["caption"]
+        self.assertEqual(len(gpu.prepare_calls), 1)
+
+        failed = executor.execute_next("worker-code-publish-1")["task"]
+        self.assertEqual(failed["status"], "retry_wait")
+        self.clock.value += timedelta(minutes=5, seconds=1)
+        published = executor.execute_next("worker-code-publish-2")["task"]
+
+        self.assertEqual(published["status"], "published")
+        self.assertEqual(published["caption"], frozen_caption)
+        self.assertEqual(
+            [call["queue"]["caption"] for call in gpu.publish_calls],
+            [frozen_caption, frozen_caption],
+        )
+        self.assertGreaterEqual(len(broker.freeze_calls), 3)
+        self.assertEqual(
+            [call["state"] for call in broker.state_calls],
+            ["publishing", "publishing", "published"],
         )
 
     def test_ready_is_reclaimed_and_inflight_publish_cannot_be_stolen(self):

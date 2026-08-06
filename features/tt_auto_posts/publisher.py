@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
+from features.tt_posts.core import caption_uses_code_macro
 from features.tt_posts.service import GPUClientError
 
 from .client import safe_public_message
@@ -255,6 +256,7 @@ class AutoPostExecutor:
         account_source: Any,
         gpu_client: Any,
         *,
+        code_route_broker: Any = None,
         gates: Optional[AutoLiveGates] = None,
         now_fn=lambda: datetime.now(UTC),
         short_link_root: Any = "/mnt/data-disk/tt-auto-post-public/s2l",
@@ -267,6 +269,7 @@ class AutoPostExecutor:
         self.selector = selector
         self.account_source = account_source
         self.gpu_client = gpu_client
+        self.code_route_broker = code_route_broker
         self.gates = gates or AutoLiveGates.from_env()
         self.now_fn = now_fn
         self.short_link_root = str(short_link_root or "").strip()
@@ -422,6 +425,7 @@ class AutoPostExecutor:
             "源素材",
         )
         job_id = _stable_gpu_job_id(task)
+        caption = self._caption_and_link(task)
         if task.status != "preparing":
             task = self.store.transition_task(
                 task.id,
@@ -431,6 +435,7 @@ class AutoPostExecutor:
                 updates={
                     "gpu_job_id": job_id,
                     "source_media_url": source_url,
+                    "caption": caption,
                     "error_code": "",
                     "error_message": "",
                 },
@@ -442,7 +447,11 @@ class AutoPostExecutor:
                 "preparing",
                 expected_statuses={"preparing"},
                 claim_token=claim_token,
-                updates={"gpu_job_id": job_id, "source_media_url": source_url},
+                updates={
+                    "gpu_job_id": job_id,
+                    "source_media_url": source_url,
+                    "caption": caption,
+                },
                 event_type="task_preparation_recovered",
             )
         prepared = self.gpu_client.prepare(
@@ -614,12 +623,67 @@ class AutoPostExecutor:
         )
         write_auto_short_redirect(self.short_link_root, task.id, long_url)
         description = material.get("description") or drama.get("name")
-        return render_auto_caption(
-            template.config.get("caption_template"),
+        caption_template = template.config.get("caption_template")
+        code = None
+        if caption_uses_code_macro(caption_template):
+            if self.code_route_broker is None:
+                raise AutoPostExecutionError(
+                    "tt_auto_code_service_not_configured",
+                    "自动发布四位码服务尚未配置",
+                    503,
+                )
+            code = self.code_route_broker.freeze_route(
+                task.id,
+                content_id=task.content_id,
+                long_url=long_url,
+                created_at=str(task.reserved_at_utc or task.created_at or ""),
+            )
+        rendered = render_auto_caption(
+            caption_template,
             task.content_id,
             short_url=short_url,
             description=description,
+            code=code,
         )
+        if task.caption and task.caption != rendered:
+            raise AutoPostExecutionError(
+                "tt_auto_caption_frozen_conflict",
+                "自动发布任务的冻结文案不一致",
+                409,
+            )
+        return task.caption or rendered
+
+    def _sync_code_state(
+        self,
+        task: TaskRecord,
+        state: str,
+        *,
+        best_effort: bool = False,
+    ) -> None:
+        template = self.store.get_template(
+            task.template_id, version=task.template_version
+        )
+        if not caption_uses_code_macro(template.config.get("caption_template")):
+            return
+        if self.code_route_broker is None:
+            if best_effort:
+                return
+            raise AutoPostExecutionError(
+                "tt_auto_code_service_not_configured",
+                "自动发布四位码服务尚未配置",
+                503,
+            )
+        try:
+            self.code_route_broker.set_state(
+                task.id,
+                state=state,
+                updated_at=self._now().isoformat(timespec="seconds").replace(
+                    "+00:00", "Z"
+                ),
+            )
+        except Exception:
+            if not best_effort:
+                raise
 
     def _publish(
         self, task: TaskRecord, claim_token: Optional[str] = None
@@ -659,6 +723,7 @@ class AutoPostExecutor:
             },
             event_type="task_publish_started",
         )
+        self._sync_code_state(task, "publishing")
         queue = {
             **dict(task.account_settings),
             "caption": caption,
@@ -751,7 +816,7 @@ class AutoPostExecutor:
             )
         remote = str(result.get("state") or result.get("remote_status") or "").lower()
         if remote in {"published", "publish_complete"}:
-            return self.store.transition_task(
+            published = self.store.transition_task(
                 task.id,
                 "published",
                 expected_statuses={"publishing"},
@@ -769,6 +834,8 @@ class AutoPostExecutor:
                 },
                 event_type="task_published",
             )
+            self._sync_code_state(published, "published", best_effort=True)
+            return published
         return self.store.transition_task(
             task.id,
             "reconciling",
@@ -812,7 +879,7 @@ class AutoPostExecutor:
             )
         remote = str(result.get("state") or result.get("remote_status") or "").lower()
         if remote in {"published", "publish_complete"}:
-            return self.store.transition_task(
+            published = self.store.transition_task(
                 task.id,
                 "published",
                 expected_statuses={task.status},
@@ -830,6 +897,8 @@ class AutoPostExecutor:
                 },
                 event_type="task_reconciled_published",
             )
+            self._sync_code_state(published, "published", best_effort=True)
+            return published
         if remote in {"failed", "publish_failed"}:
             return self.store.transition_task(
                 task.id,

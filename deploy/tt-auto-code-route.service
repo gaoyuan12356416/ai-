@@ -1,8 +1,7 @@
 [Unit]
-Description=Dramawave TikTok automatic publishing-template sidecar
-After=network-online.target tt-auto-code-route.service
+Description=Dramawave TikTok automatic publishing code-route broker
+After=network-online.target
 Wants=network-online.target
-Requires=tt-auto-code-route.service
 ConditionPathIsMountPoint=/mnt/data-disk
 
 [Service]
@@ -12,11 +11,10 @@ Group=tt-post
 WorkingDirectory=/opt/tt-auto-post/current
 EnvironmentFile=/etc/tt-auto-post.env
 EnvironmentFile=/etc/tt-auto-post.secrets
-EnvironmentFile=/etc/tt-post.secrets
-ExecStart=/usr/bin/python3 /opt/tt-auto-post/current/scripts/tt_auto_post_service.py
+ExecStart=/usr/bin/python3 /opt/tt-auto-post/current/scripts/tt_auto_code_route_service.py
 Restart=on-failure
 RestartSec=5
-RuntimeDirectory=tt-auto-post
+RuntimeDirectory=tt-auto-code-route
 RuntimeDirectoryMode=0700
 PrivateTmp=true
 PrivateDevices=true
@@ -34,10 +32,10 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
-ReadOnlyPaths=/opt/tt-auto-post/current /mnt/data-disk/tt-post-publisher
-ReadWritePaths=/mnt/data-disk/tt-auto-post-publisher /mnt/data-disk/tt-auto-post-public /run/tt-auto-post
+ReadOnlyPaths=/opt/tt-auto-post/current
+ReadWritePaths=/mnt/data-disk/tt-post-publisher
 UMask=0077
-TimeoutStopSec=9600s
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=multi-user.target

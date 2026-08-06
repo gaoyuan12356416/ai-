@@ -108,7 +108,7 @@ class TTAutoPostLinksTests(unittest.TestCase):
         self.assertEqual(query["af_channel"], ["TT"])
         self.assertIn("*88", query["c"][0])
 
-    def test_caption_renders_supported_macros_and_rejects_code(self):
+    def test_caption_renders_supported_macros_including_code(self):
         short_url = build_auto_short_url(9)
         rendered = render_auto_caption(
             "Drama {{content_id}}\n{desc}\n{url}",
@@ -119,6 +119,14 @@ class TTAutoPostLinksTests(unittest.TestCase):
         self.assertIn("C9", rendered)
         self.assertIn("A short description", rendered)
         self.assertIn(short_url, rendered)
+        code_rendered = render_auto_caption(
+            "Code: {code}\n{url}",
+            "C9",
+            short_url=short_url,
+            description="desc",
+            code="AB12",
+        )
+        self.assertEqual(code_rendered, "Code: AB12\n%s" % short_url)
         with self.assertRaises(AutoPostLinkError) as caught:
             render_auto_caption(
                 "{code} {url}",
@@ -126,7 +134,7 @@ class TTAutoPostLinksTests(unittest.TestCase):
                 short_url=short_url,
                 description="desc",
             )
-        self.assertEqual(caught.exception.code, "tt_auto_caption_code_unsupported")
+        self.assertEqual(caught.exception.code, "caption_code_required")
 
     def test_redirect_rejects_relative_root_and_non_w2a_target(self):
         valid = build_auto_w2a_url(

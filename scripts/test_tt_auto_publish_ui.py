@@ -199,7 +199,8 @@ class TtAutoPublishUiTest(unittest.TestCase):
         self.assertIn("{{content_id}}", source)
         self.assertIn("{desc}", source)
         self.assertIn("{url}", source)
-        self.assertNotIn("{code}", source)
+        self.assertIn("{code}", source)
+        self.assertIn("唯一四位剧情查询码", source)
         self.assertIn("剧 ID 宏为可选", source)
         self.assertNotIn("发布文案模板必须包含", script)
 

@@ -8,7 +8,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from features.tt_posts.core import TTPostError, caption_uses_code_macro, render_caption_template
+from features.tt_posts.core import TTPostError, render_caption_template
 
 
 RESOURCE_TYPE_V2_LABELS = {
@@ -262,17 +262,13 @@ def _schedule(raw: Any) -> Dict[str, Any]:
 
 def _caption_template(value: Any) -> str:
     template = _text(value, "发布文案", minimum=1, maximum=20000)
-    if caption_uses_code_macro(template):
-        raise ValidationError(
-            "tt_auto_caption_code_unsupported",
-            "自动发布模板暂不支持{code}变量",
-        )
     try:
         render_caption_template(
             template,
             "123456",
             description="Drama description",
             defer_url=True,
+            defer_code=True,
         )
     except TTPostError as exc:
         raise ValidationError(

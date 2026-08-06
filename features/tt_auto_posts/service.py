@@ -29,6 +29,7 @@ from .client import (
     contains_sensitive_key,
     safe_public_message,
 )
+from .code_broker_client import AutoCodeBrokerClient, DEFAULT_BROKER_URL
 from .core import AuditActor, TTPostAutoStore
 from .legacy_reader import LegacyTTPostReader
 from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
@@ -1007,6 +1008,18 @@ def build_service_from_env(
         selector,
         account_repository.as_account_source(),
         gpu,
+        code_route_broker=AutoCodeBrokerClient(
+            str(
+                source.get(
+                    "TT_AUTO_CODE_ROUTE_SERVICE_URL",
+                    DEFAULT_BROKER_URL,
+                )
+            ),
+            internal_token,
+            timeout_seconds=float(
+                source.get("TT_AUTO_CODE_ROUTE_TIMEOUT_SECONDS", "5")
+            ),
+        ),
         gates=AutoLiveGates.from_env(source),
         short_link_root=str(
             source.get(

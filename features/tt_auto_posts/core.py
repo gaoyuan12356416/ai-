@@ -2407,6 +2407,7 @@ class TTAutoPostStore:
                 "source_media_url",
                 "prepared_media_url",
                 "prepared_output_sha256",
+                "caption",
                 "publish_id",
             ):
                 stored_value = str(row[immutable_field] or "")

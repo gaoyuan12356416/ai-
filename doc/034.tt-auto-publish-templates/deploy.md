@@ -9,7 +9,7 @@
 
 ## 部署前
 
-1. 复跑 108 个新系统测试、64 个旧 TT 回归、JS 语法检查、浏览器无发布验收和最终安全复核。
+1. 复跑 117 个新系统测试、64 个旧 TT 回归、JS 语法检查、浏览器无发布验收和最终安全复核。
 2. 提交并推送 `codex/tt-auto-publish-templates-20260805`，记录提交 SHA；确认生产当前提交是目标提交的可安全升级祖先，且工作区没有未提交改动。
 3. 只读确认 `/mnt/data-disk` 为独立挂载、`127.0.0.1:18831` 未占用、现有 GPU 回环 `127.0.0.1:18830` 可达，旧 `tt-post-service.service` 为 active。
 4. 备份当前主 API release/软链、静态文件、systemd 单元与 drop-in、两个站点的 Nginx 配置，以及已有的新系统 SQLite、公开短链目录和日志；记录备份绝对路径与 SHA256。
@@ -40,6 +40,7 @@
 
 5. 安装并 `systemctl daemon-reload`：
    - `tt-auto-post-service.service`：loopback `127.0.0.1:18831` sidecar。
+   - `tt-auto-code-route.service`：loopback `127.0.0.1:18832` 四位码 broker；普通自动发布 sidecar 对旧 SQLite 仍为只读，只有该 broker 可写共享码路由表。
    - `tt-auto-post-scheduler.service/.timer`：每分钟生成到期 run，`--mode tick`。
    - `tt-auto-post-runner.service/.timer/.path`：并发执行已入队账号任务，`--mode execute`；path 用于手动请求唤醒。
    - `tt-auto-post-metric.service/.timer`：按完整北京时间日刷新指标缓存。
@@ -78,7 +79,7 @@ systemd-run --unit=tt-auto-post-metric-backfill-30d \
 ## 发布后关闭默认验收
 
 - `tt-post-service.service` 仍为原 release 且 active；旧 TT 页面和 API 回归正常。
-- 新 sidecar只监听 `127.0.0.1:18831`，主 API 通过同源代理访问，外部不能直连内部接口。
+- 新 sidecar只监听 `127.0.0.1:18831`，四位码 broker 只监听 `127.0.0.1:18832`；主 API 通过同源代理访问管理 sidecar，外部不能直连任一内部接口。
 - `systemctl list-timers` 可见 scheduler、runner 和 metric；scheduler 与 runner 使用不同锁，worker 并发数有界。
 - 三个发布门禁均为 `0`；模板数量为 0；run/task 数量为 0；material ledger 没有由本次验收新增的冻结记录。
 - 仅打开模板列表、创建页和运行列表，验证空态、权限和 no-store；不在生产创建模板、不点击立即执行、不做真实 canary。
@@ -95,12 +96,12 @@ systemd-run --unit=tt-auto-post-metric-backfill-30d \
    ```
 
    查询必须返回 0 行。尤其 `publishing`、`unknown`、`reconciling` 必须取得明确远端结果并完成 reconcile；若任一状态长期无法收敛，回滚视为被阻断，保留 runner/sidecar 和短链服务并升级人工处理，禁止通过停服务掩盖未知发布结果。
-3. 账本已排空后停止并禁用 `tt-auto-post-runner.timer`、`tt-auto-post-runner.path` 和 `tt-auto-post-metric.timer`，等待当前 oneshot 完整退出，再次执行上面的只读查询确认仍为 0 行，然后停止 `tt-auto-post-service.service`。sidecar 的 graceful shutdown 会等待正在处理的 HTTP 工作线程。
+3. 账本已排空后停止并禁用 `tt-auto-post-runner.timer`、`tt-auto-post-runner.path` 和 `tt-auto-post-metric.timer`，等待当前 oneshot 完整退出，再次执行上面的只读查询确认仍为 0 行，然后依次停止 `tt-auto-post-service.service` 与 `tt-auto-code-route.service`。sidecar 的 graceful shutdown 会等待正在处理的 HTTP 工作线程。
 4. 验证主 API 已无新管理入口，旧 TT 服务和页面正常；随后可关闭三重门禁。以下发布后事实必须永久保留：
    - `/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3` 及素材永久 ledger/事件审计；
    - `/mnt/data-disk/tt-auto-post-public/s2l/tt-auto/` 下所有已生成短链文件；
    - `gy.g2flow.com` 的 `/s2l/tt-auto/<task_id>.html` Nginx location 和访问能力。
-5. 不得因应用回滚删除、改写或重新分配既有 task ID 短链；已发布 TT 帖子依赖这些不可变 URL。恢复 Nginx 备份时必须把该短链 location 合并保留并先执行 `nginx -t`。
+5. 不得因应用回滚删除、改写或重新分配既有 task ID 短链及 `7_000_000_000_000_000_000 + task_id` 对应的四位码路由；已发布 TT 帖子依赖这些不可变 URL/码。恢复 Nginx 备份时必须把该短链 location 合并保留并先执行 `nginx -t`。
 6. 回滚不修改或迁移旧 TT 发布池数据，也不释放新系统已冻结素材。记录停止时间、最后 run/task 状态和保留目录校验值，供后续 reconcile/审计。
 
 ## 2026-08-06 发布文案剧 ID 宏可选增量部署
