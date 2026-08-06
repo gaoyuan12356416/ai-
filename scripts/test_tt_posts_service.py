@@ -1229,6 +1229,19 @@ class ServiceLifecycleTests(unittest.TestCase):
             service.store.get_daily_schedule("101")["publish_times"],
         )
 
+    def test_auto_config_accepts_template_without_drama_placeholder(self):
+        service = self.service(CLOSED_GATES)
+        self.save_public_settings(service, "101")
+        payload = self.auto_config_payload()
+        payload["caption_template"] = "Custom copy without a drama placeholder"
+        saved = service.auto_config_save(payload)["item"]
+
+        self.assertEqual(payload["caption_template"], saved["caption_template"])
+        self.assertEqual(
+            payload["caption_template"],
+            service.auto_config_get()["item"]["caption_template"],
+        )
+
     def test_random_auto_config_persists_one_plan_per_account(self):
         self.accounts.add_account("102")
         service = self.service(CLOSED_GATES)
@@ -3717,15 +3730,18 @@ class ServiceLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(payload["caption_template"], created["caption_template"])
 
-    def test_queue_rejects_template_without_drama_placeholder_before_gpu(self):
+    def test_queue_accepts_template_without_drama_placeholder(self):
         service = self.service(CLOSED_GATES)
         payload = queue_payload(self.clock)
         payload.pop("caption_text")
         payload["caption_template"] = "Custom copy without a drama placeholder"
-        with self.assertRaises(TTPostError) as caught:
-            service.queue_create(payload)
-        self.assertEqual("caption_content_id_required", caught.exception.code)
-        self.assertEqual(self.gpu.prepare_jobs, [])
+        created = service.queue_create(payload)["item"]
+        self.assertEqual(
+            "Custom copy without a drama placeholder",
+            created["caption_text"],
+        )
+        self.assertEqual(payload["caption_template"], created["caption_template"])
+        self.assertEqual(1, len(self.gpu.prepare_jobs))
 
     def test_queue_rejects_caption_that_does_not_match_template_render(self):
         service = self.service(CLOSED_GATES)

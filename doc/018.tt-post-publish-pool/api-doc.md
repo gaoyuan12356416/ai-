@@ -157,7 +157,7 @@ GPU publish 请求中的敏感账号凭证只存在于 AES-GCM 短时任务信�
 | --- | --- | --- |
 | 400 | `invalid_request` | 字段或时间格式错误 |
 | 400 | `invalid_caption_template` | 描述模板为空、含 NUL 或结构无效 |
-| 400 | `caption_content_id_required` | 描述模板缺少 Drama ID 占位符，或旧 `caption_text` 未保留准确 Drama ID |
+| 400 | `caption_content_id_required` | 仅旧 `caption_text` 兼容接口未保留准确 Drama ID；`caption_template` 不再强制包含 Drama ID 宏 |
 | 400 | `caption_placeholder_invalid` | 描述模板包含未知占位符 |
 | 400 | `caption_length_invalid` | 按真实 Drama ID 渲染后超过 2200 个 UTF-16 单位 |
 | 400 | `tt_caption_template_render_mismatch` | 同时提交的模板和最终描述不一致 |

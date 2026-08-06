@@ -2788,10 +2788,14 @@ class CaptionPolicyAndTimeTests(unittest.TestCase):
             )
         self.assertEqual("caption_placeholder_invalid", uppercase.exception.code)
 
-    def test_caption_requires_content_id_placeholder(self):
-        with self.assertRaises(TTPostError) as caught:
-            render_caption_template("Watch now", "ABC")
-        self.assertEqual("caption_content_id_required", caught.exception.code)
+    def test_caption_allows_template_without_content_id_placeholder(self):
+        self.assertEqual(
+            "Custom copy without a drama placeholder",
+            render_caption_template(
+                "Custom copy without a drama placeholder",
+                "ABC",
+            ),
+        )
 
     def test_caption_rejects_unknown_placeholder(self):
         with self.assertRaises(TTPostError):
