@@ -112,6 +112,7 @@ systemd-run --unit=tt-auto-post-metric-backfill-30d \
 - 新 sidecar `GET /health` 返回 200；公开 HTML/JS 返回 200，SHA-256 分别为 `df54ed403847bf3d7257ff665fea945925b6208a39aa511f4be01647ec042b94`、`93354fb3e8d80e8cc1fe764e527aea2185cdcf99435891a9746328d157bdc429`。
 - 生产 release 上的只读验证确认不含剧 ID 宏、仅含 `{desc}` / `{url}` 的模板可通过归一化；未创建生产模板。三重门禁保持 0，模板/run/task/material ledger 均为 0，SQLite `quick_check=ok`。
 - 旧 TT release 保持 `4362f3928e8c5c3f437917585b9f645e51986536`，PID `3055551` 未变化。scheduler、runner、runner path、metric timer 及新 sidecar 全部 active。
+- `16:15` 的 scheduler/runner 自然触发恰好与 sidecar 重启窗口重叠，各失败 1 次；`16:16` 至 `16:19` 连续 4 轮自然触发均成功，最终 `Result=success`、`ExecMainStatus=0`，且账本仍为空，未产生发布副作用。
 - 首次切换验收误用了不存在的 `/healthz`，因得到非 200 按预案自动回滚，且未替换页面或写入账本；确认正确健康路径为 `/health` 后重新切换并通过。该探针错误不是应用启动失败。
 
 当前精确回滚必须先按上文账本检查确认无非终态任务，再执行：
