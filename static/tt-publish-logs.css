@@ -6,11 +6,12 @@
 .source-chip { display: inline-flex; width: fit-content; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 800; white-space: nowrap; }
 .source-chip.material { color: #136b57; background: #e5f7f1; }
 .source-chip.automatic { color: #2459ac; background: #eaf1ff; }
-.log-table { min-width: 1680px; }
+.log-table { min-width: 1760px; }
 .log-table td:nth-child(1) { min-width: 150px; }
 .log-table td:nth-child(4) { min-width: 180px; }
 .log-table td:nth-child(5) { min-width: 170px; }
 .log-table td:nth-child(6) { min-width: 180px; }
+.code-cell { min-width: 76px; font-weight: 800; letter-spacing: .08em; white-space: nowrap; }
 .caption-copy { min-width: 280px; max-width: 430px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .result-copy { min-width: 210px; max-width: 310px; overflow-wrap: anywhere; }
 .row-actions { min-width: 108px; }

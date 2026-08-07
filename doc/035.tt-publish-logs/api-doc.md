@@ -29,6 +29,7 @@
     "task_key": "material_pool:automatic:57",
     "task_id": 57,
     "task_at_utc": "2026-08-06T06:24:00+00:00",
+    "code": "A1B2",
     "status": "published",
     "status_group": "published"
   }],
@@ -39,11 +40,13 @@
 
 响应不返回 `source_media_url`、`prepared_media_url`、claim token 或任何账号凭据。
 
+`code` 只表示共享路由账本中真实存在的 4 位 code：素材池排期读取 `tt_post_queue.code`，自动模板按高位合成 queue ID 读取 `tt_post_code_route`。立即测试没有 durable code，固定为空字符串。页面只展示合法 `[A-Z0-9]{4}`，不会从 caption 猜测。
+
 ## 错误语义
 
 - 非法来源、触发方式、状态、日期、ID 或分页参数返回 `400 invalid_request`。
 - 默认查询同时读取两个账本；任一账本不可用时失败关闭，不返回半份聚合结果。
-- 明确指定单一来源时，只读取该来源；未被请求的另一个账本不可用不会阻塞。
+- 明确指定单一来源时，只读取该来源的任务账本；自动模板会额外尽力读取共享 code 路由，路由不可用时任务列表仍返回且 code 留空。
 
 ## 兼容性
 

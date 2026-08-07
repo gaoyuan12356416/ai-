@@ -29,9 +29,10 @@ from .client import (
     contains_sensitive_key,
     safe_public_message,
 )
+from .code_broker import synthetic_queue_id
 from .code_broker_client import AutoCodeBrokerClient, DEFAULT_BROKER_URL
 from .core import AuditActor, PUBLISH_LOG_STATUS_GROUPS, TTPostAutoStore
-from .legacy_reader import LegacyTTPostReader
+from .legacy_reader import LegacyTTPostReader, LegacyTTPostReaderError
 from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
 from .repositories import (
     BEIJING_TZ,
@@ -945,6 +946,23 @@ class TTAutoPostService:
             if include_auto
             else dict(empty)
         )
+
+        automatic_items = automatic.get("items", [])
+        if automatic_items:
+            route_to_task = {
+                synthetic_queue_id(item.get("task_id")): item
+                for item in automatic_items
+            }
+            try:
+                automatic_codes = self.legacy_reader.code_routes_for_queue_ids(
+                    route_to_task
+                )
+            except LegacyTTPostReaderError as exc:
+                if int(exc.status) < 500:
+                    raise AutoPostServiceError(exc.code, str(exc), exc.status) from None
+                automatic_codes = {}
+            for route_id, code in automatic_codes.items():
+                route_to_task[route_id]["code"] = code
 
         values = [
             dict(item)

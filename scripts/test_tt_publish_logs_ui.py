@@ -35,11 +35,18 @@ class TTPublishLogsUiTests(unittest.TestCase):
             "自动定时",
             "手动执行",
             "素材 / Drama ID",
+            "4位码",
         ):
             self.assertIn(text, self.html)
         self.assertIn("/publish-logs", self.js)
         self.assertIn("publish_source", self.js)
         self.assertIn("trigger_type", self.js)
+        self.assertIn("displayCode(item.code)", self.js)
+        self.assertIn("/^[A-Z0-9]{4}$/", self.js)
+        self.assertNotIn('String(value || "").trim()', self.js)
+        self.assertNotIn("toUpperCase()", self.js)
+        self.assertIn('colspan="11"', self.html)
+        self.assertIn("cell.colSpan = 11", self.js)
 
     def test_page_preserves_legacy_actions_and_auto_run_details(self):
         self.assertIn("/queue/${encodeURIComponent(item.task_id)}/${action}", self.js)

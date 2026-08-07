@@ -9,6 +9,7 @@ legacy SQLite file with ``mode=ro`` and additionally enables
 from __future__ import annotations
 
 import contextlib
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ LEGACY_MATERIAL_TABLES: Tuple[str, ...] = (
 )
 LEGACY_ACCOUNT_SETTINGS_TABLE = "tt_post_account_setting"
 MAX_BATCH_MATERIAL_IDS = 10_000
+MAX_BATCH_CODE_ROUTE_IDS = 10_200
+_CODE_RE = re.compile(r"^[A-Z0-9]{4}$")
 PUBLISH_LOG_STATUS_GROUPS: Tuple[str, ...] = (
     "scheduled",
     "processing",
@@ -542,9 +545,101 @@ class LegacyTTPostReader:
             },
         }
 
+    def code_routes_for_queue_ids(
+        self,
+        queue_ids: Iterable[Any],
+    ) -> Dict[int, str]:
+        """Read valid four-character codes from the shared route ledger.
+
+        Automatic-post tasks use a synthetic high queue ID in the same route
+        ledger as scheduled material-pool posts.  This method reads only that
+        narrow identity projection and never constructs the mutating legacy
+        store.
+        """
+
+        normalized: List[int] = []
+        seen: Set[int] = set()
+        for value in queue_ids:
+            if isinstance(value, bool):
+                raise LegacyTTPostReaderError(
+                    "tt_auto_code_route_identity_invalid",
+                    "code route queue identity is invalid",
+                    400,
+                )
+            try:
+                queue_id = int(value)
+            except (TypeError, ValueError, OverflowError):
+                queue_id = 0
+            if queue_id <= 0:
+                raise LegacyTTPostReaderError(
+                    "tt_auto_code_route_identity_invalid",
+                    "code route queue identity is invalid",
+                    400,
+                )
+            if queue_id not in seen:
+                seen.add(queue_id)
+                normalized.append(queue_id)
+        if len(normalized) > MAX_BATCH_CODE_ROUTE_IDS:
+            raise LegacyTTPostReaderError(
+                "tt_auto_code_route_batch_too_large",
+                "too many code route identities were requested",
+                400,
+            )
+        if not normalized:
+            return {}
+
+        result: Dict[int, str] = {}
+        with self.connection() as conn:
+            names = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "tt_post_code_route" not in names:
+                raise LegacyTTPostReaderError(
+                    "tt_auto_code_route_schema_invalid",
+                    "shared TT code route ledger is unavailable",
+                    503,
+                )
+            columns = self._table_columns(conn, "tt_post_code_route")
+            if not {"queue_id", "code"}.issubset(columns):
+                raise LegacyTTPostReaderError(
+                    "tt_auto_code_route_schema_invalid",
+                    "shared TT code route schema is invalid",
+                    503,
+                )
+            conn.execute("BEGIN")
+            for offset in range(0, len(normalized), 500):
+                batch = normalized[offset : offset + 500]
+                placeholders = ",".join("?" for _item in batch)
+                rows = conn.execute(
+                    "SELECT queue_id,code FROM tt_post_code_route "
+                    "WHERE queue_id IN (%s)" % placeholders,
+                    tuple(batch),
+                ).fetchall()
+                for row in rows:
+                    queue_id = int(row["queue_id"])
+                    code = str(row["code"] or "")
+                    if queue_id not in seen or not _CODE_RE.fullmatch(code):
+                        raise LegacyTTPostReaderError(
+                            "tt_auto_code_route_row_invalid",
+                            "shared TT code route row is invalid",
+                            503,
+                        )
+                    if queue_id in result and result[queue_id] != code:
+                        raise LegacyTTPostReaderError(
+                            "tt_auto_code_route_row_invalid",
+                            "shared TT code route identity is not unique",
+                            503,
+                        )
+                    result[queue_id] = code
+        return result
+
 
 __all__ = [
     "LEGACY_MATERIAL_TABLES",
+    "MAX_BATCH_CODE_ROUTE_IDS",
     "PUBLISH_LOG_STATUS_GROUPS",
     "LegacyAccountSetting",
     "LegacyTTPostReader",

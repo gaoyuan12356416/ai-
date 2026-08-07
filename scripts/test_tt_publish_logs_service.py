@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from features.tt_auto_posts.core import AuditActor, TTPostAutoStore  # noqa: E402
+from features.tt_auto_posts.code_broker import synthetic_queue_id  # noqa: E402
 from features.tt_auto_posts.legacy_reader import (  # noqa: E402
     LegacyTTPostReader,
     LegacyTTPostReaderError,
@@ -87,6 +88,10 @@ class UnifiedPublishLogTests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(self.legacy_path)) as conn:
             conn.execute("CREATE TABLE tt_post_queue(%s)" % QUEUE_COLUMNS)
             conn.execute("CREATE TABLE tt_post_direct_test(%s)" % DIRECT_COLUMNS)
+            conn.execute(
+                "CREATE TABLE tt_post_code_route("
+                "queue_id INTEGER NOT NULL UNIQUE,code TEXT NOT NULL UNIQUE)"
+            )
             conn.execute(
                 """
                 INSERT INTO tt_post_queue VALUES (
@@ -184,6 +189,12 @@ class UnifiedPublishLogTests(unittest.TestCase):
                 (manual_task.id,),
             )
             conn.commit()
+        with contextlib.closing(sqlite3.connect(self.legacy_path)) as conn:
+            conn.execute(
+                "INSERT INTO tt_post_code_route(queue_id,code) VALUES(?,?)",
+                (synthetic_queue_id(manual_task.id), "E5F6"),
+            )
+            conn.commit()
 
         enabled = self.auto_store.set_template_enabled(
             template.id,
@@ -247,6 +258,13 @@ class UnifiedPublishLogTests(unittest.TestCase):
         self.assertEqual(payload["sources"], {"material_pool": 3, "auto_template": 2})
         self.assertEqual(payload["summary"]["total"], 5)
         self.assertEqual(payload["summary"]["no_candidate"], 1)
+        by_key = {item["task_key"]: item for item in payload["items"]}
+        self.assertEqual(by_key["material_pool:automatic:57"]["code"], "A1B2")
+        self.assertEqual(by_key["material_pool:direct_test:9"]["code"], "")
+        self.assertEqual(
+            by_key["auto_template:auto_task:1"]["code"],
+            "E5F6",
+        )
 
     def test_cross_source_pagination_has_no_gap_or_duplicate(self):
         first = self.service.publish_logs(self.query(limit=2, offset=0))
@@ -344,8 +362,18 @@ class UnifiedPublishLogTests(unittest.TestCase):
             self.query(publish_source="auto_template", limit=20, offset=0)
         )
         self.assertEqual(auto_only["pagination"]["total"], 2)
+        self.assertTrue(all(item["code"] == "" for item in auto_only["items"]))
         with self.assertRaises(LegacyTTPostReaderError):
             service.publish_logs(self.query(limit=20, offset=0))
+
+    def test_malformed_shared_route_code_is_not_normalized_for_display(self):
+        with contextlib.closing(sqlite3.connect(self.legacy_path)) as conn:
+            conn.execute("UPDATE tt_post_code_route SET code=' e5f6'")
+            conn.commit()
+        payload = self.service.publish_logs(
+            self.query(publish_source="auto_template", limit=20, offset=0)
+        )
+        self.assertTrue(all(item["code"] == "" for item in payload["items"]))
 
 
 if __name__ == "__main__":

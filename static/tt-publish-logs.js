@@ -68,13 +68,18 @@
         || ["unknown", "reconciling"].includes(String(item.status || "")));
   }
 
+  function displayCode(value) {
+    const code = String(value || "");
+    return /^[A-Z0-9]{4}$/.test(code) ? code : "—";
+  }
+
   function renderRows() {
     const body = ui.byId("logRows");
     ui.clear(body);
     if (!state.items.length) {
       const row = ui.element("tr");
       const cell = ui.element("td", { className: "empty", text: "没有符合当前筛选条件的发布任务。" });
-      cell.colSpan = 10;
+      cell.colSpan = 11;
       row.appendChild(cell);
       body.appendChild(row);
       return;
@@ -101,6 +106,7 @@
         `素材 ${item.material_id || "—"}`,
         `Drama ID ${item.content_id || "—"}${item.drama_name ? ` · ${item.drama_name}` : ""}`
       ));
+      ui.appendTextCell(row, displayCode(item.code), "code-cell mono");
       ui.appendTextCell(row, item.caption || "—", "caption-copy");
       row.appendChild(statusBadge(item));
 
@@ -163,7 +169,7 @@
     ui.clear(body);
     const row = ui.element("tr");
     const cell = ui.element("td", { className: "empty", text: message });
-    cell.colSpan = 10;
+    cell.colSpan = 11;
     row.appendChild(cell);
     body.appendChild(row);
   }
@@ -268,6 +274,7 @@
       ["触发方式", TRIGGER_LABELS[item.trigger_type]],
       ["账号", item.account_display_name || item.creator_nickname_snapshot || item.source_account_id],
       ["素材 / Drama ID", `${item.material_id || "—"} / ${item.content_id || "—"}`],
+      ["4位码", displayCode(item.code)],
       ["模板 / 运行", item.template_id ? `${item.template_name || `模板 ${item.template_id}`} / ${item.run_id || "—"}` : "—"],
       ["状态", `${STATUS_LABELS[item.status_group] || item.status_group} (${item.status || "—"})`],
       ["publish_id", item.publish_id || "—"],
