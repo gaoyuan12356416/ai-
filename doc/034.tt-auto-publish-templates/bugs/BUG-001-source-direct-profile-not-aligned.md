@@ -54,4 +54,6 @@ TT Post 素材池与 TT 自动发布是两个独立 CPU 服务。首次切换只
 
 ## 回归结论
 
-本地回归通过；生产配置切换、stale task 终态化和自然调度验收待部署后补充。
+通过。生产自动发布和 GPU health 均为 `tt-post-source-direct-v1`，trim 为 `0`；task 6/run 6
+已安全收敛为 failed。18:15、18:16 两轮自然调度成功且未新增 run/task，publish_id 仍为 3、
+unknown 与 nonterminal 均为 0。

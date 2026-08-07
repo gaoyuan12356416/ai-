@@ -70,4 +70,6 @@
   服务启动阶段返回 `tt_auto_source_direct_trim_forbidden`。
 - health 现在明确暴露自动发布请求的 profile 和 trim，部署验收不再只检查三重门禁。
 - 定向测试 31/31、完整 TT 回归 560/560、Python compile 和 `git diff --check` 全部通过。
-- 生产非发布验收和最终 run/task 基线待部署完成后补充；不由修复过程创建真实帖子。
+- 生产自动发布/GPU health profile 对齐；task 6/run 6 已安全终态化。18:15、18:16 两轮自然
+  调度成功，max run/task 保持 `6/12`，publish_id 保持 `3`，unknown/nonterminal 均为 `0`。
+- 修复通过，可以由用户重新执行一次新的手动测试；本次修复与验收没有创建真实帖子。

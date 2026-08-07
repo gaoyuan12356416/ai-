@@ -218,3 +218,30 @@ curl -fsS http://127.0.0.1:18831/health
   `profile=tt-post-source-direct-v1`、`source_trim_tail_seconds=0`；CPU tunnel 上的 GPU
   `/health` 必须返回相同 profile、`media_mode=source_direct`、`transition=none`。
 - 验收只观察自然 scheduler/runner，不创建新 run，不调用 TikTok；真实测试由用户重新手动执行。
+
+### 生产部署记录
+
+- GitHub/生产提交：`4f2d3f7408fee1c7a2f8a37caf7081c821ee7bfd`。
+- 新 release：`/opt/tt-auto-post/releases/4f2d3f7408fee1c7a2f8a37caf7081c821ee7bfd`；
+  原 release：`/opt/tt-auto-post/releases/0392013f68825530ac52132c7be3c258650be1de`。
+- 备份：`/mnt/data-disk/tt-auto-post-deploy/backups/20260807T181142+0800-source-direct-profile-pre-4f2d3f7`；
+  SQLite online backup `integrity_check=ok`，`SHA256SUMS` 全部通过。
+- GitHub archive SHA256：`841c97d5485ef43c6a89fcd26efeb557e45eb031863dae26c6745a9cfa45cd9e`。
+- 候选 release compile 通过，自动发布定向测试 31/31 通过；本地完整 TT 回归 560/560 通过。
+- task 6 在停止 sidecar/runner 后通过账本状态机终态化为 failed，错误码
+  `source_direct_profile_mismatch_cancelled`；run 6 同步收敛为 failed。task 7–12 保持原失败事实，
+  所有这些任务均无 `publish_id`、无 unknown、publish attempt 为 0。
+- 自动发布 health 返回 `profile=tt-post-source-direct-v1`、trim `0`、三重门禁 open；GPU health
+  返回相同 profile、`media_mode=source_direct`、`transition=none`、`direct_post_eligible=true`。
+- 18:15、18:16 两轮自然 scheduler/runner 均 success；max run/task 仍为 `6/12`，publish_id
+  仍为 `3`，unknown/nonterminal 均为 `0`，未调用 TikTok。
+
+### 精确回滚
+
+1. 停止 scheduler timer、runner timer/path，确认 scheduler/runner oneshot inactive；停止
+   `tt-auto-post-service.service`。
+2. 从上述备份恢复 `/etc/tt-auto-post.env`，把 `/opt/tt-auto-post/current` 原子切回
+   `0392013f68825530ac52132c7be3c258650be1de`。
+3. 重启自动发布 sidecar，验证旧 health；再恢复 scheduler/runner timer/path。
+4. 常规代码/配置回滚不得恢复备份 SQLite：备份中的 task 6 仍是带有效 lease 的 selecting，恢复它会
+   重新激活已关闭的测试任务。当前生产账本中的 failed 终态和事件审计必须保留。
