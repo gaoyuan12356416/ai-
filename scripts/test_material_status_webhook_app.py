@@ -296,11 +296,14 @@ class MaterialStatusHTTPTests(unittest.TestCase):
 class MaterialStatusDeliveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.store = service.MaterialStatusOutbox(
-            Path(self.temp.name) / "events.sqlite3"
-        )
+        self.db_path = Path(self.temp.name) / "events.sqlite3"
+        self.store = service.MaterialStatusOutbox(self.db_path)
+        self.cache = service.MaterialStatusOptimizerCache(self.db_path)
+        self.old_cache = app.MATERIAL_STATUS_MAPPING_CACHE
+        app.MATERIAL_STATUS_MAPPING_CACHE = self.cache
 
     def tearDown(self):
+        app.MATERIAL_STATUS_MAPPING_CACHE = self.old_cache
         self.temp.cleanup()
 
     def claim(self, key, payload=None, max_attempts=5):
@@ -333,6 +336,76 @@ class MaterialStatusDeliveryTests(unittest.TestCase):
         self.assertIn("admin_user_group", query.call_args_list[1].args[0])
         self.assertIn("sub_user_id=17", query.call_args_list[1].args[0])
         self.assertIn("status=0", query.call_args_list[1].args[0])
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(
+            self.cache.get("测试优化师")["email"],
+            "optimizer@example.com",
+        )
+
+    def test_cached_optimizer_skips_mysql(self):
+        self.cache.upsert("fengkai", "17", "fengkai@example.com")
+        with mock.patch.object(
+            app,
+            "run_material_status_mapping_query",
+        ) as query:
+            result = app.resolve_material_status_optimizer(" fengkai ")
+
+        query.assert_not_called()
+        self.assertEqual(
+            result,
+            {
+                "matched": True,
+                "admin_user_id": "17",
+                "email": "fengkai@example.com",
+            },
+        )
+
+    def test_full_refresh_caches_only_unique_usable_mappings(self):
+        self.cache.upsert("stale", "99", "stale@example.com")
+        rows = [
+            ["17", "fengkai", "fengkai@example.com"],
+            ["17", "fengkai", "FENGKAI@example.com"],
+            ["18", "duplicate", "first@example.com"],
+            ["19", "duplicate", "second@example.com"],
+            ["20", "multi_email", "one@example.com"],
+            ["20", "multi_email", "two@example.com"],
+            ["21", "no_email", ""],
+        ]
+        with mock.patch.object(
+            app,
+            "run_material_status_mapping_query",
+            return_value=rows,
+        ) as query:
+            count = app.refresh_material_status_optimizer_cache()
+
+        self.assertEqual(count, 1)
+        self.assertIsNone(self.cache.get("stale"))
+        self.assertEqual(
+            self.cache.get("fengkai")["admin_user_id"],
+            "17",
+        )
+        self.assertIsNone(self.cache.get("duplicate"))
+        self.assertIsNone(self.cache.get("multi_email"))
+        self.assertEqual(
+            query.call_args.kwargs["timeout_seconds"],
+            app.MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS,
+        )
+
+    def test_empty_refresh_preserves_last_good_cache(self):
+        self.cache.upsert("fengkai", "17", "fengkai@example.com")
+        with mock.patch.object(
+            app,
+            "run_material_status_mapping_query",
+            return_value=[],
+        ):
+            with self.assertRaises(app.MaterialStatusDeliveryError) as caught:
+                app.refresh_material_status_optimizer_cache()
+
+        self.assertEqual(caught.exception.code, "mapping_invalid")
+        self.assertEqual(
+            self.cache.get("fengkai")["email"],
+            "fengkai@example.com",
+        )
 
     def test_private_delivery(self):
         event, _ = self.claim("mst-delivery-0001")

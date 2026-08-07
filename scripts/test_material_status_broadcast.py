@@ -263,6 +263,80 @@ class ValidationTests(unittest.TestCase):
                     service.sanitize_result_details(details)
 
 
+class OptimizerCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "events.sqlite3"
+        self.clock = MutableClock()
+        self.cache = service.MaterialStatusOptimizerCache(
+            self.path,
+            clock=self.clock,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_replace_persists_exact_names_and_upsert_adds_misses(self):
+        count = self.cache.replace_all(
+            [
+                {
+                    "optimizer_name": "fengkai",
+                    "admin_user_id": "17",
+                    "email": "fengkai@example.com",
+                },
+                {
+                    "optimizer_name": "CaseSensitive",
+                    "admin_user_id": "18",
+                    "email": "case@example.com",
+                },
+            ]
+        )
+
+        self.assertEqual(count, 2)
+        self.assertEqual(self.cache.count(), 2)
+        self.assertEqual(
+            self.cache.get(" fengkai ")["admin_user_id"],
+            "17",
+        )
+        self.assertIsNone(self.cache.get("casesensitive"))
+        reopened = service.MaterialStatusOptimizerCache(self.path)
+        self.assertEqual(reopened.get("fengkai")["email"], "fengkai@example.com")
+
+        self.clock.advance(60)
+        added = self.cache.upsert(
+            "new_optimizer",
+            "19",
+            "new@example.com",
+        )
+        self.assertEqual(added["admin_user_id"], "19")
+        self.assertEqual(self.cache.count(), 3)
+
+    def test_conflicting_refresh_does_not_replace_last_good_cache(self):
+        self.cache.upsert("fengkai", "17", "fengkai@example.com")
+
+        with self.assertRaises(service.MaterialStatusError):
+            self.cache.replace_all(
+                [
+                    {
+                        "optimizer_name": "duplicate",
+                        "admin_user_id": "20",
+                        "email": "first@example.com",
+                    },
+                    {
+                        "optimizer_name": "duplicate",
+                        "admin_user_id": "21",
+                        "email": "second@example.com",
+                    },
+                ]
+            )
+
+        self.assertEqual(self.cache.count(), 1)
+        self.assertEqual(
+            self.cache.get("fengkai")["email"],
+            "fengkai@example.com",
+        )
+
+
 class OutboxTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

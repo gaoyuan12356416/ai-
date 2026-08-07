@@ -490,7 +490,7 @@ def _connect(db_path):
 
 
 def ensure_storage(db_path):
-    """Create the additive outbox table and indexes if they are absent."""
+    """Create the additive outbox and optimizer-cache tables if absent."""
 
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -535,6 +535,16 @@ def ensure_storage(db_path):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS material_status_optimizer_cache (
+                optimizer_name TEXT PRIMARY KEY,
+                admin_user_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                refreshed_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -572,6 +582,141 @@ def _decode_row(row):
         item["result"] = {}
         item.pop("result_json", None)
     return item
+
+
+def normalize_optimizer_cache_entry(optimizer_name, admin_user_id, email):
+    name = str(optimizer_name or "").strip()
+    user_id = str(admin_user_id or "").strip()
+    address = str(email or "").strip()
+    if (
+        not name
+        or len(name) > _FIELD_LIMITS["optimizer_name"]
+        or any(unicodedata.category(char) == "Cc" for char in name)
+    ):
+        raise MaterialStatusError(
+            "invalid_optimizer_cache_entry",
+            "optimizer cache name is invalid",
+            400,
+        )
+    if not user_id.isdigit():
+        raise MaterialStatusError(
+            "invalid_optimizer_cache_entry",
+            "optimizer cache admin user id is invalid",
+            400,
+        )
+    if len(address) > 254 or not _EMAIL_RE.fullmatch(address):
+        raise MaterialStatusError(
+            "invalid_optimizer_cache_entry",
+            "optimizer cache email is invalid",
+            400,
+        )
+    return {
+        "optimizer_name": name,
+        "admin_user_id": user_id,
+        "email": address,
+    }
+
+
+class MaterialStatusOptimizerCache:
+    """Persistent last-known-good optimizer-to-email mapping cache."""
+
+    def __init__(self, db_path, clock=None):
+        self.db_path = Path(db_path)
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        ensure_storage(self.db_path)
+
+    def get(self, optimizer_name):
+        name = str(optimizer_name or "").strip()
+        if not name:
+            return None
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                """
+                SELECT optimizer_name,admin_user_id,email,refreshed_at
+                FROM material_status_optimizer_cache
+                WHERE optimizer_name=?
+                """,
+                (name,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "matched": True,
+            "admin_user_id": str(row["admin_user_id"]),
+            "email": str(row["email"]),
+            "refreshed_at": str(row["refreshed_at"]),
+        }
+
+    def upsert(self, optimizer_name, admin_user_id, email):
+        entry = normalize_optimizer_cache_entry(
+            optimizer_name,
+            admin_user_id,
+            email,
+        )
+        refreshed_at = _utc_iso(_utc_datetime(self.clock))
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO material_status_optimizer_cache(
+                    optimizer_name,admin_user_id,email,refreshed_at
+                ) VALUES(?,?,?,?)
+                """,
+                (
+                    entry["optimizer_name"],
+                    entry["admin_user_id"],
+                    entry["email"],
+                    refreshed_at,
+                ),
+            )
+            conn.commit()
+        return self.get(entry["optimizer_name"])
+
+    def replace_all(self, entries):
+        normalized = {}
+        for raw_entry in entries or ():
+            entry = normalize_optimizer_cache_entry(
+                (raw_entry or {}).get("optimizer_name"),
+                (raw_entry or {}).get("admin_user_id"),
+                (raw_entry or {}).get("email"),
+            )
+            previous = normalized.get(entry["optimizer_name"])
+            if previous is not None and previous != entry:
+                raise MaterialStatusError(
+                    "invalid_optimizer_cache_entry",
+                    "optimizer cache contains conflicting names",
+                    400,
+                )
+            normalized[entry["optimizer_name"]] = entry
+        refreshed_at = _utc_iso(_utc_datetime(self.clock))
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM material_status_optimizer_cache")
+            conn.executemany(
+                """
+                INSERT INTO material_status_optimizer_cache(
+                    optimizer_name,admin_user_id,email,refreshed_at
+                ) VALUES(?,?,?,?)
+                """,
+                [
+                    (
+                        entry["optimizer_name"],
+                        entry["admin_user_id"],
+                        entry["email"],
+                        refreshed_at,
+                    )
+                    for entry in normalized.values()
+                ],
+            )
+            conn.commit()
+        return len(normalized)
+
+    def count(self):
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM material_status_optimizer_cache"
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
 
 
 class MaterialStatusOutbox:

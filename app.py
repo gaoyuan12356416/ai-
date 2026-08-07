@@ -1538,6 +1538,30 @@ MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS = max(
     min(3600, int(os.environ.get("MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS", "300"))),
 )
 MATERIAL_STATUS_WEBHOOK_RETRY_DELAYS = (1, 5, 30, 120, 600)
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS = max(
+    60,
+    min(
+        86400,
+        int(
+            os.environ.get(
+                "MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS",
+                "300",
+            )
+        ),
+    ),
+)
+MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS = max(
+    30,
+    min(
+        300,
+        int(
+            os.environ.get(
+                "MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS",
+                "180",
+            )
+        ),
+    ),
+)
 
 COS_SECRET_ID = os.environ.get("COS_SECRET_ID", "").strip()
 
@@ -2712,6 +2736,11 @@ MATERIAL_STATUS_OUTBOX = None
 MATERIAL_STATUS_WORKER_STOP = threading.Event()
 MATERIAL_STATUS_WORKER_LOCK = threading.Lock()
 MATERIAL_STATUS_WORKER_THREAD = None
+MATERIAL_STATUS_MAPPING_CACHE_LOCK = threading.Lock()
+MATERIAL_STATUS_MAPPING_CACHE = None
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP = threading.Event()
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_LOCK = threading.Lock()
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD = None
 
 
 
@@ -47422,7 +47451,19 @@ def get_material_status_outbox():
         return MATERIAL_STATUS_OUTBOX
 
 
-def run_material_status_mapping_query(query):
+def get_material_status_optimizer_cache():
+    global MATERIAL_STATUS_MAPPING_CACHE
+    with MATERIAL_STATUS_MAPPING_CACHE_LOCK:
+        if MATERIAL_STATUS_MAPPING_CACHE is None:
+            MATERIAL_STATUS_MAPPING_CACHE = (
+                material_status_service.MaterialStatusOptimizerCache(
+                    JOB_DB_PATH
+                )
+            )
+        return MATERIAL_STATUS_MAPPING_CACHE
+
+
+def run_material_status_mapping_query(query, timeout_seconds=None):
     database = ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME
     if not (
         ADMIN_MAPPING_MYSQL_HOST
@@ -47440,6 +47481,13 @@ def run_material_status_mapping_query(query):
             "admin mapping database name is invalid",
             retryable=False,
         )
+    if timeout_seconds is None:
+        timeout_seconds = ADMIN_MAPPING_MYSQL_TIMEOUT
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (TypeError, ValueError, OverflowError):
+        timeout_seconds = ADMIN_MAPPING_MYSQL_TIMEOUT
+    timeout_seconds = max(2, min(timeout_seconds, 300))
     cmd = ["mysql", "-h", ADMIN_MAPPING_MYSQL_HOST]
     if ADMIN_MAPPING_MYSQL_PORT:
         cmd.extend(["-P", ADMIN_MAPPING_MYSQL_PORT])
@@ -47464,7 +47512,7 @@ def run_material_status_mapping_query(query):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=max(2, min(ADMIN_MAPPING_MYSQL_TIMEOUT, 30)),
+            timeout=timeout_seconds,
             env=mysql_env,
             universal_newlines=True,
         )
@@ -47487,7 +47535,106 @@ def run_material_status_mapping_query(query):
     ]
 
 
-def resolve_material_status_optimizer(optimizer_name):
+def build_material_status_optimizer_cache_entries(rows):
+    grouped = {}
+    for row in rows or ():
+        if len(row) < 2:
+            continue
+        admin_user_id = str(row[0] or "").strip()
+        optimizer_name = str(row[1] or "").strip()
+        email = str(row[2] if len(row) > 2 else "").strip()
+        if not admin_user_id.isdigit() or not optimizer_name:
+            continue
+        item = grouped.setdefault(
+            optimizer_name,
+            {"admin_user_ids": set(), "emails": {}},
+        )
+        item["admin_user_ids"].add(admin_user_id)
+        if email:
+            item["emails"].setdefault(email.lower(), email)
+    entries = []
+    for optimizer_name, item in grouped.items():
+        if len(item["admin_user_ids"]) != 1 or len(item["emails"]) != 1:
+            continue
+        try:
+            entry = material_status_service.normalize_optimizer_cache_entry(
+                optimizer_name,
+                next(iter(item["admin_user_ids"])),
+                next(iter(item["emails"].values())),
+            )
+        except material_status_service.MaterialStatusError:
+            continue
+        entries.append(entry)
+    entries.sort(key=lambda item: item["optimizer_name"])
+    return entries
+
+
+def refresh_material_status_optimizer_cache():
+    database = (ADMIN_MAPPING_MYSQL_DATABASE or DB_NAME).replace("`", "``")
+    rows = run_material_status_mapping_query(
+        "SELECT CAST(u.id AS CHAR),u.username,g.email "
+        "FROM `%s`.admin_users AS u "
+        "LEFT JOIN `%s`.admin_user_group AS g "
+        "ON g.sub_user_id=u.id AND g.status=0 AND TRIM(g.email)<>'' "
+        "WHERE TRIM(u.username)<>'' "
+        "ORDER BY u.id ASC,g.id ASC LIMIT 10000"
+        % (database, database),
+        timeout_seconds=MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS,
+    )
+    entries = build_material_status_optimizer_cache_entries(rows)
+    if not entries:
+        raise MaterialStatusDeliveryError(
+            "mapping_invalid",
+            "admin mapping refresh returned no usable optimizer entries",
+            retryable=True,
+        )
+    count = get_material_status_optimizer_cache().replace_all(entries)
+    logging.info(
+        "material status optimizer cache refreshed entries=%s",
+        count,
+    )
+    return count
+
+
+def material_status_mapping_cache_refresh_loop():
+    while not MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP.is_set():
+        try:
+            refresh_material_status_optimizer_cache()
+        except MaterialStatusDeliveryError as exc:
+            logging.warning(
+                "material status optimizer cache refresh failed code=%s error=%s",
+                exc.code,
+                str(exc),
+            )
+        except Exception:
+            logging.exception(
+                "material status optimizer cache refresh failed"
+            )
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP.wait(
+            MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS
+        )
+
+
+def start_material_status_mapping_cache_refresh_worker():
+    global MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD
+    with MATERIAL_STATUS_MAPPING_CACHE_REFRESH_LOCK:
+        if (
+            MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD is not None
+            and MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD.is_alive()
+        ):
+            return MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD
+        get_material_status_optimizer_cache()
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_STOP.clear()
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD = threading.Thread(
+            target=material_status_mapping_cache_refresh_loop,
+            name="material-status-mapping-cache-refresh",
+            daemon=True,
+        )
+        MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD.start()
+        return MATERIAL_STATUS_MAPPING_CACHE_REFRESH_THREAD
+
+
+def resolve_material_status_optimizer_from_database(optimizer_name):
     optimizer_name = str(optimizer_name or "").strip()
     if not optimizer_name:
         return {
@@ -47555,6 +47702,42 @@ def resolve_material_status_optimizer(optimizer_name):
         "admin_user_id": admin_user_id,
         "email": next(iter(emails.values())),
     }
+
+
+def resolve_material_status_optimizer(optimizer_name):
+    optimizer_name = str(optimizer_name or "").strip()
+    if not optimizer_name:
+        return resolve_material_status_optimizer_from_database(optimizer_name)
+    try:
+        cached = get_material_status_optimizer_cache().get(optimizer_name)
+    except Exception:
+        logging.exception(
+            "material status optimizer cache read failed optimizer=%s",
+            optimizer_name,
+        )
+        cached = None
+    if cached:
+        return {
+            "matched": True,
+            "admin_user_id": cached["admin_user_id"],
+            "email": cached["email"],
+        }
+    resolution = resolve_material_status_optimizer_from_database(
+        optimizer_name
+    )
+    if resolution.get("matched"):
+        try:
+            get_material_status_optimizer_cache().upsert(
+                optimizer_name,
+                resolution["admin_user_id"],
+                resolution["email"],
+            )
+        except Exception:
+            logging.exception(
+                "material status optimizer cache write failed optimizer=%s",
+                optimizer_name,
+            )
+    return resolution
 
 
 def mask_material_status_email(email):
@@ -100363,6 +100546,19 @@ def main():
 
 
     ensure_audit_log_table()
+
+    try:
+        cache = get_material_status_optimizer_cache()
+        start_material_status_mapping_cache_refresh_worker()
+        logging.info(
+            "material status optimizer cache worker started entries=%s refresh_seconds=%s",
+            cache.count(),
+            MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS,
+        )
+    except Exception:
+        logging.exception(
+            "material status optimizer cache worker startup failed"
+        )
 
     try:
         start_material_status_worker()

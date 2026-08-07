@@ -9,6 +9,7 @@
 - 新增公开接口文档
 - 十字段增量新增 `resource_name` 和 `drama_dubbing_type`，保留既有
   `task_type`，三项统一进入私聊与兜底播报
+- 新增 SQLite 持久化优化师映射缓存、五分钟全量刷新和未命中回源
 
 ## 配置项
 
@@ -21,17 +22,24 @@ MATERIAL_STATUS_WEBHOOK_MAX_BODY_BYTES=32768
 MATERIAL_STATUS_WEBHOOK_MAX_ATTEMPTS=5
 MATERIAL_STATUS_WEBHOOK_POLL_SECONDS=1
 MATERIAL_STATUS_WEBHOOK_LEASE_SECONDS=300
+MATERIAL_STATUS_MAPPING_CACHE_REFRESH_SECONDS=300
+MATERIAL_STATUS_MAPPING_CACHE_QUERY_TIMEOUT_SECONDS=180
 ```
 
 - `MATERIAL_STATUS_WEBHOOK_TOKENS` 支持逗号分隔的新旧 Token，以便无停机轮换。
 - 每个有效 Token 至少 32 个字符。
 - 不配置 Token 时接口必须 fail closed，并返回服务未配置。
 - 不配置来源 IP 白名单。
+- 映射缓存刷新在独立线程执行；默认每 300 秒刷新一次，最长等待 SQL
+  并发闸门 180 秒，不阻塞素材播报 worker。
 
 ## 数据库变更
 
 - 不修改 MySQL，不执行 MySQL DDL 或写入。
-- 在现有任务 SQLite 中幂等创建素材状态事件/outbox 表和索引。
+- 在现有任务 SQLite 中幂等创建素材状态事件/outbox 表、索引和
+  `material_status_optimizer_cache` 表。
+- 全量刷新只有在查询成功且至少得到一个可用映射后才原子替换缓存；
+  查询失败保留最后一次成功缓存。
 
 ## GitHub-first 部署步骤
 
