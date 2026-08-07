@@ -226,3 +226,7 @@ curl -fsS http://127.0.0.1:18831/health
 - 快照 `token_status=3` 直接记录 `tt_access_token_expired`；TikTok API 明确返回 Token 无效或 scope 不足时分别记录 `tt_access_token_invalid`、`tt_access_token_scope_missing`，错误文案包含重新登录授权建议及脱敏后的上游 `log_id`。
 - 上游 Token 错误只在新自动发布 CPU consumer 内映射；共享 GPU worker和旧发布池不切换、不重启。
 - 已有 `publish_id` 或未知结果的任务继续只允许 reconcile；旧 TT 发布池不切换 release、不重启，自动发布生产闸门保持开启。
+- GitHub 精确提交和生产 release 为 `3c3db5a078d1352f7864480f16237c916feafa19`；它以已准备的 source-direct 后继 `4f2d3f7408fee1c7a2f8a37caf7081c821ee7bfd` 为父提交，避免覆盖 profile 对齐修复。
+- 部署前备份为 `/mnt/data-disk/tt-auto-post-deploy/backups/20260807-182200-pre-hourly-token-logs-3c3db5a`，新旧 SQLite 副本 `quick_check=ok`。部署后自动 sidecar PID `133010`，旧 `tt-post-service.service` PID 保持 `102092`，GPU release/PID 保持 `202e94b007c6f22efe3c56aaf1e651c188a38856` / `4160884`。
+- 三重生产闸门保持开启；账号快照 timer 已加载 `OnCalendar=*-*-* *:05:00`，下一次自然触发为 `2026-08-07 19:05:00 +08:00`。
+- 经用户此前真实执行确认，模板 1 v4 使用稳定幂等键创建手动 run 7。7 个账号均越过账号/Token校验并进入两层筛选，最终全部 `no_candidate`；run 为 `completed`，无素材冻结、GPU job、`publish_id` 或 TikTok 请求。

@@ -76,3 +76,4 @@ systemctl list-timers socialkit-tiktok-account-sync.timer --no-pager
 - timer 契约恢复为 `OnCalendar=*-*-* *:05:00`；每轮仍会各占用一次源库与目标库连接并执行查询/事务写入，因此不再维持五分钟频率。
 - 发布侧不再用 `token_expires_time` 做候选或取 Token 拦截；仍保留 `is_active=1`、`account_status=2`、`token_status=2`、`disable_publish=0` 和 Token 非空条件。
 - TikTok API 明确返回 Token 失效或 Content Posting scope 不足时，自动任务分别记录 `tt_access_token_invalid` 或 `tt_access_token_scope_missing` 及脱敏后的 TikTok `log_id`。
+- 生产 timer 已安装 `OnCalendar=*-*-* *:05:00` 并保持 enabled/active；切换时最后一次旧周期触发为 `18:22`，新周期下一次自然触发为 `19:05`。本次不额外手工同步，避免无意义占用 SQL 查询位。

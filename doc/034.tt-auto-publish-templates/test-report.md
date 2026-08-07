@@ -80,3 +80,6 @@
 - 同步 timer 契约为 `OnCalendar=*-*-* *:05:00` 且 `Persistent=true`。
 - 并发执行器回归模拟另一个 worker 抢先完成 `queued -> running`，后到 worker将其视为幂等成功，不遗留死租约。
 - 基于待切换的 source-direct profile 后继版本重放后，本地 TT 全量相关回归共 451 项通过，失败 0。
+- 生产 release 中同一 451 项回归除 2 个 Linux 受信锁目录用例和 1 个已占用 broker 端口用例外全部直接通过；2 个 runner 用例在 `/run/tt-auto-post` 重跑通过，4 个不抢占 `18832` 的 broker 离线用例通过。现网 broker 未停止。
+- 部署后 `/health` 返回 `profile=tt-post-source-direct-v1`、trim `0`、三重闸门全开；发布侧源码中 `token_expires_time >` 条件计数为 0。旧 TT 与共享 GPU PID 均未变化，部署后自动服务/runner warning 日志为 0。
+- 真实手动 run 7 的 7 个任务均到达 `no_candidate`，证明账号与 Token 校验已通过且并发 run 启动不再遗留死租约；`publish_id` 数量为 0。
