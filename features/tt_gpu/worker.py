@@ -85,6 +85,12 @@ DIRECT_CLEAN_MEDIA_MODE = "direct_clean"
 DIRECT_OUTRO_MEDIA_MODE = "direct_outro"
 SOURCE_DIRECT_MEDIA_MODE = "source_direct"
 DEFAULT_MEDIA_MODE = BRANDED_PREVIEW_MEDIA_MODE
+SOURCE_DIRECT_VIDEO_PROFILES = {
+    ("h264", "avc1"): frozenset(
+        {"baseline", "constrained baseline", "main", "high"}
+    ),
+    ("hevc", "hvc1"): frozenset({"main"}),
+}
 HEALTH_PATH = "/health"
 CREATOR_INFO_PATH = "/internal/tt-post/creator-info"
 PREPARE_PATH = "/internal/tt-post/prepare"
@@ -1625,6 +1631,28 @@ def _frame_rate(value):
     return result if result > 0 else 0.0
 
 
+def _video_matches_delivery_contract(
+    config,
+    video_contract,
+    codec,
+    codec_tag,
+    profile,
+):
+    normalized_codec = str(codec or "").strip().lower()
+    normalized_tag = str(codec_tag or "").strip().lower()
+    normalized_profile = str(profile or "").strip().lower()
+    if config.media_mode == SOURCE_DIRECT_MEDIA_MODE:
+        return normalized_profile in SOURCE_DIRECT_VIDEO_PROFILES.get(
+            (normalized_codec, normalized_tag),
+            frozenset(),
+        )
+    return bool(
+        normalized_codec == video_contract["codec"]
+        and normalized_tag == video_contract["codec_tag"]
+        and normalized_profile == video_contract["profile"]
+    )
+
+
 def validate_prepared_output(config, payload, path, max_size, expected_duration):
     video_contract = _delivery_video_contract(config)
     videos = _stream_items(payload, "video")
@@ -1656,15 +1684,18 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration)
         size = Path(path).stat().st_size
     except OSError:
         size = 0
+    video_codec = str(video.get("codec_name") or "").strip().lower()
     profile = str(video.get("profile") or "").strip().lower()
     codec_tag = str(video.get("codec_tag_string") or "").strip().lower()
     audio_profile = str(audio.get("profile") or "").strip().lower()
     average_bitrate = size * 8.0 / duration if duration > 0 else math.inf
     source_direct = config.media_mode == SOURCE_DIRECT_MEDIA_MODE
-    profile_matches = (
-        profile in {"baseline", "constrained baseline", "main", "high"}
-        if source_direct
-        else profile == video_contract["profile"]
+    video_contract_matches = _video_matches_delivery_contract(
+        config,
+        video_contract,
+        video_codec,
+        codec_tag,
+        profile,
     )
     sample_rate_matches = (
         sample_rate in {44100, 48000}
@@ -1672,9 +1703,7 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration)
         else sample_rate == 48000
     )
     if (
-        str(video.get("codec_name") or "").lower() != video_contract["codec"]
-        or not profile_matches
-        or codec_tag != video_contract["codec_tag"]
+        not video_contract_matches
         or str(video.get("pix_fmt") or "").lower() != "yuv420p"
         or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
         or abs(rate - 30.0) > 0.01
@@ -1707,8 +1736,8 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration)
         "pixel_format": "yuv420p",
         "profile": profile,
         "size": size,
-        "video_codec": video_contract["codec"],
-        "video_codec_tag": video_contract["codec_tag"],
+        "video_codec": video_codec,
+        "video_codec_tag": codec_tag,
         "width": width,
     }
 
@@ -3395,13 +3424,16 @@ def _prepare_response(manifest, reused, config, expected_job_id):
             and 0 < request_source_size <= int(config.max_source_bytes)
             and request_trim == 0.0
         )
+    probe_video_codec = str(probe.get("video_codec") or "").lower()
+    probe_video_codec_tag = str(probe.get("video_codec_tag") or "").lower()
     probe_profile = str(probe.get("profile") or "").lower()
     source_direct = config.media_mode == SOURCE_DIRECT_MEDIA_MODE
-    profile_matches = (
-        probe_profile
-        in {"baseline", "constrained baseline", "main", "high"}
-        if source_direct
-        else probe_profile == video_contract["profile"]
+    video_contract_matches = _video_matches_delivery_contract(
+        config,
+        video_contract,
+        probe_video_codec,
+        probe_video_codec_tag,
+        probe_profile,
     )
     sample_rate_matches = (
         audio_sample_rate in {44100, 48000}
@@ -3447,15 +3479,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         or not math.isfinite(frame_rate)
         or abs(frame_rate - 30.0) > 0.01
         or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
-        or (
-            str(probe.get("video_codec") or "").lower()
-            != video_contract["codec"]
-        )
-        or (
-            str(probe.get("video_codec_tag") or "").lower()
-            != video_contract["codec_tag"]
-        )
-        or not profile_matches
+        or not video_contract_matches
         or str(probe.get("pixel_format") or "").lower() != "yuv420p"
         or str(probe.get("audio_codec") or "").lower() != "aac"
         or str(probe.get("audio_profile") or "").lower() != "lc"

@@ -20,6 +20,8 @@
 | TC-005 | manifest 身份 | 检查 v6/reuse | mode/profile/source SHA/size/URL hash 冻结，重放复用 | P0 | 通过 |
 | TC-006 | 发布链路 | 开门禁并使用 mock TikTok | 仍走 `PULL_FROM_URL`，init 一次 | P0 | 通过 |
 | TC-007 | 44.1kHz 原片 | H.264 Main + AAC 44.1kHz | 合同通过 | P1 | 通过 |
+| TC-013 | HEVC 原片 | HEVC Main + `hvc1` + AAC 44.1kHz，首次 prepare 后重放 manifest | 原字节合同通过，返回实际 codec/tag，重放继续通过 | P0 | 通过 |
+| TC-014 | 编码/tag 错配或不支持编码 | HEVC+`avc1`、H.264+`hvc1`、VP9、HEVC Main 10 | 返回 `prepared_media_invalid` | P0 | 通过 |
 | TC-008 | 旧模式回归 | 全量 GPU 测试 | branded/clean/outro/local/COS/ledger 无回归 | P0 | 通过 |
 | TC-009 | CPU profile 隔离 | 跑 TT core/service/runner 测试 | 仅当前 profile 可领取，历史状态不改 | P0 | 通过 |
 | TC-010 | 生产切换 | 检查 CPU/GPU health 和配置 | 两端 mode/profile 对齐，服务 active | P0 | 待执行 |

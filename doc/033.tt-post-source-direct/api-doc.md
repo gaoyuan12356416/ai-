@@ -30,6 +30,8 @@
 
 `output_sha256` 和 `output_size` 必须分别等于下载后原片的 SHA-256 和大小。`output_url` 指向已验证的拉取 origin，不是原始 COS URL。
 
+响应 `probe` 返回原片实际编码，不做伪装或重写：H.264 必须与 `avc1` 配对，HEVC/H.265 必须与 `hvc1` 配对。两者仍必须满足 profile、`yuv420p`、720×1280、30fps、AAC-LC、声道、采样率、时长、大小和平均码率边界；不支持编码或错配 tag 返回 `prepared_media_invalid`。
+
 ## GPU health
 
 `GET /health` 增加新的可观测取值：

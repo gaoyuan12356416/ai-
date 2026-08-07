@@ -98,14 +98,26 @@ def prepared_probe(duration, video_encoder="hevc_nvenc"):
     }
 
 
-def source_direct_probe(duration, *, profile="Main", sample_rate="44100"):
+def source_direct_probe(
+    duration,
+    *,
+    codec="h264",
+    codec_tag=None,
+    profile=None,
+    sample_rate="44100",
+):
+    normalized_codec = str(codec).lower()
+    if codec_tag is None:
+        codec_tag = "hvc1" if normalized_codec == "hevc" else "avc1"
+    if profile is None:
+        profile = "Main"
     return {
         "format": {"duration": str(duration)},
         "streams": [
             {
                 "avg_frame_rate": "30/1",
-                "codec_name": "h264",
-                "codec_tag_string": "avc1",
+                "codec_name": normalized_codec,
+                "codec_tag_string": codec_tag,
                 "codec_type": "video",
                 "height": 1280,
                 "pix_fmt": "yuv420p",
@@ -1737,6 +1749,75 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertEqual(published["state"], "initialized")
         self.assertEqual(len(api.init_calls), 1)
         self.assertEqual(api.init_calls[0][2], prepared["output_url"])
+
+    def test_source_direct_accepts_hevc_hvc1_and_revalidates_manifest(self):
+        config = make_source_direct_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner(
+                [source_direct_probe(107.6, codec="hevc", sample_rate="44100")]
+            ),
+            downloader=make_downloader([]),
+            object_store=FakeObjectStore(),
+            api=api,
+        )
+
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+
+        self.assertEqual(prepared["probe"]["video_codec"], "hevc")
+        self.assertEqual(prepared["probe"]["video_codec_tag"], "hvc1")
+        self.assertEqual(prepared["probe"]["profile"], "main")
+        self.assertEqual(prepared["probe"]["audio_sample_rate"], 44100)
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(len(api.init_calls), 1)
+        self.assertEqual(api.init_calls[0][2], prepared["output_url"])
+
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        manifest["result"]["probe"]["video_codec_tag"] = "avc1"
+        with self.assertRaises(worker.TTGPUError) as caught:
+            worker._prepare_response(manifest, True, config, JOB_ID)
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+
+    def test_source_direct_rejects_unsupported_or_mismatched_video_contract(self):
+        config = make_source_direct_config(self.root)
+        path = self.root / "source-direct-invalid.mp4"
+        path.write_bytes(SOURCE_BYTES)
+        cases = (
+            {"codec": "hevc", "codec_tag": "avc1", "profile": "Main"},
+            {"codec": "h264", "codec_tag": "hvc1", "profile": "High"},
+            {"codec": "vp9", "codec_tag": "vp09", "profile": "0"},
+            {"codec": "hevc", "codec_tag": "hvc1", "profile": "Main 10"},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    worker.validate_prepared_output(
+                        config,
+                        source_direct_probe(10, **case),
+                        path,
+                        1024 * 1024,
+                        10,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "prepared_media_invalid",
+                )
 
     def test_source_direct_rejects_trim_before_download(self):
         config = make_source_direct_config(self.root)

@@ -9,7 +9,7 @@
 - CPU release：`4362f3928e8c5c3f437917585b9f645e51986536`。
 - GPU release：`f1a0434443751646b848a5d931781ce9a404e511`。
 - 原素材域名为 `advertising-1306474899.cos.ap-hongkong.myqcloud.com`，当前已验证的 TikTok URL Property origin 为 `https://socialkit-cdn.yingliang.tech`，因此不能直接把原始 COS URL 交给 TikTok。
-- 最近 5 个真实素材只读探测均为 720×1280、30fps、H.264/AVC、AAC 双声道，采样率为 44.1kHz 或 48kHz。
+- 生产只读探测已确认原片可能为 H.264/AVC `avc1` 或 HEVC/H.265 `hvc1`；两类均可为 720×1280、30fps、AAC 双声道，采样率为 44.1kHz 或 48kHz。
 
 ## 目标
 
@@ -39,7 +39,7 @@
 1. 新入池或立即测试任务仍先持久化并由独立 prepare runner 处理。
 2. GPU 校验 `expected_profile=tt-post-source-direct-v1` 和 `source_trim_tail_seconds=0`。
 3. GPU 下载原片、计算 SHA-256/大小并执行 ffprobe；不调用 FFmpeg。
-4. 只接受 720×1280、30fps、H.264 `avc1`、`yuv420p`、AAC-LC 双声道、44.1/48kHz，且满足现有大小、时长和平均码率上限的素材。
+4. 只接受 720×1280、30fps、H.264 `avc1`（Baseline/Constrained Baseline/Main/High）或 HEVC `hvc1`（Main）、`yuv420p`、AAC-LC 双声道、44.1/48kHz，且满足现有大小、时长和平均码率上限的素材。编码与容器 tag 必须严格配对。
 5. GPU 将原片字节原样上传到当前已验证的存储 origin，并在 manifest 中冻结源 SHA/大小、输出 SHA/大小、profile、mode 和 URL 哈希。
 6. 发布前再次校验 manifest、实际输出 origin、三项生产门禁和 TikTok Creator Info。
 7. 当前 profile 只领取同 profile 的素材。切到 `source_direct` 后，旧 `direct_outro` 素材保留但不被新调度领取；切回旧 profile 后可继续使用。
@@ -81,9 +81,10 @@
 ## 风险与待确认
 
 - `source_direct` 仍需一次下载和镜像，因为原始 COS origin 不是当前已验证 URL Property；这是传输，不是视频制作。
-- 未来出现非 720×1280/H.264/AAC 标准素材时会 fail-closed，需要切回制作模式或扩展并评审原片合同。
+- 未来出现非 720×1280、非 H.264/HEVC、非 `yuv420p` 或非 AAC 标准素材时仍会 fail-closed，需要切回制作模式或扩展并评审原片合同。
 - 真实帖子效果与 TikTok 最终处理结果由用户的手动测试确认。
 
 ## 变更记录
 
 - 2026-08-07：初版，采用独立 `source_direct` profile 和原字节镜像方案。
+- 2026-08-07：根据生产素材 `6028067` 的只读 ffprobe 证据，将原字节合同扩展为严格配对的 H.264/`avc1` 与 HEVC/`hvc1`，不引入转码。
