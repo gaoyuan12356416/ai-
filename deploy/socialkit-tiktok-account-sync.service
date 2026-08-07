@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly SocialKit TikTok account snapshot sync to ads_ai
+Description=SocialKit TikTok account snapshot sync to ads_ai
 Wants=network-online.target
 After=network-online.target
 

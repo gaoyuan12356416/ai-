@@ -11,6 +11,7 @@ from unittest import mock
 
 MODULE_PATH = pathlib.Path(__file__).with_name("sync_socialkit_tiktok_accounts.py")
 TIMER_PATH = MODULE_PATH.parents[1] / "deploy" / "socialkit-tiktok-account-sync.timer"
+SERVICE_PATH = MODULE_PATH.parents[1] / "deploy" / "socialkit-tiktok-account-sync.service"
 SPEC = importlib.util.spec_from_file_location("socialkit_tt_sync", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
@@ -229,6 +230,14 @@ class TimerContractTest(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* *:02/5:00", timer)
         self.assertIn("Persistent=true", timer)
         self.assertNotIn("OnCalendar=*-*-* *:05:00", timer)
+
+    def test_service_description_does_not_claim_hourly_frequency(self):
+        service = SERVICE_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "Description=SocialKit TikTok account snapshot sync to ads_ai",
+            service,
+        )
+        self.assertNotIn("Hourly", service)
 
 
 if __name__ == "__main__":

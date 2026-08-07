@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | 源/目标边界与关联核验 | Codex | SocialKit / ads_ai metadata | 完成 |
 | 同步脚本与安全保护 | Codex | `scripts/sync_socialkit_tiktok_accounts.py` | 完成 |
-| 单元测试 | Codex | `scripts/test_sync_socialkit_tiktok_accounts.py` | 14/14 通过 |
+| 单元测试 | Codex | `scripts/test_sync_socialkit_tiktok_accounts.py` | 15/15 通过 |
 | DDL 与配置模板 | Codex | `doc/013.../*.sql`, `deploy/*.env.example` | 完成 |
 | systemd 五分钟任务 | Codex | `deploy/*.service|timer` | 完成，待部署 |
 | GitHub-first 生产部署 | Codex | commit/release/systemd/DDL | 待执行 |
