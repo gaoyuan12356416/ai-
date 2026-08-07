@@ -119,6 +119,45 @@ class MemorySafetyContractTest(unittest.TestCase):
         self.assertIn("for item in cursor:", function_source)
         self.assertNotIn(".fetchall()", function_source)
 
+    def test_streamed_cache_summary_matches_materialized_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.module.CACHE_DB = Path(temp_dir) / "fixture.sqlite3"
+            with self.module.cache_conn() as conn:
+                self.module.ensure_cache_schema(conn)
+                placeholders = ",".join(["?"] * (len(self.module.SOURCE_COLUMNS) + 1))
+                conn.executemany(
+                    "INSERT INTO tt_minis_multi_dim_rows (%s, refreshed_at) VALUES (%s)"
+                    % (",".join(self.module.SOURCE_COLUMNS), placeholders),
+                    (
+                        [row.get(column, "") for column in self.module.SOURCE_COLUMNS]
+                        + ["2026-08-07 16:00:00"]
+                        for row in self.rows
+                    ),
+                )
+                conn.commit()
+            conn.close()
+
+            materialized_rows = self.module.fetch_rows_from_cache("2026-08-06", "2026-08-07", "campaign")
+            materialized = self.module.build_payload(
+                materialized_rows,
+                "2026-08-06",
+                "2026-08-07",
+                self.validation,
+                include_rows=False,
+            )
+            summary = self.module.summarize_cache_range("2026-08-06", "2026-08-07", "campaign")
+            streamed = self.module.build_payload(
+                [],
+                "2026-08-06",
+                "2026-08-07",
+                self.validation,
+                include_rows=False,
+                summary=summary,
+            )
+
+            for key in ("meta", "totals", "daily_totals", "validation", "levels"):
+                self.assertEqual(materialized[key], streamed[key], key)
+
     def test_failed_publish_keeps_previous_manifest_references_readable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)

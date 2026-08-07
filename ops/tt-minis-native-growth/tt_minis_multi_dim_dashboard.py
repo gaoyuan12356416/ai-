@@ -813,7 +813,8 @@ def ensure_cache_for_range(start_date, end_date, metric_level=DEFAULT_METRIC_LEV
 def fetch_rows_from_cache(start_date, end_date, metric_level=DEFAULT_METRIC_LEVEL):
     metric_level = normalize_metric_level(metric_level)
     rows = []
-    with cache_conn() as conn:
+    conn = cache_conn()
+    try:
         ensure_cache_schema(conn)
         cursor = conn.execute(
             """
@@ -831,16 +832,46 @@ def fetch_rows_from_cache(start_date, end_date, metric_level=DEFAULT_METRIC_LEVE
                 if col in row:
                     row[col] = int_num(row[col]) if col in {"installs", "impressions", "clicks", "ad_impression", "row_count"} else num(row[col])
             rows.append(row)
+    finally:
+        conn.close()
     return rows
 
 
-def aggregate_totals(rows):
-    spend = sum(dec(r["spend"]) for r in rows)
-    revenue = sum(dec(r["revenue"]) for r in rows)
-    installs = sum(dec(r["installs"]) for r in rows)
-    impressions = sum(dec(r["impressions"]) for r in rows)
-    clicks = sum(dec(r["clicks"]) for r in rows)
-    ad_impression = sum(dec(r["ad_impression"]) for r in rows)
+def totals_accumulator():
+    return {
+        "spend": Decimal("0"),
+        "revenue": Decimal("0"),
+        "installs": Decimal("0"),
+        "impressions": Decimal("0"),
+        "clicks": Decimal("0"),
+        "ad_impression": Decimal("0"),
+        "accounts": set(),
+        "campaigns": set(),
+        "adgroups": set(),
+        "ads": set(),
+    }
+
+
+def accumulate_totals(accumulator, row):
+    for key in ("spend", "revenue", "installs", "impressions", "clicks", "ad_impression"):
+        accumulator[key] += dec(row[key])
+    if row["ad_account_id"]:
+        accumulator["accounts"].add(row["ad_account_id"])
+    if row["campaign_id"]:
+        accumulator["campaigns"].add(row["campaign_id"])
+    if row["adset_id"] and row["adset_id"] != "campaign层级不可用":
+        accumulator["adgroups"].add(row["adset_id"])
+    if row["ad_id"] and row["ad_id"] != "campaign层级不可用":
+        accumulator["ads"].add(row["ad_id"])
+
+
+def finalize_totals(accumulator):
+    spend = accumulator["spend"]
+    revenue = accumulator["revenue"]
+    installs = accumulator["installs"]
+    impressions = accumulator["impressions"]
+    clicks = accumulator["clicks"]
+    ad_impression = accumulator["ad_impression"]
     return {
         "spend": num(spend),
         "revenue": num(revenue),
@@ -851,11 +882,18 @@ def aggregate_totals(rows):
         "clicks": int_num(clicks),
         "ctr": num(clicks / impressions) if impressions else 0.0,
         "ad_impression": int_num(ad_impression),
-        "accounts": len({r["ad_account_id"] for r in rows if r["ad_account_id"]}),
-        "campaigns": len({r["campaign_id"] for r in rows if r["campaign_id"]}),
-        "adgroups": len({r["adset_id"] for r in rows if r["adset_id"] and r["adset_id"] != "campaign层级不可用"}),
-        "ads": len({r["ad_id"] for r in rows if r["ad_id"] and r["ad_id"] != "campaign层级不可用"}),
+        "accounts": len(accumulator["accounts"]),
+        "campaigns": len(accumulator["campaigns"]),
+        "adgroups": len(accumulator["adgroups"]),
+        "ads": len(accumulator["ads"]),
     }
+
+
+def aggregate_totals(rows):
+    accumulator = totals_accumulator()
+    for row in rows:
+        accumulate_totals(accumulator, row)
+    return finalize_totals(accumulator)
 
 
 def rows_by_date(rows):
@@ -873,6 +911,53 @@ def daily_totals(rows):
         total["rows"] = len(day_rows)
         out[day] = total
     return out
+
+
+def summarize_cache_range(start_date, end_date, metric_level=DEFAULT_METRIC_LEVEL):
+    """Build the manifest summary without materializing the full cached row set."""
+    metric_level = normalize_metric_level(metric_level)
+    total = totals_accumulator()
+    daily = {}
+    daily_counts = collections.Counter()
+    row_count = 0
+    columns = (
+        "dt, ad_account_id, campaign_id, adset_id, ad_id, "
+        "spend, revenue, installs, impressions, clicks, ad_impression"
+    )
+    conn = cache_conn()
+    try:
+        ensure_cache_schema(conn)
+        cursor = conn.execute(
+            """
+            SELECT %s
+            FROM tt_minis_multi_dim_rows
+            WHERE metric_level = ? AND dt BETWEEN ? AND ?
+            ORDER BY dt DESC
+            """
+            % columns,
+            (metric_level, start_date, end_date),
+        )
+        for item in cursor:
+            row = dict(item)
+            for col in ("spend", "revenue"):
+                row[col] = num(row[col])
+            for col in ("installs", "impressions", "clicks", "ad_impression"):
+                row[col] = int_num(row[col])
+            accumulate_totals(total, row)
+            day = row["dt"]
+            if day not in daily:
+                daily[day] = totals_accumulator()
+            accumulate_totals(daily[day], row)
+            daily_counts[day] += 1
+            row_count += 1
+    finally:
+        conn.close()
+    daily_result = {}
+    for day, accumulator in daily.items():
+        day_total = finalize_totals(accumulator)
+        day_total["rows"] = daily_counts[day]
+        daily_result[day] = day_total
+    return {"row_count": row_count, "totals": finalize_totals(total), "daily_totals": daily_result}
 
 
 def sample_validation(rows):
@@ -989,10 +1074,12 @@ def level_source_text(metric_level):
     )
 
 
-def build_payload(rows, start_date, end_date, validation, include_rows=True, metric_level=DEFAULT_METRIC_LEVEL):
+def build_payload(rows, start_date, end_date, validation, include_rows=True, metric_level=DEFAULT_METRIC_LEVEL, summary=None):
     metric_level = normalize_metric_level(metric_level)
     generated_at = bj_now().strftime("%Y-%m-%d %H:%M:%S")
-    totals = aggregate_totals(rows)
+    totals = summary["totals"] if summary is not None else aggregate_totals(rows)
+    row_count = summary["row_count"] if summary is not None else len(rows)
+    totals_by_day = summary["daily_totals"] if summary is not None else daily_totals(rows)
     dictionaries = {}
     compact_rows = []
     if include_rows:
@@ -1017,7 +1104,7 @@ def build_payload(rows, start_date, end_date, validation, include_rows=True, met
             "start_date": start_date,
             "end_date": end_date,
             "public_url": PUBLIC_URL,
-            "row_count": len(rows),
+            "row_count": row_count,
             "metric_level": metric_level,
             "metric_level_label": METRIC_LEVELS[metric_level]["label"],
             "source": level_source_text(metric_level),
@@ -1045,7 +1132,7 @@ def build_payload(rows, start_date, end_date, validation, include_rows=True, met
         "dict_columns": DICT_COLUMNS,
         "dicts": dictionaries,
         "totals": totals,
-        "daily_totals": daily_totals(rows),
+        "daily_totals": totals_by_day,
         "validation": validation,
         "rows": compact_rows if include_rows else [],
     }
@@ -1344,30 +1431,39 @@ def main():
         for level in METRIC_LEVELS:
             refresh_results.extend(ensure_cache_for_range(start_date, end_date, level))
     missing_dates = {level: missing_cache_dates(start_date, end_date, level) for level in METRIC_LEVELS}
-    rows = fetch_rows_from_cache(start_date, end_date, DEFAULT_METRIC_LEVEL)
+    summary = summarize_cache_range(start_date, end_date, DEFAULT_METRIC_LEVEL)
     validation = {"type": "skipped", "checks": [], "warnings": []}
-    if not args.skip_validation and rows:
-        validation = sample_validation(rows)
-    payload = build_payload(rows, start_date, end_date, validation, include_rows=False, metric_level=DEFAULT_METRIC_LEVEL)
+    if not args.skip_validation and summary["row_count"]:
+        validation_dates = list(summary["daily_totals"].keys())[:SAMPLE_VALIDATION_DAYS]
+        validation_rows = fetch_rows_from_cache(min(validation_dates), max(validation_dates), DEFAULT_METRIC_LEVEL)
+        validation = sample_validation(validation_rows)
+        del validation_rows
+    payload = build_payload(
+        [],
+        start_date,
+        end_date,
+        validation,
+        include_rows=False,
+        metric_level=DEFAULT_METRIC_LEVEL,
+        summary=summary,
+    )
     elapsed = time.time() - started
     if args.publish:
-        if not args.dry_run:
-            del rows
         out = publish_from_cache(payload, Path(args.output_dir), start_date, end_date)
         print("published=%s" % out)
         print("url=%s" % PUBLIC_URL)
     if args.dry_run or not args.publish:
-        rows_by_level = {DEFAULT_METRIC_LEVEL: rows}
+        summaries_by_level = {DEFAULT_METRIC_LEVEL: summary}
         for level in METRIC_LEVELS:
             if level != DEFAULT_METRIC_LEVEL:
-                rows_by_level[level] = fetch_rows_from_cache(start_date, end_date, level)
+                summaries_by_level[level] = summarize_cache_range(start_date, end_date, level)
         print(
             json.dumps(
                 {
                     "start_date": start_date,
                     "end_date": end_date,
-                    "rows": {level: len(level_rows) for level, level_rows in rows_by_level.items()},
-                    "totals": {level: build_payload(level_rows, start_date, end_date, {"type": "skipped", "checks": [], "warnings": []}, include_rows=False, metric_level=level)["totals"] for level, level_rows in rows_by_level.items()},
+                    "rows": {level: level_summary["row_count"] for level, level_summary in summaries_by_level.items()},
+                    "totals": {level: level_summary["totals"] for level, level_summary in summaries_by_level.items()},
                     "validation": validation,
                     "cache_refresh": refresh_results,
                     "cache_prune": prune_result,

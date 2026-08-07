@@ -26,7 +26,7 @@ nginx -t
 
 ## Memory and publish-safety contract
 
-- The 60-day summary payload deliberately omits dictionaries and compact rows; `latest.json` already publishes `rows=[]` and `dicts={}`, while daily detail JSON keeps the existing dictionary-encoded schema.
+- The 60-day summary is accumulated directly from the SQLite cursor and never materializes the full campaign row set. `latest.json` still publishes `rows=[]` and `dicts={}`, while daily detail JSON keeps the existing dictionary-encoded schema.
 - SQLite rows are converted directly from the cursor instead of retaining a second `fetchall()` result.
 - Refresh inserts stream parameters into `executemany()` instead of creating another full two-day parameter matrix.
 - Every run writes detail JSON under its own `data/<version>/<level>/<day>.json` directory. Only after every detail file succeeds are `latest.json` and `index.html` atomically replaced, so a failed run cannot mix old and new detail data.
