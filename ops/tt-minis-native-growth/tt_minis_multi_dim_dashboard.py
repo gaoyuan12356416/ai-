@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -1478,5 +1479,17 @@ def main():
     return 0
 
 
+def run_cli():
+    try:
+        return main()
+    except subprocess.TimeoutExpired as exc:
+        print(
+            "TT minis source query timed out after %s seconds; "
+            "the published report was not replaced." % exc.timeout,
+            file=sys.stderr,
+        )
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())

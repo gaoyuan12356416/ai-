@@ -1,10 +1,13 @@
 import importlib.util
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime
 from pathlib import Path
 
@@ -78,6 +81,40 @@ class MemorySafetyContractTest(unittest.TestCase):
             sample_row(self.module, "2026-08-06", "1001", "2001", 5.75),
             sample_row(self.module, "2026-08-07", "1002", "2002", 3.50),
         ]
+
+    def test_timeout_error_redacts_command_arguments(self):
+        secret = "do-not-log-this-password"
+
+        def raise_timeout():
+            raise subprocess.TimeoutExpired(
+                ["mysql", "--password=" + secret],
+                300,
+                output="stdout-" + secret,
+                stderr="stderr-" + secret,
+            )
+
+        self.module.main = raise_timeout
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            exit_code = self.module.run_cli()
+
+        message = stderr.getvalue()
+        self.assertEqual(exit_code, 2)
+        self.assertIn("timed out after 300 seconds", message)
+        self.assertIn("published report was not replaced", message)
+        self.assertNotIn(secret, message)
+        self.assertNotIn("--password", message)
+
+    def test_run_cli_preserves_success_and_non_timeout_failures(self):
+        self.module.main = lambda: 17
+        self.assertEqual(17, self.module.run_cli())
+
+        def raise_value_error():
+            raise ValueError("unrelated failure")
+
+        self.module.main = raise_value_error
+        with self.assertRaisesRegex(ValueError, "unrelated failure"):
+            self.module.run_cli()
 
     def test_summary_payload_skips_rows_without_changing_summary(self):
         full = self.module.build_payload(
