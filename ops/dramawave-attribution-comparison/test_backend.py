@@ -281,6 +281,11 @@ class MappingTests(unittest.TestCase):
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
+        retention_patcher = mock.patch.object(
+            service, "retention_start", return_value=dt.date(2026, 8, 1)
+        )
+        retention_patcher.start()
+        self.addCleanup(retention_patcher.stop)
         service.clear_response_cache()
         self.tempdir = tempfile.TemporaryDirectory()
         self.path = Path(self.tempdir.name) / "dashboard.sqlite3"
@@ -1295,6 +1300,98 @@ class RefreshAtomicityTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) n FROM refresh_revenue_stage").fetchone()["n"], 0
+                )
+
+    def test_successful_refresh_prunes_expired_facts_rollups_and_logs(self):
+        class FixedDateTime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(2026, 10, 1, 4, 0, tzinfo=dt.timezone.utc)
+                return value if tz is None else value.astimezone(tz)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard.sqlite3"
+            expired_day = "2026-08-02"
+            retained_day = "2026-10-01"
+            with common.connect_sqlite(path) as conn:
+                expired = refresh_cache.blank_fact(dt.date.fromisoformat(expired_day))
+                expired.update(custom_row(dt=expired_day, spend=9))
+                common.insert_facts(conn, [expired])
+                refresh_cache.rebuild_rollups_for_day(conn, expired_day)
+                conn.execute(
+                    "INSERT INTO refresh_log(dt,started_at,finished_at,status,fact_rows,detail,data_version) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (
+                        expired_day,
+                        "2026-08-02T11:59:00+08:00",
+                        "2026-08-02T12:00:00+08:00",
+                        "success",
+                        1,
+                        "{}",
+                        "old-version",
+                    ),
+                )
+                mark_published_d10_cache(conn, "old-version")
+                conn.commit()
+
+            args = argparse.Namespace(
+                db_path=str(path),
+                env_file=None,
+                date=[retained_day],
+                bootstrap_start=None,
+                bootstrap_end=None,
+                skip_mount_check=True,
+            )
+
+            @contextlib.contextmanager
+            def fake_connection(_config):
+                yield object()
+
+            env = {
+                "ADMIN_MAPPING_MYSQL_HOST": "readonly",
+                "ADMIN_MAPPING_MYSQL_PORT": "63350",
+                "ADMIN_MAPPING_MYSQL_USER": "reader",
+                "ADMIN_MAPPING_MYSQL_PASSWORD": "secret",
+                "ADMIN_MAPPING_MYSQL_DATABASE": "kunlunads_dev",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                refresh_cache.dt, "datetime", FixedDateTime
+            ), mock.patch.object(
+                refresh_cache, "mysql_connection", fake_connection
+            ), mock.patch.object(
+                refresh_cache, "source_day_snapshot", lambda _source: contextlib.nullcontext()
+            ), mock.patch.object(
+                refresh_cache,
+                "fetch_custom",
+                return_value=(
+                    [custom_row(dt=retained_day)],
+                    "2026-10-01 12:00:00",
+                ),
+            ), mock.patch.object(
+                refresh_cache,
+                "fetch_revenue",
+                return_value=([revenue_row()], "2026-10-01 12:00:00"),
+            ):
+                refresh_cache.refresh(args)
+
+            with common.connect_sqlite(path, readonly=True) as conn:
+                for table in (
+                    service.FACT_TABLE,
+                    service.FILTER_ROLLUP_TABLE,
+                    service.CAMPAIGN_ROLLUP_TABLE,
+                    "refresh_log",
+                ):
+                    self.assertEqual(
+                        conn.execute(
+                            f"SELECT COUNT(*) n FROM {table} WHERE dt=?", (expired_day,)
+                        ).fetchone()["n"],
+                        0,
+                    )
+                self.assertGreater(
+                    conn.execute(
+                        "SELECT COUNT(*) n FROM attribution_fact WHERE dt=?", (retained_day,)
+                    ).fetchone()["n"],
+                    0,
                 )
 
     def test_failed_multi_day_refresh_keeps_previous_facts_and_version(self):

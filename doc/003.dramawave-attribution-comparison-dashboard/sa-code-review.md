@@ -30,9 +30,9 @@ D7/D10 代码设计评审通过，允许进入候选缓存和生产验收。数�
 
 - 2026-08-06 历史 D30 基线：Windows/目标机 Python `51/51`、编译、Python 3.9 兼容、浏览器 fixture、只读源快照、单日 canary、`920,751` facts bootstrap、systemd/Nginx 和自然 timer 均按当时记录通过。
 - 2026-08-07 D10 已核验事实：`ads_app_revenues_10d` schema/index 与 D30 相同，当前最早日期为 `2026-08-01`。
-- 2026-08-07 D10 本地验证：自动化 `63/63` 通过，覆盖 D10 字段/源表合同及旧缓存拒绝等本地路径；checkpointed 历史 D30 库先经 `mode=ro&immutable=1` 拒绝，测试确认 bytes/mtime 不变且不创建 `-wal` / `-shm`；D10 主文件配合未 checkpoint 的已提交 WAL 篡改，则由随后普通只读、WAL-aware 的二次合同校验拒绝，refresh 不进入 writable/MySQL，Web 不启动 HTTP Server。
+- 2026-08-07 D10 本地验证：自动化 `64/64` 通过，覆盖 D10 字段/源表合同、60 天裁剪及旧缓存拒绝等本地路径；checkpointed 历史 D30 库先经 `mode=ro&immutable=1` 拒绝，测试确认 bytes/mtime 不变且不创建 `-wal` / `-shm`；D10 主文件配合未 checkpoint 的已提交 WAL 篡改，则由随后普通只读、WAL-aware 的二次合同校验拒绝，refresh 不进入 writable/MySQL，Web 不启动 HTTP Server。
 - D10 待验证：全新候选 SQLite 的真实 bootstrap/语义标记、生产数据对账、原子切换、已授权浏览器、自然 timer 和生产页面。未执行前不得回填为通过。
 
 ## 变更记录
 
-- 2026-08-07：评审对象由 D7/D30 改为 D7/D10；新增旧 D30 SQLite 拒绝门禁。用户批准 8/1 起点后，代码、前端和测试边界已统一，本地自动化 `63/63` 通过；历史 D30 验证结果保持原值并仅作为容量和回滚基线，生产仍待候选验收。
+- 2026-08-07：评审对象由 D7/D30 改为 D7/D10；新增旧 D30 SQLite 拒绝门禁。用户批准 8/1 起点后，代码、前端和测试边界已统一，本地自动化 `64/64` 通过；历史 D30 验证结果保持原值并仅作为容量和回滚基线，生产仍待候选验收。

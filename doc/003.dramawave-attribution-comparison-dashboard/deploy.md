@@ -24,7 +24,7 @@
 | --- | --- |
 | 目标新源 | `kunlunads_dev.ads_app_revenues_10d` |
 | schema/index | 已只读核验，与 D30 相同 |
-| D10 本地自动化 | 边界调整后 `63/63` 通过；不等于候选/生产验收 |
+| D10 本地自动化 | 边界与 60 天裁剪回归后 `64/64` 通过；不等于候选/生产验收 |
 | 当前最早 D10 日期 | `2026-08-01` |
 | 批准业务起点 | `2026-08-01` |
 | 日期决策 | 用户已明确批准从 8/1 开始；代码/测试边界已同步 |
@@ -39,7 +39,7 @@ D10 不在历史 D30 SQLite 上做原地迁移。使用三个明确对象：
 | 对象 | 路径/约束 |
 | --- | --- |
 | 历史 D30 live/回滚库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`，原样保留 |
-| 全新 D10 候选库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>.sqlite3`，发布前必须不存在 |
+| 全新 D10 候选库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>-<attempt>.sqlite3`，发布前必须不存在；失败重试使用新 attempt，旧候选保留审计 |
 | 活动数据库指针 | `dashboard.env` 中的 `DRAMAWAVE_ATTRIBUTION_DB_PATH`；通过同目录临时文件 + `mv -Tf` 原子替换，禁止复制候选库覆盖 live 文件 |
 
 D10 候选库第一次成功发布版本时，必须在同一 SQLite 事务中包含以下权威语义标记：
@@ -62,7 +62,7 @@ D10 Web 和 refresh 在任何普通 SQLite 打开前，都必须先用 `mode=ro&
 | Web 监听 | `127.0.0.1:8832` |
 | 公网页面 | `/reports/dramawave-attribution-comparison/` |
 | 历史 D30 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`；D10 切换后仍保留作回滚 |
-| D10 候选 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>.sqlite3`；每次候选使用新路径 |
+| D10 候选 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>-<attempt>.sqlite3`；每次候选使用新路径 |
 | 活动 SQLite 选择 | `dashboard.env` 的 `DRAMAWAVE_ATTRIBUTION_DB_PATH`；只允许原子替换环境文件 |
 | 独立环境文件 | `/mnt/data-disk/dramawave-attribution-comparison/dashboard.env` |
 | 复用的 MySQL 凭据环境文件 | `/root/drama_material_service/.env`，仅 refresh oneshot 读取 |
@@ -117,7 +117,15 @@ TARGET_SHA='<待发布回填的40位commit>'
 SOURCE_REPO='/root/drama_material_service'
 RELEASE_ROOT='/opt/dramawave-attribution-comparison/releases'
 RELEASE_PATH="${RELEASE_ROOT}/${TARGET_SHA}"
+SHORT_SHA="$(printf '%s' "$TARGET_SHA" | cut -c1-12)"
+ATTEMPT_ID="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M%S)"
+D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}-${ATTEMPT_ID}.sqlite3"
+BOOTSTRAP_START='2026-08-01'
+BOOTSTRAP_END="$(TZ=Asia/Shanghai date +%F)"
+test ! -e "$D10_CANDIDATE_DB"
 ```
+
+`ATTEMPT_ID` 和 `D10_CANDIDATE_DB` 必须记录到本次发布清单，并在后续命令中复用同一绝对路径；不得在失败后删除或覆盖旧候选再重试。
 
 从 GitHub 更新对象并确认 SHA：
 
@@ -195,7 +203,11 @@ SHORT_SHA="$(printf '%s' "$TARGET_SHA" | cut -c1-12)"
 BACKUP_DIR="/mnt/data-disk/dramawave-attribution-comparison/backups/${BACKUP_TS}-pre-${SHORT_SHA}"
 install -d -o root -g root -m 0700 "$BACKUP_DIR"
 
-readlink -f /opt/dramawave-attribution-comparison/current > "$BACKUP_DIR/previous-current.txt" 2>&1 || true
+CURRENT_BEFORE="$(readlink -f /opt/dramawave-attribution-comparison/current)"
+test -d "$CURRENT_BEFORE"
+printf '%s\n' "$CURRENT_BEFORE" > "$BACKUP_DIR/previous-current.txt"
+test -f "$CURRENT_BEFORE/SOURCE_COMMIT"
+install -o root -g root -m 0600 "$CURRENT_BEFORE/SOURCE_COMMIT" "$BACKUP_DIR/previous-SOURCE_COMMIT"
 systemctl is-enabled dramawave-attribution-comparison.service > "$BACKUP_DIR/web-enabled.txt" 2>&1 || true
 systemctl is-active dramawave-attribution-comparison.service > "$BACKUP_DIR/web-active.txt" 2>&1 || true
 systemctl is-enabled dramawave-attribution-comparison-refresh.timer > "$BACKUP_DIR/timer-enabled.txt" 2>&1 || true
@@ -273,15 +285,20 @@ install -d -o root -g root -m 0700 /mnt/data-disk/dramawave-attribution-comparis
 install -d -o root -g root -m 0700 /mnt/data-disk/dramawave-attribution-comparison/backups
 ```
 
-创建服务专用 venv，并从 release 内的精确版本依赖清单安装。首次部署必须执行；后续 release 仅在 `requirements.txt` 变化时重建并复验：
+首次部署创建服务专用 venv，并从 release 内的精确版本依赖清单安装。已有 D30 生产 venv 时不得原地覆盖：先确认新旧 `requirements.txt` 完全一致后复用；不一致则停止本次迁移，另建经验证的新 venv，确保 D30 回滚环境不受影响：
 
 ```bash
 install -d -o root -g root -m 0755 /opt/dramawave-attribution-comparison
-python3 -m venv /opt/dramawave-attribution-comparison/venv
-/opt/dramawave-attribution-comparison/venv/bin/python -m pip install --disable-pip-version-check \
-  -r "$RELEASE_PATH/requirements.txt"
-/opt/dramawave-attribution-comparison/venv/bin/python -c \
-  'import pymysql; print("PyMySQL import ok")'
+VENV_PY=/opt/dramawave-attribution-comparison/venv/bin/python
+if test -x "$VENV_PY"; then
+  CURRENT_BEFORE="$(readlink -f /opt/dramawave-attribution-comparison/current)"
+  test -f "$CURRENT_BEFORE/requirements.txt"
+  cmp -s "$CURRENT_BEFORE/requirements.txt" "$RELEASE_PATH/requirements.txt"
+else
+  python3 -m venv /opt/dramawave-attribution-comparison/venv
+  "$VENV_PY" -m pip install --disable-pip-version-check -r "$RELEASE_PATH/requirements.txt"
+fi
+"$VENV_PY" -c 'import pymysql; print("PyMySQL import ok")'
 ```
 
 当前历史 D30 生产的 `dashboard.env` 至少包含：
@@ -290,18 +307,7 @@ python3 -m venv /opt/dramawave-attribution-comparison/venv
 DRAMAWAVE_ATTRIBUTION_DB_PATH=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
 ```
 
-在 D10 候选验证完成前保持该文件不变。候选发布时先创建同目录临时文件，指向已经核验的独立 D10 库；不要提前覆盖活动环境文件：
-
-```bash
-D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
-D10_ENV_NEXT=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d10.next
-test -f "$D10_CANDIDATE_DB"
-printf 'DRAMAWAVE_ATTRIBUTION_DB_PATH=%s\n' "$D10_CANDIDATE_DB" > "$D10_ENV_NEXT"
-chown root:root "$D10_ENV_NEXT"
-chmod 0600 "$D10_ENV_NEXT"
-```
-
-如果现有 `dashboard.env` 还含其他非 MySQL 配置，必须逐项安全复制到 `.d10.next`；不得输出文件内容或丢失既有键。第 8 节仅在所有 D10 门禁通过后用 `mv -Tf` 原子替换活动环境文件。
+在 D10 候选验证完成前保持该文件不变，也不提前创建 `.d10.next`。第 8.1 节只有在候选 bootstrap、离线合同和候选端口 HTTP 全部通过后，才从活动环境文件复制非 MySQL 配置、替换唯一 DB 指针并创建带 `ATTEMPT_ID` 的临时文件；随后用 `mv -Tf` 原子替换。
 
 ```bash
 chown root:root /mnt/data-disk/dramawave-attribution-comparison/dashboard.env
@@ -356,6 +362,49 @@ nginx -t
 
 ## 7. 首次 bootstrap
 
+### 7.0 D10 逐日源覆盖门禁
+
+在共享锁空闲、63350 主机连接数稳定不高于 3 且最近一轮 D30 已真实成功后，只建立一个 63350 只读连接。使用与生产刷新相同的日期格式，确认批准范围内 custom、D7、D10 每天都有源行；未来日期不进入门禁：
+
+```bash
+"$VENV_PY" - "$BOOTSTRAP_START" "$BOOTSTRAP_END" <<'PY'
+import datetime as dt
+import sys
+
+from refresh_cache import load_env_file, mysql_connection, require_source_config, source_day_snapshot
+
+load_env_file("/root/drama_material_service/.env")
+start, end = (dt.date.fromisoformat(value) for value in sys.argv[1:])
+days = [start + dt.timedelta(days=offset) for offset in range((end - start).days + 1)]
+queries = {
+    "custom": (
+        "SELECT COUNT(*) AS n FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (pss) "
+        "WHERE dt=%s AND product='Dramawave'"
+    ),
+    "d7": "SELECT COUNT(*) AS n FROM kunlunads_dev.ads_app_revenues WHERE dt=%s",
+    "d10": "SELECT COUNT(*) AS n FROM kunlunads_dev.ads_app_revenues_10d WHERE dt=%s",
+}
+missing = []
+with mysql_connection(require_source_config()) as conn:
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT @@read_only AS read_only")
+        assert int(cursor.fetchone()["read_only"]) == 1
+    for day in days:
+        with source_day_snapshot(conn), conn.cursor() as cursor:
+            counts = {}
+            for name, sql in queries.items():
+                parameter = day.isoformat() if name == "custom" else day.strftime("%Y%m%d")
+                cursor.execute(sql, (parameter,))
+                counts[name] = int(cursor.fetchone()["n"] or 0)
+                if not counts[name]:
+                    missing.append((day.isoformat(), name))
+            print(day.isoformat(), counts, flush=True)
+assert not missing, missing
+PY
+```
+
+任何一天为空都停止发布，不得以历史 D30 或 0 值补洞；连接上限或查询超时同样判定为门禁未通过，不立即重试。
+
 ### 7.1 D10 日期范围与候选路径
 
 用户已批准起点为 `2026-08-01`。部署时 `BOOTSTRAP_START` 必须固定为该值，并与目标 commit 的 `MIN_DATE` 完全相同：
@@ -363,7 +412,7 @@ nginx -t
 ```bash
 BOOTSTRAP_START='2026-08-01'
 BOOTSTRAP_END="$(TZ=Asia/Shanghai date +%F)"
-D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
+: "${D10_CANDIDATE_DB:?reuse the recorded candidate path}"
 test "$BOOTSTRAP_START" = '2026-08-01'
 EXPECTED_MIN_DATE="$($VENV_PY - <<'PY'
 from common import MIN_DATE
@@ -385,7 +434,6 @@ BOOTSTRAP_UNIT="dramawave-attribution-comparison-bootstrap-$(date +%Y%m%d%H%M%S)
 systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
   --property=Type=oneshot \
   --property=WorkingDirectory="$RELEASE_PATH" \
-  --property=EnvironmentFile=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env \
   --property=EnvironmentFile=/root/drama_material_service/.env \
   --property=RequiresMountsFor=/mnt/data-disk \
   --property=TimeoutStartSec=45min \
@@ -403,6 +451,7 @@ systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
   /usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock \
   /opt/dramawave-attribution-comparison/venv/bin/python \
   "$RELEASE_PATH/refresh_cache.py" \
+  --env-file /root/drama_material_service/.env \
   --db-path "$D10_CANDIDATE_DB" \
   --bootstrap-start "$BOOTSTRAP_START" --bootstrap-end "$BOOTSTRAP_END"
 ```
@@ -413,31 +462,72 @@ systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
 
 ```bash
 DB="$D10_CANDIDATE_DB"
-sqlite3 "$DB" 'PRAGMA quick_check;'
+EXPECTED_RETAINED_START="$("$VENV_PY" - <<'PY'
+from common import retention_start
+print(retention_start().isoformat())
+PY
+)"
+test "$(sqlite3 "$DB" 'PRAGMA quick_check;')" = 'ok'
 sqlite3 "$DB" "SELECT MIN(dt),MAX(dt),COUNT(*) FROM attribution_fact;"
 sqlite3 "$DB" "SELECT 'fact',COUNT(*) FROM attribution_fact UNION ALL SELECT 'filter_daily',COUNT(*) FROM attribution_filter_daily UNION ALL SELECT 'campaign_daily',COUNT(*) FROM attribution_campaign_daily;"
 sqlite3 "$DB" "SELECT key,value FROM cache_meta WHERE key IN ('comparison_window','new_attribution_source','data_version','rollup_version','generated_at','last_refresh_dates','source_max_updated_at') ORDER BY key;"
 sqlite3 "$DB" "SELECT dt,status,fact_rows,data_version FROM refresh_log ORDER BY id DESC LIMIT 20;"
-test "$(sqlite3 "$DB" 'SELECT MIN(dt) FROM attribution_fact;')" = '2026-08-01'
-test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM attribution_fact WHERE dt<'2026-08-01';")" = '0'
-test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM attribution_filter_daily WHERE dt<'2026-08-01';")" = '0'
-test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM attribution_campaign_daily WHERE dt<'2026-08-01';")" = '0'
-test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM refresh_log WHERE dt<'2026-08-01';")" = '0'
+test "$(sqlite3 "$DB" 'SELECT MIN(dt) FROM attribution_fact;')" = "$EXPECTED_RETAINED_START"
+test "$(sqlite3 "$DB" 'SELECT MAX(dt) FROM attribution_fact;')" = "$BOOTSTRAP_END"
+for table in attribution_fact attribution_filter_daily attribution_campaign_daily refresh_log; do
+  test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM ${table} WHERE dt<'${EXPECTED_RETAINED_START}';")" = '0'
+done
+for table in attribution_fact attribution_filter_daily attribution_campaign_daily; do
+  test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM ${table};")" -gt 0
+done
+for table in refresh_stage refresh_fact_stage refresh_revenue_stage; do
+  test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM ${table};")" = '0'
+done
+test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM refresh_log WHERE status<>'success';")" = '0'
+DATA_VERSION="$(sqlite3 "$DB" "SELECT value FROM cache_meta WHERE key='data_version';")"
+test -n "$DATA_VERSION"
+test "$DATA_VERSION" = "$(sqlite3 "$DB" "SELECT value FROM cache_meta WHERE key='rollup_version';")"
 sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);'
+test "$(sqlite3 "$DB" 'PRAGMA quick_check;')" = 'ok'
+
+DRAMAWAVE_ATTRIBUTION_DB_PATH="$DB" "$VENV_PY" - "$BOOTSTRAP_END" "$EXPECTED_RETAINED_START" <<'PY'
+import json
+import sys
+
+from common import connect_sqlite, db_path
+from service import meta_payload
+
+expected_end, expected_start = sys.argv[1:]
+with connect_sqlite(db_path(), readonly=True) as conn:
+    payload = meta_payload(conn)
+cache = payload["cache"]
+assert payload["minimum_date"] == "2026-08-01", payload
+assert payload["comparison_window"] == "D10", payload
+assert payload["new_attribution_source"] == "kunlunads_dev.ads_app_revenues_10d", payload
+assert payload["source_tables"]["new_attribution"] == "kunlunads_dev.ads_app_revenues_10d", payload
+assert cache["start_date"] == expected_start, payload
+assert cache["end_date"] == expected_end, payload
+assert cache["expected_start_date"] == expected_start, payload
+assert cache["range_complete"] is True, payload
+assert cache["missing_dates"] == [], payload
+print(json.dumps({"minimum_date": payload["minimum_date"], "cache": cache}, ensure_ascii=False))
+PY
 ```
 
-要求：`quick_check=ok`、实际起点为 `2026-08-01`、三层和刷新日志均无更早数据、三层均有数据、所有 bootstrap 日期日志为 success、`data_version` 非空且与 `rollup_version` 完全相等，且标记精确为 `comparison_window="D10"`、`new_attribution_source="kunlunads_dev.ads_app_revenues_10d"`。候选 HTTP 验收还必须确认 `minimum_date=expected_start_date=2026-08-01`、`range_complete=true`、`missing_dates=[]`。任何不符都删除候选发布资格，保留历史 D30 生产不动；不得修改标记来掩盖错误数据。
+以上命令是候选提升前的失败即停门禁：`minimum_date` 固定为批准边界 `2026-08-01`；实际缓存起点与 `expected_start_date` 均为 `max(2026-08-01, 北京当天-59天)`。同时要求 `quick_check=ok`、终点为北京当天、三层和刷新日志均无保留窗口前数据、三层均有数据、所有保留日期日志为 success、`data_version` 非空且与 `rollup_version` 完全相等，且标记精确为 `comparison_window="D10"`、`new_attribution_source="kunlunads_dev.ads_app_revenues_10d"`、`range_complete=true`、`missing_dates=[]`。任何断言失败都取消候选发布资格，保留历史 D30 生产不动；不得修改标记来掩盖错误数据。
 
-再验证 D10 release 会拒绝历史 D30 数据库。两个命令都必须非零退出，日志必须包含 D10 cache contract rejection；执行期间 timer/Web 仍运行历史 D30 release，D10 检查仅以只读方式打开旧库：
+再验证 D10 release 会拒绝历史 D30 数据库。两个命令都必须非零退出，日志必须包含 D10 cache contract rejection。探针只使用第 4.3 节已校验的 D30 online-backup 副本；即使门禁代码存在缺陷，也不得让测试命令获得 live D30 路径：
 
 ```bash
-D30_DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
+D30_PROBE_DB="$BACKUP_DIR/dashboard.sqlite3"
+test -f "$D30_PROBE_DB"
+PROBE_SHA_BEFORE="$(sha256sum "$D30_PROBE_DB" | cut -d' ' -f1)"
 set +e
-DRAMAWAVE_ATTRIBUTION_DB_PATH="$D30_DB" "$VENV_PY" "$RELEASE_PATH/service.py" \
+DRAMAWAVE_ATTRIBUTION_DB_PATH="$D30_PROBE_DB" "$VENV_PY" "$RELEASE_PATH/service.py" \
   --host 127.0.0.1 --port 0 > "$BACKUP_DIR/d10-web-rejects-d30.log" 2>&1
 WEB_REJECT_RC=$?
 /usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock \
-  "$VENV_PY" "$RELEASE_PATH/refresh_cache.py" --db-path "$D30_DB" --date "$BOOTSTRAP_START" \
+  "$VENV_PY" "$RELEASE_PATH/refresh_cache.py" --db-path "$D30_PROBE_DB" --date "$BOOTSTRAP_START" \
   > "$BACKUP_DIR/d10-refresh-rejects-d30.log" 2>&1
 REFRESH_REJECT_RC=$?
 set -e
@@ -445,7 +535,88 @@ test "$WEB_REJECT_RC" -eq 2
 test "$REFRESH_REJECT_RC" -eq 1
 grep -q 'D10 cache contract rejected' "$BACKUP_DIR/d10-web-rejects-d30.log"
 grep -q 'D10 cache contract rejected' "$BACKUP_DIR/d10-refresh-rejects-d30.log"
+test "$PROBE_SHA_BEFORE" = "$(sha256sum "$D30_PROBE_DB" | cut -d' ' -f1)"
 ```
+
+### 7.3 候选端口 HTTP 验收
+
+在生产 `current`、`dashboard.env`、Web 和 timer 仍保持 D30 时，用空闲高端口启动瞬态 D10 Web。失败时 trap 必须先停止候选服务，不能遗留监听：
+
+```bash
+CANDIDATE_PORT=18835
+test -z "$(ss -ltnH "sport = :${CANDIDATE_PORT}")"
+CANDIDATE_WEB_UNIT="dramawave-attribution-comparison-candidate-${ATTEMPT_ID}"
+cleanup_candidate_web() { systemctl stop "$CANDIDATE_WEB_UNIT.service" 2>/dev/null || true; }
+trap cleanup_candidate_web EXIT
+
+systemd-run --unit="$CANDIDATE_WEB_UNIT" \
+  --property=Type=simple \
+  --property=WorkingDirectory="$RELEASE_PATH" \
+  --property=NoNewPrivileges=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
+  --property=ReadOnlyPaths="$RELEASE_PATH" \
+  /usr/bin/env DRAMAWAVE_ATTRIBUTION_DB_PATH="$D10_CANDIDATE_DB" \
+  "$VENV_PY" "$RELEASE_PATH/service.py" --host 127.0.0.1 --port "$CANDIDATE_PORT"
+
+for _ in $(seq 1 30); do
+  curl -fsS "http://127.0.0.1:${CANDIDATE_PORT}/healthz" >/dev/null && break
+  sleep 1
+done
+curl -fsS "http://127.0.0.1:${CANDIDATE_PORT}/healthz" >/dev/null
+"$VENV_PY" "$RELEASE_PATH/warm_cache.py" \
+  --base-url "http://127.0.0.1:${CANDIDATE_PORT}" --attempts 3 --retry-delay 1
+
+DRAMAWAVE_CANDIDATE_BASE="http://127.0.0.1:${CANDIDATE_PORT}" "$VENV_PY" - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+
+base = os.environ["DRAMAWAVE_CANDIDATE_BASE"]
+
+def get(path, expected=200):
+    try:
+        with urllib.request.urlopen(base + path, timeout=20) as response:
+            assert response.status == expected, (path, response.status)
+            return response.read(), dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == expected, (path, exc.code, exc.read())
+        return exc.read(), dict(exc.headers)
+
+health = json.loads(get("/healthz")[0])
+meta = json.loads(get("/api/meta")[0])
+assert health["ok"] is True and health["stale"] is False, health
+assert meta["minimum_date"] == "2026-08-01", meta
+assert meta["cache"]["range_complete"] is True and meta["cache"]["missing_dates"] == [], meta
+assert meta["source_tables"]["new_attribution"] == "kunlunads_dev.ads_app_revenues_10d", meta
+start, end = meta["cache"]["start_date"], meta["cache"]["end_date"]
+version = meta["data_version"]
+common = {"api_schema_version": 2, "start_date": start, "end_date": end, "data_version": version}
+
+def path(endpoint, extra=None):
+    params = dict(common)
+    params.update(extra or {})
+    return endpoint + "?" + urllib.parse.urlencode(params)
+
+get(path("/api/options"))
+get(path("/api/query", {"dimensions": "dt,campaign", "metric_basis": "d0", "include_rankings": 0}))
+get(path("/api/rankings", {"metric_basis": "d0"}))
+csv_body, _ = get(path("/api/export.csv", {"dimensions": "dt,campaign", "metric_basis": "d0"}))
+assert b"d10_revenue" in csv_body.splitlines()[0], csv_body[:200]
+stale = dict(common)
+stale.update({"dimensions": "dt", "data_version": "stale-version", "include_rankings": 0})
+get("/api/query?" + urllib.parse.urlencode(stale), expected=409)
+print(json.dumps({"ok": True, "data_version": version, "range": [start, end]}, ensure_ascii=False))
+PY
+
+cleanup_candidate_web
+trap - EXIT
+test -z "$(ss -ltnH "sport = :${CANDIDATE_PORT}")"
+```
+
+该步骤通过后才允许进入原子提升；它不能由切换后的生产 HTTP 检查替代。
 
 ## 8. 启动 Web、Nginx 和 timer
 
@@ -456,15 +627,31 @@ grep -q 'D10 cache contract rejected' "$BACKUP_DIR/d10-refresh-rejects-d30.log"
 ```bash
 D30_RELEASE="$(readlink -f /opt/dramawave-attribution-comparison/current)"
 D30_DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
-D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
-D10_ENV_NEXT=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d10.next
+: "${D10_CANDIDATE_DB:?reuse the recorded candidate path}"
+D10_ENV_NEXT="/mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d10.next.${ATTEMPT_ID}"
 test -d "$D30_RELEASE"
 test -f "$D30_DB"
 test -f "$D10_CANDIDATE_DB"
-test -f "$D10_ENV_NEXT"
+test ! -e "$D10_ENV_NEXT"
+
+sed '/^[[:space:]]*DRAMAWAVE_ATTRIBUTION_DB_PATH=/d' \
+  /mnt/data-disk/dramawave-attribution-comparison/dashboard.env > "$D10_ENV_NEXT"
+printf 'DRAMAWAVE_ATTRIBUTION_DB_PATH=%s\n' "$D10_CANDIDATE_DB" >> "$D10_ENV_NEXT"
+chown root:root "$D10_ENV_NEXT"
+chmod 0600 "$D10_ENV_NEXT"
+test "$(grep -Ec '^[[:space:]]*DRAMAWAVE_ATTRIBUTION_DB_PATH=' "$D10_ENV_NEXT")" -eq 1
+! grep -q '^[[:space:]]*ADMIN_MAPPING_MYSQL_' "$D10_ENV_NEXT"
 
 systemctl stop dramawave-attribution-comparison-refresh.timer
-systemctl stop dramawave-attribution-comparison-refresh.service 2>/dev/null || true
+for _ in $(seq 1 180); do
+  systemctl is-active --quiet dramawave-attribution-comparison-refresh.service || break
+  sleep 5
+done
+if systemctl is-active --quiet dramawave-attribution-comparison-refresh.service; then
+  systemctl start dramawave-attribution-comparison-refresh.timer
+  echo 'active D30 refresh did not finish in 15 minutes; cutover aborted' >&2
+  exit 1
+fi
 systemctl stop dramawave-attribution-comparison.service
 test -z "$(lsof -t "$D30_DB" "$D10_CANDIDATE_DB" 2>/dev/null || true)"
 ```
@@ -605,8 +792,15 @@ D10 发布失败时必须同时切回历史 D30 release 和历史 D30 数据库�
 
 ```bash
 systemctl stop dramawave-attribution-comparison-refresh.timer
-systemctl stop dramawave-attribution-comparison-refresh.service 2>/dev/null || true
 systemctl stop dramawave-attribution-comparison.service
+for _ in $(seq 1 320); do
+  systemctl is-active --quiet dramawave-attribution-comparison-refresh.service || break
+  sleep 5
+done
+if systemctl is-active --quiet dramawave-attribution-comparison-refresh.service; then
+  echo 'D10 refresh did not finish in 26 minutes; inspect before rollback' >&2
+  exit 1
+fi
 
 D30_RELEASE='<从发布前 previous-current.txt 回填>'
 D30_DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
@@ -638,18 +832,31 @@ if systemctl cat nginx.service >/dev/null 2>&1; then
 else
   nginx -s reload
 fi
-systemctl start dramawave-attribution-comparison.service
+if grep -qx enabled "$BACKUP_DIR/web-enabled.txt"; then
+  systemctl enable dramawave-attribution-comparison.service
+else
+  systemctl disable dramawave-attribution-comparison.service
+fi
+if grep -qx active "$BACKUP_DIR/web-active.txt"; then
+  systemctl start dramawave-attribution-comparison.service
+else
+  systemctl stop dramawave-attribution-comparison.service
+fi
 
 # D30 库在 D10 在线期间保持冻结；先执行一次旧 release 的正常刷新。
 # oneshot 自带共享 TT 锁、1 GiB 限制和旧 warm_cache ExecStartPost。
-systemctl start dramawave-attribution-comparison-refresh.service
-curl -fsS http://127.0.0.1:8832/healthz
-curl -fsS http://127.0.0.1:8832/api/meta
+if grep -qx active "$BACKUP_DIR/web-active.txt"; then
+  systemctl start dramawave-attribution-comparison-refresh.service
+  curl -fsS http://127.0.0.1:8832/healthz
+  curl -fsS http://127.0.0.1:8832/api/meta
+fi
 
 # 再显式预热，避免刚才共享锁返回 75 或 Web 启动时序使 ExecStartPost 未命中。
-/opt/dramawave-attribution-comparison/venv/bin/python \
-  "$D30_RELEASE/warm_cache.py" --base-url http://127.0.0.1:8832 \
-  --attempts 3 --retry-delay 1
+if grep -qx active "$BACKUP_DIR/web-active.txt"; then
+  /opt/dramawave-attribution-comparison/venv/bin/python \
+    "$D30_RELEASE/warm_cache.py" --base-url http://127.0.0.1:8832 \
+    --attempts 3 --retry-delay 1
+fi
 
 # 严格按发布前记录恢复 timer 的 enabled / active 两个独立状态。
 if grep -qx enabled "$BACKUP_DIR/timer-enabled.txt"; then
@@ -724,6 +931,14 @@ curl -fsS http://127.0.0.1:8832/healthz
 
 2026-08-06 D30 首次发布证据已回填到第 1、9.4 和 9.5 节，且仅作为历史基线。2026-08-07 D10 起点已批准为 `2026-08-01`，生产切换尚未执行。必须回填 D10 commit/release、独立候选 DB 路径、语义标记、D30 备份/回滚库、原子环境切换、真实点样本、自动化/浏览器、自然 timer、性能和回滚演练；在这些证据齐全前不得把状态改为已发布。
 
+自然 timer 和全部发布证据写入后，重新生成最终清单；发布前的 `SHA256SUMS` 不能替代这一步：
+
+```bash
+cd "$BACKUP_DIR"
+find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.final
+sha256sum -c SHA256SUMS.final
+```
+
 ## 12. 变更记录
 
-- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，用户批准起点为 `2026-08-01`，边界调整后本地自动化 `63/63` 通过。保留 2026-08-06 D30 发布为历史基线；新增全新 D10 SQLite、语义门禁、旧 D30 库拒绝测试、活动 DB 指针原子替换和同时回滚到旧 D30 release/数据库的流程。候选和生产待验收。
+- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，用户批准起点为 `2026-08-01`，边界与 60 天裁剪回归后本地自动化 `64/64` 通过。保留 2026-08-06 D30 发布为历史基线；新增全新 D10 SQLite、提升前失败即停门禁、旧 D30 库拒绝测试、活动 DB 指针原子替换和同时回滚到旧 D30 release/数据库的流程。候选和生产待验收。
