@@ -2,7 +2,7 @@
 
 ## 1. 发布状态回填
 
-2026-08-06 已完成的首次生产发布是 D7/D30 历史基线。下表是该版本的不可变发布证据，不代表 D10 已发布。2026-08-07 用户已批准 D7/D10 看板起点为 `2026-08-01`；代码边界已修改，生产 bootstrap、切换和验收尚未执行。
+2026-08-06 首次生产发布的 D7/D30 版本现作为不可变历史基线。2026-08-07 用户批准 D7/D10 看板起点为 `2026-08-01`，独立 D10 缓存、生产切换及验收均已完成；D30 release 和 SQLite 保留作回滚。
 
 | D30 历史项目 | 实际值 |
 | --- | --- |
@@ -18,28 +18,50 @@
 | 第一轮自然 timer 时间及版本 | `2026-08-06 21:22:00`～`21:27:01`；推进至 `20260806T132547Z-d44a154d` |
 | 回滚点 | 首次上线无旧 release；停用并移除新 units/Nginx include，保留 SQLite；配置证据使用上述备份目录 |
 
-### 1.1 D10 当前门禁
+### 1.1 2026-08-07 D10 生产发布
+
+| D10 生产项目 | 实际值 |
+| --- | --- |
+| GitHub 目标 commit | `ec6fba1b7e155be904c4c54791fd491c76e09a9a` |
+| 发布分支 | `codex/dramawave-attribution-10d-20260807` |
+| 发布主机 | `43.166.187.96` |
+| 发布时间（Asia/Shanghai） | `2026-08-07 18:34` |
+| 发布 release 路径 | `/opt/dramawave-attribution-comparison/releases/ec6fba1b7e155be904c4c54791fd491c76e09a9a` |
+| 归因口径 / 最小日期 | 旧 D7 / 新 D10；`2026-08-01` |
+| 新归因源 | `kunlunads_dev.ads_app_revenues_10d` |
+| 活动 D10 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-6c323f5ff35e-20260807-175911.sqlite3` |
+| 历史 D30 回滚 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3` |
+| 发布前备份 | `/mnt/data-disk/dramawave-attribution-comparison/backups/20260807-175041-pre-6c323f5ff35e` |
+| refresh timer | `OnCalendar=*-*-* *:04,34:00`，每 30 分钟一次 |
+| 第一轮自然刷新 | `18:34:10`～`18:38:33`；版本推进至 `20260807T103755Z-96c22ea1` |
+| 生产状态 | D10 已原子切换并由生产 Web 读取 |
+| 回滚点 | 同时恢复历史 D30 release、D30 SQLite 与备份中的环境/units/Nginx 配置 |
+
+活动 SQLite 名中的 `6c323f5` 是候选构建标识；当前生产代码以 `ec6fba1b7e155be904c4c54791fd491c76e09a9a` 为准。后者仅调整 timer 错峰及其测试/文档，不改变 D10 SQLite schema 或归因数据合同。
+
+### 1.2 D10 当前生产状态
 
 | 项目 | 当前结论 |
 | --- | --- |
 | 目标新源 | `kunlunads_dev.ads_app_revenues_10d` |
 | schema/index | 已只读核验，与 D30 相同 |
-| D10 本地自动化 | 边界与 60 天裁剪回归后 `64/64` 通过；不等于候选/生产验收 |
+| D10 自动化 | 本地和目标机 `64/64` 通过 |
 | 当前最早 D10 日期 | `2026-08-01` |
 | 批准业务起点 | `2026-08-01` |
 | 日期决策 | 用户已明确批准从 8/1 开始；代码/测试边界已同步 |
-| 生产状态 | 历史 D30 继续服务；D10 未切换 |
+| 生产状态 | D10 已上线；历史 D30 release/SQLite 原样保留作回滚 |
 
-生产 bootstrap 只允许在边界提交已推送、D10 逐日源覆盖通过且全新候选路径确认不存在后执行。目标 commit 的 `MIN_DATE`、前端 `FALLBACK_MIN_DATE` 和 `BOOTSTRAP_START` 必须全部为 `2026-08-01`；D30 的 2026-08-06 发布数据只能作为容量、性能与回滚基线。
+本次生产 bootstrap 已按上述门禁执行。后续重建仍只允许在边界提交已推送、D10 逐日源覆盖通过且全新候选路径确认不存在后执行；目标 commit 的 `MIN_DATE`、前端 `FALLBACK_MIN_DATE` 和 `BOOTSTRAP_START` 必须全部为 `2026-08-01`。D30 的 2026-08-06 发布数据只能作为容量、性能与回滚基线。
 
-### 1.2 D10 独立数据库与原子切换原则
+### 1.3 D10 独立数据库与原子切换原则
 
 D10 不在历史 D30 SQLite 上做原地迁移。使用三个明确对象：
 
 | 对象 | 路径/约束 |
 | --- | --- |
-| 历史 D30 live/回滚库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`，原样保留 |
-| 全新 D10 候选库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>-<attempt>.sqlite3`，发布前必须不存在；失败重试使用新 attempt，旧候选保留审计 |
+| 历史 D30 回滚库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`，原样保留 |
+| 当前活动 D10 库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-6c323f5ff35e-20260807-175911.sqlite3` |
+| 后续发布候选库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>-<attempt>.sqlite3`，发布前必须不存在；失败重试使用新 attempt，旧候选保留审计 |
 | 活动数据库指针 | `dashboard.env` 中的 `DRAMAWAVE_ATTRIBUTION_DB_PATH`；通过同目录临时文件 + `mv -Tf` 原子替换，禁止复制候选库覆盖 live 文件 |
 
 D10 候选库第一次成功发布版本时，必须在同一 SQLite 事务中包含以下权威语义标记：
@@ -62,6 +84,7 @@ D10 Web 和 refresh 在任何普通 SQLite 打开前，都必须先用 `mode=ro&
 | Web 监听 | `127.0.0.1:8832` |
 | 公网页面 | `/reports/dramawave-attribution-comparison/` |
 | 历史 D30 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`；D10 切换后仍保留作回滚 |
+| 当前活动 D10 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-6c323f5ff35e-20260807-175911.sqlite3` |
 | D10 候选 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>-<attempt>.sqlite3`；每次候选使用新路径 |
 | 活动 SQLite 选择 | `dashboard.env` 的 `DRAMAWAVE_ATTRIBUTION_DB_PATH`；只允许原子替换环境文件 |
 | 独立环境文件 | `/mnt/data-disk/dramawave-attribution-comparison/dashboard.env` |
@@ -304,7 +327,7 @@ fi
 "$VENV_PY" -c 'import pymysql; print("PyMySQL import ok")'
 ```
 
-当前历史 D30 生产的 `dashboard.env` 至少包含：
+D10 迁移前历史 D30 生产的 `dashboard.env` 至少包含：
 
 ```dotenv
 DRAMAWAVE_ATTRIBUTION_DB_PATH=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
@@ -776,7 +799,7 @@ sqlite3 "$D10_CANDIDATE_DB" \
 
 要求本轮为 success、`last_refresh_dates` 含今天/昨天/一个历史日期、版本已推进、Web health 显示新版本。
 
-2026-08-06 历史 D30 第一轮自然 timer 证据：`21:22:00` 启动，依次刷新 `2026-08-06`、`2026-08-05`、`2026-07-29`，facts 分别为 `99,000`、`131,011`、`75,283`；`21:26:12` 提交版本 `20260806T132547Z-d44a154d`，`21:27:01` 完成预热。该记录不能代替 D10 自然 timer 验收；D10 切换后必须另行回填新证据。
+2026-08-06 历史 D30 第一轮自然 timer 证据：`21:22:00` 启动，依次刷新 `2026-08-06`、`2026-08-05`、`2026-07-29`，facts 分别为 `99,000`、`131,011`、`75,283`；`21:26:12` 提交版本 `20260806T132547Z-d44a154d`，`21:27:01` 完成预热。2026-08-07 D10 第一轮自然 timer 于 `18:34:10` 启动，刷新 `2026-08-07`、`2026-08-06`、`2026-08-01`，`18:37:55` 提交 `20260807T103755Z-96c22ea1`，`18:38:33` 完成预热并以 success 结束。
 
 ### 9.5 2026-08-06 历史 D30 生产实测记录
 
@@ -789,6 +812,16 @@ sqlite3 "$D10_CANDIDATE_DB" \
 - Web 常驻 RSS `35,580 KiB`，`VmHWM 177,524 KiB`，`VmSwap 0`。Web service 与 refresh timer 均为 active/enabled，Nginx 配置检查无 warning。
 - 公网未登录页面/API 均 `302` 进入飞书登录。当前执行环境没有可复用的已授权飞书浏览器会话，因此已授权后的生产页面视觉检查由首次登录用户补验；本地真实浏览器 fixture 已覆盖桌面/移动和全部关键交互。
 - timer 每 `:22/:52` 发起一次刷新并与 TT 刷新共用宿主锁。锁忙以专用状态 `75` 安全跳过且保留旧版本；这保证不并发挤压生产源库，但在 TT 单轮超过 30 分钟时，不能承诺每个调度点都完成计算。严格的“每 30 分钟必完成”SLO 需要独立资源窗口或另行调整 TT 调度。
+
+### 9.6 2026-08-07 D10 生产实测记录
+
+- 生产代码 `ec6fba1b7e155be904c4c54791fd491c76e09a9a`，release 为 `/opt/dramawave-attribution-comparison/releases/ec6fba1b7e155be904c4c54791fd491c76e09a9a`；活动 D10 DB、历史 D30 回滚库及备份路径见第 1.1 节。
+- 独立候选 bootstrap `2026-08-01`～`2026-08-07`，共 `766,990` facts；最终生产自然刷新后为 `767,310` facts、`59,765` filter rollups、`748,141` campaign rollups，日期连续、stage 为空、`quick_check=ok`。
+- 真实唯一 Ad 样本 `2026-08-01 / ad_id=120252416995140782`：custom 1 行、D7 2 行、D10 2 行；custom 5 项及 D7/D10 各 8 项指标与源表精确一致。
+- 候选 API 的 schema v2、ETag/304、gzip、409、所有筛选/排行及 CSV 通过；超过 20 万行的全范围导出按设计返回 413，筛选后导出成功。生产同一暖查询重复请求为 `2.7 ms`。
+- 公网未登录页面/API 均 302 到飞书登录；已授权 Chrome 页面加载成功，Meta 渠道和 D7 指标切换返回数据，随后恢复默认 D0/全渠道视图。没有功能错误；首次加载的 3 条 message-channel 日志来自浏览器扩展噪声。
+- 第一轮自然 timer `18:34:10`～`18:38:33` 成功刷新今昨与历史轮转日，版本由 `20260807T101302Z-28d37de4` 推进为 `20260807T103755Z-96c22ea1`，预热成功；下一次触发为 `19:04`。
+- 首次切换因公网 Location 断言只接受相对地址而自动恢复 D30；修正断言后重新原子切换成功。该事实证明发布脚本的失败自动恢复路径；上线后未额外执行主动全量回滚演练。
 
 ## 10. 精确回滚
 
@@ -935,7 +968,7 @@ curl -fsS http://127.0.0.1:8832/healthz
 
 ## 11. 发布后记录
 
-2026-08-06 D30 首次发布证据已回填到第 1、9.4 和 9.5 节，且仅作为历史基线。2026-08-07 D10 起点已批准为 `2026-08-01`，生产切换尚未执行。必须回填 D10 commit/release、独立候选 DB 路径、语义标记、D30 备份/回滚库、原子环境切换、真实点样本、自动化/浏览器、自然 timer、性能和回滚演练；在这些证据齐全前不得把状态改为已发布。
+2026-08-06 D30 首次发布证据保留在第 1、9.4 和 9.5 节，仅作为历史基线。2026-08-07 D10 已按 `2026-08-01` 起点完成发布；commit/release、独立 D10 DB、语义标记、D30 备份/回滚库、原子切换、真实点样本、自动化/浏览器、自然 timer 和性能证据已回填至第 1.1 与 9.6 节。未执行上线后的主动全量回滚演练，回滚步骤仍以第 10.0 节为准。
 
 自然 timer 和全部发布证据写入后，重新生成最终清单；发布前的 `SHA256SUMS` 不能替代这一步：
 
@@ -947,4 +980,4 @@ sha256sum -c SHA256SUMS.final
 
 ## 12. 变更记录
 
-- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，用户批准起点为 `2026-08-01`，边界与 60 天裁剪回归后本地自动化 `64/64` 通过。保留 2026-08-06 D30 发布为历史基线；新增全新 D10 SQLite、提升前失败即停门禁、旧 D30 库拒绝测试、活动 DB 指针原子替换和同时回滚到旧 D30 release/数据库的流程。候选和生产待验收。
+- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，用户批准起点为 `2026-08-01`；完成 `64/64`、独立 D10 SQLite、旧 D30 库拒绝、真实点样本、原子切换、已授权浏览器和自然 timer 验收。生产 release 为 `ec6fba1b7e155be904c4c54791fd491c76e09a9a`，timer 为 `:04/:34`，历史 D30 release/SQLite 与备份保留作回滚。

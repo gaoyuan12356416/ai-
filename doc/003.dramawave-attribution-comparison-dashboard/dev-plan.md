@@ -2,19 +2,19 @@
 
 ## 开发范围
 
-将独立 Dramawave 归因对比服务从 D7/D30 合同迁移为 D7/D10：新口径读取 `ads_app_revenues_10d`，API/缓存字段使用 `d10_*`，并沿用服务端缓存架构。不得修改远程业务表；日期边界已批准为 `2026-08-01`，生产在候选与切换门禁通过前继续运行历史 D30 基线。
+独立 Dramawave 归因对比服务已从 D7/D30 合同迁移为 D7/D10：新口径读取 `ads_app_revenues_10d`，API/缓存字段使用 `d10_*`，并沿用服务端缓存架构。未修改远程业务表；日期边界固定为 `2026-08-01`，生产已运行独立 D10 缓存，历史 D30 基线仅作回滚。
 
 ## 任务拆分
 
 | 任务 | 文件/模块 | 状态 |
 | --- | --- | --- |
-| SQLite schema、白名单维度/指标和公共工具 | `ops/dramawave-attribution-comparison/common.py` | D10 本地自动化通过；生产未验收 |
-| 只读 MySQL 分层映射、事务刷新、裁剪和历史 cursor | `refresh_cache.py` | D10 本地自动化通过；候选库未 bootstrap |
-| 聚合 API、ETag/gzip、CSV 和健康检查 | `service.py` | D10 本地自动化通过；生产未验收 |
-| 响应式多维对比页面 | `index.html` | D10 本地契约通过；生产浏览器未验收 |
-| systemd timer/service、Nginx auth location | `deploy/*` / `*.conf` | D30 历史版本已验证；D10 未发布 |
-| 后端、前端契约和浏览器回归 | `test_*.py` + Playwright CLI | 本地自动化 `64/64` 通过；候选/生产浏览器待验收 |
-| GitHub-first 发布、全新 D10 SQLite、原子切换和回滚 | 部署记录 | 起点已批准为 8/1；待候选/生产执行 |
+| SQLite schema、白名单维度/指标和公共工具 | `ops/dramawave-attribution-comparison/common.py` | D10 已生产 |
+| 只读 MySQL 分层映射、事务刷新、裁剪和历史 cursor | `refresh_cache.py` | D10 已生产；自然刷新通过 |
+| 聚合 API、ETag/gzip、CSV 和健康检查 | `service.py` | D10 已生产 |
+| 响应式多维对比页面 | `index.html` | D10 已生产；已授权浏览器交互通过 |
+| systemd timer/service、Nginx auth location | `deploy/*` / `*.conf` | D10 已生产；timer `:04/:34` |
+| 后端、前端契约和浏览器回归 | `test_*.py` + Chrome | 自动化 `64/64`；生产页面与筛选通过 |
+| GitHub-first 发布、全新 D10 SQLite、原子切换和回滚 | 部署记录 | 已完成 |
 
 ## 构建 / 验证命令
 
@@ -57,5 +57,8 @@ curl -fsS http://127.0.0.1:8832/healthz
 - 2026-08-06（历史 D30 基线）：生产 canary 在 1 GiB cgroup 内完成，最大日 `131,010` facts、峰值约 772 MiB；全量 bootstrap `2026-07-29`～`2026-08-06` 写入 `920,751` facts。
 - 2026-08-06（历史 D30 基线）：GitHub-first 发布 commit `e92f2aef417ce47cabfb6e3ae2056d96ad7f9894`，启用独立 Web service、`:22/:52` refresh timer、飞书鉴权 Nginx 路由和共享 TT 重任务锁。
 - 2026-08-06（历史 D30 基线）：第一轮自然 timer 成功刷新近两天与轮转历史日，推进至 `20260806T132547Z-d44a154d`；预热后全范围常用 Campaign/Ad Set/排行接口均低于 3 ms。
-- 2026-08-07：目标新口径改为 D10；已只读核验 `ads_app_revenues_10d` schema/index 与 D30 相同，最早数据日期为 `2026-08-01`。用户已批准看板从 8/1 开始，后端/前端边界、测试和文档已同步修改；D10 生产 bootstrap、切换和验收待执行。
-- 2026-08-07：边界与 60 天裁剪回归后 D10 本地自动化 `64/64` 通过；该结果仅覆盖本地代码/合同，不包含候选 SQLite bootstrap、生产数据对账、原子切换、浏览器或自然 timer 验收。
+- 2026-08-07：目标新口径改为 D10；只读核验 `ads_app_revenues_10d` schema/index 与 D30 相同，用户批准并固定看板起点为 `2026-08-01`。
+- 2026-08-07：D10 自动化在本地和目标机均 `64/64`；独立候选库 bootstrap 8/1～8/7 共 `766,990` facts，真实唯一 Ad 精确对账、三层汇总守恒、API/CSV 和旧 D30 缓存失败关闭通过。
+- 2026-08-07：GitHub-first 发布 commit `ec6fba1b7e155be904c4c54791fd491c76e09a9a`；独立 D10 SQLite 已提升为活动库，历史 D30 release/SQLite 与发布前备份原样保留作回滚。
+- 2026-08-07：refresh timer 从历史 D30 的 `:22/:52` 调整为 D10 生产 `:04/:34`，避开 TT `:13/:43` 重刷新窗口。第一轮自然任务成功刷新今昨及历史轮转日并推进版本，预热完成。
+- 2026-08-07：发布前备份位于 `/mnt/data-disk/dramawave-attribution-comparison/backups/20260807-175041-pre-6c323f5ff35e`；已授权 Chrome 页面加载、Meta 筛选和 D7 指标切换通过。
