@@ -2,7 +2,7 @@
 
 ## 测试范围
 
-覆盖配置、prepare、manifest、发布前再校验、回切隔离和生产非发布验证。
+覆盖配置、prepare、manifest、发布前再校验、回切隔离和生产自然调度验证。
 
 ## 测试数据
 
@@ -24,8 +24,8 @@
 | TC-014 | 编码/tag 错配或不支持编码 | HEVC+`avc1`、H.264+`hvc1`、VP9、HEVC Main 10 | 返回 `prepared_media_invalid` | P0 | 通过 |
 | TC-008 | 旧模式回归 | 全量 GPU 测试 | branded/clean/outro/local/COS/ledger 无回归 | P0 | 通过 |
 | TC-009 | CPU profile 隔离 | 跑 TT core/service/runner 测试 | 仅当前 profile 可领取，历史状态不改 | P0 | 通过 |
-| TC-010 | 生产切换 | 检查 CPU/GPU health 和配置 | 两端 mode/profile 对齐，服务 active | P0 | 待执行 |
-| TC-011 | 无主动发布 | 比较部署前后队列/init 证据 | 部署验证不产生助手触发的真实发布 | P0 | 待执行 |
+| TC-010 | 生产切换 | 检查 CPU/GPU health 和配置 | 两端 mode/profile 对齐，服务 active | P0 | 通过 |
+| TC-011 | 原任务自然恢复 | 不新建任务，观察任务 34 原 `gpu_job_id` 自然重试 | prepare 通过、TikTok init 一次并由 reconcile 收敛为 published | P0 | 通过 |
 | TC-012 | 回切 | 恢复旧两项配置 | `direct_outro` v2 健康，旧池可继续使用 | P0 | 文档验证 |
 
 ## 回归范围

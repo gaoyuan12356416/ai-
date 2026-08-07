@@ -36,3 +36,9 @@
 ## 回归边界
 
 未修改 profile 名称、数据库、CPU 调度、TikTok publish、生产闸门、输出 origin、大小/时长/码率、分辨率/帧率、像素格式或音频合同。
+
+## 生产验证
+
+- GPU release：`7e428f57786b0337451d081297cfa55800935497`。
+- 任务 34 的 manifest v6 记录实际 `hevc`/`hvc1`/Main 与 AAC-LC 44.1kHz，源/输出 SHA 和大小完全一致。
+- 任务沿原 `gpu_job_id` 完成一次 TikTok init，并由 reconcile 收敛为 `published`；未出现未知结果或重复发布。
