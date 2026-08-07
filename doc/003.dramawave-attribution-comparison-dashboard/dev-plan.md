@@ -13,8 +13,8 @@
 | 聚合 API、ETag/gzip、CSV 和健康检查 | `service.py` | D10 本地自动化通过；生产未验收 |
 | 响应式多维对比页面 | `index.html` | D10 本地契约通过；生产浏览器未验收 |
 | systemd timer/service、Nginx auth location | `deploy/*` / `*.conf` | D30 历史版本已验证；D10 未发布 |
-| 后端、前端契约和浏览器回归 | `test_*.py` + Playwright CLI | 本地自动化 `62/62` 通过；候选/生产浏览器待验收 |
-| GitHub-first 发布、全新 D10 SQLite、原子切换和回滚 | 部署记录 | 阻塞：待决定 7/29 补数或起点改为 8/1 |
+| 后端、前端契约和浏览器回归 | `test_*.py` + Playwright CLI | 本地自动化 `63/63` 通过；候选/生产浏览器待验收 |
+| GitHub-first 发布、全新 D10 SQLite、原子切换和回滚 | 部署记录 | 起点已批准为 8/1；待候选/生产执行 |
 
 ## 构建 / 验证命令
 
@@ -31,7 +31,7 @@ git diff --check
 python3 -m compileall -q .
 python3 -m unittest discover -p 'test_*.py' -v
 DRAMAWAVE_ATTRIBUTION_DB_PATH='<全新D10候选SQLite绝对路径>' \
-  python3 refresh_cache.py --bootstrap-start '<经批准的看板起点>' --bootstrap-end "$(date +%F)"
+  python3 refresh_cache.py --bootstrap-start '2026-08-01' --bootstrap-end "$(date +%F)"
 nginx -t
 systemctl status dramawave-attribution-comparison.service --no-pager
 systemctl status dramawave-attribution-comparison-refresh.timer --no-pager
@@ -57,5 +57,5 @@ curl -fsS http://127.0.0.1:8832/healthz
 - 2026-08-06（历史 D30 基线）：生产 canary 在 1 GiB cgroup 内完成，最大日 `131,010` facts、峰值约 772 MiB；全量 bootstrap `2026-07-29`～`2026-08-06` 写入 `920,751` facts。
 - 2026-08-06（历史 D30 基线）：GitHub-first 发布 commit `e92f2aef417ce47cabfb6e3ae2056d96ad7f9894`，启用独立 Web service、`:22/:52` refresh timer、飞书鉴权 Nginx 路由和共享 TT 重任务锁。
 - 2026-08-06（历史 D30 基线）：第一轮自然 timer 成功刷新近两天与轮转历史日，推进至 `20260806T132547Z-d44a154d`；预热后全范围常用 Campaign/Ad Set/排行接口均低于 3 ms。
-- 2026-08-07：目标新口径改为 D10；已只读核验 `ads_app_revenues_10d` schema/index 与 D30 相同，但最早数据日期为 `2026-08-01`。原 `2026-07-29` 边界尚未满足，D10 生产 bootstrap、切换和验收均保持待执行。当前代码边界仍是 7/29；若用户批准从 8/1 开始，先另行修改后端/前端边界、测试与文档并形成新审核 commit，不能直接拿当前 commit bootstrap。
-- 2026-08-07：D10 本地自动化 `62/62` 通过；该结果仅覆盖本地代码/合同，不包含候选 SQLite bootstrap、生产数据对账、原子切换、浏览器或自然 timer 验收，生产结论仍为 NO-GO。
+- 2026-08-07：目标新口径改为 D10；已只读核验 `ads_app_revenues_10d` schema/index 与 D30 相同，最早数据日期为 `2026-08-01`。用户已批准看板从 8/1 开始，后端/前端边界、测试和文档已同步修改；D10 生产 bootstrap、切换和验收待执行。
+- 2026-08-07：边界调整后 D10 本地自动化 `63/63` 通过；该结果仅覆盖本地代码/合同，不包含候选 SQLite bootstrap、生产数据对账、原子切换、浏览器或自然 timer 验收。

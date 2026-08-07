@@ -2,7 +2,7 @@
 
 ## 1. 发布状态回填
 
-2026-08-06 已完成的首次生产发布是 D7/D30 历史基线。下表是该版本的不可变发布证据，不代表 D10 已发布。2026-08-07 的 D7/D10 切换状态为“待业务决定日期边界，未执行生产 bootstrap、切换或验收”。
+2026-08-06 已完成的首次生产发布是 D7/D30 历史基线。下表是该版本的不可变发布证据，不代表 D10 已发布。2026-08-07 用户已批准 D7/D10 看板起点为 `2026-08-01`；代码边界已修改，生产 bootstrap、切换和验收尚未执行。
 
 | D30 历史项目 | 实际值 |
 | --- | --- |
@@ -24,13 +24,13 @@
 | --- | --- |
 | 目标新源 | `kunlunads_dev.ads_app_revenues_10d` |
 | schema/index | 已只读核验，与 D30 相同 |
-| D10 本地自动化 | `62/62` 通过；不等于候选/生产验收 |
+| D10 本地自动化 | 边界调整后 `63/63` 通过；不等于候选/生产验收 |
 | 当前最早 D10 日期 | `2026-08-01` |
-| 原业务起点 | `2026-07-29` |
-| 阻塞决策 | 等待源侧补齐 7/29～7/31，或用户明确批准从 8/1 开始 |
+| 批准业务起点 | `2026-08-01` |
+| 日期决策 | 用户已明确批准从 8/1 开始；代码/测试边界已同步 |
 | 生产状态 | 历史 D30 继续服务；D10 未切换 |
 
-边界未决定前，不运行 D10 生产 bootstrap，不修改 `dashboard.env`，不切换 `current`，不重启生产 Web/timer。当前候选代码的 `MIN_DATE` 与前端 `FALLBACK_MIN_DATE` 均仍固定为 `2026-07-29`；若用户批准从 `2026-08-01` 开始，必须先形成另一个经评审的代码提交，同时修改这两个边界、对应测试和文档并重新跑全套验证，不能只改部署变量。D30 的 2026-08-06 发布数据只能作为容量、性能与回滚基线。
+生产 bootstrap 只允许在边界提交已推送、D10 逐日源覆盖通过且全新候选路径确认不存在后执行。目标 commit 的 `MIN_DATE`、前端 `FALLBACK_MIN_DATE` 和 `BOOTSTRAP_START` 必须全部为 `2026-08-01`；D30 的 2026-08-06 发布数据只能作为容量、性能与回滚基线。
 
 ### 1.2 D10 独立数据库与原子切换原则
 
@@ -358,21 +358,13 @@ nginx -t
 
 ### 7.1 D10 日期范围与候选路径
 
-仅在业务边界决策和对应代码版本都完成后设置 `BOOTSTRAP_START`：
-
-- 源侧补齐分支：使用当前候选代码，确认 `MIN_DATE=2026-07-29`，并先验证 D10 已补齐 7/29～7/31。
-- 用户批准改起点分支：先提交并评审边界变更，将后端 `MIN_DATE`、前端 `FALLBACK_MIN_DATE`、边界测试和文档全部改为 `2026-08-01`，重新跑全套测试后才允许继续。
-
-部署时 `BOOTSTRAP_START` 必须与目标 commit 的 `/api/meta.minimum_date` 完全相同，不要保留占位符执行：
+用户已批准起点为 `2026-08-01`。部署时 `BOOTSTRAP_START` 必须固定为该值，并与目标 commit 的 `MIN_DATE` 完全相同：
 
 ```bash
-BOOTSTRAP_START='<经批准后填写 2026-07-29 或 2026-08-01>'
+BOOTSTRAP_START='2026-08-01'
 BOOTSTRAP_END="$(TZ=Asia/Shanghai date +%F)"
 D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
-case "$BOOTSTRAP_START" in
-  2026-07-29|2026-08-01) ;;
-  *) echo 'unapproved bootstrap boundary' >&2; exit 1 ;;
-esac
+test "$BOOTSTRAP_START" = '2026-08-01'
 EXPECTED_MIN_DATE="$($VENV_PY - <<'PY'
 from common import MIN_DATE
 print(MIN_DATE.isoformat())
@@ -426,10 +418,15 @@ sqlite3 "$DB" "SELECT MIN(dt),MAX(dt),COUNT(*) FROM attribution_fact;"
 sqlite3 "$DB" "SELECT 'fact',COUNT(*) FROM attribution_fact UNION ALL SELECT 'filter_daily',COUNT(*) FROM attribution_filter_daily UNION ALL SELECT 'campaign_daily',COUNT(*) FROM attribution_campaign_daily;"
 sqlite3 "$DB" "SELECT key,value FROM cache_meta WHERE key IN ('comparison_window','new_attribution_source','data_version','rollup_version','generated_at','last_refresh_dates','source_max_updated_at') ORDER BY key;"
 sqlite3 "$DB" "SELECT dt,status,fact_rows,data_version FROM refresh_log ORDER BY id DESC LIMIT 20;"
+test "$(sqlite3 "$DB" 'SELECT MIN(dt) FROM attribution_fact;')" = '2026-08-01'
+test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM attribution_fact WHERE dt<'2026-08-01';")" = '0'
+test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM attribution_filter_daily WHERE dt<'2026-08-01';")" = '0'
+test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM attribution_campaign_daily WHERE dt<'2026-08-01';")" = '0'
+test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM refresh_log WHERE dt<'2026-08-01';")" = '0'
 sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);'
 ```
 
-要求：`quick_check=ok`、实际起点与批准边界/60 天裁剪一致、三层均有数据、所有 bootstrap 日期日志为 success、`data_version` 非空且与 `rollup_version` 完全相等，且标记精确为 `comparison_window="D10"`、`new_attribution_source="kunlunads_dev.ads_app_revenues_10d"`。任何不符都删除候选发布资格，保留历史 D30 生产不动；不得修改标记来掩盖错误数据。
+要求：`quick_check=ok`、实际起点为 `2026-08-01`、三层和刷新日志均无更早数据、三层均有数据、所有 bootstrap 日期日志为 success、`data_version` 非空且与 `rollup_version` 完全相等，且标记精确为 `comparison_window="D10"`、`new_attribution_source="kunlunads_dev.ads_app_revenues_10d"`。候选 HTTP 验收还必须确认 `minimum_date=expected_start_date=2026-08-01`、`range_complete=true`、`missing_dates=[]`。任何不符都删除候选发布资格，保留历史 D30 生产不动；不得修改标记来掩盖错误数据。
 
 再验证 D10 release 会拒绝历史 D30 数据库。两个命令都必须非零退出，日志必须包含 D10 cache contract rejection；执行期间 timer/Web 仍运行历史 D30 release，D10 检查仅以只读方式打开旧库：
 
@@ -725,8 +722,8 @@ curl -fsS http://127.0.0.1:8832/healthz
 
 ## 11. 发布后记录
 
-2026-08-06 D30 首次发布证据已回填到第 1、9.4 和 9.5 节，且仅作为历史基线。2026-08-07 D10 状态仍为“待日期边界决策，未执行生产切换”。边界决定后，必须回填 D10 commit/release、批准起点、独立候选 DB 路径、语义标记、D30 备份/回滚库、原子环境切换、真实点样本、自动化/浏览器、自然 timer、性能和回滚演练；在这些证据齐全前不得把状态改为已发布。
+2026-08-06 D30 首次发布证据已回填到第 1、9.4 和 9.5 节，且仅作为历史基线。2026-08-07 D10 起点已批准为 `2026-08-01`，生产切换尚未执行。必须回填 D10 commit/release、独立候选 DB 路径、语义标记、D30 备份/回滚库、原子环境切换、真实点样本、自动化/浏览器、自然 timer、性能和回滚演练；在这些证据齐全前不得把状态改为已发布。
 
 ## 12. 变更记录
 
-- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，本地自动化 `62/62` 通过。保留 2026-08-06 D30 发布为历史基线；新增全新 D10 SQLite、`comparison_window` / `new_attribution_source` 语义门禁、旧 D30 库只读拒绝测试、活动 DB 指针原子替换和同时回滚到旧 D30 release/数据库的流程。候选和生产未验收，切换继续阻塞于 7/29 与 8/1 起点决策。
+- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，用户批准起点为 `2026-08-01`，边界调整后本地自动化 `63/63` 通过。保留 2026-08-06 D30 发布为历史基线；新增全新 D10 SQLite、语义门禁、旧 D30 库拒绝测试、活动 DB 指针原子替换和同时回滚到旧 D30 release/数据库的流程。候选和生产待验收。

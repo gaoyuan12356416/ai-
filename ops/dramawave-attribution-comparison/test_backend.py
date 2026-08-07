@@ -22,7 +22,7 @@ import warm_cache
 
 def custom_row(**overrides):
     row = {
-        "dt": "2026-07-29",
+        "dt": "2026-08-01",
         "channel": "Meta",
         "channel_id": "0",
         "product": "Dramawave",
@@ -104,7 +104,7 @@ class MappingTests(unittest.TestCase):
             events.append(f"{label}:end")
 
         mapped = refresh_cache.map_day_state(
-            dt.date(2026, 7, 29),
+            dt.date(2026, 8, 1),
             stream("custom", [custom_row()]),
             stream("d7", [revenue_row()]),
             stream("d10", [revenue_row()]),
@@ -127,9 +127,9 @@ class MappingTests(unittest.TestCase):
         plan = warm_cache.request_plan(
             {
                 "data_version": "v1",
-                "cache": {"start_date": "2026-07-29", "end_date": "2026-08-06"},
+                "cache": {"start_date": "2026-08-01", "end_date": "2026-08-06"},
                 "defaults": {
-                    "start_date": "2026-07-31",
+                    "start_date": "2026-08-03",
                     "end_date": "2026-08-06",
                     "basis": "d0",
                     "dimensions": ["dt", "campaign"],
@@ -141,7 +141,7 @@ class MappingTests(unittest.TestCase):
         options = [params for path, params in plan if path == "/api/options"]
         self.assertTrue(
             any(
-                params["start_date"] == "2026-07-31"
+                params["start_date"] == "2026-08-03"
                 and params["dimensions"] == "dt,campaign"
                 and params["metric_basis"] == "d0"
                 for params in queries
@@ -149,7 +149,7 @@ class MappingTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                params["start_date"] == "2026-07-29"
+                params["start_date"] == "2026-08-01"
                 and params["dimensions"] == "adset"
                 and params["metric_basis"] == "d7"
                 for params in queries
@@ -166,7 +166,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual({params["metric_basis"] for params in rankings}, {"d0", "d7"})
         self.assertTrue(all(params["data_version"] == "v1" for params in rankings))
         self.assertTrue(all("limit" not in params for params in rankings))
-        self.assertEqual({params["start_date"] for params in options}, {"2026-07-29", "2026-07-31"})
+        self.assertEqual({params["start_date"] for params in options}, {"2026-08-01", "2026-08-03"})
         self.assertLess(len(plan), service.RESPONSE_CACHE_SIZE)
 
     def test_custom_sql_uses_live_schema_and_pss_index(self):
@@ -176,7 +176,7 @@ class MappingTests(unittest.TestCase):
         self.assertNotIn("c.ad_name", refresh_cache.CUSTOM_SQL)
 
     def test_os_like_duplicate_rows_are_merged_once(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         old = [revenue_row(), revenue_row(users=2, revenue_iaa_d0=1, revenue_iap_d0=4)]
         new = [revenue_row(revenue_iaa_d0=25, revenue_iap_d0=25)]
         facts, stats = refresh_cache.map_day(day, [custom_row()], old, new)
@@ -189,7 +189,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(stats["d7_candidate_keys"], 1)
 
     def test_adset_fallback_and_ambiguity_are_not_allocated(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         unique = custom_row(ad_id="", adset_id="set-unique", spend=40)
         ambiguous_a = custom_row(ad_id="a", adset_id="set-shared", country_group="US", spend=50)
         ambiguous_b = custom_row(ad_id="b", adset_id="set-shared", country_group="CA", spend=60)
@@ -210,7 +210,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(stats["d7_ambiguous_keys"], 1)
 
     def test_unmatched_global_revenue_is_excluded_from_dramawave_scope(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         facts, stats = refresh_cache.map_day(
             day,
             [custom_row()],
@@ -232,14 +232,14 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(stats["d7_fact_revenue_iaa_d0"] + stats["d7_fact_revenue_iap_d0"], 10)
 
     def test_campaign_fallback(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         custom = custom_row(ad_id="", adset_id="")
         old = [revenue_row(ad_id="", adset_id="")]
         facts, _ = refresh_cache.map_day(day, [custom], old, [])
         self.assertEqual(facts[0]["matched_grain"], "campaign")
 
     def test_present_but_missing_ad_does_not_fall_back_to_adset(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         custom = custom_row(ad_id="known-ad", adset_id="shared-set")
         old = [revenue_row(ad_id="unknown-ad", adset_id="shared-set")]
         facts, stats = refresh_cache.map_day(day, [custom], old, [])
@@ -249,7 +249,7 @@ class MappingTests(unittest.TestCase):
         self.assertGreater(stats["d7_excluded_unscoped_revenue_iaa_d0"], 0)
 
     def test_adset_fallback_is_unique_when_only_lower_ad_ids_differ(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         custom_a = custom_row(ad_id="ad-a", ad_name="A", adset_id="shared", spend=30)
         custom_b = custom_row(ad_id="ad-b", ad_name="B", adset_id="shared", spend=70)
         old = [revenue_row(ad_id="", adset_id="shared", revenue_iaa_d0=10, revenue_iap_d0=20)]
@@ -265,7 +265,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(stats["d7_ambiguous_keys"], 0)
 
     def test_revenue_fills_campaign_and_adset_names_without_ad_name_pollution(self):
-        day = dt.date(2026, 7, 29)
+        day = dt.date(2026, 8, 1)
         custom_a = custom_row(campaign_name="", adset_name="", ad_id="ad-a", ad_name="")
         custom_b = custom_row(campaign_name="", adset_name="", ad_id="ad-b", ad_name="", spend=25)
         old = [
@@ -285,7 +285,7 @@ class ServiceTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.path = Path(self.tempdir.name) / "dashboard.sqlite3"
         with common.connect_sqlite(self.path) as conn:
-            first = refresh_cache.blank_fact(dt.date(2026, 7, 29))
+            first = refresh_cache.blank_fact(dt.date(2026, 8, 1))
             first.update(
                 custom_row(),
             )
@@ -307,7 +307,7 @@ class ServiceTests(unittest.TestCase):
                     "d10_mapped_keys": 1,
                 }
             )
-            second = refresh_cache.blank_fact(dt.date(2026, 7, 29))
+            second = refresh_cache.blank_fact(dt.date(2026, 8, 1))
             second.update(
                 custom_row(
                     campaign_id="1200000000000000002",
@@ -333,16 +333,16 @@ class ServiceTests(unittest.TestCase):
                 }
             )
             common.insert_facts(conn, [first, second])
-            refresh_cache.rebuild_rollups_for_day(conn, "2026-07-29")
+            refresh_cache.rebuild_rollups_for_day(conn, "2026-08-01")
             mark_published_d10_cache(conn, "v-test")
-            common.set_meta(conn, "generated_at", "2026-07-29T12:00:00+08:00")
+            common.set_meta(conn, "generated_at", "2026-08-01T12:00:00+08:00")
             conn.execute(
                 "INSERT INTO refresh_log(dt,started_at,finished_at,status,fact_rows,detail,data_version) "
                 "VALUES(?,?,?,?,?,?,?)",
                 (
-                    "2026-07-29",
-                    "2026-07-29T11:59:00+08:00",
-                    "2026-07-29T12:00:00+08:00",
+                    "2026-08-01",
+                    "2026-08-01T11:59:00+08:00",
+                    "2026-08-01T12:00:00+08:00",
                     "success",
                     2,
                     json.dumps(
@@ -369,7 +369,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_aggregate_recomputes_roas_after_sum_and_keeps_ids_as_text(self):
         params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&metric_basis=d0&sort_by=spend&sort_dir=desc&data_version=v-test"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign&metric_basis=d0&sort_by=spend&sort_dir=desc&data_version=v-test"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn:
             conn.execute("BEGIN")
@@ -385,7 +385,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_api_and_metadata_expose_only_the_d10_attribution_contract(self):
         params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign&"
             "metric_basis=d0&sort_by=d10_revenue&include_rankings=0"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn:
@@ -406,6 +406,12 @@ class ServiceTests(unittest.TestCase):
             "kunlunads_dev.ads_app_revenues_10d",
         )
         self.assertEqual(metadata["api_schema_version"], 2)
+        self.assertEqual(common.MIN_DATE, dt.date(2026, 8, 1))
+        self.assertEqual(metadata["minimum_date"], "2026-08-01")
+        self.assertEqual(metadata["cache"]["expected_start_date"], "2026-08-01")
+        self.assertTrue(metadata["cache"]["range_complete"])
+        self.assertEqual(metadata["cache"]["missing_dates"], [])
+        self.assertEqual(metadata["defaults"]["start_date"], "2026-08-01")
         self.assertIn("app_revenues_10d", metadata["source_max_updated_at"])
         csv_header = csv_body.decode("utf-8-sig").splitlines()[0]
         self.assertIn("d10_revenue", csv_header)
@@ -413,7 +419,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_data_endpoints_require_api_schema_version_two(self):
         query = (
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign&"
             "include_rankings=0"
         )
         invalid_params = (
@@ -444,7 +450,7 @@ class ServiceTests(unittest.TestCase):
             common.set_meta(conn, "new_attribution_source", legacy_source)
             conn.commit()
         params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign&"
             "include_rankings=0"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn:
@@ -461,7 +467,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_same_version_and_parameters_use_bounded_service_cache(self):
         params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign&"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign&"
             "data_version=v-test&include_rankings=0"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn:
@@ -472,10 +478,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_rankings_can_be_deferred_and_loaded_from_independent_cache_key(self):
         query_params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&include_rankings=0&data_version=v-test"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=dt&include_rankings=0&data_version=v-test"
         )
         ranking_params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&metric_basis=d0&data_version=v-test"
+            "start_date=2026-08-01&end_date=2026-08-01&metric_basis=d0&data_version=v-test"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn, mock.patch.object(
             service, "build_rankings", wraps=service.build_rankings
@@ -489,7 +495,7 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(builder.call_count, 1)
             self.assertIs(ranking_payload, service.rankings_payload(conn, ranking_params))
             alternate = api_qs(
-                "start_date=2026-07-29&end_date=2026-07-29&metric_basis=d0&data_version=v-test&"
+                "start_date=2026-08-01&end_date=2026-08-01&metric_basis=d0&data_version=v-test&"
                 "dimensions=adset&sort_by=d10_revenue&offset=50&limit=100"
             )
             self.assertIs(ranking_payload, service.rankings_payload(conn, alternate))
@@ -499,7 +505,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_same_ranking_key_is_singleflight_across_threads(self):
         params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&metric_basis=d0&data_version=v-test"
+            "start_date=2026-08-01&end_date=2026-08-01&metric_basis=d0&data_version=v-test"
         )
         original = service.build_rankings
         started = threading.Event()
@@ -537,10 +543,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_source_scope_exclusions_are_global_to_date_range_and_flag_filters(self):
         unfiltered = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d0&include_rankings=0"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=dt&metric_basis=d0&include_rankings=0"
         )
         filtered = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d0&"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=dt&metric_basis=d0&"
             "country_group=US&include_rankings=0"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn:
@@ -575,9 +581,9 @@ class ServiceTests(unittest.TestCase):
             conn.execute(
                 "INSERT INTO refresh_log(dt,started_at,finished_at,status,detail,data_version) VALUES(?,?,?,?,?,?)",
                 (
-                    "2026-07-29",
-                    "2026-07-29T12:29:00+08:00",
-                    "2026-07-29T12:30:00+08:00",
+                    "2026-08-01",
+                    "2026-08-01T12:29:00+08:00",
+                    "2026-08-01T12:30:00+08:00",
                     "success",
                     json.dumps(latest),
                     "v-test",
@@ -586,7 +592,7 @@ class ServiceTests(unittest.TestCase):
             conn.commit()
         service.clear_response_cache()
         params = api_qs(
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d7&include_rankings=0"
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=dt&metric_basis=d7&include_rankings=0"
         )
         with common.connect_sqlite(self.path, readonly=True) as conn:
             item = service.query_payload(conn, params)["mapping_quality"]["source_scope_exclusions"]
@@ -630,7 +636,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(campaign_indexes), 6)
 
     def test_rollup_routing_and_stale_version_fallback(self):
-        empty = parse_qs("start_date=2026-07-29&end_date=2026-07-29")
+        empty = parse_qs("start_date=2026-08-01&end_date=2026-08-01")
         campaign_search = parse_qs("campaign_q=Campaign")
         adset_search = parse_qs("adset_q=Ad+Set")
         with common.connect_sqlite(self.path, readonly=True) as conn:
@@ -666,10 +672,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_rollup_results_exactly_match_fact_fallback(self):
         queries = [
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&include_rankings=0",
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=campaign",
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=adset",
-            "start_date=2026-07-29&end_date=2026-07-29&dimensions=optimizer&country_group=US",
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=dt&include_rankings=0",
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign",
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=adset",
+            "start_date=2026-08-01&end_date=2026-08-01&dimensions=optimizer&country_group=US",
         ]
         with common.connect_sqlite(self.path, readonly=True) as conn:
             rollup_payloads = [service.query_payload(conn, api_qs(query)) for query in queries]
@@ -688,7 +694,7 @@ class ServiceTests(unittest.TestCase):
                     conn,
                     table="attribution_fact; DROP TABLE cache_meta",
                     where_sql="dt=?",
-                    where_values=["2026-07-29"],
+                    where_values=["2026-08-01"],
                     dimensions=["dt"],
                     basis="d0",
                 )
@@ -696,19 +702,19 @@ class ServiceTests(unittest.TestCase):
                 service.grouped_count(
                     conn,
                     "dt=?",
-                    ["2026-07-29"],
+                    ["2026-08-01"],
                     ["dt"],
                     table="not_a_table",
                 )
             with self.assertRaises(service.RequestError):
                 service.export_csv(
                     conn,
-                    api_qs("start_date=2026-07-29&end_date=2026-07-29&dimensions=dt"),
+                    api_qs("start_date=2026-08-01&end_date=2026-08-01&dimensions=dt"),
                     table="attribution_fact UNION SELECT 1",
                 )
 
     def test_d7_cumulative_basis_is_independent_from_attribution_window(self):
-        params = api_qs("start_date=2026-07-29&end_date=2026-07-29&dimensions=dt&metric_basis=d7")
+        params = api_qs("start_date=2026-08-01&end_date=2026-08-01&dimensions=dt&metric_basis=d7")
         with common.connect_sqlite(self.path, readonly=True) as conn:
             payload = service.query_payload(conn, params)
         self.assertEqual(payload["totals"]["d7_revenue"], 70)
@@ -720,27 +726,27 @@ class ServiceTests(unittest.TestCase):
                 service.query_payload(conn, api_qs("data_version=old&dimensions=dt"))
             self.assertEqual(conflict.exception.status, 409)
             with self.assertRaises(service.RequestError):
-                service.query_payload(conn, api_qs("dimensions=dt,(SELECT+1)&start_date=2026-07-29&end_date=2026-07-29"))
+                service.query_payload(conn, api_qs("dimensions=dt,(SELECT+1)&start_date=2026-08-01&end_date=2026-08-01"))
 
     def test_cutoff_and_options(self):
         with common.connect_sqlite(self.path, readonly=True) as conn:
             with self.assertRaises(service.RequestError):
-                service.parse_range(conn, parse_qs("start_date=2026-07-28&end_date=2026-07-29"))
-            result = service.options_payload(conn, api_qs("start_date=2026-07-29&end_date=2026-07-29"))
+                service.parse_range(conn, parse_qs("start_date=2026-07-31&end_date=2026-08-01"))
+            result = service.options_payload(conn, api_qs("start_date=2026-08-01&end_date=2026-08-01"))
         self.assertEqual(result["options"]["channel"][0], {"value": "0", "label": "Meta"})
 
     def test_missing_cache_day_is_not_silently_treated_as_zero(self):
         with common.connect_sqlite(self.path) as conn:
-            row = refresh_cache.blank_fact(dt.date(2026, 7, 31))
-            row.update(custom_row(dt="2026-07-31", spend=1))
+            row = refresh_cache.blank_fact(dt.date(2026, 8, 3))
+            row.update(custom_row(dt="2026-08-03", spend=1))
             common.insert_facts(conn, [row])
             conn.commit()
         with common.connect_sqlite(self.path, readonly=True) as conn:
             coverage = service.cache_coverage(conn)
             self.assertFalse(coverage["complete"])
-            self.assertIn("2026-07-30", coverage["missing_dates"])
+            self.assertIn("2026-08-02", coverage["missing_dates"])
             with self.assertRaisesRegex(service.RequestError, "missing requested dates"):
-                service.parse_range(conn, parse_qs("start_date=2026-07-29&end_date=2026-07-31"))
+                service.parse_range(conn, parse_qs("start_date=2026-08-01&end_date=2026-08-03"))
 
 
 class DeploymentContractTests(unittest.TestCase):
@@ -851,7 +857,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             args = argparse.Namespace(
                 db_path=str(path),
                 env_file=None,
-                date=["2026-07-29"],
+                date=["2026-08-01"],
                 bootstrap_start=None,
                 bootstrap_end=None,
                 skip_mount_check=True,
@@ -906,7 +912,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             args = argparse.Namespace(
                 db_path=str(path),
                 env_file=None,
-                date=["2026-07-29"],
+                date=["2026-08-01"],
                 bootstrap_start=None,
                 bootstrap_end=None,
                 skip_mount_check=True,
@@ -1058,7 +1064,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             row = {}
             for index, column in enumerate(columns):
                 if column == "dt":
-                    row[column] = "2026-07-29"
+                    row[column] = "2026-08-01"
                 elif column in common.BASE_METRICS:
                     row[column] = index + 0.25 if column in common.FLOAT_BASE_METRICS else index + 1
                 else:
@@ -1078,7 +1084,7 @@ class RefreshAtomicityTests(unittest.TestCase):
     def test_revenue_union_is_disk_backed_and_conserves_duplicate_keys(self):
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "dashboard.sqlite3"
-            day = dt.date(2026, 7, 29)
+            day = dt.date(2026, 8, 1)
             with common.connect_sqlite(path) as conn:
                 d7 = refresh_cache.stage_revenue_source(
                     conn,
@@ -1117,7 +1123,7 @@ class RefreshAtomicityTests(unittest.TestCase):
     def test_publish_validation_checks_each_staged_base_metric_against_stats(self):
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "dashboard.sqlite3"
-            day = dt.date(2026, 7, 29)
+            day = dt.date(2026, 8, 1)
             facts, stats = refresh_cache.map_day(
                 day, [custom_row()], [revenue_row()], [revenue_row()]
             )
@@ -1157,14 +1163,14 @@ class RefreshAtomicityTests(unittest.TestCase):
             path = Path(tempdir) / "dashboard.sqlite3"
             with common.connect_sqlite(path) as conn:
                 dates, historical = refresh_cache.choose_default_dates(conn, dt.date(2026, 8, 6))
-                self.assertEqual(dates, [dt.date(2026, 8, 6), dt.date(2026, 8, 5), dt.date(2026, 7, 29)])
-                self.assertEqual(historical, dt.date(2026, 7, 29))
-                common.set_meta(conn, "history_cursor", "2026-07-29")
+                self.assertEqual(dates, [dt.date(2026, 8, 6), dt.date(2026, 8, 5), dt.date(2026, 8, 1)])
+                self.assertEqual(historical, dt.date(2026, 8, 1))
+                common.set_meta(conn, "history_cursor", "2026-08-01")
                 conn.commit()
             with common.connect_sqlite(path) as conn:
                 dates, historical = refresh_cache.choose_default_dates(conn, dt.date(2026, 8, 6))
-                self.assertEqual(dates[-1], dt.date(2026, 7, 30))
-                self.assertEqual(historical, dt.date(2026, 7, 30))
+                self.assertEqual(dates[-1], dt.date(2026, 8, 2))
+                self.assertEqual(historical, dt.date(2026, 8, 2))
 
     def test_source_port_gate_rejects_anything_except_63350(self):
         env = {
@@ -1178,13 +1184,38 @@ class RefreshAtomicityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "63350"):
                 refresh_cache.require_source_config()
 
+    def test_refresh_entry_rejects_bootstrap_before_august_first(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "dashboard-d10.sqlite3"
+            args = argparse.Namespace(
+                db_path=str(path),
+                env_file=None,
+                date=None,
+                bootstrap_start="2026-07-31",
+                bootstrap_end="2026-08-01",
+                skip_mount_check=True,
+            )
+            env = {
+                "ADMIN_MAPPING_MYSQL_HOST": "readonly",
+                "ADMIN_MAPPING_MYSQL_PORT": "63350",
+                "ADMIN_MAPPING_MYSQL_USER": "reader",
+                "ADMIN_MAPPING_MYSQL_PASSWORD": "secret",
+                "ADMIN_MAPPING_MYSQL_DATABASE": "kunlunads_dev",
+            }
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                refresh_cache, "mysql_connection"
+            ) as mysql:
+                with self.assertRaisesRegex(ValueError, "cannot be earlier than 2026-08-01"):
+                    refresh_cache.refresh(args)
+                mysql.assert_not_called()
+
     def test_successful_refresh_builds_conserving_rollups_and_versions_them(self):
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "dashboard.sqlite3"
             args = argparse.Namespace(
                 db_path=str(path),
                 env_file=None,
-                date=["2026-07-29"],
+                date=["2026-08-01"],
                 bootstrap_start=None,
                 bootstrap_end=None,
                 skip_mount_check=True,
@@ -1192,18 +1223,18 @@ class RefreshAtomicityTests(unittest.TestCase):
             with common.connect_sqlite(path) as conn:
                 conn.execute(
                     "INSERT INTO refresh_stage(run_id,dt,created_at,payload) VALUES(?,?,?,?)",
-                    ("abandoned", "2026-07-29", "2026-08-06", "{}"),
+                    ("abandoned", "2026-08-01", "2026-08-06", "{}"),
                 )
                 common.insert_staged_facts(
                     conn,
                     "abandoned",
                     "2026-08-06",
-                    [refresh_cache.blank_fact(dt.date(2026, 7, 29))],
+                    [refresh_cache.blank_fact(dt.date(2026, 8, 1))],
                 )
                 refresh_cache.stage_revenue_source(
                     conn,
                     "abandoned",
-                    dt.date(2026, 7, 29),
+                    dt.date(2026, 8, 1),
                     "d7",
                     iter([revenue_row()]),
                 )
@@ -1244,16 +1275,16 @@ class RefreshAtomicityTests(unittest.TestCase):
                     metadata["new_attribution_source"],
                     common.NEW_ATTRIBUTION_SOURCE,
                 )
-                fact_totals = refresh_cache.additive_totals(conn, service.FACT_TABLE, "2026-07-29")
+                fact_totals = refresh_cache.additive_totals(conn, service.FACT_TABLE, "2026-08-01")
                 for table in (service.FILTER_ROLLUP_TABLE, service.CAMPAIGN_ROLLUP_TABLE):
                     self.assertEqual(
-                        refresh_cache.additive_totals(conn, table, "2026-07-29"),
+                        refresh_cache.additive_totals(conn, table, "2026-08-01"),
                         fact_totals,
                     )
                 detail = json.loads(
                     conn.execute(
                         "SELECT detail FROM refresh_log WHERE dt=? AND status='success' ORDER BY id DESC LIMIT 1",
-                        ("2026-07-29",),
+                        ("2026-08-01",),
                     ).fetchone()["detail"]
                 )
                 self.assertEqual(detail["attribution_filter_daily_rows"], 1)
@@ -1270,10 +1301,10 @@ class RefreshAtomicityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "dashboard.sqlite3"
             with common.connect_sqlite(path) as conn:
-                old_a = refresh_cache.blank_fact(dt.date(2026, 7, 29))
+                old_a = refresh_cache.blank_fact(dt.date(2026, 8, 1))
                 old_a.update(custom_row(spend=11))
-                old_b = refresh_cache.blank_fact(dt.date(2026, 7, 30))
-                old_b.update(custom_row(dt="2026-07-30", spend=22))
+                old_b = refresh_cache.blank_fact(dt.date(2026, 8, 2))
+                old_b.update(custom_row(dt="2026-08-02", spend=22))
                 common.insert_facts(conn, [old_a, old_b])
                 mark_published_d10_cache(conn, "old-version")
                 conn.commit()
@@ -1281,7 +1312,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             args = argparse.Namespace(
                 db_path=str(path),
                 env_file=None,
-                date=["2026-07-29", "2026-07-30"],
+                date=["2026-08-01", "2026-08-02"],
                 bootstrap_start=None,
                 bootstrap_end=None,
                 skip_mount_check=True,
@@ -1292,7 +1323,7 @@ class RefreshAtomicityTests(unittest.TestCase):
                 yield object()
 
             def fake_custom(_source, day):
-                if day == dt.date(2026, 7, 30):
+                if day == dt.date(2026, 8, 2):
                     raise RuntimeError("injected source failure")
                 return [custom_row(spend=999)], "2026-08-06 12:00:00"
 
@@ -1318,7 +1349,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             with common.connect_sqlite(path, readonly=True) as conn:
                 self.assertEqual(common.get_meta(conn)["data_version"], "old-version")
                 rows = conn.execute("SELECT dt,spend FROM attribution_fact ORDER BY dt").fetchall()
-                self.assertEqual([(row["dt"], row["spend"]) for row in rows], [("2026-07-29", 11), ("2026-07-30", 22)])
+                self.assertEqual([(row["dt"], row["spend"]) for row in rows], [("2026-08-01", 11), ("2026-08-02", 22)])
                 self.assertEqual(conn.execute("SELECT COUNT(*) n FROM refresh_stage").fetchone()["n"], 0)
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) n FROM refresh_fact_stage").fetchone()["n"], 0
@@ -1331,7 +1362,7 @@ class RefreshAtomicityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "dashboard.sqlite3"
             with common.connect_sqlite(path) as conn:
-                for day, spend in (("2026-07-29", 11), ("2026-07-30", 22)):
+                for day, spend in (("2026-08-01", 11), ("2026-08-02", 22)):
                     old = refresh_cache.blank_fact(dt.date.fromisoformat(day))
                     old.update(custom_row(dt=day, spend=spend))
                     common.insert_facts(conn, [old])
@@ -1341,7 +1372,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             args = argparse.Namespace(
                 db_path=str(path),
                 env_file=None,
-                date=["2026-07-29", "2026-07-30"],
+                date=["2026-08-01", "2026-08-02"],
                 bootstrap_start=None,
                 bootstrap_end=None,
                 skip_mount_check=True,
@@ -1357,7 +1388,7 @@ class RefreshAtomicityTests(unittest.TestCase):
             original_rebuild = refresh_cache.rebuild_rollups_for_day
 
             def fail_second_publish(conn, day):
-                if str(day) == "2026-07-30":
+                if str(day) == "2026-08-02":
                     raise RuntimeError("injected publish failure")
                 return original_rebuild(conn, day)
 
@@ -1387,7 +1418,7 @@ class RefreshAtomicityTests(unittest.TestCase):
                 rows = conn.execute("SELECT dt,spend FROM attribution_fact ORDER BY dt").fetchall()
                 self.assertEqual(
                     [(row["dt"], row["spend"]) for row in rows],
-                    [("2026-07-29", 11), ("2026-07-30", 22)],
+                    [("2026-08-01", 11), ("2026-08-02", 22)],
                 )
                 for table in ("refresh_stage", "refresh_fact_stage", "refresh_revenue_stage"):
                     self.assertEqual(

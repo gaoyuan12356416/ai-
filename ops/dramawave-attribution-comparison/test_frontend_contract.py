@@ -89,6 +89,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("state.meta.comparison_window)!=='D10'", self.html)
 
     def test_date_boundary_and_presets(self) -> None:
+        self.assertIn("const FALLBACK_MIN_DATE = '2026-08-01'", self.html)
         self.assertIn("const minimumDate=asText(state.meta.minimum_date)||FALLBACK_MIN_DATE", self.html)
         self.assertNotRegex(self.html, r'<input[^>]+min="2026-')
         for label in ("今天", "昨天", "近3天", "近7天", "近30天", "全部"):

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 
-MIN_DATE = dt.date(2026, 7, 29)
+MIN_DATE = dt.date(2026, 8, 1)
 RETENTION_DAYS = 60
 DEFAULT_DB_PATH = "/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10.sqlite3"
 DEFAULT_HOST = "127.0.0.1"
