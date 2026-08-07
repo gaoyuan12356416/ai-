@@ -20,10 +20,20 @@ This directory is the GitHub-maintained source for the standalone report at:
 ```bash
 python3 -m py_compile ops/tt-minis-native-growth/tt_minis_multi_dim_dashboard.py
 python3 ops/tt-minis-native-growth/test_browser_cache_contract.py
+python3 -m unittest ops/tt-minis-native-growth/test_memory_safety_contract.py
 nginx -t
 ```
 
-After deployment, request `latest.json` and one versioned `data/YYYY-MM-DD.json` with an authorized session. The expected cache headers are respectively `private, no-store` and `private, max-age=900`.
+## Memory and publish-safety contract
+
+- The 60-day summary payload deliberately omits dictionaries and compact rows; `latest.json` already publishes `rows=[]` and `dicts={}`, while daily detail JSON keeps the existing dictionary-encoded schema.
+- SQLite rows are converted directly from the cursor instead of retaining a second `fetchall()` result.
+- Refresh inserts stream parameters into `executemany()` instead of creating another full two-day parameter matrix.
+- Every run writes detail JSON under its own `data/<version>/<level>/<day>.json` directory. Only after every detail file succeeds are `latest.json` and `index.html` atomically replaced, so a failed run cannot mix old and new detail data.
+- Unreferenced version files are removed only after the replacement manifest is committed and after a 24-hour grace period.
+- A first full-range validation must publish to a shadow directory on `/mnt/data-disk`; do not use the public report directory for an unverified build.
+
+After deployment, request `latest.json` and one detail URL from its `data_files[*][*].path` with an authorized session. The expected cache headers are respectively `private, no-store` and `private, max-age=900`.
 
 ## Deployment and rollback
 

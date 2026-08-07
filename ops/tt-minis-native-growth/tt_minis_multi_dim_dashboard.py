@@ -25,6 +25,7 @@ BJ_OFFSET_HOURS = 8
 DEFAULT_DAYS = 60
 CACHE_REFRESH_DAYS = 2
 CACHE_RETENTION_DAYS = 60
+PUBLISHED_FILE_STALE_GRACE_SECONDS = 24 * 60 * 60
 SAMPLE_VALIDATION_DAYS = 3
 SAMPLE_VALIDATION_TOP_ADS = 200
 DRAMAWAVE_TT_MINIS_PRODUCT_IDS = ("1479", "3346")
@@ -755,7 +756,7 @@ def refresh_cache(start_date, end_date, metric_levels=None):
             )
             conn.executemany(
                 insert_sql,
-                [[row.get(col, "") for col in SOURCE_COLUMNS] + [refreshed_at] for row in rows],
+                ([row.get(col, "") for col in SOURCE_COLUMNS] + [refreshed_at] for row in rows),
             )
             for day in each_date(start_date, end_date):
                 conn.execute(
@@ -811,9 +812,10 @@ def ensure_cache_for_range(start_date, end_date, metric_level=DEFAULT_METRIC_LEV
 
 def fetch_rows_from_cache(start_date, end_date, metric_level=DEFAULT_METRIC_LEVEL):
     metric_level = normalize_metric_level(metric_level)
+    rows = []
     with cache_conn() as conn:
         ensure_cache_schema(conn)
-        raw = conn.execute(
+        cursor = conn.execute(
             """
             SELECT %s
             FROM tt_minis_multi_dim_rows
@@ -822,14 +824,13 @@ def fetch_rows_from_cache(start_date, end_date, metric_level=DEFAULT_METRIC_LEVE
             """
             % ",".join(SOURCE_COLUMNS),
             (metric_level, start_date, end_date),
-        ).fetchall()
-    rows = []
-    for item in raw:
-        row = dict(item)
-        for col in NUMERIC_COLUMNS:
-            if col in row:
-                row[col] = int_num(row[col]) if col in {"installs", "impressions", "clicks", "ad_impression", "row_count"} else num(row[col])
-        rows.append(row)
+        )
+        for item in cursor:
+            row = dict(item)
+            for col in NUMERIC_COLUMNS:
+                if col in row:
+                    row[col] = int_num(row[col]) if col in {"installs", "impressions", "clicks", "ad_impression", "row_count"} else num(row[col])
+            rows.append(row)
     return rows
 
 
@@ -993,21 +994,22 @@ def build_payload(rows, start_date, end_date, validation, include_rows=True, met
     generated_at = bj_now().strftime("%Y-%m-%d %H:%M:%S")
     totals = aggregate_totals(rows)
     dictionaries = {}
-    dictionary_index = {}
-    for col in DICT_COLUMNS:
-        values = sorted({str(row.get(col, "") or "") for row in rows})
-        dictionaries[col] = values
-        dictionary_index[col] = {value: idx for idx, value in enumerate(values)}
     compact_rows = []
-    for row in rows:
-        compact = []
-        for col in ROW_COLUMNS:
-            value = row.get(col, "")
-            if col in dictionary_index:
-                compact.append(dictionary_index[col].get(str(value or ""), 0))
-            else:
-                compact.append(value)
-        compact_rows.append(compact)
+    if include_rows:
+        dictionary_index = {}
+        for col in DICT_COLUMNS:
+            values = sorted({str(row.get(col, "") or "") for row in rows})
+            dictionaries[col] = values
+            dictionary_index[col] = {value: idx for idx, value in enumerate(values)}
+        for row in rows:
+            compact = []
+            for col in ROW_COLUMNS:
+                value = row.get(col, "")
+                if col in dictionary_index:
+                    compact.append(dictionary_index[col].get(str(value or ""), 0))
+                else:
+                    compact.append(value)
+            compact_rows.append(compact)
     return {
         "meta": {
             "title": "TT小程序多维投放报表",
@@ -1057,6 +1059,43 @@ def atomic_write(path, content, binary=False):
     else:
         tmp.write_text(content, encoding="utf-8")
     os.replace(str(tmp), str(path))
+
+
+def published_data_version(payload):
+    generated_at = str((payload.get("meta") or {}).get("generated_at") or "")
+    timestamp = re.sub(r"[^0-9]", "", generated_at)[:14]
+    if not timestamp:
+        timestamp = bj_now().strftime("%Y%m%d%H%M%S")
+    return "%s-%s" % (timestamp, os.getpid())
+
+
+def prune_stale_published_files(data_dir, keep_paths, now=None):
+    """Remove old unreferenced detail files only after a new manifest is live."""
+    cutoff = (time.time() if now is None else now) - PUBLISHED_FILE_STALE_GRACE_SECONDS
+    root = data_dir.parent
+    removed = 0
+    for old in data_dir.glob("**/*.json"):
+        rel = old.relative_to(root).as_posix()
+        if rel in keep_paths:
+            continue
+        try:
+            if old.stat().st_mtime > cutoff:
+                continue
+            old.unlink()
+            removed += 1
+        except OSError:
+            pass
+    directories = sorted(
+        (path for path in data_dir.glob("**/*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return removed
 
 
 def html_template(payload=None):
@@ -1198,15 +1237,11 @@ def publish(payload, output_dir, rows_by_level=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    for old in data_dir.glob("**/*.json"):
-        try:
-            old.unlink()
-        except OSError:
-            pass
     manifest = dict(payload)
     manifest["rows"] = []
     manifest["dicts"] = {}
     manifest["data_files"] = {}
+    data_version = published_data_version(payload)
     rows_by_level = rows_by_level or {DEFAULT_METRIC_LEVEL: []}
     for level, level_rows in rows_by_level.items():
         level = normalize_metric_level(level)
@@ -1221,12 +1256,14 @@ def publish(payload, output_dir, rows_by_level=None):
                 include_rows=True,
                 metric_level=level,
             )
-            rel = "data/%s/%s.json" % (level, day)
+            rel = "data/%s/%s/%s.json" % (data_version, level, day)
             atomic_write(output_dir / rel, json.dumps(day_payload, ensure_ascii=False, separators=(",", ":")))
             manifest["data_files"][level][day] = {"path": rel, "row_count": len(grouped[day])}
     data = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     atomic_write(output_dir / "latest.json", data)
     atomic_write(output_dir / "index.html", html_template(payload))
+    keep_paths = {item["path"] for files in manifest["data_files"].values() for item in files.values()}
+    prune_stale_published_files(data_dir, keep_paths)
     return output_dir / "index.html"
 
 
@@ -1234,15 +1271,11 @@ def publish_from_cache(payload, output_dir, start_date, end_date):
     output_dir.mkdir(parents=True, exist_ok=True)
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    for old in data_dir.glob("**/*.json"):
-        try:
-            old.unlink()
-        except OSError:
-            pass
     manifest = dict(payload)
     manifest["rows"] = []
     manifest["dicts"] = {}
     manifest["data_files"] = {}
+    data_version = published_data_version(payload)
     for level in METRIC_LEVELS:
         manifest["data_files"][level] = {}
         for day in each_date(start_date, end_date):
@@ -1257,7 +1290,7 @@ def publish_from_cache(payload, output_dir, start_date, end_date):
                 include_rows=True,
                 metric_level=level,
             )
-            rel = "data/%s/%s.json" % (level, day)
+            rel = "data/%s/%s/%s.json" % (data_version, level, day)
             (output_dir / rel).parent.mkdir(parents=True, exist_ok=True)
             atomic_write(output_dir / rel, json.dumps(day_payload, ensure_ascii=False, separators=(",", ":")))
             manifest["data_files"][level][day] = {"path": rel, "row_count": len(day_rows)}
@@ -1265,6 +1298,8 @@ def publish_from_cache(payload, output_dir, start_date, end_date):
     data = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     atomic_write(output_dir / "latest.json", data)
     atomic_write(output_dir / "index.html", html_template(payload))
+    keep_paths = {item["path"] for files in manifest["data_files"].values() for item in files.values()}
+    prune_stale_published_files(data_dir, keep_paths)
     return output_dir / "index.html"
 
 
@@ -1313,9 +1348,11 @@ def main():
     validation = {"type": "skipped", "checks": [], "warnings": []}
     if not args.skip_validation and rows:
         validation = sample_validation(rows)
-    payload = build_payload(rows, start_date, end_date, validation, metric_level=DEFAULT_METRIC_LEVEL)
+    payload = build_payload(rows, start_date, end_date, validation, include_rows=False, metric_level=DEFAULT_METRIC_LEVEL)
     elapsed = time.time() - started
     if args.publish:
+        if not args.dry_run:
+            del rows
         out = publish_from_cache(payload, Path(args.output_dir), start_date, end_date)
         print("published=%s" % out)
         print("url=%s" % PUBLIC_URL)
