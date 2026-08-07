@@ -225,11 +225,11 @@ class MaxRowsTest(unittest.TestCase):
 
 
 class TimerContractTest(unittest.TestCase):
-    def test_timer_runs_every_five_minutes_with_two_minute_offset(self):
+    def test_timer_runs_hourly_with_five_minute_offset(self):
         timer = TIMER_PATH.read_text(encoding="utf-8")
-        self.assertIn("OnCalendar=*-*-* *:02/5:00", timer)
+        self.assertIn("OnCalendar=*-*-* *:05:00", timer)
         self.assertIn("Persistent=true", timer)
-        self.assertNotIn("OnCalendar=*-*-* *:05:00", timer)
+        self.assertNotIn("OnCalendar=*-*-* *:02/5:00", timer)
 
     def test_service_description_does_not_claim_hourly_frequency(self):
         service = SERVICE_PATH.read_text(encoding="utf-8")

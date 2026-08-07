@@ -7,7 +7,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 ## 目标
 
 - 新增 `ads_ai.tiktok_personal_account_snapshot` 当前快照表。
-- 每 5 分钟同步 `platform=3 AND is_deleted=0` 的 SocialKit TikTok 个号，固定在分钟数 `02/07/12/.../57` 触发，缩短 Token 自动续期后的目标快照滞后。
+- 每小时同步一次 `platform=3 AND is_deleted=0` 的 SocialKit TikTok 个号，固定在每小时 `:05` 触发。
 - 以 `social_center_accounts.id` 为主键，关联 `social_account_data.team_id + account_id` 获取指标。
 - 明文 Token 只存在数据库字段和进程内存，不进入代码、Git、命令行、日志或任务输出。
 - 保持幂等、单事务、单实例、失败不清空现有数据。
@@ -18,7 +18,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 
 - 源表 `socialkit.social_center_accounts` 与 `socialkit.social_account_data` 的只读查询。
 - 目标表一次性 DDL、参数化 upsert、消失账号停用与 Token 清空。
-- 独立 systemd oneshot 与 timer，每 5 分钟执行一次，并保留单实例锁避免重叠。
+- 独立 systemd oneshot 与 timer，每小时执行一次，并保留单实例锁避免重叠。
 - 源/目标专用 root-only 环境文件、固定端点校验、运行日志脱敏。
 
 ### 不包含
@@ -33,7 +33,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 
 1. 内部系统能按 TikTok 个号读取最新指标与当前 access token 状态。
 2. 仅同步未逻辑删除的 TikTok 个号；已删除源账号的 Token 不得继续保留在目标表。
-3. `token_status=2` 只是源状态；使用 Token 时仍需同时检查过期时间、账号状态和发布禁用状态。
+3. 发布候选必须满足 `token_status=2`、账号状态正常、未禁投且 Token 非空；`token_expires_time` 仅作为同步信息，不再作为发布前拦截条件，真实失效与权限不足以 TikTok API 响应为准并记录明确错误。
 4. 源账号没有指标行时仍保留账号与 Token，七项指标置 0，`has_metric_snapshot=0`。
 5. 源查询返回 0 行、重复主键或超过 1000 行时 fail closed，不更新目标。
 6. 目标固定为 `101.32.56.53:63353/ads_ai`，运行时代码禁止 DDL，失败零重试，等待下一小时。
@@ -41,7 +41,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 ## 交互与流程
 
 ```text
-systemd timer（每 5 分钟，:02/:07/.../:57）
+systemd timer（每小时 :05）
   -> 获取主机文件锁
   -> 只读查询 SocialKit 现有 TikTok 个号 + 左连接指标
   -> 校验非空、主键唯一、行数上限
@@ -92,7 +92,7 @@ systemctl start socialkit-tiktok-account-sync.service
 - 相同源数据连续同步两次不增加行数，第二次仍成功。
 - 模拟源账号消失后目标行 `is_active=0 AND access_token IS NULL`。
 - 错误端点、错误目标库、空源、重复主键和超量源均 fail closed。
-- systemd timer enabled/active，下一次触发时间符合 `:02/5` 五分钟周期。
+- systemd timer enabled/active，下一次触发时间符合每小时 `:05`。
 
 ## 风险与待确认
 
@@ -105,4 +105,5 @@ systemctl start socialkit-tiktok-account-sync.service
 
 | 日期 | 内容 |
 | --- | --- |
+| 2026-08-07 | 按生产内测策略恢复每小时 `:05` 同步；Token 到期时间不再参与发布前拦截，实际 Token 错误由 TikTok API 明确返回。 |
 | 2026-07-22 | 初版：TikTok 个号指标与明文 access token 小时级同步。 |

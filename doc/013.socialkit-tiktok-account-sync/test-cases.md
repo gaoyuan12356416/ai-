@@ -25,8 +25,8 @@
 | TC-009 | 首次生产同步 | 表已创建、密钥已配 | 手工启动 service | 目标活动行与源一致 | P0 | 待执行 |
 | TC-010 | 幂等重跑 | 首次同步成功 | 再次启动 service | 行数不增加，任务成功 | P0 | 待执行 |
 | TC-011 | 消失账号停用 | 测试/模拟旧 run_id 行 | 执行同步 | inactive 且 Token 为 NULL | P0 | 待执行 |
-| TC-012 | Timer | 单元安装 | `systemctl list-timers` | enabled/active，下一次符合 :02/5 | P1 | 待执行 |
-| TC-014 | Timer 契约 | 本地仓库 | 读取 timer unit | 每 5 分钟且保留 Persistent | P1 | 通过 |
+| TC-012 | Timer | 单元安装 | `systemctl list-timers` | enabled/active，下一次符合每小时 :05 | P1 | 待执行 |
+| TC-014 | Timer 契约 | 本地仓库 | 读取 timer unit | 每小时 :05 且保留 Persistent | P1 | 通过 |
 | TC-013 | 密钥权限 | env 已安装 | `stat` | root:root 0600 | P0 | 待执行 |
 
 ## 回归范围

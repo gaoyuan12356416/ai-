@@ -4,7 +4,7 @@
 
 - 新增 `ads_ai.tiktok_personal_account_snapshot`。
 - 新增独立 SocialKit -> ads_ai 同步脚本。
-- systemd oneshot 保持不变；timer 调整为每 5 分钟运行，固定在 `:02/:07/.../:57`。
+- systemd oneshot 保持不变；timer 每小时运行一次，固定在 `:05`。
 
 ## 配置项
 
@@ -70,3 +70,9 @@ systemctl list-timers socialkit-tiktok-account-sync.timer --no-pager
 - timer 在 `2026-08-07 10:57:12`、`11:02:00`、`11:07:00 +08:00` 连续 3 次自然触发成功；每轮 24 行、23 个正常 Token 状态、1 个过期 Token 状态、23 行指标、1 行缺指标，退出状态均为 0。下一次触发为 `11:12:00`。
 - 当前同步 release：`/mnt/data-disk/ai-drama-material-service/releases/socialkit-tiktok-account-sync-f178e2394bf1ec81689bd1320b224448838fced0`；timer 为 `OnCalendar=*-*-* *:02/5:00`，service 日志描述已移除旧 `Hourly` 字样。
 - 对账号 640/641/642 完成脱敏源—目标对账：状态、有效期、Token 是否存在及 Token 值一致性布尔结果均匹配；640、642 满足发布条件，641 因 `disable_publish=1` 保持不可发布。未输出 Token 原文。
+
+## 2026-08-07 小时级同步恢复
+
+- timer 契约恢复为 `OnCalendar=*-*-* *:05:00`；每轮仍会各占用一次源库与目标库连接并执行查询/事务写入，因此不再维持五分钟频率。
+- 发布侧不再用 `token_expires_time` 做候选或取 Token 拦截；仍保留 `is_active=1`、`account_status=2`、`token_status=2`、`disable_publish=0` 和 Token 非空条件。
+- TikTok API 明确返回 Token 失效或 Content Posting scope 不足时，自动任务分别记录 `tt_access_token_invalid` 或 `tt_access_token_scope_missing` 及脱敏后的 TikTok `log_id`。

@@ -93,6 +93,8 @@
 6. 浏览器公开 DTO 不返回源素材 URL、GPU 准备后 URL或黑名单值明细；只返回准备完成布尔值、黑名单计数/哈希摘要和经过域名约束的 TikTok 发布链接。
 7. 手动立即执行的同模板版本、同幂等键只允许对应一个 run；前端在未知响应时不得换键重试。
 8. 使用 `{code}` 的任务必须先通过独立四位码 broker 在共享路由表完成幂等冻结，broker 或路由账本不可用时不得调用 GPU prepare 或 TikTok publish；旧发布池队列、素材和发布状态机不得被写入。
+9. 账号候选与取 Token 保留启用状态、`account_status=2`、`token_status=2`、未禁投和 Token 非空校验，但不使用快照中的 `token_expires_time` 做时间窗口拦截。TikTok API 明确返回 Token 失效或 scope 不足时，任务日志必须写入稳定错误码、可操作中文提示和脱敏 `log_id`。
+10. 同一 run 的多个账号 worker 并发启动时，`queued -> running` 必须幂等；一个 worker 已完成状态切换后，其他 worker不得因状态冲突遗留带有效租约的 `selecting` 任务。
 
 ## 交互流程
 

@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from features.tt_auto_posts.core import (  # noqa: E402
     AuditActor,
+    TTAutoPostStoreError,
     TTPostAutoStore,
 )
 from features.tt_auto_posts.publisher import (  # noqa: E402
@@ -338,6 +339,24 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             (Path(self.temp.name) / "s2l" / "tt-auto" / ("%d.html" % task.id)).is_file()
         )
 
+    def test_concurrent_run_start_conflict_is_idempotent(self):
+        task = self.reserved_task(suffix="run-start-race")
+        executor = self.executor(FakeGPU())
+        original = self.store.set_run_status
+
+        def concurrent_winner(run_id, to_status, **kwargs):
+            original(run_id, to_status, **kwargs)
+            raise TTAutoPostStoreError(
+                "tt_auto_run_status_conflict",
+                "run status changed",
+                409,
+            )
+
+        self.store.set_run_status = concurrent_winner
+        run = executor._ensure_run_running(task.run_id)
+        self.assertEqual(run.status, "running")
+        self.assertEqual(self.store.get_run(task.run_id).status, "running")
+
     def test_snapshot_external_account_identity_does_not_block_preparation(self):
         task = self.reserved_task(
             suffix="snapshot-external-id",
@@ -531,34 +550,28 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             [job_id, job_id],
         )
 
-    def test_snapshot_refresh_pending_retries_same_task_after_one_minute(self):
-        task = self.reserved_task(suffix="snapshot-refresh")
+    def test_token_error_is_terminal_and_written_explicitly(self):
+        task = self.reserved_task(suffix="token-expired")
         gpu = FakeGPU()
         executor = self.executor(gpu)
 
         prepared = executor.execute_next("worker-prepare")["task"]
         self.assertEqual(prepared["status"], "ready")
         self.account_source.failure = AccountSourceError(
-            "tt_account_snapshot_refresh_pending",
-            "snapshot refresh pending",
-            503,
+            "tt_access_token_expired",
+            "TikTok账号Token状态为已过期，请重新登录授权后等待每小时账号同步",
+            409,
         )
-        waiting = executor.execute_next("worker-publish")["task"]
-        self.assertEqual(waiting["status"], "retry_wait")
+        failed = executor.execute_next("worker-publish")["task"]
+        self.assertEqual(failed["status"], "failed")
         self.assertEqual(
-            waiting["error_code"],
-            "tt_account_snapshot_refresh_pending",
+            failed["error_code"],
+            "tt_access_token_expired",
         )
-        self.assertEqual(waiting["material_id"], task.material_id)
-
-        self.clock.value += timedelta(seconds=59)
-        self.assertFalse(executor.execute_next("worker-too-early")["claimed"])
-        self.account_source.failure = None
-        self.clock.value += timedelta(seconds=2)
-        published = executor.execute_next("worker-retry")["task"]
-        self.assertEqual(published["status"], "published")
-        self.assertEqual(published["material_id"], task.material_id)
+        self.assertIn("Token", failed["error_message"])
+        self.assertEqual(failed["material_id"], task.material_id)
         self.assertEqual(len(gpu.prepare_calls), 1)
+        self.assertEqual(len(gpu.publish_calls), 0)
 
     def test_retry_keeps_short_link_identical_after_account_name_changes(self):
         task = self.reserved_task(suffix="frozen-account-name")

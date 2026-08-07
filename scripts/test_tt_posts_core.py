@@ -2643,17 +2643,17 @@ class AccountSourceTests(unittest.TestCase):
 
     def test_typed_account_loader_error_is_preserved(self):
         expected = AccountSourceError(
-            "tt_account_snapshot_refresh_pending",
-            "snapshot refresh pending",
-            503,
+            "tt_access_token_expired",
+            "TikTok账号Token状态为已过期",
+            409,
         )
 
-        def pending(_value):
+        def expired(_value):
             raise expected
 
         source = SnapshotAccountSource(
             lambda: [self.metadata()],
-            pending,
+            expired,
             lambda _value: None,
         )
         with self.assertRaises(AccountSourceError) as caught:

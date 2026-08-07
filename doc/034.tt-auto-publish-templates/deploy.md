@@ -218,3 +218,11 @@ curl -fsS http://127.0.0.1:18831/health
   `profile=tt-post-source-direct-v1`、`source_trim_tail_seconds=0`；CPU tunnel 上的 GPU
   `/health` 必须返回相同 profile、`media_mode=source_direct`、`transition=none`。
 - 验收只观察自然 scheduler/runner，不创建新 run，不调用 TikTok；真实测试由用户重新手动执行。
+
+## 2026-08-07 小时同步与 Token 错误可观测性
+
+- 账号快照 timer 恢复为每小时 `:05`，减少每轮源库 SELECT 与目标库事务写入造成的 SQL 查询占用。
+- 删除列表、执行前账号复核和精确取 Token 三处的 `token_expires_time > 当前时间+5分钟` 条件；保留账号状态、`token_status=2`、未禁投和 Token 非空条件。
+- 快照 `token_status=3` 直接记录 `tt_access_token_expired`；TikTok API 明确返回 Token 无效或 scope 不足时分别记录 `tt_access_token_invalid`、`tt_access_token_scope_missing`，错误文案包含重新登录授权建议及脱敏后的上游 `log_id`。
+- 上游 Token 错误只在新自动发布 CPU consumer 内映射；共享 GPU worker和旧发布池不切换、不重启。
+- 已有 `publish_id` 或未知结果的任务继续只允许 reconcile；旧 TT 发布池不切换 release、不重启，自动发布生产闸门保持开启。

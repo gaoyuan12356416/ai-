@@ -731,13 +731,13 @@ class SnapshotAccountSource:
             except Exception:
                 raise AccountSourceError(
                     "tt_access_token_unavailable",
-                    "TikTok发布凭据暂不可用",
+                    "TikTok账号Token读取失败，请稍后重试",
                     503,
                 ) from None
             if not isinstance(raw, Mapping):
                 raise AccountSourceError(
                     "tt_access_token_missing",
-                    "TikTok发布凭据缺失",
+                    "TikTok账号Token缺失，请重新登录授权后等待每小时账号同步",
                     409,
                 )
             token_account_id = _account_id(raw.get("account_id"))
@@ -756,7 +756,7 @@ class SnapshotAccountSource:
             ):
                 raise AccountSourceError(
                     "tt_access_token_missing",
-                    "TikTok发布凭据缺失",
+                    "TikTok账号Token缺失，请重新登录授权后等待每小时账号同步",
                     409,
                 )
             token = token_value

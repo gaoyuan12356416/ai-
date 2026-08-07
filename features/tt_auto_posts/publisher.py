@@ -22,7 +22,12 @@ from features.tt_posts.core import caption_uses_code_macro
 from features.tt_posts.service import GPUClientError
 
 from .client import safe_public_message
-from .core import TASK_STATUSES, TTPostAutoStore, TaskRecord
+from .core import (
+    TASK_STATUSES,
+    TTAutoPostStoreError,
+    TTPostAutoStore,
+    TaskRecord,
+)
 from .links import (
     build_auto_short_url,
     build_auto_w2a_url,
@@ -370,11 +375,6 @@ class AutoPostExecutor:
         )
         if publish_evidence or transient_selection or transient_reserved:
             retry_delay = timedelta(minutes=5)
-            if (
-                code == "tt_account_snapshot_refresh_pending"
-                and not publish_evidence
-            ):
-                retry_delay = timedelta(minutes=1)
             return self.store.transition_task(
                 task.id,
                 "retry_wait",
@@ -954,11 +954,7 @@ class AutoPostExecutor:
         if not tasks:
             return
         if not all(task.status in TERMINAL_TASK_STATUSES for task in tasks):
-            run = self.store.get_run(run_id)
-            if run.status == "queued":
-                self.store.set_run_status(
-                    run_id, "running", expected_statuses={"queued"}
-                )
+            self._ensure_run_running(run_id)
             return
         failed = [task for task in tasks if task.status in {"failed", "canceled"}]
         successful = [task for task in tasks if task.status not in {"failed", "canceled"}]
@@ -976,6 +972,26 @@ class AutoPostExecutor:
                 target,
                 expected_statuses={run.status},
             )
+
+    def _ensure_run_running(self, run_id: int):
+        """Idempotently start a run when concurrent account workers race."""
+        run = self.store.get_run(run_id)
+        if run.status != "queued":
+            return run
+        try:
+            return self.store.set_run_status(
+                run_id,
+                "running",
+                expected_statuses={"queued"},
+            )
+        except TTAutoPostStoreError as exc:
+            current = self.store.get_run(run_id)
+            if (
+                exc.code == "tt_auto_run_status_conflict"
+                and current.status == "running"
+            ):
+                return current
+            raise
 
     def execute_next(self, worker_id: Any) -> Dict[str, Any]:
         if not self.gates.is_open:
@@ -1003,11 +1019,7 @@ class AutoPostExecutor:
             task = claim.task
             phase = claim.claim_phase
             claim_token = claim.reveal_claim_token()
-            run = self.store.get_run(task.run_id)
-            if run.status == "queued":
-                self.store.set_run_status(
-                    run.id, "running", expected_statuses={"queued"}
-                )
+            self._ensure_run_running(task.run_id)
             try:
                 prepared_now = False
                 if phase == "selection":

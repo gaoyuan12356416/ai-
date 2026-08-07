@@ -155,9 +155,9 @@ class AccountSQLTests(unittest.TestCase):
                 "account_status = 2",
                 "token_status = 2",
                 "disable_publish = 0",
-                "token_expires_time > %s",
             ):
                 self.assertIn(condition, statement)
+            self.assertNotIn("token_expires_time >", statement)
 
     def test_token_sql_is_exact_single_account_execution_query(self):
         lowered = ACCOUNT_TOKEN_SQL.lower()
@@ -189,6 +189,7 @@ class AccountSQLTests(unittest.TestCase):
         rendered = json.dumps(items)
         self.assertNotIn("access_token", rendered.lower())
         self.assertEqual([sql for sql, _params in statements], [ACCOUNT_LIST_SQL])
+        self.assertEqual(statements[0][1], ())
 
     def test_exact_credential_context_queries_metadata_then_one_token(self):
         statements = []
@@ -196,10 +197,10 @@ class AccountSQLTests(unittest.TestCase):
 
         def router(sql, params):
             if sql == ACCOUNT_METADATA_SQL:
-                self.assertEqual(params[0], "101")
+                self.assertEqual(params, ("101",))
                 return [account_row()]
             if sql == ACCOUNT_TOKEN_SQL:
-                self.assertEqual(params[0], "101")
+                self.assertEqual(params, ("101",))
                 return [{"source_account_id": 101, "access_token": secret}]
             raise AssertionError("unexpected SQL")
 
@@ -217,18 +218,19 @@ class AccountSQLTests(unittest.TestCase):
             [ACCOUNT_METADATA_SQL, ACCOUNT_TOKEN_SQL],
         )
 
-    def test_expiry_only_rejection_reports_retryable_snapshot_refresh(self):
+    def test_expired_timestamp_does_not_block_normal_token_status(self):
         statements = []
+        secret = "still-valid-token"
 
         def router(sql, params):
             if sql == ACCOUNT_METADATA_SQL:
-                self.assertEqual(params[0], "101")
-                return []
-            if sql == ACCOUNT_STATUS_SQL:
                 self.assertEqual(params, ("101",))
                 row = account_row()
                 row["token_expires_time"] = 1
                 return [row]
+            if sql == ACCOUNT_TOKEN_SQL:
+                self.assertEqual(params, ("101",))
+                return [{"source_account_id": 101, "access_token": secret}]
             raise AssertionError("unexpected SQL")
 
         repo = MySQLSnapshotAccountRepository(
@@ -237,13 +239,37 @@ class AccountSQLTests(unittest.TestCase):
             now_fn=lambda: datetime(2026, 7, 29, tzinfo=UTC),
             verify_identity=False,
         )
+        with repo.as_account_source().publish_credentials("101") as credentials:
+            self.assertEqual(credentials.reveal_access_token(), secret)
+        self.assertEqual(
+            [sql for sql, _params in statements],
+            [ACCOUNT_METADATA_SQL, ACCOUNT_TOKEN_SQL],
+        )
+
+    def test_expired_token_status_reports_explicit_token_error(self):
+        statements = []
+
+        def router(sql, params):
+            if sql == ACCOUNT_METADATA_SQL:
+                self.assertEqual(params, ("101",))
+                return []
+            if sql == ACCOUNT_STATUS_SQL:
+                self.assertEqual(params, ("101",))
+                row = account_row()
+                row["token_status"] = 3
+                return [row]
+            raise AssertionError("unexpected SQL")
+
+        repo = MySQLSnapshotAccountRepository(
+            self.config(),
+            connection_factory=lambda _config: FakeConnection(router, statements),
+            verify_identity=False,
+        )
         with self.assertRaises(AccountSourceError) as caught:
             repo.as_account_source().get_safe_account("101")
-        self.assertEqual(
-            caught.exception.code,
-            "tt_account_snapshot_refresh_pending",
-        )
-        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(caught.exception.code, "tt_access_token_expired")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("Token", str(caught.exception))
         self.assertEqual(
             [sql for sql, _params in statements],
             [ACCOUNT_METADATA_SQL, ACCOUNT_STATUS_SQL],
@@ -504,6 +530,90 @@ class GPUClientTests(unittest.TestCase):
             )
         self.assertTrue(caught.exception.publish_was_not_created)
         self.assertFalse(caught.exception.unknown_outcome)
+
+    def test_cpu_maps_gpu_token_rejections_to_explicit_known_failures(self):
+        cases = (
+            (
+                "access_token_invalid",
+                401,
+                "tt_access_token_invalid",
+                "Token已失效",
+            ),
+            (
+                "scope_not_authorized",
+                403,
+                "tt_access_token_scope_missing",
+                "Token权限不足",
+            ),
+        )
+        for upstream_code, upstream_status, expected_code, expected_text in cases:
+            with self.subTest(upstream_code=upstream_code):
+                connection = CaptureConnection(
+                    {
+                        "code": "tt_upstream_rejected",
+                        "message": "TikTok API rejected the request",
+                        "details": {
+                            "upstream_code": upstream_code,
+                            "upstream_http_status": upstream_status,
+                            "log_id": "log-token-safe",
+                        },
+                    },
+                    status=502,
+                )
+                client = self.client(connection)
+                with self.assertRaises(GPUClientError) as caught:
+                    client.publish(
+                        job_id="ttpost-abcdef1234567890",
+                        source_account_id="101",
+                        access_token="token",
+                        queue={
+                            "caption": "hello",
+                            "privacy_level": "SELF_ONLY",
+                            "allow_comment": False,
+                            "allow_duet": False,
+                            "allow_stitch": False,
+                            "brand_content_toggle": False,
+                            "brand_organic_toggle": False,
+                            "is_aigc": True,
+                        },
+                    )
+                self.assertEqual(caught.exception.code, expected_code)
+                self.assertTrue(caught.exception.publish_was_not_created)
+                self.assertFalse(caught.exception.unknown_outcome)
+                self.assertIn(expected_text, str(caught.exception))
+                self.assertIn("log-token-safe", str(caught.exception))
+
+    def test_cpu_keeps_non_token_gpu_rejection_generic(self):
+        connection = CaptureConnection(
+            {
+                "code": "tt_upstream_rejected",
+                "message": "TikTok API rejected the request",
+                "details": {
+                    "upstream_code": "url_ownership_unverified",
+                    "upstream_http_status": 403,
+                    "log_id": "log-url-safe",
+                },
+            },
+            status=502,
+        )
+        client = self.client(connection)
+        with self.assertRaises(GPUClientError) as caught:
+            client.publish(
+                job_id="ttpost-abcdef1234567890",
+                source_account_id="101",
+                access_token="token",
+                queue={
+                    "caption": "hello",
+                    "privacy_level": "SELF_ONLY",
+                    "allow_comment": False,
+                    "allow_duet": False,
+                    "allow_stitch": False,
+                    "brand_content_toggle": False,
+                    "brand_organic_toggle": False,
+                    "is_aigc": True,
+                },
+            )
+        self.assertEqual(caught.exception.code, "tt_upstream_rejected")
 
     def test_reconcile_uses_job_ledger_and_does_not_send_publish_id(self):
         connection = CaptureConnection({"item": {"state": "processing"}})

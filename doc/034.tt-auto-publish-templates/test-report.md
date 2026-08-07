@@ -71,3 +71,12 @@
 - health 现在明确暴露自动发布请求的 profile 和 trim，部署验收不再只检查三重门禁。
 - 定向测试 31/31、完整 TT 回归 560/560、Python compile 和 `git diff --check` 全部通过。
 - 生产非发布验收和最终 run/task 基线待部署完成后补充；不由修复过程创建真实帖子。
+
+## 2026-08-07 小时同步与 Token 日志回归
+
+- 账号仓库回归证明过期时间戳不再阻止 `token_status=2` 的账号；`token_status=3` 返回明确 `tt_access_token_expired/409`，禁投账号仍不可用。
+- 自动执行器回归证明 Token 状态错误会终止任务并完整写入稳定错误码与中文提示，不重复 GPU prepare 或 publish。
+- 新自动发布 CPU 的 GPUClient 回归覆盖 HTTP 401 `access_token_invalid`、403 `scope_not_authorized` 和非 Token 403；前两者转换为明确 Token 错误，非 Token 拒绝仍保持 `tt_upstream_rejected`，共享 GPU worker与旧发布池无需切换。
+- 同步 timer 契约为 `OnCalendar=*-*-* *:05:00` 且 `Persistent=true`。
+- 并发执行器回归模拟另一个 worker 抢先完成 `queued -> running`，后到 worker将其视为幂等成功，不遗留死租约。
+- 基于待切换的 source-direct profile 后继版本重放后，本地 TT 全量相关回归共 451 项通过，失败 0。

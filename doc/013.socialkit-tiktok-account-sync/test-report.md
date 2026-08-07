@@ -23,7 +23,7 @@
 ## 验证证据
 
 - `py_compile`：通过。
-- `scripts/test_sync_socialkit_tiktok_accounts.py`：`Ran 15 tests ... OK`，包含五分钟 timer 与非小时制 service 描述契约回归。
+- `scripts/test_sync_socialkit_tiktok_accounts.py`：`Ran 15 tests ... OK`，包含每小时 `:05` timer 与通用 service 描述契约回归。
 - `git diff --cached --check`：通过。
 - 变更集未发现真实数据库密码。
 - 生产 `10:57/11:02/11:07` 三轮自然同步均为 `success/0`，每轮 upsert 24 行。
@@ -36,4 +36,4 @@
 
 ## 发布建议
 
-已完成 GitHub-first 部署、三轮自然同步和脱敏对账；允许维持当前五分钟 timer。
+小时级 timer 与 Token 日志分类回归通过后，按 GitHub-first 流程部署并观察下一次自然同步。
