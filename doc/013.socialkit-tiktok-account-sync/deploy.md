@@ -65,4 +65,8 @@ systemctl list-timers socialkit-tiktok-account-sync.timer --no-pager
 
 ## 生产部署记录
 
-首次部署已完成。本次频率调整待补充精确 commit、备份目录和连续 3 次自然同步证据。
+- 行为修复提交 `729ce90174e0c2c8fa1047295f6e606bf35cdb67`，service 描述修正提交 `f178e2394bf1ec81689bd1320b224448838fced0`，均已推送 GitHub。
+- 部署前备份：`/mnt/data-disk/tt-auto-post-deploy/backups/20260807-105308-pre-account-snapshot-refresh-fix`。新旧 SQLite `quick_check=ok`，排除清单自身后的 `SHA256SUMS` 全部通过。
+- timer 在 `2026-08-07 10:57:12`、`11:02:00`、`11:07:00 +08:00` 连续 3 次自然触发成功；每轮 24 行、23 个正常 Token 状态、1 个过期 Token 状态、23 行指标、1 行缺指标，退出状态均为 0。下一次触发为 `11:12:00`。
+- 当前同步 release：`/mnt/data-disk/ai-drama-material-service/releases/socialkit-tiktok-account-sync-f178e2394bf1ec81689bd1320b224448838fced0`；timer 为 `OnCalendar=*-*-* *:02/5:00`，service 日志描述已移除旧 `Hourly` 字样。
+- 对账号 640/641/642 完成脱敏源—目标对账：状态、有效期、Token 是否存在及 Token 值一致性布尔结果均匹配；640、642 满足发布条件，641 因 `disable_publish=1` 保持不可发布。未输出 Token 原文。

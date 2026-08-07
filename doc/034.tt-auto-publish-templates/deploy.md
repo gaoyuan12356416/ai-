@@ -191,4 +191,6 @@ curl -fsS http://127.0.0.1:18831/health
 - 保留 `is_active=1`、`account_status=2`、`token_status=2`、`disable_publish=0`、Token 非空和“到期时间晚于当前时间 5 分钟”全部安全条件，不删除校验。
 - 仅当账号其他状态均正常、唯一不满足项为目标快照 Token 有效期窗口时，返回 `tt_account_snapshot_refresh_pending`；同一冻结任务、素材、GPU 成片和文案在 1 分钟后重试。其他瞬时失败仍按 5 分钟重试，已有 `publish_id` 或未知结果仍只允许 reconcile。
 - SocialKit 账号快照 timer 从每小时 `:05` 改为每 5 分钟 `:02/:07/.../:57`。641 的 `disable_publish=1` 不会被误判为快照滞后，仍禁止发布。
-- 旧 TT 发布池不切换 release、不重启服务；新自动发布三重生产闸门保持开启，模板 1 保持停用。本次不创建真实发布任务。
+- 旧 TT 发布池不切换 release、不重启服务；新自动发布三重生产闸门保持开启。本次部署前实时核验发现模板 1 已由现网状态开启，部署未改动该开关；本次未手工创建真实发布任务。
+- 自动 sidecar 已切到 `/opt/tt-auto-post/releases/729ce90174e0c2c8fa1047295f6e606bf35cdb67`，健康检查为 200。旧 `tt-post-service.service` PID 部署前后均为 `3055551`。
+- 部署后 `10:57/11:02/11:07` 三轮账号快照自然同步均成功；640、642 的目标快照与源端一致且可发布，641 仍因 `disable_publish=1` 不可发布。最终没有非终态自动任务，历史任务 3 仍为 `published`、原 `publish_id` 不变。
