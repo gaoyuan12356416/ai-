@@ -80,6 +80,9 @@
 | PUB-05 | creator-info 不允许发布 | 失败关闭并记录阶段响应 |
 | PUB-06 | 浏览器读取运行详情 | 不返回源/准备媒体 URL或黑名单值，仅返回摘要和 `prepared` |
 | PUB-07 | 下游返回非 TikTok、带查询或带凭据 publish URL | 浏览器响应中的 `publish_url` 置空 |
+| PUB-08 | 自动发布使用 `source_direct` profile 且裁尾为 0 | prepare 请求 profile/trim 与 GPU 一致，任务进入 ready |
+| PUB-09 | 自动发布使用 `source_direct` profile 但裁尾非 0 | 服务启动失败并返回 `tt_auto_source_direct_trim_forbidden`，不创建发布任务 |
+| PUB-10 | 读取自动发布 health | 返回当前请求 profile、裁尾秒数和三重门禁，便于与 GPU health 对照 |
 
 ## 调度与执行隔离
 

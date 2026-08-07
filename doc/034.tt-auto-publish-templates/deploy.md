@@ -194,3 +194,27 @@ curl -fsS http://127.0.0.1:18831/health
 - 旧 TT 发布池不切换 release、不重启服务；新自动发布三重生产闸门保持开启。本次部署前实时核验发现模板 1 已由现网状态开启，部署未改动该开关；本次未手工创建真实发布任务。
 - 自动 sidecar 已切到 `/opt/tt-auto-post/releases/729ce90174e0c2c8fa1047295f6e606bf35cdb67`，健康检查为 200。旧 `tt-post-service.service` PID 部署前后均为 `3055551`。
 - 部署后 `10:57/11:02/11:07` 三轮账号快照自然同步均成功；640、642 的目标快照与源端一致且可发布，641 仍因 `disable_publish=1` 不可发布。最终没有非终态自动任务，历史任务 3 仍为 `published`、原 `publish_id` 不变。
+
+## 2026-08-07 原片直发 profile 对齐修复
+
+- 自动发布是独立于旧素材池发布的 CPU consumer。切换 GPU 媒体模式时必须同时检查
+  `/etc/tt-post.env` 和 `/etc/tt-auto-post.env`，不得只更新其中一个。
+- 当前原片直发配置必须成对设置：
+
+  ```text
+  TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=0
+  TT_POST_MEDIA_PROFILE_VERSION=tt-post-source-direct-v1
+  ```
+
+- 回切自动发布旧制作模式时也必须成对恢复：裁尾 `4.333333`，profile
+  `tt-post-direct-outro-hevc-720x1280-v2`。旧制作代码保持不变。
+- 部署前停止 `tt-auto-post-scheduler.timer`、`tt-auto-post-runner.timer` 和
+  `tt-auto-post-runner.path`，确认两个 oneshot 均 inactive；创建 SQLite online backup，
+  保存 env/unit/current release 及 SHA256。
+- 本次失败 run 6 的 task 7–12 均为确定的 prepare 前失败，无 `publish_id`、无 publish
+  attempt、无 unknown。task 6 留有 selection lease，恢复 runner 前必须在备份后终态化为
+  failed，并把 run 6 收敛为 failed，防止 lease 到期后自动继续；不得重置或重跑 task 7–12。
+- 切换 release/env 后，自动发布 `/health` 必须返回
+  `profile=tt-post-source-direct-v1`、`source_trim_tail_seconds=0`；CPU tunnel 上的 GPU
+  `/health` 必须返回相同 profile、`media_mode=source_direct`、`transition=none`。
+- 验收只观察自然 scheduler/runner，不创建新 run，不调用 TikTok；真实测试由用户重新手动执行。

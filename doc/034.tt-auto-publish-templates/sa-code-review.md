@@ -22,3 +22,11 @@
 
 - 部署精确 GitHub 提交并执行生产“关闭默认”验收；部署前复跑 108 个新系统测试、64 个旧 TT 回归、JS 语法和 `git diff --check`。
 - 部署时保持三重门禁关闭、模板库为空；不得用真实 TT 帖子作为验收手段。
+
+## 2026-08-07 原片直发对齐修复评审
+
+- P0 已关闭：自动发布 env 与 GPU profile 漂移导致任务确定失败。
+- P0 已关闭：`source_direct` 搭配非零裁尾时服务启动即拒绝，避免静默改变原片。
+- P1 已关闭：health 暴露请求 profile/trim，部署可直接与 GPU health 对照。
+- 旧 `direct_outro` 默认实现、发布幂等、`publish_id`/unknown reconcile 规则均未修改。
+- 560/560 TT 回归、Python compile 和 `git diff --check` 通过。

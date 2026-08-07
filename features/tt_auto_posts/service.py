@@ -223,6 +223,15 @@ class TTAutoPostService:
                 "tt_auto_schedule_config_invalid", "调度宽限时间无效", 500
             )
 
+    def health(self) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "service": "tt-auto-post",
+            "gates": self.executor.gates.as_dict(),
+            "profile": self.executor.media_profile_version,
+            "source_trim_tail_seconds": self.executor.source_trim_tail_seconds,
+        }
+
     def _now(self) -> datetime:
         value = self.now_fn()
         if not isinstance(value, datetime) or value.tzinfo is None:
@@ -1342,11 +1351,7 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         service = self.server.tt_auto_service
         if self.command == "GET" and path == "/health":
-            return 200, {
-                "ok": True,
-                "service": "tt-auto-post",
-                "gates": service.executor.gates.as_dict(),
-            }
+            return 200, service.health()
         if not self._authorized():
             return 403, {
                 "ok": False,

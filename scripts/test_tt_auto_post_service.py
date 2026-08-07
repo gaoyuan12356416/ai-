@@ -130,6 +130,8 @@ class FakeSelector:
 class FakeExecutor:
     def __init__(self, gates):
         self.gates = gates
+        self.media_profile_version = "tt-post-source-direct-v1"
+        self.source_trim_tail_seconds = 0.0
         self.execute_calls = []
 
     def execute_next(self, worker_id):
@@ -190,6 +192,14 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
     def test_http_server_waits_for_inflight_threads_on_shutdown(self):
         self.assertFalse(TTAutoPostHTTPServer.daemon_threads)
         self.assertTrue(TTAutoPostHTTPServer.block_on_close)
+
+    def test_health_exposes_preparation_profile_and_trim(self):
+        service, _ = self.service(gates=AutoLiveGates(True, True, True))
+        result = service.health()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["profile"], "tt-post-source-direct-v1")
+        self.assertEqual(result["source_trim_tail_seconds"], 0.0)
+        self.assertTrue(result["gates"]["is_open"])
 
     def test_startup_rejects_documented_placeholder_bearer_before_storage(self):
         with self.assertRaises(AutoPostServiceError) as caught:

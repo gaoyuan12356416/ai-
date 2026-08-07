@@ -263,7 +263,7 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         )
         return self.store.get_task(task.id)
 
-    def executor(self, gpu, code_broker=None):
+    def executor(self, gpu, code_broker=None, **overrides):
         return AutoPostExecutor(
             self.store,
             UnusedSelector(),
@@ -274,7 +274,36 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             now_fn=self.clock,
             short_link_root=Path(self.temp.name).resolve() / "s2l",
             lease_seconds=120,
+            **overrides,
         )
+
+    def test_source_direct_profile_requires_zero_trim(self):
+        with self.assertRaises(AutoPostExecutionError) as caught:
+            self.executor(
+                FakeGPU(),
+                media_profile_version="tt-post-source-direct-v1",
+                source_trim_tail_seconds=4.333333,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "tt_auto_source_direct_trim_forbidden",
+        )
+
+    def test_source_direct_prepare_forwards_profile_and_zero_trim(self):
+        self.reserved_task(suffix="source-direct")
+        gpu = FakeGPU()
+        result = self.executor(
+            gpu,
+            media_profile_version="tt-post-source-direct-v1",
+            source_trim_tail_seconds=0,
+        ).execute_next("worker-source-direct")
+        self.assertEqual(result["task"]["status"], "ready")
+        self.assertEqual(len(gpu.prepare_calls), 1)
+        self.assertEqual(
+            gpu.prepare_calls[0]["expected_profile"],
+            "tt-post-source-direct-v1",
+        )
+        self.assertEqual(gpu.prepare_calls[0]["source_trim_tail_seconds"], 0)
 
     def test_prepare_then_publish_completes_once(self):
         task = self.reserved_task(suffix="success")

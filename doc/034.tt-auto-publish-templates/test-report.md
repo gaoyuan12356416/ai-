@@ -61,3 +61,13 @@
 - 本地完整相关回归共 341 项通过：自动发布 96、四位码 broker 5、TT 共用账号/服务层 225、账号同步 15，失败 0。
 - 生产 release `729ce90174e0c2c8fa1047295f6e606bf35cdb67` 通过自动发布 96 项（runner 中 2 项按受信 `/run/tt-auto-post` 路径重跑通过）、broker 4 项纯离线回归、TT 共用层 225 项和同步 15 项。broker 唯一 loopback 用例因生产 18832 已占用而未抢占端口，本地已通过。
 - 三重闸门均为 1；旧 TT PID `3055551` 未变化；账号同步连续 3 轮 `success/0`。640/642 源—快照一致且可发布，641 因 `disable_publish=1` 继续禁止。最终无非终态自动任务，任务 3 仍为已发布且 `unknown_outcome=0`。
+
+## 2026-08-07 原片直发 profile 对齐回归
+
+- 确认生产失败任务 7–12 均为 `prepare_profile_mismatch`，`publish_id` 为空、
+  `publish_attempt_count=0`、`unknown_outcome=0`；TikTok init 未发生。
+- 新测试证明自动发布以 `tt-post-source-direct-v1` 和 trim `0` 调用 prepare；错误组合在
+  服务启动阶段返回 `tt_auto_source_direct_trim_forbidden`。
+- health 现在明确暴露自动发布请求的 profile 和 trim，部署验收不再只检查三重门禁。
+- 定向测试 31/31、完整 TT 回归 560/560、Python compile 和 `git diff --check` 全部通过。
+- 生产非发布验收和最终 run/task 基线待部署完成后补充；不由修复过程创建真实帖子。

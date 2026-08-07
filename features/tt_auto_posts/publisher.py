@@ -39,6 +39,7 @@ from .selector import (
 
 
 UTC = timezone.utc
+SOURCE_DIRECT_MEDIA_PROFILE = "tt-post-source-direct-v1"
 TERMINAL_TASK_STATUSES = frozenset(
     {"no_candidate", "published", "failed", "canceled", "skipped"}
 )
@@ -278,6 +279,15 @@ class AutoPostExecutor:
         self.lease_seconds = int(lease_seconds)
         self.max_concurrent_tasks = int(max_concurrent_tasks)
         self._execute_slots = threading.BoundedSemaphore(self.max_concurrent_tasks)
+        if (
+            self.media_profile_version == SOURCE_DIRECT_MEDIA_PROFILE
+            and self.source_trim_tail_seconds != 0
+        ):
+            raise AutoPostExecutionError(
+                "tt_auto_source_direct_trim_forbidden",
+                "source-direct publishing requires zero source trim",
+                500,
+            )
         if (
             not Path(self.short_link_root).is_absolute()
             or not 0 <= self.source_trim_tail_seconds <= 60
