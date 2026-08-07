@@ -117,7 +117,7 @@ set -Eeuo pipefail
 umask 077
 
 TARGET_SHA='<待发布回填的40位commit>'
-SOURCE_REPO='/root/drama_material_service'
+SOURCE_REPO='/root/codex_repos/ai-drama-material-service-ad-control-deploy'
 RELEASE_ROOT='/opt/dramawave-attribution-comparison/releases'
 RELEASE_PATH="${RELEASE_ROOT}/${TARGET_SHA}"
 SHORT_SHA="$(printf '%s' "$TARGET_SHA" | cut -c1-12)"
@@ -391,14 +391,17 @@ missing = []
 with mysql_connection(require_source_config()) as conn:
     with conn.cursor() as cursor:
         cursor.execute("SELECT @@read_only AS read_only")
-        assert int(cursor.fetchone()["read_only"]) == 1
+        rows = cursor.fetchall()
+        assert len(rows) == 1 and int(rows[0]["read_only"]) == 1
     for day in days:
         with source_day_snapshot(conn), conn.cursor() as cursor:
             counts = {}
             for name, sql in queries.items():
                 parameter = day.isoformat() if name == "custom" else day.strftime("%Y%m%d")
                 cursor.execute(sql, (parameter,))
-                counts[name] = int(cursor.fetchone()["n"] or 0)
+                rows = cursor.fetchall()
+                assert len(rows) == 1
+                counts[name] = int(rows[0]["n"] or 0)
                 if not counts[name]:
                     missing.append((day.isoformat(), name))
             print(day.isoformat(), counts, flush=True)

@@ -1042,19 +1042,32 @@ class RefreshAtomicityTests(unittest.TestCase):
 
     def test_cache_contract_rejects_partial_and_mixed_schemas(self):
         legacy_column = ("d" + str(30)) + "_revenue_iaa_d0"
-        mutations = {
-            "partial": "ALTER TABLE attribution_fact DROP COLUMN d10_revenue_iap_d0",
-            "mixed": (
-                "ALTER TABLE attribution_fact ADD COLUMN "
-                f"{legacy_column} REAL NOT NULL DEFAULT 0"
-            ),
-        }
-        for case, sql in mutations.items():
+        for case in ("partial", "mixed"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tempdir:
                 path = Path(tempdir) / "dashboard-d10.sqlite3"
                 with common.connect_sqlite(path) as conn:
                     mark_published_d10_cache(conn, "v-test")
-                    conn.execute(sql)
+                    if case == "partial":
+                        columns = [
+                            row["name"]
+                            for row in conn.execute("PRAGMA table_info(attribution_fact)")
+                            if row["name"] != "d10_revenue_iap_d0"
+                        ]
+                        selected_columns = ",".join(columns)
+                        conn.execute(
+                            "CREATE TABLE attribution_fact_partial AS "
+                            f"SELECT {selected_columns} FROM attribution_fact"
+                        )
+                        conn.execute("DROP TABLE attribution_fact")
+                        conn.execute(
+                            "ALTER TABLE attribution_fact_partial "
+                            "RENAME TO attribution_fact"
+                        )
+                    else:
+                        conn.execute(
+                            "ALTER TABLE attribution_fact ADD COLUMN "
+                            f"{legacy_column} REAL NOT NULL DEFAULT 0"
+                        )
                     with self.assertRaisesRegex(
                         common.CacheContractError,
                         "D10 cache contract rejected",
