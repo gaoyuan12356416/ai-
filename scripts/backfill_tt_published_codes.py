@@ -3,8 +3,10 @@
 
 The default mode is read-only discovery.  Apply is deliberately guarded by
 explicit queue IDs, an exact candidate count, a plan SHA-256, and a verified
-SQLite backup.  Only published rows in ``tt_post_queue`` are eligible;
-``tt_post_direct_test`` is never read or written.
+SQLite backup.  Rows that predate frozen links additionally require exact,
+per-ID ledger reconstruction opt-in.  Only published rows in
+``tt_post_queue`` are eligible; ``tt_post_direct_test`` is never read or
+written.
 """
 
 from __future__ import annotations
@@ -33,7 +35,9 @@ from features.tt_posts.code_routes import (  # noqa: E402
     allocate_code_route,
 )
 from features.tt_posts.links import (  # noqa: E402
+    TT_SHORT_LINK_NAMESPACE,
     TTPostLinkError,
+    build_w2a_url,
     build_w2a_url_from_fields,
     validate_w2a_url,
 )
@@ -57,17 +61,46 @@ _QUEUE_COLUMNS = {
     "scheduled_at_utc",
     "account_id",
     "account_username",
+    "account_display_name",
+    "creator_nickname_snapshot",
     "creator_username_snapshot",
     "content_id",
     "material_id",
     "long_url",
+    "short_link_id",
+    "short_url",
+    "material_name",
+    "drama_name",
+    "material_language",
+    "material_tag",
     "code",
     "status",
     "publish_id",
     "created_at",
     "updated_at",
 }
-_EVENT_COLUMNS = {"id", "queue_id", "to_status", "created_at"}
+_EVENT_COLUMNS = {
+    "id",
+    "queue_id",
+    "event_type",
+    "to_status",
+    "details_json",
+    "created_at",
+}
+_RECURRING_COLUMNS = {
+    "id",
+    "queue_id",
+    "run_id",
+    "material_id",
+    "account_id",
+    "content_id",
+    "material_name",
+    "drama_name",
+    "material_language",
+    "routing_language",
+    "material_tag",
+    "status",
+}
 _ROUTE_COLUMNS = {
     "code",
     "queue_id",
@@ -163,6 +196,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
         "tt_post_queue": _QUEUE_COLUMNS,
         "tt_post_event": _EVENT_COLUMNS,
         "tt_post_code_route": _ROUTE_COLUMNS,
+        "tt_post_recurring_pool": _RECURRING_COLUMNS,
     }
     for table, columns in required.items():
         if table not in names or not columns.issubset(_table_columns(conn, table)):
@@ -221,6 +255,118 @@ def _utc_iso(value: Any, label: str) -> str:
     )
 
 
+def _canonical_routing_language(value: Any, queue_id: int) -> str:
+    text = str(value or "").strip()
+    normalized = text.casefold().replace("_", "-")
+    if (
+        not text
+        or text != normalized
+        or len(text) > 32
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", text) is None
+    ):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_language_invalid",
+            "queue %s recurring routing language is not canonical" % queue_id,
+        )
+    return text
+
+
+def _frozen_or_fallback(
+    row: Mapping[str, Any],
+    recurring: Mapping[str, Any],
+    field: str,
+    fallback_value: str,
+    fallback_source: str,
+) -> tuple[str, str]:
+    queue_id = int(row["id"])
+    queue_value = str(row[field] or "").strip()
+    recurring_value = str(recurring[field] or "").strip()
+    if queue_value and recurring_value and queue_value != recurring_value:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_metadata_conflict",
+            "queue %s frozen %s values conflict" % (queue_id, field),
+        )
+    if queue_value:
+        return queue_value, "queue.%s" % field
+    if recurring_value:
+        return recurring_value, "recurring_pool.%s" % field
+    return fallback_value, fallback_source
+
+
+def _event_details(value: Any, queue_id: int) -> tuple[Mapping[str, Any], str]:
+    text = str(value or "")
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        parsed = None
+    if not isinstance(parsed, Mapping):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_event_invalid",
+            "queue %s publish event details are invalid" % queue_id,
+        )
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return parsed, digest
+
+
+def _route_from_target(
+    row: Mapping[str, Any],
+    target: Any,
+    *,
+    published_at_value: Any = None,
+) -> Dict[str, str]:
+    queue_id = int(row["id"])
+    content_id = str(row["content_id"] or "").strip()
+    try:
+        validated = validate_w2a_url(target)
+        target_pairs = parse_qsl(urlsplit(validated).query, keep_blank_values=True)
+    except (TTPostLinkError, TypeError, ValueError):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_route_invalid",
+            "queue %s reconstructed route is invalid" % queue_id,
+        ) from None
+    if len(target_pairs) != len(_ROUTE_QUERY_FIELDS) or tuple(
+        key for key, _value in target_pairs
+    ) != _ROUTE_QUERY_FIELDS:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_route_invalid",
+            "queue %s reconstructed route fields are invalid" % queue_id,
+        )
+    target_fields = dict(target_pairs)
+    if (
+        target_fields.get("af_channel") != "TT"
+        or target_fields.get("af_dp") != content_id
+        or target_fields.get("af_c_id") != str(queue_id)
+        or target_fields.get("af_ad_id") != str(row["material_id"] or "")
+        or target_fields.get("af_adset_id") != str(row["account_id"] or "")
+    ):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_identity_mismatch",
+            "queue %s reconstructed attribution identity does not match" % queue_id,
+        )
+    created_at = _utc_iso(row["created_at"], "queue created_at")
+    published_at = _utc_iso(
+        row["route_published_at"]
+        if published_at_value is None
+        else published_at_value,
+        "queue published_at",
+    )
+    return {
+        "content_id": content_id,
+        "c": target_fields["c"],
+        "af_adset": target_fields["af_adset"],
+        "af_adset_id": target_fields["af_adset_id"],
+        "af_ad": target_fields["af_ad"],
+        "af_ad_id": target_fields["af_ad_id"],
+        "af_channel": "TT",
+        "af_c_id": target_fields["af_c_id"],
+        "long_url": validated,
+        "state": "published",
+        "created_at": created_at,
+        "published_at": published_at,
+        "updated_at": published_at,
+    }
+
+
 def _route_from_queue(row: Mapping[str, Any]) -> Dict[str, str]:
     queue_id = int(row["id"])
     content_id = str(row["content_id"] or "").strip()
@@ -274,35 +420,233 @@ def _route_from_queue(row: Mapping[str, Any]) -> Dict[str, str]:
             "tt_code_backfill_route_invalid",
             "queue %s attribution route cannot be rebuilt" % queue_id,
         ) from None
-    target_fields = dict(parse_qsl(urlsplit(target).query, keep_blank_values=True))
+    return _route_from_target(row, target)
+
+
+def _route_from_ledger(
+    conn: sqlite3.Connection,
+    row: Mapping[str, Any],
+) -> tuple[Dict[str, str], Dict[str, Any]]:
+    queue_id = int(row["id"])
+    if (
+        str(row["long_url"] or "")
+        or int(row["short_link_id"] or 0) != 0
+        or str(row["short_url"] or "")
+    ):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_not_legacy",
+            "queue %s is not a pre-link ledger row" % queue_id,
+        )
+
+    recurring_rows = conn.execute(
+        """
+        SELECT id,queue_id,run_id,material_id,account_id,content_id,
+               material_name,drama_name,material_language,routing_language,
+               material_tag,status
+        FROM tt_post_recurring_pool WHERE queue_id=?
+        """,
+        (queue_id,),
+    ).fetchall()
+    if len(recurring_rows) != 1:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_recurring_missing",
+            "queue %s has no unique recurring-pool evidence" % queue_id,
+        )
+    recurring = recurring_rows[0]
+    try:
+        run_id = int(recurring["run_id"])
+    except (TypeError, ValueError, OverflowError):
+        run_id = 0
+    identity_matches = (
+        int(recurring["queue_id"] or 0) == queue_id
+        and str(recurring["material_id"] or "") == str(row["material_id"] or "")
+        and str(recurring["account_id"] or "") == str(row["account_id"] or "")
+        and str(recurring["content_id"] or "") == str(row["content_id"] or "")
+    )
+    if (
+        not identity_matches
+        or run_id <= 0
+        or str(recurring["status"] or "") != "consumed"
+    ):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_recurring_mismatch",
+            "queue %s recurring-pool evidence does not match" % queue_id,
+        )
+
+    publish_events = conn.execute(
+        """
+        SELECT id,details_json,created_at
+        FROM tt_post_event
+        WHERE queue_id=? AND event_type='publish_reconciled'
+          AND to_status='published'
+        ORDER BY id
+        """,
+        (queue_id,),
+    ).fetchall()
+    if len(publish_events) != 1:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_event_missing",
+            "queue %s has no unique publish completion event" % queue_id,
+        )
+    publish_event = publish_events[0]
+    details, details_sha256 = _event_details(
+        publish_event["details_json"], queue_id
+    )
+    if str(details.get("publish_id") or "") != str(row["publish_id"] or ""):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_publish_id_mismatch",
+            "queue %s publish event identity does not match" % queue_id,
+        )
+    published_at = _utc_iso(
+        publish_event["created_at"], "queue publish event created_at"
+    )
+
+    creator_username = str(row["creator_username_snapshot"] or "").strip()
+    page_name = str(
+        row["creator_nickname_snapshot"] or row["account_display_name"] or ""
+    ).strip()
+    if not creator_username or not page_name:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_account_invalid",
+            "queue %s frozen account snapshot is incomplete" % queue_id,
+        )
+
+    routing_language = _canonical_routing_language(
+        recurring["routing_language"], queue_id
+    )
+    material_name, material_name_source = _frozen_or_fallback(
+        row,
+        recurring,
+        "material_name",
+        str(row["material_id"] or ""),
+        "queue.material_id_surrogate",
+    )
+    drama_name, drama_name_source = _frozen_or_fallback(
+        row,
+        recurring,
+        "drama_name",
+        str(row["content_id"] or ""),
+        "queue.content_id_surrogate",
+    )
+    material_language, material_language_source = _frozen_or_fallback(
+        row,
+        recurring,
+        "material_language",
+        routing_language,
+        "recurring_pool.routing_language",
+    )
+    material_tag, material_tag_source = _frozen_or_fallback(
+        row,
+        recurring,
+        "material_tag",
+        "none",
+        "literal.none",
+    )
+    if _canonical_routing_language(material_language, queue_id) != routing_language:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_language_mismatch",
+            "queue %s frozen material language conflicts with routing" % queue_id,
+        )
+
     created_at = _utc_iso(row["created_at"], "queue created_at")
-    published_at = _utc_iso(row["route_published_at"], "queue published_at")
-    return {
-        "content_id": content_id,
-        "c": target_fields["c"],
-        "af_adset": target_fields["af_adset"],
-        "af_adset_id": target_fields["af_adset_id"],
-        "af_ad": target_fields["af_ad"],
-        "af_ad_id": target_fields["af_ad_id"],
-        "af_channel": "TT",
-        "af_c_id": target_fields["af_c_id"],
-        "long_url": target,
-        "state": "published",
-        "created_at": created_at,
-        "published_at": published_at,
-        "updated_at": published_at,
+    timestamp = int(
+        datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+    )
+    legacy_link_id = TT_SHORT_LINK_NAMESPACE + queue_id
+    try:
+        target = build_w2a_url(
+            {
+                "username": creator_username,
+                "timestamp": timestamp,
+                "material_language": routing_language,
+                "drama_name": drama_name,
+                "tag": material_tag,
+                "link_id": legacy_link_id,
+                "page_name": page_name,
+                "page_id": str(row["account_id"] or ""),
+                "material_name": material_name,
+                "material_id": str(row["material_id"] or ""),
+                "queue_id": queue_id,
+                "content_id": str(row["content_id"] or ""),
+                "channel": "TT",
+                "af_dp_first": True,
+            }
+        )
+    except (TTPostLinkError, TypeError, ValueError):
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_route_invalid",
+            "queue %s ledger evidence cannot build a route" % queue_id,
+        ) from None
+    route = _route_from_target(
+        row,
+        target,
+        published_at_value=published_at,
+    )
+    evidence = {
+        "source": "publish_recurring_v1",
+        "recurring_pool_id": int(recurring["id"]),
+        "run_id": run_id,
+        "publish_event_id": int(publish_event["id"]),
+        "publish_event_created_at": published_at,
+        "publish_event_details_sha256": details_sha256,
+        "fallback_fields": {
+            "campaign_timestamp": {
+                "source": "queue.created_at_surrogate",
+                "value": created_at,
+            },
+            "username": {
+                "source": "queue.creator_username_snapshot",
+                "value": creator_username,
+            },
+            "page_name": {
+                "source": (
+                    "queue.creator_nickname_snapshot"
+                    if str(row["creator_nickname_snapshot"] or "").strip()
+                    else "queue.account_display_name"
+                ),
+                "value": page_name,
+            },
+            "material_name": {
+                "source": material_name_source,
+                "value": material_name,
+            },
+            "drama_name": {
+                "source": drama_name_source,
+                "value": drama_name,
+            },
+            "material_language": {
+                "source": material_language_source,
+                "value": routing_language,
+            },
+            "material_tag": {
+                "source": material_tag_source,
+                "value": material_tag,
+            },
+            "link_id": {
+                "source": "legacy_short_link_namespace_plus_queue_id_surrogate",
+                "value": str(legacy_link_id),
+            },
+        },
     }
+    return route, evidence
 
 
 def build_plan(
     conn: sqlite3.Connection,
     *,
     queue_ids: Sequence[Any] = (),
+    reconstruct_route_from_ledger_queue_ids: Sequence[Any] = (),
 ) -> List[Dict[str, Any]]:
     """Build a deterministic plan without mutating SQLite."""
 
     _validate_schema(conn)
     normalized_ids = _queue_ids(queue_ids)
+    reconstruction_ids = _queue_ids(reconstruct_route_from_ledger_queue_ids)
+    if reconstruction_ids and not normalized_ids:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_scope_invalid",
+            "ledger reconstruction requires explicit queue IDs",
+        )
     clauses = ["q.status='published'", "trim(q.publish_id)<>''", "trim(q.code)='' "]
     params: List[Any] = []
     if normalized_ids:
@@ -311,14 +655,14 @@ def build_plan(
     rows = conn.execute(
         """
         SELECT q.id,q.scheduled_at_utc,q.account_id,q.account_username,
+               q.account_display_name,q.creator_nickname_snapshot,
                q.creator_username_snapshot,q.content_id,q.material_id,
-               q.long_url,q.code,q.status,q.publish_id,q.created_at,q.updated_at,
-               COALESCE(
-                   (SELECT e.created_at FROM tt_post_event e
-                    WHERE e.queue_id=q.id AND e.to_status='published'
-                    ORDER BY e.id DESC LIMIT 1),
-                   q.updated_at
-               ) AS route_published_at
+               q.material_name,q.drama_name,q.material_language,q.material_tag,
+               q.short_link_id,q.short_url,q.long_url,q.code,q.status,q.publish_id,
+               q.created_at,q.updated_at,
+               (SELECT e.created_at FROM tt_post_event e
+                WHERE e.queue_id=q.id AND e.to_status='published'
+                ORDER BY e.id DESC LIMIT 1) AS route_published_at
         FROM tt_post_queue q
         WHERE %s
         ORDER BY q.id
@@ -329,6 +673,19 @@ def build_plan(
         raise TTCodeBackfillError(
             "tt_code_backfill_candidate_changed",
             "one or more explicit queue IDs are no longer eligible",
+        )
+    blank_long_url_ids = [
+        int(row["id"]) for row in rows if not str(row["long_url"] or "").strip()
+    ]
+    if blank_long_url_ids and not reconstruction_ids:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_long_url_missing",
+            "queue %s needs explicit ledger reconstruction" % blank_long_url_ids[0],
+        )
+    if reconstruction_ids != blank_long_url_ids:
+        raise TTCodeBackfillError(
+            "tt_code_backfill_reconstruction_scope_mismatch",
+            "ledger reconstruction IDs must exactly match selected blank routes",
         )
 
     plan: List[Dict[str, Any]] = []
@@ -341,6 +698,11 @@ def build_plan(
                 "tt_code_backfill_route_conflict",
                 "queue %s already has a route while its code is empty" % queue_id,
             )
+        if str(row["long_url"] or ""):
+            route = _route_from_queue(row)
+            route_evidence: Dict[str, Any] = {"source": "frozen_long_url"}
+        else:
+            route, route_evidence = _route_from_ledger(conn, row)
         plan.append(
             {
                 "queue_id": queue_id,
@@ -355,7 +717,9 @@ def build_plan(
                 "material_id": str(row["material_id"] or ""),
                 "publish_id": str(row["publish_id"] or ""),
                 "frozen_long_url": str(row["long_url"] or ""),
-                "route": _route_from_queue(row),
+                "route_source": str(route_evidence["source"]),
+                "route_evidence": route_evidence,
+                "route": route,
             }
         )
     return plan
@@ -380,6 +744,8 @@ def public_plan(plan: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         "content_id",
         "material_id",
         "publish_id",
+        "route_source",
+        "route_evidence",
     )
     return [{key: item[key] for key in keys} for item in plan]
 
@@ -461,6 +827,7 @@ def apply_plan(
     queue_ids: Sequence[Any],
     expected_count: Any,
     expected_hash: Any,
+    reconstruct_route_from_ledger_queue_ids: Sequence[Any] = (),
     choice_fn: Optional[Callable[[Sequence[str]], str]] = None,
 ) -> List[Dict[str, Any]]:
     path = _database_path(db_path)
@@ -485,7 +852,13 @@ def apply_plan(
     with _connection(path, read_only=False) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            plan = build_plan(conn, queue_ids=normalized_ids)
+            plan = build_plan(
+                conn,
+                queue_ids=normalized_ids,
+                reconstruct_route_from_ledger_queue_ids=(
+                    reconstruct_route_from_ledger_queue_ids
+                ),
+            )
             current_hash = plan_hash(plan)
             if len(plan) != count or current_hash != digest:
                 raise TTCodeBackfillError(
@@ -508,7 +881,7 @@ def apply_plan(
                     item["route"],
                     **kwargs,
                 )
-                code = str(route.get("code") or "").strip().upper()
+                code = str(route.get("code") or "")
                 if not _CODE_RE.fullmatch(code):
                     raise TTCodeBackfillError(
                         "tt_code_backfill_code_invalid",
@@ -546,10 +919,25 @@ def apply_plan(
     return written
 
 
-def inspect_database(db_path: Any, *, queue_ids: Sequence[Any] = ()) -> Dict[str, Any]:
+def inspect_database(
+    db_path: Any,
+    *,
+    queue_ids: Sequence[Any] = (),
+    reconstruct_route_from_ledger_queue_ids: Sequence[Any] = (),
+) -> Dict[str, Any]:
     path = _database_path(db_path)
     with _connection(path, read_only=True) as conn:
-        plan = build_plan(conn, queue_ids=queue_ids)
+        conn.execute("BEGIN")
+        try:
+            plan = build_plan(
+                conn,
+                queue_ids=queue_ids,
+                reconstruct_route_from_ledger_queue_ids=(
+                    reconstruct_route_from_ledger_queue_ids
+                ),
+            )
+        finally:
+            conn.rollback()
     return {
         "mode": "dry-run",
         "candidate_count": len(plan),
@@ -569,12 +957,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--expected-hash")
     parser.add_argument("--backup-path")
+    parser.add_argument(
+        "--reconstruct-route-from-ledger-queue-id",
+        action="append",
+        type=int,
+        default=[],
+    )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
 
     try:
         if not args.apply:
-            result = inspect_database(args.db_path, queue_ids=args.queue_id)
+            result = inspect_database(
+                args.db_path,
+                queue_ids=args.queue_id,
+                reconstruct_route_from_ledger_queue_ids=(
+                    args.reconstruct_route_from_ledger_queue_id
+                ),
+            )
         else:
             if (
                 not args.queue_id
@@ -592,6 +992,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 queue_ids=args.queue_id,
                 expected_count=args.expected_count,
                 expected_hash=args.expected_hash,
+                reconstruct_route_from_ledger_queue_ids=(
+                    args.reconstruct_route_from_ledger_queue_id
+                ),
             )
             result = {
                 "mode": "apply",

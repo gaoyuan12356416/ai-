@@ -42,7 +42,8 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 7. 自动发布任务无候选素材时仍属于日志，状态显示“无可投素材”。
 8. code 只接受大写 `[A-Z0-9]{4}`；缺失或非法值显示 `—`。
 9. 自动模板 code 按共享路由账本中的高位合成 queue ID 读取，不从 caption 提取。
-10. 历史回填只使用已冻结发布记录；缺少或冲突的归因信息必须整批失败关闭。
+10. 历史回填优先使用已冻结的 `AIpost` 长链；对从未生成长链的旧队列，只允许按逐 queue ID 显式授权，从同一 SQLite 快照中的唯一 `consumed` recurring 记录、唯一 `publish_reconciled → published` 事件和冻结账号快照生成确定性替代路由。缺少或冲突的账本证据必须整批失败关闭。
+11. 确定性替代路由不能称为恢复原始长链：campaign 时间使用 `queue.created_at` surrogate，素材名/剧名/语言/标签缺失时分别使用 `material_id`、`content_id`、recurring `routing_language`、`none`，link identity 使用历史 `TT_SHORT_LINK_NAMESPACE + queue_id` surrogate。不得从 caption 或当前远端素材解析器推断历史字段。
 
 ## 交互与流程
 
@@ -89,7 +90,8 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 - 浏览器响应不得包含媒体源地址、凭据、claim token 或内部 token。
 - 旧库始终以 SQLite `mode=ro` 与 `PRAGMA query_only=ON` 打开。
 - 历史回填 apply 必须提供明确 queue ID、expected count、plan SHA-256 和全新备份路径；在 `BEGIN IMMEDIATE` 内分配全局唯一 code 并守卫更新。
-- 回填只写 `tt_post_code_route` 新行和 `tt_post_queue.code`，保留原 `long_url` 的历史 `AIpost` 归因；新 code 路由由冻结字段重建为 `af_channel=TT`。
+- 空 `long_url` 的候选必须通过重复参数 `--reconstruct-route-from-ledger-queue-id` 逐 ID 授权，而且授权集合必须与所选候选中的空长链集合完全相等；不提供全局放行开关。
+- 回填只写 `tt_post_code_route` 新行和 `tt_post_queue.code`。已有长链保留历史 `AIpost` 原值并仅在新 route 中改为 `af_channel=TT`；无长链记录不补写历史长短链、caption 或元数据。
 
 ## 验收标准
 
@@ -99,7 +101,7 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 - 旧历史记录无需迁移即可显示。
 - 素材池取消/核对/事件以及自动运行详情仍可使用。
 - 发布相关状态机、表结构和定时执行代码没有行为变更。
-- 首批符合条件的已发布排期均有可解析 code，页面显示与路由账本一致；立即测试不在回填范围。
+- 首批符合条件的已发布排期均有可解析 code，页面显示与路由账本一致；确定性替代路由带可审计 provenance/fallback，立即测试不在回填范围。
 - 契约、服务、UI 和回归测试全部通过。
 
 ## 风险与待确认

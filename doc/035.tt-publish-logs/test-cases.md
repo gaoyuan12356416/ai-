@@ -30,6 +30,10 @@
 | TC-016 | 回填 dry-run | 有历史 published 空 code 排期及 direct test | 默认执行脚本 | 只发现排期，数据库字节、route 和 direct test 不变 | P0 | 通过 |
 | TC-017 | 回填 apply 门禁 | exact plan 已确认 | 带 queue IDs、count、hash、backup apply | 先生成可校验备份，再原子分配 code；公共 resolver 精确命中 | P0 | 通过 |
 | TC-018 | 回填异常关闭 | 计划变化、long URL 缺失或 route 冲突 | 尝试 apply | 整批回滚，不写半批数据 | P0 | 通过 |
+| TC-019 | 空长链逐 ID 授权 | 同批包含 frozen long URL 与 legacy 空 long URL | exact dry-run/apply | reconstruction ID 必须精确等于空长链候选；漏选、多选、无显式 queue scope 均失败 | P0 | 通过 |
+| TC-020 | ledger-only 重建 | 唯一 consumed recurring、唯一 publish_reconciled 事件、冻结账号快照完整 | 重建 route | 身份与 publish ID 精确一致；使用 queue.created_at surrogate 和已记录 fallback；不读 caption/当前 resolver | P0 | 通过 |
+| TC-021 | ledger 证据漂移 | recurring/event/snapshot 在 dry-run 后变化 | 使用旧 hash apply | plan hash 变化，事务零写入，direct test 不变 | P0 | 通过 |
+| TC-022 | 混合原子回填 | 一条 ledger route 与一条 frozen URL route | 同批 apply | 两条均生成唯一 code 并精确解析；原 queue/recurring/event/长短链不变 | P0 | 通过 |
 
 ## 回归范围
 

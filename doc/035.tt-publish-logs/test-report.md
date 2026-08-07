@@ -36,12 +36,13 @@
 
 ## 发布建议
 
-按 `deploy.md` 通过 GitHub 不可变 commit 发布；先备份 release 指针和 SQLite，先切 TT auto sidecar、再切主 API 与静态资源，只做只读页面验证，不触发真实发布。
+按 `deploy.md` 通过 GitHub 不可变 commit 发布；先备份 TT auto release 指针、静态文件和 SQLite，只切 TT auto sidecar 与静态资源，不切主 API；只做只读页面验证，不触发真实发布。
 
 ## 2026-08-07 4 位码增量
 
-- 专项 20 项通过：页面 code 列、自动高位路由补读、空/非法 code、历史回填 discovery/apply、备份、计划变化、归因渠道、容量和 direct-test 隔离。
-- TT Post / TT 自动发布完整回归 387 项通过。
+- 专项 32 项通过：页面 code 列、自动高位路由补读、空/非法 code、历史回填 discovery/apply、备份、计划变化、归因渠道、容量、ledger-only 重建和 direct-test 隔离。
+- ledger-only 回填单文件 18 项通过：逐 ID opt-in、唯一 recurring/event、账本身份、冻结账号快照、fallback provenance、hash drift、混合事务和失败零写入。
+- TT Post / TT 自动发布完整回归 557 项通过。
 - Python 编译、JavaScript 语法和 `git diff --check` 通过。
 - 所有测试均为离线账本/静态页面验证，没有触发真实 TikTok 发布。
-- 生产 SQLite 候选、备份、回填映射和线上页面验收须在 CPU 主机连接恢复后记录，不能用 caption 缺少 4 位 token 代替 `code=''` 的数据库证据。
+- 生产 SQLite 已只读精确核对候选为 q2–q7，且 q2–q4 ledger lineage、q5–q7 frozen URL 均满足门禁；backup/apply、最终 code 映射和线上页面验收仍须在执行后记录。不能用 caption 缺少 4 位 token 代替 `code=''` 的数据库证据。
