@@ -306,6 +306,32 @@ class HTTP400TikTokOpener:
         )
 
 
+class HTTPTokenTikTokOpener:
+    def __init__(self, status, code, message, log_id):
+        self.status = status
+        self.code = code
+        self.message = message
+        self.log_id = log_id
+
+    def open(self, request, timeout):
+        body = json.dumps(
+            {
+                "error": {
+                    "code": self.code,
+                    "message": self.message,
+                    "log_id": self.log_id,
+                }
+            }
+        ).encode("utf-8")
+        raise urllib.error.HTTPError(
+            request.full_url,
+            self.status,
+            "TikTok Token Error",
+            {},
+            io.BytesIO(body),
+        )
+
+
 def make_config(root, gates=False):
     root = Path(root)
     outro = root / "fixed-outro.mp4"
@@ -2889,6 +2915,51 @@ class TTGPUWorkerTests(unittest.TestCase):
             repeated.exception.code,
             "tt_publish_retry_blocked",
         )
+
+    def test_token_and_scope_rejections_have_explicit_stable_errors(self):
+        cases = (
+            (
+                401,
+                "access_token_invalid",
+                "The access token is invalid.",
+                "log-token-401",
+                "tt_access_token_invalid",
+                "Token已失效",
+            ),
+            (
+                403,
+                "scope_not_authorized",
+                "The requested scope is not authorized.",
+                "log-scope-403",
+                "tt_access_token_scope_missing",
+                "Token权限不足",
+            ),
+        )
+        for status, code, message, log_id, expected_code, expected_message in cases:
+            with self.subTest(code=code):
+                api = worker.TikTokContentPostingAPI(
+                    opener=HTTPTokenTikTokOpener(status, code, message, log_id),
+                )
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    api.creator_info(TOKEN)
+                error = caught.exception
+                self.assertEqual(error.code, expected_code)
+                self.assertIn(expected_message, str(error))
+                self.assertIn(log_id, str(error))
+                self.assertEqual(error.details["upstream_code"], code)
+
+    def test_non_token_403_remains_generic_upstream_rejection(self):
+        api = worker.TikTokContentPostingAPI(
+            opener=HTTPTokenTikTokOpener(
+                403,
+                "url_ownership_unverified",
+                "The video URL property is not verified.",
+                "log-url-403",
+            ),
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            api.creator_info(TOKEN)
+        self.assertEqual(caught.exception.code, "tt_upstream_rejected")
 
     def test_verified_property_is_bound_to_selected_storage_origin(self):
         config = replace(

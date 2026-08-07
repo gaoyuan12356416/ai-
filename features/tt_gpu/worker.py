@@ -2812,6 +2812,15 @@ class TikTokContentPostingAPI:
             finally:
                 exc.close()
             details = _upstream_error_details(data, http_status)
+            token_error = _token_upstream_error(details)
+            if token_error is not None:
+                code, message, status = token_error
+                raise TTGPUError(
+                    code,
+                    message,
+                    status,
+                    details,
+                ) from None
             if (
                 http_status >= 500
                 or http_status in {408, 409, 425, 429}
@@ -2859,6 +2868,15 @@ class TikTokContentPostingAPI:
             code = str(error.get("code") or "")
             if code and code.lower() != "ok":
                 details = _upstream_error_details(data, 200)
+                token_error = _token_upstream_error(details)
+                if token_error is not None:
+                    token_code, message, status = token_error
+                    raise TTGPUError(
+                        token_code,
+                        message,
+                        status,
+                        details,
+                    )
                 raise TTGPUError(
                     "tt_upstream_rejected",
                     _upstream_error_summary(details),
@@ -2957,6 +2975,62 @@ def _upstream_error_summary(details, *, unavailable=False):
     if message:
         summary += ": " + message
     return _clean_message(summary, 300)
+
+
+def _token_upstream_error(details):
+    """Return a stable, explicit Token error only for unambiguous signals."""
+    code = str(details.get("upstream_code") or "").strip().lower()
+    try:
+        http_status = int(details.get("upstream_http_status") or 0)
+    except (TypeError, ValueError, OverflowError):
+        http_status = 0
+    scope_error = code in {
+        "scope_not_authorized",
+        "insufficient_scope",
+        "scope_permission_missing",
+    } or (
+        "scope" in code
+        and any(
+            marker in code
+            for marker in ("denied", "missing", "unauthorized")
+        )
+    )
+    token_error = http_status == 401 or code in {
+        "access_token_expired",
+        "access_token_invalid",
+        "invalid_access_token",
+        "oauth_token_invalid",
+        "token_expired",
+        "token_invalid",
+        "token_revoked",
+    } or (
+        "token" in code
+        and any(
+            marker in code
+            for marker in ("expired", "invalid", "revoked", "unauthorized")
+        )
+    )
+    upstream = _upstream_error_summary(details)
+    if scope_error:
+        return (
+            "tt_access_token_scope_missing",
+            _clean_message(
+                "TikTok账号Token权限不足，请重新登录授权并确认Content Posting权限；"
+                + upstream,
+                300,
+            ),
+            403,
+        )
+    if token_error:
+        return (
+            "tt_access_token_invalid",
+            _clean_message(
+                "TikTok账号Token已失效，请重新登录授权；" + upstream,
+                300,
+            ),
+            401,
+        )
+    return None
 
 
 def _upstream_log_id(payload):
