@@ -110,9 +110,12 @@ git rev-parse HEAD
 
 ### 3.2 服务器从精确 commit 取文件
 
-以下变量必须替换为已审核值，不得直接复制占位符执行：
+以下变量必须在同一个 root Bash 发布会话中替换为已审核值并贯穿后续全部服务器步骤，不得把独立代码块放进会忽略失败的 shell；任一未显式捕获的错误、未定义变量或管道失败都立即终止发布：
 
 ```bash
+set -Eeuo pipefail
+umask 077
+
 TARGET_SHA='<待发布回填的40位commit>'
 SOURCE_REPO='/root/drama_material_service'
 RELEASE_ROOT='/opt/dramawave-attribution-comparison/releases'
