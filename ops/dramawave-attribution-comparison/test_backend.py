@@ -788,7 +788,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("ReadWritePaths=/tmp", service_unit)
         self.assertIn("MemoryHigh=800M", service_unit)
         self.assertIn("MemoryMax=1G", service_unit)
-        self.assertIn("OnCalendar=*-*-* *:22,52:00", timer_unit)
+        self.assertIn("OnCalendar=*-*-* *:04,34:00", timer_unit)
 
 
 class RefreshAtomicityTests(unittest.TestCase):

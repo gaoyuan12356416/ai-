@@ -713,7 +713,7 @@ systemctl status dramawave-attribution-comparison-refresh.timer --no-pager
 systemctl list-timers dramawave-attribution-comparison-refresh.timer --all --no-pager
 ```
 
-timer 在每小时 `:22` 和 `:52` 触发，允许最多 5 秒随机延迟；`Persistent=true` 会补跑错过的计划。该错峰仍严格保持 30 分钟频率。refresh 还与现有 TT 多维看板共用 `/tmp/tt_minis_multi_dim_dashboard.lock`：任一重任务正在运行时另一方不得并发，避免 3.67GiB 共享主机进入换页风暴。flock 的专用退出码 `75` 仅表示本轮因锁忙正常跳过；Python 的退出码 `1` 仍是 refresh 失败，不能被吞掉。refresh cgroup 同时设置 `MemoryHigh=800M`、`MemoryMax=1G`；触顶时保留上一成功版本，不允许拖垮既有服务。普通运行不带参数，刷新北京今天、昨天，并按 `history_cursor` 轮转一个更早日期。
+timer 在每小时 `:04` 和 `:34` 触发，允许最多 5 秒随机延迟；`Persistent=true` 会补跑错过的计划。该错峰仍严格保持 30 分钟频率，并避开生产实测在 `:13/:43` 启动、单轮可持续约 15 分钟的 TT 多维刷新。refresh 还与现有 TT 多维看板共用 `/tmp/tt_minis_multi_dim_dashboard.lock`：任一重任务正在运行时另一方不得并发，避免共享主机进入换页风暴。flock 的专用退出码 `75` 仅表示本轮因锁忙正常跳过；Python 的退出码 `1` 仍是 refresh 失败，不能被吞掉。refresh cgroup 同时设置 `MemoryHigh=800M`、`MemoryMax=1G`；触顶时保留上一成功版本，不允许拖垮既有服务。普通运行不带参数，刷新北京今天、昨天，并按 `history_cursor` 轮转一个更早日期。
 
 目标机是 systemd 239 + cgroup v1；发布前瞬态单元实测 `MemoryMax=1G` 写入 `memory.limit_in_bytes=1073741824`，因此 1GB 是有效硬限制。`MemoryHigh` 在该主机仅保留为迁移到 cgroup v2 后的软门槛，当前不能把它当作已生效的 800MB 限制。
 
@@ -763,7 +763,7 @@ curl -sSI https://ai.yingliangads.com/reports/dramawave-attribution-comparison/a
 
 ### 9.4 自然 timer 证据
 
-不要用手工 `systemctl start ...refresh.service` 代替自然调度证据。等下一次 `:22` 或 `:52` 自然触发后检查：
+不要用手工 `systemctl start ...refresh.service` 代替自然调度证据。等下一次 `:04` 或 `:34` 自然触发后检查：
 
 ```bash
 systemctl list-timers dramawave-attribution-comparison-refresh.timer --all --no-pager

@@ -2,7 +2,7 @@
 Description=Refresh Dramawave D7/D10 attribution comparison cache every 30 minutes
 
 [Timer]
-OnCalendar=*-*-* *:22,52:00
+OnCalendar=*-*-* *:04,34:00
 Persistent=true
 AccuracySec=30s
 RandomizedDelaySec=5s
