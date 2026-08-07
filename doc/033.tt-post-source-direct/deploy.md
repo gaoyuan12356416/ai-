@@ -42,3 +42,21 @@
 
 - 回滚代码和配置必须成对执行，禁止 CPU/GPU profile 不一致。
 - 若任何任务已有 `publish_id` 或 unknown 结果，只允许核对，禁止重新 init。
+
+## 2026-08-07 生产记录
+
+- GitHub/生产代码：`202e94b007c6f22efe3c56aaf1e651c188a38856`。
+- CPU release：`/opt/tt-post/releases/202e94b007c6f22efe3c56aaf1e651c188a38856`；部署前 release：`/opt/tt-post/releases/4362f3928e8c5c3f437917585b9f645e51986536`。
+- GPU release：`/opt/tt-post-gpu/releases/202e94b007c6f22efe3c56aaf1e651c188a38856`；部署前 release：`/opt/tt-post-gpu/releases/f1a0434443751646b848a5d931781ce9a404e511`。
+- GitHub archive 两端 SHA256：`d6efac1ca9f7d40935866c3c8f85b70639a61d493b817ae3f0a7ad3476912161`。
+- CPU 备份：`/mnt/data-disk/tt-post-publisher/backups/20260807T173347+0800-source-direct-pre-202e94b`。
+- GPU 备份：`/data/tt-post-publisher/backups/20260807T173347+0800-source-direct-pre-202e94b`。
+- 切换后 CPU health、CPU 到 GPU tunnel health、GPU 本机 health 均通过；GPU 报告 `source_direct` / `tt-post-source-direct-v1` / `direct_post_eligible=true` / `transition=none`。
+- 17:37、17:38、17:39 三轮自然 prepare/runner 均为空闲，`publish_request_count=0`；未调用 TikTok init。
+- SQLite `integrity_check=ok`；部署后仍为 queue max `91`、run max `95`、`publish_id=89`、active `0`、unknown `0`。
+
+### 精确回滚值
+
+- GPU：把 current 恢复到上述 `f1a0434...` release，并恢复 `TT_POST_GPU_MEDIA_MODE=direct_outro`。
+- CPU：把 current 恢复到上述 `4362f39...` release，并恢复 `TT_POST_MEDIA_PROFILE_VERSION=tt-post-direct-outro-hevc-720x1280-v2`。
+- 两端继续保持 trim 为 `0`；按“回滚”章节的停调度、GPU 先行、CPU 后行、健康检查、恢复调度顺序执行。

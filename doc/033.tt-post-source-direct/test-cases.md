@@ -22,8 +22,8 @@
 | TC-007 | 44.1kHz 原片 | H.264 Main + AAC 44.1kHz | 合同通过 | P1 | 通过 |
 | TC-008 | 旧模式回归 | 全量 GPU 测试 | branded/clean/outro/local/COS/ledger 无回归 | P0 | 通过 |
 | TC-009 | CPU profile 隔离 | 跑 TT core/service/runner 测试 | 仅当前 profile 可领取，历史状态不改 | P0 | 通过 |
-| TC-010 | 生产切换 | 检查 CPU/GPU health 和配置 | 两端 mode/profile 对齐，服务 active | P0 | 待执行 |
-| TC-011 | 无主动发布 | 比较部署前后队列/init 证据 | 部署验证不产生助手触发的真实发布 | P0 | 待执行 |
+| TC-010 | 生产切换 | 检查 CPU/GPU health 和配置 | 两端 mode/profile 对齐，服务 active | P0 | 通过 |
+| TC-011 | 无主动发布 | 比较部署前后队列/init 证据 | 部署验证不产生助手触发的真实发布 | P0 | 通过 |
 | TC-012 | 回切 | 恢复旧两项配置 | `direct_outro` v2 健康，旧池可继续使用 | P0 | 文档验证 |
 
 ## 回归范围
