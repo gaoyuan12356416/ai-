@@ -23,6 +23,6 @@
 ## 编译 / 验证结果
 
 - `python -m py_compile scripts\sync_socialkit_tiktok_accounts.py scripts\test_sync_socialkit_tiktok_accounts.py`：通过。
-- `python scripts\test_sync_socialkit_tiktok_accounts.py`：13/13 通过。
+- `python scripts\test_sync_socialkit_tiktok_accounts.py`：14/14 通过。
 - `git diff --cached --check`：通过。
 - 变更集数据库密码扫描：未发现真实密码。

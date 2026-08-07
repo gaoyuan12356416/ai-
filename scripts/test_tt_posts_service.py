@@ -38,6 +38,7 @@ from features.tt_posts.core import (
 from features.tt_posts.service import (
     ACCOUNT_LIST_SQL,
     ACCOUNT_METADATA_SQL,
+    ACCOUNT_STATUS_SQL,
     ACCOUNT_TOKEN_SQL,
     DEFAULT_GRACE_SECONDS,
     DEFAULT_LEASE_SECONDS,
@@ -140,10 +141,15 @@ class AccountSQLTests(unittest.TestCase):
         )
 
     def test_list_and_metadata_sql_never_name_access_token(self):
-        for statement in (ACCOUNT_LIST_SQL, ACCOUNT_METADATA_SQL):
+        for statement in (
+            ACCOUNT_LIST_SQL,
+            ACCOUNT_METADATA_SQL,
+            ACCOUNT_STATUS_SQL,
+        ):
             lowered = statement.lower()
             self.assertNotIn("access_token", lowered)
             self.assertNotRegex(lowered, r"select\s+\*")
+        for statement in (ACCOUNT_LIST_SQL, ACCOUNT_METADATA_SQL):
             for condition in (
                 "is_active = 1",
                 "account_status = 2",
@@ -210,6 +216,60 @@ class AccountSQLTests(unittest.TestCase):
             [sql for sql, _params in statements],
             [ACCOUNT_METADATA_SQL, ACCOUNT_TOKEN_SQL],
         )
+
+    def test_expiry_only_rejection_reports_retryable_snapshot_refresh(self):
+        statements = []
+
+        def router(sql, params):
+            if sql == ACCOUNT_METADATA_SQL:
+                self.assertEqual(params[0], "101")
+                return []
+            if sql == ACCOUNT_STATUS_SQL:
+                self.assertEqual(params, ("101",))
+                row = account_row()
+                row["token_expires_time"] = 1
+                return [row]
+            raise AssertionError("unexpected SQL")
+
+        repo = MySQLSnapshotAccountRepository(
+            self.config(),
+            connection_factory=lambda _config: FakeConnection(router, statements),
+            now_fn=lambda: datetime(2026, 7, 29, tzinfo=UTC),
+            verify_identity=False,
+        )
+        with self.assertRaises(AccountSourceError) as caught:
+            repo.as_account_source().get_safe_account("101")
+        self.assertEqual(
+            caught.exception.code,
+            "tt_account_snapshot_refresh_pending",
+        )
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(
+            [sql for sql, _params in statements],
+            [ACCOUNT_METADATA_SQL, ACCOUNT_STATUS_SQL],
+        )
+
+    def test_disabled_account_is_not_misclassified_as_snapshot_refresh(self):
+        def router(sql, _params):
+            if sql == ACCOUNT_METADATA_SQL:
+                return []
+            if sql == ACCOUNT_STATUS_SQL:
+                row = account_row()
+                row["disable_publish"] = 1
+                row["token_expires_time"] = 1
+                return [row]
+            raise AssertionError("unexpected SQL")
+
+        repo = MySQLSnapshotAccountRepository(
+            self.config(),
+            connection_factory=lambda _config: FakeConnection(router, []),
+            now_fn=lambda: datetime(2026, 7, 29, tzinfo=UTC),
+            verify_identity=False,
+        )
+        with self.assertRaises(AccountSourceError) as caught:
+            repo.as_account_source().get_safe_account("101")
+        self.assertEqual(caught.exception.code, "tt_account_not_found")
+        self.assertEqual(caught.exception.status, 404)
 
 
 class FakeResponse:

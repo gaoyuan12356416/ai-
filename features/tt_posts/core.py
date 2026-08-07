@@ -686,6 +686,8 @@ class SnapshotAccountSource:
         normalized = _account_id(account_id)
         try:
             raw = self._account_loader(normalized)
+        except TTPostError:
+            raise
         except Exception:
             raise AccountSourceError(
                 "tt_account_source_unavailable",

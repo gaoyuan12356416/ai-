@@ -7,7 +7,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 ## 目标
 
 - 新增 `ads_ai.tiktok_personal_account_snapshot` 当前快照表。
-- 每小时同步 `platform=3 AND is_deleted=0` 的 SocialKit TikTok 个号。
+- 每 5 分钟同步 `platform=3 AND is_deleted=0` 的 SocialKit TikTok 个号，固定在分钟数 `02/07/12/.../57` 触发，缩短 Token 自动续期后的目标快照滞后。
 - 以 `social_center_accounts.id` 为主键，关联 `social_account_data.team_id + account_id` 获取指标。
 - 明文 Token 只存在数据库字段和进程内存，不进入代码、Git、命令行、日志或任务输出。
 - 保持幂等、单事务、单实例、失败不清空现有数据。
@@ -18,7 +18,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 
 - 源表 `socialkit.social_center_accounts` 与 `socialkit.social_account_data` 的只读查询。
 - 目标表一次性 DDL、参数化 upsert、消失账号停用与 Token 清空。
-- 独立 systemd oneshot 与 timer，每小时第 5 分钟执行。
+- 独立 systemd oneshot 与 timer，每 5 分钟执行一次，并保留单实例锁避免重叠。
 - 源/目标专用 root-only 环境文件、固定端点校验、运行日志脱敏。
 
 ### 不包含
@@ -41,7 +41,7 @@ SocialKit 已通过外部 CynosDB 暴露 TikTok 个号授权信息与最新指�
 ## 交互与流程
 
 ```text
-systemd timer（每小时 :05）
+systemd timer（每 5 分钟，:02/:07/.../:57）
   -> 获取主机文件锁
   -> 只读查询 SocialKit 现有 TikTok 个号 + 左连接指标
   -> 校验非空、主键唯一、行数上限
@@ -92,7 +92,7 @@ systemctl start socialkit-tiktok-account-sync.service
 - 相同源数据连续同步两次不增加行数，第二次仍成功。
 - 模拟源账号消失后目标行 `is_active=0 AND access_token IS NULL`。
 - 错误端点、错误目标库、空源、重复主键和超量源均 fail closed。
-- systemd timer enabled/active，下一次触发时间符合每小时第 5 分钟。
+- systemd timer enabled/active，下一次触发时间符合 `:02/5` 五分钟周期。
 
 ## 风险与待确认
 

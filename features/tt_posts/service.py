@@ -215,6 +215,25 @@ LIMIT 2
 """
 
 
+# Exact metadata-only diagnostic used only when the normal eligibility query
+# returns no row.  It distinguishes a lagging token-expiry snapshot from real
+# account disablement without ever selecting the credential.
+ACCOUNT_STATUS_SQL = """
+SELECT
+  source_account_id,
+  token_status,
+  account_status,
+  token_expires_time,
+  disable_publish,
+  is_active,
+  last_seen_at,
+  updated_at
+FROM `ads_ai`.`tiktok_personal_account_snapshot`
+WHERE source_account_id = %s
+LIMIT 2
+"""
+
+
 # This is the only statement allowed to select the credential.  It is always
 # parameterized by one exact primary-key identity inside publish_credentials.
 ACCOUNT_TOKEN_SQL = """
@@ -775,7 +794,58 @@ class MySQLSnapshotAccountRepository:
         normalized = _positive_decimal(source_account_id, "TikTok账号ID")
         minimum = _minimum_token_expiry_ns(self._now_fn)
         rows = self._rows(ACCOUNT_METADATA_SQL, (normalized, minimum))
-        if len(rows) != 1:
+        if len(rows) > 1:
+            raise AccountSourceError(
+                "tt_account_metadata_ambiguous",
+                "TikTok账号候选存在重复身份",
+                503,
+            )
+        if not rows:
+            status_rows = self._rows(ACCOUNT_STATUS_SQL, (normalized,))
+            if len(status_rows) > 1:
+                raise AccountSourceError(
+                    "tt_account_metadata_ambiguous",
+                    "TikTok账号候选存在重复身份",
+                    503,
+                )
+            if status_rows:
+                status_row = status_rows[0]
+                diagnostic_id = _positive_decimal(
+                    status_row.get("source_account_id"),
+                    "TikTok账号ID",
+                )
+                if not secrets.compare_digest(diagnostic_id, normalized):
+                    raise AccountSourceError(
+                        "tt_account_metadata_mismatch",
+                        "TikTok账号资料与请求账号不一致",
+                        409,
+                    )
+                try:
+                    is_active = int(status_row.get("is_active") or 0)
+                    account_status = int(status_row.get("account_status") or 0)
+                    token_status = int(status_row.get("token_status") or 0)
+                    disable_publish = int(status_row.get("disable_publish") or 0)
+                    token_expires_time = int(
+                        status_row.get("token_expires_time") or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    raise AccountSourceError(
+                        "tt_account_metadata_invalid",
+                        "TikTok账号候选数据无效",
+                        503,
+                    ) from None
+                if (
+                    is_active == 1
+                    and account_status == 2
+                    and token_status == 2
+                    and disable_publish == 0
+                    and token_expires_time <= minimum
+                ):
+                    raise AccountSourceError(
+                        "tt_account_snapshot_refresh_pending",
+                        "TikTok账号快照等待刷新，请稍后自动重试",
+                        503,
+                    )
             raise AccountSourceError(
                 "tt_account_not_found",
                 "TikTok账号不存在或不满足候选条件",

@@ -185,3 +185,10 @@ curl -fsS http://127.0.0.1:18831/health
 - `18:47` 复核确认 SocialKit 源表中的 640、641、642 均为 `token_status=2/account_status=2`；640 和 642 已在 `18:30` 自动续期到次日，但 `ads_ai` 小时快照仍停留在 `18:05` 的旧到期值。`18:50` 手动执行现有 snapshot oneshot 成功同步 24 行后，640/642 均通过 5 分钟发布窗口；641 的 `disable_publish=1` 仍保持不可发布。此过程不需要重新授权，也未改源表。
 - 任务 3 在账号快照恢复后暴露冻结中文/Emoji 文案的 Unicode 幂等比较缺陷；修复上线后继续同一任务，于 `2026-08-06 19:04:39 +08:00` 记录 `publish_id=v_pub_url~v2-1.7670872578680457224`，立即转入 reconcile-only，并于 `19:05:04` 确认为 `published`。run 3 为 `completed`，`unknown_outcome=0`。
 - 四位码 `Q66Y` 同步进入 `published`；共享高位 route 未在旧 `tt_post_queue` 创建碰撞行。模板 1 仍停用，旧发布池和定时逻辑保持原样。
+
+## 2026-08-07 账号快照滞后修复
+
+- 保留 `is_active=1`、`account_status=2`、`token_status=2`、`disable_publish=0`、Token 非空和“到期时间晚于当前时间 5 分钟”全部安全条件，不删除校验。
+- 仅当账号其他状态均正常、唯一不满足项为目标快照 Token 有效期窗口时，返回 `tt_account_snapshot_refresh_pending`；同一冻结任务、素材、GPU 成片和文案在 1 分钟后重试。其他瞬时失败仍按 5 分钟重试，已有 `publish_id` 或未知结果仍只允许 reconcile。
+- SocialKit 账号快照 timer 从每小时 `:05` 改为每 5 分钟 `:02/:07/.../:57`。641 的 `disable_publish=1` 不会被误判为快照滞后，仍禁止发布。
+- 旧 TT 发布池不切换 release、不重启服务；新自动发布三重生产闸门保持开启，模板 1 保持停用。本次不创建真实发布任务。

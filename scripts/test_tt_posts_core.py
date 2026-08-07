@@ -2641,6 +2641,25 @@ class AccountSourceTests(unittest.TestCase):
                 pass
         self.assertNotIn(secret, str(caught.exception))
 
+    def test_typed_account_loader_error_is_preserved(self):
+        expected = AccountSourceError(
+            "tt_account_snapshot_refresh_pending",
+            "snapshot refresh pending",
+            503,
+        )
+
+        def pending(_value):
+            raise expected
+
+        source = SnapshotAccountSource(
+            lambda: [self.metadata()],
+            pending,
+            lambda _value: None,
+        )
+        with self.assertRaises(AccountSourceError) as caught:
+            source.get_safe_account("acct-1")
+        self.assertIs(caught.exception, expected)
+
     def test_ineligible_account_does_not_read_token(self):
         calls = []
         metadata = self.metadata()

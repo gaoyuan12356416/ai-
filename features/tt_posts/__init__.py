@@ -29,6 +29,7 @@ from .core import (
 from .service import (
     ACCOUNT_LIST_SQL,
     ACCOUNT_METADATA_SQL,
+    ACCOUNT_STATUS_SQL,
     ACCOUNT_TOKEN_SQL,
     GPUClient,
     GPUClientError,
@@ -44,6 +45,7 @@ __all__ = [
     "AccountSourceError",
     "ACCOUNT_LIST_SQL",
     "ACCOUNT_METADATA_SQL",
+    "ACCOUNT_STATUS_SQL",
     "ACCOUNT_TOKEN_SQL",
     "DramawaveMaterialResolver",
     "FIXED_CAPTION_TEMPLATE",

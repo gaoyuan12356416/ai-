@@ -12,7 +12,7 @@
 
 | 类型 | 数量 | 通过 | 失败 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| 单元测试 | 13 | 13 | 0 | 0 |
+| 同步组件单元测试 | 14 | 14 | 0 | 0 |
 | 本地静态检查 | 3 | 3 | 0 | 0 |
 | 生产验证 | 待执行 | 0 | 0 | 0 |
 
@@ -23,7 +23,7 @@
 ## 验证证据
 
 - `py_compile`：通过。
-- `scripts/test_sync_socialkit_tiktok_accounts.py`：`Ran 13 tests ... OK`。
+- `scripts/test_sync_socialkit_tiktok_accounts.py`：`Ran 14 tests ... OK`，包含五分钟 timer 契约回归。
 - `git diff --cached --check`：通过。
 - 变更集未发现真实数据库密码。
 

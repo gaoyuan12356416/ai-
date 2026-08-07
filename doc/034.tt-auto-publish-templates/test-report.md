@@ -52,3 +52,11 @@
 - 快照恢复后的首次重试在 TikTok 调用前暴露冻结文案的非 ASCII `compare_digest` 缺陷；加入中文/Emoji 回归用例后，UTF-8 字节比较修复通过本地和生产 release 测试。该确定失败阶段没有 `publish_id`，因此继续复用原任务是安全的。
 - `19:04:39 +08:00` 任务 3 获得 `publish_id=v_pub_url~v2-1.7670872578680457224` 后只执行 reconcile；`19:05:04` 收敛为 `published`，run 3 同时为 `completed`，`unknown_outcome=0`、错误为空。四位码 `Q66Y` 状态为 `published`，旧队列表中不存在对应高位 queue ID。
 - 三重生产门禁继续为开；模板 1 继续停用，避免定时产生新任务。旧 TT PID `3055551` 未变化。
+
+## 2026-08-07 账号快照滞后回归
+
+- 新增账号仓库回归：只有 Token 有效期窗口不足时返回 `tt_account_snapshot_refresh_pending/503`，诊断查询不读取 `access_token`；`disable_publish=1` 仍返回不可用，不进入快照等待分支。
+- 新增执行器回归：快照待刷新任务在 59 秒时不可领取，61 秒后复用同一任务和素材继续发布，GPU prepare 不重复；其他 503 仍保持 5 分钟退避。
+- 新增同步 timer 契约回归：`OnCalendar=*-*-* *:02/5:00` 且 `Persistent=true`。
+- 本地完整相关回归共 340 项通过：自动发布 96、四位码 broker 5、TT 共用账号/服务层 225、账号同步 14，失败 0。
+- 生产验证待记录精确 release、三重闸门、旧服务 PID、连续 3 次自然同步和 640/642 脱敏状态对账。

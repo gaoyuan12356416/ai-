@@ -4,7 +4,7 @@
 
 - 新增 `ads_ai.tiktok_personal_account_snapshot`。
 - 新增独立 SocialKit -> ads_ai 同步脚本。
-- 新增 systemd oneshot 与 timer，每小时第 5 分钟运行。
+- systemd oneshot 保持不变；timer 调整为每 5 分钟运行，固定在 `:02/:07/.../:57`。
 
 ## 配置项
 
@@ -65,4 +65,4 @@ systemctl list-timers socialkit-tiktok-account-sync.timer --no-pager
 
 ## 生产部署记录
 
-待部署后补充 commit、release、备份目录、DDL 回读、首次/二次同步和 timer 证据。
+首次部署已完成。本次频率调整待补充精确 commit、备份目录和连续 3 次自然同步证据。

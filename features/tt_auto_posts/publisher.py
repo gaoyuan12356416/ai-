@@ -359,6 +359,12 @@ class AutoPostExecutor:
             and phase in {"prepare", "publish"}
         )
         if publish_evidence or transient_selection or transient_reserved:
+            retry_delay = timedelta(minutes=5)
+            if (
+                code == "tt_account_snapshot_refresh_pending"
+                and not publish_evidence
+            ):
+                retry_delay = timedelta(minutes=1)
             return self.store.transition_task(
                 task.id,
                 "retry_wait",
@@ -369,7 +375,7 @@ class AutoPostExecutor:
                     "claim_worker": "",
                     "claim_token": "",
                     "lease_expires_at_utc": "",
-                    "next_attempt_at_utc": self._now() + timedelta(minutes=5),
+                    "next_attempt_at_utc": self._now() + retry_delay,
                     "error_code": code,
                     "error_message": message,
                 },

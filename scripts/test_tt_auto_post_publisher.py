@@ -27,7 +27,11 @@ from features.tt_auto_posts.publisher import (  # noqa: E402
     AutoPostExecutionError,
     AutoPostExecutor,
 )
-from features.tt_posts.core import PublishCredentials, SafeAccount  # noqa: E402
+from features.tt_posts.core import (  # noqa: E402
+    AccountSourceError,
+    PublishCredentials,
+    SafeAccount,
+)
 from features.tt_posts.service import GPUClientError  # noqa: E402
 
 
@@ -59,9 +63,12 @@ class FakeAccountSource:
         self.tokens_opened = 0
         self.username = "account640"
         self.display_name = "Account 640"
+        self.failure = None
 
     def publish_credentials(self, account_id):
         self.tokens_opened += 1
+        if self.failure is not None:
+            raise self.failure
         account = SafeAccount(
             account_id=str(account_id),
             username=self.username,
@@ -494,6 +501,35 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             [call["job_id"] for call in gpu.publish_calls],
             [job_id, job_id],
         )
+
+    def test_snapshot_refresh_pending_retries_same_task_after_one_minute(self):
+        task = self.reserved_task(suffix="snapshot-refresh")
+        gpu = FakeGPU()
+        executor = self.executor(gpu)
+
+        prepared = executor.execute_next("worker-prepare")["task"]
+        self.assertEqual(prepared["status"], "ready")
+        self.account_source.failure = AccountSourceError(
+            "tt_account_snapshot_refresh_pending",
+            "snapshot refresh pending",
+            503,
+        )
+        waiting = executor.execute_next("worker-publish")["task"]
+        self.assertEqual(waiting["status"], "retry_wait")
+        self.assertEqual(
+            waiting["error_code"],
+            "tt_account_snapshot_refresh_pending",
+        )
+        self.assertEqual(waiting["material_id"], task.material_id)
+
+        self.clock.value += timedelta(seconds=59)
+        self.assertFalse(executor.execute_next("worker-too-early")["claimed"])
+        self.account_source.failure = None
+        self.clock.value += timedelta(seconds=2)
+        published = executor.execute_next("worker-retry")["task"]
+        self.assertEqual(published["status"], "published")
+        self.assertEqual(published["material_id"], task.material_id)
+        self.assertEqual(len(gpu.prepare_calls), 1)
 
     def test_retry_keeps_short_link_identical_after_account_name_changes(self):
         task = self.reserved_task(suffix="frozen-account-name")

@@ -10,6 +10,7 @@ from unittest import mock
 
 
 MODULE_PATH = pathlib.Path(__file__).with_name("sync_socialkit_tiktok_accounts.py")
+TIMER_PATH = MODULE_PATH.parents[1] / "deploy" / "socialkit-tiktok-account-sync.timer"
 SPEC = importlib.util.spec_from_file_location("socialkit_tt_sync", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
@@ -220,6 +221,14 @@ class MaxRowsTest(unittest.TestCase):
                 os.environ.pop("SOCIALKIT_TT_SYNC_MAX_ROWS", None)
             else:
                 os.environ["SOCIALKIT_TT_SYNC_MAX_ROWS"] = previous
+
+
+class TimerContractTest(unittest.TestCase):
+    def test_timer_runs_every_five_minutes_with_two_minute_offset(self):
+        timer = TIMER_PATH.read_text(encoding="utf-8")
+        self.assertIn("OnCalendar=*-*-* *:02/5:00", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertNotIn("OnCalendar=*-*-* *:05:00", timer)
 
 
 if __name__ == "__main__":
