@@ -81,12 +81,16 @@ class FrontendContractTests(unittest.TestCase):
             "limit",
             "offset",
             "include_rankings",
+            "api_schema_version",
         )
         for name in required:
             self.assertRegex(self.html, rf"['\"]{re.escape(name)}['\"]")
+        self.assertIn("const API_SCHEMA_VERSION = '2'", self.html)
+        self.assertIn("state.meta.comparison_window)!=='D10'", self.html)
 
     def test_date_boundary_and_presets(self) -> None:
-        self.assertGreaterEqual(self.html.count("2026-07-29"), 3)
+        self.assertIn("const minimumDate=asText(state.meta.minimum_date)||FALLBACK_MIN_DATE", self.html)
+        self.assertNotRegex(self.html, r'<input[^>]+min="2026-')
         for label in ("今天", "昨天", "近3天", "近7天", "近30天", "全部"):
             self.assertIn(label, self.html)
         self.assertIn("最新可用日", self.html)
@@ -95,11 +99,11 @@ class FrontendContractTests(unittest.TestCase):
     def test_null_revenue_does_not_fall_back_to_zero_roas(self) -> None:
         self.run_inline_javascript_probe(
             """
-  const missingOld = metricModel({spend:100,d30_revenue:50});
+  const missingOld = metricModel({spend:100,d10_revenue:50});
   const missingNew = metricModel({spend:100,d7_revenue:25});
   if(missingOld.oldRoas !== null)throw new Error('missing D7 revenue became zero ROAS');
-  if(missingNew.newRoas !== null)throw new Error('missing D30 revenue became zero ROAS');
-  if(missingOld.newRoas !== 0.5)throw new Error('D30 ROAS fallback is incorrect');
+  if(missingNew.newRoas !== null)throw new Error('missing D10 revenue became zero ROAS');
+  if(missingOld.newRoas !== 0.5)throw new Error('D10 ROAS fallback is incorrect');
   if(missingNew.oldRoas !== 0.25)throw new Error('D7 ROAS fallback is incorrect');
 """.rstrip()
         )
@@ -118,23 +122,28 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("state.dataVersion=''", self.html)
         self.assertIn("loadAll(false,false", self.html)
 
-    def test_mapping_quality_is_reported_separately_for_d7_and_d30(self) -> None:
+    def test_mapping_quality_is_reported_separately_for_d7_and_d10(self) -> None:
         self.assertIn("windowQuality(quality,'d7')", self.html)
-        self.assertIn("windowQuality(quality,'d30')", self.html)
+        self.assertIn("windowQuality(quality,'d10')", self.html)
         self.assertIn("旧D7", self.html)
-        self.assertIn("新D30", self.html)
+        self.assertIn("新D10", self.html)
+        self.assertIn("app_revenues_10d", self.html)
+        self.assertIn("d10_revenue", self.html)
+        self.assertIn("d10_roas", self.html)
+        for obsolete in ("D30", "app_revenues_30d", "d30_"):
+            self.assertNotIn(obsolete, self.html)
         self.assertIn("source_scope_exclusions", self.html)
         self.assertIn("候选内未匹配", self.html)
         self.run_inline_javascript_probe(
             """
   const quality = {
     d7:{total_revenue_rows:100,mapped_revenue_rows:80,unmapped_revenue_rows:20},
-    d30:{total_revenue_rows:200,mapped_revenue_rows:190,ambiguous_revenue_rows:10}
+    d10:{total_revenue_rows:200,mapped_revenue_rows:190,ambiguous_revenue_rows:10}
   };
   const d7 = windowQuality(quality,'d7');
-  const d30 = windowQuality(quality,'d30');
+  const d10 = windowQuality(quality,'d10');
   if(d7.total !== 100 || d7.mapped !== 80 || d7.coverage !== 0.8)throw new Error('D7 quality was mixed');
-  if(d30.total !== 200 || d30.mapped !== 190 || d30.coverage !== 0.95)throw new Error('D30 quality was mixed');
+  if(d10.total !== 200 || d10.mapped !== 190 || d10.coverage !== 0.95)throw new Error('D10 quality was mixed');
 """.rstrip()
         )
 
@@ -191,7 +200,7 @@ class FrontendContractTests(unittest.TestCase):
         for text in (
             "共同花费",
             "旧D7归因",
-            "新D30归因",
+            "新D10归因",
             "收入差额",
             "收入提升率",
             "Campaign 排行",

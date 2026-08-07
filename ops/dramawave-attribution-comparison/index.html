@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:,">
 <meta name="color-scheme" content="light">
-<title>DramaWave D7 / D30 归因对比看板</title>
+<title>DramaWave D7 / D10 归因对比看板</title>
 <style>
 :root{--bg:#f3f6fa;--panel:#fff;--line:#d8e0ea;--text:#172033;--muted:#667085;--blue:#245ea8;--blue-soft:#eaf2ff;--teal:#0f766e;--purple:#7651a6;--green:#08783e;--orange:#b45f06;--red:#c52d35;--shadow:0 1px 3px rgba(16,24,40,.08)}
 *{box-sizing:border-box}
@@ -51,7 +51,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
 <header>
   <div class="head">
     <div>
-      <h1>DramaWave D7 / D30 归因对比看板</h1>
+      <h1>DramaWave D7 / D10 归因对比看板</h1>
       <div class="head-meta" id="headerMeta">正在读取缓存元数据…</div>
     </div>
     <div class="head-actions">
@@ -73,14 +73,14 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
   <section class="meta-grid" id="metaGrid" aria-label="缓存和数据质量状态">
     <div class="panel meta-card"><div class="meta-label">缓存版本</div><div class="meta-value" id="metaVersion">—</div><div class="meta-sub" id="metaGenerated">生成时间 —</div></div>
     <div class="panel meta-card"><div class="meta-label">旧口径源表</div><div class="meta-value">app_revenues</div><div class="meta-sub" id="metaOldSource">最大更新时间 —</div></div>
-    <div class="panel meta-card"><div class="meta-label">新口径源表</div><div class="meta-value">app_revenues_30d</div><div class="meta-sub" id="metaNewSource">最大更新时间 —</div></div>
+    <div class="panel meta-card"><div class="meta-label">新口径源表</div><div class="meta-value">app_revenues_10d</div><div class="meta-sub" id="metaNewSource">最大更新时间 —</div></div>
     <div class="panel meta-card"><div class="meta-label">共同花费源</div><div class="meta-value">custom_source_insight</div><div class="meta-sub" id="metaSpendSource">最大更新时间 —</div></div>
     <div class="panel meta-card"><div class="meta-label">映射质量</div><div class="meta-value" id="metaCoverage">覆盖率 —</div><div class="meta-sub" id="metaAmbiguity">歧义 —</div></div>
   </section>
 
   <section class="panel controls" aria-label="筛选条件">
-    <div class="field"><label for="startDate">开始日期</label><input type="date" id="startDate" min="2026-07-29"></div>
-    <div class="field"><label for="endDate">结束日期</label><input type="date" id="endDate" min="2026-07-29"></div>
+    <div class="field"><label for="startDate">开始日期</label><input type="date" id="startDate"></div>
+    <div class="field"><label for="endDate">结束日期</label><input type="date" id="endDate"></div>
     <div class="field field-wide"><span class="field-label">日期快捷选择</span><div class="presets" id="datePresets" aria-label="日期快捷选择"></div></div>
     <div class="field"><label for="channelFilter">渠道</label><select id="channelFilter"><option value="">全部渠道</option></select></div>
     <div class="field"><label for="appFilter">投放产品（App ID）</label><select id="appFilter"><option value="">全部投放产品</option></select></div>
@@ -96,7 +96,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
         <button class="basis-btn" type="button" data-basis="d7" aria-pressed="false">D7 指标</button>
       </div>
     </fieldset>
-    <div class="basis-note"><strong>D7 / D30 表示归因窗口。</strong>“D0 / D7 指标”切换的是两张归因表内要比较的收入成熟口径。</div>
+    <div class="basis-note"><strong>D7 / D10 表示归因窗口。</strong>“D0 / D7 指标”切换的是两张归因表内要比较的收入成熟口径。</div>
   </section>
 
   <section class="section panel dimension-box" aria-labelledby="dimensionTitle">
@@ -135,7 +135,8 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
   'use strict';
 
   const API = Object.freeze({meta:'./api/meta', options:'./api/options', query:'./api/query', rankings:'./api/rankings', exportCsv:'./api/export.csv'});
-  const MIN_DATE = '2026-07-29';
+  const API_SCHEMA_VERSION = '2';
+  const FALLBACK_MIN_DATE = '2026-07-29';
   const DIMENSIONS = Object.freeze([
     {key:'dt',label:'时间'},
     {key:'campaign',label:'Campaign'},
@@ -163,7 +164,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
   ]);
   const state = {
     meta:{}, options:{}, metricBasis:'d0', dimensions:['dt','campaign'],
-    sortBy:'spend', sortDir:'desc', limit:50, page:1, availableStart:MIN_DATE,
+    sortBy:'spend', sortDir:'desc', limit:50, page:1, availableStart:FALLBACK_MIN_DATE,
     availableEnd:'', today:'', controller:null, requestSeq:0, rankingController:null, rankingSeq:0,
     rankingKey:'', rankingStatus:'idle', hasData:false,
     debounceTimer:0, lastPayload:null, dataVersion:'', resultsStale:false,
@@ -198,9 +199,9 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     const item=source || {};
     const spend=finite(pick(item,['spend','common_spend']));
     const oldRevenue=finite(pick(item,['d7_revenue','old_revenue','revenue_d7_attribution']));
-    const newRevenue=finite(pick(item,['d30_revenue','new_revenue','revenue_d30_attribution']));
+    const newRevenue=finite(pick(item,['d10_revenue','new_revenue','revenue_d10_attribution']));
     const oldRoas=finite(pick(item,['d7_roas','old_roas'])) ?? (spend && oldRevenue !== null ? oldRevenue / spend : null);
-    const newRoas=finite(pick(item,['d30_roas','new_roas'])) ?? (spend && newRevenue !== null ? newRevenue / spend : null);
+    const newRoas=finite(pick(item,['d10_roas','new_roas'])) ?? (spend && newRevenue !== null ? newRevenue / spend : null);
     const revenueDiff=finite(pick(item,['revenue_diff','revenue_delta'])) ?? (oldRevenue !== null && newRevenue !== null ? newRevenue-oldRevenue : null);
     const roasDiff=finite(pick(item,['roas_diff'])) ?? (oldRoas !== null && newRoas !== null ? newRoas-oldRoas : null);
     let liftRate=finite(pick(item,['lift_rate','revenue_lift_rate']));
@@ -238,6 +239,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     validateDates();
     const {start,end}=currentDateRange();
     const params=new URLSearchParams();
+    params.set('api_schema_version',API_SCHEMA_VERSION);
     params.set('start_date',start);
     params.set('end_date',end);
     params.set('dimensions',state.dimensions.join(','));
@@ -255,13 +257,13 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
   }
   function buildOptionsParams(){
     const {start,end}=currentDateRange();
-    const params=new URLSearchParams({start_date:start,end_date:end});
+    const params=new URLSearchParams({api_schema_version:API_SCHEMA_VERSION,start_date:start,end_date:end});
     if(state.dataVersion)params.set('data_version',state.dataVersion);
     return params;
   }
   function buildRankingParams(){
     validateDates();
-    const {start,end}=currentDateRange(),params=new URLSearchParams({start_date:start,end_date:end,metric_basis:state.metricBasis});
+    const {start,end}=currentDateRange(),params=new URLSearchParams({api_schema_version:API_SCHEMA_VERSION,start_date:start,end_date:end,metric_basis:state.metricBasis});
     for(const item of FILTERS){const value=get(item.id).value;if(value)params.append(item.param,asText(value));}
     const campaign=get('campaignKeyword').value.trim(),adset=get('adsetKeyword').value.trim();
     if(campaign)params.set('campaign',campaign);
@@ -323,7 +325,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     if(cache.range_complete===false||cache.complete===false)messages.push(`缓存日期存在缺口：${(cache.missing_dates||[]).join('、')||'请查看健康检查'}。缺失日不会按 0 处理。`);
     if(cache.rollups_current===false)messages.push('日级汇总版本落后于事实版本；服务已安全回退最细事实，但查询性能不满足上线标准。');
     if(cache.current_date_present===false)messages.push('缓存尚未覆盖北京时间今天；“最新可用日”以缓存上限为准。');
-    const scoped=[windowQuality(quality,'d7'),windowQuality(quality,'d30')].filter(item=>item.hasAny);
+    const scoped=[windowQuality(quality,'d7'),windowQuality(quality,'d10')].filter(item=>item.hasAny);
     if(scoped.length){
       for(const item of scoped){
         if((item.ambiguous||0)>0)messages.push(`${item.label}存在 ${integer(item.ambiguous)} 条映射歧义记录，已保留为歧义而未强行归属。`);
@@ -335,10 +337,10 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
       if((overall.unmapped||0)>0)messages.push(`存在 ${integer(overall.unmapped)} 条候选范围内未匹配收入记录，请结合“匹配粒度”维度核查。`);
     }
     const excluded=(quality&&quality.source_scope_exclusions)||{};
-    const excludedD7=finite(excluded.d7_rows)||0,excludedD30=finite(excluded.d30_rows)||0;
-    if(excludedD7||excludedD30){
+    const excludedD7=finite(excluded.d7_rows)||0,excludedD10=finite(excluded.d10_rows)||0;
+    if(excludedD7||excludedD10){
       const filterNote=excluded.business_filters_applied?'；这是整段日期的全局审计量，不能归属到当前业务筛选':'';
-      messages.push(`源收入表另有旧D7 ${integer(excludedD7)} / 新D30 ${integer(excludedD30)} 个键未命中任何 Dramawave custom 候选，因无法判定产品归属而未计入看板${filterNote}。`);
+      messages.push(`源收入表另有旧D7 ${integer(excludedD7)} / 新D10 ${integer(excludedD10)} 个键未命中任何 Dramawave custom 候选，因无法判定产品归属而未计入看板${filterNote}。`);
     }
     const range=currentDateRange();
     if(range.end && range.end===state.today)messages.push(`${state.today} 为未完结当日，指标仍会继续变化。`);
@@ -352,7 +354,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     return {label:'综合',hasAny:[total,mapped,unmapped,ambiguous,coverage].some(value=>value!==null),total,mapped,unmapped,ambiguous,coverage};
   }
   function windowQuality(quality,windowName){
-    const item=quality||{},legacy=windowName==='d7'?'old':'new',label=windowName==='d7'?'旧D7归因':'新D30归因';
+    const item=quality||{},legacy=windowName==='d7'?'old':'new',label=windowName==='d7'?'旧D7归因':'新D10归因';
     const nested=(item[windowName]&&typeof item[windowName]==='object'?item[windowName]:null)||(item[legacy]&&typeof item[legacy]==='object'?item[legacy]:null)||{};
     const fromNested=names=>finite(pick(nested,names));
     const fromFlat=suffixes=>finite(pick(item,suffixes.flatMap(suffix=>[`${windowName}_${suffix}`,`${legacy}_${suffix}`])));
@@ -374,11 +376,11 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     get('metaVersion').textContent=version;
     get('metaGenerated').textContent='生成时间 '+generated;
     get('metaOldSource').textContent='最大更新时间 '+sourceTime(sources,['app_revenues','old_revenue']);
-    get('metaNewSource').textContent='最大更新时间 '+sourceTime(sources,['app_revenues_30d','new_revenue']);
+    get('metaNewSource').textContent='最大更新时间 '+sourceTime(sources,['app_revenues_10d','new_revenue']);
     get('metaSpendSource').textContent='最大更新时间 '+sourceTime(sources,['custom_source_insight','ads_custom_source_insight','spend']);
-    const d7=windowQuality(quality,'d7'),d30=windowQuality(quality,'d30'),overall=overallQuality(quality);
-    get('metaCoverage').textContent=d7.hasAny||d30.hasAny?`旧D7 ${percent(d7.coverage)}｜新D30 ${percent(d30.coverage)}`:'综合覆盖率 '+percent(overall.coverage);
-    get('metaAmbiguity').textContent=d7.hasAny||d30.hasAny?`D7歧义 ${integer(d7.ambiguous)} / 候选内未匹配 ${integer(d7.unmapped)}｜D30歧义 ${integer(d30.ambiguous)} / 候选内未匹配 ${integer(d30.unmapped)}`:`歧义 ${integer(overall.ambiguous)}｜候选内未匹配 ${integer(overall.unmapped)}`;
+    const d7=windowQuality(quality,'d7'),d10=windowQuality(quality,'d10'),overall=overallQuality(quality);
+    get('metaCoverage').textContent=d7.hasAny||d10.hasAny?`旧D7 ${percent(d7.coverage)}｜新D10 ${percent(d10.coverage)}`:'综合覆盖率 '+percent(overall.coverage);
+    get('metaAmbiguity').textContent=d7.hasAny||d10.hasAny?`D7歧义 ${integer(d7.ambiguous)} / 候选内未匹配 ${integer(d7.unmapped)}｜D10歧义 ${integer(d10.ambiguous)} / 候选内未匹配 ${integer(d10.unmapped)}`:`歧义 ${integer(overall.ambiguous)}｜候选内未匹配 ${integer(overall.unmapped)}`;
     get('headerMeta').textContent=`生成 ${generated}｜版本 ${version}｜每 ${finite(meta.cache&&meta.cache.refresh_interval_minutes)||30} 分钟刷新｜保留 ${finite(meta.cache&&meta.cache.retention_days)||60} 天`;
     setWarnings(meta,quality);
   }
@@ -437,9 +439,9 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
       {label:'共同花费',value:money(model.spend),sub:'两种归因窗口共用同一花费分母',kind:''},
       {label:`旧D7归因 · ${basis}收入`,value:money(model.oldRevenue),sub:'来源 app_revenues',kind:'old'},
       {label:`旧D7归因 · ${basis} ROAS`,value:ratio(model.oldRoas),sub:'旧口径收入 ÷ 共同花费',kind:'old'},
-      {label:`新D30归因 · ${basis}收入`,value:money(model.newRevenue),sub:'来源 app_revenues_30d',kind:'new'},
-      {label:`新D30归因 · ${basis} ROAS`,value:ratio(model.newRoas),sub:'新口径收入 ÷ 共同花费',kind:'new'},
-      {label:'收入差额',value:money(model.revenueDiff),sub:'新D30归因 − 旧D7归因',kind:'diff '+signClass(model.revenueDiff)},
+      {label:`新D10归因 · ${basis}收入`,value:money(model.newRevenue),sub:'来源 app_revenues_10d',kind:'new'},
+      {label:`新D10归因 · ${basis} ROAS`,value:ratio(model.newRoas),sub:'新口径收入 ÷ 共同花费',kind:'new'},
+      {label:'收入差额',value:money(model.revenueDiff),sub:'新D10归因 − 旧D7归因',kind:'diff '+signClass(model.revenueDiff)},
       {label:'收入提升率',value:lift,sub:model.oldRevenue===0&&finite(model.newRevenue)>0?'旧口径为0，新口径产生收入':'收入差额 ÷ 旧D7归因收入',kind:'diff '+signClass(model.liftRate)}
     ];
     get('kpis').innerHTML=cards.map(card=>`<article class="panel kpi ${card.kind}"><div class="kpi-label">${safe(card.label)}</div><div class="kpi-value">${safe(card.value)}</div><div class="kpi-sub">${safe(card.sub)}</div></article>`).join('');
@@ -458,10 +460,10 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     const barWidth=Math.max(3,Math.min(18,innerWidth/Math.max(points.length,1)*.38));
     const bars=points.map((item,index)=>{const yy=y(item.spend),xx=x(index)-barWidth/2;return `<rect x="${xx.toFixed(1)}" y="${yy.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${(top+innerHeight-yy).toFixed(1)}" fill="#c6d5e9"><title>${safe(item.dt)} 共同花费 ${safe(money(item.spend))}</title></rect>`;}).join('');
     const oldDots=points.map((item,index)=>`<circle cx="${x(index).toFixed(1)}" cy="${y(item.oldRevenue).toFixed(1)}" r="3" fill="#0f766e"><title>${safe(item.dt)} 旧D7归因${basisLabel()}收入 ${safe(money(item.oldRevenue))}</title></circle>`).join('');
-    const newDots=points.map((item,index)=>`<circle cx="${x(index).toFixed(1)}" cy="${y(item.newRevenue).toFixed(1)}" r="3" fill="#7651a6"><title>${safe(item.dt)} 新D30归因${basisLabel()}收入 ${safe(money(item.newRevenue))}</title></circle>`).join('');
+    const newDots=points.map((item,index)=>`<circle cx="${x(index).toFixed(1)}" cy="${y(item.newRevenue).toFixed(1)}" r="3" fill="#7651a6"><title>${safe(item.dt)} 新D10归因${basisLabel()}收入 ${safe(money(item.newRevenue))}</title></circle>`).join('');
     const labelEvery=Math.max(1,Math.ceil(points.length/10));
     const labels=points.map((item,index)=>index%labelEvery===0||index===points.length-1?`<text x="${x(index).toFixed(1)}" y="${height-13}" text-anchor="middle" font-size="11" fill="#667085">${safe(item.dt.slice(5))}</text>`:'').join('');
-    get('trendChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="共同花费、旧D7归因收入和新D30归因收入按日趋势"><line x1="${left}" y1="${top+innerHeight}" x2="${width-right}" y2="${top+innerHeight}" stroke="#cfd8e5"/><text x="${left}" y="14" font-size="11" fill="#667085">${safe(money(maxValue))}</text>${bars}<path d="${pathFor('oldRevenue')}" fill="none" stroke="#0f766e" stroke-width="3" vector-effect="non-scaling-stroke"/>${oldDots}<path d="${pathFor('newRevenue')}" fill="none" stroke="#7651a6" stroke-width="3" vector-effect="non-scaling-stroke"/>${newDots}${labels}</svg><div class="legend"><span class="spend">共同花费</span><span class="old">旧D7归因 ${basisLabel()}收入</span><span class="new">新D30归因 ${basisLabel()}收入</span></div>`;
+    get('trendChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="共同花费、旧D7归因收入和新D10归因收入按日趋势"><line x1="${left}" y1="${top+innerHeight}" x2="${width-right}" y2="${top+innerHeight}" stroke="#cfd8e5"/><text x="${left}" y="14" font-size="11" fill="#667085">${safe(money(maxValue))}</text>${bars}<path d="${pathFor('oldRevenue')}" fill="none" stroke="#0f766e" stroke-width="3" vector-effect="non-scaling-stroke"/>${oldDots}<path d="${pathFor('newRevenue')}" fill="none" stroke="#7651a6" stroke-width="3" vector-effect="non-scaling-stroke"/>${newDots}${labels}</svg><div class="legend"><span class="spend">共同花费</span><span class="old">旧D7归因 ${basisLabel()}收入</span><span class="new">新D10归因 ${basisLabel()}收入</span></div>`;
   }
 
   function rawDimension(row,key){
@@ -492,8 +494,8 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
       {key:'spend',label:'共同花费',format:model=>money(model.spend)},
       {key:'d7_revenue',label:`旧D7归因 ${basis}收入`,format:model=>money(model.oldRevenue)},
       {key:'d7_roas',label:`旧D7归因 ${basis} ROAS`,format:model=>ratio(model.oldRoas)},
-      {key:'d30_revenue',label:`新D30归因 ${basis}收入`,format:model=>money(model.newRevenue)},
-      {key:'d30_roas',label:`新D30归因 ${basis} ROAS`,format:model=>ratio(model.newRoas)},
+      {key:'d10_revenue',label:`新D10归因 ${basis}收入`,format:model=>money(model.newRevenue)},
+      {key:'d10_roas',label:`新D10归因 ${basis} ROAS`,format:model=>ratio(model.newRoas)},
       {key:'revenue_diff',label:'收入差额',format:model=>money(model.revenueDiff),className:model=>signClass(model.revenueDiff)},
       {key:'lift_rate',label:'提升率',format:model=>liftText(model),className:model=>signClass(model.liftRate)}
     ];
@@ -516,11 +518,11 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
     get('nextPage').disabled=!total || offset+returned>=total;
   }
   function renderQuality(quality){
-    const d7=windowQuality(quality,'d7'),d30=windowQuality(quality,'d30'),overall=overallQuality(quality);
+    const d7=windowQuality(quality,'d7'),d10=windowQuality(quality,'d10'),overall=overallQuality(quality);
     const summary=item=>`<strong>${safe(item.label)}覆盖率 ${safe(percent(item.coverage))}</strong>｜收入候选 ${safe(integer(item.total))}｜已匹配 ${safe(integer(item.mapped))}｜候选内未匹配 ${safe(integer(item.unmapped))}｜映射歧义 ${safe(integer(item.ambiguous))}`;
-    const parts=d7.hasAny||d30.hasAny?[summary(d7),summary(d30)]:[summary(overall)];
+    const parts=d7.hasAny||d10.hasAny?[summary(d7),summary(d10)]:[summary(overall)];
     const excluded=(quality&&quality.source_scope_exclusions)||{};
-    const excludedLine=(finite(excluded.d7_rows)||finite(excluded.d30_rows))?` 日期级全源排除：旧D7 ${safe(integer(excluded.d7_rows))} 条 / ${safe(money(excluded.d7_revenue))}，新D30 ${safe(integer(excluded.d30_rows))} 条 / ${safe(money(excluded.d30_revenue))}；这些键未命中任何 Dramawave custom 候选，无法判定产品归属${excluded.business_filters_applied?'，且不能归属到当前业务筛选':''}。`:'';
+    const excludedLine=(finite(excluded.d7_rows)||finite(excluded.d10_rows))?` 日期级全源排除：旧D7 ${safe(integer(excluded.d7_rows))} 条 / ${safe(money(excluded.d7_revenue))}，新D10 ${safe(integer(excluded.d10_rows))} 条 / ${safe(money(excluded.d10_revenue))}；这些键未命中任何 Dramawave custom 候选，无法判定产品归属${excluded.business_filters_applied?'，且不能归属到当前业务筛选':''}。`:'';
     get('qualityLine').innerHTML=parts.join('。<br>')+'。覆盖率分母仅含至少命中一条 Dramawave 维度候选的收入键；“候选内未匹配”不包含全源范围外排除。'+excludedLine+' ID 全程按字符串展示；歧义记录不会被强行归属。';
   }
   function renderPayload(payload){
@@ -566,14 +568,18 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;box-shadow
   }
   function applyMeta(meta,initialize=false){
     state.meta=meta||{};
+    if(String(state.meta.api_schema_version)!==API_SCHEMA_VERSION||asText(state.meta.comparison_window)!=='D10'){
+      throw new Error('看板 API 口径版本不匹配，请刷新页面后重试');
+    }
     const version=asText(state.meta.data_version);
     if(version)state.dataVersion=version;
     else if(initialize)state.dataVersion='';
     state.today=bjToday();
-    const cache=state.meta.cache||{},cacheStart=asText(cache.start_date)||MIN_DATE,cacheEnd=asText(cache.end_date)||state.today;
-    state.availableStart=cacheStart>MIN_DATE?cacheStart:MIN_DATE;
+    const minimumDate=asText(state.meta.minimum_date)||FALLBACK_MIN_DATE;
+    const cache=state.meta.cache||{},cacheStart=asText(cache.start_date)||minimumDate,cacheEnd=asText(cache.end_date)||state.today;
+    state.availableStart=cacheStart>minimumDate?cacheStart:minimumDate;
     state.availableEnd=cacheEnd<state.today?cacheEnd:state.today;
-    if(state.availableEnd<state.availableStart)throw new Error('缓存日期范围尚未覆盖 2026-07-29 之后的数据');
+    if(state.availableEnd<state.availableStart)throw new Error(`缓存日期范围尚未覆盖 ${minimumDate} 之后的数据`);
     for(const id of ['startDate','endDate']){get(id).min=state.availableStart;get(id).max=state.availableEnd;}
     const defaults=state.meta.defaults||{};
     if(initialize){

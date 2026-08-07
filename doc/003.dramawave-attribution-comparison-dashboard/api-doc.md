@@ -1,5 +1,7 @@
 # API 文档
 
+> 状态（2026-08-07）：本文定义目标 D7/D10 合同，尚未切换生产。生产仍运行 2026-08-06 发布的历史 D7/D30 基线。当前 D10 最早数据日期为 `2026-08-01`，原 `2026-07-29` 起点待源侧补齐，或待用户批准改为 `2026-08-01`；边界确定前不得把下文合同示例当作生产响应证据。
+
 ## 1. 访问方式与通用约定
 
 生产入口前缀：
@@ -30,9 +32,10 @@ JSON 响应支持：
 `data_version` 是一次完整缓存快照的版本。推荐客户端流程：
 
 1. 调用 `/api/meta` 取得 `data_version`。
-2. 调用 `/api/options`、`/api/query` 和 `/api/export.csv` 时原样携带该值。
-3. 分页期间继续携带同一版本。
-4. 如果后台刷新推进了版本，接口返回 HTTP 409；客户端重新读取 `/api/meta`，刷新筛选项并从第 1 页重新查询。
+2. 校验 `api_schema_version=2`、`comparison_window=D10` 和 `new_attribution_source=kunlunads_dev.ads_app_revenues_10d`。
+3. 调用 `/api/options`、`/api/query`、`/api/rankings` 和 `/api/export.csv` 时携带 `api_schema_version=2`，并原样携带 `data_version`。
+4. 分页期间继续携带同一版本。
+5. 如果后台刷新推进了版本，接口返回 HTTP 409；客户端重新读取 `/api/meta`，刷新筛选项并从第 1 页重新查询。
 
 如果未传 `data_version`，接口使用请求开始时读到的当前缓存版本，但不会提供跨请求的版本冲突保护。
 
@@ -48,11 +51,12 @@ Cache-Control: private, no-store
 
 ## 3. 公共查询参数
 
-以下参数用于 `/api/query` 和 `/api/export.csv`；日期和 `data_version` 也适用于 `/api/options`。
+以下参数用于 `/api/query` 和 `/api/export.csv`；`api_schema_version`、日期和 `data_version` 也适用于 `/api/options` 与 `/api/rankings`。
 
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `start_date` | `YYYY-MM-DD` | 缓存最早日期 | 起始日期，含当天；兼容别名 `start`。不得早于 `2026-07-29`。 |
+| `api_schema_version` | integer string | 无 | D10 合同固定为 `2`，用于 `/api/options`、`/api/query`、`/api/rankings` 和 `/api/export.csv`；缺失或不匹配返回 409，客户端必须重新加载页面。 |
+| `start_date` | `YYYY-MM-DD` | 缓存最早日期 | 起始日期，含当天；兼容别名 `start`。不得早于 `/api/meta.minimum_date`。D10 切换时该值只能是源侧补齐后的 `2026-07-29`，或用户批准后的 `2026-08-01`。 |
 | `end_date` | `YYYY-MM-DD` | 缓存最晚日期 | 结束日期，含当天；兼容别名 `end`。 |
 | `data_version` | string | 空 | 可选快照版本；与当前版本不一致时返回 409。 |
 | `dimensions` | comma-separated string | `dt,campaign` | 聚合维度；兼容别名 `group_by`。至少一个。 |
@@ -116,7 +120,7 @@ mapping_level -> matched_grain
 
 ```text
 spend, impressions, clicks, installs, af_installs,
-d7_revenue, d30_revenue, d7_roas, d30_roas,
+d7_revenue, d10_revenue, d7_roas, d10_roas,
 revenue_diff, lift_rate
 ```
 
@@ -124,16 +128,16 @@ revenue_diff, lift_rate
 
 检查 SQLite 缓存是否可读及是否存在事实数据。
 
-成功示例：
+成功响应形状示例（字段值仅用于合同说明，不是 D10 生产验收数据；示例暂按当前已存在的 `2026-08-01` 表达）：
 
 ```json
 {
   "ok": true,
   "stale": false,
-  "data_version": "20260806T173000+0800",
-  "generated_at": "2026-08-06T17:30:00+08:00",
-  "cache_start_date": "2026-07-29",
-  "cache_end_date": "2026-08-06",
+  "data_version": "EXAMPLE_D10_VERSION",
+  "generated_at": "YYYY-MM-DDTHH:MM:SS+08:00",
+  "cache_start_date": "2026-08-01",
+  "cache_end_date": "2026-08-01",
   "fact_rows": 18420,
   "cache_complete": true,
   "current_date_present": true,
@@ -150,33 +154,36 @@ revenue_diff, lift_rate
 
 无查询参数。
 
-响应示例：
+响应形状示例（占位时间/版本不是 D10 实测数据；边界最终值仍以业务决策和真实缓存为准）：
 
 ```json
 {
-  "data_version": "20260806T173000+0800",
-  "generated_at": "2026-08-06T17:30:00+08:00",
+  "api_schema_version": 2,
+  "data_version": "EXAMPLE_D10_VERSION",
+  "comparison_window": "D10",
+  "new_attribution_source": "kunlunads_dev.ads_app_revenues_10d",
+  "generated_at": "YYYY-MM-DDTHH:MM:SS+08:00",
   "source_max_updated_at": {
-    "ads_custom_source_insight": "2026-08-06 17:24:10",
-    "app_revenues": "2026-08-06 17:20:03",
-    "app_revenues_30d": "2026-08-06 17:21:08"
+    "ads_custom_source_insight": "YYYY-MM-DD HH:MM:SS",
+    "app_revenues": "YYYY-MM-DD HH:MM:SS",
+    "app_revenues_10d": "YYYY-MM-DD HH:MM:SS"
   },
   "cache": {
-    "start_date": "2026-07-29",
-    "end_date": "2026-08-06",
+    "start_date": "2026-08-01",
+    "end_date": "2026-08-01",
     "retention_days": 60,
     "refresh_interval_minutes": 30,
     "stale": false,
     "complete": true,
     "range_complete": true,
     "current_date_present": true,
-    "expected_start_date": "2026-07-29",
+    "expected_start_date": "2026-08-01",
     "missing_dates": [],
     "rollups_current": true
   },
   "defaults": {
-    "start_date": "2026-07-31",
-    "end_date": "2026-08-06",
+    "start_date": "2026-08-01",
+    "end_date": "2026-08-01",
     "basis": "d0",
     "dimensions": ["dt", "campaign"]
   },
@@ -185,16 +192,16 @@ revenue_diff, lift_rate
     "account", "campaign", "adset", "matched_grain"
   ],
   "metric_bases": ["d0", "d7"],
-  "minimum_date": "2026-07-29",
+  "minimum_date": "2026-08-01",
   "source_tables": {
     "old_attribution": "kunlunads_dev.ads_app_revenues",
-    "new_attribution": "kunlunads_dev.ads_app_revenues_30d",
+    "new_attribution": "kunlunads_dev.ads_app_revenues_10d",
     "delivery": "kunlunads_dev.ads_custom_source_insight"
   }
 }
 ```
 
-`defaults.start_date` 是缓存范围内最近 7 天的起点。它只是页面建议值；其他接口在未传日期时仍默认使用整个缓存可用范围。
+`defaults.start_date` 是缓存范围内最近 7 天的起点。它只是页面建议值；其他接口在未传日期时仍默认使用整个缓存可用范围。上例以“批准起点改为 8 月 1 日”的候选分支说明字段形状；如果源侧补齐并保留原边界，`minimum_date` / `expected_start_date` 应为 `2026-07-29`。
 
 `complete` / `range_complete` 表示 `expected_start_date` 到 `cache.end_date` 每个自然日都有成功缓存；`current_date_present` 单独说明北京当天是否已进入缓存。页面会显式警告日期空洞或当天尚未完成首轮刷新。任一查询的请求区间包含缺失日期时返回 503，而不是把缺失日静默显示为 0。
 
@@ -202,19 +209,19 @@ revenue_diff, lift_rate
 
 返回指定日期范围内的低基数筛选项。
 
-支持参数：`start_date`、`end_date`、`data_version` 及日期别名。当前接口不应用其他业务筛选条件，也不返回 Campaign/Ad Set 选项。
+支持参数：必填 `api_schema_version=2`，以及 `start_date`、`end_date`、`data_version` 和日期别名。当前接口不应用其他业务筛选条件，也不返回 Campaign/Ad Set 选项。
 
 请求示例：
 
 ```text
-GET /api/options?start_date=2026-07-29&end_date=2026-08-06&data_version=20260806T173000%2B0800
+GET /api/options?api_schema_version=2&start_date=2026-08-01&end_date=2026-08-01&data_version=EXAMPLE_D10_VERSION
 ```
 
 响应示例：
 
 ```json
 {
-  "data_version": "20260806T173000+0800",
+  "data_version": "EXAMPLE_D10_VERSION",
   "options": {
     "channel": [
       {"value": "0", "label": "Meta"},
@@ -245,15 +252,15 @@ GET /api/options?start_date=2026-07-29&end_date=2026-08-06&data_version=20260806
 请求示例：
 
 ```text
-GET /api/query?start_date=2026-07-29&end_date=2026-08-06&dimensions=dt,campaign&metric_basis=d0&channel=0&country_group=US&sort_by=spend&sort_dir=desc&limit=50&offset=0&data_version=20260806T173000%2B0800
+GET /api/query?api_schema_version=2&start_date=2026-08-01&end_date=2026-08-01&dimensions=dt,campaign&metric_basis=d0&channel=0&country_group=US&sort_by=spend&sort_dir=desc&limit=50&offset=0&data_version=EXAMPLE_D10_VERSION
 ```
 
-响应结构：
+响应结构（以下金额和计数沿用合成 fixture 只说明字段关系，不是 D10 源表点样本或生产验收值）：
 
 ```json
 {
-  "data_version": "20260806T173000+0800",
-  "generated_at": "2026-08-06T17:30:00+08:00",
+  "data_version": "EXAMPLE_D10_VERSION",
+  "generated_at": "YYYY-MM-DDTHH:MM:SS+08:00",
   "metric_basis": "d0",
   "dimensions": ["dt", "campaign"],
   "totals": {
@@ -263,24 +270,24 @@ GET /api/query?start_date=2026-07-29&end_date=2026-08-06&dimensions=dt,campaign&
     "installs": 40,
     "af_installs": 36,
     "d7_revenue": 60.0,
-    "d30_revenue": 95.0,
+    "d10_revenue": 95.0,
     "d7_roas": 0.3,
-    "d30_roas": 0.475,
+    "d10_roas": 0.475,
     "revenue_diff": 35.0,
     "lift_rate": 0.5833333333,
     "d7_users": 35,
     "d7_purchases": 5,
-    "d30_users": 37,
-    "d30_purchases": 7
+    "d10_users": 37,
+    "d10_purchases": 7
   },
   "trend": [
     {
-      "dt": "2026-07-29",
+      "dt": "2026-08-01",
       "spend": 200.0,
       "d7_revenue": 60.0,
-      "d30_revenue": 95.0,
+      "d10_revenue": 95.0,
       "d7_roas": 0.3,
-      "d30_roas": 0.475,
+      "d10_roas": 0.475,
       "revenue_diff": 35.0,
       "lift_rate": 0.5833333333
     }
@@ -293,20 +300,20 @@ GET /api/query?start_date=2026-07-29&end_date=2026-08-06&dimensions=dt,campaign&
   },
   "rows": [
     {
-      "dt": "2026-07-29",
+      "dt": "2026-08-01",
       "campaign": "1200000000000000001",
       "campaign_name": "Campaign A",
       "spend": 100.0,
       "d7_revenue": 50.0,
-      "d30_revenue": 75.0,
+      "d10_revenue": 75.0,
       "d7_roas": 0.5,
-      "d30_roas": 0.75,
+      "d10_roas": 0.75,
       "revenue_diff": 25.0,
       "lift_rate": 0.5,
       "d7_users": 18,
       "d7_purchases": 2,
-      "d30_users": 19,
-      "d30_purchases": 3
+      "d10_users": 19,
+      "d10_purchases": 3
     }
   ],
   "pagination": {
@@ -321,14 +328,14 @@ GET /api/query?start_date=2026-07-29&end_date=2026-08-06&dimensions=dt,campaign&
 
 ### 7.1 指标语义
 
-- `spend` 只汇总一次 `ads_custom_source_insight.spend`，是 D7/D30 两个 ROAS 的共同分母。
-- `metric_basis=d0` 时，`d7_revenue` 和 `d30_revenue` 分别汇总对应归因表的 `revenue_iaa_d0 + revenue_iap_d0`。
+- `spend` 只汇总一次 `ads_custom_source_insight.spend`，是 D7/D10 两个 ROAS 的共同分母。
+- `metric_basis=d0` 时，`d7_revenue` 和 `d10_revenue` 分别汇总对应归因表的 `revenue_iaa_d0 + revenue_iap_d0`。
 - `metric_basis=d7` 时，分别汇总 `revenue_iaa_d7 + revenue_iap_d7`。
-- `d7_roas = d7_revenue / spend`；`d30_roas = d30_revenue / spend`。
-- `revenue_diff = d30_revenue - d7_revenue`。
+- `d7_roas = d7_revenue / spend`；`d10_roas = d10_revenue / spend`。
+- `revenue_diff = d10_revenue - d7_revenue`。
 - `lift_rate = revenue_diff / d7_revenue`。
-- `d7_purchases`、`d30_purchases` 随 `metric_basis` 切换 D0/D7 purchase 字段。
-- `users` 在源表中没有 D0/D7 后缀，因此 `d7_users`、`d30_users` 不随 `metric_basis` 切换。
+- `d7_purchases`、`d10_purchases` 随 `metric_basis` 切换 D0/D7 purchase 字段。
+- `users` 在源表中没有 D0/D7 后缀，因此 `d7_users`、`d10_users` 不随 `metric_basis` 切换。
 - 所有比率均在筛选和分组汇总后重新相除，不平均行级比率。
 - `spend=0` 时两个 ROAS 为 `null`；旧口径收入为 0 时 `lift_rate=null`。
 
@@ -342,9 +349,9 @@ GET /api/query?start_date=2026-07-29&end_date=2026-08-06&dimensions=dt,campaign&
 d7_total_rows, d7_mapped_rows, d7_ambiguous_rows, d7_unmapped_rows,
 d7_total_revenue, d7_mapped_revenue,
 d7_coverage_ratio, d7_revenue_coverage_ratio,
-d30_total_rows, d30_mapped_rows, d30_ambiguous_rows, d30_unmapped_rows,
-d30_total_revenue, d30_mapped_revenue,
-d30_coverage_ratio, d30_revenue_coverage_ratio,
+d10_total_rows, d10_mapped_rows, d10_ambiguous_rows, d10_unmapped_rows,
+d10_total_revenue, d10_mapped_revenue,
+d10_coverage_ratio, d10_revenue_coverage_ratio,
 total_revenue_rows, mapped_revenue_rows, ambiguous_revenue_rows,
 unmapped_revenue_rows, mapped_ratio, source_scope_exclusions
 ```
@@ -355,17 +362,17 @@ unmapped_revenue_rows, mapped_ratio, source_scope_exclusions
 - `*_revenue_coverage_ratio = mapped_revenue / total_revenue`。
 - 分母为 0 时对应覆盖率为 `null`。
 - 覆盖率分母仅包含至少命中一条 `product='Dramawave'` custom 维度候选的 revenue 键。两张 revenue 表本身没有产品字段，完全未命中的全表行无法可靠判断产品归属，因此不进入看板；刷新日志会分别记录源表总金额、候选金额和被排除的未定产品范围金额，以证明全表金额守恒。
-- `source_scope_exclusions` 是对象，固定包含 `scope="date_range_global_not_filter_attributable"`、`business_filters_applied`、`d7_rows`、`d30_rows`、`d7_revenue`、`d30_revenue`。它从请求日期内每个自然日最新一条成功刷新审计聚合，表示未命中任何 Dramawave custom 候选、因而无法判定产品归属的全源键。它只具有日期级含义；当请求还带渠道、国家、优化师等业务筛选时，`business_filters_applied=true`，这些数量/金额仍不得解释为筛选后的排除量。
+- `source_scope_exclusions` 是对象，固定包含 `scope="date_range_global_not_filter_attributable"`、`business_filters_applied`、`d7_rows`、`d10_rows`、`d7_revenue`、`d10_revenue`。它从请求日期内每个自然日最新一条成功刷新审计聚合，表示未命中任何 Dramawave custom 候选、因而无法判定产品归属的全源键。它只具有日期级含义；当请求还带渠道、国家、优化师等业务筛选时，`business_filters_applied=true`，这些数量/金额仍不得解释为筛选后的排除量。
 - `*_unmapped_rows` 只表示已经进入 Dramawave 候选分母后的未匹配数，不包含 `source_scope_exclusions`；UI 显示为“候选内未匹配”。
-- 不带 D7/D30 前缀的五个字段是兼容旧客户端的合并字段；其中计数取两个口径对应计数的较大值，`mapped_ratio` 取两个非空覆盖率中的较小值。
+- 不带 D7/D10 前缀的五个字段是兼容旧客户端的合并字段；其中计数取两个口径对应计数的较大值，`mapped_ratio` 取两个非空覆盖率中的较小值。
 
 ### 7.3 GET /api/rankings
 
-使用与 `/api/query` 相同的日期、业务筛选、`metric_basis` 和 `data_version`，独立返回四组排行：
+使用与 `/api/query` 相同的必填 `api_schema_version=2`、日期、业务筛选、`metric_basis` 和 `data_version`，独立返回四组排行：
 
 ```json
 {
-  "data_version": "20260806T173000+0800",
+  "data_version": "EXAMPLE_D10_VERSION",
   "rankings": {
     "campaign": [],
     "adset": [],
@@ -384,7 +391,7 @@ unmapped_revenue_rows, mapped_ratio, source_scope_exclusions
 请求示例：
 
 ```text
-GET /api/export.csv?start_date=2026-07-29&end_date=2026-08-06&dimensions=campaign,adset&metric_basis=d7&channel=0&sort_by=d30_revenue&sort_dir=desc&data_version=20260806T173000%2B0800
+GET /api/export.csv?api_schema_version=2&start_date=2026-08-01&end_date=2026-08-01&dimensions=campaign,adset&metric_basis=d7&channel=0&sort_by=d10_revenue&sort_dir=desc&data_version=EXAMPLE_D10_VERSION
 ```
 
 成功响应：
@@ -392,7 +399,7 @@ GET /api/export.csv?start_date=2026-07-29&end_date=2026-08-06&dimensions=campaig
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/csv; charset=utf-8
-Content-Disposition: attachment; filename="dramawave-attribution-2026-07-29-2026-08-06.csv"
+Content-Disposition: attachment; filename="dramawave-attribution-2026-08-01-2026-08-01.csv"
 ```
 
 CSV 使用 UTF-8 BOM。存在数据时列名与聚合行实际字段一致，包含所选维度、维度名称和全部聚合指标。导出聚合行超过 200,000 时返回 413，调用方需要缩小日期或筛选范围。
@@ -411,10 +418,10 @@ CSV 使用 UTF-8 BOM。存在数据时列名与聚合行实际字段一致，包
 | --- | --- | --- |
 | 302 | 经 Nginx 访问但未登录飞书 | 跳转 `/api/auth/feishu/login?next=/reports/dramawave-attribution-comparison/` |
 | 304 | `If-None-Match` 与当前 200 响应的 ETag 一致 | 无正文 |
-| 400 | 日期格式非法、早于 `2026-07-29`、起始日期晚于结束日期、日期超出当前缓存边界、不支持的维度/排序字段、非法 `metric_basis`、`/api/query` 非法 `sort_dir` | `{"error":"..."}` |
+| 400 | 日期格式非法、早于 `/api/meta.minimum_date`、起始日期晚于结束日期、日期超出当前缓存边界、不支持的维度/排序字段、非法 `metric_basis`、`/api/query` 非法 `sort_dir` | `{"error":"..."}` |
 | 403 | 飞书用户不在允许范围；或 Nginx 拒绝 API 非 GET 方法 | HTML 403 页面或 Nginx 默认 403 |
 | 404 | 未定义路径 | `{"error":"not found"}` |
-| 409 | 请求携带的 `data_version` 不等于当前缓存版本 | `{"error":"data_version changed; reload from page 1"}` |
+| 409 | `api_schema_version` 缺失/不等于 `2`，或请求携带的 `data_version` 不等于当前缓存版本 | `{"error":"api_schema_version=2 is required; reload the dashboard"}` 或 `{"error":"data_version changed; reload from page 1"}` |
 | 413 | CSV 聚合结果超过 200,000 行 | `{"error":"export contains N rows; narrow filters below 200000"}` |
 | 500 | 未被参数校验包装的异常 | `{"error":"internal server error"}` |
 | 503 | SQLite 文件不存在/不可读、SQLite 查询错误、缓存为空；`/healthz` 事实表为空 | `{"error":"cache unavailable","detail":"..."}` 或 health 响应 |
@@ -427,6 +434,7 @@ async function loadPage() {
   const meta = await fetch(`${prefix}/api/meta`, {credentials: 'same-origin'}).then(r => r.json());
 
   const params = new URLSearchParams({
+    api_schema_version: String(meta.api_schema_version),
     start_date: meta.defaults.start_date,
     end_date: meta.defaults.end_date,
     dimensions: 'dt,campaign',
@@ -449,3 +457,7 @@ async function loadPage() {
   return response.json();
 }
 ```
+
+## 11. 变更记录
+
+- 2026-08-07：目标新口径由 D30 改为 D10；所有 API、排序、质量和导出字段从 `d30_*` 改为 `d10_*`，新源表改为 `kunlunads_dev.ads_app_revenues_10d`。D10 本地自动化 `62/62` 通过；示例仍只说明目标合同，生产继续使用历史 D30 基线，待日期边界决策和候选/生产重新验收后切换。

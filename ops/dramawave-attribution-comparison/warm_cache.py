@@ -10,6 +10,8 @@ from typing import Any, Optional
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from common import API_SCHEMA_VERSION
+
 
 PREWARM_DIMENSION_SETS = (
     ("dt", "campaign"),
@@ -40,7 +42,12 @@ def request_plan(meta: dict[str, Any]) -> list[tuple[str, dict[str, str]]]:
     dimension_sets.extend(value for value in PREWARM_DIMENSION_SETS if value not in dimension_sets)
     plan: list[tuple[str, dict[str, str]]] = []
     for start, end in ranges:
-        common = {"start_date": start, "end_date": end, "data_version": version}
+        common = {
+            "api_schema_version": str(API_SCHEMA_VERSION),
+            "start_date": start,
+            "end_date": end,
+            "data_version": version,
+        }
         plan.append(("/api/options", common))
         for basis in ("d0", "d7"):
             for dimensions in dimension_sets:

@@ -2,9 +2,9 @@
 
 ## 1. 发布状态回填
 
-已于 2026-08-06 完成首次生产发布、全量 bootstrap 和第一轮自然 timer 验证。下表为不可变发布证据；后续版本仍按本文步骤执行。
+2026-08-06 已完成的首次生产发布是 D7/D30 历史基线。下表是该版本的不可变发布证据，不代表 D10 已发布。2026-08-07 的 D7/D10 切换状态为“待业务决定日期边界，未执行生产 bootstrap、切换或验收”。
 
-| 项目 | 实际值 |
+| D30 历史项目 | 实际值 |
 | --- | --- |
 | GitHub 目标 commit | `e92f2aef417ce47cabfb6e3ae2056d96ad7f9894` |
 | 发布分支 / PR | `codex/dramawave-attribution-compare-20260806`；未创建 PR |
@@ -18,6 +18,41 @@
 | 第一轮自然 timer 时间及版本 | `2026-08-06 21:22:00`～`21:27:01`；推进至 `20260806T132547Z-d44a154d` |
 | 回滚点 | 首次上线无旧 release；停用并移除新 units/Nginx include，保留 SQLite；配置证据使用上述备份目录 |
 
+### 1.1 D10 当前门禁
+
+| 项目 | 当前结论 |
+| --- | --- |
+| 目标新源 | `kunlunads_dev.ads_app_revenues_10d` |
+| schema/index | 已只读核验，与 D30 相同 |
+| D10 本地自动化 | `62/62` 通过；不等于候选/生产验收 |
+| 当前最早 D10 日期 | `2026-08-01` |
+| 原业务起点 | `2026-07-29` |
+| 阻塞决策 | 等待源侧补齐 7/29～7/31，或用户明确批准从 8/1 开始 |
+| 生产状态 | 历史 D30 继续服务；D10 未切换 |
+
+边界未决定前，不运行 D10 生产 bootstrap，不修改 `dashboard.env`，不切换 `current`，不重启生产 Web/timer。当前候选代码的 `MIN_DATE` 与前端 `FALLBACK_MIN_DATE` 均仍固定为 `2026-07-29`；若用户批准从 `2026-08-01` 开始，必须先形成另一个经评审的代码提交，同时修改这两个边界、对应测试和文档并重新跑全套验证，不能只改部署变量。D30 的 2026-08-06 发布数据只能作为容量、性能与回滚基线。
+
+### 1.2 D10 独立数据库与原子切换原则
+
+D10 不在历史 D30 SQLite 上做原地迁移。使用三个明确对象：
+
+| 对象 | 路径/约束 |
+| --- | --- |
+| 历史 D30 live/回滚库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`，原样保留 |
+| 全新 D10 候选库 | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>.sqlite3`，发布前必须不存在 |
+| 活动数据库指针 | `dashboard.env` 中的 `DRAMAWAVE_ATTRIBUTION_DB_PATH`；通过同目录临时文件 + `mv -Tf` 原子替换，禁止复制候选库覆盖 live 文件 |
+
+D10 候选库第一次成功发布版本时，必须在同一 SQLite 事务中包含以下权威语义标记：
+
+```text
+cache_meta.comparison_window = "D10"
+cache_meta.new_attribution_source = "kunlunads_dev.ads_app_revenues_10d"
+cache_meta.data_version = <非空版本>
+cache_meta.rollup_version = cache_meta.data_version
+```
+
+D10 Web 和 refresh 在任何普通 SQLite 打开前，都必须先用 `mode=ro&immutable=1` 校验 D10 结构签名及上述标记。checkpointed 历史 D30 库缺少 D10 列或标记不匹配时立即失败关闭；该粗门禁不能初始化 schema、切换 journal、创建 `-wal` / `-shm` 或写入任何字节。粗门禁通过后，必须再用普通只读、WAL-aware 连接复核同一合同，防止未 checkpoint 的已提交 WAL 篡改绕过检查；只有二次检查通过，refresh 才可 writable open、Web 才可启动。正常 API 也保持非 immutable，以便观察在线 WAL 更新。只有“从未存在”的新候选路径可以作为空 D10 库 bootstrap。
+
 ## 2. 固定拓扑
 
 | 项目 | 固定值 |
@@ -26,7 +61,9 @@
 | 当前版本软链接 | `/opt/dramawave-attribution-comparison/current` |
 | Web 监听 | `127.0.0.1:8832` |
 | 公网页面 | `/reports/dramawave-attribution-comparison/` |
-| SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3` |
+| 历史 D30 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3`；D10 切换后仍保留作回滚 |
+| D10 候选 SQLite | `/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-<shortsha>.sqlite3`；每次候选使用新路径 |
+| 活动 SQLite 选择 | `dashboard.env` 的 `DRAMAWAVE_ATTRIBUTION_DB_PATH`；只允许原子替换环境文件 |
 | 独立环境文件 | `/mnt/data-disk/dramawave-attribution-comparison/dashboard.env` |
 | 复用的 MySQL 凭据环境文件 | `/root/drama_material_service/.env`，仅 refresh oneshot 读取 |
 | Web unit | `dramawave-attribution-comparison.service` |
@@ -40,6 +77,7 @@ Web 进程只读取 SQLite，不应拥有 `ADMIN_MAPPING_MYSQL_*` 凭据。refre
 - MySQL 端口必须为 `63350`。
 - 建连后 `SELECT @@read_only` 必须为 `1`。
 - SQLite 路径必须位于 `/mnt/data-disk`，所在挂载 UUID 必须完全匹配上表。
+- D10 发布时必须校验 `comparison_window=D10`、`new_attribution_source=kunlunads_dev.ads_app_revenues_10d` 和 D10 结构签名；不匹配时 Web/刷新均失败关闭。
 - 同一时刻只能有一个 refresh；锁文件为缓存目录下的 `refresh.lock`。
 
 不要使用 `--skip-mount-check` 部署或运行生产 Web/刷新进程。该参数仅供本地测试。
@@ -208,6 +246,8 @@ if test -f "$DB"; then
 fi
 ```
 
+D10 切换前，此处的 `dashboard.sqlite3` 是历史 D30 回滚库。备份完成后记录其 `PRAGMA quick_check`、`data_version`、文件大小和 SHA-256；不得重命名、覆盖或用 D10 schema 改写它。D10 候选库使用独立路径，bootstrap 完成且无写进程时另行执行 `PRAGMA wal_checkpoint(TRUNCATE)`、`PRAGMA quick_check` 和 SHA-256 记录。
+
 环境文件备份必须保持 root-only 权限，不打印内容：
 
 ```bash
@@ -244,11 +284,24 @@ python3 -m venv /opt/dramawave-attribution-comparison/venv
   'import pymysql; print("PyMySQL import ok")'
 ```
 
-`dashboard.env` 至少包含：
+当前历史 D30 生产的 `dashboard.env` 至少包含：
 
 ```dotenv
 DRAMAWAVE_ATTRIBUTION_DB_PATH=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
 ```
+
+在 D10 候选验证完成前保持该文件不变。候选发布时先创建同目录临时文件，指向已经核验的独立 D10 库；不要提前覆盖活动环境文件：
+
+```bash
+D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
+D10_ENV_NEXT=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d10.next
+test -f "$D10_CANDIDATE_DB"
+printf 'DRAMAWAVE_ATTRIBUTION_DB_PATH=%s\n' "$D10_CANDIDATE_DB" > "$D10_ENV_NEXT"
+chown root:root "$D10_ENV_NEXT"
+chmod 0600 "$D10_ENV_NEXT"
+```
+
+如果现有 `dashboard.env` 还含其他非 MySQL 配置，必须逐项安全复制到 `.d10.next`；不得输出文件内容或丢失既有键。第 8 节仅在所有 D10 门禁通过后用 `mv -Tf` 原子替换活动环境文件。
 
 ```bash
 chown root:root /mnt/data-disk/dramawave-attribution-comparison/dashboard.env
@@ -269,7 +322,9 @@ ADMIN_MAPPING_MYSQL_DATABASE
 
 ## 6. 安装 release 和部署配置
 
-原子切换 `current`：
+以下 `current` 切换是首次部署/普通同语义发布的通用步骤。D10 迁移不得在候选库完成前执行；先直接从 `$RELEASE_PATH` 运行第 7 节 bootstrap 和验证，再在第 8 节停服窗口内与数据库指针一起切换。
+
+普通同语义发布原子切换 `current`：
 
 ```bash
 ln -s "$RELEASE_PATH" /opt/dramawave-attribution-comparison/current.next
@@ -297,20 +352,37 @@ systemctl daemon-reload
 nginx -t
 ```
 
-此时不要先启 Web 或 timer。`service.py` 在缓存文件不存在时会退出码 2；应先完成首次 bootstrap。
+首次部署此时不要先启 Web 或 timer。D10 迁移在完成独立候选库前还不得安装会被生产 service 使用的新 units 或切换 `current`；`service.py` 在缓存不存在、结构不符或语义标记不匹配时均应退出码 2。
 
 ## 7. 首次 bootstrap
 
-### 7.1 日期范围
+### 7.1 D10 日期范围与候选路径
 
-首次上线显式回填从 `2026-07-29` 到北京当天：
+仅在业务边界决策和对应代码版本都完成后设置 `BOOTSTRAP_START`：
+
+- 源侧补齐分支：使用当前候选代码，确认 `MIN_DATE=2026-07-29`，并先验证 D10 已补齐 7/29～7/31。
+- 用户批准改起点分支：先提交并评审边界变更，将后端 `MIN_DATE`、前端 `FALLBACK_MIN_DATE`、边界测试和文档全部改为 `2026-08-01`，重新跑全套测试后才允许继续。
+
+部署时 `BOOTSTRAP_START` 必须与目标 commit 的 `/api/meta.minimum_date` 完全相同，不要保留占位符执行：
 
 ```bash
-BOOTSTRAP_START='2026-07-29'
+BOOTSTRAP_START='<经批准后填写 2026-07-29 或 2026-08-01>'
 BOOTSTRAP_END="$(TZ=Asia/Shanghai date +%F)"
+D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
+case "$BOOTSTRAP_START" in
+  2026-07-29|2026-08-01) ;;
+  *) echo 'unapproved bootstrap boundary' >&2; exit 1 ;;
+esac
+EXPECTED_MIN_DATE="$($VENV_PY - <<'PY'
+from common import MIN_DATE
+print(MIN_DATE.isoformat())
+PY
+)"
+test "$BOOTSTRAP_START" = "$EXPECTED_MIN_DATE"
+test ! -e "$D10_CANDIDATE_DB"
 ```
 
-脚本拒绝未来日期，并自动删除/忽略 60 天保留窗口之外的日期。上线时若 `2026-07-29` 已超出保留窗口，实际起点以 `max(2026-07-29, 北京当天-59天)` 为准。
+脚本拒绝未来日期，并自动删除/忽略 60 天保留窗口之外的日期。实际起点为 `max(MIN_DATE, 北京当天-59天)`；传入的 `BOOTSTRAP_START` 不能绕过代码边界。若 D10 源侧在批准范围内存在任一日期空洞，停止发布，不得用历史 D30 行或 0 值补洞。
 
 ### 7.2 使用临时 systemd oneshot 执行
 
@@ -320,7 +392,7 @@ BOOTSTRAP_END="$(TZ=Asia/Shanghai date +%F)"
 BOOTSTRAP_UNIT="dramawave-attribution-comparison-bootstrap-$(date +%Y%m%d%H%M%S)"
 systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
   --property=Type=oneshot \
-  --property=WorkingDirectory=/opt/dramawave-attribution-comparison/current \
+  --property=WorkingDirectory="$RELEASE_PATH" \
   --property=EnvironmentFile=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env \
   --property=EnvironmentFile=/root/drama_material_service/.env \
   --property=RequiresMountsFor=/mnt/data-disk \
@@ -332,13 +404,14 @@ systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
   --property=PrivateTmp=false \
   --property=ProtectSystem=strict \
   --property=ProtectHome=read-only \
-  --property=ReadOnlyPaths=/opt/dramawave-attribution-comparison/current \
+  --property=ReadOnlyPaths="$RELEASE_PATH" \
   --property=ReadOnlyPaths=/root/drama_material_service/.env \
   --property=ReadWritePaths=/tmp \
   --property=ReadWritePaths=/mnt/data-disk/dramawave-attribution-comparison \
   /usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock \
   /opt/dramawave-attribution-comparison/venv/bin/python \
-  /opt/dramawave-attribution-comparison/current/refresh_cache.py \
+  "$RELEASE_PATH/refresh_cache.py" \
+  --db-path "$D10_CANDIDATE_DB" \
   --bootstrap-start "$BOOTSTRAP_START" --bootstrap-end "$BOOTSTRAP_END"
 ```
 
@@ -347,20 +420,87 @@ systemd-run --unit="$BOOTSTRAP_UNIT" --wait --collect --pipe \
 成功后核验：
 
 ```bash
-DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
+DB="$D10_CANDIDATE_DB"
 sqlite3 "$DB" 'PRAGMA quick_check;'
 sqlite3 "$DB" "SELECT MIN(dt),MAX(dt),COUNT(*) FROM attribution_fact;"
 sqlite3 "$DB" "SELECT 'fact',COUNT(*) FROM attribution_fact UNION ALL SELECT 'filter_daily',COUNT(*) FROM attribution_filter_daily UNION ALL SELECT 'campaign_daily',COUNT(*) FROM attribution_campaign_daily;"
-sqlite3 "$DB" "SELECT key,value FROM cache_meta WHERE key IN ('data_version','rollup_version','generated_at','last_refresh_dates','source_max_updated_at') ORDER BY key;"
+sqlite3 "$DB" "SELECT key,value FROM cache_meta WHERE key IN ('comparison_window','new_attribution_source','data_version','rollup_version','generated_at','last_refresh_dates','source_max_updated_at') ORDER BY key;"
 sqlite3 "$DB" "SELECT dt,status,fact_rows,data_version FROM refresh_log ORDER BY id DESC LIMIT 20;"
+sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);'
 ```
 
-要求：`quick_check=ok`、日期边界正确、三层均有数据、所有 bootstrap 日期日志为 success、`data_version` 非空且与 `rollup_version` 完全相等。把版本和实际范围回填到本文顶部。
+要求：`quick_check=ok`、实际起点与批准边界/60 天裁剪一致、三层均有数据、所有 bootstrap 日期日志为 success、`data_version` 非空且与 `rollup_version` 完全相等，且标记精确为 `comparison_window="D10"`、`new_attribution_source="kunlunads_dev.ads_app_revenues_10d"`。任何不符都删除候选发布资格，保留历史 D30 生产不动；不得修改标记来掩盖错误数据。
+
+再验证 D10 release 会拒绝历史 D30 数据库。两个命令都必须非零退出，日志必须包含 D10 cache contract rejection；执行期间 timer/Web 仍运行历史 D30 release，D10 检查仅以只读方式打开旧库：
+
+```bash
+D30_DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
+set +e
+DRAMAWAVE_ATTRIBUTION_DB_PATH="$D30_DB" "$VENV_PY" "$RELEASE_PATH/service.py" \
+  --host 127.0.0.1 --port 0 > "$BACKUP_DIR/d10-web-rejects-d30.log" 2>&1
+WEB_REJECT_RC=$?
+/usr/bin/flock -E 75 -xn /tmp/tt_minis_multi_dim_dashboard.lock \
+  "$VENV_PY" "$RELEASE_PATH/refresh_cache.py" --db-path "$D30_DB" --date "$BOOTSTRAP_START" \
+  > "$BACKUP_DIR/d10-refresh-rejects-d30.log" 2>&1
+REFRESH_REJECT_RC=$?
+set -e
+test "$WEB_REJECT_RC" -eq 2
+test "$REFRESH_REJECT_RC" -eq 1
+grep -q 'D10 cache contract rejected' "$BACKUP_DIR/d10-web-rejects-d30.log"
+grep -q 'D10 cache contract rejected' "$BACKUP_DIR/d10-refresh-rejects-d30.log"
+```
 
 ## 8. 启动 Web、Nginx 和 timer
 
+### 8.1 D10 停服窗口内原子提升
+
+先完成第 7 节全部验证并创建 `dashboard.env.d10.next`。记录历史 D30 release/数据库/环境文件为回滚点，然后停止所有可能访问活动数据库的进程：
+
 ```bash
-systemctl enable --now dramawave-attribution-comparison.service
+D30_RELEASE="$(readlink -f /opt/dramawave-attribution-comparison/current)"
+D30_DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
+D10_CANDIDATE_DB="/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10-${SHORT_SHA}.sqlite3"
+D10_ENV_NEXT=/mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d10.next
+test -d "$D30_RELEASE"
+test -f "$D30_DB"
+test -f "$D10_CANDIDATE_DB"
+test -f "$D10_ENV_NEXT"
+
+systemctl stop dramawave-attribution-comparison-refresh.timer
+systemctl stop dramawave-attribution-comparison-refresh.service 2>/dev/null || true
+systemctl stop dramawave-attribution-comparison.service
+test -z "$(lsof -t "$D30_DB" "$D10_CANDIDATE_DB" 2>/dev/null || true)"
+```
+
+在服务停止期间安装已审核 D10 units/Nginx 配置，准备新 release 软链接。`nginx -t` 不通过时不要切换：
+
+```bash
+install -o root -g root -m 0644 "$RELEASE_PATH/deploy/dramawave-attribution-comparison.service" /etc/systemd/system/
+install -o root -g root -m 0644 "$RELEASE_PATH/deploy/dramawave-attribution-comparison-refresh.service" /etc/systemd/system/
+install -o root -g root -m 0644 "$RELEASE_PATH/deploy/dramawave-attribution-comparison-refresh.timer" /etc/systemd/system/
+install -o root -g root -m 0644 "$RELEASE_PATH/deploy/dramawave-attribution-comparison.nginx.conf" /etc/nginx/default.d/dramawave-attribution-comparison.conf
+systemctl daemon-reload
+nginx -t
+
+ln -s "$RELEASE_PATH" /opt/dramawave-attribution-comparison/current.d10.next
+test "$(cat "$RELEASE_PATH/SOURCE_COMMIT")" = "$TARGET_SHA"
+```
+
+活动 DB 不是通过复制或覆盖 `.sqlite3` 替换，而是通过同文件系统的环境文件 rename 原子替换指针；`current` 也使用原子 rename。两次 rename 期间 Web/refresh 均停止，因此不存在用户可见的代码/数据库混合态：
+
+```bash
+mv -Tf /opt/dramawave-attribution-comparison/current.d10.next /opt/dramawave-attribution-comparison/current
+mv -Tf "$D10_ENV_NEXT" /mnt/data-disk/dramawave-attribution-comparison/dashboard.env
+test "$(grep -cF "DRAMAWAVE_ATTRIBUTION_DB_PATH=$D10_CANDIDATE_DB" /mnt/data-disk/dramawave-attribution-comparison/dashboard.env)" -eq 1
+```
+
+`mv -Tf` 之后不得再改 D10 SQLite 的语义标记。若 D10 code、环境指针或候选库任一不匹配，Web 启动会失败关闭；直接执行第 10.0 节回滚，不得临时把环境指回 D30 让 D10 code 强行启动。
+
+### 8.2 启动并分阶段开放
+
+```bash
+systemctl enable dramawave-attribution-comparison.service
+systemctl start dramawave-attribution-comparison.service
 systemctl status dramawave-attribution-comparison.service --no-pager
 journalctl -u dramawave-attribution-comparison.service -n 100 --no-pager
 
@@ -375,7 +515,7 @@ Web unit 会在每次进程启动后带短重试预热默认聚合；refresh one
 
 确认 loopback 正常后再使 Nginx 配置生效。先执行 `nginx -t`；如果该主机的 Nginx 由 systemd 管理，执行 `systemctl reload nginx`，否则使用主机现有的安全 reload/HUP 方式，不要因 reload 单元不存在而重启整台服务。
 
-最后启用 timer：
+只有第 9 节 D10 API、语义标记、Nginx/飞书和真实点样本均通过后，才启用 timer：
 
 ```bash
 systemctl enable --now dramawave-attribution-comparison-refresh.timer
@@ -411,9 +551,13 @@ curl -fsS -D /tmp/dramawave-attr-health.headers -o /tmp/dramawave-attr-health.js
   http://127.0.0.1:8832/healthz
 curl -fsS -D /tmp/dramawave-attr-meta.headers -o /tmp/dramawave-attr-meta.json \
   http://127.0.0.1:8832/api/meta
+sqlite3 "$D10_CANDIDATE_DB" \
+  "SELECT key,value FROM cache_meta WHERE key IN ('comparison_window','new_attribution_source','data_version','rollup_version') ORDER BY key;"
 ```
 
-验证 `ok=true`、`stale=false`、缓存起点不早于 `2026-07-29`、终点为北京当天，并检查 `Cache-Control`、`ETag`。使用 meta 返回的日期和 `data_version` 调用 `/api/options`、`/api/query?include_rankings=0`、`/api/rankings`、完整兼容 `/api/query` 和 `/api/export.csv`；把旧版本传给 query/rankings，确认返回 409。
+验证 `ok=true`、`stale=false`、缓存起点等于批准边界经 60 天裁剪后的日期、终点为北京当天，并检查 `Cache-Control`、`ETag`。`/api/meta.source_tables.new_attribution` 必须是 `kunlunads_dev.ads_app_revenues_10d`，API/CSV 只能出现 `d7_*` / `d10_*`，不得残留 `d30_*`。SQLite 标记必须是 `comparison_window="D10"`、`new_attribution_source="kunlunads_dev.ads_app_revenues_10d"` 且 `data_version=rollup_version`。使用 meta 返回的日期和 `data_version` 调用 `/api/options`、`/api/query?include_rankings=0`、`/api/rankings`、完整兼容 `/api/query` 和 `/api/export.csv`；把旧版本传给 query/rankings，确认返回 409。
+
+在批准范围内重新选取一个同时存在 custom、D7 和 D10 数据的真实 Ad 点样本，以 63350 只读查询分别对账；不得复用 D30 的 `2026-07-29 / ad_id=120250136876120737` 数值作为 D10 证据。点样本和全量汇总守恒未通过时，立即按第 10.0 节回滚。
 
 对当前真实全范围和 7/30/60 天可用范围分别执行默认、单渠道、单投放产品、单国家组、单优化师及 Ad Set 分组。每个新版本提交后必须先完成默认 7 天/全范围、D0/D7、常用分组和排行预热，再开放用户请求；用户可见常用路径目标不高于 300 毫秒。未预热的低基数组合目标不高于 1 秒，Campaign/Ad Set 宽范围尾部查询应异步或纳入下一版预热，不得阻塞默认首屏。若真实历史尚不足 30/60 天，记录当前全范围结果并用同量级合成 SQLite 验证容量，不把尚不存在的历史伪装成真实 30/60 天证据。
 
@@ -434,17 +578,19 @@ curl -sSI https://ai.yingliangads.com/reports/dramawave-attribution-comparison/a
 ```bash
 systemctl list-timers dramawave-attribution-comparison-refresh.timer --all --no-pager
 journalctl -u dramawave-attribution-comparison-refresh.service --since '-45 minutes' --no-pager
-sqlite3 /mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3 \
+sqlite3 "$D10_CANDIDATE_DB" \
   "SELECT key,value FROM cache_meta WHERE key IN ('data_version','rollup_version','generated_at','last_refresh_dates','history_cursor') ORDER BY key;"
-sqlite3 /mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3 \
+sqlite3 "$D10_CANDIDATE_DB" \
   "SELECT dt,status,fact_rows,data_version FROM refresh_log ORDER BY id DESC LIMIT 6;"
 ```
 
 要求本轮为 success、`last_refresh_dates` 含今天/昨天/一个历史日期、版本已推进、Web health 显示新版本。
 
-第一轮自然 timer 证据：`2026-08-06 21:22:00` 启动，依次刷新 `2026-08-06`、`2026-08-05`、`2026-07-29`，facts 分别为 `99,000`、`131,011`、`75,283`；`21:26:12` 提交版本 `20260806T132547Z-d44a154d`，`21:27:01` 完成预热。三日 refresh log 均为 success，`data_version=rollup_version`，stage 表为空，`quick_check=ok`，下一次计划触发为 `21:52:02`。
+2026-08-06 历史 D30 第一轮自然 timer 证据：`21:22:00` 启动，依次刷新 `2026-08-06`、`2026-08-05`、`2026-07-29`，facts 分别为 `99,000`、`131,011`、`75,283`；`21:26:12` 提交版本 `20260806T132547Z-d44a154d`，`21:27:01` 完成预热。该记录不能代替 D10 自然 timer 验收；D10 切换后必须另行回填新证据。
 
-### 9.5 生产实测记录
+### 9.5 2026-08-06 历史 D30 生产实测记录
+
+以下数值均属于 D30 历史基线，不是 D10 生产实测；D10 切换后必须另建小节回填真实版本、范围、行数、性能、资源和回滚点。
 
 - 单日最大量 canary（`2026-08-05`）：`131,010` facts，约 93 秒，观测峰值 `809,607,168` bytes，低于 900 MiB 门禁；SQLite `quick_check=ok`，汇总最大误差 `<5e-7`。
 - 全量 bootstrap：实际源读取/发布 `20:51:17`～`21:02:29`，共 `920,751` facts；数据库约 `1.34 GiB`，WAL 已归零；1 GiB cgroup 硬限制生效，`oom_kill=0`。
@@ -456,9 +602,76 @@ sqlite3 /mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3 
 
 ## 10. 精确回滚
 
+### 10.0 D10 切换回滚到历史 D30（本次迁移默认）
+
+D10 发布失败时必须同时切回历史 D30 release 和历史 D30 数据库指针；D10 code 会主动拒绝 D30 SQLite，因此不能只回滚其中一个。候选 D10 数据库原样保留作审计，不复制、不覆盖、不删除。
+
+```bash
+systemctl stop dramawave-attribution-comparison-refresh.timer
+systemctl stop dramawave-attribution-comparison-refresh.service 2>/dev/null || true
+systemctl stop dramawave-attribution-comparison.service
+
+D30_RELEASE='<从发布前 previous-current.txt 回填>'
+D30_DB=/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3
+D10_CANDIDATE_DB='<从 D10 发布记录回填候选库绝对路径>'
+BACKUP_DIR='<从发布状态记录回填>'
+test -d "$D30_RELEASE"
+test -f "$D30_DB"
+test -f "$BACKUP_DIR/dashboard.env"
+test -z "$(lsof -t "$D30_DB" "$D10_CANDIDATE_DB" 2>/dev/null || true)"
+sqlite3 "$D30_DB" 'PRAGMA quick_check;'
+
+ln -s "$D30_RELEASE" /opt/dramawave-attribution-comparison/current.d30.rollback.next
+install -o root -g root -m 0600 "$BACKUP_DIR/dashboard.env" \
+  /mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d30.rollback.next
+
+mv -Tf /opt/dramawave-attribution-comparison/current.d30.rollback.next \
+  /opt/dramawave-attribution-comparison/current
+mv -Tf /mnt/data-disk/dramawave-attribution-comparison/dashboard.env.d30.rollback.next \
+  /mnt/data-disk/dramawave-attribution-comparison/dashboard.env
+
+install -o root -g root -m 0644 "$BACKUP_DIR/dramawave-attribution-comparison.service" /etc/systemd/system/
+install -o root -g root -m 0644 "$BACKUP_DIR/dramawave-attribution-comparison-refresh.service" /etc/systemd/system/
+install -o root -g root -m 0644 "$BACKUP_DIR/dramawave-attribution-comparison-refresh.timer" /etc/systemd/system/
+install -o root -g root -m 0644 "$BACKUP_DIR/dramawave-attribution-comparison.conf" /etc/nginx/default.d/
+systemctl daemon-reload
+nginx -t
+if systemctl cat nginx.service >/dev/null 2>&1; then
+  systemctl reload nginx
+else
+  nginx -s reload
+fi
+systemctl start dramawave-attribution-comparison.service
+
+# D30 库在 D10 在线期间保持冻结；先执行一次旧 release 的正常刷新。
+# oneshot 自带共享 TT 锁、1 GiB 限制和旧 warm_cache ExecStartPost。
+systemctl start dramawave-attribution-comparison-refresh.service
+curl -fsS http://127.0.0.1:8832/healthz
+curl -fsS http://127.0.0.1:8832/api/meta
+
+# 再显式预热，避免刚才共享锁返回 75 或 Web 启动时序使 ExecStartPost 未命中。
+/opt/dramawave-attribution-comparison/venv/bin/python \
+  "$D30_RELEASE/warm_cache.py" --base-url http://127.0.0.1:8832 \
+  --attempts 3 --retry-delay 1
+
+# 严格按发布前记录恢复 timer 的 enabled / active 两个独立状态。
+if grep -qx enabled "$BACKUP_DIR/timer-enabled.txt"; then
+  systemctl enable dramawave-attribution-comparison-refresh.timer
+else
+  systemctl disable dramawave-attribution-comparison-refresh.timer
+fi
+if grep -qx active "$BACKUP_DIR/timer-active.txt"; then
+  systemctl start dramawave-attribution-comparison-refresh.timer
+else
+  systemctl stop dramawave-attribution-comparison-refresh.timer
+fi
+```
+
+确认 `current`、活动 DB 路径和 `/api/meta.source_tables.new_attribution` 已回到 `kunlunads_dev.ads_app_revenues_30d`。D30 数据库在 D10 在线期间没有刷新，因此不能只核对切换前旧 `data_version`：还必须确认 health 为 200、`cache.stale=false`、`cache.range_complete=true`、`cache.end_date` 为北京时间今天且无 `missing_dates`。若切换已超过两天或默认刷新后仍有缺日，保持 D30 Web 可读但 timer 暂不恢复，使用第 7.2 节相同的 hardened transient oneshot、旧 `D30_RELEASE` 和 `D30_DB`，从该库当前 `MIN(dt)` 到今天执行一次完整 bootstrap 补刷；通过上述门禁并重新运行旧 `warm_cache.py` 后，再按备份状态恢复 timer。不得因为 D10 候选仍在磁盘上而让旧 timer 指向它。
+
 ### 10.1 代码/配置回滚（默认）
 
-默认回滚不删除或回退 SQLite，先保留新数据用于审计。执行顺序：
+本节仅适用于归因语义和 SQLite 合同未变化的普通代码发布，不适用于 D30→D10 迁移。D10 迁移必须使用第 10.0 节，同时切回旧 release 与旧数据库指针。普通发布默认回滚不删除或回退 SQLite，先保留新数据用于审计。执行顺序：
 
 1. 停止 timer，防止回滚过程中刷新写入。
 2. 记录当前 `current`、版本、health 和最新日志。
@@ -500,7 +713,7 @@ curl -fsS http://127.0.0.1:8832/healthz
 
 ### 10.3 SQLite 数据回滚（仅必要时）
 
-代码回滚通常不需要恢复数据。只有旧代码确认无法读取新 SQLite schema，且负责人明确批准数据回退时，才使用发布前 online backup：
+本节是同语义发布下覆盖/损坏数据库的灾难恢复，不是 D10 的标准回滚。D10 标准回滚直接把活动指针切回原样保留的历史 D30 库，不覆盖任何 SQLite。只有原 D30 库本身损坏且负责人明确批准时，才使用发布前 online backup：
 
 1. 停止 timer、refresh 和 Web。
 2. 先对当前 SQLite 再做一次 online backup，保留为回滚前证据。
@@ -512,4 +725,8 @@ curl -fsS http://127.0.0.1:8832/healthz
 
 ## 11. 发布后记录
 
-首次发布证据已回填到第 1、9.4 和 9.5 节。生产状态为“已部署并通过缓存、服务、Nginx、未登录鉴权和自然 timer 验证”；唯一待人工补验项为已授权飞书会话下的生产页面视觉检查。后续发布必须继续记录 commit/release、备份、SQLite `quick_check`、版本与刷新日期、自然 timer、性能和精确回滚点。
+2026-08-06 D30 首次发布证据已回填到第 1、9.4 和 9.5 节，且仅作为历史基线。2026-08-07 D10 状态仍为“待日期边界决策，未执行生产切换”。边界决定后，必须回填 D10 commit/release、批准起点、独立候选 DB 路径、语义标记、D30 备份/回滚库、原子环境切换、真实点样本、自动化/浏览器、自然 timer、性能和回滚演练；在这些证据齐全前不得把状态改为已发布。
+
+## 12. 变更记录
+
+- 2026-08-07：部署目标由 D7/D30 改为 D7/D10，本地自动化 `62/62` 通过。保留 2026-08-06 D30 发布为历史基线；新增全新 D10 SQLite、`comparison_window` / `new_attribution_source` 语义门禁、旧 D30 库只读拒绝测试、活动 DB 指针原子替换和同时回滚到旧 D30 release/数据库的流程。候选和生产未验收，切换继续阻塞于 7/29 与 8/1 起点决策。

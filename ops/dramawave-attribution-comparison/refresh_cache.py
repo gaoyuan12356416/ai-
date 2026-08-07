@@ -21,9 +21,11 @@ from typing import Any, Iterable
 
 from common import (
     BASE_METRICS,
+    COMPARISON_WINDOW,
     FACT_DIMENSIONS,
     FLOAT_BASE_METRICS,
     MIN_DATE,
+    NEW_ATTRIBUTION_SOURCE,
     ROLLUP_TABLE_DIMENSIONS,
     connect_sqlite,
     db_path,
@@ -31,8 +33,10 @@ from common import (
     insert_staged_facts,
     iso_now,
     parse_date,
+    preflight_existing_cache,
     retention_start,
     set_meta,
+    validate_cache_contract,
     verify_data_disk,
     yyyymmdd,
 )
@@ -40,7 +44,7 @@ from common import (
 
 CUSTOM_TABLE = "kunlunads_dev.ads_custom_source_insight"
 D7_TABLE = "kunlunads_dev.ads_app_revenues"
-D30_TABLE = "kunlunads_dev.ads_app_revenues_30d"
+D10_TABLE = NEW_ATTRIBUTION_SOURCE
 ADMIN_TABLE = "kunlunads_dev.admin_users"
 CHANNEL_NAMES = {"0": "Meta", "1": "Google", "3": "TikTok", "4": "Kwai"}
 
@@ -191,7 +195,7 @@ def mysql_connection(config: dict[str, Any]):
 
 @contextlib.contextmanager
 def source_day_snapshot(connection: Any):
-    """Keep custom, D7 and D30 reads for one day on one repeatable-read snapshot."""
+    """Keep custom, D7 and D10 reads for one day on one repeatable-read snapshot."""
     with connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         cursor.execute("START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT")
@@ -269,7 +273,7 @@ def fetch_custom(connection: Any, day: dt.date) -> tuple[Iterable[dict[str, Any]
 
 
 def fetch_revenue(connection: Any, table: str, day: dt.date) -> tuple[Iterable[dict[str, Any]], SourceRead]:
-    if table not in {D7_TABLE, D30_TABLE}:
+    if table not in {D7_TABLE, D10_TABLE}:
         raise RuntimeError("unexpected revenue table")
     state = SourceRead()
 
@@ -349,7 +353,7 @@ def merge_revenue_sources(
     old_rows: Iterable[dict[str, Any]], new_rows: Iterable[dict[str, Any]]
 ) -> dict[tuple[str, str, str], dict[str, Any]]:
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for prefix, rows in (("d7", old_rows), ("d30", new_rows)):
+    for prefix, rows in (("d7", old_rows), ("d10", new_rows)):
         for row in rows:
             key = revenue_key(row)
             target = merged.setdefault(
@@ -362,7 +366,7 @@ def merge_revenue_sources(
                     "adset_name": "",
                     "ad_name": "",
                     "d7_present": False,
-                    "d30_present": False,
+                    "d10_present": False,
                 },
             )
             target[f"{prefix}_present"] = True
@@ -515,7 +519,7 @@ def build_custom_day(day: dt.date, custom_rows: Iterable[dict[str, Any]]) -> Cus
 
 
 def _revenue_upsert_sql(prefix: str) -> str:
-    if prefix not in {"d7", "d30"}:
+    if prefix not in {"d7", "d10"}:
         raise RuntimeError(f"unexpected revenue prefix: {prefix}")
     fixed = (
         "run_id", "dt", "created_at", "campaign_id", "campaign_name",
@@ -611,18 +615,18 @@ def map_staged_revenue(
             "revenue_union_rows": int(merged_stats["revenue_union_rows"]),
             "excluded_unmatched_rows": 0,
             "excluded_unmatched_d7_rows": 0,
-            "excluded_unmatched_d30_rows": 0,
+            "excluded_unmatched_d10_rows": 0,
             "d7_source_rows": int(source_stats["d7"]["rows"]),
-            "d30_source_rows": int(source_stats["d30"]["rows"]),
+            "d10_source_rows": int(source_stats["d10"]["rows"]),
         }
     )
     excluded_sums = {
-        prefix: {metric: 0.0 for metric in REVENUE_METRICS} for prefix in ("d7", "d30")
+        prefix: {metric: 0.0 for metric in REVENUE_METRICS} for prefix in ("d7", "d10")
     }
     candidate_sums = {
-        prefix: {metric: 0.0 for metric in REVENUE_METRICS} for prefix in ("d7", "d30")
+        prefix: {metric: 0.0 for metric in REVENUE_METRICS} for prefix in ("d7", "d10")
     }
-    for prefix in ("d7", "d30"):
+    for prefix in ("d7", "d10"):
         stats[f"{prefix}_merged_keys"] = int(merged_stats[f"{prefix}_merged_keys"])
         for metric in REVENUE_METRICS:
             expected = number(source_stats[prefix]["sums"][metric])
@@ -637,7 +641,7 @@ def map_staged_revenue(
         candidate_ids = _candidate_identities(candidate)
         if not candidate_ids:
             stats["excluded_unmatched_rows"] += 1
-            for prefix in ("d7", "d30"):
+            for prefix in ("d7", "d10"):
                 if revenue.get(f"{prefix}_present"):
                     stats[f"excluded_unmatched_{prefix}_rows"] += 1
                     for metric in REVENUE_METRICS:
@@ -658,7 +662,7 @@ def map_staged_revenue(
             else:
                 target["matched_grain"] = "mixed"
             target["mapping_status"] = "mapped"
-        for prefix in ("d7", "d30"):
+        for prefix in ("d7", "d10"):
             if not revenue.get(f"{prefix}_present"):
                 continue
             target[f"{prefix}_candidate_keys"] += 1
@@ -677,7 +681,7 @@ def map_staged_revenue(
         if abs(actual - expected) > tolerance:
             raise RuntimeError(f"custom {metric} output conservation failed: {actual} != {expected}")
         stats[f"custom_fact_{metric}"] = actual
-    for prefix in ("d7", "d30"):
+    for prefix in ("d7", "d10"):
         for metric in REVENUE_METRICS:
             actual = sum(
                 number(row.get(f"{prefix}_{metric}", 0))
@@ -710,7 +714,7 @@ def map_staged_revenue(
 
 def revenue_stage_stats(conn: Any, run_id: str, day: dt.date) -> dict[str, Any]:
     fields = ["COUNT(*) AS revenue_union_rows"]
-    for prefix in ("d7", "d30"):
+    for prefix in ("d7", "d10"):
         fields.append(f"SUM(CASE WHEN {prefix}_present=1 THEN 1 ELSE 0 END) AS {prefix}_merged_keys")
         fields.extend(
             f"COALESCE(SUM({prefix}_{metric}),0) AS {prefix}_{metric}"
@@ -726,8 +730,8 @@ def revenue_stage_stats(conn: Any, run_id: str, day: dt.date) -> dict[str, Any]:
 def iter_staged_revenue(conn: Any, run_id: str, day: dt.date) -> Iterable[dict[str, Any]]:
     columns = (
         "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name",
-        "d7_present", "d30_present",
-    ) + tuple(f"{prefix}_{metric}" for prefix in ("d7", "d30") for metric in REVENUE_METRICS)
+        "d7_present", "d10_present",
+    ) + tuple(f"{prefix}_{metric}" for prefix in ("d7", "d10") for metric in REVENUE_METRICS)
     cursor = conn.execute(
         f"SELECT {','.join(columns)} FROM refresh_revenue_stage WHERE run_id=? AND dt=?",
         (run_id, day.isoformat()),
@@ -748,12 +752,12 @@ def map_day_state(
         path = Path(tempdir) / "mapping.sqlite3"
         with connect_sqlite(path) as conn:
             d7 = stage_revenue_source(conn, "mapping", day, "d7", old_rows)
-            d30 = stage_revenue_source(conn, "mapping", day, "d30", new_rows)
+            d10 = stage_revenue_source(conn, "mapping", day, "d10", new_rows)
             return map_staged_revenue(
                 day,
                 custom,
                 iter_staged_revenue(conn, "mapping", day),
-                {"d7": d7, "d30": d30},
+                {"d7": d7, "d10": d10},
                 revenue_stage_stats(conn, "mapping", day),
             )
 
@@ -780,7 +784,7 @@ def additive_totals(conn: Any, table: str, day: str) -> dict[str, float]:
 def expected_staged_metric(stats: dict[str, Any], metric: str) -> float:
     if metric in {"spend", *CUSTOM_INTEGER_METRICS}:
         return number(stats[f"custom_fact_{metric}"])
-    for prefix in ("d7", "d30"):
+    for prefix in ("d7", "d10"):
         marker = f"{prefix}_"
         if metric.startswith(marker):
             suffix = metric[len(marker):]
@@ -899,7 +903,20 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
     run_id = uuid.uuid4().hex
     started_at = iso_now()
     with process_lock(path.parent / "refresh.lock"):
+        existed = path.exists()
+        if existed:
+            # Fail closed before connect_sqlite's writable path can initialize
+            # schema, switch journal mode, or touch an accidentally supplied
+            # legacy cache. Only a non-existent target may be bootstrapped.
+            preflight_existing_cache(path, allow_unpublished_empty=True)
+            # The immutable gate intentionally ignores uncheckpointed WAL.
+            # Revalidate through SQLite's normal read path before any writable
+            # open so committed WAL metadata cannot bypass the contract.
+            with connect_sqlite(path, readonly=True) as wal_conn:
+                validate_cache_contract(wal_conn, allow_unpublished_empty=True)
         with connect_sqlite(path) as conn:
+            if not existed:
+                validate_cache_contract(conn, allow_unpublished_empty=True)
             dates, historical = resolve_dates(args, conn, today)
             # The process lock proves no earlier run is still live. Staging is
             # intentionally non-resumable, so remove every abandoned run
@@ -933,17 +950,17 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
                             d7_source_stats = stage_revenue_source(
                                 revenue_conn, run_id, day, "d7", old_rows
                             )
-                        new_rows, new_read = fetch_revenue(source, D30_TABLE, day)
+                        new_rows, new_read = fetch_revenue(source, D10_TABLE, day)
                         with connect_sqlite(path) as revenue_conn:
-                            d30_source_stats = stage_revenue_source(
-                                revenue_conn, run_id, day, "d30", new_rows
+                            d10_source_stats = stage_revenue_source(
+                                revenue_conn, run_id, day, "d10", new_rows
                             )
                     if not int(custom.stats["custom_source_rows"]):
                         raise RuntimeError(f"refusing empty custom source for {day.isoformat()}")
-                    if not int(d7_source_stats["rows"]) or not int(d30_source_stats["rows"]):
+                    if not int(d7_source_stats["rows"]) or not int(d10_source_stats["rows"]):
                         raise RuntimeError(
                             f"refusing empty revenue source for {day.isoformat()}: "
-                            f"d7={d7_source_stats['rows']} d30={d30_source_stats['rows']}"
+                            f"d7={d7_source_stats['rows']} d10={d10_source_stats['rows']}"
                         )
                     with connect_sqlite(path) as conn:
                         merged_stats = revenue_stage_stats(conn, run_id, day)
@@ -951,12 +968,12 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
                             day,
                             custom,
                             iter_staged_revenue(conn, run_id, day),
-                            {"d7": d7_source_stats, "d30": d30_source_stats},
+                            {"d7": d7_source_stats, "d10": d10_source_stats},
                             merged_stats,
                         )
                         stats = mapped.stats
                         existing = conn.execute(
-                            "SELECT COUNT(*) fact_rows,SUM(d7_candidate_keys) d7_keys,SUM(d30_candidate_keys) d30_keys "
+                            "SELECT COUNT(*) fact_rows,SUM(d7_candidate_keys) d7_keys,SUM(d10_candidate_keys) d10_keys "
                             "FROM attribution_fact WHERE dt=?",
                             (day.isoformat(),),
                         ).fetchone()
@@ -968,14 +985,14 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
                             raise RuntimeError(
                                 f"refusing zero D7 candidates over prior non-zero cache for {day.isoformat()}"
                             )
-                        if int(existing["d30_keys"] or 0) and not int(stats["d30_candidate_keys"]):
+                        if int(existing["d10_keys"] or 0) and not int(stats["d10_candidate_keys"]):
                             raise RuntimeError(
-                                f"refusing zero D30 candidates over prior non-zero cache for {day.isoformat()}"
+                                f"refusing zero D10 candidates over prior non-zero cache for {day.isoformat()}"
                             )
                         source_times = {
                             "ads_custom_source_insight": source_updated_at(custom_read),
                             "app_revenues": source_updated_at(old_read),
-                            "app_revenues_30d": source_updated_at(new_read),
+                            "app_revenues_10d": source_updated_at(new_read),
                         }
                         payload = json.dumps(
                             {"stats": stats, "source_times": source_times},
@@ -1047,14 +1064,14 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
                     log_id = log_ids[day.isoformat()]
                     conn.execute(
                         "UPDATE refresh_log SET finished_at=?,status='success',fact_rows=?,detail=?,"
-                        "source_custom_updated_at=?,source_d7_updated_at=?,source_d30_updated_at=?,data_version=? WHERE id=?",
+                        "source_custom_updated_at=?,source_d7_updated_at=?,source_d10_updated_at=?,data_version=? WHERE id=?",
                         (
                             generated_at,
                             int(staged["stats"]["fact_rows"]),
                             json.dumps(staged["stats"], ensure_ascii=False, separators=(",", ":")),
                             staged["source_times"].get("ads_custom_source_insight", ""),
                             staged["source_times"].get("app_revenues", ""),
-                            staged["source_times"].get("app_revenues_30d", ""),
+                            staged["source_times"].get("app_revenues_10d", ""),
                             version,
                             log_id,
                         ),
@@ -1081,6 +1098,8 @@ def refresh(args: argparse.Namespace) -> dict[str, Any]:
                 conn.execute("DELETE FROM refresh_stage WHERE run_id=?", (run_id,))
                 conn.execute("DELETE FROM refresh_fact_stage WHERE run_id=?", (run_id,))
                 conn.execute("DELETE FROM refresh_revenue_stage WHERE run_id=?", (run_id,))
+                set_meta(conn, "comparison_window", COMPARISON_WINDOW)
+                set_meta(conn, "new_attribution_source", NEW_ATTRIBUTION_SOURCE)
                 set_meta(conn, "data_version", version)
                 set_meta(conn, "rollup_version", version)
                 set_meta(conn, "generated_at", generated_at)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only aggregate HTTP API for the Dramawave D7/D30 dashboard."""
+"""Read-only aggregate HTTP API for the Dramawave D7/D10 dashboard."""
 
 from __future__ import annotations
 
@@ -23,18 +23,24 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from common import (
+    API_SCHEMA_VERSION,
     BASE_METRICS,
+    COMPARISON_WINDOW,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DIMENSION_COLUMNS,
     FILTER_COLUMNS,
     MIN_DATE,
+    NEW_ATTRIBUTION_SOURCE,
     RETENTION_DAYS,
+    CacheContractError,
     connect_sqlite,
     db_path,
     get_meta,
     parse_date,
+    preflight_existing_cache,
     retention_start,
+    validate_cache_contract,
     verify_data_disk,
 )
 
@@ -55,9 +61,9 @@ SORTABLE_METRICS = {
     "installs",
     "af_installs",
     "d7_revenue",
-    "d30_revenue",
+    "d10_revenue",
     "d7_roas",
-    "d30_roas",
+    "d10_roas",
     "revenue_diff",
     "lift_rate",
 }
@@ -71,6 +77,13 @@ class RequestError(ValueError):
     def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST):
         super().__init__(message)
         self.status = int(status)
+
+
+def published_metadata(conn: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        return validate_cache_contract(conn)
+    except CacheContractError as exc:
+        raise RequestError(str(exc), HTTPStatus.SERVICE_UNAVAILABLE) from exc
 
 
 def response_cache_key(namespace: str, version: str, params: dict[str, list[str]]) -> tuple[Any, ...]:
@@ -338,20 +351,20 @@ def dimension_select(dimensions: list[str]) -> tuple[list[str], list[str]]:
 def metric_select(basis: str) -> list[str]:
     suffix = "d0" if basis == "d0" else "d7"
     old_revenue = f"SUM(d7_revenue_iaa_{suffix}) + SUM(d7_revenue_iap_{suffix})"
-    new_revenue = f"SUM(d30_revenue_iaa_{suffix}) + SUM(d30_revenue_iap_{suffix})"
+    new_revenue = f"SUM(d10_revenue_iaa_{suffix}) + SUM(d10_revenue_iap_{suffix})"
     fields = [f"SUM({column}) AS {column}" for column in ("spend", "impressions", "clicks", "installs", "af_installs")]
     fields.extend(
         [
             f"({old_revenue}) AS d7_revenue",
-            f"({new_revenue}) AS d30_revenue",
+            f"({new_revenue}) AS d10_revenue",
             f"CASE WHEN SUM(spend) != 0 THEN ({old_revenue}) / SUM(spend) END AS d7_roas",
-            f"CASE WHEN SUM(spend) != 0 THEN ({new_revenue}) / SUM(spend) END AS d30_roas",
+            f"CASE WHEN SUM(spend) != 0 THEN ({new_revenue}) / SUM(spend) END AS d10_roas",
             f"(({new_revenue}) - ({old_revenue})) AS revenue_diff",
             f"CASE WHEN ({old_revenue}) != 0 THEN (({new_revenue}) - ({old_revenue})) / ({old_revenue}) END AS lift_rate",
             "SUM(d7_users) AS d7_users",
             f"SUM(d7_purchase_{suffix}) AS d7_purchases",
-            "SUM(d30_users) AS d30_users",
-            f"SUM(d30_purchase_{suffix}) AS d30_purchases",
+            "SUM(d10_users) AS d10_users",
+            f"SUM(d10_purchase_{suffix}) AS d10_purchases",
         ]
     )
     return fields
@@ -427,18 +440,18 @@ def quality_select(basis: str) -> list[str]:
         "SUM(d7_candidate_keys) AS d7_total_rows",
         "SUM(d7_mapped_keys) AS d7_mapped_rows",
         "SUM(d7_ambiguous_keys) AS d7_ambiguous_rows",
-        "SUM(d30_candidate_keys) AS d30_total_rows",
-        "SUM(d30_mapped_keys) AS d30_mapped_rows",
-        "SUM(d30_ambiguous_keys) AS d30_ambiguous_rows",
+        "SUM(d10_candidate_keys) AS d10_total_rows",
+        "SUM(d10_mapped_keys) AS d10_mapped_rows",
+        "SUM(d10_ambiguous_keys) AS d10_ambiguous_rows",
         f"SUM(d7_revenue_iaa_{suffix}+d7_revenue_iap_{suffix}) AS d7_total_revenue",
         f"SUM(CASE WHEN mapping_status='mapped' THEN d7_revenue_iaa_{suffix}+d7_revenue_iap_{suffix} ELSE 0 END) AS d7_mapped_revenue",
-        f"SUM(d30_revenue_iaa_{suffix}+d30_revenue_iap_{suffix}) AS d30_total_revenue",
-        f"SUM(CASE WHEN mapping_status='mapped' THEN d30_revenue_iaa_{suffix}+d30_revenue_iap_{suffix} ELSE 0 END) AS d30_mapped_revenue",
+        f"SUM(d10_revenue_iaa_{suffix}+d10_revenue_iap_{suffix}) AS d10_total_revenue",
+        f"SUM(CASE WHEN mapping_status='mapped' THEN d10_revenue_iaa_{suffix}+d10_revenue_iap_{suffix} ELSE 0 END) AS d10_mapped_revenue",
     ]
 
 
 def finalize_quality(item: dict[str, Any]) -> dict[str, Any]:
-    for prefix in ("d7", "d30"):
+    for prefix in ("d7", "d10"):
         total = int(item.get(f"{prefix}_total_rows") or 0)
         mapped = int(item.get(f"{prefix}_mapped_rows") or 0)
         ambiguous = int(item.get(f"{prefix}_ambiguous_rows") or 0)
@@ -448,12 +461,12 @@ def finalize_quality(item: dict[str, Any]) -> dict[str, Any]:
         item[f"{prefix}_coverage_ratio"] = mapped / total if total else None
         item[f"{prefix}_revenue_coverage_ratio"] = mapped_revenue / total_revenue if total_revenue else None
     # Backwards-compatible combined fields used by older report clients.
-    item["total_revenue_rows"] = max(int(item.get("d7_total_rows") or 0), int(item.get("d30_total_rows") or 0))
-    item["mapped_revenue_rows"] = max(int(item.get("d7_mapped_rows") or 0), int(item.get("d30_mapped_rows") or 0))
-    item["ambiguous_revenue_rows"] = max(int(item.get("d7_ambiguous_rows") or 0), int(item.get("d30_ambiguous_rows") or 0))
-    item["unmapped_revenue_rows"] = max(int(item.get("d7_unmapped_rows") or 0), int(item.get("d30_unmapped_rows") or 0))
+    item["total_revenue_rows"] = max(int(item.get("d7_total_rows") or 0), int(item.get("d10_total_rows") or 0))
+    item["mapped_revenue_rows"] = max(int(item.get("d7_mapped_rows") or 0), int(item.get("d10_mapped_rows") or 0))
+    item["ambiguous_revenue_rows"] = max(int(item.get("d7_ambiguous_rows") or 0), int(item.get("d10_ambiguous_rows") or 0))
+    item["unmapped_revenue_rows"] = max(int(item.get("d7_unmapped_rows") or 0), int(item.get("d10_unmapped_rows") or 0))
     item["mapped_ratio"] = min(
-        (ratio for ratio in (item.get("d7_coverage_ratio"), item.get("d30_coverage_ratio")) if ratio is not None),
+        (ratio for ratio in (item.get("d7_coverage_ratio"), item.get("d10_coverage_ratio")) if ratio is not None),
         default=None,
     )
     item["denominator_scope"] = "revenue keys with at least one Dramawave custom-source candidate"
@@ -474,9 +487,9 @@ def source_scope_exclusions(
         "scope": "date_range_global_not_filter_attributable",
         "business_filters_applied": bool(filtered),
         "d7_rows": 0,
-        "d30_rows": 0,
+        "d10_rows": 0,
         "d7_revenue": 0.0,
-        "d30_revenue": 0.0,
+        "d10_revenue": 0.0,
     }
     rows = conn.execute(
         "SELECT r.detail FROM refresh_log r "
@@ -492,7 +505,7 @@ def source_scope_exclusions(
             continue
         if not isinstance(detail, dict):
             continue
-        for prefix in ("d7", "d30"):
+        for prefix in ("d7", "d10"):
             try:
                 result[f"{prefix}_rows"] += int(detail.get(f"excluded_unmatched_{prefix}_rows") or 0)
             except (TypeError, ValueError):
@@ -523,13 +536,13 @@ def aggregate_total_and_quality(
         "d7_total_rows",
         "d7_mapped_rows",
         "d7_ambiguous_rows",
-        "d30_total_rows",
-        "d30_mapped_rows",
-        "d30_ambiguous_rows",
+        "d10_total_rows",
+        "d10_mapped_rows",
+        "d10_ambiguous_rows",
         "d7_total_revenue",
         "d7_mapped_revenue",
-        "d30_total_revenue",
-        "d30_mapped_revenue",
+        "d10_total_revenue",
+        "d10_mapped_revenue",
     }
     totals = {key: value for key, value in combined.items() if key not in quality_keys}
     quality_item = {key: combined.get(key) for key in quality_keys}
@@ -548,7 +561,7 @@ def quality(
 
 
 def meta_payload(conn: sqlite3.Connection) -> dict[str, Any]:
-    metadata = get_meta(conn)
+    metadata = published_metadata(conn)
     rollup_ready = bool(metadata.get("data_version")) and (
         str(metadata.get("rollup_version") or "") == str(metadata.get("data_version") or "")
     )
@@ -567,10 +580,13 @@ def meta_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     source_times = metadata.get("source_max_updated_at") or {
         "ads_custom_source_insight": metadata.get("source_custom_updated_at", ""),
         "app_revenues": metadata.get("source_d7_updated_at", ""),
-        "app_revenues_30d": metadata.get("source_d30_updated_at", ""),
+        "app_revenues_10d": metadata.get("source_d10_updated_at", ""),
     }
     return {
+        "api_schema_version": API_SCHEMA_VERSION,
         "data_version": metadata.get("data_version", ""),
+        "comparison_window": metadata["comparison_window"],
+        "new_attribution_source": metadata["new_attribution_source"],
         "generated_at": generated_at,
         "source_max_updated_at": source_times,
         "cache": {
@@ -597,14 +613,23 @@ def meta_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "minimum_date": MIN_DATE.isoformat(),
         "source_tables": {
             "old_attribution": "kunlunads_dev.ads_app_revenues",
-            "new_attribution": "kunlunads_dev.ads_app_revenues_30d",
+            "new_attribution": NEW_ATTRIBUTION_SOURCE,
             "delivery": "kunlunads_dev.ads_custom_source_insight",
         },
     }
 
 
+def check_api_schema(params: dict[str, list[str]]) -> None:
+    received = first(params, "api_schema_version").strip()
+    if received != str(API_SCHEMA_VERSION):
+        raise RequestError(
+            f"api_schema_version={API_SCHEMA_VERSION} is required; reload the dashboard",
+            HTTPStatus.CONFLICT,
+        )
+
+
 def check_version(conn: sqlite3.Connection, params: dict[str, list[str]]) -> str:
-    current = str(get_meta(conn).get("data_version") or "")
+    current = str(published_metadata(conn).get("data_version") or "")
     requested = first(params, "data_version")
     if requested and requested != current:
         raise RequestError("data_version changed; reload from page 1", HTTPStatus.CONFLICT)
@@ -612,6 +637,7 @@ def check_version(conn: sqlite3.Connection, params: dict[str, list[str]]) -> str
 
 
 def options_payload(conn: sqlite3.Connection, params: dict[str, list[str]]) -> dict[str, Any]:
+    check_api_schema(params)
     version = check_version(conn, params)
     cache_key = response_cache_key("options", version, params)
     cached = response_cache_get(cache_key)
@@ -673,6 +699,7 @@ def build_rankings(
 
 
 def rankings_payload(conn: sqlite3.Connection, params: dict[str, list[str]]) -> dict[str, Any]:
+    check_api_schema(params)
     version = check_version(conn, params)
     cache_key = response_cache_key("rankings", version, ranking_semantic_params(params))
     owner_event: Any = None
@@ -707,6 +734,7 @@ def rankings_payload(conn: sqlite3.Connection, params: dict[str, list[str]]) -> 
 
 
 def query_payload(conn: sqlite3.Connection, params: dict[str, list[str]]) -> dict[str, Any]:
+    check_api_schema(params)
     version = check_version(conn, params)
     cache_key = response_cache_key("query", version, params)
     cached = response_cache_get(cache_key)
@@ -785,6 +813,7 @@ def export_csv(
     *,
     table: str | None = None,
 ) -> tuple[str, bytes]:
+    check_api_schema(params)
     check_version(conn, params)
     start_date, end_date = parse_range(conn, params)
     dimensions = normalize_dimensions(params)
@@ -807,7 +836,7 @@ def export_csv(
         sort_dir=sort_dir,
     )
     output = io.StringIO(newline="")
-    fields = list(rows[0]) if rows else dimensions + ["spend", "d7_revenue", "d7_roas", "d30_revenue", "d30_roas", "revenue_diff", "lift_rate"]
+    fields = list(rows[0]) if rows else dimensions + ["spend", "d7_revenue", "d7_roas", "d10_revenue", "d10_roas", "revenue_diff", "lift_rate"]
     writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
@@ -949,6 +978,12 @@ class Handler(BaseHTTPRequestHandler):
             )
         except (FileNotFoundError, sqlite3.Error) as exc:
             self.send_json({"ok": False, "error": "cache unavailable", "detail": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE, no_store=True)
+        except RequestError as exc:
+            self.send_json(
+                {"ok": False, "error": "cache contract rejected", "detail": str(exc)},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                no_store=True,
+            )
 
 
 def main() -> int:
@@ -962,11 +997,18 @@ def main() -> int:
         return 2
     try:
         verify_data_disk(db_path(), skip=args.skip_mount_check)
+        metadata = preflight_existing_cache(db_path())
+        with connect_sqlite(db_path(), readonly=True) as wal_conn:
+            metadata = validate_cache_contract(wal_conn)
     except Exception as exc:
-        print(f"cache mount verification failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"cache validation failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"serving Dramawave attribution dashboard on http://{args.host}:{args.port}", flush=True)
+    print(
+        "serving Dramawave attribution dashboard "
+        f"({COMPARISON_WINDOW}, {metadata['data_version']}) on http://{args.host}:{args.port}",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

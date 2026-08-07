@@ -15,10 +15,14 @@ from typing import Any, Iterable, Iterator
 
 MIN_DATE = dt.date(2026, 7, 29)
 RETENTION_DAYS = 60
-DEFAULT_DB_PATH = "/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard.sqlite3"
+DEFAULT_DB_PATH = "/mnt/data-disk/dramawave-attribution-comparison/cache/dashboard-d10.sqlite3"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8832
 EXPECTED_DATA_DISK_UUID = "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"
+COMPARISON_WINDOW = "D10"
+NEW_ATTRIBUTION_SOURCE = "kunlunads_dev.ads_app_revenues_10d"
+API_SCHEMA_VERSION = 2
+LEGACY_ATTRIBUTION_TOKEN = "d" + str(30)
 
 DIMENSION_COLUMNS = {
     "dt": ("dt", "dt"),
@@ -54,20 +58,20 @@ BASE_METRICS = (
     "d7_revenue_iaa_d7",
     "d7_revenue_iap_d7",
     "d7_ad_impression_count",
-    "d30_users",
-    "d30_purchase_d0",
-    "d30_purchase_d7",
-    "d30_revenue_iaa_d0",
-    "d30_revenue_iap_d0",
-    "d30_revenue_iaa_d7",
-    "d30_revenue_iap_d7",
-    "d30_ad_impression_count",
+    "d10_users",
+    "d10_purchase_d0",
+    "d10_purchase_d7",
+    "d10_revenue_iaa_d0",
+    "d10_revenue_iap_d0",
+    "d10_revenue_iaa_d7",
+    "d10_revenue_iap_d7",
+    "d10_ad_impression_count",
     "d7_candidate_keys",
     "d7_mapped_keys",
     "d7_ambiguous_keys",
-    "d30_candidate_keys",
-    "d30_mapped_keys",
-    "d30_ambiguous_keys",
+    "d10_candidate_keys",
+    "d10_mapped_keys",
+    "d10_ambiguous_keys",
 )
 
 FLOAT_BASE_METRICS = frozenset(
@@ -116,6 +120,50 @@ CAMPAIGN_ROLLUP_DIMENSIONS = FILTER_ROLLUP_DIMENSIONS + (
 ROLLUP_TABLE_DIMENSIONS = {
     "attribution_filter_daily": FILTER_ROLLUP_DIMENSIONS,
     "attribution_campaign_daily": CAMPAIGN_ROLLUP_DIMENSIONS,
+}
+
+MAPPING_METRIC_SUFFIXES = ("_candidate_keys", "_mapped_keys", "_ambiguous_keys")
+REVENUE_STAGE_METRICS = frozenset(
+    metric
+    for metric in BASE_METRICS
+    if metric.startswith(("d7_", "d10_")) and not metric.endswith(MAPPING_METRIC_SUFFIXES)
+)
+CACHE_CONTRACT_COLUMNS = {
+    "cache_meta": {"key", "value"},
+    "attribution_fact": {"id", *FACT_DIMENSIONS, *BASE_METRICS},
+    "refresh_log": {
+        "id",
+        "dt",
+        "started_at",
+        "finished_at",
+        "status",
+        "fact_rows",
+        "detail",
+        "source_custom_updated_at",
+        "source_d7_updated_at",
+        "source_d10_updated_at",
+        "data_version",
+    },
+    "refresh_stage": {"run_id", "dt", "created_at", "payload"},
+    "refresh_fact_stage": {"run_id", "created_at", *FACT_DIMENSIONS, *BASE_METRICS},
+    "refresh_revenue_stage": {
+        "run_id",
+        "dt",
+        "created_at",
+        "campaign_id",
+        "campaign_name",
+        "adset_id",
+        "adset_name",
+        "ad_id",
+        "ad_name",
+        "d7_present",
+        "d10_present",
+        *REVENUE_STAGE_METRICS,
+    },
+    **{
+        table: {*dimensions, *BASE_METRICS}
+        for table, dimensions in ROLLUP_TABLE_DIMENSIONS.items()
+    },
 }
 
 
@@ -182,20 +230,20 @@ CREATE TABLE IF NOT EXISTS attribution_fact (
     d7_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
     d7_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
     d7_ad_impression_count INTEGER NOT NULL DEFAULT 0,
-    d30_users INTEGER NOT NULL DEFAULT 0,
-    d30_purchase_d0 INTEGER NOT NULL DEFAULT 0,
-    d30_purchase_d7 INTEGER NOT NULL DEFAULT 0,
-    d30_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
-    d30_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    d10_users INTEGER NOT NULL DEFAULT 0,
+    d10_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d10_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d10_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d10_ad_impression_count INTEGER NOT NULL DEFAULT 0,
     d7_candidate_keys INTEGER NOT NULL DEFAULT 0,
     d7_mapped_keys INTEGER NOT NULL DEFAULT 0,
     d7_ambiguous_keys INTEGER NOT NULL DEFAULT 0,
-    d30_candidate_keys INTEGER NOT NULL DEFAULT 0,
-    d30_mapped_keys INTEGER NOT NULL DEFAULT 0,
-    d30_ambiguous_keys INTEGER NOT NULL DEFAULT 0
+    d10_candidate_keys INTEGER NOT NULL DEFAULT 0,
+    d10_mapped_keys INTEGER NOT NULL DEFAULT 0,
+    d10_ambiguous_keys INTEGER NOT NULL DEFAULT 0
 );
 DROP INDEX IF EXISTS idx_fact_dt_channel;
 DROP INDEX IF EXISTS idx_fact_dt_app;
@@ -226,7 +274,7 @@ CREATE TABLE IF NOT EXISTS refresh_log (
     detail TEXT,
     source_custom_updated_at TEXT,
     source_d7_updated_at TEXT,
-    source_d30_updated_at TEXT,
+    source_d10_updated_at TEXT,
     data_version TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_log_dt ON refresh_log(dt, id DESC);
@@ -272,20 +320,20 @@ CREATE TABLE IF NOT EXISTS refresh_fact_stage (
     d7_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
     d7_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
     d7_ad_impression_count INTEGER NOT NULL DEFAULT 0,
-    d30_users INTEGER NOT NULL DEFAULT 0,
-    d30_purchase_d0 INTEGER NOT NULL DEFAULT 0,
-    d30_purchase_d7 INTEGER NOT NULL DEFAULT 0,
-    d30_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
-    d30_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    d10_users INTEGER NOT NULL DEFAULT 0,
+    d10_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d10_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d10_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d10_ad_impression_count INTEGER NOT NULL DEFAULT 0,
     d7_candidate_keys INTEGER NOT NULL DEFAULT 0,
     d7_mapped_keys INTEGER NOT NULL DEFAULT 0,
     d7_ambiguous_keys INTEGER NOT NULL DEFAULT 0,
-    d30_candidate_keys INTEGER NOT NULL DEFAULT 0,
-    d30_mapped_keys INTEGER NOT NULL DEFAULT 0,
-    d30_ambiguous_keys INTEGER NOT NULL DEFAULT 0
+    d10_candidate_keys INTEGER NOT NULL DEFAULT 0,
+    d10_mapped_keys INTEGER NOT NULL DEFAULT 0,
+    d10_ambiguous_keys INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_fact_stage_run_day
     ON refresh_fact_stage(run_id, dt);
@@ -302,7 +350,7 @@ CREATE TABLE IF NOT EXISTS refresh_revenue_stage (
     ad_id TEXT NOT NULL DEFAULT '',
     ad_name TEXT NOT NULL DEFAULT '',
     d7_present INTEGER NOT NULL DEFAULT 0,
-    d30_present INTEGER NOT NULL DEFAULT 0,
+    d10_present INTEGER NOT NULL DEFAULT 0,
     d7_users INTEGER NOT NULL DEFAULT 0,
     d7_purchase_d0 INTEGER NOT NULL DEFAULT 0,
     d7_purchase_d7 INTEGER NOT NULL DEFAULT 0,
@@ -311,14 +359,14 @@ CREATE TABLE IF NOT EXISTS refresh_revenue_stage (
     d7_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
     d7_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
     d7_ad_impression_count INTEGER NOT NULL DEFAULT 0,
-    d30_users INTEGER NOT NULL DEFAULT 0,
-    d30_purchase_d0 INTEGER NOT NULL DEFAULT 0,
-    d30_purchase_d7 INTEGER NOT NULL DEFAULT 0,
-    d30_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
-    d30_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
-    d30_ad_impression_count INTEGER NOT NULL DEFAULT 0,
+    d10_users INTEGER NOT NULL DEFAULT 0,
+    d10_purchase_d0 INTEGER NOT NULL DEFAULT 0,
+    d10_purchase_d7 INTEGER NOT NULL DEFAULT 0,
+    d10_revenue_iaa_d0 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iap_d0 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iaa_d7 REAL NOT NULL DEFAULT 0,
+    d10_revenue_iap_d7 REAL NOT NULL DEFAULT 0,
+    d10_ad_impression_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(run_id, dt, campaign_id, adset_id, ad_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_refresh_revenue_stage_created
@@ -429,6 +477,102 @@ def get_meta(conn: sqlite3.Connection) -> dict[str, Any]:
         except json.JSONDecodeError:
             result[row["key"]] = row["value"]
     return result
+
+
+class CacheContractError(RuntimeError):
+    """Raised when a cache cannot safely be interpreted as published D10 data."""
+
+
+def validate_cache_contract(
+    conn: sqlite3.Connection,
+    *,
+    allow_unpublished_empty: bool = False,
+) -> dict[str, Any]:
+    """Validate cache schema and attribution semantics before reading or refreshing.
+
+    A fresh, structurally D10 database may be opened by the refresher before its
+    first successful publication. Every web read requires a data version and the
+    exact semantic markers written in the same transaction as that version.
+    """
+
+    metadata = get_meta(conn)
+    mismatches: list[str] = []
+    for table, required in CACHE_CONTRACT_COLUMNS.items():
+        actual = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        missing = sorted(required - actual)
+        if missing:
+            mismatches.append(f"{table} missing {','.join(missing)}")
+        legacy = sorted(
+            column for column in actual if LEGACY_ATTRIBUTION_TOKEN in column.lower()
+        )
+        if legacy:
+            mismatches.append(f"{table} contains legacy columns {','.join(legacy)}")
+
+    data_version = str(metadata.get("data_version") or "")
+    comparison_window = str(metadata.get("comparison_window") or "")
+    attribution_source = str(metadata.get("new_attribution_source") or "")
+    unpublished_empty = False
+    if allow_unpublished_empty and not data_version:
+        row = conn.execute("SELECT COUNT(*) AS n FROM attribution_fact").fetchone()
+        unpublished_empty = int(row["n"] or 0) == 0
+        if not unpublished_empty:
+            mismatches.append("unpublished cache contains attribution facts")
+
+    if not unpublished_empty:
+        if not data_version:
+            mismatches.append("data_version is missing")
+        if comparison_window != COMPARISON_WINDOW:
+            mismatches.append(
+                f"comparison_window={comparison_window or '<missing>'}; expected {COMPARISON_WINDOW}"
+            )
+        if attribution_source != NEW_ATTRIBUTION_SOURCE:
+            mismatches.append(
+                "new_attribution_source="
+                f"{attribution_source or '<missing>'}; expected {NEW_ATTRIBUTION_SOURCE}"
+            )
+    elif comparison_window or attribution_source:
+        # Partial metadata on an unpublished file indicates an interrupted or
+        # hand-edited bootstrap. Only a complete exact pair is safe to resume.
+        if comparison_window != COMPARISON_WINDOW:
+            mismatches.append(
+                f"comparison_window={comparison_window or '<missing>'}; expected {COMPARISON_WINDOW}"
+            )
+        if attribution_source != NEW_ATTRIBUTION_SOURCE:
+            mismatches.append(
+                "new_attribution_source="
+                f"{attribution_source or '<missing>'}; expected {NEW_ATTRIBUTION_SOURCE}"
+            )
+
+    if mismatches:
+        raise CacheContractError("D10 cache contract rejected: " + "; ".join(mismatches))
+    return metadata
+
+
+def preflight_existing_cache(
+    path: Path | str | None = None,
+    *,
+    allow_unpublished_empty: bool = False,
+) -> dict[str, Any]:
+    """Validate an existing cache without creating WAL or shared-memory files.
+
+    This immutable connection is only for the first contract gate. Normal API
+    reads must continue using connect_sqlite(readonly=True) so they observe
+    committed WAL updates from live refreshes.
+    """
+
+    target = Path(path or db_path())
+    uri = f"file:{target.resolve().as_posix()}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA query_only=ON")
+        return validate_cache_contract(
+            conn,
+            allow_unpublished_empty=allow_unpublished_empty,
+        )
+    finally:
+        conn.close()
 
 
 def insert_facts(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:

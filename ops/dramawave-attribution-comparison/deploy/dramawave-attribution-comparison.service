@@ -1,5 +1,5 @@
 [Unit]
-Description=Dramawave D7/D30 attribution comparison dashboard
+Description=Dramawave D7/D10 attribution comparison dashboard
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/mnt/data-disk

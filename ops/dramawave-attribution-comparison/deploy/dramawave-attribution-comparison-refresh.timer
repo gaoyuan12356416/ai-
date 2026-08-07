@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh Dramawave D7/D30 attribution comparison cache every 30 minutes
+Description=Refresh Dramawave D7/D10 attribution comparison cache every 30 minutes
 
 [Timer]
 OnCalendar=*-*-* *:22,52:00

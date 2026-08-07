@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh Dramawave D7/D30 attribution comparison cache
+Description=Refresh Dramawave D7/D10 attribution comparison cache
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/mnt/data-disk

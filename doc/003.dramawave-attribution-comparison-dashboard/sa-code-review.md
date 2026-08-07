@@ -2,11 +2,11 @@
 
 ## 结论
 
-通过。数据正确性、只读边界、原子刷新和 API 白名单未发现未解决 P0；真实 canary/bootstrap、目标 Linux systemd/Nginx、缓存预热和第一轮自然 timer 均已通过。生产已授权飞书会话的视觉检查仍需首次登录用户补验，但不影响服务端发布结论。
+D7/D10 代码设计评审有条件通过，生产切换不通过。数据正确性、只读边界、原子刷新、API 白名单和 D10 缓存语义门禁未发现新的设计级 P0；但当前 D10 最早日期为 `2026-08-01`，无法满足原 `2026-07-29` 边界。2026-08-06 的 canary/bootstrap、systemd/Nginx、缓存预热和自然 timer 证据属于历史 D30 基线，不能作为 D10 生产验收。
 
 ## 评审范围
 
-- `common.py`：SQLite schema、索引、汇总层和 ID/指标定义。
+- `common.py`：D10 SQLite schema、索引、汇总层、ID/指标定义和缓存语义标记。
 - `refresh_cache.py`：只读源连接、同日一致性快照、分层映射、金额守恒、staging/版本提交、60 天裁剪。
 - `service.py` / `index.html`：查询白名单、汇总路由、比率重算、质量语义、ETag/gzip、分页/CSV 和前端竞态。
 - `deploy/*`：独立 venv、数据盘挂载、systemd hardening、Nginx server-context include、备份和回滚。
@@ -23,13 +23,16 @@
 | CR-006 | P1 | 部署 | unit 未绑定数据盘、Nginx 片段可能放错 context、PyMySQL 未固定环境 | `RequiresMountsFor`、明确 `/etc/nginx/default.d`、独立 pinned venv | 已修复并通过目标机验证 |
 | CR-007 | P1 | 映射质量 | 候选内 `unmapped=0` 不能代表全源没有被排除的 revenue | 从每日最新成功刷新日志返回日期级全源排除量，并标明不可归属业务筛选 | 已修复并回归 |
 | CR-008 | P2 | health 语义 | 当天尚未产数或缓存超过 45 分钟是否应直接 503 | 日期连续性决定结构健康；`stale` 和 `current_date_present` 单独告警，保留上一成功版本可读 | 设计接受 |
+| CR-009 | P0 | 缓存复用 | D10 代码可能误开历史 D30 SQLite，并把旧数据当作新口径 | 要求结构签名及 `comparison_window=D10`、`new_attribution_source=kunlunads_dev.ads_app_revenues_10d` 完全匹配；不匹配时 Web/刷新失败关闭 | 已纳入代码，待候选库验证 |
+| CR-010 | P0 | 日期边界 | 代码保留原 7/29 最小日期时，当前 D10 源缺 7/29～7/31 | 不允许以空值或历史 D30 数据补洞；生产切换等待源侧补齐或批准起点改为 8/1 | 待业务决策 |
 
 ## 编译 / 验证结果
 
-- Windows/目标机 Python：`51/51` 自动化测试通过，包含汇总守恒、路由回退、排行 singleflight、缓存预热、磁盘 staging、共享锁和前端并发契约。
-- `python -m compileall -q ops/dramawave-attribution-comparison`：通过。
-- `git diff --check`：通过。
-- Python 3.9 AST/编译兼容复核：通过。
-- 本地真实浏览器 fixture：桌面/移动布局、筛选、D0/D7、分页、无明细下载、控制台 0 错误通过。
-- 生产只读源：63350 且 `@@read_only=1`；`REPEATABLE READ + READ ONLY, WITH CONSISTENT SNAPSHOT` 在 autocommit on/off 均验证通过。
-- 生产证据：单日 canary 峰值约 772 MiB；全量 `920,751` facts bootstrap 成功；`systemd-analyze verify`、`nginx -t`、未登录飞书跳转和自然 timer 版本推进通过。已授权飞书会话视觉检查待首次登录用户补验。
+- 2026-08-06 历史 D30 基线：Windows/目标机 Python `51/51`、编译、Python 3.9 兼容、浏览器 fixture、只读源快照、单日 canary、`920,751` facts bootstrap、systemd/Nginx 和自然 timer 均按当时记录通过。
+- 2026-08-07 D10 已核验事实：`ads_app_revenues_10d` schema/index 与 D30 相同，当前最早日期为 `2026-08-01`。
+- 2026-08-07 D10 本地验证：自动化 `62/62` 通过，覆盖 D10 字段/源表合同及旧缓存拒绝等本地路径；checkpointed 历史 D30 库先经 `mode=ro&immutable=1` 拒绝，测试确认 bytes/mtime 不变且不创建 `-wal` / `-shm`；D10 主文件配合未 checkpoint 的已提交 WAL 篡改，则由随后普通只读、WAL-aware 的二次合同校验拒绝，refresh 不进入 writable/MySQL，Web 不启动 HTTP Server。
+- D10 待验证：全新候选 SQLite 的真实 bootstrap/语义标记、生产数据对账、原子切换、已授权浏览器、自然 timer 和生产页面。未执行前不得回填为通过。
+
+## 变更记录
+
+- 2026-08-07：评审对象由 D7/D30 改为 D7/D10；新增旧 D30 SQLite 拒绝门禁与日期边界阻塞项。本地自动化 `62/62` 通过，历史 D30 验证结果保持原值并仅作为容量和回滚基线；生产仍为 NO-GO。
