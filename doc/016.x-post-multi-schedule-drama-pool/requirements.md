@@ -26,32 +26,39 @@
 - 修改 `ads_drama_resource` 或其原始视频。
 - 补发未被认领的历史时间点。
 - 自动跳过失败或结果未知的短剧继续发布后续剧。
-- 修改既有素材池 Post 文案模板和 W2A 参数合同。
+- 修改 W2A 参数合同。
 
 ## 用户故事 / 业务规则
 
 1. 每个池保存 `账号集合 × 发布时间集合`。一个时间点给每个已选账号创建一条 Post。
 2. 同一账号不能在素材池和短剧池配置相同时间，防止同时争用一个账号。
-3. 素材池严格按入池时间和池 ID 正序选择；已发布或已有队列的素材全局不可重复使用。
-4. 短剧池严格按入池时间和池 ID 正序；当前剧的所有免费集发布完后才进入下一剧。
+3. 素材池严格按入池时间和池 ID 倒序选择，最新上传优先；已发布或已有队列的素材全局不可重复使用。
+4. 短剧池对未绑定新剧严格按入池时间和池 ID 倒序选择；已经绑定账号的当前剧继续发布到所有免费集完成，不因新剧上传而换剧。
 5. 同一短剧内按 `sub_number=1..N` 顺序发布；`episode_key=content_id:sub_number` 全局唯一。
 6. 免费集数 `N` 取该剧所有 Dramawave app 变体记录中 `unlocked_episodes_count` 的最小值；1..N 必须连续。
 7. 同一集的重复资源行仅在 URL 和元数据一致时合并；同集 URL 不一致、元数据漂移或缺集时整剧不可用。
 8. 视频 URL 的 `http` 自动规范为 `https`；格式或尺寸不合规时复用 GPU 修复流程并上传 COS，再使用修复后 URL。
-9. `name_tag` 未提供人工字段，因此按“剧名 hashtag + 最多两个标签 hashtag”确定性生成；无标签时至少保留剧名 hashtag。
-10. 短剧 Post 文案固定为：
+9. `name_tag` 保留为历史归因元数据，不再进入发布正文。
+10. 两个池分别保存可编辑的 Post 描述模板；素材池默认模板为：
 
 ```text
-{url}
- 👆Full story continues here:☝️
-Episode👉{sub_num}
+🎬 {{drama_name}}
+{{desc}}
 
-{name_tag}
-
- {desc}
+#shortdrama #shortfilms #tvdrama #aidrama #dramawave
 ```
 
-11. X 字数计算保留 URL、CTA、集数和 `name_tag`；仅允许截断末尾 `desc`。
+短剧池默认模板为：
+
+```text
+🎬 {{drama_name}}
+Episode {{episode_number}}
+{{desc}}
+
+#shortdrama #shortfilms #tvdrama #aidrama #dramawave
+```
+
+11. 模板宏支持 `{{drama_name}}`、`{{desc}}`、`{{url}}`；短剧池额外支持 `{{episode_number}}`。`{{url}}` 表示当前 queue/log 生成的 `gy.g2flow.com` 追踪短链，不是视频 URL 或 W2A 长链。短链始终生成并写入发布日志，只有模板显式包含 `{{url}}` 时才进入帖子正文。未知、缺失必需或重复宏拒绝保存；X 字数计算只允许截断 `desc`。
 12. 生产数据抽样确认描述可能包含换行；查询入口统一折叠连续空白，NUL 等非法控制字符仍拒绝。
 13. 任一短剧发生预检失败、已知发布失败或结果未知，当前批次停止且该剧标记 `needs_review`，后续短剧暂停，等待人工确认。
 14. 素材池在每次入池校验和排期 worker 发布前，读取 `ads_drama_info.app_id=1479` 中同 `content_id + language` 的 `deploy_time`；多端取最晚值。可投放时间严格晚于当前时间时暂时跳过且不创建 queue，到达边界后由后续排期重新校验并自动恢复；缺失或非法数据 fail closed。
@@ -63,7 +70,7 @@ Episode👉{sub_num}
 1. 页面加载账号选项和当前配置。
 2. 用户选择多个账号、增加/删除时间点并保存；版本冲突时刷新后重试。
 3. 短剧 ID 在加入前查询源表并展示剧名、免费集数和校验结果。
-4. 每分钟整点秒由轻量 claim 任务冻结当前时间点的配置版本和账号顺序。
+4. 每分钟整点秒由轻量 claim 任务冻结当前时间点的配置版本、账号顺序和描述模板。
 5. 每分钟第 10 秒由 worker 读取冻结批次，执行账号验证、源表查询、短剧可投放时间校验、媒体预检/修复、队列落库和顺序发布。
 6. 发布日志保留短链、长链、X 预览链接、账号、素材/短剧/集数和错误。
 7. 短剧池列表由后台直接返回 `deletable` 和不可删除原因；页面全选只勾选当前页 `deletable=true` 的记录，删除前二次确认。
@@ -72,7 +79,7 @@ Episode👉{sub_num}
 
 ### 影响模块
 
-- `features/x_posts/service.py`：SQLite 迁移、配置、批次、短剧池、队列、FIFO 和日志状态机。
+- `features/x_posts/service.py`：SQLite 迁移、配置、批次、短剧池、队列、最新上传优先和日志状态机。
 - `features/x_posts/drama_selector.py`：只读短剧审计与集数选择。
 - `features/x_accounts/oauth_service.py`：loopback 内部接口和发布权限。
 - `features/x_accounts/client.py`、`app.py`：后台页面 API。
@@ -81,10 +88,10 @@ Episode👉{sub_num}
 
 ### 数据结构
 
-- `x_post_schedule_config`：`source_type` 唯一；保存启用状态、账号 JSON、时间 JSON、版本和操作人。
-- `x_post_schedule_run`：`source_type + run_date + publish_time` 唯一；冻结配置版本、账号顺序和执行汇总。
+- `x_post_schedule_config`：`source_type` 唯一；保存启用状态、账号 JSON、时间 JSON、描述模板、版本和操作人。
+- `x_post_schedule_run`：`source_type + run_date + publish_time` 唯一；冻结配置版本、账号顺序、描述模板和执行汇总。
 - `x_post_drama_pool`：短剧元数据、免费集数、下一集数、发布数量和校验/失败状态。
-- `x_post_queue`：新增 schedule、source、短剧池、episode 和 `name_tag` 字段；保留既有数据兼容。
+- `x_post_queue`：新增 schedule、source、短剧池、episode、`name_tag` 和冻结的 `body_template` 字段；保留既有数据兼容。
 - 唯一索引保证素材、短剧集数、幂等键和时间点不可重复。
 
 ### 调度一致性
@@ -125,3 +132,4 @@ Episode👉{sub_num}
 - 2026-07-27：完成需求、设计、实现及离线回归；待生产发布验证。
 - 2026-07-28：短剧池账号列表在页面加载及“刷新账号”时，自动校验动态状态为 `refresh_required` 的账号；有效账号不重复请求 X，停用、缺权限或校验失败账号仍保持不可选。前端最多并发校验 3 个账号，遇 X 限流即暂缓剩余账号；临时限流、上游或网络错误只记录原因，不把账号永久改为 `error`。校验完成前禁止保存排期。
 - 2026-07-28：短剧池明细增加当前页全选、逐行选择、清空选择和原子批量删除；列表可删除状态改由后台计算，修正页面此前读取不存在的历史字段导致已占用记录可能仍显示可删的问题。
+- 2026-08-04：素材池和未绑定短剧池统一改为最新上传优先；已有短剧与账号的粘性绑定保持不变。

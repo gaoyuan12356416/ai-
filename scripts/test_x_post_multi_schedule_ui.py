@@ -14,11 +14,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MATERIAL_PATH = ROOT / "static" / "x-post-material-pool.html"
 DRAMA_PATH = ROOT / "static" / "x-post-drama-pool.html"
+LOGS_PATH = ROOT / "static" / "x-post-logs.html"
 QUICK_NAV_PATH = ROOT / "static" / "quick-nav.js"
 NAVIGATION_PATH = ROOT / "static" / "navigation.json"
 
 MATERIAL = MATERIAL_PATH.read_text(encoding="utf-8")
 DRAMA = DRAMA_PATH.read_text(encoding="utf-8")
+LOGS = LOGS_PATH.read_text(encoding="utf-8")
 QUICK_NAV = QUICK_NAV_PATH.read_text(encoding="utf-8")
 NAVIGATION = json.loads(NAVIGATION_PATH.read_text(encoding="utf-8"))
 
@@ -34,6 +36,13 @@ def inline_javascript(source):
 
 
 class XPostMultiScheduleUiTest(unittest.TestCase):
+    def test_pool_pages_describe_newest_upload_first(self):
+        self.assertIn("可用素材按上传时间倒序、最新上传优先", MATERIAL)
+        self.assertIn("按上传时间倒序领取尚未发布过的新剧", DRAMA)
+        self.assertIn("领取最新上传的未绑定短剧", DRAMA)
+        self.assertIn("人工素材池按最新上传优先选材", LOGS)
+        self.assertNotIn("人工素材池 FIFO", LOGS)
+
     def test_navigation_registers_drama_pool_and_keeps_configurable_permission(self):
         items = x_navigation_items()
         drama = items["xPostDramaPool"]
@@ -181,22 +190,40 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('item.status === "active"', DRAMA)
         self.assertIn("item.publish_eligible === true", DRAMA)
 
-    def test_drama_template_is_rendered_exactly_and_not_merged_into_material_template(self):
-        expected = (
-            "{url}\n"
-            " 👆Full story continues here:☝️\n"
-            "Episode👉{sub_num}\n\n"
-            "{name_tag}\n\n"
-            " {desc}"
+    def test_material_and_drama_templates_are_rendered_exactly(self):
+        material_expected = (
+            "🎬 {{drama_name}}\n"
+            "{{desc}}\n\n"
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
         )
-        match = re.search(
-            r'<pre id="postTemplatePreview">(?P<body>.*?)</pre>',
+        material_match = re.search(
+            r'<textarea id="materialPostTemplate"[^>]*>(?P<body>.*?)</textarea>',
+            MATERIAL,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(material_match)
+        self.assertEqual(material_match.group("body"), material_expected)
+
+        drama_expected = (
+            "🎬 {{drama_name}}\n"
+            "Episode {{episode_number}}\n"
+            "{{desc}}\n\n"
+            "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
+        )
+        drama_match = re.search(
+            r'<textarea id="dramaPostTemplate"[^>]*>(?P<body>.*?)</textarea>',
             DRAMA,
             flags=re.DOTALL,
         )
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group("body"), expected)
-        self.assertNotIn("Full story continues here", MATERIAL)
+        self.assertIsNotNone(drama_match)
+        self.assertEqual(drama_match.group("body"), drama_expected)
+        self.assertNotIn("{{short_link}}", material_expected)
+        self.assertNotIn("{{short_link}}", drama_expected)
+        self.assertNotIn("Episode {{episode_number}}", material_expected)
+        self.assertIn("{{url}}（当前队列的追踪短链）", MATERIAL)
+        self.assertIn("{{url}}（当前队列的追踪短链）", DRAMA)
+        self.assertIn("body_template: bodyTemplate", MATERIAL)
+        self.assertIn("body_template: bodyTemplate", DRAMA)
         self.assertIn("短剧 ID（content_id）", DRAMA)
         self.assertIn(r"/^[A-Za-z0-9_-]{1,128}$/", DRAMA)
 

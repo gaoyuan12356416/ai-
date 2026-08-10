@@ -25,6 +25,7 @@
   "timezone": "Asia/Shanghai",
   "account_ids": [2, 3, 4],
   "publish_times": ["09:00", "12:30", "18:00"],
+  "body_template": "🎬 {{drama_name}}\n{{desc}}\n{{url}}",
   "version": 2
 }
 ```
@@ -33,6 +34,10 @@
 - 账号按提交顺序冻结；时间会去重并按 `HH:MM` 排序。
 - 启用时账号和时间均不能为空。
 - 同一账号不能在两个池配置同一时间。
+- 素材池模板必须包含一次 `{{drama_name}}` 和 `{{desc}}`；短剧池还必须包含一次 `{{episode_number}}`。
+- 两个池都可选用一次 `{{url}}`，其值为当前发布日志对应的 `https://gy.g2flow.com/s2l/{log_id}.html` 追踪短链。
+- 未知宏、重复宏、控制字符、空模板和超过 2000 字符的模板返回 `invalid_post_template`。
+- 保存递增配置版本；claim 和 queue 都冻结模板，因此后续编辑不会改写已经认领或已创建队列的正文。
 
 ## 短剧加入
 
@@ -107,8 +112,8 @@
 | `/internal/posts/schedule-plan/query` | 查询冻结批次和队列 |
 | `/internal/posts/schedule-plan` | 原子创建素材或短剧队列 |
 | `/internal/posts/schedule-runs/record-failure` | 记录预检失败；可绑定短剧池并标记待确认 |
-| `/internal/posts/material-pool/available` | 返回 FIFO 可用素材 |
-| `/internal/posts/drama-pool/available` | 返回精简 FIFO 短剧进度 |
+| `/internal/posts/material-pool/available` | 按上传时间倒序返回可用素材 |
+| `/internal/posts/drama-pool/available` | 保留账号绑定，并按上传时间倒序补充未绑定短剧 |
 | `/internal/posts/storage/preflight` | 数据盘/短链目录预检 |
 | `/internal/posts/queue/{queue_id}/publish` | 发布既有冻结队列 |
 
@@ -120,7 +125,7 @@
 | `x_post_schedule_version_conflict` | 排期已被其他操作修改 |
 | `x_post_schedule_slot_in_progress` | 当前 90 秒窗口内禁止修改 |
 | `x_post_drama_pool_needs_review` | 前序短剧需人工确认，暂停后续 |
-| `x_post_drama_sequence_conflict` | 候选没有按剧/集 FIFO 提交 |
+| `x_post_drama_sequence_conflict` | 候选没有按账号绑定、剧集顺序或新剧倒序规则提交 |
 | `drama_episode_gap` | 免费集数不连续 |
 | `drama_episode_url_ambiguous` | 同一集存在不一致 URL |
 | `drama_metadata_ambiguous` | 短剧元数据不一致 |
