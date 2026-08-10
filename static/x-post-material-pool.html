@@ -329,7 +329,7 @@
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>只有这里选中的账号才会从素材池取素材发布；可用素材按上传时间倒序、最新上传优先。每个账号会在每个发布时间点各发布一篇。新增账号从下一个未来时间点开始执行，不会补发已过时间点。</p>
+            <p>只有这里选中的账号才会从素材池取素材发布；可用素材按上传时间倒序、最新上传优先。超过 140 秒的视频只会分配给通过个号 token 确认有 X Basic、Premium 或 Premium+ 的账号，自动发布最长支持 600 秒。每个账号会在每个发布时间点各发布一篇。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
@@ -383,13 +383,13 @@
         <section class="panel">
           <div class="section-head">
             <h2>添加素材</h2>
-            <p>支持一次粘贴多个自定义素材库 ID，以逗号、空格或换行分隔；重复或已被历史队列占用的素材不会再次加入。</p>
+            <p>支持一次粘贴多个自定义素材库 ID，以逗号、空格或换行分隔；允许加入超过 140 秒的视频，发布时会自动匹配有会员资格的账号。重复或已被历史队列占用的素材不会再次加入。</p>
           </div>
           <div class="add-layout">
             <div class="field">
               <label for="materialIds">自定义素材 ID</label>
               <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
-              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。加入后立即按 X 发布标准检查素材、违规记录、色情/暴力标签和短剧映射。</span>
+              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。加入后立即检查素材、违规记录、色情/暴力标签和短剧映射；长视频在排期预检时按账号会员资格路由。</span>
             </div>
             <div class="add-actions">
               <button id="addMaterials" class="button primary" type="button">加入素材池</button>
@@ -617,6 +617,15 @@
       function accountEligible(item) {
         return !!item && item.status === "active" && item.publish_eligible === true;
       }
+      function subscriptionLabel(item) {
+        return ({
+          basic: "X Basic",
+          premium: "X Premium",
+          premium_plus: "X Premium+",
+          none: "无会员",
+          unknown: "会员未知",
+        })[String(item && item.subscription_type || "unknown")] || "会员未知";
+      }
       function accountTitle(item) {
         const username = String(item && item.username || "").trim().replace(/^@/, "");
         return String(item && item.display_name || "").trim() || (username ? `@${username}` : `账号 ${accountId(item) || "—"}`);
@@ -647,6 +656,7 @@
             item.username,
             item.x_user_id,
             item.owner_name,
+            item.subscription_type,
           ].map(value => String(value || "").toLocaleLowerCase()).join(" ");
           return haystack.includes(query);
         });
@@ -675,11 +685,11 @@
           setText(strong, accountTitle(item));
           const username = String(item.username || "").trim().replace(/^@/, "");
           const secondary = document.createElement("span");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · ${subscriptionLabel(item)}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(status, eligible ? (item.long_video_publish_eligible === true ? "可发布 · 长视频" : "可发布 · 最长 140 秒") : (selected ? "不可发布，请移除" : "不可发布"));
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });

@@ -35,6 +35,16 @@ DEFAULT_SHORT_BASE_URL = "https://gy.g2flow.com/s2l"
 DEFAULT_STORAGE_MOUNT_ROOT = "/mnt/data-disk"
 DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
+STANDARD_MAX_DURATION_SECONDS = 140.0
+PREMIUM_MAX_DURATION_SECONDS = 600.0
+STANDARD_MEDIA_CATEGORY = "tweet_video"
+PREMIUM_MEDIA_CATEGORY = "amplify_video"
+MEDIA_CATEGORIES = frozenset(
+    {STANDARD_MEDIA_CATEGORY, PREMIUM_MEDIA_CATEGORY}
+)
+PREMIUM_SUBSCRIPTION_TYPES = frozenset(
+    {"basic", "premium", "premium_plus"}
+)
 DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 SQLITE_QUERY_BATCH_SIZE = 900
@@ -119,6 +129,7 @@ QUEUE_LEDGER_FIELDS = (
     "media_repair_source_sha256",
     "preflight_sha256",
     "preflight_size",
+    "preflight_duration",
     "facebook_violation_count",
     "tiktok_violation_count",
     "twitter_violation_count",
@@ -141,6 +152,7 @@ NONBLOCKING_MATERIAL_VALIDATION_CODES = frozenset(
         "material_has_violation",
         "material_source_tag_unsafe",
         "material_tag_unsafe",
+        "x_long_video_requires_premium",
     }
 )
 _NONBLOCKING_MATERIAL_VALIDATION_SQL = "(" + ",".join(
@@ -1012,6 +1024,7 @@ def ensure_storage(db_path):
                 media_repair_source_sha256 TEXT NOT NULL DEFAULT '',
                 preflight_sha256 TEXT NOT NULL DEFAULT '',
                 preflight_size INTEGER NOT NULL DEFAULT 0,
+                preflight_duration REAL NOT NULL DEFAULT 0,
                 facebook_violation_count INTEGER NOT NULL DEFAULT 0,
                 tiktok_violation_count INTEGER NOT NULL DEFAULT 0,
                 twitter_violation_count INTEGER NOT NULL DEFAULT 0,
@@ -1221,6 +1234,7 @@ def ensure_storage(db_path):
                 "media_repair_source_sha256": "TEXT NOT NULL DEFAULT ''",
                 "preflight_sha256": "TEXT NOT NULL DEFAULT ''",
                 "preflight_size": "INTEGER NOT NULL DEFAULT 0",
+                "preflight_duration": "REAL NOT NULL DEFAULT 0",
                 "facebook_violation_count": "INTEGER NOT NULL DEFAULT 0",
                 "tiktok_violation_count": "INTEGER NOT NULL DEFAULT 0",
                 "twitter_violation_count": "INTEGER NOT NULL DEFAULT 0",
@@ -3505,6 +3519,9 @@ class XPostStore:
         preflight_sha256 = str(payload.get("preflight_sha256", "") or "").strip().lower()
         result["preflight_size"] = _nonnegative_int(
             payload.get("preflight_size"), "preflight_size", 0
+        )
+        result["preflight_duration"] = _nonnegative_float(
+            payload.get("preflight_duration"), "preflight_duration", 0
         )
         if preflight_sha256 and not re.fullmatch(r"[0-9a-f]{64}", preflight_sha256):
             raise XPostError("invalid_request", "preflight_sha256无效", 400)
@@ -8697,8 +8714,40 @@ def _frame_rate(value):
         return 0.0
 
 
-def probe_media(path, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, runner=None):
+def _account_has_premium_video_entitlement(account):
+    subscription_type = (
+        str(account.get("subscription_type", "") or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    if subscription_type == "premiumplus":
+        subscription_type = "premium_plus"
+    return subscription_type in PREMIUM_SUBSCRIPTION_TYPES
+
+
+def probe_media(
+    path,
+    max_bytes=DEFAULT_MAX_MEDIA_BYTES,
+    timeout=30,
+    runner=None,
+    max_duration_seconds=STANDARD_MAX_DURATION_SECONDS,
+):
     """Fail closed unless ffprobe confirms the X canary video contract."""
+    try:
+        duration_limit = float(max_duration_seconds)
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError(
+            "invalid_configuration", "X video duration policy is invalid", 500
+        ) from None
+    if duration_limit not in {
+        STANDARD_MAX_DURATION_SECONDS,
+        PREMIUM_MAX_DURATION_SECONDS,
+    }:
+        raise XPostError(
+            "invalid_configuration", "X video duration policy is invalid", 500
+        )
     path = Path(path)
     try:
         file_size = path.stat().st_size
@@ -8748,6 +8797,32 @@ def probe_media(path, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, runner=None
     streams = streams if isinstance(streams, list) else []
     videos = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"]
     audios = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio"]
+    format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
+    duration_value = format_data.get("duration")
+    if not duration_value and len(videos) == 1:
+        duration_value = videos[0].get("duration")
+    try:
+        duration = float(duration_value)
+    except (TypeError, ValueError, OverflowError):
+        duration = 0.0
+    if not math.isfinite(duration) or duration < 0.5:
+        raise XPostError(
+            "invalid_media_duration",
+            "Video duration must be at least 0.5 seconds",
+            422,
+        )
+    if duration > duration_limit:
+        if duration_limit == STANDARD_MAX_DURATION_SECONDS:
+            raise XPostError(
+                "x_long_video_requires_premium",
+                "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+                422,
+            )
+        raise XPostError(
+            "invalid_media_duration",
+            "Premium X video duration must not exceed 600 seconds",
+            422,
+        )
     if len(videos) != 1 or not audios:
         raise XPostError("invalid_media_codec", "素材必须包含一个H264视频流和AAC音频流", 422)
     video = videos[0]
@@ -8773,14 +8848,6 @@ def probe_media(path, max_bytes=DEFAULT_MAX_MEDIA_BYTES, timeout=30, runner=None
     fps = _frame_rate(video.get("avg_frame_rate") or video.get("r_frame_rate"))
     if fps <= 0 or fps > 60.0:
         raise XPostError("invalid_media_frame_rate", "素材帧率必须大于0且不超过60fps", 422)
-    format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
-    duration_value = format_data.get("duration") or video.get("duration")
-    try:
-        duration = float(duration_value)
-    except (TypeError, ValueError, OverflowError):
-        duration = 0.0
-    if duration < 0.5 or duration > 140.0:
-        raise XPostError("invalid_media_duration", "素材时长必须为0.5至140秒", 422)
     return {
         "codec": "h264",
         "pixel_format": "yuv420p",
@@ -8909,6 +8976,11 @@ class XApiClient:
 
     def upload_media(self, access_token, path, media_type="video/mp4", media_category="tweet_video"):
         path = Path(path)
+        media_category = str(media_category or "").strip()
+        if media_category not in MEDIA_CATEGORIES:
+            raise XPostError(
+                "invalid_request", "X media category is invalid", 400
+            )
         size = path.stat().st_size
         if size <= 0:
             raise XPostError("invalid_media", "待上传素材为空", 400)
@@ -9121,12 +9193,47 @@ def publish_canary(
                 "素材内容与建计划前的预检指纹不一致",
                 409,
             )
-        probe_media(media["path"], max_bytes=max_media_bytes, timeout=timeout)
+        premium_video_eligible = _account_has_premium_video_entitlement(
+            account
+        )
+        duration_limit = (
+            PREMIUM_MAX_DURATION_SECONDS
+            if premium_video_eligible
+            else STANDARD_MAX_DURATION_SECONDS
+        )
+        media_probe = probe_media(
+            media["path"],
+            max_bytes=max_media_bytes,
+            timeout=timeout,
+            max_duration_seconds=duration_limit,
+        )
+        expected_duration = float(
+            queue.get("preflight_duration", 0) or 0
+        )
+        if expected_duration > 0 and abs(
+            expected_duration - float(media_probe["duration"])
+        ) > 0.05:
+            raise XPostError(
+                "media_preflight_changed",
+                "素材时长与建计划前的预检记录不一致",
+                409,
+            )
+        media_category = (
+            PREMIUM_MEDIA_CATEGORY
+            if float(media_probe["duration"])
+            > STANDARD_MAX_DURATION_SECONDS
+            else STANDARD_MEDIA_CATEGORY
+        )
         if callable(storage_guard):
             storage_guard()
         store.mark_publishing(log["id"])
         x_client = XApiClient(http_client=http_client, sleeper=sleeper, timeout=timeout)
-        uploaded = x_client.upload_media(access_token, media["path"], media_type=media["media_type"])
+        uploaded = x_client.upload_media(
+            access_token,
+            media["path"],
+            media_type=media["media_type"],
+            media_category=media_category,
+        )
         if callable(storage_guard):
             storage_guard()
         store.mark_media_uploaded(log["id"], uploaded["media_id"])

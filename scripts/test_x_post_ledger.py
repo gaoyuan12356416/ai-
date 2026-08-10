@@ -219,7 +219,9 @@ class XPostLedgerTests(unittest.TestCase):
         repaired["material_url"] = (
             "https://media.example.com/x-post-repair/6301-output.mp4"
         )
-        repaired["media_repair_trigger_code"] = "invalid_media_duration"
+        repaired["media_repair_trigger_code"] = (
+            "x_long_video_requires_premium"
+        )
         repaired["media_repair_job_key"] = "xpost-repair:x-video-v1:6301:" + (
             "c" * 64
         )

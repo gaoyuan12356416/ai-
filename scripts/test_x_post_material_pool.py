@@ -145,10 +145,13 @@ class XPostMaterialPoolTests(unittest.TestCase):
         items = self.add("00101", "102", "103", "104")
         self.assertEqual([item["material_id"] for item in items], ["101", "102", "103", "104"])
         available = self.store.available_pool_items(10)
-        self.assertEqual([item["material_id"] for item in available], ["101", "102", "103", "104"])
+        self.assertEqual([item["material_id"] for item in available], ["104", "103", "102", "101"])
         self.assertEqual(
             [(item["created_at"], item["id"]) for item in available],
-            sorted((item["created_at"], item["id"]) for item in available),
+            sorted(
+                ((item["created_at"], item["id"]) for item in available),
+                reverse=True,
+            ),
         )
 
         duplicate = self.store.add_pool_materials(
@@ -201,20 +204,20 @@ class XPostMaterialPoolTests(unittest.TestCase):
         self.assertTrue(deleted["deleted"])
         self.assertEqual(
             [item["material_id"] for item in self.store.available_pool_items(10)],
-            ["102", "103"],
+            ["103", "102"],
         )
 
     def test_pool_plan_is_atomic_fifo_and_success_only_marks_published(self):
         items = self.add("201", "202", "203", "204")
-        reversed_candidates = [
+        out_of_order_candidates = [
             plan_candidate(account_id, pool_item)
-            for account_id, pool_item in zip((2, 3, 4), reversed(items[:3]))
+            for account_id, pool_item in zip((2, 3, 4), items[:3])
         ]
         with self.assertRaises(service.XPostError) as out_of_order:
             self.store.create_daily_plan(
                 "2026-07-23",
                 "2026-07-22",
-                reversed_candidates,
+                out_of_order_candidates,
                 require_pool=True,
             )
         self.assertEqual(out_of_order.exception.code, "invalid_request")
@@ -222,9 +225,10 @@ class XPostMaterialPoolTests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 0)
 
+        selected_items = list(reversed(items[1:]))
         candidates = [
             plan_candidate(account_id, pool_item)
-            for account_id, pool_item in zip((2, 3, 4), items[:3])
+            for account_id, pool_item in zip((2, 3, 4), selected_items)
         ]
         plan = self.store.create_daily_plan(
             "2026-07-23",
@@ -234,11 +238,11 @@ class XPostMaterialPoolTests(unittest.TestCase):
         )
         self.assertEqual(
             [queue["pool_item_id"] for queue in plan["queues"]],
-            [item["id"] for item in items[:3]],
+            [item["id"] for item in selected_items],
         )
         self.assertEqual(
             [item["material_id"] for item in self.store.available_pool_items(10)],
-            ["204"],
+            ["201"],
         )
 
         first_queue = plan["queues"][0]
@@ -250,14 +254,14 @@ class XPostMaterialPoolTests(unittest.TestCase):
             "https://ai.yingliangads.com/s2l/%s.html\nDescription" % log["id"],
         )
         self.store.mark_publishing(log["id"])
-        self.store.mark_media_uploaded(log["id"], "media-201")
+        self.store.mark_media_uploaded(log["id"], "media-204")
         self.store.mark_published(
             log["id"],
-            "media-201",
-            "9000201",
-            "https://x.com/account2/status/9000201",
+            "media-204",
+            "9000204",
+            "https://x.com/account2/status/9000204",
         )
-        published = self.store.query_pool({"material_id": "201"})["items"][0]
+        published = self.store.query_pool({"material_id": "204"})["items"][0]
         self.assertEqual(published["status"], "published")
         self.assertEqual(published["availability"], "published")
         self.assertTrue(published["published_at"])
@@ -271,7 +275,7 @@ class XPostMaterialPoolTests(unittest.TestCase):
         )
         self.store.mark_publishing(second_log["id"])
         self.store.mark_failed(second_log["id"], "x_upstream_error", "known failure")
-        failed = self.store.query_pool({"material_id": "202"})["items"][0]
+        failed = self.store.query_pool({"material_id": "203"})["items"][0]
         self.assertEqual(failed["status"], "unpublished")
         self.assertEqual(failed["availability"], "failed")
 
@@ -289,11 +293,11 @@ class XPostMaterialPoolTests(unittest.TestCase):
             "transport interrupted",
             unknown_outcome=True,
         )
-        unknown = self.store.query_pool({"material_id": "203"})["items"][0]
+        unknown = self.store.query_pool({"material_id": "202"})["items"][0]
         self.assertEqual(unknown["status"], "unpublished")
         self.assertEqual(unknown["availability"], "needs_review")
 
-        for pool_item in items[:3]:
+        for pool_item in selected_items:
             with self.assertRaises(service.XPostError) as occupied:
                 self.store.delete_pool_material(pool_item["id"])
             self.assertIn(

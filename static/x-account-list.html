@@ -215,9 +215,20 @@
           if (!query) return true;
           const ownerName = item.owner_name || item.authorized_by_name || "";
           const ownerEmail = item.owner_email || item.authorized_by_email || "";
-          return [item.display_name,item.username,item.x_user_id,ownerName,ownerEmail,item.location]
+          return [item.display_name,item.username,item.x_user_id,ownerName,ownerEmail,item.location,item.subscription_type]
             .some(value => String(value || "").toLocaleLowerCase().includes(query));
         });
+      }
+
+      function subscriptionLabel(item) {
+        const labels = {
+          basic: "X Basic",
+          premium: "X Premium",
+          premium_plus: "X Premium+",
+          none: "无会员",
+          unknown: "会员未知",
+        };
+        return labels[String(item.subscription_type || "unknown")] || "会员未知";
       }
 
       function booleanChips(item) {
@@ -225,7 +236,9 @@
         const protectedAccount = nullableBoolean(item.protected);
         const verifiedText = verified === null ? "认证 —" : (verified ? "已认证" : "未认证");
         const protectedText = protectedAccount === null ? "可见性 —" : (protectedAccount ? "受保护" : "公开账号");
-        return `<div class="chip-list"><span class="chip ${verified ? "good" : ""}">${escapeHtml(verifiedText)}</span><span class="chip">${escapeHtml(protectedText)}</span></div>`;
+        const premium = item.long_video_eligible === true;
+        const premiumText = `${subscriptionLabel(item)}${premium ? " · 可发长视频" : ""}`;
+        return `<div class="chip-list"><span class="chip ${verified ? "good" : ""}">${escapeHtml(verifiedText)}</span><span class="chip">${escapeHtml(protectedText)}</span><span class="chip ${premium ? "good" : ""}">${escapeHtml(premiumText)}</span></div>`;
       }
 
       function metricsHtml(item) {

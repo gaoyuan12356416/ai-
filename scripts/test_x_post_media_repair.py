@@ -166,6 +166,7 @@ def make_request(source=b"source-video", **overrides):
         "source_size": len(source),
         "trigger_code": "invalid_media_codec",
         "profile": media_repair.REPAIR_PROFILE,
+        "duration_policy": "standard",
     }
     payload.update(overrides)
     return payload
@@ -200,6 +201,7 @@ class MediaRepairTests(unittest.TestCase):
     def test_request_contract_is_exact_and_only_three_triggers_are_repairable(self):
         request = media_repair.validate_request(make_request())
         self.assertEqual(request["profile"], media_repair.REPAIR_PROFILE)
+        self.assertEqual(request["duration_policy"], "standard")
         self.assertEqual(request["pool_item_id"], "8")
         resource_id = "21c09b915223a0695f0a4cf85386cabd"
         resource_request = media_repair.validate_request(
@@ -237,6 +239,15 @@ class MediaRepairTests(unittest.TestCase):
         with self.assertRaises(media_repair.MediaRepairError) as caught:
             media_repair.validate_request(make_request(trigger_code="media_download_failed"))
         self.assertEqual(caught.exception.code, "trigger_not_repairable")
+        premium_request = media_repair.validate_request(
+            make_request(duration_policy="premium")
+        )
+        self.assertEqual(premium_request["duration_policy"], "premium")
+        with self.assertRaises(media_repair.MediaRepairError) as caught:
+            media_repair.validate_request(
+                make_request(duration_policy="enterprise")
+            )
+        self.assertEqual(caught.exception.code, "invalid_request")
         with self.assertRaises(media_repair.MediaRepairError) as caught:
             media_repair.validate_request(make_request(unexpected=True))
         self.assertEqual(caught.exception.code, "invalid_request")
@@ -296,6 +307,47 @@ class MediaRepairTests(unittest.TestCase):
                 "invalid_media_duration",
             )
         self.assertEqual(caught.exception.code, "source_not_repairable")
+
+    def test_premium_duration_policy_preserves_140_to_600_seconds(self):
+        premium = media_repair.inspect_source(
+            source_probe(duration="300"),
+            "invalid_media_codec",
+            "premium",
+        )
+        self.assertFalse(premium["trim_applied"])
+        self.assertEqual(premium["output_duration"], 300.0)
+        self.assertEqual(
+            premium["max_duration"],
+            media_repair.PREMIUM_MAX_DURATION_SECONDS,
+        )
+
+        premium_over_limit = media_repair.inspect_source(
+            source_probe(duration="600.001"),
+            "invalid_media_duration",
+            "premium",
+        )
+        self.assertTrue(premium_over_limit["trim_applied"])
+        self.assertEqual(
+            premium_over_limit["output_duration"],
+            media_repair.PREMIUM_TRIM_TARGET_SECONDS,
+        )
+        command = media_repair.build_ffmpeg_command(
+            make_config(self.root),
+            self.root / "source.mp4",
+            self.root / "output.mp4",
+            premium_over_limit,
+        )
+        self.assertIn("599.000", command)
+
+        standard = media_repair.inspect_source(
+            source_probe(duration="300"),
+            "invalid_media_duration",
+            "standard",
+        )
+        self.assertEqual(
+            standard["output_duration"],
+            media_repair.STANDARD_TRIM_TARGET_SECONDS,
+        )
 
     def test_ffmpeg_command_is_nvenc_cfr30_gop60_pad_without_crop_and_adds_silence(self):
         config = make_config(self.root)
@@ -402,7 +454,7 @@ class MediaRepairTests(unittest.TestCase):
                 / (request["job_key"] + ".json")
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["version"], 3)
         self.assertEqual(
             manifest["repair"],
             {

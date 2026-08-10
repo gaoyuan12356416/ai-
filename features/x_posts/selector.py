@@ -16,6 +16,7 @@ SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 DEFAULT_SCHEMA = "kunlunads_dev"
 DEFAULT_PRODUCT = "Dramawave"
 DEFAULT_DRAMAWAVE_APP_ID = 1479
+MAX_X_SOURCE_DURATION_SECONDS = 600
 MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
@@ -277,7 +278,15 @@ class DramawaveCandidateSelector:
         return _cursor_rows(
             self.connection,
             sql,
-            (product, source_date, 2, 0, 1, 140, int(scan_limit)),
+            (
+                product,
+                source_date,
+                2,
+                0,
+                1,
+                MAX_X_SOURCE_DURATION_SECONDS,
+                int(scan_limit),
+            ),
         )
 
     def _violation_counts(self, material_id):
@@ -347,7 +356,14 @@ class DramawaveCandidateSelector:
         return _cursor_rows(
             self.connection,
             sql,
-            (material_id, DEFAULT_PRODUCT, 2, 0, 1, 140),
+            (
+                material_id,
+                DEFAULT_PRODUCT,
+                2,
+                0,
+                1,
+                MAX_X_SOURCE_DURATION_SECONDS,
+            ),
         )
 
     def _pool_drama_rows(self, content_id, language):
@@ -759,7 +775,7 @@ class DramawaveCandidateSelector:
         return selected
 
     def select_pool(self, pool_items, source_date, limit=3):
-        """Hydrate the oldest safe manual-pool items.
+        """Hydrate the newest safe manual-pool items.
 
         Pool order is determined exclusively by ``created_at`` then ``id``.
         A data-quality or safety rejection is returned per item, while a
@@ -826,7 +842,7 @@ class DramawaveCandidateSelector:
                     "sort_key": (created_timestamp, pool_item_id, position),
                 }
             )
-        prepared.sort(key=lambda item: item["sort_key"])
+        prepared.sort(key=lambda item: item["sort_key"], reverse=True)
 
         selected = []
         seen_pool_ids = set()
@@ -912,7 +928,7 @@ def select_pool_candidates(
     schema=DEFAULT_SCHEMA,
     now=None,
 ):
-    """Hydrate manual-pool materials in oldest-first order.
+    """Hydrate manual-pool materials in newest-first order.
 
     Returns ``(candidates, rejections)``. Rejections are safe item-level
     outcomes; a :class:`CandidateQueryError` still aborts the whole call.
@@ -970,7 +986,15 @@ def ranked_material_ids(
     rows = _cursor_rows(
         connection,
         sql,
-        (product, source_date, 2, 0, 1, 140, scan_limit),
+        (
+            product,
+            source_date,
+            2,
+            0,
+            1,
+            MAX_X_SOURCE_DURATION_SECONDS,
+            scan_limit,
+        ),
     )
     values = []
     seen = set()

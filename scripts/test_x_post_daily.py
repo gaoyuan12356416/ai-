@@ -638,6 +638,7 @@ class RunnerTests(unittest.TestCase):
             "source_size": 5,
             "trigger_code": "invalid_media_codec",
             "profile": DEFAULT_REPAIR_PROFILE,
+            "duration_policy": "standard",
         }
         opener = CaptureOpener()
         client = MediaRepairClient(
@@ -693,6 +694,7 @@ class RunnerTests(unittest.TestCase):
             "source_size": 5,
             "trigger_code": "invalid_media_codec",
             "profile": DEFAULT_REPAIR_PROFILE,
+            "duration_policy": "standard",
         }
 
         with self.assertRaises(MediaRepairError) as caught:
@@ -748,6 +750,7 @@ class RunnerTests(unittest.TestCase):
             "source_size": 5,
             "trigger_code": "invalid_media_codec",
             "profile": DEFAULT_REPAIR_PROFILE,
+            "duration_policy": "standard",
         }
         oversized = MediaRepairClient(
             "http://127.0.0.1:18799/internal/x-post-media-repair",
@@ -1305,7 +1308,7 @@ class RunnerTests(unittest.TestCase):
             Path(destination).write_bytes(b"video")
             return {"size": 5, "sha256": "a" * 64, "media_type": "video/mp4"}
 
-        def prober(path, max_bytes, timeout):
+        def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
             preflight_events.append(("probe", Path(path).name))
             return {"duration": 30.0, "width": 720, "height": 1280}
 
@@ -1700,6 +1703,142 @@ class RunnerTests(unittest.TestCase):
         downloaded_urls = [event[1] for event in preflight if event[0] == "download"]
         self.assertFalse(any("/10.mp4" in url for url in downloaded_urls))
 
+    def test_long_material_routes_only_to_token_confirmed_premium_account(self):
+        config = test_config()
+        accounts = [
+            {
+                "id": 2,
+                "username": "premium2",
+                "x_user_id": "2002",
+                "display_name": "Premium 2",
+                "subscription_type": "premium",
+                "long_video_eligible": True,
+            },
+            {
+                "id": 3,
+                "username": "standard3",
+                "x_user_id": "2003",
+                "display_name": "Standard 3",
+                "subscription_type": "none",
+                "long_video_eligible": False,
+            },
+            {
+                "id": 4,
+                "username": "standard4",
+                "x_user_id": "2004",
+                "display_name": "Standard 4",
+                "subscription_type": "unknown",
+                "long_video_eligible": False,
+            },
+        ]
+        probes = []
+
+        def downloader(_url, destination, _hosts, max_bytes, timeout):
+            Path(destination).write_bytes(b"video")
+            return {
+                "size": 5,
+                "sha256": "a" * 64,
+                "media_type": "video/mp4",
+            }
+
+        def prober(
+            path, max_bytes, timeout, max_duration_seconds=140.0
+        ):
+            material_id = Path(path).stem
+            probes.append((material_id, max_duration_seconds))
+            if material_id == "10" and max_duration_seconds == 140.0:
+                raise XPostError(
+                    "x_long_video_requires_premium",
+                    "premium required",
+                    422,
+                )
+            return {
+                "duration": 180.0 if material_id == "10" else 30.0,
+                "width": 720,
+                "height": 1280,
+            }
+
+        accepted, failures = _preflight_candidates(
+            config,
+            [candidate(10, 400), candidate(11, 300), candidate(12, 200)],
+            accounts,
+            1784772000,
+            downloader,
+            prober,
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            [(item["account_id"], item["material_id"]) for item in accepted],
+            [(2, "10"), (3, "11"), (4, "12")],
+        )
+        self.assertEqual(
+            probes,
+            [
+                ("10", 140.0),
+                ("10", 600.0),
+                ("11", 140.0),
+                ("12", 140.0),
+            ],
+        )
+
+    def test_long_material_without_premium_stays_retryable_and_short_items_fill(self):
+        config = test_config()
+        accounts = [
+            {
+                "id": account_id,
+                "username": "standard%s" % account_id,
+                "x_user_id": "200%s" % account_id,
+                "display_name": "Standard %s" % account_id,
+                "subscription_type": "none",
+                "long_video_eligible": False,
+            }
+            for account_id in (2, 3, 4)
+        ]
+
+        def downloader(_url, destination, _hosts, max_bytes, timeout):
+            Path(destination).write_bytes(b"video")
+            return {
+                "size": 5,
+                "sha256": "a" * 64,
+                "media_type": "video/mp4",
+            }
+
+        def prober(
+            path, max_bytes, timeout, max_duration_seconds=140.0
+        ):
+            if Path(path).stem == "10":
+                raise XPostError(
+                    "x_long_video_requires_premium",
+                    "premium required",
+                    422,
+                )
+            return {"duration": 30.0, "width": 720, "height": 1280}
+
+        accepted, failures = _preflight_candidates(
+            config,
+            [
+                candidate(10, 400),
+                candidate(11, 300),
+                candidate(12, 200),
+                candidate(13, 100),
+            ],
+            accounts,
+            1784772000,
+            downloader,
+            prober,
+        )
+
+        self.assertEqual(
+            [item["material_id"] for item in accepted],
+            ["11", "12", "13"],
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(
+            failures[0]["error_code"],
+            "x_long_video_requires_premium",
+        )
+
     def test_rejected_media_is_deleted_before_next_candidate_download(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = replace(test_config(), work_dir=temporary)
@@ -1727,7 +1866,7 @@ class RunnerTests(unittest.TestCase):
                 peak_files[0] = max(peak_files[0], len(list(root.glob("*.mp4"))))
                 return {"size": 5, "sha256": "a" * 64, "media_type": "video/mp4"}
 
-            def prober(path, max_bytes, timeout):
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
                 if Path(path).stem in {"10", "11"}:
                     raise XPostError("invalid_media_codec", "rejected", 422)
                 return {"duration": 30.0, "width": 720, "height": 1280}
@@ -1797,7 +1936,7 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout):
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
                 if (
                     Path(path).read_bytes() == b"video"
                     and Path(path).stem == drama_resource_id
@@ -1859,11 +1998,13 @@ class RunnerTests(unittest.TestCase):
                 "source_size",
                 "trigger_code",
                 "profile",
+                "duration_policy",
             },
         )
         self.assertEqual(repair_payload["pool_item_id"], 10)
         self.assertEqual(repair_payload["material_id"], drama_resource_id)
         self.assertEqual(repair_payload["source_size"], 5)
+        self.assertEqual(repair_payload["duration_policy"], "standard")
         self.assertTrue(
             re.fullmatch(
                 r"[a-f0-9]{64}", repaired["media_repair_job_key"]
@@ -1911,7 +2052,7 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout):
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
                 material_id = Path(path).stem
                 if Path(path).read_bytes() == b"video" and material_id in {"10", "11"}:
                     raise XPostError(
@@ -1988,7 +2129,7 @@ class RunnerTests(unittest.TestCase):
                     "media_type": "video/mp4",
                 }
 
-            def prober(path, max_bytes, timeout):
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
                 if Path(path).stem == "10" and Path(path).read_bytes() == b"video":
                     raise XPostError(
                         "invalid_media_codec", "bad codec", 422
@@ -2044,7 +2185,7 @@ class RunnerTests(unittest.TestCase):
                 Path(destination).write_bytes(b"video")
                 return {"size": 5, "sha256": "a" * 64, "media_type": "video/mp4"}
 
-            def prober(_path, max_bytes, timeout):
+            def prober(_path, max_bytes, timeout, max_duration_seconds=140.0):
                 return {"duration": 30.0, "width": 720, "height": 1280}
 
             accepted, failures = _preflight_candidates(

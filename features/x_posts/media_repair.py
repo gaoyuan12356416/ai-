@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - exercised only outside Linux.
     fcntl = None
 
 
-REPAIR_PROFILE = "x-h264-nvenc-720-trim139-v2"
+REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v3"
 REPAIR_PATH = "/internal/x-post-media-repair"
 HEALTH_PATH = "/health"
 REPAIRABLE_TRIGGER_CODES = frozenset(
@@ -50,8 +50,23 @@ REPAIRABLE_TRIGGER_CODES = frozenset(
     }
 )
 MIN_DURATION_SECONDS = 0.5
-MAX_DURATION_SECONDS = 140.0
-TRIM_TARGET_SECONDS = 139.0
+STANDARD_MAX_DURATION_SECONDS = 140.0
+PREMIUM_MAX_DURATION_SECONDS = 600.0
+STANDARD_TRIM_TARGET_SECONDS = 139.0
+PREMIUM_TRIM_TARGET_SECONDS = 599.0
+# Backward-compatible names remain the strict standard-account contract.
+MAX_DURATION_SECONDS = STANDARD_MAX_DURATION_SECONDS
+TRIM_TARGET_SECONDS = STANDARD_TRIM_TARGET_SECONDS
+DURATION_POLICIES = {
+    "standard": (
+        STANDARD_MAX_DURATION_SECONDS,
+        STANDARD_TRIM_TARGET_SECONDS,
+    ),
+    "premium": (
+        PREMIUM_MAX_DURATION_SECONDS,
+        PREMIUM_TRIM_TARGET_SECONDS,
+    ),
+}
 TRIM_DURATION_TOLERANCE_SECONDS = 0.5
 REQUEST_FIELDS = frozenset(
     {
@@ -63,6 +78,7 @@ REQUEST_FIELDS = frozenset(
         "source_size",
         "trigger_code",
         "profile",
+        "duration_policy",
     }
 )
 HEX_64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -501,6 +517,13 @@ def validate_request(payload, profile=REPAIR_PROFILE):
             "repair profile does not match the worker",
             409,
         )
+    duration_policy = str(payload.get("duration_policy") or "").strip().lower()
+    if duration_policy not in DURATION_POLICIES:
+        raise MediaRepairError(
+            "invalid_request",
+            "duration_policy must be standard or premium",
+            400,
+        )
     return {
         "job_key": job_key,
         "material_id": material_id,
@@ -510,6 +533,7 @@ def validate_request(payload, profile=REPAIR_PROFILE):
         "source_size": _parse_source_size(payload.get("source_size")),
         "trigger_code": trigger_code,
         "profile": request_profile,
+        "duration_policy": duration_policy,
     }
 
 
@@ -613,7 +637,13 @@ def _rotation(video):
     return 0
 
 
-def inspect_source(payload, trigger_code=""):
+def inspect_source(payload, trigger_code="", duration_policy="standard"):
+    duration_policy = str(duration_policy or "").strip().lower()
+    if duration_policy not in DURATION_POLICIES:
+        raise MediaRepairError(
+            "invalid_request", "duration policy is invalid", 400
+        )
+    max_duration, trim_target = DURATION_POLICIES[duration_policy]
     videos = _streams(payload, "video")
     if len(videos) != 1:
         raise MediaRepairError(
@@ -667,7 +697,7 @@ def inspect_source(payload, trigger_code=""):
             "source duration is outside the X post contract",
             422,
         )
-    trim_applied = duration > MAX_DURATION_SECONDS
+    trim_applied = duration > max_duration
     if (
         str(trigger_code or "") == "invalid_media_duration"
         and not trim_applied
@@ -685,9 +715,12 @@ def inspect_source(payload, trigger_code=""):
         "rotation": rotation,
         "duration": duration,
         "output_duration": (
-            TRIM_TARGET_SECONDS if trim_applied else duration
+            trim_target if trim_applied else duration
         ),
         "trim_applied": trim_applied,
+        "duration_policy": duration_policy,
+        "max_duration": max_duration,
+        "trim_target": trim_target,
         "frame_rate": frame_rate,
         "has_audio": bool(_streams(payload, "audio")),
         "canvas": canvas,
@@ -778,7 +811,7 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
     if not source_info["has_audio"]:
         command.append("-shortest")
     if source_info.get("trim_applied"):
-        command.extend(["-t", "%.3f" % TRIM_TARGET_SECONDS])
+        command.extend(["-t", "%.3f" % source_info["trim_target"]])
     command.append(str(output_path))
     return command
 
@@ -803,7 +836,21 @@ def validate_output(
     max_output_bytes,
     expected_duration=None,
     trim_applied=False,
+    max_duration_seconds=STANDARD_MAX_DURATION_SECONDS,
 ):
+    try:
+        max_duration_seconds = float(max_duration_seconds)
+    except (TypeError, ValueError, OverflowError):
+        raise MediaRepairError(
+            "invalid_configuration", "output duration policy is invalid", 500
+        ) from None
+    if max_duration_seconds not in {
+        STANDARD_MAX_DURATION_SECONDS,
+        PREMIUM_MAX_DURATION_SECONDS,
+    }:
+        raise MediaRepairError(
+            "invalid_configuration", "output duration policy is invalid", 500
+        )
     videos = _streams(payload, "video")
     audios = _streams(payload, "audio")
     if len(videos) != 1 or len(audios) != 1:
@@ -858,7 +905,7 @@ def validate_output(
         )
     format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
     duration = _positive_number(format_data.get("duration") or video.get("duration"))
-    if duration < MIN_DURATION_SECONDS or duration > MAX_DURATION_SECONDS:
+    if duration < MIN_DURATION_SECONDS or duration > max_duration_seconds:
         raise MediaRepairError(
             "repaired_media_invalid",
             "repaired media duration is outside the X post contract",
@@ -1232,6 +1279,7 @@ class MediaRepairProcessor:
             source_info = inspect_source(
                 source_probe,
                 request["trigger_code"],
+                request["duration_policy"],
             )
             command = build_ffmpeg_command(
                 self.config,
@@ -1260,6 +1308,7 @@ class MediaRepairProcessor:
                 self.config.max_output_bytes,
                 expected_duration=source_info["output_duration"],
                 trim_applied=source_info["trim_applied"],
+                max_duration_seconds=source_info["max_duration"],
             )
             if probe["size"] != output_size:
                 raise MediaRepairError(
@@ -1279,7 +1328,7 @@ class MediaRepairProcessor:
                 "probe": probe,
             }
             manifest = {
-                "version": 2,
+                "version": 3,
                 "status": "ready",
                 "request": request,
                 "cos_key": cos_key,

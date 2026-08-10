@@ -517,6 +517,79 @@ class XAccountsTestCase(unittest.TestCase):
         unsafe = self.complete(x_user_id="777777779", username="bad/name")
         self.assertEqual(unsafe["profile_url"], "")
 
+    def test_token_subscription_snapshot_controls_long_video_eligibility(self):
+        self.assertIn("subscription_type", service.USER_FIELDS)
+        self.assertEqual(
+            {
+                value: (
+                    service.normalize_subscription_type(value),
+                    service.is_premium_subscriber(value),
+                )
+                for value in (
+                    "None",
+                    "Basic",
+                    "Premium",
+                    "PremiumPlus",
+                    "FutureTier",
+                )
+            },
+            {
+                "None": ("none", False),
+                "Basic": ("basic", True),
+                "Premium": ("premium", True),
+                "PremiumPlus": ("premium_plus", True),
+                "FutureTier": ("unknown", False),
+            },
+        )
+        item = self.complete(
+            x_user_id="990000001",
+            username="premium_user",
+            account_fields={"subscription_type": "PremiumPlus"},
+        )
+        self.assertEqual(item["subscription_type"], "premium_plus")
+        self.assertIs(item["premium_subscriber"], True)
+        self.assertIs(item["long_video_eligible"], True)
+        self.assertIs(item["long_video_publish_eligible"], True)
+        service._require_candidate_duration_capability(
+            {"preflight_duration": 140.001}, item
+        )
+
+        refreshed_profile = {
+            "data": {
+                "id": item["x_user_id"],
+                "username": item["username"],
+                "name": item["display_name"],
+                "subscription_type": "Basic",
+            }
+        }
+        with mock.patch.object(
+            service, "user_request", return_value=refreshed_profile
+        ):
+            refreshed = service.verify_account(item["id"], self.owner)
+        self.assertEqual(refreshed["subscription_type"], "basic")
+        self.assertIs(refreshed["long_video_eligible"], True)
+
+        # A successful token check without the field must clear an older
+        # entitlement instead of retaining stale Premium state.
+        refreshed_profile["data"].pop("subscription_type")
+        with mock.patch.object(
+            service, "user_request", return_value=refreshed_profile
+        ):
+            downgraded = service.verify_account(item["id"], self.owner)
+        self.assertEqual(downgraded["subscription_type"], "unknown")
+        self.assertIs(downgraded["long_video_eligible"], False)
+        self.assertIs(downgraded["long_video_publish_eligible"], False)
+        with self.assertRaises(service.ServiceError) as caught:
+            service._require_candidate_duration_capability(
+                {"preflight_duration": 140.001}, downgraded
+            )
+        self.assertEqual(
+            caught.exception.code, "x_long_video_requires_premium"
+        )
+        service._require_candidate_duration_capability(
+            {"preflight_duration": 140.0}, downgraded
+        )
+
     def test_missing_scope_is_visible(self):
         granted = "tweet.read tweet.write users.read offline.access"
         item = self.complete(scope=granted)
@@ -577,6 +650,7 @@ class XAccountsTestCase(unittest.TestCase):
                 "followers_count",
                 "like_count",
                 "media_count",
+                "subscription_type",
                 "profile_synced_at",
                 "disconnected_at",
                 "publish_approved",
@@ -2045,7 +2119,7 @@ class XAccountsTestCase(unittest.TestCase):
             self.assertEqual(queried_pool["pagination"]["total"], 2)
             self.assertEqual(
                 [item["material_id"] for item in queried_pool["items"]],
-                ["8001", "8002"],
+                ["8002", "8001"],
             )
             checked_pool = client.record_x_post_material_pool_checks(
                 [

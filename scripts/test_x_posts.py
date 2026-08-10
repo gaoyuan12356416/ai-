@@ -72,6 +72,7 @@ def candidate(account_id=2, username="ShortsDramhx"):
 
 def valid_probe_payload(width=720, height=1280, fps="30000/1001", duration="45.25"):
     return {
+        "duration": duration,
         "streams": [
             {
                 "codec_type": "video",
@@ -116,6 +117,7 @@ class XPostsTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT value FROM sentinel").fetchone()[0], "keep")
             columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
             self.assertIn("account_username", columns)
+            self.assertIn("preflight_duration", columns)
             self.assertNotIn("source_queue_id", columns)
 
     def test_daily_plan_accepts_nine_candidates_with_dynamic_expected_count(self):
@@ -609,6 +611,21 @@ class XPostsTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "invalid_media_frame_rate")
         with self.assertRaises(service.XPostError) as caught:
             service.probe_media(media, runner=runner_for(valid_probe_payload(duration="140.1")))
+        self.assertEqual(
+            caught.exception.code, "x_long_video_requires_premium"
+        )
+        premium_result = service.probe_media(
+            media,
+            runner=runner_for(valid_probe_payload(duration="599.9")),
+            max_duration_seconds=service.PREMIUM_MAX_DURATION_SECONDS,
+        )
+        self.assertEqual(premium_result["duration"], 599.9)
+        with self.assertRaises(service.XPostError) as caught:
+            service.probe_media(
+                media,
+                runner=runner_for(valid_probe_payload(duration="600.1")),
+                max_duration_seconds=service.PREMIUM_MAX_DURATION_SECONDS,
+            )
         self.assertEqual(caught.exception.code, "invalid_media_duration")
         with self.assertRaises(service.XPostError) as caught:
             service.probe_media(media, runner=runner_for(valid_probe_payload(width=1080, height=1920)))
@@ -917,6 +934,117 @@ class XPostsTests(unittest.TestCase):
         self.assertIn("yingliang_post_CLV_VL_ShortsDramhx*", c_value)
         self.assertEqual(af_c_id, str(queue["id"]))
         self.assertNotIn("secret-token", dump)
+
+    def test_premium_long_publish_uses_amplify_video_category(self):
+        queue = self.enqueue(preflight_duration=180.0)
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                ),
+                response(200, {"data": {"id": "long-media"}}),
+                response(200, {"data": {"expires_at": 1}}),
+                response(200, {"data": {"id": "long-media"}}),
+                response(201, {"data": {"id": "190003", "text": "ok"}}),
+            ]
+        )
+        with mock.patch.object(
+            service,
+            "probe_media",
+            return_value={"duration": 180.0},
+        ) as probe:
+            result = service.publish_canary(
+                db_path=self.db_path,
+                queue_id=queue["id"],
+                account={
+                    "id": 2,
+                    "username": "ShortsDramhx",
+                    "subscription_type": "premium",
+                },
+                access_token="secret-token",
+                public_root=self.root / "long-public" / "s2l",
+                short_base_url="https://gy.g2flow.com/s2l",
+                allowed_media_hosts=["media.example.com"],
+                http_client=client,
+                sleeper=lambda _seconds: None,
+                timeout=5,
+            )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(
+            probe.call_args.kwargs["max_duration_seconds"],
+            service.PREMIUM_MAX_DURATION_SECONDS,
+        )
+        initialize = next(
+            request
+            for request in client.requests
+            if request["url"].endswith("/2/media/upload/initialize")
+        )
+        self.assertEqual(
+            json.loads(initialize["body"].decode("utf-8"))["media_category"],
+            "amplify_video",
+        )
+
+    def test_nonpremium_long_publish_fails_before_media_upload(self):
+        queue = self.enqueue(material_id="88009", preflight_duration=180.0)
+        client = ScriptedHttpClient(
+            [
+                service.HttpResponse(
+                    200,
+                    {"content-type": "video/mp4", "content-length": "5"},
+                    body=b"video",
+                )
+            ]
+        )
+
+        def fail_closed_probe(*_args, **kwargs):
+            self.assertEqual(
+                kwargs["max_duration_seconds"],
+                service.STANDARD_MAX_DURATION_SECONDS,
+            )
+            raise service.XPostError(
+                "x_long_video_requires_premium",
+                "premium required",
+                422,
+            )
+
+        with mock.patch.object(
+            service, "probe_media", side_effect=fail_closed_probe
+        ):
+            with self.assertRaises(service.XPostError) as caught:
+                service.publish_canary(
+                    db_path=self.db_path,
+                    queue_id=queue["id"],
+                    account={
+                        "id": 2,
+                        "username": "ShortsDramhx",
+                        "subscription_type": "none",
+                    },
+                    access_token="secret-token",
+                    public_root=self.root / "standard-public" / "s2l",
+                    short_base_url="https://gy.g2flow.com/s2l",
+                    allowed_media_hosts=["media.example.com"],
+                    http_client=client,
+                    timeout=5,
+                )
+        self.assertEqual(
+            caught.exception.code, "x_long_video_requires_premium"
+        )
+        self.assertEqual(len(client.requests), 1)
+        self.assertFalse(
+            any(
+                request["url"].endswith("/2/media/upload/initialize")
+                for request in client.requests
+            )
+        )
+
+    def test_long_video_validation_code_keeps_material_retryable(self):
+        self.assertFalse(
+            service._material_validation_is_blocking(
+                "x_long_video_requires_premium"
+            )
+        )
 
     def test_short_link_preparation_failure_does_not_leave_reserved_log(self):
         queue = self.enqueue(material_id="88004")

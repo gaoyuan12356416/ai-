@@ -363,7 +363,7 @@ def run_new_catchup(sidecar, *, config=None, loaded_candidates=None):
             "media_type": "video/mp4",
         }
 
-    def prober(path, max_bytes, timeout):
+    def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
         preflight_events.append(("probe", Path(path).name))
         return {"duration": 30.0, "width": 720, "height": 1280}
 

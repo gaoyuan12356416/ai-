@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -42,7 +43,9 @@ USER_FIELDS = (
     "verified",
     "protected",
     "location",
+    "subscription_type",
 )
+PREMIUM_SUBSCRIPTION_TYPES = frozenset({"basic", "premium", "premium_plus"})
 USERS_ME_URL = "https://api.x.com/2/users/me?" + urllib.parse.urlencode(
     {"user.fields": ",".join(USER_FIELDS)}
 )
@@ -279,6 +282,7 @@ def ensure_storage():
                     media_count INTEGER,
                     verified INTEGER,
                     protected INTEGER,
+                    subscription_type TEXT NOT NULL DEFAULT 'unknown',
                     location TEXT,
                     x_created_at TEXT,
                     profile_synced_at TEXT NOT NULL DEFAULT '',
@@ -330,6 +334,7 @@ def ensure_storage():
                 "media_count": "INTEGER",
                 "verified": "INTEGER",
                 "protected": "INTEGER",
+                "subscription_type": "TEXT NOT NULL DEFAULT 'unknown'",
                 "location": "TEXT",
                 "x_created_at": "TEXT",
                 "profile_synced_at": "TEXT NOT NULL DEFAULT ''",
@@ -711,6 +716,30 @@ def optional_clean_text(value, limit):
     return clean_text(value, limit)
 
 
+def normalize_subscription_type(value):
+    """Normalize X's token-scoped Premium entitlement to a fail-closed value."""
+    normalized = (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    aliases = {
+        "none": "none",
+        "basic": "basic",
+        "premium": "premium",
+        "premiumplus": "premium_plus",
+        "premium_plus": "premium_plus",
+        "premium+": "premium_plus",
+    }
+    return aliases.get(normalized, "unknown")
+
+
+def is_premium_subscriber(value):
+    return normalize_subscription_type(value) in PREMIUM_SUBSCRIPTION_TYPES
+
+
 def profile_snapshot(account, previous=None, timestamp=None):
     account = account if isinstance(account, dict) else {}
     previous = previous or {}
@@ -726,6 +755,13 @@ def profile_snapshot(account, previous=None, timestamp=None):
             result[field] = previous.get(field)
     result["verified"] = optional_bool(account.get("verified")) if "verified" in account else previous.get("verified")
     result["protected"] = optional_bool(account.get("protected")) if "protected" in account else previous.get("protected")
+    # /users/me is authenticated. Missing or unrecognized entitlement data must
+    # not retain an older Premium value because that could authorize a long post.
+    result["subscription_type"] = normalize_subscription_type(
+        account.get("subscription_type")
+        if "subscription_type" in account
+        else None
+    )
     result["location"] = optional_clean_text(account.get("location"), 255) if "location" in account else previous.get("location")
     result["x_created_at"] = optional_clean_text(account.get("created_at"), 64) if "created_at" in account else previous.get("x_created_at")
     result["profile_synced_at"] = timestamp or iso_utc()
@@ -793,7 +829,7 @@ def complete_authorization(code, raw_state):
                 "authorized_by_user_id", "authorized_by_name", "authorized_by_email",
                 "owner_tenant_key", "owner_user_id", "owner_name", "owner_email",
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
-                "verified", "protected", "location", "x_created_at", "profile_synced_at",
+                "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at",
                 "disconnected_at", "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name",
                 "created_at", "updated_at",
             )
@@ -805,7 +841,8 @@ def complete_authorization(code, raw_state):
                 actor["email"], actor["tenant_key"], actor["user_id"], actor["name"], actor["email"],
                 profile["followers_count"], profile["following_count"], profile["tweet_count"],
                 profile["listed_count"], profile["like_count"], profile["media_count"], profile["verified"],
-                profile["protected"], profile["location"], profile["x_created_at"], profile["profile_synced_at"],
+                profile["protected"], profile["subscription_type"], profile["location"], profile["x_created_at"],
+                profile["profile_synced_at"],
                 "", "", "", "", timestamp, timestamp,
             )
             update_columns = (
@@ -813,7 +850,7 @@ def complete_authorization(code, raw_state):
                 "status", "last_authorized_at", "access_expires_at", "last_token_refresh_at", "last_verified_at",
                 "last_error_at", "last_error", "authorized_by_user_id", "authorized_by_name", "authorized_by_email",
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
-                "verified", "protected", "location", "x_created_at", "profile_synced_at", "disconnected_at",
+                "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at", "disconnected_at",
                 "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at",
             )
             try:
@@ -875,6 +912,16 @@ def row_to_item(row):
     item["publish_approved"] = publish_approved
     item["credential_publish_eligible"] = status == "active"
     item["publish_eligible"] = status == "active" and publish_approved
+    item["subscription_type"] = normalize_subscription_type(
+        item.get("subscription_type")
+    )
+    item["premium_subscriber"] = is_premium_subscriber(
+        item["subscription_type"]
+    )
+    item["long_video_eligible"] = item["premium_subscriber"]
+    item["long_video_publish_eligible"] = (
+        item["publish_eligible"] and item["long_video_eligible"]
+    )
     item["daily_auto_publish_configured"] = (
         int(item.get("id") or 0) in DAILY_ACCOUNT_IDS
     )
@@ -1113,7 +1160,7 @@ def verify_account(
                         UPDATE x_authorized_account SET username=?,display_name=?,profile_image_url=?,scopes_json=?,status=?,
                             access_expires_at=?,last_token_refresh_at=?,last_verified_at=?,last_error_at='',last_error='',
                             followers_count=?,following_count=?,tweet_count=?,listed_count=?,like_count=?,media_count=?,
-                            verified=?,protected=?,location=?,x_created_at=?,profile_synced_at=?,updated_at=?
+                            verified=?,protected=?,subscription_type=?,location=?,x_created_at=?,profile_synced_at=?,updated_at=?
                         WHERE id=?
                         """,
                         (
@@ -1123,7 +1170,7 @@ def verify_account(
                             json.dumps(scopes), status, expires_at, refresh_at, timestamp,
                             profile["followers_count"], profile["following_count"], profile["tweet_count"],
                             profile["listed_count"], profile["like_count"], profile["media_count"], profile["verified"],
-                            profile["protected"], profile["location"], profile["x_created_at"],
+                            profile["protected"], profile["subscription_type"], profile["location"], profile["x_created_at"],
                             profile["profile_synced_at"], timestamp, account_id,
                         ),
                     )
@@ -1675,6 +1722,28 @@ def _daily_account_scope(allowed_account_ids):
     return values
 
 
+def _require_candidate_duration_capability(candidate, account):
+    raw_duration = candidate.get("preflight_duration", 0)
+    try:
+        duration = float(raw_duration or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError(
+            "invalid_request", "preflight_duration is invalid", 400
+        ) from None
+    if not math.isfinite(duration) or duration < 0:
+        raise ServiceError(
+            "invalid_request", "preflight_duration is invalid", 400
+        )
+    if duration > 140.0 and not account.get(
+        "long_video_publish_eligible"
+    ):
+        raise ServiceError(
+            "x_long_video_requires_premium",
+            "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+            409,
+        )
+
+
 def _active_schedule_account_scope():
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
@@ -1723,6 +1792,7 @@ def create_daily_plan_request(
         account = find_account(account_id)
         if account.get("status") != "active" or not account.get("publish_eligible"):
             raise ServiceError("x_account_not_publishable", "X账号当前状态不可用于发布", 409)
+        _require_candidate_duration_capability(raw, account)
         candidate = dict(raw)
         candidate.update(
             {
@@ -1948,6 +2018,7 @@ def create_catchup_plan_request(
                 "X catch-up target account is not publishable",
                 409,
             )
+        _require_candidate_duration_capability(raw, account)
         candidate = dict(raw)
         candidate.update(
             {
@@ -2291,6 +2362,18 @@ def post_schedule_account_options_request(payload, navigation_item):
                 "status": str(account.get("status", "") or ""),
                 "publish_eligible": bool(
                     account.get("publish_eligible")
+                ),
+                "subscription_type": str(
+                    account.get("subscription_type", "unknown") or "unknown"
+                ),
+                "premium_subscriber": bool(
+                    account.get("premium_subscriber")
+                ),
+                "long_video_eligible": bool(
+                    account.get("long_video_eligible")
+                ),
+                "long_video_publish_eligible": bool(
+                    account.get("long_video_publish_eligible")
                 ),
             }
         )
@@ -2700,6 +2783,7 @@ def create_post_schedule_plan_request(payload):
                 "X账号当前状态不可用于发布",
                 409,
             )
+        _require_candidate_duration_capability(candidate, account)
         item = dict(candidate)
         item.update(
             {

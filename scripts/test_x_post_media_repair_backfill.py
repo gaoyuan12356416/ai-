@@ -126,7 +126,7 @@ def media_downloader(url, destination, _hosts, max_bytes, timeout):
     }
 
 
-def media_prober(path, max_bytes, timeout):
+def media_prober(path, max_bytes, timeout, max_duration_seconds=140.0):
     if Path(path).read_bytes() == b"video":
         raise XPostError("invalid_media_codec", "bad codec", 422)
     return {

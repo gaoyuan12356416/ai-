@@ -34,6 +34,9 @@ from features.x_posts.selector import (  # noqa: E402
     shanghai_now,
 )
 from features.x_posts.service import (  # noqa: E402
+    PREMIUM_MAX_DURATION_SECONDS,
+    PREMIUM_SUBSCRIPTION_TYPES,
+    STANDARD_MAX_DURATION_SECONDS,
     XPostError,
     build_post_text,
     build_w2a_url,
@@ -56,7 +59,7 @@ REPAIRABLE_MEDIA_CODES = frozenset(
         "invalid_media_duration",
     }
 )
-DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-trim139-v2"
+DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v3"
 MAX_DAILY_ACCOUNTS = 50
 POSITIVE_REPAIR_MATERIAL_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
 DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
@@ -382,7 +385,26 @@ def _finite_number(value):
     return normalized if math.isfinite(normalized) else None
 
 
-def _validate_repair_probe(raw, output_size):
+def _validate_repair_probe(
+    raw, output_size, max_duration_seconds=STANDARD_MAX_DURATION_SECONDS
+):
+    try:
+        max_duration_seconds = float(max_duration_seconds)
+    except (TypeError, ValueError, OverflowError):
+        raise MediaRepairError(
+            "x_post_media_repair_invalid_response",
+            "X media repair duration policy is invalid",
+            502,
+        ) from None
+    if max_duration_seconds not in {
+        STANDARD_MAX_DURATION_SECONDS,
+        PREMIUM_MAX_DURATION_SECONDS,
+    }:
+        raise MediaRepairError(
+            "x_post_media_repair_invalid_response",
+            "X media repair duration policy is invalid",
+            502,
+        )
     if not isinstance(raw, dict):
         raise MediaRepairError(
             "x_post_media_repair_invalid_response",
@@ -421,7 +443,7 @@ def _validate_repair_probe(raw, output_size):
         or frame_rate > 60
         or duration is None
         or duration < 0.5
-        or duration > 140
+        or duration > max_duration_seconds
         or str(raw.get("codec", "") or "").lower() != "h264"
         or str(raw.get("pixel_format", "") or "").lower() != "yuv420p"
         or str(raw.get("audio_codec", "") or "").lower() != "aac"
@@ -482,6 +504,15 @@ class MediaRepairClient:
                 400,
             )
         payload = dict(payload)
+        duration_policy = str(
+            payload.get("duration_policy", "") or ""
+        ).strip().lower()
+        if duration_policy not in {"standard", "premium"}:
+            raise MediaRepairError(
+                "x_post_media_repair_invalid_request",
+                "X media repair duration policy is invalid",
+                400,
+            )
         payload["material_id"] = _normalize_repair_material_id(
             payload.get("material_id")
         )
@@ -598,7 +629,15 @@ class MediaRepairClient:
                 "X media repair worker response identity is invalid",
                 502,
             )
-        probe = _validate_repair_probe(data.get("probe"), output_size)
+        probe = _validate_repair_probe(
+            data.get("probe"),
+            output_size,
+            max_duration_seconds=(
+                PREMIUM_MAX_DURATION_SECONDS
+                if duration_policy == "premium"
+                else STANDARD_MAX_DURATION_SECONDS
+            ),
+        )
         return {
             "status": "ready",
             "job_key": expected_job_key,
@@ -1278,11 +1317,21 @@ def _connect_from_config(config):
 
 
 def _safe_account(item):
+    subscription_type = str(
+        item.get("subscription_type", "unknown") or "unknown"
+    ).strip().lower()
+    long_video_eligible = (
+        subscription_type in PREMIUM_SUBSCRIPTION_TYPES
+        and bool(item.get("long_video_eligible"))
+    )
     return {
         "id": int(item["id"]),
         "username": str(item["username"]),
         "x_user_id": str(item["x_user_id"]),
         "display_name": str(item.get("display_name", "") or item["username"]),
+        "subscription_type": subscription_type,
+        "premium_subscriber": long_video_eligible,
+        "long_video_eligible": long_video_eligible,
     }
 
 
@@ -1315,7 +1364,9 @@ def _plan_candidate(account, candidate, rank, timestamp):
     )
     build_post_text(
         "https://ai.yingliangads.com/s2l/1.html",
+        item["drama_name"],
         item["description"],
+        item.get("body_template"),
     )
     return item
 
@@ -1341,15 +1392,28 @@ def _media_fingerprint(media):
     return sha256, size
 
 
-def _repair_job_key(item, source_sha256, profile):
+def _duration_policy(account):
+    return "premium" if account.get("long_video_eligible") else "standard"
+
+
+def _duration_limit(account):
+    return (
+        PREMIUM_MAX_DURATION_SECONDS
+        if _duration_policy(account) == "premium"
+        else STANDARD_MAX_DURATION_SECONDS
+    )
+
+
+def _repair_job_key(item, source_sha256, profile, duration_policy):
     material_id = _normalize_repair_material_id(item["material_id"])
     identity = "\0".join(
         (
-            "x-post-media-repair-v2",
+            "x-post-media-repair-v3",
             material_id,
             str(item["pool_item_id"]),
             str(source_sha256),
             str(profile),
+            str(duration_policy),
         )
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
@@ -1438,6 +1502,7 @@ def _preflight_candidate(
                 destination,
                 max_bytes=config.max_media_bytes,
                 timeout=config.media_timeout,
+                max_duration_seconds=_duration_limit(account),
             )
         except XPostError as exc:
             trigger_code = str(getattr(exc, "code", "") or "")
@@ -1452,8 +1517,12 @@ def _preflight_candidate(
             source_sha256, source_size = _media_fingerprint(media)
             state["attempted"] = repairs_attempted + 1
             original_url = str(item["material_url"])
+            duration_policy = _duration_policy(account)
             job_key = _repair_job_key(
-                item, source_sha256, config.repair_profile
+                item,
+                source_sha256,
+                config.repair_profile,
+                duration_policy,
             )
             repaired = repair_client.repair(
                 {
@@ -1465,6 +1534,7 @@ def _preflight_candidate(
                     "source_size": source_size,
                     "trigger_code": trigger_code,
                     "profile": config.repair_profile,
+                    "duration_policy": duration_policy,
                 }
             )
             _remove_preflight_file(destination)
@@ -1480,6 +1550,7 @@ def _preflight_candidate(
                 destination,
                 max_bytes=config.max_media_bytes,
                 timeout=config.media_timeout,
+                max_duration_seconds=_duration_limit(account),
             )
             final_sha256, final_size, probe = _verify_repaired_download(
                 repaired,
@@ -1521,7 +1592,7 @@ def _preflight_candidates(
     prober,
     repair_client=None,
 ):
-    accepted = []
+    accepted_by_account = {}
     failures = []
     target_count = len(verified_accounts)
     if target_count < 1 or target_count > MAX_DAILY_ACCOUNTS:
@@ -1529,6 +1600,15 @@ def _preflight_candidates(
             "configured account count is outside the supported daily batch range"
         )
     repair_state = {"attempted": 0}
+    remaining_accounts = list(verified_accounts)
+    material_routing = all(
+        str(candidate.get("source_type", "material") or "material")
+        .strip()
+        .lower()
+        != "drama"
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    )
     work_root = Path(config.work_dir)
     if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
         raise DailyRunError(
@@ -1541,9 +1621,19 @@ def _preflight_candidates(
     ) as temporary:
         root = Path(temporary)
         for candidate in candidates:
-            if len(accepted) == target_count:
+            if len(accepted_by_account) == target_count:
                 break
-            account = verified_accounts[len(accepted)]
+            if material_routing:
+                account = next(
+                    (
+                        item
+                        for item in remaining_accounts
+                        if not item.get("long_video_eligible")
+                    ),
+                    remaining_accounts[0],
+                )
+            else:
+                account = remaining_accounts[0]
             material_id = str(
                 candidate.get("material_id", "")
                 if isinstance(candidate, dict)
@@ -1551,18 +1641,60 @@ def _preflight_candidates(
             )
             destination = root / ("%s.mp4" % material_id)
             try:
-                item = _preflight_candidate(
-                    config,
-                    candidate,
-                    account,
-                    len(accepted) + 1,
-                    timestamp,
-                    destination,
-                    downloader,
-                    prober,
-                    repair_client=repair_client,
-                    repair_state=repair_state,
-                )
+                try:
+                    item = _preflight_candidate(
+                        config,
+                        candidate,
+                        account,
+                        len(accepted_by_account) + 1,
+                        timestamp,
+                        destination,
+                        downloader,
+                        prober,
+                        repair_client=repair_client,
+                        repair_state=repair_state,
+                    )
+                except (
+                    XPostError,
+                    CandidatePreflightError,
+                    http.client.HTTPException,
+                    OSError,
+                    ValueError,
+                ) as first_error:
+                    premium_account = None
+                    if (
+                        material_routing
+                        and str(
+                            getattr(first_error, "code", "") or ""
+                        )
+                        == "x_long_video_requires_premium"
+                        and not account.get("long_video_eligible")
+                    ):
+                        premium_account = next(
+                            (
+                                candidate_account
+                                for candidate_account in remaining_accounts
+                                if candidate_account.get(
+                                    "long_video_eligible"
+                                )
+                            ),
+                            None,
+                        )
+                    if premium_account is None:
+                        raise
+                    account = premium_account
+                    item = _preflight_candidate(
+                        config,
+                        candidate,
+                        account,
+                        len(accepted_by_account) + 1,
+                        timestamp,
+                        destination,
+                        downloader,
+                        prober,
+                        repair_client=repair_client,
+                        repair_state=repair_state,
+                    )
             except (
                 XPostError,
                 CandidatePreflightError,
@@ -1581,7 +1713,19 @@ def _preflight_candidates(
                     }
                 )
                 continue
-            accepted.append(item)
+            remaining_accounts = [
+                remaining
+                for remaining in remaining_accounts
+                if int(remaining["id"]) != int(account["id"])
+            ]
+            accepted_by_account[int(account["id"])] = item
+    accepted = []
+    for account in verified_accounts:
+        item = accepted_by_account.get(int(account["id"]))
+        if item is None:
+            continue
+        item["candidate_rank"] = len(accepted) + 1
+        accepted.append(item)
     return accepted, failures
 
 
