@@ -98,6 +98,44 @@ def prepared_probe(duration, video_encoder="hevc_nvenc"):
     }
 
 
+def source_direct_probe(
+    duration,
+    *,
+    codec="h264",
+    codec_tag=None,
+    profile=None,
+    sample_rate="44100",
+):
+    normalized_codec = str(codec).lower()
+    if codec_tag is None:
+        codec_tag = "hvc1" if normalized_codec == "hevc" else "avc1"
+    if profile is None:
+        profile = "Main"
+    return {
+        "format": {"duration": str(duration)},
+        "streams": [
+            {
+                "avg_frame_rate": "30/1",
+                "codec_name": normalized_codec,
+                "codec_tag_string": codec_tag,
+                "codec_type": "video",
+                "height": 1280,
+                "pix_fmt": "yuv420p",
+                "profile": profile,
+                "r_frame_rate": "30/1",
+                "width": 720,
+            },
+            {
+                "channels": 2,
+                "codec_name": "aac",
+                "codec_type": "audio",
+                "profile": "LC",
+                "sample_rate": sample_rate,
+            },
+        ],
+    }
+
+
 class FakeRunner:
     def __init__(self, probes=None):
         self.probes = list(
@@ -349,6 +387,16 @@ def make_direct_outro_config(root, gates=False, **overrides):
         ).hexdigest(),
         media_mode=worker.DIRECT_OUTRO_MEDIA_MODE,
         profile=worker.DIRECT_OUTRO_PROFILE,
+    )
+    return replace(config, **overrides) if overrides else config
+
+
+def make_source_direct_config(root, gates=False, **overrides):
+    config = replace(
+        make_config(root, gates=gates),
+        default_source_trim_tail_seconds=0,
+        media_mode=worker.SOURCE_DIRECT_MEDIA_MODE,
+        profile=worker.SOURCE_DIRECT_PROFILE,
     )
     return replace(config, **overrides) if overrides else config
 
@@ -1011,6 +1059,30 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertTrue(loaded_clean.direct_post_eligible())
         self.assertFalse(loaded_clean.brand_overlay_review_required())
         self.assertEqual(loaded_clean.preparation_transition(), "none")
+        with mock.patch.dict(
+            os.environ,
+            dict(
+                env,
+                TT_POST_GPU_MEDIA_MODE="source_direct",
+                TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS="0",
+            ),
+            clear=True,
+        ):
+            loaded_source_direct = worker.WorkerConfig.from_env()
+        self.assertEqual(
+            loaded_source_direct.media_mode,
+            worker.SOURCE_DIRECT_MEDIA_MODE,
+        )
+        self.assertEqual(
+            loaded_source_direct.profile,
+            worker.SOURCE_DIRECT_PROFILE,
+        )
+        self.assertTrue(loaded_source_direct.direct_post_eligible())
+        self.assertFalse(loaded_source_direct.uses_outro_pipeline())
+        self.assertEqual(
+            loaded_source_direct.preparation_transition(),
+            "none",
+        )
         direct_outro_env = dict(
             env,
             TT_POST_GPU_MEDIA_MODE="direct_outro",
@@ -1613,6 +1685,158 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertTrue(reused["reused"])
         self.assertEqual(len(calls), 1)
+
+    def test_source_direct_mirrors_exact_source_without_ffmpeg_and_publishes(self):
+        config = make_source_direct_config(self.root, gates=True)
+        runner = FakeRunner([source_direct_probe(97.756)])
+        calls = []
+        store = FakeObjectStore()
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+            object_store=store,
+            api=api,
+        )
+
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+
+        source_sha = hashlib.sha256(SOURCE_BYTES).hexdigest()
+        self.assertEqual(prepared["profile"], worker.SOURCE_DIRECT_PROFILE)
+        self.assertEqual(prepared["output_sha256"], source_sha)
+        self.assertEqual(prepared["output_size"], len(SOURCE_BYTES))
+        self.assertTrue(prepared["direct_post_eligible"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(store.upload_calls), 1)
+        self.assertEqual(store.upload_calls[0]["sha256"], source_sha)
+        self.assertTrue(store.upload_calls[0]["path"].endswith("source.mp4"))
+        self.assertFalse(
+            any(
+                "ffmpeg" in Path(command[0]).name.lower()
+                for command in runner.commands
+            )
+        )
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(manifest["version"], 6)
+        self.assertEqual(
+            manifest["request"]["media_mode"],
+            worker.SOURCE_DIRECT_MEDIA_MODE,
+        )
+        self.assertEqual(manifest["request"]["source_sha256"], source_sha)
+        self.assertEqual(
+            manifest["request"]["source_size"], len(SOURCE_BYTES)
+        )
+        self.assertEqual(manifest["request"]["source_trim_tail_seconds"], 0)
+
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        self.assertEqual(len(calls), 1)
+
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(len(api.init_calls), 1)
+        self.assertEqual(api.init_calls[0][2], prepared["output_url"])
+
+    def test_source_direct_accepts_hevc_hvc1_and_revalidates_manifest(self):
+        config = make_source_direct_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner(
+                [source_direct_probe(107.6, codec="hevc", sample_rate="44100")]
+            ),
+            downloader=make_downloader([]),
+            object_store=FakeObjectStore(),
+            api=api,
+        )
+
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+
+        self.assertEqual(prepared["probe"]["video_codec"], "hevc")
+        self.assertEqual(prepared["probe"]["video_codec_tag"], "hvc1")
+        self.assertEqual(prepared["probe"]["profile"], "main")
+        self.assertEqual(prepared["probe"]["audio_sample_rate"], 44100)
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(len(api.init_calls), 1)
+        self.assertEqual(api.init_calls[0][2], prepared["output_url"])
+
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        manifest["result"]["probe"]["video_codec_tag"] = "avc1"
+        with self.assertRaises(worker.TTGPUError) as caught:
+            worker._prepare_response(manifest, True, config, JOB_ID)
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+
+    def test_source_direct_rejects_unsupported_or_mismatched_video_contract(self):
+        config = make_source_direct_config(self.root)
+        path = self.root / "source-direct-invalid.mp4"
+        path.write_bytes(SOURCE_BYTES)
+        cases = (
+            {"codec": "hevc", "codec_tag": "avc1", "profile": "Main"},
+            {"codec": "h264", "codec_tag": "hvc1", "profile": "High"},
+            {"codec": "vp9", "codec_tag": "vp09", "profile": "0"},
+            {"codec": "hevc", "codec_tag": "hvc1", "profile": "Main 10"},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    worker.validate_prepared_output(
+                        config,
+                        source_direct_probe(10, **case),
+                        path,
+                        1024 * 1024,
+                        10,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "prepared_media_invalid",
+                )
+
+    def test_source_direct_rejects_trim_before_download(self):
+        config = make_source_direct_config(self.root)
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner([source_direct_probe(97.756)]),
+            downloader=make_downloader(calls),
+            object_store=FakeObjectStore(),
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.prepare(
+                make_prepare(
+                    expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                    source_trim_tail_seconds=1,
+                )
+            )
+        self.assertEqual(caught.exception.code, "source_direct_trim_forbidden")
+        self.assertEqual(calls, [])
 
     def test_direct_clean_prepared_manifest_reaches_formal_publish(self):
         config = make_direct_clean_config(self.root, gates=True)
@@ -3216,6 +3440,8 @@ class TTGPUWorkerTests(unittest.TestCase):
             self.assertIn(name, env)
         self.assertNotIn("TT_POST_GPU_LIVE_API_ENABLED", env)
         self.assertNotIn("TT_POST_GPU_PUBLISH_ENABLED", env)
+        self.assertIn("source_direct", env)
+        self.assertIn("tt-post-source-direct-v1", env)
         nginx = (
             REPO_ROOT / "deploy" / "tt-post-gpu-media-nginx.conf.example"
         ).read_text(encoding="utf-8")

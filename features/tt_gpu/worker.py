@@ -3,8 +3,10 @@
 The service has four responsibilities:
 
 * prepare an immutable vertical video with one explicit, versioned media mode:
-  the legacy branded-preview compositor, a clean Direct Post normalizer, or a
-  reviewed Direct Post compositor with the fixed tutorial outro and no Logo;
+  the legacy branded-preview compositor, a clean Direct Post normalizer, a
+  reviewed Direct Post compositor with the fixed tutorial outro and no Logo,
+  or a source-direct passthrough that mirrors the original bytes without
+  FFmpeg production;
 * keep the branded-preview Logo/tutorial-outro profile permanently ineligible
   for formal Direct Post while allowing the clean and Logo-free reviewed-outro
   profiles to carry separate auditable identities;
@@ -77,10 +79,18 @@ DIRECT_CLEAN_PROFILE = "tt-post-direct-clean-hevc-720x1280-v1"
 DIRECT_CLEAN_H264_PROFILE = "tt-post-direct-clean-h264-720x1280-v1"
 DIRECT_OUTRO_PROFILE = "tt-post-direct-outro-hevc-720x1280-v2"
 DIRECT_OUTRO_H264_PROFILE = "tt-post-direct-outro-h264-720x1280-v2"
+SOURCE_DIRECT_PROFILE = "tt-post-source-direct-v1"
 BRANDED_PREVIEW_MEDIA_MODE = "branded_preview"
 DIRECT_CLEAN_MEDIA_MODE = "direct_clean"
 DIRECT_OUTRO_MEDIA_MODE = "direct_outro"
+SOURCE_DIRECT_MEDIA_MODE = "source_direct"
 DEFAULT_MEDIA_MODE = BRANDED_PREVIEW_MEDIA_MODE
+SOURCE_DIRECT_VIDEO_PROFILES = {
+    ("h264", "avc1"): frozenset(
+        {"baseline", "constrained baseline", "main", "high"}
+    ),
+    ("hevc", "hvc1"): frozenset({"main"}),
+}
 HEALTH_PATH = "/health"
 CREATOR_INFO_PATH = "/internal/tt-post/creator-info"
 PREPARE_PATH = "/internal/tt-post/prepare"
@@ -423,6 +433,8 @@ def _selected_media_profile(video_encoder, media_mode):
             if video_encoder == "hevc_nvenc"
             else DIRECT_OUTRO_H264_PROFILE
         )
+    if media_mode == SOURCE_DIRECT_MEDIA_MODE:
+        return SOURCE_DIRECT_PROFILE
     raise TTGPUError(
         "invalid_configuration",
         "TT_POST_GPU_MEDIA_MODE is not supported",
@@ -587,12 +599,13 @@ class WorkerConfig:
             BRANDED_PREVIEW_MEDIA_MODE,
             DIRECT_CLEAN_MEDIA_MODE,
             DIRECT_OUTRO_MEDIA_MODE,
+            SOURCE_DIRECT_MEDIA_MODE,
         }:
             raise TTGPUError(
                 "invalid_configuration",
                 (
                     "TT_POST_GPU_MEDIA_MODE must be branded_preview, "
-                    "direct_clean, or direct_outro"
+                    "direct_clean, direct_outro, or source_direct"
                 ),
                 500,
             )
@@ -1023,6 +1036,7 @@ class WorkerConfig:
         return self.media_mode in {
             DIRECT_CLEAN_MEDIA_MODE,
             DIRECT_OUTRO_MEDIA_MODE,
+            SOURCE_DIRECT_MEDIA_MODE,
         }
 
     def uses_outro_pipeline(self):
@@ -1617,6 +1631,28 @@ def _frame_rate(value):
     return result if result > 0 else 0.0
 
 
+def _video_matches_delivery_contract(
+    config,
+    video_contract,
+    codec,
+    codec_tag,
+    profile,
+):
+    normalized_codec = str(codec or "").strip().lower()
+    normalized_tag = str(codec_tag or "").strip().lower()
+    normalized_profile = str(profile or "").strip().lower()
+    if config.media_mode == SOURCE_DIRECT_MEDIA_MODE:
+        return normalized_profile in SOURCE_DIRECT_VIDEO_PROFILES.get(
+            (normalized_codec, normalized_tag),
+            frozenset(),
+        )
+    return bool(
+        normalized_codec == video_contract["codec"]
+        and normalized_tag == video_contract["codec_tag"]
+        and normalized_profile == video_contract["profile"]
+    )
+
+
 def validate_prepared_output(config, payload, path, max_size, expected_duration):
     video_contract = _delivery_video_contract(config)
     videos = _stream_items(payload, "video")
@@ -1648,20 +1684,32 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration)
         size = Path(path).stat().st_size
     except OSError:
         size = 0
+    video_codec = str(video.get("codec_name") or "").strip().lower()
     profile = str(video.get("profile") or "").strip().lower()
     codec_tag = str(video.get("codec_tag_string") or "").strip().lower()
     audio_profile = str(audio.get("profile") or "").strip().lower()
     average_bitrate = size * 8.0 / duration if duration > 0 else math.inf
+    source_direct = config.media_mode == SOURCE_DIRECT_MEDIA_MODE
+    video_contract_matches = _video_matches_delivery_contract(
+        config,
+        video_contract,
+        video_codec,
+        codec_tag,
+        profile,
+    )
+    sample_rate_matches = (
+        sample_rate in {44100, 48000}
+        if source_direct
+        else sample_rate == 48000
+    )
     if (
-        str(video.get("codec_name") or "").lower() != video_contract["codec"]
-        or profile != video_contract["profile"]
-        or codec_tag != video_contract["codec_tag"]
+        not video_contract_matches
         or str(video.get("pix_fmt") or "").lower() != "yuv420p"
         or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
         or abs(rate - 30.0) > 0.01
         or str(audio.get("codec_name") or "").lower() != "aac"
         or audio_profile != "lc"
-        or sample_rate != 48000
+        or not sample_rate_matches
         or channels != 2
         or size <= 0
         or size > int(max_size)
@@ -1686,10 +1734,10 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration)
         "frame_rate": 30.0,
         "height": height,
         "pixel_format": "yuv420p",
-        "profile": video_contract["profile"],
+        "profile": profile,
         "size": size,
-        "video_codec": video_contract["codec"],
-        "video_codec_tag": video_contract["codec_tag"],
+        "video_codec": video_codec,
+        "video_codec_tag": codec_tag,
         "width": width,
     }
 
@@ -1748,6 +1796,12 @@ def _delivery_video_contract(config):
             "video encoder and media mode require their exact media profile",
             500,
         )
+    if config.media_mode == SOURCE_DIRECT_MEDIA_MODE:
+        return {
+            "codec": "h264",
+            "codec_tag": "avc1",
+            "profile": "",
+        }
     if config.video_encoder == "hevc_nvenc":
         return {
             "codec": "hevc",
@@ -3093,6 +3147,15 @@ def validate_prepare_request(payload, config):
             "source_trim_tail_seconds is outside the contract",
         )
     result["source_trim_tail_seconds"] = round(trim_seconds, 6)
+    if (
+        config.media_mode == SOURCE_DIRECT_MEDIA_MODE
+        and result["source_trim_tail_seconds"] != 0
+    ):
+        raise TTGPUError(
+            "source_direct_trim_forbidden",
+            "source_direct requires source_trim_tail_seconds=0",
+            409,
+        )
     return result
 
 
@@ -3330,6 +3393,53 @@ def _prepare_response(manifest, reused, config, expected_job_id):
                 for key, value in expected_assets.items()
             )
         )
+    elif config.media_mode == SOURCE_DIRECT_MEDIA_MODE:
+        try:
+            request_source_size = int(stored_request.get("source_size"))
+            request_trim = float(
+                stored_request.get("source_trim_tail_seconds")
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            request_source_size = 0
+            request_trim = -1.0
+        request_source_sha = (
+            str(stored_request.get("source_sha256") or "")
+            if isinstance(stored_request, dict)
+            else ""
+        )
+        request_source_url_sha = (
+            str(stored_request.get("source_url_sha256") or "")
+            if isinstance(stored_request, dict)
+            else ""
+        )
+        request_contract_match = bool(
+            isinstance(stored_request, dict)
+            and manifest.get("version") == 6
+            and stored_request.get("transition") == "none"
+            and stored_request.get("profile") == config.profile
+            and HEX_64_RE.fullmatch(request_source_url_sha)
+            and HEX_64_RE.fullmatch(request_source_sha)
+            and secrets.compare_digest(request_source_sha, output_sha)
+            and request_source_size == output_size
+            and 0 < request_source_size <= int(config.max_source_bytes)
+            and request_trim == 0.0
+        )
+    probe_video_codec = str(probe.get("video_codec") or "").lower()
+    probe_video_codec_tag = str(probe.get("video_codec_tag") or "").lower()
+    probe_profile = str(probe.get("profile") or "").lower()
+    source_direct = config.media_mode == SOURCE_DIRECT_MEDIA_MODE
+    video_contract_matches = _video_matches_delivery_contract(
+        config,
+        video_contract,
+        probe_video_codec,
+        probe_video_codec_tag,
+        probe_profile,
+    )
+    sample_rate_matches = (
+        audio_sample_rate in {44100, 48000}
+        if source_direct
+        else audio_sample_rate == 48000
+    )
     if (
         str(result.get("job_id") or "") != str(expected_job_id or "")
         or not CONTENT_ID_RE.fullmatch(request_content_id)
@@ -3369,23 +3479,12 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         or not math.isfinite(frame_rate)
         or abs(frame_rate - 30.0) > 0.01
         or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
-        or (
-            str(probe.get("video_codec") or "").lower()
-            != video_contract["codec"]
-        )
-        or (
-            str(probe.get("video_codec_tag") or "").lower()
-            != video_contract["codec_tag"]
-        )
-        or (
-            str(probe.get("profile") or "").lower()
-            != video_contract["profile"]
-        )
+        or not video_contract_matches
         or str(probe.get("pixel_format") or "").lower() != "yuv420p"
         or str(probe.get("audio_codec") or "").lower() != "aac"
         or str(probe.get("audio_profile") or "").lower() != "lc"
         or audio_channels != 2
-        or audio_sample_rate != 48000
+        or not sample_rate_matches
         or storage_key != expected_storage_key
         or output_url != expected_output_url
     ):
@@ -3810,10 +3909,11 @@ class TTPostGPUProcessor:
     ):
         job_id = request["job_id"]
         if self.config.storage_backend == "local":
+            required_bytes = int(self.config.max_source_bytes)
+            if self.config.media_mode != SOURCE_DIRECT_MEDIA_MODE:
+                required_bytes += int(self.config.max_output_bytes)
             self._object_store().admit_prepare(
-                int(self.config.max_source_bytes)
-                + int(self.config.max_output_bytes)
-                + LOCAL_PREPARE_OVERHEAD_BYTES
+                required_bytes + LOCAL_PREPARE_OVERHEAD_BYTES
             )
         job_dir = Path(
             tempfile.mkdtemp(prefix=job_id + ".", dir=str(self.jobs_root))
@@ -3960,75 +4060,81 @@ class TTPostGPUProcessor:
                     "prepared media exceeds the configured duration",
                     400,
                 )
-            deadline.check()
-            acquired_gpu = self._gpu_slot.acquire(
-                timeout=deadline.remaining()
-            )
-            if not acquired_gpu:
-                raise TTGPUError(
-                    "prepare_timeout",
-                    "GPU prepare exceeded the total execution budget",
-                    504,
-                )
-            try:
+            if self.config.media_mode == SOURCE_DIRECT_MEDIA_MODE:
+                # Preserve the source byte-for-byte. The upload below mirrors
+                # it to the already verified TikTok URL Property origin; no
+                # FFmpeg command, trim, overlay, transition, or re-encode runs.
+                output_path = source_path
+            else:
                 deadline.check()
-                if not self.config.uses_outro_pipeline():
-                    _run_command(
-                        self.runner,
-                        build_normalize_command(
-                            self.config,
-                            source_path,
-                            output_path,
-                            source_info,
-                            _base_video_filter(),
-                            output_duration=effective_source_duration,
-                        ),
-                        deadline.stage_timeout(
-                            self.config.transcode_timeout
-                        ),
-                        "direct_clean_transcode_failed",
-                        timeout_error_code="prepare_timeout",
+                acquired_gpu = self._gpu_slot.acquire(
+                    timeout=deadline.remaining()
+                )
+                if not acquired_gpu:
+                    raise TTGPUError(
+                        "prepare_timeout",
+                        "GPU prepare exceeded the total execution budget",
+                        504,
                     )
-                else:
-                    _run_command(
-                        self.runner,
-                        build_normalize_command(
-                            self.config,
-                            outro_input_path,
-                            outro_normalized,
-                            outro_info,
-                            build_outro_filter(
+                try:
+                    deadline.check()
+                    if not self.config.uses_outro_pipeline():
+                        _run_command(
+                            self.runner,
+                            build_normalize_command(
                                 self.config,
-                                drama_text_path,
-                                tutorial_text_path,
+                                source_path,
+                                output_path,
+                                source_info,
+                                _base_video_filter(),
+                                output_duration=effective_source_duration,
                             ),
-                        ),
-                        deadline.stage_timeout(
-                            self.config.transcode_timeout
-                        ),
-                        "outro_transcode_failed",
-                        timeout_error_code="prepare_timeout",
-                    )
-                    _run_command(
-                        self.runner,
-                        build_phone_match_command(
-                            self.config,
-                            source_path,
-                            outro_normalized,
-                            output_path,
-                            effective_source_duration,
-                            outro_info["duration"],
-                            source_has_audio=source_info["has_audio"],
-                            logo_path=logo_input_path,
-                        ),
-                        deadline.stage_timeout(
-                            self.config.transcode_timeout
-                        ),
-                        "phone_match_transition_failed",
-                        timeout_error_code="prepare_timeout",
-                    )
-            finally:
-                self._gpu_slot.release()
+                            deadline.stage_timeout(
+                                self.config.transcode_timeout
+                            ),
+                            "direct_clean_transcode_failed",
+                            timeout_error_code="prepare_timeout",
+                        )
+                    else:
+                        _run_command(
+                            self.runner,
+                            build_normalize_command(
+                                self.config,
+                                outro_input_path,
+                                outro_normalized,
+                                outro_info,
+                                build_outro_filter(
+                                    self.config,
+                                    drama_text_path,
+                                    tutorial_text_path,
+                                ),
+                            ),
+                            deadline.stage_timeout(
+                                self.config.transcode_timeout
+                            ),
+                            "outro_transcode_failed",
+                            timeout_error_code="prepare_timeout",
+                        )
+                        _run_command(
+                            self.runner,
+                            build_phone_match_command(
+                                self.config,
+                                source_path,
+                                outro_normalized,
+                                output_path,
+                                effective_source_duration,
+                                outro_info["duration"],
+                                source_has_audio=source_info["has_audio"],
+                                logo_path=logo_input_path,
+                            ),
+                            deadline.stage_timeout(
+                                self.config.transcode_timeout
+                            ),
+                            "phone_match_transition_failed",
+                            timeout_error_code="prepare_timeout",
+                        )
+                finally:
+                    self._gpu_slot.release()
             output_sha, output_size = _file_sha256(
                 output_path,
                 deadline=deadline,
@@ -4039,11 +4145,15 @@ class TTPostGPUProcessor:
                     "prepared output size is outside the contract",
                     500,
                 )
-            output_probe = probe_media(
-                self.config,
-                output_path,
-                self.runner,
-                deadline=deadline,
+            output_probe = (
+                source_probe
+                if self.config.media_mode == SOURCE_DIRECT_MEDIA_MODE
+                else probe_media(
+                    self.config,
+                    output_path,
+                    self.runner,
+                    deadline=deadline,
+                )
             )
             safe_probe = validate_prepared_output(
                 self.config,
@@ -4104,7 +4214,9 @@ class TTPostGPUProcessor:
                     "key": storage_key,
                 },
                 "version": (
-                    5
+                    6
+                    if self.config.media_mode == SOURCE_DIRECT_MEDIA_MODE
+                    else 5
                     if self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE
                     else 3
                     if self.config.media_mode == DIRECT_CLEAN_MEDIA_MODE
