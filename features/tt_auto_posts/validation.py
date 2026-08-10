@@ -269,6 +269,7 @@ def _caption_template(value: Any) -> str:
             description="Drama description",
             defer_url=True,
             defer_code=True,
+            defer_drama_name=True,
         )
     except TTPostError as exc:
         raise ValidationError(

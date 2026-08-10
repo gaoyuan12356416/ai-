@@ -56,6 +56,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .credentials import CredentialEnvelopeError, decode_seal_key, open_access_token
+from .random_overlay import (
+    RandomOverlayError,
+    derive_recipe,
+    load_asset_set,
+    selected_asset_paths,
+    sha256_file as overlay_sha256_file,
+    validate_recipe,
+)
 
 try:  # Production Linux uses flock; Windows tests use the in-process fallback.
     import fcntl
@@ -80,10 +88,13 @@ DIRECT_CLEAN_H264_PROFILE = "tt-post-direct-clean-h264-720x1280-v1"
 DIRECT_OUTRO_PROFILE = "tt-post-direct-outro-hevc-720x1280-v2"
 DIRECT_OUTRO_H264_PROFILE = "tt-post-direct-outro-h264-720x1280-v2"
 SOURCE_DIRECT_PROFILE = "tt-post-source-direct-v1"
+RANDOM_OVERLAY_PROFILE = "tt-post-random-overlay-hevc-720x1280-v1"
+RANDOM_OVERLAY_H264_PROFILE = "tt-post-random-overlay-h264-720x1280-v1"
 BRANDED_PREVIEW_MEDIA_MODE = "branded_preview"
 DIRECT_CLEAN_MEDIA_MODE = "direct_clean"
 DIRECT_OUTRO_MEDIA_MODE = "direct_outro"
 SOURCE_DIRECT_MEDIA_MODE = "source_direct"
+RANDOM_OVERLAY_MEDIA_MODE = "random_overlay"
 DEFAULT_MEDIA_MODE = BRANDED_PREVIEW_MEDIA_MODE
 SOURCE_DIRECT_VIDEO_PROFILES = {
     ("h264", "avc1"): frozenset(
@@ -435,6 +446,12 @@ def _selected_media_profile(video_encoder, media_mode):
         )
     if media_mode == SOURCE_DIRECT_MEDIA_MODE:
         return SOURCE_DIRECT_PROFILE
+    if media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+        return (
+            RANDOM_OVERLAY_PROFILE
+            if video_encoder == "hevc_nvenc"
+            else RANDOM_OVERLAY_H264_PROFILE
+        )
     raise TTGPUError(
         "invalid_configuration",
         "TT_POST_GPU_MEDIA_MODE is not supported",
@@ -503,6 +520,13 @@ class WorkerConfig:
     profile: str = PROFILE
     fixed_outro_sha256: str = ""
     logo_sha256: str = ""
+    random_overlay_root: Path = Path("/")
+    random_overlay_manifest_sha256: str = ""
+    random_overlay_assets: object = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_env(cls):
@@ -600,16 +624,43 @@ class WorkerConfig:
             DIRECT_CLEAN_MEDIA_MODE,
             DIRECT_OUTRO_MEDIA_MODE,
             SOURCE_DIRECT_MEDIA_MODE,
+            RANDOM_OVERLAY_MEDIA_MODE,
         }:
             raise TTGPUError(
                 "invalid_configuration",
                 (
                     "TT_POST_GPU_MEDIA_MODE must be branded_preview, "
-                    "direct_clean, direct_outro, or source_direct"
+                    "direct_clean, direct_outro, source_direct, or random_overlay"
                 ),
                 500,
             )
         selected_profile = _selected_media_profile(encoder, media_mode)
+        random_overlay_root = Path("/")
+        random_overlay_manifest_sha256 = ""
+        random_overlay_assets = None
+        if media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+            random_overlay_root = _absolute_path(
+                os.environ.get("TT_POST_GPU_RANDOM_OVERLAY_ROOT", ""),
+                "TT_POST_GPU_RANDOM_OVERLAY_ROOT",
+            )
+            random_overlay_manifest_sha256 = str(
+                os.environ.get(
+                    "TT_POST_GPU_RANDOM_OVERLAY_MANIFEST_SHA256",
+                    "",
+                )
+                or ""
+            ).strip().lower()
+            try:
+                random_overlay_assets = load_asset_set(
+                    random_overlay_root,
+                    random_overlay_manifest_sha256,
+                )
+            except RandomOverlayError as exc:
+                raise TTGPUError(
+                    "invalid_configuration",
+                    "random overlay asset set is invalid: %s" % exc,
+                    500,
+                ) from None
         fixed_outro_sha256 = str(
             os.environ.get("TT_POST_GPU_FIXED_OUTRO_SHA256", "") or ""
         ).strip().lower()
@@ -927,6 +978,11 @@ class WorkerConfig:
             profile=selected_profile,
             fixed_outro_sha256=fixed_outro_sha256,
             logo_sha256=logo_sha256,
+            random_overlay_root=random_overlay_root,
+            random_overlay_manifest_sha256=(
+                random_overlay_manifest_sha256
+            ),
+            random_overlay_assets=random_overlay_assets,
             cos_secret_id=secret_id,
             cos_secret_key=secret_key,
             cos_bucket=bucket,
@@ -1037,6 +1093,7 @@ class WorkerConfig:
             DIRECT_CLEAN_MEDIA_MODE,
             DIRECT_OUTRO_MEDIA_MODE,
             SOURCE_DIRECT_MEDIA_MODE,
+            RANDOM_OVERLAY_MEDIA_MODE,
         }
 
     def uses_outro_pipeline(self):
@@ -1046,6 +1103,22 @@ class WorkerConfig:
         }
 
     def asset_identity_ready(self):
+        if self.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+            return bool(
+                isinstance(self.random_overlay_assets, dict)
+                and HEX_64_RE.fullmatch(
+                    self.random_overlay_manifest_sha256
+                )
+                and secrets.compare_digest(
+                    str(
+                        self.random_overlay_assets.get(
+                            "manifest_sha256"
+                        )
+                        or ""
+                    ),
+                    self.random_overlay_manifest_sha256,
+                )
+            )
         if self.media_mode != DIRECT_OUTRO_MEDIA_MODE:
             return True
         if not HEX_64_RE.fullmatch(self.fixed_outro_sha256):
@@ -1972,6 +2045,155 @@ def build_normalize_command(
     if output_duration is not None:
         command.extend(["-t", "%.6f" % float(output_duration)])
     command.append(str(output_path))
+    return command
+
+
+def build_random_overlay_command(
+    config,
+    source_path,
+    output_path,
+    input_info,
+    output_duration,
+    recipe,
+    asset_paths,
+):
+    """Build the deterministic five-layer TT de-duplication composition."""
+
+    try:
+        rotation = int(recipe["rotation_millidegrees"]) / 1000.0
+        scale = int(recipe["scale_bp"]) / 10000.0
+        tint_opacity = int(recipe["tint_opacity_bp"]) / 10000.0
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise TTGPUError(
+            "random_overlay_recipe_invalid",
+            "random overlay recipe is invalid",
+            500,
+        ) from None
+    command = [
+        config.ffmpeg_bin,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_path),
+        "-loop",
+        "1",
+        "-i",
+        str(asset_paths["border"]),
+        "-stream_loop",
+        "-1",
+        "-c:v",
+        "libvpx-vp9",
+        "-i",
+        str(asset_paths["light"]),
+        "-stream_loop",
+        "-1",
+        "-c:v",
+        "libvpx-vp9",
+        "-i",
+        str(asset_paths["opacity_video"]),
+        "-stream_loop",
+        "-1",
+        "-c:v",
+        "libvpx-vp9",
+        "-i",
+        str(asset_paths["corners"]),
+        "-loop",
+        "1",
+        "-i",
+        str(asset_paths["tint"]),
+    ]
+    if not input_info["has_audio"]:
+        command.extend(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ]
+        )
+    audio_map = "0:a:0" if input_info["has_audio"] else "6:a:0"
+    scale_text = "%.4f" % scale
+    angle_text = "%.6f" % rotation
+    opacity_text = "%.4f" % tint_opacity
+    filter_complex = (
+        "[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];"
+        "[backraw]scale=720:1280:force_original_aspect_ratio=increase:"
+        "flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];"
+        "[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:"
+        "flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+        "setsar=1,format=rgba,"
+        "scale=w='trunc(iw*%s/2)*2':h='trunc(ih*%s/2)*2':flags=lanczos,"
+        "rotate=%s*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];"
+        "[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];"
+        "[5:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "colorchannelmixer=aa=%s,fps=30,setpts=PTS-STARTPTS[tint];"
+        "[3:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "fps=30,setpts=PTS-STARTPTS[opacity];"
+        "[2:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "fps=30,setpts=PTS-STARTPTS[light];"
+        "[1:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "fps=30,setpts=PTS-STARTPTS[border];"
+        "[4:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "fps=30,setpts=PTS-STARTPTS[corners];"
+        "[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];"
+        "[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];"
+        "[o2][light]overlay=0:0:shortest=1:eof_action=repeat[o3];"
+        "[o3][border]overlay=0:0:shortest=1:eof_action=repeat[o4];"
+        "[o4][corners]overlay=0:0:shortest=1:eof_action=repeat,"
+        "format=yuv420p[v]"
+    ) % (scale_text, scale_text, angle_text, opacity_text)
+    command.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            audio_map,
+            "-af",
+            "aresample=48000:async=1:first_pts=0,apad",
+            "-shortest",
+        ]
+    )
+    command.extend(_encoder_arguments(config))
+    command.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-g",
+            "60",
+            "-keyint_min",
+            "60",
+            "-flags",
+            "+cgop",
+            "-c:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-b:a",
+            AUDIO_BITRATE,
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-movflags",
+            "+faststart",
+            "-max_muxing_queue_size",
+            "2048",
+            "-t",
+            "%.6f" % float(output_duration),
+            str(output_path),
+        ]
+    )
     return command
 
 
@@ -3156,6 +3378,15 @@ def validate_prepare_request(payload, config):
             "source_direct requires source_trim_tail_seconds=0",
             409,
         )
+    if (
+        config.media_mode == RANDOM_OVERLAY_MEDIA_MODE
+        and result["source_trim_tail_seconds"] != 0
+    ):
+        raise TTGPUError(
+            "random_overlay_trim_forbidden",
+            "random_overlay requires source_trim_tail_seconds=0",
+            409,
+        )
     return result
 
 
@@ -3393,6 +3624,56 @@ def _prepare_response(manifest, reused, config, expected_job_id):
                 for key, value in expected_assets.items()
             )
         )
+    elif config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+        try:
+            request_source_size = int(stored_request.get("source_size"))
+            request_trim = float(
+                stored_request.get("source_trim_tail_seconds")
+            )
+            stored_recipe = stored_request.get("random_overlay_recipe")
+            validate_recipe(stored_recipe, config.random_overlay_assets)
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            RandomOverlayError,
+        ):
+            request_source_size = 0
+            request_trim = -1.0
+            stored_recipe = None
+        request_source_sha = (
+            str(stored_request.get("source_sha256") or "")
+            if isinstance(stored_request, dict)
+            else ""
+        )
+        request_source_url_sha = (
+            str(stored_request.get("source_url_sha256") or "")
+            if isinstance(stored_request, dict)
+            else ""
+        )
+        request_contract_match = bool(
+            isinstance(stored_request, dict)
+            and manifest.get("version") == 7
+            and stored_request.get("transition") == "none"
+            and stored_request.get("profile") == config.profile
+            and secrets.compare_digest(
+                str(stored_request.get("asset_set_sha256") or ""),
+                config.random_overlay_manifest_sha256,
+            )
+            and isinstance(stored_recipe, dict)
+            and result.get("random_overlay_recipe") == stored_recipe
+            and HEX_64_RE.fullmatch(request_source_url_sha)
+            and HEX_64_RE.fullmatch(request_source_sha)
+            and 0 < request_source_size <= int(config.max_source_bytes)
+            and request_trim == 0.0
+        )
+        response_assets = {
+            "asset_set_sha256": config.random_overlay_manifest_sha256,
+            "selected": stored_recipe.get("assets")
+            if isinstance(stored_recipe, dict)
+            else {},
+        }
     elif config.media_mode == SOURCE_DIRECT_MEDIA_MODE:
         try:
             request_source_size = int(stored_request.get("source_size"))
@@ -3526,6 +3807,10 @@ def _prepare_response(manifest, reused, config, expected_job_id):
     }
     if response_assets is not None:
         response["assets"] = response_assets
+    if config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+        response["random_overlay_recipe"] = result[
+            "random_overlay_recipe"
+        ]
     return response
 
 
@@ -3836,6 +4121,32 @@ class TTPostGPUProcessor:
         }
         if self.config.media_mode != BRANDED_PREVIEW_MEDIA_MODE:
             reuse_contract["media_mode"] = self.config.media_mode
+        if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+            try:
+                recipe = derive_recipe(
+                    job_id=job_id,
+                    content_id=request["content_id"],
+                    profile=self.config.profile,
+                    source_url_sha256=reuse_contract[
+                        "source_url_sha256"
+                    ],
+                    asset_set=self.config.random_overlay_assets,
+                )
+            except RandomOverlayError as exc:
+                raise TTGPUError(
+                    "random_overlay_recipe_invalid",
+                    str(exc),
+                    500,
+                ) from None
+            reuse_contract.update(
+                {
+                    "asset_set_sha256": (
+                        self.config.random_overlay_manifest_sha256
+                    ),
+                    "random_overlay_recipe": recipe,
+                    "transition": "none",
+                }
+            )
         if self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE:
             reuse_contract["transition"] = (
                 self.config.preparation_transition()
@@ -3930,8 +4241,55 @@ class TTPostGPUProcessor:
             if self.config.media_mode == BRANDED_PREVIEW_MEDIA_MODE
             else None
         )
+        random_overlay_paths = None
         local_orphan = None
         try:
+            if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+                try:
+                    selected = selected_asset_paths(
+                        reuse_contract["random_overlay_recipe"],
+                        self.config.random_overlay_assets,
+                    )
+                except RandomOverlayError as exc:
+                    raise TTGPUError(
+                        "random_overlay_recipe_invalid",
+                        str(exc),
+                        500,
+                    ) from None
+                random_overlay_paths = {}
+                for category, source_asset in selected.items():
+                    suffix = source_asset.suffix.lower()
+                    snapshot = job_dir / (
+                        "overlay-%s%s" % (category, suffix)
+                    )
+                    try:
+                        shutil.copyfile(source_asset, snapshot)
+                        snapshot_sha, snapshot_size = (
+                            overlay_sha256_file(snapshot)
+                        )
+                    except OSError:
+                        raise TTGPUError(
+                            "random_overlay_asset_unavailable",
+                            "random overlay asset is unavailable",
+                            500,
+                        ) from None
+                    expected_asset = reuse_contract[
+                        "random_overlay_recipe"
+                    ]["assets"][category]
+                    if (
+                        snapshot_size != int(expected_asset["size"])
+                        or not secrets.compare_digest(
+                            snapshot_sha,
+                            str(expected_asset["sha256"]),
+                        )
+                    ):
+                        raise TTGPUError(
+                            "random_overlay_asset_mismatch",
+                            "random overlay asset fingerprint mismatch",
+                            500,
+                        )
+                    os.chmod(snapshot, 0o400)
+                    random_overlay_paths[category] = snapshot
             if self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE:
                 outro_input_path = job_dir / "approved-outro.mp4"
                 deadline.check()
@@ -4078,7 +4436,27 @@ class TTPostGPUProcessor:
                     )
                 try:
                     deadline.check()
-                    if not self.config.uses_outro_pipeline():
+                    if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+                        _run_command(
+                            self.runner,
+                            build_random_overlay_command(
+                                self.config,
+                                source_path,
+                                output_path,
+                                source_info,
+                                effective_source_duration,
+                                reuse_contract[
+                                    "random_overlay_recipe"
+                                ],
+                                random_overlay_paths,
+                            ),
+                            deadline.stage_timeout(
+                                self.config.transcode_timeout
+                            ),
+                            "random_overlay_transcode_failed",
+                            timeout_error_code="prepare_timeout",
+                        )
+                    elif not self.config.uses_outro_pipeline():
                         _run_command(
                             self.runner,
                             build_normalize_command(
@@ -4203,6 +4581,10 @@ class TTPostGPUProcessor:
                 "probe": safe_probe,
                 "profile": self.config.profile,
             }
+            if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+                result["random_overlay_recipe"] = reuse_contract[
+                    "random_overlay_recipe"
+                ]
             manifest = {
                 "completed_at": _utc_now(),
                 "object_reused": bool(reused),
@@ -4214,6 +4596,9 @@ class TTPostGPUProcessor:
                     "key": storage_key,
                 },
                 "version": (
+                    7
+                    if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE
+                    else
                     6
                     if self.config.media_mode == SOURCE_DIRECT_MEDIA_MODE
                     else 5
@@ -4730,6 +5115,13 @@ class TTPostGPURequestHandler(BaseHTTPRequestHandler):
                     == 32
                 ),
                 "media_mode": self.server.processor.config.media_mode,
+                "random_overlay_asset_set_sha256": (
+                    self.server.processor.config
+                    .random_overlay_manifest_sha256
+                    if self.server.processor.config.media_mode
+                    == RANDOM_OVERLAY_MEDIA_MODE
+                    else ""
+                ),
                 "profile": self.server.processor.config.profile,
                 "storage_backend": self.server.processor.config.storage_backend,
                 "storage": self.server.processor.storage_health(),

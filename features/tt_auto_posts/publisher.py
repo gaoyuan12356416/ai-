@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit
 
-from features.tt_posts.core import caption_uses_code_macro
+from features.tt_posts.core import (
+    caption_uses_code_macro,
+    caption_uses_drama_name_macro,
+)
 from features.tt_posts.service import GPUClientError
 
 from .client import safe_public_message
@@ -45,6 +48,13 @@ from .selector import (
 
 UTC = timezone.utc
 SOURCE_DIRECT_MEDIA_PROFILE = "tt-post-source-direct-v1"
+ZERO_TRIM_MEDIA_PROFILES = frozenset(
+    {
+        SOURCE_DIRECT_MEDIA_PROFILE,
+        "tt-post-random-overlay-hevc-720x1280-v1",
+        "tt-post-random-overlay-h264-720x1280-v1",
+    }
+)
 TERMINAL_TASK_STATUSES = frozenset(
     {"no_candidate", "published", "failed", "canceled", "skipped"}
 )
@@ -291,6 +301,15 @@ class AutoPostExecutor:
             raise AutoPostExecutionError(
                 "tt_auto_source_direct_trim_forbidden",
                 "source-direct publishing requires zero source trim",
+                500,
+            )
+        if (
+            self.media_profile_version in ZERO_TRIM_MEDIA_PROFILES
+            and self.source_trim_tail_seconds != 0
+        ):
+            raise AutoPostExecutionError(
+                "tt_auto_media_profile_trim_forbidden",
+                "%s requires zero source trim" % self.media_profile_version,
                 500,
             )
         if (
@@ -621,13 +640,26 @@ class AutoPostExecutor:
                 "自动发布任务的冻结时间无效",
                 500,
             )
+        caption_template = template.config.get("caption_template")
+        drama_name = str(
+            material.get("drama_name") or drama.get("name") or ""
+        ).strip()
+        if (
+            caption_uses_drama_name_macro(caption_template)
+            and not drama_name
+        ):
+            raise AutoPostExecutionError(
+                "caption_drama_name_required",
+                "发布文案使用{{drama_name}}时必须有有效剧名",
+                409,
+            )
         long_url = build_auto_w2a_url(
             link_id=task.id,
             username=task.account_username or task.account_id,
             # Keep the immutable task short link byte-identical across retries.
             timestamp=int(frozen_at.astimezone(UTC).timestamp()),
             language=task.drama_language,
-            drama_name=material.get("drama_name") or drama.get("name") or task.content_id,
+            drama_name=drama_name or task.content_id,
             tag=material.get("material_tag") or "TTauto",
             page_name=task.account_display_name
             or task.account_username
@@ -639,7 +671,6 @@ class AutoPostExecutor:
         )
         write_auto_short_redirect(self.short_link_root, task.id, long_url)
         description = material.get("description") or drama.get("name")
-        caption_template = template.config.get("caption_template")
         code = None
         if caption_uses_code_macro(caption_template):
             if self.code_route_broker is None:
@@ -660,6 +691,7 @@ class AutoPostExecutor:
             short_url=short_url,
             description=description,
             code=code,
+            drama_name=drama_name,
         )
         if task.caption and task.caption != rendered:
             raise AutoPostExecutionError(

@@ -401,6 +401,42 @@ def make_source_direct_config(root, gates=False, **overrides):
     return replace(config, **overrides) if overrides else config
 
 
+def make_random_overlay_config(root, gates=False, **overrides):
+    root = Path(root)
+    asset_root = root / "random-overlay-assets"
+    asset_root.mkdir(exist_ok=True)
+    categories = {}
+    for category in ("border", "light", "opacity_video", "corners", "tint"):
+        suffix = ".png" if category in {"border", "tint"} else ".webm"
+        name = "%s-01%s" % (category.replace("_", "-"), suffix)
+        payload = ("asset:" + category).encode("ascii")
+        (asset_root / name).write_bytes(payload)
+        categories[category] = [
+            {
+                "media_type": (
+                    "image/png" if suffix == ".png" else "video/webm"
+                ),
+                "name": name,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        ]
+    manifest = {"categories": categories, "version": 1}
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
+    (asset_root / "manifest.json").write_bytes(raw)
+    manifest_sha = hashlib.sha256(raw).hexdigest()
+    config = replace(
+        make_config(root, gates=gates),
+        default_source_trim_tail_seconds=0,
+        media_mode=worker.RANDOM_OVERLAY_MEDIA_MODE,
+        profile=worker.RANDOM_OVERLAY_PROFILE,
+        random_overlay_root=asset_root,
+        random_overlay_manifest_sha256=manifest_sha,
+        random_overlay_assets=worker.load_asset_set(asset_root, manifest_sha),
+    )
+    return replace(config, **overrides) if overrides else config
+
+
 def make_manual_canary_config(root):
     return replace(
         make_config(root, gates=False),
@@ -1684,6 +1720,66 @@ class TTGPUWorkerTests(unittest.TestCase):
             )
         )
         self.assertTrue(reused["reused"])
+        self.assertEqual(len(calls), 1)
+
+    def test_random_overlay_prepare_freezes_recipe_and_reuses_it(self):
+        config = make_random_overlay_config(self.root)
+        runner = FakeRunner(
+            [
+                input_probe(28.5),
+                prepared_probe(28.5),
+            ]
+        )
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+        )
+        request = make_prepare(
+            expected_profile=worker.RANDOM_OVERLAY_PROFILE,
+            source_trim_tail_seconds=0,
+        )
+        result = processor.prepare(request)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["profile"], worker.RANDOM_OVERLAY_PROFILE)
+        self.assertTrue(result["direct_post_eligible"])
+        recipe = result["random_overlay_recipe"]
+        self.assertEqual(
+            recipe["asset_set_sha256"],
+            config.random_overlay_manifest_sha256,
+        )
+        self.assertEqual(
+            set(recipe["assets"]),
+            {"border", "light", "opacity_video", "corners", "tint"},
+        )
+        self.assertTrue(-2000 <= recipe["rotation_millidegrees"] <= 2000)
+        self.assertTrue(9800 <= recipe["scale_bp"] <= 10200)
+        self.assertTrue(1000 <= recipe["tint_opacity_bp"] <= 2000)
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(manifest["version"], 7)
+        self.assertEqual(
+            manifest["request"]["random_overlay_recipe"],
+            recipe,
+        )
+        ffmpeg_commands = [
+            command
+            for command in runner.commands
+            if "ffmpeg" in Path(command[0]).name.lower()
+        ]
+        self.assertEqual(len(ffmpeg_commands), 1)
+        command = ffmpeg_commands[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[base][tint]", graph)
+        self.assertIn("[o1][opacity]", graph)
+        self.assertIn("[o2][light]", graph)
+        self.assertIn("[o3][border]", graph)
+        self.assertIn("[o4][corners]", graph)
+        reused = processor.prepare(request)
+        self.assertTrue(reused["reused"])
+        self.assertEqual(reused["random_overlay_recipe"], recipe)
         self.assertEqual(len(calls), 1)
 
     def test_source_direct_mirrors_exact_source_without_ffmpeg_and_publishes(self):

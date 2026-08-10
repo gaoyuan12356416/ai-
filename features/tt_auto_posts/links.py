@@ -230,6 +230,7 @@ def render_auto_caption(
     short_url: Any,
     description: Any,
     code: Any = None,
+    drama_name: Any = None,
 ) -> str:
     normalized_url = validate_auto_short_url(short_url)
     try:
@@ -238,6 +239,7 @@ def render_auto_caption(
             content_id,
             description=description,
             code=code,
+            drama_name=drama_name,
             defer_url=True,
         )
     except TTPostError as exc:

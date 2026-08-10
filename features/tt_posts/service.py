@@ -62,6 +62,7 @@ from .core import (
     beijing_to_utc,
     caption_uses_desc_macro,
     caption_uses_code_macro,
+    caption_uses_drama_name_macro,
     caption_uses_url_macro,
     normalize_drama_language,
     redact_text,
@@ -1902,7 +1903,9 @@ def _caption_from_submission(
     content_id: Any,
     *,
     description: Any = None,
+    drama_name: Any = None,
     defer_description: bool = False,
+    defer_drama_name: bool = False,
 ) -> Tuple[str, str]:
     """Normalize editable templates while preserving legacy callers."""
 
@@ -1918,14 +1921,20 @@ def _caption_from_submission(
             template,
             content_id,
             description=description,
+            drama_name=drama_name,
             defer_url=True,
             defer_description=defer_description,
             defer_code=True,
+            defer_drama_name=defer_drama_name,
         )
         if raw_caption not in (None, ""):
             submitted = _bounded_text(raw_caption, "发布描述", 2200)
             if not (
-                defer_description and caption_uses_desc_macro(template)
+                (defer_description and caption_uses_desc_macro(template))
+                or (
+                    defer_drama_name
+                    and caption_uses_drama_name_macro(template)
+                )
             ):
                 if not secrets.compare_digest(
                     submitted.encode("utf-8"),
@@ -1947,9 +1956,11 @@ def _caption_from_submission(
         template,
         content_id,
         description=description,
+        drama_name=drama_name,
         defer_url=True,
         defer_description=defer_description,
         defer_code=True,
+        defer_drama_name=defer_drama_name,
     )
     if not secrets.compare_digest(
         rendered.encode("utf-8"),
@@ -2112,6 +2123,21 @@ class TTPostService:
             "TT媒体制作版本",
             128,
         )
+        if (
+            self.media_profile_version
+            in {
+                "tt-post-source-direct-v1",
+                "tt-post-random-overlay-hevc-720x1280-v1",
+                "tt-post-random-overlay-h264-720x1280-v1",
+            }
+            and self.source_trim_tail_seconds != 0
+        ):
+            raise TTPostServiceError(
+                "tt_media_profile_trim_forbidden",
+                "%s requires zero source trim"
+                % self.media_profile_version,
+                500,
+            )
         self.short_link_root = str(short_link_root or "").strip()
         self.code_resolver = code_resolver or TTCodeRouteResolver(
             self.store.db_path,
@@ -2523,6 +2549,7 @@ class TTPostService:
             defer_url=True,
             defer_description=True,
             defer_code=True,
+            defer_drama_name=True,
         )
         # A pure stop must not require the operator to create a new consent
         # record. The UI still submits an explicit accepted=false placeholder
@@ -3063,6 +3090,7 @@ class TTPostService:
             resolved["content_id"],
             url=short_url or None,
             description=resolved.get("description"),
+            drama_name=resolved.get("drama_name"),
         )
         synced_at = _now_utc(self._now_fn).replace(
             microsecond=0
@@ -3845,6 +3873,7 @@ class TTPostService:
                 payload,
                 resolved["content_id"],
                 description=resolved.get("description"),
+                drama_name=resolved.get("drama_name"),
             )
         else:
             caption_template = str(auto_config.get("caption_template") or "")
@@ -3852,6 +3881,7 @@ class TTPostService:
                 caption_template,
                 resolved["content_id"],
                 description=resolved.get("description"),
+                drama_name=resolved.get("drama_name"),
                 defer_url=True,
                 defer_code=True,
             )
@@ -5424,6 +5454,7 @@ class TTPostService:
                 url=existing.get("short_url"),
                 description=existing.get("description"),
                 code=existing.get("code"),
+                drama_name=existing.get("drama_name"),
             )
         if not secrets.compare_digest(
             str(existing.get("caption") or "").encode("utf-8"),
@@ -5467,6 +5498,7 @@ class TTPostService:
                 payload,
                 requested_content_id,
                 defer_description=True,
+                defer_drama_name=True,
             )
         elif submitted_caption not in (None, ""):
             candidate_template = None
@@ -5565,6 +5597,7 @@ class TTPostService:
             payload,
             requested_content_id,
             description=prepared.get("description"),
+            drama_name=prepared.get("drama_name"),
         )
         maximum_duration = int(
             creator.get("max_video_post_duration_sec") or 0

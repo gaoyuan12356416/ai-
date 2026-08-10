@@ -508,7 +508,12 @@ class TtPostPoolUiTest(unittest.TestCase):
         self.assertIn("allPublicationCounts.unpublished", PAGE)
 
     def test_caption_supports_url_desc_and_both_drama_id_macros(self):
-        self.assertIn('new Set(["contect_id", "content_id"])', PAGE)
+        self.assertIn(
+            'new Set(["contect_id", "content_id", "drama_name"])',
+            PAGE,
+        )
+        self.assertIn("{{drama_name}}", PAGE)
+        self.assertIn("normalizeDramaName", PAGE)
         self.assertIn("可选使用 {{contect_id}} 或 {{content_id}}", PAGE)
         self.assertIn('const CAPTION_URL_PLACEHOLDER = "{url}"', PAGE)
         self.assertIn('const CAPTION_DESC_PLACEHOLDER = "{desc}"', PAGE)

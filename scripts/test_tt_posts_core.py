@@ -2693,6 +2693,33 @@ class CaptionPolicyAndTimeTests(unittest.TestCase):
             render_caption_template("Drama ID: {{content_id}}", "ABC_123"),
         )
 
+    def test_caption_renders_drama_name_macro_and_normalizes_whitespace(self):
+        self.assertEqual(
+            "Watch My Great Drama now",
+            render_caption_template(
+                "Watch {{drama_name}} now",
+                "ABC_123",
+                drama_name="  My\nGreat   Drama  ",
+            ),
+        )
+
+    def test_caption_drama_name_macro_fails_closed_or_can_be_deferred(self):
+        with self.assertRaises(TTPostError) as caught:
+            render_caption_template(
+                "Watch {{drama_name}}",
+                "ABC_123",
+                drama_name="",
+            )
+        self.assertEqual(caught.exception.code, "caption_drama_name_required")
+        self.assertEqual(
+            "Watch {{drama_name}}",
+            render_caption_template(
+                "Watch {{drama_name}}",
+                "ABC_123",
+                defer_drama_name=True,
+            ),
+        )
+
     def test_caption_url_macro_preserves_exact_line_breaks(self):
         short_url = (
             "https://gy.g2flow.com/s2l/"

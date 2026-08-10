@@ -756,7 +756,7 @@
                 <label for="materialIds"><span class="step">2</span>批量填写素材 ID</label>
                 <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
                 <button id="previewMaterial" class="button primary" type="button">批量校验素材</button>
-                <span id="materialHelp" class="helper">支持逗号、空格、分号或换行分隔，每次最多 100 个正整数 ID。这里只校验素材与真实 Drama ID，校验通过即可入池；视频下载和片尾预制作会在后台进行。</span>
+                <span id="materialHelp" class="helper">支持逗号、空格、分号或换行分隔，每次最多 100 个正整数 ID。这里只校验素材与真实 Drama ID，校验通过即可入池；视频下载和随机透明模板制作会在后台进行。</span>
                 <div id="materialProgress" class="material-progress" role="status" aria-live="polite">尚未校验素材。</div>
                 <div id="materialResults" class="material-results hidden" aria-label="素材校验结果"></div>
               </div>
@@ -771,7 +771,7 @@ Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">可选使用 {{contect_id}} 或 {{content_id}} 填入当前剧 ID；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。模板会与账号、时间和开关一起保存。</span>
+                  <span id="captionHelp">可选使用 {{contect_id}} 或 {{content_id}} 填入当前剧 ID、{{drama_name}} 填入剧名；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。使用 {{drama_name}} 时，缺少剧名会阻止发布。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -907,7 +907,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
       const API_BASE = "/api/admin/tt-posts";
       const CAPTION_TEMPLATE = "Watch the full story in the app 🎬\n\nDrama ID: {{contect_id}}\n\nVisit my profile → Open the link → Search the Drama ID → Watch now.";
       const CAPTION_PLACEHOLDER_PATTERN = /\{\{([^{}]*)\}\}/g;
-      const CAPTION_PLACEHOLDERS = new Set(["contect_id", "content_id"]);
+      const CAPTION_PLACEHOLDERS = new Set(["contect_id", "content_id", "drama_name"]);
       const CAPTION_SINGLE_PLACEHOLDER_PATTERN = /\{([^{}]*)\}/g;
       const CAPTION_URL_PLACEHOLDER = "{url}";
       const CAPTION_DESC_PLACEHOLDER = "{desc}";
@@ -2648,13 +2648,27 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         ) return "";
         return normalized;
       }
-      function renderCaptionTemplate(template, contentId, description) {
+      function normalizeDramaName(value) {
+        const raw = String(value || "");
+        if (raw.includes("\u0000")) return "";
+        const normalized = raw.replace(/\s+/g, " ").trim();
+        if (
+          !normalized ||
+          Array.from(normalized).length > 500 ||
+          /[\u0000-\u001f]/.test(normalized)
+        ) return "";
+        return normalized;
+      }
+      function renderCaptionTemplate(template, contentId, description, dramaName) {
         const placeholderPattern = new RegExp(CAPTION_PLACEHOLDER_PATTERN.source, "g");
         const renderedContent = String(template || "").replace(
           placeholderPattern,
-          (match, name) => CAPTION_PLACEHOLDERS.has(String(name || "").trim())
-            ? cleanId(contentId)
-            : match
+          (match, name) => {
+            const normalizedName = String(name || "").trim();
+            if (["contect_id", "content_id"].includes(normalizedName)) return cleanId(contentId);
+            if (normalizedName === "drama_name") return normalizeDramaName(dramaName);
+            return match;
+          }
         );
         const normalizedDescription = normalizeDramaDescription(description);
         return renderedContent.replace(
@@ -2722,6 +2736,15 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         let maxRenderedUnits = 0;
         for (const material of materials) {
           if (
+            placeholders.includes("drama_name") &&
+            !normalizeDramaName(material.drama_name)
+          ) {
+            return {
+              error: `素材 ${material.material_id} 缺少有效剧名，不能使用 {{drama_name}}。`,
+              maxRenderedUnits,
+            };
+          }
+          if (
             singlePlaceholders.includes("desc") &&
             !normalizeDramaDescription(material.description)
           ) {
@@ -2733,7 +2756,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           const units = utf16Units(renderCaptionTemplate(
             template,
             material.content_id,
-            material.description
+            material.description,
+            material.drama_name
           ));
           maxRenderedUnits = Math.max(maxRenderedUnits, units);
           if (units > 2200) {

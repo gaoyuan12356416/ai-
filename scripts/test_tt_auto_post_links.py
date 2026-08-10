@@ -163,6 +163,25 @@ class TTAutoPostLinksTests(unittest.TestCase):
             code="AB12",
         )
         self.assertEqual(code_rendered, "Code: AB12\n%s" % short_url)
+        drama_rendered = render_auto_caption(
+            "Watch {{drama_name}}\n{url}",
+            "C9",
+            short_url=short_url,
+            description="desc",
+            drama_name="Drama Nine",
+        )
+        self.assertEqual(drama_rendered, "Watch Drama Nine\n%s" % short_url)
+        with self.assertRaises(AutoPostLinkError) as drama_caught:
+            render_auto_caption(
+                "Watch {{drama_name}}\n{url}",
+                "C9",
+                short_url=short_url,
+                description="desc",
+            )
+        self.assertEqual(
+            drama_caught.exception.code,
+            "caption_drama_name_required",
+        )
         with self.assertRaises(AutoPostLinkError) as caught:
             render_auto_caption(
                 "{code} {url}",
