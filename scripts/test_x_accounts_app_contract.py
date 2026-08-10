@@ -58,10 +58,15 @@ def source_between(start, end):
 class XAccountsAppContractTest(unittest.TestCase):
     def test_x_post_schedule_template_is_forwarded_and_audited_without_plaintext(self):
         self.assertIn('"body_template",', X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn('"schedule_mode",', X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn('"random_daily_count",', X_ACCOUNTS_SIDECAR_SOURCE)
         self.assertIn('"settings": dict(settings)', X_ACCOUNTS_CLIENT_SOURCE)
         self.assertIn('"invalid_post_template"', X_ACCOUNTS_CLIENT_SOURCE)
         self.assertIn('"body_template_sha256"', APP_SOURCE)
         self.assertIn('"body_template_uses_url"', APP_SOURCE)
+        self.assertIn('"schedule_mode": str(', APP_SOURCE)
+        self.assertIn('"random_daily_count": (', APP_SOURCE)
+        self.assertIn('settings.get("random_daily_count", 0)', APP_SOURCE)
         self.assertNotIn('"body_template": settings.get', APP_SOURCE)
 
     def test_dynamic_daily_batch_has_extended_timeout_and_generic_timer_label(self):

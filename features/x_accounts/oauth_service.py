@@ -2317,6 +2317,8 @@ def save_post_schedule_request(payload, source_type, navigation_item):
                 "timezone",
                 "account_ids",
                 "publish_times",
+                "schedule_mode",
+                "random_daily_count",
                 "body_template",
                 "version",
             )

@@ -42095,6 +42095,8 @@ except ValueError:
     )
 
 X_ACCOUNTS_ERROR_META = {
+    "invalid_random_daily_count": (400, "每日随机发布次数无效"),
+    "invalid_schedule_mode": (400, "自动发布模式无效"),
     "invalid_post_template": (400, "X Post描述模板无效"),
     "invalid_request": (400, "请求参数无效"),
     "x_account_disabled": (409, "X账号已在后台停用，请重新授权后再使用"),
@@ -42113,6 +42115,8 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_pool_material_already_exists": (409, "素材已在X素材池中"),
     "x_post_pool_material_already_used": (409, "素材已有X发布历史，不能重新入池"),
     "x_post_rate_limited": (429, "X API请求过于频繁，请稍后重试"),
+    "x_post_random_plan_generation_failed": (500, "随机发布时间生成失败"),
+    "x_post_random_times_must_be_empty": (400, "随机发布不能同时设置固定时间"),
     "x_post_storage_conflict": (409, "素材池写入冲突，请刷新后重试"),
     "x_post_pool_required": (409, "正式每日计划必须使用素材池记录"),
     "x_post_schedule_collision": (409, "同一账号不能在两个发布池配置相同时间点"),
@@ -98455,6 +98459,22 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                                     list,
                                 )
                                 else []
+                            ),
+                            "schedule_mode": str(
+                                settings.get("schedule_mode", "fixed")
+                                or "fixed"
+                            ),
+                            "random_daily_count": (
+                                settings.get("random_daily_count", 0)
+                                if isinstance(
+                                    settings.get("random_daily_count", 0),
+                                    int,
+                                )
+                                and not isinstance(
+                                    settings.get("random_daily_count", 0),
+                                    bool,
+                                )
+                                else 0
                             ),
                             "publish_time_count": len(
                                 settings.get("publish_times", [])

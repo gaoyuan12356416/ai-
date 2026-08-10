@@ -9,6 +9,8 @@ import urllib.request
 
 
 SAFE_ERROR_CODES = {
+    "invalid_random_daily_count",
+    "invalid_schedule_mode",
     "invalid_post_template",
     "invalid_request",
     "x_account_disabled",
@@ -37,6 +39,8 @@ SAFE_ERROR_CODES = {
     "x_post_pool_required",
     "x_post_queue_not_found",
     "x_post_rate_limited",
+    "x_post_random_plan_generation_failed",
+    "x_post_random_times_must_be_empty",
     "x_post_retry_requires_review",
     "x_post_run_not_found",
     "x_post_schedule_collision",

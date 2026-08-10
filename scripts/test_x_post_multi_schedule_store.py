@@ -90,6 +90,42 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ),
         )
 
+    def save_random_schedule(
+        self,
+        source_type,
+        accounts,
+        daily_count,
+        version=1,
+        body_template=None,
+        now=None,
+    ):
+        settings = {
+            "enabled": True,
+            "timezone": "Asia/Shanghai",
+            "account_ids": accounts,
+            "publish_times": [],
+            "schedule_mode": "random",
+            "random_daily_count": daily_count,
+            "version": version,
+        }
+        if body_template is not None:
+            settings["body_template"] = body_template
+        return self.store.save_schedule_config(
+            source_type,
+            settings,
+            actor={"user_id": "admin-1", "name": "Admin"},
+            eligible_account_ids=[2, 3, 4],
+            now=now
+            or datetime(
+                2026,
+                7,
+                27,
+                8,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+
     def add_drama(self, content_id="D1", free_episode_count=2, labels=""):
         name_tag = "#Drama_One"
         if labels:
@@ -211,6 +247,205 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(
             stale.exception.code,
             "x_post_schedule_version_conflict",
+        )
+
+    def test_random_schedule_is_persisted_stable_spaced_and_next_day_only(self):
+        template = "{{url}}\n🎬 {{drama_name}}\n{{desc}}"
+        saved = self.save_random_schedule(
+            "material",
+            [2, 3],
+            6,
+            body_template=template,
+        )
+        self.assertEqual(saved["schedule_mode"], "random")
+        self.assertEqual(saved["random_daily_count"], 6)
+        self.assertEqual(saved["random_effective_date"], "2026-07-28")
+        self.assertEqual(saved["publish_times"], [])
+        self.assertEqual(saved["posts_per_day"], 12)
+        self.assertTrue(saved["body_template"].startswith("{{url}}"))
+        self.assertEqual(
+            self.store.due_schedule_slots(
+                datetime(2026, 7, 27, 12, 0, tzinfo=service.BEIJING_TZ)
+            )["items"],
+            [],
+        )
+        self.assertEqual(len(saved["random_daily_plans"]), 1)
+        plan = saved["random_daily_plans"][0]
+        self.assertEqual(plan["run_date"], "2026-07-28")
+        self.assertEqual(plan["config_version"], 2)
+        self.assertEqual(plan["account_ids"], [2, 3])
+        self.assertEqual(plan["body_template"], template)
+        self.assertEqual(len(plan["publish_times"]), 6)
+        minute_values = [
+            int(value[:2]) * 60 + int(value[3:])
+            for value in plan["publish_times"]
+        ]
+        self.assertTrue(all(value % 60 for value in minute_values))
+        self.assertTrue(
+            all(
+                right - left >= 60
+                for left, right in zip(minute_values, minute_values[1:])
+            )
+        )
+        reopened = service.XPostStore(self.db_path).get_schedule_config(
+            "material",
+            now=datetime(
+                2026,
+                7,
+                27,
+                9,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+        self.assertEqual(
+            reopened["random_daily_plans"][0]["publish_times"],
+            plan["publish_times"],
+        )
+
+    def test_random_generator_supports_full_daily_limit_without_whole_hours(self):
+        previous = []
+        for _attempt in range(50):
+            publish_times = service._generate_random_publish_times(
+                service.MAX_RANDOM_DAILY_COUNT,
+                previous_times=previous,
+            )
+            minute_values = [
+                int(value[:2]) * 60 + int(value[3:])
+                for value in publish_times
+            ]
+            self.assertEqual(
+                len(publish_times),
+                service.MAX_RANDOM_DAILY_COUNT,
+            )
+            self.assertEqual(len(set(publish_times)), len(publish_times))
+            self.assertNotEqual(publish_times, previous)
+            self.assertTrue(all(value % 60 for value in minute_values))
+            self.assertTrue(
+                all(
+                    right - left
+                    >= service.RANDOM_PUBLISH_MIN_GAP_MINUTES
+                    for left, right in zip(
+                        minute_values,
+                        minute_values[1:],
+                    )
+                )
+            )
+            previous = publish_times
+
+    def test_random_due_freezes_url_template_and_config_snapshot(self):
+        template = "{{url}}\n🎬 {{drama_name}}\n{{desc}}"
+        saved = self.save_random_schedule(
+            "material",
+            [2],
+            2,
+            body_template=template,
+        )
+        plan = saved["random_daily_plans"][0]
+        first_time = plan["publish_times"][0]
+        hour, minute = (int(part) for part in first_time.split(":"))
+        due = self.store.due_schedule_slots(
+            datetime(
+                2026,
+                7,
+                28,
+                hour,
+                minute,
+                10,
+                tzinfo=service.BEIJING_TZ,
+            )
+        )
+        self.assertEqual(len(due["items"]), 1)
+        self.assertEqual(due["items"][0]["schedule_mode"], "random")
+        self.assertEqual(due["items"][0]["version"], 2)
+        self.assertEqual(due["items"][0]["body_template"], template)
+
+        updated = self.save_random_schedule(
+            "material",
+            [3],
+            3,
+            version=2,
+            body_template="🎬 {{drama_name}}\n{{desc}}\n{{url}}",
+            now=datetime(
+                2026,
+                7,
+                28,
+                12,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+        self.assertEqual(updated["random_effective_date"], "2026-07-29")
+        frozen = self.store.query_schedule_plan(
+            "material",
+            "2026-07-28",
+            first_time,
+        )["run"]
+        self.assertEqual(frozen["account_ids"], [2])
+        self.assertEqual(frozen["body_template"], template)
+        short_url = service._build_short_url(
+            service.DEFAULT_SHORT_BASE_URL,
+            9876,
+        )
+        rendered = service.build_post_text(
+            short_url,
+            "Demo Drama",
+            "A frozen random-schedule description.",
+            body_template=frozen["body_template"],
+        )
+        self.assertEqual(
+            short_url,
+            "https://gy.g2flow.com/s2l/9876.html",
+        )
+        self.assertEqual(rendered.count(short_url), 1)
+        self.assertNotIn("{{url}}", rendered)
+
+    def test_random_plans_avoid_shared_account_cross_pool_collision(self):
+        material = self.save_random_schedule("material", [2], 8)
+        drama = self.save_random_schedule("drama", [2], 8)
+        material_times = set(
+            material["random_daily_plans"][0]["publish_times"]
+        )
+        drama_times = set(
+            drama["random_daily_plans"][0]["publish_times"]
+        )
+        self.assertFalse(material_times.intersection(drama_times))
+
+    def test_random_schedule_rejects_mixed_times_and_invalid_count(self):
+        for count in (0, 25):
+            with self.subTest(count=count):
+                with self.assertRaises(service.XPostError) as caught:
+                    self.save_random_schedule("material", [2], count)
+                self.assertEqual(
+                    caught.exception.code,
+                    "invalid_random_daily_count",
+                )
+        with self.assertRaises(service.XPostError) as mixed:
+            self.store.save_schedule_config(
+                "material",
+                {
+                    "enabled": True,
+                    "timezone": "Asia/Shanghai",
+                    "account_ids": [2],
+                    "publish_times": ["09:00"],
+                    "schedule_mode": "random",
+                    "random_daily_count": 2,
+                    "version": 1,
+                },
+                actor={"user_id": "admin-1", "name": "Admin"},
+                eligible_account_ids=[2],
+                now=datetime(
+                    2026,
+                    7,
+                    27,
+                    8,
+                    0,
+                    tzinfo=service.BEIJING_TZ,
+                ),
+            )
+        self.assertEqual(
+            mixed.exception.code,
+            "x_post_random_times_must_be_empty",
         )
 
     def test_schedule_change_is_rejected_during_the_current_slot_window(self):
@@ -2090,6 +2325,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             }
             self.assertIn("x_post_schedule_config", tables)
             self.assertIn("x_post_schedule_run", tables)
+            self.assertIn("x_post_schedule_random_plan", tables)
             self.assertIn("x_post_drama_pool", tables)
             drama_columns = {
                 row[1]
@@ -2103,6 +2339,19 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     "assigned_at",
                     "assigned_source_queue_id",
                 }.issubset(drama_columns)
+            )
+            config_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_schedule_config)"
+                )
+            }
+            self.assertTrue(
+                {
+                    "schedule_mode",
+                    "random_daily_count",
+                    "random_effective_date",
+                }.issubset(config_columns)
             )
             triggers = {
                 row[0]
@@ -2124,6 +2373,97 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.assertEqual(
                 conn.execute("PRAGMA integrity_check").fetchone()[0],
                 "ok",
+            )
+
+    def test_random_schema_migration_preserves_legacy_fixed_config(self):
+        legacy_path = Path(self.temp.name) / "legacy-schedule.sqlite3"
+        with contextlib.closing(sqlite3.connect(legacy_path)) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE x_post_schedule_config (
+                    source_type TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+                    account_ids_json TEXT NOT NULL DEFAULT '[]',
+                    publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    body_template TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    updated_by_user_id TEXT NOT NULL DEFAULT '',
+                    updated_by_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE x_post_schedule_run (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slot_key TEXT NOT NULL UNIQUE,
+                    source_type TEXT NOT NULL,
+                    run_date TEXT NOT NULL,
+                    publish_time TEXT NOT NULL,
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+                    config_version INTEGER NOT NULL,
+                    account_ids_json TEXT NOT NULL,
+                    body_template TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    expected_count INTEGER NOT NULL,
+                    queued_count INTEGER NOT NULL DEFAULT 0,
+                    published_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    unknown_count INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(source_type,run_date,publish_time)
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO x_post_schedule_config("
+                "source_type,enabled,account_ids_json,publish_times_json,"
+                "body_template,version,created_at,updated_at"
+                ") VALUES(?,1,?,?,?,?,?,?)",
+                (
+                    "material",
+                    "[16,14]",
+                    '["10:32"]',
+                    "{{url}}\n🎬 {{drama_name}}\n{{desc}}",
+                    15,
+                    "2026-08-10T06:11:24Z",
+                    "2026-08-10T06:11:24Z",
+                ),
+            )
+            conn.commit()
+
+        migrated = service.XPostStore(legacy_path).get_schedule_config(
+            "material",
+            now=datetime(
+                2026,
+                8,
+                10,
+                15,
+                0,
+                tzinfo=service.BEIJING_TZ,
+            ),
+        )
+        self.assertEqual(migrated["schedule_mode"], "fixed")
+        self.assertEqual(migrated["random_daily_count"], 0)
+        self.assertEqual(migrated["random_effective_date"], "")
+        self.assertEqual(migrated["account_ids"], [16, 14])
+        self.assertEqual(migrated["publish_times"], ["10:32"])
+        self.assertEqual(migrated["version"], 15)
+        self.assertTrue(migrated["body_template"].startswith("{{url}}"))
+        with contextlib.closing(sqlite3.connect(legacy_path)) as conn:
+            self.assertEqual(
+                conn.execute("PRAGMA integrity_check").fetchone()[0],
+                "ok",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_schedule_random_plan"
+                ).fetchone()[0],
+                0,
             )
 
 

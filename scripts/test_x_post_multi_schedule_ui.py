@@ -70,6 +70,8 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
             "refreshAccounts",
             "publishTimeInput",
             "publishTimeChips",
+            "randomDailyCount",
+            "randomPlanPreview",
             "scheduleEnabled",
             "scheduleSummary",
             "scheduleMeta",
@@ -84,13 +86,28 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('api("/api/admin/x-posts/material-pool/schedule", {', MATERIAL)
         self.assertIn('method: "PUT"', MATERIAL)
         self.assertIn("account_ids: selectedIds.map", MATERIAL)
-        self.assertIn("publish_times: state.schedule.publishTimes.slice()", MATERIAL)
+        self.assertIn('publish_times: scheduleMode === "fixed" ? state.schedule.publishTimes.slice() : []', MATERIAL)
+        self.assertIn("schedule_mode: scheduleMode", MATERIAL)
+        self.assertIn("random_daily_count:", MATERIAL)
         self.assertIn('timezone: "Asia/Shanghai"', MATERIAL)
         self.assertIn("version: state.schedule.version", MATERIAL)
         self.assertIn("accountEligible(item)", MATERIAL)
         self.assertIn('item.status === "active"', MATERIAL)
         self.assertIn("item.publish_eligible === true", MATERIAL)
         self.assertIn("每日最多", MATERIAL)
+
+    def test_both_pools_support_persisted_random_daily_schedules(self):
+        for page in (MATERIAL, DRAMA):
+            self.assertIn("随机时间发布", page)
+            self.assertIn("每天随机发布次数", page)
+            self.assertIn("00:00–23:59", page)
+            self.assertIn("相邻时间至少间隔 1 小时", page)
+            self.assertIn("从次日生效", page)
+            self.assertIn('item.schedule_mode || "fixed"', page)
+            self.assertIn("item.random_daily_count", page)
+            self.assertIn("item.random_daily_plans", page)
+            self.assertIn("schedule_mode: scheduleMode", page)
+            self.assertIn("random_daily_count:", page)
 
     def test_drama_pool_covers_preview_pool_detail_delete_and_schedule_apis(self):
         endpoints = {

@@ -102,6 +102,11 @@
       grid-template-columns: minmax(320px, 1.25fr) minmax(280px, .9fr);
       gap: 18px;
     }
+    .mode-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .mode-option { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 11px; background: #fff; font-size: 13px; font-weight: 800; cursor: pointer; }
+    .mode-option input { accent-color: var(--blue); }
+    .random-count { width: 100%; min-height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; color: var(--ink); }
+    .random-plan { display: grid; gap: 6px; padding: 10px 12px; border: 1px dashed #bfd0e8; border-radius: 11px; background: #f8fbff; }
     .field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .field-head label { margin: 0; }
     .inline-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -342,13 +347,26 @@
               <div id="selectedAccountSummary" class="selection-summary">尚未选择发布账号。</div>
             </div>
             <div class="field">
-              <label for="publishTimeInput">发布时间点</label>
-              <div class="time-add">
-                <input id="publishTimeInput" class="time-input" type="time" step="60" aria-describedby="publishTimeHelp" />
-                <button id="addPublishTime" class="button" type="button">添加时间</button>
+              <label>发布方式</label>
+              <div class="mode-toggle" role="radiogroup" aria-label="发布方式">
+                <label class="mode-option"><input type="radio" name="scheduleMode" value="fixed" checked />固定时间发布</label>
+                <label class="mode-option"><input type="radio" name="scheduleMode" value="random" />随机时间发布</label>
               </div>
-              <div id="publishTimeChips" class="time-chips" aria-live="polite"></div>
-              <span id="publishTimeHelp" class="helper">统一使用北京时间（Asia/Shanghai）；同一时间不能重复添加。</span>
+              <div id="fixedSchedulePanel" class="field">
+                <label for="publishTimeInput">固定发布时间点</label>
+                <div class="time-add">
+                  <input id="publishTimeInput" class="time-input" type="time" step="60" aria-describedby="publishTimeHelp" />
+                  <button id="addPublishTime" class="button" type="button">添加时间</button>
+                </div>
+                <div id="publishTimeChips" class="time-chips" aria-live="polite"></div>
+                <span id="publishTimeHelp" class="helper">统一使用北京时间（Asia/Shanghai）；同一时间不能重复添加。</span>
+              </div>
+              <div id="randomSchedulePanel" class="field hidden">
+                <label for="randomDailyCount">每天随机发布次数</label>
+                <input id="randomDailyCount" class="random-count" type="number" min="1" max="24" step="1" value="1" />
+                <span class="helper">北京时间 00:00–23:59 内按分钟随机；避开整点，相邻时间至少间隔 1 小时。首次启用或修改次数后从次日生效。</span>
+                <div id="randomPlanPreview" class="random-plan" aria-live="polite">随机计划尚未生成。</div>
+              </div>
             </div>
           </div>
           <div class="schedule-footer">
@@ -464,6 +482,9 @@
           timezone: "Asia/Shanghai",
           accountIds: new Set(),
           publishTimes: [],
+          scheduleMode: "fixed",
+          randomDailyCount: 1,
+          randomDailyPlans: [],
           bodyTemplate: "",
           version: 0,
           updatedByName: "",
@@ -695,15 +716,45 @@
       }
       function renderScheduleSummary() {
         const accountCount = state.schedule.accountIds.size;
-        const timeCount = state.schedule.publishTimes.length;
+        const randomMode = state.schedule.scheduleMode === "random";
+        const timeCount = randomMode
+          ? state.schedule.randomDailyCount
+          : state.schedule.publishTimes.length;
         const total = accountCount * timeCount;
         const summary = document.createDocumentFragment();
-        const prefix = document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个时间点 = 每日最多 `);
+        const prefix = document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "随机批次" : "时间点"} = 每日最多 `);
         const strong = document.createElement("strong");
         setText(strong, `${total} 篇 Post`);
         summary.append(prefix, strong);
         const node = byId("scheduleSummary");
         node.replaceChildren(summary);
+      }
+      function renderRandomPlans() {
+        const container = byId("randomPlanPreview");
+        container.replaceChildren();
+        const plans = Array.isArray(state.schedule.randomDailyPlans)
+          ? state.schedule.randomDailyPlans
+          : [];
+        if (!plans.length) {
+          setText(container, "随机计划尚未生成；首次启用或修改后从次日生效。");
+          return;
+        }
+        plans.forEach(plan => {
+          const line = document.createElement("span");
+          const times = Array.isArray(plan.publish_times) ? plan.publish_times.join("、") : "";
+          setText(line, `${String(plan.run_date || "")}：${times || "尚无时间"}`);
+          container.appendChild(line);
+        });
+      }
+      function renderScheduleMode() {
+        const randomMode = state.schedule.scheduleMode === "random";
+        byId("fixedSchedulePanel").classList.toggle("hidden", randomMode);
+        byId("randomSchedulePanel").classList.toggle("hidden", !randomMode);
+        const radio = document.querySelector(`input[name="scheduleMode"][value="${state.schedule.scheduleMode}"]`);
+        if (radio) radio.checked = true;
+        byId("randomDailyCount").value = String(state.schedule.randomDailyCount || 1);
+        renderRandomPlans();
+        renderScheduleSummary();
       }
       function applySchedule(payload) {
         const item = scheduleItem(payload);
@@ -717,6 +768,9 @@
           rawAccounts.map(value => String(value || "")).filter(value => /^\d+$/.test(value) && Number(value) > 0)
         );
         state.schedule.publishTimes = Array.from(new Set(rawTimes.map(value => String(value || "").trim()).filter(validPublishTime))).sort();
+        state.schedule.scheduleMode = String(item.schedule_mode || "fixed") === "random" ? "random" : "fixed";
+        state.schedule.randomDailyCount = Math.max(1, Math.min(24, Number(item.random_daily_count || 1)));
+        state.schedule.randomDailyPlans = Array.isArray(item.random_daily_plans) ? item.random_daily_plans : [];
         state.schedule.bodyTemplate = String(item.body_template || "");
         state.schedule.version = Number.isInteger(Number(item.version)) ? Number(item.version) : 0;
         state.schedule.updatedByName = String(item.updated_by_name || item.updated_by || "");
@@ -726,6 +780,7 @@
         byId("materialPostTemplate").value = state.schedule.bodyTemplate;
         renderAccountOptions();
         renderPublishTimes();
+        renderScheduleMode();
         const updated = state.schedule.updatedAt
           ? `${state.schedule.updatedByName || "未知用户"} · ${formatTime(state.schedule.updatedAt)}`
           : "尚未保存发布设置";
@@ -785,6 +840,8 @@
         if (state.scheduleBusy) return;
         const enabled = byId("scheduleEnabled").checked;
         const selectedIds = Array.from(state.schedule.accountIds);
+        const scheduleMode = document.querySelector('input[name="scheduleMode"]:checked')?.value === "random" ? "random" : "fixed";
+        const randomDailyCount = Number(byId("randomDailyCount").value);
         const bodyTemplate = String(byId("materialPostTemplate").value || "").trim();
         if (!bodyTemplate.includes("{{drama_name}}") || !bodyTemplate.includes("{{desc}}")) {
           setScheduleMessage("描述模板必须包含 {{drama_name}} 和 {{desc}}。", true);
@@ -794,8 +851,13 @@
           setScheduleMessage("启用自动发布前，请至少选择一个可发布账号。", true);
           return;
         }
-        if (enabled && !state.schedule.publishTimes.length) {
+        if (enabled && scheduleMode === "fixed" && !state.schedule.publishTimes.length) {
           setScheduleMessage("启用自动发布前，请至少添加一个发布时间。", true);
+          return;
+        }
+        if (scheduleMode === "random" && (!Number.isInteger(randomDailyCount) || randomDailyCount < 1 || randomDailyCount > 24)) {
+          setScheduleMessage("每天随机发布次数必须是1到24的整数。", true);
+          byId("randomDailyCount").focus();
           return;
         }
         const invalidSelected = selectedIds.filter(id => {
@@ -818,13 +880,15 @@
               enabled,
               timezone: "Asia/Shanghai",
               account_ids: selectedIds.map(value => Number(value)),
-              publish_times: state.schedule.publishTimes.slice(),
+              publish_times: scheduleMode === "fixed" ? state.schedule.publishTimes.slice() : [],
+              schedule_mode: scheduleMode,
+              random_daily_count: scheduleMode === "random" ? randomDailyCount : 0,
               body_template: bodyTemplate,
               version: state.schedule.version,
             }),
           });
           applySchedule(result);
-          setScheduleMessage("发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
+          setScheduleMessage(scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
           showToast("素材池自动发布设置已保存。", false);
         } catch (error) {
           setScheduleMessage(`保存失败：${error.message}`, true);
@@ -1219,6 +1283,20 @@
       });
       byId("scheduleEnabled").addEventListener("change", () => {
         setScheduleMessage("启用状态已修改，保存后生效。", false);
+      });
+      document.querySelectorAll('input[name="scheduleMode"]').forEach(input => {
+        input.addEventListener("change", () => {
+          state.schedule.scheduleMode = input.value === "random" ? "random" : "fixed";
+          renderScheduleMode();
+          setScheduleMessage(state.schedule.scheduleMode === "random" ? "已选择随机时间发布，保存后从次日生效。" : "已选择固定时间发布，保存后生效。", false);
+        });
+      });
+      byId("randomDailyCount").addEventListener("input", event => {
+        const value = Number(event.target.value);
+        if (Number.isInteger(value) && value >= 1 && value <= 24) {
+          state.schedule.randomDailyCount = value;
+          renderScheduleSummary();
+        }
       });
       byId("saveSchedule").addEventListener("click", saveSchedule);
       byId("addMaterials").addEventListener("click", addMaterials);

@@ -40,10 +40,13 @@ MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 SQLITE_QUERY_BATCH_SIZE = 900
 MAX_DAILY_BATCH_SIZE = 50
 MAX_SCHEDULE_ACCOUNTS = 50
+MAX_RANDOM_DAILY_COUNT = 24
+RANDOM_PUBLISH_MIN_GAP_MINUTES = 60
 MAX_DRAMA_POOL_BATCH_DELETE_SIZE = 100
 MAX_DRAMA_POOL_REPLAY_SIZE = 100
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
+SCHEDULE_MODES = frozenset({"fixed", "random"})
 DRAMA_REPLAY_REASON = "operator_full_replay_v1"
 DRAMA_POOL_DELETABLE_STATUSES = frozenset(
     {"pending", "validation_failed"}
@@ -1059,6 +1062,11 @@ def ensure_storage(db_path):
                         CHECK(timezone='Asia/Shanghai'),
                     account_ids_json TEXT NOT NULL DEFAULT '[]',
                     publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    schedule_mode TEXT NOT NULL DEFAULT 'fixed'
+                        CHECK(schedule_mode IN ('fixed','random')),
+                    random_daily_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(random_daily_count BETWEEN 0 AND 24),
+                    random_effective_date TEXT NOT NULL DEFAULT '',
                     body_template TEXT NOT NULL DEFAULT '',
                     version INTEGER NOT NULL DEFAULT 1,
                     updated_by_user_id TEXT NOT NULL DEFAULT '',
@@ -1081,6 +1089,8 @@ def ensure_storage(db_path):
                         CHECK(timezone='Asia/Shanghai'),
                     config_version INTEGER NOT NULL,
                     account_ids_json TEXT NOT NULL,
+                    schedule_mode TEXT NOT NULL DEFAULT 'fixed'
+                        CHECK(schedule_mode IN ('fixed','random')),
                     body_template TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'queued',
                     expected_count INTEGER NOT NULL,
@@ -1095,6 +1105,21 @@ def ensure_storage(db_path):
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(source_type,run_date,publish_time)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
+                    source_type TEXT NOT NULL
+                        CHECK(source_type IN ('material','drama')),
+                    run_date TEXT NOT NULL,
+                    config_version INTEGER NOT NULL,
+                    account_ids_json TEXT NOT NULL,
+                    body_template TEXT NOT NULL,
+                    publish_times_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(source_type,run_date)
                 )
                 """
             )
@@ -1217,6 +1242,23 @@ def ensure_storage(db_path):
                     "ALTER TABLE x_post_schedule_config "
                     "ADD COLUMN body_template TEXT NOT NULL DEFAULT ''"
                 )
+            schedule_config_additive_columns = {
+                "schedule_mode": (
+                    "TEXT NOT NULL DEFAULT 'fixed' "
+                    "CHECK(schedule_mode IN ('fixed','random'))"
+                ),
+                "random_daily_count": (
+                    "INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(random_daily_count BETWEEN 0 AND 24)"
+                ),
+                "random_effective_date": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in schedule_config_additive_columns.items():
+                if name not in schedule_config_columns:
+                    conn.execute(
+                        "ALTER TABLE x_post_schedule_config ADD COLUMN %s %s"
+                        % (name, definition)
+                    )
             schedule_run_columns = {
                 row[1]
                 for row in conn.execute(
@@ -1227,6 +1269,12 @@ def ensure_storage(db_path):
                 conn.execute(
                     "ALTER TABLE x_post_schedule_run "
                     "ADD COLUMN body_template TEXT NOT NULL DEFAULT ''"
+                )
+            if "schedule_mode" not in schedule_run_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_schedule_run "
+                    "ADD COLUMN schedule_mode TEXT NOT NULL DEFAULT 'fixed' "
+                    "CHECK(schedule_mode IN ('fixed','random'))"
                 )
 
             drama_pool_columns = {
@@ -1264,8 +1312,9 @@ def ensure_storage(db_path):
                 conn.execute(
                     "INSERT OR IGNORE INTO x_post_schedule_config("
                     "source_type,enabled,timezone,account_ids_json,publish_times_json,"
+                    "schedule_mode,random_daily_count,random_effective_date,"
                     "body_template,version,created_at,updated_at"
-                    ") VALUES(?,0,?,'[]','[]',?,1,?,?)",
+                    ") VALUES(?,0,?,'[]','[]','fixed',0,'',?,1,?,?)",
                     (
                         source_type,
                         SCHEDULE_TIMEZONE,
@@ -2097,6 +2146,84 @@ def _schedule_publish_times(values, *, allow_empty=False):
     return sorted(normalized)
 
 
+def _schedule_mode(value):
+    mode = str(value or "fixed").strip().lower()
+    if mode not in SCHEDULE_MODES:
+        raise XPostError(
+            "invalid_schedule_mode",
+            "自动发布模式必须是fixed或random",
+            400,
+        )
+    return mode
+
+
+def _schedule_random_daily_count(value, *, allow_zero=False):
+    if isinstance(value, bool):
+        raise XPostError(
+            "invalid_random_daily_count",
+            "每日随机发布次数必须是1到24",
+            400,
+        )
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise XPostError(
+            "invalid_random_daily_count",
+            "每日随机发布次数必须是1到24",
+            400,
+        ) from None
+    minimum = 0 if allow_zero else 1
+    if count < minimum or count > MAX_RANDOM_DAILY_COUNT:
+        raise XPostError(
+            "invalid_random_daily_count",
+            "每日随机发布次数必须是1到24",
+            400,
+        )
+    return count
+
+
+def _generate_random_publish_times(
+    count,
+    *,
+    previous_times=(),
+    forbidden_times=(),
+):
+    """Generate one immutable Beijing-day plan with bounded spacing."""
+
+    normalized_count = _schedule_random_daily_count(count)
+    previous = list(previous_times)
+    forbidden = {
+        _schedule_publish_time(value) for value in forbidden_times
+    }
+    upper = 1439 - (normalized_count - 1) * (
+        RANDOM_PUBLISH_MIN_GAP_MINUTES - 1
+    )
+    rng = secrets.SystemRandom()
+    for _attempt in range(1024):
+        compressed = sorted(
+            rng.sample(range(upper + 1), normalized_count)
+        )
+        minute_values = [
+            value
+            + index * (RANDOM_PUBLISH_MIN_GAP_MINUTES - 1)
+            for index, value in enumerate(compressed)
+        ]
+        if any(value % 60 == 0 for value in minute_values):
+            continue
+        result = [
+            "%02d:%02d" % divmod(value, 60)
+            for value in minute_values
+        ]
+        if result == previous or forbidden.intersection(result):
+            continue
+        return result
+    raise XPostError(
+        "x_post_random_plan_generation_failed",
+        "无法生成满足间隔与账号冲突要求的随机发布时间",
+        500,
+    )
+
+
 def _json_array(value, label):
     try:
         parsed = json.loads(str(value or "[]"))
@@ -2220,9 +2347,25 @@ class XPostStore:
             _json_array(item.pop("publish_times_json"), "publish_times"),
             allow_empty=True,
         )
+        schedule_mode = _schedule_mode(item.get("schedule_mode", "fixed"))
+        random_daily_count = _schedule_random_daily_count(
+            item.get("random_daily_count", 0),
+            allow_zero=True,
+        )
+        random_effective_date = str(
+            item.get("random_effective_date", "") or ""
+        ).strip()
+        if random_effective_date:
+            random_effective_date = _date_value(
+                random_effective_date,
+                "random_effective_date",
+            )
         item["enabled"] = bool(item["enabled"])
         item["account_ids"] = account_ids
         item["publish_times"] = publish_times
+        item["schedule_mode"] = schedule_mode
+        item["random_daily_count"] = random_daily_count
+        item["random_effective_date"] = random_effective_date
         item["body_template"] = _normalize_post_template(
             item.get("body_template"),
             item["source_type"],
@@ -2232,26 +2375,257 @@ class XPostStore:
             item["supported_macros"].append("episode_number")
         item["supported_macros"].extend(["desc", "url"])
         item["posts_per_day"] = (
-            len(account_ids) * len(publish_times)
+            len(account_ids)
+            * (
+                random_daily_count
+                if schedule_mode == "random"
+                else len(publish_times)
+            )
             if item["enabled"]
             else 0
         )
-        item["next_due_at"] = _schedule_next_due(
-            account_ids,
-            publish_times,
-            item["enabled"],
-            now=now,
+        item["next_due_at"] = (
+            ""
+            if schedule_mode == "random"
+            else _schedule_next_due(
+                account_ids,
+                publish_times,
+                item["enabled"],
+                now=now,
+            )
+        )
+        item["random_daily_plans"] = []
+        return item
+
+    @staticmethod
+    def _random_schedule_plan_item(row):
+        if not row:
+            return None
+        item = _row_dict(row)
+        item["source_type"] = _schedule_source_type(item["source_type"])
+        item["run_date"] = _date_value(item["run_date"], "run_date")
+        item["config_version"] = _positive_int(
+            item["config_version"],
+            "config_version",
+        )
+        item["account_ids"] = _schedule_account_ids(
+            _json_array(item.pop("account_ids_json"), "account_ids")
+        )
+        item["body_template"] = _normalize_post_template(
+            item.get("body_template"),
+            item["source_type"],
+        )
+        item["publish_times"] = _schedule_publish_times(
+            _json_array(item.pop("publish_times_json"), "publish_times")
         )
         return item
 
+    def _ensure_random_schedule_plan(
+        self,
+        conn,
+        config_row,
+        run_date,
+        timestamp,
+        *,
+        replace_future=False,
+    ):
+        config = self._schedule_config_item(config_row)
+        normalized_date = _date_value(run_date, "run_date")
+        if (
+            not config["enabled"]
+            or config["schedule_mode"] != "random"
+            or config["random_daily_count"] < 1
+            or not config["random_effective_date"]
+            or normalized_date < config["random_effective_date"]
+        ):
+            return None
+        existing = conn.execute(
+            "SELECT * FROM x_post_schedule_random_plan "
+            "WHERE source_type=? AND run_date=?",
+            (config["source_type"], normalized_date),
+        ).fetchone()
+        if existing is not None and not replace_future:
+            return self._random_schedule_plan_item(existing)
+        if existing is not None:
+            started = conn.execute(
+                "SELECT 1 FROM x_post_schedule_run "
+                "WHERE source_type=? AND run_date=? LIMIT 1",
+                (config["source_type"], normalized_date),
+            ).fetchone()
+            if started is not None:
+                return self._random_schedule_plan_item(existing)
+        previous = conn.execute(
+            "SELECT * FROM x_post_schedule_random_plan "
+            "WHERE source_type=? AND run_date<? "
+            "ORDER BY run_date DESC LIMIT 1",
+            (config["source_type"], normalized_date),
+        ).fetchone()
+        previous_times = (
+            self._random_schedule_plan_item(previous)["publish_times"]
+            if previous is not None
+            else []
+        )
+        forbidden_times = set()
+        other_rows = conn.execute(
+            "SELECT * FROM x_post_schedule_config "
+            "WHERE source_type<>? AND enabled=1",
+            (config["source_type"],),
+        ).fetchall()
+        for other_row in other_rows:
+            other = self._schedule_config_item(other_row)
+            if not set(other["account_ids"]).intersection(
+                config["account_ids"]
+            ):
+                continue
+            if other["schedule_mode"] == "fixed":
+                forbidden_times.update(other["publish_times"])
+                continue
+            other_plan = conn.execute(
+                "SELECT * FROM x_post_schedule_random_plan "
+                "WHERE source_type=? AND run_date=?",
+                (other["source_type"], normalized_date),
+            ).fetchone()
+            if other_plan is not None:
+                forbidden_times.update(
+                    self._random_schedule_plan_item(other_plan)[
+                        "publish_times"
+                    ]
+                )
+        publish_times = _generate_random_publish_times(
+            config["random_daily_count"],
+            previous_times=previous_times,
+            forbidden_times=forbidden_times,
+        )
+        values = (
+            int(config["version"]),
+            json.dumps(config["account_ids"], separators=(",", ":")),
+            config["body_template"],
+            json.dumps(publish_times, separators=(",", ":")),
+            timestamp,
+        )
+        if existing is None:
+            conn.execute(
+                "INSERT INTO x_post_schedule_random_plan("
+                "source_type,run_date,config_version,account_ids_json,"
+                "body_template,publish_times_json,created_at"
+                ") VALUES(?,?,?,?,?,?,?)",
+                (
+                    config["source_type"],
+                    normalized_date,
+                    *values,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE x_post_schedule_random_plan SET "
+                "config_version=?,account_ids_json=?,body_template=?,"
+                "publish_times_json=?,created_at=? "
+                "WHERE source_type=? AND run_date=?",
+                (
+                    *values,
+                    config["source_type"],
+                    normalized_date,
+                ),
+            )
+        row = conn.execute(
+            "SELECT * FROM x_post_schedule_random_plan "
+            "WHERE source_type=? AND run_date=?",
+            (config["source_type"], normalized_date),
+        ).fetchone()
+        return self._random_schedule_plan_item(row)
+
+    def ensure_random_schedule_plans(self, run_dates):
+        if not isinstance(run_dates, list):
+            raise XPostError(
+                "invalid_request",
+                "随机计划日期必须是数组",
+                400,
+            )
+        normalized_dates = sorted(
+            {_date_value(value, "run_date") for value in run_dates}
+        )
+        if len(normalized_dates) > 7:
+            raise XPostError(
+                "invalid_request",
+                "单次最多生成7天随机计划",
+                400,
+            )
+        timestamp = utc_now()
+        results = []
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            configs = conn.execute(
+                "SELECT * FROM x_post_schedule_config "
+                "WHERE enabled=1 AND schedule_mode='random' "
+                "ORDER BY source_type"
+            ).fetchall()
+            for normalized_date in normalized_dates:
+                for config in configs:
+                    item = self._ensure_random_schedule_plan(
+                        conn,
+                        config,
+                        normalized_date,
+                        timestamp,
+                    )
+                    if item is not None:
+                        results.append(item)
+            conn.commit()
+        return sorted(
+            results,
+            key=lambda item: (item["run_date"], item["source_type"]),
+        )
+
     def get_schedule_config(self, source_type, now=None):
         source_type = _schedule_source_type(source_type)
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
         with contextlib.closing(_connect(self.db_path)) as conn:
             row = conn.execute(
                 "SELECT * FROM x_post_schedule_config WHERE source_type=?",
                 (source_type,),
             ).fetchone()
-        return self._schedule_config_item(row, now=now)
+            item = self._schedule_config_item(row, now=current)
+            if item["schedule_mode"] == "random":
+                dates = [
+                    current.date().isoformat(),
+                    (current.date() + timedelta(days=1)).isoformat(),
+                ]
+                placeholders = ",".join("?" for _value in dates)
+                plans = conn.execute(
+                    "SELECT * FROM x_post_schedule_random_plan "
+                    "WHERE source_type=? AND run_date IN (%s) "
+                    "ORDER BY run_date" % placeholders,
+                    (source_type, *dates),
+                ).fetchall()
+                item["random_daily_plans"] = [
+                    self._random_schedule_plan_item(plan) for plan in plans
+                ]
+        if item["schedule_mode"] == "random" and item["enabled"]:
+            for plan in item["random_daily_plans"]:
+                for publish_time in plan["publish_times"]:
+                    hour, minute = (
+                        int(part) for part in publish_time.split(":")
+                    )
+                    plan_date = datetime.strptime(
+                        plan["run_date"], "%Y-%m-%d"
+                    ).date()
+                    candidate = datetime(
+                        plan_date.year,
+                        plan_date.month,
+                        plan_date.day,
+                        hour,
+                        minute,
+                        tzinfo=BEIJING_TZ,
+                    )
+                    if candidate > current:
+                        item["next_due_at"] = candidate.isoformat(
+                            timespec="minutes"
+                        )
+                        return item
+        return item
 
     def scheduled_account_ids(
         self,
@@ -2313,12 +2687,43 @@ class XPostStore:
         )
         publish_times = _schedule_publish_times(
             payload.get("publish_times"),
-            allow_empty=not enabled,
+            allow_empty=True,
         )
-        if enabled and (not account_ids or not publish_times):
+        schedule_mode = _schedule_mode(
+            payload.get("schedule_mode", "fixed")
+        )
+        random_daily_count = _schedule_random_daily_count(
+            payload.get("random_daily_count", 0),
+            allow_zero=not enabled or schedule_mode == "fixed",
+        )
+        if schedule_mode == "random" and publish_times:
+            raise XPostError(
+                "x_post_random_times_must_be_empty",
+                "随机发布模式不能同时设置固定发布时间",
+                400,
+            )
+        if schedule_mode == "fixed":
+            random_daily_count = 0
+        if enabled and not account_ids:
             raise XPostError(
                 "invalid_request",
-                "启用自动发布时必须选择账号和发布时间",
+                "启用自动发布时必须选择账号",
+                400,
+            )
+        if enabled and schedule_mode == "fixed" and not publish_times:
+            raise XPostError(
+                "invalid_request",
+                "启用固定时间发布时必须设置发布时间",
+                400,
+            )
+        if (
+            enabled
+            and schedule_mode == "random"
+            and random_daily_count < 1
+        ):
+            raise XPostError(
+                "invalid_random_daily_count",
+                "启用随机发布时必须设置每天1到24次",
                 400,
             )
         if enabled and eligible_account_ids is not None:
@@ -2402,10 +2807,14 @@ class XPostStore:
                     source_type,
                 )
             )
+            current_mode = current_item["schedule_mode"]
+            current_random_count = current_item["random_daily_count"]
             settings_changed = (
                 bool(current_item["enabled"]) != enabled
                 or list(current_item["account_ids"]) != account_ids
                 or list(current_item["publish_times"]) != publish_times
+                or current_mode != schedule_mode
+                or current_random_count != random_daily_count
                 or current_item["body_template"] != body_template
             )
             protected_schedule_times = set(
@@ -2413,6 +2822,21 @@ class XPostStore:
                 if current_item["enabled"]
                 else []
             ).union(publish_times if enabled else [])
+            current_plan = conn.execute(
+                "SELECT publish_times_json "
+                "FROM x_post_schedule_random_plan "
+                "WHERE source_type=? AND run_date=?",
+                (source_type, current_time.date().isoformat()),
+            ).fetchone()
+            if current_plan is not None:
+                protected_schedule_times.update(
+                    _schedule_publish_times(
+                        _json_array(
+                            current_plan["publish_times_json"],
+                            "publish_times",
+                        )
+                    )
+                )
             if (
                 settings_changed
                 and protected_schedule_times.intersection(
@@ -2457,26 +2881,44 @@ class XPostStore:
                     (source_type,),
                 ).fetchone()
                 if other:
+                    other_item = self._schedule_config_item(
+                        other,
+                        now=current_time,
+                    )
                     other_accounts = set(
-                        _schedule_account_ids(
-                            _json_array(
-                                other["account_ids_json"],
-                                "account_ids",
-                            ),
-                            allow_empty=True,
-                        )
+                        other_item["account_ids"]
                     )
-                    other_times = set(
-                        _schedule_publish_times(
-                            _json_array(
-                                other["publish_times_json"],
-                                "publish_times",
+                    other_times = set(other_item["publish_times"])
+                    if (
+                        schedule_mode == "fixed"
+                        and other_item["schedule_mode"] == "random"
+                    ):
+                        tomorrow = (
+                            current_time.date() + timedelta(days=1)
+                        ).isoformat()
+                        other_plans = conn.execute(
+                            "SELECT publish_times_json "
+                            "FROM x_post_schedule_random_plan "
+                            "WHERE source_type=? AND run_date IN (?,?)",
+                            (
+                                other_item["source_type"],
+                                current_time.date().isoformat(),
+                                tomorrow,
                             ),
-                            allow_empty=True,
-                        )
-                    )
-                    if other_accounts.intersection(account_ids) and other_times.intersection(
-                        publish_times
+                        ).fetchall()
+                        for plan in other_plans:
+                            other_times.update(
+                                _schedule_publish_times(
+                                    _json_array(
+                                        plan["publish_times_json"],
+                                        "publish_times",
+                                    )
+                                )
+                            )
+                    if (
+                        schedule_mode == "fixed"
+                        and other_accounts.intersection(account_ids)
+                        and other_times.intersection(publish_times)
                     ):
                         conn.rollback()
                         raise XPostError(
@@ -2484,9 +2926,21 @@ class XPostStore:
                             "同一X账号不能在素材池和短剧池配置相同发布时间",
                             409,
                         )
+            tomorrow_date = (
+                current_time.date() + timedelta(days=1)
+            ).isoformat()
+            random_effective_date = ""
+            if schedule_mode == "random":
+                random_effective_date = (
+                    tomorrow_date
+                    if settings_changed
+                    or not current_item["random_effective_date"]
+                    else current_item["random_effective_date"]
+                )
             cursor = conn.execute(
                 "UPDATE x_post_schedule_config SET enabled=?,timezone=?,"
-                "account_ids_json=?,publish_times_json=?,body_template=?,"
+                "account_ids_json=?,publish_times_json=?,schedule_mode=?,"
+                "random_daily_count=?,random_effective_date=?,body_template=?,"
                 "version=version+1,"
                 "updated_by_user_id=?,updated_by_name=?,updated_at=? "
                 "WHERE source_type=? AND version=?",
@@ -2495,6 +2949,9 @@ class XPostStore:
                     SCHEDULE_TIMEZONE,
                     json.dumps(account_ids, separators=(",", ":")),
                     json.dumps(publish_times, separators=(",", ":")),
+                    schedule_mode,
+                    random_daily_count,
+                    random_effective_date,
                     body_template,
                     updated_by_user_id,
                     updated_by_name,
@@ -2510,12 +2967,29 @@ class XPostStore:
                     "自动发布设置已被其他人修改，请刷新后重试",
                     409,
                 )
+            if settings_changed:
+                conn.execute(
+                    "DELETE FROM x_post_schedule_random_plan "
+                    "WHERE source_type=? AND run_date>=? "
+                    "AND NOT EXISTS("
+                    "SELECT 1 FROM x_post_schedule_run r "
+                    "WHERE r.source_type=x_post_schedule_random_plan.source_type "
+                    "AND r.run_date=x_post_schedule_random_plan.run_date)",
+                    (source_type, tomorrow_date),
+                )
             row = conn.execute(
                 "SELECT * FROM x_post_schedule_config WHERE source_type=?",
                 (source_type,),
             ).fetchone()
+            if schedule_mode == "random" and enabled:
+                self._ensure_random_schedule_plan(
+                    conn,
+                    row,
+                    tomorrow_date,
+                    timestamp,
+                )
             conn.commit()
-        return self._schedule_config_item(row)
+        return self.get_schedule_config(source_type, now=current_time)
 
     def due_schedule_slots(self, now=None, grace_seconds=90):
         current = now or datetime.now(BEIJING_TZ)
@@ -2573,11 +3047,47 @@ class XPostStore:
                 "SELECT * FROM x_post_schedule_config "
                 "WHERE enabled=1 ORDER BY source_type"
             ).fetchall()
+            plan_dates = [
+                current.date().isoformat(),
+                (current.date() + timedelta(days=1)).isoformat(),
+            ]
+            for plan_date in plan_dates:
+                for row in configs:
+                    if _schedule_mode(row["schedule_mode"]) == "random":
+                        self._ensure_random_schedule_plan(
+                            conn,
+                            row,
+                            plan_date,
+                            timestamp,
+                        )
+            random_plan_rows = conn.execute(
+                "SELECT * FROM x_post_schedule_random_plan "
+                "WHERE run_date IN (?,?)",
+                tuple(plan_dates),
+            ).fetchall()
+            random_plans = {
+                (str(row["source_type"]), str(row["run_date"])):
+                    self._random_schedule_plan_item(row)
+                for row in random_plan_rows
+            }
             for run_date, publish_time in slots:
                 for row in configs:
                     config = self._schedule_config_item(row, now=current)
-                    if publish_time not in config["publish_times"]:
-                        continue
+                    schedule_mode = config["schedule_mode"]
+                    slot_config = config
+                    if schedule_mode == "fixed":
+                        if publish_time not in config["publish_times"]:
+                            continue
+                    else:
+                        slot_config = random_plans.get(
+                            (config["source_type"], run_date)
+                        )
+                        if (
+                            not slot_config
+                            or publish_time
+                            not in slot_config["publish_times"]
+                        ):
+                            continue
                     slot_key = "xpost:schedule:v1:%s:%s:%s" % (
                         config["source_type"],
                         run_date,
@@ -2586,22 +3096,26 @@ class XPostStore:
                     conn.execute(
                         "INSERT OR IGNORE INTO x_post_schedule_run("
                         "slot_key,source_type,run_date,publish_time,timezone,"
-                        "config_version,account_ids_json,body_template,status,"
+                        "config_version,account_ids_json,schedule_mode,"
+                        "body_template,status,"
                         "expected_count,queued_count,created_at,updated_at"
-                        ") VALUES(?,?,?,?,?,?,?,?,'claimed',?,0,?,?)",
+                        ") VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,0,?,?)",
                         (
                             slot_key,
                             config["source_type"],
                             run_date,
                             publish_time,
                             SCHEDULE_TIMEZONE,
-                            int(config["version"]),
+                            int(slot_config["config_version"])
+                            if schedule_mode == "random"
+                            else int(config["version"]),
                             json.dumps(
-                                config["account_ids"],
+                                slot_config["account_ids"],
                                 separators=(",", ":"),
                             ),
-                            config["body_template"],
-                            len(config["account_ids"]),
+                            schedule_mode,
+                            slot_config["body_template"],
+                            len(slot_config["account_ids"]),
                             timestamp,
                             timestamp,
                         ),
@@ -2725,6 +3239,9 @@ class XPostStore:
                     "timezone": str(row["timezone"]),
                     "version": int(row["config_version"]),
                     "account_ids": account_ids,
+                    "schedule_mode": _schedule_mode(
+                        row["schedule_mode"]
+                    ),
                     "body_template": _normalize_post_template(
                         row["body_template"],
                         row["source_type"],
@@ -4875,6 +5392,7 @@ class XPostStore:
             "timezone",
             "config_version",
             "account_ids_json",
+            "schedule_mode",
             "body_template",
             "status",
             "expected_count",
@@ -5225,18 +5743,41 @@ class XPostStore:
                     409,
                 )
             account_ids = list(frozen_run["account_ids"])
+            schedule_mode = _schedule_mode(
+                frozen_run.get("schedule_mode", "fixed")
+            )
             body_template = _normalize_post_template(
                 frozen_run.get("body_template"),
                 source_type,
             )
         else:
             config = self.get_schedule_config(source_type)
-            account_ids = list(config["account_ids"])
-            body_template = config["body_template"]
+            schedule_mode = config["schedule_mode"]
+            slot = config
+            if schedule_mode == "random":
+                with contextlib.closing(_connect(self.db_path)) as conn:
+                    plan_row = conn.execute(
+                        "SELECT * FROM x_post_schedule_random_plan "
+                        "WHERE source_type=? AND run_date=?",
+                        (source_type, run_date),
+                    ).fetchone()
+                slot = self._random_schedule_plan_item(plan_row)
+            if not config["enabled"] or not slot:
+                raise XPostError(
+                    "x_post_schedule_config_changed",
+                    "自动发布设置已变更，本时间点不再创建新队列",
+                    409,
+                )
+            account_ids = list(slot["account_ids"])
+            body_template = slot["body_template"]
+            valid_version = (
+                int(slot["config_version"])
+                if schedule_mode == "random"
+                else int(config["version"])
+            )
             if (
-                not config["enabled"]
-                or int(config["version"]) != config_version
-                or publish_time not in config["publish_times"]
+                valid_version != config_version
+                or publish_time not in slot["publish_times"]
             ):
                 raise XPostError(
                     "x_post_schedule_config_changed",
@@ -5401,25 +5942,46 @@ class XPostStore:
                     "WHERE source_type=?",
                     (source_type,),
                 ).fetchone()
-                if (
-                    not current_config
-                    or not bool(current_config["enabled"])
-                    or int(current_config["version"]) != config_version
-                    or _schedule_account_ids(
-                        _json_array(
-                            current_config["account_ids_json"],
-                            "account_ids",
-                        )
+                valid_current_slot = False
+                if current_config and bool(current_config["enabled"]):
+                    current_mode = _schedule_mode(
+                        current_config["schedule_mode"]
                     )
-                    != account_ids
-                    or publish_time
-                    not in _schedule_publish_times(
-                        _json_array(
-                            current_config["publish_times_json"],
-                            "publish_times",
+                    if current_mode == "fixed":
+                        valid_current_slot = bool(
+                            schedule_mode == "fixed"
+                            and int(current_config["version"])
+                            == config_version
+                            and _schedule_account_ids(
+                                _json_array(
+                                    current_config["account_ids_json"],
+                                    "account_ids",
+                                )
+                            )
+                            == account_ids
+                            and publish_time
+                            in _schedule_publish_times(
+                                _json_array(
+                                    current_config["publish_times_json"],
+                                    "publish_times",
+                                )
+                            )
                         )
-                    )
-                ):
+                    else:
+                        plan_row = conn.execute(
+                            "SELECT * FROM x_post_schedule_random_plan "
+                            "WHERE source_type=? AND run_date=?",
+                            (source_type, run_date),
+                        ).fetchone()
+                        plan = self._random_schedule_plan_item(plan_row)
+                        valid_current_slot = bool(
+                            schedule_mode == "random"
+                            and plan
+                            and plan["config_version"] == config_version
+                            and plan["account_ids"] == account_ids
+                            and publish_time in plan["publish_times"]
+                        )
+                if not valid_current_slot:
                     conn.rollback()
                     raise XPostError(
                         "x_post_schedule_config_changed",
@@ -5605,9 +6167,10 @@ class XPostStore:
                 cursor = conn.execute(
                     "INSERT INTO x_post_schedule_run("
                     "slot_key,source_type,run_date,publish_time,timezone,"
-                    "config_version,account_ids_json,body_template,status,expected_count,"
+                    "config_version,account_ids_json,schedule_mode,"
+                    "body_template,status,expected_count,"
                     "queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                     (
                         slot_key,
                         source_type,
@@ -5616,6 +6179,7 @@ class XPostStore:
                         SCHEDULE_TIMEZONE,
                         config_version,
                         json.dumps(account_ids, separators=(",", ":")),
+                        schedule_mode,
                         body_template,
                         len(prepared),
                         len(prepared),
