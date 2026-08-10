@@ -21,8 +21,21 @@ This directory is the GitHub-maintained source for the standalone report at:
 python3 -m py_compile ops/tt-minis-native-growth/tt_minis_multi_dim_dashboard.py
 python3 ops/tt-minis-native-growth/test_browser_cache_contract.py
 python3 -m unittest ops/tt-minis-native-growth/test_memory_safety_contract.py
+python3 -m unittest ops/tt-minis-native-growth/test_source_query_optimization.py
 nginx -t
 ```
+
+## Source refresh query contract
+
+- Refresh first aggregates only the requested dates from `ads_tiktok_insights FORCE INDEX(pcsa)`.
+- It extracts the resulting ad or campaign IDs, normalizes them as digit-only strings, and loads publish metadata in bounded batches of 5,000 through the `ads_tiktok_auto_created_data.ad_id` or `.campaign_id` index. Each batch selects the exact latest created-data primary key per metric ID with `MAX(created_at)` followed by the tie-breaking `MAX(id)`, then reads the full row back through `PRIMARY`; it must not restore ordered `GROUP_CONCAT` field scans. At 19-digit TikTok IDs this keeps each SQL argument comfortably below the host process limit while amortizing per-query latency.
+- The indexed string lookup relies on canonical TikTok IDs. Before deployment, verify the target insight dates have no whitespace/non-canonical or leading-zero IDs. The read-only 2026-08-09 through 2026-08-10 check covered 272,167 ad insight rows and 133,193 campaign insight rows; both mismatch and leading-zero counts were zero.
+- Each metadata row still joins `tiktok_publish_template_queue` by its primary key and requires the exact Dramawave minis ID. Python then performs the inner-join-equivalent merge, so out-of-scope insight rows remain excluded.
+- Install enrichment scans each requested compact `dt` once with `ads_app_revenues FORCE INDEX(dt)`, aggregates by campaign or ad ID, and keeps only the scoped insight keys in Python. Do not restore 500-ID key-first chunks; at current campaign volume, the repeated chunks became a multi-minute bottleneck.
+- Do not restore the former query that grouped the complete minis queue/created-data history before joining the requested insight dates.
+- MySQL credentials are removed from the child-process argv and passed through `MYSQL_PWD`. Timeout and query failures expose only the error type, return code, and at most 400 characters of redacted stderr; SQL and command arguments are not logged.
+- The read-only 2026-08-09 production shadow completed campaign source refresh in 93.175 seconds (9.929 insight, 63.792 metadata, 3.254 content, 15.328 install enrichment) and ad source refresh in 131.118 seconds (12.384, 99.365, 3.377, 14.219). Against the just-refreshed legacy cache, both levels had identical row counts, spend, installs, impressions, clicks, and every non-metric output field; revenue and ad-impression had only expected live-source drift between query times. Exact latest-scope rows had zero nulls in user/account/campaign/adset/created-at fields across 24,581 campaign and 44,590 ad IDs.
+- On that shadow, `ads_app_revenues.dt` was `char(10)` with a BTREE `dt` index; the legacy two-day `BETWEEN` range covered 361,385 rows with zero null or non-eight-digit values. `EXPLAIN` selected `dt` as `ref`, and actual per-day aggregates completed in 15.328 seconds for campaign and 14.219 seconds for ad.
 
 ## Memory and publish-safety contract
 

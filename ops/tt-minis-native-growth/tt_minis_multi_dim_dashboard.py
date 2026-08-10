@@ -3,6 +3,7 @@
 """Generate the TT mini-program multi-dimensional static dashboard."""
 
 import argparse
+import csv
 import collections
 import json
 import os
@@ -38,7 +39,77 @@ METRIC_LEVELS = {
 }
 TIKTOK_INSIGHT_CATEGORY = METRIC_LEVELS["ad"]["category"]
 TIKTOK_INSIGHT_PRODUCTS = ("dramawaveminis", "Dramawave")
-APP_REVENUE_CHUNK_SIZE = 500
+APP_REVENUE_QUERY_TIMEOUT_SECONDS = 180
+SOURCE_METADATA_CHUNK_SIZE = 5000
+MYSQL_ERROR_MAX_CHARS = 400
+
+AD_INSIGHT_COLUMNS = [
+    "dt",
+    "ad_id",
+    "advertiser_id",
+    "campaign_id",
+    "adgroup_id",
+    "ads_name",
+    "country_id",
+    "language",
+    "spend",
+    "revenue",
+    "impressions",
+    "clicks",
+    "ad_impression",
+    "row_count",
+]
+
+CAMPAIGN_INSIGHT_COLUMNS = [
+    "dt",
+    "campaign_id",
+    "advertiser_id",
+    "ads_name",
+    "country_id",
+    "language",
+    "spend",
+    "revenue",
+    "impressions",
+    "clicks",
+    "ad_impression",
+    "row_count",
+]
+
+SCOPE_METADATA_COLUMNS = [
+    "metric_id",
+    "product_id",
+    "ac_user_id",
+    "ad_account_id",
+    "campaign_id",
+    "adset_id",
+    "minis_id",
+    "publish_user_id",
+    "campaign_name",
+    "adset_name",
+    "ad_name",
+    "source_id",
+    "original_source_id",
+    "material_id",
+    "country",
+    "drama_language",
+    "bid_type",
+    "status",
+    "op_status",
+    "ad_created_at",
+    "optimizer_id",
+    "optimizer_name",
+]
+
+
+class MySQLQueryError(RuntimeError):
+    pass
+
+
+class MySQLQueryTimeout(MySQLQueryError):
+    def __init__(self, timeout, stderr=""):
+        self.timeout = timeout
+        detail = " stderr=%s" % stderr if stderr else ""
+        super().__init__("MySQLQueryTimeout(timeout=%s)%s" % (timeout, detail))
 
 
 DIMENSIONS = [
@@ -202,6 +273,71 @@ def sql_in(values, numeric=False):
     return "(" + ",".join(sql_quote(v) for v in vals) + ")"
 
 
+def redact_mysql_error(value, secrets=()):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    text = str(value or "")
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "<redacted>")
+    text = re.sub(r"(?i)--password(?:=|\s+)\S+", "--password=<redacted>", text)
+    text = re.sub(r"(?i)(?<!\S)-p\S+", "-p<redacted>", text)
+    return " ".join(text.split())[:MYSQL_ERROR_MAX_CHARS]
+
+
+def mysql_command_env():
+    raw = list(base.mysql_cmd())
+    safe = []
+    secrets = []
+    env = os.environ.copy()
+    inherited_password = env.get("MYSQL_PWD")
+    if inherited_password:
+        secrets.append(inherited_password)
+    index = 0
+    while index < len(raw):
+        arg = str(raw[index])
+        if arg in ("-p", "--password") and index + 1 < len(raw):
+            secrets.append(str(raw[index + 1]))
+            index += 2
+            continue
+        if arg.startswith("--password="):
+            secrets.append(arg.split("=", 1)[1])
+            index += 1
+            continue
+        if arg.startswith("-p") and len(arg) > 2:
+            secrets.append(arg[2:])
+            index += 1
+            continue
+        safe.append(arg)
+        index += 1
+    if secrets:
+        env["MYSQL_PWD"] = secrets[-1]
+    return safe, env, tuple(secrets)
+
+
+def run_mysql(sql, timeout=180):
+    command, env, secrets = mysql_command_env()
+    compact_sql = " ".join(str(sql).split())
+    try:
+        proc = subprocess.run(
+            command + [compact_sql],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = redact_mysql_error(getattr(exc, "stderr", ""), secrets)
+        raise MySQLQueryTimeout(timeout, stderr)
+    if proc.returncode:
+        stderr = redact_mysql_error(proc.stderr, secrets)
+        raise MySQLQueryError(
+            "MySQLQueryError(returncode=%s, stderr=%s)" % (proc.returncode, stderr or "<empty>")
+        )
+    return list(csv.reader(proc.stdout.splitlines(), delimiter="\t", quoting=csv.QUOTE_NONE))
+
+
 def normalize_metric_level(metric_level):
     level = str(metric_level or DEFAULT_METRIC_LEVEL).strip().lower()
     if level not in METRIC_LEVELS:
@@ -267,90 +403,118 @@ def date_range(days, start_date=None, end_date=None):
     return start.isoformat(), end.isoformat()
 
 
-def minis_ad_scope_sql():
-    # Keep the minis scope anchored on the small publish queue set first. This
-    # avoids scanning the full auto-created table before the minis filter.
-    return """
-      SELECT
-        CAST(ac.ad_id AS UNSIGNED) AS ad_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.product_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS product_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.user_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ac_user_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.ad_account_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ad_account_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.campaign_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS campaign_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.adset_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS adset_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(q.minis_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS minis_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(COALESCE(q.user_id, ac.user_id, 0) AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS publish_user_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.campaign_name, ''), CONCAT('campaign_', ac.campaign_id)) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS campaign_name,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.adset_name, ''), CONCAT('adgroup_', ac.adset_id)) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS adset_name,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.ad_name, ''), CONCAT('ad_', ac.ad_id)) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ad_name,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.source_id, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS source_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.original_source_id, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS original_source_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.material_id, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS material_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.country, ''), '未填') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS country,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.language, ''), '未填') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS drama_language,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.bid_type, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS bid_type,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.status, ''), 'UNKNOWN') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS status,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.op_status, ''), 'UNKNOWN') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS op_status,
-        SUBSTRING_INDEX(GROUP_CONCAT(DATE_FORMAT(ac.created_at, '%Y-%m-%d %H:%i:%s') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ad_created_at
-      FROM (
-        SELECT id, user_id, minis_id
-        FROM kunlunads_dev.tiktok_publish_template_queue
-        WHERE minis_id IS NOT NULL
-          AND TRIM(minis_id) <> ''
-      ) q
-      STRAIGHT_JOIN kunlunads_dev.ads_tiktok_auto_created_data ac
-        ON ac.publish_queue_id = q.id
-      WHERE ac.ad_id IS NOT NULL
-        AND TRIM(ac.ad_id) <> ''
-        AND ac.ad_id REGEXP '^[0-9]+$'
-        AND ac.product_id IN {product_ids}
-        AND q.minis_id = {minis_id}
-      GROUP BY CAST(ac.ad_id AS UNSIGNED)
-    """.format(
-        product_ids=sql_in(DRAMAWAVE_TT_MINIS_PRODUCT_IDS, numeric=True),
-        minis_id=sql_quote(DRAMAWAVE_TT_MINIS_ID),
-    )
+def source_text(value):
+    if value in (None, "", "NULL"):
+        return ""
+    return str(value)
 
 
-def minis_campaign_scope_sql():
-    return """
-      SELECT
-        CAST(ac.campaign_id AS UNSIGNED) AS campaign_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.product_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS product_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.user_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ac_user_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(ac.ad_account_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ad_account_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(q.minis_id AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS minis_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(COALESCE(q.user_id, ac.user_id, 0) AS CHAR) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS publish_user_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.campaign_name, ''), CONCAT('campaign_', ac.campaign_id)) ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS campaign_name,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.source_id, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS source_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.original_source_id, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS original_source_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.material_id, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS material_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.country, ''), '未填') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS country,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.language, ''), '未填') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS drama_language,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.bid_type, ''), '') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS bid_type,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.status, ''), 'UNKNOWN') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS status,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ac.op_status, ''), 'UNKNOWN') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS op_status,
-        SUBSTRING_INDEX(GROUP_CONCAT(DATE_FORMAT(ac.created_at, '%Y-%m-%d %H:%i:%s') ORDER BY ac.created_at DESC, ac.id DESC SEPARATOR '||'), '||', 1) AS ad_created_at,
-        COUNT(DISTINCT CAST(ac.adset_id AS CHAR)) AS scoped_adgroups,
-        COUNT(DISTINCT CAST(ac.ad_id AS CHAR)) AS scoped_ads
-      FROM (
-        SELECT id, user_id, minis_id
-        FROM kunlunads_dev.tiktok_publish_template_queue
-        WHERE minis_id IS NOT NULL
-          AND TRIM(minis_id) <> ''
-      ) q
-      STRAIGHT_JOIN kunlunads_dev.ads_tiktok_auto_created_data ac
-        ON ac.publish_queue_id = q.id
-      WHERE ac.campaign_id IS NOT NULL
-        AND TRIM(ac.campaign_id) <> ''
-        AND ac.campaign_id REGEXP '^[0-9]+$'
-        AND ac.product_id IN {product_ids}
-        AND q.minis_id = {minis_id}
-      GROUP BY CAST(ac.campaign_id AS UNSIGNED)
-    """.format(
-        product_ids=sql_in(DRAMAWAVE_TT_MINIS_PRODUCT_IDS, numeric=True),
-        minis_id=sql_quote(DRAMAWAVE_TT_MINIS_ID),
+def first_source_text(*values):
+    for value in values:
+        text = source_text(value)
+        if text:
+            return text
+    return ""
+
+
+def normalize_metric_id(value):
+    text = source_text(value).strip()
+    if not text.isdigit():
+        return ""
+    return str(int(text))
+
+
+def fetch_scope_metadata(metric_level, metric_ids):
+    """Load minis metadata only for IDs present in the requested insight dates.
+
+    The old source query grouped the complete minis publish history before it
+    joined the requested dates. Starting from indexed ad/campaign IDs keeps each
+    metadata query bounded while the queue primary-key lookup still enforces the
+    exact minis scope.
+    """
+    metric_level = normalize_metric_level(metric_level)
+    key_column = "campaign_id" if metric_level == "campaign" else "ad_id"
+    index_hint = "campaign_id" if metric_level == "campaign" else "ad_id"
+    keys = sorted(
+        {normalize_metric_id(value) for value in metric_ids if normalize_metric_id(value)},
+        key=int,
     )
+    metadata = {}
+    for part in chunked(keys, SOURCE_METADATA_CHUNK_SIZE):
+        sql = """
+        SELECT
+          CAST(ac.{key_column} AS CHAR) AS metric_id,
+          CAST(ac.product_id AS CHAR) AS product_id,
+          CAST(ac.user_id AS CHAR) AS ac_user_id,
+          CAST(ac.ad_account_id AS CHAR) AS ad_account_id,
+          CAST(ac.campaign_id AS CHAR) AS campaign_id,
+          CAST(ac.adset_id AS CHAR) AS adset_id,
+          CAST(q.minis_id AS CHAR) AS minis_id,
+          CAST(COALESCE(q.user_id, ac.user_id, 0) AS CHAR) AS publish_user_id,
+          COALESCE(NULLIF(ac.campaign_name, ''), CONCAT('campaign_', ac.campaign_id)) AS campaign_name,
+          COALESCE(NULLIF(ac.adset_name, ''), CONCAT('adgroup_', ac.adset_id)) AS adset_name,
+          COALESCE(NULLIF(ac.ad_name, ''), CONCAT('ad_', ac.ad_id)) AS ad_name,
+          COALESCE(NULLIF(ac.source_id, ''), '') AS source_id,
+          COALESCE(NULLIF(ac.original_source_id, ''), '') AS original_source_id,
+          COALESCE(NULLIF(ac.material_id, ''), '') AS material_id,
+          COALESCE(NULLIF(ac.country, ''), '未填') AS country,
+          COALESCE(NULLIF(ac.language, ''), '未填') AS drama_language,
+          COALESCE(NULLIF(ac.bid_type, ''), '') AS bid_type,
+          COALESCE(NULLIF(ac.status, ''), 'UNKNOWN') AS status,
+          COALESCE(NULLIF(ac.op_status, ''), 'UNKNOWN') AS op_status,
+          DATE_FORMAT(ac.created_at, '%Y-%m-%d %H:%i:%s') AS ad_created_at,
+          CAST(COALESCE(q.user_id, ac.user_id, 0) AS CHAR) AS optimizer_id,
+          COALESCE(NULLIF(au.name, ''), NULLIF(au.username, ''), CONCAT('user_', CAST(COALESCE(q.user_id, ac.user_id, 0) AS CHAR))) AS optimizer_name
+        FROM (
+          SELECT
+            newest.metric_id,
+            MAX(ac1.id) AS latest_id
+          FROM (
+            SELECT
+              ac0.{key_column} AS metric_id,
+              MAX(ac0.created_at) AS latest_created_at
+            FROM kunlunads_dev.ads_tiktok_auto_created_data ac0 FORCE INDEX ({index_hint})
+            STRAIGHT_JOIN kunlunads_dev.tiktok_publish_template_queue q0
+              ON q0.id = ac0.publish_queue_id
+            WHERE ac0.{key_column} IN {metric_ids}
+              AND ac0.{key_column} IS NOT NULL
+              AND TRIM(ac0.{key_column}) <> ''
+              AND ac0.{key_column} REGEXP '^[0-9]+$'
+              AND ac0.product_id IN {product_ids}
+              AND q0.minis_id = {minis_id}
+            GROUP BY ac0.{key_column}
+          ) newest
+          STRAIGHT_JOIN kunlunads_dev.ads_tiktok_auto_created_data ac1 FORCE INDEX ({index_hint})
+            ON ac1.{key_column} = newest.metric_id
+           AND ac1.created_at <=> newest.latest_created_at
+          STRAIGHT_JOIN kunlunads_dev.tiktok_publish_template_queue q1
+            ON q1.id = ac1.publish_queue_id
+          WHERE ac1.product_id IN {product_ids}
+            AND q1.minis_id = {minis_id}
+          GROUP BY newest.metric_id
+        ) latest
+        STRAIGHT_JOIN kunlunads_dev.ads_tiktok_auto_created_data ac FORCE INDEX (PRIMARY)
+          ON ac.id = latest.latest_id
+         AND ac.{key_column} = latest.metric_id
+         AND ac.product_id IN {product_ids}
+        STRAIGHT_JOIN kunlunads_dev.tiktok_publish_template_queue q
+          ON q.id = ac.publish_queue_id
+         AND q.minis_id = {minis_id}
+        LEFT JOIN kunlunads_dev.admin_users au
+          ON au.id = COALESCE(q.user_id, ac.user_id, 0)
+        """.format(
+            key_column=key_column,
+            index_hint=index_hint,
+            metric_ids=sql_in(part),
+            product_ids=sql_in(DRAMAWAVE_TT_MINIS_PRODUCT_IDS, numeric=True),
+            minis_id=sql_quote(DRAMAWAVE_TT_MINIS_ID),
+        )
+        for item in run_mysql(sql, timeout=120):
+            row = dict(zip(SCOPE_METADATA_COLUMNS, item))
+            key = normalize_metric_id(row.get("metric_id"))
+            if key:
+                metadata[key] = row
+    return metadata
 
 
 def fetch_content_mapping(rows):
@@ -381,7 +545,7 @@ def fetch_content_mapping(rows):
           AND content_id <> ''
         GROUP BY series_code, language, audio_type
         """
-        for series_code, language, audio_type, content_id, name, content_count in base.run_mysql(sql, timeout=120):
+        for series_code, language, audio_type, content_id, name, content_count in run_mysql(sql, timeout=120):
             if int_num(content_count) == 1:
                 mapping[(str(series_code), str(language), int_num(audio_type))] = {
                     "content_id": str(content_id or ""),
@@ -393,26 +557,28 @@ def fetch_content_mapping(rows):
 def fetch_app_revenue_users(rows, start_date, end_date, metric_level=DEFAULT_METRIC_LEVEL):
     metric_level = normalize_metric_level(metric_level)
     key_col = "campaign_id" if metric_level == "campaign" else "ad_id"
-    keys = sorted({str(row.get(key_col) or "") for row in rows if str(row.get(key_col) or "").isdigit()})
+    keys = {str(row.get(key_col) or "") for row in rows if str(row.get(key_col) or "").isdigit()}
     if not keys:
         return {}
     users = {}
-    start_dt = compact_date(start_date)
-    end_dt = compact_date(end_date)
-    index_hint = "campaign_id" if metric_level == "campaign" else "ad_id"
-    for part in chunked(keys, APP_REVENUE_CHUNK_SIZE):
+    # A key-first 500-ID query used the campaign/ad index once per chunk and
+    # became the next refresh bottleneck at current volume. Scan each requested
+    # date once through the dt index, aggregate all keys for that day, then keep
+    # only the keys already present in the scoped insight rows.
+    for day in each_date(start_date, end_date):
+        compact_day = compact_date(day)
         sql = f"""
         SELECT
-          CONCAT(SUBSTRING(dt, 1, 4), '-', SUBSTRING(dt, 5, 2), '-', SUBSTRING(dt, 7, 2)) AS stat_day,
           CAST({key_col} AS CHAR) AS metric_key,
           SUM(users) AS users
-        FROM kunlunads_dev.ads_app_revenues FORCE INDEX({index_hint})
-        WHERE dt BETWEEN {sql_quote(start_dt)} AND {sql_quote(end_dt)}
-          AND {key_col} IN {sql_in(part)}
-        GROUP BY stat_day, CAST({key_col} AS CHAR)
+        FROM kunlunads_dev.ads_app_revenues FORCE INDEX(dt)
+        WHERE dt = {sql_quote(compact_day)}
+        GROUP BY CAST({key_col} AS CHAR)
         """
-        for stat_day, metric_key, app_users in base.run_mysql(sql, timeout=180):
-            users[(str(stat_day), str(metric_key))] = dec(app_users)
+        for metric_key, app_users in run_mysql(sql, timeout=APP_REVENUE_QUERY_TIMEOUT_SECONDS):
+            key = str(metric_key or "")
+            if key in keys:
+                users[(day, key)] = dec(app_users)
     return users
 
 
@@ -423,100 +589,58 @@ def fetch_rows_from_source(start_date, end_date, metric_level=DEFAULT_METRIC_LEV
     return fetch_ad_rows_from_source(start_date, end_date)
 
 
-def fetch_ad_rows_from_source(start_date, end_date):
-    cols = SOURCE_COLUMNS[:-3]
+def fetch_ad_insight_rows(start_date, end_date):
     sql = f"""
     SELECT
-      'ad' AS metric_level,
-      DATE_FORMAT(i.start_date, '%Y-%m-%d') AS dt,
-      CAST(COALESCE(m.publish_user_id, m.ac_user_id, 0) AS CHAR) AS optimizer_id,
-      COALESCE(NULLIF(au.name, ''), NULLIF(au.username, ''), CONCAT('user_', CAST(COALESCE(m.publish_user_id, m.ac_user_id, 0) AS CHAR))) AS optimizer_name,
-      CAST(COALESCE(NULLIF(i.advertiser_id, ''), m.ad_account_id) AS CHAR) AS ad_account_id,
-      CASE WHEN m.product_id = '3346' THEN 'dramawaveminis' ELSE 'Dramawave' END AS app_id,
-      'Dramawave' AS product,
-      COALESCE(NULLIF(m.minis_id, ''), '未填') AS minis_id,
-      '未填' AS series_code,
-      '未填' AS data_source_id,
-      COALESCE(NULLIF(m.original_source_id, ''), NULLIF(m.material_id, ''), NULLIF(m.source_id, ''), '未填') AS resource_id,
-      COALESCE(NULLIF(m.ad_name, ''), CONCAT('ad_', CAST(i.ad_id AS CHAR))) AS resource_name,
-      COALESCE(NULLIF(m.country, ''), NULLIF(i.country_id, ''), '未填') AS country,
-      COALESCE(NULLIF(i.country_id, ''), '未填') AS country_group,
-      COALESCE(NULLIF(i.language, ''), 'none') AS language,
-      COALESCE(NULLIF(m.drama_language, ''), '未填') AS drama_language,
-      CAST(COALESCE(NULLIF(i.campaign_id, ''), m.campaign_id) AS CHAR) AS campaign_id,
-      COALESCE(NULLIF(m.campaign_name, ''), NULLIF(i.ads_name, ''), CONCAT('campaign_', CAST(i.campaign_id AS CHAR))) AS campaign_name,
-      CAST(COALESCE(NULLIF(i.adgroup_id, ''), m.adset_id) AS CHAR) AS adset_id,
-      COALESCE(NULLIF(m.adset_name, ''), CONCAT('adgroup_', CAST(COALESCE(NULLIF(i.adgroup_id, ''), m.adset_id) AS CHAR))) AS adset_name,
-      CAST(i.ad_id AS CHAR) AS ad_id,
-      COALESCE(NULLIF(m.ad_name, ''), CONCAT('ad_', CAST(i.ad_id AS CHAR))) AS ad_name,
-      COALESCE(NULLIF(m.country, ''), '未填') AS resource_type,
-      'tt_minis' AS source_type,
-      COALESCE(NULLIF(m.bid_type, ''), '未填') AS bid_type,
-      COALESCE(NULLIF(m.status, ''), 'UNKNOWN') AS status,
-      COALESCE(NULLIF(m.op_status, ''), 'UNKNOWN') AS op_status,
-      COALESCE(NULLIF(m.ad_created_at, ''), '') AS ad_created_at,
-      ROUND(i.stat_cost, 6) AS spend,
-      ROUND(i.ad_impression_value, 6) AS revenue,
-      0 AS installs,
-      i.show_cnt AS impressions,
-      i.click_cnt AS clicks,
-      i.ad_impression AS ad_impression,
-      i.insight_rows AS row_count
-    FROM (
-      SELECT
-        start_date,
-        CAST(ad_id AS UNSIGNED) AS ad_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(advertiser_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS advertiser_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(campaign_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS campaign_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(adgroup_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS adgroup_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ads_name, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS ads_name,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(country_id, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS country_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(language, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS language,
-        ROUND(SUM(stat_cost), 6) AS stat_cost,
-        ROUND(SUM(ad_impression_value), 6) AS ad_impression_value,
-        SUM(show_cnt) AS show_cnt,
-        SUM(click_cnt) AS click_cnt,
-        SUM(ad_impression) AS ad_impression,
-        COUNT(*) AS insight_rows
-      FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(pcsa)
-      WHERE product IN {sql_in(TIKTOK_INSIGHT_PRODUCTS)}
-        AND category = {TIKTOK_INSIGHT_CATEGORY}
-        AND start_date BETWEEN {sql_quote(start_date)} AND {sql_quote(end_date)}
-        AND ad_id <> 0
-      GROUP BY start_date, CAST(ad_id AS UNSIGNED)
-    ) i
-    JOIN ({minis_ad_scope_sql()}) m
-      ON m.ad_id = i.ad_id
-    LEFT JOIN kunlunads_dev.admin_users au
-      ON au.id = COALESCE(m.publish_user_id, m.ac_user_id, 0)
-    ORDER BY i.start_date DESC, spend DESC
+      DATE_FORMAT(start_date, '%Y-%m-%d') AS dt,
+      CAST(ad_id AS UNSIGNED) AS ad_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(CAST(advertiser_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS advertiser_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(CAST(campaign_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS campaign_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(CAST(adgroup_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS adgroup_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ads_name, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS ads_name,
+      SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(country_id, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS country_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(language, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS language,
+      ROUND(SUM(stat_cost), 6) AS spend,
+      ROUND(SUM(ad_impression_value), 6) AS revenue,
+      SUM(show_cnt) AS impressions,
+      SUM(click_cnt) AS clicks,
+      SUM(ad_impression) AS ad_impression,
+      COUNT(*) AS row_count
+    FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(pcsa)
+    WHERE product IN {sql_in(TIKTOK_INSIGHT_PRODUCTS)}
+      AND category = {TIKTOK_INSIGHT_CATEGORY}
+      AND start_date BETWEEN {sql_quote(start_date)} AND {sql_quote(end_date)}
+      AND ad_id <> 0
+    GROUP BY start_date, CAST(ad_id AS UNSIGNED)
+    ORDER BY start_date DESC, spend DESC
     """
-    raw = base.run_mysql(sql, timeout=300)
-    rows = []
-    for item in raw:
-        row = dict(zip(cols, item))
-        row["series_code"] = parse_series_code(row.get("campaign_name"), row.get("adset_name"), row.get("ad_name"))
-        row["_audio_type"] = detect_audio_type(row.get("campaign_name")) or detect_audio_type(row.get("adset_name"))
-        spend = dec(row["spend"])
-        revenue = dec(row["revenue"])
-        installs = dec(row["installs"])
-        impressions = dec(row["impressions"])
-        clicks = dec(row["clicks"])
-        row.update(
-            {
-                "spend": num(spend),
-                "revenue": num(revenue),
-                "installs": int_num(installs),
-                "impressions": int_num(impressions),
-                "clicks": int_num(clicks),
-                "ad_impression": int_num(row["ad_impression"]),
-                "row_count": int_num(row["row_count"]),
-                "roas": num(revenue / spend) if spend else 0.0,
-                "cpi": num(spend / installs) if installs else 0.0,
-                "ctr": num(clicks / impressions) if impressions else 0.0,
-            }
-        )
-        rows.append(row)
+    return [dict(zip(AD_INSIGHT_COLUMNS, item)) for item in run_mysql(sql, timeout=300)]
+
+
+def normalize_source_metrics(row):
+    spend = dec(row["spend"])
+    revenue = dec(row["revenue"])
+    installs = dec(row["installs"])
+    impressions = dec(row["impressions"])
+    clicks = dec(row["clicks"])
+    row.update(
+        {
+            "spend": num(spend),
+            "revenue": num(revenue),
+            "installs": int_num(installs),
+            "impressions": int_num(impressions),
+            "clicks": int_num(clicks),
+            "ad_impression": int_num(row["ad_impression"]),
+            "row_count": int_num(row["row_count"]),
+            "roas": num(revenue / spend) if spend else 0.0,
+            "cpi": num(spend / installs) if installs else 0.0,
+            "ctr": num(clicks / impressions) if impressions else 0.0,
+        }
+    )
+    return row
+
+
+def attach_source_enrichment(rows, start_date, end_date, metric_level):
     content_mapping = fetch_content_mapping(rows)
     for row in rows:
         meta = content_mapping.get(
@@ -526,123 +650,164 @@ def fetch_ad_rows_from_source(start_date, end_date):
             row["data_source_id"] = meta["content_id"] or "未填"
             row["resource_name"] = meta["name"] or row.get("resource_name") or "未填"
         row.pop("_audio_type", None)
-    app_users_by_key = fetch_app_revenue_users(rows, start_date, end_date, "ad")
+    key_column = "campaign_id" if metric_level == "campaign" else "ad_id"
+    app_users_by_key = fetch_app_revenue_users(rows, start_date, end_date, metric_level)
     for row in rows:
-        installs = app_users_by_key.get((str(row.get("dt")), str(row.get("ad_id"))), Decimal("0"))
+        installs = app_users_by_key.get((str(row.get("dt")), str(row.get(key_column))), Decimal("0"))
         spend = dec(row["spend"])
         row["installs"] = int_num(installs)
         row["cpi"] = num(spend / installs) if installs else 0.0
     return rows
+
+
+def fetch_ad_rows_from_source(start_date, end_date):
+    insights = fetch_ad_insight_rows(start_date, end_date)
+    if not insights:
+        return []
+    metadata = fetch_scope_metadata("ad", (row.get("ad_id") for row in insights))
+    rows = []
+    for insight in insights:
+        ad_id = normalize_metric_id(insight.get("ad_id"))
+        meta = metadata.get(ad_id)
+        if not meta:
+            continue
+        campaign_id = first_source_text(insight.get("campaign_id"), meta.get("campaign_id"))
+        adset_id = first_source_text(insight.get("adgroup_id"), meta.get("adset_id"))
+        campaign_name = first_source_text(
+            meta.get("campaign_name"),
+            insight.get("ads_name"),
+            "campaign_" + source_text(insight.get("campaign_id")),
+        )
+        adset_name = first_source_text(meta.get("adset_name"), "adgroup_" + adset_id)
+        ad_name = first_source_text(meta.get("ad_name"), "ad_" + ad_id)
+        country = first_source_text(meta.get("country"), insight.get("country_id"), "未填")
+        row = {
+            "metric_level": "ad",
+            "dt": source_text(insight.get("dt")),
+            "optimizer_id": first_source_text(meta.get("optimizer_id"), "0"),
+            "optimizer_name": first_source_text(meta.get("optimizer_name"), "user_0"),
+            "ad_account_id": first_source_text(insight.get("advertiser_id"), meta.get("ad_account_id")),
+            "app_id": "dramawaveminis" if source_text(meta.get("product_id")) == "3346" else "Dramawave",
+            "product": "Dramawave",
+            "minis_id": first_source_text(meta.get("minis_id"), "未填"),
+            "series_code": parse_series_code(campaign_name, adset_name, ad_name),
+            "data_source_id": "未填",
+            "resource_id": first_source_text(
+                meta.get("original_source_id"), meta.get("material_id"), meta.get("source_id"), "未填"
+            ),
+            "resource_name": ad_name,
+            "country": country,
+            "country_group": first_source_text(insight.get("country_id"), "未填"),
+            "language": first_source_text(insight.get("language"), "none"),
+            "drama_language": first_source_text(meta.get("drama_language"), "未填"),
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "adset_id": adset_id,
+            "adset_name": adset_name,
+            "ad_id": ad_id,
+            "ad_name": ad_name,
+            "resource_type": first_source_text(meta.get("country"), "未填"),
+            "source_type": "tt_minis",
+            "bid_type": first_source_text(meta.get("bid_type"), "未填"),
+            "status": first_source_text(meta.get("status"), "UNKNOWN"),
+            "op_status": first_source_text(meta.get("op_status"), "UNKNOWN"),
+            "ad_created_at": source_text(meta.get("ad_created_at")),
+            "spend": insight.get("spend"),
+            "revenue": insight.get("revenue"),
+            "installs": 0,
+            "impressions": insight.get("impressions"),
+            "clicks": insight.get("clicks"),
+            "ad_impression": insight.get("ad_impression"),
+            "row_count": insight.get("row_count"),
+            "_audio_type": detect_audio_type(campaign_name) or detect_audio_type(adset_name),
+        }
+        rows.append(normalize_source_metrics(row))
+    return attach_source_enrichment(rows, start_date, end_date, "ad")
+
+
+def fetch_campaign_insight_rows(start_date, end_date):
+    sql = f"""
+    SELECT
+      DATE_FORMAT(start_date, '%Y-%m-%d') AS dt,
+      CAST(campaign_id AS UNSIGNED) AS campaign_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(CAST(advertiser_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS advertiser_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ads_name, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS ads_name,
+      SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(country_id, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS country_id,
+      SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(language, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS language,
+      ROUND(SUM(stat_cost), 6) AS spend,
+      ROUND(SUM(ad_impression_value), 6) AS revenue,
+      SUM(show_cnt) AS impressions,
+      SUM(click_cnt) AS clicks,
+      SUM(ad_impression) AS ad_impression,
+      COUNT(*) AS row_count
+    FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(pcsa)
+    WHERE product IN {sql_in(TIKTOK_INSIGHT_PRODUCTS)}
+      AND category = {METRIC_LEVELS["campaign"]["category"]}
+      AND start_date BETWEEN {sql_quote(start_date)} AND {sql_quote(end_date)}
+      AND campaign_id <> 0
+    GROUP BY start_date, CAST(campaign_id AS UNSIGNED), COALESCE(NULLIF(country_id, ''), ''), COALESCE(NULLIF(language, ''), '')
+    ORDER BY start_date DESC, spend DESC
+    """
+    return [dict(zip(CAMPAIGN_INSIGHT_COLUMNS, item)) for item in run_mysql(sql, timeout=300)]
 
 
 def fetch_campaign_rows_from_source(start_date, end_date):
-    cols = SOURCE_COLUMNS[:-3]
-    sql = f"""
-    SELECT
-      'campaign' AS metric_level,
-      DATE_FORMAT(i.start_date, '%Y-%m-%d') AS dt,
-      CAST(COALESCE(m.publish_user_id, m.ac_user_id, 0) AS CHAR) AS optimizer_id,
-      COALESCE(NULLIF(au.name, ''), NULLIF(au.username, ''), CONCAT('user_', CAST(COALESCE(m.publish_user_id, m.ac_user_id, 0) AS CHAR))) AS optimizer_name,
-      CAST(COALESCE(NULLIF(i.advertiser_id, ''), m.ad_account_id) AS CHAR) AS ad_account_id,
-      CASE WHEN m.product_id = '3346' THEN 'dramawaveminis' ELSE 'Dramawave' END AS app_id,
-      'Dramawave' AS product,
-      COALESCE(NULLIF(m.minis_id, ''), '未填') AS minis_id,
-      '未填' AS series_code,
-      '未填' AS data_source_id,
-      COALESCE(NULLIF(m.original_source_id, ''), NULLIF(m.material_id, ''), NULLIF(m.source_id, ''), '未填') AS resource_id,
-      COALESCE(NULLIF(m.campaign_name, ''), NULLIF(i.ads_name, ''), CONCAT('campaign_', CAST(i.campaign_id AS CHAR))) AS resource_name,
-      COALESCE(NULLIF(m.country, ''), NULLIF(i.country_id, ''), '未填') AS country,
-      COALESCE(NULLIF(i.country_id, ''), '未填') AS country_group,
-      COALESCE(NULLIF(i.language, ''), 'none') AS language,
-      COALESCE(NULLIF(m.drama_language, ''), '未填') AS drama_language,
-      CAST(i.campaign_id AS CHAR) AS campaign_id,
-      COALESCE(NULLIF(m.campaign_name, ''), NULLIF(i.ads_name, ''), CONCAT('campaign_', CAST(i.campaign_id AS CHAR))) AS campaign_name,
-      'campaign层级不可用' AS adset_id,
-      'campaign层级不可用' AS adset_name,
-      'campaign层级不可用' AS ad_id,
-      'campaign层级不可用' AS ad_name,
-      COALESCE(NULLIF(m.country, ''), '未填') AS resource_type,
-      'tt_minis' AS source_type,
-      COALESCE(NULLIF(m.bid_type, ''), '未填') AS bid_type,
-      COALESCE(NULLIF(m.status, ''), 'UNKNOWN') AS status,
-      COALESCE(NULLIF(m.op_status, ''), 'UNKNOWN') AS op_status,
-      COALESCE(NULLIF(m.ad_created_at, ''), '') AS ad_created_at,
-      ROUND(i.stat_cost, 6) AS spend,
-      ROUND(i.ad_impression_value, 6) AS revenue,
-      0 AS installs,
-      i.show_cnt AS impressions,
-      i.click_cnt AS clicks,
-      i.ad_impression AS ad_impression,
-      i.insight_rows AS row_count
-    FROM (
-      SELECT
-        start_date,
-        CAST(campaign_id AS UNSIGNED) AS campaign_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(CAST(advertiser_id AS CHAR) ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS advertiser_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(ads_name, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS ads_name,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(country_id, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS country_id,
-        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(NULLIF(language, ''), '') ORDER BY stat_cost DESC SEPARATOR '||'), '||', 1) AS language,
-        ROUND(SUM(stat_cost), 6) AS stat_cost,
-        ROUND(SUM(ad_impression_value), 6) AS ad_impression_value,
-        SUM(show_cnt) AS show_cnt,
-        SUM(click_cnt) AS click_cnt,
-        SUM(ad_impression) AS ad_impression,
-        COUNT(*) AS insight_rows
-      FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(pcsa)
-      WHERE product IN {sql_in(TIKTOK_INSIGHT_PRODUCTS)}
-        AND category = {METRIC_LEVELS["campaign"]["category"]}
-        AND start_date BETWEEN {sql_quote(start_date)} AND {sql_quote(end_date)}
-        AND campaign_id <> 0
-      GROUP BY start_date, CAST(campaign_id AS UNSIGNED), COALESCE(NULLIF(country_id, ''), ''), COALESCE(NULLIF(language, ''), '')
-    ) i
-    JOIN ({minis_campaign_scope_sql()}) m
-      ON CAST(m.campaign_id AS UNSIGNED) = i.campaign_id
-    LEFT JOIN kunlunads_dev.admin_users au
-      ON au.id = COALESCE(m.publish_user_id, m.ac_user_id, 0)
-    ORDER BY i.start_date DESC, spend DESC
-    """
-    raw = base.run_mysql(sql, timeout=300)
+    insights = fetch_campaign_insight_rows(start_date, end_date)
+    if not insights:
+        return []
+    metadata = fetch_scope_metadata("campaign", (row.get("campaign_id") for row in insights))
     rows = []
-    for item in raw:
-        row = dict(zip(cols, item))
-        row["series_code"] = parse_series_code(row.get("campaign_name"))
-        row["_audio_type"] = detect_audio_type(row.get("campaign_name"))
-        spend = dec(row["spend"])
-        revenue = dec(row["revenue"])
-        installs = dec(row["installs"])
-        impressions = dec(row["impressions"])
-        clicks = dec(row["clicks"])
-        row.update(
-            {
-                "spend": num(spend),
-                "revenue": num(revenue),
-                "installs": int_num(installs),
-                "impressions": int_num(impressions),
-                "clicks": int_num(clicks),
-                "ad_impression": int_num(row["ad_impression"]),
-                "row_count": int_num(row["row_count"]),
-                "roas": num(revenue / spend) if spend else 0.0,
-                "cpi": num(spend / installs) if installs else 0.0,
-                "ctr": num(clicks / impressions) if impressions else 0.0,
-            }
+    for insight in insights:
+        campaign_id = normalize_metric_id(insight.get("campaign_id"))
+        meta = metadata.get(campaign_id)
+        if not meta:
+            continue
+        campaign_name = first_source_text(
+            meta.get("campaign_name"), insight.get("ads_name"), "campaign_" + campaign_id
         )
-        rows.append(row)
-    content_mapping = fetch_content_mapping(rows)
-    for row in rows:
-        meta = content_mapping.get(
-            (str(row.get("series_code") or ""), str(row.get("drama_language") or ""), int(row.get("_audio_type") or 0))
-        )
-        if meta:
-            row["data_source_id"] = meta["content_id"] or "未填"
-            row["resource_name"] = meta["name"] or row.get("resource_name") or "未填"
-        row.pop("_audio_type", None)
-    app_users_by_key = fetch_app_revenue_users(rows, start_date, end_date, "campaign")
-    for row in rows:
-        installs = app_users_by_key.get((str(row.get("dt")), str(row.get("campaign_id"))), Decimal("0"))
-        spend = dec(row["spend"])
-        row["installs"] = int_num(installs)
-        row["cpi"] = num(spend / installs) if installs else 0.0
-    return rows
+        country = first_source_text(meta.get("country"), insight.get("country_id"), "未填")
+        row = {
+            "metric_level": "campaign",
+            "dt": source_text(insight.get("dt")),
+            "optimizer_id": first_source_text(meta.get("optimizer_id"), "0"),
+            "optimizer_name": first_source_text(meta.get("optimizer_name"), "user_0"),
+            "ad_account_id": first_source_text(insight.get("advertiser_id"), meta.get("ad_account_id")),
+            "app_id": "dramawaveminis" if source_text(meta.get("product_id")) == "3346" else "Dramawave",
+            "product": "Dramawave",
+            "minis_id": first_source_text(meta.get("minis_id"), "未填"),
+            "series_code": parse_series_code(campaign_name),
+            "data_source_id": "未填",
+            "resource_id": first_source_text(
+                meta.get("original_source_id"), meta.get("material_id"), meta.get("source_id"), "未填"
+            ),
+            "resource_name": campaign_name,
+            "country": country,
+            "country_group": first_source_text(insight.get("country_id"), "未填"),
+            "language": first_source_text(insight.get("language"), "none"),
+            "drama_language": first_source_text(meta.get("drama_language"), "未填"),
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "adset_id": "campaign层级不可用",
+            "adset_name": "campaign层级不可用",
+            "ad_id": "campaign层级不可用",
+            "ad_name": "campaign层级不可用",
+            "resource_type": first_source_text(meta.get("country"), "未填"),
+            "source_type": "tt_minis",
+            "bid_type": first_source_text(meta.get("bid_type"), "未填"),
+            "status": first_source_text(meta.get("status"), "UNKNOWN"),
+            "op_status": first_source_text(meta.get("op_status"), "UNKNOWN"),
+            "ad_created_at": source_text(meta.get("ad_created_at")),
+            "spend": insight.get("spend"),
+            "revenue": insight.get("revenue"),
+            "installs": 0,
+            "impressions": insight.get("impressions"),
+            "clicks": insight.get("clicks"),
+            "ad_impression": insight.get("ad_impression"),
+            "row_count": insight.get("row_count"),
+            "_audio_type": detect_audio_type(campaign_name),
+        }
+        rows.append(normalize_source_metrics(row))
+    return attach_source_enrichment(rows, start_date, end_date, "campaign")
 
 
 def cache_conn():
@@ -1002,7 +1167,7 @@ def sample_validation(rows):
               AND category = {TIKTOK_INSIGHT_CATEGORY}
               AND ad_id IN {ids_num}
             """
-            tti = base.run_mysql(tti_sql, timeout=120)
+            tti = run_mysql(tti_sql, timeout=120)
             tti_spend = dec(tti[0][0] if tti else 0)
             tti_revenue = dec(tti[0][1] if tti else 0)
             app_sql = f"""
@@ -1011,7 +1176,7 @@ def sample_validation(rows):
             WHERE dt = {sql_quote(compact_date(day))}
               AND ad_id IN {sql_in(top_ads)}
             """
-            app = base.run_mysql(app_sql, timeout=120)
+            app = run_mysql(app_sql, timeout=120)
             app_users = dec(app[0][0] if app else 0)
             spend_diff = source_spend - tti_spend
             revenue_diff = source_revenue - tti_revenue
@@ -1482,7 +1647,7 @@ def main():
 def run_cli():
     try:
         return main()
-    except subprocess.TimeoutExpired as exc:
+    except (subprocess.TimeoutExpired, MySQLQueryTimeout) as exc:
         print(
             "TT minis source query timed out after %s seconds; "
             "the published report was not replaced." % exc.timeout,
