@@ -41536,6 +41536,7 @@ except ValueError:
     )
 
 X_ACCOUNTS_ERROR_META = {
+    "invalid_post_template": (400, "X Post描述模板无效"),
     "invalid_request": (400, "请求参数无效"),
     "x_account_disabled": (409, "X账号已在后台停用，请重新授权后再使用"),
     "x_account_not_publishable": (409, "X账号当前状态不可用于发布"),
@@ -95976,6 +95977,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         source_type,
                         {
                             "enabled": bool(settings.get("enabled")),
+                            "body_template_sha256": hashlib.sha256(
+                                str(settings.get("body_template", "") or "").encode(
+                                    "utf-8"
+                                )
+                            ).hexdigest(),
+                            "body_template_uses_url": "{{url}}"
+                            in str(settings.get("body_template", "") or ""),
                             "account_count": len(
                                 settings.get("account_ids", [])
                                 if isinstance(

@@ -97,6 +97,7 @@ QUEUE_LEDGER_FIELDS = (
     "schedule_run_id",
     "run_date",
     "source_type",
+    "body_template",
     "material_key",
     "episode_key",
     "drama_replay_generation",
@@ -304,6 +305,84 @@ def _tweet_char_weight(char):
 
 
 X_POST_HASHTAGS = "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
+DEFAULT_MATERIAL_POST_TEMPLATE = (
+    "🎬 {{drama_name}}\n"
+    "{{desc}}\n\n"
+    + X_POST_HASHTAGS
+)
+DEFAULT_DRAMA_POST_TEMPLATE = (
+    "🎬 {{drama_name}}\n"
+    "Episode {{episode_number}}\n"
+    "{{desc}}\n\n"
+    + X_POST_HASHTAGS
+)
+POST_TEMPLATE_MACRO_RE = re.compile(r"\{\{([a-z_]+)\}\}")
+POST_TEMPLATE_ALLOWED_MACROS = frozenset(
+    {"drama_name", "episode_number", "desc", "url"}
+)
+
+
+def _default_post_template(source_type):
+    source_type = _schedule_source_type(source_type)
+    return (
+        DEFAULT_DRAMA_POST_TEMPLATE
+        if source_type == "drama"
+        else DEFAULT_MATERIAL_POST_TEMPLATE
+    )
+
+
+def _normalize_post_template(value, source_type):
+    source_type = _schedule_source_type(source_type)
+    if value in (None, ""):
+        value = _default_post_template(source_type)
+    template = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not template or len(template) > 2000:
+        raise XPostError(
+            "invalid_post_template",
+            "X Post描述模板不能为空且不能超过2000个字符",
+            400,
+        )
+    if any(ord(char) < 32 and char not in {"\n", "\t"} for char in template):
+        raise XPostError("invalid_post_template", "X Post描述模板包含无效字符", 400)
+    macros = POST_TEMPLATE_MACRO_RE.findall(template)
+    unmatched = POST_TEMPLATE_MACRO_RE.sub("", template)
+    if "{{" in unmatched or "}}" in unmatched:
+        raise XPostError(
+            "invalid_post_template",
+            "X Post描述模板包含不完整或格式无效的宏",
+            400,
+        )
+    unknown = sorted(set(macros) - POST_TEMPLATE_ALLOWED_MACROS)
+    if unknown:
+        raise XPostError(
+            "invalid_post_template",
+            "X Post描述模板包含不支持的宏: %s" % "、".join(unknown),
+            400,
+        )
+    required = {"drama_name", "desc"}
+    if source_type == "drama":
+        required.add("episode_number")
+    missing = sorted(required - set(macros))
+    if missing:
+        raise XPostError(
+            "invalid_post_template",
+            "X Post描述模板缺少必需宏: %s" % "、".join(missing),
+            400,
+        )
+    repeated = sorted(macro for macro in set(macros) if macros.count(macro) > 1)
+    if repeated:
+        raise XPostError(
+            "invalid_post_template",
+            "X Post描述模板宏不能重复: %s" % "、".join(repeated),
+            400,
+        )
+    if source_type == "material" and "episode_number" in macros:
+        raise XPostError(
+            "invalid_post_template",
+            "素材池模板不支持episode_number宏",
+            400,
+        )
+    return template
 
 
 def _tweet_text_weight(value):
@@ -321,13 +400,14 @@ def _normalize_post_field(value, label, maximum):
     return normalized
 
 
-def _render_post_text(short_url, drama_name, description, episode_number=None):
-    """Render the shared fixed copy while truncating only the description.
-
-    The short URL remains validated and stored for attribution/audit, but it is
-    intentionally excluded from the public Post body. The drama name, optional
-    episode line and fixed hashtags are mandatory.
-    """
+def _render_post_text(
+    short_url,
+    drama_name,
+    description,
+    episode_number=None,
+    body_template=None,
+):
+    """Render a validated frozen template while truncating only ``desc``."""
     parsed = urllib.parse.urlsplit(str(short_url or ""))
     if (
         parsed.scheme != "https"
@@ -340,13 +420,22 @@ def _render_post_text(short_url, drama_name, description, episode_number=None):
         raise XPostError("invalid_request", "短链无效", 400)
     normalized_name = _normalize_post_field(drama_name, "剧名", 500)
     normalized_description = _normalize_post_field(description, "剧描述", 10000)
-    before_description = "🎬 %s\n" % normalized_name
+    source_type = "drama" if episode_number is not None else "material"
+    template = _normalize_post_template(body_template, source_type)
+    substitutions = {
+        "drama_name": normalized_name,
+        "url": str(short_url),
+    }
     if episode_number is not None:
-        before_description += "Episode %s\n" % _positive_int(
+        substitutions["episode_number"] = str(_positive_int(
             episode_number,
             "episode_number",
-        )
-    after_description = "\n\n" + X_POST_HASHTAGS
+        ))
+    before_description, after_description = template.split("{{desc}}", 1)
+    for macro, replacement in substitutions.items():
+        marker = "{{%s}}" % macro
+        before_description = before_description.replace(marker, replacement)
+        after_description = after_description.replace(marker, replacement)
     mandatory_weight = (
         _tweet_text_weight(before_description)
         + _tweet_text_weight(after_description)
@@ -376,8 +465,13 @@ def _render_post_text(short_url, drama_name, description, episode_number=None):
     return before_description + rendered_description + after_description
 
 
-def build_post_text(short_url, drama_name, description):
-    return _render_post_text(short_url, drama_name, description)
+def build_post_text(short_url, drama_name, description, body_template=None):
+    return _render_post_text(
+        short_url,
+        drama_name,
+        description,
+        body_template=body_template,
+    )
 
 
 def build_drama_episode_post_text(
@@ -385,12 +479,14 @@ def build_drama_episode_post_text(
     sub_num,
     drama_name,
     description,
+    body_template=None,
 ):
     return _render_post_text(
         short_url,
         drama_name,
         description,
         episode_number=sub_num,
+        body_template=body_template,
     )
 
 
@@ -963,6 +1059,7 @@ def ensure_storage(db_path):
                         CHECK(timezone='Asia/Shanghai'),
                     account_ids_json TEXT NOT NULL DEFAULT '[]',
                     publish_times_json TEXT NOT NULL DEFAULT '[]',
+                    body_template TEXT NOT NULL DEFAULT '',
                     version INTEGER NOT NULL DEFAULT 1,
                     updated_by_user_id TEXT NOT NULL DEFAULT '',
                     updated_by_name TEXT NOT NULL DEFAULT '',
@@ -984,6 +1081,7 @@ def ensure_storage(db_path):
                         CHECK(timezone='Asia/Shanghai'),
                     config_version INTEGER NOT NULL,
                     account_ids_json TEXT NOT NULL,
+                    body_template TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'queued',
                     expected_count INTEGER NOT NULL,
                     queued_count INTEGER NOT NULL DEFAULT 0,
@@ -1076,6 +1174,7 @@ def ensure_storage(db_path):
                 "schedule_run_id": "INTEGER",
                 "run_date": "TEXT NOT NULL DEFAULT ''",
                 "source_type": "TEXT NOT NULL DEFAULT 'material'",
+                "body_template": "TEXT NOT NULL DEFAULT ''",
                 "material_key": "TEXT NOT NULL DEFAULT ''",
                 "episode_key": "TEXT NOT NULL DEFAULT ''",
                 "drama_replay_generation": (
@@ -1106,6 +1205,29 @@ def ensure_storage(db_path):
             for name, definition in additive_columns.items():
                 if name not in queue_columns:
                     conn.execute("ALTER TABLE x_post_queue ADD COLUMN %s %s" % (name, definition))
+
+            schedule_config_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_schedule_config)"
+                )
+            }
+            if "body_template" not in schedule_config_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_schedule_config "
+                    "ADD COLUMN body_template TEXT NOT NULL DEFAULT ''"
+                )
+            schedule_run_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_schedule_run)"
+                )
+            }
+            if "body_template" not in schedule_run_columns:
+                conn.execute(
+                    "ALTER TABLE x_post_schedule_run "
+                    "ADD COLUMN body_template TEXT NOT NULL DEFAULT ''"
+                )
 
             drama_pool_columns = {
                 row[1]
@@ -1142,14 +1264,20 @@ def ensure_storage(db_path):
                 conn.execute(
                     "INSERT OR IGNORE INTO x_post_schedule_config("
                     "source_type,enabled,timezone,account_ids_json,publish_times_json,"
-                    "version,created_at,updated_at"
-                    ") VALUES(?,0,?,'[]','[]',1,?,?)",
+                    "body_template,version,created_at,updated_at"
+                    ") VALUES(?,0,?,'[]','[]',?,1,?,?)",
                     (
                         source_type,
                         SCHEDULE_TIMEZONE,
+                        _default_post_template(source_type),
                         migration_timestamp,
                         migration_timestamp,
                     ),
+                )
+                conn.execute(
+                    "UPDATE x_post_schedule_config SET body_template=? "
+                    "WHERE source_type=? AND body_template=''",
+                    (_default_post_template(source_type), source_type),
                 )
 
             legacy_rows = conn.execute(
@@ -2095,6 +2223,14 @@ class XPostStore:
         item["enabled"] = bool(item["enabled"])
         item["account_ids"] = account_ids
         item["publish_times"] = publish_times
+        item["body_template"] = _normalize_post_template(
+            item.get("body_template"),
+            item["source_type"],
+        )
+        item["supported_macros"] = ["drama_name"]
+        if item["source_type"] == "drama":
+            item["supported_macros"].append("episode_number")
+        item["supported_macros"].extend(["desc", "url"])
         item["posts_per_day"] = (
             len(account_ids) * len(publish_times)
             if item["enabled"]
@@ -2258,10 +2394,19 @@ class XPostStore:
                 current,
                 now=current_time,
             )
+            body_template = (
+                current_item["body_template"]
+                if "body_template" not in payload
+                else _normalize_post_template(
+                    payload.get("body_template"),
+                    source_type,
+                )
+            )
             settings_changed = (
                 bool(current_item["enabled"]) != enabled
                 or list(current_item["account_ids"]) != account_ids
                 or list(current_item["publish_times"]) != publish_times
+                or current_item["body_template"] != body_template
             )
             protected_schedule_times = set(
                 current_item["publish_times"]
@@ -2341,7 +2486,8 @@ class XPostStore:
                         )
             cursor = conn.execute(
                 "UPDATE x_post_schedule_config SET enabled=?,timezone=?,"
-                "account_ids_json=?,publish_times_json=?,version=version+1,"
+                "account_ids_json=?,publish_times_json=?,body_template=?,"
+                "version=version+1,"
                 "updated_by_user_id=?,updated_by_name=?,updated_at=? "
                 "WHERE source_type=? AND version=?",
                 (
@@ -2349,6 +2495,7 @@ class XPostStore:
                     SCHEDULE_TIMEZONE,
                     json.dumps(account_ids, separators=(",", ":")),
                     json.dumps(publish_times, separators=(",", ":")),
+                    body_template,
                     updated_by_user_id,
                     updated_by_name,
                     timestamp,
@@ -2439,9 +2586,9 @@ class XPostStore:
                     conn.execute(
                         "INSERT OR IGNORE INTO x_post_schedule_run("
                         "slot_key,source_type,run_date,publish_time,timezone,"
-                        "config_version,account_ids_json,status,"
+                        "config_version,account_ids_json,body_template,status,"
                         "expected_count,queued_count,created_at,updated_at"
-                        ") VALUES(?,?,?,?,?,?,?,'claimed',?,0,?,?)",
+                        ") VALUES(?,?,?,?,?,?,?,?,'claimed',?,0,?,?)",
                         (
                             slot_key,
                             config["source_type"],
@@ -2453,6 +2600,7 @@ class XPostStore:
                                 config["account_ids"],
                                 separators=(",", ":"),
                             ),
+                            config["body_template"],
                             len(config["account_ids"]),
                             timestamp,
                             timestamp,
@@ -2577,6 +2725,10 @@ class XPostStore:
                     "timezone": str(row["timezone"]),
                     "version": int(row["config_version"]),
                     "account_ids": account_ids,
+                    "body_template": _normalize_post_template(
+                        row["body_template"],
+                        row["source_type"],
+                    ),
                     "slot_key": str(row["slot_key"]),
                     "frozen": True,
                 }
@@ -2680,6 +2832,10 @@ class XPostStore:
         if source_type not in SCHEDULE_SOURCE_TYPES:
             raise XPostError("invalid_request", "source_type无效", 400)
         result["source_type"] = source_type
+        result["body_template"] = _normalize_post_template(
+            payload.get("body_template"),
+            source_type,
+        )
         if source_type == "material":
             material_key = normalize_material_key(result["material_id"])
             supplied_material_key = payload.get("material_key")
@@ -4700,6 +4856,10 @@ class XPostStore:
             _json_array(item.pop("account_ids_json"), "account_ids"),
             allow_empty=True,
         )
+        item["body_template"] = _normalize_post_template(
+            item.get("body_template"),
+            item["source_type"],
+        )
         return item
 
     def query_schedule_plan(self, source_type, run_date, publish_time):
@@ -4715,6 +4875,7 @@ class XPostStore:
             "timezone",
             "config_version",
             "account_ids_json",
+            "body_template",
             "status",
             "expected_count",
             "queued_count",
@@ -5064,9 +5225,14 @@ class XPostStore:
                     409,
                 )
             account_ids = list(frozen_run["account_ids"])
+            body_template = _normalize_post_template(
+                frozen_run.get("body_template"),
+                source_type,
+            )
         else:
             config = self.get_schedule_config(source_type)
             account_ids = list(config["account_ids"])
+            body_template = config["body_template"]
             if (
                 not config["enabled"]
                 or int(config["version"]) != config_version
@@ -5091,6 +5257,7 @@ class XPostStore:
             if not isinstance(payload, dict):
                 raise XPostError("invalid_request", "candidate必须是对象", 400)
             payload["source_type"] = source_type
+            payload["body_template"] = body_template
             values = self._queue_payload(
                 payload,
                 run_date=run_date,
@@ -5438,9 +5605,9 @@ class XPostStore:
                 cursor = conn.execute(
                     "INSERT INTO x_post_schedule_run("
                     "slot_key,source_type,run_date,publish_time,timezone,"
-                    "config_version,account_ids_json,status,expected_count,"
+                    "config_version,account_ids_json,body_template,status,expected_count,"
                     "queued_count,started_at,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                    ") VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                     (
                         slot_key,
                         source_type,
@@ -5449,6 +5616,7 @@ class XPostStore:
                         SCHEDULE_TIMEZONE,
                         config_version,
                         json.dumps(account_ids, separators=(",", ":")),
+                        body_template,
                         len(prepared),
                         len(prepared),
                         timestamp,
@@ -8331,12 +8499,14 @@ def publish_canary(
                     queue.get("episode_number"),
                     queue.get("drama_name"),
                     queue["description"],
+                    queue.get("body_template"),
                 )
             else:
                 post_text = build_post_text(
                     short_url,
                     queue.get("drama_name"),
                     queue["description"],
+                    queue.get("body_template"),
                 )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)
 

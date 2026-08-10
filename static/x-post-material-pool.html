@@ -205,7 +205,13 @@
       background: #f7f9fd;
     }
     .template-box strong { display: block; margin-bottom: 8px; font-size: 13px; }
-    .template-box pre { margin: 0; overflow: auto; color: #273b58; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+    .template-box textarea {
+      width: 100%; min-height: 150px; resize: vertical; box-sizing: border-box;
+      border: 1px solid #bfcdea; border-radius: 10px; padding: 11px 12px;
+      color: #273b58; background: #fff;
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .template-box .helper { display: block; margin-top: 8px; }
     .filters {
       display: grid;
       grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(160px, 1fr) auto auto;
@@ -374,10 +380,11 @@
           </div>
           <div class="template-box">
             <strong>素材 Post 描述模板</strong>
-            <pre id="materialPostTemplatePreview">🎬 {{drama_name}}
+            <textarea id="materialPostTemplate" maxlength="2000" aria-describedby="materialPostTemplateHelp">🎬 {{drama_name}}
 {{desc}}
 
-#shortdrama #shortfilms #tvdrama #aidrama #dramawave</pre>
+#shortdrama #shortfilms #tvdrama #aidrama #dramawave</textarea>
+            <span id="materialPostTemplateHelp" class="helper">必需宏：{{drama_name}}、{{desc}}；可选宏：{{url}}（当前队列的追踪短链）。编辑后点击上方“保存发布设置”生效。</span>
           </div>
         </section>
 
@@ -457,6 +464,7 @@
           timezone: "Asia/Shanghai",
           accountIds: new Set(),
           publishTimes: [],
+          bodyTemplate: "",
           version: 0,
           updatedByName: "",
           updatedAt: "",
@@ -709,11 +717,13 @@
           rawAccounts.map(value => String(value || "")).filter(value => /^\d+$/.test(value) && Number(value) > 0)
         );
         state.schedule.publishTimes = Array.from(new Set(rawTimes.map(value => String(value || "").trim()).filter(validPublishTime))).sort();
+        state.schedule.bodyTemplate = String(item.body_template || "");
         state.schedule.version = Number.isInteger(Number(item.version)) ? Number(item.version) : 0;
         state.schedule.updatedByName = String(item.updated_by_name || item.updated_by || "");
         state.schedule.updatedAt = String(item.updated_at || "");
         state.schedule.nextDueAt = String(item.next_due_at || "");
         byId("scheduleEnabled").checked = state.schedule.enabled;
+        byId("materialPostTemplate").value = state.schedule.bodyTemplate;
         renderAccountOptions();
         renderPublishTimes();
         const updated = state.schedule.updatedAt
@@ -775,6 +785,11 @@
         if (state.scheduleBusy) return;
         const enabled = byId("scheduleEnabled").checked;
         const selectedIds = Array.from(state.schedule.accountIds);
+        const bodyTemplate = String(byId("materialPostTemplate").value || "").trim();
+        if (!bodyTemplate.includes("{{drama_name}}") || !bodyTemplate.includes("{{desc}}")) {
+          setScheduleMessage("描述模板必须包含 {{drama_name}} 和 {{desc}}。", true);
+          return;
+        }
         if (enabled && !selectedIds.length) {
           setScheduleMessage("启用自动发布前，请至少选择一个可发布账号。", true);
           return;
@@ -804,6 +819,7 @@
               timezone: "Asia/Shanghai",
               account_ids: selectedIds.map(value => Number(value)),
               publish_times: state.schedule.publishTimes.slice(),
+              body_template: bodyTemplate,
               version: state.schedule.version,
             }),
           });

@@ -197,7 +197,7 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
             "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
         )
         material_match = re.search(
-            r'<pre id="materialPostTemplatePreview">(?P<body>.*?)</pre>',
+            r'<textarea id="materialPostTemplate"[^>]*>(?P<body>.*?)</textarea>',
             MATERIAL,
             flags=re.DOTALL,
         )
@@ -211,7 +211,7 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
             "#shortdrama #shortfilms #tvdrama #aidrama #dramawave"
         )
         drama_match = re.search(
-            r'<pre id="postTemplatePreview">(?P<body>.*?)</pre>',
+            r'<textarea id="dramaPostTemplate"[^>]*>(?P<body>.*?)</textarea>',
             DRAMA,
             flags=re.DOTALL,
         )
@@ -220,6 +220,10 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertNotIn("{{short_link}}", material_expected)
         self.assertNotIn("{{short_link}}", drama_expected)
         self.assertNotIn("Episode {{episode_number}}", material_expected)
+        self.assertIn("{{url}}（当前队列的追踪短链）", MATERIAL)
+        self.assertIn("{{url}}（当前队列的追踪短链）", DRAMA)
+        self.assertIn("body_template: bodyTemplate", MATERIAL)
+        self.assertIn("body_template: bodyTemplate", DRAMA)
         self.assertIn("短剧 ID（content_id）", DRAMA)
         self.assertIn(r"/^[A-Za-z0-9_-]{1,128}$/", DRAMA)
 

@@ -380,6 +380,37 @@ class XPostsTests(unittest.TestCase):
             "#shortdrama #shortfilms #tvdrama #aidrama #dramawave",
         )
 
+    def test_url_macro_renders_the_frozen_tracked_short_link(self):
+        short = "https://gy.g2flow.com/s2l/12.html"
+        rendered = service.build_post_text(
+            short,
+            "My Drama",
+            "A complete drama description.",
+            "{{drama_name}}\n{{desc}}\n{{url}}",
+        )
+        self.assertEqual(
+            rendered,
+            "My Drama\nA complete drama description.\n" + short,
+        )
+
+    def test_post_template_rejects_unknown_missing_or_repeated_macros(self):
+        invalid_templates = (
+            "{{drama_name}} {{unknown}} {{desc}}",
+            "{{drama_name}} {{URL}} {{desc}}",
+            "{{drama_name}} only",
+            "{{drama_name}} {{desc}} {{desc}}",
+        )
+        for template in invalid_templates:
+            with self.subTest(template=template):
+                with self.assertRaises(service.XPostError) as caught:
+                    service.build_post_text(
+                        "https://gy.g2flow.com/s2l/12.html",
+                        "My Drama",
+                        "A complete drama description.",
+                        template,
+                    )
+                self.assertEqual(caught.exception.code, "invalid_post_template")
+
     def test_short_redirect_is_atomic_immutable_and_public_readable(self):
         long_url = service.build_w2a_url(
             {

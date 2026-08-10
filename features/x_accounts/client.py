@@ -9,6 +9,7 @@ import urllib.request
 
 
 SAFE_ERROR_CODES = {
+    "invalid_post_template",
     "invalid_request",
     "x_account_disabled",
     "x_account_not_publishable",

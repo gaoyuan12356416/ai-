@@ -26,7 +26,7 @@
 - 修改 `ads_drama_resource` 或其原始视频。
 - 补发未被认领的历史时间点。
 - 自动跳过失败或结果未知的短剧继续发布后续剧。
-- 修改既有素材池 Post 文案模板和 W2A 参数合同。
+- 修改 W2A 参数合同。
 
 ## 用户故事 / 业务规则
 
@@ -39,7 +39,16 @@
 7. 同一集的重复资源行仅在 URL 和元数据一致时合并；同集 URL 不一致、元数据漂移或缺集时整剧不可用。
 8. 视频 URL 的 `http` 自动规范为 `https`；格式或尺寸不合规时复用 GPU 修复流程并上传 COS，再使用修复后 URL。
 9. `name_tag` 保留为历史归因元数据，不再进入发布正文。
-10. 短剧 Post 文案固定为：
+10. 两个池分别保存可编辑的 Post 描述模板；素材池默认模板为：
+
+```text
+🎬 {{drama_name}}
+{{desc}}
+
+#shortdrama #shortfilms #tvdrama #aidrama #dramawave
+```
+
+短剧池默认模板为：
 
 ```text
 🎬 {{drama_name}}
@@ -49,7 +58,7 @@ Episode {{episode_number}}
 #shortdrama #shortfilms #tvdrama #aidrama #dramawave
 ```
 
-11. 短链继续生成并写入发布日志用于归因和审计，但不进入帖子正文。X 字数计算保留剧名、集数和固定 hashtags；仅允许截断 `desc`。
+11. 模板宏支持 `{{drama_name}}`、`{{desc}}`、`{{url}}`；短剧池额外支持 `{{episode_number}}`。`{{url}}` 表示当前 queue/log 生成的 `gy.g2flow.com` 追踪短链，不是视频 URL 或 W2A 长链。短链始终生成并写入发布日志，只有模板显式包含 `{{url}}` 时才进入帖子正文。未知、缺失必需或重复宏拒绝保存；X 字数计算只允许截断 `desc`。
 12. 生产数据抽样确认描述可能包含换行；查询入口统一折叠连续空白，NUL 等非法控制字符仍拒绝。
 13. 任一短剧发生预检失败、已知发布失败或结果未知，当前批次停止且该剧标记 `needs_review`，后续短剧暂停，等待人工确认。
 14. 素材池在每次入池校验和排期 worker 发布前，读取 `ads_drama_info.app_id=1479` 中同 `content_id + language` 的 `deploy_time`；多端取最晚值。可投放时间严格晚于当前时间时暂时跳过且不创建 queue，到达边界后由后续排期重新校验并自动恢复；缺失或非法数据 fail closed。
@@ -61,7 +70,7 @@ Episode {{episode_number}}
 1. 页面加载账号选项和当前配置。
 2. 用户选择多个账号、增加/删除时间点并保存；版本冲突时刷新后重试。
 3. 短剧 ID 在加入前查询源表并展示剧名、免费集数和校验结果。
-4. 每分钟整点秒由轻量 claim 任务冻结当前时间点的配置版本和账号顺序。
+4. 每分钟整点秒由轻量 claim 任务冻结当前时间点的配置版本、账号顺序和描述模板。
 5. 每分钟第 10 秒由 worker 读取冻结批次，执行账号验证、源表查询、短剧可投放时间校验、媒体预检/修复、队列落库和顺序发布。
 6. 发布日志保留短链、长链、X 预览链接、账号、素材/短剧/集数和错误。
 7. 短剧池列表由后台直接返回 `deletable` 和不可删除原因；页面全选只勾选当前页 `deletable=true` 的记录，删除前二次确认。
@@ -79,10 +88,10 @@ Episode {{episode_number}}
 
 ### 数据结构
 
-- `x_post_schedule_config`：`source_type` 唯一；保存启用状态、账号 JSON、时间 JSON、版本和操作人。
-- `x_post_schedule_run`：`source_type + run_date + publish_time` 唯一；冻结配置版本、账号顺序和执行汇总。
+- `x_post_schedule_config`：`source_type` 唯一；保存启用状态、账号 JSON、时间 JSON、描述模板、版本和操作人。
+- `x_post_schedule_run`：`source_type + run_date + publish_time` 唯一；冻结配置版本、账号顺序、描述模板和执行汇总。
 - `x_post_drama_pool`：短剧元数据、免费集数、下一集数、发布数量和校验/失败状态。
-- `x_post_queue`：新增 schedule、source、短剧池、episode 和 `name_tag` 字段；保留既有数据兼容。
+- `x_post_queue`：新增 schedule、source、短剧池、episode、`name_tag` 和冻结的 `body_template` 字段；保留既有数据兼容。
 - 唯一索引保证素材、短剧集数、幂等键和时间点不可重复。
 
 ### 调度一致性

@@ -25,6 +25,7 @@
   "timezone": "Asia/Shanghai",
   "account_ids": [2, 3, 4],
   "publish_times": ["09:00", "12:30", "18:00"],
+  "body_template": "🎬 {{drama_name}}\n{{desc}}\n{{url}}",
   "version": 2
 }
 ```
@@ -33,6 +34,10 @@
 - 账号按提交顺序冻结；时间会去重并按 `HH:MM` 排序。
 - 启用时账号和时间均不能为空。
 - 同一账号不能在两个池配置同一时间。
+- 素材池模板必须包含一次 `{{drama_name}}` 和 `{{desc}}`；短剧池还必须包含一次 `{{episode_number}}`。
+- 两个池都可选用一次 `{{url}}`，其值为当前发布日志对应的 `https://gy.g2flow.com/s2l/{log_id}.html` 追踪短链。
+- 未知宏、重复宏、控制字符、空模板和超过 2000 字符的模板返回 `invalid_post_template`。
+- 保存递增配置版本；claim 和 queue 都冻结模板，因此后续编辑不会改写已经认领或已创建队列的正文。
 
 ## 短剧加入
 
