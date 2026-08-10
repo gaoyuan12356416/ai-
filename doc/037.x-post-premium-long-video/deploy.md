@@ -2,7 +2,42 @@
 
 ## 变更内容
 
-待提交后填写精确 commit。CPU X sidecar/main API/静态页与 GPU 媒体修复器需部署同一 GitHub 提交。
+CPU X sidecar/main API/静态页与 GPU 媒体修复器部署同一 GitHub 提交
+`29bd90034396c597b30ceb7135376efb750ec886`。素材池允许加入最长 600 秒视频；
+每次排期及最终发布前都通过个号 token 的 `/2/users/me` 返回值刷新
+`subscription_type`，仅 `basic`、`premium`、`premium_plus` 账号可承接超过
+140 秒的视频，缺失或未知值失败关闭。
+
+## 2026-08-10 生产结果
+
+- GitHub 分支：`codex/x-post-premium-long-video-20260810`；提交：
+  `29bd90034396c597b30ceb7135376efb750ec886`。
+- CPU current：
+  `/mnt/data-disk/x-post-automation/releases/29bd90034396c597b30ceb7135376efb750ec886`；
+  发布前 release：
+  `/mnt/data-disk/x-post-automation/releases/0d36c7b56b8b415a1ab5776249540c5a7c0e8fb6`。
+- GPU current：
+  `/opt/x-post-media-repair/releases/29bd90034396c597b30ceb7135376efb750ec886`；
+  发布前 release：
+  `/opt/x-post-media-repair/releases/b6f95f3874a9bb187aa7e8c7faac6254893ba787`。
+- CPU 回滚包：
+  `/mnt/data-disk/x-post-automation/backups/20260810T183611-premium-long-video`；
+  GPU 回滚包：
+  `/data/x-post-media-repair/backups/20260810T183611-premium-long-video`。
+- 迁移演练在 online backup 副本上连续执行两次，`quick_check=ok`；账号、队列、
+  发布日志、素材池计数保持 `15/150/150/184`，新增两列均存在。
+- 5 个正式排期账号均用各自 token 在 `2026-08-10T10:42:06Z` 同步成功：
+  `16 @zinonymouss`、`13 @_shaniyalanae`、`14 @MKSawyer313`、
+  `15 @WitTheGoodHair`、`5 @Kkkkkk2016911` 均为 `active`、
+  `publish_approved=true`、`subscription_type=none`。因此发布时没有任何账号可承接
+  超过 140 秒的视频；长视频会保留为未绑定素材，等待以后出现会员账号。
+- GPU 本机及 CPU 反向隧道健康均返回
+  `x-h264-nvenc-720-duration-policy-v3`；CPU sidecar/main API 均为 active，
+  公共 health 与 3 个静态页返回 HTTP 200 且与 release hash 一致。
+- 18:44 自然 claim 轮询返回 `claimed_or_pending_count=0`；18:44:10 自然 scheduler
+  返回 `status=no_due`。发布后队列/发布日志仍为 `150/150`，没有为验收创建真实 X Post。
+- `x-post-schedule.timer` 与 `x-post-schedule-claim.timer` 已恢复为
+  `active/enabled`。
 
 ## 配置项
 
