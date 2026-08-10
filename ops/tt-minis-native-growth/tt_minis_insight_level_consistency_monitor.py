@@ -28,6 +28,7 @@ LEVELS = {
     "ad": {"category": 2, "label": "ad层级"},
 }
 LEVEL_KEY = {"campaign": "campaign_id", "adgroup": "adset_id", "ad": "ad_id"}
+INSIGHT_KEY = {"campaign": "campaign_id", "adgroup": "adgroup_id", "ad": "ad_id"}
 UNAVAILABLE = {"", "未填", "campaign层级不可用", None}
 
 
@@ -100,95 +101,88 @@ def validate_manifest_freshness(manifest, max_snapshot_age=MAX_SNAPSHOT_AGE):
     return generated_text
 
 
-def load_published_levels(days, report_root=PUBLISHED_REPORT_ROOT, max_snapshot_age=MAX_SNAPSHOT_AGE):
-    """Load campaign/ad rows from one atomically selected manifest."""
+def load_published_scope_contexts(days, report_root=PUBLISHED_REPORT_ROOT, max_snapshot_age=MAX_SNAPSHOT_AGE):
+    """Load compact campaign scope contexts from one atomically selected manifest."""
     report_root = Path(report_root)
     manifest = load_json(report_root / "latest.json")
     generated_text = validate_manifest_freshness(manifest, max_snapshot_age=max_snapshot_age)
-    data_files = manifest.get("data_files") or {}
+    ad_files = ((manifest.get("data_files") or {}).get("ad") or {})
     result = {}
     for day in days:
-        result[day] = {}
-        for level in ("campaign", "ad"):
-            file_meta = (data_files.get(level) or {}).get(day)
-            if not file_meta or not file_meta.get("path"):
-                raise RuntimeError("published %s-level snapshot is missing date %s" % (level, day))
-            payload = load_json(resolve_snapshot_path(report_root, file_meta["path"]))
-            meta = payload.get("meta") or {}
-            if meta.get("metric_level") != level or meta.get("start_date") != day or meta.get("end_date") != day:
-                raise RuntimeError("published %s-level snapshot metadata mismatch for %s" % (level, day))
-            rows = decode_snapshot_rows(payload)
-            expected_count = int(file_meta.get("row_count") or 0)
-            if expected_count != len(rows) or int(meta.get("row_count") or 0) != len(rows):
-                raise RuntimeError("published %s-level snapshot row count mismatch for %s" % (level, day))
-            result[day][level] = rows
+        file_meta = ad_files.get(day)
+        if not file_meta or not file_meta.get("path"):
+            raise RuntimeError("published ad-level snapshot is missing date %s" % day)
+        payload = load_json(resolve_snapshot_path(report_root, file_meta["path"]))
+        meta = payload.get("meta") or {}
+        if meta.get("metric_level") != "ad" or meta.get("start_date") != day or meta.get("end_date") != day:
+            raise RuntimeError("published ad-level snapshot metadata mismatch for %s" % day)
+        rows = decode_snapshot_rows(payload)
+        expected_count = int(file_meta.get("row_count") or 0)
+        if expected_count != len(rows) or int(meta.get("row_count") or 0) != len(rows):
+            raise RuntimeError("published ad-level snapshot row count mismatch for %s" % day)
+        result[day] = scope_context_from_ad_rows(rows)
     return result, generated_text
 
 
 def numeric_id(value):
     text = str(value or "").strip()
-    return text if text not in UNAVAILABLE and text.isdigit() and int(text) > 0 else ""
-
-
-def aggregate_snapshot_rows(rows):
-    required = {"campaign_id", "adset_id", "ad_id", "spend", "revenue", "row_count"}
-    if rows:
-        missing = sorted(required - set(rows[0]))
-        if missing:
-            raise RuntimeError("published snapshot is missing columns: %s" % ", ".join(missing))
-    campaigns = set()
-    adgroups = set()
-    ads = set()
-    total_rows = Decimal("0")
-    spend = Decimal("0")
-    revenue = Decimal("0")
-    for row in rows:
-        campaign_id = numeric_id(row.get("campaign_id"))
-        adgroup_id = numeric_id(row.get("adset_id"))
-        ad_id = numeric_id(row.get("ad_id"))
-        if campaign_id:
-            campaigns.add(campaign_id)
-        if adgroup_id:
-            adgroups.add(adgroup_id)
-        if ad_id:
-            ads.add(ad_id)
-        total_rows += dec(row.get("row_count"))
-        spend += dec(row.get("spend"))
-        revenue += dec(row.get("revenue"))
-    return {
-        "rows": int(total_rows),
-        "campaigns": len(campaigns),
-        "adgroups": len(adgroups),
-        "ads": len(ads),
-        "spend": spend,
-        "revenue": revenue,
-    }
+    return str(int(text)) if text not in UNAVAILABLE and text.isdigit() and int(text) > 0 else ""
 
 
 def scope_from_ad_rows(rows, key):
     return {value for value in (numeric_id(row.get(key)) for row in rows) if value}
 
 
-def adgroup_rollup_sql(day):
-    """Return one exact-day category=1 rollup; scope filtering happens in Python."""
-    return f"""
-    SELECT
-      CAST(adgroup_id AS UNSIGNED) AS adgroup_id,
-      CAST(campaign_id AS CHAR) AS campaign_id,
-      CAST(ad_id AS CHAR) AS ad_id,
-      COUNT(*) AS insight_rows,
-      ROUND(SUM(stat_cost), 6) AS spend,
-      ROUND(SUM(ad_impression_value), 6) AS revenue
-    FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(pcsa)
-    WHERE product IN {dash.sql_in(dash.TIKTOK_INSIGHT_PRODUCTS)}
-      AND start_date = {dash.sql_quote(day)}
-      AND category = {LEVELS["adgroup"]["category"]}
-      AND adgroup_id IS NOT NULL
-      AND TRIM(adgroup_id) <> ''
-      AND adgroup_id REGEXP '^[0-9]+$'
-      AND CAST(adgroup_id AS UNSIGNED) > 0
-    GROUP BY CAST(adgroup_id AS UNSIGNED), CAST(campaign_id AS CHAR), CAST(ad_id AS CHAR)
-    """
+def scope_context_from_ad_rows(rows):
+    id_keys = ("campaign_id", "adset_id", "ad_id")
+    return {
+        "campaign_ids": scope_from_ad_rows(rows, "campaign_id"),
+        "snapshot_adgroup_count": len(scope_from_ad_rows(rows, "adset_id")),
+        "snapshot_ad_count": len(scope_from_ad_rows(rows, "ad_id")),
+        "snapshot_noncanonical_id_count_by_field": {
+            key: sum(
+                1
+                for row in rows
+                if numeric_id(row.get(key))
+                and str(row.get(key)).strip() != numeric_id(row.get(key))
+            )
+            for key in id_keys
+        },
+    }
+
+
+def live_level_rollup_sql(day):
+    """Return all three levels in one exact-day consistent-read statement."""
+    branches = []
+    for level, cfg in LEVELS.items():
+        scope_key = INSIGHT_KEY[level]
+        branches.append(
+            f"""
+            SELECT
+              {dash.sql_quote(level)} AS metric_level,
+              CAST({scope_key} AS UNSIGNED) AS scope_id,
+              CAST(campaign_id AS CHAR) AS campaign_id,
+              CAST(adgroup_id AS CHAR) AS adgroup_id,
+              CAST(ad_id AS CHAR) AS ad_id,
+              COUNT(*) AS insight_rows,
+              ROUND(SUM(stat_cost), 6) AS spend,
+              ROUND(SUM(ad_impression_value), 6) AS revenue
+            FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(pcsa)
+            WHERE product IN {dash.sql_in(dash.TIKTOK_INSIGHT_PRODUCTS)}
+              AND start_date = {dash.sql_quote(day)}
+              AND category = {cfg["category"]}
+              AND {scope_key} IS NOT NULL
+              AND TRIM({scope_key}) <> ''
+              AND {scope_key} REGEXP '^[0-9]+$'
+              AND CAST({scope_key} AS UNSIGNED) > 0
+            GROUP BY
+              CAST({scope_key} AS UNSIGNED),
+              CAST(campaign_id AS CHAR),
+              CAST(adgroup_id AS CHAR),
+              CAST(ad_id AS CHAR)
+            """
+        )
+    return "\nUNION ALL\n".join(branches)
 
 
 def mysql_command_and_env():
@@ -231,69 +225,131 @@ def run_mysql_safe(sql, timeout=120):
             env=env,
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError("TT minis adgroup query timed out after %s seconds" % timeout) from None
+        raise RuntimeError("TT minis consistency query timed out after %s seconds" % timeout) from None
     except Exception as exc:
-        raise RuntimeError("TT minis adgroup query failed before completion (%s)" % type(exc).__name__) from None
+        raise RuntimeError("TT minis consistency query failed before completion (%s)" % type(exc).__name__) from None
     if proc.returncode:
-        raise RuntimeError("TT minis adgroup query failed with mysql exit code %s" % proc.returncode)
+        raise RuntimeError("TT minis consistency query failed with mysql exit code %s" % proc.returncode)
     return list(csv.reader(proc.stdout.splitlines(), delimiter="\t", quoting=csv.QUOTE_NONE))
 
 
-def fetch_adgroup_level(day, scope_ids):
-    if not scope_ids:
-        raise RuntimeError("published ad-level snapshot has no adgroup scope for %s" % day)
-    rows = run_mysql_safe(adgroup_rollup_sql(day), timeout=120)
-    campaigns = set()
-    adgroups = set()
-    ads = set()
-    total_rows = Decimal("0")
-    spend = Decimal("0")
-    revenue = Decimal("0")
-    for row in rows:
-        adgroup_id = numeric_id(row[0])
-        if not adgroup_id or adgroup_id not in scope_ids:
-            continue
-        campaign_id = numeric_id(row[1])
-        ad_id = numeric_id(row[2])
-        adgroups.add(adgroup_id)
-        if campaign_id:
-            campaigns.add(campaign_id)
-        if ad_id:
-            ads.add(ad_id)
-        total_rows += dec(row[3])
-        spend += dec(row[4])
-        revenue += dec(row[5])
-    return {
-        "rows": int(total_rows),
-        "campaigns": len(campaigns),
-        "adgroups": len(adgroups),
-        "ads": len(ads),
-        "spend": spend,
-        "revenue": revenue,
+def fetch_live_levels(day, scope_context):
+    campaign_scope = scope_context["campaign_ids"]
+    if not campaign_scope:
+        raise RuntimeError("published ad-level snapshot has no campaign scope for %s" % day)
+    rows = run_mysql_safe(live_level_rollup_sql(day), timeout=120)
+    accumulators = {
+        level: {
+            "rows": Decimal("0"),
+            "campaigns": set(),
+            "adgroups": set(),
+            "ads": set(),
+            "spend": Decimal("0"),
+            "revenue": Decimal("0"),
+        }
+        for level in LEVELS
     }
+    returned_groups = 0
+    returned_insight_rows = Decimal("0")
+    missing_parent_groups = 0
+    missing_parent_insight_rows = Decimal("0")
+    ignored_foreign_rows = Decimal("0")
+    ignored_foreign_groups = 0
+    matched_groups = 0
+    for raw_row in rows:
+        returned_groups += 1
+        row = raw_row
+        if len(row) != 8:
+            raise RuntimeError("TT minis consistency query returned an invalid column count")
+        level = str(row[0] or "").strip()
+        if level not in LEVELS:
+            raise RuntimeError("TT minis consistency query returned an invalid metric level")
+        parsed = {
+            "level": level,
+            "scope_id": numeric_id(row[1]),
+            "campaign_id": numeric_id(row[2]),
+            "adgroup_id": numeric_id(row[3]),
+            "ad_id": numeric_id(row[4]),
+            "rows": dec(row[5]),
+            "spend": dec(row[6]),
+            "revenue": dec(row[7]),
+        }
+        returned_insight_rows += parsed["rows"]
+        if parsed["level"] in ("adgroup", "ad") and parsed["scope_id"] and not parsed["campaign_id"]:
+            missing_parent_groups += 1
+            missing_parent_insight_rows += parsed["rows"]
+            continue
+        campaign_id = parsed["campaign_id"]
+        if not campaign_id or campaign_id not in campaign_scope:
+            ignored_foreign_rows += parsed["rows"]
+            ignored_foreign_groups += 1
+            continue
+        matched_groups += 1
+        accumulator = accumulators[level]
+        accumulator["campaigns"].add(campaign_id)
+        if parsed["adgroup_id"]:
+            accumulator["adgroups"].add(parsed["adgroup_id"])
+        if parsed["ad_id"]:
+            accumulator["ads"].add(parsed["ad_id"])
+        accumulator["rows"] += parsed["rows"]
+        accumulator["spend"] += parsed["spend"]
+        accumulator["revenue"] += parsed["revenue"]
+    if missing_parent_groups:
+        raise RuntimeError(
+            "TT minis consistency query returned child rows without campaign_id: groups=%s rows=%s"
+            % (missing_parent_groups, int(missing_parent_insight_rows))
+        )
+    if not matched_groups:
+        raise RuntimeError("TT minis consistency query matched no live groups for scoped campaigns")
+    metrics = {
+        level: {
+            "rows": int(accumulator["rows"]),
+            "campaigns": len(accumulator["campaigns"]),
+            "adgroups": len(accumulator["adgroups"]),
+            "ads": len(accumulator["ads"]),
+            "spend": accumulator["spend"],
+            "revenue": accumulator["revenue"],
+        }
+        for level, accumulator in accumulators.items()
+    }
+    campaigns_seen_anywhere = set().union(
+        *(accumulators[level]["campaigns"] for level in LEVELS)
+    )
+    diagnostics = {
+        "scope_mode": "snapshot_campaign_closed_live_children",
+        "snapshot_campaign_count": len(campaign_scope),
+        "snapshot_adgroup_count": scope_context["snapshot_adgroup_count"],
+        "snapshot_ad_count": scope_context["snapshot_ad_count"],
+        "snapshot_noncanonical_id_count_by_field": scope_context["snapshot_noncanonical_id_count_by_field"],
+        "live_group_rows_returned": returned_groups,
+        "live_insight_rows_returned": int(returned_insight_rows),
+        "matched_live_group_rows": matched_groups,
+        "matched_live_insight_rows": int(
+            sum((accumulator["rows"] for accumulator in accumulators.values()), Decimal("0"))
+        ),
+        "ignored_foreign_group_rows": ignored_foreign_groups,
+        "ignored_foreign_insight_rows": int(ignored_foreign_rows),
+        "missing_parent_insight_rows": 0,
+        "missing_scoped_campaign_count_by_level": {
+            level: len(campaign_scope - accumulators[level]["campaigns"])
+            for level in LEVELS
+        },
+        "missing_scoped_campaign_count_all_levels": len(campaign_scope - campaigns_seen_anywhere),
+    }
+    return metrics, diagnostics
 
 
 def fetch_days(days, report_root=PUBLISHED_REPORT_ROOT, max_snapshot_age=MAX_SNAPSHOT_AGE):
-    published, generated_at = load_published_levels(
+    scope_contexts, generated_at = load_published_scope_contexts(
         days,
         report_root=report_root,
         max_snapshot_age=max_snapshot_age,
     )
     result = {}
+    diagnostics = {}
     for day in days:
-        ad_rows = published[day]["ad"]
-        campaign_scope = scope_from_ad_rows(ad_rows, "campaign_id")
-        if not campaign_scope:
-            raise RuntimeError("published ad-level snapshot has no campaign scope for %s" % day)
-        campaign_rows = [
-            row for row in published[day]["campaign"] if numeric_id(row.get("campaign_id")) in campaign_scope
-        ]
-        result[day] = {
-            "campaign": aggregate_snapshot_rows(campaign_rows),
-            "adgroup": fetch_adgroup_level(day, scope_from_ad_rows(ad_rows, "adset_id")),
-            "ad": aggregate_snapshot_rows(ad_rows),
-        }
-    return result, generated_at
+        result[day], diagnostics[day] = fetch_live_levels(day, scope_contexts[day])
+    return result, generated_at, diagnostics
 
 
 def is_large_diff(a, b, abs_threshold, pct_threshold):
@@ -400,7 +456,7 @@ def notification_presentation(alerts, recoveries):
 
 def build_markdown(alerts, recoveries, all_data, abs_threshold, pct_threshold):
     lines = [
-        "**口径**：TT小程序广告；`minis_id=mn1yi38ikcrqhitt`，`product_id IN (1479,3346)`；campaign/ad 取同版原子日快照，adgroup 取同日 `ads_tiktok_insights category=1`。",
+        "**口径**：TT小程序广告；`minis_id=mn1yi38ikcrqhitt`，`product_id IN (1479,3346)`；原子日快照只锁定 campaign 范围，同一 campaign 的全部实时子级由同一条 `UNION ALL` SQL 读取。",
         "**阈值**：绝对差 >= %s 且相对差 >= %s。" % (money(abs_threshold), pct(pct_threshold)),
     ]
     if alerts:
@@ -475,7 +531,7 @@ def main():
     days = [(end_day - timedelta(days=offset)).isoformat() for offset in range(max(1, args.days))]
     abs_threshold = dec(args.abs_threshold)
     pct_threshold = dec(args.pct_threshold)
-    all_data, snapshot_generated_at = fetch_days(days, report_root=Path(args.snapshot_root))
+    all_data, snapshot_generated_at, scope_diagnostics = fetch_days(days, report_root=Path(args.snapshot_root))
     anomalies = []
     for day, day_data in all_data.items():
         anomalies.extend(find_anomalies(day, day_data, abs_threshold, pct_threshold))
@@ -488,6 +544,7 @@ def main():
         "header_template": header_template,
         "days": days,
         "snapshot_generated_at": snapshot_generated_at,
+        "scope_diagnostics": scope_diagnostics,
         "all_data": {
             day: {level: {key: str(value) for key, value in metrics.items()} for level, metrics in day_data.items()}
             for day, day_data in all_data.items()
@@ -500,8 +557,9 @@ def main():
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if args.send and (alerts or recoveries):
         response = send_feishu_card(args.chat_id, title, markdown, header_template=header_template)
-        if response.get("code") not in (0, None):
-            raise RuntimeError("Feishu send failed: " + json.dumps(response, ensure_ascii=False)[:1000])
+        if not isinstance(response, dict) or response.get("code") != 0:
+            code = response.get("code") if isinstance(response, dict) else None
+            raise RuntimeError("Feishu send failed: code=%s" % code)
         print("Feishu sent message_id=%s" % ((response.get("data") or {}).get("message_id", "")))
     if not args.dry_run:
         save_state(state)

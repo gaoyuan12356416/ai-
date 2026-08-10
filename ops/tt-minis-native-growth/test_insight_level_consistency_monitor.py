@@ -59,39 +59,27 @@ def snapshot_payload(day, level, rows):
 
 
 class PublishedSnapshotTest(unittest.TestCase):
-    def write_snapshot(self, root, days):
-        generated_at = monitor.bj_now().strftime("%Y-%m-%d %H:%M:%S")
-        manifest = {"meta": {"generated_at": generated_at}, "data_files": {"campaign": {}, "ad": {}}}
-        for day, levels in days.items():
-            for level in ("campaign", "ad"):
-                relative = "data/%s/%s.json" % (level, day)
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                payload = snapshot_payload(day, level, levels[level])
-                path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-                manifest["data_files"][level][day] = {"path": relative, "row_count": len(levels[level])}
+    def write_snapshot(self, root, days, age=timedelta(0)):
+        generated_at = (monitor.bj_now() - age).strftime("%Y-%m-%d %H:%M:%S")
+        manifest = {"meta": {"generated_at": generated_at}, "data_files": {"ad": {}}}
+        for day, rows in days.items():
+            relative = "data/ad/%s.json" % day
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = snapshot_payload(day, "ad", rows)
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            manifest["data_files"]["ad"][day] = {"path": relative, "row_count": len(rows)}
         (root / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         return generated_at
 
-    def test_two_days_use_two_adgroup_queries_and_snapshot_for_other_levels(self):
+    def test_two_days_use_two_same_statement_queries_and_ignore_stale_snapshot_metrics(self):
         days = {
-            "2026-08-09": {
-                "campaign": [
-                    {"campaign_id": "100", "adset_id": "campaign层级不可用", "ad_id": "campaign层级不可用", "row_count": 2, "spend": "10", "revenue": "5"},
-                    {"campaign_id": "999", "adset_id": "campaign层级不可用", "ad_id": "campaign层级不可用", "row_count": 1, "spend": "999", "revenue": "999"},
-                ],
-                "ad": [
-                    {"campaign_id": "100", "adset_id": "10", "ad_id": "1000", "row_count": 3, "spend": "10.1", "revenue": "5.1"},
-                ],
-            },
-            "2026-08-10": {
-                "campaign": [
-                    {"campaign_id": "200", "adset_id": "campaign层级不可用", "ad_id": "campaign层级不可用", "row_count": 4, "spend": "20", "revenue": "8"},
-                ],
-                "ad": [
-                    {"campaign_id": "200", "adset_id": "20", "ad_id": "2000", "row_count": 5, "spend": "20.2", "revenue": "8.2"},
-                ],
-            },
+            "2026-08-09": [
+                {"campaign_id": "100", "adset_id": "10", "ad_id": "1000", "row_count": 999, "spend": "9999", "revenue": "1"},
+            ],
+            "2026-08-10": [
+                {"campaign_id": "200", "adset_id": "20", "ad_id": "2000", "row_count": 999, "spend": "1", "revenue": "9999"},
+            ],
         }
         sql_calls = []
 
@@ -99,33 +87,223 @@ class PublishedSnapshotTest(unittest.TestCase):
             sql_calls.append((sql, timeout))
             if "2026-08-09" in sql:
                 return [
-                    ["10", "100", "0", "2", "10.05", "5.05"],
-                    ["99", "999", "0", "1", "500", "500"],
+                    ["campaign", "100", "100", "7", "8", "2", "10", "5"],
+                    ["campaign", "999", "999", "99", "999", "1", "500", "500"],
+                    ["adgroup", "10", "100", "10", "7", "3", "10", "5"],
+                    ["adgroup", "99", "999", "99", "999", "1", "500", "500"],
+                    ["ad", "1000", "100", "10", "1000", "4", "10", "5"],
+                    ["ad", "9999", "999", "99", "9999", "1", "500", "500"],
                 ]
-            return [["20", "200", "0", "4", "20.1", "8.1"]]
+            return [
+                ["campaign", "200", "200", "0", "0", "4", "20", "8"],
+                ["adgroup", "20", "200", "20", "0", "5", "20", "8"],
+                ["ad", "2000", "200", "20", "2000", "6", "20", "8"],
+            ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            generated_at = self.write_snapshot(root, days)
+            generated_at = self.write_snapshot(root, days, age=timedelta(minutes=90))
             with mock.patch.object(monitor, "run_mysql_safe", side_effect=fake_run_mysql):
-                result, actual_generated_at = monitor.fetch_days(
+                result, actual_generated_at, diagnostics = monitor.fetch_days(
                     ["2026-08-09", "2026-08-10"],
                     report_root=root,
                     max_snapshot_age=timedelta(hours=2),
                 )
 
         self.assertEqual(generated_at, actual_generated_at)
+        self.assertEqual("snapshot_campaign_closed_live_children", diagnostics["2026-08-09"]["scope_mode"])
+        self.assertEqual(1, diagnostics["2026-08-09"]["snapshot_campaign_count"])
+        self.assertEqual(6, diagnostics["2026-08-09"]["live_group_rows_returned"])
+        self.assertEqual(3, diagnostics["2026-08-09"]["matched_live_group_rows"])
+        self.assertEqual(3, diagnostics["2026-08-09"]["ignored_foreign_group_rows"])
+        self.assertEqual(3, diagnostics["2026-08-09"]["ignored_foreign_insight_rows"])
         self.assertEqual(2, len(sql_calls))
         self.assertTrue(all(timeout == 120 for _, timeout in sql_calls))
-        self.assertTrue(all("category = 1" in sql for sql, _ in sql_calls))
-        self.assertTrue(all("GROUP BY CAST(adgroup_id AS UNSIGNED)" in sql for sql, _ in sql_calls))
-        self.assertLess(max(len(sql) for sql, _ in sql_calls), 2500)
-        self.assertEqual(Decimal("10"), result["2026-08-09"]["campaign"]["spend"])
+        for sql, _ in sql_calls:
+            self.assertEqual(2, sql.count("UNION ALL"))
+            self.assertEqual(3, sql.count("FORCE INDEX(pcsa)"))
+            self.assertEqual(3, sql.count("GROUP BY"))
+            for category in (0, 1, 2):
+                self.assertEqual(1, sql.count("category = %s" % category))
+        self.assertLess(max(len(sql) for sql, _ in sql_calls), 7000)
+        for level in monitor.LEVELS:
+            self.assertEqual(Decimal("10"), result["2026-08-09"][level]["spend"])
+            self.assertEqual(Decimal("5"), result["2026-08-09"][level]["revenue"])
+        self.assertEqual(2, result["2026-08-09"]["campaign"]["rows"])
+        self.assertEqual(3, result["2026-08-09"]["adgroup"]["rows"])
+        self.assertEqual(4, result["2026-08-09"]["ad"]["rows"])
         self.assertEqual(1, result["2026-08-09"]["campaign"]["campaigns"])
-        self.assertEqual(Decimal("10.05"), result["2026-08-09"]["adgroup"]["spend"])
         self.assertEqual(1, result["2026-08-09"]["adgroup"]["adgroups"])
-        self.assertEqual(Decimal("10.1"), result["2026-08-09"]["ad"]["spend"])
-        self.assertEqual(3, result["2026-08-09"]["ad"]["rows"])
+        self.assertEqual(1, result["2026-08-09"]["ad"]["ads"])
+        self.assertEqual(
+            [],
+            monitor.find_anomalies(
+                "2026-08-09",
+                result["2026-08-09"],
+                Decimal("100"),
+                Decimal("0.05"),
+            ),
+        )
+
+    def test_new_children_under_scoped_campaign_are_included_and_foreign_campaign_is_ignored(self):
+        scope_rows = [
+            {"campaign_id": "100", "adset_id": "10", "ad_id": "1000"},
+            {"campaign_id": "200", "adset_id": "20", "ad_id": "2000"},
+        ]
+        live_rows = [
+            ["campaign", "100", "100", "0", "0", "4", "100", "100"],
+            ["adgroup", "10", "100", "10", "0", "2", "50", "50"],
+            ["adgroup", "11", "100", "11", "0", "2", "50", "50"],
+            ["ad", "1000", "100", "10", "1000", "1", "50", "50"],
+            ["ad", "1001", "100", "11", "1001", "1", "50", "50"],
+            ["campaign", "200", "200", "0", "0", "1", "10", "8"],
+            ["adgroup", "20", "200", "20", "0", "1", "10", "8"],
+            ["ad", "2000", "200", "20", "2000", "1", "10", "8"],
+            ["campaign", "999", "999", "0", "0", "1", "900", "900"],
+            ["adgroup", "99", "999", "99", "0", "1", "900", "900"],
+            ["ad", "9999", "999", "99", "9999", "1", "900", "900"],
+        ]
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=live_rows):
+            metrics, diagnostics = monitor.fetch_live_levels(
+                "2026-08-10",
+                monitor.scope_context_from_ad_rows(scope_rows),
+            )
+        for level in monitor.LEVELS:
+            self.assertEqual(Decimal("110"), metrics[level]["spend"])
+            self.assertEqual(Decimal("108"), metrics[level]["revenue"])
+        self.assertEqual(3, diagnostics["ignored_foreign_group_rows"])
+        self.assertEqual(3, diagnostics["ignored_foreign_insight_rows"])
+        self.assertEqual(3, metrics["adgroup"]["adgroups"])
+        self.assertEqual(3, metrics["ad"]["ads"])
+        self.assertEqual(
+            [],
+            monitor.find_anomalies(
+                "2026-08-10",
+                metrics,
+                Decimal("100"),
+                Decimal("0.05"),
+            ),
+        )
+
+    def test_child_row_without_campaign_id_fails_closed(self):
+        scope_rows = [{"campaign_id": "100", "adset_id": "10", "ad_id": "1000"}]
+        live_rows = [
+            ["campaign", "100", "100", "0", "0", "1", "100", "100"],
+            ["adgroup", "10", "0", "10", "0", "2", "100", "100"],
+            ["ad", "1000", "100", "10", "1000", "1", "100", "100"],
+        ]
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=live_rows):
+            with self.assertRaisesRegex(RuntimeError, "child rows without campaign_id: groups=1 rows=2"):
+                monitor.fetch_live_levels(
+                    "2026-08-10",
+                    monitor.scope_context_from_ad_rows(scope_rows),
+                )
+
+    def test_partial_ad_campaign_coverage_remains_an_alertable_metric_gap(self):
+        scope_rows = [
+            {"campaign_id": "100", "adset_id": "10", "ad_id": "1000"},
+            {"campaign_id": "200", "adset_id": "20", "ad_id": "2000"},
+        ]
+        live_rows = [
+            ["campaign", "100", "100", "0", "0", "1", "100", "100"],
+            ["campaign", "200", "200", "0", "0", "1", "10", "10"],
+            ["adgroup", "10", "100", "10", "0", "1", "100", "100"],
+            ["adgroup", "20", "200", "20", "0", "1", "10", "10"],
+            ["ad", "2000", "200", "20", "2000", "1", "10", "10"],
+        ]
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=live_rows):
+            metrics, diagnostics = monitor.fetch_live_levels(
+                "2026-08-10",
+                monitor.scope_context_from_ad_rows(scope_rows),
+            )
+        self.assertEqual(Decimal("110"), metrics["campaign"]["spend"])
+        self.assertEqual(Decimal("110"), metrics["adgroup"]["spend"])
+        self.assertEqual(Decimal("10"), metrics["ad"]["spend"])
+        self.assertEqual(1, diagnostics["missing_scoped_campaign_count_by_level"]["ad"])
+        anomalies = monitor.find_anomalies(
+            "2026-08-10",
+            metrics,
+            Decimal("100"),
+            Decimal("0.05"),
+        )
+        self.assertEqual({"spend", "revenue"}, {item["metric"] for item in anomalies})
+        self.assertTrue(all(item["abnormal_level"] == "ad" for item in anomalies))
+
+    def test_campaign_absent_from_all_live_levels_contributes_zero_without_failure(self):
+        scope_rows = [
+            {"campaign_id": "100", "adset_id": "10", "ad_id": "1000"},
+            {"campaign_id": "200", "adset_id": "20", "ad_id": "2000"},
+        ]
+        live_rows = [
+            ["campaign", "200", "200", "0", "0", "1", "10", "10"],
+            ["adgroup", "20", "200", "20", "0", "1", "10", "10"],
+            ["ad", "2000", "200", "20", "2000", "1", "10", "10"],
+        ]
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=live_rows):
+            metrics, diagnostics = monitor.fetch_live_levels(
+                "2026-08-10",
+                monitor.scope_context_from_ad_rows(scope_rows),
+            )
+        self.assertEqual(1, diagnostics["missing_scoped_campaign_count_all_levels"])
+        self.assertEqual([], monitor.find_anomalies("2026-08-10", metrics, Decimal("100"), Decimal("0.05")))
+
+    def test_zero_matched_groups_fails_closed(self):
+        context = monitor.scope_context_from_ad_rows(
+            [{"campaign_id": "100", "adset_id": "10", "ad_id": "1000"}]
+        )
+        foreign_rows = [
+            ["campaign", "999", "999", "0", "0", "1", "10", "10"],
+            ["adgroup", "99", "999", "99", "0", "1", "10", "10"],
+            ["ad", "9999", "999", "99", "9999", "1", "10", "10"],
+        ]
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=foreign_rows):
+            with self.assertRaisesRegex(RuntimeError, "matched no live groups for scoped campaigns"):
+                monitor.fetch_live_levels("2026-08-10", context)
+
+    def test_numeric_ids_are_canonicalized_like_unsigned_sql_scope_ids(self):
+        self.assertEqual("123", monitor.numeric_id("000123"))
+        context = monitor.scope_context_from_ad_rows(
+            [{"campaign_id": "000100", "adset_id": "00010", "ad_id": "001000"}]
+        )
+        self.assertEqual({"100"}, context["campaign_ids"])
+        self.assertEqual(1, context["snapshot_adgroup_count"])
+        self.assertEqual(1, context["snapshot_ad_count"])
+        self.assertEqual(
+            {"campaign_id": 1, "adset_id": 1, "ad_id": 1},
+            context["snapshot_noncanonical_id_count_by_field"],
+        )
+
+    def test_valid_query_with_missing_level_stays_zero_and_participates_in_alerting(self):
+        scope_rows = [{"campaign_id": "100", "adset_id": "10", "ad_id": "1000"}]
+        live_rows = [
+            ["campaign", "100", "100", "0", "0", "1", "1000", "1000"],
+            ["ad", "1000", "100", "10", "1000", "1", "1000", "1000"],
+        ]
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=live_rows):
+            metrics, _ = monitor.fetch_live_levels(
+                "2026-08-10",
+                monitor.scope_context_from_ad_rows(scope_rows),
+            )
+        self.assertEqual(Decimal("0"), metrics["adgroup"]["spend"])
+        anomalies = monitor.find_anomalies(
+            "2026-08-10",
+            metrics,
+            Decimal("100"),
+            Decimal("0.05"),
+        )
+        self.assertEqual({"spend", "revenue"}, {item["metric"] for item in anomalies})
+        self.assertTrue(all(item["abnormal_level"] == "adgroup" for item in anomalies))
+
+    def test_invalid_query_level_and_column_count_fail_closed(self):
+        context = monitor.scope_context_from_ad_rows(
+            [{"campaign_id": "100", "adset_id": "10", "ad_id": "1000"}]
+        )
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=[["invalid"] * 8]):
+            with self.assertRaisesRegex(RuntimeError, "invalid metric level"):
+                monitor.fetch_live_levels("2026-08-10", context)
+        with mock.patch.object(monitor, "run_mysql_safe", return_value=[["campaign"] * 7]):
+            with self.assertRaisesRegex(RuntimeError, "invalid column count"):
+                monitor.fetch_live_levels("2026-08-10", context)
 
     def test_manifest_path_escape_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -138,12 +316,12 @@ class PublishedSnapshotTest(unittest.TestCase):
         rows = [{"campaign_id": "1", "adset_id": "1", "ad_id": "1", "row_count": 1, "spend": 1, "revenue": 1}]
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            self.write_snapshot(root, {day: {"campaign": rows, "ad": rows}})
+            self.write_snapshot(root, {day: rows})
             manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
             manifest["data_files"]["ad"][day]["row_count"] = 2
             (root / "latest.json").write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "row count mismatch"):
-                monitor.load_published_levels([day], report_root=root)
+                monitor.load_published_scope_contexts([day], report_root=root)
 
 
 class AlertSemanticsTest(unittest.TestCase):
@@ -182,7 +360,13 @@ class AlertSemanticsTest(unittest.TestCase):
         with mock.patch.object(monitor, "STATE_FILE", state_file), mock.patch.object(
             monitor, "parse_args", return_value=args
         ), mock.patch.object(
-            monitor, "fetch_days", return_value=(all_data, "2026-08-10 16:00:00")
+            monitor,
+            "fetch_days",
+            return_value=(
+                all_data,
+                "2026-08-10 16:00:00",
+                {"2026-08-10": {"scope_mode": "snapshot_campaign_closed_live_children"}},
+            ),
         ), mock.patch.object(
             monitor, "send_feishu_card", return_value=response
         ) as send, contextlib.redirect_stdout(io.StringIO()):
@@ -199,7 +383,7 @@ class AlertSemanticsTest(unittest.TestCase):
             original = {"active": {}, "marker": "unchanged"}
             state_file.write_text(json.dumps(original), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "Feishu send failed"):
-                self.run_main_with(state_file, all_data, {"code": 1})
+                self.run_main_with(state_file, all_data, {})
             self.assertEqual(original, json.loads(state_file.read_text(encoding="utf-8")))
 
             result, send = self.run_main_with(
@@ -240,6 +424,46 @@ class AlertSemanticsTest(unittest.TestCase):
             self.assertEqual(1, send.call_count)
             self.assertEqual({}, json.loads(state_file.read_text(encoding="utf-8"))["active"])
 
+    def test_zero_hit_failure_does_not_turn_active_anomaly_into_recovery(self):
+        args = SimpleNamespace(
+            date="2026-08-10",
+            days=1,
+            abs_threshold="100",
+            pct_threshold="0.05",
+            send=True,
+            dry_run=False,
+            dry_run_message=False,
+            chat_id="oc_test",
+            snapshot_root="/unused",
+        )
+        original = {
+            "active": {
+                "2026-08-10:spend": {
+                    "key": "2026-08-10:spend",
+                    "day": "2026-08-10",
+                    "metric": "spend",
+                    "abnormal_level": "adgroup",
+                }
+            },
+            "marker": "unchanged",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "state.json"
+            state_file.write_text(json.dumps(original), encoding="utf-8")
+            with mock.patch.object(monitor, "STATE_FILE", state_file), mock.patch.object(
+                monitor, "parse_args", return_value=args
+            ), mock.patch.object(
+                monitor,
+                "fetch_days",
+                side_effect=RuntimeError("TT minis consistency query matched no live groups for scoped campaigns"),
+            ), mock.patch.object(
+                monitor, "send_feishu_card"
+            ) as send, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, "matched no live groups"):
+                    monitor.main()
+            self.assertEqual(0, send.call_count)
+            self.assertEqual(original, json.loads(state_file.read_text(encoding="utf-8")))
+
 
 class MysqlCredentialRedactionTest(unittest.TestCase):
     def test_password_moves_to_env_and_is_absent_from_argv(self):
@@ -266,7 +490,7 @@ class MysqlCredentialRedactionTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as caught:
                 monitor.run_mysql_safe("SELECT 1", timeout=120)
         message = str(caught.exception)
-        self.assertEqual("TT minis adgroup query timed out after 120 seconds", message)
+        self.assertEqual("TT minis consistency query timed out after 120 seconds", message)
         self.assertNotIn("SUPERSECRET", message)
         self.assertNotIn("-p", message)
 
@@ -305,7 +529,7 @@ class MysqlCredentialRedactionTest(unittest.TestCase):
         with mock.patch.object(monitor.subprocess, "run", return_value=completed):
             with self.assertRaises(RuntimeError) as caught:
                 monitor.run_mysql_safe("SELECT 1")
-        self.assertEqual("TT minis adgroup query failed with mysql exit code 1", str(caught.exception))
+        self.assertEqual("TT minis consistency query failed with mysql exit code 1", str(caught.exception))
         self.assertNotIn("SUPERSECRET", str(caught.exception))
 
 
