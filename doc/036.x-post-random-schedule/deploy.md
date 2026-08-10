@@ -15,3 +15,12 @@
 - sidecar symlink 切回部署前 release；主服务和静态页面从备份恢复。
 - 重启同一组服务并恢复 timers。
 - 新增表和列为 additive，可保留；线上出现新写入后不回滚整个 SQLite，避免丢失队列、日志和 token 状态。
+
+## 2026-08-10 生产记录
+
+- 代码 commit：`0d36c7b56b8b415a1ab5776249540c5a7c0e8fb6`。
+- 当前 release：`/mnt/data-disk/x-post-automation/releases/0d36c7b56b8b415a1ab5776249540c5a7c0e8fb6`。
+- 回滚包：`/mnt/data-disk/x-post-automation/backups/20260810T064002Z-random-schedule-0d36c7b`，manifest 校验通过。
+- 前一 release：`/mnt/data-disk/x-post-automation/releases/dafbd174104c2f4ee1cb6a99725e6929f6b4abca`。
+- 迁移前后保持 32 个 schedule run、150 个 queue、150 个 publish log；配置版本、账号、固定时间和模板逐字段不变，`integrity_check=ok`。
+- sidecar、主 API、两个 timer 均 active；两个线上页面 HTTP 200。自然 claim 为 0，自然 scheduler 为 `no_due`，未触发真实发帖。
