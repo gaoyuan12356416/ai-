@@ -2315,6 +2315,183 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pre_x_recovery_not_allowed",
         )
 
+    def _add_recovery_account(self, account_id, status="active"):
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS x_authorized_account("
+                "id INTEGER PRIMARY KEY,status TEXT NOT NULL,"
+                "publish_approved INTEGER NOT NULL,"
+                "token_store_key TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO x_authorized_account("
+                "id,status,publish_approved,token_store_key) "
+                "VALUES(?,?,1,?)",
+                (account_id, status, "account-%s.json" % account_id),
+            )
+            conn.commit()
+
+    def _failed_schedule_run(self, error_code="x_token_missing"):
+        saved = self.save_schedule("material", [2], ["09:00"])
+        self._add_recovery_account(2)
+        due = self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ)
+        )["items"][0]
+        failed = self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            saved["version"],
+            [2],
+            error_code,
+            "Account preflight failed before any queue or X write",
+        )
+        self.assertEqual(failed["status"], "failed_preflight")
+        return failed
+
+    def test_failed_preflight_recovery_is_same_day_zero_write_and_audited(self):
+        failed = self._failed_schedule_run()
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        validated = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["validated_count"], 1)
+        self.assertEqual(validated["updated_count"], 0)
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "failed_preflight",
+        )
+
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        restored = self.store.get_schedule_run(failed["id"])
+        self.assertEqual(restored["status"], "claimed")
+        self.assertEqual(restored["error_code"], "")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT recovery_reason,actor,previous_status,"
+                "previous_error_code,validated_queue_count,"
+                "validated_log_count FROM x_post_schedule_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (failed["id"],),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                "codex_operator",
+                "failed_preflight",
+                "x_token_missing",
+                0,
+                0,
+            ),
+        )
+        due = self.store.due_schedule_slots(
+            datetime(2026, 7, 27, 10, 0, tzinfo=service.BEIJING_TZ)
+        )
+        self.assertEqual(
+            [item["slot_key"] for item in due["items"]],
+            [restored["slot_key"]],
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_token_missing",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def test_failed_preflight_recovery_accepts_exact_frozen_random_plan(self):
+        saved = self.save_random_schedule("material", [2], 2)
+        self._add_recovery_account(2)
+        plan = saved["random_daily_plans"][0]
+        first_time = plan["publish_times"][0]
+        hour, minute = (int(part) for part in first_time.split(":"))
+        run_now = datetime(
+            2026,
+            7,
+            28,
+            hour,
+            minute,
+            10,
+            tzinfo=service.BEIJING_TZ,
+        )
+        due = self.store.due_schedule_slots(run_now)["items"][0]
+        failed = self.store.record_schedule_failure(
+            "material",
+            "2026-07-28",
+            first_time,
+            due["version"],
+            [2],
+            "x_token_missing",
+            "Token file was unavailable before queue creation",
+        )
+
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=run_now,
+        )
+
+        self.assertEqual(recovered["updated_count"], 1)
+        restored = self.store.get_schedule_run(failed["id"])
+        self.assertEqual(restored["schedule_mode"], "random")
+        self.assertEqual(restored["status"], "claimed")
+        self.assertEqual(restored["account_ids"], plan["account_ids"])
+        self.assertEqual(restored["body_template"], plan["body_template"])
+
+    def test_failed_preflight_recovery_rejects_stale_or_unready_scope(self):
+        failed = self._failed_schedule_run("x_upstream_error")
+        with self.assertRaises(service.XPostError) as stale:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_upstream_error",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 28, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            stale.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+        self._add_recovery_account(2, status="disabled")
+        with self.assertRaises(service.XPostError) as unready:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_upstream_error",
+                reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+                actor="codex_operator",
+                now=datetime(
+                    2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+                ),
+            )
+        self.assertEqual(
+            unready.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_schema_is_additive_and_integrity_check_passes(self):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             tables = {
@@ -2325,6 +2502,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             }
             self.assertIn("x_post_schedule_config", tables)
             self.assertIn("x_post_schedule_run", tables)
+            self.assertIn("x_post_schedule_recovery_audit", tables)
             self.assertIn("x_post_schedule_random_plan", tables)
             self.assertIn("x_post_drama_pool", tables)
             drama_columns = {

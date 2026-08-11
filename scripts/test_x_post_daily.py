@@ -806,6 +806,76 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertEqual(opener.payload, {"material_keys": ["10", "11"]})
 
+    def test_material_pool_response_uses_newest_first_order(self):
+        class Response:
+            status = 200
+
+            def __init__(self, items):
+                self.raw = json.dumps({"items": items}).encode("utf-8")
+
+            def read(self, _limit):
+                return self.raw
+
+            def getcode(self):
+                return self.status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class PoolOpener:
+            def __init__(self, items):
+                self.items = items
+
+            def open(self, _request, timeout):
+                self.timeout = timeout
+                return Response(self.items)
+
+        newest_first = [
+            {
+                "id": 12,
+                "material_id": "120",
+                "material_key": "120",
+                "created_at": "2026-08-10T10:57:08Z",
+            },
+            {
+                "id": 11,
+                "material_id": "110",
+                "material_key": "110",
+                "created_at": "2026-08-10T10:57:08Z",
+            },
+            {
+                "id": 10,
+                "material_id": "100",
+                "material_key": "100",
+                "created_at": "2026-08-10T10:11:28Z",
+            },
+        ]
+        accepted = SidecarClient(
+            "http://127.0.0.1:8810",
+            "secret",
+            timeout=30,
+            opener=PoolOpener(newest_first),
+        ).available_pool_items("/internal/posts/material-pool/available", 10)
+        self.assertEqual([item["id"] for item in accepted], [12, 11, 10])
+
+        with self.assertRaises(SidecarError) as caught:
+            SidecarClient(
+                "http://127.0.0.1:8810",
+                "secret",
+                timeout=30,
+                opener=PoolOpener(list(reversed(newest_first))),
+            ).available_pool_items(
+                "/internal/posts/material-pool/available",
+                10,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "x_post_pool_invalid_response",
+        )
+
     def test_sidecar_parses_flat_unknown_publish_error(self):
         class ErrorOpener:
             def open(self, request, timeout):
