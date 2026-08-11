@@ -381,6 +381,20 @@ class ScheduleRunnerTests(unittest.TestCase):
             def __init__(self):
                 self.available_calls = 0
                 self.checks = []
+                self.verify_calls = []
+
+            def verify_account(self, account_id):
+                self.verify_calls.append(account_id)
+                return {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "x%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                    "status": "active",
+                    "publish_eligible": True,
+                    "subscription_type": "none",
+                    "long_video_eligible": False,
+                }
 
             def available_drama_pool(self, _path, _limit, _account_ids):
                 self.available_calls += 1
@@ -501,6 +515,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(sidecar.available_calls, 2)
+        self.assertEqual(sidecar.verify_calls, [10, 9])
         self.assertEqual(
             [(item["pool_item_id"], item["content_id"]) for item in sidecar.checks],
             [(53, "BAD")],
@@ -697,6 +712,22 @@ class ScheduleRunnerTests(unittest.TestCase):
             def __init__(self):
                 self.checks = []
                 self.available_calls = 0
+                self.verify_calls = []
+
+            def verify_account(self, account_id):
+                self.verify_calls.append(account_id)
+                return {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "x%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                    "status": "active",
+                    "publish_eligible": True,
+                    "subscription_type": (
+                        "premium" if account_id == 9 else "none"
+                    ),
+                    "long_video_eligible": account_id == 9,
+                }
 
             def available_drama_pool(self, _path, _limit, _account_ids):
                 self.available_calls += 1
@@ -825,6 +856,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(sidecar.available_calls, 2)
+        self.assertEqual(sidecar.verify_calls, [10, 9])
         self.assertEqual(
             [(item["pool_item_id"], item["error_code"]) for item in sidecar.checks],
             [(138, "x_long_video_requires_premium")],
@@ -1002,6 +1034,10 @@ class ScheduleRunnerTests(unittest.TestCase):
         result = self.execute(sidecar)
 
         self.assertEqual(result["status"], "published")
+        self.assertEqual(
+            [call for call in sidecar.calls if call[0] == "verify"],
+            [("verify", 11), ("verify", 11)],
+        )
         self.assertIn("create", [call[0] for call in sidecar.calls])
         self.assertIn("publish", [call[0] for call in sidecar.calls])
         self.assertFalse(
@@ -1060,6 +1096,8 @@ class ScheduleRunnerTests(unittest.TestCase):
                 "due",
                 "query",
                 "storage",
+                "verify",
+                "verify",
                 "verify",
                 "verify",
                 "storage",

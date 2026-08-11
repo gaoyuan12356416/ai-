@@ -137,6 +137,14 @@ FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES = {
         "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
     ),
 }
+FAILED_PREFLIGHT_TOKEN_REFRESH_RECOVERY_REASON = (
+    "operator_same_day_preflight_token_refresh_v1"
+)
+FAILED_PREFLIGHT_TOKEN_REFRESH_ERROR_MESSAGES = {
+    "x_account_not_publishable": (
+        "X账号当前不可用于手动发布",
+    ),
+}
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1349,6 +1357,36 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_token_refresh_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    drama_capability_recovery_audit_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_preflight_token_refresh_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL
+                        CHECK(length(deployed_commit)=40),
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='failed_preflight'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='x_account_not_publishable'),
+                    previous_error_message TEXT NOT NULL,
+                    previous_started_at TEXT NOT NULL DEFAULT '',
+                    previous_finished_at TEXT NOT NULL DEFAULT '',
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_queue_count=0),
+                    validated_log_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_log_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id)
+                        REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(drama_capability_recovery_audit_id)
+                        REFERENCES x_post_schedule_drama_capability_recovery_audit(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -1827,6 +1865,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_drama_cap_recovery_created "
                 "ON x_post_schedule_drama_capability_recovery_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_token_refresh_recovery_created "
+                "ON x_post_schedule_token_refresh_recovery_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -6889,6 +6931,9 @@ class XPostStore:
         drama_capability_recovery = (
             reason == FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON
         )
+        token_refresh_recovery = (
+            reason == FAILED_PREFLIGHT_TOKEN_REFRESH_RECOVERY_REASON
+        )
         verified_repair_job_key = str(
             verified_repair_job_key or ""
         ).strip().lower()
@@ -6933,6 +6978,12 @@ class XPostStore:
                 drama_capability_recovery
                 and expected_error_code
                 in FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES
+                and re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
+            )
+            or (
+                token_refresh_recovery
+                and expected_error_code
+                in FAILED_PREFLIGHT_TOKEN_REFRESH_ERROR_MESSAGES
                 and re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
             )
         ):
@@ -7008,6 +7059,11 @@ class XPostStore:
                 "WHERE schedule_run_id=?",
                 (run_id,),
             ).fetchone()
+            token_refresh_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_token_refresh_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
             previous_error_message = str(run["error_message"] or "")
             corrective_message_matches = bool(
                 corrective_recovery
@@ -7034,6 +7090,16 @@ class XPostStore:
                 and any(
                     fragment in previous_error_message
                     for fragment in FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES.get(
+                        expected_error_code,
+                        (),
+                    )
+                )
+            )
+            token_refresh_message_matches = bool(
+                token_refresh_recovery
+                and any(
+                    fragment in previous_error_message
+                    for fragment in FAILED_PREFLIGHT_TOKEN_REFRESH_ERROR_MESSAGES.get(
                         expected_error_code,
                         (),
                     )
@@ -7078,7 +7144,7 @@ class XPostStore:
                     and str(run["source_type"]) != "drama"
                 )
                 or (
-                    drama_capability_recovery
+                    (drama_capability_recovery or token_refresh_recovery)
                     and str(run["source_type"]) != "drama"
                 )
                 or (
@@ -7089,6 +7155,7 @@ class XPostStore:
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
                         or drama_capability_audit is not None
+                        or token_refresh_audit is not None
                     )
                 )
                 or (
@@ -7099,6 +7166,7 @@ class XPostStore:
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
                         or drama_capability_audit is not None
+                        or token_refresh_audit is not None
                         or not corrective_message_matches
                     )
                 )
@@ -7110,6 +7178,7 @@ class XPostStore:
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
                         or drama_capability_audit is not None
+                        or token_refresh_audit is not None
                         or not verified_repair_message_matches
                     )
                 )
@@ -7121,6 +7190,7 @@ class XPostStore:
                         or verified_repair_audit is None
                         or codefix_compensation_audit is not None
                         or drama_capability_audit is not None
+                        or token_refresh_audit is not None
                         or not verified_repair_message_matches
                         or str(
                             verified_repair_audit[
@@ -7142,7 +7212,20 @@ class XPostStore:
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
                         or drama_capability_audit is not None
+                        or token_refresh_audit is not None
                         or not drama_capability_message_matches
+                    )
+                )
+                or (
+                    token_refresh_recovery
+                    and (
+                        prior_audit is not None
+                        or corrective_audit is not None
+                        or verified_repair_audit is not None
+                        or codefix_compensation_audit is not None
+                        or drama_capability_audit is None
+                        or token_refresh_audit is not None
+                        or not token_refresh_message_matches
                     )
                 )
             )
@@ -7244,7 +7327,11 @@ class XPostStore:
                             else (
                                 "codefix_compensation"
                                 if codefix_compensation
-                                else "drama_capability_fallback"
+                                else (
+                                    "drama_capability_fallback"
+                                    if drama_capability_recovery
+                                    else "preflight_token_refresh"
+                                )
                             )
                         )
                     )
@@ -7269,7 +7356,11 @@ class XPostStore:
                 ),
                 "deployed_commit": (
                     deployed_commit
-                    if (codefix_compensation or drama_capability_recovery)
+                    if (
+                        codefix_compensation
+                        or drama_capability_recovery
+                        or token_refresh_recovery
+                    )
                     else ""
                 ),
                 "compensation_publish_time": (
@@ -7364,7 +7455,32 @@ class XPostStore:
                 log_count,
                 timestamp,
             )
-            if drama_capability_recovery:
+            if token_refresh_recovery:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_token_refresh_recovery_audit("
+                    "schedule_run_id,drama_capability_recovery_audit_id,"
+                    "recovery_reason,actor,deployed_commit,previous_status,"
+                    "previous_error_code,previous_error_message,"
+                    "previous_started_at,previous_finished_at,"
+                    "validated_queue_count,validated_log_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        int(drama_capability_audit["id"]),
+                        reason,
+                        actor,
+                        deployed_commit,
+                        str(run["status"]),
+                        str(run["error_code"]),
+                        redact_text(run["error_message"], 500),
+                        str(run["started_at"]),
+                        str(run["finished_at"]),
+                        queue_count,
+                        log_count,
+                        timestamp,
+                    ),
+                )
+            elif drama_capability_recovery:
                 conn.execute(
                     "INSERT INTO x_post_schedule_drama_capability_recovery_audit("
                     "schedule_run_id,recovery_reason,actor,deployed_commit,"

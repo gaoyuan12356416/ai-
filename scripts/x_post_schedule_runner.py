@@ -1019,6 +1019,7 @@ def _drama_candidates(
         repair_state = {"attempted": 0}
         rejected_ids = set()
         preflight_cache = {}
+        refresh_accounts = False
 
         def preflight_one(candidate, account, rank, temporary):
             cache_key = (
@@ -1075,6 +1076,9 @@ def _drama_candidates(
             prefix="x-post-schedule-drama-", dir=str(work_root)
         ) as temporary:
             while len(rejected_ids) < config.scan_limit:
+                if refresh_accounts:
+                    accounts = _verify_accounts(sidecar, account_ids)
+                    refresh_accounts = False
                 pool_items = sidecar.available_drama_pool(
                     config.drama_pool_path,
                     config.scan_limit,
@@ -1115,6 +1119,7 @@ def _drama_candidates(
                         str(exc),
                     )
                     rejected_ids.add(int(exc.pool_item_id))
+                    refresh_accounts = True
                     continue
                 if len(candidates) != len(accounts):
                     raise ScheduleRunError(
@@ -1308,6 +1313,7 @@ def _drama_candidates(
                         rejected_ids.add(
                             int(candidate["drama_pool_item_id"])
                         )
+                        refresh_accounts = True
                         rejected = True
                         break
                     planned_by_index[index] = normalize_item(item, candidate)
@@ -1536,6 +1542,10 @@ def execute_schedule_tick(
                     "candidate account order does not match frozen schedule",
                     "x_post_schedule_account_mismatch",
                 )
+            # Media download/repair may outlive a two-hour X access token.
+            # Refresh the frozen scope again immediately before the atomic
+            # plan transaction; each later publish also verifies its account.
+            accounts = _verify_accounts(sidecar, identity["account_ids"])
             sidecar.preflight_storage(config.storage_preflight_path)
         except Exception as exc:
             audit = _record_schedule_failure_best_effort(

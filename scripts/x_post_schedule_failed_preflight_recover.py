@@ -18,6 +18,7 @@ from features.x_posts.service import (  # noqa: E402
     FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
     FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON,
     FAILED_PREFLIGHT_RECOVERY_REASON,
+    FAILED_PREFLIGHT_TOKEN_REFRESH_RECOVERY_REASON,
     FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
     XPostError,
     XPostStore,
@@ -84,13 +85,14 @@ def _argument_parser():
         "--reason",
         required=True,
         help=(
-            "Must equal %s, %s, %s, %s, or %s"
+            "Must equal %s, %s, %s, %s, %s, or %s"
             % (
                 FAILED_PREFLIGHT_RECOVERY_REASON,
                 FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
                 FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
                 FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
                 FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON,
+                FAILED_PREFLIGHT_TOKEN_REFRESH_RECOVERY_REASON,
             )
         ),
     )

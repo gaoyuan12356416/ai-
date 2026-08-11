@@ -155,6 +155,7 @@
 - GPU 返回和 CPU 下载后的两次 repaired-media 探测必须使用同一账号能力上限；token-confirmed Premium 账号按 Premium 时长上限复核，不能在本地下载复核时退回普通账号的 140 秒上限。
 - 若前三层恢复审计均已使用且原 run 仍以同一 `x_post_media_repair_invalid_response` 零写入终止，只有在精确代码修复 commit 已部署后，才允许使用 `operator_same_day_codefix_compensation_v1` 创建一个独立的同日补偿 run。原 run 及全部失败历史保持终态不变；补偿必须记录 40 位部署 commit、同一 64 位 repair job key、未占用且已过去的补偿时刻，并且每个原 run 只允许创建一次。
 - 若短剧 run 因 `x_long_video_requires_premium` 在建队列前零写入失败，只有在账号能力兜底修复的精确 commit 已部署后，才允许使用 `operator_same_day_drama_capability_fallback_v1` 将同一冻结 run 原子恢复一次。必须保持同日、零 queue/log/unknown/post_creating、冻结账号就绪，并独立记录原错误和 40 位部署 commit；不允许覆盖或复用其他恢复审计。
+- 媒体下载与 GPU 修复可能跨越 X Access Token 的两小时有效期；短剧候选被拒并重新扫描前、以及任意素材/短剧批次进入原子建队列事务前，必须重新校验冻结账号并按需刷新 Token，实际发布每条 queue 前仍再次校验。若已使用短剧能力兜底审计的同一 run 随后精确因 `x_account_not_publishable` 零写入失败，只有在该刷新修复 commit 已部署后，才允许使用 `operator_same_day_preflight_token_refresh_v1` 再恢复一次，并关联前一级审计、记录 40 位 commit 且保持单次约束。
 - 调度客户端必须与素材池和原子建队列的顺序一致：按 `created_at,id` 倒序接受“最新可用记录优先”响应；升序、重复或身份不完整的响应必须在建 queue 前拒绝。
 - 建队列事务必须校验候选素材集合精确等于当前最新的 N 条可用记录，不允许跳过更新素材；当 Premium/普通账号能力路由需要调整素材与账号的对应时，允许该最新集合按冻结账号顺序重排。
 - 短剧预检发现未绑定剧集超过 140 秒时，只能分配给 token 实时确认具备 Premium 长视频资格且当前未被既有连载占用的账号；已绑定连载始终保持原账号。没有空闲 Premium 容量时，该长视频保持未绑定、保留 `x_long_video_requires_premium` 证据且后续可重试，选材继续扫描更早的短视频候选补足普通账号；只有账号感知扫描后仍无法凑齐完整批次时才整批零写入失败。建队列事务按相同能力集合复算并锁定精确账号/剧集对应关系。
@@ -206,3 +207,4 @@
 | 2026-08-11 | 增加只接受已核验 GPU repair job 的末级单次重试审计；保留前两级恢复历史且继续要求零 queue/log/unknown |
 | 2026-08-11 | 修正 Premium repaired-media 在 CPU 下载复核时误用 140 秒上限；增加保留原失败终态、绑定精确部署 commit 与 repair job 的独立同日补偿 run 审计 |
 | 2026-08-11 | 修正无空闲 Premium 时长视频短剧阻断整批的问题；长视频保持未绑定可重试并继续扫描短视频补位，增加绑定精确部署 commit 的单次零写入恢复审计 |
+| 2026-08-11 | 修正长耗时媒体预检跨过 Access Token 到期点后候选重扫失败的问题；重扫及建队列前重新校验/刷新冻结账号，增加关联短剧能力审计的单次零写入恢复 |
