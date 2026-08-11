@@ -90,6 +90,12 @@ class XAutoPostDeployTests(unittest.TestCase):
         self.assertEqual(len(values), 2)
         self.assertNotEqual(values[0], values[1])
 
+    def test_main_api_uses_an_optional_dedicated_environment_dropin(self):
+        dropin = self.text("deploy/x-auto-post-app.conf")
+        self.assertIn("[Service]", dropin)
+        self.assertIn("EnvironmentFile=-/etc/x-auto-post-app.env", dropin)
+        self.assertNotIn("X_POST_AUTO_INTERNAL_TOKEN", dropin)
+
     def test_new_timers_are_nonpersistent_and_do_not_replace_existing_units(self):
         for name in (
             "x-auto-post-metric.timer",
