@@ -88,6 +88,13 @@ PRE_X_RECOVERABLE_ERROR_CODES = frozenset(
         "invalid_short_base_url",
     }
 )
+FAILED_PREFLIGHT_RECOVERY_REASON = "operator_same_day_compensation_v1"
+FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
+    {
+        "x_token_missing",
+        "x_upstream_error",
+    }
+)
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1159,6 +1166,29 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_compensation_v1'),
+                    actor TEXT NOT NULL,
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='failed_preflight'),
+                    previous_error_code TEXT NOT NULL,
+                    previous_error_message TEXT NOT NULL,
+                    previous_started_at TEXT NOT NULL DEFAULT '',
+                    previous_finished_at TEXT NOT NULL DEFAULT '',
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_queue_count=0),
+                    validated_log_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_log_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -1617,6 +1647,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_run_status "
                 "ON x_post_schedule_run(status,run_date,publish_time,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_recovery_created "
+                "ON x_post_schedule_recovery_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -6561,6 +6595,258 @@ class XPostStore:
         item = self.get_schedule_run(run_id)
         item["recorded"] = True
         return item
+
+    def recover_failed_preflight_schedule_run(
+        self,
+        run_id,
+        expected_error_code,
+        *,
+        reason,
+        actor,
+        validate_only=False,
+        now=None,
+    ):
+        """Re-arm one exact same-day zero-write preflight failure.
+
+        The original terminal evidence is copied into an append-only audit row
+        before the frozen schedule run returns to ``claimed``.  The method does
+        not select candidates, create queues, or call X.
+        """
+        run_id = _positive_int(run_id, "run_id")
+        if not isinstance(validate_only, bool):
+            raise XPostError(
+                "invalid_request",
+                "validate_only must be a boolean",
+                400,
+            )
+        try:
+            expected_error_code = _clean_token(
+                expected_error_code,
+                "expected error code",
+                64,
+            )
+            reason = _clean_token(reason, "recovery reason", 128)
+            actor = _clean_token(actor, "recovery actor", 128)
+        except ValueError:
+            raise XPostError(
+                "invalid_request",
+                "Failed-preflight recovery arguments are invalid",
+                400,
+            ) from None
+        if (
+            reason != FAILED_PREFLIGHT_RECOVERY_REASON
+            or expected_error_code
+            not in FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES
+        ):
+            raise XPostError(
+                "x_post_failed_preflight_recovery_not_allowed",
+                "This failed preflight is not eligible for guarded recovery",
+                409,
+            )
+
+        current = now or datetime.now(BEIJING_TZ)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=BEIJING_TZ)
+        else:
+            current = current.astimezone(BEIJING_TZ)
+        current_date = current.date().isoformat()
+        timestamp = utc_now()
+
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM x_post_schedule_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if not run:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_run_not_found",
+                    "X schedule run was not found",
+                    404,
+                )
+
+            account_ids = _schedule_account_ids(
+                _json_array(run["account_ids_json"], "account_ids")
+            )
+            queue_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue "
+                    "WHERE schedule_run_id=?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            log_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_publish_log l "
+                    "JOIN x_post_queue q ON q.id=l.queue_id "
+                    "WHERE q.schedule_run_id=?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            prior_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+
+            scheduled_at = datetime.strptime(
+                "%s %s" % (run["run_date"], run["publish_time"]),
+                "%Y-%m-%d %H:%M",
+            ).replace(tzinfo=BEIJING_TZ)
+            conflict = bool(
+                str(run["run_date"]) != current_date
+                or scheduled_at > current
+                or str(run["status"]) != "failed_preflight"
+                or str(run["error_code"]) != expected_error_code
+                or int(run["expected_count"] or 0) != len(account_ids)
+                or int(run["queued_count"] or 0) != 0
+                or int(run["published_count"] or 0) != 0
+                or int(run["failed_count"] or 0) != 0
+                or int(run["unknown_count"] or 0) != 0
+                or queue_count != 0
+                or log_count != 0
+                or prior_audit is not None
+            )
+
+            mode = _schedule_mode(run["schedule_mode"])
+            if mode == "random":
+                plan_row = conn.execute(
+                    "SELECT * FROM x_post_schedule_random_plan "
+                    "WHERE source_type=? AND run_date=?",
+                    (run["source_type"], run["run_date"]),
+                ).fetchone()
+                plan = (
+                    self._random_schedule_plan_item(plan_row)
+                    if plan_row
+                    else None
+                )
+                conflict = conflict or not bool(
+                    plan
+                    and int(plan["config_version"])
+                    == int(run["config_version"])
+                    and plan["account_ids"] == account_ids
+                    and str(run["publish_time"]) in plan["publish_times"]
+                    and str(plan["body_template"])
+                    == str(run["body_template"])
+                )
+            else:
+                config_row = conn.execute(
+                    "SELECT * FROM x_post_schedule_config "
+                    "WHERE source_type=?",
+                    (run["source_type"],),
+                ).fetchone()
+                config = (
+                    self._schedule_config_item(config_row, now=current)
+                    if config_row
+                    else None
+                )
+                conflict = conflict or not bool(
+                    config
+                    and config["enabled"]
+                    and config["schedule_mode"] == "fixed"
+                    and int(config["version"])
+                    == int(run["config_version"])
+                    and config["account_ids"] == account_ids
+                    and str(run["publish_time"])
+                    in config["publish_times"]
+                    and str(config["body_template"])
+                    == str(run["body_template"])
+                )
+
+            placeholders = ",".join("?" for _item in account_ids)
+            accounts = conn.execute(
+                "SELECT id,status,publish_approved,token_store_key "
+                "FROM x_authorized_account WHERE id IN (%s)" % placeholders,
+                tuple(account_ids),
+            ).fetchall()
+            ready_ids = {
+                int(row["id"])
+                for row in accounts
+                if str(row["status"]) == "active"
+                and int(row["publish_approved"] or 0) == 1
+                and bool(str(row["token_store_key"] or "").strip())
+            }
+            conflict = conflict or ready_ids != set(account_ids)
+            unresolved = conn.execute(
+                "SELECT 1 FROM x_post_publish_log l "
+                "JOIN x_post_queue q ON q.id=l.queue_id "
+                "WHERE q.account_id IN (%s) "
+                "AND (COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status='post_creating') LIMIT 1" % placeholders,
+                tuple(account_ids),
+            ).fetchone()
+            conflict = conflict or unresolved is not None
+
+            if conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_failed_preflight_recovery_conflict",
+                    "Run, account, plan, queue, or audit state is not an exact zero-write failure",
+                    409,
+                )
+
+            result = {
+                "run_id": run_id,
+                "source_type": str(run["source_type"]),
+                "run_date": str(run["run_date"]),
+                "publish_time": str(run["publish_time"]),
+                "expected_count": int(run["expected_count"]),
+                "expected_error_code": expected_error_code,
+                "reason": reason,
+                "actor": actor,
+                "validated_queue_count": queue_count,
+                "validated_log_count": log_count,
+                "validate_only": validate_only,
+                "validated_count": 1,
+                "updated_count": 0,
+            }
+            if validate_only:
+                conn.rollback()
+                return result
+
+            conn.execute(
+                "INSERT INTO x_post_schedule_recovery_audit("
+                "schedule_run_id,recovery_reason,actor,previous_status,"
+                "previous_error_code,previous_error_message,"
+                "previous_started_at,previous_finished_at,"
+                "validated_queue_count,validated_log_count,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    reason,
+                    actor,
+                    str(run["status"]),
+                    str(run["error_code"]),
+                    redact_text(run["error_message"], 500),
+                    str(run["started_at"]),
+                    str(run["finished_at"]),
+                    queue_count,
+                    log_count,
+                    timestamp,
+                ),
+            )
+            cursor = conn.execute(
+                "UPDATE x_post_schedule_run SET status='claimed',"
+                "queued_count=0,published_count=0,failed_count=0,"
+                "unknown_count=0,error_code='',error_message='',"
+                "started_at='',finished_at='',updated_at=? "
+                "WHERE id=? AND status='failed_preflight' "
+                "AND error_code=? AND queued_count=0 "
+                "AND published_count=0 AND failed_count=0 "
+                "AND unknown_count=0",
+                (timestamp, run_id, expected_error_code),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_failed_preflight_recovery_conflict",
+                    "Failed-preflight recovery state changed during the transaction",
+                    409,
+                )
+            conn.commit()
+            result["updated_count"] = 1
+            return result
 
     def create_schedule_plan(
         self,
