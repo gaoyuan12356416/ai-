@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 
-CATEGORIES = ("border", "light", "opacity_video", "corners", "tint")
-DISABLED_ASSET_NAMES = {"light": frozenset({"light-01.webm"})}
+ASSET_CATEGORIES = ("border", "light", "opacity_video", "corners", "tint")
+CATEGORIES = ("border", "opacity_video", "corners", "tint")
 HEX_64_RE = re.compile(r"[0-9a-f]{64}")
 SAFE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 
@@ -57,11 +57,11 @@ def load_asset_set(root: Path, expected_manifest_sha256: str) -> Dict[str, Any]:
     if not isinstance(manifest, dict) or manifest.get("version") != 1:
         raise RandomOverlayError("overlay manifest version is unsupported")
     categories = manifest.get("categories")
-    if not isinstance(categories, dict) or set(categories) != set(CATEGORIES):
+    if not isinstance(categories, dict) or set(categories) != set(ASSET_CATEGORIES):
         raise RandomOverlayError("overlay manifest categories are invalid")
     root_resolved = root.resolve(strict=True)
     verified: Dict[str, tuple[Dict[str, Any], ...]] = {}
-    for category in CATEGORIES:
+    for category in ASSET_CATEGORIES:
         rows = categories.get(category)
         if not isinstance(rows, list) or not rows:
             raise RandomOverlayError("overlay category is empty: %s" % category)
@@ -156,16 +156,7 @@ def derive_recipe(
         rows = categories.get(category)
         if not isinstance(rows, (tuple, list)) or not rows:
             raise RandomOverlayError("overlay category is unavailable")
-        eligible_rows = [
-            row
-            for row in rows
-            if row.get("name") not in DISABLED_ASSET_NAMES.get(category, ())
-        ]
-        if not eligible_rows:
-            raise RandomOverlayError("overlay category has no eligible assets")
-        row = eligible_rows[
-            _seed(identity, "asset:%s" % category) % len(eligible_rows)
-        ]
+        row = rows[_seed(identity, "asset:%s" % category) % len(rows)]
         selected[category] = {
             "media_type": row["media_type"],
             "name": row["name"],
@@ -227,13 +218,7 @@ def validate_recipe(recipe: Any, asset_set: Mapping[str, Any]) -> None:
         }:
             raise RandomOverlayError("overlay recipe asset is invalid")
         candidates = categories.get(category) if isinstance(categories, Mapping) else ()
-        expected = [
-            item
-            for item in candidates or ()
-            if item.get("name") == row.get("name")
-            and item.get("name")
-            not in DISABLED_ASSET_NAMES.get(category, ())
-        ]
+        expected = [item for item in candidates or () if item.get("name") == row.get("name")]
         if len(expected) != 1 or any(
             row.get(key) != expected[0].get(key)
             for key in ("media_type", "name", "sha256", "size")

@@ -2127,8 +2127,8 @@ class TTPostService:
             self.media_profile_version
             in {
                 "tt-post-source-direct-v1",
-                "tt-post-random-overlay-hevc-720x1280-v2",
-                "tt-post-random-overlay-h264-720x1280-v2",
+                "tt-post-random-overlay-hevc-720x1280-v3",
+                "tt-post-random-overlay-h264-720x1280-v3",
             }
             and self.source_trim_tail_seconds != 0
         ):

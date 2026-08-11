@@ -12,7 +12,7 @@
 请求结构不增加客户端可控随机字段。`expected_profile` 在新模式必须为：
 
 ```text
-tt-post-random-overlay-hevc-720x1280-v2
+tt-post-random-overlay-hevc-720x1280-v3
 ```
 
 响应在新模式增加只读审计字段：
@@ -22,7 +22,6 @@ tt-post-random-overlay-hevc-720x1280-v2
   "recipe": {
     "asset_set_sha256": "<sha256>",
     "border": "border-1.png",
-    "light": "light-02.webm",
     "opacity_video": "opacity-video-1.webm",
     "corners": "corners-1.webm",
     "tint": "tint-white.png",

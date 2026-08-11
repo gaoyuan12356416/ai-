@@ -88,8 +88,8 @@ DIRECT_CLEAN_H264_PROFILE = "tt-post-direct-clean-h264-720x1280-v1"
 DIRECT_OUTRO_PROFILE = "tt-post-direct-outro-hevc-720x1280-v2"
 DIRECT_OUTRO_H264_PROFILE = "tt-post-direct-outro-h264-720x1280-v2"
 SOURCE_DIRECT_PROFILE = "tt-post-source-direct-v1"
-RANDOM_OVERLAY_PROFILE = "tt-post-random-overlay-hevc-720x1280-v2"
-RANDOM_OVERLAY_H264_PROFILE = "tt-post-random-overlay-h264-720x1280-v2"
+RANDOM_OVERLAY_PROFILE = "tt-post-random-overlay-hevc-720x1280-v3"
+RANDOM_OVERLAY_H264_PROFILE = "tt-post-random-overlay-h264-720x1280-v3"
 BRANDED_PREVIEW_MEDIA_MODE = "branded_preview"
 DIRECT_CLEAN_MEDIA_MODE = "direct_clean"
 DIRECT_OUTRO_MEDIA_MODE = "direct_outro"
@@ -2057,7 +2057,7 @@ def build_random_overlay_command(
     recipe,
     asset_paths,
 ):
-    """Build the deterministic five-layer TT de-duplication composition."""
+    """Build the deterministic four-layer TT de-duplication composition."""
 
     try:
         rotation = int(recipe["rotation_millidegrees"]) / 1000.0
@@ -2087,12 +2087,6 @@ def build_random_overlay_command(
         "-c:v",
         "libvpx-vp9",
         "-i",
-        str(asset_paths["light"]),
-        "-stream_loop",
-        "-1",
-        "-c:v",
-        "libvpx-vp9",
-        "-i",
         str(asset_paths["opacity_video"]),
         "-stream_loop",
         "-1",
@@ -2114,7 +2108,7 @@ def build_random_overlay_command(
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
             ]
         )
-    audio_map = "0:a:0" if input_info["has_audio"] else "6:a:0"
+    audio_map = "0:a:0" if input_info["has_audio"] else "5:a:0"
     scale_text = "%.4f" % scale
     angle_text = "%.6f" % rotation
     opacity_text = "%.4f" % tint_opacity
@@ -2128,21 +2122,18 @@ def build_random_overlay_command(
         "scale=w='trunc(iw*%s/2)*2':h='trunc(ih*%s/2)*2':flags=lanczos,"
         "rotate=%s*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];"
         "[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];"
-        "[5:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "[4:v]scale=720:1280:flags=lanczos,format=rgba,"
         "colorchannelmixer=aa=%s,fps=30,setpts=PTS-STARTPTS[tint];"
-        "[3:v]scale=720:1280:flags=lanczos,format=rgba,"
-        "fps=30,setpts=PTS-STARTPTS[opacity];"
         "[2:v]scale=720:1280:flags=lanczos,format=rgba,"
-        "fps=30,setpts=PTS-STARTPTS[light];"
+        "fps=30,setpts=PTS-STARTPTS[opacity];"
         "[1:v]scale=720:1280:flags=lanczos,format=rgba,"
         "fps=30,setpts=PTS-STARTPTS[border];"
-        "[4:v]scale=720:1280:flags=lanczos,format=rgba,"
+        "[3:v]scale=720:1280:flags=lanczos,format=rgba,"
         "fps=30,setpts=PTS-STARTPTS[corners];"
         "[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];"
         "[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];"
-        "[o2][light]overlay=0:0:shortest=1:eof_action=repeat[o3];"
-        "[o3][border]overlay=0:0:shortest=1:eof_action=repeat[o4];"
-        "[o4][corners]overlay=0:0:shortest=1:eof_action=repeat,"
+        "[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];"
+        "[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,"
         "format=yuv420p[v]"
     ) % (scale_text, scale_text, angle_text, opacity_text)
     command.extend(

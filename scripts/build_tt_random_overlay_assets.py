@@ -231,7 +231,7 @@ def build(source_root: Path, output_root: Path, ffmpeg: str, ffprobe: str) -> st
                 "canvas": "720x1280",
                 "light_black_key": "0.02/0.10",
                 "opacity_video_alpha_cap": "13/255",
-                "disabled_runtime_assets": ["light-01.webm"],
+                "disabled_runtime_categories": ["light"],
                 "tint_runtime_opacity_bp": [100, 1000],
             },
             "sources": source_contract,

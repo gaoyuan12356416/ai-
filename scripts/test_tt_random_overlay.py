@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused contract tests for TT five-layer random production."""
+"""Focused contract tests for TT four-layer random production."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from features.tt_gpu.random_overlay import (  # noqa: E402
+    ASSET_CATEGORIES,
     CATEGORIES,
     RandomOverlayError,
     derive_recipe,
@@ -29,7 +30,7 @@ from features.tt_gpu.worker import build_random_overlay_command  # noqa: E402
 class RandomOverlayTests(unittest.TestCase):
     def build_assets(self, root: Path):
         categories = {}
-        for category in CATEGORIES:
+        for category in ASSET_CATEGORIES:
             rows = []
             for index in range(2):
                 suffix = ".png" if category in {"border", "tint"} else ".webm"
@@ -59,7 +60,7 @@ class RandomOverlayTests(unittest.TestCase):
             kwargs = {
                 "job_id": "job-12345678",
                 "content_id": "DRAMA123",
-                "profile": "tt-post-random-overlay-hevc-720x1280-v2",
+                "profile": "tt-post-random-overlay-hevc-720x1280-v3",
                 "source_url_sha256": "a" * 64,
                 "asset_set": assets,
             }
@@ -70,7 +71,7 @@ class RandomOverlayTests(unittest.TestCase):
             self.assertTrue(-2000 <= first["rotation_millidegrees"] <= 2000)
             self.assertTrue(9800 <= first["scale_bp"] <= 10200)
             self.assertTrue(100 <= first["tint_opacity_bp"] <= 1000)
-            self.assertEqual(first["assets"]["light"]["name"], "light-00.webm")
+            self.assertNotIn("light", first["assets"])
             validate_recipe(first, assets)
 
     def test_asset_tamper_and_recipe_tamper_fail_closed(self):
@@ -81,7 +82,7 @@ class RandomOverlayTests(unittest.TestCase):
             recipe = derive_recipe(
                 job_id="job-12345678",
                 content_id="DRAMA123",
-                profile="tt-post-random-overlay-hevc-720x1280-v2",
+                profile="tt-post-random-overlay-hevc-720x1280-v3",
                 source_url_sha256="b" * 64,
                 asset_set=assets,
             )
@@ -93,11 +94,10 @@ class RandomOverlayTests(unittest.TestCase):
             with self.assertRaises(RandomOverlayError):
                 load_asset_set(root, manifest_sha)
 
-    def test_ffmpeg_command_stacks_five_layers_and_keeps_full_audio(self):
+    def test_ffmpeg_command_stacks_four_layers_and_keeps_full_audio(self):
         config = SimpleNamespace(ffmpeg_bin="ffmpeg", video_encoder="hevc_nvenc")
         paths = {
             "border": Path("border.png"),
-            "light": Path("light.webm"),
             "opacity_video": Path("opacity.webm"),
             "corners": Path("corners.webm"),
             "tint": Path("tint.png"),
@@ -121,9 +121,10 @@ class RandomOverlayTests(unittest.TestCase):
         self.assertIn("iw*1.0125", graph)
         self.assertIn("colorchannelmixer=aa=0.0750", graph)
         self.assertLess(graph.index("[base][tint]"), graph.index("[o1][opacity]"))
-        self.assertLess(graph.index("[o1][opacity]"), graph.index("[o2][light]"))
-        self.assertLess(graph.index("[o2][light]"), graph.index("[o3][border]"))
-        self.assertLess(graph.index("[o3][border]"), graph.index("[o4][corners]"))
+        self.assertLess(graph.index("[o1][opacity]"), graph.index("[o2][border]"))
+        self.assertLess(graph.index("[o2][border]"), graph.index("[o3][corners]"))
+        self.assertNotIn("[light]", graph)
+        self.assertNotIn("light.webm", command)
         self.assertEqual(command[command.index("-map", command.index("[v]")) + 1], "0:a:0")
         self.assertIn("12.500000", command)
 

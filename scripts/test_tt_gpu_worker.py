@@ -1756,12 +1756,12 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertEqual(
             set(recipe["assets"]),
-            {"border", "light", "opacity_video", "corners", "tint"},
+            {"border", "opacity_video", "corners", "tint"},
         )
         self.assertTrue(-2000 <= recipe["rotation_millidegrees"] <= 2000)
         self.assertTrue(9800 <= recipe["scale_bp"] <= 10200)
         self.assertTrue(100 <= recipe["tint_opacity_bp"] <= 1000)
-        self.assertNotEqual(recipe["assets"]["light"]["name"], "light-01.webm")
+        self.assertNotIn("light", recipe["assets"])
         manifest = worker._read_json(
             processor._prepare_manifest_path(JOB_ID)
         )
@@ -1780,9 +1780,9 @@ class TTGPUWorkerTests(unittest.TestCase):
         graph = command[command.index("-filter_complex") + 1]
         self.assertIn("[base][tint]", graph)
         self.assertIn("[o1][opacity]", graph)
-        self.assertIn("[o2][light]", graph)
-        self.assertIn("[o3][border]", graph)
-        self.assertIn("[o4][corners]", graph)
+        self.assertNotIn("[light]", graph)
+        self.assertIn("[o2][border]", graph)
+        self.assertIn("[o3][corners]", graph)
         reused = processor.prepare(request)
         self.assertTrue(reused["reused"])
         self.assertEqual(reused["random_overlay_recipe"], recipe)
