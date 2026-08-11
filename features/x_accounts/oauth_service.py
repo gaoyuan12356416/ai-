@@ -2814,10 +2814,21 @@ def available_post_drama_pool_request(payload):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
+        account_ids = payload.get("account_ids")
+        accounts = (
+            _manual_publish_accounts(account_ids)
+            if account_ids is not None
+            else []
+        )
         return {
             "items": XPostStore(POST_DB_PATH).available_drama_pool_items(
                 payload.get("limit", 50),
-                account_ids=payload.get("account_ids"),
+                account_ids=account_ids,
+                premium_account_ids=[
+                    int(account["id"])
+                    for account in accounts
+                    if account.get("long_video_eligible")
+                ],
             )
         }
     except XPostError as exc:
@@ -3031,6 +3042,7 @@ def create_post_schedule_plan_request(payload):
     ):
         raise ServiceError("invalid_request", "account_ids无效", 400)
     trusted = []
+    premium_account_ids = []
     for candidate, account_id in zip(candidates, requested_ids):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
@@ -3044,6 +3056,8 @@ def create_post_schedule_plan_request(payload):
                 409,
             )
         _require_candidate_duration_capability(candidate, account)
+        if account.get("long_video_eligible"):
+            premium_account_ids.append(int(account["id"]))
         item = dict(candidate)
         item.update(
             {
@@ -3069,6 +3083,7 @@ def create_post_schedule_plan_request(payload):
             payload.get("publish_time"),
             payload.get("version"),
             trusted,
+            premium_account_ids=premium_account_ids,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)

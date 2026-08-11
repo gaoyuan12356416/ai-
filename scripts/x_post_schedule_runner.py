@@ -102,6 +102,7 @@ _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
         "media_host_not_allowed",
         "media_too_large",
         "source_not_repairable",
+        "x_long_video_requires_premium",
         "x_post_daily_copy_validation_failed",
     }
 )

@@ -100,6 +100,9 @@ FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
         "x_upstream_error",
     }
 )
+DRAMA_POOL_RETRYABLE_VALIDATION_CODES = frozenset(
+    {"x_long_video_requires_premium"}
+)
 FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON = (
     "operator_same_day_corrective_retry_v1"
 )
@@ -126,6 +129,14 @@ FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES = {
 FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON = (
     "operator_same_day_codefix_compensation_v1"
 )
+FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON = (
+    "operator_same_day_drama_capability_fallback_v1"
+)
+FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES = {
+    "x_long_video_requires_premium": (
+        "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+    ),
+}
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1311,6 +1322,33 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_drama_capability_recovery_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_drama_capability_fallback_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL
+                        CHECK(length(deployed_commit)=40),
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='failed_preflight'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='x_long_video_requires_premium'),
+                    previous_error_message TEXT NOT NULL,
+                    previous_started_at TEXT NOT NULL DEFAULT '',
+                    previous_finished_at TEXT NOT NULL DEFAULT '',
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_queue_count=0),
+                    validated_log_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_log_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id)
+                        REFERENCES x_post_schedule_run(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -1785,6 +1823,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_codefix_comp_created "
                 "ON x_post_schedule_codefix_compensation_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_drama_cap_recovery_created "
+                "ON x_post_schedule_drama_capability_recovery_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -4724,8 +4766,24 @@ class XPostStore:
         }
 
     @staticmethod
-    def _drama_assignment_candidates(conn, account_ids, limit):
+    def _drama_assignment_candidates(
+        conn,
+        account_ids,
+        limit,
+        premium_account_ids=None,
+    ):
         account_ids = _schedule_account_ids(account_ids)
+        premium_account_ids = (
+            set(_schedule_account_ids(premium_account_ids))
+            if premium_account_ids
+            else set()
+        )
+        if not premium_account_ids.issubset(set(account_ids)):
+            raise XPostError(
+                "invalid_request",
+                "Premium账号必须属于当前短剧发布账号范围",
+                400,
+            )
         if limit < len(account_ids):
             raise XPostError(
                 "invalid_request",
@@ -4774,14 +4832,16 @@ class XPostStore:
                     500,
                 )
             owned_by_account[owner_id] = row
-        unassigned_limit = min(
-            max(0, limit - len(owned_rows)),
-            max(0, len(account_ids) - len(owned_by_account)),
-        )
+        free_account_ids = [
+            account_id
+            for account_id in account_ids
+            if account_id not in owned_by_account
+        ]
+        unassigned_limit = max(0, limit)
         unassigned_rows = conn.execute(
             "SELECT * FROM x_post_drama_pool "
             "WHERE status IN ('pending','active') "
-            "AND last_error_code='' "
+            "AND last_error_code IN ('','x_long_video_requires_premium') "
             "AND free_episode_count>0 "
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id=0 "
@@ -4789,12 +4849,33 @@ class XPostStore:
             "priority_at DESC,created_at DESC,id DESC LIMIT ?",
             (unassigned_limit,),
         ).fetchall()
-        unassigned = iter(unassigned_rows)
+        selected_by_account = {}
+        remaining_accounts = list(free_account_ids)
+        for row in unassigned_rows:
+            if not remaining_accounts:
+                break
+            if str(row["last_error_code"] or "") in (
+                DRAMA_POOL_RETRYABLE_VALIDATION_CODES
+            ):
+                account_id = next(
+                    (
+                        value
+                        for value in remaining_accounts
+                        if value in premium_account_ids
+                    ),
+                    None,
+                )
+                if account_id is None:
+                    continue
+            else:
+                account_id = remaining_accounts[0]
+            selected_by_account[account_id] = row
+            remaining_accounts.remove(account_id)
         assignments = []
         for account_id in account_ids:
             row = owned_by_account.get(account_id)
             if row is None:
-                row = next(unassigned, None)
+                row = selected_by_account.get(account_id)
             if row is None:
                 break
             item = _row_dict(row)
@@ -4802,7 +4883,12 @@ class XPostStore:
             assignments.append(item)
         return assignments
 
-    def available_drama_pool_items(self, limit=50, account_ids=None):
+    def available_drama_pool_items(
+        self,
+        limit=50,
+        account_ids=None,
+        premium_account_ids=None,
+    ):
         try:
             limit = int(limit)
         except (TypeError, ValueError, OverflowError):
@@ -4832,13 +4918,14 @@ class XPostStore:
                     conn,
                     account_ids,
                     limit,
+                    premium_account_ids=premium_account_ids,
                 )
             rows = conn.execute(
                 "SELECT id,content_id,next_sub_number,created_at,"
                 "assigned_account_id,assigned_at,assigned_source_queue_id "
                 "FROM x_post_drama_pool "
                 "WHERE status IN ('pending','active') "
-                "AND last_error_code='' "
+                "AND last_error_code IN ('','x_long_video_requires_premium') "
                 "AND free_episode_count>0 "
                 "AND next_sub_number<=free_episode_count "
                 "ORDER BY CASE WHEN priority_at<>'' THEN 0 ELSE 1 END,"
@@ -4895,7 +4982,10 @@ class XPostStore:
                         "error_code is invalid",
                         400,
                     ) from None
-                if code not in DRAMA_POOL_DETERMINISTIC_REJECTION_CODES:
+                if code not in (
+                    DRAMA_POOL_DETERMINISTIC_REJECTION_CODES
+                    | DRAMA_POOL_RETRYABLE_VALIDATION_CODES
+                ):
                     raise XPostError(
                         "invalid_request",
                         "error_code is not a deterministic drama rejection",
@@ -5040,6 +5130,22 @@ class XPostStore:
                     )
                 validated += 1
                 if validate_only:
+                    continue
+                if code in DRAMA_POOL_RETRYABLE_VALIDATION_CODES:
+                    cursor = conn.execute(
+                        "UPDATE x_post_drama_pool SET last_checked_at=?,"
+                        "last_error_code=?,last_error_message=?,updated_at=? "
+                        "WHERE id=? AND assigned_account_id=0 "
+                        "AND status IN ('pending','active')",
+                        (
+                            timestamp,
+                            code,
+                            message,
+                            timestamp,
+                            pool_item_id,
+                        ),
+                    )
+                    updated += int(cursor.rowcount or 0)
                     continue
                 cursor = conn.execute(
                     "UPDATE x_post_drama_pool SET status='validation_failed',"
@@ -6780,6 +6886,9 @@ class XPostStore:
         codefix_compensation = (
             reason == FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON
         )
+        drama_capability_recovery = (
+            reason == FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON
+        )
         verified_repair_job_key = str(
             verified_repair_job_key or ""
         ).strip().lower()
@@ -6819,6 +6928,12 @@ class XPostStore:
                 and re.fullmatch(r"[a-f0-9]{64}", verified_repair_job_key)
                 and re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
                 and bool(normalized_compensation_time)
+            )
+            or (
+                drama_capability_recovery
+                and expected_error_code
+                in FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES
+                and re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
             )
         ):
             raise XPostError(
@@ -6888,6 +7003,11 @@ class XPostStore:
                 "WHERE original_schedule_run_id=?",
                 (run_id,),
             ).fetchone()
+            drama_capability_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_drama_capability_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
             previous_error_message = str(run["error_message"] or "")
             corrective_message_matches = bool(
                 corrective_recovery
@@ -6904,6 +7024,16 @@ class XPostStore:
                 and any(
                     fragment in previous_error_message
                     for fragment in FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES.get(
+                        expected_error_code,
+                        (),
+                    )
+                )
+            )
+            drama_capability_message_matches = bool(
+                drama_capability_recovery
+                and any(
+                    fragment in previous_error_message
+                    for fragment in FAILED_PREFLIGHT_DRAMA_CAPABILITY_ERROR_MESSAGES.get(
                         expected_error_code,
                         (),
                     )
@@ -6948,12 +7078,17 @@ class XPostStore:
                     and str(run["source_type"]) != "drama"
                 )
                 or (
+                    drama_capability_recovery
+                    and str(run["source_type"]) != "drama"
+                )
+                or (
                     initial_recovery
                     and (
                         prior_audit is not None
                         or corrective_audit is not None
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
+                        or drama_capability_audit is not None
                     )
                 )
                 or (
@@ -6963,6 +7098,7 @@ class XPostStore:
                         or corrective_audit is not None
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
+                        or drama_capability_audit is not None
                         or not corrective_message_matches
                     )
                 )
@@ -6973,6 +7109,7 @@ class XPostStore:
                         or corrective_audit is None
                         or verified_repair_audit is not None
                         or codefix_compensation_audit is not None
+                        or drama_capability_audit is not None
                         or not verified_repair_message_matches
                     )
                 )
@@ -6983,6 +7120,7 @@ class XPostStore:
                         or corrective_audit is None
                         or verified_repair_audit is None
                         or codefix_compensation_audit is not None
+                        or drama_capability_audit is not None
                         or not verified_repair_message_matches
                         or str(
                             verified_repair_audit[
@@ -6994,6 +7132,17 @@ class XPostStore:
                         == str(run["publish_time"])
                         or compensation_scheduled_at > current
                         or target_run is not None
+                    )
+                )
+                or (
+                    drama_capability_recovery
+                    and (
+                        prior_audit is not None
+                        or corrective_audit is not None
+                        or verified_repair_audit is not None
+                        or codefix_compensation_audit is not None
+                        or drama_capability_audit is not None
+                        or not drama_capability_message_matches
                     )
                 )
             )
@@ -7092,7 +7241,11 @@ class XPostStore:
                         else (
                             "verified_repair"
                             if verified_repair_recovery
-                            else "codefix_compensation"
+                            else (
+                                "codefix_compensation"
+                                if codefix_compensation
+                                else "drama_capability_fallback"
+                            )
                         )
                     )
                 ),
@@ -7115,7 +7268,9 @@ class XPostStore:
                     else ""
                 ),
                 "deployed_commit": (
-                    deployed_commit if codefix_compensation else ""
+                    deployed_commit
+                    if (codefix_compensation or drama_capability_recovery)
+                    else ""
                 ),
                 "compensation_publish_time": (
                     normalized_compensation_time
@@ -7209,7 +7364,31 @@ class XPostStore:
                 log_count,
                 timestamp,
             )
-            if initial_recovery:
+            if drama_capability_recovery:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_drama_capability_recovery_audit("
+                    "schedule_run_id,recovery_reason,actor,deployed_commit,"
+                    "previous_status,previous_error_code,"
+                    "previous_error_message,previous_started_at,"
+                    "previous_finished_at,validated_queue_count,"
+                    "validated_log_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        reason,
+                        actor,
+                        deployed_commit,
+                        str(run["status"]),
+                        str(run["error_code"]),
+                        redact_text(run["error_message"], 500),
+                        str(run["started_at"]),
+                        str(run["finished_at"]),
+                        queue_count,
+                        log_count,
+                        timestamp,
+                    ),
+                )
+            elif initial_recovery:
                 conn.execute(
                     "INSERT INTO x_post_schedule_recovery_audit("
                     "schedule_run_id,recovery_reason,actor,previous_status,"
@@ -7283,6 +7462,7 @@ class XPostStore:
         publish_time,
         config_version,
         candidates,
+        premium_account_ids=None,
     ):
         source_type = _schedule_source_type(source_type)
         run_date = _date_value(run_date, "run_date")
@@ -7649,7 +7829,8 @@ class XPostStore:
                 assignments = self._drama_assignment_candidates(
                     conn,
                     account_ids,
-                    len(account_ids),
+                    1000,
+                    premium_account_ids=premium_account_ids,
                 )
                 if len(assignments) != len(prepared):
                     conn.rollback()

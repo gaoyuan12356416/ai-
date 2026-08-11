@@ -688,6 +688,156 @@ class ScheduleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(sidecar.checks, [])
 
+    def test_unassigned_long_drama_skips_when_only_premium_is_owned(self):
+        class Connection:
+            def close(self):
+                return None
+
+        class DramaSidecar:
+            def __init__(self):
+                self.checks = []
+                self.available_calls = 0
+
+            def available_drama_pool(self, _path, _limit, _account_ids):
+                self.available_calls += 1
+                unassigned = (
+                    {
+                        "id": 138,
+                        "content_id": "LONG",
+                        "created_at": "2026-08-11T01:00:00+00:00",
+                        "next_sub_number": 1,
+                        "assigned_account_id": 0,
+                        "candidate_account_id": 10,
+                    }
+                    if not self.checks
+                    else {
+                        "id": 136,
+                        "content_id": "SHORT",
+                        "created_at": "2026-08-10T23:00:00+00:00",
+                        "next_sub_number": 1,
+                        "assigned_account_id": 0,
+                        "candidate_account_id": 10,
+                    }
+                )
+                return [
+                    unassigned,
+                    {
+                        "id": 137,
+                        "content_id": "OWNER",
+                        "created_at": "2026-08-11T00:00:00+00:00",
+                        "next_sub_number": 2,
+                        "assigned_account_id": 9,
+                        "candidate_account_id": 9,
+                    },
+                ]
+
+            def record_drama_pool_checks(self, _path, checks):
+                self.checks.extend(checks)
+                return {"updated_count": len(checks)}
+
+        def selected(_connection, pool_items, **_kwargs):
+            return [
+                {
+                    "drama_pool_item_id": item["id"],
+                    "drama_pool_created_at": item["created_at"],
+                    "episode_number": item["next_sub_number"],
+                    "sub_num": item["next_sub_number"],
+                    "episode_key": "%s:%s"
+                    % (item["content_id"], item["next_sub_number"]),
+                    "material_key": "",
+                    "material_id": str(item["id"]),
+                    "content_id": item["content_id"],
+                    "material_url": "https://media.example.test/%s.mp4"
+                    % item["id"],
+                    "material_name": "Episode",
+                    "material_language": "en",
+                    "drama_name": "Drama",
+                    "tag": "Drama",
+                    "name_tag": "#Drama",
+                    "description": "A complete episode description.",
+                    "free_episode_count": 20,
+                    "assigned_account_id": item["assigned_account_id"],
+                    "candidate_account_id": item["candidate_account_id"],
+                    "spend": 0,
+                    "facebook_violation_count": 0,
+                    "tiktok_violation_count": 0,
+                    "twitter_violation_count": 0,
+                    "resource_audit_count": 0,
+                    "dangerous_tag_count": 0,
+                }
+                for item in pool_items
+            ]
+
+        preflight_calls = []
+
+        def preflight(
+            _config,
+            candidate,
+            account,
+            _rank,
+            _timestamp,
+            _destination,
+            _downloader,
+            _prober,
+            **_kwargs,
+        ):
+            preflight_calls.append((candidate["content_id"], account["id"]))
+            if candidate["content_id"] == "LONG":
+                raise CandidatePreflightError(
+                    "Videos longer than 140 seconds require Premium",
+                    code="x_long_video_requires_premium",
+                )
+            return {
+                "account_id": account["id"],
+                "content_id": candidate["content_id"],
+            }
+
+        sidecar = DramaSidecar()
+        accounts = [
+            {
+                "id": 10,
+                "username": "standard",
+                "long_video_eligible": False,
+            },
+            {
+                "id": 9,
+                "username": "owned-premium",
+                "long_video_eligible": True,
+            },
+        ]
+        with mock.patch(
+            "scripts.x_post_schedule_runner.select_drama_pool_episodes",
+            side_effect=selected,
+        ), mock.patch(
+            "scripts.x_post_schedule_runner._preflight_candidate",
+            side_effect=preflight,
+        ):
+            planned = _drama_candidates(
+                self.config,
+                sidecar,
+                accounts,
+                source_date="2026-08-11",
+                connection_factory=lambda _config: Connection(),
+                downloader=object(),
+                prober=object(),
+                repair_client=None,
+                timestamp=1,
+            )
+
+        self.assertEqual(sidecar.available_calls, 2)
+        self.assertEqual(
+            [(item["pool_item_id"], item["error_code"]) for item in sidecar.checks],
+            [(138, "x_long_video_requires_premium")],
+        )
+        self.assertEqual(
+            [(item["account_id"], item["content_id"]) for item in planned],
+            [(10, "SHORT"), (9, "OWNER")],
+        )
+        self.assertEqual(
+            preflight_calls,
+            [("LONG", 10), ("SHORT", 10), ("OWNER", 9)],
+        )
+
     def test_plan_query_requires_exact_frozen_identity_and_account_order(self):
         identity = due_item(accounts=[11, 12])
         client = StubScheduleClient(

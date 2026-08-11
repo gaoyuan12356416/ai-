@@ -1702,6 +1702,61 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(assigned, [("LONG", 2), ("SHORT", 3)])
 
+    def test_retryable_long_drama_skips_without_free_premium(self):
+        saved = self.save_schedule("drama", [2, 3], ["09:00"])
+        older_short = self.add_drama(content_id="OLDER-SHORT")
+        newer_short = self.add_drama(content_id="NEWER-SHORT")
+        newest_long = self.add_drama(content_id="NEWEST-LONG")
+        recorded = self.store.record_drama_pool_checks(
+            [
+                {
+                    "pool_item_id": newest_long["id"],
+                    "content_id": newest_long["content_id"],
+                    "error_code": "x_long_video_requires_premium",
+                    "error_message": (
+                        "Videos longer than 140 seconds require a "
+                        "token-confirmed X Premium subscription"
+                    ),
+                }
+            ]
+        )
+        self.assertEqual(recorded["updated_count"], 1)
+
+        available = self.store.available_drama_pool_items(
+            limit=1000,
+            account_ids=[2, 3],
+            premium_account_ids=[],
+        )
+        self.assertEqual(
+            [(item["candidate_account_id"], item["id"]) for item in available],
+            [(2, newer_short["id"]), (3, older_short["id"])],
+        )
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            saved["version"],
+            [
+                self.drama_candidate(newer_short, 2, 1),
+                self.drama_candidate(older_short, 3, 1),
+            ],
+            premium_account_ids=[],
+        )
+        self.assertEqual(
+            [(item["account_id"], item["content_id"]) for item in plan["queues"]],
+            [(2, "NEWER-SHORT"), (3, "OLDER-SHORT")],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            long_row = conn.execute(
+                "SELECT status,assigned_account_id,last_error_code "
+                "FROM x_post_drama_pool WHERE id=?",
+                (newest_long["id"],),
+            ).fetchone()
+        self.assertEqual(
+            long_row,
+            ("pending", 0, "x_long_video_requires_premium"),
+        )
+
     def test_legacy_frozen_cross_account_queue_is_blocked_before_publish(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
@@ -2909,6 +2964,118 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_failed_preflight_recovery_conflict",
         )
 
+    def test_drama_capability_fallback_recovery_is_commit_bound_and_once(self):
+        failed = self._failed_schedule_run(source_type="drama")
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        message = (
+            "episode DRAMA-LONG:1 media preflight failed: "
+            "Videos longer than 140 seconds require a token-confirmed "
+            "X Premium subscription"
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_long_video_requires_premium",
+            message,
+        )
+
+        with self.assertRaises(service.XPostError) as missing_commit:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_long_video_requires_premium",
+                reason=(
+                    service.FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON
+                ),
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            missing_commit.exception.code,
+            "x_post_failed_preflight_recovery_not_allowed",
+        )
+
+        deployed_commit = "c" * 40
+        validated = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_long_video_requires_premium",
+            reason=service.FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit=deployed_commit,
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(
+            validated["recovery_mode"],
+            "drama_capability_fallback",
+        )
+        self.assertEqual(validated["deployed_commit"], deployed_commit)
+        self.assertEqual(validated["updated_count"], 0)
+
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_long_video_requires_premium",
+            reason=service.FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit=deployed_commit,
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        self.assertEqual(
+            self.store.get_schedule_run(failed["id"])["status"],
+            "claimed",
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT recovery_reason,actor,deployed_commit,"
+                "previous_status,previous_error_code,"
+                "validated_queue_count,validated_log_count "
+                "FROM x_post_schedule_drama_capability_recovery_audit "
+                "WHERE schedule_run_id=?",
+                (failed["id"],),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON,
+                "codex_operator",
+                deployed_commit,
+                "failed_preflight",
+                "x_long_video_requires_premium",
+                0,
+                0,
+            ),
+        )
+
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_long_video_requires_premium",
+            message,
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_long_video_requires_premium",
+                reason=(
+                    service.FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON
+                ),
+                actor="codex_operator",
+                deployed_commit=deployed_commit,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_schema_is_additive_and_integrity_check_passes(self):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             tables = {
@@ -2927,6 +3094,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
             self.assertIn(
                 "x_post_schedule_codefix_compensation_audit",
+                tables,
+            )
+            self.assertIn(
+                "x_post_schedule_drama_capability_recovery_audit",
                 tables,
             )
             self.assertIn("x_post_schedule_random_plan", tables)
