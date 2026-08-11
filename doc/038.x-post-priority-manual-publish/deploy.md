@@ -93,3 +93,42 @@
 2. 停止 Sidecar，将 `/opt/x-post-automation/current` 原子切回 `70768ec1741caad08a9dd49ba11b9639839dad14`。
 3. 从 `20260811T075304Z-manual-duration-fc237746` 仅恢复主后台 `features/x_posts/service.py`、`selector.py`、应用静态页和 Nginx 公网页面；不恢复 SQLite 或 token。
 4. 启动 Sidecar、重启主后台并恢复三个 timer；重新核对 queue/log/Post/unknown 与 SQLite 完整性。
+
+## 2026-08-11 短剧高优 PUT 502 修复记录
+
+- 真实请求：15:42:54、15:43:03 对池记录 `137` 的两次
+  `PUT /api/admin/x-posts/drama-pool/137/priority` 均由 Nginx 返回 502；主 API
+  traceback 定位到 `app.py#do_PUT` 的 `NameError: name 'urllib' is not defined`。
+- 状态确认：两次请求均未到达 Sidecar，池 `137` 保持 `pending`、未绑定且
+  `priority_at=''`，当时高优记录数为 `0`，无半成功状态。
+- GitHub 修复提交：`ae0b5a99f29506a4651b2c860d3a3a1306d787b8`；精确源 checkout：
+  `/mnt/data-disk/x-post-automation/releases/ae0b5a99f29506a4651b2c860d3a3a1306d787b8`。
+  checkout 的父提交 `app.py` 与部署前主 API 文件逐字节一致，新文件仅有一行替换，
+  SHA-256 为 `2cf6be5f28ba6ec3039cb2b596ec4cc9d418d10f89939808324b904ff3488dac`。
+- 回滚备份：
+  `/mnt/data-disk/x-post-automation/backups/20260811T081818Z-drama-priority-put-ae0b5a9`；
+  包含旧 `app.py`、主 API unit、服务/账本基线、SQLite 在线备份和 15 个 Token 的
+  非敏感 hash/mode/owner 清单，`SHA256SUMS` 与 `integrity_check=ok` 均通过。
+- 本地验证：`app.py` 编译通过；路由合同 27 项、X Post 330 项（1 项既有环境门禁
+  跳过）、X 账号 58 项通过。Linux 精确 checkout 的路由合同 27 项通过。
+- 仅替换 `/root/drama_material_service/app.py` 并重启
+  `drama-material-api.service`。首轮验收脚本错误地预期匿名请求返回 403，实际正确合同
+  为 401；trap 已自动恢复旧文件并重启，确认账本不变后按正确合同重新部署成功。
+- 部署后 loopback 与公网匿名 PUT 均稳定返回 `401 auth_required`，不再断链或 502；
+  新主 API PID 日志无 traceback，公网短剧池页面 HTTP 200。
+- Sidecar PID 与并行前进的 release
+  `e4d0b032491c271591ce7016d3559c8af6105073` 均未改变；manual/schedule/claim
+  timers 保持 active。部署即时账本仍为 queue/log/确认 Post `151/151/150`、unknown
+  `0`、活跃 queue `0`，本修复没有创建 Post。
+- 部署完成后，另一管理员“苏斯琪”独立创建 manual run `4`，其 queue/log `152`
+  在 16:25:07 正常完成，最终全局计数变为 `152/152/151`、unknown/active `0`；该
+  Post 与部署、高优接口验收无关。
+- Chrome 扩展在确认池 `137` 高优后、发出 PUT 之前超时；Nginx、Sidecar 和 SQLite
+  均证明没有新增高优请求。为避免重发，池 `137` 有意保持未高优，交由管理员在页面
+  重新点击一次。
+
+### 本次精确回滚点
+
+仅回滚主 API 文件：将备份中的 `app.py.before` 以 `0644 root:root` 原子恢复到
+`/root/drama_material_service/app.py`，然后只重启 `drama-material-api.service`。
+不要切换 Sidecar release、恢复 SQLite/Token 或停止发布 timers。
