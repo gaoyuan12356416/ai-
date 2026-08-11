@@ -408,7 +408,12 @@ def make_random_overlay_config(root, gates=False, **overrides):
     categories = {}
     for category in ("border", "light", "opacity_video", "corners", "tint"):
         suffix = ".png" if category in {"border", "tint"} else ".webm"
-        name = "%s-01%s" % (category.replace("_", "-"), suffix)
+        asset_index = 2 if category == "light" else 1
+        name = "%s-%02d%s" % (
+            category.replace("_", "-"),
+            asset_index,
+            suffix,
+        )
         payload = ("asset:" + category).encode("ascii")
         (asset_root / name).write_bytes(payload)
         categories[category] = [
@@ -1755,7 +1760,8 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertTrue(-2000 <= recipe["rotation_millidegrees"] <= 2000)
         self.assertTrue(9800 <= recipe["scale_bp"] <= 10200)
-        self.assertTrue(1000 <= recipe["tint_opacity_bp"] <= 2000)
+        self.assertTrue(100 <= recipe["tint_opacity_bp"] <= 1000)
+        self.assertNotEqual(recipe["assets"]["light"]["name"], "light-01.webm")
         manifest = worker._read_json(
             processor._prepare_manifest_path(JOB_ID)
         )

@@ -23,6 +23,8 @@
 | TC-13 | 新 profile/trim mismatch | CPU/GPU 启动或 prepare fail closed | P0 |
 | TC-14 | `source_direct`/`direct_outro` 回归 | 旧模式测试不变 | P0 |
 | TC-15 | 离线完整合成 | 720x1280/30fps/yuv420p/AAC-LC，时长匹配 | P0 |
+| TC-16 | 光效随机选择 | `light-01.webm` 永不进入新配方，光效类只选择光效2 | P0 |
+| TC-17 | 模板音频审计 | 原始 GIF/PNG 与转换资产均无音频，成片只映射源素材音轨 | P0 |
 
 ## 回归范围
 

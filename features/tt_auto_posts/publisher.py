@@ -51,8 +51,8 @@ SOURCE_DIRECT_MEDIA_PROFILE = "tt-post-source-direct-v1"
 ZERO_TRIM_MEDIA_PROFILES = frozenset(
     {
         SOURCE_DIRECT_MEDIA_PROFILE,
-        "tt-post-random-overlay-hevc-720x1280-v1",
-        "tt-post-random-overlay-h264-720x1280-v1",
+        "tt-post-random-overlay-hevc-720x1280-v2",
+        "tt-post-random-overlay-h264-720x1280-v2",
     }
 )
 TERMINAL_TASK_STATUSES = frozenset(

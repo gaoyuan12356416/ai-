@@ -59,7 +59,7 @@ class RandomOverlayTests(unittest.TestCase):
             kwargs = {
                 "job_id": "job-12345678",
                 "content_id": "DRAMA123",
-                "profile": "tt-post-random-overlay-hevc-720x1280-v1",
+                "profile": "tt-post-random-overlay-hevc-720x1280-v2",
                 "source_url_sha256": "a" * 64,
                 "asset_set": assets,
             }
@@ -69,7 +69,8 @@ class RandomOverlayTests(unittest.TestCase):
             self.assertEqual(set(first["assets"]), set(CATEGORIES))
             self.assertTrue(-2000 <= first["rotation_millidegrees"] <= 2000)
             self.assertTrue(9800 <= first["scale_bp"] <= 10200)
-            self.assertTrue(1000 <= first["tint_opacity_bp"] <= 2000)
+            self.assertTrue(100 <= first["tint_opacity_bp"] <= 1000)
+            self.assertEqual(first["assets"]["light"]["name"], "light-00.webm")
             validate_recipe(first, assets)
 
     def test_asset_tamper_and_recipe_tamper_fail_closed(self):
@@ -80,7 +81,7 @@ class RandomOverlayTests(unittest.TestCase):
             recipe = derive_recipe(
                 job_id="job-12345678",
                 content_id="DRAMA123",
-                profile="tt-post-random-overlay-hevc-720x1280-v1",
+                profile="tt-post-random-overlay-hevc-720x1280-v2",
                 source_url_sha256="b" * 64,
                 asset_set=assets,
             )
@@ -104,7 +105,7 @@ class RandomOverlayTests(unittest.TestCase):
         recipe = {
             "rotation_millidegrees": -1250,
             "scale_bp": 10125,
-            "tint_opacity_bp": 1750,
+            "tint_opacity_bp": 750,
         }
         command = build_random_overlay_command(
             config,
@@ -118,7 +119,7 @@ class RandomOverlayTests(unittest.TestCase):
         graph = command[command.index("-filter_complex") + 1]
         self.assertIn("rotate=-1.250000*PI/180", graph)
         self.assertIn("iw*1.0125", graph)
-        self.assertIn("colorchannelmixer=aa=0.1750", graph)
+        self.assertIn("colorchannelmixer=aa=0.0750", graph)
         self.assertLess(graph.index("[base][tint]"), graph.index("[o1][opacity]"))
         self.assertLess(graph.index("[o1][opacity]"), graph.index("[o2][light]"))
         self.assertLess(graph.index("[o2][light]"), graph.index("[o3][border]"))

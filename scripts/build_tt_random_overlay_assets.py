@@ -82,7 +82,7 @@ def discover(source_root: Path) -> dict[str, list[Path]]:
 def png_command(ffmpeg: str, source: Path, output: Path, category: str) -> list[str]:
     filters = ["scale=720:1280:flags=lanczos", "format=rgba"]
     if category == "tint":
-        # Runtime opacity is absolute 10%-20%, so remove embedded export alpha.
+        # Runtime opacity is absolute 1%-10%, so remove embedded export alpha.
         filters.append("lut=a=255")
     return [
         ffmpeg,
@@ -231,7 +231,8 @@ def build(source_root: Path, output_root: Path, ffmpeg: str, ffprobe: str) -> st
                 "canvas": "720x1280",
                 "light_black_key": "0.02/0.10",
                 "opacity_video_alpha_cap": "13/255",
-                "tint_runtime_opacity_bp": [1000, 2000],
+                "disabled_runtime_assets": ["light-01.webm"],
+                "tint_runtime_opacity_bp": [100, 1000],
             },
             "sources": source_contract,
             "version": 1,

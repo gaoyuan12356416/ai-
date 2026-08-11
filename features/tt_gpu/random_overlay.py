@@ -11,6 +11,7 @@ from typing import Any, Dict, Mapping
 
 
 CATEGORIES = ("border", "light", "opacity_video", "corners", "tint")
+DISABLED_ASSET_NAMES = {"light": frozenset({"light-01.webm"})}
 HEX_64_RE = re.compile(r"[0-9a-f]{64}")
 SAFE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 
@@ -155,7 +156,16 @@ def derive_recipe(
         rows = categories.get(category)
         if not isinstance(rows, (tuple, list)) or not rows:
             raise RandomOverlayError("overlay category is unavailable")
-        row = rows[_seed(identity, "asset:%s" % category) % len(rows)]
+        eligible_rows = [
+            row
+            for row in rows
+            if row.get("name") not in DISABLED_ASSET_NAMES.get(category, ())
+        ]
+        if not eligible_rows:
+            raise RandomOverlayError("overlay category has no eligible assets")
+        row = eligible_rows[
+            _seed(identity, "asset:%s" % category) % len(eligible_rows)
+        ]
         selected[category] = {
             "media_type": row["media_type"],
             "name": row["name"],
@@ -171,7 +181,7 @@ def derive_recipe(
         "assets": selected,
         "rotation_millidegrees": bounded("rotation", -2000, 2000),
         "scale_bp": bounded("scale", 9800, 10200),
-        "tint_opacity_bp": bounded("tint-opacity", 1000, 2000),
+        "tint_opacity_bp": bounded("tint-opacity", 100, 1000),
         "version": 1,
     }
     validate_recipe(recipe, asset_set)
@@ -201,7 +211,7 @@ def validate_recipe(recipe: Any, asset_set: Mapping[str, Any]) -> None:
         opacity = int(recipe.get("tint_opacity_bp"))
     except (TypeError, ValueError, OverflowError) as exc:
         raise RandomOverlayError("overlay recipe parameters are invalid") from exc
-    if not (-2000 <= rotation <= 2000 and 9800 <= scale <= 10200 and 1000 <= opacity <= 2000):
+    if not (-2000 <= rotation <= 2000 and 9800 <= scale <= 10200 and 100 <= opacity <= 1000):
         raise RandomOverlayError("overlay recipe parameters are outside contract")
     selected = recipe.get("assets")
     categories = asset_set.get("categories")
@@ -221,6 +231,8 @@ def validate_recipe(recipe: Any, asset_set: Mapping[str, Any]) -> None:
             item
             for item in candidates or ()
             if item.get("name") == row.get("name")
+            and item.get("name")
+            not in DISABLED_ASSET_NAMES.get(category, ())
         ]
         if len(expected) != 1 or any(
             row.get(key) != expected[0].get(key)
