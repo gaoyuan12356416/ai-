@@ -99910,10 +99910,13 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_PUT(self):
-        parsed = urllib.parse.urlparse(self.path)
-        if re.fullmatch(
-            r"/api/admin/x-posts/drama-pool/([0-9]+)/priority",
-            parsed.path,
+        parsed = urlparse(self.path)
+        x_post_schedule_paths = {
+            "/api/admin/x-posts/material-pool/schedule",
+            "/api/admin/x-posts/drama-pool/schedule",
+        }
+        if parsed.path in x_post_schedule_paths or re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/priority", parsed.path
         ):
             self.do_POST()
             return

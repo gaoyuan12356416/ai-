@@ -834,18 +834,33 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertIn('"set_x_post_drama_pool_priority"', route)
         self.assertIn('"set_x_post_drama_pool_priority_failed"', route)
         self.assertIn("no_store=True", route)
-        self.assertIn("def do_PUT(self):", APP_SOURCE)
-        self.assertIn(
-            'r"/api/admin/x-posts/drama-pool/([0-9]+)/priority"',
-            APP_SOURCE,
-        )
-        self.assertNotIn("def do_PUT(self):\n        self.do_POST()", APP_SOURCE)
         self.assertIn("def set_x_post_drama_pool_priority(", X_ACCOUNTS_CLIENT_SOURCE)
         self.assertIn(
             '"/internal/posts/drama-pool/%s/priority" % pool_item_id',
             X_ACCOUNTS_CLIENT_SOURCE,
         )
         self.assertIn("取消高优", X_POST_DRAMA_POOL_SOURCE)
+
+    def test_x_post_put_router_forwards_only_scoped_mutations(self):
+        put_route = source_between(
+            "    def do_PUT(self):",
+            "    def do_DELETE(self):",
+        )
+        self.assertIn("parsed = urlparse(self.path)", put_route)
+        for path in (
+            "/api/admin/x-posts/material-pool/schedule",
+            "/api/admin/x-posts/drama-pool/schedule",
+        ):
+            self.assertIn(f'"{path}"', put_route)
+        self.assertIn("parsed.path in x_post_schedule_paths", put_route)
+        self.assertIn(
+            'r"/api/admin/x-posts/drama-pool/([0-9]+)/priority"',
+            put_route,
+        )
+        self.assertEqual(put_route.count("self.do_POST()"), 1)
+        self.assertIn('json_response(self, 404, {"error": "not_found"})', put_route)
+        self.assertNotIn("urllib.parse.urlparse", put_route)
+        self.assertNotIn("def do_PUT(self):\n        self.do_POST()", APP_SOURCE)
 
     def test_manual_worker_sidecar_scope_and_public_response_are_fail_closed(self):
         for path in (
