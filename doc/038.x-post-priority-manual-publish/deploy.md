@@ -72,3 +72,24 @@
 3. 从备份 `rollback-files.tar` 仅恢复 `app.py`、X accounts client、应用静态页面和原 systemd unit；再从 `public-static-before-correction.tar` 将 3 个公网 X 页面恢复到 `/usr/share/nginx/html`。manual unit 保持禁用。
 4. `daemon-reload` 后启动 Sidecar、主后台和原两个 timer。
 5. 保留 additive schema 和任何后来产生的 manual run/queue/log，不删除、不重放；按备份 `baseline.json` 与部署结果重新核对账本。
+
+## 2026-08-11 手动超长原片修复部署记录
+
+- 生产根因：手动 selector 复用了自动素材池的 `video_duration<=600` SQL 条件；服务层又把 Ads promoted-video 的 600 秒边界误作 token 确认 Premium 账号的有机 Post 上限。
+- 用户授权的唯一真实边界 canary 使用账号 `13`、素材 `5286820`。原片实际 `763.938005` 秒、`162253615` 字节、720×1280、30fps、H.264/AAC；以 `amplify_video` 发布成功，queue/log `151`，X Post `2087081262754169202`，回读 `duration_ms=763938`、`unknown_outcome=0`。
+- canary 前备份：`/mnt/data-disk/x-post-automation/backups/20260811T073629Z-raw-763s-canary`，包含 SQLite 在线快照、15 个 token 文件、运行配置和原 release 链接。
+- 修复先提交为 `513af93d381ccfbb7faf167747c2f13e7dc326ad`，发现并行生产 release 已前进到 `70768ec1741caad08a9dd49ba11b9639839dad14` 后，以 merge commit `fc2377460da20ef59e53082609c421a79de1e972` 合并当前生产头再部署，未覆盖并行变更。
+- 当前 release：`/mnt/data-disk/x-post-automation/releases/fc2377460da20ef59e53082609c421a79de1e972`；上一 release `70768ec1741caad08a9dd49ba11b9639839dad14` 完整保留。
+- 部署备份：`/mnt/data-disk/x-post-automation/backups/20260811T075304Z-manual-duration-fc237746`；SQLite SHA-256 为 `d78c48e1de46fb350c0afa308af57d2169eec11cd5267343503899bf42c9fec7`，token 文件 15 个，另含主后台 overlay、公网页面、配置、units 和原 release 链接。
+- Windows 合并后回归：X Post `330` 项通过、`1` 项按设计跳过；X 账号/内部接口 `89` 项通过。Linux 目标 release 的本次聚焦回归 `119/119`、账号/接口 `89/89` 通过。Linux 全量测试中的 3 个失败/22 个错误与前一生产 release 完全同型，均源于测试夹具 `/tmp` 与 Linux 固定数据盘目录门禁冲突，不是本变更新增。
+- 切换时先持有 `/run/x-post-daily/runner.lock`，再短暂停止 manual/schedule/claim timers 与依赖 oneshot，原子切换 Sidecar release，并同步主后台 `service.py`、`selector.py` 和两份素材池静态页。所有失败的部署编排尝试均由 trap 自动切回旧 release；失败点仅为 systemd 并发事务、中文 SSH 校验字面量和一次 `curl` 参数拼写，账本在每次回滚后均未变化。
+- 最终验收：Sidecar cwd 指向新 release，health `ok`；主后台与公网文件 SHA-256 均与 release 一致，公网 HTTP 200；运行策略为 `PREMIUM_MAX_DURATION_SECONDS=14400.0`，手动 selector 参数为 `allow_long_duration=False`（仅手动调用显式开启）。
+- 部署前后均为 queue `151`、log `151`、published/确认 Post `150/150`、unknown `0`、活跃 queue `0`，`integrity_check=ok`；没有第二次真实发布。生产批次 `#3` 保持 `failed_preflight` 且未重放，canary log `151` 保持 `published`。
+- 自然 timer 证据：manual timer 连续返回 `no_pending`；schedule/claim 正常 `Succeeded`，三个 timer 均 `active/enabled`。
+
+### 本次精确回滚点
+
+1. 获取共享发布锁并停止 manual/schedule/claim timers 与依赖 oneshot。
+2. 停止 Sidecar，将 `/opt/x-post-automation/current` 原子切回 `70768ec1741caad08a9dd49ba11b9639839dad14`。
+3. 从 `20260811T075304Z-manual-duration-fc237746` 仅恢复主后台 `features/x_posts/service.py`、`selector.py`、应用静态页和 Nginx 公网页面；不恢复 SQLite 或 token。
+4. 启动 Sidecar、重启主后台并恢复三个 timer；重新核对 queue/log/Post/unknown 与 SQLite 完整性。
