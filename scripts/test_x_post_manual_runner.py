@@ -123,9 +123,19 @@ class XPostManualRunnerTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def execute(self, sidecar):
+        # ScheduleConfig's fixed Linux data-disk path is covered by the
+        # schedule-runner configuration tests.  These orchestration tests use
+        # an isolated temporary work directory on every OS, so mock only that
+        # outer validation boundary instead of touching production paths.
+        with mock.patch(
+            "scripts.x_post_manual_runner.ScheduleConfig.validate"
+        ):
+            return execute_manual_tick(self.config, sidecar=sidecar)
+
     def test_no_pending_run_performs_no_preflight_or_publish(self):
         sidecar = FakeManualSidecar(None)
-        result = execute_manual_tick(self.config, sidecar=sidecar)
+        result = self.execute(sidecar)
         self.assertEqual(result, {"status": "no_pending"})
         self.assertEqual(sidecar.calls, [("claim",)])
 
@@ -135,7 +145,7 @@ class XPostManualRunnerTests(unittest.TestCase):
             "scripts.x_post_manual_runner._manual_candidates",
             return_value=planned_candidates(),
         ) as preflight:
-            result = execute_manual_tick(self.config, sidecar=sidecar)
+            result = self.execute(sidecar)
 
         self.assertEqual(result["manual_run_id"], 71)
         self.assertEqual(result["attempted_count"], 2)
@@ -157,7 +167,7 @@ class XPostManualRunnerTests(unittest.TestCase):
         with mock.patch(
             "scripts.x_post_manual_runner._manual_candidates"
         ) as preflight:
-            result = execute_manual_tick(self.config, sidecar=sidecar)
+            result = self.execute(sidecar)
         preflight.assert_not_called()
         self.assertTrue(result["resumed_existing_plan"])
         self.assertEqual(
@@ -174,7 +184,7 @@ class XPostManualRunnerTests(unittest.TestCase):
                 ]
             )
         )
-        result = execute_manual_tick(self.config, sidecar=sidecar)
+        result = self.execute(sidecar)
         self.assertEqual(result["status"], "stopped")
         self.assertTrue(result["results"][0]["unknown_outcome"])
         self.assertEqual(sidecar.calls, [("claim",)])
@@ -185,7 +195,7 @@ class XPostManualRunnerTests(unittest.TestCase):
         sidecar.publish_errors[801] = SidecarError(
             "invalid_media_type", "known rejection", 409
         )
-        result = execute_manual_tick(self.config, sidecar=sidecar)
+        result = self.execute(sidecar)
         self.assertEqual(result["status"], "completed_with_errors")
         self.assertEqual(
             [call[1] for call in sidecar.calls if call[0] == "publish"],
@@ -196,7 +206,7 @@ class XPostManualRunnerTests(unittest.TestCase):
         rate_limited.publish_errors[801] = SidecarError(
             "x_post_rate_limited", "rate limited", 429
         )
-        result = execute_manual_tick(self.config, sidecar=rate_limited)
+        result = self.execute(rate_limited)
         self.assertEqual(result["status"], "stopped")
         self.assertEqual(
             [call[1] for call in rate_limited.calls if call[0] == "publish"],
@@ -212,7 +222,7 @@ class XPostManualRunnerTests(unittest.TestCase):
                 "x_post_manual_source_preflight_failed",
             ),
         ):
-            result = execute_manual_tick(self.config, sidecar=sidecar)
+            result = self.execute(sidecar)
         self.assertEqual(result["status"], "failed_preflight")
         self.assertTrue(result["failure_recorded"])
         self.assertNotIn("plan", [call[0] for call in sidecar.calls])
@@ -235,7 +245,7 @@ class XPostManualRunnerTests(unittest.TestCase):
             return_value=planned_candidates(),
         ):
             with self.assertRaises(SidecarError):
-                execute_manual_tick(self.config, sidecar=sidecar)
+                self.execute(sidecar)
         self.assertNotIn("failure", [call[0] for call in sidecar.calls])
         self.assertNotIn("publish", [call[0] for call in sidecar.calls])
 
