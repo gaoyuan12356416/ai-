@@ -99910,7 +99910,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_PUT(self):
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urlparse(self.path)
         if re.fullmatch(
             r"/api/admin/x-posts/drama-pool/([0-9]+)/priority",
             parsed.path,

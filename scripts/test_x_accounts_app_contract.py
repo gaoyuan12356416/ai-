@@ -839,6 +839,12 @@ class XAccountsAppContractTest(unittest.TestCase):
             'r"/api/admin/x-posts/drama-pool/([0-9]+)/priority"',
             APP_SOURCE,
         )
+        put_route = source_between(
+            "    def do_PUT(self):",
+            "    def do_DELETE(self):",
+        )
+        self.assertIn("parsed = urlparse(self.path)", put_route)
+        self.assertNotIn("urllib.parse.urlparse", put_route)
         self.assertNotIn("def do_PUT(self):\n        self.do_POST()", APP_SOURCE)
         self.assertIn("def set_x_post_drama_pool_priority(", X_ACCOUNTS_CLIENT_SOURCE)
         self.assertIn(
