@@ -6,7 +6,7 @@
 
 ## 配置项
 
-- 新服务配置独立放入 root-only `/etc/x-auto-post.env`。
+- 新服务非敏感配置独立放入 root-owned `/etc/x-auto-post.env`；bearer 与只读数据库凭据仅放入 `root:x-post-daily`、`0440` 的 `/etc/x-auto-post.secrets`。
 - 三道生产闸门首次部署均为 `0`：
   - `X_AUTO_POST_LIVE_ENABLED`
   - `X_AUTO_POST_ACCOUNT_AUDIT_APPROVED`
