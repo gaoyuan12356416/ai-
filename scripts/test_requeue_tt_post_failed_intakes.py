@@ -19,6 +19,10 @@ from scripts.requeue_tt_post_failed_intakes import (
     FailedIntakeRecoveryError,
     apply_recovery,
     plan_recovery,
+    preparation_job_id as recovery_preparation_job_id,
+)
+from scripts.upgrade_tt_post_recurring_profile import (
+    preparation_job_id as canonical_preparation_job_id,
 )
 
 
@@ -203,6 +207,17 @@ class FailedIntakeRecoveryTest(unittest.TestCase):
         with self.assertRaises(FailedIntakeRecoveryError) as caught:
             self._plan()
         self.assertEqual(caught.exception.code, "tt_post_failed_intake_lineage_conflict")
+
+    def test_recovery_job_identity_matches_existing_upgrade_tool(self):
+        material = {
+            "material_id": "4001",
+            "content_id": "C000004001",
+            "source_media_url": "https://cdn.example.com/4001.mp4",
+        }
+        self.assertEqual(
+            recovery_preparation_job_id(material, TARGET_PROFILE, 0.0),
+            canonical_preparation_job_id(material, TARGET_PROFILE, 0.0),
+        )
 
 
 if __name__ == "__main__":

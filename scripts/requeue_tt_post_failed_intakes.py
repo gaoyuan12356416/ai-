@@ -24,15 +24,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from scripts.upgrade_tt_post_recurring_profile import (  # noqa: E402
-    preparation_job_id,
-)
-
-
 PRODUCTION_DB_PATH = "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3"
 PRODUCTION_AUTO_DB_PATH = (
     "/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3"
@@ -51,6 +42,28 @@ class FailedIntakeRecoveryError(RuntimeError):
     def __init__(self, code: str, message: str):
         self.code = str(code or "tt_post_failed_intake_recovery_failed")[:96]
         super().__init__(str(message or "TT Post intake recovery failed")[:500])
+
+
+def preparation_job_id(
+    material: Mapping[str, Any],
+    target_profile: str,
+    source_trim_tail_seconds: float,
+) -> str:
+    """Match the production TTPostService preparation identity exactly."""
+
+    source_url_hash = hashlib.sha256(
+        str(material["source_media_url"]).encode("utf-8")
+    ).hexdigest()
+    identity = "|".join(
+        (
+            str(material["material_id"]),
+            str(material["content_id"]),
+            source_url_hash,
+            target_profile,
+            str(source_trim_tail_seconds),
+        )
+    )
+    return "ttpreview-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:36]
 
 
 def _utc_now() -> str:
