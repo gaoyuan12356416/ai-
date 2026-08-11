@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts.service import (  # noqa: E402
+    FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
     FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
     FAILED_PREFLIGHT_RECOVERY_REASON,
     FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
@@ -39,6 +40,8 @@ def execute_recovery(
     reason,
     actor,
     verified_repair_job_key="",
+    deployed_commit="",
+    compensation_publish_time="",
     validate_only=False,
     db_path=DB_PATH,
     lock_factory=process_lock,
@@ -58,6 +61,8 @@ def execute_recovery(
             reason=reason,
             actor=actor,
             verified_repair_job_key=verified_repair_job_key,
+            deployed_commit=deployed_commit,
+            compensation_publish_time=compensation_publish_time,
             validate_only=validate_only,
         )
     result = dict(result)
@@ -78,16 +83,19 @@ def _argument_parser():
         "--reason",
         required=True,
         help=(
-            "Must equal %s, %s, or %s"
+            "Must equal %s, %s, %s, or %s"
             % (
                 FAILED_PREFLIGHT_RECOVERY_REASON,
                 FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
                 FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
+                FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
             )
         ),
     )
     parser.add_argument("--actor", required=True)
     parser.add_argument("--verified-repair-job-key", default="")
+    parser.add_argument("--deployed-commit", default="")
+    parser.add_argument("--compensation-publish-time", default="")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--report-path")
     return parser
@@ -111,6 +119,8 @@ def main(argv=None):
             reason=args.reason,
             actor=args.actor,
             verified_repair_job_key=args.verified_repair_job_key,
+            deployed_commit=args.deployed_commit,
+            compensation_publish_time=args.compensation_publish_time,
             validate_only=bool(args.validate_only),
         )
     except XPostError as exc:

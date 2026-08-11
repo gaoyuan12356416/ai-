@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from features.x_posts.service import (  # noqa: E402
+    FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
     FAILED_PREFLIGHT_RECOVERY_REASON,
 )
 from scripts.x_post_schedule_failed_preflight_recover import (  # noqa: E402
@@ -46,6 +47,8 @@ class FakeStore:
         reason,
         actor,
         verified_repair_job_key="",
+        deployed_commit="",
+        compensation_publish_time="",
         validate_only=False,
     ):
         self.calls.append(
@@ -55,6 +58,8 @@ class FakeStore:
                 reason,
                 actor,
                 verified_repair_job_key,
+                deployed_commit,
+                compensation_publish_time,
                 validate_only,
             )
         )
@@ -129,6 +134,44 @@ class FailedPreflightScheduleRecoveryTests(unittest.TestCase):
         self.assertEqual(
             result["error_code"],
             "x_post_failed_preflight_recovery_report_required",
+        )
+
+    def test_codefix_compensation_proof_is_forwarded(self):
+        job_key = "a" * 64
+        deployed_commit = "b" * 40
+        with mock.patch(
+            "scripts.x_post_schedule_failed_preflight_recover.execute_recovery",
+            return_value={"status": "validated"},
+        ) as execute, mock.patch("builtins.print"):
+            exit_code = main(
+                [
+                    "--run-id",
+                    "103",
+                    "--expected-error-code",
+                    "x_post_media_repair_invalid_response",
+                    "--reason",
+                    FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
+                    "--actor",
+                    "codex_operator",
+                    "--verified-repair-job-key",
+                    job_key,
+                    "--deployed-commit",
+                    deployed_commit,
+                    "--compensation-publish-time",
+                    "12:40",
+                    "--validate-only",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        execute.assert_called_once_with(
+            "103",
+            "x_post_media_repair_invalid_response",
+            reason=FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
+            actor="codex_operator",
+            verified_repair_job_key=job_key,
+            deployed_commit=deployed_commit,
+            compensation_publish_time="12:40",
+            validate_only=True,
         )
 
     def test_unexpected_errors_do_not_leak_details(self):

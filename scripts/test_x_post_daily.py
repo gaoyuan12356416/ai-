@@ -2140,6 +2140,81 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(accepted[0]["preflight_duration"], 763.938005)
         self.assertEqual(accepted[0]["material_url"], item["material_url"])
 
+    def test_premium_repaired_download_keeps_account_duration_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(
+                test_config(account_ids=(13,)),
+                work_dir=temporary,
+                repair_url=(
+                    "http://127.0.0.1:18799/internal/x-post-media-repair"
+                ),
+                repair_token="repair-secret",
+            )
+            account = {
+                "id": 13,
+                "username": "premium13",
+                "x_user_id": "2013",
+                "display_name": "Premium 13",
+                "subscription_type": "premium",
+                "long_video_eligible": True,
+            }
+            item = candidate(137, 0)
+
+            class Repair:
+                def repair(self, payload):
+                    self_payload = repair_response(payload["job_key"])
+                    self_payload["probe"]["duration"] = 148.138
+                    return self_payload
+
+            def downloader(url, destination, _hosts, max_bytes, timeout):
+                body = (
+                    b"repaired"
+                    if url.startswith("https://cos.example.test/")
+                    else b"video"
+                )
+                Path(destination).write_bytes(body)
+                return {
+                    "size": len(body),
+                    "sha256": "b" * 64 if body == b"repaired" else "a" * 64,
+                    "media_type": "video/mp4",
+                }
+
+            probe_limits = []
+
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+                probe_limits.append(max_duration_seconds)
+                if Path(path).read_bytes() == b"video":
+                    raise XPostError(
+                        "invalid_media_dimensions",
+                        "source dimensions require repair",
+                        422,
+                    )
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 148.138,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            accepted, failures = _preflight_candidates(
+                config,
+                [item],
+                [account],
+                1784772000,
+                downloader,
+                prober,
+                Repair(),
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["preflight_duration"], 148.138)
+        self.assertEqual(probe_limits, [14400.0, 14400.0])
+
     def test_repair_quota_is_shared_across_all_repairable_errors(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = replace(

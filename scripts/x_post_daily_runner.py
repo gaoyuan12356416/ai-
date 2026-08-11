@@ -1443,7 +1443,13 @@ def _remove_preflight_file(destination):
         ) from None
 
 
-def _verify_repaired_download(worker_result, media, probe):
+def _verify_repaired_download(
+    worker_result,
+    media,
+    probe,
+    *,
+    max_duration_seconds=STANDARD_MAX_DURATION_SECONDS,
+):
     sha256, size = _media_fingerprint(media)
     if (
         sha256 != worker_result["output_sha256"]
@@ -1454,7 +1460,11 @@ def _verify_repaired_download(worker_result, media, probe):
             "Repaired media fingerprint does not match the GPU worker response",
             502,
         )
-    local_probe = _validate_repair_probe(probe, size)
+    local_probe = _validate_repair_probe(
+        probe,
+        size,
+        max_duration_seconds=max_duration_seconds,
+    )
     worker_probe = worker_result["probe"]
     if (
         local_probe["codec"] != worker_probe["codec"]
@@ -1571,6 +1581,7 @@ def _preflight_candidate(
                 repaired,
                 repaired_media,
                 repaired_probe,
+                max_duration_seconds=_duration_limit(account),
             )
             media = {
                 "sha256": final_sha256,

@@ -2782,6 +2782,101 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_failed_preflight_recovery_conflict",
         )
 
+        deployed_commit = "b" * 40
+        validated_compensation = (
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_media_repair_invalid_response",
+                reason=service.FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
+                actor="codex_operator",
+                verified_repair_job_key=job_key,
+                deployed_commit=deployed_commit,
+                compensation_publish_time="09:01",
+                validate_only=True,
+                now=recovery_now,
+            )
+        )
+        self.assertEqual(
+            validated_compensation["recovery_mode"],
+            "codefix_compensation",
+        )
+        self.assertEqual(validated_compensation["updated_count"], 0)
+        compensation = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_media_repair_invalid_response",
+            reason=service.FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
+            actor="codex_operator",
+            verified_repair_job_key=job_key,
+            deployed_commit=deployed_commit,
+            compensation_publish_time="09:01",
+            now=recovery_now,
+        )
+        self.assertEqual(compensation["updated_count"], 1)
+        compensation_run_id = compensation["compensation_run_id"]
+        original = self.store.get_schedule_run(failed["id"])
+        compensation_run = self.store.get_schedule_run(compensation_run_id)
+        self.assertEqual(original["status"], "failed_preflight")
+        self.assertEqual(compensation_run["status"], "claimed")
+        self.assertEqual(compensation_run["publish_time"], "09:01")
+        self.assertEqual(
+            compensation_run["slot_key"],
+            "xpost:schedule:v1:drama:2026-07-27:0901",
+        )
+        self.assertEqual(
+            compensation_run["account_ids"],
+            original["account_ids"],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            codefix_audit = conn.execute(
+                "SELECT recovery_reason,deployed_commit,"
+                "verified_repair_job_key,validated_queue_count,"
+                "validated_log_count "
+                "FROM x_post_schedule_codefix_compensation_audit "
+                "WHERE original_schedule_run_id=? "
+                "AND compensation_schedule_run_id=?",
+                (failed["id"], compensation_run_id),
+            ).fetchone()
+        self.assertEqual(
+            codefix_audit,
+            (
+                service.FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
+                deployed_commit,
+                job_key,
+                0,
+                0,
+            ),
+        )
+        due = self.store.due_schedule_slots(recovery_now)
+        self.assertEqual(
+            [item["slot_key"] for item in due["items"]],
+            [compensation_run["slot_key"]],
+        )
+        pool = self.add_drama(content_id="CODEFIX-COMPENSATION")
+        created_plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:01",
+            original["config_version"],
+            [self.drama_candidate(pool, 2, 1)],
+        )
+        self.assertEqual(created_plan["id"], compensation_run_id)
+        self.assertEqual(len(created_plan["queues"]), 1)
+        with self.assertRaises(service.XPostError) as duplicate_compensation:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_media_repair_invalid_response",
+                reason=service.FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON,
+                actor="codex_operator",
+                verified_repair_job_key=job_key,
+                deployed_commit=deployed_commit,
+                compensation_publish_time="09:02",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            duplicate_compensation.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_failed_preflight_recovery_rejects_stale_or_unready_scope(self):
         failed = self._failed_schedule_run("x_upstream_error")
         with self.assertRaises(service.XPostError) as stale:
@@ -2828,6 +2923,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.assertIn("x_post_schedule_corrective_retry_audit", tables)
             self.assertIn(
                 "x_post_schedule_verified_repair_retry_audit",
+                tables,
+            )
+            self.assertIn(
+                "x_post_schedule_codefix_compensation_audit",
                 tables,
             )
             self.assertIn("x_post_schedule_random_plan", tables)

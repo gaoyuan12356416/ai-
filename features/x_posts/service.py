@@ -123,6 +123,9 @@ FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES = {
         "X media repair probe does not meet the X video contract",
     ),
 }
+FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON = (
+    "operator_same_day_codefix_compensation_v1"
+)
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1275,6 +1278,39 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_codefix_compensation_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_schedule_run_id INTEGER NOT NULL UNIQUE,
+                    compensation_schedule_run_id INTEGER NOT NULL UNIQUE,
+                    verified_repair_retry_audit_id INTEGER NOT NULL,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_codefix_compensation_v1'),
+                    actor TEXT NOT NULL,
+                    deployed_commit TEXT NOT NULL
+                        CHECK(length(deployed_commit)=40),
+                    verified_repair_job_key TEXT NOT NULL
+                        CHECK(length(verified_repair_job_key)=64),
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='failed_preflight'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='x_post_media_repair_invalid_response'),
+                    previous_error_message TEXT NOT NULL,
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_queue_count=0),
+                    validated_log_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_log_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(original_schedule_run_id)
+                        REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(compensation_schedule_run_id)
+                        REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(verified_repair_retry_audit_id)
+                        REFERENCES x_post_schedule_verified_repair_retry_audit(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -1745,6 +1781,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_verified_repair_created "
                 "ON x_post_schedule_verified_repair_retry_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_codefix_comp_created "
+                "ON x_post_schedule_codefix_compensation_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -6698,6 +6738,8 @@ class XPostStore:
         reason,
         actor,
         verified_repair_job_key="",
+        deployed_commit="",
+        compensation_publish_time="",
         validate_only=False,
         now=None,
     ):
@@ -6735,9 +6777,21 @@ class XPostStore:
         verified_repair_recovery = (
             reason == FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON
         )
+        codefix_compensation = (
+            reason == FAILED_PREFLIGHT_CODEFIX_COMPENSATION_REASON
+        )
         verified_repair_job_key = str(
             verified_repair_job_key or ""
         ).strip().lower()
+        deployed_commit = str(deployed_commit or "").strip().lower()
+        try:
+            normalized_compensation_time = (
+                _schedule_publish_time(compensation_publish_time)
+                if codefix_compensation
+                else ""
+            )
+        except XPostError:
+            normalized_compensation_time = ""
         if not (
             (
                 initial_recovery
@@ -6757,6 +6811,14 @@ class XPostStore:
                     r"[a-f0-9]{64}",
                     verified_repair_job_key,
                 )
+            )
+            or (
+                codefix_compensation
+                and expected_error_code
+                in FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES
+                and re.fullmatch(r"[a-f0-9]{64}", verified_repair_job_key)
+                and re.fullmatch(r"[a-f0-9]{40}", deployed_commit)
+                and bool(normalized_compensation_time)
             )
         ):
             raise XPostError(
@@ -6816,8 +6878,14 @@ class XPostStore:
                 (run_id,),
             ).fetchone()
             verified_repair_audit = conn.execute(
-                "SELECT id FROM x_post_schedule_verified_repair_retry_audit "
+                "SELECT id,verified_repair_job_key "
+                "FROM x_post_schedule_verified_repair_retry_audit "
                 "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+            codefix_compensation_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_codefix_compensation_audit "
+                "WHERE original_schedule_run_id=?",
                 (run_id,),
             ).fetchone()
             previous_error_message = str(run["error_message"] or "")
@@ -6832,7 +6900,7 @@ class XPostStore:
                 )
             )
             verified_repair_message_matches = bool(
-                verified_repair_recovery
+                (verified_repair_recovery or codefix_compensation)
                 and any(
                     fragment in previous_error_message
                     for fragment in FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES.get(
@@ -6846,6 +6914,23 @@ class XPostStore:
                 "%s %s" % (run["run_date"], run["publish_time"]),
                 "%Y-%m-%d %H:%M",
             ).replace(tzinfo=BEIJING_TZ)
+            compensation_scheduled_at = None
+            target_run = None
+            if codefix_compensation:
+                compensation_scheduled_at = datetime.strptime(
+                    "%s %s"
+                    % (run["run_date"], normalized_compensation_time),
+                    "%Y-%m-%d %H:%M",
+                ).replace(tzinfo=BEIJING_TZ)
+                target_run = conn.execute(
+                    "SELECT id FROM x_post_schedule_run "
+                    "WHERE source_type=? AND run_date=? AND publish_time=?",
+                    (
+                        run["source_type"],
+                        run["run_date"],
+                        normalized_compensation_time,
+                    ),
+                ).fetchone()
             conflict = bool(
                 str(run["run_date"]) != current_date
                 or scheduled_at > current
@@ -6859,7 +6944,7 @@ class XPostStore:
                 or queue_count != 0
                 or log_count != 0
                 or (
-                    verified_repair_recovery
+                    (verified_repair_recovery or codefix_compensation)
                     and str(run["source_type"]) != "drama"
                 )
                 or (
@@ -6868,6 +6953,7 @@ class XPostStore:
                         prior_audit is not None
                         or corrective_audit is not None
                         or verified_repair_audit is not None
+                        or codefix_compensation_audit is not None
                     )
                 )
                 or (
@@ -6876,6 +6962,7 @@ class XPostStore:
                         prior_audit is None
                         or corrective_audit is not None
                         or verified_repair_audit is not None
+                        or codefix_compensation_audit is not None
                         or not corrective_message_matches
                     )
                 )
@@ -6885,7 +6972,28 @@ class XPostStore:
                         prior_audit is None
                         or corrective_audit is None
                         or verified_repair_audit is not None
+                        or codefix_compensation_audit is not None
                         or not verified_repair_message_matches
+                    )
+                )
+                or (
+                    codefix_compensation
+                    and (
+                        prior_audit is None
+                        or corrective_audit is None
+                        or verified_repair_audit is None
+                        or codefix_compensation_audit is not None
+                        or not verified_repair_message_matches
+                        or str(
+                            verified_repair_audit[
+                                "verified_repair_job_key"
+                            ]
+                        )
+                        != verified_repair_job_key
+                        or normalized_compensation_time
+                        == str(run["publish_time"])
+                        or compensation_scheduled_at > current
+                        or target_run is not None
                     )
                 )
             )
@@ -6981,7 +7089,11 @@ class XPostStore:
                     else (
                         "corrective"
                         if corrective_recovery
-                        else "verified_repair"
+                        else (
+                            "verified_repair"
+                            if verified_repair_recovery
+                            else "codefix_compensation"
+                        )
                     )
                 ),
                 "initial_recovery_audit_id": (
@@ -6996,7 +7108,18 @@ class XPostStore:
                 ),
                 "verified_repair_job_key": (
                     verified_repair_job_key
-                    if verified_repair_recovery
+                    if (
+                        verified_repair_recovery
+                        or codefix_compensation
+                    )
+                    else ""
+                ),
+                "deployed_commit": (
+                    deployed_commit if codefix_compensation else ""
+                ),
+                "compensation_publish_time": (
+                    normalized_compensation_time
+                    if codefix_compensation
                     else ""
                 ),
                 "actor": actor,
@@ -7008,6 +7131,69 @@ class XPostStore:
             }
             if validate_only:
                 conn.rollback()
+                return result
+
+            if codefix_compensation:
+                compensation_slot_key = (
+                    "xpost:schedule:v1:%s:%s:%s"
+                    % (
+                        str(run["source_type"]),
+                        str(run["run_date"]),
+                        normalized_compensation_time.replace(":", ""),
+                    )
+                )
+                cursor = conn.execute(
+                    "INSERT INTO x_post_schedule_run("
+                    "slot_key,source_type,run_date,publish_time,timezone,"
+                    "config_version,account_ids_json,schedule_mode,"
+                    "body_template,status,expected_count,queued_count,"
+                    "published_count,failed_count,unknown_count,"
+                    "created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,'claimed',?,0,0,0,0,?,?)",
+                    (
+                        compensation_slot_key,
+                        str(run["source_type"]),
+                        str(run["run_date"]),
+                        normalized_compensation_time,
+                        SCHEDULE_TIMEZONE,
+                        int(run["config_version"]),
+                        str(run["account_ids_json"]),
+                        str(run["schedule_mode"]),
+                        str(run["body_template"]),
+                        int(run["expected_count"]),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                compensation_run_id = int(cursor.lastrowid)
+                conn.execute(
+                    "INSERT INTO x_post_schedule_codefix_compensation_audit("
+                    "original_schedule_run_id,compensation_schedule_run_id,"
+                    "verified_repair_retry_audit_id,recovery_reason,actor,"
+                    "deployed_commit,verified_repair_job_key,"
+                    "previous_status,previous_error_code,"
+                    "previous_error_message,validated_queue_count,"
+                    "validated_log_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        compensation_run_id,
+                        int(verified_repair_audit["id"]),
+                        reason,
+                        actor,
+                        deployed_commit,
+                        verified_repair_job_key,
+                        str(run["status"]),
+                        str(run["error_code"]),
+                        redact_text(run["error_message"], 500),
+                        queue_count,
+                        log_count,
+                        timestamp,
+                    ),
+                )
+                conn.commit()
+                result["updated_count"] = 1
+                result["compensation_run_id"] = compensation_run_id
                 return result
 
             audit_values = (
