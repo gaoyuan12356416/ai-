@@ -616,14 +616,15 @@ class XPostsTests(unittest.TestCase):
         )
         premium_result = service.probe_media(
             media,
-            runner=runner_for(valid_probe_payload(duration="599.9")),
+            runner=runner_for(valid_probe_payload(duration="763.938005")),
             max_duration_seconds=service.PREMIUM_MAX_DURATION_SECONDS,
         )
-        self.assertEqual(premium_result["duration"], 599.9)
+        self.assertEqual(premium_result["duration"], 763.938005)
+        self.assertEqual(service.PREMIUM_MAX_DURATION_SECONDS, 14400.0)
         with self.assertRaises(service.XPostError) as caught:
             service.probe_media(
                 media,
-                runner=runner_for(valid_probe_payload(duration="600.1")),
+                runner=runner_for(valid_probe_payload(duration="14400.1")),
                 max_duration_seconds=service.PREMIUM_MAX_DURATION_SECONDS,
             )
         self.assertEqual(caught.exception.code, "invalid_media_duration")
@@ -936,7 +937,7 @@ class XPostsTests(unittest.TestCase):
         self.assertNotIn("secret-token", dump)
 
     def test_premium_long_publish_uses_amplify_video_category(self):
-        queue = self.enqueue(preflight_duration=180.0)
+        queue = self.enqueue(preflight_duration=763.938005)
         client = ScriptedHttpClient(
             [
                 service.HttpResponse(
@@ -953,7 +954,7 @@ class XPostsTests(unittest.TestCase):
         with mock.patch.object(
             service,
             "probe_media",
-            return_value={"duration": 180.0},
+            return_value={"duration": 763.938005},
         ) as probe:
             result = service.publish_canary(
                 db_path=self.db_path,

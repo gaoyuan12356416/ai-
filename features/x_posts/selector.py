@@ -333,8 +333,20 @@ class DramawaveCandidateSelector:
         """.format(schema=self.schema)
         return _cursor_rows(self.connection, sql, (content_id, series_code, language))
 
-    def _pool_material_rows(self, material_id):
-        """Load one eligible video directly from the custom material library."""
+    def _pool_material_rows(self, material_id, *, allow_long_duration=False):
+        """Load one eligible video directly from the custom material library.
+
+        Automatic pool selection keeps the 600-second source ceiling. An
+        explicit manual batch may hydrate a longer positive-duration source so
+        the account-aware media preflight can either route the original file to
+        a token-confirmed Premium account or reject the whole batch before
+        queue reservation.
+        """
+        duration_predicate = (
+            "AND cs.video_duration >= %s"
+            if allow_long_duration
+            else "AND cs.video_duration BETWEEN %s AND %s"
+        )
         sql = """
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
@@ -350,9 +362,17 @@ class DramawaveCandidateSelector:
                AND cs.product = %s
                AND cs.type = %s
                AND cs.is_delete = %s
-               AND cs.video_duration BETWEEN %s AND %s
+               {duration_predicate}
              LIMIT 2
-        """.format(schema=self.schema)
+        """.format(
+            schema=self.schema,
+            duration_predicate=duration_predicate,
+        )
+        duration_params = (
+            (1,)
+            if allow_long_duration
+            else (1, MAX_X_SOURCE_DURATION_SECONDS)
+        )
         return _cursor_rows(
             self.connection,
             sql,
@@ -361,9 +381,8 @@ class DramawaveCandidateSelector:
                 DEFAULT_PRODUCT,
                 2,
                 0,
-                1,
-                MAX_X_SOURCE_DURATION_SECONDS,
-            ),
+            )
+            + duration_params,
         )
 
     def _pool_drama_rows(self, content_id, language):
@@ -446,8 +465,17 @@ class DramawaveCandidateSelector:
             )
         return effective_deploy_time
 
-    def _pool_candidate(self, material_id, source_date):
-        material_rows = self._pool_material_rows(material_id)
+    def _pool_candidate(
+        self,
+        material_id,
+        source_date,
+        *,
+        allow_long_duration=False,
+    ):
+        material_rows = self._pool_material_rows(
+            material_id,
+            allow_long_duration=allow_long_duration,
+        )
         if len(material_rows) != 1:
             raise PoolCandidateRejection(
                 "material_not_found_or_ineligible",
@@ -937,7 +965,11 @@ class DramawaveCandidateSelector:
         rejections = []
         for position, candidate_id in enumerate(normalized, 1):
             try:
-                candidate = self._pool_candidate(candidate_id, source_date)
+                candidate = self._pool_candidate(
+                    candidate_id,
+                    source_date,
+                    allow_long_duration=True,
+                )
             except CandidateQueryError:
                 raise
             except PoolCandidateRejection as exc:

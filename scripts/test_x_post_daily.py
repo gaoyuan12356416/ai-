@@ -1776,7 +1776,7 @@ class RunnerTests(unittest.TestCase):
             probes,
             [
                 ("10", 140.0),
-                ("10", 600.0),
+                ("10", 14400.0),
                 ("11", 140.0),
                 ("12", 140.0),
             ],
@@ -2010,6 +2010,65 @@ class RunnerTests(unittest.TestCase):
                 r"[a-f0-9]{64}", repaired["media_repair_job_key"]
             )
         )
+
+    def test_manual_premium_over_600_source_keeps_original_media(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(test_config(account_ids=(13,)), work_dir=temporary)
+            account = {
+                "id": 13,
+                "username": "premium13",
+                "x_user_id": "2013",
+                "display_name": "Premium 13",
+                "subscription_type": "premium",
+                "long_video_eligible": True,
+            }
+            item = candidate(5286820, 0)
+            item["pool_item_id"] = None
+            item["manual_item_id"] = 1
+
+            class Repair:
+                def repair(self, _payload):
+                    raise AssertionError(
+                        "a valid 763-second Premium source must not be repaired"
+                    )
+
+            def downloader(url, destination, _hosts, max_bytes, timeout):
+                Path(destination).write_bytes(b"video")
+                return {
+                    "size": 5,
+                    "sha256": "a" * 64,
+                    "media_type": "video/mp4",
+                }
+
+            def prober(path, max_bytes, timeout, max_duration_seconds=140.0):
+                self.assertEqual(max_duration_seconds, 14400.0)
+                self.assertEqual(Path(path).read_bytes(), b"video")
+                return {
+                    "codec": "h264",
+                    "pixel_format": "yuv420p",
+                    "audio_codec": "aac",
+                    "duration": 763.938005,
+                    "width": 720,
+                    "height": 1280,
+                    "frame_rate": 30.0,
+                    "size": Path(path).stat().st_size,
+                }
+
+            accepted, failures = _preflight_candidates(
+                config,
+                [item],
+                [account],
+                1784772000,
+                downloader,
+                prober,
+                Repair(),
+            )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["material_id"], "5286820")
+        self.assertEqual(accepted[0]["preflight_duration"], 763.938005)
+        self.assertEqual(accepted[0]["material_url"], item["material_url"])
 
     def test_repair_quota_is_shared_across_all_repairable_errors(self):
         with tempfile.TemporaryDirectory() as temporary:

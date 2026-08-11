@@ -36,7 +36,12 @@ DEFAULT_STORAGE_MOUNT_ROOT = "/mnt/data-disk"
 DEFAULT_STORAGE_ROOT = "/mnt/data-disk/x-post-automation"
 DEFAULT_MAX_MEDIA_BYTES = 512 * 1024 * 1024
 STANDARD_MAX_DURATION_SECONDS = 140.0
-PREMIUM_MAX_DURATION_SECONDS = 600.0
+# X's Premium product contract currently permits videos up to four hours on
+# supported clients.  The v2 media API documents its own tighter 512 MiB byte
+# ceiling but no separate duration ceiling for ``amplify_video``; a production
+# canary also confirmed a raw 763.938-second upload and Post readback.  Keep the
+# entitlement token-scoped and the API byte/codec gates unchanged.
+PREMIUM_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 STANDARD_MEDIA_CATEGORY = "tweet_video"
 PREMIUM_MEDIA_CATEGORY = "amplify_video"
 MEDIA_CATEGORIES = frozenset(
@@ -9658,7 +9663,7 @@ def probe_media(
             )
         raise XPostError(
             "invalid_media_duration",
-            "Premium X video duration must not exceed 600 seconds",
+            "Premium X video duration must not exceed 4 hours",
             422,
         )
     if len(videos) != 1 or not audios:

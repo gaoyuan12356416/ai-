@@ -172,6 +172,31 @@ class ManualPoolSelectorTests(unittest.TestCase):
         ]
         self.assertEqual([params[0] for params in material_calls], ["20", "10", "30"])
 
+    def test_direct_manual_selection_hydrates_over_600_source_for_premium_preflight(self):
+        connection = PoolConnection([5286820])
+        connection.materials["5286820"]["video_duration"] = 763
+
+        selected, rejections = select_manual_candidates(
+            connection,
+            ["5286820"],
+            "2026-08-10",
+            limit=1,
+        )
+
+        self.assertEqual(rejections, [])
+        self.assertEqual([item["material_id"] for item in selected], ["5286820"])
+        material_sql, material_params = next(
+            (sql, params)
+            for sql, params in connection.calls
+            if "ads_custom_source cs" in sql
+        )
+        self.assertIn("cs.video_duration >= %s", material_sql)
+        self.assertNotIn("cs.video_duration BETWEEN %s AND %s", material_sql)
+        self.assertEqual(
+            material_params,
+            ("5286820", "Dramawave", 2, 0, 1),
+        )
+
     def test_direct_manual_selection_rejects_normalized_duplicates_before_queries(self):
         connection = PoolConnection([10])
         with self.assertRaises(CandidateSelectionError):

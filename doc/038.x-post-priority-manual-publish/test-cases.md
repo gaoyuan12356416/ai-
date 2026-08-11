@@ -48,6 +48,7 @@
 | TC-034 | 页面幂等与轮询 | 提交响应丢失/刷新 | 重试/轮询 | 复用同键同 run，展示终态和日志入口 | P0 | 本地通过 |
 | TC-035 | X 既有回归 | 历史 daily/catchup/schedule/canary | 跑既有测试 | 选择、绑定、排期、文案、长视频、去重无回归 | P0 | 本地通过 |
 | TC-036 | 无真实发布部署验收 | 生产备份已完成 | 迁移/服务/HTTP/DB检查 | queue/log/post 数量不增加，timer 和服务正常 | P0 | 生产通过 |
+| TC-037 | 手动 Premium 原片超过 600 秒 | 763.938 秒素材、Premium账号 | 执行 selector、原片预检、单次真实 API canary 与回读 | selector 不在 SQL 早退；原片使用 `amplify_video` 发布，回读 `duration_ms=763938`；自动池仍过滤 >600 秒 | P0 | 生产通过（Post `2087081262754169202`） |
 
 ## 回归范围
 
