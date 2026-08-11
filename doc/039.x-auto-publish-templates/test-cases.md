@@ -28,17 +28,17 @@
 | TC-012 | >140 秒账号路由 | 仅当前 token 合格账号可选；降级后最终发布前失败 | P0 | 通过 |
 | TC-013 | bridge 隔离 | manual claim 不领取 `auto_template`；自动 claim 不领取 `manual` | P0 | 通过 |
 | TC-014 | 现有人工发布默认值 | 未传新字段时仍读取素材池正文且来源为 manual | P0 | 通过 |
-| TC-015 | 模板闸门关闭 | scheduler/runner 自然执行无 run/task/queue/log/Post 增量 | P0 | 离线通过，生产待验 |
+| TC-015 | 模板闸门关闭 | scheduler/runner 自然执行无 run/task/queue/log/Post 增量 | P0 | 离线、生产通过 |
 | TC-016 | unknown outcome | 停止后续，重复执行不再调用 X | P0 | 通过 |
 | TC-017 | Cookie/权限/同源 | 401/403/404 和审计行为正确 | P0 | 通过 |
 | TC-018 | 敏感信息 | API、DOM、日志不含 token、bearer、源媒体 URL | P0 | 通过 |
 | TC-019 | 既有素材池/剧集池排期 | 相关现有测试全部通过且默认输出不变 | P0 | 通过 |
-| TC-020 | 增量迁移 | 旧行摘要不变，重复迁移幂等，integrity_check=ok | P0 | 离线通过，生产待验 |
+| TC-020 | 增量迁移 | 旧行摘要不变，重复迁移幂等，integrity_check=ok | P0 | 离线、生产通过 |
 | TC-021 | canonical 预检失败 | 无 queue 时先记录 failed_preflight，再释放临时素材和账号；记录失败则重试 | P0 | 通过 |
 | TC-022 | exact recovery | queued/no-log、reserved、publishing、锁忙和迟到线程均 fence，publish 最多一次 | P0 | 通过 |
 | TC-023 | 关闭 live gate 后对账 | pending 不领取；已有 queue/run 只 reconcile，不 publish | P0 | 通过 |
-| TC-024 | Linux 共享 flock | existing daily 持锁时 x_auto execute 必须跳过 | P0 | 生产待验 |
-| TC-025 | 跨进程响应丢失 | 8810 响应丢失/重启后 busy 收敛到终态，publish 计数始终 1 | P0 | 生产故障注入待验 |
+| TC-024 | Linux 共享 flock | existing daily 持锁时 x_auto execute 必须跳过 | P0 | 生产通过 |
+| TC-025 | 跨进程响应丢失 | 8810 响应丢失/重启后 busy 收敛到终态，publish 计数始终 1 | P0 | 离线通过；未做生产故障注入 |
 
 ## 回归范围
 

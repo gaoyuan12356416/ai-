@@ -34,7 +34,7 @@
 
 ## 验证步骤
 
-- loopback/public health 200；新页面 200/no-store，未登录接口 401。
+- loopback/public health 200；新页面 200，管理 API 响应 `no-store`，未登录接口 401。
 - 新 SQLite 模板数 0，所有 live gates 0。
 - 现有 X SQLite `integrity_check=ok`；迁移前后旧行摘要一致。
 - 现有 material/drama/manual/schedule timer 均保持原状态和下一触发。
@@ -56,10 +56,19 @@
 - 生产部署后在本节补充 commit、release、backup、PID、命令结果和精确回滚命令。
 - 首次发布只交付关闭状态的能力；启用任一模板需要用户另行明确授权。
 
-## 生产证据（部署后填写）
+## 生产证据（2026-08-11）
 
-- Git commit / release：待部署。
-- 备份目录与 manifest SHA256：待部署。
-- 既有 X SQLite 迁移前后摘要：待部署。
-- 新 x_auto health / gates / template count：待部署。
-- 自然 timer 与现有 queue/log/Post 不变证据：待部署。
+- Git commit / release：`0e03210cd2c5c80b134884f9e96304797efa2545`，不可变 release 为 `/mnt/data-disk/x-post-automation/releases/0e03210cd2c5c80b134884f9e96304797efa2545`；部署前 X release 为 `db67fc71a73702feaa88689273356f1a21883bdc`。
+- 备份目录：`/mnt/data-disk/x-post-automation/backups/20260811T200055+0800-x-auto-templates-8b4b1b0`；最终 `manifest.sha256` 文件自身 SHA256 为 `9c7983d923f31830b585b4632c1f5d6fdb2bf9025cdc880b00ee19cb80e5aca3`。
+- 迁移副本和生产 SQLite 均为 `quick_check=ok`；旧表旧列内容哈希无变化。生产账本保持 queue/log `177/177`、published `176`、failed `1`、confirmed Post ID `176`、active `0`、unknown `0`；四条历史 manual run 均保持 `trigger_source=manual`。账号 token 目录 hash/owner/mode 与部署前一致。
+- 新 sidecar 健康；`live_enabled/account_audit_approved/url_property_verified/is_open` 全为 `false`。新 SQLite 的 template/run/task/material-ledger/event 均为 `0`。
+- `x-auto-post-scheduler.timer` 与 `x-auto-post-runner.timer` 在 `20:10 CST` 自然执行成功且没有新增任何自动发布事实；现有 `x-post-schedule` 持续 `no_due`，`x-post-manual` 持续 `no_pending`，旧账本计数不变。
+- Linux 共享锁实测：root 持有 `/run/x-post-daily/runner.lock` 时，以故意错误的 auto bearer 运行 execute 仍安全返回 0，证明没有访问 sidecar、更没有进入发布路径。
+- 已启用新 sidecar、scheduler timer、runner timer 与 runner path；`x-auto-post-metric.timer` 保持 disabled/inactive。未创建模板、未开启 gate、未调用真实 X 发布。
+- 页面：`/x-auto-publish-templates.html`、`/x-auto-publish-template.html`、`/x-auto-publish-runs.html` 均返回 200；未登录管理 API 返回 401。
+
+### 精确回滚点
+
+1. 先验证新 SQLite 没有 queued/running/unknown 事实，再执行 `systemctl disable --now x-auto-post-scheduler.timer x-auto-post-runner.timer x-auto-post-runner.path` 和 `systemctl disable --now x-auto-post-service.service`。
+2. 主 API、主静态文件和公开静态文件均从上述备份目录的 `files/` 对应路径恢复；移除 `80-x-auto-post.conf` 后仅重启 `drama-material-api.service`。保留新 SQLite，不用备份覆盖任何当前账本。
+3. 现有 X sidecar 的 forward-compatible schema/来源隔离代码默认保留。只有在确认 auto run/task/queue/unknown 全为 0 时，才可把 `/opt/x-post-automation/current` 原子切回 `db67fc71a73702feaa88689273356f1a21883bdc` 并仅重启 `x-post-automation.service`。
