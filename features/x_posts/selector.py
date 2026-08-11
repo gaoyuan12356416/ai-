@@ -903,6 +903,70 @@ class DramawaveCandidateSelector:
                 break
         return selected, rejections
 
+    def select_manual(self, material_ids, source_date, limit=50):
+        """Hydrate an exact operator-selected material set in request order.
+
+        Unlike ``select_pool``, this path never invents or persists pool rows.
+        Every requested identity receives either one candidate or one rejection,
+        allowing the caller to fail the whole batch before queue reservation.
+        """
+        source_date = normalize_date(source_date)
+        try:
+            limit = int(limit)
+            raw_ids = list(material_ids)
+        except (TypeError, ValueError, OverflowError):
+            raise CandidateSelectionError(
+                "manual material IDs and limit are invalid"
+            ) from None
+        if limit <= 0 or limit > 50 or not raw_ids or len(raw_ids) > limit:
+            raise CandidateSelectionError(
+                "manual material count is outside the supported range"
+            )
+        normalized = []
+        seen = set()
+        for raw in raw_ids:
+            key = material_key(raw)
+            if key in seen:
+                raise CandidateSelectionError(
+                    "manual material IDs must be unique"
+                )
+            seen.add(key)
+            normalized.append(key)
+
+        selected = []
+        rejections = []
+        for position, candidate_id in enumerate(normalized, 1):
+            try:
+                candidate = self._pool_candidate(candidate_id, source_date)
+            except CandidateQueryError:
+                raise
+            except PoolCandidateRejection as exc:
+                rejections.append(
+                    {
+                        "manual_item_id": position,
+                        "material_id": candidate_id,
+                        "error_code": exc.error_code,
+                        "error_message": exc.error_message,
+                    }
+                )
+                continue
+            except CandidateSelectionError as exc:
+                rejections.append(
+                    {
+                        "manual_item_id": position,
+                        "material_id": candidate_id,
+                        "error_code": "material_safety_check_failed",
+                        "error_message": str(exc),
+                    }
+                )
+                continue
+            candidate["manual_item_id"] = position
+            candidate["pool_item_id"] = None
+            candidate["pool_created_at"] = ""
+            candidate["source_type"] = "material"
+            selected.append(candidate)
+        return selected, rejections
+
 
 def select_candidates(
     connection,
@@ -939,6 +1003,26 @@ def select_pool_candidates(
         now=now,
     ).select_pool(
         pool_items,
+        source_date,
+        limit=limit,
+    )
+
+
+def select_manual_candidates(
+    connection,
+    material_ids,
+    source_date,
+    limit=50,
+    schema=DEFAULT_SCHEMA,
+    now=None,
+):
+    """Hydrate an exact manual batch without adding it to the material pool."""
+    return DramawaveCandidateSelector(
+        connection,
+        schema=schema,
+        now=now,
+    ).select_manual(
+        material_ids,
         source_date,
         limit=limit,
     )

@@ -15,7 +15,9 @@ if str(ROOT) not in sys.path:
 
 from features.x_posts.selector import (  # noqa: E402
     CandidateQueryError,
+    CandidateSelectionError,
     normalize_material_url,
+    select_manual_candidates,
     select_pool_candidates,
 )
 
@@ -143,6 +145,44 @@ class PoolConnection:
 
 
 class ManualPoolSelectorTests(unittest.TestCase):
+    def test_direct_manual_selection_preserves_exact_request_order_without_pool_rows(self):
+        connection = PoolConnection([10, 20, 30])
+        selected, rejections = select_manual_candidates(
+            connection,
+            ["20", "010", "30"],
+            "2026-07-22",
+            limit=3,
+        )
+
+        self.assertEqual(rejections, [])
+        self.assertEqual(
+            [item["material_id"] for item in selected],
+            ["20", "10", "30"],
+        )
+        self.assertEqual(
+            [item["manual_item_id"] for item in selected],
+            [1, 2, 3],
+        )
+        self.assertTrue(all(item["pool_item_id"] is None for item in selected))
+        self.assertTrue(all(item["pool_created_at"] == "" for item in selected))
+        material_calls = [
+            params
+            for sql, params in connection.calls
+            if "ads_custom_source cs" in sql
+        ]
+        self.assertEqual([params[0] for params in material_calls], ["20", "10", "30"])
+
+    def test_direct_manual_selection_rejects_normalized_duplicates_before_queries(self):
+        connection = PoolConnection([10])
+        with self.assertRaises(CandidateSelectionError):
+            select_manual_candidates(
+                connection,
+                ["10", "010"],
+                "2026-07-22",
+                limit=2,
+            )
+        self.assertEqual(connection.calls, [])
+
     def test_pool_order_is_created_at_then_id_and_does_not_use_insight(self):
         connection = PoolConnection([10, 20, 30])
         selected, rejections = select_pool_candidates(

@@ -42047,6 +42047,7 @@ from features.x_accounts.client import (
     add_x_post_drama_pool,
     add_x_post_material_pool,
     batch_delete_x_post_drama_pool,
+    create_x_post_manual_run,
     delete_x_post_drama_pool,
     delete_x_post_material_pool,
     query_x_post_account_options,
@@ -42054,11 +42055,13 @@ from features.x_accounts.client import (
     query_x_post_drama_pool_episodes,
     query_x_post_logs,
     query_x_post_material_pool,
+    query_x_post_manual_run,
     query_x_post_runs,
     query_x_post_schedule,
     query_x_accounts as query_x_authorized_accounts,
     logout_x_account,
     save_x_post_schedule,
+    set_x_post_drama_pool_priority,
     set_x_account_publish_approval,
     start_x_authorization,
     verify_x_account,
@@ -42130,7 +42133,17 @@ X_ACCOUNTS_ERROR_META = {
     "x_post_drama_pool_item_not_found": (404, "短剧池记录不存在"),
     "x_post_drama_pool_item_occupied": (409, "已生成发布队列的短剧不能删除"),
     "x_post_drama_pool_item_unavailable": (409, "短剧池记录当前不可用于发布"),
+    "x_post_drama_priority_conflict": (409, "仅未分配且可用的短剧可以设置高优"),
     "x_post_drama_sequence_conflict": (409, "短剧没有按入池和免费集数顺序发布"),
+    "x_post_manual_account_mismatch": (409, "手动发布账号与冻结任务不一致"),
+    "x_post_manual_candidate_shortage": (409, "手动发布候选数量不足"),
+    "x_post_manual_material_mismatch": (409, "手动发布素材与冻结任务不一致"),
+    "x_post_manual_material_unavailable": (409, "所选素材已入池或已被发布队列占用"),
+    "x_post_manual_plan_exists": (409, "手动发布任务已生成冻结队列"),
+    "x_post_manual_run_not_found": (404, "手动发布任务不存在"),
+    "x_post_manual_run_terminal": (409, "手动发布任务已经结束"),
+    "x_post_manual_scope_mismatch": (400, "素材数量必须与目标账号数量一致"),
+    "x_post_manual_source_mismatch": (409, "手动发布素材来源日期发生变化"),
     "x_token_missing": (409, "X账号Token不存在，请重新授权"),
     "x_token_revoked": (409, "X授权已失效，请重新授权"),
     "x_upstream_error": (502, "X API请求失败，请稍后重试"),
@@ -94763,6 +94776,29 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 )
             return
 
+        x_manual_run_match = re.fullmatch(
+            r"/api/admin/x-posts/material-pool/manual-runs/([0-9]+)",
+            parsed.path,
+        )
+        if x_manual_run_match:
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            try:
+                json_response(
+                    self,
+                    200,
+                    query_x_post_manual_run(
+                        x_manual_run_match.group(1),
+                        x_accounts_actor(self._session()),
+                        navigation_item="xPostMaterialPool",
+                    ),
+                    no_store=True,
+                )
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
         if parsed.path == "/api/admin/x-posts/material-pool":
             if not self._require_cookie_navigation_item("xPostMaterialPool"):
                 return
@@ -98409,6 +98445,152 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, status, payload, no_store=True)
             return
 
+        if parsed.path == "/api/admin/x-posts/material-pool/manual-publish":
+            if not self._require_cookie_navigation_item("xPostMaterialPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            requested_material_ids = []
+            requested_account_ids = []
+            try:
+                payload = self._read_json()
+                if set(payload) != {
+                    "material_ids",
+                    "account_ids",
+                    "idempotency_key",
+                }:
+                    raise ValueError("手动发布请求字段不完整或包含未知字段")
+                requested_material_ids = list(payload.get("material_ids") or [])
+                requested_account_ids = list(payload.get("account_ids") or [])
+                result = create_x_post_manual_run(
+                    requested_material_ids,
+                    requested_account_ids,
+                    payload.get("idempotency_key"),
+                    x_accounts_actor(session),
+                    navigation_item="xPostMaterialPool",
+                )
+                item = result.get("item", {}) if isinstance(result, dict) else {}
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "create_x_post_manual_run",
+                        "x_post_manual_run",
+                        str(item.get("id", "") or ""),
+                        {
+                            "material_ids": requested_material_ids,
+                            "account_ids": requested_account_ids,
+                            "expected_count": int(item.get("expected_count", 0) or 0),
+                            "created": bool(item.get("created")),
+                        },
+                    )
+                except Exception:
+                    logging.exception("X post manual-run audit write failed")
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 202, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "create_x_post_manual_run_failed",
+                        "x_post_manual_run",
+                        "batch",
+                        {
+                            "material_ids": requested_material_ids[:50],
+                            "account_ids": requested_account_ids[:50],
+                            "error": error_payload["error"],
+                        },
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post manual-run failure audit write failed"
+                    )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
+        x_drama_priority_match = re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/priority",
+            parsed.path,
+        )
+        if x_drama_priority_match:
+            if self.command != "PUT":
+                json_response(
+                    self,
+                    405,
+                    {"error": "method_not_allowed", "message": "请使用 PUT"},
+                    no_store=True,
+                )
+                return
+            if not self._require_cookie_navigation_item("xPostDramaPool"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            pool_item_id = x_drama_priority_match.group(1)
+            try:
+                payload = self._read_json()
+                if set(payload) != {"high_priority"} or not isinstance(
+                    payload.get("high_priority"), bool
+                ):
+                    raise ValueError("high_priority必须是布尔值")
+                result = set_x_post_drama_pool_priority(
+                    pool_item_id,
+                    payload["high_priority"],
+                    x_accounts_actor(session),
+                    navigation_item="xPostDramaPool",
+                )
+                audit_recorded = True
+                try:
+                    append_audit_log(
+                        session,
+                        "set_x_post_drama_pool_priority",
+                        "x_post_drama_pool",
+                        pool_item_id,
+                        {"high_priority": payload["high_priority"]},
+                    )
+                except Exception:
+                    logging.exception("X post drama priority audit write failed")
+                    audit_recorded = False
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["audit_recorded"] = audit_recorded
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, error_payload = x_accounts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "set_x_post_drama_pool_priority_failed",
+                        "x_post_drama_pool",
+                        pool_item_id,
+                        {"error": error_payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "X post drama priority failure audit write failed"
+                    )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception as exc:
+                json_response(
+                    self,
+                    400,
+                    {"error": "invalid_request", "message": str(exc)},
+                    no_store=True,
+                )
+            return
+
         x_post_schedule_routes = {
             "/api/admin/x-posts/material-pool/schedule": (
                 "material",
@@ -99728,7 +99910,14 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_PUT(self):
-        self.do_POST()
+        parsed = urllib.parse.urlparse(self.path)
+        if re.fullmatch(
+            r"/api/admin/x-posts/drama-pool/([0-9]+)/priority",
+            parsed.path,
+        ):
+            self.do_POST()
+            return
+        json_response(self, 404, {"error": "not_found"})
 
 
     def do_DELETE(self):

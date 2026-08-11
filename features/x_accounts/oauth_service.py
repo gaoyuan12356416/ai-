@@ -1757,6 +1757,14 @@ def _active_schedule_account_scope():
         _raise_x_post_error(exc)
 
 
+def _active_manual_account_scope():
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        return tuple(XPostStore(POST_DB_PATH).active_manual_account_ids())
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
 def create_daily_plan_request(
     payload, allowed_account_ids=None, require_pool=False
 ):
@@ -2158,6 +2166,7 @@ def publish_queue_request(
     allowed_account_ids=None,
     *,
     allow_schedule=None,
+    allow_manual=False,
 ):
     """Publish one frozen queue row; no request field can override its account or copy."""
     XPostError, XPostStore, publish_canary = _x_posts_api()
@@ -2174,9 +2183,15 @@ def publish_queue_request(
         run_id = int(queue.get("run_id") or 0)
         catchup_run_id = int(queue.get("catchup_run_id") or 0)
         schedule_run_id = int(queue.get("schedule_run_id") or 0)
+        manual_run_id = int(queue.get("manual_run_id") or 0)
         parent_count = sum(
             value > 0
-            for value in (run_id, catchup_run_id, schedule_run_id)
+            for value in (
+                run_id,
+                catchup_run_id,
+                schedule_run_id,
+                manual_run_id,
+            )
         )
         if allowed_accounts is not None and (
             parent_count != 1
@@ -2185,7 +2200,12 @@ def publish_queue_request(
                 and not allow_schedule
             )
             or (
+                manual_run_id > 0
+                and not allow_manual
+            )
+            or (
                 schedule_run_id == 0
+                and manual_run_id == 0
                 and int(queue.get("account_id") or 0)
                 not in allowed_accounts
             )
@@ -2195,6 +2215,16 @@ def publish_queue_request(
                 "X自动发布只能处理已冻结的授权账号队列",
                 403,
             )
+        if allowed_accounts is not None and manual_run_id > 0:
+            manual_run = store.get_manual_run(manual_run_id)
+            if int(queue.get("account_id") or 0) not in manual_run[
+                "account_ids"
+            ]:
+                raise ServiceError(
+                    "x_daily_account_scope_denied",
+                    "X手动发布队列账号与冻结任务不一致",
+                    403,
+                )
         log = store.reserve_log(queue["id"])
     except ServiceError:
         raise
@@ -2460,6 +2490,196 @@ def add_post_material_pool_request(payload):
         _raise_x_post_error(exc)
 
 
+def _manual_publish_accounts(account_ids):
+    if not isinstance(account_ids, list):
+        raise ServiceError("invalid_request", "account_ids必须是数组", 400)
+    if not account_ids or len(account_ids) > MAX_DAILY_ACCOUNTS:
+        raise ServiceError("invalid_request", "手动发布账号数量无效", 400)
+    normalized = []
+    seen = set()
+    for raw in account_ids:
+        if isinstance(raw, bool):
+            raise ServiceError("invalid_request", "account_id无效", 400)
+        try:
+            account_id = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError("invalid_request", "account_id无效", 400) from None
+        if account_id <= 0 or account_id in seen:
+            raise ServiceError("invalid_request", "account_ids不能重复", 400)
+        account = find_account(account_id)
+        if account.get("status") != "active" or not account.get(
+            "publish_eligible"
+        ):
+            raise ServiceError(
+                "x_account_not_publishable",
+                "X账号当前不可用于手动发布",
+                409,
+            )
+        seen.add(account_id)
+        normalized.append(account)
+    return normalized
+
+
+def _public_manual_run(item):
+    """Return only fields needed by the browser status view."""
+    source = item if isinstance(item, dict) else {}
+    allowed_run = (
+        "id",
+        "run_date",
+        "source_date",
+        "account_ids",
+        "material_ids",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "error_code",
+        "error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+        "created",
+        "recorded",
+    )
+    allowed_queue = (
+        "id",
+        "manual_run_id",
+        "run_date",
+        "source_date",
+        "account_id",
+        "account_username",
+        "material_id",
+        "candidate_rank",
+        "queue_status",
+        "status",
+        "unknown_outcome",
+        "preview_url",
+        "error_code",
+        "error_message",
+        "created_at",
+        "updated_at",
+    )
+    result = {key: source[key] for key in allowed_run if key in source}
+    result["queues"] = [
+        {key: queue[key] for key in allowed_queue if key in queue}
+        for queue in source.get("queues", [])
+        if isinstance(queue, dict)
+    ]
+    return result
+
+
+def create_post_manual_run_request(payload):
+    actor = _material_pool_actor(payload)
+    accounts = _manual_publish_accounts(payload.get("account_ids"))
+    material_ids = payload.get("material_ids")
+    if not isinstance(material_ids, list) or len(material_ids) != len(accounts):
+        raise ServiceError(
+            "x_post_manual_scope_mismatch",
+            "手动发布的素材数必须与目标账号数一致",
+            400,
+        )
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).create_manual_run(
+            material_ids,
+            [int(account["id"]) for account in accounts],
+            payload.get("idempotency_key"),
+            actor,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": _public_manual_run(item)}
+
+
+def query_post_manual_run_request(payload, run_id):
+    _material_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).get_manual_run(run_id)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": _public_manual_run(item)}
+
+
+def claim_post_manual_run_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).claim_manual_run()
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": item}
+
+
+def create_post_manual_plan_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    try:
+        run_id = int(payload.get("run_id"))
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "run_id无效", 400) from None
+    candidates = payload.get("candidates")
+    if run_id <= 0 or not isinstance(candidates, list):
+        raise ServiceError("invalid_request", "手动发布计划无效", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    store = XPostStore(POST_DB_PATH)
+    try:
+        frozen = store.get_manual_run(run_id)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    if len(candidates) != len(frozen["account_ids"]):
+        raise ServiceError(
+            "x_post_manual_candidate_shortage",
+            "手动发布候选数量与冻结账号数量不一致",
+            409,
+        )
+    accounts = _manual_publish_accounts(list(frozen["account_ids"]))
+    trusted = []
+    for candidate, account in zip(candidates, accounts):
+        if not isinstance(candidate, dict):
+            raise ServiceError("invalid_request", "candidate必须是对象", 400)
+        _require_candidate_duration_capability(candidate, account)
+        item = dict(candidate)
+        item.update(
+            {
+                "account_id": int(account["id"]),
+                "account_username": str(account.get("username", "") or ""),
+                "page_name": str(
+                    account.get("display_name", "")
+                    or account.get("username", "")
+                    or ""
+                ),
+                "page_id": str(account.get("x_user_id", "") or ""),
+            }
+        )
+        trusted.append(item)
+    preflight_post_storage_request(len(trusted))
+    try:
+        item = store.create_manual_plan(run_id, trusted)
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": item}
+
+
+def record_post_manual_failure_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).record_manual_failure(
+            payload.get("run_id"),
+            payload.get("error_code"),
+            payload.get("error_message") or payload.get("message"),
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": item}
+
+
 def delete_post_material_pool_request(payload, pool_item_id):
     _material_pool_actor(payload)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
@@ -2515,6 +2735,20 @@ def add_post_drama_pool_request(payload):
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
+
+
+def set_post_drama_pool_priority_request(payload, pool_item_id):
+    actor = _drama_pool_actor(payload)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).set_drama_pool_priority(
+            pool_item_id,
+            payload.get("high_priority"),
+            actor,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": item}
 
 
 def delete_post_drama_pool_request(payload, pool_item_id):
@@ -3194,6 +3428,14 @@ class Handler(BaseHTTPRequestHandler):
             r"/internal/posts/drama-pool/([0-9]+)/episodes",
             parsed.path,
         )
+        drama_pool_priority_match = re.fullmatch(
+            r"/internal/posts/drama-pool/([0-9]+)/priority",
+            parsed.path,
+        )
+        manual_run_query_match = re.fullmatch(
+            r"/internal/posts/manual-runs/([0-9]+)/query",
+            parsed.path,
+        )
         daily_exact_paths = {
             "/internal/posts/daily-plan",
             "/internal/posts/daily-plan/query",
@@ -3216,10 +3458,16 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/drama-pool/available",
             "/internal/posts/drama-pool/check",
         }
+        manual_worker_exact_paths = {
+            "/internal/posts/manual-runs/claim",
+            "/internal/posts/manual-plan",
+            "/internal/posts/manual-runs/record-failure",
+        }
         allow_daily = bool(
             parsed.path in daily_exact_paths
             or parsed.path in catchup_exact_paths
             or parsed.path in schedule_exact_paths
+            or parsed.path in manual_worker_exact_paths
             or daily_verify_match
             or daily_publish_match
         )
@@ -3227,7 +3475,10 @@ class Handler(BaseHTTPRequestHandler):
         if not internal_role:
             return
         if (
-            parsed.path in catchup_exact_paths.union(schedule_exact_paths)
+            parsed.path
+            in catchup_exact_paths.union(schedule_exact_paths).union(
+                manual_worker_exact_paths
+            )
             and internal_role != "daily"
         ):
             self.send_json(
@@ -3244,6 +3495,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/internal/posts/daily-plan",
                 "/internal/posts/catchup-plan",
                 "/internal/posts/schedule-plan",
+                "/internal/posts/manual-plan",
             }:
                 request_body_limit = MAX_DAILY_PLAN_BODY_BYTES
             elif parsed.path == "/internal/posts/material-pool/check":
@@ -3255,6 +3507,18 @@ class Handler(BaseHTTPRequestHandler):
             )
             if parsed.path == "/internal/posts/canary":
                 self.send_json(200, {"item": publish_canary_request(payload)})
+                return
+            if parsed.path == "/internal/posts/manual-runs/claim":
+                self.send_json(200, claim_post_manual_run_request(payload))
+                return
+            if parsed.path == "/internal/posts/manual-plan":
+                self.send_json(200, create_post_manual_plan_request(payload))
+                return
+            if parsed.path == "/internal/posts/manual-runs/record-failure":
+                self.send_json(
+                    200,
+                    record_post_manual_failure_request(payload),
+                )
                 return
             if parsed.path == "/internal/posts/daily-plan":
                 if internal_role == "daily":
@@ -3397,6 +3661,18 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/internal/posts/material-pool/add":
                 self.send_json(200, add_post_material_pool_request(payload))
                 return
+            if parsed.path == "/internal/posts/manual-runs/create":
+                self.send_json(200, create_post_manual_run_request(payload))
+                return
+            if manual_run_query_match:
+                self.send_json(
+                    200,
+                    query_post_manual_run_request(
+                        payload,
+                        manual_run_query_match.group(1),
+                    ),
+                )
+                return
             if parsed.path == "/internal/posts/material-pool/account-options":
                 self.send_json(
                     200,
@@ -3447,6 +3723,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(
                     200,
                     add_post_drama_pool_request(payload),
+                )
+                return
+            if drama_pool_priority_match:
+                self.send_json(
+                    200,
+                    set_post_drama_pool_priority_request(
+                        payload,
+                        drama_pool_priority_match.group(1),
+                    ),
                 )
                 return
             if parsed.path == "/internal/posts/drama-pool/check":
@@ -3520,6 +3805,7 @@ class Handler(BaseHTTPRequestHandler):
                     dict.fromkeys(
                         tuple(DAILY_ACCOUNT_IDS)
                         + tuple(_active_schedule_account_scope())
+                        + tuple(_active_manual_account_scope())
                     )
                 )
                 if internal_role == "daily" and account_id not in allowed_accounts:
@@ -3550,6 +3836,7 @@ class Handler(BaseHTTPRequestHandler):
                     published = publish_queue_request(
                         daily_publish_match.group(1),
                         DAILY_ACCOUNT_IDS,
+                        allow_manual=True,
                     )
                 else:
                     published = publish_queue_request(daily_publish_match.group(1))
@@ -3610,6 +3897,7 @@ class Handler(BaseHTTPRequestHandler):
                     daily_publish_match
                     or parsed.path == "/internal/posts/daily-plan"
                     or parsed.path == "/internal/posts/catchup-plan"
+                    or parsed.path == "/internal/posts/manual-plan"
                 ),
             )
         except Exception:

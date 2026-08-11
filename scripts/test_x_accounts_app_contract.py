@@ -35,6 +35,9 @@ X_POST_LOGS_SOURCE = (ROOT / "static" / "x-post-logs.html").read_text(encoding="
 X_POST_POOL_SOURCE = (ROOT / "static" / "x-post-material-pool.html").read_text(
     encoding="utf-8"
 )
+X_POST_DRAMA_POOL_SOURCE = (
+    ROOT / "static" / "x-post-drama-pool.html"
+).read_text(encoding="utf-8")
 X_ACCOUNTS_CLIENT_SOURCE = (
     ROOT / "features" / "x_accounts" / "client.py"
 ).read_text(encoding="utf-8")
@@ -46,6 +49,12 @@ X_POST_DAILY_SERVICE_SOURCE = (
 ).read_text(encoding="utf-8")
 X_POST_DAILY_TIMER_SOURCE = (
     ROOT / "deploy" / "x-post-daily.timer"
+).read_text(encoding="utf-8")
+X_POST_MANUAL_SERVICE_SOURCE = (
+    ROOT / "deploy" / "x-post-manual.service"
+).read_text(encoding="utf-8")
+X_POST_MANUAL_TIMER_SOURCE = (
+    ROOT / "deploy" / "x-post-manual.timer"
 ).read_text(encoding="utf-8")
 
 
@@ -120,6 +129,8 @@ class XAccountsAppContractTest(unittest.TestCase):
         self.assertNotIn('id="latestPublished">0 / 3', X_POST_LOGS_SOURCE)
         self.assertIn('item.batch_kind === "catchup"', X_POST_LOGS_SOURCE)
         self.assertIn("`补发批次 ${item.catchup_run_id}`", X_POST_LOGS_SOURCE)
+        self.assertIn('item.batch_kind === "manual"', X_POST_LOGS_SOURCE)
+        self.assertIn("`手动批次 ${item.manual_run_id}`", X_POST_LOGS_SOURCE)
         self.assertIn(
             '"href": "/x-account-list.html?v=20260727catchup1"',
             NAVIGATION_SOURCE,
@@ -411,7 +422,7 @@ class XAccountsAppContractTest(unittest.TestCase):
             routes.count(
                 '_require_cookie_navigation_item("xPostMaterialPool")'
             ),
-            4,
+            5,
         )
         self.assertEqual(routes.count('"actor": x_accounts_actor(self._session())'), 5)
         self.assertEqual(routes.count('"scope": "all"'), 5)
@@ -764,6 +775,105 @@ class XAccountsAppContractTest(unittest.TestCase):
             "batch_delete_post_drama_pool_request(payload)",
             X_ACCOUNTS_SIDECAR_SOURCE,
         )
+
+    def test_x_post_manual_publish_routes_are_cookie_gated_exact_and_async(self):
+        query_route = source_between(
+            "x_manual_run_match = re.fullmatch(",
+            'if parsed.path == "/api/admin/x-posts/material-pool":',
+        )
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostMaterialPool")',
+            query_route,
+        )
+        self.assertIn("query_x_post_manual_run(", query_route)
+        self.assertIn("no_store=True", query_route)
+
+        create_route = source_between(
+            'if parsed.path == "/api/admin/x-posts/material-pool/manual-publish":',
+            "x_drama_priority_match = re.fullmatch(",
+        )
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostMaterialPool")',
+            create_route,
+        )
+        self.assertIn("_require_same_origin_json()", create_route)
+        self.assertIn(
+            '"material_ids",\n                    "account_ids",\n                    "idempotency_key",',
+            create_route,
+        )
+        self.assertIn("create_x_post_manual_run(", create_route)
+        self.assertIn('"create_x_post_manual_run"', create_route)
+        self.assertIn('"create_x_post_manual_run_failed"', create_route)
+        self.assertIn("json_response(self, 202", create_route)
+        self.assertIn("no_store=True", create_route)
+
+        self.assertIn("def create_x_post_manual_run(", X_ACCOUNTS_CLIENT_SOURCE)
+        self.assertIn(
+            '"/internal/posts/manual-runs/create"',
+            X_ACCOUNTS_CLIENT_SOURCE,
+        )
+        self.assertIn("def query_x_post_manual_run(", X_ACCOUNTS_CLIENT_SOURCE)
+        self.assertIn(
+            '"/internal/posts/manual-runs/%s/query" % run_id',
+            X_ACCOUNTS_CLIENT_SOURCE,
+        )
+
+    def test_x_post_high_priority_route_is_put_gated_reversible_and_audited(self):
+        route = source_between(
+            "x_drama_priority_match = re.fullmatch(",
+            'if parsed.path == "/api/admin/x-posts/drama-pool/batch-delete":',
+        )
+        self.assertIn('if self.command != "PUT":', route)
+        self.assertIn(
+            '_require_cookie_navigation_item("xPostDramaPool")',
+            route,
+        )
+        self.assertIn("_require_same_origin_json()", route)
+        self.assertIn('set(payload) != {"high_priority"}', route)
+        self.assertIn("set_x_post_drama_pool_priority(", route)
+        self.assertIn('"set_x_post_drama_pool_priority"', route)
+        self.assertIn('"set_x_post_drama_pool_priority_failed"', route)
+        self.assertIn("no_store=True", route)
+        self.assertIn("def do_PUT(self):", APP_SOURCE)
+        self.assertIn(
+            'r"/api/admin/x-posts/drama-pool/([0-9]+)/priority"',
+            APP_SOURCE,
+        )
+        self.assertNotIn("def do_PUT(self):\n        self.do_POST()", APP_SOURCE)
+        self.assertIn("def set_x_post_drama_pool_priority(", X_ACCOUNTS_CLIENT_SOURCE)
+        self.assertIn(
+            '"/internal/posts/drama-pool/%s/priority" % pool_item_id',
+            X_ACCOUNTS_CLIENT_SOURCE,
+        )
+        self.assertIn("取消高优", X_POST_DRAMA_POOL_SOURCE)
+
+    def test_manual_worker_sidecar_scope_and_public_response_are_fail_closed(self):
+        for path in (
+            '"/internal/posts/manual-runs/claim"',
+            '"/internal/posts/manual-plan"',
+            '"/internal/posts/manual-runs/record-failure"',
+        ):
+            self.assertIn(path, X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("manual_worker_exact_paths", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("and internal_role != \"daily\"", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("_active_manual_account_scope()", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("allow_manual=True", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("def _public_manual_run(item):", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("allowed_run = (", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("allowed_queue = (", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertNotIn('"body_template",\n        "actor_user_id"', X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("preflight_post_storage_request(len(trusted))", X_ACCOUNTS_SIDECAR_SOURCE)
+        self.assertIn("_require_candidate_duration_capability", X_ACCOUNTS_SIDECAR_SOURCE)
+
+    def test_manual_worker_uses_shared_lock_and_persistent_timer(self):
+        self.assertIn("scripts/x_post_manual_runner.py", X_POST_MANUAL_SERVICE_SOURCE)
+        self.assertIn("EnvironmentFile=/etc/x-post-daily.env", X_POST_MANUAL_SERVICE_SOURCE)
+        self.assertIn("EnvironmentFile=/etc/x-post-media-repair.token", X_POST_MANUAL_SERVICE_SOURCE)
+        self.assertIn("EnvironmentFile=/etc/x-post-schedule.env", X_POST_MANUAL_SERVICE_SOURCE)
+        self.assertIn("ProtectSystem=strict", X_POST_MANUAL_SERVICE_SOURCE)
+        self.assertIn("OnBootSec=15s", X_POST_MANUAL_TIMER_SOURCE)
+        self.assertIn("OnUnitActiveSec=15s", X_POST_MANUAL_TIMER_SOURCE)
+        self.assertIn("Persistent=false", X_POST_MANUAL_TIMER_SOURCE)
 
     def test_x_post_account_auto_verify_uses_navigation_gate_and_safe_scope(self):
         route = source_between(

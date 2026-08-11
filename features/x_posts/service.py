@@ -54,6 +54,7 @@ MAX_RANDOM_DAILY_COUNT = 24
 RANDOM_PUBLISH_MIN_GAP_MINUTES = 60
 MAX_DRAMA_POOL_BATCH_DELETE_SIZE = 100
 MAX_DRAMA_POOL_REPLAY_SIZE = 100
+MAX_MANUAL_PUBLISH_SIZE = 50
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
 SCHEDULE_MODES = frozenset({"fixed", "random"})
@@ -108,6 +109,7 @@ QUEUE_LEDGER_FIELDS = (
     "run_id",
     "catchup_run_id",
     "schedule_run_id",
+    "manual_run_id",
     "run_date",
     "source_type",
     "body_template",
@@ -993,11 +995,44 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_manual_run (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    run_date TEXT NOT NULL,
+                    source_date TEXT NOT NULL,
+                    account_ids_json TEXT NOT NULL,
+                    material_ids_json TEXT NOT NULL,
+                    body_template TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    actor_name TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued'
+                        CHECK(status IN (
+                            'queued','running','completed',
+                            'completed_with_errors','needs_review',
+                            'stopped','failed_preflight'
+                        )),
+                    expected_count INTEGER NOT NULL,
+                    queued_count INTEGER NOT NULL DEFAULT 0,
+                    published_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    unknown_count INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
             CREATE TABLE IF NOT EXISTS x_post_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 run_id INTEGER,
                 catchup_run_id INTEGER,
+                manual_run_id INTEGER,
                 run_date TEXT NOT NULL DEFAULT '',
                 material_key TEXT NOT NULL DEFAULT '',
                 pool_item_id INTEGER,
@@ -1035,6 +1070,7 @@ def ensure_storage(db_path):
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES x_post_daily_run(id),
                 FOREIGN KEY(catchup_run_id) REFERENCES x_post_catchup_run(id),
+                FOREIGN KEY(manual_run_id) REFERENCES x_post_manual_run(id),
                 FOREIGN KEY(pool_item_id) REFERENCES x_post_material_pool(id)
             )
                 """
@@ -1161,6 +1197,9 @@ def ensure_storage(db_path):
                         CHECK(assigned_account_id>=0),
                     assigned_at TEXT NOT NULL DEFAULT '',
                     assigned_source_queue_id INTEGER,
+                    priority_at TEXT NOT NULL DEFAULT '',
+                    priority_by_user_id TEXT NOT NULL DEFAULT '',
+                    priority_by_name TEXT NOT NULL DEFAULT '',
                     last_checked_at TEXT NOT NULL DEFAULT '',
                     last_error_code TEXT NOT NULL DEFAULT '',
                     last_error_message TEXT NOT NULL DEFAULT '',
@@ -1210,6 +1249,7 @@ def ensure_storage(db_path):
                 "run_id": "INTEGER",
                 "catchup_run_id": "INTEGER",
                 "schedule_run_id": "INTEGER",
+                "manual_run_id": "INTEGER",
                 "run_date": "TEXT NOT NULL DEFAULT ''",
                 "source_type": "TEXT NOT NULL DEFAULT 'material'",
                 "body_template": "TEXT NOT NULL DEFAULT ''",
@@ -1308,6 +1348,9 @@ def ensure_storage(db_path):
                     "INTEGER NOT NULL DEFAULT 1 "
                     "CHECK(replay_generation>0)"
                 ),
+                "priority_at": "TEXT NOT NULL DEFAULT ''",
+                "priority_by_user_id": "TEXT NOT NULL DEFAULT ''",
+                "priority_by_name": "TEXT NOT NULL DEFAULT ''",
             }
             for name, definition in drama_pool_additive_columns.items():
                 if name not in drama_pool_columns:
@@ -1494,6 +1537,7 @@ def ensure_storage(db_path):
             duplicate_account_day = conn.execute(
                 "SELECT account_id,run_date,COUNT(*) AS total FROM x_post_queue "
                 "WHERE run_date<>'' AND schedule_run_id IS NULL "
+                "AND manual_run_id IS NULL "
                 "GROUP BY account_id,run_date HAVING COUNT(*)>1 LIMIT 1"
             ).fetchone()
             if duplicate_account_day:
@@ -1514,12 +1558,18 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_account_run_date "
                 "ON x_post_queue(account_id,run_date) "
-                "WHERE run_date<>'' AND schedule_run_id IS NULL"
+                "WHERE run_date<>'' AND schedule_run_id IS NULL "
+                "AND manual_run_id IS NULL"
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_schedule_account "
                 "ON x_post_queue(schedule_run_id,account_id) "
                 "WHERE schedule_run_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_manual_account "
+                "ON x_post_queue(manual_run_id,account_id) "
+                "WHERE manual_run_id IS NOT NULL"
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_queue_episode_key "
@@ -1539,6 +1589,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_schedule "
                 "ON x_post_queue(schedule_run_id,candidate_rank,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_queue_manual "
+                "ON x_post_queue(manual_run_id,candidate_rank,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_status ON x_post_queue(status,created_at,id)"
@@ -1565,6 +1619,10 @@ def ensure_storage(db_path):
                 "ON x_post_schedule_run(status,run_date,publish_time,id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
+                "ON x_post_manual_run(status,created_at,id)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_fifo "
                 "ON x_post_drama_pool(status,created_at,id)"
             )
@@ -1579,6 +1637,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_assignment "
                 "ON x_post_drama_pool(assigned_account_id,status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_priority "
+                "ON x_post_drama_pool(assigned_account_id,status,priority_at,created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_drama_replay_audit_pool "
@@ -1679,6 +1741,42 @@ def ensure_storage(db_path):
                 END
                 """
             )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_manual_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_manual_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN NEW.manual_run_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                        FROM x_post_manual_run
+                       WHERE id=NEW.manual_run_id
+                         AND run_date=NEW.run_date
+                         AND source_date=NEW.source_date
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue manual_run_id missing or mismatched');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_manual_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_manual_update
+                BEFORE UPDATE OF manual_run_id,run_date,source_date ON x_post_queue
+                WHEN NEW.manual_run_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1
+                        FROM x_post_manual_run
+                       WHERE id=NEW.manual_run_id
+                         AND run_date=NEW.run_date
+                         AND source_date=NEW.source_date
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue manual_run_id missing or mismatched');
+                END
+                """
+            )
             conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_batch_parent_insert")
             conn.execute(
                 """
@@ -1688,6 +1786,7 @@ def ensure_storage(db_path):
                     (NEW.run_id IS NOT NULL)
                     + (NEW.catchup_run_id IS NOT NULL)
                     + (NEW.schedule_run_id IS NOT NULL)
+                    + (NEW.manual_run_id IS NOT NULL)
                 ) > 1
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue has multiple batch parents');
@@ -1698,11 +1797,13 @@ def ensure_storage(db_path):
             conn.execute(
                 """
                 CREATE TRIGGER trg_x_post_queue_batch_parent_update
-                BEFORE UPDATE OF run_id,catchup_run_id,schedule_run_id ON x_post_queue
+                BEFORE UPDATE OF run_id,catchup_run_id,schedule_run_id,
+                    manual_run_id ON x_post_queue
                 WHEN (
                     (NEW.run_id IS NOT NULL)
                     + (NEW.catchup_run_id IS NOT NULL)
                     + (NEW.schedule_run_id IS NOT NULL)
+                    + (NEW.manual_run_id IS NOT NULL)
                 ) > 1
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue has multiple batch parents');
@@ -2143,6 +2244,43 @@ def _schedule_account_ids(values, *, allow_empty=False):
         seen.add(account_id)
         normalized.append(account_id)
     return normalized
+
+
+def _manual_material_ids(values):
+    if (
+        not isinstance(values, list)
+        or not values
+        or len(values) > MAX_MANUAL_PUBLISH_SIZE
+    ):
+        raise XPostError(
+            "invalid_request",
+            "material_ids必须包含1到%s个素材" % MAX_MANUAL_PUBLISH_SIZE,
+            400,
+        )
+    normalized = []
+    seen = set()
+    for raw in values:
+        material_id = normalize_material_key(raw)
+        if material_id in seen:
+            raise XPostError(
+                "invalid_request",
+                "material_ids不能重复",
+                400,
+            )
+        seen.add(material_id)
+        normalized.append(material_id)
+    return normalized
+
+
+def _manual_idempotency_key(value):
+    try:
+        return _clean_token(value, "manual idempotency key", 200)
+    except ValueError:
+        raise XPostError(
+            "invalid_request",
+            "idempotency_key无效",
+            400,
+        ) from None
 
 
 def _schedule_publish_times(values, *, allow_empty=False):
@@ -3445,12 +3583,19 @@ class XPostStore:
             if raw_schedule_run_id not in (None, "")
             else None
         )
+        raw_manual_run_id = payload.get("manual_run_id")
+        result["manual_run_id"] = (
+            _positive_int(raw_manual_run_id, "manual_run_id")
+            if raw_manual_run_id not in (None, "")
+            else None
+        )
         if sum(
             value is not None
             for value in (
                 result["run_id"],
                 result["catchup_run_id"],
                 result["schedule_run_id"],
+                result["manual_run_id"],
             )
         ) > 1:
             raise XPostError(
@@ -3577,6 +3722,7 @@ class XPostStore:
                     "run_id",
                     "catchup_run_id",
                     "schedule_run_id",
+                    "manual_run_id",
                     "run_date",
                     "pool_item_id",
                     "drama_pool_item_id",
@@ -3679,11 +3825,16 @@ class XPostStore:
                         "该短剧集数已被X发布队列占用",
                         409,
                     )
-            if values["schedule_run_id"] is None and conn.execute(
+            if (
+                values["schedule_run_id"] is None
+                and values["manual_run_id"] is None
+                and conn.execute(
                 "SELECT id FROM x_post_queue "
-                "WHERE account_id=? AND run_date=? AND schedule_run_id IS NULL",
+                "WHERE account_id=? AND run_date=? "
+                "AND schedule_run_id IS NULL AND manual_run_id IS NULL",
                 (values["account_id"], values["run_date"]),
-            ).fetchone():
+                ).fetchone()
+            ):
                 conn.rollback()
                 raise XPostError("x_post_account_day_already_reserved", "该X账号当日已有发布队列", 409)
             placeholders = ",".join("?" for _field in columns)
@@ -4466,7 +4617,8 @@ class XPostStore:
             "AND free_episode_count>0 "
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id=0 "
-            "ORDER BY created_at DESC,id DESC LIMIT ?",
+            "ORDER BY CASE WHEN priority_at<>'' THEN 0 ELSE 1 END,"
+            "priority_at DESC,created_at DESC,id DESC LIMIT ?",
             (unassigned_limit,),
         ).fetchall()
         unassigned = iter(unassigned_rows)
@@ -4521,7 +4673,8 @@ class XPostStore:
                 "AND last_error_code='' "
                 "AND free_episode_count>0 "
                 "AND next_sub_number<=free_episode_count "
-                "ORDER BY created_at DESC,id DESC LIMIT ?",
+                "ORDER BY CASE WHEN priority_at<>'' THEN 0 ELSE 1 END,"
+                "priority_at DESC,created_at DESC,id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             return [_row_dict(row) for row in rows]
@@ -4722,6 +4875,7 @@ class XPostStore:
                     continue
                 cursor = conn.execute(
                     "UPDATE x_post_drama_pool SET status='validation_failed',"
+                    "priority_at='',priority_by_user_id='',priority_by_name='',"
                     "last_checked_at=?,last_error_code=?,"
                     "last_error_message=?,updated_at=? "
                     "WHERE id=? AND assigned_account_id=0 "
@@ -4806,7 +4960,14 @@ class XPostStore:
             rows = conn.execute(
                 select_sql
                 + where
-                + " ORDER BY p.created_at DESC,p.id DESC LIMIT ? OFFSET ?",
+                + " ORDER BY CASE WHEN p.assigned_account_id=0 "
+                "AND p.status IN ('pending','active') "
+                "AND p.last_error_code='' "
+                "AND p.free_episode_count>0 "
+                "AND p.next_sub_number<=p.free_episode_count "
+                "AND p.priority_at<>'' THEN 0 ELSE 1 END,"
+                "p.priority_at DESC,p.created_at DESC,p.id DESC "
+                "LIMIT ? OFFSET ?",
                 tuple(values) + (page_size, offset),
             ).fetchall()
             summary = conn.execute(
@@ -4862,6 +5023,111 @@ class XPostStore:
                 "pages": (total + page_size - 1) // page_size,
             },
         }
+
+    def set_drama_pool_priority(
+        self,
+        pool_item_id,
+        high_priority,
+        actor=None,
+    ):
+        pool_item_id = _positive_int(pool_item_id, "pool_item_id")
+        if not isinstance(high_priority, bool):
+            raise XPostError(
+                "invalid_request",
+                "high_priority必须是布尔值",
+                400,
+            )
+        actor = actor if isinstance(actor, dict) else {}
+        actor_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        actor_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        if (
+            not actor_user_id
+            or not actor_name
+            or any(ord(char) < 32 for char in actor_user_id + actor_name)
+        ):
+            raise XPostError(
+                "invalid_request",
+                "短剧高优操作人无效",
+                400,
+            )
+        # Priority ordering must preserve consecutive operator clicks that can
+        # occur within the same second; the general ledger timestamp is only
+        # second-granular for historical compatibility.
+        timestamp = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_drama_pool WHERE id=?",
+                (pool_item_id,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_pool_item_not_found",
+                    "短剧池记录不存在",
+                    404,
+                )
+            eligible = bool(
+                str(row["status"]) in {"pending", "active"}
+                and int(row["assigned_account_id"] or 0) == 0
+                and not str(row["last_error_code"] or "")
+                and int(row["free_episode_count"] or 0) > 0
+                and int(row["next_sub_number"] or 0)
+                <= int(row["free_episode_count"] or 0)
+            )
+            if high_priority and not eligible:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_priority_conflict",
+                    "仅未分配、校验正常且仍有免费集数的短剧可设置高优",
+                    409,
+                )
+            if high_priority:
+                cursor = conn.execute(
+                    "UPDATE x_post_drama_pool SET priority_at=?,"
+                    "priority_by_user_id=?,priority_by_name=?,updated_at=? "
+                    "WHERE id=? AND assigned_account_id=0 "
+                    "AND status IN ('pending','active') "
+                    "AND last_error_code='' "
+                    "AND free_episode_count>0 "
+                    "AND next_sub_number<=free_episode_count",
+                    (
+                        timestamp,
+                        actor_user_id,
+                        actor_name,
+                        timestamp,
+                        pool_item_id,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE x_post_drama_pool SET priority_at='',"
+                    "priority_by_user_id='',priority_by_name='',updated_at=? "
+                    "WHERE id=?",
+                    (timestamp, pool_item_id),
+                )
+            if int(cursor.rowcount or 0) != 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_drama_priority_conflict",
+                    "短剧状态已变化，请刷新后重试",
+                    409,
+                )
+            conn.commit()
+        result = self.query_drama_pool(
+            {"drama_id": str(row["content_id"]), "page": 1, "page_size": 1}
+        )
+        if not result["items"]:
+            raise XPostError(
+                "x_post_storage_conflict",
+                "短剧高优结果无法读取",
+                500,
+            )
+        return result["items"][0]
 
     def query_drama_pool_episodes(self, pool_item_id, payload=None):
         pool_item_id = _positive_int(pool_item_id, "pool_item_id")
@@ -5371,6 +5637,570 @@ class XPostStore:
             "validate_only": validate_only,
             "reason": reason,
         }
+
+    @staticmethod
+    def _manual_run_item(row):
+        if not row:
+            raise XPostError(
+                "x_post_manual_run_not_found",
+                "X手动发布任务不存在",
+                404,
+            )
+        item = _row_dict(row)
+        item["account_ids"] = _schedule_account_ids(
+            _json_array(item.pop("account_ids_json"), "account_ids"),
+        )
+        item["material_ids"] = _manual_material_ids(
+            _json_array(item.pop("material_ids_json"), "material_ids"),
+        )
+        item["body_template"] = _normalize_post_template(
+            item.get("body_template"),
+            "material",
+        )
+        item["error_message"] = redact_text(item.get("error_message"), 500)
+        return item
+
+    def get_manual_run(self, run_id):
+        run_id = _positive_int(run_id, "run_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN")
+            row = conn.execute(
+                "SELECT * FROM x_post_manual_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            queues = conn.execute(
+                "SELECT q.id,q.manual_run_id,q.run_date,q.source_date,"
+                "q.account_id,q.account_username,q.material_id,"
+                "q.candidate_rank,q.status AS queue_status,"
+                # The runner resumes from the queue state, while the log state
+                # below supplies the no-retry marker.  A crash during media
+                # upload or Post creation therefore remains ``publishing`` and
+                # is stopped for review instead of becoming an unparseable
+                # sidecar response or being published a second time.
+                "q.status AS status,"
+                "CASE WHEN l.status='post_creating' "
+                "OR COALESCE(l.unknown_outcome,0)=1 "
+                "THEN 1 ELSE 0 END AS unknown_outcome,"
+                "COALESCE(l.x_post_url,'') AS preview_url,"
+                "COALESCE(l.error_code,'') AS error_code,"
+                "COALESCE(l.error_message,'') AS error_message,"
+                "q.created_at,q.updated_at "
+                "FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.manual_run_id=? "
+                "ORDER BY q.candidate_rank,q.id",
+                (run_id,),
+            ).fetchall()
+            conn.commit()
+        item = self._manual_run_item(row)
+        item["queues"] = []
+        for queue in queues:
+            queue_item = _row_dict(queue)
+            queue_item["unknown_outcome"] = bool(
+                queue_item["unknown_outcome"]
+            )
+            queue_item["error_message"] = redact_text(
+                queue_item["error_message"],
+                500,
+            )
+            item["queues"].append(queue_item)
+        return item
+
+    def create_manual_run(
+        self,
+        material_ids,
+        account_ids,
+        idempotency_key,
+        actor=None,
+    ):
+        material_ids = _manual_material_ids(material_ids)
+        account_ids = _schedule_account_ids(account_ids)
+        if len(material_ids) != len(account_ids):
+            raise XPostError(
+                "x_post_manual_scope_mismatch",
+                "手动发布的素材数必须与目标账号数一致",
+                400,
+            )
+        idempotency_key = _manual_idempotency_key(idempotency_key)
+        actor = actor if isinstance(actor, dict) else {}
+        actor_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        actor_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        if (
+            not actor_user_id
+            or not actor_name
+            or any(ord(char) < 32 for char in actor_user_id + actor_name)
+        ):
+            raise XPostError(
+                "invalid_request",
+                "手动发布操作人无效",
+                400,
+            )
+        run_date = _beijing_today()
+        source_date = (
+            datetime.strptime(run_date, "%Y-%m-%d").date()
+            - timedelta(days=1)
+        ).isoformat()
+        timestamp = utc_now()
+        accounts_json = json.dumps(account_ids, separators=(",", ":"))
+        materials_json = json.dumps(material_ids, separators=(",", ":"))
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM x_post_manual_run WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                same = bool(
+                    str(existing["run_date"]) == run_date
+                    and str(existing["source_date"]) == source_date
+                    and str(existing["account_ids_json"]) == accounts_json
+                    and str(existing["material_ids_json"]) == materials_json
+                    and str(existing["actor_user_id"]) == actor_user_id
+                )
+                if not same:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_idempotency_conflict",
+                        "手动发布幂等键已对应其他任务",
+                        409,
+                    )
+                run_id = int(existing["id"])
+                conn.commit()
+                result = self.get_manual_run(run_id)
+                result["created"] = False
+                return result
+
+            placeholders = ",".join("?" for _item in material_ids)
+            in_pool = conn.execute(
+                "SELECT material_key FROM x_post_material_pool "
+                "WHERE material_key IN (%s) LIMIT 1" % placeholders,
+                tuple(material_ids),
+            ).fetchone()
+            already_used = conn.execute(
+                "SELECT material_key FROM x_post_queue "
+                "WHERE material_key IN (%s) LIMIT 1" % placeholders,
+                tuple(material_ids),
+            ).fetchone()
+            if in_pool or already_used:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_material_unavailable",
+                    "所选素材已进入素材池或已被发布队列占用",
+                    409,
+                )
+            config = conn.execute(
+                "SELECT body_template FROM x_post_schedule_config "
+                "WHERE source_type='material'",
+            ).fetchone()
+            if not config:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_schedule_not_found",
+                    "素材发布文案设置不存在",
+                    404,
+                )
+            body_template = _normalize_post_template(
+                config["body_template"],
+                "material",
+            )
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_manual_run("
+                    "idempotency_key,run_date,source_date,account_ids_json,"
+                    "material_ids_json,body_template,actor_user_id,actor_name,"
+                    "status,expected_count,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    (
+                        idempotency_key,
+                        run_date,
+                        source_date,
+                        accounts_json,
+                        materials_json,
+                        body_template,
+                        actor_user_id,
+                        actor_name,
+                        len(account_ids),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "手动发布任务唯一约束冲突",
+                    409,
+                ) from exc
+            run_id = int(cursor.lastrowid)
+            conn.commit()
+        result = self.get_manual_run(run_id)
+        result["created"] = True
+        return result
+
+    def claim_manual_run(self):
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_manual_run "
+                "WHERE status IN ('queued','running') "
+                "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
+                "created_at,id LIMIT 1"
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return {"found": False, "run": None}
+            run_id = int(row["id"])
+            if str(row["status"]) == "running":
+                interrupted = conn.execute(
+                    "SELECT q.id,COALESCE(l.status,'') AS log_status,"
+                    "COALESCE(l.unknown_outcome,0) AS unknown_outcome "
+                    "FROM x_post_queue q "
+                    "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "WHERE q.manual_run_id=? AND q.status='publishing' "
+                    "ORDER BY q.candidate_rank,q.id LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if interrupted:
+                    unknown = bool(interrupted["unknown_outcome"]) or str(
+                        interrupted["log_status"]
+                    ) == "post_creating"
+                    status = "needs_review" if unknown else "stopped"
+                    code = (
+                        "x_post_unknown_outcome"
+                        if unknown
+                        else "x_post_manual_interrupted"
+                    )
+                    message = (
+                        "A manual Post creation was interrupted and requires review"
+                        if unknown
+                        else "A manual publish was interrupted before a confirmed Post result"
+                    )
+                    conn.execute(
+                        "UPDATE x_post_manual_run SET status=?,"
+                        "unknown_count=CASE WHEN ?=1 AND unknown_count<1 "
+                        "THEN 1 ELSE unknown_count END,error_code=?,"
+                        "error_message=?,finished_at=?,updated_at=? "
+                        "WHERE id=? AND status='running'",
+                        (
+                            status,
+                            1 if unknown else 0,
+                            code,
+                            message,
+                            timestamp,
+                            timestamp,
+                            run_id,
+                        ),
+                    )
+                    conn.commit()
+                    return {
+                        "found": True,
+                        "run": self.get_manual_run(run_id),
+                    }
+            if str(row["status"]) == "queued":
+                cursor = conn.execute(
+                    "UPDATE x_post_manual_run SET status='running',"
+                    "started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,"
+                    "updated_at=? WHERE id=? AND status='queued'",
+                    (timestamp, timestamp, run_id),
+                )
+                if int(cursor.rowcount or 0) != 1:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "手动发布任务领取冲突",
+                        409,
+                    )
+            conn.commit()
+        return {"found": True, "run": self.get_manual_run(run_id)}
+
+    def active_manual_account_ids(self):
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT account_ids_json FROM x_post_manual_run "
+                "WHERE status IN ('queued','running') ORDER BY id"
+            ).fetchall()
+        result = []
+        seen = set()
+        for row in rows:
+            for account_id in _schedule_account_ids(
+                _json_array(row["account_ids_json"], "account_ids")
+            ):
+                if account_id not in seen:
+                    seen.add(account_id)
+                    result.append(account_id)
+        return result
+
+    def record_manual_failure(self, run_id, error_code, error_message):
+        run_id = _positive_int(run_id, "run_id")
+        try:
+            code = _clean_token(
+                error_code or "x_post_manual_preflight_failed",
+                "error code",
+                64,
+            )
+        except ValueError:
+            raise XPostError("invalid_request", "error_code无效", 400) from None
+        message = redact_text(
+            error_message or "X手动发布预检失败",
+            500,
+        )
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_manual_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_run_not_found",
+                    "X手动发布任务不存在",
+                    404,
+                )
+            queue_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM x_post_queue WHERE manual_run_id=?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            if queue_count:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_plan_exists",
+                    "手动发布任务已生成队列，不能记录为预检失败",
+                    409,
+                )
+            if str(row["status"]) == "failed_preflight":
+                conn.commit()
+                result = self.get_manual_run(run_id)
+                result["recorded"] = False
+                return result
+            if str(row["status"]) not in {"queued", "running"}:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_run_terminal",
+                    "手动发布任务已结束",
+                    409,
+                )
+            conn.execute(
+                "UPDATE x_post_manual_run SET status='failed_preflight',"
+                "queued_count=0,published_count=0,failed_count=0,"
+                "unknown_count=0,error_code=?,error_message=?,"
+                "finished_at=?,updated_at=? WHERE id=?",
+                (code, message, timestamp, timestamp, run_id),
+            )
+            conn.commit()
+        result = self.get_manual_run(run_id)
+        result["recorded"] = True
+        return result
+
+    def create_manual_plan(self, run_id, candidates):
+        run_id = _positive_int(run_id, "run_id")
+        if not isinstance(candidates, list):
+            raise XPostError("invalid_request", "candidates必须是数组", 400)
+        frozen = self.get_manual_run(run_id)
+        account_ids = list(frozen["account_ids"])
+        material_ids = list(frozen["material_ids"])
+        if len(candidates) != len(account_ids):
+            raise XPostError(
+                "x_post_manual_candidate_shortage",
+                "手动发布候选数量与冻结账号数量不一致",
+                409,
+            )
+        prepared = []
+        seen_materials = set()
+        for index, candidate in enumerate(candidates, 1):
+            if not isinstance(candidate, dict):
+                raise XPostError("invalid_request", "candidate必须是对象", 400)
+            payload = dict(candidate)
+            payload.update(
+                {
+                    "source_type": "material",
+                    "body_template": frozen["body_template"],
+                    "manual_run_id": run_id,
+                }
+            )
+            values = self._queue_payload(
+                payload,
+                run_date=frozen["run_date"],
+                candidate_rank=index,
+                require_compliance=True,
+            )
+            if values["source_date"] != frozen["source_date"]:
+                raise XPostError(
+                    "x_post_manual_source_mismatch",
+                    "手动发布候选来源日期与冻结任务不一致",
+                    409,
+                )
+            if values["account_id"] != account_ids[index - 1]:
+                raise XPostError(
+                    "x_post_manual_account_mismatch",
+                    "手动发布候选账号顺序与冻结任务不一致",
+                    409,
+                )
+            if values["pool_item_id"] is not None:
+                raise XPostError(
+                    "x_post_manual_pool_forbidden",
+                    "手动发布候选不能绑定素材池记录",
+                    409,
+                )
+            if values["material_key"] in seen_materials:
+                raise XPostError(
+                    "invalid_request",
+                    "手动发布候选素材不能重复",
+                    400,
+                )
+            seen_materials.add(values["material_key"])
+            values["idempotency_key"] = "xpost:manual:v1:%s:%s" % (
+                run_id,
+                values["account_id"],
+            )
+            prepared.append(values)
+        if seen_materials != set(material_ids):
+            raise XPostError(
+                "x_post_manual_material_mismatch",
+                "手动发布候选素材与冻结任务不一致",
+                409,
+            )
+
+        timestamp = utc_now()
+        columns = ("idempotency_key",) + QUEUE_LEDGER_FIELDS + QUEUE_FIELDS
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM x_post_manual_run WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if not run:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_run_not_found",
+                    "X手动发布任务不存在",
+                    404,
+                )
+            stored_accounts = _schedule_account_ids(
+                _json_array(run["account_ids_json"], "account_ids")
+            )
+            stored_materials = _manual_material_ids(
+                _json_array(run["material_ids_json"], "material_ids")
+            )
+            if stored_accounts != account_ids or stored_materials != material_ids:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "手动发布冻结任务在建队列前发生变化",
+                    500,
+                )
+            existing_queues = conn.execute(
+                "SELECT * FROM x_post_queue WHERE manual_run_id=? "
+                "ORDER BY candidate_rank,id",
+                (run_id,),
+            ).fetchall()
+            if existing_queues:
+                expected = [
+                    (values["account_id"], values["material_key"])
+                    for values in prepared
+                ]
+                actual = [
+                    (int(row["account_id"]), str(row["material_key"]))
+                    for row in existing_queues
+                ]
+                if actual != expected:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_manual_plan_exists",
+                        "手动发布任务已存在不同的冻结队列",
+                        409,
+                    )
+                conn.commit()
+                result = self.get_manual_run(run_id)
+                result["created"] = False
+                return result
+            if str(run["status"]) not in {"queued", "running"}:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_run_terminal",
+                    "手动发布任务已结束，不能再生成队列",
+                    409,
+                )
+
+            material_placeholders = ",".join("?" for _item in material_ids)
+            if conn.execute(
+                "SELECT 1 FROM x_post_material_pool "
+                "WHERE material_key IN (%s) LIMIT 1"
+                % material_placeholders,
+                tuple(material_ids),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_material_unavailable",
+                    "所选素材已进入素材池",
+                    409,
+                )
+            if conn.execute(
+                "SELECT 1 FROM x_post_queue "
+                "WHERE material_key IN (%s) LIMIT 1"
+                % material_placeholders,
+                tuple(material_ids),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError(
+                    "x_post_material_already_used",
+                    "所选素材已被其他发布队列占用",
+                    409,
+                )
+            account_placeholders = ",".join("?" for _item in account_ids)
+            if conn.execute(
+                "SELECT 1 FROM x_post_publish_log l "
+                "JOIN x_post_queue q ON q.id=l.queue_id "
+                "WHERE q.account_id IN (%s) "
+                "AND (COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status='post_creating') LIMIT 1"
+                % account_placeholders,
+                tuple(account_ids),
+            ).fetchone():
+                conn.rollback()
+                raise XPostError(
+                    "x_post_unknown_outcome",
+                    "所选账号存在待核对发布结果，已停止手动发布",
+                    409,
+                    True,
+                )
+            conn.execute(
+                "UPDATE x_post_manual_run SET status='running',"
+                "queued_count=?,published_count=0,failed_count=0,"
+                "unknown_count=0,error_code='',error_message='',"
+                "started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,"
+                "finished_at='',updated_at=? WHERE id=?",
+                (len(prepared), timestamp, timestamp, run_id),
+            )
+            placeholders = ",".join("?" for _field in columns)
+            try:
+                for values in prepared:
+                    conn.execute(
+                        "INSERT INTO x_post_queue("
+                        + ",".join(columns)
+                        + ",status,created_at,updated_at) VALUES("
+                        + placeholders
+                        + ",'queued',?,?)",
+                        tuple(values[field] for field in columns)
+                        + (timestamp, timestamp),
+                    )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "手动发布原子建队列唯一约束冲突",
+                    409,
+                ) from exc
+            conn.commit()
+        result = self.get_manual_run(run_id)
+        result["created"] = True
+        return result
 
     def get_schedule_run(self, run_id):
         run_id = _positive_int(run_id, "run_id")
@@ -6262,6 +7092,8 @@ class XPostStore:
                                 "assigned_account_id=?,assigned_at=?,"
                                 "assigned_source_queue_id=?,drama_name=?,"
                                 "description=?,language=?,labels=?,name_tag=?,"
+                                "priority_at='',priority_by_user_id='',"
+                                "priority_by_name='',"
                                 "last_checked_at=?,last_error_code='',"
                                 "last_error_message='',updated_at=? "
                                 "WHERE id=? AND assigned_account_id=0 "
@@ -7593,10 +8425,11 @@ class XPostStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         select = (
             "SELECT q.id AS queue_id,q.run_id,q.catchup_run_id,"
-            "q.schedule_run_id,"
+            "q.schedule_run_id,q.manual_run_id,"
             "CASE WHEN q.run_id IS NOT NULL THEN 'daily' "
             "WHEN q.catchup_run_id IS NOT NULL THEN 'catchup' "
             "WHEN q.schedule_run_id IS NOT NULL THEN 'schedule' "
+            "WHEN q.manual_run_id IS NOT NULL THEN 'manual' "
             "ELSE 'canary' END AS batch_kind,"
             "q.source_type,q.run_date,q.source_date,q.account_id,"
             "q.pool_item_id,q.pool_created_at,q.drama_pool_item_id,"
@@ -7695,7 +8528,7 @@ class XPostStore:
     @staticmethod
     def _sync_run(conn, queue_id, timestamp):
         queue = conn.execute(
-            "SELECT run_id,catchup_run_id,schedule_run_id "
+            "SELECT run_id,catchup_run_id,schedule_run_id,manual_run_id "
             "FROM x_post_queue WHERE id=?",
             (queue_id,),
         ).fetchone()
@@ -7707,6 +8540,7 @@ class XPostStore:
                 queue["run_id"],
                 queue["catchup_run_id"],
                 queue["schedule_run_id"],
+                queue["manual_run_id"],
             )
         ) > 1:
             raise XPostError(
@@ -7726,6 +8560,10 @@ class XPostStore:
             table_name = "x_post_schedule_run"
             queue_column = "schedule_run_id"
             batch_id = int(queue["schedule_run_id"])
+        elif queue["manual_run_id"]:
+            table_name = "x_post_manual_run"
+            queue_column = "manual_run_id"
+            batch_id = int(queue["manual_run_id"])
         else:
             return
         counts = conn.execute(
@@ -9182,6 +10020,7 @@ def publish_canary(
             queue.get("run_id")
             or queue.get("catchup_run_id")
             or queue.get("schedule_run_id")
+            or queue.get("manual_run_id")
         ) and (
             not expected_sha256
             or expected_size <= 0

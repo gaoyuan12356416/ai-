@@ -1406,11 +1406,23 @@ def _duration_limit(account):
 
 def _repair_job_key(item, source_sha256, profile, duration_policy):
     material_id = _normalize_repair_material_id(item["material_id"])
+    repair_item_id = item.get("pool_item_id")
+    if repair_item_id in (None, ""):
+        repair_item_id = item.get("manual_item_id")
+    if (
+        isinstance(repair_item_id, bool)
+        or not str(repair_item_id or "").isdigit()
+        or int(repair_item_id) <= 0
+    ):
+        raise CandidatePreflightError(
+            "media repair item identity is invalid",
+            code="media_preflight_failed",
+        )
     identity = "\0".join(
         (
             "x-post-media-repair-v3",
             material_id,
-            str(item["pool_item_id"]),
+            str(int(repair_item_id)),
             str(source_sha256),
             str(profile),
             str(duration_policy),
@@ -1528,7 +1540,10 @@ def _preflight_candidate(
                 {
                     "job_key": job_key,
                     "material_id": str(item["material_id"]),
-                    "pool_item_id": int(item["pool_item_id"]),
+                    "pool_item_id": int(
+                        item.get("pool_item_id")
+                        or item.get("manual_item_id")
+                    ),
                     "source_url": original_url,
                     "source_sha256": source_sha256,
                     "source_size": source_size,
@@ -1705,6 +1720,9 @@ def _preflight_candidates(
                 failures.append(
                     {
                         "pool_item_id": candidate.get("pool_item_id")
+                        if isinstance(candidate, dict)
+                        else None,
+                        "manual_item_id": candidate.get("manual_item_id")
                         if isinstance(candidate, dict)
                         else None,
                         "material_id": material_id,

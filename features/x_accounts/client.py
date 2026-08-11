@@ -55,7 +55,17 @@ SAFE_ERROR_CODES = {
     "x_post_drama_pool_item_not_found",
     "x_post_drama_pool_item_occupied",
     "x_post_drama_pool_item_unavailable",
+    "x_post_drama_priority_conflict",
     "x_post_drama_sequence_conflict",
+    "x_post_manual_account_mismatch",
+    "x_post_manual_candidate_shortage",
+    "x_post_manual_material_mismatch",
+    "x_post_manual_material_unavailable",
+    "x_post_manual_plan_exists",
+    "x_post_manual_run_not_found",
+    "x_post_manual_run_terminal",
+    "x_post_manual_scope_mismatch",
+    "x_post_manual_source_mismatch",
     "x_post_storage_conflict",
     "x_post_unknown_outcome",
     "x_posts_unavailable",
@@ -307,6 +317,62 @@ def add_x_post_material_pool(
     )
 
 
+def create_x_post_manual_run(
+    material_ids,
+    account_ids,
+    idempotency_key,
+    actor,
+    navigation_item="",
+):
+    if not isinstance(material_ids, (list, tuple)) or not isinstance(
+        account_ids, (list, tuple)
+    ):
+        raise XAccountsClientError(
+            "invalid_request",
+            "手动发布素材和账号必须是数组",
+            400,
+        )
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+        "material_ids": list(material_ids),
+        "account_ids": list(account_ids),
+        "idempotency_key": str(idempotency_key or ""),
+    }
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/manual-runs/create",
+        method="POST",
+        payload=payload,
+    )
+
+
+def query_x_post_manual_run(
+    run_id,
+    actor,
+    navigation_item="",
+):
+    run_id = str(run_id or "")
+    if not run_id.isdigit() or int(run_id) <= 0:
+        raise XAccountsClientError(
+            "invalid_request",
+            "手动发布任务ID无效",
+            400,
+        )
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+    }
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/manual-runs/%s/query" % run_id,
+        method="POST",
+        payload=payload,
+    )
+
+
 def delete_x_post_material_pool(pool_item_id, actor, navigation_item=""):
     pool_item_id = str(pool_item_id or "")
     if not pool_item_id.isdigit() or int(pool_item_id) <= 0:
@@ -435,6 +501,39 @@ def add_x_post_drama_pool(
         payload["navigation_item"] = str(navigation_item)
     return _request(
         "/internal/posts/drama-pool/add",
+        method="POST",
+        payload=payload,
+    )
+
+
+def set_x_post_drama_pool_priority(
+    pool_item_id,
+    high_priority,
+    actor,
+    navigation_item="",
+):
+    pool_item_id = str(pool_item_id or "")
+    if not pool_item_id.isdigit() or int(pool_item_id) <= 0:
+        raise XAccountsClientError(
+            "invalid_request",
+            "短剧池记录ID无效",
+            400,
+        )
+    if not isinstance(high_priority, bool):
+        raise XAccountsClientError(
+            "invalid_request",
+            "high_priority必须是布尔值",
+            400,
+        )
+    payload = {
+        "actor": normalize_actor(actor),
+        "scope": "all",
+        "high_priority": high_priority,
+    }
+    if navigation_item:
+        payload["navigation_item"] = str(navigation_item)
+    return _request(
+        "/internal/posts/drama-pool/%s/priority" % pool_item_id,
         method="POST",
         payload=payload,
     )

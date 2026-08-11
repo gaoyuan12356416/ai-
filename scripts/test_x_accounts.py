@@ -1642,6 +1642,7 @@ class XAccountsTestCase(unittest.TestCase):
                 publish_mock.assert_called_once_with(
                     "77",
                     service.DAILY_ACCOUNT_IDS,
+                    allow_manual=True,
                 )
 
             for code, expected_known, expected_unknown in (

@@ -207,6 +207,64 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('item.status === "active"', DRAMA)
         self.assertIn("item.publish_eligible === true", DRAMA)
 
+    def test_drama_pool_exposes_reversible_high_priority_without_rewriting_age(self):
+        self.assertIn('data-priority-pool-id', DRAMA)
+        self.assertIn('setText(priority, highPriority ? "取消高优" : "高优")', DRAMA)
+        self.assertIn("function dramaPriorityEligible(item)", DRAMA)
+        self.assertIn("Number(item.assigned_account_id || 0) === 0", DRAMA)
+        self.assertIn('method: "PUT"', DRAMA)
+        self.assertIn("/priority`,", DRAMA)
+        self.assertIn("已绑定短剧和已冻结计划不受影响", DRAMA)
+        self.assertIn('JSON.stringify({ high_priority: highPriority })', DRAMA)
+        self.assertNotIn("item.created_at =", DRAMA)
+
+    def test_material_pool_manual_publish_is_explicit_durable_and_schedule_independent(self):
+        required_ids = {
+            "manualPublish",
+            "manualPublishDialog",
+            "manualAccountSearch",
+            "manualAccountOptions",
+            "manualAccountSummary",
+            "manualMapping",
+            "manualRunPanel",
+            "manualRunTitle",
+            "manualRunCounts",
+            "manualQueueRows",
+            "manualPublishSubmit",
+        }
+        for element_id in required_ids:
+            self.assertIn(f'id="{element_id}"', MATERIAL)
+        self.assertLess(
+            MATERIAL.index('id="manualPublish"'),
+            MATERIAL.index('id="addMaterials"'),
+        )
+        self.assertIn("本批素材不会进入素材池", MATERIAL)
+        self.assertIn("可能部分成功、部分失败", MATERIAL)
+        self.assertIn("系统无法撤回已经发布的帖子", MATERIAL)
+        self.assertIn("弹窗选择不会改动自动发布设置", MATERIAL)
+        self.assertIn('parseMaterialIds(50, "手动发布")', MATERIAL)
+        self.assertIn("accountIds.length !== materialIds.length", MATERIAL)
+        self.assertIn("state.manual.accountIds", MATERIAL)
+        self.assertIn("stableManualIdempotencyKey", MATERIAL)
+        self.assertIn("window.sessionStorage", MATERIAL)
+        self.assertIn(
+            'api("/api/admin/x-posts/material-pool/manual-publish", {',
+            MATERIAL,
+        )
+        self.assertIn('method: "POST"', MATERIAL)
+        self.assertIn("material_ids: materialIds", MATERIAL)
+        self.assertIn("account_ids: accountIds.map(Number)", MATERIAL)
+        self.assertIn("idempotency_key: idempotencyKey", MATERIAL)
+        self.assertIn(
+            "/api/admin/x-posts/material-pool/manual-runs/${encodeURIComponent(runId)}",
+            MATERIAL,
+        )
+        self.assertIn("MANUAL_TERMINAL_STATUSES", MATERIAL)
+        self.assertNotIn(
+            "state.schedule.accountIds = state.manual.accountIds",
+            MATERIAL,
+        )
+
     def test_material_and_drama_templates_are_rendered_exactly(self):
         material_expected = (
             "🎬 {{drama_name}}\n"

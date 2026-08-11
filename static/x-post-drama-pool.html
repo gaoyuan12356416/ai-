@@ -1267,6 +1267,18 @@ Episode {{episode_number}}
       function dramaItemDeletable(item) {
         return !!poolItemId(item) && !!item && item.deletable === true;
       }
+      function dramaPriorityEligible(item) {
+        if (!poolItemId(item) || !item) return false;
+        const status = String(item.status || "").toLowerCase();
+        const nextEpisode = Number(item.next_sub_number ?? item.next_sub_num ?? 0);
+        const freeEpisodes = Number(item.free_episode_count || 0);
+        return ["pending", "active"].includes(status)
+          && Number(item.assigned_account_id || 0) === 0
+          && !String(item.last_error_code || "")
+          && freeEpisodes > 0
+          && nextEpisode > 0
+          && nextEpisode <= freeEpisodes;
+      }
       function currentDeletablePoolIds() {
         return state.currentPoolItems
           .filter(dramaItemDeletable)
@@ -1302,6 +1314,13 @@ Episode {{episode_number}}
           button => {
             button.disabled = actionBusy
               || button.dataset.deletable !== "true";
+          }
+        );
+        document.querySelectorAll("button[data-priority-pool-id]").forEach(
+          button => {
+            button.disabled = actionBusy
+              || (button.dataset.highPriority !== "true"
+                && button.dataset.priorityEligible !== "true");
           }
         );
         setText(
@@ -1399,6 +1418,12 @@ Episode {{episode_number}}
           const status = poolStatus(item);
           const statusCell = document.createElement("td");
           statusCell.appendChild(badge(status.label, status.value));
+          if (String(item.priority_at || "")) {
+            statusCell.appendChild(document.createElement("br"));
+            const priorityBadge = badge("高优", "queued");
+            priorityBadge.title = `设置时间：${formatTime(item.priority_at)}${item.priority_by_name ? ` · 操作人：${item.priority_by_name}` : ""}`;
+            statusCell.appendChild(priorityBadge);
+          }
           row.appendChild(statusCell);
           const assignedAccountId = Math.max(0, Number(item.assigned_account_id || 0));
           const username = String(item.assigned_account_username || "").replace(/^@/, "");
@@ -1452,6 +1477,20 @@ Episode {{episode_number}}
           if (errorCode || errorMessage) errorCell.className = "error";
           const actionCell = document.createElement("td");
           actionCell.className = "row-actions";
+          const highPriority = !!String(item.priority_at || "");
+          const priorityEligible = dramaPriorityEligible(item);
+          const priority = document.createElement("button");
+          priority.type = "button";
+          priority.className = highPriority ? "button small" : "button primary small";
+          priority.dataset.priorityPoolId = String(item.id || "");
+          priority.dataset.highPriority = highPriority ? "true" : "false";
+          priority.dataset.priorityEligible = priorityEligible ? "true" : "false";
+          priority.dataset.dramaLabel = String(item.drama_name || item.drama_id || item.content_id || "");
+          priority.disabled = state.poolMutationBusy || (!highPriority && !priorityEligible);
+          priority.title = highPriority
+            ? "取消后恢复普通候选顺序"
+            : (priorityEligible ? "下一次为未绑定账号选择新短剧时优先" : "仅未分配、校验正常且仍有免费集数的短剧可设置高优");
+          setText(priority, highPriority ? "取消高优" : "高优");
           const episodes = document.createElement("button");
           episodes.type = "button";
           episodes.className = "button small";
@@ -1471,7 +1510,7 @@ Episode {{episode_number}}
             remove.setAttribute("aria-describedby", blockReasonId);
           }
           setText(remove, "删除");
-          actionCell.append(episodes, remove);
+          actionCell.append(priority, episodes, remove);
           if (!selectable) {
             const reason = document.createElement("div");
             reason.id = blockReasonId;
@@ -1585,6 +1624,32 @@ Episode {{episode_number}}
           await loadDramaPool();
         } catch (error) {
           showToast(`删除失败：${error.message}`, true);
+        } finally {
+          state.busy = false;
+          setPoolMutationBusy(false);
+        }
+      }
+      async function setDramaPriority(poolId, dramaLabel, highPriority) {
+        if (!poolId || state.busy || state.poolMutationBusy) return;
+        const action = highPriority ? "设为高优" : "取消高优";
+        const message = highPriority
+          ? `确认将 ${dramaLabel || `池记录 ${poolId}`} 设为高优？该剧会排在未绑定短剧候选首位，供下一次空闲账号优先选择；已绑定短剧和已冻结计划不受影响。`
+          : `确认取消 ${dramaLabel || `池记录 ${poolId}`} 的高优状态？`;
+        if (!window.confirm(message)) return;
+        state.busy = true;
+        setPoolMutationBusy(true);
+        try {
+          await api(
+            `/api/admin/x-posts/drama-pool/${encodeURIComponent(poolId)}/priority`,
+            {
+              method: "PUT",
+              body: JSON.stringify({ high_priority: highPriority }),
+            }
+          );
+          showToast(`${dramaLabel || `短剧 ${poolId}`} 已${action}。`, false);
+          await loadDramaPool();
+        } catch (error) {
+          showToast(`${action}失败：${error.message}`, true);
         } finally {
           state.busy = false;
           setPoolMutationBusy(false);
@@ -1776,6 +1841,15 @@ Episode {{episode_number}}
         syncDramaSelectionControls();
       });
       byId("dramaRows").addEventListener("click", event => {
+        const priorityButton = event.target.closest("button[data-priority-pool-id]");
+        if (priorityButton && !priorityButton.disabled) {
+          setDramaPriority(
+            priorityButton.dataset.priorityPoolId,
+            priorityButton.dataset.dramaLabel,
+            priorityButton.dataset.highPriority !== "true"
+          );
+          return;
+        }
         const episodeButton = event.target.closest("button[data-episodes-pool-id]");
         if (episodeButton) {
           loadEpisodes(episodeButton.dataset.episodesPoolId, episodeButton.dataset.dramaLabel);
