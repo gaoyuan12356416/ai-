@@ -1,0 +1,52 @@
+{
+  "commit": "5f9084b59bb14d1efd806ed32d070a6b2ee851c1",
+  "previous_commit": "29bd90034396c597b30ceb7135376efb750ec886",
+  "deployed_at": "2026-08-11T11:42:03+08:00",
+  "public_static_corrected_at": "2026-08-11T11:52:38+08:00",
+  "release": "/mnt/data-disk/x-post-automation/releases/5f9084b59bb14d1efd806ed32d070a6b2ee851c1",
+  "backup": "/mnt/data-disk/x-post-automation/backups/20260811T113511+0800-x-post-priority-manual-74e7d50",
+  "public_static_backup": {
+    "path": "public-static-before-correction.tar",
+    "sha256": "ba11b41c5d76e9d7a01676d2c2941ee884b5588917e68a53e5b812cdf62799e0"
+  },
+  "public_static": {
+    "x-post-material-pool.html": "5855dfa246b7a97ef30b12900ccbdab675f61b54ea2d776a99a8126ff965180f",
+    "x-post-drama-pool.html": "e549036459d0a7a7396553ac6f7ba9ac4ead6124a2e30184280c3c8bb454413f",
+    "x-post-logs.html": "f7e98a2d7ade423ae8176a805a1ef71b28e43170802c64376c6fdc8aa834d1f7"
+  },
+  "checks": {
+    "local_x_tests": {
+      "discovered": 408,
+      "passed": 407,
+      "skipped": 1,
+      "failed": 0
+    },
+    "server_targeted_tests_passed": 72,
+    "database": {
+      "integrity_check": "ok",
+      "queue_count": 150,
+      "log_count": 150,
+      "confirmed_post_ids": 149,
+      "unknown_outcome": 0,
+      "active_queue": 0,
+      "manual_runs": 0,
+      "manual_queue_links": 0,
+      "priority_rows": 0,
+      "foreign_key_violations": 0
+    },
+    "browser": {
+      "manual_button_visible": true,
+      "manual_button_before_pool_button": true,
+      "manual_dialog_visible": true,
+      "manual_submit_clicked": false,
+      "drama_priority_buttons": 12,
+      "drama_priority_enabled": 7,
+      "drama_priority_disabled": 5,
+      "account_snapshots": 15,
+      "publishable_account_snapshots": 0
+    },
+    "services_active_and_enabled": true,
+    "manual_natural_tick": "no_pending",
+    "real_x_post_created_for_validation": false
+  }
+}

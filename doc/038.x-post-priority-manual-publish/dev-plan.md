@@ -8,14 +8,14 @@
 
 | 任务 | 负责人 | 文件/模块 | 状态 |
 | --- | --- | --- | --- |
-| 需求、SA、API、部署与 QA 文档 | Codex | `doc/038.x-post-priority-manual-publish/` | 本地完成，待补生产证据 |
+| 需求、SA、API、部署与 QA 文档 | Codex | `doc/038.x-post-priority-manual-publish/` | 已完成 |
 | additive schema、高优及手动批次状态机 | Codex | `features/x_posts/service.py` | 已完成 |
 | 明确素材 ID selector | Codex | `features/x_posts/selector.py` | 已完成 |
 | Sidecar 与主后台 API/client | Codex | `features/x_accounts/`, `app.py` | 已完成 |
 | 手动 runner 与 systemd 单元 | Codex | `scripts/x_post_manual_runner.py`, `deploy/` | 已完成 |
 | 页面交互及发布日志批次标识 | Codex | `static/x-post-*.html` | 已完成 |
 | 单元/接口/DOM/迁移回归 | Codex | `scripts/test_x_post_*.py` | 本地通过 |
-| GitHub-first 生产备份、部署和无发帖验收 | Codex | CPU 43.166.187.96 | 待执行 |
+| GitHub-first 生产备份、部署和无发帖验收 | Codex | CPU 43.166.187.96 | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -38,4 +38,5 @@ git diff --check
 
 - 2026-08-11：完成生产 Git blob 对齐并建立独立分支/需求目录。
 - 2026-08-11：完成高优、手动 durable run/queue、runner/timer、管理 API/UI 和发布日志标识。
-- 2026-08-11：完成本地 X 全回归；生产备份、迁移演练、GitHub 推送和无发帖部署验收尚待执行。
+- 2026-08-11：完成本地 X 全回归并修正 Linux 测试夹具路径隔离。
+- 2026-08-11：精确提交 `5f9084b59bb14d1efd806ed32d070a6b2ee851c1` 已部署；数据库副本双迁移、自然 timer 空跑及 150/150/149 零增量验收通过。

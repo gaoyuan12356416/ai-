@@ -51,3 +51,24 @@
 - 不以真实 Post 作为部署 canary。
 - 如部署时已有手动 run/queue，回滚前先只读核查；不得删除或重放。
 - 如任何 publish log 为 unknown/post_creating，停止后续部署动作并人工对账。
+
+## 2026-08-11 实际部署记录
+
+- 部署提交：`5f9084b59bb14d1efd806ed32d070a6b2ee851c1`。
+- 前一 release：`29bd90034396c597b30ceb7135376efb750ec886`，仍完整保留。
+- 当前 release：`/mnt/data-disk/x-post-automation/releases/5f9084b59bb14d1efd806ed32d070a6b2ee851c1`。
+- 备份：`/mnt/data-disk/x-post-automation/backups/20260811T113511+0800-x-post-priority-manual-74e7d50`；原始 `SHA256SUMS`、在线 SQLite 备份、rollback tar 和部署结果均已校验。Nginx 公网页面修正前的 3 个旧文件另存为 `public-static-before-correction.tar`，SHA256 为 `ba11b41c5d76e9d7a01676d2c2941ee884b5588917e68a53e5b812cdf62799e0`。
+- 精确提交的生产数据库副本连续执行两次迁移：旧表全部行的原字段哈希未变，`integrity_check=ok`，第二次 schema 与第一次相同，新表/关联为空。
+- 服务：Sidecar、主后台、schedule timer、claim timer、manual timer 均 `active/enabled`；manual service 由 timer 自然执行并返回 `no_pending`，没有人工启动。
+- 部署前后均为 queue `150`、log `150`、确认 Post ID `149`、unknown/post_creating `0`、活跃 queue `0`；本次验收未创建真实 X Post。
+- Nginx 对 3 个 X 页面直接使用 `/usr/share/nginx/html`；已从精确 release 补齐公网静态文件，并逐个 `cmp`/SHA256 对齐。三个页面 HTTP 200；匿名手动任务查询 HTTP 401 且 `Cache-Control: no-store`。
+- 登录态 Chrome 只读验收：素材池“手动发布”可见且在“加入素材池”上方，弹窗警告和二次确认可见；短剧池 12 行均有“高优”，7 行符合条件可用、5 行按业务规则禁用。仅打开并关闭弹窗，没有点击最终确认。
+- 浏览器验收后数据库仍为 queue/log/Post ID `150/150/149`，manual run `0`、manual queue link `0`、高优记录 `0`、外键违规 `0`。
+
+### 精确回滚点
+
+1. 停止 manual/schedule/claim timers，并停止 Sidecar。
+2. 将 `/opt/x-post-automation/current` 原子切回前一 release。
+3. 从备份 `rollback-files.tar` 仅恢复 `app.py`、X accounts client、应用静态页面和原 systemd unit；再从 `public-static-before-correction.tar` 将 3 个公网 X 页面恢复到 `/usr/share/nginx/html`。manual unit 保持禁用。
+4. `daemon-reload` 后启动 Sidecar、主后台和原两个 timer。
+5. 保留 additive schema 和任何后来产生的 manual run/queue/log，不删除、不重放；按备份 `baseline.json` 与部署结果重新核对账本。
