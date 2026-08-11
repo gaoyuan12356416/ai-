@@ -51,11 +51,28 @@ class XAutoPostDeployTests(unittest.TestCase):
     def test_sidecar_cannot_read_existing_x_tokens_or_accounts_database(self):
         unit = self.text("deploy/x-auto-post-service.service")
         self.assertIn("User=x-post-daily", unit)
+        self.assertIn("EnvironmentFile=/etc/x-post-schedule.env", unit)
+        self.assertNotIn("EnvironmentFile=/etc/x-post-daily.env", unit)
         self.assertIn("InaccessiblePaths=/var/lib/x-post-automation /etc/ssh", unit)
         self.assertNotIn("X_CLIENT_SECRET", unit)
         self.assertNotIn("X_TOKENS_DIR", unit)
         self.assertIn("ProtectSystem=strict", unit)
         self.assertIn("NoNewPrivileges=true", unit)
+
+    def test_metric_and_sidecar_use_only_the_narrow_auto_mysql_environment(self):
+        secrets = self.text("deploy/x-auto-post.secrets.example")
+        for name in (
+            "X_AUTO_POST_MYSQL_HOST",
+            "X_AUTO_POST_MYSQL_PORT",
+            "X_AUTO_POST_MYSQL_USER",
+            "X_AUTO_POST_MYSQL_PASSWORD",
+        ):
+            self.assertIn(name + "=", secrets)
+        for name in ("x-auto-post-service.service", "x-auto-post-metric.service"):
+            unit = self.text("deploy/" + name)
+            self.assertIn("EnvironmentFile=/etc/x-post-schedule.env", unit)
+            self.assertIn("EnvironmentFile=/etc/x-auto-post.secrets", unit)
+            self.assertNotIn("EnvironmentFile=/etc/x-post-daily.env", unit)
 
     def test_execution_bearer_is_dedicated_and_not_in_browser_configuration(self):
         secrets = self.text("deploy/x-auto-post.secrets.example")
