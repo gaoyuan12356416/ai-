@@ -37,3 +37,23 @@ TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=0
 
 - 自动发布生产门禁当前为开启状态；切换窗口必须先确认无运行中任务。
 - 验收不运行真实发帖 canary。
+
+## 旧 profile 失败 intake 恢复
+
+当旧 `source_direct` intake 仅因 `prepared_media_invalid` 终止、且新
+`random_overlay` profile 已三方配对上线后，可用
+`scripts/requeue_tt_post_failed_intakes.py` 做一次受控恢复：
+
+1. 先停 `tt-post-prepare.timer` 和 `tt-post-prepare.path`，确认没有
+   `preparing` / `retry_wait` 行。
+2. 对生产 SQLite 做在线备份并通过 `PRAGMA integrity_check`。
+3. 先运行默认 dry-run，保存精确候选数量、ID 与
+   `candidate_set_sha256`。脚本会同时拒绝旧 TT 队列、立即测试和 TT 自动模板台账重叠。
+4. 用相同参数增加 `--apply --expected-candidate-sha256 <dry-run hash>`；
+   apply 只把精确失败行改为当前 profile 的 `queued`，重算 GPU job ID 和请求哈希，
+   并写 `tt_post_material_intake_recovery_audit`，不调用 GPU 或 TikTok。
+5. 恢复 prepare timer/path，让正常预制作 runner 消费；只观察自然排期，
+   不用 `run-now` 补发已错过时点。
+
+恢复只适用于未进入 recurring pool、无任何发布台账事实的失败 intake；
+不得迁移 consumed/published/unknown 历史，也不得恢复没有同语言账号的素材。
