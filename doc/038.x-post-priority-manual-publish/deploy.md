@@ -132,3 +132,37 @@
 仅回滚主 API 文件：将备份中的 `app.py.before` 以 `0644 root:root` 原子恢复到
 `/root/drama_material_service/app.py`，然后只重启 `drama-material-api.service`。
 不要切换 Sidecar release、恢复 SQLite/Token 或停止发布 timers。
+
+## 2026-08-11 素材池发布设置 PUT 404 修复记录
+
+- 16:47:53、16:47:57、16:48:02 三次
+  `PUT /api/admin/x-posts/material-pool/schedule` 均返回 404
+  `not_found`。素材配置保持版本 `16` 和旧更新时间，证明没有部分保存。
+- 根因是主 API 的 `do_PUT()` 白名单只包含短剧高优路径，漏掉素材池和短剧池
+  两个实际由页面使用的 schedule PUT。
+- GitHub 修复提交：
+  `e248b757215f62fd73194060c72363002a93355e`；生产 checkout：
+  `/mnt/data-disk/x-post-automation/releases/e248b757215f62fd73194060c72363002a93355e`。
+- 回滚包：
+  `/mnt/data-disk/x-post-automation/backups/20260811T090300Z-x-post-schedule-put-e248b75`；
+  在线 SQLite、旧主 API、unit、服务/账本基线、Token 非敏感清单和 manifest 均已校验。
+- 仅部署 `/root/drama_material_service/app.py` 并重启主 API。新 SHA-256：
+  `80703d90bc4cc80e527ff550de410ebda0e522055a7454bd99d8e5d7fd902570`；
+  Sidecar 保持 PID `2617520` 和独立 release
+  `1d60a8b09d0dcf7100490c56b1ac9b19217cf6e8`。
+- 匿名素材/短剧 schedule PUT 及高优 PUT 均为结构化 401，未知 PUT 仍为 404，
+  主 API PID `2626926` 无 traceback。
+- 登录态 17:05:51 原请求重试返回 HTTP 200；素材配置升级到版本 `17`，
+  新模板 SHA-256 为
+  `c2d348c42fdf1b123133b549fc8efaed433cbc93060f52ab49a4e16b6e613911`，
+  从 2026-08-12 生效，次日计划为 `02:33,15:42,21:08`。
+- 当天版本 16 的已冻结计划未改写。自然 scheduler 在保存前 36 秒已为旧
+  09:59 批次建立队列，最终完成五条独立 Post；它不是部署或保存触发的 canary。
+  最终账本为 queue/log/published `162/162/161`，unknown/active `0/0`，
+  `integrity_check=ok`，Token hash/mode/owner 清单未变。
+
+### 本次精确回滚点
+
+只恢复备份中的 `app.py.before` 并重启 `drama-material-api.service`。
+保留版本 17 配置、现有 SQLite/Token、当前 Sidecar release 和所有历史队列；
+不得通过回滚重画计划、删除队列或重放任何 Post。
