@@ -1221,6 +1221,43 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pool_fifo_conflict",
         )
 
+    def test_material_schedule_allows_latest_set_to_follow_account_capability_order(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        added = self.store.add_pool_materials(
+            ["221", "222"],
+            actor={"user_id": "admin-1", "name": "Admin"},
+            validation_checks=[
+                {"material_id": "221", "error_code": ""},
+                {"material_id": "222", "error_code": ""},
+            ],
+        )
+        oldest_pool, newest_pool = added["items"]
+
+        created = self.store.create_schedule_plan(
+            "material",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.material_candidate(oldest_pool, 2),
+                self.material_candidate(newest_pool, 3),
+            ],
+        )
+
+        self.assertTrue(created["created"])
+        self.assertEqual(
+            [queue["account_id"] for queue in created["queues"]],
+            [2, 3],
+        )
+        self.assertEqual(
+            [queue["pool_item_id"] for queue in created["queues"]],
+            [oldest_pool["id"], newest_pool["id"]],
+        )
+        self.assertEqual(
+            {queue["pool_item_id"] for queue in created["queues"]},
+            {oldest_pool["id"], newest_pool["id"]},
+        )
+
     def test_material_schedule_accepts_newest_violation_audit_record(self):
         self.save_schedule("material", [2], ["09:00"])
         pool = self.store.add_pool_materials(

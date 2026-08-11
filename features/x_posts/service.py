@@ -7167,14 +7167,16 @@ class XPostStore:
                 actual_pool_ids = [
                     int(values["pool_item_id"]) for values in prepared
                 ]
-                if actual_pool_ids != expected_pool_ids:
+                if (
+                    len(actual_pool_ids) != len(expected_pool_ids)
+                    or set(actual_pool_ids) != set(expected_pool_ids)
+                ):
                     conn.rollback()
                     raise XPostError(
                         "x_post_pool_fifo_conflict",
                         "素材计划必须使用当前素材池最新的可用记录",
                         409,
                     )
-                previous_order = None
                 for values in prepared:
                     pool = conn.execute(
                         "SELECT * FROM x_post_material_pool WHERE id=?",
@@ -7206,15 +7208,6 @@ class XPostStore:
                             "候选素材已被其他发布队列占用",
                             409,
                         )
-                    order_key = (str(pool["created_at"]), int(pool["id"]))
-                    if previous_order is not None and order_key >= previous_order:
-                        conn.rollback()
-                        raise XPostError(
-                            "invalid_request",
-                            "素材计划必须按素材池加入时间倒序提交",
-                            400,
-                        )
-                    previous_order = order_key
             else:
                 blocked = conn.execute(
                     "SELECT id,content_id FROM x_post_drama_pool "
