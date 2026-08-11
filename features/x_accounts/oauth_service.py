@@ -625,11 +625,28 @@ def token_path(x_user_id):
     return TOKENS_DIR / (value + ".json")
 
 
+def atomic_write_owner(path):
+    parent_stat = path.parent.stat()
+    return parent_stat.st_uid, parent_stat.st_gid
+
+
 def atomic_write_bytes(path, payload):
     ensure_storage()
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:
+            # A privileged maintenance process may import this module. Keep the
+            # replacement owned like the token directory instead of silently
+            # replacing a service-owned credential with a root-owned 0600 file.
+            fchown = getattr(os, "fchown", None)
+            if callable(fchown):
+                owner_uid, owner_gid = atomic_write_owner(path)
+                temporary_stat = os.fstat(handle.fileno())
+                if (
+                    temporary_stat.st_uid != owner_uid
+                    or temporary_stat.st_gid != owner_gid
+                ):
+                    fchown(handle.fileno(), owner_uid, owner_gid)
             handle.write(payload)
         try:
             os.chmod(tmp_name, 0o600)
@@ -817,7 +834,16 @@ def complete_authorization(code, raw_state):
                     conn.close()
             if existing_row and not same_owner(existing_row, actor):
                 raise ServiceError("x_account_owned_by_other", "该X账号已由其他后台用户管理", 409)
-            previous_token = token_file.read_bytes() if token_file.exists() else None
+            previous_token = None
+            if token_file.exists():
+                try:
+                    previous_token = token_file.read_bytes()
+                except OSError:
+                    # Completing OAuth for the same owner is an explicit
+                    # credential replacement. An unreadable stale token must
+                    # not discard the newly exchanged credential; if the DB
+                    # commit later fails, the new file is removed below.
+                    previous_token = None
             atomic_write_json(token_file, token)
             timestamp = iso_utc(obtained)
             status, _missing = status_for(scopes, expires, token, "active")

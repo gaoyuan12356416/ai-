@@ -1,5 +1,25 @@
 # 部署文档
 
+## Token 属主与显式重授权恢复（2026-08-11）
+
+- `x-post-automation.service` 以 `x-post-automation` 用户运行。Token 目录保持
+  `0700`，账号 Token 文件保持 `0600`，并必须由 Token 目录同一用户/组拥有；
+  只有 mode 正确但 owner 为 `root:root` 时，正式 Sidecar 仍无法读取。
+- 禁止以 root 直接导入 `features.x_accounts.oauth_service` 对 live 账号执行
+  `verify_account()`。该函数可能刷新并原子替换 Token；旧实现会让替换文件继承
+  调用进程的 root 属主。生产账号刷新必须经过正在运行的 loopback Sidecar，或在
+  明确隔离的维护窗口以 `x-post-automation` 服务用户执行。
+- 原子 Token 写入现在会把临时替换文件的 uid/gid 对齐到 Token 目录；显式同 owner
+  OAuth 回调也允许用新凭证替换一个不可读的旧 Token。跨 owner 保护仍在读取或
+  覆盖 Token 之前执行。
+- 修复 live 权限前必须创建 SQLite online backup、完整 Token 目录副本和 hash/mode/
+  owner 清单。先只 `chown` 精确受影响文件并证明 SHA-256 未变，再通过 Sidecar
+  校验/刷新；刷新成功会旋转 Token，刷新前备份此后只能作为事故证据，禁止恢复
+  成 active 凭证。
+- 若一次失败回调已经在 X 端换出新 Token、但在本地保存前因旧文件不可读而失败，
+  旧 Refresh Token 可能已失效。修复属主后必须重新完成一次同 owner 授权，不能
+  反复重试旧 Refresh Token，也不能恢复旧 Token 备份。
+
 ## Sidecar 自恢复策略（2026-07-21）
 
 - `x-post-automation.service` 使用 `Restart=always`。这样进程被外部 `SIGTERM` 结束或正常意外退出后，systemd 会在 3 秒后自动恢复服务。

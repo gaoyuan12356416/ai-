@@ -36,6 +36,15 @@ CPU X sidecar/main API/静态页与 GPU 媒体修复器部署同一 GitHub 提�
   公共 health 与 3 个静态页返回 HTTP 200 且与 release hash 一致。
 - 18:44 自然 claim 轮询返回 `claimed_or_pending_count=0`；18:44:10 自然 scheduler
   返回 `status=no_due`。发布后队列/发布日志仍为 `150/150`，没有为验收创建真实 X Post。
+
+### 2026-08-11 纠正说明
+
+上述 5 个账号的会员快照曾通过 root 进程直接导入 Sidecar 模块并调用
+`verify_account()`。刷新本身成功，但原子替换后的 5 个 `0600` Token 文件变成
+`root:root`，导致正式 `x-post-automation` 服务用户后续读取失败。今后不得复用该
+验收方式；应通过运行中的 loopback Sidecar 刷新，或以 Sidecar 服务用户执行，并
+同时断言 Token owner、mode、hash。修复与防复发代码记录在
+`doc/006.x-account-authorization/deploy.md`。
 - `x-post-schedule.timer` 与 `x-post-schedule-claim.timer` 已恢复为
   `active/enabled`。
 

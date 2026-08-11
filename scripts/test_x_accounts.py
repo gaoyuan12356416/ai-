@@ -293,6 +293,54 @@ class XAccountsTestCase(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(service.DB_PATH.stat().st_mode), 0o600)
         self.assertEqual(first["x_user_id"], second["x_user_id"])
 
+    def test_atomic_token_write_aligns_replacement_owner_with_token_directory(self):
+        token_file = service.TOKENS_DIR / "123456789.json"
+        temporary_stat = mock.Mock(st_uid=0, st_gid=0)
+        with mock.patch.object(service, "atomic_write_owner", return_value=(1234, 5678)), \
+                mock.patch.object(service.os, "fstat", return_value=temporary_stat), \
+                mock.patch.object(service.os, "fchown", create=True) as fchown:
+            service.atomic_write_bytes(token_file, b'{"safe":"fixture"}\n')
+        self.assertEqual(token_file.read_bytes(), b'{"safe":"fixture"}\n')
+        fchown.assert_called_once()
+        self.assertEqual(fchown.call_args.args[1:], (1234, 5678))
+
+    def test_same_owner_callback_replaces_unreadable_existing_token(self):
+        original = self.complete(username="before_permission_repair")
+        token_file = service.token_path(original["x_user_id"])
+        _result, state = self.new_state(self.owner)
+        replacement = {
+            "access_token": "replacement-access",
+            "refresh_token": "replacement-refresh",
+            "token_type": "bearer",
+            "expires_in": 7200,
+            "scope": " ".join(service.SCOPES),
+        }
+        account = {
+            "data": {
+                "id": original["x_user_id"],
+                "username": "after_permission_repair",
+                "name": "Recovered",
+            }
+        }
+        original_read_bytes = Path.read_bytes
+
+        def unreadable_existing_token(path):
+            if path == token_file:
+                raise PermissionError("simulated root-owned 0600 token")
+            return original_read_bytes(path)
+
+        with mock.patch.object(service, "token_request", return_value=replacement), \
+                mock.patch.object(service, "user_request", return_value=account), \
+                mock.patch.object(Path, "read_bytes", autospec=True, side_effect=unreadable_existing_token):
+            restored = service.complete_authorization("replacement-code", state)
+
+        saved = json.loads(token_file.read_text(encoding="utf-8"))
+        self.assertEqual(restored["id"], original["id"])
+        self.assertEqual(restored["status"], "active")
+        self.assertEqual(restored["username"], "after_permission_repair")
+        self.assertEqual(saved["access_token"], "replacement-access")
+        self.assertEqual(saved["refresh_token"], "replacement-refresh")
+
     def test_multiple_x_accounts_use_separate_token_files(self):
         self.complete(x_user_id="111111111", username="first")
         self.complete(x_user_id="222222222", username="second")
