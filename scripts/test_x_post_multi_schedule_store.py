@@ -3203,6 +3203,124 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_failed_preflight_recovery_conflict",
         )
 
+    def test_transient_media_recovery_requires_token_refresh_audit(self):
+        failed = self._failed_schedule_run(source_type="drama")
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_long_video_requires_premium",
+            "episode DRAMA-LONG:1 media preflight failed: Videos longer "
+            "than 140 seconds require a token-confirmed X Premium "
+            "subscription",
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_long_video_requires_premium",
+            reason=service.FAILED_PREFLIGHT_DRAMA_CAPABILITY_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="c" * 40,
+            now=recovery_now,
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_account_not_publishable",
+            "X账号当前不可用于手动发布",
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_account_not_publishable",
+            reason=service.FAILED_PREFLIGHT_TOKEN_REFRESH_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit="d" * 40,
+            now=recovery_now,
+        )
+        media_message = (
+            "episode DRAMA-SLOW:1 media preflight failed: "
+            "素材下载响应中断: The read operation timed out"
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "media_download_failed",
+            media_message,
+        )
+        media_commit = "e" * 40
+        validated = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "media_download_failed",
+            reason=service.FAILED_PREFLIGHT_TRANSIENT_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit=media_commit,
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["recovery_mode"], "transient_media_retry")
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "media_download_failed",
+            reason=service.FAILED_PREFLIGHT_TRANSIENT_MEDIA_RECOVERY_REASON,
+            actor="codex_operator",
+            deployed_commit=media_commit,
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT m.recovery_reason,m.deployed_commit,"
+                "m.previous_error_code,m.validated_queue_count,"
+                "m.validated_log_count "
+                "FROM x_post_schedule_transient_media_recovery_audit m "
+                "JOIN x_post_schedule_token_refresh_recovery_audit t "
+                "ON t.id=m.token_refresh_recovery_audit_id "
+                "WHERE m.schedule_run_id=? AND t.schedule_run_id=?",
+                (failed["id"], failed["id"]),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.FAILED_PREFLIGHT_TRANSIENT_MEDIA_RECOVERY_REASON,
+                media_commit,
+                "media_download_failed",
+                0,
+                0,
+            ),
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "media_download_failed",
+            media_message,
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "media_download_failed",
+                reason=service.FAILED_PREFLIGHT_TRANSIENT_MEDIA_RECOVERY_REASON,
+                actor="codex_operator",
+                deployed_commit=media_commit,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_schema_is_additive_and_integrity_check_passes(self):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             tables = {
@@ -3229,6 +3347,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
             self.assertIn(
                 "x_post_schedule_token_refresh_recovery_audit",
+                tables,
+            )
+            self.assertIn(
+                "x_post_schedule_transient_media_recovery_audit",
                 tables,
             )
             self.assertIn("x_post_schedule_random_plan", tables)

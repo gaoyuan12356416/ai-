@@ -83,6 +83,7 @@ DEFAULT_WORK_DIR = "/mnt/data-disk/x-post-automation/daily-work"
 DEFAULT_LOCK_PATH = "/run/x-post-daily/runner.lock"
 MAX_DUE_BATCHES = 10
 MAX_POOL_SCAN = 1000
+SCHEDULE_MEDIA_DOWNLOAD_ATTEMPTS = 3
 _SAFE_INTERNAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _SOURCE_TYPES = {"material", "drama"}
 _QUEUE_STATUSES = {
@@ -906,6 +907,27 @@ def _verify_accounts(sidecar, account_ids):
     return verified
 
 
+def _retrying_media_downloader(
+    downloader,
+    attempts=SCHEDULE_MEDIA_DOWNLOAD_ATTEMPTS,
+):
+    attempts = max(1, int(attempts))
+
+    def download(*args, **kwargs):
+        for attempt in range(1, attempts + 1):
+            try:
+                return downloader(*args, **kwargs)
+            except XPostError as exc:
+                if (
+                    exc.code != "media_download_failed"
+                    or attempt >= attempts
+                ):
+                    raise
+        raise AssertionError("unreachable media download retry state")
+
+    return download
+
+
 def _material_candidates(
     config,
     sidecar,
@@ -1484,6 +1506,7 @@ def execute_schedule_tick(
         }
 
     batches = []
+    retrying_downloader = _retrying_media_downloader(downloader)
     for identity in accepted_due:
         # Frozen state always wins.  This query precedes token verification,
         # MySQL reads, downloads and GPU repair.
@@ -1518,7 +1541,7 @@ def execute_schedule_tick(
                     accounts,
                     source_date=source_date,
                     connection_factory=connection_factory,
-                    downloader=downloader,
+                    downloader=retrying_downloader,
                     prober=prober,
                     repair_client=repair_client,
                     timestamp=timestamp,
@@ -1530,7 +1553,7 @@ def execute_schedule_tick(
                     accounts,
                     source_date=source_date,
                     connection_factory=connection_factory,
-                    downloader=downloader,
+                    downloader=retrying_downloader,
                     prober=prober,
                     repair_client=repair_client,
                     timestamp=timestamp,

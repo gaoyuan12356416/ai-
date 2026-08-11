@@ -19,11 +19,13 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     CandidatePreflightError,
     SidecarError,
 )
+from features.x_posts.service import XPostError  # noqa: E402
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
     ScheduleSidecarClient,
     _drama_candidates,
+    _retrying_media_downloader,
     execute_schedule_tick,
 )
 from scripts.x_post_schedule_claim_runner import execute_claim_tick  # noqa: E402
@@ -227,6 +229,36 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.config = make_config(self.temporary.name)
         self.now = datetime(2026, 7, 27, 10, 0, 30, tzinfo=BEIJING)
+
+    def test_media_download_retry_is_bounded_and_code_specific(self):
+        attempts = []
+
+        def flaky(*_args, **_kwargs):
+            attempts.append("download")
+            if len(attempts) < 3:
+                raise XPostError(
+                    "media_download_failed",
+                    "source read timed out",
+                    502,
+                )
+            return {"size": 42}
+
+        result = _retrying_media_downloader(flaky)("https://example.test")
+        self.assertEqual(result, {"size": 42})
+        self.assertEqual(len(attempts), 3)
+
+        deterministic_attempts = []
+
+        def deterministic(*_args, **_kwargs):
+            deterministic_attempts.append("download")
+            raise XPostError("media_too_large", "too large", 413)
+
+        with self.assertRaises(XPostError) as rejected:
+            _retrying_media_downloader(deterministic)(
+                "https://example.test"
+            )
+        self.assertEqual(rejected.exception.code, "media_too_large")
+        self.assertEqual(len(deterministic_attempts), 1)
 
     def tearDown(self):
         self.temporary.cleanup()
