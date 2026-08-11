@@ -114,6 +114,15 @@ FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES = {
         "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
     ),
 }
+FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON = (
+    "operator_same_day_verified_repair_retry_v1"
+)
+FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES = {
+    "x_post_media_repair_invalid_response": (
+        "unassigned Premium drama routing failed: "
+        "X media repair probe does not meet the X video contract",
+    ),
+}
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1234,6 +1243,38 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_verified_repair_retry_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    initial_recovery_audit_id INTEGER NOT NULL,
+                    corrective_retry_audit_id INTEGER NOT NULL,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_verified_repair_retry_v1'),
+                    actor TEXT NOT NULL,
+                    verified_repair_job_key TEXT NOT NULL
+                        CHECK(length(verified_repair_job_key)=64),
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='failed_preflight'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code='x_post_media_repair_invalid_response'),
+                    previous_error_message TEXT NOT NULL,
+                    previous_started_at TEXT NOT NULL DEFAULT '',
+                    previous_finished_at TEXT NOT NULL DEFAULT '',
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_queue_count=0),
+                    validated_log_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_log_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(initial_recovery_audit_id)
+                        REFERENCES x_post_schedule_recovery_audit(id),
+                    FOREIGN KEY(corrective_retry_audit_id)
+                        REFERENCES x_post_schedule_corrective_retry_audit(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -1700,6 +1741,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_corrective_created "
                 "ON x_post_schedule_corrective_retry_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_verified_repair_created "
+                "ON x_post_schedule_verified_repair_retry_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -6652,6 +6697,7 @@ class XPostStore:
         *,
         reason,
         actor,
+        verified_repair_job_key="",
         validate_only=False,
         now=None,
     ):
@@ -6686,6 +6732,12 @@ class XPostStore:
         corrective_recovery = (
             reason == FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON
         )
+        verified_repair_recovery = (
+            reason == FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON
+        )
+        verified_repair_job_key = str(
+            verified_repair_job_key or ""
+        ).strip().lower()
         if not (
             (
                 initial_recovery
@@ -6696,6 +6748,15 @@ class XPostStore:
                 corrective_recovery
                 and expected_error_code
                 in FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES
+            )
+            or (
+                verified_repair_recovery
+                and expected_error_code
+                in FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES
+                and re.fullmatch(
+                    r"[a-f0-9]{64}",
+                    verified_repair_job_key,
+                )
             )
         ):
             raise XPostError(
@@ -6754,12 +6815,27 @@ class XPostStore:
                 "WHERE schedule_run_id=?",
                 (run_id,),
             ).fetchone()
+            verified_repair_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_verified_repair_retry_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
             previous_error_message = str(run["error_message"] or "")
             corrective_message_matches = bool(
                 corrective_recovery
                 and any(
                     fragment in previous_error_message
                     for fragment in FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES.get(
+                        expected_error_code,
+                        (),
+                    )
+                )
+            )
+            verified_repair_message_matches = bool(
+                verified_repair_recovery
+                and any(
+                    fragment in previous_error_message
+                    for fragment in FAILED_PREFLIGHT_VERIFIED_REPAIR_ERROR_MESSAGES.get(
                         expected_error_code,
                         (),
                     )
@@ -6783,10 +6859,15 @@ class XPostStore:
                 or queue_count != 0
                 or log_count != 0
                 or (
+                    verified_repair_recovery
+                    and str(run["source_type"]) != "drama"
+                )
+                or (
                     initial_recovery
                     and (
                         prior_audit is not None
                         or corrective_audit is not None
+                        or verified_repair_audit is not None
                     )
                 )
                 or (
@@ -6794,7 +6875,17 @@ class XPostStore:
                     and (
                         prior_audit is None
                         or corrective_audit is not None
+                        or verified_repair_audit is not None
                         or not corrective_message_matches
+                    )
+                )
+                or (
+                    verified_repair_recovery
+                    and (
+                        prior_audit is None
+                        or corrective_audit is None
+                        or verified_repair_audit is not None
+                        or not verified_repair_message_matches
                     )
                 )
             )
@@ -6885,12 +6976,28 @@ class XPostStore:
                 "expected_error_code": expected_error_code,
                 "reason": reason,
                 "recovery_mode": (
-                    "initial" if initial_recovery else "corrective"
+                    "initial"
+                    if initial_recovery
+                    else (
+                        "corrective"
+                        if corrective_recovery
+                        else "verified_repair"
+                    )
                 ),
                 "initial_recovery_audit_id": (
                     int(prior_audit["id"])
                     if prior_audit is not None
                     else None
+                ),
+                "corrective_retry_audit_id": (
+                    int(corrective_audit["id"])
+                    if corrective_audit is not None
+                    else None
+                ),
+                "verified_repair_job_key": (
+                    verified_repair_job_key
+                    if verified_repair_recovery
+                    else ""
                 ),
                 "actor": actor,
                 "validated_queue_count": queue_count,
@@ -6926,7 +7033,7 @@ class XPostStore:
                     ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     audit_values,
                 )
-            else:
+            elif corrective_recovery:
                 conn.execute(
                     "INSERT INTO x_post_schedule_corrective_retry_audit("
                     "schedule_run_id,initial_recovery_audit_id,"
@@ -6940,6 +7047,26 @@ class XPostStore:
                         int(prior_audit["id"]),
                     )
                     + audit_values[1:],
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_verified_repair_retry_audit("
+                    "schedule_run_id,initial_recovery_audit_id,"
+                    "corrective_retry_audit_id,recovery_reason,actor,"
+                    "verified_repair_job_key,previous_status,"
+                    "previous_error_code,previous_error_message,"
+                    "previous_started_at,previous_finished_at,"
+                    "validated_queue_count,validated_log_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        int(prior_audit["id"]),
+                        int(corrective_audit["id"]),
+                        reason,
+                        actor,
+                        verified_repair_job_key,
+                    )
+                    + audit_values[3:],
                 )
             cursor = conn.execute(
                 "UPDATE x_post_schedule_run SET status='claimed',"

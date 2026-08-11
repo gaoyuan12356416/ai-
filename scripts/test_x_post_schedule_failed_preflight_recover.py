@@ -45,6 +45,7 @@ class FakeStore:
         *,
         reason,
         actor,
+        verified_repair_job_key="",
         validate_only=False,
     ):
         self.calls.append(
@@ -53,6 +54,7 @@ class FakeStore:
                 expected_error_code,
                 reason,
                 actor,
+                verified_repair_job_key,
                 validate_only,
             )
         )

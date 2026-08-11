@@ -2406,14 +2406,19 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             )
             conn.commit()
 
-    def _failed_schedule_run(self, error_code="x_token_missing"):
-        saved = self.save_schedule("material", [2], ["09:00"])
+    def _failed_schedule_run(
+        self,
+        error_code="x_token_missing",
+        *,
+        source_type="material",
+    ):
+        saved = self.save_schedule(source_type, [2], ["09:00"])
         self._add_recovery_account(2)
         due = self.store.due_schedule_slots(
             datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ)
         )["items"][0]
         failed = self.store.record_schedule_failure(
-            "material",
+            source_type,
             "2026-07-27",
             "09:00",
             saved["version"],
@@ -2651,6 +2656,132 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_failed_preflight_recovery_conflict",
         )
 
+    def test_verified_repair_retry_requires_two_audits_and_job_proof(self):
+        failed = self._failed_schedule_run(source_type="drama")
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_pool_invalid_response",
+            "Material pool FIFO order is invalid",
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_pool_invalid_response",
+            reason=service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_media_repair_invalid_response",
+            "unassigned Premium drama routing failed: "
+            "X media repair probe does not meet the X video contract",
+        )
+        job_key = "a" * 64
+
+        with self.assertRaises(service.XPostError) as missing_job:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_media_repair_invalid_response",
+                reason=(
+                    service.FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON
+                ),
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            missing_job.exception.code,
+            "x_post_failed_preflight_recovery_not_allowed",
+        )
+
+        validated = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_media_repair_invalid_response",
+            reason=service.FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
+            actor="codex_operator",
+            verified_repair_job_key=job_key,
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["recovery_mode"], "verified_repair")
+        self.assertEqual(validated["verified_repair_job_key"], job_key)
+        recovered = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_media_repair_invalid_response",
+            reason=service.FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
+            actor="codex_operator",
+            verified_repair_job_key=job_key,
+            now=recovery_now,
+        )
+        self.assertEqual(recovered["updated_count"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT v.recovery_reason,v.verified_repair_job_key,"
+                "v.previous_error_code,v.validated_queue_count,"
+                "v.validated_log_count "
+                "FROM x_post_schedule_verified_repair_retry_audit v "
+                "JOIN x_post_schedule_recovery_audit i "
+                "ON i.id=v.initial_recovery_audit_id "
+                "JOIN x_post_schedule_corrective_retry_audit c "
+                "ON c.id=v.corrective_retry_audit_id "
+                "WHERE v.schedule_run_id=? AND i.schedule_run_id=? "
+                "AND c.schedule_run_id=?",
+                (failed["id"], failed["id"], failed["id"]),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON,
+                job_key,
+                "x_post_media_repair_invalid_response",
+                0,
+                0,
+            ),
+        )
+
+        self.store.record_schedule_failure(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_media_repair_invalid_response",
+            "unassigned Premium drama routing failed: "
+            "X media repair probe does not meet the X video contract",
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_media_repair_invalid_response",
+                reason=(
+                    service.FAILED_PREFLIGHT_VERIFIED_REPAIR_RECOVERY_REASON
+                ),
+                actor="codex_operator",
+                verified_repair_job_key=job_key,
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_failed_preflight_recovery_rejects_stale_or_unready_scope(self):
         failed = self._failed_schedule_run("x_upstream_error")
         with self.assertRaises(service.XPostError) as stale:
@@ -2695,6 +2826,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.assertIn("x_post_schedule_run", tables)
             self.assertIn("x_post_schedule_recovery_audit", tables)
             self.assertIn("x_post_schedule_corrective_retry_audit", tables)
+            self.assertIn(
+                "x_post_schedule_verified_repair_retry_audit",
+                tables,
+            )
             self.assertIn("x_post_schedule_random_plan", tables)
             self.assertIn("x_post_drama_pool", tables)
             drama_columns = {
