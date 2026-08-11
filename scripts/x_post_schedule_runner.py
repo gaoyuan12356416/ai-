@@ -1122,11 +1122,53 @@ def _drama_candidates(
                         "x_post_schedule_drama_shortage",
                     )
 
-                planned = []
+                planned_by_index = {}
+                routed_candidate_by_index = {}
+                swapped_premium_indexes = set()
                 rejected = False
-                for rank, (candidate, account) in enumerate(
-                    zip(candidates, accounts), 1
-                ):
+                # Preflight token-confirmed Premium slots first.  This lets a
+                # later unassigned long episode safely trade places with a
+                # short unassigned episode without changing any owned drama's
+                # durable account affinity.
+                processing_indexes = sorted(
+                    range(len(accounts)),
+                    key=lambda index: (
+                        0
+                        if int(
+                            candidates[index].get(
+                                "assigned_account_id", 0
+                            )
+                            or 0
+                        )
+                        == 0
+                        and bool(
+                            accounts[index].get("long_video_eligible")
+                        )
+                        else 1,
+                        index,
+                    ),
+                )
+
+                def normalize_item(item, candidate):
+                    normalized = dict(item)
+                    # pool_item_id is used only by the GPU repair worker.
+                    # The durable affinity is stored on the drama pool row.
+                    normalized["pool_item_id"] = None
+                    normalized["pool_created_at"] = ""
+                    normalized["drama_pool_item_id"] = candidate[
+                        "drama_pool_item_id"
+                    ]
+                    normalized["drama_pool_created_at"] = candidate[
+                        "drama_pool_created_at"
+                    ]
+                    normalized["source_type"] = "drama"
+                    normalized["source_date"] = source_date
+                    return normalized
+
+                for index in processing_indexes:
+                    rank = index + 1
+                    candidate = candidates[index]
+                    account = accounts[index]
                     if int(candidate.get("candidate_account_id") or 0) != int(
                         account["id"]
                     ):
@@ -1164,6 +1206,84 @@ def _drama_candidates(
                             candidate["episode_key"],
                             exc,
                         )
+                        premium_index = None
+                        if (
+                            code == "x_long_video_requires_premium"
+                            and int(
+                                candidate.get("assigned_account_id") or 0
+                            )
+                            == 0
+                            and not account.get("long_video_eligible")
+                        ):
+                            premium_index = next(
+                                (
+                                    candidate_index
+                                    for candidate_index in processing_indexes
+                                    if candidate_index in planned_by_index
+                                    and candidate_index
+                                    not in swapped_premium_indexes
+                                    and accounts[candidate_index].get(
+                                        "long_video_eligible"
+                                    )
+                                    and int(
+                                        routed_candidate_by_index[
+                                            candidate_index
+                                        ].get("assigned_account_id")
+                                        or 0
+                                    )
+                                    == 0
+                                ),
+                                None,
+                            )
+                        if premium_index is not None:
+                            premium_account = accounts[premium_index]
+                            donor_candidate = routed_candidate_by_index[
+                                premium_index
+                            ]
+                            try:
+                                premium_item = preflight_one(
+                                    candidate,
+                                    premium_account,
+                                    premium_index + 1,
+                                    temporary,
+                                )
+                                standard_item = preflight_one(
+                                    donor_candidate,
+                                    account,
+                                    rank,
+                                    temporary,
+                                )
+                            except (
+                                CandidatePreflightError,
+                                XPostError,
+                                http.client.HTTPException,
+                                OSError,
+                                TypeError,
+                                ValueError,
+                            ) as route_exc:
+                                raise ScheduleRunError(
+                                    "unassigned Premium drama routing failed: %s"
+                                    % route_exc,
+                                    str(
+                                        getattr(
+                                            route_exc,
+                                            "code",
+                                            "x_post_drama_preflight_failed",
+                                        )
+                                    ),
+                                ) from None
+                            planned_by_index[premium_index] = normalize_item(
+                                premium_item,
+                                candidate,
+                            )
+                            routed_candidate_by_index[premium_index] = candidate
+                            planned_by_index[index] = normalize_item(
+                                standard_item,
+                                donor_candidate,
+                            )
+                            routed_candidate_by_index[index] = donor_candidate
+                            swapped_premium_indexes.add(premium_index)
+                            continue
                         if code not in _DRAMA_DETERMINISTIC_REJECTION_CODES:
                             raise ScheduleRunError(
                                 message,
@@ -1189,22 +1309,19 @@ def _drama_candidates(
                         )
                         rejected = True
                         break
-                    # pool_item_id is used only by the GPU repair worker.
-                    # The durable affinity is stored on the drama pool row.
-                    item["pool_item_id"] = None
-                    item["pool_created_at"] = ""
-                    item["drama_pool_item_id"] = candidate[
-                        "drama_pool_item_id"
-                    ]
-                    item["drama_pool_created_at"] = candidate[
-                        "drama_pool_created_at"
-                    ]
-                    item["source_type"] = "drama"
-                    item["source_date"] = source_date
-                    planned.append(item)
+                    planned_by_index[index] = normalize_item(item, candidate)
+                    routed_candidate_by_index[index] = candidate
                 if rejected:
                     continue
-                return planned
+                if len(planned_by_index) != len(accounts):
+                    raise ScheduleRunError(
+                        "short-drama Premium routing did not fill every account",
+                        "x_post_schedule_drama_shortage",
+                    )
+                return [
+                    planned_by_index[index]
+                    for index in range(len(accounts))
+                ]
             raise ScheduleRunError(
                 "drama preflight rejection limit was reached",
                 "x_post_schedule_drama_shortage",

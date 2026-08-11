@@ -100,6 +100,20 @@ FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES = frozenset(
         "x_upstream_error",
     }
 )
+FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON = (
+    "operator_same_day_corrective_retry_v1"
+)
+FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES = {
+    "x_post_pool_invalid_response": (
+        "Material pool FIFO order is invalid",
+    ),
+    "x_post_schedule_preflight_failed": (
+        "read-only candidate query failed: OperationalError",
+    ),
+    "x_long_video_requires_premium": (
+        "Videos longer than 140 seconds require a token-confirmed X Premium subscription",
+    ),
+}
 
 QUEUE_FIELDS = (
     "account_id",
@@ -1194,6 +1208,32 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_schedule_corrective_retry_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_run_id INTEGER NOT NULL UNIQUE,
+                    initial_recovery_audit_id INTEGER NOT NULL,
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason='operator_same_day_corrective_retry_v1'),
+                    actor TEXT NOT NULL,
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='failed_preflight'),
+                    previous_error_code TEXT NOT NULL,
+                    previous_error_message TEXT NOT NULL,
+                    previous_started_at TEXT NOT NULL DEFAULT '',
+                    previous_finished_at TEXT NOT NULL DEFAULT '',
+                    validated_queue_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_queue_count=0),
+                    validated_log_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(validated_log_count=0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(schedule_run_id) REFERENCES x_post_schedule_run(id),
+                    FOREIGN KEY(initial_recovery_audit_id)
+                        REFERENCES x_post_schedule_recovery_audit(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_random_plan (
                     source_type TEXT NOT NULL
                         CHECK(source_type IN ('material','drama')),
@@ -1656,6 +1696,10 @@ def ensure_storage(db_path):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_recovery_created "
                 "ON x_post_schedule_recovery_audit(created_at,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_schedule_corrective_created "
+                "ON x_post_schedule_corrective_retry_audit(created_at,id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_status "
@@ -6638,10 +6682,21 @@ class XPostStore:
                 "Failed-preflight recovery arguments are invalid",
                 400,
             ) from None
-        if (
-            reason != FAILED_PREFLIGHT_RECOVERY_REASON
-            or expected_error_code
-            not in FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES
+        initial_recovery = reason == FAILED_PREFLIGHT_RECOVERY_REASON
+        corrective_recovery = (
+            reason == FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON
+        )
+        if not (
+            (
+                initial_recovery
+                and expected_error_code
+                in FAILED_PREFLIGHT_RECOVERABLE_ERROR_CODES
+            )
+            or (
+                corrective_recovery
+                and expected_error_code
+                in FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES
+            )
         ):
             raise XPostError(
                 "x_post_failed_preflight_recovery_not_allowed",
@@ -6694,6 +6749,22 @@ class XPostStore:
                 "WHERE schedule_run_id=?",
                 (run_id,),
             ).fetchone()
+            corrective_audit = conn.execute(
+                "SELECT id FROM x_post_schedule_corrective_retry_audit "
+                "WHERE schedule_run_id=?",
+                (run_id,),
+            ).fetchone()
+            previous_error_message = str(run["error_message"] or "")
+            corrective_message_matches = bool(
+                corrective_recovery
+                and any(
+                    fragment in previous_error_message
+                    for fragment in FAILED_PREFLIGHT_CORRECTIVE_ERROR_MESSAGES.get(
+                        expected_error_code,
+                        (),
+                    )
+                )
+            )
 
             scheduled_at = datetime.strptime(
                 "%s %s" % (run["run_date"], run["publish_time"]),
@@ -6711,7 +6782,21 @@ class XPostStore:
                 or int(run["unknown_count"] or 0) != 0
                 or queue_count != 0
                 or log_count != 0
-                or prior_audit is not None
+                or (
+                    initial_recovery
+                    and (
+                        prior_audit is not None
+                        or corrective_audit is not None
+                    )
+                )
+                or (
+                    corrective_recovery
+                    and (
+                        prior_audit is None
+                        or corrective_audit is not None
+                        or not corrective_message_matches
+                    )
+                )
             )
 
             mode = _schedule_mode(run["schedule_mode"])
@@ -6799,6 +6884,14 @@ class XPostStore:
                 "expected_count": int(run["expected_count"]),
                 "expected_error_code": expected_error_code,
                 "reason": reason,
+                "recovery_mode": (
+                    "initial" if initial_recovery else "corrective"
+                ),
+                "initial_recovery_audit_id": (
+                    int(prior_audit["id"])
+                    if prior_audit is not None
+                    else None
+                ),
                 "actor": actor,
                 "validated_queue_count": queue_count,
                 "validated_log_count": log_count,
@@ -6810,27 +6903,44 @@ class XPostStore:
                 conn.rollback()
                 return result
 
-            conn.execute(
-                "INSERT INTO x_post_schedule_recovery_audit("
-                "schedule_run_id,recovery_reason,actor,previous_status,"
-                "previous_error_code,previous_error_message,"
-                "previous_started_at,previous_finished_at,"
-                "validated_queue_count,validated_log_count,created_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    run_id,
-                    reason,
-                    actor,
-                    str(run["status"]),
-                    str(run["error_code"]),
-                    redact_text(run["error_message"], 500),
-                    str(run["started_at"]),
-                    str(run["finished_at"]),
-                    queue_count,
-                    log_count,
-                    timestamp,
-                ),
+            audit_values = (
+                run_id,
+                reason,
+                actor,
+                str(run["status"]),
+                str(run["error_code"]),
+                redact_text(run["error_message"], 500),
+                str(run["started_at"]),
+                str(run["finished_at"]),
+                queue_count,
+                log_count,
+                timestamp,
             )
+            if initial_recovery:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_recovery_audit("
+                    "schedule_run_id,recovery_reason,actor,previous_status,"
+                    "previous_error_code,previous_error_message,"
+                    "previous_started_at,previous_finished_at,"
+                    "validated_queue_count,validated_log_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    audit_values,
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO x_post_schedule_corrective_retry_audit("
+                    "schedule_run_id,initial_recovery_audit_id,"
+                    "recovery_reason,actor,previous_status,"
+                    "previous_error_code,previous_error_message,"
+                    "previous_started_at,previous_finished_at,"
+                    "validated_queue_count,validated_log_count,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        int(prior_audit["id"]),
+                    )
+                    + audit_values[1:],
+                )
             cursor = conn.execute(
                 "UPDATE x_post_schedule_run SET status='claimed',"
                 "queued_count=0,published_count=0,failed_count=0,"
@@ -7235,32 +7345,42 @@ class XPostStore:
                         "短剧池中没有足够的未绑定短剧供全部账号发布",
                         409,
                     )
-                expected_pairs = [
-                    (
-                        int(item["candidate_account_id"]),
-                        int(item["id"]),
-                        int(item["next_sub_number"]),
-                    )
-                    for item in assignments
-                ]
-                actual_pairs = [
-                    (
-                        int(values["account_id"]),
-                        int(values["drama_pool_item_id"]),
-                        int(values["episode_number"]),
-                    )
+                expected_by_pool = {
+                    int(item["id"]): item for item in assignments
+                }
+                actual_pool_ids = [
+                    int(values["drama_pool_item_id"])
                     for values in prepared
                 ]
-                if actual_pairs != expected_pairs:
+                assignment_conflict = bool(
+                    len(actual_pool_ids) != len(expected_by_pool)
+                    or len(set(actual_pool_ids)) != len(actual_pool_ids)
+                    or set(actual_pool_ids) != set(expected_by_pool)
+                )
+                for values in prepared:
+                    pool_id = int(values["drama_pool_item_id"])
+                    expected = expected_by_pool.get(pool_id)
+                    if not expected:
+                        assignment_conflict = True
+                        continue
+                    owner_id = int(expected["assigned_account_id"] or 0)
+                    if (
+                        int(values["episode_number"])
+                        != int(expected["next_sub_number"])
+                        or (
+                            owner_id > 0
+                            and int(values["account_id"]) != owner_id
+                        )
+                    ):
+                        assignment_conflict = True
+                if assignment_conflict:
                     conn.rollback()
                     raise XPostError(
                         "x_post_drama_assignment_conflict",
                         "短剧候选与账号固定归属或新剧入池顺序不一致",
                         409,
                     )
-                pool_by_id = {
-                    int(item["id"]): item for item in assignments
-                }
+                pool_by_id = expected_by_pool
                 for values in prepared:
                     pool = pool_by_id.get(
                         int(values["drama_pool_item_id"])

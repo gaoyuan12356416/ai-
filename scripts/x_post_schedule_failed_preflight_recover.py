@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts.service import (  # noqa: E402
+    FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
     FAILED_PREFLIGHT_RECOVERY_REASON,
     XPostError,
     XPostStore,
@@ -73,7 +74,13 @@ def _argument_parser():
     parser.add_argument(
         "--reason",
         required=True,
-        help="Must equal %s" % FAILED_PREFLIGHT_RECOVERY_REASON,
+        help=(
+            "Must equal %s or %s"
+            % (
+                FAILED_PREFLIGHT_RECOVERY_REASON,
+                FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+            )
+        ),
     )
     parser.add_argument("--actor", required=True)
     parser.add_argument("--validate-only", action="store_true")

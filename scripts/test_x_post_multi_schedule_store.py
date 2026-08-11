@@ -1664,6 +1664,44 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                     (first_plan["queues"][0]["id"],),
                 )
 
+    def test_unassigned_drama_latest_set_allows_account_permutation(self):
+        self.save_schedule("drama", [2, 3], ["09:00"])
+        older_pool = self.add_drama(content_id="LONG", free_episode_count=2)
+        newer_pool = self.add_drama(content_id="SHORT", free_episode_count=2)
+
+        available = self.store.available_drama_pool_items(
+            limit=2,
+            account_ids=[2, 3],
+        )
+        self.assertEqual(
+            [(item["candidate_account_id"], item["id"]) for item in available],
+            [(2, newer_pool["id"]), (3, older_pool["id"])],
+        )
+
+        plan = self.store.create_schedule_plan(
+            "drama",
+            "2026-07-27",
+            "09:00",
+            2,
+            [
+                self.drama_candidate(older_pool, 2, 1),
+                self.drama_candidate(newer_pool, 3, 1),
+            ],
+        )
+
+        self.assertEqual(
+            [(item["account_id"], item["content_id"]) for item in plan["queues"]],
+            [(2, "LONG"), (3, "SHORT")],
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            assigned = conn.execute(
+                "SELECT content_id,assigned_account_id "
+                "FROM x_post_drama_pool WHERE id IN (?,?) "
+                "ORDER BY content_id",
+                (older_pool["id"], newer_pool["id"]),
+            ).fetchall()
+        self.assertEqual(assigned, [("LONG", 2), ("SHORT", 3)])
+
     def test_legacy_frozen_cross_account_queue_is_blocked_before_publish(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
         second_pool = self.add_drama(content_id="D2", free_episode_count=2)
@@ -2497,6 +2535,122 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.assertEqual(restored["account_ids"], plan["account_ids"])
         self.assertEqual(restored["body_template"], plan["body_template"])
 
+    def test_failed_preflight_corrective_retry_is_once_and_audited(self):
+        failed = self._failed_schedule_run()
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_pool_invalid_response",
+            "Material pool FIFO order is invalid",
+        )
+
+        validated = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_pool_invalid_response",
+            reason=service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+            actor="codex_operator",
+            validate_only=True,
+            now=recovery_now,
+        )
+        self.assertEqual(validated["recovery_mode"], "corrective")
+        self.assertEqual(validated["updated_count"], 0)
+        corrected = self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_post_pool_invalid_response",
+            reason=service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.assertEqual(corrected["updated_count"], 1)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            audit = conn.execute(
+                "SELECT c.recovery_reason,c.previous_error_code,"
+                "c.validated_queue_count,c.validated_log_count "
+                "FROM x_post_schedule_corrective_retry_audit c "
+                "JOIN x_post_schedule_recovery_audit i "
+                "ON i.id=c.initial_recovery_audit_id "
+                "WHERE c.schedule_run_id=? AND i.schedule_run_id=?",
+                (failed["id"], failed["id"]),
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            (
+                service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+                "x_post_pool_invalid_response",
+                0,
+                0,
+            ),
+        )
+
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_pool_invalid_response",
+            "Material pool FIFO order is invalid",
+        )
+        with self.assertRaises(service.XPostError) as repeated:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_pool_invalid_response",
+                reason=service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            repeated.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
+    def test_failed_preflight_corrective_retry_rejects_unproven_message(self):
+        failed = self._failed_schedule_run()
+        recovery_now = datetime(
+            2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ
+        )
+        self.store.recover_failed_preflight_schedule_run(
+            failed["id"],
+            "x_token_missing",
+            reason=service.FAILED_PREFLIGHT_RECOVERY_REASON,
+            actor="codex_operator",
+            now=recovery_now,
+        )
+        self.store.record_schedule_failure(
+            "material",
+            "2026-07-27",
+            "09:00",
+            failed["config_version"],
+            [2],
+            "x_post_schedule_preflight_failed",
+            "unrelated validation failure",
+        )
+        with self.assertRaises(service.XPostError) as rejected:
+            self.store.recover_failed_preflight_schedule_run(
+                failed["id"],
+                "x_post_schedule_preflight_failed",
+                reason=service.FAILED_PREFLIGHT_CORRECTIVE_RECOVERY_REASON,
+                actor="codex_operator",
+                now=recovery_now,
+            )
+        self.assertEqual(
+            rejected.exception.code,
+            "x_post_failed_preflight_recovery_conflict",
+        )
+
     def test_failed_preflight_recovery_rejects_stale_or_unready_scope(self):
         failed = self._failed_schedule_run("x_upstream_error")
         with self.assertRaises(service.XPostError) as stale:
@@ -2540,6 +2694,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             self.assertIn("x_post_schedule_config", tables)
             self.assertIn("x_post_schedule_run", tables)
             self.assertIn("x_post_schedule_recovery_audit", tables)
+            self.assertIn("x_post_schedule_corrective_retry_audit", tables)
             self.assertIn("x_post_schedule_random_plan", tables)
             self.assertIn("x_post_drama_pool", tables)
             drama_columns = {
