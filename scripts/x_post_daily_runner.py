@@ -870,7 +870,7 @@ class SidecarClient:
                     "Material pool item identity is invalid",
                 )
             order = (created_at, pool_item_id)
-            if previous_order is not None and order <= previous_order:
+            if previous_order is not None and order >= previous_order:
                 raise SidecarError(
                     "x_post_pool_invalid_response",
                     "Material pool FIFO order is invalid",
