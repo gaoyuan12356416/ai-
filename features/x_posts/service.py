@@ -60,6 +60,12 @@ RANDOM_PUBLISH_MIN_GAP_MINUTES = 60
 MAX_DRAMA_POOL_BATCH_DELETE_SIZE = 100
 MAX_DRAMA_POOL_REPLAY_SIZE = 100
 MAX_MANUAL_PUBLISH_SIZE = 50
+MANUAL_TRIGGER_SOURCE = "manual"
+AUTO_TEMPLATE_TRIGGER_SOURCE = "auto_template"
+MANUAL_TRIGGER_SOURCES = frozenset(
+    {MANUAL_TRIGGER_SOURCE, AUTO_TEMPLATE_TRIGGER_SOURCE}
+)
+AUTO_TEMPLATE_MAX_DURATION_SECONDS = 600.0
 SCHEDULE_TIMEZONE = "Asia/Shanghai"
 SCHEDULE_SOURCE_TYPES = frozenset({"material", "drama"})
 SCHEDULE_MODES = frozenset({"fixed", "random"})
@@ -1047,6 +1053,13 @@ def ensure_storage(db_path):
                 CREATE TABLE IF NOT EXISTS x_post_manual_run (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     idempotency_key TEXT NOT NULL UNIQUE,
+                    trigger_source TEXT NOT NULL DEFAULT 'manual'
+                        CHECK(trigger_source IN ('manual','auto_template')),
+                    external_task_key TEXT NOT NULL DEFAULT '',
+                    template_ref TEXT NOT NULL DEFAULT '',
+                    template_version INTEGER NOT NULL DEFAULT 0
+                        CHECK(template_version>=0),
+                    body_template_sha256 TEXT NOT NULL DEFAULT '',
                     run_date TEXT NOT NULL,
                     source_date TEXT NOT NULL,
                     account_ids_json TEXT NOT NULL,
@@ -1475,6 +1488,31 @@ def ensure_storage(db_path):
                 if name not in queue_columns:
                     conn.execute("ALTER TABLE x_post_queue ADD COLUMN %s %s" % (name, definition))
 
+            manual_run_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(x_post_manual_run)"
+                )
+            }
+            manual_run_additive_columns = {
+                "trigger_source": (
+                    "TEXT NOT NULL DEFAULT 'manual' "
+                    "CHECK(trigger_source IN ('manual','auto_template'))"
+                ),
+                "external_task_key": "TEXT NOT NULL DEFAULT ''",
+                "template_ref": "TEXT NOT NULL DEFAULT ''",
+                "template_version": (
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(template_version>=0)"
+                ),
+                "body_template_sha256": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in manual_run_additive_columns.items():
+                if name not in manual_run_columns:
+                    conn.execute(
+                        "ALTER TABLE x_post_manual_run ADD COLUMN %s %s"
+                        % (name, definition)
+                    )
+
             schedule_config_columns = {
                 row[1]
                 for row in conn.execute(
@@ -1833,6 +1871,16 @@ def ensure_storage(db_path):
                 "ON x_post_manual_run(status,created_at,id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_x_post_manual_run_source_status "
+                "ON x_post_manual_run(trigger_source,status,created_at,id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "ux_x_post_manual_run_auto_external_task "
+                "ON x_post_manual_run(external_task_key) "
+                "WHERE trigger_source='auto_template'"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_drama_pool_fifo "
                 "ON x_post_drama_pool(status,created_at,id)"
             )
@@ -1984,6 +2032,36 @@ def ensure_storage(db_path):
                   )
                 BEGIN
                     SELECT RAISE(ABORT, 'x_post_queue manual_run_id missing or mismatched');
+                END
+                """
+            )
+            conn.execute(
+                "DROP TRIGGER IF EXISTS trg_x_post_manual_run_identity_update"
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_manual_run_identity_update
+                BEFORE UPDATE OF idempotency_key,trigger_source,
+                    external_task_key,template_ref,template_version,
+                    body_template_sha256,run_date,source_date,
+                    account_ids_json,material_ids_json,body_template,
+                    actor_user_id,actor_name
+                ON x_post_manual_run
+                WHEN NEW.idempotency_key<>OLD.idempotency_key
+                  OR NEW.trigger_source<>OLD.trigger_source
+                  OR NEW.external_task_key<>OLD.external_task_key
+                  OR NEW.template_ref<>OLD.template_ref
+                  OR NEW.template_version<>OLD.template_version
+                  OR NEW.body_template_sha256<>OLD.body_template_sha256
+                  OR NEW.run_date<>OLD.run_date
+                  OR NEW.source_date<>OLD.source_date
+                  OR NEW.account_ids_json<>OLD.account_ids_json
+                  OR NEW.material_ids_json<>OLD.material_ids_json
+                  OR NEW.body_template<>OLD.body_template
+                  OR NEW.actor_user_id<>OLD.actor_user_id
+                  OR NEW.actor_name<>OLD.actor_name
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_manual_run identity is immutable');
                 END
                 """
             )
@@ -2489,6 +2567,28 @@ def _manual_idempotency_key(value):
         raise XPostError(
             "invalid_request",
             "idempotency_key无效",
+            400,
+        ) from None
+
+
+def _manual_trigger_source(value):
+    source = str(value or MANUAL_TRIGGER_SOURCE).strip().lower()
+    if source not in MANUAL_TRIGGER_SOURCES:
+        raise XPostError(
+            "invalid_request",
+            "trigger_source invalid",
+            400,
+        )
+    return source
+
+
+def _auto_provenance_token(value, label):
+    try:
+        return _clean_token(value, label, 200)
+    except ValueError:
+        raise XPostError(
+            "invalid_request",
+            "%s invalid" % label,
             400,
         ) from None
 
@@ -5921,6 +6021,9 @@ class XPostStore:
                 404,
             )
         item = _row_dict(row)
+        item["trigger_source"] = _manual_trigger_source(
+            item.get("trigger_source")
+        )
         item["account_ids"] = _schedule_account_ids(
             _json_array(item.pop("account_ids_json"), "account_ids"),
         )
@@ -5934,13 +6037,19 @@ class XPostStore:
         item["error_message"] = redact_text(item.get("error_message"), 500)
         return item
 
-    def get_manual_run(self, run_id):
+    def get_manual_run(
+        self,
+        run_id,
+        trigger_source=MANUAL_TRIGGER_SOURCE,
+    ):
         run_id = _positive_int(run_id, "run_id")
+        trigger_source = _manual_trigger_source(trigger_source)
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN")
             row = conn.execute(
-                "SELECT * FROM x_post_manual_run WHERE id=?",
-                (run_id,),
+                "SELECT * FROM x_post_manual_run "
+                "WHERE id=? AND trigger_source=?",
+                (run_id, trigger_source),
             ).fetchone()
             queues = conn.execute(
                 "SELECT q.id,q.manual_run_id,q.run_date,q.source_date,"
@@ -5955,6 +6064,8 @@ class XPostStore:
                 "CASE WHEN l.status='post_creating' "
                 "OR COALESCE(l.unknown_outcome,0)=1 "
                 "THEN 1 ELSE 0 END AS unknown_outcome,"
+                "COALESCE(l.id,0) AS log_id,"
+                "COALESCE(l.x_post_id,'') AS post_id,"
                 "COALESCE(l.x_post_url,'') AS preview_url,"
                 "COALESCE(l.error_code,'') AS error_code,"
                 "COALESCE(l.error_message,'') AS error_message,"
@@ -6027,7 +6138,9 @@ class XPostStore:
             ).fetchone()
             if existing:
                 same = bool(
-                    str(existing["run_date"]) == run_date
+                    str(existing["trigger_source"])
+                    == MANUAL_TRIGGER_SOURCE
+                    and str(existing["run_date"]) == run_date
                     and str(existing["source_date"]) == source_date
                     and str(existing["account_ids_json"]) == accounts_json
                     and str(existing["material_ids_json"]) == materials_json
@@ -6082,12 +6195,14 @@ class XPostStore:
             try:
                 cursor = conn.execute(
                     "INSERT INTO x_post_manual_run("
-                    "idempotency_key,run_date,source_date,account_ids_json,"
+                    "idempotency_key,trigger_source,run_date,source_date,"
+                    "account_ids_json,"
                     "material_ids_json,body_template,actor_user_id,actor_name,"
                     "status,expected_count,created_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    ") VALUES(?,? ,?,?,?,?,?,?,?,'queued',?,?,?)",
                     (
                         idempotency_key,
+                        MANUAL_TRIGGER_SOURCE,
                         run_date,
                         source_date,
                         accounts_json,
@@ -6113,15 +6228,190 @@ class XPostStore:
         result["created"] = True
         return result
 
-    def claim_manual_run(self):
+    def create_auto_template_run(
+        self,
+        material_id,
+        account_id,
+        external_task_key,
+        template_ref,
+        template_version,
+        body_template,
+        actor=None,
+    ):
+        material_ids = _manual_material_ids([material_id])
+        account_ids = _schedule_account_ids([account_id])
+        external_task_key = _auto_provenance_token(
+            external_task_key,
+            "external_task_key",
+        )
+        template_ref = _auto_provenance_token(
+            template_ref,
+            "template_ref",
+        )
+        template_version = _positive_int(
+            template_version,
+            "template_version",
+        )
+        body_template = _normalize_post_template(
+            body_template,
+            "material",
+        )
+        body_template_sha256 = hashlib.sha256(
+            body_template.encode("utf-8")
+        ).hexdigest()
+        actor = actor if isinstance(actor, dict) else {}
+        actor_user_id = str(actor.get("user_id", "") or "").strip()[:255]
+        actor_name = str(
+            actor.get("name", "") or actor.get("email", "") or ""
+        ).strip()[:255]
+        if (
+            not actor_user_id
+            or not actor_name
+            or any(ord(char) < 32 for char in actor_user_id + actor_name)
+        ):
+            raise XPostError(
+                "invalid_request",
+                "auto template actor invalid",
+                400,
+            )
+        run_date = _beijing_today()
+        source_date = (
+            datetime.strptime(run_date, "%Y-%m-%d").date()
+            - timedelta(days=1)
+        ).isoformat()
+        timestamp = utc_now()
+        accounts_json = json.dumps(account_ids, separators=(",", ":"))
+        materials_json = json.dumps(material_ids, separators=(",", ":"))
+        idempotency_key = "xpost:auto-template:v1:%s" % hashlib.sha256(
+            external_task_key.encode("utf-8")
+        ).hexdigest()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM x_post_manual_run "
+                "WHERE external_task_key=?",
+                (external_task_key,),
+            ).fetchone()
+            if existing:
+                same = bool(
+                    str(existing["trigger_source"])
+                    == AUTO_TEMPLATE_TRIGGER_SOURCE
+                    and str(existing["idempotency_key"]) == idempotency_key
+                    and str(existing["account_ids_json"]) == accounts_json
+                    and str(existing["material_ids_json"]) == materials_json
+                    and str(existing["template_ref"]) == template_ref
+                    and int(existing["template_version"])
+                    == template_version
+                    and str(existing["body_template"])
+                    == body_template
+                    and str(existing["body_template_sha256"])
+                    == body_template_sha256
+                    and str(existing["actor_user_id"]) == actor_user_id
+                )
+                if not same:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_auto_template_idempotency_conflict",
+                        "auto template task key already identifies another run",
+                        409,
+                    )
+                run_id = int(existing["id"])
+                conn.commit()
+                result = self.get_manual_run(
+                    run_id,
+                    AUTO_TEMPLATE_TRIGGER_SOURCE,
+                )
+                result["created"] = False
+                return result
+
+            idempotency_conflict = conn.execute(
+                "SELECT 1 FROM x_post_manual_run WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if idempotency_conflict:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_auto_template_idempotency_conflict",
+                    "auto template task key hash conflicts with another run",
+                    409,
+                )
+
+            material_key = material_ids[0]
+            in_pool = conn.execute(
+                "SELECT 1 FROM x_post_material_pool "
+                "WHERE material_key=? LIMIT 1",
+                (material_key,),
+            ).fetchone()
+            already_used = conn.execute(
+                "SELECT 1 FROM x_post_queue "
+                "WHERE material_key=? LIMIT 1",
+                (material_key,),
+            ).fetchone()
+            if in_pool or already_used:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_auto_template_material_unavailable",
+                    "selected material is already reserved by the X ledger or pool",
+                    409,
+                )
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO x_post_manual_run("
+                    "idempotency_key,trigger_source,external_task_key,"
+                    "template_ref,template_version,body_template_sha256,"
+                    "run_date,source_date,account_ids_json,material_ids_json,"
+                    "body_template,actor_user_id,actor_name,status,"
+                    "expected_count,created_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?)",
+                    (
+                        idempotency_key,
+                        AUTO_TEMPLATE_TRIGGER_SOURCE,
+                        external_task_key,
+                        template_ref,
+                        template_version,
+                        body_template_sha256,
+                        run_date,
+                        source_date,
+                        accounts_json,
+                        materials_json,
+                        body_template,
+                        actor_user_id,
+                        actor_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "auto template run unique constraint conflict",
+                    409,
+                ) from exc
+            run_id = int(cursor.lastrowid)
+            conn.commit()
+        result = self.get_manual_run(
+            run_id,
+            AUTO_TEMPLATE_TRIGGER_SOURCE,
+        )
+        result["created"] = True
+        return result
+
+    def claim_manual_run(
+        self,
+        trigger_source=MANUAL_TRIGGER_SOURCE,
+    ):
+        trigger_source = _manual_trigger_source(trigger_source)
         timestamp = utc_now()
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM x_post_manual_run "
-                "WHERE status IN ('queued','running') "
+                "WHERE trigger_source=? "
+                "AND status IN ('queued','running') "
                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
-                "created_at,id LIMIT 1"
+                "created_at,id LIMIT 1",
+                (trigger_source,),
             ).fetchone()
             if not row:
                 conn.commit()
@@ -6145,12 +6435,17 @@ class XPostStore:
                     code = (
                         "x_post_unknown_outcome"
                         if unknown
-                        else "x_post_manual_interrupted"
+                        else (
+                            "x_post_auto_template_interrupted"
+                            if trigger_source
+                            == AUTO_TEMPLATE_TRIGGER_SOURCE
+                            else "x_post_manual_interrupted"
+                        )
                     )
                     message = (
-                        "A manual Post creation was interrupted and requires review"
+                        "An X Post creation was interrupted and requires review"
                         if unknown
-                        else "A manual publish was interrupted before a confirmed Post result"
+                        else "An X publish was interrupted before a confirmed Post result"
                     )
                     conn.execute(
                         "UPDATE x_post_manual_run SET status=?,"
@@ -6171,7 +6466,10 @@ class XPostStore:
                     conn.commit()
                     return {
                         "found": True,
-                        "run": self.get_manual_run(run_id),
+                        "run": self.get_manual_run(
+                            run_id,
+                            trigger_source,
+                        ),
                     }
             if str(row["status"]) == "queued":
                 cursor = conn.execute(
@@ -6188,7 +6486,182 @@ class XPostStore:
                         409,
                     )
             conn.commit()
-        return {"found": True, "run": self.get_manual_run(run_id)}
+        return {
+            "found": True,
+            "run": self.get_manual_run(run_id, trigger_source),
+        }
+
+    def recover_auto_template_run(self, run_id):
+        """Terminalize one stranded auto publish without selecting another run.
+
+        The caller must separately prove that the account's in-process publish
+        lock is free.  This transaction then rechecks the exact canonical run
+        and installs a durable no-republish fence for a still-active exact
+        queue, including the pre-request ``queued`` and log ``reserved``
+        windows.  It never republishes or claims a different task.
+        """
+        run_id = _positive_int(run_id, "run_id")
+        timestamp = utc_now()
+        recovered = False
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM x_post_manual_run "
+                "WHERE id=? AND trigger_source=?",
+                (run_id, AUTO_TEMPLATE_TRIGGER_SOURCE),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_manual_run_not_found",
+                    "X auto template run does not exist",
+                    404,
+                )
+            queue_rows = conn.execute(
+                "SELECT q.*,l.id AS log_id,COALESCE(l.status,'') AS log_status,"
+                "COALESCE(l.unknown_outcome,0) AS log_unknown_outcome "
+                "FROM x_post_queue q "
+                "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.manual_run_id=? ORDER BY q.candidate_rank,q.id LIMIT 2",
+                (run_id,),
+            ).fetchall()
+            if len(queue_rows) > 1:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_storage_conflict",
+                    "auto template run has multiple queues",
+                    500,
+                )
+            if str(row["status"]) in {"queued", "running"} and queue_rows:
+                queue = queue_rows[0]
+                log_status = str(queue["log_status"] or "")
+                unknown = bool(queue["log_unknown_outcome"]) or (
+                    log_status == "post_creating"
+                )
+                if unknown:
+                    cursor = conn.execute(
+                        "UPDATE x_post_manual_run SET status='needs_review',"
+                        "unknown_count=CASE WHEN unknown_count<1 THEN 1 "
+                        "ELSE unknown_count END,error_code='x_post_unknown_outcome',"
+                        "error_message=?,finished_at=?,updated_at=? "
+                        "WHERE id=? AND trigger_source=? "
+                        "AND status IN ('queued','running')",
+                        (
+                            "An X Post creation was interrupted and requires review",
+                            timestamp,
+                            timestamp,
+                            run_id,
+                            AUTO_TEMPLATE_TRIGGER_SOURCE,
+                        ),
+                    )
+                    recovered = int(cursor.rowcount or 0) == 1
+                elif str(queue["status"] or "") == "published" or (
+                    log_status == "published"
+                ):
+                    # A confirmed Post is authoritative. Its normal completion
+                    # transaction also synchronizes the parent run; recovery
+                    # must never replace it with a failure fence.
+                    pass
+                elif str(queue["status"] or "") not in {
+                    "queued",
+                    "reserved",
+                    "publishing",
+                    "failed",
+                }:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "auto template queue recovery state is invalid",
+                        500,
+                    )
+                else:
+                    code = "x_post_auto_template_interrupted"
+                    message = (
+                        "An X publish was interrupted before a confirmed Post result"
+                    )
+                    log_id = int(queue["log_id"] or 0)
+                    if log_id:
+                        conn.execute(
+                            "UPDATE x_post_publish_log SET status='failed',"
+                            "error_code=?,error_message=?,unknown_outcome=0,"
+                            "updated_at=? WHERE id=? "
+                            "AND status IN ('reserved','media_uploading','failed')",
+                            (code, message, timestamp, log_id),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO x_post_publish_log("
+                            "queue_id,account_id,status,error_code,error_message,"
+                            "unknown_outcome,created_at,updated_at"
+                            ") VALUES(?,?,'failed',?,?,0,?,?)",
+                            (
+                                int(queue["id"]),
+                                int(queue["account_id"]),
+                                code,
+                                message,
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+                    conn.execute(
+                        "UPDATE x_post_queue SET status='failed',updated_at=? "
+                        "WHERE id=? AND status IN ('queued','reserved','publishing','failed')",
+                        (timestamp, int(queue["id"])),
+                    )
+                    cursor = conn.execute(
+                        "UPDATE x_post_manual_run SET status='stopped',"
+                        "queued_count=1,published_count=0,failed_count=1,"
+                        "unknown_count=0,error_code=?,error_message=?,"
+                        "finished_at=?,updated_at=? WHERE id=? AND trigger_source=? "
+                        "AND status IN ('queued','running')",
+                        (
+                            code,
+                            message,
+                            timestamp,
+                            timestamp,
+                            run_id,
+                            AUTO_TEMPLATE_TRIGGER_SOURCE,
+                        ),
+                    )
+                    recovered = int(cursor.rowcount or 0) == 1
+            conn.commit()
+        return {
+            "recovered": recovered,
+            "run": self.get_manual_run(
+                run_id,
+                AUTO_TEMPLATE_TRIGGER_SOURCE,
+            ),
+        }
+
+    def assert_auto_template_publishable(self, queue_id, log_id):
+        """Recheck the auto recovery fence while the account lock is held."""
+        queue_id = _positive_int(queue_id, "queue_id")
+        log_id = _positive_int(log_id, "log_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT q.id,q.status AS queue_status,q.manual_run_id,"
+                "mr.trigger_source,mr.status AS run_status,l.id AS log_id,"
+                "l.status AS log_status,COALESCE(l.unknown_outcome,0) "
+                "AS unknown_outcome FROM x_post_queue q "
+                "JOIN x_post_manual_run mr ON mr.id=q.manual_run_id "
+                "JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.id=? AND l.id=?",
+                (queue_id, log_id),
+            ).fetchone()
+        if (
+            not row
+            or str(row["trigger_source"]) != AUTO_TEMPLATE_TRIGGER_SOURCE
+            or str(row["run_status"]) != "running"
+            or str(row["queue_status"]) not in {"queued", "reserved"}
+            or str(row["log_status"]) != "reserved"
+            or bool(row["unknown_outcome"])
+        ):
+            raise XPostError(
+                "x_post_auto_template_recovery_fenced",
+                "auto template publish was stopped by canonical recovery",
+                409,
+            )
+        return True
 
     def active_manual_account_ids(self):
         with contextlib.closing(_connect(self.db_path)) as conn:
@@ -6207,11 +6680,23 @@ class XPostStore:
                     result.append(account_id)
         return result
 
-    def record_manual_failure(self, run_id, error_code, error_message):
+    def record_manual_failure(
+        self,
+        run_id,
+        error_code,
+        error_message,
+        trigger_source=MANUAL_TRIGGER_SOURCE,
+    ):
         run_id = _positive_int(run_id, "run_id")
+        trigger_source = _manual_trigger_source(trigger_source)
         try:
             code = _clean_token(
-                error_code or "x_post_manual_preflight_failed",
+                error_code
+                or (
+                    "x_post_auto_template_preflight_failed"
+                    if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE
+                    else "x_post_manual_preflight_failed"
+                ),
                 "error code",
                 64,
             )
@@ -6225,8 +6710,9 @@ class XPostStore:
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT * FROM x_post_manual_run WHERE id=?",
-                (run_id,),
+                "SELECT * FROM x_post_manual_run "
+                "WHERE id=? AND trigger_source=?",
+                (run_id, trigger_source),
             ).fetchone()
             if not row:
                 conn.rollback()
@@ -6250,7 +6736,7 @@ class XPostStore:
                 )
             if str(row["status"]) == "failed_preflight":
                 conn.commit()
-                result = self.get_manual_run(run_id)
+                result = self.get_manual_run(run_id, trigger_source)
                 result["recorded"] = False
                 return result
             if str(row["status"]) not in {"queued", "running"}:
@@ -6268,17 +6754,33 @@ class XPostStore:
                 (code, message, timestamp, timestamp, run_id),
             )
             conn.commit()
-        result = self.get_manual_run(run_id)
+        result = self.get_manual_run(run_id, trigger_source)
         result["recorded"] = True
         return result
 
-    def create_manual_plan(self, run_id, candidates):
+    def create_manual_plan(
+        self,
+        run_id,
+        candidates,
+        trigger_source=MANUAL_TRIGGER_SOURCE,
+    ):
         run_id = _positive_int(run_id, "run_id")
+        trigger_source = _manual_trigger_source(trigger_source)
         if not isinstance(candidates, list):
             raise XPostError("invalid_request", "candidates必须是数组", 400)
-        frozen = self.get_manual_run(run_id)
+        frozen = self.get_manual_run(run_id, trigger_source)
         account_ids = list(frozen["account_ids"])
         material_ids = list(frozen["material_ids"])
+        if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE and (
+            len(account_ids) != 1
+            or len(material_ids) != 1
+            or len(candidates) != 1
+        ):
+            raise XPostError(
+                "x_post_auto_template_scope_mismatch",
+                "auto template execution requires exactly one account and material",
+                409,
+            )
         if len(candidates) != len(account_ids):
             raise XPostError(
                 "x_post_manual_candidate_shortage",
@@ -6304,6 +6806,19 @@ class XPostStore:
                 candidate_rank=index,
                 require_compliance=True,
             )
+            if (
+                trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE
+                and (
+                    float(values["preflight_duration"]) <= 0
+                    or float(values["preflight_duration"])
+                    > AUTO_TEMPLATE_MAX_DURATION_SECONDS
+                )
+            ):
+                raise XPostError(
+                    "x_post_auto_template_duration_exceeded",
+                    "automatic X materials cannot exceed 600 seconds",
+                    409,
+                )
             if values["source_date"] != frozen["source_date"]:
                 raise XPostError(
                     "x_post_manual_source_mismatch",
@@ -6329,7 +6844,12 @@ class XPostStore:
                     400,
                 )
             seen_materials.add(values["material_key"])
-            values["idempotency_key"] = "xpost:manual:v1:%s:%s" % (
+            values["idempotency_key"] = "xpost:%s:v1:%s:%s" % (
+                (
+                    "auto-template"
+                    if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE
+                    else "manual"
+                ),
                 run_id,
                 values["account_id"],
             )
@@ -6346,8 +6866,9 @@ class XPostStore:
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             run = conn.execute(
-                "SELECT * FROM x_post_manual_run WHERE id=?",
-                (run_id,),
+                "SELECT * FROM x_post_manual_run "
+                "WHERE id=? AND trigger_source=?",
+                (run_id, trigger_source),
             ).fetchone()
             if not run:
                 conn.rollback()
@@ -6391,7 +6912,7 @@ class XPostStore:
                         409,
                     )
                 conn.commit()
-                result = self.get_manual_run(run_id)
+                result = self.get_manual_run(run_id, trigger_source)
                 result["created"] = False
                 return result
             if str(run["status"]) not in {"queued", "running"}:
@@ -6472,7 +6993,7 @@ class XPostStore:
                     409,
                 ) from exc
             conn.commit()
-        result = self.get_manual_run(run_id)
+        result = self.get_manual_run(run_id, trigger_source)
         result["created"] = True
         return result
 
@@ -9230,7 +9751,7 @@ class XPostStore:
         item["recorded"] = recorded
         return item
 
-    def query_material_keys(self, material_keys):
+    def query_material_keys(self, material_keys, *, include_pool=False):
         if not isinstance(material_keys, list) or not material_keys or len(material_keys) > 1000:
             raise XPostError(
                 "invalid_request",
@@ -9257,6 +9778,15 @@ class XPostStore:
                         tuple(batch),
                     ).fetchall()
                 )
+                if include_pool:
+                    occupied.update(
+                        str(row["material_key"])
+                        for row in conn.execute(
+                            "SELECT material_key FROM x_post_material_pool "
+                            "WHERE material_key IN (%s)" % placeholders,
+                            tuple(batch),
+                        ).fetchall()
+                    )
         return [material_key for material_key in normalized if material_key in occupied]
 
     @staticmethod
@@ -9327,6 +9857,9 @@ class XPostStore:
             "CASE WHEN q.run_id IS NOT NULL THEN 'daily' "
             "WHEN q.catchup_run_id IS NOT NULL THEN 'catchup' "
             "WHEN q.schedule_run_id IS NOT NULL THEN 'schedule' "
+            "WHEN q.manual_run_id IS NOT NULL "
+            "AND COALESCE(mr.trigger_source,'manual')='auto_template' "
+            "THEN 'auto_template' "
             "WHEN q.manual_run_id IS NOT NULL THEN 'manual' "
             "ELSE 'canary' END AS batch_kind,"
             "q.source_type,q.run_date,q.source_date,q.account_id,"
@@ -9344,7 +9877,8 @@ class XPostStore:
             "COALESCE(l.error_code,'') AS error_code,COALESCE(l.error_message,'') AS error_message,"
             "COALESCE(l.started_at,'') AS started_at,COALESCE(l.published_at,'') AS published_at,"
             "q.created_at,q.updated_at FROM x_post_queue q "
-            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id"
+            "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+            "LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id"
         )
         offset = (page - 1) * page_size
         with contextlib.closing(_connect(self.db_path)) as conn:

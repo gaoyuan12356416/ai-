@@ -88,7 +88,11 @@ class XAccountsAppContractTest(unittest.TestCase):
 
     def test_drama_pool_sidecar_forwards_account_affinity_scope(self):
         self.assertIn(
-            'account_ids=payload.get("account_ids")',
+            '"account_ids",',
+            X_ACCOUNTS_SIDECAR_SOURCE,
+        )
+        self.assertIn(
+            "eligible_account_ids=eligible_ids",
             X_ACCOUNTS_SIDECAR_SOURCE,
         )
 

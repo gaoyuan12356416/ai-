@@ -1,0 +1,12 @@
+[Unit]
+Description=Create due X automatic publishing runs every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 Asia/Shanghai
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=x-auto-post-scheduler.service
+
+[Install]
+WantedBy=timers.target

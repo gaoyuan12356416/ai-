@@ -22,9 +22,10 @@ class FakeStore:
             "account_id": 202,
         }
 
-    def get_manual_run(self, run_id):
+    def get_manual_run(self, run_id, trigger_source="manual"):
         return {
             "id": int(run_id),
+            "trigger_source": trigger_source,
             "account_ids": [202],
             "material_ids": ["501"],
             "body_template": "{{drama_name}}\n{{desc}}\n{{url}}",
@@ -33,7 +34,7 @@ class FakeStore:
             "queues": [],
         }
 
-    def create_manual_plan(self, run_id, candidates):
+    def create_manual_plan(self, run_id, candidates, trigger_source="manual"):
         self.candidates = list(candidates)
         return {"id": int(run_id), "queues": []}
 

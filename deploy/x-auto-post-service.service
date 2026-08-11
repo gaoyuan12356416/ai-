@@ -1,0 +1,46 @@
+[Unit]
+Description=Dramawave X automatic publishing-template sidecar
+After=network-online.target x-post-automation.service
+Wants=network-online.target
+Requires=x-post-automation.service
+RequiresMountsFor=/mnt/data-disk/x-auto-post-publisher /mnt/data-disk/x-post-automation
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=simple
+User=x-post-daily
+Group=x-post-daily
+WorkingDirectory=/opt/x-post-automation/current
+EnvironmentFile=/etc/x-post-schedule.env
+EnvironmentFile=-/etc/x-post-media-repair.token
+EnvironmentFile=/etc/x-auto-post.env
+EnvironmentFile=/etc/x-auto-post.secrets
+ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_auto_post_service.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=x-auto-post
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+InaccessiblePaths=/var/lib/x-post-automation /etc/ssh
+ReadOnlyPaths=/opt/x-post-automation/current
+ReadWritePaths=/mnt/data-disk/x-auto-post-publisher /mnt/data-disk/x-post-automation/daily-work /run/x-auto-post
+UMask=0077
+TimeoutStopSec=360min
+
+[Install]
+WantedBy=multi-user.target

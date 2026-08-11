@@ -240,6 +240,28 @@
           order: 20,
         },
         {
+          key: "xAutoPublishTemplates",
+          label: "X Post 自动发布模板",
+          description: "维护独立的选材、文案和发布时间模板",
+          kind: "page",
+          href: "/x-auto-publish-templates.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 21,
+        },
+        {
+          key: "xAutoPublishRuns",
+          label: "X Post 自动发布记录",
+          description: "查看模板运行、账号任务和最终发布结果",
+          kind: "page",
+          href: "/x-auto-publish-runs.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 22,
+        },
+        {
           key: "xPostMaterialPool",
           label: "Post素材池",
           description: "维护定时发布使用的自定义素材",
@@ -454,6 +476,8 @@
     ttAutoPublishRuns: "/tt-publish-logs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
+    xAutoPublishTemplates: "/x-auto-publish-templates.html",
+    xAutoPublishRuns: "/x-auto-publish-runs.html",
     xPostMaterialPool: "/x-post-material-pool.html",
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
@@ -565,6 +589,38 @@
     const xPlatform = normalized.find(group => group && group.key === "x_platform");
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      const xAutoPublishTemplatesExists = xPlatform.items.some(
+        item => item && item.key === "xAutoPublishTemplates"
+      );
+      if (!xAutoPublishTemplatesExists) {
+        xPlatform.items.push({
+          key: "xAutoPublishTemplates",
+          label: "X Post 自动发布模板",
+          description: "维护独立的选材、文案和发布时间模板",
+          kind: "page",
+          href: "/x-auto-publish-templates.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 21,
+        });
+      }
+      const xAutoPublishRunsExists = xPlatform.items.some(
+        item => item && item.key === "xAutoPublishRuns"
+      );
+      if (!xAutoPublishRunsExists) {
+        xPlatform.items.push({
+          key: "xAutoPublishRuns",
+          label: "X Post 自动发布记录",
+          description: "查看模板运行、账号任务和最终发布结果",
+          kind: "page",
+          href: "/x-auto-publish-runs.html",
+          module: "x_accounts",
+          adminOnly: false,
+          enabled: true,
+          order: 22,
+        });
+      }
       const exists = xPlatform.items.some(item => item && item.key === "xPostMaterialPool");
       if (!exists) {
         xPlatform.items.push({

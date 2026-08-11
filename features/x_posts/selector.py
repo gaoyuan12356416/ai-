@@ -999,6 +999,60 @@ class DramawaveCandidateSelector:
             selected.append(candidate)
         return selected, rejections
 
+    def select_auto_template(self, material_ids, source_date, limit=1):
+        """Hydrate one exact automatic material under the 600-second ceiling.
+
+        The execution bridge deliberately resembles the manual exact-ID flow,
+        but it must never inherit the operator-only long-source exception.
+        """
+        source_date = normalize_date(source_date)
+        try:
+            limit = int(limit)
+            raw_ids = list(material_ids)
+        except (TypeError, ValueError, OverflowError):
+            raise CandidateSelectionError(
+                "auto template material IDs and limit are invalid"
+            ) from None
+        if limit != 1 or len(raw_ids) != 1:
+            raise CandidateSelectionError(
+                "auto template selection requires exactly one material"
+            )
+        candidate_id = material_key(raw_ids[0])
+        try:
+            candidate = self._pool_candidate(
+                candidate_id,
+                source_date,
+                allow_long_duration=False,
+            )
+        except CandidateQueryError:
+            raise
+        except PoolCandidateRejection as exc:
+            return [], [
+                {
+                    "auto_template_item_id": 1,
+                    "material_id": candidate_id,
+                    "error_code": exc.error_code,
+                    "error_message": exc.error_message,
+                }
+            ]
+        except CandidateSelectionError as exc:
+            return [], [
+                {
+                    "auto_template_item_id": 1,
+                    "material_id": candidate_id,
+                    "error_code": "material_safety_check_failed",
+                    "error_message": str(exc),
+                }
+            ]
+        candidate["auto_template_item_id"] = 1
+        # Shared X media repair/preflight code uses this bounded per-run
+        # identity when the material did not originate in an operator pool.
+        candidate["manual_item_id"] = 1
+        candidate["pool_item_id"] = None
+        candidate["pool_created_at"] = ""
+        candidate["source_type"] = "material"
+        return [candidate], []
+
 
 def select_candidates(
     connection,
@@ -1054,6 +1108,26 @@ def select_manual_candidates(
         schema=schema,
         now=now,
     ).select_manual(
+        material_ids,
+        source_date,
+        limit=limit,
+    )
+
+
+def select_auto_template_candidates(
+    connection,
+    material_ids,
+    source_date,
+    limit=1,
+    schema=DEFAULT_SCHEMA,
+    now=None,
+):
+    """Hydrate one exact auto-template material without the manual >600s gate."""
+    return DramawaveCandidateSelector(
+        connection,
+        schema=schema,
+        now=now,
+    ).select_auto_template(
         material_ids,
         source_date,
         limit=limit,

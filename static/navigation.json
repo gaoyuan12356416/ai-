@@ -267,6 +267,28 @@
         "adminOnly": true
       },
       {
+        "key": "xAutoPublishTemplates",
+        "label": "X Post 自动发布模板",
+        "description": "维护独立的选材、文案和发布时间模板",
+        "kind": "page",
+        "href": "/x-auto-publish-templates.html",
+        "enabled": true,
+        "order": 21,
+        "module": "x_accounts",
+        "adminOnly": false
+      },
+      {
+        "key": "xAutoPublishRuns",
+        "label": "X Post 自动发布记录",
+        "description": "查看模板运行、账号任务和最终发布结果",
+        "kind": "page",
+        "href": "/x-auto-publish-runs.html",
+        "enabled": true,
+        "order": 22,
+        "module": "x_accounts",
+        "adminOnly": false
+      },
+      {
         "key": "xPostMaterialPool",
         "label": "Post素材池",
         "description": "维护定时发布使用的自定义素材",

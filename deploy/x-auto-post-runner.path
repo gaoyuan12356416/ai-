@@ -1,0 +1,11 @@
+[Unit]
+Description=Wake the X automatic publishing runner for a confirmed manual request
+After=x-auto-post-service.service
+Requires=x-auto-post-service.service
+
+[Path]
+PathChanged=/run/x-auto-post/manual-kick
+Unit=x-auto-post-runner.service
+
+[Install]
+WantedBy=multi-user.target

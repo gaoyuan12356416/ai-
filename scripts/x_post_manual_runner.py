@@ -117,6 +117,7 @@ def _manual_identity(raw):
         or not isinstance(expected_count, int)
         or expected_count != len(account_ids)
         or raw.get("status") not in _RUN_STATUSES
+        or raw.get("trigger_source") != "manual"
         or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(raw.get("run_date", "")))
         or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(raw.get("source_date", "")))
         or not isinstance(raw.get("body_template"), str)

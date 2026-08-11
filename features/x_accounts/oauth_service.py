@@ -55,6 +55,7 @@ MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
 MAX_DRAMA_POOL_BODY_BYTES = 5 * 1024 * 1024
 MAX_ERROR_TEXT = 240
 MAX_DAILY_ACCOUNTS = 50
+AUTO_TEMPLATE_MAX_DURATION_SECONDS = 600.0
 TRANSIENT_VERIFY_ERROR_CODES = frozenset(
     {
         "x_post_rate_limited",
@@ -117,6 +118,10 @@ INTERNAL_TOKEN = (
     or os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN", "").strip()
 )
 DAILY_INTERNAL_TOKEN = os.environ.get("X_POST_DAILY_INTERNAL_TOKEN", "").strip()
+AUTO_INTERNAL_TOKEN = os.environ.get(
+    "X_POST_AUTO_INTERNAL_TOKEN",
+    "",
+).strip()
 DAILY_ACCOUNT_IDS = env_positive_int_tuple("X_POST_DAILY_ACCOUNT_IDS")
 CATCHUP_REASON_SCOPE_EXPANSION = "scope_expansion_v1"
 PUBLIC_BASE_URL = os.environ.get(
@@ -170,6 +175,15 @@ CANARY_ACTOR = {
     "email": "",
     "role": "admin",
 }
+
+AUTO_TEMPLATE_ACTOR = {
+    "tenant_key": "internal",
+    "user_id": "x-post-auto-template",
+    "name": "X Post Auto Template",
+    "email": "",
+    "role": "admin",
+}
+AUTO_TEMPLATE_ACTOR_LABEL = "x_auto_post_service"
 
 _DB_LOCK = threading.RLock()
 _ACCOUNT_LOCKS = {}
@@ -2193,6 +2207,8 @@ def publish_queue_request(
     *,
     allow_schedule=None,
     allow_manual=False,
+    expected_manual_trigger_source=None,
+    require_manual_parent=False,
 ):
     """Publish one frozen queue row; no request field can override its account or copy."""
     XPostError, XPostStore, publish_canary = _x_posts_api()
@@ -2203,13 +2219,33 @@ def publish_queue_request(
         queue = store.get_queue(queue_id)
         allowed_accounts = (
             ()
-            if allow_schedule and not allowed_account_ids
+            if (
+                (allow_schedule or expected_manual_trigger_source is not None)
+                and not allowed_account_ids
+            )
             else _daily_account_scope(allowed_account_ids)
         )
         run_id = int(queue.get("run_id") or 0)
         catchup_run_id = int(queue.get("catchup_run_id") or 0)
         schedule_run_id = int(queue.get("schedule_run_id") or 0)
         manual_run_id = int(queue.get("manual_run_id") or 0)
+        manual_run = None
+        if expected_manual_trigger_source not in {
+            None,
+            "manual",
+            "auto_template",
+        }:
+            raise ServiceError(
+                "invalid_request",
+                "manual trigger source is invalid",
+                400,
+            )
+        if not isinstance(require_manual_parent, bool):
+            raise ServiceError(
+                "invalid_request",
+                "manual parent requirement is invalid",
+                400,
+            )
         parent_count = sum(
             value > 0
             for value in (
@@ -2230,6 +2266,10 @@ def publish_queue_request(
                 and not allow_manual
             )
             or (
+                require_manual_parent
+                and manual_run_id == 0
+            )
+            or (
                 schedule_run_id == 0
                 and manual_run_id == 0
                 and int(queue.get("account_id") or 0)
@@ -2241,9 +2281,28 @@ def publish_queue_request(
                 "X自动发布只能处理已冻结的授权账号队列",
                 403,
             )
-        if allowed_accounts is not None and manual_run_id > 0:
-            manual_run = store.get_manual_run(manual_run_id)
-            if int(queue.get("account_id") or 0) not in manual_run[
+        # A manual-parent queue is always source-gated, including calls made
+        # with the backend bearer.  This keeps the new auto-template queues
+        # reachable only through their dedicated bearer/route while preserving
+        # the historical backend path for operator-created manual queues.
+        if manual_run_id > 0:
+            manual_run = store.get_manual_run(
+                manual_run_id,
+                expected_manual_trigger_source or "manual",
+            )
+            if (
+                expected_manual_trigger_source == "auto_template"
+                and str(manual_run.get("status") or "")
+                not in {"running", "completed"}
+            ):
+                raise ServiceError(
+                    "x_post_auto_template_recovery_fenced",
+                    "auto template publish was stopped by canonical recovery",
+                    409,
+                )
+            if allowed_accounts is not None and int(
+                queue.get("account_id") or 0
+            ) not in manual_run[
                 "account_ids"
             ]:
                 raise ServiceError(
@@ -2279,7 +2338,11 @@ def publish_queue_request(
         )
 
     account_id = int(queue["account_id"])
-    actor = dict(CANARY_ACTOR)
+    actor = dict(
+        AUTO_TEMPLATE_ACTOR
+        if expected_manual_trigger_source == "auto_template"
+        else CANARY_ACTOR
+    )
     try:
         verify_account(account_id, actor, "all")
     except ServiceError as exc:
@@ -2292,6 +2355,11 @@ def publish_queue_request(
     try:
         with publish_credentials(account_id, actor, "all") as (account, access_token):
             try:
+                if expected_manual_trigger_source == "auto_template":
+                    store.assert_auto_template_publishable(
+                        int(queue["id"]),
+                        int(log["id"]),
+                    )
                 result = publish_canary(
                     db_path=POST_DB_PATH,
                     queue_id=int(queue["id"]),
@@ -2351,6 +2419,56 @@ POST_PAGE_NAVIGATION_ITEMS = frozenset(
 )
 
 
+def _safe_post_account(account):
+    account = account if isinstance(account, dict) else {}
+    return {
+        "id": int(account["id"]),
+        "x_user_id": str(account.get("x_user_id", "") or ""),
+        "username": str(account.get("username", "") or ""),
+        "display_name": str(
+            account.get("display_name", "")
+            or account.get("username", "")
+            or ""
+        ),
+        "profile_image_url": str(
+            account.get("profile_image_url", "") or ""
+        ),
+        "status": str(account.get("status", "") or ""),
+        "publish_eligible": bool(account.get("publish_eligible")),
+        "subscription_type": str(
+            account.get("subscription_type", "unknown") or "unknown"
+        ),
+        "premium_subscriber": bool(account.get("premium_subscriber")),
+        "long_video_eligible": bool(account.get("long_video_eligible")),
+        "long_video_publish_eligible": bool(
+            account.get("long_video_publish_eligible")
+        ),
+    }
+
+
+def auto_template_accounts_request(_payload):
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM x_authorized_account "
+                "ORDER BY updated_at DESC,id DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+    items = [_safe_post_account(row_to_item(row)) for row in rows]
+    return {"items": items, "total": len(items), "updated_at": iso_utc()}
+
+
+def verify_auto_template_account_request(_payload, account_id):
+    account = verify_account(
+        account_id,
+        AUTO_TEMPLATE_ACTOR,
+        "all",
+    )
+    return {"item": _safe_post_account(account)}
+
+
 def _post_page_actor(payload, navigation_item):
     if not isinstance(payload, dict):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
@@ -2401,38 +2519,7 @@ def post_schedule_account_options_request(payload, navigation_item):
             conn.close()
     items = []
     for row in rows:
-        account = row_to_item(row)
-        items.append(
-            {
-                "id": int(account["id"]),
-                "x_user_id": str(account.get("x_user_id", "") or ""),
-                "username": str(account.get("username", "") or ""),
-                "display_name": str(
-                    account.get("display_name", "")
-                    or account.get("username", "")
-                    or ""
-                ),
-                "profile_image_url": str(
-                    account.get("profile_image_url", "") or ""
-                ),
-                "status": str(account.get("status", "") or ""),
-                "publish_eligible": bool(
-                    account.get("publish_eligible")
-                ),
-                "subscription_type": str(
-                    account.get("subscription_type", "unknown") or "unknown"
-                ),
-                "premium_subscriber": bool(
-                    account.get("premium_subscriber")
-                ),
-                "long_video_eligible": bool(
-                    account.get("long_video_eligible")
-                ),
-                "long_video_publish_eligible": bool(
-                    account.get("long_video_publish_eligible")
-                ),
-            }
-        )
+        items.append(_safe_post_account(row_to_item(row)))
     return {"items": items, "total": len(items), "updated_at": iso_utc()}
 
 
@@ -2597,6 +2684,273 @@ def _public_manual_run(item):
     return result
 
 
+def _auto_template_run(item):
+    """Return the frozen execution identity required by the auto runner."""
+    source = item if isinstance(item, dict) else {}
+    allowed_run = (
+        "id",
+        "trigger_source",
+        "external_task_key",
+        "template_ref",
+        "template_version",
+        "body_template_sha256",
+        "run_date",
+        "source_date",
+        "account_ids",
+        "material_ids",
+        "body_template",
+        "status",
+        "expected_count",
+        "queued_count",
+        "published_count",
+        "failed_count",
+        "unknown_count",
+        "error_code",
+        "error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+        "created",
+        "recorded",
+    )
+    allowed_queue = (
+        "id",
+        "manual_run_id",
+        "run_date",
+        "source_date",
+        "account_id",
+        "account_username",
+        "material_id",
+        "candidate_rank",
+        "queue_status",
+        "status",
+        "unknown_outcome",
+        "log_id",
+        "post_id",
+        "preview_url",
+        "error_code",
+        "error_message",
+        "created_at",
+        "updated_at",
+    )
+    result = {key: source[key] for key in allowed_run if key in source}
+    result["queues"] = [
+        {key: queue[key] for key in allowed_queue if key in queue}
+        for queue in source.get("queues", [])
+        if isinstance(queue, dict)
+    ]
+    if result.get("trigger_source") != "auto_template":
+        raise ServiceError(
+            "x_post_auto_template_invalid_response",
+            "X auto template run source is invalid",
+            503,
+        )
+    return result
+
+
+def create_post_auto_template_run_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON request body must be an object", 400)
+    if str(payload.get("actor", "") or "").strip() != AUTO_TEMPLATE_ACTOR_LABEL:
+        raise ServiceError(
+            "invalid_request",
+            "auto template actor is invalid",
+            400,
+        )
+    accounts = _manual_publish_accounts([payload.get("account_id")])
+    account = accounts[0]
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).create_auto_template_run(
+            payload.get("material_id"),
+            int(account["id"]),
+            payload.get("external_task_key"),
+            payload.get("template_ref"),
+            payload.get("template_version"),
+            payload.get("body_template"),
+            AUTO_TEMPLATE_ACTOR,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": _auto_template_run(item)}
+
+
+def query_post_auto_template_run_request(_payload, run_id):
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).get_manual_run(
+            run_id,
+            "auto_template",
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": _auto_template_run(item)}
+
+
+def recover_post_auto_template_run_request(_payload, run_id):
+    """Recover one exact stranded auto run only when its publish lock is free."""
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    store = XPostStore(POST_DB_PATH)
+    try:
+        current = store.get_manual_run(run_id, "auto_template")
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    account_ids = list(current.get("account_ids") or [])
+    if len(account_ids) != 1:
+        raise ServiceError(
+            "x_post_auto_template_scope_mismatch",
+            "frozen auto template run scope is invalid",
+            409,
+        )
+    account = find_account(account_ids[0])
+    publish_guard = account_lock("x:" + str(account.get("x_user_id", "") or ""))
+    if not publish_guard.acquire(blocking=False):
+        return {
+            "item": {
+                "busy": True,
+                "recovered": False,
+                "run": _auto_template_run(current),
+            }
+        }
+    try:
+        try:
+            result = store.recover_auto_template_run(run_id)
+        except XPostError as exc:
+            _raise_x_post_error(exc)
+    finally:
+        publish_guard.release()
+    return {
+        "item": {
+            "busy": False,
+            "recovered": bool(result.get("recovered")),
+            "run": _auto_template_run(result.get("run")),
+        }
+    }
+
+
+def claim_post_auto_template_run_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON request body must be an object", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        claimed = XPostStore(POST_DB_PATH).claim_manual_run(
+            "auto_template"
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    run = claimed.get("run") if isinstance(claimed, dict) else None
+    if not claimed.get("found"):
+        return {"item": {"found": False, "run": None}}
+    return {
+        "item": {
+            "found": True,
+            "run": _auto_template_run(run),
+        }
+    }
+
+
+def create_post_auto_template_plan_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON request body must be an object", 400)
+    try:
+        run_id = int(payload.get("run_id"))
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "run_id is invalid", 400) from None
+    candidates = payload.get("candidates")
+    if run_id <= 0 or not isinstance(candidates, list) or len(candidates) != 1:
+        raise ServiceError(
+            "x_post_auto_template_scope_mismatch",
+            "auto template plan requires exactly one candidate",
+            400,
+        )
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    store = XPostStore(POST_DB_PATH)
+    try:
+        frozen = store.get_manual_run(run_id, "auto_template")
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    if len(frozen["account_ids"]) != 1 or len(frozen["material_ids"]) != 1:
+        raise ServiceError(
+            "x_post_auto_template_scope_mismatch",
+            "frozen auto template run scope is invalid",
+            409,
+        )
+    account = _manual_publish_accounts(list(frozen["account_ids"]))[0]
+    candidate = candidates[0]
+    if not isinstance(candidate, dict):
+        raise ServiceError("invalid_request", "candidate must be an object", 400)
+    _require_candidate_duration_capability(candidate, account)
+    try:
+        duration = float(candidate.get("preflight_duration", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise ServiceError("invalid_request", "preflight_duration is invalid", 400) from None
+    if not math.isfinite(duration) or duration < 0:
+        raise ServiceError("invalid_request", "preflight_duration is invalid", 400)
+    if duration <= 0 or duration > AUTO_TEMPLATE_MAX_DURATION_SECONDS:
+        raise ServiceError(
+            "x_post_auto_template_duration_exceeded",
+            "automatic X materials cannot exceed 600 seconds",
+            409,
+        )
+    trusted = dict(candidate)
+    trusted.update(
+        {
+            "account_id": int(account["id"]),
+            "account_username": str(account.get("username", "") or ""),
+            "page_name": str(
+                account.get("display_name", "")
+                or account.get("username", "")
+                or ""
+            ),
+            "page_id": str(account.get("x_user_id", "") or ""),
+        }
+    )
+    preflight_post_storage_request(1)
+    try:
+        item = store.create_manual_plan(
+            run_id,
+            [trusted],
+            "auto_template",
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": _auto_template_run(item)}
+
+
+def record_post_auto_template_failure_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON request body must be an object", 400)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        item = XPostStore(POST_DB_PATH).record_manual_failure(
+            payload.get("run_id"),
+            payload.get("error_code"),
+            payload.get("error_message") or payload.get("message"),
+            "auto_template",
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": _auto_template_run(item)}
+
+
+def query_post_auto_template_material_keys_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON request body must be an object", 400)
+    values = payload.get("material_keys")
+    if values is None:
+        values = payload.get("material_ids")
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        material_keys = XPostStore(POST_DB_PATH).query_material_keys(
+            values,
+            include_pool=True,
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    return {"item": {"material_keys": material_keys}}
+
+
 def create_post_manual_run_request(payload):
     actor = _material_pool_actor(payload)
     accounts = _manual_publish_accounts(payload.get("account_ids"))
@@ -2624,7 +2978,7 @@ def query_post_manual_run_request(payload, run_id):
     _material_pool_actor(payload)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
-        item = XPostStore(POST_DB_PATH).get_manual_run(run_id)
+        item = XPostStore(POST_DB_PATH).get_manual_run(run_id, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": _public_manual_run(item)}
@@ -2635,7 +2989,7 @@ def claim_post_manual_run_request(payload):
         raise ServiceError("invalid_request", "JSON请求体必须是对象", 400)
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
-        item = XPostStore(POST_DB_PATH).claim_manual_run()
+        item = XPostStore(POST_DB_PATH).claim_manual_run("manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": item}
@@ -2654,7 +3008,7 @@ def create_post_manual_plan_request(payload):
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     store = XPostStore(POST_DB_PATH)
     try:
-        frozen = store.get_manual_run(run_id)
+        frozen = store.get_manual_run(run_id, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
     if len(candidates) != len(frozen["account_ids"]):
@@ -2685,7 +3039,7 @@ def create_post_manual_plan_request(payload):
         trusted.append(item)
     preflight_post_storage_request(len(trusted))
     try:
-        item = store.create_manual_plan(run_id, trusted)
+        item = store.create_manual_plan(run_id, trusted, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": item}
@@ -2700,6 +3054,7 @@ def record_post_manual_failure_request(payload):
             payload.get("run_id"),
             payload.get("error_code"),
             payload.get("error_message") or payload.get("message"),
+            "manual",
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3357,15 +3712,21 @@ class Handler(BaseHTTPRequestHandler):
             return "backend"
         if DAILY_INTERNAL_TOKEN and secrets.compare_digest(token, DAILY_INTERNAL_TOKEN):
             return "daily"
+        if AUTO_INTERNAL_TOKEN and secrets.compare_digest(token, AUTO_INTERNAL_TOKEN):
+            return "auto"
         return ""
 
     def is_internal_authorized(self):
         """Backward-compatible boolean used by older diagnostics."""
         return bool(self.internal_role())
 
-    def require_internal(self, allow_daily=False):
+    def require_internal(self, allow_daily=False, allow_auto=False):
         role = self.internal_role()
-        if role == "backend" or (allow_daily and role == "daily"):
+        if (
+            role == "backend"
+            or (allow_daily and role == "daily")
+            or (allow_auto and role == "auto")
+        ):
             return role
         self.send_json(403, {"error": "x_internal_auth_failed", "message": "内部鉴权失败"})
         return ""
@@ -3458,6 +3819,22 @@ class Handler(BaseHTTPRequestHandler):
         daily_publish_match = re.fullmatch(
             r"/internal/posts/queue/([0-9]+)/publish", parsed.path
         )
+        auto_verify_match = re.fullmatch(
+            r"/internal/posts/auto-template/accounts/([0-9]+)/verify",
+            parsed.path,
+        )
+        auto_run_query_match = re.fullmatch(
+            r"/internal/posts/auto-template/runs/([0-9]+)/query",
+            parsed.path,
+        )
+        auto_run_recover_match = re.fullmatch(
+            r"/internal/posts/auto-template/runs/([0-9]+)/recover",
+            parsed.path,
+        )
+        auto_publish_match = re.fullmatch(
+            r"/internal/posts/auto-template/queue/([0-9]+)/publish",
+            parsed.path,
+        )
         pool_delete_match = re.fullmatch(
             r"/internal/posts/material-pool/([0-9]+)/delete", parsed.path
         )
@@ -3504,6 +3881,22 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/manual-plan",
             "/internal/posts/manual-runs/record-failure",
         }
+        auto_exact_paths = {
+            "/internal/posts/auto-template/accounts",
+            "/internal/posts/auto-template/material-keys/query",
+            "/internal/posts/auto-template/runs/create",
+            "/internal/posts/auto-template/runs/claim",
+            "/internal/posts/auto-template/plan",
+            "/internal/posts/auto-template/runs/record-failure",
+            "/internal/posts/auto-template/storage/preflight",
+        }
+        is_auto_route = bool(
+            parsed.path in auto_exact_paths
+            or auto_verify_match
+            or auto_run_query_match
+            or auto_run_recover_match
+            or auto_publish_match
+        )
         allow_daily = bool(
             parsed.path in daily_exact_paths
             or parsed.path in catchup_exact_paths
@@ -3512,8 +3905,20 @@ class Handler(BaseHTTPRequestHandler):
             or daily_verify_match
             or daily_publish_match
         )
-        internal_role = self.require_internal(allow_daily=allow_daily)
+        internal_role = self.require_internal(
+            allow_daily=allow_daily,
+            allow_auto=is_auto_route,
+        )
         if not internal_role:
+            return
+        if is_auto_route and internal_role != "auto":
+            self.send_json(
+                403,
+                {
+                    "error": "x_auto_internal_required",
+                    "message": "X auto template routes require the auto internal bearer",
+                },
+            )
             return
         if (
             parsed.path
@@ -3537,15 +3942,96 @@ class Handler(BaseHTTPRequestHandler):
                 "/internal/posts/catchup-plan",
                 "/internal/posts/schedule-plan",
                 "/internal/posts/manual-plan",
+                "/internal/posts/auto-template/plan",
             }:
                 request_body_limit = MAX_DAILY_PLAN_BODY_BYTES
-            elif parsed.path == "/internal/posts/material-pool/check":
+            elif parsed.path in {
+                "/internal/posts/material-pool/check",
+                "/internal/posts/auto-template/material-keys/query",
+            }:
                 request_body_limit = MAX_DAILY_CHECK_BODY_BYTES
             elif parsed.path == "/internal/posts/drama-pool/add":
                 request_body_limit = MAX_DRAMA_POOL_BODY_BYTES
             payload = self.read_json(
                 request_body_limit
             )
+            if parsed.path == "/internal/posts/auto-template/accounts":
+                self.send_json(200, auto_template_accounts_request(payload))
+                return
+            if auto_verify_match:
+                self.send_json(
+                    200,
+                    verify_auto_template_account_request(
+                        payload,
+                        auto_verify_match.group(1),
+                    ),
+                )
+                return
+            if parsed.path == "/internal/posts/auto-template/material-keys/query":
+                self.send_json(
+                    200,
+                    query_post_auto_template_material_keys_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/auto-template/runs/create":
+                self.send_json(
+                    200,
+                    create_post_auto_template_run_request(payload),
+                )
+                return
+            if auto_run_query_match:
+                self.send_json(
+                    200,
+                    query_post_auto_template_run_request(
+                        payload,
+                        auto_run_query_match.group(1),
+                    ),
+                )
+                return
+            if auto_run_recover_match:
+                self.send_json(
+                    200,
+                    recover_post_auto_template_run_request(
+                        payload,
+                        auto_run_recover_match.group(1),
+                    ),
+                )
+                return
+            if parsed.path == "/internal/posts/auto-template/runs/claim":
+                self.send_json(
+                    200,
+                    claim_post_auto_template_run_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/auto-template/plan":
+                self.send_json(
+                    200,
+                    create_post_auto_template_plan_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/auto-template/runs/record-failure":
+                self.send_json(
+                    200,
+                    record_post_auto_template_failure_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/auto-template/storage/preflight":
+                self.send_json(
+                    200,
+                    {"item": preflight_post_storage_request(1)},
+                )
+                return
+            if auto_publish_match:
+                published = publish_queue_request(
+                    auto_publish_match.group(1),
+                    (),
+                    allow_schedule=False,
+                    allow_manual=True,
+                    expected_manual_trigger_source="auto_template",
+                    require_manual_parent=True,
+                )
+                self.send_json(200, {"item": published})
+                return
             if parsed.path == "/internal/posts/canary":
                 self.send_json(200, {"item": publish_canary_request(payload)})
                 return
@@ -3878,6 +4364,7 @@ class Handler(BaseHTTPRequestHandler):
                         daily_publish_match.group(1),
                         DAILY_ACCOUNT_IDS,
                         allow_manual=True,
+                        expected_manual_trigger_source="manual",
                     )
                 else:
                     published = publish_queue_request(daily_publish_match.group(1))
@@ -3936,9 +4423,12 @@ class Handler(BaseHTTPRequestHandler):
                 exc,
                 include_write_outcome=bool(
                     daily_publish_match
+                    or auto_publish_match
                     or parsed.path == "/internal/posts/daily-plan"
                     or parsed.path == "/internal/posts/catchup-plan"
                     or parsed.path == "/internal/posts/manual-plan"
+                    or parsed.path == "/internal/posts/auto-template/plan"
+                    or auto_run_recover_match
                 ),
             )
         except Exception:
@@ -3952,8 +4442,12 @@ def serve():
         raise RuntimeError("X_INTERNAL_TOKEN is required")
     if not DAILY_INTERNAL_TOKEN:
         raise RuntimeError("X_POST_DAILY_INTERNAL_TOKEN is required")
-    if secrets.compare_digest(INTERNAL_TOKEN, DAILY_INTERNAL_TOKEN):
-        raise RuntimeError("daily and backend internal tokens must be different")
+    if not AUTO_INTERNAL_TOKEN:
+        raise RuntimeError("X_POST_AUTO_INTERNAL_TOKEN is required")
+    if len({INTERNAL_TOKEN, DAILY_INTERNAL_TOKEN, AUTO_INTERNAL_TOKEN}) != 3:
+        raise RuntimeError(
+            "backend, daily, and auto internal tokens must be different"
+        )
     if (
         not DAILY_ACCOUNT_IDS
         or len(DAILY_ACCOUNT_IDS) > MAX_DAILY_ACCOUNTS

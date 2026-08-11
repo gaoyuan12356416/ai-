@@ -37,6 +37,7 @@ def queue(queue_id, run_id, account_id, rank, status="queued", unknown=False):
 def manual_run(queues=None):
     return {
         "id": 71,
+        "trigger_source": "manual",
         "run_date": "2026-08-11",
         "source_date": "2026-08-10",
         "account_ids": [11, 12],

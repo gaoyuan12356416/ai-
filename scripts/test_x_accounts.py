@@ -1691,6 +1691,7 @@ class XAccountsTestCase(unittest.TestCase):
                     "77",
                     service.DAILY_ACCOUNT_IDS,
                     allow_manual=True,
+                    expected_manual_trigger_source="manual",
                 )
 
             for code, expected_known, expected_unknown in (

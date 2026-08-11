@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>X Post 自动发布记录 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/x-auto-publish.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>X Post 自动发布记录</h1>
+          <p>查看每次模板触发、账号任务、筛选冻结、视频准备和 X Post 发布结果；结果未知的任务不会自动创建第二次发布。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button link-button" href="/x-auto-publish-templates.html">模板管理</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能查看 X Post 自动发布记录。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 X Post 自动发布权限</strong>
+        <span>请联系管理员在用户管理中开启 x_accounts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="stats" aria-label="运行统计">
+          <article class="stat"><span>运行总数</span><strong id="totalCount">—</strong></article>
+          <article class="stat"><span>执行中</span><strong id="activeCount">—</strong></article>
+          <article class="stat"><span>已完成</span><strong id="completedCount">—</strong></article>
+          <article class="stat"><span>失败 / 待确认</span><strong id="attentionCount">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div><h2>运行列表</h2><p>定时与手动执行统一展示；运行详情包含模板版本快照和每个账号的选材、准备、发布事实。</p></div>
+            <button id="reloadRuns" class="button" type="button">刷新记录</button>
+          </div>
+
+          <form id="runFilters" class="filters">
+            <div class="field">
+              <label for="filterTemplateId">模板</label>
+              <select id="filterTemplateId"><option value="">全部模板</option></select>
+            </div>
+            <div class="field">
+              <label for="filterTriggerType">触发方式</label>
+              <select id="filterTriggerType">
+                <option value="">全部方式</option>
+                <option value="auto">自动定时</option>
+                <option value="manual">手动执行</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterStatus">状态</label>
+              <select id="filterStatus">
+                <option value="">全部状态</option>
+                <option value="queued">等待执行</option>
+                <option value="running">执行中</option>
+                <option value="completed">已完成</option>
+                <option value="partial_failed">部分失败</option>
+                <option value="failed">失败</option>
+                <option value="canceled">已取消</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterFrom">开始日期</label>
+              <input id="filterFrom" type="date" />
+            </div>
+            <div class="field">
+              <label for="filterTo">结束日期</label>
+              <input id="filterTo" type="date" />
+            </div>
+            <div class="actions">
+              <button class="button primary" type="submit">查询</button>
+              <button id="resetFilters" class="button" type="button">重置</button>
+            </div>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>触发时间</th>
+                  <th>模板 / 版本</th>
+                  <th>触发方式</th>
+                  <th>账号任务</th>
+                  <th>状态</th>
+                  <th>结果摘要</th>
+                  <th>完成时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="runRows"><tr><td colspan="8" class="empty">正在加载运行记录…</td></tr></tbody>
+            </table>
+          </div>
+
+          <div class="pager">
+            <span id="pageInfo">第 1 页</span>
+            <div class="pager-actions">
+              <button id="prevPage" class="button" type="button">上一页</button>
+              <button id="nextPage" class="button" type="button">下一页</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="runDetailDialog" class="detail-dialog">
+    <div class="dialog-head">
+      <div><h2 id="runDetailTitle">运行详情</h2><span id="runDetailSubtitle" class="secondary">—</span></div>
+      <button id="closeRunDetail" class="button" type="button">关闭</button>
+    </div>
+    <div class="dialog-body">
+      <div id="runDetailFacts" class="detail-grid"></div>
+      <h3>账号任务</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>账号</th><th>剧 / 素材</th><th>指标</th><th>准备 / 发布</th><th>状态</th><th>结果</th></tr></thead>
+          <tbody id="runTaskRows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody>
+        </table>
+      </div>
+      <h3>模板与筛选快照</h3>
+      <pre id="runSnapshot" class="json-view">正在加载…</pre>
+      <h3>事件</h3>
+      <div id="runEvents" class="summary-list"></div>
+    </div>
+  </dialog>
+
+  <dialog id="confirmDialog">
+    <div class="dialog-head"><h2 id="confirmTitle">请确认操作</h2></div>
+    <div class="dialog-body"><p id="confirmMessage"></p></div>
+    <div class="dialog-foot">
+      <button id="confirmCancel" class="button" type="button">取消</button>
+      <button id="confirmAccept" class="button primary" type="button">确认</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js"></script>
+  <script src="/x-auto-publish-common.js"></script>
+  <script src="/x-auto-publish-runs.js"></script>
+</body>
+</html>
