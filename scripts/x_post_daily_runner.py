@@ -34,6 +34,7 @@ from features.x_posts.selector import (  # noqa: E402
     shanghai_now,
 )
 from features.x_posts.service import (  # noqa: E402
+    DEFAULT_SHORT_BASE_URL,
     PREMIUM_MAX_DURATION_SECONDS,
     PREMIUM_SUBSCRIPTION_TYPES,
     STANDARD_MAX_DURATION_SECONDS,
@@ -47,6 +48,7 @@ from features.x_posts.service import (  # noqa: E402
 
 
 DEFAULT_INTERNAL_URL = "http://127.0.0.1:8810"
+EXPECTED_SHORT_BASE = urllib.parse.urlsplit(DEFAULT_SHORT_BASE_URL)
 MAX_ERROR_BODY_BYTES = 64 * 1024
 MAX_SIDECAR_RESPONSE_BYTES = 1024 * 1024
 MAX_REPAIR_RESPONSE_BYTES = 64 * 1024
@@ -1279,14 +1281,16 @@ class SidecarClient:
                 and not preview.fragment
                 and preview_match is not None
                 and preview_match.group(1) == post_id
-                and short.scheme == "https"
-                and short.hostname == "ai.yingliangads.com"
-                and short_port is None
+                and short.scheme == EXPECTED_SHORT_BASE.scheme
+                and short.hostname == EXPECTED_SHORT_BASE.hostname
+                and short_port == EXPECTED_SHORT_BASE.port
                 and not short.username
                 and not short.password
                 and not short.query
                 and not short.fragment
-                and short.path == "/s2l/%s.html" % log_id
+                and short.path
+                == "%s/%s.html"
+                % (EXPECTED_SHORT_BASE.path.rstrip("/"), log_id)
             )
         if not valid:
             raise SidecarError(
@@ -1363,7 +1367,7 @@ def _plan_candidate(account, candidate, rank, timestamp):
         }
     )
     build_post_text(
-        "https://ai.yingliangads.com/s2l/1.html",
+        DEFAULT_SHORT_BASE_URL + "/1.html",
         item["drama_name"],
         item["description"],
         item.get("body_template"),

@@ -41,6 +41,7 @@ from features.x_posts.selector import (  # noqa: E402
     shanghai_now,
 )
 from features.x_posts.service import (  # noqa: E402
+    DEFAULT_SHORT_BASE_URL,
     XPostError,
     build_drama_episode_post_text,
     build_w2a_url,
@@ -83,6 +84,7 @@ DEFAULT_WORK_DIR = "/mnt/data-disk/x-post-automation/daily-work"
 DEFAULT_LOCK_PATH = "/run/x-post-daily/runner.lock"
 MAX_DUE_BATCHES = 10
 MAX_POOL_SCAN = 1000
+SCHEDULE_MEDIA_DOWNLOAD_ATTEMPTS = 3
 _SAFE_INTERNAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _SOURCE_TYPES = {"material", "drama"}
 _QUEUE_STATUSES = {
@@ -906,6 +908,27 @@ def _verify_accounts(sidecar, account_ids):
     return verified
 
 
+def _retrying_media_downloader(
+    downloader,
+    attempts=SCHEDULE_MEDIA_DOWNLOAD_ATTEMPTS,
+):
+    attempts = max(1, int(attempts))
+
+    def download(*args, **kwargs):
+        for attempt in range(1, attempts + 1):
+            try:
+                return downloader(*args, **kwargs)
+            except XPostError as exc:
+                if (
+                    exc.code != "media_download_failed"
+                    or attempt >= attempts
+                ):
+                    raise
+        raise AssertionError("unreachable media download retry state")
+
+    return download
+
+
 def _material_candidates(
     config,
     sidecar,
@@ -1019,6 +1042,7 @@ def _drama_candidates(
         repair_state = {"attempted": 0}
         rejected_ids = set()
         preflight_cache = {}
+        refresh_accounts = False
 
         def preflight_one(candidate, account, rank, temporary):
             cache_key = (
@@ -1036,7 +1060,7 @@ def _drama_candidates(
             if cached is not None:
                 return dict(cached)
             build_drama_episode_post_text(
-                "https://ai.yingliangads.com/s2l/1.html",
+                DEFAULT_SHORT_BASE_URL + "/1.html",
                 candidate["sub_num"],
                 candidate["name_tag"],
                 candidate["description"],
@@ -1075,6 +1099,9 @@ def _drama_candidates(
             prefix="x-post-schedule-drama-", dir=str(work_root)
         ) as temporary:
             while len(rejected_ids) < config.scan_limit:
+                if refresh_accounts:
+                    accounts = _verify_accounts(sidecar, account_ids)
+                    refresh_accounts = False
                 pool_items = sidecar.available_drama_pool(
                     config.drama_pool_path,
                     config.scan_limit,
@@ -1115,6 +1142,7 @@ def _drama_candidates(
                         str(exc),
                     )
                     rejected_ids.add(int(exc.pool_item_id))
+                    refresh_accounts = True
                     continue
                 if len(candidates) != len(accounts):
                     raise ScheduleRunError(
@@ -1308,6 +1336,7 @@ def _drama_candidates(
                         rejected_ids.add(
                             int(candidate["drama_pool_item_id"])
                         )
+                        refresh_accounts = True
                         rejected = True
                         break
                     planned_by_index[index] = normalize_item(item, candidate)
@@ -1478,6 +1507,7 @@ def execute_schedule_tick(
         }
 
     batches = []
+    retrying_downloader = _retrying_media_downloader(downloader)
     for identity in accepted_due:
         # Frozen state always wins.  This query precedes token verification,
         # MySQL reads, downloads and GPU repair.
@@ -1512,7 +1542,7 @@ def execute_schedule_tick(
                     accounts,
                     source_date=source_date,
                     connection_factory=connection_factory,
-                    downloader=downloader,
+                    downloader=retrying_downloader,
                     prober=prober,
                     repair_client=repair_client,
                     timestamp=timestamp,
@@ -1524,7 +1554,7 @@ def execute_schedule_tick(
                     accounts,
                     source_date=source_date,
                     connection_factory=connection_factory,
-                    downloader=downloader,
+                    downloader=retrying_downloader,
                     prober=prober,
                     repair_client=repair_client,
                     timestamp=timestamp,
@@ -1536,6 +1566,10 @@ def execute_schedule_tick(
                     "candidate account order does not match frozen schedule",
                     "x_post_schedule_account_mismatch",
                 )
+            # Media download/repair may outlive a two-hour X access token.
+            # Refresh the frozen scope again immediately before the atomic
+            # plan transaction; each later publish also verifies its account.
+            accounts = _verify_accounts(sidecar, identity["account_ids"])
             sidecar.preflight_storage(config.storage_preflight_path)
         except Exception as exc:
             audit = _record_schedule_failure_best_effort(

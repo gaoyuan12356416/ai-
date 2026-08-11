@@ -9,6 +9,7 @@
 5. 从 GitHub 精确 commit 构建不可变 release；同步主后端和两个静态页面。
 6. 只重启 X sidecar 与 drama-material-api，再恢复 timers。
 7. 验证健康端点、页面、静态 hash、数据库计数和自然 timer 日志；不手工触发真实发帖。
+8. 校验 sidecar 返回的 `gy.g2flow.com/s2l/<log_id>.html` 可被 runner 一次识别为 published；部署后仅用已有 published 队列做幂等离线响应验证，不新增真实 X Post。
 
 ## 回滚
 

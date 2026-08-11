@@ -19,11 +19,13 @@ from scripts.x_post_daily_runner import (  # noqa: E402
     CandidatePreflightError,
     SidecarError,
 )
+from features.x_posts.service import XPostError  # noqa: E402
 from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
     ScheduleSidecarClient,
     _drama_candidates,
+    _retrying_media_downloader,
     execute_schedule_tick,
 )
 from scripts.x_post_schedule_claim_runner import execute_claim_tick  # noqa: E402
@@ -228,6 +230,36 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.config = make_config(self.temporary.name)
         self.now = datetime(2026, 7, 27, 10, 0, 30, tzinfo=BEIJING)
 
+    def test_media_download_retry_is_bounded_and_code_specific(self):
+        attempts = []
+
+        def flaky(*_args, **_kwargs):
+            attempts.append("download")
+            if len(attempts) < 3:
+                raise XPostError(
+                    "media_download_failed",
+                    "source read timed out",
+                    502,
+                )
+            return {"size": 42}
+
+        result = _retrying_media_downloader(flaky)("https://example.test")
+        self.assertEqual(result, {"size": 42})
+        self.assertEqual(len(attempts), 3)
+
+        deterministic_attempts = []
+
+        def deterministic(*_args, **_kwargs):
+            deterministic_attempts.append("download")
+            raise XPostError("media_too_large", "too large", 413)
+
+        with self.assertRaises(XPostError) as rejected:
+            _retrying_media_downloader(deterministic)(
+                "https://example.test"
+            )
+        self.assertEqual(rejected.exception.code, "media_too_large")
+        self.assertEqual(len(deterministic_attempts), 1)
+
     def tearDown(self):
         self.temporary.cleanup()
 
@@ -381,6 +413,20 @@ class ScheduleRunnerTests(unittest.TestCase):
             def __init__(self):
                 self.available_calls = 0
                 self.checks = []
+                self.verify_calls = []
+
+            def verify_account(self, account_id):
+                self.verify_calls.append(account_id)
+                return {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "x%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                    "status": "active",
+                    "publish_eligible": True,
+                    "subscription_type": "none",
+                    "long_video_eligible": False,
+                }
 
             def available_drama_pool(self, _path, _limit, _account_ids):
                 self.available_calls += 1
@@ -501,6 +547,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(sidecar.available_calls, 2)
+        self.assertEqual(sidecar.verify_calls, [10, 9])
         self.assertEqual(
             [(item["pool_item_id"], item["content_id"]) for item in sidecar.checks],
             [(53, "BAD")],
@@ -697,6 +744,22 @@ class ScheduleRunnerTests(unittest.TestCase):
             def __init__(self):
                 self.checks = []
                 self.available_calls = 0
+                self.verify_calls = []
+
+            def verify_account(self, account_id):
+                self.verify_calls.append(account_id)
+                return {
+                    "id": account_id,
+                    "username": "account%s" % account_id,
+                    "x_user_id": "x%s" % account_id,
+                    "display_name": "Account %s" % account_id,
+                    "status": "active",
+                    "publish_eligible": True,
+                    "subscription_type": (
+                        "premium" if account_id == 9 else "none"
+                    ),
+                    "long_video_eligible": account_id == 9,
+                }
 
             def available_drama_pool(self, _path, _limit, _account_ids):
                 self.available_calls += 1
@@ -825,6 +888,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(sidecar.available_calls, 2)
+        self.assertEqual(sidecar.verify_calls, [10, 9])
         self.assertEqual(
             [(item["pool_item_id"], item["error_code"]) for item in sidecar.checks],
             [(138, "x_long_video_requires_premium")],
@@ -1002,6 +1066,10 @@ class ScheduleRunnerTests(unittest.TestCase):
         result = self.execute(sidecar)
 
         self.assertEqual(result["status"], "published")
+        self.assertEqual(
+            [call for call in sidecar.calls if call[0] == "verify"],
+            [("verify", 11), ("verify", 11)],
+        )
         self.assertIn("create", [call[0] for call in sidecar.calls])
         self.assertIn("publish", [call[0] for call in sidecar.calls])
         self.assertFalse(
@@ -1060,6 +1128,8 @@ class ScheduleRunnerTests(unittest.TestCase):
                 "due",
                 "query",
                 "storage",
+                "verify",
+                "verify",
                 "verify",
                 "verify",
                 "storage",
