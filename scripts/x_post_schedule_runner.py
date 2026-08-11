@@ -41,6 +41,7 @@ from features.x_posts.selector import (  # noqa: E402
     shanghai_now,
 )
 from features.x_posts.service import (  # noqa: E402
+    DEFAULT_SHORT_BASE_URL,
     XPostError,
     build_drama_episode_post_text,
     build_w2a_url,
@@ -1059,7 +1060,7 @@ def _drama_candidates(
             if cached is not None:
                 return dict(cached)
             build_drama_episode_post_text(
-                "https://ai.yingliangads.com/s2l/1.html",
+                DEFAULT_SHORT_BASE_URL + "/1.html",
                 candidate["sub_num"],
                 candidate["name_tag"],
                 candidate["description"],

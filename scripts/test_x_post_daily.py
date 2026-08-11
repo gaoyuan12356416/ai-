@@ -1035,6 +1035,95 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "x_publish_invalid_response")
         self.assertTrue(captured.exception.unknown_outcome)
 
+    def test_publish_response_accepts_current_g2flow_short_url(self):
+        class Response:
+            status = 200
+
+            def read(self, _limit):
+                return json.dumps(
+                    {
+                        "item": {
+                            "status": "published",
+                            "log_id": 101,
+                            "short_url": "https://gy.g2flow.com/s2l/101.html",
+                            "post_id": "123456789",
+                            "preview_url": "https://x.com/account/status/123456789",
+                        }
+                    }
+                ).encode("utf-8")
+
+            def getcode(self):
+                return self.status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class SuccessOpener:
+            def open(self, _request, timeout):
+                self.timeout = timeout
+                return Response()
+
+        client = SidecarClient(
+            "http://127.0.0.1:8810",
+            "secret",
+            timeout=30,
+            opener=SuccessOpener(),
+        )
+        result = client.publish_queue(
+            "/internal/posts/queue/{queue_id}/publish",
+            101,
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["short_url"], "https://gy.g2flow.com/s2l/101.html")
+
+    def test_publish_response_rejects_legacy_short_host_as_unknown(self):
+        class Response:
+            status = 200
+
+            def read(self, _limit):
+                return json.dumps(
+                    {
+                        "item": {
+                            "status": "published",
+                            "log_id": 101,
+                            "short_url": "https://ai.yingliangads.com/s2l/101.html",
+                            "post_id": "123456789",
+                            "preview_url": "https://x.com/account/status/123456789",
+                        }
+                    }
+                ).encode("utf-8")
+
+            def getcode(self):
+                return self.status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class LegacyOpener:
+            def open(self, _request, timeout):
+                self.timeout = timeout
+                return Response()
+
+        client = SidecarClient(
+            "http://127.0.0.1:8810",
+            "secret",
+            timeout=30,
+            opener=LegacyOpener(),
+        )
+        with self.assertRaises(SidecarError) as captured:
+            client.publish_queue(
+                "/internal/posts/queue/{queue_id}/publish",
+                101,
+            )
+        self.assertEqual(captured.exception.code, "x_publish_invalid_response")
+        self.assertTrue(captured.exception.unknown_outcome)
+
     def test_truncated_sidecar_publish_response_is_unknown(self):
         class TruncatedOpener:
             def open(self, _request, timeout):

@@ -20,6 +20,7 @@ X 素材池和 X 短剧池的自动发布设置增加“固定时间 / 随机时
 
 - 描述模板继续支持 `{{url}}`、`{{drama_name}}`、`{{desc}}`；短剧池另支持 `{{episode_number}}`。
 - `{{url}}` 在日志 ID 预留后替换为 `https://gy.g2flow.com/s2l/<log_id>.html`。
+- 发布客户端必须按同一 `gy.g2flow.com/s2l/<log_id>.html` 契约校验 sidecar 成功响应；不得继续使用旧 `ai.yingliangads.com` 域名，否则已成功发布会被误记为未知结果。
 - 队列冻结完整模板；配置修改仅影响后续未冻结批次。
 
 ## 技术设计
