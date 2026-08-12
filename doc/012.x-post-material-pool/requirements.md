@@ -210,3 +210,4 @@
 | 2026-08-11 | 修正无空闲 Premium 时长视频短剧阻断整批的问题；长视频保持未绑定可重试并继续扫描短视频补位，增加绑定精确部署 commit 的单次零写入恢复审计 |
 | 2026-08-11 | 修正长耗时媒体预检跨过 Access Token 到期点后候选重扫失败的问题；重扫及建队列前重新校验/刷新冻结账号，增加关联短剧能力审计的单次零写入恢复 |
 | 2026-08-11 | 为 schedule 媒体瞬时下载中断增加最多 3 次的有界完整重试；增加关联账号刷新审计、绑定精确部署 commit 的单次零写入恢复 |
+> 2026-08-12 policy override: automatic publishing still excludes every historical queue material, but an explicit operator-manual batch may create a separate audited queue for a historical or pooled material. See `doc/040.x-post-no-violation-manual-reuse/requirements.md`.

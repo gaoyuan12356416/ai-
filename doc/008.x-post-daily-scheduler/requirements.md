@@ -139,3 +139,4 @@ x-post-daily.timer
 ## 变更记录
 
 - 2026-07-23：根据用户确认，将单条 canary 扩展为三账号每日正式任务，并要求 AI 后台日志表及个人 Skill。
+> 2026-08-12 policy override: X publishing no longer queries or blocks on Facebook/TikTok/Twitter/resource-audit violation-history tables. Source/resource-tag, mapping, media, account, and unknown-outcome gates remain. See `doc/040.x-post-no-violation-manual-reuse/requirements.md`.

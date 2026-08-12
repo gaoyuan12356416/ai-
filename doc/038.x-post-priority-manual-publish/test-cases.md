@@ -60,3 +60,4 @@
 - `scripts/test_x_post_material_pool.py`
 - `scripts/test_x_post_ledger.py`
 - X 素材池/短剧池页面 DOM 合同和所有授权边界。
+> 2026-08-12 policy override: historical TC-014/015/016/021/029/035 expectations are superseded where they conflict with `doc/040.x-post-no-violation-manual-reuse/test-cases.md`.

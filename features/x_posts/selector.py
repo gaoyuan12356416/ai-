@@ -1,8 +1,9 @@
 """Read-only Dramawave candidate selection for the daily X publisher.
 
 The selector deliberately keeps the reporting database outside the publishing
-transaction.  It only returns candidates whose source metadata, four violation
-stores, material tags and drama mapping can all be checked unambiguously.
+transaction.  It only returns candidates whose source metadata, material tags
+and drama mapping can all be checked unambiguously.  Violation-history stores
+are intentionally outside the X publishing eligibility contract.
 """
 
 from __future__ import annotations
@@ -293,29 +294,6 @@ class DramawaveCandidateSelector:
             ),
         )
 
-    def _violation_counts(self, material_id):
-        schema = self.schema
-        sql = """
-            SELECT
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_facebook_violations f
-                WHERE f.source_id = %s) AS facebook_count,
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_tiktok_violations t
-                WHERE t.source_id = %s OR t.original_source_id = %s) AS tiktok_count,
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_twitter_violations x
-                WHERE x.source_id = %s OR x.original_source_id = %s) AS twitter_count,
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_resource_audit a
-                WHERE a.resource_id = %s) AS resource_audit_count
-        """.format(schema=schema)
-        return _cursor_row(
-            self.connection,
-            sql,
-            (material_id, material_id, material_id, material_id, material_id, material_id),
-        )
-
     def _material_tags(self, material_id):
         sql = """
             SELECT rt.tag_name
@@ -530,26 +508,15 @@ class DramawaveCandidateSelector:
                 "material URL is not HTTPS",
             )
 
-        violation_counts = self._violation_counts(candidate_id)
-        normalized_counts = {}
-        try:
-            for field in (
-                "facebook_count",
-                "tiktok_count",
-                "twitter_count",
-                "resource_audit_count",
-            ):
-                normalized_counts[field] = _integer(violation_counts.get(field), field)
-        except CandidateSelectionError as exc:
-            raise PoolCandidateRejection(
-                "violation_check_invalid",
-                "violation check returned invalid data: %s" % exc,
-            ) from None
-        if any(value != 0 for value in normalized_counts.values()):
-            raise PoolCandidateRejection(
-                "material_has_violation",
-                "material has a violation record",
-            )
+        # Keep the frozen compliance shape stable without consulting external
+        # violation-history tables. X publishing eligibility is independent of
+        # whether the material has a historical violation record.
+        normalized_counts = {
+            "facebook_count": 0,
+            "tiktok_count": 0,
+            "twitter_count": 0,
+            "resource_audit_count": 0,
+        }
 
         source_tag = row.get("source_tag_name")
         if source_tag not in (None, ""):
@@ -703,17 +670,14 @@ class DramawaveCandidateSelector:
         if not material_url.startswith("https://"):
             raise CandidateSelectionError("material URL is not HTTPS")
 
-        violation_counts = self._violation_counts(candidate_id)
-        normalized_counts = {}
-        for field in (
-            "facebook_count",
-            "tiktok_count",
-            "twitter_count",
-            "resource_audit_count",
-        ):
-            normalized_counts[field] = _integer(violation_counts.get(field), field)
-            if normalized_counts[field] != 0:
-                raise CandidateSelectionError("material has a violation record")
+        # Preserve the queue audit fields, but do not query or gate on
+        # violation-history tables for any X publishing path.
+        normalized_counts = {
+            "facebook_count": 0,
+            "tiktok_count": 0,
+            "twitter_count": 0,
+            "resource_audit_count": 0,
+        }
 
         source_tag = row.get("source_tag_name")
         if source_tag not in (None, "") and contains_dangerous_tag(source_tag):

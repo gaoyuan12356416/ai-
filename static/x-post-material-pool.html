@@ -460,7 +460,7 @@
             <div class="field">
               <label for="materialIds">自定义素材 ID</label>
               <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
-              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。加入后立即检查素材、违规记录、色情/暴力标签和短剧映射；长视频在排期预检时按账号会员资格路由。</span>
+              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。X 发布不查询违规历史记录；仍会检查素材、色情/暴力来源标签、短剧映射和媒体条件，长视频在排期预检时按账号会员资格路由。</span>
             </div>
             <div class="add-actions">
               <button id="manualPublish" class="button danger" type="button">手动发布</button>
@@ -538,12 +538,12 @@
     <div class="manual-dialog-head">
       <div>
         <h2 id="manualPublishTitle">手动立即发布</h2>
-        <p>本批素材不会进入素材池；后台完成整批预检和原子建队列后，按顺序向所选 X 个号各发布一次。</p>
+        <p>本批素材不会进入素材池；允许复用已在素材池或历史队列中的素材，后台完成整批预检和原子建队列后，按顺序向所选 X 个号各发布一次。</p>
       </div>
       <button id="manualDialogCloseTop" class="button small" type="button" aria-label="关闭手动发布弹窗">关闭</button>
     </div>
     <div class="manual-dialog-body">
-      <div class="manual-warning"><strong>不可回滚：</strong>X 写入开始后，本批可能部分成功、部分失败，系统无法撤回已经发布的帖子。遇到限流或未知结果会停止后续发布，需先人工核对。手动和素材池自动发布使用同一会员时长规则：超过 140 秒仅在最终发布账号通过 token 确认为 Premium 时进入原片预检；会员账号不再受原 600 秒上限限制，当前统一按 4 小时时长、512 MiB 文件门禁执行，已实测原片 763.938 秒可发布。</div>
+      <div class="manual-warning"><strong>不可回滚：</strong>X 写入开始后，本批可能部分成功、部分失败，系统无法撤回已经发布的帖子。历史素材复用会创建新的 Post 和独立账本记录，不会重试或改写旧队列。遇到限流或未知结果会停止后续发布，需先人工核对。手动和素材池自动发布使用同一会员时长规则：超过 140 秒仅在最终发布账号通过 token 确认为 Premium 时进入原片预检；会员账号不再受原 600 秒上限限制，当前统一按 4 小时时长、512 MiB 文件门禁执行，已实测原片 763.938 秒可发布。</div>
       <div id="manualSelectionPanel">
         <div class="field">
           <strong id="manualMaterialSummary">尚未选择素材。</strong>

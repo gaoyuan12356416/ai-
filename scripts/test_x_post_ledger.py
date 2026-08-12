@@ -143,9 +143,9 @@ class XPostLedgerTests(unittest.TestCase):
                 for item in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
             }
             triggers = {
-                item[0]
+                item[0]: item[1]
                 for item in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                    "SELECT name,sql FROM sqlite_master WHERE type='trigger'"
                 )
             }
             queue_columns = {
@@ -161,11 +161,22 @@ class XPostLedgerTests(unittest.TestCase):
         self.assertIn("pool_created_at", queue_columns)
         self.assertIn("original_material_url", queue_columns)
         self.assertIn("media_repair_source_sha256", queue_columns)
-        self.assertIn("ux_x_post_queue_material_key", indexes)
+        self.assertNotIn("ux_x_post_queue_material_key", indexes)
+        self.assertIn("idx_x_post_queue_material_key", indexes)
         self.assertIn("ux_x_post_queue_account_run_date", indexes)
         self.assertIn("ux_x_post_queue_pool_item_id", indexes)
         self.assertIn("idx_x_post_pool_fifo", indexes)
         self.assertIn("trg_x_post_queue_pool_required_insert", triggers)
+        self.assertIn("trg_x_post_queue_material_dedupe_insert", triggers)
+        self.assertIn("trg_x_post_queue_material_dedupe_update", triggers)
+        self.assertIn(
+            "trigger_source='manual'",
+            "".join(triggers["trg_x_post_queue_material_dedupe_insert"].split()),
+        )
+        self.assertIn(
+            "trigger_source='manual'",
+            "".join(triggers["trg_x_post_queue_material_dedupe_update"].split()),
+        )
         self.assertIn("trg_x_post_pool_queue_guard", triggers)
         self.assertIn("trg_x_post_pool_delete_guard", triggers)
 

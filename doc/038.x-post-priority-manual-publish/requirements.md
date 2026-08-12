@@ -165,3 +165,4 @@
 
 - 2026-08-11：根据用户确认的实施计划建立需求，生产基线对齐 `29bd900`/`3998ee4`。
 - 2026-08-11：修复首个真实手动批次暴露的超长源素材 SQL 早退；763.938 秒原片通过 v2 `amplify_video` 与 `POST /2/tweets` 发布成功并回读一致，因此手动 Premium 路径改为保留原片、4 小时时长/512 MiB API 文件门禁，自动素材池 600 秒来源合同不变。
+> 2026-08-12 policy override: operator-manual publishing may reuse pooled or historical materials, and all X paths ignore violation-history tables. Automatic de-duplication and all remaining safety/media/account/unknown-outcome gates stay in force. See `doc/040.x-post-no-violation-manual-reuse/requirements.md`.
