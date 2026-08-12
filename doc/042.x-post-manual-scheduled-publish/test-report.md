@@ -20,6 +20,7 @@
 
 - BUG-001：active reservation 未进入 unavailable material key 查询；已修复并关闭。
 - BUG-002：future manual reservation 未排除既有 pool 自动候选；已修复并关闭。
+- BUG-003：并发主 API 部署覆盖手动发布时间字段；以 `11db78a…` 为基线合并 TT 强制关闭补丁，生产只读验收通过并关闭。
 - 无未关闭 P0/P1/P2 缺陷。
 
 ## 验证证据
@@ -29,6 +30,7 @@
 - operator manual 仍可显式选择创建任务前已在 pool/历史 queue 中的素材；任务创建后，pool 自动候选、另一 manual、auto_template、直接 queue SQL 绕过均无法占用 active material。
 - 非规范 DB 时间被 timing trigger 拒绝；迁移重复执行且 `integrity_check=ok`。
 - 浏览器截获请求体包含 `publish_mode=scheduled`、分钟精度 `+08:00`；响应显示固定北京时间和“等待定时发布”。
+- BUG-003 合并回归：X/TT 主 API 契约 39 项、X 手动发布/runner/UI 相关 40 项通过；生产立即/定时完整字段 payload 均在无 Cookie 边界返回 401，而非字段校验 400，账本保持 `7/182/182/181/0`。
 - 40 个 `scripts/test_x*.py` 模块逐个新进程执行：627 项、625 passed、2 skipped、0 failed。
 - 单进程 discover 两次分别在不同的本地 HTTP 用例遇到 Windows `10053`；对应单测、`test_x_accounts` 60 项以及全部模块隔离执行均通过，判定为本机连接层偶发，不是可复现代码缺陷。
 
