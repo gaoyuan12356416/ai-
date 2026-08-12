@@ -54,6 +54,16 @@
     return String(item && (item.subscription_type || item.membership_type) || "unknown").trim().toLowerCase();
   }
 
+  function accountMembershipLabel(item) {
+    return ({
+      basic: "X Basic",
+      premium: "X Premium",
+      premium_plus: "X Premium+",
+      none: "无会员 · 最长 140 秒",
+      unknown: "会员资格未知 · 最长 140 秒",
+    })[accountSubscription(item)] || "会员资格未知 · 最长 140 秒";
+  }
+
   function accountEligible(item) {
     if (item && item.publish_eligible !== undefined) return ui.boolValue(item.publish_eligible);
     const status = String(item && item.status || "").toLowerCase();
@@ -131,12 +141,11 @@
       details.appendChild(ui.element("strong", { text: accountName(item) }));
       details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
       const meta = ui.element("div");
-      const subscription = accountSubscription(item);
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,
         text: accountEligibilityText(item),
       }));
-      meta.appendChild(ui.element("span", { className: "secondary", text: `订阅 ${subscription}` }));
+      meta.appendChild(ui.element("span", { className: "secondary", text: accountMembershipLabel(item) }));
       label.append(checkbox, details, meta);
       list.appendChild(label);
     });

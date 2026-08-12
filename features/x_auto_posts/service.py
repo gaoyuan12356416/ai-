@@ -537,7 +537,7 @@ class XAutoPostService:
                         template_version=template.version,
                         account_id=account_id,
                         language=str(template.config.get("language") or ""),
-                        rules=selector_rules(template.config),
+                        rules=selector_rules(template.config, account=account),
                         now=self._now(),
                     )
                 )
@@ -678,7 +678,7 @@ class XAutoPostService:
             )
         if not self.executor.gates.is_open:
             raise AutoPostServiceError(
-                "x_auto_live_gates_closed", "all X automatic publishing gates must be open", 409
+                "x_auto_live_gates_closed", "X 自动发布生产门禁未全部开启", 409
             )
         template = self.store.get_template(template_id)
         if expected_version(payload.get("expected_version")) != template.version:

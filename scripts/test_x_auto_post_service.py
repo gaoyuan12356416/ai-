@@ -160,6 +160,40 @@ class XAutoPostServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_preview_applies_current_standard_account_duration_cap(self):
+        service = self.service()
+        created = service.create_template(
+            self.actor(valid_payload(account_ids=["102"]))
+        )["template"]
+
+        class PreviewSelection:
+            @staticmethod
+            def as_dict():
+                return {
+                    "drama": {"content_id": "drama-1"},
+                    "material": {"material_id": "material-1"},
+                }
+
+        class CapturingSelector:
+            request = None
+
+            def select_and_reserve(self, request):
+                self.request = request
+                return PreviewSelection()
+
+        selector = CapturingSelector()
+        service._preview_selector = lambda: selector
+        result = service.preview(
+            created["id"],
+            self.actor({"expected_version": created["version"]}),
+        )
+
+        self.assertTrue(result["preview"][0]["ok"])
+        self.assertEqual(
+            selector.request.rules.material.duration_seconds.as_dict()["max"],
+            "140",
+        )
+
     def test_account_refresh_rejects_bridge_mismatch_and_non_publishable_result(self):
         service = self.service()
         self.bridge.accounts_by_id["101"]["id"] = 999

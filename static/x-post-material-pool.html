@@ -796,9 +796,9 @@
           basic: "X Basic",
           premium: "X Premium",
           premium_plus: "X Premium+",
-          none: "无会员",
-          unknown: "会员未知",
-        })[String(item && item.subscription_type || "unknown")] || "会员未知";
+          none: "无会员 · 最长 140 秒",
+          unknown: "会员未知 · 最长 140 秒",
+        })[String(item && item.subscription_type || "unknown")] || "会员未知 · 最长 140 秒";
       }
       function accountTitle(item) {
         const username = String(item && item.username || "").trim().replace(/^@/, "");
@@ -1034,7 +1034,7 @@
           setText(
             status,
             eligible
-              ? `${selected ? `第 ${position} 个 · ` : ""}${item.long_video_publish_eligible === true ? "支持长视频" : "最长 140 秒"}`
+              ? `${selected ? `第 ${position} 个 · ` : ""}可发布`
               : "不可发布"
           );
           label.append(checkbox, textWrap, status);
@@ -1350,7 +1350,7 @@
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? (item.long_video_publish_eligible === true ? "可发布 · 长视频" : "可发布 · 最长 140 秒") : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });

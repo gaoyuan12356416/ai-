@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -19,11 +20,71 @@ from features.x_auto_posts.publisher import (  # noqa: E402
     AutoLiveGates,
     AutoPostExecutionError,
     AutoPostExecutor,
+    account_duration_limit_seconds,
+    selector_rules,
 )
+from features.x_auto_posts.selector import NoEligibleMaterial  # noqa: E402
 from features.x_auto_posts.x_sidecar import XPostBridgeError  # noqa: E402
 
 
 UTC = timezone.utc
+
+
+class XAutoPostAccountDurationRuleTests(unittest.TestCase):
+    @staticmethod
+    def config(minimum=1, maximum=600):
+        return {
+            "metric_window_days": 7,
+            "platform": 0,
+            "material_rule": {
+                "duration_min_seconds": minimum,
+                "duration_max_seconds": maximum,
+            },
+        }
+
+    def test_standard_account_caps_effective_selection_at_140_seconds(self):
+        account = {
+            "subscription_type": "none",
+            "long_video_eligible": False,
+        }
+        rules = selector_rules(self.config(), account=account)
+        self.assertEqual(account_duration_limit_seconds(account), 140)
+        self.assertEqual(rules.material.duration_seconds.maximum, Decimal("140"))
+
+    def test_token_confirmed_subscription_keeps_auto_template_600_second_cap(self):
+        for subscription_type in ("basic", "premium", "premium_plus"):
+            with self.subTest(subscription_type=subscription_type):
+                account = {
+                    "subscription_type": subscription_type,
+                    "long_video_eligible": True,
+                }
+                rules = selector_rules(self.config(), account=account)
+                self.assertEqual(account_duration_limit_seconds(account), 600)
+                self.assertEqual(
+                    rules.material.duration_seconds.maximum, Decimal("600")
+                )
+
+    def test_untrusted_long_video_flag_cannot_override_subscription_type(self):
+        account = {
+            "subscription_type": "none",
+            "long_video_eligible": True,
+        }
+        rules = selector_rules(self.config(), account=account)
+        self.assertEqual(rules.material.duration_seconds.maximum, Decimal("140"))
+
+    def test_standard_account_with_only_long_materials_has_no_candidate(self):
+        with self.assertRaises(NoEligibleMaterial) as caught:
+            selector_rules(
+                self.config(minimum=141, maximum=600),
+                account={
+                    "subscription_type": "none",
+                    "long_video_eligible": False,
+                },
+            )
+        self.assertEqual(
+            caught.exception.rejection_counts,
+            {"account_duration_limit": 1},
+        )
 
 
 class MutableClock:

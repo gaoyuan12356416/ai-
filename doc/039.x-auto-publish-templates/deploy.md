@@ -125,3 +125,24 @@
 - 若进行生产目标账号刷新，必须先记录明确账号 ID 和审批状态；成功后只允许该账号 Token/刷新时间等预期字段变化，并回读 `active + approved + publish_eligible`。临时错误应保持 `refresh_required`，明确撤销应提示重新授权。
 - Chrome 只验证按钮、状态回读和复选框解锁；不保存模板、不创建 run、不执行 Post。三道 gate 保持原值，既有 X queue/log/Post 与 X Auto 各业务表不得因本验收增加。
 - 回滚只恢复本次代码和静态资产，保留当前账号数据库与 Token；若已成功轮换 Token，禁止用部署前 Token 备份覆盖。
+
+## BUG-005 门禁启用与账号时长修复
+
+1. 从已推送的 exact GitHub commit 构建新的不可变 X Auto release；切换 X Auto
+   代码，并把本次修改的账号/X Auto 静态文件同步到应用静态目录和 Nginx 公共根目录。
+   不覆盖主 API、现有 X Sidecar、SQLite 或 Token，也不重启主 API/X Sidecar/Nginx。
+2. 变更前记录 X Auto/X SQLite `quick_check`、模板/run/task/ledger、既有
+   queue/log/Post/active/unknown、三门禁、服务 PID/当前 release 和相关 timer/path。
+3. 创建包含 X Auto/X SQLite online backup、当前 release、unit/env 非密钥副本、
+   本次将替换的两份静态文件和 SHA256 manifest 的回滚包。Token 只记录组合 hash、
+   owner、mode，不打印内容。
+4. 先在服务器不可变 release 上运行聚焦回归；通过后短暂停止 X Auto
+   scheduler/runner timer/path，等待 oneshot 结束，原子切换 current。
+5. 在 `/etc/x-auto-post.env` 中仅把既有三项门禁从 0 改为 1；保留其他行、owner、
+   mode。重启 `x-auto-post-service.service`，随后恢复原 timer/path 状态。
+6. 验证 `/health` 三门禁及 `is_open=true`；模板 `1` 仍为停用，X Auto run/task
+   不增加。调用只读 preview 验证账号 `1` 的候选不超过 140 秒且 `reserved=false`。
+7. 不调用 `run-now`、不触发 publish/canary。对比部署窗口内账本变化，明确区分
+   既有 X 自然/运营发布与本次 X Auto 修复；本次新增 X Auto Post 必须为 0。
+8. 回滚先把三门禁恢复为 0，再切回旧 release 并重启 X Auto sidecar。保留所有
+   当前账本；若用户随后已创建真实运行，只做代码/配置回滚，不恢复 SQLite 备份。

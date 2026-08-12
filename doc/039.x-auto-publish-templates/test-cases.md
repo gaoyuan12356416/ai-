@@ -56,3 +56,13 @@
 - `app.py` TT auto routes、X pool routes和未知 PUT/POST/GET 分发。
 - quick-nav 用户权限和现有页面链接。
 - X accounts 管理员身份、`publish_approved`、`refresh_required`、账号锁、Token 原子轮换及撤销/临时错误状态机。
+
+## BUG-005 增量用例
+
+| 编号 | 场景 | 预期结果 | 优先级 | 状态 |
+| --- | --- | --- | --- | --- |
+| TC-035 | 标准账号模板上限为 600 秒 | 预览和实际选择的有效上限均为 140 秒，选择器继续扫描短素材 | P0 | 通过 |
+| TC-036 | token 确认会员账号 | `basic/premium/premium_plus + long_video_eligible=true` 保留模板上限；伪造布尔值不能绕过会员类型 | P0 | 通过 |
+| TC-037 | 模板最小时长高于账号上限 | 返回 `x_auto_no_eligible_material` / `no_candidate`，不创建 X queue 或 Post | P0 | 通过 |
+| TC-038 | 手动执行生产门禁 | 三门禁关闭时仍为 409 且零 run；就绪审计后开启时不影响停用模板的自动调度 | P0 | 待生产验收 |
+| TC-039 | 账号会员展示 | 会员账号只显示 Basic/Premium/Premium+；无会员/未知账号显示“最长 140 秒”，后台资格逻辑不变 | P1 | 通过 |

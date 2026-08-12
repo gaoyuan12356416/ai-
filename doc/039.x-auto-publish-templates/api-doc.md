@@ -100,3 +100,10 @@
 ## 兼容性说明
 
 既有 manual API 始终写入/领取 `trigger_source=manual`；daily、catchup、schedule 的非 manual parent 继续走原路径。`x_post_manual_run` 只做增量列/索引迁移，旧行默认 `manual`。自动模板的 queue 仍使用原 `x_post_queue` 唯一约束、发布日志、短链和账号 token 锁。
+
+## 账号有效时长
+
+`preview` 返回的 `selection.rules.material.duration_seconds.max` 是模板上限与当前账号
+token 资格上限的交集：标准账号最多 140 秒；仅 token 确认的
+Basic/Premium/Premium+ 账号可保留模板最多 600 秒的范围。门禁关闭时
+`x_auto_live_gates_closed` 的公开消息为中文，错误码保持不变。

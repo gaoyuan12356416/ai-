@@ -225,10 +225,10 @@
           basic: "X Basic",
           premium: "X Premium",
           premium_plus: "X Premium+",
-          none: "无会员",
-          unknown: "会员未知",
+          none: "无会员 · 最长 140 秒",
+          unknown: "会员未知 · 最长 140 秒",
         };
-        return labels[String(item.subscription_type || "unknown")] || "会员未知";
+        return labels[String(item.subscription_type || "unknown")] || "会员未知 · 最长 140 秒";
       }
 
       function booleanChips(item) {
@@ -237,7 +237,7 @@
         const verifiedText = verified === null ? "认证 —" : (verified ? "已认证" : "未认证");
         const protectedText = protectedAccount === null ? "可见性 —" : (protectedAccount ? "受保护" : "公开账号");
         const premium = item.long_video_eligible === true;
-        const premiumText = `${subscriptionLabel(item)}${premium ? " · 可发长视频" : ""}`;
+        const premiumText = subscriptionLabel(item);
         return `<div class="chip-list"><span class="chip ${verified ? "good" : ""}">${escapeHtml(verifiedText)}</span><span class="chip">${escapeHtml(protectedText)}</span><span class="chip ${premium ? "good" : ""}">${escapeHtml(premiumText)}</span></div>`;
       }
 

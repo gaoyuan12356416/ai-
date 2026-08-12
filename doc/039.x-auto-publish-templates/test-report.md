@@ -86,3 +86,18 @@ Chrome 生产实测发现的 CSS 漏发、静态旧缓存、UI DTO 映射和共�
 - 未批准账号仍显示“未批准发布”并置灰；离线用例证明其在 X 网络调用前被拒绝，临时错误保留 `refresh_required`，模板与最终发布严格校验不放宽。
 - 未保存模板、未创建 run/task/queue/log/Post，三道 gate 均 false；最终现有 X 账本 `182/182/181/1`、active/unknown `0/0`，X Auto 七类业务表全为 0。
 - 部署前后 Token 文件哈希相同；两份 SQLite `quick_check=ok`。自然 manual `no_pending`、schedule `no_due`、claim 0，X Auto scheduler/runner succeeded。
+
+## BUG-005 手动执行就绪修复（2026-08-12）
+
+- 生产取证确认两次 409 均在门禁检查处结束，X Auto run/task/ledger 为 0，
+  没有产生 X 写入。
+- 账号 `1` 为 `active + publish_approved`、权限完整、Token 文件 `0600` 且归属正确；
+  7 个完整北京时间日指标代均为 `ready`；真实 `gy.g2flow.com` 短链返回
+  200、`Cache-Control: no-store`。
+- 原只读预览成功但误选 270 秒素材；修复后标准账号有效选择上限为 140 秒，
+  token 确认会员仍保留模板 600 秒硬上限。
+- 素材池、账号授权页、账号列表和 X Auto 模板账号选择器统一为：会员只显示会员
+  类型，无会员/未知账号显示“最长 140 秒”；静态契约用例防止文案回退。
+- 本地 X Auto/bridge/UI/app-contract 聚焦套件 159 项执行、158 项通过、
+  1 项仅因 Windows 平台跳过；新增账号时长测试全部通过。
+- 本节生产部署结果、exact commit/release、备份与零额外 Post 账本证据在部署完成后补充。

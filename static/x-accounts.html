@@ -144,9 +144,9 @@
         return /^[A-Za-z0-9_]{1,50}$/.test(username) ? `https://x.com/${encodeURIComponent(username)}` : "";
       };
       const subscriptionLabel = item => ({
-        basic: "X Basic · 可发长视频",
-        premium: "X Premium · 可发长视频",
-        premium_plus: "X Premium+ · 可发长视频",
+        basic: "X Basic",
+        premium: "X Premium",
+        premium_plus: "X Premium+",
         none: "无会员 · 最长 140 秒",
         unknown: "会员资格未知 · 最长 140 秒",
       })[String(item && item.subscription_type || "unknown")] || "会员资格未知 · 最长 140 秒";
