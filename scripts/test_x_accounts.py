@@ -638,6 +638,67 @@ class XAccountsTestCase(unittest.TestCase):
             {"preflight_duration": 140.0}, downgraded
         )
 
+    def test_premium_relay_discovery_filters_and_orders_bound_accounts(self):
+        first = self.complete(
+            x_user_id="7001",
+            username="premium_one",
+            account_fields={
+                "subscription_type": "Premium",
+                "protected": False,
+            },
+        )
+        second = self.complete(
+            x_user_id="7002",
+            username="premium_two",
+            account_fields={
+                "subscription_type": "PremiumPlus",
+                "protected": False,
+            },
+        )
+        self.complete(
+            x_user_id="7003",
+            username="protected_premium",
+            account_fields={
+                "subscription_type": "Premium",
+                "protected": True,
+            },
+        )
+        self.complete(
+            x_user_id="7004",
+            username="standard_account",
+            account_fields={
+                "subscription_type": "none",
+                "protected": False,
+            },
+        )
+        with mock.patch.object(
+            service,
+            "verify_account",
+            side_effect=lambda account_id, *_args, **_kwargs: service.find_account(
+                account_id
+            ),
+        ) as verify:
+            result = service.premium_relay_accounts_request(
+                {"run_date": "2026-08-12"}
+            )
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            [first["id"], second["id"]],
+        )
+        self.assertTrue(
+            all(item["long_video_publish_eligible"] for item in result["items"])
+        )
+        self.assertTrue(all(not item["protected"] for item in result["items"]))
+        self.assertEqual(
+            [item["relay_assignment_count"] for item in result["items"]],
+            [0, 0],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs.get("preserve_transient_status") is True
+                for call in verify.call_args_list
+            )
+        )
     def test_missing_scope_is_visible(self):
         granted = "tweet.read tweet.write users.read offline.access"
         item = self.complete(scope=granted)
@@ -1656,6 +1717,48 @@ class XAccountsTestCase(unittest.TestCase):
                 drama_check_mock.assert_called_once_with(
                     drama_check_payload
                 )
+
+            expected_relays = {
+                "items": [
+                    {
+                        "id": accounts[0]["id"],
+                        "username": accounts[0]["username"],
+                        "relay_assignment_count": 0,
+                    }
+                ]
+            }
+            with mock.patch.object(
+                service,
+                "premium_relay_accounts_request",
+                return_value=expected_relays,
+            ) as relay_mock:
+                relay_payload = {"run_date": "2026-08-12"}
+                with urllib.request.urlopen(
+                    request(
+                        "/internal/posts/premium-relay/accounts",
+                        relay_payload,
+                    ),
+                    timeout=5,
+                ) as response:
+                    self.assertEqual(
+                        json.loads(response.read().decode("utf-8")),
+                        expected_relays,
+                    )
+                relay_mock.assert_called_once_with(relay_payload)
+
+            backend_request = urllib.request.Request(
+                base_url + "/internal/posts/premium-relay/accounts",
+                data=b'{"run_date":"2026-08-12"}',
+                headers={
+                    "Authorization": "Bearer " + service.INTERNAL_TOKEN,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as denied_relay:
+                urllib.request.urlopen(backend_request, timeout=5)
+            self.assertEqual(denied_relay.exception.code, 403)
+            denied_relay.exception.close()
 
             with mock.patch.object(
                 service,
