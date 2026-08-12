@@ -1,7 +1,8 @@
 [Unit]
 Description=Wake the X automatic publishing runner for a confirmed manual request
-After=x-auto-post-service.service
+After=x-auto-post-service.service systemd-tmpfiles-setup.service
 Requires=x-auto-post-service.service
+ConditionPathIsDirectory=/run/x-auto-post
 
 [Path]
 PathChanged=/run/x-auto-post/manual-kick

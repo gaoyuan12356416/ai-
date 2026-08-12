@@ -1,0 +1,8 @@
+x-auto-publish.css
+x-auto-publish-common.js
+x-auto-publish-template.html
+x-auto-publish-template.js
+x-auto-publish-templates.html
+x-auto-publish-templates.js
+x-auto-publish-runs.html
+x-auto-publish-runs.js

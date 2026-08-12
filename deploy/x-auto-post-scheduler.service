@@ -1,7 +1,8 @@
 [Unit]
 Description=Create due Dramawave X automatic publishing runs
-After=network-online.target x-auto-post-service.service
+After=network-online.target x-auto-post-service.service systemd-tmpfiles-setup.service
 Requires=x-auto-post-service.service
+ConditionPathIsDirectory=/run/x-auto-post
 
 [Service]
 Type=oneshot
@@ -11,8 +12,6 @@ WorkingDirectory=/opt/x-post-automation/current
 EnvironmentFile=/etc/x-auto-post.env
 EnvironmentFile=/etc/x-auto-post.secrets
 ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_auto_post_runner.py --mode tick
-RuntimeDirectory=x-auto-post
-RuntimeDirectoryMode=0700
 PrivateTmp=true
 PrivateDevices=true
 NoNewPrivileges=true

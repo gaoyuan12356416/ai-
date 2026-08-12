@@ -1,10 +1,11 @@
 [Unit]
 Description=Durable operator-requested Dramawave X post publisher
-After=network-online.target x-post-automation.service
+After=network-online.target x-post-automation.service systemd-tmpfiles-setup.service
 Wants=network-online.target
 Requires=x-post-automation.service
 RequiresMountsFor=/mnt/data-disk/x-post-automation
 ConditionPathIsMountPoint=/mnt/data-disk
+ConditionPathIsDirectory=/run/x-post-daily
 
 [Service]
 Type=oneshot
@@ -15,8 +16,6 @@ EnvironmentFile=/etc/x-post-daily.env
 EnvironmentFile=/etc/x-post-media-repair.token
 EnvironmentFile=/etc/x-post-schedule.env
 ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_post_manual_runner.py
-RuntimeDirectory=x-post-daily
-RuntimeDirectoryMode=0700
 PrivateTmp=true
 PrivateDevices=true
 NoNewPrivileges=true

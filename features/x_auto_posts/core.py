@@ -1656,6 +1656,21 @@ class XAutoPostStore:
             ).fetchone()
         return None if row is None else _run_from_row(row)
 
+    def get_latest_run_for_template(self, template_id: Any) -> Optional[RunRecord]:
+        normalized_id = _positive_int(template_id, "template id")
+        with self._reader() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM x_auto_run
+                WHERE template_id=?
+                ORDER BY scheduled_at_utc DESC,id DESC
+                LIMIT 1
+                """,
+                (normalized_id,),
+            ).fetchone()
+        return None if row is None else _run_from_row(row)
+
     def list_runs(
         self,
         *,

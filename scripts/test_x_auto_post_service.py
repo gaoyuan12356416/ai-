@@ -156,6 +156,52 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(original.config["body_template"], valid_payload()["body_template"])
         self.assertNotEqual(original.config_sha256, updated["config_sha256"])
 
+    def test_template_list_exposes_real_next_and_last_run_facts(self):
+        service = self.service(AutoLiveGates(True, True, True))
+        template = service.create_template(self.actor(valid_payload()))["template"]
+        service.set_enabled(
+            template["id"],
+            True,
+            self.actor({"expected_version": template["version"]}),
+        )
+        run = self.store.create_run(
+            run_key="ui-list-last-run",
+            template_id=template["id"],
+            template_version=template["version"],
+            trigger_type="manual",
+            scheduled_at_utc="2026-08-11T09:00:00+00:00",
+            shanghai_date="2026-08-11",
+            publish_time="17:00",
+            blacklist_snapshot={},
+        )
+        item = service.templates({})["templates"][0]
+        self.assertEqual(item["next_run_at"], "2026-08-11T12:35:00+00:00")
+        self.assertEqual(item["last_run"]["id"], run.id)
+        self.assertEqual(item["last_run_status"], "queued")
+        self.assertEqual(item["last_run_at"], run.created_at)
+
+    def test_disabled_template_does_not_advertise_next_run(self):
+        service = self.service()
+        created = service.create_template(self.actor(valid_payload()))["template"]
+        item = service.template(created["id"])["template"]
+        self.assertNotIn("next_run_at", item)
+
+    def test_random_template_read_does_not_create_a_plan(self):
+        service = self.service(AutoLiveGates(True, True, True))
+        template = service.create_template(
+            self.actor(valid_payload(schedule={"mode": "random", "daily_count": 2}))
+        )["template"]
+        service.set_enabled(
+            template["id"],
+            True,
+            self.actor({"expected_version": template["version"]}),
+        )
+        item = service.template(template["id"])["template"]
+        self.assertNotIn("next_run_at", item)
+        self.assertIsNone(
+            self.store.get_random_plan(template["id"], template["version"], "2026-08-11")
+        )
+
     def test_run_now_is_blocked_before_creating_rows_when_gates_closed(self):
         service = self.service()
         template = service.create_template(self.actor(valid_payload()))["template"]

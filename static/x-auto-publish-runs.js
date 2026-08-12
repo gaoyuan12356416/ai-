@@ -16,8 +16,14 @@
     queued: "等待执行",
     scheduled: "等待执行",
     running: "执行中",
+    pending: "等待执行",
+    selecting: "筛选中",
     filtering: "筛选中",
+    no_candidate: "没有合适素材",
+    reserved: "素材已锁定",
     preparing: "视频准备中",
+    retry_wait: "等待重试",
+    ready: "等待发布",
     publishing: "发布中",
     reconciling: "结果核对中",
     completed: "已完成",
@@ -25,7 +31,9 @@
     published: "已发布",
     failed: "失败",
     needs_review: "结果待确认",
+    unknown: "结果待确认",
     canceled: "已取消",
+    skipped: "已跳过",
   };
 
   function runId(item) {
@@ -109,7 +117,7 @@
 
       const totalTasks = countValue(item, ["task_count", "account_count", "total_tasks"], 0);
       const completedTasks = countValue(item, ["completed_task_count", "completed_accounts", "completed_tasks"], 0);
-      const failedTasks = countValue(item, ["failed_task_count", "failed_accounts", "failed_tasks"], 0);
+      const failedTasks = countValue(item, ["attention_task_count", "failed_task_count", "failed_accounts", "failed_tasks"], 0);
       const tasksCell = ui.element("td");
       tasksCell.appendChild(ui.element("strong", { text: `${completedTasks} / ${totalTasks || "—"} 完成` }));
       if (failedTasks) tasksCell.appendChild(ui.element("div", { className: "secondary", text: `${failedTasks} 个失败或待确认` }));
@@ -119,7 +127,10 @@
       statusCell.appendChild(ui.statusBadge(statusLabel(status), ui.statusKind(status)));
       row.appendChild(statusCell);
 
-      const summary = item.result_summary || item.summary || item.message || item.error_message || "—";
+      const summary = item.result_summary || item.summary || item.message || item.error_message
+        || (totalTasks
+          ? `${completedTasks} 个完成${failedTasks ? `，${failedTasks} 个失败或待确认` : ""}`
+          : "—");
       ui.appendTextCell(row, summary);
       ui.appendTextCell(row, ui.formatTime(item.completed_at || item.finished_at || item.finished_at_utc));
 
@@ -267,7 +278,8 @@
       row.appendChild(metricsCell);
 
       const stageCell = ui.element("td");
-      const prepareFact = item.prepare_status || item.preparation_status || (item.prepared ? `已准备 ${ui.formatNumber(item.prepared_duration_sec)} 秒` : item.gpu_job_id ? `GPU ${item.gpu_job_id}` : "—");
+      const preparedDuration = item.selected_duration_sec == null ? item.prepared_duration_sec : item.selected_duration_sec;
+      const prepareFact = item.prepare_status || item.preparation_status || (item.prepared ? `已准备 ${ui.formatNumber(preparedDuration)} 秒` : item.gpu_job_id ? `GPU ${item.gpu_job_id}` : "—");
       stageCell.appendChild(ui.element("div", { text: prepareFact }));
       const queueId = item.execution_queue_id || item.x_queue_id;
       const logId = item.execution_log_id || item.x_log_id;
@@ -318,6 +330,15 @@
     else dialog.setAttribute("open", "");
   }
 
+  function detailErrorMessage(error) {
+    const labels = {
+      x_auto_run_not_found: "运行记录不存在或已不可访问。",
+      x_auto_template_not_found: "运行对应的模板版本不存在或已不可访问。",
+      invalid_request: "运行详情请求无效。",
+    };
+    return labels[String(error && error.code || "")] || (error && error.message) || "详情加载失败。";
+  }
+
   async function showRunDetail(id) {
     const request = ++state.detailRequest;
     const dialog = ui.byId("runDetailDialog");
@@ -354,9 +375,10 @@
       renderEvents(events);
     } catch (error) {
       if (request !== state.detailRequest) return;
-      ui.setText(ui.byId("runDetailSubtitle"), error.message || "详情加载失败。", "");
+      const message = detailErrorMessage(error);
+      ui.setText(ui.byId("runDetailSubtitle"), message, "");
       ui.setText(ui.byId("runSnapshot"), "详情加载失败。", "");
-      ui.showToast(error.message || "运行详情加载失败", true);
+      ui.showToast(message, true);
     }
   }
 

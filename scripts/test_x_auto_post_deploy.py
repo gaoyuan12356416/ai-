@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -47,6 +51,90 @@ class XAutoPostDeployTests(unittest.TestCase):
         self.assertIn('"' + expected + '"', runner)
         self.assertIn("ReadWritePaths=/run/x-auto-post /run/x-post-daily", unit)
         self.assertNotIn("/run/x-auto-post/runner.lock", env + runner + unit)
+
+    def test_shared_lock_directories_have_one_persistent_tmpfiles_owner(self):
+        tmpfiles = self.text("deploy/x-post-runtime-tmpfiles.conf")
+        auto_tmpfiles = self.text("deploy/x-auto-post-tmpfiles.conf")
+        self.assertIn(
+            "d /run/x-auto-post 0700 x-post-daily x-post-daily -", tmpfiles
+        )
+        self.assertIn(
+            "d /run/x-post-daily 0700 x-post-daily x-post-daily -", tmpfiles
+        )
+        self.assertEqual(tmpfiles.count("d /run/x-auto-post "), 1)
+        self.assertEqual(tmpfiles.count("d /run/x-post-daily "), 1)
+        self.assertNotIn("/run/x-auto-post", auto_tmpfiles)
+        self.assertNotIn("/run/x-post-daily", auto_tmpfiles)
+
+        shared_units = (
+            "x-auto-post-service.service",
+            "x-auto-post-scheduler.service",
+            "x-auto-post-runner.service",
+            "x-auto-post-metric.service",
+            "x-post-daily.service",
+            "x-post-manual.service",
+            "x-post-schedule.service",
+            "x-post-catchup.service",
+        )
+        for name in shared_units:
+            with self.subTest(unit=name):
+                unit = self.text("deploy/" + name)
+                self.assertNotIn("RuntimeDirectory=", unit)
+                self.assertIn("systemd-tmpfiles-setup.service", unit)
+                if "/run/x-auto-post" in unit:
+                    self.assertIn(
+                        "ConditionPathIsDirectory=/run/x-auto-post", unit
+                    )
+                if "/run/x-post-daily" in unit:
+                    self.assertIn(
+                        "ConditionPathIsDirectory=/run/x-post-daily", unit
+                    )
+
+    @unittest.skipIf(os.name == "nt", "requires Linux flock and inode semantics")
+    def test_linux_shared_lock_inode_survives_peer_process_exit(self):
+        """A peer unit/process exit must not replace the shared flock inode."""
+
+        from scripts.x_auto_post_runner import exclusive_lock
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            runtime = root / "x-post-daily"
+            runtime.mkdir(mode=0o700)
+            lock_path = runtime / "runner.lock"
+            with exclusive_lock(str(lock_path)) as acquired:
+                self.assertTrue(acquired)
+                inode = lock_path.stat().st_ino
+                peer = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        textwrap.dedent(
+                            """
+                            import fcntl
+                            import os
+                            import sys
+
+                            path = sys.argv[1]
+                            handle = open(path, "a+b")
+                            try:
+                                fcntl.flock(
+                                    handle.fileno(),
+                                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                                )
+                            except BlockingIOError:
+                                sys.exit(75)
+                            sys.exit(0)
+                            """
+                        ),
+                        str(lock_path),
+                    ],
+                    check=False,
+                )
+                self.assertEqual(peer.returncode, 75)
+                self.assertTrue(runtime.is_dir())
+                self.assertEqual(lock_path.stat().st_ino, inode)
+            self.assertTrue(runtime.is_dir())
+            self.assertEqual(lock_path.stat().st_ino, inode)
 
     def test_sidecar_cannot_read_existing_x_tokens_or_accounts_database(self):
         unit = self.text("deploy/x-auto-post-service.service")

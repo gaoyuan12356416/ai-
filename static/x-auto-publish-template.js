@@ -3,6 +3,7 @@
 
   const ui = window.XAutoPublish;
   const templateId = ui.pageIdFromQuery("id");
+  document.title = `${templateId ? "编辑" : "创建"} X Post 自动发布模板 - AI自动后台`;
   const RESOURCE_TYPE_V2_OPTIONS = Object.freeze([
     { value: "0", label: "其他" },
     { value: "1", label: "翻译剧非首发" },

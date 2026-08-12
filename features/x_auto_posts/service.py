@@ -212,8 +212,88 @@ class XAutoPostService:
             raise AutoPostServiceError("x_auto_clock_invalid", "service clock is invalid", 500)
         return value.astimezone(UTC)
 
+    def _template_item(self, snapshot: Any) -> Dict[str, Any]:
+        item = self._template_snapshot_item(snapshot)
+        last_run = self.store.get_latest_run_for_template(snapshot.id)
+        next_run_at = ""
+        if snapshot.enabled:
+            now = self._now()
+            shanghai_now = now.astimezone(BEIJING_TZ)
+            try:
+                enabled_at = datetime.fromisoformat(
+                    str(snapshot.enabled_at_utc).replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except (TypeError, ValueError, OverflowError):
+                enabled_at = None
+            schedule = snapshot.config.get("schedule")
+            schedule = schedule if isinstance(schedule, Mapping) else {}
+            for day_offset in (range(2) if enabled_at is not None else ()):
+                local_day = (shanghai_now + timedelta(days=day_offset)).date()
+                day = local_day.isoformat()
+                if schedule.get("mode") == "fixed":
+                    publish_times = list(schedule.get("times") or [])
+                else:
+                    publish_times = self.store.get_random_plan(
+                        snapshot.id, snapshot.version, day
+                    ) or []
+                for publish_time in publish_times:
+                    hour, minute = (int(value) for value in publish_time.split(":"))
+                    slot = datetime(
+                        local_day.year,
+                        local_day.month,
+                        local_day.day,
+                        hour,
+                        minute,
+                        tzinfo=BEIJING_TZ,
+                    ).astimezone(UTC)
+                    if slot >= now and slot >= enabled_at:
+                        next_run_at = slot.isoformat(timespec="seconds")
+                        break
+                if next_run_at:
+                    break
+        if next_run_at:
+            item["next_run_at"] = next_run_at
+        if last_run is not None:
+            item["last_run"] = self._run_item(last_run)
+            item["last_run_status"] = last_run.status
+            item["last_run_at"] = last_run.created_at
+        return item
+
     @staticmethod
-    def _template_item(snapshot: Any) -> Dict[str, Any]:
+    def _run_item(run: Any, *, template: Optional[Any] = None, tasks=None) -> Dict[str, Any]:
+        item = run.as_dict()
+        item["run_id"] = run.id
+        if item.get("error_message"):
+            item["error_message"] = safe_public_message(item["error_message"])
+        snapshot = item.get("blacklist_snapshot")
+        if isinstance(snapshot, Mapping):
+            item["blacklist_snapshot"] = {
+                "loaded_at_utc": str(snapshot.get("loaded_at_utc") or ""),
+                "source_row_count": int(snapshot.get("source_row_count") or 0),
+                "sha256": str(snapshot.get("sha256") or ""),
+            }
+        if template is not None:
+            item["template_name"] = template.name
+            item["template_snapshot"] = XAutoPostService._template_snapshot_item(template)
+        if tasks is not None:
+            values = list(tasks)
+            item["task_count"] = len(values)
+            item["completed_task_count"] = sum(
+                task.status in {"published", "no_candidate", "skipped"}
+                for task in values
+            )
+            item["failed_task_count"] = sum(
+                task.status in {"failed", "canceled"} for task in values
+            )
+            item["attention_task_count"] = sum(
+                task.status in {"failed", "canceled", "unknown"} for task in values
+            )
+        return item
+
+    @staticmethod
+    def _template_snapshot_item(snapshot: Any) -> Dict[str, Any]:
+        """Return the frozen template DTO without querying live run state."""
+
         config = dict(snapshot.config)
         schedule = config.get("schedule") if isinstance(config.get("schedule"), Mapping) else {}
         if schedule.get("mode") == "fixed":
@@ -238,34 +318,6 @@ class XAutoPostService:
             "created_at": snapshot.created_at,
             "updated_at": snapshot.updated_at,
         }
-
-    @staticmethod
-    def _run_item(run: Any, *, template: Optional[Any] = None, tasks=None) -> Dict[str, Any]:
-        item = run.as_dict()
-        item["run_id"] = run.id
-        if item.get("error_message"):
-            item["error_message"] = safe_public_message(item["error_message"])
-        snapshot = item.get("blacklist_snapshot")
-        if isinstance(snapshot, Mapping):
-            item["blacklist_snapshot"] = {
-                "loaded_at_utc": str(snapshot.get("loaded_at_utc") or ""),
-                "source_row_count": int(snapshot.get("source_row_count") or 0),
-                "sha256": str(snapshot.get("sha256") or ""),
-            }
-        if template is not None:
-            item["template_name"] = template.name
-            item["template_snapshot"] = XAutoPostService._template_item(template)
-        if tasks is not None:
-            values = list(tasks)
-            item["task_count"] = len(values)
-            item["completed_task_count"] = sum(
-                task.status in {"published", "no_candidate", "skipped"}
-                for task in values
-            )
-            item["failed_task_count"] = sum(
-                task.status in {"failed", "canceled"} for task in values
-            )
-        return item
 
     @staticmethod
     def _task_item(task: Any) -> Dict[str, Any]:

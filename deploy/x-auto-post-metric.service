@@ -1,7 +1,8 @@
 [Unit]
 Description=Refresh Dramawave X automatic publishing daily metrics
-After=network-online.target x-auto-post-service.service
+After=network-online.target x-auto-post-service.service systemd-tmpfiles-setup.service
 Requires=x-auto-post-service.service
+ConditionPathIsDirectory=/run/x-auto-post
 
 [Service]
 Type=oneshot
@@ -12,8 +13,6 @@ EnvironmentFile=/etc/x-post-schedule.env
 EnvironmentFile=/etc/x-auto-post.env
 EnvironmentFile=/etc/x-auto-post.secrets
 ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_auto_post_metric_runner.py
-RuntimeDirectory=x-auto-post
-RuntimeDirectoryMode=0700
 PrivateTmp=true
 PrivateDevices=true
 NoNewPrivileges=true

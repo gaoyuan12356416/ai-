@@ -160,6 +160,12 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn("确认真实执行", source)
         self.assertIn("视频准备完成后自动发布", source)
 
+    def test_template_list_uses_real_schedule_and_run_summary_dto(self):
+        source = SCRIPTS["templates"]
+        self.assertIn("item.next_run_at", source)
+        self.assertIn("item.last_run_status", source)
+        self.assertIn("item.last_run_at", source)
+
     def test_editor_has_required_language_x_body_and_two_filter_layers(self):
         ids = parse_page(PAGES["template"]).ids
         required = {
@@ -283,6 +289,26 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn("PRIVATE_DETAIL_KEYS", source)
         self.assertIn("publicDetail(snapshot)", source)
         self.assertNotIn("TikTok", PAGES["runs"] + source)
+        for status in (
+            "pending",
+            "selecting",
+            "no_candidate",
+            "reserved",
+            "retry_wait",
+            "ready",
+            "unknown",
+            "skipped",
+        ):
+            self.assertIn(f'{status}:', source)
+        self.assertIn("item.selected_duration_sec", source)
+        self.assertIn('"attention_task_count"', source)
+        self.assertIn("x_auto_run_not_found", source)
+        self.assertIn("运行记录不存在或已不可访问。", source)
+        self.assertIn("`${completedTasks} 个完成", source)
+
+    def test_create_editor_sets_create_document_title(self):
+        source = SCRIPTS["template"]
+        self.assertIn('document.title = `${templateId ? "编辑" : "创建"}', source)
 
     def test_template_write_contract_matches_api(self):
         source = SCRIPTS["template"]
