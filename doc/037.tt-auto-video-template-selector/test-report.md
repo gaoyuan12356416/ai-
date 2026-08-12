@@ -2,7 +2,7 @@
 
 ## 测试结论
 
-离线测试通过；生产 health、无副作用对比和登录态浏览器只读验收待部署后补充。
+离线与生产验收全部通过；未触发真实 TikTok prepare/publish canary。
 
 ## 测试范围
 
@@ -31,12 +31,21 @@
 - `python scripts/test_tt_gpu_worker.py`：73/73 通过。
 - `python scripts/test_tt_posts_service.py`：141/141 通过。
 - `py_compile`、`node --check`、`git diff --check`：通过。
+- CPU 从 GitHub exact commit 构建 release 后，服务切换前核心测试 59/59 通过。
+- CPU health 同时返回 random v3/trim 0 与 direct-outro v2/trim 4.333333；响应不含 URL/凭据。
+- GPU random PID `1362906` 保持不变；direct PID `1812308`、tunnel PID `1812341` 均 active，
+  两个 health 均 `asset_identity_ready=true`、`direct_post_eligible=true`。
+- 部署前后数据库事实保持：模板 `1`、版本 `12`、run `25`、task `145`、publish_id `109`、
+  active claim/nonterminal `0`、`integrity_check=ok`。
+- 15:06、15:07 的自然 scheduler/runner 均成功；direct work root 文件数为 0。
+- 登录态浏览器加载模板 1 v12/enabled：两项可见，历史缺字段选中“随机排重”，未保存。
 
 ## 遗留风险
 
-- 部署前仍需确认 CPU 18834 与 GPU 8832 无监听、现有 auto 无 in-flight。
-- 必须验证 direct-outro 固定片尾 SHA 与 worker health；不能用真实帖子作上线 canary。
+- direct-outro 的真实制作只会在操作人保存选择并由自然调度创建任务后发生；上线验收刻意不创建帖子。
+- 14:12 指标刷新曾因只读源查询 `OperationalError` 失败，08:00–13:00 均成功；此状态早于本次部署，
+  未手动重跑，保留小时定时器自然重试。
 
 ## 发布建议
 
-同意按 `deploy.md` 执行备份、精确 commit 部署和只读生产验收；任一步失败即停止并按备份回滚。
+已按 `deploy.md` 完成备份、精确 commit 部署和只读生产验收，可正常使用。

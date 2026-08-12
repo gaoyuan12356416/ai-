@@ -14,7 +14,7 @@
 | 编辑页选择与摘要 | Codex | TT auto HTML/JS | 已完成 |
 | 双 GPU systemd/env 合同 | Codex | `deploy/`, `.env.example` | 已完成 |
 | 自动化与静态合同测试 | Codex | `scripts/test_tt_auto_*` | 已完成 |
-| GitHub-first 生产部署与浏览器验收 | Codex | CPU/GPU/Chrome | 待执行 |
+| GitHub-first 生产部署与浏览器验收 | Codex | CPU/GPU/Chrome | 已完成 |
 
 ## 编译 / 构建命令
 
@@ -36,4 +36,6 @@ git diff --check
 ## 完成记录
 
 - 2026-08-12：完成生产现状、端口、资产 SHA 和历史代码只读核对。
-- 2026-08-12：完成实现与 346 项离线回归；生产部署与真实浏览器只读验收待执行。
+- 2026-08-12：完成实现与 346 项离线回归，随后进入生产部署与真实浏览器只读验收。
+- 2026-08-12：GitHub commit `18559c03cc68afe83af87b963bf812e09320bb3a` 已部署；
+  双路由 health、自然 scheduler/runner、数据库事实对比与登录态浏览器只读验收通过。

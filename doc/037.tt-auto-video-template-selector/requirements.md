@@ -115,3 +115,5 @@ TT 自动发布模板当前由服务端全局固定使用 `random_overlay`，生
 
 - 2026-08-12：创建需求；根据线上页面、生产 release `d3202fc829379fce91de6ffa4588cd29af36492e`
   和当前 health `tt-post-random-overlay-hevc-720x1280-v3` 固化设计。
+- 2026-08-12：实现 commit `18559c03cc68afe83af87b963bf812e09320bb3a` 完成生产部署；
+  模板 1 保持 v12/enabled 且历史 JSON 未回填。

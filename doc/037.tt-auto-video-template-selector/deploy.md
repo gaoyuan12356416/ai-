@@ -67,3 +67,47 @@ TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333
 - 不得把 direct worker 与 random worker 指向同一控制端口或同一工作目录。
 - 不得打印 secret env 文件或凭据。
 - 不得用真实 TikTok 帖子验证部署。
+
+## 2026-08-12 生产记录
+
+- GitHub/runtime commit：`18559c03cc68afe83af87b963bf812e09320bb3a`。
+- CPU release：`/opt/tt-auto-post/releases/18559c03cc68afe83af87b963bf812e09320bb3a`；
+  `tt-auto-post-service.service` PID `3222244`，active。
+- GPU 现有 random release/PID 保持
+  `d3202fc829379fce91de6ffa4588cd29af36492e` / `1362906`；未重启。
+- 新增 GPU direct worker PID `1812308`（8832）和 tunnel PID `1812341`（CPU 18834），active/enabled。
+- CPU 备份：
+  `/mnt/data-disk/tt-auto-post-deploy/backups/20260812T150123+0800-video-template-pre-d3202fc`。
+- GPU 备份：
+  `/data/tt-post-publisher/backups/20260812T150123+0800-video-template-pre-d3202fc`。
+- 公网页面 SHA：HTML `40b44b52912228866988a2820e19661be8f8b8d1096d595d573fbf1fe9087a68`；
+  JS `639c82490303bf7238e10f8f1f4a64658386e055941174b425027f4a3f0fbc8a`。
+- 部署前后模板/版本/run/task/publish_id 为 `1/12/25/145/109`，active/nonterminal 为 `0/0`；
+  SQLite integrity `ok`。15:06、15:07 自然 scheduler/runner 成功，未新增发布事实。
+- 登录态浏览器确认模板 1 v12/enabled 的两个选项可见，历史缺字段默认选中随机排重；未保存。
+
+精确代码回滚：
+
+```bash
+systemctl stop tt-auto-post-runner.path tt-auto-post-runner.timer tt-auto-post-scheduler.timer tt-auto-post-metric.timer
+systemctl stop tt-auto-post-service.service
+cp -a /mnt/data-disk/tt-auto-post-deploy/backups/20260812T150123+0800-video-template-pre-d3202fc/tt-auto-post.env /etc/tt-auto-post.env
+ln -s /opt/tt-auto-post/releases/d3202fc829379fce91de6ffa4588cd29af36492e /opt/tt-auto-post/.current-rollback
+mv -Tf /opt/tt-auto-post/.current-rollback /opt/tt-auto-post/current
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T150123+0800-video-template-pre-d3202fc/static-app/tt-auto-publish-template.html /root/drama_material_service/static/tt-auto-publish-template.html
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T150123+0800-video-template-pre-d3202fc/static-app/tt-auto-publish-template.js /root/drama_material_service/static/tt-auto-publish-template.js
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T150123+0800-video-template-pre-d3202fc/static-nginx/tt-auto-publish-template.html /usr/share/nginx/html/tt-auto-publish-template.html
+install -o root -g root -m 0644 /mnt/data-disk/tt-auto-post-deploy/backups/20260812T150123+0800-video-template-pre-d3202fc/static-nginx/tt-auto-publish-template.js /usr/share/nginx/html/tt-auto-publish-template.js
+systemctl start tt-auto-post-service.service
+systemctl start tt-auto-post-scheduler.timer tt-auto-post-runner.timer tt-auto-post-runner.path tt-auto-post-metric.timer
+```
+
+GPU 精确回滚（备份已证明以下三个文件部署前不存在）：
+
+```bash
+systemctl disable --now tt-gpu-direct-outro-reverse-tunnel.service tt-gpu-direct-outro.service
+rm -f /etc/systemd/system/tt-gpu-direct-outro-reverse-tunnel.service /etc/systemd/system/tt-gpu-direct-outro.service /etc/tt-post-gpu-direct-outro.env
+systemctl daemon-reload
+```
+
+数据库事实未变化，常规回滚不得恢复 SQLite 备份覆盖线上账本。
