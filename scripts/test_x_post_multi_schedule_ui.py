@@ -336,8 +336,22 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn('link.rel = "noopener noreferrer"', DRAMA)
         self.assertIn('url.hostname === "x.com"', DRAMA)
 
+    def test_logs_explain_premium_relay_and_target_repost_states(self):
+        self.assertIn(
+            'source_published:"原帖已发布，等待目标账号 Repost"',
+            LOGS,
+        )
+        self.assertIn('repost_creating:"目标账号 Repost 中"', LOGS)
+        self.assertIn('item.delivery_mode || "direct"', LOGS)
+        self.assertIn("目标账号 Repost · 原帖由 @", LOGS)
+        self.assertIn('relayDelivery ? "预览原 Post" : "预览 Post"', LOGS)
+
     def test_inline_javascript_parses(self):
-        for path, source in ((MATERIAL_PATH, MATERIAL), (DRAMA_PATH, DRAMA)):
+        for path, source in (
+            (MATERIAL_PATH, MATERIAL),
+            (DRAMA_PATH, DRAMA),
+            (LOGS_PATH, LOGS),
+        ):
             javascript = inline_javascript(source)
             self.assertTrue(javascript.strip(), path)
             with tempfile.NamedTemporaryFile(

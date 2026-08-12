@@ -230,6 +230,47 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.config = make_config(self.temporary.name)
         self.now = datetime(2026, 7, 27, 10, 0, 30, tzinfo=BEIJING)
 
+    def test_premium_relay_client_requires_exact_current_entitlement(self):
+        eligible = {
+            "id": 10,
+            "username": "premium10",
+            "x_user_id": "x10",
+            "display_name": "Premium 10",
+            "subscription_type": "premium",
+            "premium_subscriber": True,
+            "long_video_eligible": True,
+            "long_video_publish_eligible": True,
+            "publish_eligible": True,
+            "protected": False,
+            "relay_assignment_count": 3,
+        }
+        client = StubScheduleClient([{"items": [eligible]}])
+        result = client.premium_relay_accounts("2026-08-12")
+        self.assertEqual(result[0]["id"], 10)
+        self.assertEqual(result[0]["relay_assignment_count"], 3)
+        self.assertEqual(
+            client.requests,
+            [
+                (
+                    "/internal/posts/premium-relay/accounts",
+                    {"run_date": "2026-08-12"},
+                    False,
+                )
+            ],
+        )
+
+        for override in (
+            {"long_video_publish_eligible": False},
+            {"publish_eligible": 1},
+            {"protected": None},
+        ):
+            with self.subTest(override=override):
+                client = StubScheduleClient(
+                    [{"items": [{**eligible, **override}]}]
+                )
+                with self.assertRaises(SidecarError):
+                    client.premium_relay_accounts("2026-08-12")
+
     def test_media_download_retry_is_bounded_and_code_specific(self):
         attempts = []
 
@@ -637,6 +678,17 @@ class ScheduleRunnerTests(unittest.TestCase):
                 self.checks.extend(checks)
                 return {"updated_count": len(checks)}
 
+            def premium_relay_accounts(self, _run_date):
+                return [
+                    {
+                        "id": 9,
+                        "username": "premium",
+                        "x_user_id": "x9",
+                        "display_name": "Premium",
+                        "long_video_eligible": True,
+                    }
+                ]
+
         def selected(_connection, pool_items, **_kwargs):
             return [
                 {
@@ -698,11 +750,15 @@ class ScheduleRunnerTests(unittest.TestCase):
             {
                 "id": 10,
                 "username": "standard",
+                "x_user_id": "x10",
+                "display_name": "Standard",
                 "long_video_eligible": False,
             },
             {
                 "id": 9,
                 "username": "premium",
+                "x_user_id": "x9",
+                "display_name": "Premium",
                 "long_video_eligible": True,
             },
         ]
@@ -727,15 +783,17 @@ class ScheduleRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             [(item["account_id"], item["content_id"]) for item in planned],
-            [(10, "SHORT"), (9, "LONG")],
+            [(10, "LONG"), (9, "SHORT")],
         )
+        self.assertEqual(planned[0]["delivery_mode"], "premium_relay_repost")
+        self.assertEqual(planned[0]["relay_account_id"], 9)
         self.assertEqual(
             preflight_calls,
-            [("SHORT", 9), ("LONG", 10), ("LONG", 9), ("SHORT", 10)],
+            [("LONG", 10), ("LONG", 9), ("SHORT", 9)],
         )
         self.assertEqual(sidecar.checks, [])
 
-    def test_unassigned_long_drama_skips_when_only_premium_is_owned(self):
+    def test_owned_premium_account_can_relay_for_another_target(self):
         class Connection:
             def close(self):
                 return None
@@ -798,6 +856,17 @@ class ScheduleRunnerTests(unittest.TestCase):
                 self.checks.extend(checks)
                 return {"updated_count": len(checks)}
 
+            def premium_relay_accounts(self, _run_date):
+                return [
+                    {
+                        "id": 9,
+                        "username": "owned-premium",
+                        "x_user_id": "x9",
+                        "display_name": "Owned Premium",
+                        "long_video_eligible": True,
+                    }
+                ]
+
         def selected(_connection, pool_items, **_kwargs):
             return [
                 {
@@ -845,7 +914,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             **_kwargs,
         ):
             preflight_calls.append((candidate["content_id"], account["id"]))
-            if candidate["content_id"] == "LONG":
+            if candidate["content_id"] == "LONG" and account["id"] == 10:
                 raise CandidatePreflightError(
                     "Videos longer than 140 seconds require Premium",
                     code="x_long_video_requires_premium",
@@ -860,11 +929,15 @@ class ScheduleRunnerTests(unittest.TestCase):
             {
                 "id": 10,
                 "username": "standard",
+                "x_user_id": "x10",
+                "display_name": "Standard",
                 "long_video_eligible": False,
             },
             {
                 "id": 9,
                 "username": "owned-premium",
+                "x_user_id": "x9",
+                "display_name": "Owned Premium",
                 "long_video_eligible": True,
             },
         ]
@@ -887,19 +960,17 @@ class ScheduleRunnerTests(unittest.TestCase):
                 timestamp=1,
             )
 
-        self.assertEqual(sidecar.available_calls, 2)
-        self.assertEqual(sidecar.verify_calls, [10, 9])
-        self.assertEqual(
-            [(item["pool_item_id"], item["error_code"]) for item in sidecar.checks],
-            [(138, "x_long_video_requires_premium")],
-        )
+        self.assertEqual(sidecar.available_calls, 1)
+        self.assertEqual(sidecar.verify_calls, [])
+        self.assertEqual(sidecar.checks, [])
         self.assertEqual(
             [(item["account_id"], item["content_id"]) for item in planned],
-            [(10, "SHORT"), (9, "OWNER")],
+            [(10, "LONG"), (9, "OWNER")],
         )
+        self.assertEqual(planned[0]["relay_account_id"], 9)
         self.assertEqual(
             preflight_calls,
-            [("LONG", 10), ("SHORT", 10), ("OWNER", 9)],
+            [("LONG", 10), ("LONG", 9), ("OWNER", 9)],
         )
 
     def test_plan_query_requires_exact_frozen_identity_and_account_order(self):

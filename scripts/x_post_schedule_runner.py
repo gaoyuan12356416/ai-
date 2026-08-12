@@ -76,6 +76,9 @@ DEFAULT_PLAN_PATH = "/internal/posts/schedule-plan"
 DEFAULT_FAILURE_PATH = "/internal/posts/schedule-runs/record-failure"
 DEFAULT_DRAMA_POOL_PATH = "/internal/posts/drama-pool/available"
 DEFAULT_DRAMA_CHECK_PATH = "/internal/posts/drama-pool/check"
+DEFAULT_PREMIUM_RELAY_ACCOUNTS_PATH = (
+    "/internal/posts/premium-relay/accounts"
+)
 DEFAULT_MATERIAL_POOL_PATH = "/internal/posts/material-pool/available"
 DEFAULT_MATERIAL_CHECK_PATH = "/internal/posts/material-pool/check"
 DEFAULT_STORAGE_PREFLIGHT_PATH = "/internal/posts/storage/preflight"
@@ -630,6 +633,11 @@ class ScheduleSidecarClient(SidecarClient):
             rank = raw.get("candidate_rank")
             status = raw.get("status")
             unknown = raw.get("unknown_outcome", False)
+            delivery_mode = str(
+                raw.get("delivery_mode", "direct") or "direct"
+            )
+            relay_account_id = raw.get("relay_account_id", 0)
+            repost_status = str(raw.get("repost_status", "") or "")
             if (
                 not isinstance(queue_id, int)
                 or isinstance(queue_id, bool)
@@ -645,6 +653,30 @@ class ScheduleSidecarClient(SidecarClient):
                 or rank <= previous_rank
                 or status not in _QUEUE_STATUSES
                 or not isinstance(unknown, bool)
+                or delivery_mode
+                not in {"direct", "premium_relay_repost"}
+                or not isinstance(relay_account_id, int)
+                or isinstance(relay_account_id, bool)
+                or (
+                    delivery_mode == "direct"
+                    and (relay_account_id != 0 or repost_status)
+                )
+                or (
+                    delivery_mode == "premium_relay_repost"
+                    and (
+                        relay_account_id <= 0
+                        or repost_status
+                        not in {
+                            "reserved",
+                            "source_publishing",
+                            "source_published",
+                            "reposting",
+                            "reposted",
+                            "failed",
+                            "needs_review",
+                        }
+                    )
+                )
             ):
                 raise SidecarError(
                     "x_post_schedule_plan_invalid_response",
@@ -653,15 +685,22 @@ class ScheduleSidecarClient(SidecarClient):
             seen_ids.add(queue_id)
             seen_accounts.add(account_id)
             previous_rank = rank
-            queues.append(
-                {
-                    "id": queue_id,
-                    "account_id": account_id,
-                    "candidate_rank": rank,
-                    "status": status,
-                    "unknown_outcome": unknown,
-                }
-            )
+            normalized = {
+                "id": queue_id,
+                "account_id": account_id,
+                "candidate_rank": rank,
+                "status": status,
+                "unknown_outcome": unknown,
+            }
+            if delivery_mode == "premium_relay_repost":
+                normalized.update(
+                    {
+                        "delivery_mode": delivery_mode,
+                        "relay_account_id": relay_account_id,
+                        "repost_status": repost_status,
+                    }
+                )
+            queues.append(normalized)
         return queues
 
     def create_schedule_plan(self, path, payload):
@@ -741,6 +780,55 @@ class ScheduleSidecarClient(SidecarClient):
             )
         # The selector performs the full identity/FIFO validation.
         return [dict(item) if isinstance(item, dict) else item for item in items]
+
+    def premium_relay_accounts(self, run_date):
+        result = self.post(
+            DEFAULT_PREMIUM_RELAY_ACCOUNTS_PATH,
+            {"run_date": str(run_date)},
+        )
+        items = result.get("items") if isinstance(result, dict) else None
+        if not isinstance(items, list) or len(items) > MAX_DAILY_ACCOUNTS:
+            raise SidecarError(
+                "x_post_premium_relay_accounts_invalid_response",
+                "Premium relay account response is invalid",
+            )
+        normalized = []
+        seen = set()
+        previous_load = -1
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise SidecarError(
+                    "x_post_premium_relay_accounts_invalid_response",
+                    "Premium relay account response is invalid",
+                )
+            account = _safe_account(raw)
+            account["publish_eligible"] = raw.get("publish_eligible") is True
+            account["long_video_publish_eligible"] = (
+                raw.get("long_video_publish_eligible") is True
+            )
+            account["protected"] = raw.get("protected") is True
+            account_id = int(account["id"])
+            load = raw.get("relay_assignment_count")
+            if (
+                account_id in seen
+                or not isinstance(load, int)
+                or isinstance(load, bool)
+                or load < previous_load
+                or not account.get("publish_eligible")
+                or not account.get("long_video_eligible")
+                or not account.get("long_video_publish_eligible")
+                or raw.get("protected") is not False
+            ):
+                raise SidecarError(
+                    "x_post_premium_relay_accounts_invalid_response",
+                    "Premium relay account response is invalid",
+                )
+            account["relay_assignment_count"] = load
+            account["protected"] = False
+            normalized.append(account)
+            seen.add(account_id)
+            previous_load = load
+        return normalized
 
     def record_drama_pool_checks(
         self,
@@ -1043,6 +1131,7 @@ def _drama_candidates(
         rejected_ids = set()
         preflight_cache = {}
         refresh_accounts = False
+        relay_accounts = None
 
         def preflight_one(candidate, account, rank, temporary):
             cache_key = (
@@ -1152,31 +1241,8 @@ def _drama_candidates(
                     )
 
                 planned_by_index = {}
-                routed_candidate_by_index = {}
-                swapped_premium_indexes = set()
                 rejected = False
-                # Preflight token-confirmed Premium slots first.  This lets a
-                # later unassigned long episode safely trade places with a
-                # short unassigned episode without changing any owned drama's
-                # durable account affinity.
-                processing_indexes = sorted(
-                    range(len(accounts)),
-                    key=lambda index: (
-                        0
-                        if int(
-                            candidates[index].get(
-                                "assigned_account_id", 0
-                            )
-                            or 0
-                        )
-                        == 0
-                        and bool(
-                            accounts[index].get("long_video_eligible")
-                        )
-                        else 1,
-                        index,
-                    ),
-                )
+                processing_indexes = range(len(accounts))
 
                 def normalize_item(item, candidate):
                     normalized = dict(item)
@@ -1192,6 +1258,30 @@ def _drama_candidates(
                     ]
                     normalized["source_type"] = "drama"
                     normalized["source_date"] = source_date
+                    return normalized
+
+                def normalize_relay_item(
+                    item, candidate, target_account, relay_account
+                ):
+                    normalized = normalize_item(item, candidate)
+                    normalized.update(
+                        {
+                            "delivery_mode": "premium_relay_repost",
+                            "relay_account_id": int(relay_account["id"]),
+                            "relay_account_username": str(
+                                relay_account["username"]
+                            ),
+                            "account_id": int(target_account["id"]),
+                            "account_username": str(
+                                target_account["username"]
+                            ),
+                            "page_name": str(
+                                target_account.get("display_name", "")
+                                or target_account["username"]
+                            ),
+                            "page_id": str(target_account["x_user_id"]),
+                        }
+                    )
                     return normalized
 
                 for index in processing_indexes:
@@ -1235,50 +1325,38 @@ def _drama_candidates(
                             candidate["episode_key"],
                             exc,
                         )
-                        premium_index = None
                         if (
                             code == "x_long_video_requires_premium"
-                            and int(
-                                candidate.get("assigned_account_id") or 0
-                            )
-                            == 0
                             and not account.get("long_video_eligible")
                         ):
-                            premium_index = next(
+                            if relay_accounts is None:
+                                relay_accounts = sidecar.premium_relay_accounts(
+                                    datetime.fromtimestamp(
+                                        timestamp, BEIJING_TZ
+                                    ).date().isoformat()
+                                )
+                            relay_account = next(
                                 (
-                                    candidate_index
-                                    for candidate_index in processing_indexes
-                                    if candidate_index in planned_by_index
-                                    and candidate_index
-                                    not in swapped_premium_indexes
-                                    and accounts[candidate_index].get(
-                                        "long_video_eligible"
-                                    )
-                                    and int(
-                                        routed_candidate_by_index[
-                                            candidate_index
-                                        ].get("assigned_account_id")
-                                        or 0
-                                    )
-                                    == 0
+                                    relay
+                                    for relay in relay_accounts
+                                    if int(relay["id"])
+                                    != int(account["id"])
                                 ),
                                 None,
                             )
-                        if premium_index is not None:
-                            premium_account = accounts[premium_index]
-                            donor_candidate = routed_candidate_by_index[
-                                premium_index
-                            ]
+                            if relay_account is None:
+                                raise ScheduleRunError(
+                                    "no currently eligible public Premium relay account is available",
+                                    "x_post_premium_relay_unavailable",
+                                    drama_pool_item_id=candidate[
+                                        "drama_pool_item_id"
+                                    ],
+                                    content_id=candidate["content_id"],
+                                ) from None
                             try:
-                                premium_item = preflight_one(
+                                relay_item = preflight_one(
                                     candidate,
-                                    premium_account,
-                                    premium_index + 1,
-                                    temporary,
-                                )
-                                standard_item = preflight_one(
-                                    donor_candidate,
-                                    account,
+                                    relay_account,
                                     rank,
                                     temporary,
                                 )
@@ -1291,7 +1369,7 @@ def _drama_candidates(
                                 ValueError,
                             ) as route_exc:
                                 raise ScheduleRunError(
-                                    "unassigned Premium drama routing failed: %s"
+                                    "Premium relay drama preflight failed: %s"
                                     % route_exc,
                                     str(
                                         getattr(
@@ -1301,17 +1379,12 @@ def _drama_candidates(
                                         )
                                     ),
                                 ) from None
-                            planned_by_index[premium_index] = normalize_item(
-                                premium_item,
+                            planned_by_index[index] = normalize_relay_item(
+                                relay_item,
                                 candidate,
+                                account,
+                                relay_account,
                             )
-                            routed_candidate_by_index[premium_index] = candidate
-                            planned_by_index[index] = normalize_item(
-                                standard_item,
-                                donor_candidate,
-                            )
-                            routed_candidate_by_index[index] = donor_candidate
-                            swapped_premium_indexes.add(premium_index)
                             continue
                         if code not in _DRAMA_DETERMINISTIC_REJECTION_CODES:
                             raise ScheduleRunError(
@@ -1340,7 +1413,6 @@ def _drama_candidates(
                         rejected = True
                         break
                     planned_by_index[index] = normalize_item(item, candidate)
-                    routed_candidate_by_index[index] = candidate
                 if rejected:
                     continue
                 if len(planned_by_index) != len(accounts):
@@ -1383,7 +1455,14 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
             "account_id": queue["account_id"],
             "status": queue["status"],
         }
-        if queue.get("unknown_outcome") or queue["status"] == "publishing":
+        relay_repost_resume = bool(
+            queue.get("delivery_mode") == "premium_relay_repost"
+            and queue.get("repost_status") == "source_published"
+            and not queue.get("unknown_outcome")
+        )
+        if queue.get("unknown_outcome") or (
+            queue["status"] == "publishing" and not relay_repost_resume
+        ):
             entry.update(
                 {
                     "status": "needs_review",

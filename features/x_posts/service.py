@@ -186,6 +186,9 @@ QUEUE_LEDGER_FIELDS = (
     "run_date",
     "source_type",
     "body_template",
+    "delivery_mode",
+    "relay_account_id",
+    "relay_account_username",
     "material_key",
     "episode_key",
     "drama_replay_generation",
@@ -212,6 +215,11 @@ QUEUE_LEDGER_FIELDS = (
     "dangerous_tag_count",
 )
 
+DIRECT_DELIVERY_MODE = "direct"
+PREMIUM_RELAY_REPOST_MODE = "premium_relay_repost"
+DELIVERY_MODES = frozenset(
+    {DIRECT_DELIVERY_MODE, PREMIUM_RELAY_REPOST_MODE}
+)
 COMPLIANCE_FIELD_ALIASES = {
     "facebook_violation_count": ("facebook_violation_count", "facebook_violations"),
     "tiktok_violation_count": ("tiktok_violation_count", "tiktok_violations"),
@@ -1182,6 +1190,40 @@ def ensure_storage(db_path):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS x_post_repost_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    queue_id INTEGER NOT NULL UNIQUE,
+                    run_date TEXT NOT NULL,
+                    target_account_id INTEGER NOT NULL
+                        CHECK(target_account_id>0),
+                    relay_account_id INTEGER NOT NULL
+                        CHECK(relay_account_id>0),
+                    source_post_id TEXT NOT NULL DEFAULT '',
+                    source_post_url TEXT NOT NULL DEFAULT '',
+                    repost_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'reserved'
+                        CHECK(status IN (
+                            'reserved','source_publishing','source_published',
+                            'reposting','reposted','failed','needs_review'
+                        )),
+                    source_attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(source_attempt_count>=0),
+                    repost_attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(repost_attempt_count>=0),
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    unknown_outcome INTEGER NOT NULL DEFAULT 0
+                        CHECK(unknown_outcome IN (0,1)),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source_published_at TEXT NOT NULL DEFAULT '',
+                    reposted_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(queue_id) REFERENCES x_post_queue(id)
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS x_post_schedule_config (
                     source_type TEXT PRIMARY KEY
                         CHECK(source_type IN ('material','drama')),
@@ -1534,6 +1576,15 @@ def ensure_storage(db_path):
                 "run_date": "TEXT NOT NULL DEFAULT ''",
                 "source_type": "TEXT NOT NULL DEFAULT 'material'",
                 "body_template": "TEXT NOT NULL DEFAULT ''",
+                "delivery_mode": (
+                    "TEXT NOT NULL DEFAULT 'direct' "
+                    "CHECK(delivery_mode IN "
+                    "('direct','premium_relay_repost'))"
+                ),
+                "relay_account_id": (
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(relay_account_id>=0)"
+                ),
+                "relay_account_username": "TEXT NOT NULL DEFAULT ''",
                 "material_key": "TEXT NOT NULL DEFAULT ''",
                 "episode_key": "TEXT NOT NULL DEFAULT ''",
                 "drama_replay_generation": (
@@ -1565,6 +1616,21 @@ def ensure_storage(db_path):
             for name, definition in additive_columns.items():
                 if name not in queue_columns:
                     conn.execute("ALTER TABLE x_post_queue ADD COLUMN %s %s" % (name, definition))
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_x_post_repost_relay_day "
+                "ON x_post_repost_ledger(run_date,relay_account_id,status,id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_x_post_repost_relay_load "
+                "ON x_post_repost_ledger(relay_account_id,id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "ux_x_post_repost_source_target "
+                "ON x_post_repost_ledger(source_post_id,target_account_id) "
+                "WHERE source_post_id<>''"
+            )
 
             manual_run_columns = {
                 row[1]
@@ -2240,6 +2306,133 @@ def ensure_storage(db_path):
                 "DROP TRIGGER IF EXISTS "
                 "trg_x_post_queue_drama_assignment_source_delete"
             )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_relay_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_relay_insert
+                BEFORE INSERT ON x_post_queue
+                WHEN (
+                    NEW.delivery_mode='direct'
+                    AND (
+                        NEW.relay_account_id<>0
+                        OR NEW.relay_account_username<>''
+                    )
+                ) OR (
+                    NEW.delivery_mode='premium_relay_repost'
+                    AND (
+                        NEW.source_type<>'drama'
+                        OR NEW.preflight_duration<=140
+                        OR NEW.relay_account_id<=0
+                        OR NEW.relay_account_id=NEW.account_id
+                        OR NEW.relay_account_username=''
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue relay binding invalid');
+                END
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                    x_post_drama_capability_block_recovery (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_item_id INTEGER NOT NULL UNIQUE,
+                    previous_status TEXT NOT NULL
+                        CHECK(previous_status='needs_review'),
+                    previous_error_code TEXT NOT NULL
+                        CHECK(previous_error_code=
+                            'x_long_video_requires_premium'),
+                    recovery_reason TEXT NOT NULL
+                        CHECK(recovery_reason=
+                            'premium_relay_repost_zero_write_migration_v1'),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(pool_item_id)
+                        REFERENCES x_post_drama_pool(id)
+                )
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_queue_relay_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_queue_relay_update
+                BEFORE UPDATE OF delivery_mode,relay_account_id,
+                    relay_account_username,source_type,preflight_duration,
+                    account_id ON x_post_queue
+                WHEN (
+                    NEW.delivery_mode='direct'
+                    AND (
+                        NEW.relay_account_id<>0
+                        OR NEW.relay_account_username<>''
+                    )
+                ) OR (
+                    NEW.delivery_mode='premium_relay_repost'
+                    AND (
+                        NEW.source_type<>'drama'
+                        OR NEW.preflight_duration<=140
+                        OR NEW.relay_account_id<=0
+                        OR NEW.relay_account_id=NEW.account_id
+                        OR NEW.relay_account_username=''
+                    )
+                ) OR (
+                    EXISTS(
+                        SELECT 1 FROM x_post_repost_ledger r
+                        WHERE r.queue_id=OLD.id
+                          AND r.source_attempt_count>0
+                    )
+                    AND (
+                        NEW.delivery_mode<>OLD.delivery_mode
+                        OR NEW.relay_account_id<>OLD.relay_account_id
+                        OR NEW.relay_account_username<>
+                            OLD.relay_account_username
+                        OR NEW.account_id<>OLD.account_id
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_queue relay binding invalid');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_repost_binding_insert")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_repost_binding_insert
+                BEFORE INSERT ON x_post_repost_ledger
+                WHEN NOT EXISTS(
+                    SELECT 1 FROM x_post_queue q
+                    WHERE q.id=NEW.queue_id
+                      AND q.delivery_mode='premium_relay_repost'
+                      AND q.run_date=NEW.run_date
+                      AND q.account_id=NEW.target_account_id
+                      AND q.relay_account_id=NEW.relay_account_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_repost binding invalid');
+                END
+                """
+            )
+            conn.execute("DROP TRIGGER IF EXISTS trg_x_post_repost_binding_update")
+            conn.execute(
+                """
+                CREATE TRIGGER trg_x_post_repost_binding_update
+                BEFORE UPDATE OF queue_id,run_date,target_account_id,
+                    relay_account_id ON x_post_repost_ledger
+                WHEN NOT EXISTS(
+                    SELECT 1 FROM x_post_queue q
+                    WHERE q.id=NEW.queue_id
+                      AND q.delivery_mode='premium_relay_repost'
+                      AND q.run_date=NEW.run_date
+                      AND q.account_id=NEW.target_account_id
+                      AND q.relay_account_id=NEW.relay_account_id
+                ) OR (
+                    OLD.source_attempt_count>0
+                    AND NEW.relay_account_id<>OLD.relay_account_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'x_post_repost binding invalid');
+                END
+                """
+            )
             conn.execute(
                 """
                 CREATE TRIGGER
@@ -2571,6 +2764,44 @@ def ensure_storage(db_path):
                     SELECT RAISE(ABORT, 'x_post_drama_pool item occupied');
                 END
                 """
+            )
+            recovery_timestamp = utc_now()
+            conn.execute(
+                "INSERT OR IGNORE INTO "
+                "x_post_drama_capability_block_recovery("
+                "pool_item_id,previous_status,previous_error_code,"
+                "recovery_reason,created_at) "
+                "SELECT p.id,p.status,p.last_error_code,"
+                "'premium_relay_repost_zero_write_migration_v1',? "
+                "FROM x_post_drama_pool p "
+                "WHERE p.status='needs_review' "
+                "AND p.last_error_code='x_long_video_requires_premium' "
+                "AND p.next_sub_number<=p.free_episode_count "
+                "AND NOT EXISTS("
+                "SELECT 1 FROM x_post_queue q "
+                "WHERE q.drama_pool_item_id=p.id "
+                "AND q.drama_replay_generation=p.replay_generation "
+                "AND q.episode_number=p.next_sub_number)",
+                (recovery_timestamp,),
+            )
+            conn.execute(
+                "UPDATE x_post_drama_pool SET "
+                "status=CASE WHEN assigned_account_id>0 "
+                "THEN 'active' ELSE 'pending' END,"
+                "last_checked_at=?,last_error_code='',"
+                "last_error_message='',updated_at=? "
+                "WHERE status='needs_review' "
+                "AND last_error_code='x_long_video_requires_premium' "
+                "AND next_sub_number<=free_episode_count "
+                "AND id IN (SELECT pool_item_id FROM "
+                "x_post_drama_capability_block_recovery) "
+                "AND NOT EXISTS("
+                "SELECT 1 FROM x_post_queue q "
+                "WHERE q.drama_pool_item_id=x_post_drama_pool.id "
+                "AND q.drama_replay_generation="
+                "x_post_drama_pool.replay_generation "
+                "AND q.episode_number=x_post_drama_pool.next_sub_number)",
+                (recovery_timestamp, recovery_timestamp),
             )
             conn.commit()
         except Exception:
@@ -3901,6 +4132,29 @@ class XPostStore:
             payload.get("body_template"),
             source_type,
         )
+        delivery_mode = str(
+            payload.get("delivery_mode", DIRECT_DELIVERY_MODE) or ""
+        ).strip().lower()
+        if delivery_mode not in DELIVERY_MODES:
+            raise XPostError(
+                "invalid_request", "delivery_mode is invalid", 400
+            )
+        result["delivery_mode"] = delivery_mode
+        result["relay_account_id"] = _nonnegative_int(
+            payload.get("relay_account_id", 0),
+            "relay_account_id",
+            0,
+        )
+        relay_username = str(
+            payload.get("relay_account_username", "") or ""
+        ).strip().lstrip("@")
+        if relay_username and not re.fullmatch(
+            r"[A-Za-z0-9_]{1,50}", relay_username
+        ):
+            raise XPostError(
+                "invalid_request", "relay_account_username is invalid", 400
+            )
+        result["relay_account_username"] = relay_username
         if source_type == "material":
             material_key = normalize_material_key(result["material_id"])
             supplied_material_key = payload.get("material_key")
@@ -4064,6 +4318,26 @@ class XPostStore:
         result["preflight_duration"] = _nonnegative_float(
             payload.get("preflight_duration"), "preflight_duration", 0
         )
+        if delivery_mode == DIRECT_DELIVERY_MODE:
+            if result["relay_account_id"] or relay_username:
+                raise XPostError(
+                    "invalid_request",
+                    "direct delivery cannot contain a relay account",
+                    400,
+                )
+        elif (
+            source_type != "drama"
+            or result["preflight_duration"]
+            <= STANDARD_MAX_DURATION_SECONDS
+            or result["relay_account_id"] <= 0
+            or result["relay_account_id"] == result["account_id"]
+            or not relay_username
+        ):
+            raise XPostError(
+                "invalid_request",
+                "Premium relay delivery requires a long drama and a distinct relay account",
+                400,
+            )
         if preflight_sha256 and not re.fullmatch(r"[0-9a-f]{64}", preflight_sha256):
             raise XPostError("invalid_request", "preflight_sha256无效", 400)
         if require_compliance and (not preflight_sha256 or result["preflight_size"] <= 0):
@@ -4546,7 +4820,7 @@ class XPostStore:
             "CASE "
             "WHEN p.status='published' THEN 'published' "
             "WHEN q.id IS NOT NULL AND "
-            "(COALESCE(l.unknown_outcome,0)=1 OR l.status='post_creating') "
+            "(COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')) "
             "THEN 'needs_review' "
             "WHEN q.id IS NOT NULL AND COALESCE(l.status,q.status)='failed' "
             "THEN 'failed' "
@@ -5040,21 +5314,10 @@ class XPostStore:
         for row in unassigned_rows:
             if not remaining_accounts:
                 break
-            if str(row["last_error_code"] or "") in (
-                DRAMA_POOL_RETRYABLE_VALIDATION_CODES
-            ):
-                account_id = next(
-                    (
-                        value
-                        for value in remaining_accounts
-                        if value in premium_account_ids
-                    ),
-                    None,
-                )
-                if account_id is None:
-                    continue
-            else:
-                account_id = remaining_accounts[0]
+            # A prior long-video entitlement rejection no longer pins this
+            # drama to a Premium target. The target keeps normal FIFO affinity;
+            # a distinct Premium relay source is selected later if needed.
+            account_id = remaining_accounts[0]
             selected_by_account[account_id] = row
             remaining_accounts.remove(account_id)
         assignments = []
@@ -5119,6 +5382,59 @@ class XPostStore:
                 (limit,),
             ).fetchall()
             return [_row_dict(row) for row in rows]
+
+    def premium_relay_account_loads(self, run_date, account_ids):
+        """Return eligible relay accounts ordered by durable lifetime load."""
+        # Keep validating run_date because it is part of the internal route
+        # contract, but deliberately do not reset balancing at midnight.  A
+        # daily counter would repeatedly choose the lowest-id account when
+        # there is only one long-video assignment per day.
+        _date_value(run_date, "run_date")
+        account_ids = _schedule_account_ids(account_ids, allow_empty=True)
+        if not account_ids:
+            return []
+        placeholders = ",".join("?" for _item in account_ids)
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT relay_account_id,COUNT(*) AS assignment_count "
+                "FROM x_post_repost_ledger WHERE relay_account_id IN (%s) "
+                "GROUP BY relay_account_id"
+                % placeholders,
+                tuple(account_ids),
+            ).fetchall()
+            unresolved_rows = conn.execute(
+                "SELECT q.account_id,q.relay_account_id "
+                "FROM x_post_queue q JOIN x_post_publish_log l "
+                "ON l.queue_id=q.id WHERE "
+                "(COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('post_creating','repost_creating')) "
+                "AND (q.account_id IN (%s) OR q.relay_account_id IN (%s))"
+                % (placeholders, placeholders),
+                tuple(account_ids) + tuple(account_ids),
+            ).fetchall()
+        unresolved = set()
+        for row in unresolved_rows:
+            unresolved.add(int(row["account_id"] or 0))
+            unresolved.add(int(row["relay_account_id"] or 0))
+        counts = {
+            int(row["relay_account_id"]): int(row["assignment_count"])
+            for row in rows
+        }
+        account_ids = [
+            account_id
+            for account_id in account_ids
+            if account_id not in unresolved
+        ]
+        return [
+            {
+                "account_id": account_id,
+                "relay_assignment_count": counts.get(account_id, 0),
+            }
+            for account_id in sorted(
+                account_ids,
+                key=lambda value: (counts.get(value, 0), value),
+            )
+        ]
 
     def record_drama_pool_checks(self, checks, validate_only=False):
         if not isinstance(checks, list) or not checks or len(checks) > 100:
@@ -6147,7 +6463,7 @@ class XPostStore:
                 # is stopped for review instead of becoming an unparseable
                 # sidecar response or being published a second time.
                 "q.status AS status,"
-                "CASE WHEN l.status='post_creating' "
+                "CASE WHEN l.status IN ('post_creating','repost_creating') "
                 "OR COALESCE(l.unknown_outcome,0)=1 "
                 "THEN 1 ELSE 0 END AS unknown_outcome,"
                 "COALESCE(l.id,0) AS log_id,"
@@ -6516,7 +6832,7 @@ class XPostStore:
                 if interrupted:
                     unknown = bool(interrupted["unknown_outcome"]) or str(
                         interrupted["log_status"]
-                    ) == "post_creating"
+                    ) in {"post_creating", "repost_creating"}
                     status = "needs_review" if unknown else "stopped"
                     code = (
                         "x_post_unknown_outcome"
@@ -6622,7 +6938,7 @@ class XPostStore:
                 queue = queue_rows[0]
                 log_status = str(queue["log_status"] or "")
                 unknown = bool(queue["log_unknown_outcome"]) or (
-                    log_status == "post_creating"
+                    log_status in {"post_creating", "repost_creating"}
                 )
                 if unknown:
                     cursor = conn.execute(
@@ -7040,7 +7356,7 @@ class XPostStore:
                 "JOIN x_post_queue q ON q.id=l.queue_id "
                 "WHERE q.account_id IN (%s) "
                 "AND (COALESCE(l.unknown_outcome,0)=1 "
-                "OR l.status='post_creating') LIMIT 1"
+                "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
                 % account_placeholders,
                 tuple(account_ids),
             ).fetchone():
@@ -7144,6 +7460,9 @@ class XPostStore:
             "account_id",
             "candidate_rank",
             "episode_number",
+            "delivery_mode",
+            "relay_account_id",
+            "repost_status",
             "status",
             "unknown_outcome",
             "created_at",
@@ -7161,13 +7480,18 @@ class XPostStore:
                 conn.execute(
                     "SELECT q.id,q.schedule_run_id,q.source_type,q.run_date,"
                     "q.source_date,q.account_id,q.candidate_rank,"
-                    "q.episode_number,q.status,"
-                    "CASE WHEN l.status='post_creating' "
+                    "q.episode_number,q.delivery_mode,"
+                    "q.relay_account_id,COALESCE(r.status,'') AS repost_status,"
+                    "q.status,"
+                    "CASE WHEN l.status IN ('post_creating','repost_creating') "
                     "OR COALESCE(l.unknown_outcome,0)=1 "
+                    "OR COALESCE(r.unknown_outcome,0)=1 "
+                    "OR r.status IN ('reposting','needs_review') "
                     "THEN 1 ELSE 0 END AS unknown_outcome,"
                     "q.created_at,q.updated_at "
                     "FROM x_post_queue q "
                     "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                    "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
                     "WHERE q.schedule_run_id=? "
                     "ORDER BY q.candidate_rank,q.id",
                     (run["id"],),
@@ -7301,6 +7625,14 @@ class XPostStore:
 
             def mark_drama_pool_failure():
                 if bound_pool_item_id is None:
+                    return
+                if code in {
+                    "x_long_video_requires_premium",
+                    "x_post_premium_relay_unavailable",
+                }:
+                    # These are deterministic pre-X capability misses. They
+                    # remain retryable and must never poison the whole pool as
+                    # a possible unknown publish outcome.
                     return
                 has_history = bool(
                     conn.execute(
@@ -7906,7 +8238,7 @@ class XPostStore:
                 "JOIN x_post_queue q ON q.id=l.queue_id "
                 "WHERE q.account_id IN (%s) "
                 "AND (COALESCE(l.unknown_outcome,0)=1 "
-                "OR l.status='post_creating') LIMIT 1" % placeholders,
+                "OR l.status IN ('post_creating','repost_creating')) LIMIT 1" % placeholders,
                 tuple(account_ids),
             ).fetchone()
             conflict = conflict or unresolved is not None
@@ -8221,6 +8553,7 @@ class XPostStore:
         config_version,
         candidates,
         premium_account_ids=None,
+        premium_relay_accounts=None,
     ):
         source_type = _schedule_source_type(source_type)
         run_date = _date_value(run_date, "run_date")
@@ -8228,6 +8561,34 @@ class XPostStore:
         config_version = _positive_int(config_version, "config_version")
         if not isinstance(candidates, list):
             raise XPostError("invalid_request", "candidates必须是数组", 400)
+        if premium_relay_accounts is None:
+            premium_relay_accounts = []
+        if not isinstance(premium_relay_accounts, list):
+            raise XPostError(
+                "invalid_request", "premium_relay_accounts must be an array", 400
+            )
+        relay_options = []
+        relay_ids = set()
+        for raw in premium_relay_accounts:
+            if not isinstance(raw, dict):
+                raise XPostError(
+                    "invalid_request", "Premium relay account is invalid", 400
+                )
+            relay_id = _positive_int(raw.get("id"), "relay account id")
+            relay_username = str(
+                raw.get("username", "") or ""
+            ).strip().lstrip("@")
+            if (
+                relay_id in relay_ids
+                or not re.fullmatch(
+                    r"[A-Za-z0-9_]{1,50}", relay_username
+                )
+            ):
+                raise XPostError(
+                    "invalid_request", "Premium relay account is invalid", 400
+                )
+            relay_ids.add(relay_id)
+            relay_options.append((relay_id, relay_username))
         frozen = self.query_schedule_plan(
             source_type,
             run_date,
@@ -8495,7 +8856,7 @@ class XPostStore:
                 "JOIN x_post_queue q ON q.id=l.queue_id "
                 "WHERE q.account_id IN (%s) "
                 "AND (COALESCE(l.unknown_outcome,0)=1 "
-                "OR l.status='post_creating') LIMIT 1"
+                "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
                 % placeholders_accounts,
                 tuple(account_ids),
             ).fetchone()
@@ -8666,6 +9027,67 @@ class XPostStore:
                             409,
                         )
 
+            relay_values = [
+                values
+                for values in prepared
+                if values["delivery_mode"] == PREMIUM_RELAY_REPOST_MODE
+            ]
+            if relay_values:
+                eligible_options = [
+                    option
+                    for option in relay_options
+                    if all(
+                        option[0] != int(values["account_id"])
+                        for values in relay_values
+                    )
+                ]
+                if not eligible_options:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_premium_relay_unavailable",
+                        "No currently eligible Premium relay account is available",
+                        409,
+                    )
+                relay_placeholders = ",".join(
+                    "?" for _option in eligible_options
+                )
+                relay_counts = {
+                    account_id: 0
+                    for account_id, _username in eligible_options
+                }
+                for row in conn.execute(
+                    "SELECT relay_account_id,COUNT(*) AS assignment_count "
+                    "FROM x_post_repost_ledger WHERE relay_account_id IN (%s) "
+                    "GROUP BY relay_account_id"
+                    % relay_placeholders,
+                    tuple(
+                        account_id
+                        for account_id, _username in eligible_options
+                    ),
+                ).fetchall():
+                    relay_counts[int(row["relay_account_id"])] = int(
+                        row["assignment_count"]
+                    )
+                username_by_id = dict(eligible_options)
+                for values in relay_values:
+                    selectable = [
+                        account_id
+                        for account_id, _username in eligible_options
+                        if account_id != int(values["account_id"])
+                    ]
+                    relay_account_id = min(
+                        selectable,
+                        key=lambda account_id: (
+                            relay_counts[account_id],
+                            account_id,
+                        ),
+                    )
+                    values["relay_account_id"] = relay_account_id
+                    values["relay_account_username"] = username_by_id[
+                        relay_account_id
+                    ]
+                    relay_counts[relay_account_id] += 1
+
             if schedule_run_id is None:
                 cursor = conn.execute(
                     "INSERT INTO x_post_schedule_run("
@@ -8726,6 +9148,24 @@ class XPostStore:
                         + (timestamp, timestamp),
                     )
                     queue_ids.append(int(cursor.lastrowid))
+                    if (
+                        values["delivery_mode"]
+                        == PREMIUM_RELAY_REPOST_MODE
+                    ):
+                        conn.execute(
+                            "INSERT INTO x_post_repost_ledger("
+                            "queue_id,run_date,target_account_id,"
+                            "relay_account_id,status,created_at,updated_at"
+                            ") VALUES(?,?,?,?,'reserved',?,?)",
+                            (
+                                int(cursor.lastrowid),
+                                run_date,
+                                int(values["account_id"]),
+                                int(values["relay_account_id"]),
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
                     if source_type == "material":
                         conn.execute(
                             "UPDATE x_post_material_pool SET "
@@ -9810,10 +10250,358 @@ class XPostStore:
     def get_queue(self, queue_id):
         queue_id = _positive_int(queue_id, "queue_id")
         with contextlib.closing(_connect(self.db_path)) as conn:
-            row = conn.execute("SELECT * FROM x_post_queue WHERE id=?", (queue_id,)).fetchone()
+            row = conn.execute(
+                "SELECT q.*,COALESCE(r.status,'') AS repost_status "
+                "FROM x_post_queue q LEFT JOIN x_post_repost_ledger r "
+                "ON r.queue_id=q.id WHERE q.id=?",
+                (queue_id,),
+            ).fetchone()
         if not row:
             raise XPostError("x_post_queue_not_found", "发布队列记录不存在", 404)
         return _row_dict(row)
+
+    def get_repost_ledger(self, queue_id):
+        queue_id = _positive_int(queue_id, "queue_id")
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT * FROM x_post_repost_ledger WHERE queue_id=?",
+                (queue_id,),
+            ).fetchone()
+        if not row:
+            raise XPostError(
+                "x_post_repost_ledger_not_found",
+                "X repost ledger was not found",
+                404,
+            )
+        return _row_dict(row)
+
+    @staticmethod
+    def _assert_relay_queue_binding(conn, queue):
+        if (
+            not queue
+            or str(queue["delivery_mode"] or "")
+            != PREMIUM_RELAY_REPOST_MODE
+        ):
+            raise XPostError(
+                "x_post_relay_binding_conflict",
+                "Queue is not a Premium relay delivery",
+                409,
+            )
+        ledger = conn.execute(
+            "SELECT * FROM x_post_repost_ledger WHERE queue_id=?",
+            (queue["id"],),
+        ).fetchone()
+        if (
+            not ledger
+            or int(ledger["target_account_id"])
+            != int(queue["account_id"])
+            or int(ledger["relay_account_id"])
+            != int(queue["relay_account_id"])
+            or int(queue["relay_account_id"] or 0) <= 0
+            or int(queue["relay_account_id"]) == int(queue["account_id"])
+        ):
+            raise XPostError(
+                "x_post_relay_binding_conflict",
+                "Premium relay queue and ledger do not match",
+                409,
+            )
+        return ledger
+
+    def reassign_premium_relay(self, queue_id, eligible_accounts):
+        queue_id = _positive_int(queue_id, "queue_id")
+        if not isinstance(eligible_accounts, list):
+            raise XPostError("invalid_request", "eligible_accounts is invalid", 400)
+        options = []
+        seen = set()
+        for raw in eligible_accounts:
+            if not isinstance(raw, dict):
+                raise XPostError("invalid_request", "eligible account is invalid", 400)
+            account_id = _positive_int(raw.get("id"), "relay account id")
+            username = str(raw.get("username", "") or "").strip().lstrip("@")
+            if account_id in seen or not re.fullmatch(r"[A-Za-z0-9_]{1,50}", username):
+                raise XPostError("invalid_request", "eligible account is invalid", 400)
+            seen.add(account_id)
+            options.append((account_id, username))
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?", (queue_id,)
+            ).fetchone()
+            ledger = self._assert_relay_queue_binding(conn, queue)
+            log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                (queue_id,),
+            ).fetchone()
+            if (
+                str(ledger["status"]) != "reserved"
+                or int(ledger["source_attempt_count"] or 0) != 0
+                or str(queue["status"]) not in {"queued", "reserved"}
+                or (
+                    log
+                    and (
+                        str(log["status"]) != "reserved"
+                        or int(log["attempt_count"] or 0) != 0
+                    )
+                )
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_relay_reassignment_fenced",
+                    "Premium relay source can no longer be reassigned",
+                    409,
+                )
+            options = [
+                option
+                for option in options
+                if option[0] != int(queue["account_id"])
+            ]
+            if not options:
+                conn.rollback()
+                raise XPostError(
+                    "x_post_premium_relay_unavailable",
+                    "No currently eligible Premium relay account is available",
+                    409,
+                )
+            placeholders = ",".join("?" for _item in options)
+            counts = {account_id: 0 for account_id, _username in options}
+            for row in conn.execute(
+                "SELECT relay_account_id,COUNT(*) AS assignment_count "
+                "FROM x_post_repost_ledger WHERE id<>? "
+                "AND relay_account_id IN (%s) GROUP BY relay_account_id"
+                % placeholders,
+                (ledger["id"],)
+                + tuple(account_id for account_id, _username in options),
+            ).fetchall():
+                counts[int(row["relay_account_id"])] = int(
+                    row["assignment_count"]
+                )
+            selected_id, selected_username = min(
+                options,
+                key=lambda option: (counts[option[0]], option[0]),
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET relay_account_id=?,"
+                "relay_account_username=?,updated_at=? WHERE id=?",
+                (selected_id, selected_username, timestamp, queue_id),
+            )
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET relay_account_id=?,"
+                "updated_at=? WHERE id=?",
+                (selected_id, timestamp, ledger["id"]),
+            )
+            conn.commit()
+        return self.get_queue(queue_id)
+
+    def mark_relay_source_published(
+        self, log_id, media_id, post_id, post_url
+    ):
+        log_id = _positive_int(log_id, "log_id")
+        media_id = _clean_token(media_id, "media id", 128)
+        post_id = _clean_token(post_id, "post id", 128)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE id=?", (log_id,)
+            ).fetchone()
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (log["queue_id"],) if log else (0,),
+            ).fetchone()
+            ledger = self._assert_relay_queue_binding(conn, queue)
+            if str(log["status"]) == "source_published":
+                if str(log["x_post_id"]) != post_id:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_log_conflict", "Relay source Post differs", 409
+                    )
+                conn.commit()
+                return _row_dict(log)
+            if (
+                str(log["status"]) != "post_creating"
+                or str(ledger["status"]) != "source_publishing"
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_state_conflict", "Relay source state conflicts", 409
+                )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='source_published',"
+                "x_media_id=?,x_post_id=?,x_post_url=?,published_at=?,"
+                "error_code='',error_message='',unknown_outcome=0,updated_at=? "
+                "WHERE id=?",
+                (media_id, post_id, str(post_url), timestamp, timestamp, log_id),
+            )
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET status='source_published',"
+                "source_post_id=?,source_post_url=?,source_published_at=?,"
+                "error_code='',error_message='',unknown_outcome=0,updated_at=? "
+                "WHERE id=?",
+                (post_id, str(post_url), timestamp, timestamp, ledger["id"]),
+            )
+            self._sync_run(conn, queue["id"], timestamp)
+            conn.commit()
+        return self.get_log(log_id)
+
+    def mark_reposting(self, queue_id):
+        queue_id = _positive_int(queue_id, "queue_id")
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?", (queue_id,)
+            ).fetchone()
+            ledger = self._assert_relay_queue_binding(conn, queue)
+            log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                (queue_id,),
+            ).fetchone()
+            if str(ledger["status"]) == "reposted":
+                conn.commit()
+                return _row_dict(ledger)
+            if (
+                not log
+                or str(log["status"]) != "source_published"
+                or str(ledger["status"]) != "source_published"
+                or not str(ledger["source_post_id"] or "")
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_repost_state_conflict",
+                    "Relay source is not ready for Repost",
+                    409,
+                )
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET status='reposting',"
+                "repost_attempt_count=repost_attempt_count+1,updated_at=? "
+                "WHERE id=?",
+                (timestamp, ledger["id"]),
+            )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='repost_creating',"
+                "updated_at=? WHERE id=?",
+                (timestamp, log["id"]),
+            )
+            self._sync_run(conn, queue_id, timestamp)
+            conn.commit()
+        return self.get_repost_ledger(queue_id)
+
+    def mark_reposted(self, queue_id, repost_id=""):
+        queue_id = _positive_int(queue_id, "queue_id")
+        repost_id = str(repost_id or "").strip()
+        if repost_id and not re.fullmatch(r"[0-9]{1,32}", repost_id):
+            raise XPostError("invalid_request", "repost_id is invalid", 400)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?", (queue_id,)
+            ).fetchone()
+            ledger = self._assert_relay_queue_binding(conn, queue)
+            log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                (queue_id,),
+            ).fetchone()
+            if str(ledger["status"]) == "reposted":
+                conn.commit()
+                return _row_dict(ledger)
+            if (
+                not log
+                or str(log["status"]) != "repost_creating"
+                or str(ledger["status"]) != "reposting"
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_repost_state_conflict", "Repost state conflicts", 409
+                )
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET status='reposted',"
+                "repost_id=?,reposted_at=?,error_code='',error_message='',"
+                "unknown_outcome=0,updated_at=? WHERE id=?",
+                (repost_id, timestamp, timestamp, ledger["id"]),
+            )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='published',"
+                "published_at=?,error_code='',error_message='',"
+                "unknown_outcome=0,updated_at=? "
+                "WHERE id=?",
+                (timestamp, timestamp, log["id"]),
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET status='published',updated_at=? "
+                "WHERE id=?",
+                (timestamp, queue_id),
+            )
+            self._mark_drama_episode_published(conn, queue_id, timestamp)
+            self._sync_run(conn, queue_id, timestamp)
+            conn.commit()
+        return self.get_repost_ledger(queue_id)
+
+    def mark_repost_failed(
+        self, queue_id, error_code, error_message, unknown_outcome=False
+    ):
+        queue_id = _positive_int(queue_id, "queue_id")
+        code = _clean_token(error_code or "x_repost_failed", "error code", 64)
+        message = redact_text(error_message, 500)
+        unknown_outcome = bool(unknown_outcome)
+        timestamp = utc_now()
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?", (queue_id,)
+            ).fetchone()
+            ledger = self._assert_relay_queue_binding(conn, queue)
+            log = conn.execute(
+                "SELECT * FROM x_post_publish_log WHERE queue_id=?",
+                (queue_id,),
+            ).fetchone()
+            if str(ledger["status"]) == "reposted":
+                conn.commit()
+                return _row_dict(ledger)
+            if (
+                not log
+                or str(log["status"]) != "repost_creating"
+                or str(ledger["status"]) != "reposting"
+            ):
+                conn.rollback()
+                raise XPostError(
+                    "x_post_repost_state_conflict", "Repost state conflicts", 409
+                )
+            ledger_status = "needs_review" if unknown_outcome else "failed"
+            conn.execute(
+                "UPDATE x_post_repost_ledger SET status=?,error_code=?,"
+                "error_message=?,unknown_outcome=?,updated_at=? WHERE id=?",
+                (
+                    ledger_status,
+                    code,
+                    message,
+                    1 if unknown_outcome else 0,
+                    timestamp,
+                    ledger["id"],
+                ),
+            )
+            conn.execute(
+                "UPDATE x_post_publish_log SET status='failed',error_code=?,"
+                "error_message=?,unknown_outcome=?,updated_at=? WHERE id=?",
+                (
+                    code,
+                    message,
+                    1 if unknown_outcome else 0,
+                    timestamp,
+                    log["id"],
+                ),
+            )
+            conn.execute(
+                "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
+                (timestamp, queue_id),
+            )
+            self._mark_drama_needs_review(
+                conn, queue_id, timestamp, code, message
+            )
+            self._sync_run(conn, queue_id, timestamp)
+            conn.commit()
+        return self.get_repost_ledger(queue_id)
 
     def get_run(self, run_id):
         run_id = _positive_int(run_id, "run_id")
@@ -10056,7 +10844,8 @@ class XPostStore:
         if status:
             allowed_statuses = {
                 "queued", "reserved", "publishing", "media_uploading",
-                "post_creating", "published", "failed",
+                "post_creating", "source_published", "repost_creating",
+                "published", "failed",
             }
             if status not in allowed_statuses:
                 raise XPostError("invalid_request", "status筛选值无效", 400)
@@ -10083,7 +10872,7 @@ class XPostStore:
             else:
                 raise XPostError("invalid_request", "unknown_outcome必须为0或1", 400)
             clauses.append(
-                "CASE WHEN l.status='post_creating' OR COALESCE(l.unknown_outcome,0)=1 "
+                "CASE WHEN l.status IN ('post_creating','repost_creating') OR COALESCE(l.unknown_outcome,0)=1 "
                 "THEN 1 ELSE 0 END=?"
             )
             values.append(unknown_outcome)
@@ -10100,6 +10889,8 @@ class XPostStore:
             "WHEN q.manual_run_id IS NOT NULL THEN 'manual' "
             "ELSE 'canary' END AS batch_kind,"
             "q.source_type,q.run_date,q.source_date,q.account_id,"
+            "q.delivery_mode,q.relay_account_id,q.relay_account_username,"
+            "COALESCE(r.status,'') AS repost_status,"
             "q.pool_item_id,q.pool_created_at,q.drama_pool_item_id,"
             "q.drama_pool_created_at,q.episode_number,q.episode_key,q.name_tag,"
             "q.account_username,q.page_name,q.page_id,q.material_id,q.material_name,q.content_id,"
@@ -10108,13 +10899,14 @@ class XPostStore:
             "q.facebook_violation_count,q.tiktok_violation_count,q.twitter_violation_count,"
             "q.resource_audit_count,q.dangerous_tag_count,q.status AS queue_status,"
             "l.id AS log_id,COALESCE(l.status,q.status) AS status,COALESCE(l.attempt_count,0) AS attempt_count,"
-            "CASE WHEN l.status='post_creating' OR COALESCE(l.unknown_outcome,0)=1 "
+            "CASE WHEN l.status IN ('post_creating','repost_creating') OR COALESCE(l.unknown_outcome,0)=1 "
             "THEN 1 ELSE 0 END AS unknown_outcome,COALESCE(l.short_url,'') AS short_url,"
             "COALESCE(l.x_post_id,'') AS post_id,COALESCE(l.x_post_url,'') AS preview_url,"
             "COALESCE(l.error_code,'') AS error_code,COALESCE(l.error_message,'') AS error_message,"
             "COALESCE(l.started_at,'') AS started_at,COALESCE(l.published_at,'') AS published_at,"
             "q.created_at,q.updated_at FROM x_post_queue q "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+            "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
             "LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id"
         )
         offset = (page - 1) * page_size
@@ -10242,7 +11034,7 @@ class XPostStore:
                 COUNT(q.id) AS queued_count,
                 SUM(CASE WHEN l.status='published' THEN 1 ELSE 0 END) AS published_count,
                 SUM(CASE WHEN l.status='failed' AND COALESCE(l.unknown_outcome,0)=0 THEN 1 ELSE 0 END) AS failed_count,
-                SUM(CASE WHEN COALESCE(l.unknown_outcome,0)=1 OR l.status='post_creating' THEN 1 ELSE 0 END) AS unknown_count,
+                SUM(CASE WHEN COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating') THEN 1 ELSE 0 END) AS unknown_count,
                 SUM(CASE WHEN COALESCE(l.attempt_count,0)>0 OR q.status='publishing' THEN 1 ELSE 0 END) AS started_count,
                 SUM(CASE WHEN l.error_code='x_post_rate_limited' THEN 1 ELSE 0 END) AS rate_limited_count
             FROM x_post_queue q
@@ -10547,6 +11339,31 @@ class XPostStore:
                 (row["queue_id"],),
             ).fetchone()
             self._assert_drama_queue_assignment(conn, queue)
+            relay_ledger = None
+            if (
+                str(queue["delivery_mode"] or "")
+                == PREMIUM_RELAY_REPOST_MODE
+            ):
+                relay_ledger = self._assert_relay_queue_binding(conn, queue)
+                if str(relay_ledger["status"]) != "reserved":
+                    conn.rollback()
+                    relay_unknown = bool(
+                        relay_ledger["unknown_outcome"]
+                    ) or str(relay_ledger["status"]) in {
+                        "source_publishing",
+                        "reposting",
+                        "needs_review",
+                    }
+                    raise XPostError(
+                        (
+                            "x_post_unknown_outcome"
+                            if relay_unknown
+                            else "x_post_retry_requires_review"
+                        ),
+                        "Premium relay delivery has already started",
+                        409,
+                        relay_unknown,
+                    )
             if row["status"] != "reserved":
                 conn.rollback()
                 code = "x_post_unknown_outcome" if row["unknown_outcome"] else "x_post_retry_requires_review"
@@ -10560,6 +11377,15 @@ class XPostStore:
                 (timestamp, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='publishing',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            if relay_ledger is not None:
+                conn.execute(
+                    "UPDATE x_post_repost_ledger SET "
+                    "status='source_publishing',"
+                    "source_attempt_count=source_attempt_count+1,"
+                    "error_code='',error_message='',unknown_outcome=0,"
+                    "updated_at=? WHERE id=?",
+                    (timestamp, relay_ledger["id"]),
+                )
             self._sync_run(conn, row["queue_id"], timestamp)
             conn.commit()
         return self.get_log(log_id)
@@ -10656,6 +11482,10 @@ class XPostStore:
                     409,
                     True,
                 )
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (row["queue_id"],),
+            ).fetchone()
             conn.execute(
                 "UPDATE x_post_publish_log SET status='failed',x_media_id=?,x_post_id=?,"
                 "x_post_url=?,error_code='x_post_outcome_unknown',error_message=?,"
@@ -10666,6 +11496,27 @@ class XPostStore:
                 "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
                 (timestamp, row["queue_id"]),
             )
+            if (
+                queue
+                and str(queue["delivery_mode"] or "")
+                == PREMIUM_RELAY_REPOST_MODE
+            ):
+                relay = self._assert_relay_queue_binding(conn, queue)
+                conn.execute(
+                    "UPDATE x_post_repost_ledger SET "
+                    "status='needs_review',source_post_id=?,"
+                    "source_post_url=?,source_published_at=?,"
+                    "error_code='x_post_outcome_unknown',error_message=?,"
+                    "unknown_outcome=1,updated_at=? WHERE id=?",
+                    (
+                        post_id,
+                        post_url,
+                        timestamp,
+                        message,
+                        timestamp,
+                        relay["id"],
+                    ),
+                )
             self._mark_drama_needs_review(
                 conn,
                 row["queue_id"],
@@ -10697,11 +11548,34 @@ class XPostStore:
             # and _sync_run/replay already treats that residual state as
             # unknown without rewriting an explicit response.
             unknown_outcome = bool(unknown_outcome)
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (row["queue_id"],),
+            ).fetchone()
             conn.execute(
                 "UPDATE x_post_publish_log SET status='failed',error_code=?,error_message=?,unknown_outcome=?,updated_at=? WHERE id=?",
                 (code, message, 1 if unknown_outcome else 0, timestamp, log_id),
             )
             conn.execute("UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?", (timestamp, row["queue_id"]))
+            if (
+                queue
+                and str(queue["delivery_mode"] or "")
+                == PREMIUM_RELAY_REPOST_MODE
+            ):
+                relay = self._assert_relay_queue_binding(conn, queue)
+                conn.execute(
+                    "UPDATE x_post_repost_ledger SET status=?,"
+                    "error_code=?,error_message=?,unknown_outcome=?,"
+                    "updated_at=? WHERE id=?",
+                    (
+                        "needs_review" if unknown_outcome else "failed",
+                        code,
+                        message,
+                        1 if unknown_outcome else 0,
+                        timestamp,
+                        relay["id"],
+                    ),
+                )
             self._mark_drama_needs_review(
                 conn,
                 row["queue_id"],
@@ -10730,6 +11604,10 @@ class XPostStore:
             if row["status"] != "reserved":
                 conn.commit()
                 return _row_dict(row)
+            queue = conn.execute(
+                "SELECT * FROM x_post_queue WHERE id=?",
+                (row["queue_id"],),
+            ).fetchone()
             conn.execute(
                 "UPDATE x_post_publish_log SET status='failed',error_code=?,"
                 "error_message=?,unknown_outcome=0,updated_at=? WHERE id=? AND status='reserved'",
@@ -10739,6 +11617,18 @@ class XPostStore:
                 "UPDATE x_post_queue SET status='failed',updated_at=? WHERE id=?",
                 (timestamp, row["queue_id"]),
             )
+            if (
+                queue
+                and str(queue["delivery_mode"] or "")
+                == PREMIUM_RELAY_REPOST_MODE
+            ):
+                relay = self._assert_relay_queue_binding(conn, queue)
+                conn.execute(
+                    "UPDATE x_post_repost_ledger SET status='failed',"
+                    "error_code=?,error_message=?,unknown_outcome=0,"
+                    "updated_at=? WHERE id=?",
+                    (code, message, timestamp, relay["id"]),
+                )
             self._mark_drama_needs_review(
                 conn,
                 row["queue_id"],
@@ -11562,6 +12452,50 @@ class XApiClient:
             raise XPostError("x_post_outcome_unknown", "X Post创建响应缺少ID", 502, True)
         return {"post_id": post_id, "data": data}
 
+    def repost(self, access_token, user_id, post_id):
+        user_id = str(user_id or "").strip()
+        post_id = str(post_id or "").strip()
+        if not re.fullmatch(r"[0-9]{1,19}", user_id) or not re.fullmatch(
+            r"[0-9]{1,19}", post_id
+        ):
+            raise XPostError(
+                "invalid_request", "X repost identity is invalid", 400
+            )
+        body = json.dumps(
+            {"tweet_id": post_id},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        payload = self._request(
+            "POST",
+            "/2/users/%s/retweets"
+            % urllib.parse.quote(user_id, safe=""),
+            access_token,
+            body,
+            "application/json",
+            expected=200,
+            operation="X Repost",
+            unknown=True,
+        )
+        data = payload.get("data") if isinstance(
+            payload.get("data"), dict
+        ) else {}
+        if data.get("retweeted") is not True:
+            raise XPostError(
+                "x_repost_outcome_unknown",
+                "X Repost response did not confirm retweeted=true",
+                502,
+                True,
+            )
+        repost_id = str(data.get("rest_id", "") or "")
+        if repost_id and not re.fullmatch(r"[0-9]{1,32}", repost_id):
+            raise XPostError(
+                "x_repost_outcome_unknown",
+                "X Repost response contained an invalid rest_id",
+                502,
+                True,
+            )
+        return {"repost_id": repost_id, "data": data}
+
     def publish(self, access_token, text, media_path, media_type="video/mp4"):
         media = self.upload_media(access_token, media_path, media_type=media_type)
         post = self.create_post(access_token, text, media["media_id"])
@@ -11597,9 +12531,22 @@ def publish_canary(
         raise XPostError("x_token_missing", "X Access Token缺失", 409)
     store = XPostStore(db_path)
     queue = store.get_queue(queue_id)
-    if int(queue["account_id"]) != account_id:
+    relay_delivery = bool(
+        queue.get("delivery_mode") == PREMIUM_RELAY_REPOST_MODE
+    )
+    expected_account_id = int(
+        queue["relay_account_id"]
+        if relay_delivery
+        else queue["account_id"]
+    )
+    expected_username = str(
+        queue["relay_account_username"]
+        if relay_delivery
+        else queue["account_username"]
+    )
+    if expected_account_id != account_id:
         raise XPostError("x_post_account_mismatch", "发布队列与X账号不匹配", 409)
-    if not secrets.compare_digest(str(queue["account_username"]), username):
+    if not secrets.compare_digest(expected_username, username):
         raise XPostError("x_post_account_mismatch", "发布队列用户名与X账号不匹配", 409)
     log = store.reserve_log(queue["id"])
     if log["status"] == "published":
@@ -11750,7 +12697,20 @@ def publish_canary(
         confirmed_post = created["post_id"]
         confirmed_post_url = post_url
         confirmed_media_id = uploaded["media_id"]
-        published = store.mark_published(log["id"], uploaded["media_id"], created["post_id"], post_url)
+        if relay_delivery:
+            published = store.mark_relay_source_published(
+                log["id"],
+                uploaded["media_id"],
+                created["post_id"],
+                post_url,
+            )
+        else:
+            published = store.mark_published(
+                log["id"],
+                uploaded["media_id"],
+                created["post_id"],
+                post_url,
+            )
         return _result_from_log(published)
     except XPostError as exc:
         if confirmed_post is not None:

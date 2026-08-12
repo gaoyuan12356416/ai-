@@ -2322,6 +2322,9 @@ def publish_queue_request(
         raise
     except XPostError as exc:
         _raise_x_post_error(exc)
+    relay_delivery = bool(
+        queue.get("delivery_mode") == "premium_relay_repost"
+    )
     if log["status"] == "published":
         return _safe_canary_result(
             {
@@ -2332,8 +2335,15 @@ def publish_queue_request(
                 "preview_url": log["x_post_url"],
             }
         )
-    if log["status"] != "reserved":
-        unknown = bool(log["unknown_outcome"]) or log["status"] == "post_creating"
+    if log["status"] not in (
+        {"reserved", "source_published"}
+        if relay_delivery
+        else {"reserved"}
+    ):
+        unknown = bool(log["unknown_outcome"]) or log["status"] in {
+            "post_creating",
+            "repost_creating",
+        }
         code = "x_post_unknown_outcome" if unknown else "x_post_retry_requires_review"
         _raise_x_post_error(
             XPostError(
@@ -2344,54 +2354,174 @@ def publish_queue_request(
             )
         )
 
-    account_id = int(queue["account_id"])
     actor = dict(
         AUTO_TEMPLATE_ACTOR
         if expected_manual_trigger_source == "auto_template"
         else CANARY_ACTOR
     )
-    try:
-        verify_account(account_id, actor, "all")
-    except ServiceError as exc:
+    if log["status"] == "reserved":
+        source_account_id = int(
+            queue["relay_account_id"]
+            if relay_delivery
+            else queue["account_id"]
+        )
         try:
-            store.mark_failed_if_reserved(log["id"], exc.code, str(exc))
-        except XPostError as storage_exc:
-            _raise_x_post_error(storage_exc)
-        raise
-
-    try:
-        with publish_credentials(account_id, actor, "all") as (account, access_token):
-            try:
-                if expected_manual_trigger_source == "auto_template":
-                    store.assert_auto_template_publishable(
-                        int(queue["id"]),
-                        int(log["id"]),
+            verified_source = verify_account(source_account_id, actor, "all")
+            if relay_delivery and (
+                not verified_source.get("long_video_publish_eligible")
+                or verified_source.get("protected") is not False
+            ):
+                eligible = _premium_relay_accounts(
+                    queue["run_date"],
+                    refresh=True,
+                )
+                queue = store.reassign_premium_relay(
+                    int(queue["id"]), eligible
+                )
+                source_account_id = int(queue["relay_account_id"])
+        except ServiceError as exc:
+            if relay_delivery:
+                eligible = _premium_relay_accounts(
+                    queue["run_date"],
+                    refresh=True,
+                )
+                try:
+                    queue = store.reassign_premium_relay(
+                        int(queue["id"]), eligible
                     )
-                result = publish_canary(
-                    db_path=POST_DB_PATH,
-                    queue_id=int(queue["id"]),
-                    account=account,
-                    access_token=access_token,
-                    public_root=POST_PUBLIC_ROOT,
-                    short_base_url=POST_SHORT_BASE_URL,
-                    allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
-                    timeout=POST_HTTP_TIMEOUT_SECONDS,
-                    max_media_bytes=POST_MAX_MEDIA_BYTES,
-                    storage_guard=preflight_post_storage_request,
-                    durable_storage={
-                        "mount_root": POST_STORAGE_MOUNT_ROOT,
-                        "storage_root": POST_STORAGE_ROOT,
-                    },
+                except XPostError as storage_exc:
+                    _raise_x_post_error(storage_exc)
+                source_account_id = int(queue["relay_account_id"])
+            else:
+                try:
+                    store.mark_failed_if_reserved(
+                        log["id"],
+                        exc.code,
+                        str(exc),
+                    )
+                except XPostError as storage_exc:
+                    _raise_x_post_error(storage_exc)
+                raise
+        except XPostError as exc:
+            _raise_x_post_error(exc)
+
+        try:
+            with publish_credentials(
+                source_account_id, actor, "all"
+            ) as (account, access_token):
+                try:
+                    if relay_delivery and (
+                        not account.get("long_video_publish_eligible")
+                        or account.get("protected") is not False
+                    ):
+                        raise XPostError(
+                            "x_post_premium_relay_unavailable",
+                            "Frozen relay account is no longer eligible",
+                            409,
+                        )
+                    if expected_manual_trigger_source == "auto_template":
+                        store.assert_auto_template_publishable(
+                            int(queue["id"]),
+                            int(log["id"]),
+                        )
+                    result = publish_canary(
+                        db_path=POST_DB_PATH,
+                        queue_id=int(queue["id"]),
+                        account=account,
+                        access_token=access_token,
+                        public_root=POST_PUBLIC_ROOT,
+                        short_base_url=POST_SHORT_BASE_URL,
+                        allowed_media_hosts=POST_MEDIA_ALLOWED_HOSTS,
+                        timeout=POST_HTTP_TIMEOUT_SECONDS,
+                        max_media_bytes=POST_MAX_MEDIA_BYTES,
+                        storage_guard=preflight_post_storage_request,
+                        durable_storage={
+                            "mount_root": POST_STORAGE_MOUNT_ROOT,
+                            "storage_root": POST_STORAGE_ROOT,
+                        },
+                    )
+                except XPostError as exc:
+                    _raise_x_post_error(exc, (access_token,))
+        except ServiceError as exc:
+            if not relay_delivery:
+                try:
+                    store.mark_failed_if_reserved(
+                        log["id"], exc.code, str(exc)
+                    )
+                except XPostError as storage_exc:
+                    _raise_x_post_error(storage_exc)
+            raise
+        if not relay_delivery:
+            return _safe_canary_result(result)
+        log = store.get_log(log["id"])
+
+    # The source Post has a confirmed durable ID. Resuming from here can only
+    # execute the target Repost; it can never upload or create the source again.
+    if not relay_delivery or log["status"] != "source_published":
+        _raise_x_post_error(
+            XPostError(
+                "x_post_repost_state_conflict",
+                "Premium relay source is not ready for Repost",
+                409,
+            )
+        )
+    target_account_id = int(queue["account_id"])
+    verify_account(target_account_id, actor, "all")
+    try:
+        from features.x_posts import XApiClient
+
+        with publish_credentials(
+            target_account_id, actor, "all"
+        ) as (target_account, target_access_token):
+            relay = store.mark_reposting(int(queue["id"]))
+            try:
+                reposted = XApiClient(
+                    timeout=POST_HTTP_TIMEOUT_SECONDS
+                ).repost(
+                    target_access_token,
+                    target_account["x_user_id"],
+                    relay["source_post_id"],
                 )
             except XPostError as exc:
-                _raise_x_post_error(exc, (access_token,))
-    except ServiceError as exc:
-        try:
-            store.mark_failed_if_reserved(log["id"], exc.code, str(exc))
-        except XPostError as storage_exc:
-            _raise_x_post_error(storage_exc)
+                try:
+                    store.mark_repost_failed(
+                        int(queue["id"]),
+                        exc.code,
+                        str(exc),
+                        exc.unknown_outcome,
+                    )
+                except XPostError as storage_exc:
+                    _raise_x_post_error(
+                        storage_exc, (target_access_token,)
+                    )
+                _raise_x_post_error(exc, (target_access_token,))
+            try:
+                store.mark_reposted(
+                    int(queue["id"]), reposted.get("repost_id", "")
+                )
+            except XPostError as exc:
+                try:
+                    store.mark_repost_failed(
+                        int(queue["id"]),
+                        "x_repost_outcome_unknown",
+                        "X confirmed Repost but the final ledger commit failed",
+                        True,
+                    )
+                except XPostError:
+                    pass
+                _raise_x_post_error(exc, (target_access_token,))
+    except ServiceError:
         raise
-    return _safe_canary_result(result)
+    published_log = store.get_log(log["id"])
+    return _safe_canary_result(
+        {
+            "status": "published",
+            "log_id": int(published_log["id"]),
+            "short_url": published_log["short_url"],
+            "post_id": published_log["x_post_id"],
+            "preview_url": published_log["x_post_url"],
+        }
+    )
 
 
 def _admin_post_query(payload, method_name):
@@ -2451,7 +2581,71 @@ def _safe_post_account(account):
         "long_video_publish_eligible": bool(
             account.get("long_video_publish_eligible")
         ),
+        "protected": bool(account.get("protected", True)),
     }
+
+
+def _premium_relay_accounts(run_date, *, refresh):
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM x_authorized_account ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+    accounts = []
+    for row in rows:
+        account = row_to_item(row)
+        if account.get("status") != "active" or not account.get(
+            "publish_eligible"
+        ):
+            continue
+        if refresh:
+            try:
+                account = verify_account(
+                    int(account["id"]),
+                    CANARY_ACTOR,
+                    "all",
+                    preserve_transient_status=True,
+                )
+            except ServiceError:
+                continue
+        if (
+            account.get("status") == "active"
+            and account.get("publish_eligible")
+            and account.get("long_video_publish_eligible")
+            and account.get("protected") is False
+        ):
+            accounts.append(account)
+    XPostError, XPostStore, _publish_canary = _x_posts_api()
+    try:
+        loads = XPostStore(POST_DB_PATH).premium_relay_account_loads(
+            run_date,
+            [int(account["id"]) for account in accounts],
+        )
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+    by_id = {int(account["id"]): account for account in accounts}
+    result = []
+    for load in loads:
+        account = _safe_post_account(by_id[int(load["account_id"])])
+        account["relay_assignment_count"] = int(
+            load["relay_assignment_count"]
+        )
+        result.append(account)
+    return result
+
+
+def premium_relay_accounts_request(payload):
+    if not isinstance(payload, dict):
+        raise ServiceError("invalid_request", "JSON body must be an object", 400)
+    run_date = str(payload.get("run_date", "") or "").strip()
+    try:
+        datetime.strptime(run_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ServiceError("invalid_request", "run_date is invalid", 400) from None
+    return {"items": _premium_relay_accounts(run_date, refresh=True)}
 
 
 def auto_template_accounts_request(_payload):
@@ -3264,12 +3458,44 @@ def _safe_schedule_queue(queue):
             "X定时发布队列状态无效",
             503,
         )
+    delivery_mode = str(
+        queue.get("delivery_mode", "direct") or "direct"
+    )
+    repost_status = str(queue.get("repost_status", "") or "")
+    relay_account_id = int(queue.get("relay_account_id") or 0)
+    if delivery_mode not in {"direct", "premium_relay_repost"} or (
+        delivery_mode == "direct"
+        and (relay_account_id != 0 or repost_status)
+    ) or (
+        delivery_mode == "premium_relay_repost"
+        and (
+            relay_account_id <= 0
+            or repost_status
+            not in {
+                "reserved",
+                "source_publishing",
+                "source_published",
+                "reposting",
+                "reposted",
+                "failed",
+                "needs_review",
+            }
+        )
+    ):
+        raise ServiceError(
+            "x_posts_unavailable",
+            "X schedule relay state is invalid",
+            503,
+        )
     return {
         "id": queue_id,
         "account_id": account_id,
         "candidate_rank": candidate_rank,
         "status": status,
         "unknown_outcome": bool(queue.get("unknown_outcome", False)),
+        "delivery_mode": delivery_mode,
+        "relay_account_id": relay_account_id,
+        "repost_status": repost_status,
     }
 
 
@@ -3419,6 +3645,9 @@ def create_post_schedule_plan_request(payload):
         raise ServiceError("invalid_request", "account_ids无效", 400)
     trusted = []
     premium_account_ids = []
+    premium_relay_accounts = None
+    source_type = str(payload.get("source_type", "") or "").strip().lower()
+    run_date = str(payload.get("run_date", "") or "").strip()
     for candidate, account_id in zip(candidates, requested_ids):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
@@ -3431,7 +3660,37 @@ def create_post_schedule_plan_request(payload):
                 "X账号当前状态不可用于发布",
                 409,
             )
-        _require_candidate_duration_capability(candidate, account)
+        try:
+            duration = float(candidate.get("preflight_duration", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            raise ServiceError(
+                "invalid_request", "preflight_duration is invalid", 400
+            ) from None
+        relay_required = bool(
+            source_type == "drama"
+            and math.isfinite(duration)
+            and duration > 140.0
+            and not account.get("long_video_publish_eligible")
+        )
+        if relay_required:
+            if premium_relay_accounts is None:
+                premium_relay_accounts = _premium_relay_accounts(
+                    run_date,
+                    refresh=False,
+                )
+            selectable_relays = [
+                relay
+                for relay in premium_relay_accounts
+                if int(relay["id"]) != int(account["id"])
+            ]
+            if not selectable_relays:
+                raise ServiceError(
+                    "x_post_premium_relay_unavailable",
+                    "No currently eligible public Premium relay account is available",
+                    409,
+                )
+        else:
+            _require_candidate_duration_capability(candidate, account)
         if account.get("long_video_eligible"):
             premium_account_ids.append(int(account["id"]))
         item = dict(candidate)
@@ -3449,6 +3708,24 @@ def create_post_schedule_plan_request(payload):
                 "page_id": str(account.get("x_user_id", "") or ""),
             }
         )
+        if relay_required:
+            item.update(
+                {
+                    "delivery_mode": "premium_relay_repost",
+                    "relay_account_id": int(selectable_relays[0]["id"]),
+                    "relay_account_username": str(
+                        selectable_relays[0]["username"]
+                    ),
+                }
+            )
+        else:
+            item.update(
+                {
+                    "delivery_mode": "direct",
+                    "relay_account_id": 0,
+                    "relay_account_username": "",
+                }
+            )
         trusted.append(item)
     preflight_post_storage_request(len(trusted))
     XPostError, XPostStore, _publish_canary = _x_posts_api()
@@ -3460,6 +3737,7 @@ def create_post_schedule_plan_request(payload):
             payload.get("version"),
             trusted,
             premium_account_ids=premium_account_ids,
+            premium_relay_accounts=(premium_relay_accounts or []),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3896,6 +4174,7 @@ class Handler(BaseHTTPRequestHandler):
             "/internal/posts/schedule-runs/record-failure",
             "/internal/posts/drama-pool/available",
             "/internal/posts/drama-pool/check",
+            "/internal/posts/premium-relay/accounts",
         }
         manual_worker_exact_paths = {
             "/internal/posts/manual-runs/claim",
@@ -4195,6 +4474,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(
                     200,
                     available_post_drama_pool_request(payload),
+                )
+                return
+            if parsed.path == "/internal/posts/premium-relay/accounts":
+                self.send_json(
+                    200,
+                    premium_relay_accounts_request(payload),
                 )
                 return
             if parsed.path == "/internal/posts/material-pool/check":

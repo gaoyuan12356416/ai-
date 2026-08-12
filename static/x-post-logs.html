@@ -161,11 +161,14 @@
         const labels = {
           published:"已发布", failed:"发布失败", reserved:"已预留", queued:"已入队",
           publishing:"发布处理中", media_uploading:"媒体上传中", post_creating:"创建 Post 中",
+          source_published:"原帖已发布，等待目标账号 Repost",
+          repost_creating:"目标账号 Repost 中",
           planned:"已计划", running:"运行中", completed:"全部完成",
           completed_with_errors:"完成但有失败", needs_review:"需要人工确认",
           stopped:"已停止后续发布", failed_preflight:"发布前检查失败",
         };
-        return [labels[value] || value || "未知", labels[value] ? value : "other"];
+        const kinds = { source_published:"publishing", repost_creating:"publishing" };
+        return [labels[value] || value || "未知", labels[value] ? (kinds[value] || value) : "other"];
       };
       const safePostUrl = value => {
         try {
@@ -251,7 +254,11 @@
                 ? `补发批次 ${item.catchup_run_id}`
                 : (item.run_id ? `日批次 ${item.run_id}` : "测试批次")));
           appendCell(row, item.run_date, `数据：${item.source_date || "—"} · ${batchLabel}`);
-          appendCell(row, item.account_username ? `@${item.account_username}` : `账号 ${item.account_id || "—"}`, item.account_display_name || item.page_name || "");
+          const relayDelivery = String(item.delivery_mode || "direct") === "premium_relay_repost";
+          const accountSecondary = relayDelivery
+            ? `目标账号 Repost · 原帖由 @${item.relay_account_username || `账号${item.relay_account_id || "—"}`}`
+            : (item.account_display_name || item.page_name || "");
+          appendCell(row, item.account_username ? `@${item.account_username}` : `账号 ${item.account_id || "—"}`, accountSecondary);
           appendCell(row, item.material_name || `素材 ${item.material_id || "—"}`, `ID ${item.material_id || "—"} · Content ${item.content_id || "—"}`);
           appendCell(row, item.drama_name || "—", `${item.language || item.material_language || "—"} · ${item.tag || "—"}`);
           appendCell(row, formatTime(item.pool_created_at), `池 ID ${item.pool_item_id || "—"} · 当日顺序 ${item.candidate_rank || "—"}`);
@@ -270,7 +277,7 @@
           row.appendChild(statusCell);
           const linksCell = document.createElement("td");
           linksCell.className = "links";
-          [[safePostUrl(item.x_post_url || item.preview_url), "预览 Post"], [safeShortUrl(item.short_url), "打开短链"]].forEach(([href,label]) => {
+          [[safePostUrl(item.x_post_url || item.preview_url), relayDelivery ? "预览原 Post" : "预览 Post"], [safeShortUrl(item.short_url), "打开短链"]].forEach(([href,label]) => {
             if (!href) return;
             const link = document.createElement("a");
             link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer"; text(link, label);

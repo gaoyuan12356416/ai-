@@ -1702,7 +1702,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(assigned, [("LONG", 2), ("SHORT", 3)])
 
-    def test_retryable_long_drama_skips_without_free_premium(self):
+    def test_retryable_long_drama_keeps_target_and_uses_relay_source(self):
         saved = self.save_schedule("drama", [2, 3], ["09:00"])
         older_short = self.add_drama(content_id="OLDER-SHORT")
         newer_short = self.add_drama(content_id="NEWER-SHORT")
@@ -1729,7 +1729,16 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
         self.assertEqual(
             [(item["candidate_account_id"], item["id"]) for item in available],
-            [(2, newer_short["id"]), (3, older_short["id"])],
+            [(2, newest_long["id"]), (3, newer_short["id"])],
+        )
+        long_candidate = self.drama_candidate(newest_long, 2, 1)
+        long_candidate.update(
+            {
+                "preflight_duration": 180.0,
+                "delivery_mode": "premium_relay_repost",
+                "relay_account_id": 9,
+                "relay_account_username": "premium9",
+            }
         )
         plan = self.store.create_schedule_plan(
             "drama",
@@ -1737,25 +1746,26 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "09:00",
             saved["version"],
             [
-                self.drama_candidate(newer_short, 2, 1),
-                self.drama_candidate(older_short, 3, 1),
+                long_candidate,
+                self.drama_candidate(newer_short, 3, 1),
             ],
             premium_account_ids=[],
+            premium_relay_accounts=[
+                {"id": 9, "username": "premium9"}
+            ],
         )
         self.assertEqual(
             [(item["account_id"], item["content_id"]) for item in plan["queues"]],
-            [(2, "NEWER-SHORT"), (3, "OLDER-SHORT")],
+            [(2, "NEWEST-LONG"), (3, "NEWER-SHORT")],
         )
+        self.assertEqual(plan["queues"][0]["relay_account_id"], 9)
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             long_row = conn.execute(
                 "SELECT status,assigned_account_id,last_error_code "
                 "FROM x_post_drama_pool WHERE id=?",
                 (newest_long["id"],),
             ).fetchone()
-        self.assertEqual(
-            long_row,
-            ("pending", 0, "x_long_video_requires_premium"),
-        )
+        self.assertEqual(long_row, ("active", 2, ""))
 
     def test_legacy_frozen_cross_account_queue_is_blocked_before_publish(self):
         self.save_schedule("drama", [2, 3], ["09:00"])
