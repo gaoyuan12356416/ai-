@@ -97603,6 +97603,89 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
 
+        tt_auto_force_close_match = re.fullmatch(
+            re.escape(TT_AUTO_ADMIN_PREFIX)
+            + r"/tasks/([1-9][0-9]*)/force-close",
+            parsed.path,
+        )
+        if tt_auto_force_close_match:
+            if not self._require_cookie_navigation_item("ttAutoPublishRuns"):
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            task_id = tt_auto_force_close_match.group(1)
+            request_payload = {}
+            try:
+                request_payload = self._read_json()
+                if (
+                    not isinstance(request_payload, dict)
+                    or set(request_payload) != {"reason"}
+                ):
+                    raise TTAutoPostAdminClientError(
+                        "invalid_request", "强制关闭参数无效", 400
+                    )
+                outbound_payload = dict(request_payload)
+                outbound_payload["_actor"] = {
+                    "user_id": str(session.get("user_id") or "")[:128],
+                    "name": str(session.get("name") or "")[:200],
+                }
+                result = tt_auto_post_service_request(
+                    "POST",
+                    parsed.path,
+                    payload=outbound_payload,
+                )
+                result_task = (
+                    result.get("task", {})
+                    if isinstance(result, dict)
+                    and isinstance(result.get("task"), dict)
+                    else {}
+                )
+                try:
+                    append_audit_log(
+                        session,
+                        "force_close_tt_auto_publish_task",
+                        "tt_auto_publish_task",
+                        task_id,
+                        {
+                            "task_id": task_id,
+                            "status": str(result_task.get("status") or ""),
+                            "reason": str(request_payload.get("reason") or "")[:200],
+                        },
+                    )
+                except Exception:
+                    logging.exception("TT auto force-close audit write failed")
+                json_response(self, 200, result, no_store=True)
+            except TTAutoPostAdminClientError as exc:
+                status, error_payload = tt_auto_posts_error_payload(exc)
+                try:
+                    append_audit_log(
+                        session,
+                        "force_close_tt_auto_publish_task_failed",
+                        "tt_auto_publish_task",
+                        task_id,
+                        {"task_id": task_id, "error": error_payload["error"]},
+                    )
+                except Exception:
+                    logging.exception(
+                        "TT auto force-close failure audit write failed"
+                    )
+                json_response(self, status, error_payload, no_store=True)
+            except Exception:
+                logging.exception("TT auto force-close request failed")
+                json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "invalid_request",
+                        "code": "invalid_request",
+                        "message": "强制关闭请求无效",
+                    },
+                    no_store=True,
+                )
+            return
+
         tt_auto_template_match = re.fullmatch(
             re.escape(TT_AUTO_ADMIN_PREFIX)
             + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?)?",

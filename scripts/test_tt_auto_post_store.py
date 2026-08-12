@@ -486,6 +486,51 @@ class AutoPostStoreTests(unittest.TestCase):
         self.assertEqual(recovered.task.status, "unknown")
         self.assertTrue(recovered.task.unknown_outcome)
 
+    def test_force_close_revokes_claim_and_rejects_publish_evidence(self):
+        template = self.create_template()
+        task = self.create_task(self.create_run(template, "force-close", "manual"))
+        claim = self.store.claim_next_executable_task(
+            worker_id="selector-force-close",
+            lease_seconds=60,
+        )
+        closed = self.store.force_close_task(task.id, reason="operator closed")
+        self.assertEqual(closed.status, "canceled")
+        self.assertEqual(
+            self.store.force_close_task(task.id, reason="replayed").status,
+            "canceled",
+        )
+        with self.assertRaises(TTAutoPostStoreError) as stale_worker:
+            self.store.reserve_material(
+                task_id=task.id,
+                material_id="stale-material",
+                content_id="stale-drama",
+                claim_token=claim.reveal_claim_token(),
+            )
+        self.assertEqual(stale_worker.exception.code, "tt_auto_task_claim_conflict")
+        events = self.store.list_events(task_id=task.id)
+        self.assertEqual(events[-1]["event_type"], "task_force_closed")
+
+        evidence = self.create_task(
+            self.create_run(template, "force-close-evidence", "manual"),
+            "641",
+        )
+        self.store.reserve_material(
+            task_id=evidence.id,
+            material_id="evidence-material",
+            content_id="evidence-drama",
+        )
+        self.store.transition_task(
+            evidence.id,
+            "reconciling",
+            expected_statuses={"reserved"},
+            updates={"publish_id": "publish-1", "claim_phase": "reconcile"},
+        )
+        with self.assertRaises(TTAutoPostStoreError) as protected:
+            self.store.force_close_task(evidence.id, reason="unsafe")
+        self.assertEqual(
+            protected.exception.code, "tt_auto_publish_reconcile_required"
+        )
+
     def test_publish_evidence_is_irreversible_and_reconcile_only(self):
         template = self.create_template()
         task = self.create_task(

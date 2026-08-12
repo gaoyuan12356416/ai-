@@ -1129,6 +1129,14 @@ class AutoPostExecutor:
                 expected_statuses={run.status},
             )
 
+    def force_close_task(self, task_id: Any, *, reason: Any) -> TaskRecord:
+        """Close one pre-publish task without issuing a TikTok request."""
+
+        task = self.store.force_close_task(task_id, reason=reason)
+        self._sync_code_state(task, "failed", best_effort=True)
+        self._update_run(task.run_id)
+        return self.store.get_task(task.id)
+
     def _ensure_run_running(self, run_id: int):
         """Idempotently start a run when concurrent account workers race."""
         run = self.store.get_run(run_id)

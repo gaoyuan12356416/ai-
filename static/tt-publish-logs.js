@@ -68,6 +68,11 @@
         || ["unknown", "reconciling"].includes(String(item.status || "")));
   }
 
+  function canForceClose(item) {
+    return item.publish_source === "auto_template"
+      && ui.boolValue(item.force_close_allowed);
+  }
+
   function displayCode(value) {
     const code = String(value || "");
     return /^[A-Z0-9]{4}$/.test(code) ? code : "—";
@@ -138,6 +143,12 @@
         text: "取消任务",
         type: "button",
         dataset: { action: "cancel", taskKey: item.task_key },
+      }));
+      if (canForceClose(item)) actions.appendChild(ui.element("button", {
+        className: "button small danger",
+        text: "强制关闭",
+        type: "button",
+        dataset: { action: "force-close", taskKey: item.task_key },
       }));
       if (canReconcile(item)) actions.appendChild(ui.element("button", {
         className: "button small",
@@ -352,6 +363,29 @@
     }
   }
 
+  async function forceCloseAutoTask(item, button) {
+    const confirmed = await ui.confirmAction({
+      title: "强制关闭自动发布任务",
+      message: `确定强制关闭任务 ${item.task_id}？关闭后该任务不会继续选材、制作或发布。`,
+      confirmText: "确认强制关闭",
+      danger: true,
+    });
+    if (!confirmed) return;
+    button.disabled = true;
+    try {
+      await ui.api(`${ui.API_BASE}/tasks/${encodeURIComponent(item.task_id)}/force-close`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "由TT发布日志人工强制关闭" }),
+      });
+      ui.showToast("任务已强制关闭。", false);
+      await loadLogs({ quiet: true });
+    } catch (error) {
+      ui.showToast(`强制关闭失败：${error.message}`, true);
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
+  }
+
   function applyInitialQuery() {
     const params = new URLSearchParams(location.search);
     const mappings = {
@@ -422,6 +456,8 @@
     if (!item) return;
     if (button.dataset.action === "details") {
       void openDetails(item).catch(error => ui.showToast(`详情加载失败：${error.message}`, true));
+    } else if (button.dataset.action === "force-close") {
+      void forceCloseAutoTask(item, button);
     } else if (["cancel", "reconcile"].includes(button.dataset.action)) {
       void queueAction(item, button.dataset.action, button);
     }

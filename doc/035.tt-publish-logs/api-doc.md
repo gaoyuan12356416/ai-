@@ -40,7 +40,25 @@
 
 响应不返回 `source_media_url`、`prepared_media_url`、claim token 或任何账号凭据。
 
+自动模板任务另返回服务端计算的 `force_close_allowed`。它仅在任务仍处于
+`pending/selecting/reserved/preparing/retry_wait/ready`、尚未开始 TikTok 发布、没有
+`publish_id`/未知结果、且不在 reconcile 阶段时为 `true`。
+
 `code` 只表示共享路由账本中真实存在的 4 位 code：素材池排期读取 `tt_post_queue.code`，自动模板按高位合成 queue ID 读取 `tt_post_code_route`。立即测试没有 durable code，固定为空字符串。页面只展示合法 `[A-Z0-9]{4}`，不会从 caption 猜测。
+
+## POST `/api/admin/tt-auto-publish/tasks/{task_id}/force-close`
+
+强制关闭一个尚未进入 TikTok 发布阶段的自动模板任务。需要
+`ttAutoPublishRuns` 导航权限、同源 JSON 请求和 Feishu Cookie 会话。
+
+```json
+{"reason":"由TT发布日志人工强制关闭"}
+```
+
+成功返回 `status=canceled`。接口会原子撤销 worker claim、清空重试时间、记录
+`task_force_closed` 事件并更新运行汇总；不会调用 GPU 发布或 TikTok。重复关闭已取消任务幂等。
+已发布任务返回 `409 tt_auto_task_already_published`；已开始发布、结果未知、已有
+`publish_id` 或处于 reconcile 阶段的任务返回 `409 tt_auto_publish_reconcile_required`。
 
 ## 错误语义
 
@@ -50,5 +68,5 @@
 
 ## 兼容性
 
-- 不新增或修改数据库字段，`publish_source`、`trigger_type`、`status_group` 和 `task_key` 均为读取时派生字段。
+- 不新增或修改数据库字段，`publish_source`、`trigger_type`、`status_group`、`task_key` 和 `force_close_allowed` 均为读取时派生字段。
 - 旧素材池事件、取消、人工核对仍调用原 TT Post 接口；自动任务详情复用原运行详情接口。

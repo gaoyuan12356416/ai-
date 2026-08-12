@@ -9,9 +9,10 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 - 将发布任务日志从 TT Post 发布池页面移出，提供独立“TT 发布日志”页面。
 - 在同一任务级列表中展示素材池发布和自动模板发布，并通过稳定字段区分来源。
 - 保留原素材池任务的事件、取消和人工核对能力，以及自动发布运行详情。
+- 支持对尚未进入 TikTok 发布阶段的自动模板任务进行可审计的强制关闭。
 - 在列表和详情中展示账本冻结的 4 位 code，不能从发布文案推断。
 - 为 code 路由上线前的已发布排期记录生成可解析 code，供运营手工修改帖子。
-- 不迁移、不改写两套历史账本，不改变任何筛选、排期、准备或发布执行逻辑。
+- 不迁移、不改写两套历史账本；强制关闭只终止指定任务，不触发新发布。
 
 ## 范围
 
@@ -23,13 +24,14 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 - 独立 `trigger_type` 字段，避免将来源与触发方式混为一谈。
 - 从素材池页面移除发布日志卡片、表格和相关主动查询。
 - 一次性回填 `tt_post_queue` 中已发布、有 `publish_id`、但 `code` 为空的明确队列。
+- 自动模板任务的单任务强制关闭、状态门禁、事件和操作审计。
 
 ### 不包含
 
-- 修改旧发布池和自动模板的发布状态机、定时器、幂等键或发布 API。
+- 修改旧发布池的状态机，或修改自动模板定时器、幂等键和发布 API。
 - 立即测试记录的 code 回填；`tt_post_direct_test` 仍无 durable code 身份。
 - 修改历史 caption、长链、短链、状态、`publish_id` 或触发真实 TikTok 发布。
-- 自动重试、批量取消、删除日志。
+- 自动重试、批量取消、删除日志；已开始 TikTok 发布或待核对任务的强制关闭。
 
 ## 用户故事 / 业务规则
 
@@ -44,6 +46,8 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 9. 自动模板 code 按共享路由账本中的高位合成 queue ID 读取，不从 caption 提取。
 10. 历史回填优先使用已冻结的 `AIpost` 长链；对从未生成长链的旧队列，只允许按逐 queue ID 显式授权，从同一 SQLite 快照中的唯一 `consumed` recurring 记录、唯一 `publish_reconciled → published` 事件和冻结账号快照生成确定性替代路由。缺少或冲突的账本证据必须整批失败关闭。
 11. 确定性替代路由不能称为恢复原始长链：campaign 时间使用 `queue.created_at` surrogate，素材名/剧名/语言/标签缺失时分别使用 `material_id`、`content_id`、recurring `routing_language`、`none`，link identity 使用历史 `TT_SHORT_LINK_NAMESPACE + queue_id` surrogate。不得从 caption 或当前远端素材解析器推断历史字段。
+12. 自动模板任务只有在 `pending/selecting/reserved/preparing/retry_wait/ready` 且无发布证据时可强制关闭；`publishing/reconciling/unknown/published` 一律拒绝。
+13. 强制关闭必须原子撤销 claim 和下次重试时间，保留原错误字段，新增 `task_force_closed` 事件并写主后台操作审计；并发 worker 不得恢复任务。
 
 ## 交互与流程
 
@@ -52,6 +56,7 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 3. 用户可按来源、触发方式、账号、模板、素材 ID、Drama ID、统一状态和日期筛选。
 4. 素材池排期任务可查看事件，并在原状态规则允许时取消或人工核对。
 5. 素材池立即测试显示本地时间线；自动发布任务显示运行、任务和事件快照。
+6. 自动任务仅在服务端返回 `force_close_allowed=true` 时显示“强制关闭”，二次确认后调用单任务接口并刷新列表。
 
 ## 技术设计
 
@@ -80,7 +85,7 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 
 ### API / 接口
 
-新增只读接口 `GET /api/admin/tt-auto-publish/publish-logs`。支持 `publish_source`、`trigger_type`、`source_account_id`、`template_id`、`material_id`、`content_id`、`status`、`from`、`to`、`limit`、`offset`。响应包含 `items`、`pagination`、`summary`。
+新增只读接口 `GET /api/admin/tt-auto-publish/publish-logs`。支持 `publish_source`、`trigger_type`、`source_account_id`、`template_id`、`material_id`、`content_id`、`status`、`from`、`to`、`limit`、`offset`。响应包含 `items`、`pagination`、`summary`。新增 `POST /api/admin/tt-auto-publish/tasks/{task_id}/force-close`，只接受 `reason` 并由主 API 注入操作人。
 
 ### 异常与边界
 
@@ -100,7 +105,7 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 - 过滤、统计、跨来源倒序分页准确。
 - 旧历史记录无需迁移即可显示。
 - 素材池取消/核对/事件以及自动运行详情仍可使用。
-- 发布相关状态机、表结构和定时执行代码没有行为变更。
+- 自动任务安全状态可强制关闭；有发布证据的任务不可关闭，表结构和定时执行代码不变。
 - 首批符合条件的已发布排期均有可解析 code，页面显示与路由账本一致；确定性替代路由带可审计 provenance/fallback，立即测试不在回填范围。
 - 契约、服务、UI 和回归测试全部通过。
 
@@ -113,3 +118,4 @@ TT Post 素材池页面当前同时承担素材入池、预制作和发布任务
 
 - 2026-08-06：用户确认统一发布日志方案。
 - 2026-08-07：用户要求恢复 4 位 code 列并为路由上线前的首批已发布排期生成 code。
+- 2026-08-12：用户要求在发布日志中强制关闭尚未发布的自动模板任务。

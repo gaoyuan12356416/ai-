@@ -130,8 +130,9 @@ class FakeSelector:
 
 
 class FakeExecutor:
-    def __init__(self, gates):
+    def __init__(self, gates, store=None):
         self.gates = gates
+        self.store = store
         self.media_profile_version = "tt-post-source-direct-v1"
         self.source_trim_tail_seconds = 0.0
         self.execute_calls = []
@@ -153,6 +154,18 @@ class FakeExecutor:
                 "source_trim_tail_seconds": 4.333333,
             },
         ]
+
+    def force_close_task(self, task_id, *, reason):
+        task = self.store.force_close_task(task_id, reason=reason)
+        run = self.store.get_run(task.run_id)
+        if all(
+            item.status in {"no_candidate", "published", "failed", "canceled", "skipped"}
+            for item in self.store.list_tasks(run_id=task.run_id)
+        ) and run.status not in {"completed", "partial_failed", "failed", "canceled"}:
+            self.store.set_run_status(
+                run.id, "failed", expected_statuses={run.status}
+            )
+        return task
 
 
 def template_payload(*, name="Template A", mode="fixed", account_ids=None):
@@ -233,7 +246,7 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "tt_auto_internal_bearer_invalid")
 
     def service(self, *, gates=None):
-        executor = FakeExecutor(gates or AutoLiveGates())
+        executor = FakeExecutor(gates or AutoLiveGates(), self.store)
         service = TTAutoPostService(
             self.store,
             self.legacy,
@@ -245,6 +258,29 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
             schedule_grace_seconds=600,
         )
         return service, executor
+
+    def test_force_close_requires_reason_and_preserves_publish_safety(self):
+        service, _ = self.service()
+        template = self.create(service, account_ids=["640"])
+        result = service.run_now(
+            template["id"],
+            self.actor(
+                {
+                    "expected_version": 1,
+                    "confirmed": True,
+                    "idempotency_key": "force-close-service",
+                }
+            ),
+        )
+        task = self.store.list_tasks(run_id=result["run_id"])[0]
+        closed = service.force_close_task(
+            task.id,
+            self.actor({"reason": "operator requested close"}),
+        )
+        self.assertEqual(closed["task"]["status"], "canceled")
+        self.assertEqual(self.store.get_run(result["run_id"]).status, "failed")
+        with self.assertRaises(AutoPostServiceError):
+            service.force_close_task(task.id, self.actor({"reason": ""}))
 
     @staticmethod
     def actor(payload):

@@ -53,6 +53,9 @@ class TTPublishLogsUiTests(unittest.TestCase):
         self.assertIn("/events?${ui.queryString({ queue_id: item.task_id })}", self.js)
         self.assertIn("/runs/${encodeURIComponent(item.run_id)}", self.js)
         self.assertIn('activeKey: "ttAutoPublishRuns"', self.js)
+        self.assertIn("force_close_allowed", self.js)
+        self.assertIn("强制关闭", self.js)
+        self.assertIn("/force-close", self.js)
 
     def test_old_pool_no_longer_renders_or_requests_publish_log(self):
         self.assertNotIn("<h2>发布任务</h2>", self.pool)

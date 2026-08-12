@@ -1068,6 +1068,24 @@ class TTAutoPostService:
             "events": self.store.list_events(run_id=run.id),
         }
 
+    def force_close_task(
+        self, task_id: Any, raw: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        payload = dict(raw)
+        actor = _actor(payload)
+        if set(payload) != {"reason"}:
+            raise AutoPostServiceError("invalid_request", "强制关闭参数无效", 400)
+        reason = str(payload.get("reason") or "").strip()
+        if not reason or len(reason) > 200:
+            raise AutoPostServiceError("invalid_request", "强制关闭原因无效", 400)
+        audit_reason = "%s（操作人：%s / %s）" % (
+            reason,
+            actor.name or "未知",
+            actor.user_id or "未知",
+        )
+        task = self.executor.force_close_task(task_id, reason=audit_reason)
+        return {"ok": True, "task": self._task_item(task)}
+
     def execute_next(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(raw)
         if set(payload) != {"worker_id"}:
@@ -1471,6 +1489,13 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
             return 200, service.tick()
         if self.command == "POST" and path == "/internal/tt-auto-post/execute-next":
             return 200, service.execute_next(self._body())
+        match = re.fullmatch(
+            re.escape(TT_AUTO_ADMIN_PREFIX)
+            + r"/tasks/([1-9][0-9]*)/force-close",
+            path,
+        )
+        if self.command == "POST" and match:
+            return 200, service.force_close_task(match.group(1), self._body())
         raise AutoPostServiceError("not_found", "路由不存在", 404)
 
     def _handle(self) -> None:

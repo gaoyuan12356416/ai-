@@ -348,6 +348,33 @@ class UnifiedPublishLogTests(unittest.TestCase):
         self.assertNotIn("claim_token", serialized)
         self.assertEqual(payload["items"][0]["publish_url"], "")
 
+    def test_force_close_flag_is_server_side_and_publish_safe(self):
+        template = self.auto_store.list_templates()[0]
+        run = self.auto_store.create_run(
+            run_key="force-close-flag",
+            template_id=template.id,
+            template_version=template.version,
+            trigger_type="manual",
+            scheduled_at_utc="2026-08-06T09:00:00+00:00",
+            shanghai_date="2026-08-06",
+            publish_time="17:00",
+            blacklist_snapshot={},
+            actor=AuditActor("803", "operator"),
+        )
+        task = self.auto_store.create_task(
+            run_id=run.id,
+            account_id="644",
+            drama_language="en",
+            account_setting_version=1,
+            account_settings={"privacy_level": "SELF_ONLY"},
+        )
+        payload = self.service.publish_logs(
+            self.query(publish_source="auto_template", limit=20, offset=0)
+        )
+        by_id = {item["task_id"]: item for item in payload["items"]}
+        self.assertTrue(by_id[task.id]["force_close_allowed"])
+        self.assertFalse(by_id[1]["force_close_allowed"])
+
     def test_missing_unrequested_legacy_source_does_not_block_auto_only(self):
         missing = LegacyTTPostReader(Path(self.temp.name) / "missing.sqlite3")
         service = TTAutoPostService(

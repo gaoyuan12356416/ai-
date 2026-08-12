@@ -1894,6 +1894,20 @@ class TTAutoPostStore:
                     "is_aigc": bool(settings.get("is_aigc")),
                     "selection": selection,
                     "unknown_outcome": bool(item.get("unknown_outcome")),
+                    "force_close_allowed": (
+                        str(item.get("status") or "")
+                        in {
+                            "pending",
+                            "selecting",
+                            "reserved",
+                            "preparing",
+                            "retry_wait",
+                            "ready",
+                        }
+                        and not str(item.get("publish_id") or "")
+                        and not bool(item.get("unknown_outcome"))
+                        and str(item.get("claim_phase") or "") != "reconcile"
+                    ),
                 }
             )
             for key in (
@@ -2746,6 +2760,88 @@ class TTAutoPostStore:
                 message=message,
             )
             result = conn.execute("SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)).fetchone()
+        assert result is not None
+        return _task_from_row(result)
+
+    def force_close_task(self, task_id: Any, *, reason: Any) -> TaskRecord:
+        """Atomically terminalize a task that has not entered TikTok publish.
+
+        This operator path deliberately revokes an active worker claim.  A
+        worker that finishes selection or preparation afterwards will fail its
+        guarded transition instead of reviving the closed task.
+        """
+
+        normalized_id = _positive_int(task_id, "task id")
+        clean_reason = _bounded_text(reason, "force close reason", 500)
+        now = self._now_iso()
+        safe_statuses = {
+            "pending",
+            "selecting",
+            "reserved",
+            "preparing",
+            "retry_wait",
+            "ready",
+        }
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)
+            ).fetchone()
+            if row is None:
+                raise TTAutoPostStoreError(
+                    "tt_auto_task_not_found", "task was not found", 404
+                )
+            current = str(row["status"])
+            if current == "canceled":
+                return _task_from_row(row)
+            if current == "published":
+                raise TTAutoPostStoreError(
+                    "tt_auto_task_already_published",
+                    "published task cannot be force closed",
+                    409,
+                )
+            if (
+                current not in safe_statuses
+                or str(row["publish_id"] or "")
+                or bool(row["unknown_outcome"])
+                or str(row["claim_phase"] or "") == "reconcile"
+            ):
+                raise TTAutoPostStoreError(
+                    "tt_auto_publish_reconcile_required",
+                    "task may only be closed before TikTok publishing starts",
+                    409,
+                )
+            conn.execute(
+                """
+                UPDATE tt_auto_task
+                SET status='canceled',updated_at=?,finished_at_utc=?,
+                    next_attempt_at_utc='',claim_phase='',claim_worker='',
+                    claim_token='',lease_expires_at_utc=''
+                WHERE id=?
+                """,
+                (now, now, normalized_id),
+            )
+            if str(row["material_id"] or ""):
+                conn.execute(
+                    """
+                    UPDATE tt_auto_material_ledger
+                    SET last_task_status='canceled',updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (now, normalized_id),
+                )
+            self._event(
+                conn,
+                run_id=int(row["run_id"]),
+                task_id=normalized_id,
+                event_type="task_force_closed",
+                created_at=now,
+                from_status=current,
+                to_status="canceled",
+                message=clean_reason,
+            )
+            result = conn.execute(
+                "SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)
+            ).fetchone()
         assert result is not None
         return _task_from_row(result)
 
