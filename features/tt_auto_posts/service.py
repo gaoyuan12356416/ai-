@@ -33,7 +33,14 @@ from .code_broker import synthetic_queue_id
 from .code_broker_client import AutoCodeBrokerClient, DEFAULT_BROKER_URL
 from .core import AuditActor, PUBLISH_LOG_STATUS_GROUPS, TTPostAutoStore
 from .legacy_reader import LegacyTTPostReader, LegacyTTPostReaderError
-from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
+from .publisher import (
+    DIRECT_OUTRO_MEDIA_PROFILE,
+    RANDOM_OVERLAY_MEDIA_PROFILE,
+    AutoLiveGates,
+    AutoPostExecutor,
+    VideoTemplateRoute,
+    selector_rules,
+)
 from .repositories import (
     BEIJING_TZ,
     MetricWindowRepository,
@@ -45,6 +52,8 @@ from .selector import (
     TwoStageSelector,
 )
 from .validation import (
+    VIDEO_TEMPLATE_DIRECT_OUTRO,
+    VIDEO_TEMPLATE_RANDOM_OVERLAY,
     ValidationError,
     expected_version,
     normalize_template_payload,
@@ -224,12 +233,27 @@ class TTAutoPostService:
             )
 
     def health(self) -> Dict[str, Any]:
+        summaries = getattr(self.executor, "video_template_summaries", None)
+        video_templates = (
+            summaries()
+            if callable(summaries)
+            else [
+                {
+                    "key": VIDEO_TEMPLATE_RANDOM_OVERLAY,
+                    "profile": self.executor.media_profile_version,
+                    "source_trim_tail_seconds": (
+                        self.executor.source_trim_tail_seconds
+                    ),
+                }
+            ]
+        )
         return {
             "ok": True,
             "service": "tt-auto-post",
             "gates": self.executor.gates.as_dict(),
             "profile": self.executor.media_profile_version,
             "source_trim_tail_seconds": self.executor.source_trim_tail_seconds,
+            "video_templates": video_templates,
         }
 
     def _now(self) -> datetime:
@@ -1199,13 +1223,49 @@ def build_service_from_env(
             "自动发布内部凭据必须与旧 TT 服务及 GPU 凭据独立",
             500,
         )
+    gpu_seal_key = _required_env(
+        source, "TT_POST_GPU_CREDENTIAL_SEAL_KEY_B64"
+    )
+    gpu_timeout = int(source.get("TT_POST_GPU_TIMEOUT", "900"))
+    gpu_prepare_timeout = int(
+        source.get("TT_POST_GPU_PREPARE_TIMEOUT", "9000")
+    )
     gpu = GPUClient(
         str(source.get("TT_POST_GPU_URL", "http://127.0.0.1:18830")),
         gpu_token,
-        _required_env(source, "TT_POST_GPU_CREDENTIAL_SEAL_KEY_B64"),
-        timeout=int(source.get("TT_POST_GPU_TIMEOUT", "900")),
-        prepare_timeout=int(source.get("TT_POST_GPU_PREPARE_TIMEOUT", "9000")),
+        gpu_seal_key,
+        timeout=gpu_timeout,
+        prepare_timeout=gpu_prepare_timeout,
     )
+    direct_outro_gpu = GPUClient(
+        str(
+            source.get(
+                "TT_AUTO_POST_DIRECT_OUTRO_GPU_URL",
+                "http://127.0.0.1:18834",
+            )
+        ),
+        gpu_token,
+        gpu_seal_key,
+        timeout=gpu_timeout,
+        prepare_timeout=gpu_prepare_timeout,
+        allowed_loopback_ports=(18834,),
+    )
+    primary_trim = float(
+        source.get("TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS", "0")
+    )
+    primary_profile = str(
+        source.get(
+            "TT_POST_MEDIA_PROFILE_VERSION",
+            RANDOM_OVERLAY_MEDIA_PROFILE,
+        )
+        or ""
+    ).strip()
+    if primary_profile != RANDOM_OVERLAY_MEDIA_PROFILE or primary_trim != 0:
+        raise AutoPostServiceError(
+            "tt_auto_random_overlay_route_invalid",
+            "随机排重GPU路由的profile或trim配置不一致",
+            500,
+        )
     executor = AutoPostExecutor(
         store,
         selector,
@@ -1230,15 +1290,20 @@ def build_service_from_env(
                 "/mnt/data-disk/tt-auto-post-public/s2l",
             )
         ),
-        source_trim_tail_seconds=float(
-            source.get("TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS", "4.333333")
-        ),
-        media_profile_version=str(
-            source.get(
-                "TT_POST_MEDIA_PROFILE_VERSION",
-                "tt-post-direct-outro-hevc-720x1280-v2",
-            )
-        ),
+        source_trim_tail_seconds=primary_trim,
+        media_profile_version=primary_profile,
+        video_template_routes={
+            VIDEO_TEMPLATE_RANDOM_OVERLAY: VideoTemplateRoute(
+                gpu,
+                RANDOM_OVERLAY_MEDIA_PROFILE,
+                0.0,
+            ),
+            VIDEO_TEMPLATE_DIRECT_OUTRO: VideoTemplateRoute(
+                direct_outro_gpu,
+                DIRECT_OUTRO_MEDIA_PROFILE,
+                4.333333,
+            ),
+        },
         max_concurrent_tasks=int(source.get("TT_AUTO_POST_WORKER_COUNT", "4")),
     )
     return TTAutoPostService(

@@ -24,9 +24,16 @@ from features.tt_auto_posts.core import (  # noqa: E402
     TTPostAutoStore,
 )
 from features.tt_auto_posts.publisher import (  # noqa: E402
+    DIRECT_OUTRO_MEDIA_PROFILE,
+    RANDOM_OVERLAY_MEDIA_PROFILE,
     AutoLiveGates,
     AutoPostExecutionError,
     AutoPostExecutor,
+    VideoTemplateRoute,
+)
+from features.tt_auto_posts.validation import (  # noqa: E402
+    VIDEO_TEMPLATE_DIRECT_OUTRO,
+    VIDEO_TEMPLATE_RANDOM_OVERLAY,
 )
 from features.tt_posts.core import (  # noqa: E402
     AccountSourceError,
@@ -207,10 +214,13 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
         suffix="1",
         caption_template=None,
         account_username="account640",
+        video_template=None,
     ):
         config = template_config()
         if caption_template is not None:
             config["caption_template"] = caption_template
+        if video_template is not None:
+            config["video_template"] = video_template
         template = self.store.create_template(
             name="Template " + suffix,
             config=config,
@@ -278,6 +288,22 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             **overrides,
         )
 
+    def routed_executor(self, random_gpu, direct_outro_gpu=None):
+        routes = {
+            VIDEO_TEMPLATE_RANDOM_OVERLAY: VideoTemplateRoute(
+                random_gpu,
+                RANDOM_OVERLAY_MEDIA_PROFILE,
+                0.0,
+            )
+        }
+        if direct_outro_gpu is not None:
+            routes[VIDEO_TEMPLATE_DIRECT_OUTRO] = VideoTemplateRoute(
+                direct_outro_gpu,
+                DIRECT_OUTRO_MEDIA_PROFILE,
+                4.333333,
+            )
+        return self.executor(random_gpu, video_template_routes=routes)
+
     def test_source_direct_profile_requires_zero_trim(self):
         with self.assertRaises(AutoPostExecutionError) as caught:
             self.executor(
@@ -305,6 +331,121 @@ class TTAutoPostPublisherIntegrationTests(unittest.TestCase):
             "tt-post-source-direct-v1",
         )
         self.assertEqual(gpu.prepare_calls[0]["source_trim_tail_seconds"], 0)
+
+    def test_historical_missing_video_template_uses_random_overlay_route(self):
+        self.reserved_task(suffix="historical-missing-video-template")
+        random_gpu = FakeGPU()
+        direct_outro_gpu = FakeGPU()
+
+        result = self.routed_executor(
+            random_gpu, direct_outro_gpu
+        ).execute_next("worker-historical-template")
+
+        self.assertEqual(result["task"]["status"], "ready")
+        self.assertEqual(len(random_gpu.prepare_calls), 1)
+        self.assertEqual(direct_outro_gpu.prepare_calls, [])
+        self.assertEqual(
+            random_gpu.prepare_calls[0]["expected_profile"],
+            RANDOM_OVERLAY_MEDIA_PROFILE,
+        )
+        self.assertEqual(
+            random_gpu.prepare_calls[0]["source_trim_tail_seconds"], 0.0
+        )
+
+    def test_direct_outro_route_is_frozen_for_prepare_publish_and_reconcile(self):
+        task = self.reserved_task(
+            suffix="direct-outro-route",
+            video_template=VIDEO_TEMPLATE_DIRECT_OUTRO,
+        )
+        random_gpu = FakeGPU()
+        direct_outro_gpu = FakeGPU(
+            publish_results=[
+                {"publish_id": "pub-direct", "state": "processing"}
+            ],
+            reconcile_result={
+                "publish_id": "pub-direct",
+                "state": "published",
+                "publish_url": "https://www.tiktok.com/@account640/video/9",
+            },
+        )
+        executor = self.routed_executor(random_gpu, direct_outro_gpu)
+
+        prepared = executor.execute_next("worker-direct-prepare")["task"]
+        publishing = executor.execute_next("worker-direct-publish")["task"]
+        published = executor.execute_next("worker-direct-reconcile")["task"]
+
+        self.assertEqual(prepared["status"], "ready")
+        self.assertEqual(publishing["status"], "reconciling")
+        self.assertEqual(published["status"], "published")
+        self.assertEqual(self.store.get_task(task.id).publish_id, "pub-direct")
+        self.assertEqual(random_gpu.prepare_calls, [])
+        self.assertEqual(random_gpu.creator_calls, [])
+        self.assertEqual(random_gpu.publish_calls, [])
+        self.assertEqual(random_gpu.reconcile_calls, [])
+        self.assertEqual(len(direct_outro_gpu.prepare_calls), 1)
+        self.assertEqual(len(direct_outro_gpu.creator_calls), 1)
+        self.assertEqual(len(direct_outro_gpu.publish_calls), 1)
+        self.assertEqual(len(direct_outro_gpu.reconcile_calls), 1)
+        self.assertEqual(
+            direct_outro_gpu.prepare_calls[0]["expected_profile"],
+            DIRECT_OUTRO_MEDIA_PROFILE,
+        )
+        self.assertEqual(
+            direct_outro_gpu.prepare_calls[0]["source_trim_tail_seconds"],
+            4.333333,
+        )
+
+    def test_selected_route_unavailable_retries_without_calling_other_gpu(self):
+        self.reserved_task(
+            suffix="direct-outro-unavailable",
+            video_template=VIDEO_TEMPLATE_DIRECT_OUTRO,
+        )
+        random_gpu = FakeGPU()
+
+        result = self.routed_executor(random_gpu).execute_next(
+            "worker-direct-unavailable"
+        )["task"]
+
+        self.assertEqual(result["status"], "retry_wait")
+        self.assertEqual(
+            result["error_code"], "tt_auto_video_template_unavailable"
+        )
+        self.assertEqual(random_gpu.prepare_calls, [])
+        self.assertEqual(random_gpu.publish_calls, [])
+
+    def test_explicit_video_template_routes_require_exact_profile_and_trim(self):
+        random_gpu = FakeGPU()
+        with self.assertRaises(AutoPostExecutionError) as wrong_profile:
+            self.executor(
+                random_gpu,
+                video_template_routes={
+                    VIDEO_TEMPLATE_RANDOM_OVERLAY: VideoTemplateRoute(
+                        random_gpu,
+                        DIRECT_OUTRO_MEDIA_PROFILE,
+                        0.0,
+                    )
+                },
+            )
+        self.assertEqual(
+            wrong_profile.exception.code,
+            "tt_auto_video_template_route_invalid",
+        )
+
+        with self.assertRaises(AutoPostExecutionError) as wrong_trim:
+            self.executor(
+                random_gpu,
+                video_template_routes={
+                    VIDEO_TEMPLATE_RANDOM_OVERLAY: VideoTemplateRoute(
+                        random_gpu,
+                        RANDOM_OVERLAY_MEDIA_PROFILE,
+                        1.0,
+                    )
+                },
+            )
+        self.assertEqual(
+            wrong_trim.exception.code,
+            "tt_auto_video_template_route_invalid",
+        )
 
     def test_prepare_then_publish_completes_once(self):
         task = self.reserved_task(suffix="success")

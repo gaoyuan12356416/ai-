@@ -630,13 +630,54 @@ class GPUClientTests(unittest.TestCase):
         )
         self.assertNotIn("publish_id", payload)
 
-    def test_gpu_client_rejects_any_non_exact_loopback_endpoint(self):
+    def test_gpu_client_allows_only_the_two_exact_loopback_endpoints(self):
+        connection = CaptureConnection({"item": {"status": "ok"}})
+        connection_ports = []
+        direct_client = GPUClient(
+            "http://127.0.0.1:18834",
+            GPU_TOKEN,
+            SEAL_KEY,
+            connection_factory=lambda _host, port, _timeout: (
+                connection_ports.append(port) or connection
+            ),
+            allowed_loopback_ports=(18834,),
+        )
+        direct_client.creator_info(
+            job_id="ttcreator-101-abcdef123456",
+            source_account_id="101",
+            access_token="token",
+        )
+        self.assertEqual(direct_client.base_url, "http://127.0.0.1:18834")
+        self.assertEqual(connection_ports, [18834])
+
         with self.assertRaises(TTPostServiceError):
             GPUClient(
-                "http://127.0.0.1:18831",
+                "http://127.0.0.1:18834",
                 GPU_TOKEN,
                 SEAL_KEY,
             )
+        with self.assertRaises(TTPostServiceError):
+            GPUClient(
+                "http://127.0.0.1:18830",
+                GPU_TOKEN,
+                SEAL_KEY,
+                allowed_loopback_ports=(18830, 18834),
+            )
+
+        for endpoint in (
+            "http://127.0.0.1:18831",
+            "http://127.0.0.1:8832",
+            "http://localhost:18834",
+            "http://10.0.0.1:18834",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaises(TTPostServiceError):
+                    GPUClient(
+                        endpoint,
+                        GPU_TOKEN,
+                        SEAL_KEY,
+                        allowed_loopback_ports=(18834,),
+                    )
 
 
 class ManualCanaryConfigTests(unittest.TestCase):

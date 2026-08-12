@@ -87,6 +87,20 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
 
               <section class="panel">
                 <div class="section-head">
+                  <div><h2>视频制作模板</h2><p>选择会写入当前模板版本；已创建运行继续使用其冻结版本，不受后续编辑影响。</p></div>
+                </div>
+                <div class="field">
+                  <label class="required" for="videoTemplate">视频制作模板</label>
+                  <select id="videoTemplate">
+                    <option value="random_overlay" selected>随机排重（当前模板，无片尾）</option>
+                    <option value="direct_outro">拼接结尾（历史模板，固定教程片尾）</option>
+                  </select>
+                  <span class="helper">随机排重保留原视频完整时长并叠加随机透明模板；拼接结尾使用之前的固定教程片尾和转场。保存模板不会立即制作或发布视频。</span>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="section-head">
                   <div><h2>选择 TT 个号</h2><p>支持多选；筛选时会分别使用每个账号已保存的剧语言。</p></div>
                   <span id="selectedAccountCount" class="badge">已选 0 个</span>
                 </div>
@@ -242,6 +256,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                   <div class="summary-item"><span>指标口径</span><strong id="summaryMetric">platform=0 / 7 天</strong></div>
                   <div class="summary-item"><span>剧排序</span><strong id="summaryDramaSort">D0 ROAS / 倒序</strong></div>
                   <div class="summary-item"><span>素材排序</span><strong id="summaryMaterialSort">D0 ROAS / 倒序</strong></div>
+                  <div class="summary-item"><span>视频制作</span><strong id="summaryVideoTemplate">随机排重</strong></div>
                   <div class="summary-item"><span>发布时间</span><strong id="summarySchedule">每天 11:00</strong></div>
                 </div>
                 <div class="sticky-actions">

@@ -38,6 +38,13 @@ RESOURCE_TYPE_V2_LABELS = {
     "100": "小说",
 }
 
+VIDEO_TEMPLATE_RANDOM_OVERLAY = "random_overlay"
+VIDEO_TEMPLATE_DIRECT_OUTRO = "direct_outro"
+DEFAULT_VIDEO_TEMPLATE = VIDEO_TEMPLATE_RANDOM_OVERLAY
+VIDEO_TEMPLATE_VALUES = frozenset(
+    {VIDEO_TEMPLATE_RANDOM_OVERLAY, VIDEO_TEMPLATE_DIRECT_OUTRO}
+)
+
 
 class ValidationError(ValueError):
     def __init__(self, code: str, message: str, status: int = 400):
@@ -280,6 +287,17 @@ def _caption_template(value: Any) -> str:
     return template
 
 
+def normalize_video_template(value: Any = None, *, missing: bool = False) -> str:
+    if missing:
+        return DEFAULT_VIDEO_TEMPLATE
+    if not isinstance(value, str):
+        raise ValidationError("invalid_request", "视频制作模板无效")
+    normalized = value.strip()
+    if normalized not in VIDEO_TEMPLATE_VALUES:
+        raise ValidationError("invalid_request", "视频制作模板无效")
+    return normalized
+
+
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
     required = {
@@ -295,6 +313,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "drama_launch_window_days",
         "cooldown_days",
         "platform",
+        "video_template",
     }
     _keys(value, required=required, optional=optional, label="模板")
     accounts = value.get("account_ids")
@@ -317,6 +336,9 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "name": _text(value.get("name"), "模板名称", minimum=1, maximum=120),
         "account_ids": account_ids,
         "caption_template": _caption_template(value.get("caption_template")),
+        "video_template": normalize_video_template(
+            value.get("video_template"), missing="video_template" not in value
+        ),
         "metric_window_days": _integer(
             value.get("metric_window_days", 7), "指标统计窗口", 1, 30
         ),
@@ -347,11 +369,16 @@ def config_hash(value: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "DEFAULT_VIDEO_TEMPLATE",
+    "VIDEO_TEMPLATE_DIRECT_OUTRO",
+    "VIDEO_TEMPLATE_RANDOM_OVERLAY",
+    "VIDEO_TEMPLATE_VALUES",
     "ValidationError",
     "canonical_json",
     "config_hash",
     "expected_version",
     "is_placeholder_secret",
     "normalize_template_payload",
+    "normalize_video_template",
     "valid_internal_bearer",
 ]

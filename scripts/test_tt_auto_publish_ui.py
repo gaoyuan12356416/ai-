@@ -174,6 +174,8 @@ class TtAutoPublishUiTest(unittest.TestCase):
             "materialSortBy",
             "materialSortDirection",
             "captionTemplate",
+            "videoTemplate",
+            "summaryVideoTemplate",
         }
         self.assertFalse(required - ids, required - ids)
         source = PAGES["template"]
@@ -203,6 +205,19 @@ class TtAutoPublishUiTest(unittest.TestCase):
         self.assertIn("唯一四位剧情查询码", source)
         self.assertIn("剧 ID 宏为可选", source)
         self.assertNotIn("发布文案模板必须包含", script)
+
+    def test_editor_selects_an_immutable_video_template_route(self):
+        page = PAGES["template"]
+        script = SCRIPTS["template"]
+        self.assertIn('value="random_overlay"', page)
+        self.assertIn('value="direct_outro"', page)
+        self.assertIn("随机排重", page)
+        self.assertIn("拼接结尾", page)
+        self.assertIn('const DEFAULT_VIDEO_TEMPLATE = "random_overlay"', script)
+        self.assertIn("video_template: videoTemplate", script)
+        self.assertIn(
+            'configValue("video_template", DEFAULT_VIDEO_TEMPLATE)', script
+        )
 
     def test_resource_type_v2_is_optional_chinese_enum_multiselect(self):
         page = PAGES["template"]
@@ -321,7 +336,60 @@ class TtAutoPublishUiTest(unittest.TestCase):
         self.assertIn('ui.readItem(response, ["template", "item"])', source)
         self.assertIn('ui.readItems(payload, ["accounts", "items"])', source)
         self.assertIn("caption_template", source)
+        self.assertIn("video_template", source)
         self.assertIn("platform: integerValue", source)
+
+    def test_direct_outro_deploy_contract_is_isolated_from_random_overlay(self):
+        cpu_env = (ROOT / "deploy" / "tt-auto-post.env.example").read_text(
+            encoding="utf-8"
+        )
+        gpu_env = (
+            ROOT / "deploy" / "tt-post-gpu-direct-outro.env.example"
+        ).read_text(encoding="utf-8")
+        gpu_unit = (
+            ROOT / "deploy" / "tt-gpu-direct-outro.service"
+        ).read_text(encoding="utf-8")
+        tunnel = (
+            ROOT / "deploy" / "tt-gpu-direct-outro-reverse-tunnel.service"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "TT_AUTO_POST_DIRECT_OUTRO_GPU_URL=http://127.0.0.1:18834",
+            cpu_env,
+        )
+        self.assertIn("TT_POST_GPU_PORT=8832", gpu_env)
+        self.assertIn("TT_POST_GPU_MEDIA_MODE=direct_outro", gpu_env)
+        self.assertIn(
+            "TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS=4.333333", gpu_env
+        )
+        self.assertIn(
+            "TT_POST_GPU_WORK_ROOT=/data/tt-post-publisher/direct-outro-work",
+            gpu_env,
+        )
+        self.assertIn(
+            "EnvironmentFile=/etc/tt-post-gpu-direct-outro.env", gpu_unit
+        )
+        self.assertIn(
+            "ReadWritePaths=/data/tt-post-publisher/direct-outro-work",
+            gpu_unit,
+        )
+        self.assertIn(
+            "-R 127.0.0.1:18834:127.0.0.1:8832", tunnel
+        )
+        self.assertNotIn(":18830:127.0.0.1:8830", tunnel)
+
+    def test_only_direct_outro_client_opts_into_the_new_loopback_port(self):
+        service = (
+            ROOT / "features" / "tt_auto_posts" / "service.py"
+        ).read_text(encoding="utf-8")
+        random_block = service.split("gpu = GPUClient(", 1)[1].split(
+            "direct_outro_gpu = GPUClient(", 1
+        )[0]
+        direct_block = service.split("direct_outro_gpu = GPUClient(", 1)[1].split(
+            "primary_trim =", 1
+        )[0]
+        self.assertNotIn("allowed_loopback_ports", random_block)
+        self.assertIn("allowed_loopback_ports=(18834,)", direct_block)
 
 
 if __name__ == "__main__":

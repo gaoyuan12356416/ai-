@@ -31,6 +31,8 @@ from features.tt_auto_posts.service import (  # noqa: E402
 )
 from features.tt_auto_posts.validation import (  # noqa: E402
     RESOURCE_TYPE_V2_LABELS,
+    VIDEO_TEMPLATE_DIRECT_OUTRO,
+    VIDEO_TEMPLATE_RANDOM_OVERLAY,
     ValidationError,
     normalize_template_payload,
 )
@@ -138,6 +140,20 @@ class FakeExecutor:
         self.execute_calls.append(worker_id)
         raise AssertionError("admin/scheduler tests must not execute a publish task")
 
+    def video_template_summaries(self):
+        return [
+            {
+                "key": VIDEO_TEMPLATE_RANDOM_OVERLAY,
+                "profile": "tt-post-random-overlay-hevc-720x1280-v3",
+                "source_trim_tail_seconds": 0.0,
+            },
+            {
+                "key": VIDEO_TEMPLATE_DIRECT_OUTRO,
+                "profile": "tt-post-direct-outro-hevc-720x1280-v2",
+                "source_trim_tail_seconds": 4.333333,
+            },
+        ]
+
 
 def template_payload(*, name="Template A", mode="fixed", account_ids=None):
     schedule = (
@@ -200,6 +216,10 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(result["profile"], "tt-post-source-direct-v1")
         self.assertEqual(result["source_trim_tail_seconds"], 0.0)
         self.assertTrue(result["gates"]["is_open"])
+        self.assertEqual(
+            [item["key"] for item in result["video_templates"]],
+            [VIDEO_TEMPLATE_RANDOM_OVERLAY, VIDEO_TEMPLATE_DIRECT_OUTRO],
+        )
 
     def test_startup_rejects_documented_placeholder_bearer_before_storage(self):
         with self.assertRaises(AutoPostServiceError) as caught:
@@ -244,6 +264,24 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(normalized["platform"], 0)
         self.assertEqual(normalized["drama_rule"]["sort_by"], "roas")
         self.assertEqual(normalized["material_rule"]["sort_direction"], "asc")
+        self.assertEqual(
+            normalized["video_template"], VIDEO_TEMPLATE_RANDOM_OVERLAY
+        )
+
+        direct_outro = template_payload()
+        direct_outro["video_template"] = VIDEO_TEMPLATE_DIRECT_OUTRO
+        self.assertEqual(
+            normalize_template_payload(direct_outro)["video_template"],
+            VIDEO_TEMPLATE_DIRECT_OUTRO,
+        )
+
+        for invalid_value in ("unknown", "DIRECT_OUTRO", ""):
+            with self.subTest(video_template=invalid_value):
+                invalid_video_template = template_payload()
+                invalid_video_template["video_template"] = invalid_value
+                with self.assertRaises(ValidationError) as caught:
+                    normalize_template_payload(invalid_video_template)
+                self.assertEqual(caught.exception.code, "invalid_request")
 
         invalid = template_payload()
         invalid["platform"] = 9
@@ -312,12 +350,17 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(created["version"], 1)
         self.assertFalse(created["enabled"])
         self.assertTrue(created["confirmed"])
+        self.assertEqual(
+            created["config"]["video_template"],
+            VIDEO_TEMPLATE_RANDOM_OVERLAY,
+        )
 
         listing = service.templates({})
         self.assertEqual(listing["total"], 1)
         self.assertEqual(service.template(template_id)["template"]["name"], "Template A")
 
         updated_payload = template_payload(name="Template B", account_ids=["640"])
+        updated_payload["video_template"] = VIDEO_TEMPLATE_DIRECT_OUTRO
         updated_payload["expected_version"] = 1
         updated = service.update_template(
             template_id, self.actor(updated_payload)
@@ -325,6 +368,9 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(updated["version"], 2)
         self.assertEqual(updated["name"], "Template B")
         self.assertFalse(updated["enabled"])
+        self.assertEqual(
+            updated["config"]["video_template"], VIDEO_TEMPLATE_DIRECT_OUTRO
+        )
 
         copied = service.copy_template(
             template_id,
@@ -333,6 +379,9 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertNotEqual(copied["id"], template_id)
         self.assertFalse(copied["enabled"])
         self.assertTrue(copied["confirmed"])
+        self.assertEqual(
+            copied["config"]["video_template"], VIDEO_TEMPLATE_DIRECT_OUTRO
+        )
 
         enabled = service.set_enabled(
             template_id,
@@ -466,6 +515,9 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
     def test_random_schedule_is_stable_and_does_not_execute(self):
         gates = AutoLiveGates(True, True, True)
         service, executor = self.service(gates=gates)
+        # Enable before the Beijing scheduling day starts so either stable
+        # random slot remains eligible regardless of the config fingerprint.
+        self.clock.value = datetime(2026, 8, 4, 16, 0, tzinfo=UTC)
         template = self.create(
             service,
             mode="random",

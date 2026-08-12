@@ -1,0 +1,43 @@
+[Unit]
+Description=Dramawave TikTok direct-outro GPU preparation and publishing sidecar
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/tt-post-gpu/current
+EnvironmentFile=/etc/tt-post-gpu.env
+EnvironmentFile=/etc/tt-post-gpu.secrets
+EnvironmentFile=/etc/tt-post-gpu-direct-outro.env
+ExecStart=/root/miniconda3/envs/drama-voice/bin/python /opt/tt-post-gpu/current/scripts/tt_gpu_worker.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=tt-post-gpu-direct-outro
+RuntimeDirectoryMode=0700
+PrivateTmp=true
+PrivateDevices=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=/root/.ssh /root/drama_material_service/.env /etc/x-post-media-repair.env /etc/ssh
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/tt-post-gpu/current
+ReadWritePaths=/data/tt-post-publisher/direct-outro-work
+UMask=0077
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

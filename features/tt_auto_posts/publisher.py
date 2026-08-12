@@ -44,14 +44,27 @@ from .selector import (
     SelectionRules,
     TwoStageSelector,
 )
+from .validation import (
+    DEFAULT_VIDEO_TEMPLATE,
+    VIDEO_TEMPLATE_DIRECT_OUTRO,
+    VIDEO_TEMPLATE_RANDOM_OVERLAY,
+    ValidationError,
+    normalize_video_template,
+)
 
 
 UTC = timezone.utc
 SOURCE_DIRECT_MEDIA_PROFILE = "tt-post-source-direct-v1"
+RANDOM_OVERLAY_MEDIA_PROFILE = "tt-post-random-overlay-hevc-720x1280-v3"
+DIRECT_OUTRO_MEDIA_PROFILE = "tt-post-direct-outro-hevc-720x1280-v2"
+EXACT_VIDEO_TEMPLATE_ROUTES = {
+    VIDEO_TEMPLATE_RANDOM_OVERLAY: (RANDOM_OVERLAY_MEDIA_PROFILE, 0.0),
+    VIDEO_TEMPLATE_DIRECT_OUTRO: (DIRECT_OUTRO_MEDIA_PROFILE, 4.333333),
+}
 ZERO_TRIM_MEDIA_PROFILES = frozenset(
     {
         SOURCE_DIRECT_MEDIA_PROFILE,
-        "tt-post-random-overlay-hevc-720x1280-v3",
+        RANDOM_OVERLAY_MEDIA_PROFILE,
         "tt-post-random-overlay-h264-720x1280-v3",
     }
 )
@@ -65,6 +78,20 @@ class AutoPostExecutionError(RuntimeError):
         self.code = str(code or "tt_auto_execution_failed")[:96]
         self.status = int(status)
         super().__init__(str(message or "TT automatic publishing failed")[:500])
+
+
+@dataclass(frozen=True)
+class VideoTemplateRoute:
+    gpu_client: Any
+    media_profile_version: str
+    source_trim_tail_seconds: float
+
+    def public_dict(self, key: str) -> Dict[str, Any]:
+        return {
+            "key": key,
+            "profile": self.media_profile_version,
+            "source_trim_tail_seconds": self.source_trim_tail_seconds,
+        }
 
 
 def _flag(source: Mapping[str, str], name: str) -> bool:
@@ -278,19 +305,79 @@ class AutoPostExecutor:
         short_link_root: Any = "/mnt/data-disk/tt-auto-post-public/s2l",
         source_trim_tail_seconds: float = 4.333333,
         media_profile_version: str = "tt-post-direct-outro-hevc-720x1280-v2",
+        video_template_routes: Optional[
+            Mapping[str, VideoTemplateRoute]
+        ] = None,
         lease_seconds: int = 10800,
         max_concurrent_tasks: int = 4,
     ):
         self.store = store
         self.selector = selector
         self.account_source = account_source
-        self.gpu_client = gpu_client
         self.code_route_broker = code_route_broker
         self.gates = gates or AutoLiveGates.from_env()
         self.now_fn = now_fn
         self.short_link_root = str(short_link_root or "").strip()
-        self.source_trim_tail_seconds = float(source_trim_tail_seconds)
-        self.media_profile_version = str(media_profile_version or "").strip()
+        fallback_route = VideoTemplateRoute(
+            gpu_client=gpu_client,
+            media_profile_version=str(media_profile_version or "").strip(),
+            source_trim_tail_seconds=float(source_trim_tail_seconds),
+        )
+        raw_routes = (
+            {DEFAULT_VIDEO_TEMPLATE: fallback_route}
+            if video_template_routes is None
+            else dict(video_template_routes)
+        )
+        routes: Dict[str, VideoTemplateRoute] = {}
+        for raw_key, raw_route in raw_routes.items():
+            try:
+                key = normalize_video_template(raw_key)
+            except ValidationError:
+                raise AutoPostExecutionError(
+                    "tt_auto_video_template_route_invalid",
+                    "视频制作模板路由配置无效",
+                    500,
+                ) from None
+            if key in routes or not isinstance(raw_route, VideoTemplateRoute):
+                raise AutoPostExecutionError(
+                    "tt_auto_video_template_route_invalid",
+                    "视频制作模板路由配置无效",
+                    500,
+                )
+            profile = str(raw_route.media_profile_version or "").strip()
+            trim = float(raw_route.source_trim_tail_seconds)
+            expected_contract = EXACT_VIDEO_TEMPLATE_ROUTES.get(key)
+            if (
+                raw_route.gpu_client is None
+                or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", profile)
+                or not math.isfinite(trim)
+                or not 0 <= trim <= 60
+                or (
+                    video_template_routes is not None
+                    and expected_contract != (profile, trim)
+                )
+            ):
+                raise AutoPostExecutionError(
+                    "tt_auto_video_template_route_invalid",
+                    "视频制作模板路由配置无效",
+                    500,
+                )
+            routes[key] = VideoTemplateRoute(
+                gpu_client=raw_route.gpu_client,
+                media_profile_version=profile,
+                source_trim_tail_seconds=trim,
+            )
+        if DEFAULT_VIDEO_TEMPLATE not in routes:
+            raise AutoPostExecutionError(
+                "tt_auto_video_template_route_invalid",
+                "默认视频制作模板路由未配置",
+                500,
+            )
+        self.video_template_routes = routes
+        default_route = routes[DEFAULT_VIDEO_TEMPLATE]
+        self.gpu_client = default_route.gpu_client
+        self.source_trim_tail_seconds = default_route.source_trim_tail_seconds
+        self.media_profile_version = default_route.media_profile_version
         self.lease_seconds = int(lease_seconds)
         self.max_concurrent_tasks = int(max_concurrent_tasks)
         self._execute_slots = threading.BoundedSemaphore(self.max_concurrent_tasks)
@@ -314,10 +401,6 @@ class AutoPostExecutor:
             )
         if (
             not Path(self.short_link_root).is_absolute()
-            or not 0 <= self.source_trim_tail_seconds <= 60
-            or not re.fullmatch(
-                r"[A-Za-z0-9._-]{1,128}", self.media_profile_version
-            )
             or not 120 <= self.lease_seconds <= 10800
             or not 1 <= self.max_concurrent_tasks <= 16
         ):
@@ -326,6 +409,41 @@ class AutoPostExecutor:
                 "自动发布执行器配置无效",
                 500,
             )
+
+    def video_template_summaries(self) -> list:
+        ordered = [
+            VIDEO_TEMPLATE_RANDOM_OVERLAY,
+            VIDEO_TEMPLATE_DIRECT_OUTRO,
+        ]
+        return [
+            self.video_template_routes[key].public_dict(key)
+            for key in ordered
+            if key in self.video_template_routes
+        ]
+
+    def _video_route_for_task(self, task: TaskRecord) -> VideoTemplateRoute:
+        template = self.store.get_template(
+            task.template_id, version=task.template_version
+        )
+        try:
+            key = normalize_video_template(
+                template.config.get("video_template"),
+                missing="video_template" not in template.config,
+            )
+        except ValidationError:
+            raise AutoPostExecutionError(
+                "tt_auto_video_template_invalid",
+                "冻结模板的视频制作模板无效",
+                500,
+            ) from None
+        route = self.video_template_routes.get(key)
+        if route is None:
+            raise AutoPostExecutionError(
+                "tt_auto_video_template_unavailable",
+                "所选视频制作模板当前不可用",
+                503,
+            )
+        return route
 
     def _now(self) -> datetime:
         value = self.now_fn()
@@ -454,6 +572,7 @@ class AutoPostExecutor:
     def _prepare(
         self, task: TaskRecord, claim_token: Optional[str] = None
     ) -> TaskRecord:
+        video_route = self._video_route_for_task(task)
         material = self._selection_material(task)
         source_url = _https_url(
             material.get("source_media_url") or material.get("media_url"),
@@ -489,14 +608,14 @@ class AutoPostExecutor:
                 },
                 event_type="task_preparation_recovered",
             )
-        prepared = self.gpu_client.prepare(
+        prepared = video_route.gpu_client.prepare(
             job_id=job_id,
             material={
                 "content_id": task.content_id,
                 "source_media_url": source_url,
             },
-            source_trim_tail_seconds=self.source_trim_tail_seconds,
-            expected_profile=self.media_profile_version,
+            source_trim_tail_seconds=video_route.source_trim_tail_seconds,
+            expected_profile=video_route.media_profile_version,
         )
         if not isinstance(prepared, Mapping):
             raise AutoPostExecutionError(
@@ -508,7 +627,10 @@ class AutoPostExecutor:
             raise AutoPostExecutionError(
                 "tt_auto_prepared_identity_mismatch", "GPU成片身份不一致", 409
             )
-        if str(prepared.get("profile") or "") != self.media_profile_version:
+        if (
+            str(prepared.get("profile") or "")
+            != video_route.media_profile_version
+        ):
             raise AutoPostExecutionError(
                 "tt_auto_prepared_profile_mismatch", "GPU成片版本不一致", 409
             )
@@ -745,10 +867,11 @@ class AutoPostExecutor:
             raise AutoPostExecutionError(
                 "tt_auto_live_gates_closed", "自动发布生产门禁未全部打开", 409
             )
+        video_route = self._video_route_for_task(task)
         job_id = _stable_gpu_job_id(task)
         with self.account_source.publish_credentials(task.account_id) as credentials:
             creator = self._creator_info(
-                self.gpu_client.creator_info(
+                video_route.gpu_client.creator_info(
                     job_id=job_id,
                     source_account_id=task.account_id,
                     access_token=credentials.reveal_access_token(),
@@ -779,7 +902,7 @@ class AutoPostExecutor:
         }
         try:
             with self.account_source.publish_credentials(task.account_id) as credentials:
-                result = self.gpu_client.publish(
+                result = video_route.gpu_client.publish(
                     job_id=job_id,
                     source_account_id=task.account_id,
                     access_token=credentials.reveal_access_token(),
@@ -903,9 +1026,10 @@ class AutoPostExecutor:
     def _reconcile(
         self, task: TaskRecord, claim_token: Optional[str] = None
     ) -> TaskRecord:
+        video_route = self._video_route_for_task(task)
         job_id = _stable_gpu_job_id(task)
         with self.account_source.publish_credentials(task.account_id) as credentials:
-            result = self.gpu_client.reconcile(
+            result = video_route.gpu_client.reconcile(
                 job_id=job_id,
                 source_account_id=task.account_id,
                 access_token=credentials.reveal_access_token(),
@@ -1096,5 +1220,8 @@ __all__ = [
     "AutoLiveGates",
     "AutoPostExecutionError",
     "AutoPostExecutor",
+    "DIRECT_OUTRO_MEDIA_PROFILE",
+    "RANDOM_OVERLAY_MEDIA_PROFILE",
+    "VideoTemplateRoute",
     "selector_rules",
 ]

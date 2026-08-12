@@ -1201,6 +1201,7 @@ class GPUClient:
 
     __slots__ = (
         "base_url",
+        "_port",
         "_internal_token",
         "_seal_key",
         "timeout",
@@ -1217,7 +1218,28 @@ class GPUClient:
         timeout: int = 120,
         prepare_timeout: Optional[int] = None,
         connection_factory: Optional[Callable[[str, int, int], Any]] = None,
+        allowed_loopback_ports: Optional[Iterable[int]] = None,
     ):
+        raw_allowed_ports = (
+            (18830,)
+            if allowed_loopback_ports is None
+            else tuple(allowed_loopback_ports)
+        )
+        try:
+            allowed_ports = frozenset(int(value) for value in raw_allowed_ports)
+        except (TypeError, ValueError, OverflowError):
+            allowed_ports = frozenset()
+        if (
+            not allowed_ports
+            or len(allowed_ports) != 1
+            or not allowed_ports.issubset({18830, 18834})
+            or any(isinstance(value, bool) for value in raw_allowed_ports)
+        ):
+            raise TTPostServiceError(
+                "tt_gpu_url_invalid",
+                "TT GPU服务允许的loopback端口配置无效",
+                500,
+            )
         parsed = urllib.parse.urlsplit(str(base_url or "").rstrip("/"))
         try:
             port = parsed.port
@@ -1226,7 +1248,7 @@ class GPUClient:
         if (
             parsed.scheme != "http"
             or parsed.hostname != "127.0.0.1"
-            or port != 18830
+            or port not in allowed_ports
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in ("", "/")
@@ -1235,7 +1257,7 @@ class GPUClient:
         ):
             raise TTPostServiceError(
                 "tt_gpu_url_invalid",
-                "TT GPU服务必须使用127.0.0.1:18830",
+                "TT GPU服务必须使用指定的127.0.0.1 loopback端口",
                 500,
             )
         token = str(internal_token or "")
@@ -1267,7 +1289,8 @@ class GPUClient:
                 "TT GPU prepare timeout is invalid",
                 500,
             )
-        self.base_url = "http://127.0.0.1:18830"
+        self.base_url = "http://127.0.0.1:%d" % port
+        self._port = int(port)
         self._internal_token = token
         self._seal_key = seal_key
         self.timeout = timeout
@@ -1283,8 +1306,10 @@ class GPUClient:
 
     def _connection(self, timeout: int) -> Any:
         if self._connection_factory is not None:
-            return self._connection_factory("127.0.0.1", 18830, timeout)
-        return http.client.HTTPConnection("127.0.0.1", 18830, timeout=timeout)
+            return self._connection_factory("127.0.0.1", self._port, timeout)
+        return http.client.HTTPConnection(
+            "127.0.0.1", self._port, timeout=timeout
+        )
 
     def _post(
         self,
