@@ -59,3 +59,20 @@ python scripts/backfill_tt_published_codes.py --db-path "$TT_POST_DB_PATH" \
 ## 注意事项
 
 回填不会自动修改 TikTok 帖子；运营人员使用页面映射手工替换帖子文案。
+
+## 2026-08-12 强制关闭任务上线记录
+
+- TT auto sidecar、状态判断、页面与静态资源使用提交
+  `08262a5e47b2b6b484c5878a7a6ee01d342fcd30`；主 API 代理使用基于线上
+  `49b42bb...` 的窄补丁 `2b3a87f5916a9d4fdfa822abb1086edcdaa65c3a`。
+- 线上 release 为
+  `/opt/tt-auto-post/releases/08262a5e47b2b6b484c5878a7a6ee01d342fcd30`；
+  备份为 `/mnt/data-disk/tt-auto-post-backups/force-close-20260812-155314`。
+- 仅服务器判定为发布前、无 `publish_id`、非 unknown outcome、非 reconcile
+  的任务显示“强制关闭”；动作要求原因，写操作审计，并保持已发布或疑似发布任务
+  fail-closed。上线验收没有关闭任务，也没有发起 TikTok 发布。
+- 上线后 sidecar 与主 API 均为 `active`、`NRestarts=0`，SQLite
+  `integrity_check=ok`。任务 146–148 仍为 `retry_wait/selection`，149–151
+  仍为 `pending`，已发布计数保持 108。
+- 回滚时暂停 auto runner/scheduler，恢复旧 release 指针及备份中的主 API、
+  client 和两份静态文件后重启服务；默认保留当前 SQLite 账本，不做整体数据库回滚。
