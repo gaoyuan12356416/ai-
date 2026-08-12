@@ -30,6 +30,7 @@ CSS 返回 404，样式表规则数为 0，`.hidden` 失效。
 - 从当前不可变 GitHub release 精确补齐两份 CSS，未重启服务。
 - 新增 `deploy/x-auto-post-static-files.txt` 作为逐文件部署清单。
 - 新增清单完整性、页面引用覆盖与路径安全测试。
+- 三个页面为自己的 CSS/JS 使用统一 cache-buster，确保生产静态修复立即替换浏览器旧脚本。
 
 ## 影响文件
 

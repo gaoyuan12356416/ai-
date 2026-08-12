@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "deploy" / "x-auto-post-static-files.txt"
 STATIC_ROOT = ROOT / "static"
+ASSET_VERSION = "20260812chrome2"
 
 
 class XAutoPostStaticDeployContractTests(unittest.TestCase):
@@ -33,12 +34,31 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
             referenced.update(
                 match.group(1)
                 for match in re.finditer(
-                    r"(?:href|src)=[\"']/((?:x-auto-publish)[^\"']+)[\"']",
+                    r"(?:href|src)=[\"']/((?:x-auto-publish)[^\"'?]+)(?:\?[^\"']+)?[\"']",
                     source,
                 )
             )
         self.assertTrue(referenced)
         self.assertLessEqual(referenced, manifest)
+
+    def test_pages_cache_bust_their_css_and_javascript(self) -> None:
+        page_scripts = {
+            "x-auto-publish-template.html": "x-auto-publish-template.js",
+            "x-auto-publish-templates.html": "x-auto-publish-templates.js",
+            "x-auto-publish-runs.html": "x-auto-publish-runs.js",
+        }
+        for page_name, script_name in page_scripts.items():
+            with self.subTest(page=page_name):
+                source = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
+                self.assertIn(
+                    f'href="/x-auto-publish.css?v={ASSET_VERSION}"', source
+                )
+                self.assertIn(
+                    f'src="/x-auto-publish-common.js?v={ASSET_VERSION}"', source
+                )
+                self.assertIn(
+                    f'src="/{script_name}?v={ASSET_VERSION}"', source
+                )
 
     def test_manifest_paths_are_flat_safe_files(self) -> None:
         for item in self.manifest_items():

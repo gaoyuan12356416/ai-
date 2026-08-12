@@ -28,6 +28,7 @@ PAGES = {name: path.read_text(encoding="utf-8") for name, path in PAGE_PATHS.ite
 SCRIPTS = {name: path.read_text(encoding="utf-8") for name, path in SCRIPT_PATHS.items()}
 QUICK_NAV = (STATIC / "quick-nav.js").read_text(encoding="utf-8")
 NAVIGATION = json.loads((STATIC / "navigation.json").read_text(encoding="utf-8"))
+ASSET_VERSION = "20260812chrome2"
 
 
 class IdParser(HTMLParser):
@@ -78,10 +79,14 @@ class XAutoPublishUiTest(unittest.TestCase):
             with self.subTest(page=name):
                 parser = parse_page(source)
                 self.assertIn("/ui-topbar.css", parser.stylesheets)
-                self.assertIn("/x-auto-publish.css", parser.stylesheets)
+                self.assertIn(
+                    f"/x-auto-publish.css?v={ASSET_VERSION}", parser.stylesheets
+                )
                 self.assertIn("/ui-topbar.js", parser.scripts)
                 self.assertIn("/quick-nav.js", parser.scripts)
-                self.assertIn("/x-auto-publish-common.js", parser.scripts)
+                self.assertIn(
+                    f"/x-auto-publish-common.js?v={ASSET_VERSION}", parser.scripts
+                )
                 for node_id in (
                     "quickNav",
                     "userCard",
