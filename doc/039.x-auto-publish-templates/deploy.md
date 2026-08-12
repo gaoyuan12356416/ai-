@@ -30,8 +30,9 @@
 6. 先部署 forward-compatible 的现有 X sidecar/存储迁移，重启仅 `x-post-automation.service`；验证 manual/daily/schedule/pool API 和 timer 不变。
 7. 再安装独立 x_auto sidecar、主 API 代理、静态页和 systemd 单元；三道 gate 保持 0，启动 sidecar 健康检查。静态文件必须逐项读取 `deploy/x-auto-post-static-files.txt` 安装到 `/root/drama_material_service/static/` 和 `/usr/share/nginx/html/`，不得用 `x-auto-publish-*` glob 代替，因为该 glob 不会匹配 `x-auto-publish.css`。
 8. 共享 flock 目录只能由 `deploy/x-post-runtime-tmpfiles.conf` 持久管理。暂停相关 timer/path，安装到 `/etc/tmpfiles.d/x-post-runtime.conf` 并执行 `systemd-tmpfiles --create /etc/tmpfiles.d/x-post-runtime.conf`；同批安装 X auto 四个 service/path 与既有 X daily/manual/schedule/catchup unit，均不得保留 `RuntimeDirectory=`。停止仍加载旧 unit 的 sidecar 后再次执行 tmpfiles create，再启动 sidecar并恢复 timer/path。
-9. 重启仅 `drama-material-api.service`；只有 Nginx 配置实际变化时才 reload Nginx。
-10. 启用新 scheduler/runner timer 后只观察自然 `held=live_gates_closed`/`no_pending`；metric timer 可在运营启用模板前再启用。禁止手工运行模板或创建模板作为 canary。
+9. 将 `deploy/x-auto-post-nginx.conf` 安装为 `/etc/nginx/default.d/x-auto-post.conf`，先执行 `nginx -t`，通过后仅 reload Nginx；三个 HTML shell 必须返回 `Cache-Control: no-store, max-age=0`，自身 CSS/JS URL 必须带统一 cache-buster。
+10. 重启仅 `drama-material-api.service`；除上述新精确 location 外，不修改其他 Nginx 配置。
+11. 启用新 scheduler/runner timer 后只观察自然 `held=live_gates_closed`/`no_pending`；metric timer 可在运营启用模板前再启用。禁止手工运行模板或创建模板作为 canary。
 
 ## 验证步骤
 

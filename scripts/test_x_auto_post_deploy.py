@@ -90,6 +90,21 @@ class XAutoPostDeployTests(unittest.TestCase):
                         "ConditionPathIsDirectory=/run/x-post-daily", unit
                     )
 
+    def test_admin_html_shells_are_no_store_in_nginx(self):
+        nginx = self.text("deploy/x-auto-post-nginx.conf")
+        for page in (
+            "x-auto-publish-templates.html",
+            "x-auto-publish-template.html",
+            "x-auto-publish-runs.html",
+        ):
+            with self.subTest(page=page):
+                self.assertIn(f"location = /{page}", nginx)
+        self.assertEqual(
+            nginx.count('add_header Cache-Control "no-store, max-age=0" always;'),
+            3,
+        )
+        self.assertEqual(nginx.count("try_files $uri =404;"), 3)
+
     @unittest.skipIf(os.name == "nt", "requires Linux flock and inode semantics")
     def test_linux_shared_lock_inode_survives_peer_process_exit(self):
         """A peer unit/process exit must not replace the shared flock inode."""

@@ -31,6 +31,7 @@ CSS 返回 404，样式表规则数为 0，`.hidden` 失效。
 - 新增 `deploy/x-auto-post-static-files.txt` 作为逐文件部署清单。
 - 新增清单完整性、页面引用覆盖与路径安全测试。
 - 三个页面为自己的 CSS/JS 使用统一 cache-buster，确保生产静态修复立即替换浏览器旧脚本。
+- 三个 HTML shell 通过精确 Nginx location 返回 `Cache-Control: no-store, max-age=0`，并在页面内保留 no-store meta，避免恢复旧 shell 与新资产映射不一致。
 
 ## 影响文件
 

@@ -59,6 +59,10 @@ class XAutoPostStaticDeployContractTests(unittest.TestCase):
                 self.assertIn(
                     f'src="/{script_name}?v={ASSET_VERSION}"', source
                 )
+                self.assertIn(
+                    '<meta http-equiv="Cache-Control" content="no-store, max-age=0"',
+                    source,
+                )
 
     def test_manifest_paths_are_flat_safe_files(self) -> None:
         for item in self.manifest_items():
